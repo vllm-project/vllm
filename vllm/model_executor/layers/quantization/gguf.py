@@ -62,6 +62,8 @@ class GGUFConfig(QuantizationConfig):
     def get_supported_act_dtypes(self) -> list[torch.dtype]:
         # GGUF dequantization kernels use half precision (fp16) internally.
         # bfloat16 has precision issues on Blackwell devices.
+        if current_platform.is_mps():
+            return [torch.half, torch.float32]
         if current_platform.has_device_capability(100):
             logger.warning_once("GGUF has precision issues with bfloat16 on Blackwell.")
             return [torch.half, torch.float32]
@@ -69,6 +71,8 @@ class GGUFConfig(QuantizationConfig):
 
     @classmethod
     def get_min_capability(cls) -> int:
+        if current_platform.is_mps():
+            return -1  # MPS has no CUDA compute capability
         return 60
 
     @classmethod
@@ -188,10 +192,6 @@ MMQ_QUANT_TYPES = STANDARD_QUANT_TYPES | KQUANT_TYPES
 def _fused_mul_mat_gguf(
     x: torch.Tensor, qweight: torch.Tensor, qweight_type: int
 ) -> torch.Tensor:
-    if qweight_type in IMATRIX_QUANT_TYPES:
-        mmvq_safe = 8 if qweight.shape[0] > 5120 else 16
-    else:
-        mmvq_safe = 2 if qweight.shape[0] > 5120 else 6
     # HACK: when doing chunked prefill we don't generate output tokens
     # so input to logits generator is empty which causes invalid parameter
     if x.shape[0] == 0:
@@ -199,6 +199,27 @@ def _fused_mul_mat_gguf(
     # there is no need to call any kernel for fp16/bf16
     if qweight_type in UNQUANTIZED_TYPES:
         return x @ qweight.T
+
+    # MPS path: dequantize then matmul (no fused CUDA kernels available)
+    if current_platform.is_mps():
+        if qweight_type in DEQUANT_TYPES:
+            from vllm.model_executor.layers.quantization.utils.mps_dequant import (
+                gguf_dequant_on_mps,
+            )
+
+            block_size, type_size = gguf.GGML_QUANT_SIZES[qweight_type]
+            shape = (qweight.shape[0], qweight.shape[1] // type_size * block_size)
+            weight = gguf_dequant_on_mps(qweight, qweight_type, *shape, x.dtype)
+            return x @ weight.T
+        qweight_type = WeightType(qweight_type)
+        raise NotImplementedError(
+            f"Unsupported GGUF quantization type on MPS: {qweight_type}"
+        )
+
+    if qweight_type in IMATRIX_QUANT_TYPES:
+        mmvq_safe = 8 if qweight.shape[0] > 5120 else 16
+    else:
+        mmvq_safe = 2 if qweight.shape[0] > 5120 else 6
     # enable MMVQ in contiguous batching with batch_size=1
     if x.shape[0] <= mmvq_safe and qweight_type in MMVQ_QUANT_TYPES:
         y = ops.ggml_mul_mat_vec_a8(qweight, x, qweight_type, qweight.shape[0])
@@ -385,9 +406,18 @@ def _apply_gguf_embedding(
         x_flat = x.flatten()
         assert hidden_size == qweight.shape[1] // type_size * block_size
         quant = torch.index_select(qweight, dim=0, index=x_flat)
-        dequant = ops.ggml_dequantize(
-            quant, qweight_type, hidden_size, x_flat.shape[0], dtype
-        )
+        if current_platform.is_mps():
+            from vllm.model_executor.layers.quantization.utils.mps_dequant import (
+                gguf_dequant_on_mps,
+            )
+
+            dequant = gguf_dequant_on_mps(
+                quant, qweight_type, x_flat.shape[0], hidden_size, dtype
+            )
+        else:
+            dequant = ops.ggml_dequantize(
+                quant, qweight_type, hidden_size, x_flat.shape[0], dtype
+            )
         return dequant.view(*x.shape, hidden_size)
     else:
         qweight_type = WeightType(qweight_type)

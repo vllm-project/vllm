@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""MPS (Metal) dequantization utilities for AWQ and GPTQ int4 models.
+"""MPS (Metal) dequantization utilities for AWQ, GPTQ, and GGUF models.
 
-Uses the dequant_int4 Metal kernel package when available, with a pure
-PyTorch fallback for environments where the kernel isn't installed.
+Uses Metal kernel packages when available, with pure PyTorch/numpy
+fallbacks for environments where the kernels aren't installed.
 """
 
 from typing import Any
@@ -16,6 +16,10 @@ logger = init_logger(__name__)
 
 _metal_dequant = None
 _metal_import_attempted = False
+
+# Metal kernel types: Q4_0=2, Q4_1=3, Q5_0=6, Q5_1=7, Q8_0=8,
+# Q2_K=10, Q3_K=11, Q4_K=12, Q5_K=13, Q6_K=14
+_METAL_GGUF_TYPES = {2, 3, 6, 7, 8, 10, 11, 12, 13, 14}
 
 
 def _get_metal_dequant():
@@ -223,3 +227,66 @@ def gptq_dequant_matmul(
     if bias is not None:
         out.add_(bias)
     return out.reshape(out_shape)
+
+
+# ── GGUF ──
+
+_metal_dequant_gguf = None
+_metal_gguf_import_attempted = False
+
+
+def _get_metal_dequant_gguf():
+    """Try to import Metal dequant_gguf kernel package (cached)."""
+    global _metal_dequant_gguf, _metal_gguf_import_attempted
+    if not _metal_gguf_import_attempted:
+        _metal_gguf_import_attempted = True
+        try:
+            import dequant_gguf
+
+            _metal_dequant_gguf = dequant_gguf
+            logger.info("Using Metal dequant_gguf kernel for GGUF dequantization")
+        except ImportError:
+            logger.info(
+                "dequant_gguf Metal kernel not found, "
+                "falling back to numpy-based GGUF dequantization"
+            )
+    return _metal_dequant_gguf
+
+
+def _pytorch_dequant_gguf(
+    W: torch.Tensor,
+    quant_type: int,
+    m: int,
+    n: int,
+    dtype: torch.dtype | None = None,
+) -> torch.Tensor:
+    """Fallback GGUF dequantization using the gguf Python library.
+
+    This does a GPU→CPU→GPU round-trip via numpy, so it's slow but correct.
+    """
+    import numpy as np
+    from gguf import GGMLQuantizationType, dequantize
+
+    qt = GGMLQuantizationType(quant_type)
+    w_np = W.cpu().numpy().view(np.uint8)
+    result = dequantize(w_np, qt)
+    out_dtype = dtype if dtype is not None else torch.float16
+    return torch.tensor(result, dtype=out_dtype, device=W.device).reshape(m, n)
+
+
+def gguf_dequant_on_mps(
+    W: torch.Tensor,
+    quant_type: int,
+    m: int,
+    n: int,
+    dtype: torch.dtype | None = None,
+) -> torch.Tensor:
+    """Dequantize GGUF weights on MPS.
+
+    Uses Metal kernel if available for all standard GGUF types,
+    falls back to gguf library (numpy) for unsupported types (IQ*).
+    """
+    metal = _get_metal_dequant_gguf()
+    if metal is not None and quant_type in _METAL_GGUF_TYPES:
+        return metal.dequantize_gguf(W, quant_type, m, n, dtype)
+    return _pytorch_dequant_gguf(W, quant_type, m, n, dtype)
