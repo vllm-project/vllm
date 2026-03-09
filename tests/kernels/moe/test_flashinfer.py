@@ -204,7 +204,6 @@ def torch_w8a8_block_fp8_moe(
     hidden_states_q, hidden_states_s = native_per_token_group_quant_fp8(
         expanded_hidden_states.contiguous(), block_k
     )
-    hidden_states_q = hidden_states_q.to(torch.float32)
     silu_and_mul = SiluAndMul()
 
     for expert_idx in range(w1.shape[0]):
