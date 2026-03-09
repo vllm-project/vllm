@@ -669,7 +669,7 @@ class Step3p5Model(nn.Module):
                 full_name = f"model.{name}" if name else "model"
 
             # Normalize legacy MoE expert naming like ".moe.<E>.gate_proj" to
-            # the ".moe.experts.<E>.gate_proj" format 
+            # the ".moe.experts.<E>.gate_proj" format
             if ".moe.experts." not in local_name and ".moe." in local_name:
                 parts = local_name.split(".moe.", 1)
                 if len(parts) == 2 and "." in parts[1]:
@@ -840,19 +840,19 @@ class Step3p5ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_substr={".share_expert.": ".moe.share_expert."}
     )
-    
+
     packed_modules_mapping = {
-            "qkv_proj": [
-                "q_proj",
-                "k_proj",
-                "v_proj",
-            ],
-            "gate_up_proj": [
-                "gate_proj",
-                "up_proj",
-            ],
-        }
-    
+        "qkv_proj": [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+        ],
+        "gate_up_proj": [
+            "gate_proj",
+            "up_proj",
+        ],
+    }
+
     def __init__(
         self,
         *,
