@@ -4,7 +4,7 @@
 
 #include <torch/library.h>
 
-// Note: overwrite the external defination for sharing same name between
+// Note: overwrite the external definition for sharing same name between
 // libraries use different ISAs.
 #define TORCH_EXTENSION_NAME _C
 
