@@ -296,8 +296,8 @@ class DictEmbeddingItems(
         return self.data
 
 
-class AudioProcessorItems(ProcessorBatchItems["HfAudioItem | None"]):
-    def __init__(self, data: Sequence["HfAudioItem | None"]) -> None:
+class AudioProcessorItems(ProcessorBatchItems[HfAudioItem | None]):
+    def __init__(self, data: Sequence[HfAudioItem | None]) -> None:
         super().__init__(data, "audio")
 
     def get_audio_length(self, item_idx: int) -> int:
@@ -322,8 +322,8 @@ class ImageSize(NamedTuple):
     height: int
 
 
-class ImageProcessorItems(ProcessorBatchItems["HfImageItem | None"]):
-    def __init__(self, data: Sequence["HfImageItem | None"]) -> None:
+class ImageProcessorItems(ProcessorBatchItems[HfImageItem | None]):
+    def __init__(self, data: Sequence[HfImageItem | None]) -> None:
         super().__init__(data, "image")
 
     def get_image_size(self, item_idx: int) -> ImageSize:
@@ -349,10 +349,10 @@ class ImageEmbeddingItems(EmbeddingItems):
         super().__init__(data, "image", expected_hidden_size)
 
 
-class VideoProcessorItems(ProcessorBatchItems["HfVideoItem | None"]):
+class VideoProcessorItems(ProcessorBatchItems[HfVideoItem | None]):
     def __init__(
         self,
-        data: Sequence["HfVideoItem | None"],
+        data: Sequence[HfVideoItem | None],
         metadata: dict[str, Any] | list[dict[str, Any] | None] | None = None,
     ) -> None:
         super().__init__(data, "video")
