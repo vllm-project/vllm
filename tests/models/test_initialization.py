@@ -88,9 +88,7 @@ def can_initialize(
             [10 * GiB_bytes],
         )
         scheduler_kv_cache_config = generate_scheduler_kv_cache_config(kv_cache_configs)
-
-        # gpu_blocks (> 0), cpu_blocks, scheduler_kv_cache_config
-        return 1, 0, scheduler_kv_cache_config
+        return scheduler_kv_cache_config
 
     if model_arch == "MiniMaxVL01ForConditionalGeneration":
         pytest.skip(
