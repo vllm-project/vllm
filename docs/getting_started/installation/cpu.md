@@ -1,3 +1,7 @@
+---
+toc_depth: 3
+---
+
 # CPU
 
 vLLM is a Python library that supports the following CPU variants. Select your CPU type to see vendor specific instructions:
