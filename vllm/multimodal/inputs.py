@@ -35,27 +35,27 @@ else:
     torch = LazyLoader("torch", globals(), "torch")
 
 
-HfImageItem: TypeAlias = "Image | np.ndarray | torch.Tensor"
+HfImageItem: TypeAlias = Union["Image", np.ndarray, "torch.Tensor"]
 """
 A `transformers.image_utils.ImageInput` representing a single image
 item, which can be passed to a HuggingFace `ImageProcessor`.
 """
 
-HfVideoItem: TypeAlias = (
-    "list[Image] | np.ndarray | torch.Tensor | list[np.ndarray] | list[torch.Tensor]"
-)
+HfVideoItem: TypeAlias = Union[
+    list["Image"], np.ndarray, "torch.Tensor", list[np.ndarray], list["torch.Tensor"]
+]
 """
 A `transformers.image_utils.VideoInput` representing a single video
 item, which can be passed to a HuggingFace `VideoProcessor`.
 """
 
-HfAudioItem: TypeAlias = "list[float] | np.ndarray | torch.Tensor"
+HfAudioItem: TypeAlias = Union[list[float], np.ndarray, "torch.Tensor"]
 """
 Represents a single audio
 item, which can be passed to a HuggingFace `AudioProcessor`.
 """
 
-ImageItem: TypeAlias = "HfImageItem | torch.Tensor | MediaWithBytes[HfImageItem]"
+ImageItem: TypeAlias = Union[HfImageItem, "torch.Tensor", MediaWithBytes[HfImageItem]]
 """
 A `transformers.image_utils.ImageInput` representing a single image
 item, which can be passed to a HuggingFace `ImageProcessor`.
@@ -65,7 +65,9 @@ which are treated as image embeddings;
 these are directly passed to the model without HF processing.
 """
 
-VideoItem: TypeAlias = "HfVideoItem | torch.Tensor | tuple[HfVideoItem, dict[str, Any]]"
+VideoItem: TypeAlias = Union[
+    HfVideoItem, "torch.Tensor", tuple[HfVideoItem, dict[str, Any]]
+]
 """
 A `transformers.video_utils.VideoInput` representing a single video item. 
 This can be passed to a HuggingFace `VideoProcessor` 
@@ -76,7 +78,7 @@ which are treated as video embeddings;
 these are directly passed to the model without HF processing.
 """
 
-AudioItem: TypeAlias = "HfAudioItem | tuple[np.ndarray, float] | torch.Tensor"
+AudioItem: TypeAlias = Union[HfAudioItem, tuple[np.ndarray, float], "torch.Tensor"]
 """
 Represents a single audio
 item, which can be passed to a HuggingFace `AudioProcessor`.
