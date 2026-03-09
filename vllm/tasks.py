@@ -10,6 +10,9 @@ PoolingTask = Literal[
 ]
 POOLING_TASKS: tuple[PoolingTask, ...] = get_args(PoolingTask)
 
+ScoreType = Literal["bi-encoder", "cross-encoder", "late-interaction"]
+SCORE_Types: tuple[ScoreType, ...] = get_args(ScoreType)
+
 FrontendTask = Literal["render"]
 FRONTEND_TASKS: tuple[FrontendTask, ...] = get_args(FrontendTask)
 

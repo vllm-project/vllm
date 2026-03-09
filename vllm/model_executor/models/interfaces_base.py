@@ -15,6 +15,7 @@ import torch.nn as nn
 from typing_extensions import TypeIs, TypeVar
 
 from vllm.logger import init_logger
+from vllm.tasks import ScoreType
 from vllm.utils.func_utils import supports_kw
 
 if TYPE_CHECKING:
@@ -187,6 +188,23 @@ class VllmModelForPooling(VllmModel[T_co], Protocol[T_co]):
     decorator to conveniently set this field.
     """
 
+    score_type: ClassVar[ScoreType] = "bi-encoder"
+    """
+    Indicates the
+    [vllm.config.model.ModelConfig.score_type][]
+    to use by default.
+    
+    score_type defaults to bi-encoder, meaning the Score API uses the "embed" task.
+    
+    If you set score_type to cross-encoder via 
+    [vllm.model_executor.models.interfaces_base.SupportsCrossEncoding][], 
+    then the Score API uses the "score" task.
+    
+    If you set score_type to late-interaction via 
+    [vllm.model_executor.models.interfaces_base.SupportsLateInteraction][], 
+    then the Score API uses the "token_embed" task.    
+    """
+
     pooler: Pooler
     """The pooler is only called on TP rank 0."""
 
@@ -250,3 +268,7 @@ def attn_type(attn_type: AttnTypeStr):
 
 def get_attn_type(model: type[object] | object) -> AttnTypeStr:
     return getattr(model, "attn_type", "decoder")
+
+
+def get_score_type(model: type[object] | object) -> ScoreType:
+    return getattr(model, "score_type", "bi-encoder")

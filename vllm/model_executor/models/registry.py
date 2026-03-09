@@ -30,6 +30,7 @@ from vllm.config import (
 )
 from vllm.logger import init_logger
 from vllm.logging_utils import logtime
+from vllm.tasks import ScoreType
 from vllm.transformers_utils.dynamic_module import try_get_class_from_dynamic_module
 from vllm.utils.hashing import safe_hash
 
@@ -48,8 +49,6 @@ from .interfaces import (
     is_attention_free,
     is_hybrid,
     requires_raw_input_tokens,
-    supports_cross_encoding,
-    supports_late_interaction,
     supports_mamba_prefix_caching,
     supports_multimodal,
     supports_multimodal_encoder_tp_data,
@@ -61,6 +60,7 @@ from .interfaces_base import (
     get_attn_type,
     get_default_seq_pooling_type,
     get_default_tok_pooling_type,
+    get_score_type,
     is_pooling_model,
     is_text_generation_model,
 )
@@ -641,8 +641,7 @@ class _ModelInfo:
     attn_type: AttnTypeStr
     default_seq_pooling_type: SequencePoolingType
     default_tok_pooling_type: TokenPoolingType
-    supports_cross_encoding: bool
-    supports_late_interaction: bool
+    score_type: ScoreType
     supports_multimodal: bool
     supports_multimodal_raw_input_only: bool
     requires_raw_input_tokens: bool
@@ -665,8 +664,7 @@ class _ModelInfo:
             default_seq_pooling_type=get_default_seq_pooling_type(model),
             default_tok_pooling_type=get_default_tok_pooling_type(model),
             attn_type=get_attn_type(model),
-            supports_cross_encoding=supports_cross_encoding(model),
-            supports_late_interaction=supports_late_interaction(model),
+            score_type=get_score_type(model),
             supports_multimodal=supports_multimodal(model),
             supports_multimodal_raw_input_only=supports_multimodal_raw_input_only(
                 model
@@ -1163,14 +1161,6 @@ class _ModelRegistry:
     ) -> bool:
         model_cls, _ = self.inspect_model_cls(architectures, model_config)
         return model_cls.is_pooling_model
-
-    def is_cross_encoder_model(
-        self,
-        architectures: str | list[str],
-        model_config: ModelConfig,
-    ) -> bool:
-        model_cls, _ = self.inspect_model_cls(architectures, model_config)
-        return model_cls.supports_cross_encoding
 
     def is_multimodal_model(
         self,

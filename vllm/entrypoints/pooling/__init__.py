@@ -102,9 +102,9 @@ def init_pooling_state(
         else None
     )
     # ServingScores handles score/rerank for:
-    # - "score" task (cross-encoder models)
-    # - "embed" task (bi-encoder models)
-    # - "token_embed" task (late interaction models like ColBERT)
+    # - "score" task (score_type: cross-encoder models)
+    # - "embed" task (score_type: bi-encoder models)
+    # - "token_embed" task (score_type: late interaction models like ColBERT)
     state.openai_serving_scores = (
         ServingScores(
             engine_client,

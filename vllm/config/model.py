@@ -20,6 +20,7 @@ from vllm.config.scheduler import RunnerType
 from vllm.config.utils import config, getattr_iter
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.tasks import ScoreType
 from vllm.transformers_utils.config import (
     ConfigFormat,
     get_config,
@@ -1412,15 +1413,8 @@ class ModelConfig:
         return self._model_info.requires_raw_input_tokens
 
     @property
-    def is_cross_encoder(self) -> bool:
-        return (
-            self._model_info.supports_cross_encoding or self.convert_type == "classify"
-        )
-
-    @property
-    def is_late_interaction(self) -> bool:
-        """Check if model uses late interaction (ColBERT-style) scoring."""
-        return self._model_info.supports_late_interaction
+    def score_type(self)-> ScoreType:
+        return self._model_info.score_type
 
     @property
     def is_pp_supported(self) -> bool:
