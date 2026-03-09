@@ -15,6 +15,7 @@ from vllm.model_executor.model_loader.tensorizer import (
     tensorize_lora_adapter,
     tensorize_vllm_model,
 )
+from vllm.platforms import current_platform
 
 from ...utils import RemoteOpenAIServer
 
@@ -74,6 +75,8 @@ def server(model_uri, tensorize_model_and_lora):
         MODEL_NAME,
         "--enable-lora",
     ]
+    if current_platform.is_rocm():
+        args += ["--attention-backend", "TRITON_ATTN"]
 
     model_dir = os.path.dirname(model_uri)
     with RemoteOpenAIServer(model_dir, args) as remote_server:

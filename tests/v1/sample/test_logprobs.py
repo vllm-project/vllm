@@ -42,9 +42,7 @@ SAMPLE_PROMPT = BatchLogprobsComposition.SAMPLE_PROMPT
 # Force LLM instances into an identical, deterministic execution
 # mode so the test isolates spec-decode correctness only:
 ROCM_DETERMINISM_KWARGS: dict = (
-    dict(
-        max_num_seqs=1,
-    )
+    dict(max_num_seqs=1, attention_backend="TRITON_ATTN")
     if current_platform.is_rocm()
     else {}
 )

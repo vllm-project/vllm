@@ -91,6 +91,7 @@ def test_kv_sharing_fast_prefill(
             compilation_config=compilation_config,
             seed=SEED,
             kv_sharing_fast_prefill=kv_sharing_fast_prefill,
+            attention_backend="TRITON_ATTN",
         )
         responses = llm.generate(prompts, sampling_params)
         check_answers(
