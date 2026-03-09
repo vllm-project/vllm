@@ -416,7 +416,6 @@ class Eagle2_5_VLForConditionalGeneration(
         multimodal_embeddings: MultiModalEmbeddings | None = None,
         *,
         is_multimodal: torch.Tensor | None = None,
-        handle_oov_mm_token: bool = False,
     ) -> torch.Tensor:
         """Embed input IDs with optional multimodal embeddings."""
         if multimodal_embeddings is None or is_multimodal is None:
@@ -426,7 +425,6 @@ class Eagle2_5_VLForConditionalGeneration(
             input_ids,
             multimodal_embeddings=multimodal_embeddings,
             is_multimodal=is_multimodal,
-            handle_oov_mm_token=handle_oov_mm_token,
         )
 
     def forward(
