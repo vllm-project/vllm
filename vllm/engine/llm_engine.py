@@ -1449,6 +1449,7 @@ class LLMEngine:
                 outputs, seq_group_metadata_list)
             for scheduler in self.scheduler:
                 scheduler.free_finished_seq_groups()
+            self._process_model_outputs(ctx=ctx)
             # for branch_group in new_branch_groups:
             #     self._add_branch_to_scheduler(branch_group, virtual_engine)
             # for branch_group in branch_groups_to_delete:
