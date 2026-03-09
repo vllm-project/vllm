@@ -899,6 +899,16 @@ class MultiModalContentParser(BaseMultiModalContentParser):
 
         placeholder = self._tracker.add("video", (video, uuid))
         self._add_placeholder("video", placeholder)
+        
+        # Extract audio from video if use_audio_in_video is True
+        if (
+            video_url
+            and self._mm_processor_kwargs
+            and self._mm_processor_kwargs.get("use_audio_in_video", False)
+        ):
+            audio_coro = self._audio_with_uuid_async(video_url, uuid)
+            audio_placeholder = self._tracker.add("audio", audio_coro)
+            self._add_placeholder("audio", audio_placeholder)
 
 
 class AsyncMultiModalContentParser(BaseMultiModalContentParser):
