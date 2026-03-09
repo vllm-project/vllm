@@ -1683,9 +1683,6 @@ class OpenAIServingResponses(OpenAIServing):
                     assert pm.tool_calls[0].function is not None, (
                         "Tool call without function is not supported"
                     )
-                    assert pm.tool_calls[0].function.name is not None, (
-                        "Tool call without function name is not supported"
-                    )
                     parts.append(pm.tool_calls[0].function.arguments)
 
             tool_call_arguments = "".join(parts)
