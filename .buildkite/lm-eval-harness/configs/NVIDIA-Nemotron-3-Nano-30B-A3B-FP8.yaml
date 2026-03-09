@@ -1,0 +1,19 @@
+model_name: "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-FP8"
+tasks:
+- name: "gsm8k"
+  metrics:
+  - name: "exact_match,strict-match"
+    value: 0.7142
+  - name: "exact_match,flexible-extract"
+    value: 0.4579
+env_vars:
+  VLLM_USE_FLASHINFER_MOE_FP8: "1"
+  VLLM_FLASHINFER_MOE_BACKEND: "throughput"
+limit: 1319
+num_fewshot: 5
+max_model_len: 262144
+kv_cache_dtype: fp8
+enforce_eager: false
+apply_chat_template: true
+fewshot_as_multiturn: true
+trust_remote_code: true

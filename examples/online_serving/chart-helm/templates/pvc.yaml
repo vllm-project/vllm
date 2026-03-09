@@ -1,0 +1,13 @@
+{{-   if .Values.extraInit  }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: "{{ .Release.Name }}-storage-claim"
+  namespace: {{ .Release.Namespace }}
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: {{ .Values.extraInit.pvcStorage }}
+{{- end }}

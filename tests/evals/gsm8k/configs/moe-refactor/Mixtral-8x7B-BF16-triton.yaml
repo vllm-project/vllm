@@ -1,0 +1,5 @@
+model_name: "mistralai/Mixtral-8x7B-v0.1"
+accuracy_threshold: 0.58
+num_questions: 1319
+num_fewshot: 5
+server_args: "--enforce-eager --max-model-len 8192 --tensor-parallel-size 2"

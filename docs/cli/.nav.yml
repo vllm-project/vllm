@@ -1,0 +1,8 @@
+nav:
+  - README.md
+  - serve.md
+  - chat.md
+  - complete.md
+  - run-batch.md
+  - vllm bench:
+    - bench/**/*.md

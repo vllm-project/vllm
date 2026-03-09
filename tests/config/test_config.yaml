@@ -1,0 +1,4 @@
+port: 12312
+served_model_name: mymodel
+tensor_parallel_size: 2
+trust_remote_code: true
