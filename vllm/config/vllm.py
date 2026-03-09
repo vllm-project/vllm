@@ -677,10 +677,10 @@ class VllmConfig:
             # torch_shm uses a single IPC queue to rank 0; DP>1 is
             # incompatible because API servers can't know which
             # CoreEngine the scheduler will assign work to.
+            multimodal_config = self.model_config.multimodal_config
             if (
-                self.model_config.multimodal_config is not None
-                and self.model_config.multimodal_config.multimodal_tensor_ipc
-                == "torch_shm"
+                multimodal_config is not None
+                and multimodal_config.multimodal_tensor_ipc == "torch_shm"
                 and self.parallel_config.data_parallel_size > 1
             ):
                 raise ValueError(

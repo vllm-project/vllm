@@ -38,10 +38,7 @@ from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.utils import tensor_data
 
 if TYPE_CHECKING:
-    from vllm.v1.engine.tensor_ipc import (
-        TensorIpcReceiver,
-        TensorIpcSender,
-    )
+    from vllm.v1.engine.tensor_ipc import TensorIpcReceiver, TensorIpcSender
 
 logger = init_logger(__name__)
 

@@ -626,9 +626,7 @@ class MPClient(EngineCoreClient):
             if multimodal_tensor_ipc == "torch_shm" and tensor_queues:
                 tensor_ipc_sender = TensorIpcSender(tensor_queues[0])
 
-            self.encoder = MsgpackEncoder(
-                tensor_ipc_sender=tensor_ipc_sender,
-            )
+            self.encoder = MsgpackEncoder(tensor_ipc_sender=tensor_ipc_sender)
             self.decoder = MsgpackDecoder(EngineCoreOutputs)
             # Store tensor queues for routing
             self.resources.tensor_queues = tensor_queues
