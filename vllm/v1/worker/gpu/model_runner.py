@@ -40,7 +40,6 @@ from vllm.model_executor.model_loader import get_model_loader
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
-from vllm.utils.math_utils import cdiv
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
@@ -57,8 +56,12 @@ from vllm.v1.worker.gpu.attn_utils import (
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
 from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
-from vllm.v1.worker.gpu.cudagraph_utils import CudaGraphManager
-from vllm.v1.worker.gpu.dp_utils import get_cudagraph_and_dp_padding
+from vllm.v1.worker.gpu.cudagraph_utils import (
+    BatchExecutionDescriptor,
+    ModelCudaGraphManager,
+    get_uniform_token_count,
+)
+from vllm.v1.worker.gpu.dp_utils import sync_cudagraph_and_dp_padding
 from vllm.v1.worker.gpu.input_batch import (
     InputBatch,
     InputBuffers,
@@ -137,6 +140,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.is_first_pp_rank = True
             self.is_last_pp_rank = True
 
+        # Data parallelism.
+        self.dp_size = self.parallel_config.data_parallel_size
+        self.dp_rank = self.parallel_config.data_parallel_rank
+
         # Decode context parallelism.
         self.dcp_size = self.parallel_config.decode_context_parallel_size
         self.use_dcp = self.dcp_size > 1
@@ -193,10 +200,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.prompt_logprobs_worker = PromptLogprobsWorker(self.max_num_reqs)
 
         # CUDA graphs.
-        self.cudagraph_manager = CudaGraphManager(
+        self.decode_query_len = self.num_speculative_steps + 1
+        self.cudagraph_manager = ModelCudaGraphManager(
             self.vllm_config,
-            self.use_aux_hidden_state_outputs,
             self.device,
+            self.compilation_config.cudagraph_mode,
+            decode_query_len=self.decode_query_len,
         )
         # Structured outputs worker.
         self.structured_outputs_worker = StructuredOutputsWorker(
@@ -331,17 +340,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         **kwargs,
     ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
         # Create a dummy scheduler output.
+        num_reqs = min(num_tokens, self.max_num_reqs)
         if uniform_decode:
-            # Align tokens to uniform_decode_query_len for cudagraph
-            # compatibility across DP ranks.
-            query_len = self.cudagraph_manager.uniform_decode_query_len
-            num_reqs = min(cdiv(num_tokens, query_len), self.max_num_reqs)
-            num_tokens = num_reqs * query_len
-            num_tokens_per_request = [query_len] * num_reqs
-        else:
-            num_reqs = min(num_tokens, self.max_num_reqs)
-            num_tokens_per_request = [num_tokens // num_reqs] * num_reqs
-            num_tokens_per_request[-1] += num_tokens % num_reqs
+            # HACK(lucas): for now since the worker is shared between MRV1 and MRV2,
+            # and for spec-decode with MTP we want to make sure the dummy runs use
+            # 1+num_speculative_tokens we use max here, this will likely be eventually
+            # changed in the worker: https://github.com/vllm-project/vllm/pull/35243
+            num_tokens = max(num_tokens, self.decode_query_len)
+            num_reqs = num_tokens // self.decode_query_len
+            assert num_tokens % self.decode_query_len == 0
+        num_tokens_per_request = [num_tokens // num_reqs] * num_reqs
+        num_tokens_per_request[-1] += num_tokens % num_reqs
+
         assert sum(num_tokens_per_request) == num_tokens
         num_scheduled_tokens = {
             f"_dummy_req_{i}": n for i, n in enumerate(num_tokens_per_request)
@@ -498,13 +508,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         with self.maybe_setup_dummy_loras(self.lora_config):
             self.cudagraph_manager.capture(
-                model=self.model,
-                model_state=self.model_state,
-                input_buffers=self.input_buffers,
-                block_tables=self.block_tables,
-                attn_groups=self.attn_groups,
-                kv_cache_config=self.kv_cache_config,
+                self.model,
+                self.model_state,
+                self.input_buffers,
+                self.block_tables,
+                self.attn_groups,
+                self.kv_cache_config,
                 has_lora=self.lora_config is not None,
+                use_aux_hidden_state_outputs=self.use_aux_hidden_state_outputs,
             )
             if self.speculator is not None:
                 self.speculator.capture_model()
@@ -592,9 +603,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 )
 
     def prepare_inputs(
-        self, scheduler_output: SchedulerOutput, num_tokens_after_padding: int
+        self, scheduler_output: SchedulerOutput, batch_desc: BatchExecutionDescriptor
     ) -> InputBatch:
         num_tokens = scheduler_output.total_num_scheduled_tokens
+        num_tokens_after_padding = batch_desc.num_tokens
         assert num_tokens > 0
         num_tokens_per_req = scheduler_output.num_scheduled_tokens
         num_reqs = len(num_tokens_per_req)
@@ -644,6 +656,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
 
         # Get query_start_loc.
+        # num_reqs_padded is None for PIECEWISE graphs (no request padding needed)
+        num_reqs_padded = batch_desc.num_reqs or num_reqs
         query_start_loc_np = np.empty(self.max_num_reqs + 1, dtype=np.int32)
         query_start_loc_np[0] = 0
         np.cumsum(num_scheduled_tokens, out=query_start_loc_np[1 : num_reqs + 1])
@@ -651,8 +665,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Some attention backends like FA3 require query_start_loc to be non-decreasing.
         query_start_loc_np[num_reqs + 1 :] = num_tokens
         async_copy_to_gpu(query_start_loc_np, out=self.input_buffers.query_start_loc)
-        query_start_loc_np = query_start_loc_np[: num_reqs + 1]
-        query_start_loc = self.input_buffers.query_start_loc[: num_reqs + 1]
+        query_start_loc_np = query_start_loc_np[: num_reqs_padded + 1]
+        query_start_loc = self.input_buffers.query_start_loc[: num_reqs_padded + 1]
 
         # Get prefill tokens if any.
         if self.req_states.any_prefills(idx_mapping_np):
@@ -674,7 +688,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.input_buffers.positions,
             self.input_buffers.seq_lens,
         )
-        seq_lens = self.input_buffers.seq_lens[:num_reqs]
+        seq_lens = self.input_buffers.seq_lens[:num_reqs_padded]
 
         dcp_local_seq_lens = None
         if self.use_dcp:
@@ -687,7 +701,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.dcp_rank,
                 self.cp_interleave,
             )
-            dcp_local_seq_lens = self.input_buffers.dcp_local_seq_lens[:num_reqs]
+            dcp_local_seq_lens = self.input_buffers.dcp_local_seq_lens[:num_reqs_padded]
 
         # Some input token ids are directly read from the last sampled tokens
         # and draft tokens. Also, get the logits indices to sample tokens from.
@@ -706,6 +720,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         return InputBatch(
             req_ids=req_ids,
             num_reqs=num_reqs,
+            num_reqs_after_padding=num_reqs_padded,
             idx_mapping=idx_mapping,
             idx_mapping_np=idx_mapping_np,
             expanded_idx_mapping=expanded_idx_mapping,
@@ -729,13 +744,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def prepare_attn(
         self, input_batch: InputBatch
     ) -> tuple[tuple[torch.Tensor, ...], torch.Tensor]:
-        # Block tables: num_kv_cache_groups x [num_reqs, max_num_blocks]
-        block_tables = self.block_tables.gather_block_tables(input_batch.idx_mapping)
-        # Compute slot mappings: [num_kv_cache_groups, num_tokens]
+        # Block tables: num_kv_cache_groups x [num_reqs_padded, max_num_blocks].
+        block_tables = self.block_tables.gather_block_tables(
+            input_batch.idx_mapping,
+            num_reqs_padded=input_batch.num_reqs_after_padding,
+        )
+        # Slot mappings: [num_kv_cache_groups, num_tokens_padded].
+        # Kernel pads beyond num_tokens with PAD_SLOT_ID.
         slot_mappings = self.block_tables.compute_slot_mappings(
             input_batch.idx_mapping,
             input_batch.query_start_loc,
             input_batch.positions,
+            num_tokens_padded=input_batch.num_tokens_after_padding,
         )
         return block_tables, slot_mappings
 
@@ -851,27 +871,29 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 empty_output = self.kv_connector.no_forward(scheduler_output)
                 return empty_output
 
-        # Get local cudagraph mode and size.
-        local_cudagraph_mode, local_cudagraph_size = (
-            self.cudagraph_manager.get_cudagraph_runtime_mode(
-                num_reqs=len(scheduler_output.num_scheduled_tokens),
-                num_tokens=scheduler_output.total_num_scheduled_tokens,
-                max_query_len=max(scheduler_output.num_scheduled_tokens.values()),
-            )
-        )
+        # Get batch descriptor and sync across DP ranks.
+        num_reqs = len(scheduler_output.num_scheduled_tokens)
+        num_toks = scheduler_output.total_num_scheduled_tokens
+        max_query_len = max(scheduler_output.num_scheduled_tokens.values())
+        uniform_tok_count = get_uniform_token_count(num_reqs, num_toks, max_query_len)
 
-        # DP sync: num_tokens + cudagraph_size + cudagraph_mode
-        num_tokens_after_padding, num_tokens_across_dp, synced_cudagraph_mode = (
-            get_cudagraph_and_dp_padding(
-                scheduler_output.total_num_scheduled_tokens,
-                local_cudagraph_size,
-                local_cudagraph_mode.value,
-                self.parallel_config.data_parallel_size,
-                self.parallel_config.data_parallel_rank,
-            )
+        batch_desc = self.cudagraph_manager.dispatch(
+            num_reqs, num_toks, uniform_tok_count
         )
-        cudagraph_runtime_mode = CUDAGraphMode(synced_cudagraph_mode)
-        if num_tokens_after_padding == 0:
+        num_tokens_across_dp = None
+
+        if self.dp_size > 1:
+            batch_desc, num_tokens_across_dp = sync_cudagraph_and_dp_padding(
+                self.cudagraph_manager,
+                batch_desc,
+                num_toks,
+                num_reqs,
+                uniform_tok_count,
+                self.dp_size,
+                self.dp_rank,
+            )
+
+        if batch_desc.num_tokens == 0:
             # All DP ranks have zero tokens to run.
             empty_output = self.kv_connector.no_forward(scheduler_output)
             return empty_output
@@ -879,9 +901,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if not dummy_run:
             # Common case.
             # Prepare all the inputs and copy to the input buffers.
-            input_batch = self.prepare_inputs(
-                scheduler_output, num_tokens_after_padding
-            )
+            input_batch = self.prepare_inputs(scheduler_output, batch_desc)
             block_tables, slot_mappings = self.prepare_attn(input_batch)
 
             if self.lora_config:
@@ -894,9 +914,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self._set_active_loras(*lora_inputs)
         else:
             # No actual tokens to run. A dummy run for DP or memory profiling.
-            num_reqs = min(num_tokens_after_padding, self.max_num_reqs)
             input_batch = InputBatch.make_dummy(
-                num_reqs, num_tokens_after_padding, self.input_buffers
+                batch_desc.num_reqs or num_reqs,
+                batch_desc.num_tokens,
+                self.input_buffers,
             )
             if not skip_attn_for_dummy_run:
                 block_tables, slot_mappings = self.prepare_dummy_attn(input_batch)
@@ -948,14 +969,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             model_inputs["intermediate_tensors"] = intermediate_tensors
 
         # Run model.
-        if cudagraph_runtime_mode == CUDAGraphMode.FULL:
+        if batch_desc.cg_mode == CUDAGraphMode.FULL:
             # Use explicit cudagraph replay for FULL mode.
             # NOTE(woosuk): Here, we don't need to pass the input tensors,
             # because they are already copied to the CUDA graph input buffers.
             self.kv_connector.pre_forward(scheduler_output)
-            model_output = self.cudagraph_manager.run_fullgraph(
-                input_batch.num_tokens_after_padding
-            )
+            model_output = self.cudagraph_manager.run_fullgraph(batch_desc)
             if self.use_aux_hidden_state_outputs:
                 hidden_states, aux_hidden_states = model_output
             else:
@@ -972,7 +991,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 attn_metadata,
                 self.vllm_config,
                 num_tokens=input_batch.num_tokens_after_padding,
-                cudagraph_runtime_mode=cudagraph_runtime_mode,
+                cudagraph_runtime_mode=batch_desc.cg_mode,
                 num_tokens_across_dp=num_tokens_across_dp,
                 batch_descriptor=batch_descriptor,
                 slot_mapping=slot_mappings_by_layer,
