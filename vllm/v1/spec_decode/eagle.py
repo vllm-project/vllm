@@ -478,10 +478,19 @@ class SpecDecodeBaseProposer:
             positions = self.mrope_positions[:, token_indices_to_sample]
         else:
             positions = self.positions[token_indices_to_sample]
-        if self.method == "mtp":
-            hidden_states = self.hidden_states[token_indices_to_sample]
-        else:
-            hidden_states = hidden_states[token_indices_to_sample]
+        # For chained MTP models (e.g. Qwen3.5 with multiple distinct MTP
+        # layers), the model output hidden_states must propagate through each
+        # layer. Using self.hidden_states (target model's cached states) here
+        # breaks the chain and degrades draft quality.
+        #
+        # Before PR #34552, the check was:
+        #   if self.method in ("deepseek_mtp", "ernie_mtp", ...):
+        # which was dead code (config already converts all methods to "mtp"),
+        # so the else branch (using model output) always ran. PR #34552
+        # simplified this to `self.method == "mtp"`, inadvertently activating
+        # the if-branch for the first time, causing a ~30% acceptance rate
+        # regression for Qwen3.5-397B MTP speculative decoding.
+        hidden_states = hidden_states[token_indices_to_sample]
 
         if isinstance(attn_metadata, TreeAttentionMetadata):
             # Draft using tree attention - requires full logits for top-k
