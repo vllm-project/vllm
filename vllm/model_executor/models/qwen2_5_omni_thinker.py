@@ -78,7 +78,11 @@ from vllm.multimodal.parse import (
     ModalityDataItems,
     MultiModalDataItems,
 )
-from vllm.multimodal.processing import BaseDummyInputsBuilder, ProcessorInputs, TimingContext
+from vllm.multimodal.processing import (
+    BaseDummyInputsBuilder,
+    ProcessorInputs,
+    TimingContext,
+)
 from vllm.multimodal.processing.processor import (
     BaseMultiModalProcessor,
     MultiModalPromptUpdates,

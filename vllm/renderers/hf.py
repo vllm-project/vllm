@@ -5,7 +5,7 @@ import itertools
 from collections import defaultdict, deque
 from collections.abc import Set
 from functools import lru_cache
-from typing import TYPE_CHECKING, Any, cast, Optional
+from typing import TYPE_CHECKING, Any, cast
 
 import jinja2
 import jinja2.ext
@@ -621,7 +621,7 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
         self,
         messages: list[ChatCompletionMessageParam],
         params: ChatParams,
-        mm_processor_kwargs: Optional[dict[str, Any]] = None,
+        mm_processor_kwargs: dict[str, Any] | None = None,
     ) -> tuple[list[ConversationMessage], DictPrompt]:
         model_config = self.model_config
         tokenizer = self.get_tokenizer()
@@ -678,7 +678,7 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
         self,
         messages: list[ChatCompletionMessageParam],
         params: ChatParams,
-        mm_processor_kwargs: Optional[dict[str, Any]] = None,
+        mm_processor_kwargs: dict[str, Any] | None = None,
     ) -> tuple[list[ConversationMessage], DictPrompt]:
         model_config = self.model_config
         tokenizer = self.get_tokenizer()

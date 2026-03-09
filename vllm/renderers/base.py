@@ -5,7 +5,7 @@ import time
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from functools import cached_property
-from typing import TYPE_CHECKING, Any, Generic, overload, Optional
+from typing import TYPE_CHECKING, Any, Generic, overload
 
 from typing_extensions import TypeVar
 
@@ -263,7 +263,7 @@ class BaseRenderer(ABC, Generic[_T]):
         self,
         messages: list["ChatCompletionMessageParam"],
         params: ChatParams,
-        mm_processor_kwargs: Optional[dict[str, Any]] = None,
+        mm_processor_kwargs: dict[str, Any] | None = None,
     ) -> tuple[list["ConversationMessage"], DictPrompt]:
         raise NotImplementedError
 
@@ -271,7 +271,7 @@ class BaseRenderer(ABC, Generic[_T]):
         self,
         messages: list["ChatCompletionMessageParam"],
         params: ChatParams,
-        mm_processor_kwargs: Optional[dict[str, Any]] = None,
+        mm_processor_kwargs: dict[str, Any] | None = None,
     ) -> tuple[list["ConversationMessage"], DictPrompt]:
         return self.render_messages(messages, params, mm_processor_kwargs)
 
@@ -713,7 +713,7 @@ class BaseRenderer(ABC, Generic[_T]):
 
         if tok_params is None:
             tok_params = self.default_chat_tok_params
-            
+
         mm_processor_kwargs = prompt_extras.get("mm_processor_kwargs", None)
 
         rendered = [
@@ -749,7 +749,7 @@ class BaseRenderer(ABC, Generic[_T]):
 
         if tok_params is None:
             tok_params = self.default_chat_tok_params
-            
+
         mm_processor_kwargs = prompt_extras.get("mm_processor_kwargs", None)
 
         rendered = [
