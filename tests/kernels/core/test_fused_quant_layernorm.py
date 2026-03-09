@@ -162,6 +162,7 @@ def ops_impl(
 )
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("strided_input", [False, True])
 @torch.inference_mode()
 def test_rms_norm(
     default_vllm_config,
@@ -175,6 +176,7 @@ def test_rms_norm(
     tma_alignment: int,
     seed: int,
     device: str,
+    strided_input: bool,
 ) -> None:
     torch.random.manual_seed(seed)
     if torch.cuda.is_available():
@@ -213,10 +215,20 @@ def test_rms_norm(
     # Make weights
     layer.weight.data.normal_(mean=1.0, std=0.1)
 
-    # Make inputs
+    # Make inputs: use a wider tensor and slice to create a non-contiguous
+    # (strided) input when strided_input=True. The last dimension stride
+    # remains 1, which the kernel requires.
     scale = 1 / (hidden_size)
-    x = torch.randn(num_tokens, hidden_size, dtype=dtype) * scale
-    residual = torch.randn_like(x) * scale if add_residual else None
+    last_dim = 2 * hidden_size if strided_input else hidden_size
+    x = torch.randn(num_tokens, last_dim, dtype=dtype) * scale
+    x = x[:, :hidden_size]
+    assert x.is_contiguous() != strided_input
+    # Residual must be contiguous since the kernel requires it.
+    residual = (
+        torch.randn(num_tokens, hidden_size, dtype=dtype) * scale
+        if add_residual
+        else None
+    )
     if has_scale_ub:
         rms_x, _ = ref_rms_norm(layer, x, residual)
         scale_ub = torch.mean(rms_x).to(dtype=torch.float32, device="cuda")
@@ -260,12 +272,14 @@ def test_rms_norm(
     if add_residual:
         assert torch.allclose(ref_residual, ops_residual)
 
-    output = torch.empty_like(x, dtype=quant_dtype)
-    scales = torch.empty(
-        (x.numel() // x.shape[-1], 1), device=x.device, dtype=torch.float32
-    )
+    # opcheck uses contiguous tensors (strided inputs are tested above).
+    if not strided_input:
+        output = torch.empty(x.shape, dtype=quant_dtype, device=x.device)
+        scales = torch.empty(
+            (x.numel() // x.shape[-1], 1), device=x.device, dtype=torch.float32
+        )
 
-    opcheck(
-        torch.ops._C.rms_norm_dynamic_per_token_quant,
-        (output, x, layer.weight, scales, 1e-5, scale_ub, residual),
-    )
+        opcheck(
+            torch.ops._C.rms_norm_dynamic_per_token_quant,
+            (output, x, layer.weight, scales, 1e-5, scale_ub, residual),
+        )
