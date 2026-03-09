@@ -126,17 +126,13 @@ class StaticSinkAttention(Attention, CustomOp):
 
         if cache_config is not None:
             kv_cache_dtype = cache_config.cache_dtype
-            block_size = cache_config.block_size
         else:
             kv_cache_dtype = "auto"
-            block_size = 16
 
         if attn_backend is not None:
             underlying_attn_backend = attn_backend
         else:
-            underlying_attn_backend = get_attn_backend(
-                head_size, dtype, kv_cache_dtype, block_size
-            )
+            underlying_attn_backend = get_attn_backend(head_size, dtype, kv_cache_dtype)
         attn_backend = create_static_sink_attention_backend(
             underlying_attn_backend,  # type: ignore[arg-type]
             sink_len=sink_len,
@@ -153,7 +149,6 @@ class StaticSinkAttention(Attention, CustomOp):
         CustomOp.__init__(self)
 
         self.sink_len = sink_len
-        self.block_size = block_size
         self.sink_populated = False
         self.sink_key = None
         self.sink_value = None
@@ -212,12 +207,12 @@ class StaticSinkAttention(Attention, CustomOp):
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
         # Block size may get updated after model loading, refresh it
-        block_size = vllm_config.cache_config.block_size
+        self.block_size = vllm_config.cache_config.block_size
         # Should not be called for enc-dec or encoder-only attention.
         assert self.attn_type == AttentionType.DECODER
 
         return SinkFullAttentionSpec(
-            block_size=block_size,
+            block_size=self.block_size,
             num_kv_heads=self.num_kv_heads,
             head_size=self.head_size,
             head_size_v=self.head_size_v,
