@@ -86,7 +86,8 @@ class LoadConfig:
     in dictionary needs to be double quoted for json parsing. For more details,
     see original doc for `map_location` in https://pytorch.org/docs/stable/generated/torch.load.html
     """
-
+    return_routed_experts: bool = False
+    """Whether to return the routed experts information during model loading."""
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,

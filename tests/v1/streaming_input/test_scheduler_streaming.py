@@ -54,7 +54,7 @@ def create_scheduler() -> Scheduler:
     vllm_config.model_config.skip_tokenizer_init = True
     vllm_config.model_config.is_multimodal_model = False
     vllm_config.model_config.max_model_len = 1024
-    vllm_config.model_config.enable_return_routed_experts = False
+    vllm_config.cache_config.return_routed_experts = False
     vllm_config.cache_config = MagicMock()
     vllm_config.cache_config.num_gpu_blocks = 1000
     vllm_config.cache_config.enable_prefix_caching = False

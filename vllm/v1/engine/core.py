@@ -405,6 +405,7 @@ class EngineCore:
             scheduler_output, model_output
         )
 
+
         return engine_core_outputs, scheduler_output.total_num_scheduled_tokens > 0
 
     def post_step(self, model_executed: bool) -> None:

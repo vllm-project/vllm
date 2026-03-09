@@ -625,6 +625,17 @@ class Worker(WorkerBase):
     def get_model(self) -> nn.Module:
         return self.model_runner.get_model()
 
+    def get_routed_experts_for_requests(
+        self,
+        finished_req_ids: list[str],
+    ) -> dict[str, np.ndarray]:
+        """Get routed experts for finished requests.
+        
+        This is called via RPC by the scheduler after it determines which
+        requests have finished.
+        """
+        return self.model_runner.get_routed_experts_for_requests(finished_req_ids)
+
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         return self.model_runner.get_supported_tasks()
 

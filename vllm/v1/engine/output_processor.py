@@ -314,8 +314,15 @@ class RequestState:
                 finished,
             )
 
+        prompt_routed_experts = None
+        gen_routed_experts = None
+        if routed_experts is not None:
+            prompt_len = len(self.prompt_token_ids) if self.prompt_token_ids else 0
+            prompt_routed_experts = routed_experts[:prompt_len]
+            gen_routed_experts = routed_experts[prompt_len:]
+
         output = self._new_completion_output(
-            new_token_ids, finish_reason, stop_reason, routed_experts
+            new_token_ids, finish_reason, stop_reason, gen_routed_experts
         )
 
         if self.parent_req is None:
@@ -327,7 +334,8 @@ class RequestState:
             external_req_id = self.parent_req.external_req_id
 
         return self._new_request_output(
-            external_req_id, outputs, finished, kv_transfer_params
+            external_req_id, outputs, finished, kv_transfer_params,
+            prompt_routed_experts,
         )
 
     def _new_request_output(
@@ -336,6 +344,7 @@ class RequestState:
         outputs: list[CompletionOutput] | list[PoolingOutput],
         finished: bool,
         kv_transfer_params: dict[str, Any] | None = None,
+        prompt_routed_experts: np.ndarray | None = None,
     ) -> RequestOutput | PoolingRequestOutput:
         # If prompt embeds were used, put placeholder prompt token ids
         prompt_token_ids = self.prompt_token_ids
@@ -371,6 +380,7 @@ class RequestState:
             kv_transfer_params=kv_transfer_params,
             num_cached_tokens=self.num_cached_tokens,
             metrics=self.stats,
+            prompt_routed_experts=prompt_routed_experts,
         )
 
     def _new_completion_output(
@@ -636,6 +646,12 @@ class OutputProcessor:
                 req_state.logprobs_processor.update_from_output(engine_core_output)
 
             # 4) Create and handle RequestOutput objects.
+            routed_experts = engine_core_output.routed_experts
+            if routed_experts is not None:
+                shape, data = routed_experts
+                routed_experts = np.frombuffer(
+                    data, dtype=np.int16
+                ).copy().reshape(shape)
             if request_output := req_state.make_request_output(
                 new_token_ids,
                 pooling_output,

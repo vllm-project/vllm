@@ -173,10 +173,14 @@ class EngineCoreOutput(
     num_cached_tokens: int = 0
     # The number of tokens computed remotely (original count from connector).
     num_external_computed_tokens: int = 0
-    routed_experts: np.ndarray | None = None
     # The number of NaNs in logits.
     # A value greater than 0 indicates that the output is corrupted.
     num_nans_in_logits: int = 0
+
+    # Routed experts for finished requests (only set when finished).
+    # Encoded as (shape_tuple, raw_bytes) for efficient serialization.
+    # Reconstructed to numpy array in the output processor.
+    routed_experts: tuple | None = None
 
     @property
     def finished(self) -> bool:

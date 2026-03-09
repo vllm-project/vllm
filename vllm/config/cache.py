@@ -177,6 +177,9 @@ class CacheConfig:
     'native' (vLLM native CPU offloading), 'lmcache'.
     KV offloading is only activated when kv_offloading_size is set."""
 
+
+    return_routed_experts: bool = False
+    """Whether to return the routed experts information during model loading."""
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,

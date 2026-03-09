@@ -33,6 +33,7 @@ from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
 from vllm.model_executor.layers.fused_moe.fused_moe_modular_method import (
     FusedMoEModularMethod,
 )
+from vllm.model_executor.layers.fused_moe.routed_experts_capturer import get_global_experts_capturer
 from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
     init_aiter_topK_meta_data,
 )
@@ -297,6 +298,9 @@ class FusedMoE(CustomOp):
 
     # --8<-- [end:fused_moe]
 
+    # Counter for assigning sequential MoE layer IDs for routing capture
+    _next_moe_layer_id: int = 0
+
     def __init__(
         self,
         num_experts: int,  # Global number of experts
@@ -543,6 +547,18 @@ class FusedMoE(CustomOp):
         )
         self.hidden_size = hidden_size
 
+        # Wire up routing capture for the global experts capturer.
+        # Uses a class-level counter to assign sequential MoE layer IDs
+        # (matching the buffer dimension in RoutedExpertsCapturer).
+        moe_layer_id = FusedMoE._next_moe_layer_id
+        FusedMoE._next_moe_layer_id += 1
+        self.router.set_capture_fn(
+            lambda topk_ids, _lid=moe_layer_id:
+                get_global_experts_capturer().capture(
+                    layer_id=_lid, topk_ids=topk_ids
+                )
+        )
+
         self.moe_config: FusedMoEConfig = FusedMoEConfig(
             num_experts=self.global_num_experts,
             experts_per_token=top_k,
@@ -585,6 +601,8 @@ class FusedMoE(CustomOp):
                 quant_method = self.quant_config.get_quant_method(self, prefix)
             if quant_method is None:
                 quant_method = UnquantizedFusedMoEMethod(self.moe_config)
+                logger.debug_once(
+                    f"[Quant] No quantization method specified. Using UnquantizedFusedMoEMethod for prefix {prefix}")
             assert isinstance(quant_method, FusedMoEMethodBase)
             return quant_method
 
