@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 import pytest
 import pytest_asyncio
 from openai.types.responses import (
+    ResponseFunctionCallArgumentsDeltaEvent,
     ResponseOutputItemDoneEvent,
     ResponseReasoningItem,
     ResponseReasoningTextDeltaEvent,
@@ -23,7 +24,9 @@ from openai.types.responses.tool import (
 import vllm.envs as envs
 from vllm.entrypoints.mcp.tool_server import ToolServer
 from vllm.entrypoints.openai.engine.protocol import (
+    DeltaFunctionCall,
     DeltaMessage,
+    DeltaToolCall,
     ErrorResponse,
     RequestResponseMetadata,
 )
@@ -661,6 +664,7 @@ class TestStreamingReasoningToContentTransition:
         mock_parser.extract_reasoning_streaming = mock_extract_reasoning_streaming
         serving.parser = MagicMock()
         serving.parser.reasoning_parser_cls = MagicMock(return_value=mock_parser)
+        serving.parser.tool_parser_cls = None
 
         # Create contexts for each streaming chunk
         contexts = [
@@ -741,6 +745,7 @@ class TestStreamingReasoningToContentTransition:
         mock_parser.extract_reasoning_streaming = mock_extract_reasoning_streaming
         serving.parser = MagicMock()
         serving.parser.reasoning_parser_cls = MagicMock(return_value=mock_parser)
+        serving.parser.tool_parser_cls = None
 
         contexts = [
             _make_simple_context_with_output("chunk1", [10]),
@@ -814,6 +819,7 @@ class TestStreamingReasoningToContentTransition:
         mock_parser.extract_reasoning_streaming = mock_extract_reasoning_streaming
         serving.parser = MagicMock()
         serving.parser.reasoning_parser_cls = MagicMock(return_value=mock_parser)
+        serving.parser.tool_parser_cls = None
 
         contexts = [
             _make_simple_context_with_output("chunk1", [10]),
@@ -868,3 +874,281 @@ class TestStreamingReasoningToContentTransition:
         ]
         assert len(item_done_events) == 1
         assert isinstance(item_done_events[0].item, ResponseReasoningItem)
+
+
+def _make_serving_instance_with_tool_parser():
+    """Create an OpenAIServingResponses with a mocked tool parser."""
+    engine_client = MagicMock()
+    model_config = MagicMock()
+    model_config.max_model_len = 100
+    model_config.hf_config.model_type = "test"
+    model_config.hf_text_config = MagicMock()
+    model_config.get_diff_sampling_param.return_value = {}
+    engine_client.model_config = model_config
+    engine_client.input_processor = MagicMock()
+    engine_client.io_processor = MagicMock()
+    engine_client.renderer = MagicMock()
+
+    models = MagicMock()
+
+    serving = OpenAIServingResponses(
+        engine_client=engine_client,
+        models=models,
+        request_logger=None,
+        chat_template=None,
+        chat_template_content_format="auto",
+        tool_parser="hermes",
+    )
+    return serving
+
+
+def _make_serving_instance_with_reasoning_and_tool_parser():
+    """Create an OpenAIServingResponses with both reasoning and tool parser."""
+    engine_client = MagicMock()
+    model_config = MagicMock()
+    model_config.max_model_len = 100
+    model_config.hf_config.model_type = "test"
+    model_config.hf_text_config = MagicMock()
+    model_config.get_diff_sampling_param.return_value = {}
+    engine_client.model_config = model_config
+    engine_client.input_processor = MagicMock()
+    engine_client.io_processor = MagicMock()
+    engine_client.renderer = MagicMock()
+
+    models = MagicMock()
+
+    serving = OpenAIServingResponses(
+        engine_client=engine_client,
+        models=models,
+        request_logger=None,
+        chat_template=None,
+        chat_template_content_format="auto",
+        reasoning_parser="qwen3",
+        tool_parser="hermes",
+    )
+    return serving
+
+
+class TestStreamingToolCallEvents:
+    """Tests for _process_simple_streaming_events tool call support.
+
+    Verifies that tool calls from the tool parser are emitted as
+    ResponseFunctionCallArgumentsDeltaEvent / Done events instead of
+    leaking raw XML into ResponseTextDeltaEvent.
+    """
+
+    @pytest.mark.asyncio
+    async def test_tool_only_stream_emits_function_call_events(self, monkeypatch):
+        """When a tool parser returns tool_calls, the stream should emit
+        function call delta/done events, not text deltas."""
+
+        monkeypatch.setattr(envs, "VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT", False)
+        serving = _make_serving_instance_with_tool_parser()
+
+        # Simulate tool parser returning tool call deltas
+        delta_sequence = [
+            DeltaMessage(
+                tool_calls=[
+                    DeltaToolCall(
+                        id="call_1",
+                        index=0,
+                        type="function",
+                        function=DeltaFunctionCall(
+                            name="get_weather",
+                            arguments='{"lo',
+                        ),
+                    ),
+                ]
+            ),
+            DeltaMessage(
+                tool_calls=[
+                    DeltaToolCall(
+                        id=None,
+                        index=0,
+                        type="function",
+                        function=DeltaFunctionCall(
+                            name="",
+                            arguments='cation": "Boston"}',
+                        ),
+                    ),
+                ]
+            ),
+        ]
+        call_count = 0
+
+        def mock_extract_tool_calls_streaming(**kwargs):
+            nonlocal call_count
+            result = delta_sequence[call_count]
+            call_count += 1
+            return result
+
+        mock_parser = MagicMock()
+        mock_parser.extract_tool_calls_streaming = mock_extract_tool_calls_streaming
+        mock_parser.prev_tool_call_arr = []
+        serving.parser = MagicMock()
+        serving.parser.reasoning_parser_cls = None
+        serving.parser.tool_parser_cls = MagicMock(return_value=mock_parser)
+
+        contexts = [
+            _make_simple_context_with_output("<tool_call>", [10]),
+            _make_simple_context_with_output("args", [20]),
+        ]
+
+        async def result_generator():
+            for ctx in contexts:
+                yield ctx
+
+        request = ResponsesRequest(input="hi", tools=[], stream=True)
+        sampling_params = SamplingParams(max_tokens=64)
+        metadata = RequestResponseMetadata(request_id="req")
+        _identity_increment._counter = 0  # type: ignore
+
+        events = []
+        async for event in serving._process_simple_streaming_events(
+            request=request,
+            sampling_params=sampling_params,
+            result_generator=result_generator(),
+            context=SimpleContext(),
+            model_name="test-model",
+            tokenizer=MagicMock(),
+            request_metadata=metadata,
+            created_time=0,
+            _increment_sequence_number_and_return=_identity_increment,
+        ):
+            events.append(event)
+
+        # Should have function call argument deltas
+        fc_deltas = [
+            e for e in events if isinstance(e, ResponseFunctionCallArgumentsDeltaEvent)
+        ]
+        assert len(fc_deltas) >= 1
+
+        # No raw XML text deltas
+        text_deltas = [e for e in events if isinstance(e, ResponseTextDeltaEvent)]
+        assert len(text_deltas) == 0
+
+    @pytest.mark.asyncio
+    async def test_reasoning_then_tool_call_stream(self, monkeypatch):
+        """When a model has both reasoning and tool parsers, reasoning
+        should be emitted first, then tool calls after reasoning ends.
+        No raw XML should leak as text deltas."""
+
+        monkeypatch.setattr(envs, "VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT", False)
+        serving = _make_serving_instance_with_reasoning_and_tool_parser()
+
+        # Phase 1: reasoning parser returns reasoning content
+        reasoning_deltas = [
+            DeltaMessage(reasoning="thinking..."),
+            DeltaMessage(reasoning=" done"),
+        ]
+        # Phase 2: tool parser returns tool calls after reasoning ends.
+        # The tool parser is called once when reasoning ends (same
+        # iteration, with empty/reset state) and once for the next
+        # chunk.
+        tool_deltas = [
+            DeltaMessage(),  # no tool calls yet in the transition chunk
+            DeltaMessage(
+                tool_calls=[
+                    DeltaToolCall(
+                        id="call_1",
+                        index=0,
+                        type="function",
+                        function=DeltaFunctionCall(
+                            name="get_weather",
+                            arguments='{"location": "Boston"}',
+                        ),
+                    ),
+                ]
+            ),
+        ]
+
+        reasoning_call_count = 0
+        tool_call_count = 0
+        reasoning_end_triggered = False
+
+        def mock_extract_reasoning_streaming(**kwargs):
+            nonlocal reasoning_call_count
+            result = reasoning_deltas[reasoning_call_count]
+            reasoning_call_count += 1
+            return result
+
+        def mock_is_reasoning_end(input_ids):
+            nonlocal reasoning_end_triggered
+            # Reasoning ends after second chunk
+            if reasoning_call_count >= 2 and not reasoning_end_triggered:
+                reasoning_end_triggered = True
+                return True
+            return False
+
+        def mock_extract_content_ids(input_ids):
+            return []
+
+        def mock_extract_tool_calls_streaming(**kwargs):
+            nonlocal tool_call_count
+            result = tool_deltas[tool_call_count]
+            tool_call_count += 1
+            return result
+
+        mock_reasoning_parser = MagicMock()
+        mock_reasoning_parser.extract_reasoning_streaming = (
+            mock_extract_reasoning_streaming
+        )
+        mock_reasoning_parser.is_reasoning_end = mock_is_reasoning_end
+        mock_reasoning_parser.extract_content_ids = mock_extract_content_ids
+
+        mock_tool_parser = MagicMock()
+        mock_tool_parser.extract_tool_calls_streaming = (
+            mock_extract_tool_calls_streaming
+        )
+        mock_tool_parser.prev_tool_call_arr = []
+
+        serving.parser = MagicMock()
+        serving.parser.reasoning_parser_cls = MagicMock(
+            return_value=mock_reasoning_parser
+        )
+        serving.parser.tool_parser_cls = MagicMock(return_value=mock_tool_parser)
+
+        contexts = [
+            _make_simple_context_with_output("think1", [10]),
+            _make_simple_context_with_output("think2", [20]),
+            _make_simple_context_with_output("<tool_call>", [30]),
+        ]
+
+        async def result_generator():
+            for ctx in contexts:
+                yield ctx
+
+        request = ResponsesRequest(input="hi", tools=[], stream=True)
+        sampling_params = SamplingParams(max_tokens=64)
+        metadata = RequestResponseMetadata(request_id="req")
+        _identity_increment._counter = 0  # type: ignore
+
+        events = []
+        async for event in serving._process_simple_streaming_events(
+            request=request,
+            sampling_params=sampling_params,
+            result_generator=result_generator(),
+            context=SimpleContext(),
+            model_name="test-model",
+            tokenizer=MagicMock(),
+            request_metadata=metadata,
+            created_time=0,
+            _increment_sequence_number_and_return=_identity_increment,
+        ):
+            events.append(event)
+
+        # Should have reasoning deltas
+        reasoning_events = [
+            e for e in events if isinstance(e, ResponseReasoningTextDeltaEvent)
+        ]
+        assert len(reasoning_events) >= 1
+
+        # Should have function call argument deltas
+        fc_deltas = [
+            e for e in events if isinstance(e, ResponseFunctionCallArgumentsDeltaEvent)
+        ]
+        assert len(fc_deltas) >= 1
+
+        # No raw XML text deltas
+        text_deltas = [e for e in events if isinstance(e, ResponseTextDeltaEvent)]
+        assert len(text_deltas) == 0

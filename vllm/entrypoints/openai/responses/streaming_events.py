@@ -16,7 +16,7 @@ The file is organized as:
 """
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Final
 
 from openai.types.responses import (
@@ -96,6 +96,7 @@ class StreamingState:
     current_call_id: str = ""
     sent_output_item_added: bool = False
     is_first_function_call_delta: bool = False
+    done_emitted_tc_indices: set[int] = field(default_factory=set)
 
     def reset_for_new_item(self) -> None:
         """Reset state when expecting a new output item."""
