@@ -24,11 +24,11 @@ logger = init_logger(__name__)
 
 
 def score(request: Request) -> ServingScores | None:
-    return request.app.state.openai_serving_scores
+    return request.app.state.serving_scores
 
 
 def rerank(request: Request) -> ServingScores | None:
-    return request.app.state.openai_serving_scores
+    return request.app.state.serving_scores
 
 
 @router.post(

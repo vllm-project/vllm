@@ -1,43 +1,26 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import importlib.util
-from functools import lru_cache
+
 from http import HTTPStatus
 
 from fastapi import APIRouter, Depends, Request
-from fastapi.responses import JSONResponse, StreamingResponse
-from typing_extensions import assert_never
+from fastapi.responses import JSONResponse
 
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.openai.utils import validate_json_request
-from vllm.entrypoints.pooling.embed.protocol import (
-    EmbeddingBytesResponse,
-    EmbeddingRequest,
-    EmbeddingResponse,
+from vllm.entrypoints.pooling.embed.protocol import EmbeddingRequest
+from vllm.entrypoints.pooling.embed.serving import ServingEmbedding
+from vllm.entrypoints.utils import (
+    create_error_response,
+    load_aware_call,
+    with_cancellation,
 )
-from vllm.entrypoints.pooling.embed.serving import OpenAIServingEmbedding
-from vllm.entrypoints.utils import load_aware_call, with_cancellation
-from vllm.logger import init_logger
 
 router = APIRouter()
 
-logger = init_logger(__name__)
 
-
-@lru_cache(maxsize=1)
-def _get_json_response_cls():
-    if importlib.util.find_spec("orjson") is not None:
-        from fastapi.responses import ORJSONResponse
-
-        return ORJSONResponse
-    logger.warning_once(
-        "To make v1/embeddings API fast, please install orjson by `pip install orjson`"
-    )
-    return JSONResponse
-
-
-def embedding(request: Request) -> OpenAIServingEmbedding | None:
-    return request.app.state.openai_serving_embedding
+def embedding(request: Request) -> ServingEmbedding | None:
+    return request.app.state.serving_embedding
 
 
 @router.post(
@@ -56,24 +39,11 @@ async def create_embedding(
 ):
     handler = embedding(raw_request)
     if handler is None:
-        base_server = raw_request.app.state.openai_serving_tokenization
-        return base_server.create_error_response(
+        error_response = create_error_response(
             message="The model does not support Embeddings API"
         )
-
-    generator = await handler.create_embedding(request, raw_request)
-
-    if isinstance(generator, ErrorResponse):
         return JSONResponse(
-            content=generator.model_dump(), status_code=generator.error.code
+            content=error_response.model_dump(),
+            status_code=error_response.error.code,
         )
-    elif isinstance(generator, EmbeddingResponse):
-        return _get_json_response_cls()(content=generator.model_dump())
-    elif isinstance(generator, EmbeddingBytesResponse):
-        return StreamingResponse(
-            content=generator.content,
-            headers=generator.headers,
-            media_type=generator.media_type,
-        )
-
-    assert_never(generator)
+    return await handler(request, raw_request)

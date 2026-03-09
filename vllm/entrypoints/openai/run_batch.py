@@ -53,6 +53,7 @@ from vllm.entrypoints.pooling.score.protocol import (
     ScoreRequest,
     ScoreResponse,
 )
+from vllm.entrypoints.utils import create_error_response
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
 from vllm.utils import random_uuid
@@ -503,7 +504,10 @@ async def run_request(
     request: BatchRequestInput,
     tracker: BatchProgressTracker,
 ) -> BatchRequestOutput:
-    response = await serving_engine_func(request.body)
+    try:
+        response = await serving_engine_func(request.body)
+    except Exception as e:
+        response = create_error_response(e)
 
     if isinstance(
         response,
@@ -678,10 +682,10 @@ async def build_endpoint_registry(
 
     # Get serving objects from state (defaulting to None if not set)
     openai_serving_chat = getattr(state, "openai_serving_chat", None)
-    openai_serving_embedding = getattr(state, "openai_serving_embedding", None)
-    openai_serving_scores = getattr(state, "openai_serving_scores", None)
     openai_serving_transcription = getattr(state, "openai_serving_transcription", None)
     openai_serving_translation = getattr(state, "openai_serving_translation", None)
+    serving_embedding = getattr(state, "serving_embedding", None)
+    serving_scores = getattr(state, "serving_scores", None)
 
     # Registry of endpoint configurations
     endpoint_registry: dict[str, dict[str, Any]] = {
@@ -697,27 +701,21 @@ async def build_endpoint_registry(
         "embeddings": {
             "url_matcher": lambda url: url == "/v1/embeddings",
             "handler_getter": lambda: (
-                openai_serving_embedding.create_embedding
-                if openai_serving_embedding is not None
-                else None
+                serving_embedding if serving_embedding is not None else None
             ),
             "wrapper_fn": None,
         },
         "score": {
             "url_matcher": lambda url: url.endswith("/score"),
             "handler_getter": lambda: (
-                openai_serving_scores.create_score
-                if openai_serving_scores is not None
-                else None
+                serving_scores.create_score if serving_scores is not None else None
             ),
             "wrapper_fn": None,
         },
         "rerank": {
             "url_matcher": lambda url: url.endswith("/rerank"),
             "handler_getter": lambda: (
-                openai_serving_scores.do_rerank
-                if openai_serving_scores is not None
-                else None
+                serving_scores.do_rerank if serving_scores is not None else None
             ),
             "wrapper_fn": None,
         },
