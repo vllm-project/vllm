@@ -189,6 +189,12 @@ class RocmAttentionBackend(AttentionBackend):
         return [16, 32, 544]
 
     @classmethod
+    def supports_block_size(cls, block_size: int | None) -> bool:
+        if block_size is None:
+            return True
+        return block_size in (16, 32, 544)
+
+    @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
         return [32, 64, 80, 96, 128, 160, 192, 224, 256]
 
