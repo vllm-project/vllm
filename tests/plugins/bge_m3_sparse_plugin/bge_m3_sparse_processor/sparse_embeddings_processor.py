@@ -5,7 +5,7 @@ from collections.abc import Sequence
 
 from vllm.config import VllmConfig
 from vllm.entrypoints.openai.engine.protocol import UsageInfo
-from vllm.inputs.data import PromptType
+from vllm.inputs import PromptType
 from vllm.logger import init_logger
 from vllm.outputs import PoolingRequestOutput
 from vllm.plugins.io_processors.interface import (
