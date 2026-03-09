@@ -27,7 +27,7 @@ def _deep_merge_mm_kwargs(
         ):
             result[k] = _deep_merge_mm_kwargs(dict(result[k]), v)
         else:
-            result[k] = copy.deepcopy(v)
+            result[k] = copy.copy(v)
     return result
 
 
