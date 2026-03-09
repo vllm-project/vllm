@@ -138,11 +138,6 @@ class KimiAudioProcessor(ProcessorMixin):
         if text is None:
             raise ValueError("You need to specify either a `text` input to process.")
 
-        # Track if text is already token IDs
-        text_is_token_ids = (
-            isinstance(text, list) and len(text) > 0 and isinstance(text[0], int)
-        )
-
         # Process audio if provided
         if audio is not None:
             # Ensure audio is a list
@@ -178,41 +173,20 @@ class KimiAudioProcessor(ProcessorMixin):
                 audio_inputs["feature_attention_mask"] = audio_inputs.pop(
                     "attention_mask"
                 )
-
-            audio_lengths = iter(
-                _get_feat_extract_output_lengths(
-                    audio_inputs["feature_attention_mask"].sum(-1)
-                )
-            )
         else:
             audio_inputs = {}
-            audio_lengths = iter([])
 
-        # Handle text processing based on input type
-        if text_is_token_ids:
-            # Text is already token IDs - expand BLANK tokens
-            expanded = []
-            for token_id in text:
-                if token_id == KimiAudioProcessor.KIMIA_TEXT_BLANK:
-                    expanded.extend([token_id] * next(audio_lengths, 376))
-                else:
-                    expanded.append(token_id)
-            text_inputs = {"input_ids": torch.tensor([expanded], dtype=torch.long)}
+        # Handle text input - can be string or token IDs from vLLM processor
+        if isinstance(text, list) and len(text) > 0 and isinstance(text[0], int):
+            # Text is already token IDs (from vLLM processor) - just wrap
+            text_inputs = {"input_ids": torch.tensor([text], dtype=torch.long)}
         else:
-            # Text is string - tokenize and expand
+            # Text is string - tokenize
             if not isinstance(text, list):
                 text = [text]
 
-            processed_text = []
-            for sample in text:
-                sample = sample.replace(
-                    "<|im_kimia_text_blank|>",
-                    "<|im_kimia_text_blank|>" * next(audio_lengths, 376),
-                )
-                processed_text.append(sample)
-
             text_inputs = self.tokenizer(
-                processed_text, return_tensors=return_tensors, padding=True
+                text, return_tensors=return_tensors, padding=True
             )
 
         return BatchFeature(
