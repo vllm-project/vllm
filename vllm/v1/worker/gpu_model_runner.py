@@ -94,7 +94,6 @@ from vllm.multimodal.inputs import (
     PlaceholderRange,
 )
 from vllm.multimodal.utils import group_mm_kwargs_by_modality
-from vllm.platforms import current_platform
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingType
 from vllm.sequence import IntermediateTensors
@@ -164,6 +163,7 @@ from vllm.v1.spec_decode.extract_hidden_states import ExtractHiddenStatesPropose
 from vllm.v1.spec_decode.medusa import MedusaProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.suffix_decoding import SuffixDecodingProposer
+from vllm.v1.spec_decode.utils import update_num_computed_tokens_for_batch_change
 from vllm.v1.structured_output.utils import apply_grammar_bitmask
 from vllm.v1.utils import CpuGpuBuffer, record_function_or_nullcontext
 from vllm.v1.worker import mamba_utils
@@ -203,39 +203,6 @@ logger = init_logger(__name__)
 AttnMetadataDict: TypeAlias = dict[str, AttentionMetadata]
 # list when ubatching is enabled
 PerLayerAttnMetadata: TypeAlias = list[AttnMetadataDict] | AttnMetadataDict
-
-
-@torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
-def _update_num_computed_tokens_for_batch_change(
-    num_computed_tokens: torch.Tensor,
-    num_accepted_tokens: torch.Tensor,
-    prev_positions: torch.Tensor,
-    valid_sampled_token_count: torch.Tensor,
-    prev_num_draft_tokens: torch.Tensor,
-    cpu_num_computed_tokens: torch.Tensor,
-) -> None:
-    """Correct num_computed_tokens for async spec decode drift.
-
-    Requests that had drafts: corrected = prev_gpu + valid_count.
-    New requests or non-draft (e.g. prefills): use CPU value directly.
-    """
-    # Clamp because prev_positions can be -1 for new requests
-    gather_indices = prev_positions.clamp(min=0)
-
-    valid_counts = valid_sampled_token_count[gather_indices]
-    prev_computed = num_computed_tokens[gather_indices]
-    prev_drafts = prev_num_draft_tokens[gather_indices]
-
-    participating = (prev_positions >= 0) & (prev_drafts > 0)
-    corrected = prev_computed + valid_counts.int()
-
-    n = prev_positions.shape[0]
-    num_computed_tokens[:n].copy_(
-        torch.where(participating, corrected, cpu_num_computed_tokens)
-    )
-    num_accepted_tokens.copy_(
-        torch.where(participating, valid_counts, num_accepted_tokens)
-    )
 
 
 # Wrapper for ModelRunnerOutput to support overlapped execution.
@@ -1798,7 +1765,7 @@ class GPUModelRunner(
         # Non-hybrid: input_batch.num_accepted_tokens_cpu is always 1
         #   (default), which is wrong for draft requests. In async mode,
         #   self.num_accepted_tokens.gpu is corrected by
-        #   _update_num_computed_tokens_for_batch_change below. In sync
+        #   update_num_computed_tokens_for_batch_change below. In sync
         #   mode, self.num_accepted_tokens.gpu is unused (only GDN/Mamba2
         #   attention builders consume it).
         if self.num_accepted_tokens_event is not None:
@@ -1828,7 +1795,7 @@ class GPUModelRunner(
                 device=self.device, non_blocking=True
             )
 
-            _update_num_computed_tokens_for_batch_change(
+            update_num_computed_tokens_for_batch_change(
                 self.num_computed_tokens,
                 self.num_accepted_tokens.gpu[:num_reqs],
                 self.prev_positions.gpu[:num_reqs],
