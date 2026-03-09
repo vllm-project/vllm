@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import logging
 from typing import Any
 
 from openai.types.chat import (
@@ -24,6 +25,10 @@ from vllm import envs
 from vllm.entrypoints.constants import MCP_PREFIX
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionMessageParam
 from vllm.entrypoints.openai.responses.protocol import ResponseInputOutputItem
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 
 def should_continue_final_message(
@@ -191,10 +196,16 @@ def _construct_single_message_from_response_item(
         reasoning_content = ""
         if item.encrypted_content:
             raise ValueError("Encrypted content is not supported.")
-        if len(item.summary) == 1:
-            reasoning_content = item.summary[0].text
         elif item.content and len(item.content) == 1:
             reasoning_content = item.content[0].text
+        elif len(item.summary) >= 1:
+            reasoning_content = item.summary[0].text
+            logger.warning(
+                "Using summary text as reasoning content for item %s. "
+                "Please use content instead of summary for "
+                "reasoning items.",
+                item.id,
+            )
         return {
             "role": "assistant",
             "reasoning": reasoning_content,
