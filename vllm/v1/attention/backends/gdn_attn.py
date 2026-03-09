@@ -281,15 +281,15 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 # Async transfer to device after CPU slicing is complete
                 non_spec_token_indx = (
                     index_cpu[:num_non_spec_tokens]
+                    .to(torch.int32)
                     .pin_memory()
                     .to(query_start_loc.device, non_blocking=True)
-                    .to(torch.int32)
                 )
                 spec_token_indx = (
                     index_cpu[num_non_spec_tokens:]
+                    .to(torch.int32)
                     .pin_memory()
                     .to(query_start_loc.device, non_blocking=True)
-                    .to(torch.int32)
                 )
 
                 # Use pre-computed integer indices for block table slicing
