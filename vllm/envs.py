@@ -236,6 +236,9 @@ if TYPE_CHECKING:
     VLLM_USE_V2_MODEL_RUNNER: bool = False
     VLLM_LOG_MODEL_INSPECTION: bool = False
     VLLM_DEBUG_MFU_METRICS: bool = False
+    VLLM_DEBUG_TENSOR_DUMP_OUTPUT_FOLDER: str | None = None
+    VLLM_DEBUG_TENSOR_DUMP_LAYERS: str | None = None
+    VLLM_DEBUG_TENSOR_DUMP_SKIP_PASSES: int = 0
     VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY: bool = False
     VLLM_WEIGHT_OFFLOADING_DISABLE_UVA: bool = False
     VLLM_DISABLE_LOG_LOGO: bool = False
@@ -1596,6 +1599,18 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_DEBUG_MFU_METRICS": lambda: bool(
         int(os.getenv("VLLM_DEBUG_MFU_METRICS", "0"))
     ),
+    # Output directory for debug tensor dumps of intermediate activations.
+    # When set, forward hooks are registered on every leaf module to capture
+    # activations. Each forward pass produces a .pt file.
+    "VLLM_DEBUG_TENSOR_DUMP_OUTPUT_FOLDER":
+        lambda: os.environ.get("VLLM_DEBUG_TENSOR_DUMP_OUTPUT_FOLDER", None),
+    # Comma-separated layer indices to dump (e.g. "0,1,31").
+    # When unset all layers are dumped.
+    "VLLM_DEBUG_TENSOR_DUMP_LAYERS":
+        lambda: os.environ.get("VLLM_DEBUG_TENSOR_DUMP_LAYERS", None),
+    # Number of initial forward passes to skip before recording.
+    "VLLM_DEBUG_TENSOR_DUMP_SKIP_PASSES":
+        lambda: int(os.environ.get("VLLM_DEBUG_TENSOR_DUMP_SKIP_PASSES", "0")),
     # Disable using pytorch's pin memory for CPU offloading.
     "VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY": lambda: bool(
         int(os.getenv("VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY", "0"))
