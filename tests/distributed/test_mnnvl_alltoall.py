@@ -378,8 +378,6 @@ def data_communication_worker(rank: int, world_size: int):
     from vllm.config.vllm import VllmConfig
     from vllm.distributed.device_communicators.all2all import (
         AgRsAll2AllManager,
-        FlashInferAllToAllManager,
-        NaiveAll2AllManager,
     )
     from vllm.forward_context import set_forward_context
 
@@ -470,16 +468,20 @@ def data_communication_worker(rank: int, world_size: int):
             # Test 2: dispatch
             print(f"[Rank {rank}] Testing dispatch")
             ref_hidden2, ref_weights, ref_ids = reference_manager.dispatch(
-                hidden_states.clone(), topk_weights.clone(), topk_ids.clone(),
-                is_sequence_parallel=True
+                hidden_states.clone(),
+                topk_weights.clone(),
+                topk_ids.clone(),
+                is_sequence_parallel=True,
             )
 
             # Test 3: combine
             print(f"[Rank {rank}] Testing combine")
             # Create output tensor for combine (simulating expert outputs)
             expert_output = torch.randn(
-                world_size * num_tokens_per_rank, hidden_size,
-                device=device, dtype=torch.float16
+                world_size * num_tokens_per_rank,
+                hidden_size,
+                device=device,
+                dtype=torch.float16,
             )
             ref_combined = reference_manager.combine(
                 expert_output.clone(), is_sequence_parallel=True
@@ -488,7 +490,9 @@ def data_communication_worker(rank: int, world_size: int):
             torch.distributed.barrier()
 
             print(f"[Rank {rank}] ✓ Data communication validated successfully")
-            print(f"[Rank {rank}]   - Dispatched hidden states shape: {ref_hidden.shape}")
+            print(
+                f"[Rank {rank}]   - Dispatched hidden states shape: {ref_hidden.shape}"
+            )
             print(f"[Rank {rank}]   - Combined output shape: {ref_combined.shape}")
 
             torch.distributed.barrier()
@@ -630,7 +634,9 @@ def flashinfer_data_communication_worker(rank: int, world_size: int):
         dp_metadata = get_forward_context().dp_metadata
         with dp_metadata.sp_local_sizes(sequence_parallel_size=1):
             # Test dispatch_router_logits
-            print(f"[Rank {rank}] Testing FlashInfer dispatch_router_logits vs reference")
+            print(
+                f"[Rank {rank}] Testing FlashInfer dispatch_router_logits vs reference"
+            )
             ref_hidden, ref_router = reference_manager.dispatch_router_logits(
                 hidden_states.clone(), router_logits.clone(), is_sequence_parallel=True
             )
@@ -671,13 +677,17 @@ def flashinfer_data_communication_worker(rank: int, world_size: int):
 
             print(f"[Rank {rank}] ✓ FlashInfer a2a backend data validation passed")
             print(
-                f"[Rank {rank}]   - Input: {num_tokens_per_rank} tokens, {hidden_size} dims"
+                f"[Rank {rank}]   - Input: {num_tokens_per_rank} tokens, "
+                f"{hidden_size} dims"
             )
             print(
-                f"[Rank {rank}]   - After dispatch: {expected_total_tokens} tokens (gathered from {world_size} ranks)"
+                f"[Rank {rank}]   - After dispatch: "
+                f"{expected_total_tokens} tokens "
+                f"(gathered from {world_size} ranks)"
             )
             print(
-                f"[Rank {rank}]   - After combine: {num_tokens_per_rank} tokens (reduced back)"
+                f"[Rank {rank}]   - After combine: "
+                f"{num_tokens_per_rank} tokens (reduced back)"
             )
 
             # Cleanup
@@ -829,13 +839,16 @@ def deterministic_data_validation_worker(rank: int, world_size: int):
             # Test dispatch_router_logits
             print(f"[Rank {rank}] Testing deterministic dispatch_router_logits")
             dispatched_hidden, dispatched_router = manager.dispatch_router_logits(
-                hidden_states.clone(), router_logits.clone(), is_sequence_parallel=True
+                hidden_states.clone(),
+                router_logits.clone(),
+                is_sequence_parallel=True,
             )
 
             # Validate dispatched data contains contributions from all ranks
             expected_total_tokens = world_size * num_tokens_per_rank
             assert dispatched_hidden.shape[0] == expected_total_tokens, (
-                f"[Rank {rank}] Expected {expected_total_tokens} tokens, got {dispatched_hidden.shape[0]}"
+                f"[Rank {rank}] Expected {expected_total_tokens} tokens, "
+                f"got {dispatched_hidden.shape[0]}"
             )
 
             # Verify that dispatched data contains values from all ranks
@@ -850,8 +863,8 @@ def deterministic_data_validation_worker(rank: int, world_size: int):
                 actual_mean = rank_data.mean().item()
 
                 assert abs(actual_mean - expected_value) < 1e-4, (
-                    f"[Rank {rank}] Expected rank {r} data to have value {expected_value}, "
-                    f"but got {actual_mean}"
+                    f"[Rank {rank}] Expected rank {r} data to have value "
+                    f"{expected_value}, but got {actual_mean}"
                 )
 
             print(f"[Rank {rank}] ✓ Dispatch validation passed - all rank data present")
@@ -859,7 +872,10 @@ def deterministic_data_validation_worker(rank: int, world_size: int):
             # Test combine with deterministic pattern
             # Create expert output where each token has value = token_index
             expert_output = torch.zeros(
-                expected_total_tokens, hidden_size, device=device, dtype=torch.float32
+                expected_total_tokens,
+                hidden_size,
+                device=device,
+                dtype=torch.float32,
             )
             for i in range(expected_total_tokens):
                 expert_output[i, :] = float(i)
@@ -872,11 +888,14 @@ def deterministic_data_validation_worker(rank: int, world_size: int):
             # etc.
             expected_start_token = rank * num_tokens_per_rank
             for i in range(num_tokens_per_rank):
-                expected_value = float(expected_start_token + i) * world_size  # Due to all_reduce
+                expected_value = (
+                    float(expected_start_token + i) * world_size
+                )  # Due to all_reduce
                 actual_mean = combined[i, :].mean().item()
 
                 assert abs(actual_mean - expected_value) < 1e-3, (
-                    f"[Rank {rank}] Token {i}: expected {expected_value}, got {actual_mean}"
+                    f"[Rank {rank}] Token {i}: expected {expected_value}, "
+                    f"got {actual_mean}"
                 )
 
             print(f"[Rank {rank}] ✓ Combine validation passed - correct data reduction")
@@ -892,8 +911,14 @@ def deterministic_data_validation_worker(rank: int, world_size: int):
 
             # Verify shapes
             assert dispatched_hidden2.shape == (expected_total_tokens, hidden_size)
-            assert dispatched_weights.shape == (expected_total_tokens, num_experts_per_token)
-            assert dispatched_ids.shape == (expected_total_tokens, num_experts_per_token)
+            assert dispatched_weights.shape == (
+                expected_total_tokens,
+                num_experts_per_token,
+            )
+            assert dispatched_ids.shape == (
+                expected_total_tokens,
+                num_experts_per_token,
+            )
 
             # Verify weights contain data from all ranks
             for r in range(world_size):
@@ -1016,4 +1041,3 @@ if __name__ == "__main__":
     print("=" * 70)
     print("\nTo run full multi-GPU test suite:")
     print("  pytest tests/distributed/test_mnnvl_alltoall.py -v")
-
