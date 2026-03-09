@@ -755,6 +755,7 @@ def _create_qwen2vl_field_factory(
                 "video", video_embed_grid_sizes
             ),
             video_grid_thw=MultiModalFieldConfig.batched("video", keep_on_cpu=True),
+            timestamps=MultiModalFieldConfig.batched("video", keep_on_cpu=True),
         )
 
     return _qwen2vl_field_config
@@ -843,7 +844,13 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
         temporal_patch_size = vision_config.temporal_patch_size
 
         mm_kwargs = self.ctx.get_merged_mm_kwargs(mm_kwargs)
-        size = mm_kwargs.get("size", image_processor.size)
+        size = image_processor.size
+        if override_size := mm_kwargs.get("size"):
+            size = size | override_size
+        if (override_min_pixels := mm_kwargs.get("min_pixels")) is not None:
+            size = size | {"shortest_edge": override_min_pixels}
+        if (override_max_pixels := mm_kwargs.get("max_pixels")) is not None:
+            size = size | {"longest_edge": override_max_pixels}
 
         if do_resize:
             resized_height, resized_width = smart_resize(
@@ -909,7 +916,7 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
         self, max_pixels: int | None = None
     ) -> ImageSize:
         # NOTE: Simply processing a huge size with _get_vision_info might not give a
-        # size that maximizes the number of featrues, i.e., the number of (merged)
+        # size that maximizes the number of features, i.e., the number of (merged)
         # patches. This is because the number of patches limits the allowed aspect
         # ratios. For example, suppose the maximum number of patches is 1280. A square
         # image cannot be broken down into 1280 patches, so feeding a giant square image
@@ -925,9 +932,21 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
         vision_config = hf_config.vision_config
         patch_size = vision_config.patch_size
         merge_size = vision_config.spatial_merge_size
+
         if max_pixels is None:
             image_processor = self.get_image_processor()
-            max_pixels = image_processor.size["longest_edge"]
+
+            mm_kwargs = self.ctx.get_merged_mm_kwargs({})
+            size = image_processor.size
+            if override_size := mm_kwargs.get("size"):
+                size = size | override_size
+            if (override_min_pixels := mm_kwargs.get("min_pixels")) is not None:
+                size = size | {"shortest_edge": override_min_pixels}
+            if (override_max_pixels := mm_kwargs.get("max_pixels")) is not None:
+                size = size | {"longest_edge": override_max_pixels}
+
+            max_pixels = size["longest_edge"]
+
         unit = patch_size * merge_size
         max_seq_len = max_pixels // (unit * unit)
 
@@ -1027,22 +1046,18 @@ class Qwen2VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen2VLProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
-        mm_processor_kwargs: Mapping[str, object] | None = None,
+        mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
         num_videos = mm_counts.get("video", 0)
 
-        mm_processor_kwargs = mm_processor_kwargs or {}
-        target_width, target_height = self.info.get_image_size_with_most_features(
-            max_pixels=mm_processor_kwargs.get("max_pixels", None)
-        )
+        target_width, target_height = self.info.get_image_size_with_most_features()
         target_num_frames = self.info.get_num_frames_with_most_features(
             seq_len, mm_counts
         )
 
-        image_overrides = mm_options.get("image") if mm_options else None
-        video_overrides = mm_options.get("video") if mm_options else None
+        image_overrides = mm_options.get("image")
+        video_overrides = mm_options.get("video")
 
         return {
             "image": self._get_dummy_images(
