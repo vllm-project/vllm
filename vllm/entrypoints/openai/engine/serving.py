@@ -237,13 +237,14 @@ class OpenAIServing:
 
         if prompt["type"] == "embeds":
             raise NotImplementedError("Embedding prompt not supported for beam search")
-        if prompt["type"] == "enc_dec":
-            raise NotImplementedError(
-                "Encoder-decoder prompt not supported for beam search"
-            )
 
-        prompt_text = prompt.get("prompt")
-        prompt_token_ids = prompt["prompt_token_ids"]
+        # Extract prompt tokens and text based on model type
+        decoder_prompt = (
+            prompt if prompt["type"] != "enc_dec" else prompt["decoder_prompt"]
+        )
+        prompt_text = decoder_prompt.get("prompt")
+        prompt_token_ids = decoder_prompt["prompt_token_ids"]
+
         tokenized_length = len(prompt_token_ids)
 
         logprobs_num = 2 * beam_width
