@@ -457,5 +457,6 @@ def test_compare_guidellm_results(
         )
 
     print(
-        f"\n✓ All metrics within ±{THRESHOLD * 100:.0f}% of baseline (vLLM {vllm_version})"
+        f"\n✓ All metrics within ±{THRESHOLD * 100:.0f}% of baseline "
+        f"(vLLM {vllm_version})"
     )
