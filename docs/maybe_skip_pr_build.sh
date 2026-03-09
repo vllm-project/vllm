@@ -19,6 +19,6 @@ if [[ "$HTTP_CODE" -ne 200 ]]; then
 elif grep -qE '"name": *"(documentation|ready)"' /tmp/pr_response.json; then
   echo "Found required label, proceeding with build."
 else
-  echo "PR #${READTHEDOCS_VERSION} lacks 'documentation' or 'ready' label, skipping build."
-  exit 183
+  echo "PR #${READTHEDOCS_VERSION} lacks 'documentation' or 'ready' label, cancelling build."
+  exit 1
 fi
