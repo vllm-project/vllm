@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import asyncio
 import importlib
 import inspect
 import multiprocessing
@@ -449,6 +450,9 @@ async def init_render_app_state(
 
     # Expose models endpoint via the render handler.
     state.openai_serving_models = state.openai_serving_render
+
+    # Expose tokenization via the render handler (no engine required).
+    state.openai_serving_tokenization = state.openai_serving_render
 
     state.vllm_config = vllm_config
     # Disable stats logging — there is no engine to poll.

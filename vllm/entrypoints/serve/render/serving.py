@@ -30,14 +30,29 @@ from vllm.entrypoints.openai.parser.harmony_utils import (
     parse_chat_inputs_to_harmony_messages,
     render_for_completion,
 )
-from vllm.entrypoints.utils import sanitize_message
+from vllm.entrypoints.serve.disagg.protocol import GenerateRequest
+from vllm.entrypoints.serve.tokenize.protocol import (
+    DetokenizeRequest,
+    DetokenizeResponse,
+    TokenizeChatRequest,
+    TokenizeRequest,
+    TokenizeResponse,
+)
+from vllm.entrypoints.utils import get_max_tokens, sanitize_message
 from vllm.inputs.data import ProcessorInputs, PromptType, SingletonPrompt, TokensPrompt
 from vllm.logger import init_logger
 from vllm.parser import ParserManager
 from vllm.renderers import BaseRenderer, merge_kwargs
-from vllm.renderers.inputs.preprocess import parse_model_prompt, prompt_to_seq
+from vllm.renderers.inputs.preprocess import (
+    extract_prompt_components,
+    extract_prompt_len,
+    parse_model_prompt,
+    prompt_to_seq,
+)
+from vllm.sampling_params import SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers import ToolParser
+from vllm.utils import random_uuid
 from vllm.utils.mistral import is_mistral_tokenizer
 from vllm.utils.mistral import mt as _mt
 
@@ -88,6 +103,77 @@ class OpenAIServingRender:
         self.use_harmony = model_config.hf_config.model_type == "gpt_oss"
         self.supports_browsing = False
         self.supports_code_interpreter = False
+
+        self.default_sampling_params = model_config.get_diff_sampling_param()
+        mc = model_config
+        self.override_max_tokens = (
+            self.default_sampling_params.get("max_tokens")
+            if mc.generation_config not in ("auto", "vllm")
+            else getattr(mc, "override_generation_config", {}).get("max_new_tokens")
+        )
+
+    async def render_chat_completion(
+        self,
+        request: ChatCompletionRequest,
+    ) -> GenerateRequest | ErrorResponse:
+        """Render a chat completion request into a GenerateRequest.
+
+        This is a pure preprocessing step: it does not generate text.
+        """
+        if request.use_beam_search:
+            return self.create_error_response(
+                "Beam search is not supported by the render endpoint"
+            )
+
+        result = await self.render_chat_request(request)
+        if isinstance(result, ErrorResponse):
+            return result
+
+        _, engine_prompts = result
+
+        if len(engine_prompts) != 1:
+            return self.create_error_response(
+                f"Expected exactly 1 engine prompt, got {len(engine_prompts)}"
+            )
+
+        engine_prompt = engine_prompts[0]
+
+        prompt_components = extract_prompt_components(self.model_config, engine_prompt)
+        token_ids = prompt_components.token_ids
+        if not token_ids:
+            return self.create_error_response("No token_ids rendered")
+        token_ids = list(token_ids)
+
+        input_length = extract_prompt_len(self.model_config, engine_prompt)
+        max_tokens = get_max_tokens(
+            self.model_config.max_model_len,
+            request.max_completion_tokens
+            if request.max_completion_tokens is not None
+            else request.max_tokens,
+            input_length,
+            self.default_sampling_params,
+            self.override_max_tokens,
+        )
+        params = request.to_sampling_params(max_tokens, self.default_sampling_params)
+        if not isinstance(params, SamplingParams):
+            return self.create_error_response(
+                "Internal error: unexpected parameter type",
+                err_type="InternalServerError",
+                status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+
+        request_id = f"chatcmpl-{random_uuid()}"
+
+        return GenerateRequest(
+            request_id=request_id,
+            token_ids=token_ids,
+            sampling_params=params,
+            model=request.model,
+            stream=bool(request.stream),
+            stream_options=(request.stream_options if request.stream else None),
+            cache_salt=request.cache_salt,
+            priority=request.priority,
+        )
 
     async def render_chat_request(
         self,
@@ -276,6 +362,87 @@ class OpenAIServingRender:
                 for name in self.served_model_names
             ]
         )
+
+    async def create_tokenize(
+        self,
+        request: TokenizeRequest,
+        raw_request: Any,
+    ) -> TokenizeResponse | ErrorResponse:
+        """Tokenize a prompt or chat messages (no engine required)."""
+        error_check_ret = await self._check_model(request)
+        if error_check_ret is not None:
+            return error_check_ret
+
+        try:
+            if isinstance(request, TokenizeChatRequest):
+                tool_dicts = (
+                    None
+                    if request.tools is None
+                    else [tool.model_dump() for tool in request.tools]
+                )
+                error_check_ret = self._validate_chat_template(
+                    request_chat_template=request.chat_template,
+                    chat_template_kwargs=request.chat_template_kwargs,
+                    trust_request_chat_template=self.trust_request_chat_template,
+                )
+                if error_check_ret is not None:
+                    return error_check_ret
+
+                _, engine_prompts = await self._preprocess_chat(
+                    request,
+                    request.messages,
+                    default_template=self.chat_template,
+                    default_template_content_format=(self.chat_template_content_format),
+                    default_template_kwargs=self.default_chat_template_kwargs,
+                    tool_dicts=tool_dicts,
+                )
+            else:
+                engine_prompts = await self._preprocess_completion(
+                    request,
+                    prompt_input=request.prompt,
+                    prompt_embeds=None,
+                )
+        except (ValueError, TypeError, RuntimeError, jinja2.TemplateError) as e:
+            logger.exception("Error in tokenization preprocessing")
+            return self.create_error_response(e)
+
+        input_ids: list[int] = []
+        for engine_prompt in engine_prompts:
+            prompt_components = extract_prompt_components(
+                self.model_config, engine_prompt
+            )
+            if prompt_components.token_ids is not None:
+                input_ids.extend(prompt_components.token_ids)
+
+        token_strs = None
+        if request.return_token_strs:
+            tokenizer = self.renderer.get_tokenizer()
+            token_strs = tokenizer.convert_ids_to_tokens(input_ids)
+
+        return TokenizeResponse(
+            tokens=input_ids,
+            token_strs=token_strs,
+            count=len(input_ids),
+            max_model_len=self.model_config.max_model_len,
+        )
+
+    async def create_detokenize(
+        self,
+        request: DetokenizeRequest,
+        raw_request: Any,
+    ) -> DetokenizeResponse | ErrorResponse:
+        """Detokenize token IDs back to text (no engine required)."""
+        error_check_ret = await self._check_model(request)
+        if error_check_ret is not None:
+            return error_check_ret
+
+        engine_prompt = await self.renderer.tokenize_prompt_async(
+            TokensPrompt(prompt_token_ids=request.tokens),
+            request.build_tok_params(self.model_config),
+        )
+        prompt_text = engine_prompt["prompt"]  # type: ignore[typeddict-item]
+
+        return DetokenizeResponse(prompt=prompt_text)
 
     def create_error_response(
         self,

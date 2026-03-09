@@ -42,21 +42,12 @@ async def test_chat_render_basic(client):
     assert response.status_code == 200
     data = response.json()
 
-    assert isinstance(data, list)
-    assert len(data) == 2
-
-    conversation, engine_prompts = data
-
-    assert isinstance(conversation, list)
-    assert conversation[0]["role"] == "user"
-
-    assert isinstance(engine_prompts, list)
-    assert len(engine_prompts) > 0
-    first_prompt = engine_prompts[0]
-    assert "prompt_token_ids" in first_prompt
-    assert "prompt" in first_prompt
-    assert isinstance(first_prompt["prompt_token_ids"], list)
-    assert all(isinstance(t, int) for t in first_prompt["prompt_token_ids"])
+    # Response should be a GenerateRequest dict
+    assert isinstance(data, dict)
+    assert "token_ids" in data
+    assert isinstance(data["token_ids"], list)
+    assert len(data["token_ids"]) > 0
+    assert all(isinstance(t, int) for t in data["token_ids"])
 
 
 @pytest.mark.asyncio
@@ -74,14 +65,12 @@ async def test_chat_render_multi_turn(client):
     )
 
     assert response.status_code == 200
-    conversation, engine_prompts = response.json()
+    data = response.json()
 
-    assert len(conversation) == 3
-    assert conversation[0]["role"] == "user"
-    assert conversation[1]["role"] == "assistant"
-    assert conversation[2]["role"] == "user"
-    assert len(engine_prompts) > 0
-    assert len(engine_prompts[0]["prompt_token_ids"]) > 0
+    assert isinstance(data, dict)
+    assert "token_ids" in data
+    assert isinstance(data["token_ids"], list)
+    assert len(data["token_ids"]) > 0
 
 
 @pytest.mark.asyncio

@@ -15,7 +15,6 @@ from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.openai.orca_metrics import metrics_header
 from vllm.entrypoints.openai.utils import validate_json_request
-from vllm.entrypoints.serve.disagg.protocol import GenerateRequest
 from vllm.entrypoints.utils import (
     load_aware_call,
     with_cancellation,
@@ -70,35 +69,6 @@ async def create_chat_completion(request: ChatCompletionRequest, raw_request: Re
         )
 
     return StreamingResponse(content=generator, media_type="text/event-stream")
-
-
-@router.post(
-    "/v1/chat/completions/render",
-    dependencies=[Depends(validate_json_request)],
-    response_model=GenerateRequest,
-    responses={
-        HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
-        HTTPStatus.NOT_FOUND.value: {"model": ErrorResponse},
-        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
-        HTTPStatus.NOT_IMPLEMENTED.value: {"model": ErrorResponse},
-    },
-)
-async def render_chat_completion(request: ChatCompletionRequest, raw_request: Request):
-    """Render chat completion request and return conversation and engine
-    prompts without generating."""
-    handler = chat(raw_request)
-    if handler is None:
-        base_server = raw_request.app.state.openai_serving_tokenization
-        return base_server.create_error_response(
-            message="The model does not support Chat Completions API"
-        )
-
-    result = await handler.render_chat_completion(request, raw_request)
-
-    if isinstance(result, ErrorResponse):
-        return JSONResponse(content=result.model_dump(), status_code=result.error.code)
-
-    return JSONResponse(content=result.model_dump())
 
 
 def attach_router(app: FastAPI):
