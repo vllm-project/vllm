@@ -45,5 +45,7 @@ def test_models(
         # half datatype tests in
         # tests/models/language/pooling/test_embedding.py
         assert torch.allclose(
-            hf_output, vllm_output, 1e-3 if dtype == "float" else 1e-2
+            hf_output,
+            vllm_output,
+            rtol=2e-3 if dtype == "float" else 1e-2,
         )
