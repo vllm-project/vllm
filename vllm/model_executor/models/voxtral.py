@@ -4,7 +4,7 @@
 import math
 from collections.abc import Iterable, Mapping, Sequence
 from functools import partial
-from typing import Literal, cast
+from typing import cast
 
 import numpy as np
 import regex as re
