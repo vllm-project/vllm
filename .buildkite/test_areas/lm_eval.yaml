@@ -74,6 +74,22 @@ steps:
   commands:
     - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/moe-refactor-dp-ep/config-b200.txt
 
+- label: Nemotron-3 Super 120B GSM8K (H200)
+  timeout_in_minutes: 120
+  device: h200
+  optional: true
+  num_devices: 4
+  commands:
+    - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/models-nemotron-3-super.txt
+
+- label: Nemotron-3 Super 120B GSM8K (B200)
+  timeout_in_minutes: 120
+  device: b200
+  optional: true
+  num_devices: 4
+  commands:
+    - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/models-nemotron-3-super-b200.txt
+
 - label: GPQA Eval (GPT-OSS) (H100)
   timeout_in_minutes: 120
   device: h100

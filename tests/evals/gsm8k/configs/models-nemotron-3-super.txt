@@ -1,0 +1,2 @@
+Nemotron-3-Super-120B-A20B-BF16.yaml
+Nemotron-3-Super-120B-A20B-FP8.yaml

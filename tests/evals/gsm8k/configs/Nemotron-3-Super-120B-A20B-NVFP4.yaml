@@ -1,0 +1,12 @@
+model_name: "nvidia/NVIDIA-Nemotron-3-Super-NVFP4-Placeholder"
+accuracy_threshold: 0.93
+num_questions: 1319
+num_fewshot: 5
+startup_max_wait_seconds: 1200
+server_args: >-
+  --enforce-eager
+  --max-model-len 4096
+  --tensor-parallel-size 4
+  --enable-expert-parallel
+  --attention-backend TRITON_ATTN
+  --speculative-config '{"method":"mtp","num_speculative_tokens":5}'
