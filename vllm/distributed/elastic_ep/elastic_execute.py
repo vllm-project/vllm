@@ -239,13 +239,31 @@ class ElasticEPScalingExecutor:
             device=self.worker.device,
         )
 
+    def _release_cuda_graphs(self) -> None:
+        if isinstance(self.worker.model_runner.model, CUDAGraphWrapper):
+            wrapper = self.worker.model_runner.model
+            wrapper.concrete_cudagraph_entries = {}
+
+        elif isinstance(self.worker.model_runner.model, UBatchWrapper):
+            raise RuntimeError("DBO is not yet supported in elastic EP")
+
+        torch.compiler.reset()
+        with set_current_vllm_config(self.worker.vllm_config):
+            reset_compile_wrapper(self.worker.model_runner.get_model())
+
+        gc.collect()
+        torch.accelerator.synchronize()
+        torch.accelerator.empty_cache()
+
     def switch_and_remove(self) -> None:
+        self._release_cuda_graphs()
         _replace_active_groups(world=None, dp=None, ep=None, eplb=None, node_count=None)
 
     def switch_and_prepare(self) -> None:
         old_dp_size = get_dp_group().world_size
         old_ep_size = get_ep_group().world_size
 
+        self._release_cuda_graphs()
         _replace_active_groups(**pop_standby_groups())
 
         parallel_config = self.worker.vllm_config.parallel_config
@@ -386,13 +404,6 @@ class ElasticEPScalingExecutor:
             compilation_counter.stock_torch_compile_count += 1
             self.worker.model_runner.model.compile(fullgraph=True, backend=backend)
 
-        # release all previously captured CUDA graphs
-        if isinstance(self.worker.model_runner.model, CUDAGraphWrapper):
-            wrapper = self.worker.model_runner.model
-            wrapper.concrete_cudagraph_entries = {}
-        elif isinstance(self.worker.model_runner.model, UBatchWrapper):
-            raise RuntimeError("DBO is not yet supported in elastic EP")
-
         multi_block_table = self.worker.model_runner.input_batch.block_table
         saved_block_tables: list[tuple[torch.Tensor, torch.Tensor]] = []
         for bt in multi_block_table.block_tables:
@@ -401,14 +412,6 @@ class ElasticEPScalingExecutor:
             )
         multi_block_table.clear()
 
-        # reset the compile wrapper
-        torch.compiler.reset()
-        with set_current_vllm_config(self.worker.vllm_config):
-            reset_compile_wrapper(self.worker.model_runner.get_model())
-
-        gc.collect()
-        torch.accelerator.synchronize()
-        torch.accelerator.empty_cache()
         unlock_workspace()
         self.worker.compile_or_warm_up_model()
         lock_workspace()
