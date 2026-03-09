@@ -5073,11 +5073,11 @@ class GPUModelRunner(
             # logits processors. Therefore, "raw_*" and "processed_*" share
             # the same source tensor here; the distinction is whether we
             # return logits or logprobs.
-            logprobs = compute_prompt_scores_for_mode(
+            scores = compute_prompt_scores_for_mode(
                 logits, self.model_config.logprobs_mode, self.sampler.compute_logprobs
             )
             token_ids, logprobs, ranks, _ = self.sampler.gather_logprobs(
-                logprobs, num_prompt_logprobs, tgt_token_ids
+                scores, num_prompt_logprobs, tgt_token_ids
             )
 
             # Transfer GPU->CPU async.
