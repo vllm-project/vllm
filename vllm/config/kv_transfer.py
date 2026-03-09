@@ -6,7 +6,6 @@ from dataclasses import field
 from typing import Any, Literal, get_args
 
 from vllm.config.utils import config
-from vllm.platforms import current_platform
 from vllm.utils.hashing import safe_hash
 
 KVProducer = Literal["kv_producer", "kv_both"]
@@ -25,10 +24,9 @@ class KVTransferConfig:
     engine_id: str | None = None
     """The engine id for KV transfers."""
 
-    kv_buffer_device: str | None = current_platform.device_type
+    kv_buffer_device: str | None = None
     """The device used by kv connector to buffer the KV cache. Choices are
-    'cuda','cpu' and 'xpu'. If None, an appropriate default is selected based on
-    the current platform."""
+    'cuda','cpu' and 'xpu'."""
 
     kv_buffer_size: float = 1e9
     """The buffer size for TorchDistributedConnector. Measured in number of
@@ -101,6 +99,11 @@ class KVTransferConfig:
                 "Please specify kv_role when kv_connector "
                 f"is set, supported roles are {get_args(KVRole)}"
             )
+
+        if self.kv_buffer_device is None:
+            from vllm.platforms import current_platform
+
+            self.kv_buffer_device = current_platform.device_type
 
     @property
     def is_kv_transfer_instance(self) -> bool:
