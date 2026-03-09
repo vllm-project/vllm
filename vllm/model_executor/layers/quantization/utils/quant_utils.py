@@ -698,6 +698,9 @@ def pack_cols(
     size_k: int,
     size_n: int,
 ):
+    if isinstance(size_n, tuple):
+        size_n = size_n[0]
+    size_n = int(size_n)
     assert q_w.shape == (size_k, size_n)
 
     pack_factor = get_pack_factor(num_bits)
@@ -724,6 +727,9 @@ def unpack_cols(
     size_k: int,
     size_n: int,
 ):
+    if isinstance(size_n, tuple):
+        size_n = size_n[0]
+    size_n = int(size_n)
     pack_factor = get_pack_factor(num_bits)
     assert size_n % pack_factor == 0
     assert packed_q_w.shape == (size_k, size_n // pack_factor), (
