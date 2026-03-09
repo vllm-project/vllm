@@ -535,7 +535,18 @@ class Scheduler(SchedulerInterface):
             assert len(scheduled_loras) <= self.lora_config.max_loras
 
         # Next, schedule the WAITING requests.
-        if not preempted_reqs and self._pause_state == PauseState.UNPAUSED:
+        # When uniform batch tokens mode is active, don't mix decode (running)
+        # and prefill (waiting) requests in the same batch.
+        has_running_decode = any(
+            num_scheduled_tokens.get(r.request_id, 0) == 1
+            for r in scheduled_running_reqs
+        )
+        skip_waiting = (
+            has_running_decode
+            and scheduled_running_reqs
+            and self.scheduler_config.uniform_batch_tokens
+        )
+        if not preempted_reqs and self._pause_state == PauseState.UNPAUSED and not skip_waiting:
             # Use a temporary RequestQueue to collect requests that need to be
             # skipped and put back at the head of the waiting queue later
             skipped_waiting_requests = create_request_queue(self.policy)

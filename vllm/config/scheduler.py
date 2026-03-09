@@ -146,6 +146,11 @@ class SchedulerConfig:
     while a larger value (e.g., 10) reduces host overhead and may increase throughput
     by batching multiple tokens before sending."""
 
+    uniform_batch_tokens: bool = False
+    """If True, prevent mixing prefill and decode requests in the same batch.
+    When running requests have decode tokens scheduled, waiting (prefill)
+    requests will be skipped for that iteration."""
+
     @staticmethod
     def default_factory(**kwargs):
         """

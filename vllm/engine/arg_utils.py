@@ -598,6 +598,7 @@ class EngineArgs:
     async_scheduling: bool | None = SchedulerConfig.async_scheduling
 
     stream_interval: int = SchedulerConfig.stream_interval
+    uniform_batch_tokens: bool = SchedulerConfig.uniform_batch_tokens
 
     kv_sharing_fast_prefill: bool = CacheConfig.kv_sharing_fast_prefill
     optimization_level: OptimizationLevel = VllmConfig.optimization_level
@@ -1778,6 +1779,7 @@ class EngineArgs:
             disable_hybrid_kv_cache_manager=self.disable_hybrid_kv_cache_manager,
             async_scheduling=self.async_scheduling,
             stream_interval=self.stream_interval,
+            uniform_batch_tokens=self.uniform_batch_tokens,
         )
 
         if not model_config.is_multimodal_model and self.default_mm_loras:
