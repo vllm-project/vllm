@@ -71,9 +71,9 @@ class GlmOcrConfig(PretrainedConfig):
         self.video_token_id = video_token_id
         self.vision_config = GlmOcrVisionConfig(**(vision_config or {}))
 
-        if isinstance(text_config, dict):
-            from transformers import AutoConfig
+        from transformers import AutoConfig
 
+        if isinstance(text_config, dict):
             text_config = dict(text_config)
             model_type = text_config.pop("model_type", "glm4")
             if model_type == "glm_ocr_text":
@@ -93,8 +93,6 @@ class GlmOcrConfig(PretrainedConfig):
                 ]
             self.text_config = AutoConfig.for_model(model_type, **text_config)
         elif text_config is None:
-            from transformers import AutoConfig
-
             self.text_config = AutoConfig.for_model("glm4")
         else:
             self.text_config = text_config
