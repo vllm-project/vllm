@@ -2152,10 +2152,11 @@ def test_get_kv_cache_configs_with_mamba():
     )
 
     # Test 3: 1 mamba + 2 full attention with group size 2
+    vllm_config.cache_config.mamba_num_attn_pages = 2
     hybrid_kv_cache_specs = {
         "layer_1": new_mamba_spec(),
-        "layer_2": new_kv_cache_spec(head_size=32, group_size=2),
-        "layer_3": new_kv_cache_spec(head_size=32, group_size=2),
+        "layer_2": new_kv_cache_spec(head_size=32),
+        "layer_3": new_kv_cache_spec(head_size=32),
     }
     available_memory_hybrid = expected_page_size * 2 * 10
     kv_cache_config_hybrid = get_kv_cache_configs(
@@ -2180,14 +2181,15 @@ def test_get_kv_cache_configs_with_mamba():
     )
 
     # Test 4: 2 mamba + 5 full (with 3 padding full)
+    vllm_config.cache_config.mamba_num_attn_pages = 2
     hybrid_kv_cache_specs = {
         "layer_1": new_mamba_spec(),
         "layer_2": new_mamba_spec(),
-        "layer_3": new_kv_cache_spec(head_size=32, group_size=2),
-        "layer_4": new_kv_cache_spec(head_size=32, group_size=2),
-        "layer_5": new_kv_cache_spec(head_size=32, group_size=2),
-        "layer_6": new_kv_cache_spec(head_size=32, group_size=2),
-        "layer_7": new_kv_cache_spec(head_size=32, group_size=2),
+        "layer_3": new_kv_cache_spec(head_size=32),
+        "layer_4": new_kv_cache_spec(head_size=32),
+        "layer_5": new_kv_cache_spec(head_size=32),
+        "layer_6": new_kv_cache_spec(head_size=32),
+        "layer_7": new_kv_cache_spec(head_size=32),
     }
     available_memory_hybrid = expected_page_size * 2 * 10
     kv_cache_config_hybrid = get_kv_cache_configs(
