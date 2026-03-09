@@ -1168,8 +1168,9 @@ async def test_health_ping_success():
 
 
 @pytest.mark.asyncio(loop_scope="function")
-async def test_health_ping_timeout():
+async def test_health_ping_timeout(monkeypatch: pytest.MonkeyPatch):
     """Test that health_ping raises EngineDeadError on timeout."""
+    import vllm.envs as envs
     from vllm.v1.engine.core_client import AsyncMPClient
     from vllm.v1.engine.exceptions import EngineDeadError
 
@@ -1197,16 +1198,11 @@ async def test_health_ping_timeout():
             os.kill(proc.pid, signal.SIGSTOP)
 
         try:
-            # Use a short timeout to trigger the timeout path.
             # Monkeypatch the env to a small value.
-            import vllm.envs as envs
-            original_timeout = envs.VLLM_HEALTH_CHECK_TIMEOUT
-            envs.VLLM_HEALTH_CHECK_TIMEOUT = 1
+            monkeypatch.setattr(envs, "VLLM_HEALTH_CHECK_TIMEOUT", 1)
 
             with pytest.raises(EngineDeadError, match="not respond"):
                 await core_client.check_health_async()
-
-            envs.VLLM_HEALTH_CHECK_TIMEOUT = original_timeout
         finally:
             # Resume the engine core process.
             for proc in procs:
