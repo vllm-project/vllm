@@ -673,27 +673,27 @@ steps:
   - vllm/multimodal
   - examples/
   commands:
-  - pip install tensorizer
-  # Basic
-  - python3 offline_inference/basic/chat.py
-  - python3 offline_inference/basic/generate.py --model facebook/opt-125m
-  - python3 offline_inference/basic/generate.py --model meta-llama/Llama-2-13b-chat-hf --cpu-offload-gb 10
-  - python3 offline_inference/basic/classify.py
-  - python3 offline_inference/basic/embed.py
-  - python3 offline_inference/basic/score.py
-  # Multi-modal models
-  - python3 offline_inference/audio_language.py --seed 0
-  - python3 offline_inference/vision_language.py --seed 0
-  - python3 offline_inference/vision_language_multi_image.py --seed 0
-  - python3 offline_inference/encoder_decoder_multimodal.py --model-type whisper --seed 0
-  # Pooling models
-  - python3 pooling/embed/vision_embedding_offline.py --seed 0
-  # Features demo
-  - python3 offline_inference/prefix_caching.py
-  - python3 offline_inference/llm_engine_example.py
-  - python3 others/tensorize_vllm_model.py --model facebook/opt-125m serialize --serialized-directory /tmp/ --suffix v1 && python3 others/tensorize_vllm_model.py --model facebook/opt-125m deserialize --path-to-tensors /tmp/vllm/facebook/opt-125m/v1/model.tensors
-  - python3 offline_inference/spec_decode.py --test --method eagle --num_spec_tokens 3 --dataset-name hf --dataset-path philschmid/mt-bench --num-prompts 80 --temp 0 --top-p 1.0 --top-k -1 --tp 1 --enable-chunked-prefill --max-model-len 2048
-  - python3 offline_inference/spec_decode.py --test --method eagle3 --num_spec_tokens 3 --dataset-name hf --dataset-path philschmid/mt-bench --num-prompts 80 --temp 0 --top-p 1.0 --top-k -1 --tp 1 --enable-chunked-prefill --max-model-len 1536
+    - pip install tensorizer
+    # Basic
+    - python3 basic/offline_inference/chat.py
+    - python3 basic/offline_inference/generate.py --model facebook/opt-125m
+    - python3 basic/offline_inference/generate.py --model meta-llama/Llama-2-13b-chat-hf --cpu-offload-gb 10
+    - python3 basic/offline_inference/classify.py
+    - python3 basic/offline_inference/embed.py
+    - python3 basic/offline_inference/score.py
+    # Multi-modal models
+    - python3 offline_inference/audio_language.py --seed 0
+    - python3 offline_inference/vision_language.py --seed 0
+    - python3 offline_inference/vision_language_multi_image.py --seed 0
+    - python3 offline_inference/encoder_decoder_multimodal.py --model-type whisper --seed 0
+    # Pooling models
+    - python3 pooling/embed/vision_embedding_offline.py --seed 0
+    # Features demo
+    - python3 offline_inference/prefix_caching.py
+    - python3 offline_inference/llm_engine_example.py
+    - python3 others/tensorize_vllm_model.py --model facebook/opt-125m serialize --serialized-directory /tmp/ --suffix v1 && python3 others/tensorize_vllm_model.py --model facebook/opt-125m deserialize --path-to-tensors /tmp/vllm/facebook/opt-125m/v1/model.tensors
+    - python3 offline_inference/spec_decode.py --test --method eagle --num_spec_tokens 3 --dataset-name hf --dataset-path philschmid/mt-bench --num-prompts 80 --temp 0 --top-p 1.0 --top-k -1 --tp 1 --enable-chunked-prefill --max-model-len 2048
+    - python3 offline_inference/spec_decode.py --test --method eagle3 --num_spec_tokens 3 --dataset-name hf --dataset-path philschmid/mt-bench --num-prompts 80 --temp 0 --top-p 1.0 --top-k -1 --tp 1 --enable-chunked-prefill --max-model-len 1536
 
 
 - label: Platform Tests (CUDA) # 5.0m
@@ -1286,7 +1286,7 @@ steps:
   - pytest -v -s tests/models/test_transformers.py
   - pytest -v -s tests/models/multimodal/processing/
   - pytest -v -s tests/models/multimodal/test_mapping.py
-  - python3 examples/offline_inference/basic/chat.py
+  - python3 examples/basic/offline_inference/chat.py
   - python3 examples/offline_inference/vision_language.py --model-type qwen2_5_vl
   - VLLM_WORKER_MULTIPROC_METHOD=spawn python3 examples/offline_inference/audio_language.py --model-type whisper
 
@@ -2418,12 +2418,12 @@ steps:
   commands:
   - pip install tensorizer
   # Basic
-  - python3 offline_inference/basic/chat.py
-  - python3 offline_inference/basic/generate.py --model facebook/opt-125m
-  - python3 offline_inference/basic/generate.py --model meta-llama/Llama-2-13b-chat-hf --cpu-offload-gb 10
-  - python3 offline_inference/basic/classify.py
-  - python3 offline_inference/basic/embed.py
-  - python3 offline_inference/basic/score.py
+  - python3 basic/offline_inference/chat.py
+  - python3 basic/offline_inference/generate.py --model facebook/opt-125m
+  - python3 basic/offline_inference/generate.py --model meta-llama/Llama-2-13b-chat-hf --cpu-offload-gb 10
+  - python3 basic/offline_inference/classify.py
+  - python3 basic/offline_inference/embed.py
+  - python3 basic/offline_inference/score.py
   # Multi-modal models
   - python3 offline_inference/audio_language.py --seed 0
   - python3 offline_inference/vision_language.py --seed 0
@@ -3003,7 +3003,7 @@ steps:
   - pytest -v -s tests/models/test_transformers.py
   - pytest -v -s tests/models/multimodal/processing/
   - pytest -v -s tests/models/multimodal/test_mapping.py
-  - python3 examples/offline_inference/basic/chat.py
+  - python3 examples/basic/offline_inference/chat.py
   - python3 examples/offline_inference/vision_language.py --model-type qwen2_5_vl
   - VLLM_WORKER_MULTIPROC_METHOD=spawn python3 examples/offline_inference/audio_language.py --model-type whisper
 
@@ -3028,7 +3028,7 @@ steps:
   - vllm/platforms/rocm.py
   commands:
   - rocm-smi
-  - python3 examples/offline_inference/basic/chat.py
+  - python3 examples/basic/offline_inference/chat.py
   - pytest -v -s tests/kernels/attention/test_attention_selector.py
 
 
