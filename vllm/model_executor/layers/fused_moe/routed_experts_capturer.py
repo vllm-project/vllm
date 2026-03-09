@@ -34,8 +34,12 @@ class _RoutedExpertsDeviceCache:
         num_fused_shared_experts: int,
         device: str,
     ) -> None:
+        # Layout: (L, N, K) so that buffer[layer_id] is a contiguous (N, K)
+        # view — required by the FlashInfer routing-replay kernel which
+        # writes expert IDs assuming contiguous row-major memory.
+        self.num_hidden_layers = num_hidden_layers
         self.buffer = torch.zeros(
-            (num_batched_tokens, num_hidden_layers, num_experts_per_tok),
+            (num_hidden_layers, num_batched_tokens, num_experts_per_tok),
             dtype=self.DTYPE,
             device=device,
         )
@@ -49,7 +53,7 @@ class _RoutedExpertsDeviceCache:
             "capturing routing experts but get layer_id None"
         )
         batch, _ = topk_ids.shape
-        self.buffer[:batch, layer_id, :].copy_(topk_ids, non_blocking=True)
+        self.buffer[layer_id, :batch, :].copy_(topk_ids, non_blocking=True)
 
     def _finalize_allocation_log(self):
         buf_mb = self.get_buffer_size_bytes() / _MB
@@ -247,8 +251,9 @@ class _RoutedExpertsCapturerReal(RoutedExpertsCapturer):
         )
 
         # ---- Async D2H pipeline ----
+        # Same (L, N, K) layout as device_cache.buffer.
         self._pinned_staging = torch.zeros(
-            (num_batched_tokens, self.num_hidden_layers, self.num_experts_per_tok),
+            (self.num_hidden_layers, num_batched_tokens, self.num_experts_per_tok),
             dtype=_RoutedExpertsDeviceCache.DTYPE,
             pin_memory=True,
         )
@@ -293,11 +298,13 @@ class _RoutedExpertsCapturerReal(RoutedExpertsCapturer):
             return
 
         # 2. Issue new async D2H copy on a dedicated stream.
+        #    Device buffer layout is (L, N, K); copy the first total_tokens
+        #    along the N dimension for every layer.
         main_stream = torch.cuda.current_stream(self._copy_stream.device)
         with torch.cuda.stream(self._copy_stream):
             self._copy_stream.wait_stream(main_stream)
-            self._pinned_staging[:total_tokens].copy_(
-                self.device_cache.buffer[:total_tokens], non_blocking=True
+            self._pinned_staging[:, :total_tokens, :].copy_(
+                self.device_cache.buffer[:, :total_tokens, :], non_blocking=True
             )
             self._copy_event.record()
 
@@ -314,13 +321,14 @@ class _RoutedExpertsCapturerReal(RoutedExpertsCapturer):
     def _scatter_to_host(self):
         """Scatter D2H data into per-request host cache buffers.
 
-        Optimized vs the original: uses direct scalar indexing to avoid
-        creating numpy slice views, calling .max(), and redundant int()
-        conversions on every iteration.
+        Staging layout is (L, N, K).  Host cache layout is (seq_len, L, K).
+        We transpose the staging slice to (N, L, K) before scattering so
+        that indexing by token position naturally yields (L, K) rows.
         """
+        # Transpose (L, N, K) -> (N, L, K) for the active token range.
         host_values = self._pinned_staging[
-            :self._pending_total_tokens
-        ].numpy()
+            :, :self._pending_total_tokens, :
+        ].numpy().transpose(1, 0, 2)
         positions_np = self._pending_positions
         host_cache = self.host_cache
 

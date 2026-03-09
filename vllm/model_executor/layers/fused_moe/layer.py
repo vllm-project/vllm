@@ -552,6 +552,7 @@ class FusedMoE(CustomOp):
         # (matching the buffer dimension in RoutedExpertsCapturer).
         moe_layer_id = FusedMoE._next_moe_layer_id
         FusedMoE._next_moe_layer_id += 1
+        self.moe_layer_id = moe_layer_id
         self.router.set_capture_fn(
             lambda topk_ids, _lid=moe_layer_id:
                 get_global_experts_capturer().capture(

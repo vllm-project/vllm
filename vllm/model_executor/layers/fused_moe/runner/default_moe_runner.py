@@ -510,6 +510,14 @@ class DefaultMoERunner(MoERunner):
                     x=staged_hidden_states,
                     router_logits=staged_router_logits,
                 )
+                # The monolithic kernel bypasses select_experts, so the
+                # router's capture_fn is never invoked.  Run routing
+                # separately to populate the routed-experts device cache.
+                if self.router.capture_fn is not None:
+                    self.router.select_experts(
+                        hidden_states=staged_hidden_states,
+                        router_logits=staged_router_logits,
+                    )
             else:
                 topk_weights, topk_ids = self.router.select_experts(
                     hidden_states=staged_hidden_states,
@@ -680,6 +688,11 @@ class DefaultMoERunner(MoERunner):
                     x=hidden_states,
                     router_logits=router_logits,
                 )
+                if self.router.capture_fn is not None:
+                    self.router.select_experts(
+                        hidden_states=hidden_states,
+                        router_logits=router_logits,
+                    )
             else:
                 topk_weights, topk_ids = self.router.select_experts(
                     hidden_states=hidden_states,
