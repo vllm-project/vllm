@@ -1640,7 +1640,7 @@ steps:
   - vllm/v1/attention/backends/flashinfer.py
   commands:
   - uv pip install --system 'gpt-oss[eval]==0.0.5'
-  - pytest -s -v tests/evals/gpt_oss/test_gpqa_correctness.py --config-list-file=tests/evals/gpt_oss/configs/gpt-oss-20b-rocm.yaml
+  - pytest -s -v evals/gpt_oss/test_gpqa_correctness.py --config-list-file=configs/models-gfx942.txt
 
 ##### EPLB Accuracy Tests #####
 - label: DeepSeek V2-Lite Accuracy
@@ -3297,7 +3297,7 @@ steps:
   - vllm/v1/attention/backends/flashinfer.py
   commands:
   - uv pip install --system 'gpt-oss[eval]==0.0.5'
-  - pytest -s -v tests/evals/gpt_oss/test_gpqa_correctness.py --config-list-file=tests/evals/gpt_oss/configs/gpt-oss-20b-rocm.yaml
+  - pytest -s -v evals/gpt_oss/test_gpqa_correctness.py --config-list-file=configs/models-gfx950.txt
 
 ##### EPLB Accuracy Tests #####
 - label: DeepSeek V2-Lite Accuracy
