@@ -27,8 +27,8 @@ def _make_model_state(
 
 def test_commit_eplb_maps_normal_and_shape_change():
     """
-    _commit_eplb_maps: normal path copies in-place; shape-change path replaces
-    the physical_to_logical_map attribute rather than copying into it.
+    The normal path copies the physical_to_logical map in-place. When the number of
+    physical experts changes, the old map should be replaced entirely.
     """
     num_layers, num_logical, num_physical = 2, 4, 6
     max_slots = 3  # pre-allocated third dim for logical_to_physical_map
@@ -70,10 +70,10 @@ def test_commit_eplb_maps_normal_and_shape_change():
     assert model_state.physical_to_logical_map.shape[1] == num_physical + 2
 
 
-def test_commit_eplb_maps_for_layer_padding_and_shape_assert():
+def test_commit_eplb_maps_for_layer_logical_padding():
     """
-    _commit_eplb_maps_for_layer: log2phy is padded to pre-allocated size;
-    mismatched physical shape triggers an assertion error.
+    Test that logical_to_physical_map is padded with -1 to fill the
+    pre-allocated slots when the new map has fewer replicas than the max.
     """
     num_layers, num_logical, num_physical = 2, 4, 6
     max_slots = 3
@@ -97,22 +97,34 @@ def test_commit_eplb_maps_for_layer_padding_and_shape_assert():
         model_state, new_phy2log, new_log2phy, new_logcnt, layer
     )
 
-    # Verify padding: slot 2 should be -1, slots 0-1 should come from new_log2phy
+    # Slot 2 should be padded with -1, slots 0-1 should come from new_log2phy
     assert torch.all(model_state.logical_to_physical_map[layer, :, 2] == -1)
     assert torch.equal(
         model_state.logical_to_physical_map[layer, :, :2], new_log2phy[layer]
     )
 
-    # Physical shape mismatch must assert
+
+def test_commit_eplb_maps_for_layer_shape_assert():
+    """Test that a mismatched number of physical experts triggers an assertion error."""
+    num_layers, num_logical, num_physical = 2, 4, 6
+
+    model_state = _make_model_state(
+        phy2log=torch.zeros(num_layers, num_physical, dtype=torch.long),
+        log2phy=torch.full((num_layers, num_logical, 2), -1, dtype=torch.long),
+        logcnt=torch.zeros(num_layers, num_logical, dtype=torch.long),
+    )
+    new_log2phy = torch.zeros(num_layers, num_logical, 2, dtype=torch.long)
+    new_logcnt = torch.ones(num_layers, num_logical, dtype=torch.long)
+
     bad_phy2log = torch.zeros(num_layers, num_physical + 1, dtype=torch.long)
     with pytest.raises(AssertionError):
         _commit_eplb_maps_for_layer(
-            model_state, bad_phy2log, new_log2phy, new_logcnt, layer
+            model_state, bad_phy2log, new_log2phy, new_logcnt, layer=0
         )
 
 
 def test_commit_eplb_maps():
-    """_commit_eplb_maps: specific values are copied correctly into model_state."""
+    """Test that all values are copied correctly into model_state."""
     num_layers, num_logical, num_physical, max_slots = 2, 3, 4, 2
 
     model_state = _make_model_state(
@@ -135,7 +147,7 @@ def test_commit_eplb_maps():
 
 
 def test_commit_eplb_maps_for_layer():
-    """_commit_eplb_maps_for_layer: test that only the target layer is updated"""
+    """Test that only the target layer is updated"""
     num_layers, num_logical, max_slots = 2, 3, 2
 
     original_phy2log = torch.tensor([[9, 9, 9, 9], [8, 8, 8, 8]], dtype=torch.long)
