@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Test preemption metrics tracking."""
+
 import pytest
 
-from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import RequestStatus
 
@@ -100,7 +100,7 @@ def test_preemption_metrics_multiple():
     output = scheduler.schedule()
 
     # Simulate execution and preemption cycles
-    for req_id in output.num_scheduled_tokens.keys():
+    for req_id in output.num_scheduled_tokens:
         model_output = ModelRunnerOutput(
             req_ids=[req_id],
             req_id_to_index={req_id: 0},

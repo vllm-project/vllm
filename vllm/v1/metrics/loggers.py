@@ -422,6 +422,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
 
         labelnames = ["model_name", "engine"]
         model_name = vllm_config.model_config.served_model_name
+        self.model_name = model_name  # Store for dynamic metric creation
         max_model_len = vllm_config.model_config.max_model_len
 
         per_engine_labelvalues: dict[int, list[object]] = {
@@ -596,11 +597,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             counter_num_preempted_reqs, engine_indexes, model_name
         )
 
-        counter_preemptions_by_priority = self._counter_cls(
-            name="vllm:scheduler_preemptions_by_priority",
-            documentation="Number of preemptions grouped by request priority.",
-            labelnames=labelnames + ["priority"],
-        )
+        # Dynamic counter for preemptions by priority (created on-demand)
         self.counter_preemptions_by_priority: dict[int, dict[int, Counter]] = {}
 
         gauge_max_preemption_count = self._gauge_cls(
@@ -1112,12 +1109,16 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                         self.counter_preemptions_by_priority[priority] = {
                             idx: self._counter_cls(
                                 name="vllm:scheduler_preemptions_by_priority",
-                                documentation="Number of preemptions grouped by request priority.",
+                                documentation=(
+                                    "Number of preemptions grouped by request priority."
+                                ),
                                 labelnames=["model_name", "engine_index", "priority"],
-                            ).labels(model_name, str(idx), str(priority))
+                            ).labels(self.model_name, str(idx), str(priority))
                             for idx in self.engine_indexes
                         }
-                    self.counter_preemptions_by_priority[priority][engine_idx].inc(count)
+                    self.counter_preemptions_by_priority[priority][engine_idx].inc(
+                        count
+                    )
 
             if (
                 self.kv_cache_metrics_enabled
