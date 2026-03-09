@@ -1447,6 +1447,8 @@ class LLMEngine:
         if self._should_enable_tree_decoding(seq_group_metadata_list):
             self._process_tree_decoding(
                 outputs, seq_group_metadata_list)
+            for scheduler in self.scheduler:
+                scheduler.free_finished_seq_groups()
             # for branch_group in new_branch_groups:
             #     self._add_branch_to_scheduler(branch_group, virtual_engine)
             # for branch_group in branch_groups_to_delete:
