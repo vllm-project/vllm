@@ -352,6 +352,39 @@ class Qwen2_5OmniThinkerProcessingInfo(
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"audio": None, "image": None, "video": None}
 
+    def get_mm_max_tokens_per_item(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int] | None = None,
+    ) -> Mapping[str, int] | None:
+        mm_counts = mm_counts or {}
+        requested_modalities = {m for m, c in mm_counts.items() if c > 0}
+        mm_max_tokens: dict[str, int] = {}
+
+        if requested_modalities & {"image", "video"}:
+            vl_tokens = Qwen2_5_VLProcessingInfo.get_mm_max_tokens_per_item(
+                self,
+                seq_len=seq_len,
+                mm_counts=mm_counts,
+            )
+            mm_max_tokens.update(
+                {
+                    m: vl_tokens[m]
+                    for m in ["image", "video"]
+                    if m in requested_modalities
+                }
+            )
+
+        if "audio" in requested_modalities:
+            audio_tokens = Qwen2AudioProcessingInfo.get_mm_max_tokens_per_item(
+                self,
+                seq_len=seq_len,
+                mm_counts=mm_counts,
+            )
+            mm_max_tokens["audio"] = audio_tokens["audio"]
+
+        return mm_max_tokens
+
 
 class Qwen2_5OmniThinkerDummyInputsBuilder(
     BaseDummyInputsBuilder[Qwen2_5OmniThinkerProcessingInfo]
@@ -1394,10 +1427,18 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
         multimodal_embeddings: MultiModalEmbeddings | None = None,
         *,
         is_multimodal: torch.Tensor | None = None,
-        handle_oov_mm_token: bool = False,
     ) -> torch.Tensor:
         if multimodal_embeddings is None or is_multimodal is None:
             return super().embed_input_ids(input_ids)
+
+        inputs_embeds = self._embed_text_input_ids(
+            input_ids,
+            self.get_language_model().embed_input_ids,
+            is_multimodal=is_multimodal,
+        )
+
+        if len(multimodal_embeddings) == 0:
+            return inputs_embeds
 
         # Check for audio-in-video: interleaved video and audio tokens
         # in the multimodal region. Only use the interleaved path when
@@ -1416,7 +1457,6 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
                 input_ids,
                 self.get_language_model().embed_input_ids,
                 is_multimodal=is_multimodal,
-                handle_oov_mm_token=handle_oov_mm_token,
             )
             return merge_interleaved_embeddings(
                 inputs_embeds,
@@ -1433,7 +1473,6 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
             input_ids,
             multimodal_embeddings=multimodal_embeddings,
             is_multimodal=is_multimodal,
-            handle_oov_mm_token=handle_oov_mm_token,
         )
 
     def forward(

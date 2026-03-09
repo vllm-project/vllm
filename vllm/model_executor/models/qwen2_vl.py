@@ -915,7 +915,7 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
         self, max_pixels: int | None = None
     ) -> ImageSize:
         # NOTE: Simply processing a huge size with _get_vision_info might not give a
-        # size that maximizes the number of featrues, i.e., the number of (merged)
+        # size that maximizes the number of features, i.e., the number of (merged)
         # patches. This is because the number of patches limits the allowed aspect
         # ratios. For example, suppose the maximum number of patches is 1280. A square
         # image cannot be broken down into 1280 patches, so feeding a giant square image

@@ -82,6 +82,7 @@ class BaseRenderer(ABC, Generic[_T]):
 
         self.config = config
         self.model_config = config.model_config
+        self.api_process_rank = config.parallel_config._api_process_rank
 
         self.tokenizer = tokenizer
 
@@ -539,8 +540,8 @@ class BaseRenderer(ABC, Generic[_T]):
         mm_uuids: MultiModalUUIDDict | None,
         mm_processor_kwargs: Mapping[str, object] | None,
         tokenization_kwargs: dict[str, Any] | None,
-    ) -> MultiModalInput:
-        mm_req_id = f"renderer-mm-{self._mm_req_counter.inc(1)}"
+    ) -> "MultiModalInput":
+        mm_req_id = f"renderer{self.api_process_rank}-mm-{self._mm_req_counter.inc(1)}"
 
         mm_processor = self.get_mm_processor()
 

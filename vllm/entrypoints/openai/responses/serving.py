@@ -1360,6 +1360,26 @@ class OpenAIServingResponses(OpenAIServing):
                         for pm in previous_delta_messages
                         if pm.reasoning is not None
                     )
+
+                    # delta message could have both reasoning and
+                    # content. Include current delta's reasoning in the
+                    # finalization since it may carry the tail end of
+                    # reasoning text (e.g. when reasoning end and
+                    # content start arrive in the same delta).
+                    if delta_message.reasoning is not None:
+                        yield _increment_sequence_number_and_return(
+                            ResponseReasoningTextDeltaEvent(
+                                type="response.reasoning_text.delta",
+                                sequence_number=-1,
+                                content_index=current_content_index,
+                                output_index=current_output_index,
+                                item_id=current_item_id,
+                                delta=delta_message.reasoning,
+                            )
+                        )
+                        reason_content += delta_message.reasoning
+                        delta_message = DeltaMessage(content=delta_message.content)
+
                     yield _increment_sequence_number_and_return(
                         ResponseReasoningTextDoneEvent(
                             type="response.reasoning_text.done",
@@ -1643,9 +1663,9 @@ class OpenAIServingResponses(OpenAIServing):
                 # TODO: in streaming, we noticed this bug:
                 # https://github.com/vllm-project/vllm/issues/25697
                 await self._initialize_tool_sessions(request, context, exit_stack)
-                processer = self._process_harmony_streaming_events
+                processor = self._process_harmony_streaming_events
             else:
-                processer = self._process_simple_streaming_events
+                processor = self._process_simple_streaming_events
             # TODO Hanchen make sampling params to include the structural tag
 
             initial_response = ResponsesResponse.from_request(
@@ -1673,7 +1693,7 @@ class OpenAIServingResponses(OpenAIServing):
             )
 
             try:
-                async for event_data in processer(
+                async for event_data in processor(
                     request,
                     sampling_params,
                     result_generator,

@@ -551,6 +551,11 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
         self.multi_modal_config = multimodal_config
         assert self.multi_modal_config
 
+        self.configure_mm_token_handling(
+            self.config.vocab_size,
+            [self.config.audio_token_index],
+        )
+
         self.secondary_weights = []
         if config.audio_model_id is not None:
             # this prefix is not for initialization, but for loading weights
@@ -707,8 +712,6 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
         multimodal_embeddings: MultiModalEmbeddings | None = None,
         *,
         is_multimodal: torch.Tensor | None = None,
-        # Multi-modal token ID may exceed vocab size
-        handle_oov_mm_token: bool = True,
     ) -> torch.Tensor:
         # This is to satisfy the type checker for each overload
         if multimodal_embeddings is None or is_multimodal is None:
@@ -718,7 +721,6 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
             input_ids,
             multimodal_embeddings=multimodal_embeddings,
             is_multimodal=is_multimodal,
-            handle_oov_mm_token=handle_oov_mm_token,
         )
 
     def forward(

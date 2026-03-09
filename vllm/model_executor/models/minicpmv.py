@@ -1335,6 +1335,7 @@ class MiniCPMV2_5(MiniCPMVBaseModel, SupportsLoRA):
         model = Idefics2VisionTransformer(
             config.vision_config,
             quant_config=quant_config,
+            apply_encoder_attention_mask=True,
             prefix=prefix,
         )
         if self.config.drop_vision_last_layer:
@@ -1427,6 +1428,7 @@ class MiniCPMV2_6(MiniCPMVBaseModel, SupportsLoRA):
         model = Idefics2VisionTransformer(
             config.vision_config,
             quant_config=quant_config,
+            apply_encoder_attention_mask=True,
             prefix=prefix,
         )
         if self.config.drop_vision_last_layer:
@@ -1524,6 +1526,7 @@ class MiniCPMV4_0(MiniCPMVBaseModel, SupportsLoRA):
         model = Idefics2VisionTransformer(
             config.vision_config,
             quant_config=quant_config,
+            apply_encoder_attention_mask=True,
             prefix=prefix,
         )
         if self.config.drop_vision_last_layer:
@@ -1621,6 +1624,7 @@ class MiniCPMV4_5(MiniCPMVBaseModel, SupportsLoRA):
         model = Idefics2VisionTransformer(
             config.vision_config,
             quant_config=quant_config,
+            apply_encoder_attention_mask=True,
             prefix=prefix,
         )
         if self.config.drop_vision_last_layer:

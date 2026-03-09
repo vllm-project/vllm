@@ -60,15 +60,21 @@ class MockModelConfig:
 
 
 @dataclass
+class MockParallelConfig:
+    _api_process_rank: int = 0
+
+
+@dataclass
 class MockVllmConfig:
     model_config: MockModelConfig
+    parallel_config: MockParallelConfig
 
 
 def _build_renderer(model_config: MockModelConfig):
     _, tokenizer_name, _, kwargs = tokenizer_args_from_config(model_config)
 
     return HfRenderer.from_config(
-        MockVllmConfig(model_config),
+        MockVllmConfig(model_config, parallel_config=MockParallelConfig()),
         tokenizer_kwargs={**kwargs, "tokenizer_name": tokenizer_name},
     )
 
