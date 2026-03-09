@@ -175,6 +175,7 @@ class GDNDecodeStep(CustomOp):
             and current_platform.is_cuda()
             and current_platform.is_device_capability(90)
         )
+        logger.info_once(f"Using FlashInfer GDN decode kernel: {self.use_flashinfer}")
         self._forward_method = (
             self.forward_cuda if self.use_flashinfer else self.forward_native
         )
@@ -197,11 +198,17 @@ class GDNDecodeStep(CustomOp):
         dt_bias: torch.Tensor,
         use_qk_l2norm_in_kernel: bool = True,
     ) -> torch.Tensor:
+        assert ssm_state.dtype in (torch.bfloat16, torch.float32), (
+            "FlashInfer GDN decode requires ssm_state dtype to be "
+            f"bfloat16 or float32, got {ssm_state.dtype}."
+        )
+
         # query_non_spec shape is [1, B, ...] in decode path.
         B = query_non_spec.shape[1]
-        q_4d = query_non_spec.transpose(0, 1).contiguous()
-        k_4d = key_non_spec.transpose(0, 1).contiguous()
-        v_4d = value_non_spec.transpose(0, 1).contiguous()
+        active_decodes = min(B, num_decodes)
+        q_4d = query_non_spec.transpose(0, 1).contiguous()[:active_decodes]
+        k_4d = key_non_spec.transpose(0, 1).contiguous()[:active_decodes]
+        v_4d = value_non_spec.transpose(0, 1).contiguous()[:active_decodes]
 
         if non_spec_token_indx is None:
             a_non_spec = a
@@ -209,15 +216,18 @@ class GDNDecodeStep(CustomOp):
         else:
             a_non_spec = a.index_select(0, non_spec_token_indx)
             b_non_spec = b.index_select(0, non_spec_token_indx)
-        a_4d = a_non_spec[:B].unsqueeze(1).contiguous()
-        b_4d = b_non_spec[:B].unsqueeze(1).contiguous()
+        a_4d = a_non_spec[:active_decodes].unsqueeze(1).contiguous()
+        b_4d = b_non_spec[:active_decodes].unsqueeze(1).contiguous()
+        state_indices = non_spec_state_indices_tensor[:active_decodes]
 
-        state_batch = ssm_state[non_spec_state_indices_tensor[:B]].contiguous()
-        output, updated_state = gated_delta_rule_decode_pretranspose(
+        # Zero-copy path: decode kernel gathers/writes state by pool indices.
+        output, _ = gated_delta_rule_decode_pretranspose(
             q=q_4d,
             k=k_4d,
             v=v_4d,
-            state=state_batch.to(torch.float32),
+            state=None,
+            initial_state=ssm_state,
+            initial_state_indices=state_indices,
             A_log=A_log.float(),
             a=a_4d,
             dt_bias=dt_bias.float(),
@@ -225,7 +235,15 @@ class GDNDecodeStep(CustomOp):
             use_qk_l2norm=use_qk_l2norm_in_kernel,
         )
 
-        ssm_state[non_spec_state_indices_tensor[:B]] = updated_state.to(ssm_state.dtype)
+        if active_decodes < B:
+            padded_output = torch.zeros(
+                (B, 1, output.shape[2], output.shape[3]),
+                dtype=output.dtype,
+                device=output.device,
+            )
+            padded_output[:active_decodes] = output
+            output = padded_output
+
         return output.squeeze(1).unsqueeze(0)
 
     def forward_native(
