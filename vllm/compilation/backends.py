@@ -885,8 +885,8 @@ class VllmBackend:
                     "splitting_ops": list_to_str(cc.splitting_ops),
                     "cudagraph_mode": str(cc.cudagraph_mode),
                     "compile_sizes": list_to_str(cc.compile_sizes),
-                    "compile_ranges_split_points": list_to_str(
-                        cc.compile_ranges_split_points
+                    "compile_ranges_endpoints": list_to_str(
+                        cc.compile_ranges_endpoints
                     ),
                     "use_inductor_graph_partition": cc.use_inductor_graph_partition,
                     "inductor_passes": list_to_str(list(cc.inductor_passes.keys())),
