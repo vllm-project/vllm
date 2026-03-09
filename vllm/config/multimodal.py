@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import copy
 from collections.abc import Mapping
 from typing import Any, Literal, TypeAlias, TypedDict, final
 
@@ -274,7 +275,7 @@ class MultiModalConfig:
         Get the keyword arguments to pass to the multi-modal processor
         according to the extra arguments passed during inference.
         """
-        kwargs = self.mm_processor_kwargs or {}
+        kwargs = copy.deepcopy(self.mm_processor_kwargs or {})
         return kwargs | dict(inference_kwargs)
 
     def is_multimodal_pruning_enabled(self):
