@@ -635,6 +635,7 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
                 tokenizer=tokenizer,
                 model_config=model_config,
             ),
+            media_io_kwargs=params.media_io_kwargs,
         )
 
         prompt_raw = safe_apply_chat_template(
@@ -689,6 +690,7 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
                 tokenizer=tokenizer,
                 model_config=model_config,
             ),
+            media_io_kwargs=params.media_io_kwargs,
         )
 
         prompt_raw = safe_apply_chat_template(
