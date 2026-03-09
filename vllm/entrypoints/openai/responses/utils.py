@@ -194,7 +194,7 @@ def _construct_single_message_from_response_item(
         reasoning_content = ""
         if item.encrypted_content:
             raise ValueError("Encrypted content is not supported.")
-        elif item.content and len(item.content) == 1:
+        elif item.content and len(item.content) >= 1:
             reasoning_content = item.content[0].text
         elif len(item.summary) >= 1:
             reasoning_content = item.summary[0].text
