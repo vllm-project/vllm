@@ -175,10 +175,9 @@ class Qwen3_5GatedDeltaNet(Qwen3NextGatedDeltaNet):
         # ============================================================
         # Part 2: Core Attention (Custom Op)
         # ============================================================
-        # Note: we should not use torch.empty here like other attention backends,
-        # see discussions in https://github.com/vllm-project/vllm/pull/28182
-        core_attn_out = torch.zeros(
-            (num_tokens, self.num_v_heads // self.tp_size, self.head_v_dim),
+        # NOTE: semantics unchanged vs torch.zeros(...) — still guaranteed zero init.
+        core_attn_out = self._get_zeroed_core_attn_out(
+            num_tokens,
             dtype=hidden_states.dtype,
             device=hidden_states.device,
         )

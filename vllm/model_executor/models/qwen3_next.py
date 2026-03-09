@@ -481,6 +481,12 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
 
+        # =========================
+        # NEW: reusable workspace
+        # =========================
+        # persistent=False: Not included in state_dict; empty(0) is just a placeholder. The real buffer is allocated according to dtype/device/shape during the first forward pass.
+        self.register_buffer("_core_attn_out_buf", torch.empty(0), persistent=False)
+
     def create_qkvz_proj(
         self,
         hidden_size: int,
@@ -548,6 +554,56 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
 
         return query, key, value, z, b, a
 
+    # =========================
+    # NEW: workspace allocator
+    # =========================
+    def _get_zeroed_core_attn_out(
+        self,
+        num_tokens: int,
+        *,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> torch.Tensor:
+        """Return a (num_tokens, nheads, head_dim) tensor that is zeroed,
+        reusing an internal buffer to avoid per-call allocation.
+
+        Semantics match: torch.zeros((num_tokens, ...), dtype=dtype, device=device)
+        """
+        # Tail dims are fixed per layer.
+        tail_shape = (self.num_v_heads // self.tp_size, self.head_v_dim)
+
+        buf = self._core_attn_out_buf
+
+        need_new = (
+            buf.numel() == 0
+            or buf.device != device
+            or buf.dtype != dtype
+            or buf.dim() != 3
+            or tuple(buf.shape[1:]) != tail_shape
+            or buf.shape[0] < num_tokens
+        )
+
+        if need_new:
+            # Growth strategy: reduce realloc frequency.
+            # If buf is empty/invalid, just allocate exactly num_tokens.
+            # Otherwise grow to max(num_tokens, ceil(old * 1.5)).
+            if buf.numel() == 0 or buf.dim() != 3 or tuple(buf.shape[1:]) != tail_shape:
+                new_cap = num_tokens
+            else:
+                new_cap = max(num_tokens, int(buf.shape[0] * 1.5) + 1)
+
+            self._core_attn_out_buf = torch.empty(
+                (new_cap, *tail_shape),
+                dtype=dtype,
+                device=device,
+            )
+            buf = self._core_attn_out_buf
+
+        out = buf[:num_tokens]
+        # Keep kernel semantics: input core_attn_out is all zeros.
+        out.zero_()
+        return out
+
     def rearrange_mixed_qkv(self, mixed_qkv):
         if mixed_qkv is None:
             return None, None, None
@@ -596,10 +652,9 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         # ============================================================
         # Part 2: Core Attention (Custom Op)
         # ============================================================
-        # Note: we should not use torch.empty here like other attention backends,
-        # see discussions in https://github.com/vllm-project/vllm/pull/28182
-        core_attn_out = torch.zeros(
-            (num_tokens, self.num_v_heads // self.tp_size, self.head_v_dim),
+        # NOTE: semantics unchanged vs torch.zeros(...) — still guaranteed zero init.
+        core_attn_out = self._get_zeroed_core_attn_out(
+            num_tokens,
             dtype=hidden_states.dtype,
             device=hidden_states.device,
         )
