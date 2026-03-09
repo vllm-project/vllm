@@ -43,7 +43,7 @@ __global__ void __launch_bounds__(512, VLLM_BLOCKS_PER_SM(512))
                     uint32_t* input_offset_by_experts,
                     uint32_t* output_scale_offset_by_experts, int n_experts,
                     bool low_latency) {
-  using PackedVec = PackedVec<Type>;
+  using PackedVec = PackedVec<Type, CVT_FP4_PACK16>;
   static constexpr int CVT_FP4_NUM_THREADS_PER_SF =
       (CVT_FP4_SF_VEC_SIZE / CVT_FP4_ELTS_PER_THREAD);
   static_assert(sizeof(PackedVec) == sizeof(Type) * CVT_FP4_ELTS_PER_THREAD,
@@ -140,8 +140,8 @@ __global__ void __launch_bounds__(512, VLLM_BLOCKS_PER_SM(512))
                                            CVT_FP4_NUM_THREADS_PER_SF>(
             rowIdx_in_expert, colIdx, numKTiles, SFout_in_expert);
 
-    out_pos =
-        cvt_warp_fp16_to_fp4<Type, UE8M0_SF>(quant_input, SFScaleVal, sf_out);
+    out_pos = cvt_warp_fp16_to_fp4<Type, CVT_FP4_NUM_THREADS_PER_SF, UE8M0_SF>(
+        quant_input, SFScaleVal, sf_out);
   }
 }
 
@@ -155,7 +155,7 @@ __global__ void __launch_bounds__(1024, VLLM_BLOCKS_PER_SM(1024))
                     float const* SFScale, uint32_t* out, uint32_t* SFout,
                     uint32_t* input_offset_by_experts,
                     uint32_t* output_scale_offset_by_experts, int n_experts) {
-  using PackedVec = PackedVec<Type>;
+  using PackedVec = PackedVec<Type, CVT_FP4_PACK16>;
   static constexpr int CVT_FP4_NUM_THREADS_PER_SF =
       (CVT_FP4_SF_VEC_SIZE / CVT_FP4_ELTS_PER_THREAD);
   static_assert(sizeof(PackedVec) == sizeof(Type) * CVT_FP4_ELTS_PER_THREAD,
@@ -246,8 +246,8 @@ __global__ void __launch_bounds__(1024, VLLM_BLOCKS_PER_SM(1024))
                                            CVT_FP4_NUM_THREADS_PER_SF>(
             rowIdx_in_expert, colIdx, numKTiles, SFout_in_expert);
 
-    out_pos =
-        cvt_warp_fp16_to_fp4<Type, UE8M0_SF>(quant_input, SFScaleVal, sf_out);
+    out_pos = cvt_warp_fp16_to_fp4<Type, CVT_FP4_NUM_THREADS_PER_SF, UE8M0_SF>(
+        quant_input, SFScaleVal, sf_out);
   }
 }
 

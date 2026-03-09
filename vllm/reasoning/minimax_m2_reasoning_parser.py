@@ -8,6 +8,8 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 )
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaMessage,
+)
+from vllm.entrypoints.openai.responses.protocol import (
     ResponsesRequest,
 )
 from vllm.logger import init_logger
@@ -85,10 +87,15 @@ class MiniMaxM2AppendThinkReasoningParser(ReasoningParser):
     def __init__(self, tokenizer: TokenizerLike, *args, **kwargs):
         super().__init__(tokenizer, *args, **kwargs)
         self.end_token_id = self.vocab.get("</think>")
+        self.start_token_id = self.vocab.get("<think>")
 
-    def is_reasoning_end(self, input_ids: list[int]) -> bool:
+    def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
         end_token_id = self.end_token_id
-        return any(input_id == end_token_id for input_id in reversed(input_ids))
+        start_token_id = self.start_token_id
+        for input_id in reversed(input_ids):
+            if input_id in (end_token_id, start_token_id):
+                return input_id == end_token_id
+        return False
 
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
         return input_ids

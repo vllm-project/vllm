@@ -41,6 +41,7 @@ get_config() {
         echo "Error: file '${TEST_RUN_CONFIG_FILE}' does not exist in the warehouse" >&2
         exit 1
     fi
+    # shellcheck source=/dev/null
     source "${TEST_RUN_CONFIG_FILE}"
     echo "Base docker image name that get from configuration: ${BASE_IMAGE_NAME}"
     return 0
@@ -48,9 +49,8 @@ get_config() {
 
 # get test running configuration.
 fetch_vllm_test_cfg
-get_config
 # Check if the function call was successful. If not, exit the script.
-if [ $? -ne 0 ]; then
+if ! get_config; then
   exit 1
 fi
 
@@ -62,14 +62,14 @@ agent_idx=$(echo "${BUILDKITE_AGENT_NAME}" | awk -F'-' '{print $(NF-1)}')
 echo "agent_idx: ${agent_idx}"
 builder_name="cachebuilder${agent_idx}"
 builder_cache_dir="/mnt/docker-cache${agent_idx}"
-mkdir -p ${builder_cache_dir}
+mkdir -p "${builder_cache_dir}"
 
 # Try building the docker image
 cat <<EOF | DOCKER_BUILDKIT=1 docker build \
-    --add-host cache-service-vllm.nginx-pypi-cache.svc.cluster.local:${PYPI_CACHE_HOST} \
-    --builder ${builder_name} --cache-from type=local,src=${builder_cache_dir} \
-                           --cache-to type=local,dest=${builder_cache_dir},mode=max \
-    --progress=plain --load -t ${image_name} -f - .
+    --add-host cache-service-vllm.nginx-pypi-cache.svc.cluster.local:"${PYPI_CACHE_HOST}" \
+    --builder "${builder_name}" --cache-from type=local,src="${builder_cache_dir}" \
+                           --cache-to type=local,dest="${builder_cache_dir}",mode=max \
+    --progress=plain --load -t "${image_name}" -f - .
 FROM ${BASE_IMAGE_NAME}
 
 # Define environments
@@ -116,7 +116,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     export PIP_EXTRA_INDEX_URL=https://mirrors.huaweicloud.com/ascend/repos/pypi && \
     source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     source /usr/local/Ascend/nnal/atb/set_env.sh && \
-    export LD_LIBRARY_PATH=\$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/`uname -i`-linux/devlib && \
+    export LD_LIBRARY_PATH=\$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/$(uname -i)-linux/devlib && \
     python3 -m pip install -v -e /workspace/vllm-ascend/ --extra-index https://download.pytorch.org/whl/cpu/
 
 ENV VLLM_WORKER_MULTIPROC_METHOD=spawn
@@ -139,7 +139,7 @@ trap remove_docker_container EXIT
 # Generate corresponding --device args based on BUILDKITE_AGENT_NAME
 # Ascend NPU BUILDKITE_AGENT_NAME format is {hostname}-{agent_idx}-{npu_card_num}cards, and agent_idx starts from 1.
 #   e.g. atlas-a2-001-1-2cards means this is the 1-th agent on atlas-a2-001 host, and it has 2 NPU cards.
-#   returns --device /dev/davinci0 --device /dev/davinci1
+#   returns one argument per line: --device, /dev/davinciX, ...
 parse_and_gen_devices() {
     local input="$1"
     local index cards_num
@@ -151,29 +151,24 @@ parse_and_gen_devices() {
         return 1
     fi
 
-    local devices=""
     local i=0
     while (( i < cards_num )); do
         local dev_idx=$(((index - 1)*cards_num + i ))
-        devices="$devices --device /dev/davinci${dev_idx}"
+        printf '%s\n' "--device"
+        printf '%s\n' "/dev/davinci${dev_idx}"
         ((i++))
     done
-
-    # trim leading space
-    devices="${devices#"${devices%%[![:space:]]*}"}"
-    # Output devices: assigned to the caller variable
-    printf '%s' "$devices"
 }
 
-devices=$(parse_and_gen_devices "${BUILDKITE_AGENT_NAME}") || exit 1
+mapfile -t device_args < <(parse_and_gen_devices "${BUILDKITE_AGENT_NAME}") || exit 1
 
 # Run the image and execute the Out-Of-Tree (OOT) platform interface test case on Ascend NPU hardware.
 # This test checks whether the OOT platform interface is functioning properly in conjunction with
 # the hardware plugin vllm-ascend.
 model_cache_dir=/mnt/modelscope${agent_idx}
-mkdir -p ${model_cache_dir}
+mkdir -p "${model_cache_dir}"
 docker run \
-    ${devices} \
+    "${device_args[@]}" \
     --device /dev/davinci_manager \
     --device /dev/devmm_svm \
     --device /dev/hisi_hdc \
@@ -182,7 +177,7 @@ docker run \
     -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
     -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
     -v /etc/ascend_install.info:/etc/ascend_install.info \
-    -v ${model_cache_dir}:/root/.cache/modelscope \
+    -v "${model_cache_dir}":/root/.cache/modelscope \
     --entrypoint="" \
     --name "${container_name}" \
     "${image_name}" \

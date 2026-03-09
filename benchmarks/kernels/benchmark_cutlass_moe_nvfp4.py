@@ -12,8 +12,12 @@ import torch
 import torch.utils.benchmark as benchmark
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from tests.kernels.moe.utils import make_dummy_moe_config
 from vllm import _custom_ops as ops
 from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
+from vllm.model_executor.layers.fused_moe.all2all_utils import (
+    maybe_make_prepare_finalize,
+)
 from vllm.model_executor.layers.fused_moe.config import (
     fp8_w8a8_moe_quant_config,
     nvfp4_moe_quant_config,
@@ -22,9 +26,6 @@ from vllm.model_executor.layers.fused_moe.cutlass_moe import (
     CutlassExpertsFp4,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts, fused_topk
-from vllm.model_executor.layers.fused_moe.prepare_finalize import (
-    MoEPrepareAndFinalizeNoEP,
-)
 from vllm.scalar_type import scalar_types
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.v1.worker.workspace import init_workspace_manager
@@ -195,11 +196,21 @@ def bench_run(
             g2_alphas=w2_gs,
         )
 
-        kernel = mk.FusedMoEModularKernel(
-            MoEPrepareAndFinalizeNoEP(defer_input_quant=True),
+        moe_config = make_dummy_moe_config(
+            num_experts=num_experts,
+            hidden_dim=k,
+            intermediate_size_per_partition=n,
+            in_dtype=a.dtype,
+        )
+        kernel = mk.FusedMoEKernel(
+            maybe_make_prepare_finalize(
+                moe=moe_config,
+                quant_config=quant_config,
+                allow_new_interface=True,
+                use_monolithic=False,
+            ),
             CutlassExpertsFp4(
-                out_dtype=dtype,
-                max_experts_per_worker=e,
+                moe_config=moe_config,
                 quant_config=quant_config,
             ),
         )
@@ -240,12 +251,17 @@ def bench_run(
             g1_alphas=w1_gs,
             g2_alphas=w2_gs,
         )
+        moe_config = make_dummy_moe_config()
 
-        kernel = mk.FusedMoEModularKernel(
-            MoEPrepareAndFinalizeNoEP(defer_input_quant=True),
+        kernel = mk.FusedMoEKernel(
+            maybe_make_prepare_finalize(
+                moe=moe_config,
+                quant_config=quant_config,
+                allow_new_interface=True,
+                use_monolithic=False,
+            ),
             CutlassExpertsFp4(
-                out_dtype=dtype,
-                max_experts_per_worker=e,
+                moe_config=moe_config,
                 quant_config=quant_config,
             ),
         )
@@ -291,7 +307,7 @@ def bench_run(
     def replay_graph(graph, num_repeats):
         for _ in range(num_repeats):
             graph.replay()
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
 
     cutlass_stream = torch.cuda.Stream()
     cutlass_graph = torch.cuda.CUDAGraph()
@@ -314,7 +330,7 @@ def bench_run(
             e=num_experts,
             device=device,
         )
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     triton_stream = torch.cuda.Stream()
     triton_graph = torch.cuda.CUDAGraph()
@@ -329,7 +345,7 @@ def bench_run(
             w2_fp8scale,
             a_fp8_scale,
         )
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     min_run_time = 5
     num_warmup = 5

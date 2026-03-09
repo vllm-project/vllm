@@ -43,12 +43,12 @@ def llm():
 
 def test_pooling_params(llm: LLM):
     def get_outputs(use_activation):
-        text_1 = "What is the capital of France?"
-        text_2 = "The capital of France is Paris."
+        queries = "What is the capital of France?"
+        documents = "The capital of France is Paris."
 
         outputs = llm.score(
-            text_1,
-            text_2,
+            queries,
+            documents,
             pooling_params=PoolingParams(use_activation=use_activation),
             use_tqdm=False,
         )

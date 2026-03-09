@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from http import HTTPStatus
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
 from typing_extensions import assert_never
 
@@ -24,11 +24,11 @@ logger = init_logger(__name__)
 
 
 def score(request: Request) -> ServingScores | None:
-    return request.app.state.openai_serving_scores
+    return request.app.state.serving_scores
 
 
 def rerank(request: Request) -> ServingScores | None:
-    return request.app.state.openai_serving_scores
+    return request.app.state.serving_scores
 
 
 @router.post(
@@ -49,12 +49,8 @@ async def create_score(request: ScoreRequest, raw_request: Request):
             message="The model does not support Score API"
         )
 
-    try:
-        generator = await handler.create_score(request, raw_request)
-    except Exception as e:
-        raise HTTPException(
-            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value, detail=str(e)
-        ) from e
+    generator = await handler.create_score(request, raw_request)
+
     if isinstance(generator, ErrorResponse):
         return JSONResponse(
             content=generator.model_dump(), status_code=generator.error.code
@@ -101,12 +97,9 @@ async def do_rerank(request: RerankRequest, raw_request: Request):
         return base_server.create_error_response(
             message="The model does not support Rerank (Score) API"
         )
-    try:
-        generator = await handler.do_rerank(request, raw_request)
-    except Exception as e:
-        raise HTTPException(
-            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value, detail=str(e)
-        ) from e
+
+    generator = await handler.do_rerank(request, raw_request)
+
     if isinstance(generator, ErrorResponse):
         return JSONResponse(
             content=generator.model_dump(), status_code=generator.error.code

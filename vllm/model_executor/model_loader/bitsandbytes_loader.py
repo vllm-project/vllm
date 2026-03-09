@@ -22,6 +22,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.logger import init_logger
+from vllm.lora.utils import is_moe_model
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.linear import (
     LinearBase,
@@ -50,11 +51,6 @@ from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_default_torch_dtype
 
 logger = init_logger(__name__)
-
-
-def is_moe_model(model: torch.nn.Module) -> bool:
-    """Checks if the model contains FusedMoE layers."""
-    return bool(any(isinstance(module, FusedMoE) for module in model.modules()))
 
 
 class BitsAndBytesModelLoader(BaseModelLoader):
@@ -815,7 +811,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
             **stacked_quant_state_dict,
         }
         self._bind_quant_states_to_params(model, stacked_quant_state_dict)
-        torch.cuda.empty_cache()
+        torch.accelerator.empty_cache()
 
     def download_model(self, model_config: ModelConfig) -> None:
         self._prepare_weights(model_config.model, model_config.revision)

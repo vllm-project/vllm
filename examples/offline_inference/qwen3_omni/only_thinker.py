@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 This example shows how to use vLLM for running offline inference
-with the correct prompt format on Qwen2.5-Omni (thinker only).
+with the correct prompt format on Qwen3-Omni (thinker only).
 """
 
 from typing import NamedTuple
@@ -112,23 +112,51 @@ def get_multi_audios_query() -> QueryResult:
     )
 
 
+def get_multi_images_query() -> QueryResult:
+    question = "What are the differences between these two images?"
+    prompt = (
+        f"<|im_start|>system\n{default_system}<|im_end|>\n"
+        "<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>"
+        "<|vision_start|><|image_pad|><|vision_end|>"
+        f"{question}<|im_end|>\n"
+        f"<|im_start|>assistant\n"
+    )
+    return QueryResult(
+        inputs={
+            "prompt": prompt,
+            "multi_modal_data": {
+                "image": [
+                    convert_image_mode(ImageAsset("cherry_blossom").pil_image, "RGB"),
+                    convert_image_mode(ImageAsset("stop_sign").pil_image, "RGB"),
+                ],
+            },
+        },
+        limit_mm_per_prompt={
+            "image": 2,
+        },
+    )
+
+
 query_map = {
     "mixed_modalities": get_mixed_modalities_query,
     "use_audio_in_video": get_use_audio_in_video_query,
     "multi_audios": get_multi_audios_query,
+    "multi_images": get_multi_images_query,
 }
 
 
 def main(args):
-    model_name = "Qwen/Qwen3-Omni-30B-A3B-Instruct"
+    model_name = args.model
     query_result = query_map[args.query_type]()
 
     llm = LLM(
         model=model_name,
-        max_model_len=12800,
+        max_model_len=args.max_model_len,
         max_num_seqs=5,
         limit_mm_per_prompt=query_result.limit_mm_per_prompt,
         seed=args.seed,
+        tensor_parallel_size=args.tensor_parallel_size,
+        gpu_memory_utilization=args.gpu_memory_utilization,
     )
 
     # We set temperature to 0.2 so that outputs can be different
@@ -160,6 +188,31 @@ def parse_args():
         type=int,
         default=0,
         help="Set the seed when initializing `vllm.LLM`.",
+    )
+    parser.add_argument(
+        "--model",
+        type=str,
+        default="Qwen/Qwen3-Omni-30B-A3B-Instruct",
+        help="Model name or path.",
+    )
+    parser.add_argument(
+        "--tensor-parallel-size",
+        "-tp",
+        type=int,
+        default=1,
+        help="Tensor parallel size for distributed inference.",
+    )
+    parser.add_argument(
+        "--gpu-memory-utilization",
+        type=float,
+        default=0.9,
+        help="GPU memory utilization (0.0 to 1.0).",
+    )
+    parser.add_argument(
+        "--max-model-len",
+        type=int,
+        default=12800,
+        help="Maximum model context length.",
     )
 
     return parser.parse_args()

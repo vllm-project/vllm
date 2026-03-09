@@ -130,6 +130,18 @@ def try_get_attention_backend(
         raise AssertionError("unreachable") from None
 
 
+def try_backend_includes_kv_cache_update(
+    backend: AttentionBackendEnum,
+) -> bool:
+    """Try to get the attention backend class, skipping test if not found."""
+    try:
+        backend_class = backend.get_class()
+        return backend_class.forward_includes_kv_cache_update
+    except ImportError as e:
+        pytest.skip(f"{backend.name} not available: {e}")
+        raise AssertionError("unreachable") from None
+
+
 def create_standard_kv_cache_spec(vllm_config: VllmConfig) -> FullAttentionSpec:
     """Create a FullAttentionSpec from ModelParams only."""
     return FullAttentionSpec(
@@ -170,7 +182,6 @@ def create_vllm_config(
     cache_config = CacheConfig(
         block_size=block_size,
         cache_dtype="auto",
-        swap_space=0,
     )
     # Set cache blocks for testing
     #   (these may be set during initialization normally)

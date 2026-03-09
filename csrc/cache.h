@@ -7,6 +7,7 @@
 #include <vector>
 
 void swap_blocks(torch::Tensor& src, torch::Tensor& dst,
+                 int64_t block_size_in_bytes,
                  const torch::Tensor& block_mapping);
 
 void reshape_and_cache(torch::Tensor& key, torch::Tensor& value,
@@ -72,6 +73,12 @@ void indexer_k_quant_and_cache(
     torch::Tensor& slot_mapping,  // [num_tokens]
     int64_t quant_block_size,     // quantization block size
     const std::string& scale_fmt);
+
+// Concatenate query nope and rope for MLA/DSA attention
+void concat_mla_q(
+    torch::Tensor& ql_nope,  // [num_tokens, num_heads, nope_dim]
+    torch::Tensor& q_pe,     // [num_tokens, num_heads, rope_dim]
+    torch::Tensor& q_out);   // [num_tokens, num_heads, nope_dim + rope_dim]
 
 // Extract function to gather quantized K cache
 void cp_gather_indexer_k_quant_cache(

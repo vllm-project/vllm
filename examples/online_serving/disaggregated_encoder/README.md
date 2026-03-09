@@ -38,7 +38,7 @@ Encoder engines should be launched with the following flags:
 
 - `--max-num-batched-tokens=<large value>` **(default: 2048)** – This flag controls the token scheduling budget per decoding step and is irrelevant to encoder-only instances. **Set it to a very high value (effectively unlimited) to bypass scheduler limitations.** The actual token budget is managed by the encoder cache manager.
 
-- `--convert "mm_encoder_only"` **(Optional)** - The language model is skipped during initialization to reduce device memory usage. **Models using this option must implement the `get_language_model_spec` interface.**
+- `--mm-encoder-only` **(Optional)** - If possible, skips the language model during initialization to reduce device memory usage.
 
 ## Local media inputs
 
@@ -95,7 +95,7 @@ If you enable prefill instance (`--prefill-servers-urls` not disabled), you will
 ## Proxy Instance Flags (`disagg_epd_proxy.py`)
 
 | Flag | Description |
-|------|-------------|
+| ---- | ----------- |
 | `--encode-servers-urls` | Comma-separated list of encoder endpoints. Every multimodal item extracted from the request is fanned out to one of these URLs in a round-robin fashion. |
 | `--prefill-servers-urls` | Comma-separated list of prefill endpoints. Set to `disable`, `none`, or `""` to skip the dedicated prefill phase and run E+PD (encoder + combined prefill/decode). |
 | `--decode-servers-urls` | Comma-separated list of decode endpoints. Non-stream and stream paths both round-robin over this list. |

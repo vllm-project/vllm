@@ -8,6 +8,10 @@ import torch
 from torch.fx.experimental.proxy_tensor import make_fx
 
 from vllm.compilation.backends import split_graph
+from vllm.compilation.passes.fx_utils import find_op_nodes
+
+# This import automatically registers `torch.ops.silly.attention`
+from . import silly_attention  # noqa: F401
 
 
 def test_getitem_moved_to_producer_subgraph():
@@ -121,4 +125,115 @@ def test_no_tuple_inputs_with_multiple_consumers():
     output_original = gm(new_x)
     output_split = split_gm(new_x)
 
+    assert torch.allclose(output_original, output_split), "Output mismatch after split"
+
+
+def test_consecutive_ops_in_split():
+    """
+    Test that consecutive splitting operations are grouped into the same subgraph
+    """
+
+    def model_fn(x: torch.Tensor) -> torch.Tensor:
+        """
+        Define a simple model where consecutive operations create opportunities
+        for splitting subgraphs.
+        """
+        # Apply silly attention followed by consecutive operations
+        intermediate = torch.relu(x)
+        attn_inout = torch.sqrt(intermediate)
+        torch.ops.silly.attention(intermediate, intermediate, attn_inout, attn_inout)
+        final_result = torch.sigmoid(attn_inout)
+        return final_result
+
+    torch.set_default_device("cuda")
+
+    # Create the traced FX graph for the model
+    x = torch.randn(8, 4)
+
+    gm = make_fx(model_fn)(x)
+
+    # Assert presence of the expected operations in the setup
+    assert (
+        len(list(find_op_nodes(torch.ops.aten.relu, gm.graph))) == 1
+        and len(list(find_op_nodes(torch.ops.aten.sqrt, gm.graph))) == 1
+    ), "Test setup failed: Expected sqrt and relu operations in the graph."
+
+    # Configure split operations to test
+    splitting_ops = ["silly::attention", "aten::sqrt"]
+    split_gm, split_items = split_graph(gm, splitting_ops)
+
+    # Validate the number of partitions
+    assert len(split_items) == 3, (
+        "Consecutive splitting operations were not grouped correctly."
+    )
+
+    # Validate that correctness is preserved
+    new_x = torch.randn(8, 4)
+    output_original = gm(new_x)
+    output_split = split_gm(new_x)
+    assert torch.allclose(output_original, output_split), (
+        "Output mismatch after splitting."
+    )
+
+    # Check the splitting item has 2 nodes exactly (relu and attn)
+    splitting_items = list(s for s in split_items if s.is_splitting_graph)
+    assert len(splitting_items) == 1, "Expecting a single splitting graph"
+    print(splitting_items[0].graph.graph)
+    splitting_gm = splitting_items[0].graph
+    assert len(splitting_gm.graph.nodes) == 4, "Expecting 4 nodes in splitting graph"
+    assert [node.op for node in splitting_gm.graph.nodes] == ["placeholder"] + 2 * [
+        "call_function"
+    ] + ["output"]
+
+
+def test_empty_only_partition_is_merged():
+    """
+    Test that an empty-allocation-only partition is merged into its previous
+    partition during Dynamo FX splitting.
+    """
+
+    def model_fn(x: torch.Tensor) -> torch.Tensor:
+        y = torch.sin(x)
+        out = torch.empty_like(y)
+        torch.ops.aten.cos.out(y, out=out)
+        return out
+
+    x = torch.randn(4, 3)
+    gm = make_fx(model_fn)(x)
+
+    split_ops = ["aten::sin", "aten::cos.out"]
+    split_gm, split_items = split_graph(gm, split_ops)
+
+    # Without the merge, this graph is split into 3 partitions where the
+    # middle partition contains only aten::empty_like.
+    assert len(split_items) == 2, "Empty-only partition should be merged"
+
+    output_original = gm(x)
+    output_split = split_gm(x)
+    assert torch.allclose(output_original, output_split), "Output mismatch after split"
+
+
+def test_builtin_empty_only_partition_is_merged():
+    """
+    In Dynamo graphs, torch.empty/empty_like may appear as builtin call targets
+    (not aten OpOverload). Ensure empty-only partitions are still merged.
+    """
+
+    def model_fn(x: torch.Tensor) -> torch.Tensor:
+        out1 = torch.empty_like(x)
+        torch.ops.silly.attention(x, x, x, out1)
+        out2 = torch.empty_like(x)
+        torch.ops.silly.attention(out1, out1, out1, out2)
+        return out2
+
+    gm = torch.fx.symbolic_trace(model_fn)
+    split_gm, split_items = split_graph(gm, ["silly::attention"])
+
+    # Without the empty-only merge, this graph creates 4 partitions:
+    # [empty_like], [attention], [empty_like], [attention].
+    assert len(split_items) == 3, "Builtin empty-only partition should be merged"
+
+    x = torch.randn(2, 3, device="cuda")
+    output_original = gm(x)
+    output_split = split_gm(x)
     assert torch.allclose(output_original, output_split), "Output mismatch after split"

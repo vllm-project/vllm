@@ -7,7 +7,7 @@ import threading
 import time
 from collections import defaultdict
 from concurrent.futures import Future, ThreadPoolExecutor
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 import msgpack
 import msgspec
@@ -90,7 +90,7 @@ class MoRIIOConnector(KVConnectorBase_V1):
         self,
         vllm_config: VllmConfig,
         role: KVConnectorRole,
-        kv_cache_config: Optional["KVCacheConfig"] = None,
+        kv_cache_config: "KVCacheConfig | None" = None,
     ):
         super().__init__(vllm_config, role)
         assert vllm_config.kv_transfer_config is not None, (
@@ -333,7 +333,7 @@ class MoRIIOConnectorScheduler:
         request: "Request",
         blocks: "KVCacheBlocks",
         num_external_tokens: int,
-        connector_worker: Optional["MoRIIOConnectorWorker"] = None,
+        connector_worker: "MoRIIOConnectorWorker | None" = None,
     ):
         params = request.kv_transfer_params
         if not params:
@@ -726,7 +726,6 @@ class MoRIIOConnectorWorker:
             self.model_config.get_head_size(),
             self.model_config.dtype,
             self.cache_config.cache_dtype,
-            self.block_size,
             use_mla=self.use_mla,
         )
 

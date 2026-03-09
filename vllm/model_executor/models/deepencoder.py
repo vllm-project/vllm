@@ -18,8 +18,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers import CLIPVisionConfig
 
-from vllm.config import MultiModalConfig
-from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention
+from vllm.model_executor.custom_op import PluggableLayer
+from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.conv import Conv2dLayer
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -80,6 +80,7 @@ class ImageEncoderViT(nn.Module):
         rel_pos_zero_init: bool = True,
         window_size: int = 0,
         global_attn_indexes: tuple[int, ...] = (),
+        last_conv_output: int = 1024,
     ) -> None:
         """
         Args:
@@ -156,7 +157,7 @@ class ImageEncoderViT(nn.Module):
             256, 512, kernel_size=3, stride=2, padding=1, bias=False
         )
         self.net_3 = Conv2dLayer(
-            512, 1024, kernel_size=3, stride=2, padding=1, bias=False
+            512, last_conv_output, kernel_size=3, stride=2, padding=1, bias=False
         )
 
     def get_abs_pos(self, abs_pos: torch.Tensor, tgt_size: int):
@@ -263,8 +264,12 @@ class Block(nn.Module):
         return x
 
 
-class RelPosAttention(nn.Module):
+# --8<-- [start:rel_pos_attention]
+@PluggableLayer.register("rel_pos_attention")
+class RelPosAttention(PluggableLayer):
     """Multi-head Attention block with relative position embeddings."""
+
+    # --8<-- [end:rel_pos_attention]
 
     def __init__(
         self,
@@ -609,7 +614,6 @@ class DeepCLIPVisionTransformer(nn.Module):
         self,
         config: CLIPVisionConfig,
         quant_config: QuantizationConfig | None = None,
-        multimodal_config: MultiModalConfig | None = None,
         *,
         num_hidden_layers_override: int | None = None,
         prefix: str = "",
@@ -628,7 +632,6 @@ class DeepCLIPVisionTransformer(nn.Module):
         self.transformer = CLIPEncoder(
             config=config,
             quant_config=quant_config,
-            multimodal_config=multimodal_config,
             num_hidden_layers_override=num_hidden_layers_override,
             prefix=f"{prefix}.encoder",
             attn_cls=MMEncoderAttention,

@@ -89,11 +89,11 @@ class InputBatch:
         vocab_size: int,
         block_sizes: list[int],  # The block_size of each kv cache group
         kernel_block_sizes: list[int],
+        max_num_blocks_per_req: list[int] | None = None,
         logitsprocs: LogitsProcessors | None = None,
         logitsprocs_need_output_token_ids: bool = False,
         is_spec_decode: bool = False,
         is_pooling_model: bool = False,
-        num_speculative_tokens: int = 0,
         cp_kv_cache_interleave_size: int = 1,
     ):
         self.is_pooling_model = is_pooling_model
@@ -127,7 +127,13 @@ class InputBatch:
         # allocation if max_model_len is big.
         # Maps req_index -> tensor of shape (num_prompt_tokens, hidden_size)
         self.req_prompt_embeds: dict[int, torch.Tensor] = {}
-        self.num_tokens_no_spec = np.zeros(max_num_reqs, dtype=np.int32)
+        self.num_tokens_no_spec_cpu_tensor = torch.zeros(
+            (max_num_reqs,),
+            device="cpu",
+            dtype=torch.int32,
+            pin_memory=pin_memory,
+        )
+        self.num_tokens_no_spec = self.num_tokens_no_spec_cpu_tensor.numpy()
         self.num_prompt_tokens = np.zeros(max_num_reqs, dtype=np.int32)
         self.num_computed_tokens_cpu_tensor = torch.zeros(
             (max_num_reqs,),
@@ -146,7 +152,7 @@ class InputBatch:
             device=device,
             block_sizes=block_sizes,
             kernel_block_sizes=kernel_block_sizes,
-            num_speculative_tokens=num_speculative_tokens,
+            max_num_blocks=max_num_blocks_per_req,
             cp_kv_cache_interleave_size=cp_kv_cache_interleave_size,
         )
 

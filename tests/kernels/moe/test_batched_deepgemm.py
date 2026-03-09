@@ -4,6 +4,7 @@
 import pytest
 import torch
 
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.batched_deep_gemm_moe import (
     BatchedDeepGemmExperts,
 )
@@ -12,10 +13,11 @@ from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
     BatchedPrepareAndFinalize,
     BatchedTritonExperts,
 )
-from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEModularKernel
+from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEKernel
 from vllm.utils.deep_gemm import calc_diff, is_deep_gemm_supported
 
 from .test_deepgemm import make_block_quant_fp8_weights
+from .utils import make_dummy_moe_config
 
 BLOCK_SIZE = [128, 128]
 
@@ -71,17 +73,24 @@ def test_batched_deepgemm_vs_triton(
         max_num_tokens=max_num_tokens,
         num_dispatchers=1,
         quant_config=quant_config,
+        moe_config=make_dummy_moe_config(),
     )
-    mk_triton = FusedMoEModularKernel(prep_finalize, triton_experts)
+    mk_triton = FusedMoEKernel(
+        prep_finalize,
+        triton_experts,
+        inplace=False,
+    )
 
-    out_triton = mk_triton(
+    out_triton = mk_triton.apply(
         hidden_states=a,
         w1=w1,
         w2=w2,
         topk_weights=topk_weights,
         topk_ids=topk_ids,
-        inplace=False,
+        activation=MoEActivation.SILU,
         global_num_experts=E,
+        expert_map=None,
+        apply_router_weight_on_input=False,
     )
 
     # deepgemm
@@ -89,17 +98,24 @@ def test_batched_deepgemm_vs_triton(
         max_num_tokens=max_num_tokens,
         num_dispatchers=1,
         quant_config=quant_config,
+        moe_config=make_dummy_moe_config(),
     )
-    mk_deepgemm = FusedMoEModularKernel(prep_finalize, deepgemm_experts)
+    mk_deepgemm = FusedMoEKernel(
+        prep_finalize,
+        deepgemm_experts,
+        inplace=False,
+    )
 
-    out_deepgemm = mk_deepgemm(
+    out_deepgemm = mk_deepgemm.apply(
         hidden_states=a,
         w1=w1,
         w2=w2,
         topk_weights=topk_weights,
         topk_ids=topk_ids,
-        inplace=False,
+        activation=MoEActivation.SILU,
         global_num_experts=E,
+        expert_map=None,
+        apply_router_weight_on_input=False,
     )
 
     diff = calc_diff(out_deepgemm, out_triton)

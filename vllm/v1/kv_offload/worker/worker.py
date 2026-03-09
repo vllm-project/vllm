@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 
 from vllm.logger import init_logger
 from vllm.v1.kv_offload.abstract import LoadStoreSpec
@@ -9,10 +10,17 @@ from vllm.v1.kv_offload.abstract import LoadStoreSpec
 TransferSpec = tuple[LoadStoreSpec, LoadStoreSpec]
 # transfers are forwarded to workers by (src_medium, dst_medium)
 TransferType = tuple[str, str]
-# transfer result (job_id, success)
-TransferResult = tuple[int, bool]
 
 logger = init_logger(__name__)
+
+
+@dataclass
+class TransferResult:
+    job_id: int
+    success: bool
+    transfer_size: int | None = None  # Size in bytes
+    transfer_time: float | None = None
+    transfer_type: TransferType | None = None
 
 
 class OffloadingHandler(ABC):
@@ -57,7 +65,6 @@ class OffloadingHandler(ABC):
     def wait(self, job_ids: set[int]) -> None:
         """
         Wait for jobs to finish (blocking).
-
         Args:
             job_ids: The set of job IDs to wait for.
         """
@@ -120,7 +127,6 @@ class OffloadingWorker:
         transfer_type = (src.medium(), dst.medium())
         handler = self.transfer_type_to_handler.get(transfer_type)
         assert handler is not None
-
         try:
             success = handler.transfer_async(job_id, spec)
         except Exception as e:
@@ -137,7 +143,6 @@ class OffloadingWorker:
             logger.warning("Failed to submit %r transfer %d", transfer_type, job_id)
         else:
             logger.debug("Submitted %r transfer %d: %r", transfer_type, job_id, spec)
-
         return success
 
     def get_finished(self) -> list[TransferResult]:
@@ -145,7 +150,7 @@ class OffloadingWorker:
         Get transfers finished since last call.
 
         Returns:
-            A list of (job_id, success) of transfers.
+            A list of TransferResults
         """
         finished = []
         for handler in self.handlers:

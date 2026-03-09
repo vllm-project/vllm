@@ -57,11 +57,11 @@ def opcheck_fp8_quant(
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
 @pytest.mark.parametrize("hidden_size", HIDDEN_SIZES)
 @pytest.mark.parametrize("dtype", DTYPES)
-@pytest.mark.parametrize("scale_ub", SCALE_UBS)
+@pytest.mark.parametrize("do_scale_ub", SCALE_UBS)
 @pytest.mark.parametrize("seed", SEEDS)
 @torch.inference_mode()
 def test_dynamic_per_token_fp8_quant(
-    num_tokens: int, hidden_size: int, dtype: torch.dtype, scale_ub: bool, seed: int
+    num_tokens: int, hidden_size: int, dtype: torch.dtype, do_scale_ub: bool, seed: int
 ) -> None:
     set_random_seed(seed)
 
@@ -70,7 +70,7 @@ def test_dynamic_per_token_fp8_quant(
     )  # avoid nans
 
     scale_ub = (
-        torch.mean(x).to(dtype=torch.float32, device="cuda") if scale_ub else None
+        torch.mean(x).to(dtype=torch.float32, device="cuda") if do_scale_ub else None
     )
     ref_out, ref_scales = ref_dynamic_per_token_quant(x, FP8_DTYPE, scale_ub)
     ops_out, ops_scales = ops.scaled_fp8_quant(
@@ -174,16 +174,16 @@ def test_static_fp8_quant_group_2d(
             f"group_shape ({group_shape[0]}, {group_shape[1]})"
         )
 
-    current_platform.seed_everything(seed)
+    set_random_seed(seed)
 
     x = torch.rand(num_tokens, hidden_size, dtype=dtype, device="cuda")
     ref_out, scale = scaled_quantize(
-        x, group_shape, FP8_DTYPE, compute_dtype=torch.float32
+        x, group_shape, current_platform.fp8_dtype(), compute_dtype=torch.float32
     )
     ops_out, ops_scale = ops.scaled_fp8_quant(x, scale=scale, group_shape=group_shape)
 
     torch.testing.assert_close(scale, ops_scale)
-    torch.testing.assert_close(ref_out.float(), ops_out.float(), rtol=0.12, atol=0.0)
+    torch.testing.assert_close(ref_out.float(), ops_out.float(), rtol=1.2e-1, atol=1e-5)
 
     opcheck_fp8_quant(ops_out, x, scale=scale)
 
@@ -202,7 +202,7 @@ def test_static_fp8_quant_1d_scale(
     group_shape: tuple[int, int],
 ) -> None:
     """Test static FP8 quantization with 1D scale (per-token or per-channel)."""
-    current_platform.seed_everything(seed)
+    set_random_seed(seed)
 
     x = torch.rand(num_tokens, hidden_size, dtype=dtype, device="cuda")
     ref_out, scale_2d = scaled_quantize(

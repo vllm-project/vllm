@@ -7,7 +7,7 @@ Tests verify that embeddings with correct ndim but incorrect hidden_size
 are rejected before they can cause crashes during model inference.
 
 Validation is performed by the parser (MultiModalDataParser) and EmbeddingItems
-classes, not by CompletionRenderer or MediaIO classes.
+classes, not by MediaIO classes.
 """
 
 import pytest

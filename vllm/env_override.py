@@ -1,6 +1,88 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# ruff: noqa: E402
+import importlib.util
 import os
+
+
+def _get_torch_cuda_version():
+    """Peripheral function to _maybe_set_cuda_compatibility_path().
+    PyTorch version must not be determined by importing directly
+    because it will trigger the CUDA initialization, losing the
+    chance to set the LD_LIBRARY_PATH beforehand.
+    """
+    try:
+        spec = importlib.util.find_spec("torch")
+        if not spec:
+            return None
+        if spec.origin:
+            torch_root = os.path.dirname(spec.origin)
+        elif spec.submodule_search_locations:
+            torch_root = spec.submodule_search_locations[0]
+        else:
+            return None
+        version_path = os.path.join(torch_root, "version.py")
+        if not os.path.exists(version_path):
+            return None
+        # Load the version module without importing torch
+        ver_spec = importlib.util.spec_from_file_location("torch.version", version_path)
+        if not ver_spec or not ver_spec.loader:
+            return None
+        module = importlib.util.module_from_spec(ver_spec)
+        # Avoid registering in sys.modules to not confuse future imports
+        ver_spec.loader.exec_module(module)
+        return getattr(module, "cuda", None)
+    except Exception:
+        return None
+
+
+def _maybe_set_cuda_compatibility_path():
+    """Set LD_LIBRARY_PATH for CUDA forward compatibility if enabled.
+
+    Must run before 'import torch' since torch loads CUDA shared libraries
+    at import time and the dynamic linker only consults LD_LIBRARY_PATH when
+    a library is first loaded.
+
+    CUDA forward compatibility is only supported on select professional and
+    datacenter NVIDIA GPUs. Consumer GPUs (GeForce, RTX) do not support it
+    and will get Error 803 if compat libs are loaded.
+    """
+    enable = os.environ.get("VLLM_ENABLE_CUDA_COMPATIBILITY", "0").strip().lower() in (
+        "1",
+        "true",
+    )
+    if not enable:
+        return
+
+    cuda_compat_path = os.environ.get("VLLM_CUDA_COMPATIBILITY_PATH", "")
+    if not cuda_compat_path or not os.path.isdir(cuda_compat_path):
+        conda_prefix = os.environ.get("CONDA_PREFIX", "")
+        conda_compat = os.path.join(conda_prefix, "cuda-compat")
+        if conda_prefix and os.path.isdir(conda_compat):
+            cuda_compat_path = conda_compat
+    if not cuda_compat_path or not os.path.isdir(cuda_compat_path):
+        torch_cuda_version = _get_torch_cuda_version()
+        if torch_cuda_version:
+            default_path = f"/usr/local/cuda-{torch_cuda_version}/compat"
+            if os.path.isdir(default_path):
+                cuda_compat_path = default_path
+    if not cuda_compat_path or not os.path.isdir(cuda_compat_path):
+        return
+
+    norm_path = os.path.normpath(cuda_compat_path)
+    existing = os.environ.get("LD_LIBRARY_PATH", "")
+    ld_paths = existing.split(os.pathsep) if existing else []
+
+    if ld_paths and ld_paths[0] and os.path.normpath(ld_paths[0]) == norm_path:
+        return  # Already at the front
+
+    new_paths = [norm_path] + [
+        p for p in ld_paths if not p or os.path.normpath(p) != norm_path
+    ]
+    os.environ["LD_LIBRARY_PATH"] = os.pathsep.join(new_paths)
+
+
+_maybe_set_cuda_compatibility_path()
 
 import torch
 
@@ -95,7 +177,7 @@ def memory_plan_reuse_patched(self):
 # ===================================================
 # This change monkeypatches get_graph_partition_signature in pytorch 2.9.0 to
 # fix inductor partition + attention-nvfp4 quant fusion, tested in
-# `tests/compile/distributed/test_fusions_e2e.py::test_attn_quant`.
+# `tests/compile/test_fusion_attn.py::test_attn_quant`.
 # For more context, see https://github.com/pytorch/pytorch/pull/165815.
 
 
@@ -382,7 +464,7 @@ def _patch_get_raw_stream_if_needed():
         if hasattr(torch._C, "_cuda_getCurrentRawStream"):
             from torch._C import _cuda_getCurrentRawStream as _get_raw_stream
 
-            builtins.get_raw_stream = _get_raw_stream
+            builtins.get_raw_stream = _get_raw_stream  # type: ignore[attr-defined]
 
 
 _patch_get_raw_stream_if_needed()

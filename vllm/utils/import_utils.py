@@ -402,11 +402,6 @@ def _has_module(module_name: str) -> bool:
     return importlib.util.find_spec(module_name) is not None
 
 
-def has_pplx() -> bool:
-    """Whether the optional `pplx_kernels` package is available."""
-    return _has_module("pplx_kernels")
-
-
 def has_deep_ep() -> bool:
     """Whether the optional `deep_ep` package is available."""
     return _has_module("deep_ep")
@@ -436,3 +431,28 @@ def has_arctic_inference() -> bool:
     """Whether the optional `arctic_inference` package is available."""
 
     return _has_module("arctic_inference")
+
+
+def has_helion() -> bool:
+    """Whether the optional `helion` package is available.
+
+    Helion is a Python-embedded DSL for writing ML kernels.
+    See: https://github.com/pytorch/helion
+
+    Usage:
+        if has_helion():
+            import helion
+            import helion.language as hl
+            # use helion...
+    """
+    return _has_module("helion")
+
+
+def has_aiter() -> bool:
+    """Whether the optional `aiter` package is available."""
+    return _has_module("aiter")
+
+
+def has_mori() -> bool:
+    """Whether the optional `mori` package is available."""
+    return _has_module("mori")
