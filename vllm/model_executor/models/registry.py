@@ -171,6 +171,7 @@ _TEXT_GENERATION_MODELS = {
     "OlmoForCausalLM": ("olmo", "OlmoForCausalLM"),
     "Olmo2ForCausalLM": ("olmo2", "Olmo2ForCausalLM"),
     "Olmo3ForCausalLM": ("olmo2", "Olmo2ForCausalLM"),
+    "OlmoHybridForCausalLM": ("olmo_hybrid", "OlmoHybridForCausalLM"),
     "OlmoeForCausalLM": ("olmoe", "OlmoeForCausalLM"),
     "OPTForCausalLM": ("opt", "OPTForCausalLM"),
     "OrionForCausalLM": ("orion", "OrionForCausalLM"),
@@ -190,6 +191,8 @@ _TEXT_GENERATION_MODELS = {
     "Qwen3ForCausalLM": ("qwen3", "Qwen3ForCausalLM"),
     "Qwen3MoeForCausalLM": ("qwen3_moe", "Qwen3MoeForCausalLM"),
     "RWForCausalLM": ("falcon", "FalconForCausalLM"),
+    "SarvamMoEForCausalLM": ("sarvam", "SarvamMoEForCausalLM"),
+    "SarvamMLAForCausalLM": ("sarvam", "SarvamMLAForCausalLM"),
     "SeedOssForCausalLM": ("seed_oss", "SeedOssForCausalLM"),
     "Step1ForCausalLM": ("step1", "Step1ForCausalLM"),
     "Step3TextForCausalLM": ("step3_text", "Step3TextForCausalLM"),
@@ -284,6 +287,10 @@ _CROSS_ENCODER_MODELS = {
         "llama",
         "LlamaBidirectionalForSequenceClassification",
     ),
+    "LlamaNemotronVLForSequenceClassification": (
+        "nemotron_vl",
+        "LlamaNemotronVLForSequenceClassification",
+    ),
     "ModernBertForSequenceClassification": (
         "modernbert",
         "ModernBertForSequenceClassification",
@@ -336,6 +343,10 @@ _MULTIMODAL_MODELS = {
     "Ernie4_5_VLMoeForConditionalGeneration": (
         "ernie45_vl",
         "Ernie4_5_VLMoeForConditionalGeneration",
+    ),
+    "FireRedASR2ForConditionalGeneration": (
+        "fireredasr2",
+        "FireRedASR2ForConditionalGeneration",
     ),
     "FunASRForConditionalGeneration": ("funasr", "FunASRForConditionalGeneration"),  # noqa: E501
     "FunAudioChatForConditionalGeneration": (
@@ -512,6 +523,7 @@ _MULTIMODAL_MODELS = {
 }
 
 _SPECULATIVE_DECODING_MODELS = {
+    "ExtractHiddenStatesModel": ("extract_hidden_states", "ExtractHiddenStatesModel"),
     "MiMoMTPModel": ("mimo_mtp", "MiMoMTP"),
     "EagleLlamaForCausalLM": ("llama_eagle", "EagleLlamaForCausalLM"),
     "EagleLlama4ForCausalLM": ("llama4_eagle", "EagleLlama4ForCausalLM"),
