@@ -41,20 +41,20 @@ Key points from the PyTorch security guide:
 - Messages are sent unencrypted
 - Connections are accepted from anywhere without checks
 
-### Security Recommendations
+## Security Recommendations
 
-#### 1. **Network Isolation:**
+### 1. **Network Isolation:**
 
 - Deploy vLLM nodes on a dedicated, isolated network
 - Use network segmentation to prevent unauthorized access
 - Implement appropriate firewall rules
 
-#### 2. **Configuration Best Practices:**
+### 2. **Configuration Best Practices:**
 
 - Always set `VLLM_HOST_IP` to a specific IP address rather than using defaults
 - Configure firewalls to only allow necessary ports between nodes
 
-#### 3. **Access Control:**
+### 3. **Access Control:**
 
 - Restrict physical and network access to the deployment environment
 - Implement proper authentication and authorization for management interfaces
@@ -65,6 +65,18 @@ Key points from the PyTorch security guide:
 Restrict domains that vLLM can access for media URLs by setting
 `--allowed-media-domains` to prevent Server-Side Request Forgery (SSRF) attacks.
 (e.g. `--allowed-media-domains upload.wikimedia.org github.com www.bogotobogo.com`)
+
+Without domain restrictions, a malicious user could supply URLs that:
+
+- **Target internal services**: Access internal network endpoints, cloud metadata
+  services (e.g. `169.254.169.254`), or other services not intended to be
+  publicly reachable (SSRF).
+- **Consume excessive resources**: Point to extremely large files or slow
+  endpoints, causing the server to download unbounded amounts of data and
+  exhausting memory, disk, or network bandwidth.
+
+By explicitly allowlisting only the domains you expect media to come from, you
+significantly reduce the attack surface for these types of abuse.
 
 Also, consider setting `VLLM_MEDIA_URL_ALLOW_REDIRECTS=0` to prevent HTTP
 redirects from being followed to bypass domain restrictions.
