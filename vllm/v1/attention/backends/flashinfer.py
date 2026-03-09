@@ -920,12 +920,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         # and can be expensive to retrieve in async mode.
         needs_seq_lens_cpu = self.use_dcp or use_cascade or not is_only_trtllm_decode
         seq_lens_cpu = common_attn_metadata.seq_lens_cpu if needs_seq_lens_cpu else None
-        seq_lens_np = seq_lens_cpu.numpy() if seq_lens_cpu is not None else None
-        num_blocks_np = (
-            (seq_lens_np + (page_size - 1)) // page_size
-            if seq_lens_np is not None
-            else None
-        )
 
         # Adjust seq_lens_cpu for DCP
         if self.use_dcp:
@@ -947,6 +941,13 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 self.dcp_rank,
                 self.dcp_kv_cache_interleave_size,
             )
+
+        seq_lens_np = seq_lens_cpu.numpy() if seq_lens_cpu is not None else None
+        num_blocks_np = (
+            (seq_lens_np + (page_size - 1)) // page_size
+            if seq_lens_np is not None
+            else None
+        )
 
         # Adjust num_block_np for cascade attention
         if use_cascade:
@@ -1233,6 +1234,26 @@ class FlashInferImpl(AttentionImpl):
         self.bmm1_scale: float | None = None
         self.bmm2_scale: float | None = None
         self.o_sf_scale: float | None = None
+        self.dcp_world_size = (
+            vllm_config.parallel_config.decode_context_parallel_size
+            if vllm_config is not None
+            else 1
+        )
+        speculative_config = (
+            vllm_config.speculative_config if vllm_config is not None else None
+        )
+        num_spec_tokens = (
+            speculative_config.num_speculative_tokens
+            if speculative_config is not None
+            else 0
+        )
+        max_num_reqs = (
+            vllm_config.scheduler_config.max_num_seqs if vllm_config is not None else 0
+        )
+        self._dcp_decode_max_tokens = (1 + num_spec_tokens) * max_num_reqs
+        self._dcp_decode_query_buffers: dict[torch.dtype, torch.Tensor] = {}
+        self._dcp_decode_output_buffers: dict[torch.dtype, torch.Tensor] = {}
+        self._dcp_decode_lse_buffer: torch.Tensor | None = None
 
         dcp_a2a = (
             vllm_config is not None
@@ -1255,6 +1276,50 @@ class FlashInferImpl(AttentionImpl):
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         if self.sinks is not None and self.sinks.dtype != torch.float32:
             self.sinks = self.sinks.to(torch.float32)
+
+    def _get_dcp_decode_buffers(
+        self,
+        query: torch.Tensor,
+        num_decode_tokens: int,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        assert self.dcp_world_size > 1
+        assert self._dcp_decode_max_tokens > 0
+        total_num_heads = self.num_heads * self.dcp_world_size
+        buffer_shape = (
+            self._dcp_decode_max_tokens,
+            total_num_heads,
+            self.head_size,
+        )
+        query_buffer = self._dcp_decode_query_buffers.get(query.dtype)
+        if query_buffer is None:
+            query_buffer = torch.empty(
+                buffer_shape,
+                dtype=query.dtype,
+                device=query.device,
+            )
+            self._dcp_decode_query_buffers[query.dtype] = query_buffer
+
+        output_buffer = self._dcp_decode_output_buffers.get(query.dtype)
+        if output_buffer is None:
+            output_buffer = torch.empty(
+                buffer_shape,
+                dtype=query.dtype,
+                device=query.device,
+            )
+            self._dcp_decode_output_buffers[query.dtype] = output_buffer
+
+        if self._dcp_decode_lse_buffer is None:
+            self._dcp_decode_lse_buffer = torch.empty(
+                (self._dcp_decode_max_tokens, total_num_heads),
+                dtype=torch.float32,
+                device=query.device,
+            )
+
+        return (
+            query_buffer[:num_decode_tokens],
+            output_buffer[:num_decode_tokens],
+            self._dcp_decode_lse_buffer[:num_decode_tokens],
+        )
 
     def forward(
         self,
@@ -1512,17 +1577,17 @@ class FlashInferImpl(AttentionImpl):
                 assert decode_wrapper._sm_scale == self.scale
 
                 if use_dcp:
-                    decode_query = get_dcp_group().all_gather(
-                        decode_query.contiguous(), dim=-2
+                    decode_query_buffer, output_tmp, lse = self._get_dcp_decode_buffers(
+                        decode_query, num_decode_tokens
                     )
-                    output_tmp = torch.empty_like(decode_query)
-                    lse = torch.empty(
-                        (decode_query.size(0), decode_query.size(1)),
-                        dtype=torch.float32,
-                        device=decode_query.device,
+                    decode_query_buffer.copy_(
+                        get_dcp_group().all_gather(
+                            decode_query.contiguous(),
+                            dim=-2,
+                        )
                     )
                     decode_wrapper.run(
-                        decode_query,
+                        decode_query_buffer,
                         kv_cache_permute,
                         k_scale=layer._k_scale_float,
                         v_scale=layer._v_scale_float,
