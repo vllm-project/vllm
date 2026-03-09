@@ -118,7 +118,11 @@ class TorchCompileWithNoGuardsWrapper:
             return ctx.result
         return callable_fn(*args, **kwargs)
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        compile_prefix: str,
+        is_encoder: bool = False,
+    ) -> None:
         self.compiled = False
 
         vllm_config = get_current_vllm_config()
@@ -130,7 +134,9 @@ class TorchCompileWithNoGuardsWrapper:
         if mode is None:
             raise RuntimeError("Compilation mode cannot be NO_COMPILATION")
 
-        backend = vllm_config.compilation_config.init_backend(vllm_config)
+        backend = vllm_config.compilation_config.init_backend(
+            vllm_config, prefix=compile_prefix, is_encoder=is_encoder
+        )
         options = {}
 
         if isinstance(backend, str) and backend == "inductor":
@@ -367,4 +373,6 @@ def reset_compile_wrapper(model: torch.nn.Module) -> None:
     compilation_config.local_cache_dir = ""
 
     model.__class__.forward.__code__ = model.original_code_object()
-    TorchCompileWithNoGuardsWrapper.__init__(model)
+    TorchCompileWithNoGuardsWrapper.__init__(
+        model, compile_prefix=model.__class__.__name__
+    )
