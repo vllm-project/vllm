@@ -1414,7 +1414,15 @@ class ModelConfig:
 
     @property
     def score_type(self) -> ScoreType:
-        return self._model_info.score_type
+        # fixme: self._model_info.score_type is the score type before
+        #  as_seq_cls_model, which is "bi-encoder", rather than the
+        #  score type after as_seq_cls_model, which is "cross-encoder".
+        #  Therefore, the following logic is required.
+        return (
+            "cross-encoder"
+            if self.convert_type == "classify"
+            else self._model_info.score_type
+        )
 
     @property
     def is_pp_supported(self) -> bool:
