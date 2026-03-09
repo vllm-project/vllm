@@ -119,7 +119,7 @@ The code can be found in [vllm/v1/engine/coordinator.py](../../vllm/v1/engine/co
 For a deployment with `N` GPUs, `TP` tensor parallel size, `DP` data parallel size, and `A` API server count:
 
 | Process Type | Count | Notes |
-|---|---|---|
+| - | - | - |
 | API Server | `A` (default `DP`) | Handles HTTP requests and input processing |
 | Engine Core | `DP` (default 1) | Scheduler and KV cache management |
 | GPU Worker | `N` (= `DP x PP x TP`) | One per GPU, executes model forward passes |
