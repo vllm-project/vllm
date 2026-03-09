@@ -1171,11 +1171,11 @@ class AsyncMPClient(MPClient):
                 self.call_utility_async("health_ping"),
                 timeout=timeout,
             )
-        except asyncio.TimeoutError:
+        except asyncio.TimeoutError as e:
             raise EngineDeadError(
                 f"EngineCore did not respond to health ping within "
                 f"{timeout}s. It may be stuck in a long operation or hung."
-            )
+            ) from e
 
 
 class DPAsyncMPClient(AsyncMPClient):
