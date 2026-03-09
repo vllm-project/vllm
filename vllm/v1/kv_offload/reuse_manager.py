@@ -7,8 +7,6 @@ FilterReusedOffloadingManager — OffloadingManager decorator that skips
     storing blocks that have not yet been seen enough times.
 """
 
-from __future__ import annotations
-
 from collections import OrderedDict
 from collections.abc import Iterable
 
