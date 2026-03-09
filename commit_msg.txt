@@ -1,0 +1,5 @@
+Refactor: consolidate ROCm AITER allreduce fusion into existing files
+
+Per reviewer feedback, move ROCm AITER allreduce+RMSNorm fusion code
+from separate files into the existing allreduce_rms_fusion.py and
+test_fusion_all_reduce.py. Enable the test in test-amd.yaml for MI325.
