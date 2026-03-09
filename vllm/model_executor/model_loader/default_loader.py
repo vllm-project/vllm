@@ -197,8 +197,17 @@ class DefaultModelLoader(BaseModelLoader):
         with open(index_path) as f:
             weight_map = json.load(f)["weight_map"]
         files: set[str] = set()
+        hf_folder_real = os.path.realpath(hf_folder)
         for rel_path in weight_map.values():
-            full = os.path.join(hf_folder, rel_path)
+            if os.path.isabs(rel_path):
+                logger.warning("Skipping absolute path in weight map: %r", rel_path)
+                continue
+            full = os.path.realpath(os.path.join(hf_folder, rel_path))
+            if not full.startswith(hf_folder_real + os.sep):
+                logger.warning(
+                    "Skipping path traversal attempt in weight map: %r", rel_path
+                )
+                continue
             if os.path.isfile(full):
                 files.add(full)
         if not files:
