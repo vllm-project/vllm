@@ -3,11 +3,10 @@
 
 import torch
 
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
-# FP8 E4M3 range constants (must be constexpr for use in @jit kernels)
-FP8_E4M3_MAX = tl.constexpr(448.0)
-FP8_E4M3_MIN = tl.constexpr(-448.0)
+float8_info = torch.finfo(current_platform.fp8_dtype())
 
 
 # Implements section 2.2 of https://www.arxiv.org/pdf/2501.01005
@@ -22,9 +21,9 @@ def merge_attn_states(
     prefill_tokens_with_context: int | None = None,
     output_scale: torch.Tensor | None = None,
 ) -> None:
-    num_tokens = prefix_output.shape[0]
-    num_query_heads = prefix_output.shape[1]
-    head_size = prefix_output.shape[2]
+    num_tokens = output.shape[0]
+    num_query_heads = output.shape[1]
+    head_size = output.shape[2]
     padded_head_size = triton.next_power_of_2(head_size)
     # We assume the output stride on num_head is not always as same as the
     # `suffix_output` and `prefix_output`, as them might be padded by the
@@ -80,6 +79,8 @@ def merge_attn_states_kernel(
     OUTPUT_LSE: tl.constexpr,
     prefill_tokens_with_context: tl.constexpr,
     USE_FP8: tl.constexpr,
+    FP8_MIN: tl.constexpr = float8_info.min,
+    FP8_MAX: tl.constexpr = float8_info.max,
 ):
     token_idx = tl.program_id(0)
     num_tokens = tl.num_programs(0)
@@ -169,13 +170,14 @@ def merge_attn_states_kernel(
 
     if USE_FP8:
         out = out * output_scale_inv
-        out = tl.clamp(out, FP8_E4M3_MIN, FP8_E4M3_MAX)
+        out = tl.clamp(out, FP8_MIN, FP8_MAX)
+        out = out.to(output.dtype.element_ty)
 
     tl.store(
         output
         + token_idx * num_heads * output_head_stride
         + head_idx * output_head_stride
         + head_arange,
-        out.to(output.dtype.element_ty),
+        out,
         mask=head_mask,
     )
