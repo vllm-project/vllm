@@ -5644,6 +5644,9 @@ class GPUModelRunner(
         for instance in list(CUDAGraphWrapper._all_instances):
             if id(instance) in original_pools:
                 instance.graph_pool = original_pools[id(instance)]
+        for key_set in self.cudagraph_dispatcher.cudagraph_keys.values():
+            key_set.clear()
+        self.cudagraph_dispatcher.keys_initialized = False
         self.maybe_remove_all_loras(self.lora_config)
         self._cleanup_profiling_kv_cache()
         compilation_counter.num_cudagraph_captured = saved_num_cudagraph_captured
