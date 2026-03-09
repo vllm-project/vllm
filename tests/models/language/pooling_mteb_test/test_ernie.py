@@ -10,11 +10,9 @@ from .mteb_embed_utils import mteb_test_embed_models
 
 MODELS = [
     EmbedModelInfo(
-        "nghuyong/ernie-3.0-xbase-zh",
+        "shibing624/text2vec-base-chinese-sentence",
         architecture="ErnieModel",
-        hf_overrides={"architectures": ["ErnieModel"]},
-        mteb_score=0.195652448,
-        seq_pooling_type="CLS",
+        seq_pooling_type="MEAN",
         attn_type="encoder_only",
         is_prefix_caching_supported=False,
         is_chunked_prefill_supported=False,
@@ -25,11 +23,22 @@ MODELS = [
 
 @pytest.mark.parametrize("model_info", MODELS)
 def test_embed_models_mteb(hf_runner, vllm_runner, model_info: EmbedModelInfo) -> None:
-    mteb_test_embed_models(hf_runner, vllm_runner, model_info)
+    mteb_test_embed_models(
+        hf_runner,
+        vllm_runner,
+        model_info,
+        vllm_extra_kwargs={"gpu_memory_utilization": 0.2},
+    )
 
 
 @pytest.mark.parametrize("model_info", MODELS)
 def test_embed_models_correctness(
     hf_runner, vllm_runner, model_info: EmbedModelInfo, example_prompts
 ) -> None:
-    correctness_test_embed_models(hf_runner, vllm_runner, model_info, example_prompts)
+    correctness_test_embed_models(
+        hf_runner,
+        vllm_runner,
+        model_info,
+        example_prompts,
+        vllm_extra_kwargs={"gpu_memory_utilization": 0.2},
+    )
