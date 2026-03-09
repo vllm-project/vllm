@@ -49,6 +49,11 @@ MLA_ATTENTION_FILE = (
 # Backends to skip during doc generation
 SKIP_BACKENDS = {"CUSTOM", "TORCH_SDPA"}
 
+BACKEND_KV_DTYPE_EXCLUDES: dict[str, set[str]] = {
+    # fp8 is an alias for fp8_ds_mla for FlashMLA Sparse
+    "FLASHMLA_SPARSE": {"fp8"},
+}
+
 
 def is_relevant_file(filepath: str) -> bool:
     """Check if a file matches any of the relevant patterns."""
@@ -546,10 +551,19 @@ def analyze_backend(backend_name: str, class_path: str) -> dict[str, Any] | None
             tree, impl_class_name, "can_return_lse_for_decode", False, file_path
         )
 
+    kv_cache_dtypes = parse_kv_cache_dtypes(class_node)
+    if backend_name in BACKEND_KV_DTYPE_EXCLUDES:
+        excluded = BACKEND_KV_DTYPE_EXCLUDES[backend_name]
+        kv_cache_dtypes = ", ".join(
+            d
+            for d in (d.strip() for d in kv_cache_dtypes.split(","))
+            if d not in excluded
+        )
+
     return {
         "name": backend_name,
         "dtypes": parse_supported_dtypes(class_node),
-        "kv_cache_dtypes": parse_kv_cache_dtypes(class_node),
+        "kv_cache_dtypes": kv_cache_dtypes,
         "block_sizes": parse_block_sizes(class_node),
         "head_sizes": parse_head_sizes(class_node),
         "attn_types": parse_attention_types(class_node),
@@ -1139,11 +1153,11 @@ def _render_table(
 ) -> list[str]:
     """Render a markdown table from column specs and backend data."""
     header = "| " + " | ".join(name for name, _ in columns) + " |"
-    sep = "|" + "|".join("-" * (len(name) + 2) for name, _ in columns) + "|"
+    sep = "| " + " | ".join("-" * len(name) for name, _ in columns) + " |"
     lines = [header, sep]
     for info in sorted(backends, key=_sort_key):
         row = "| " + " | ".join(fmt(info) for _, fmt in columns) + " |"
-        lines.append(row)
+        lines.append(row.replace("  ", " "))
     return lines
 
 
@@ -1254,7 +1268,7 @@ def _priority_table(title: str, backends: list[str]) -> list[str]:
         f"**{title}:**",
         "",
         "| Priority | Backend |",
-        "|----------|---------|",
+        "| -------- | ------- |",
         *[f"| {i} | `{b}` |" for i, b in enumerate(backends, 1)],
         "",
     ]
@@ -1303,7 +1317,7 @@ def generate_legend() -> str:
     return """## Legend
 
 | Column | Description |
-|--------|-------------|
+| ------ | ----------- |
 | **Dtypes** | Supported model data types (fp16, bf16, fp32) |
 | **KV Dtypes** | Supported KV cache data types (`auto`, `fp8`, `fp8_e4m3`, etc.) |
 | **Block Sizes** | Supported KV cache block sizes (%N means multiples of N) |
@@ -1334,7 +1348,7 @@ def generate_mla_section(
         "configuration.",
         "",
         "| Backend | Description | Compute Cap. | Enable | Disable | Notes |",
-        "|---------|-------------|--------------|--------|---------|-------|",
+        "| ------- | ----------- | ------------ | ------ | ------- | ----- |",
     ]
 
     for backend in prefill_backends:
@@ -1346,7 +1360,7 @@ def generate_mla_section(
             backend["disable"],
             backend.get("notes", ""),
         )
-        lines.append(row)
+        lines.append(row.replace("  ", " "))
 
     lines.extend(
         [

@@ -96,7 +96,6 @@ def get_vllm_config():
     cache_config = CacheConfig(
         block_size=BLOCK_SIZE,
         gpu_memory_utilization=0.9,
-        swap_space=0,
         cache_dtype="auto",
     )
     parallel_config = ParallelConfig()
@@ -797,7 +796,6 @@ def test_hybrid_attention_mamba_tensor_shapes():
     cache_config = CacheConfig(
         block_size=BLOCK_SIZE,
         gpu_memory_utilization=0.9,
-        swap_space=0,
         cache_dtype="auto",
     )
     parallel_config = ParallelConfig()
@@ -1230,7 +1228,6 @@ def test_cudagraph_sizes_capped_for_mamba_cache():
     cache_config = CacheConfig(
         block_size=BLOCK_SIZE,
         gpu_memory_utilization=0.9,
-        swap_space=0,
         cache_dtype="auto",
     )
     parallel_config = ParallelConfig()
