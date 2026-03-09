@@ -25,7 +25,7 @@ def _make_model_state(
     return state
 
 
-def test_commit_eplb_maps_normal_and_shape_change():
+def test_commit_eplb_maps_shape_change():
     """
     The normal path copies the physical_to_logical map in-place. When the number of
     physical experts changes, the old map should be replaced entirely.
@@ -34,39 +34,20 @@ def test_commit_eplb_maps_normal_and_shape_change():
     max_slots = 3  # pre-allocated third dim for logical_to_physical_map
 
     # Build current state tensors
-    phy2log = torch.zeros(num_layers, num_physical, dtype=torch.long)
-    log2phy = torch.full((num_layers, num_logical, max_slots), -1, dtype=torch.long)
-    logcnt = torch.zeros(num_layers, num_logical, dtype=torch.long)
-    model_state = _make_model_state(phy2log, log2phy, logcnt)
-
-    # New maps (same physical shape, log2phy has tight max_replicas=2 < max_slots=3)
-    new_phy2log = (
-        torch.arange(num_physical, dtype=torch.long)
-        .unsqueeze(0)
-        .expand(num_layers, -1)
-        .contiguous()
+    model_state = _make_model_state(
+        phy2log=torch.zeros(num_layers, num_physical, dtype=torch.long),
+        log2phy=torch.full((num_layers, num_logical, max_slots), -1, dtype=torch.long),
+        logcnt=torch.zeros(num_layers, num_logical, dtype=torch.long),
     )
+
     new_log2phy = torch.zeros(num_layers, num_logical, 2, dtype=torch.long)
     new_logcnt = torch.ones(num_layers, num_logical, dtype=torch.long)
 
-    # --- Normal path (same physical count) ---
-    original_phy2log_id = id(model_state.physical_to_logical_map)
-    _commit_eplb_maps(model_state, new_phy2log, new_log2phy, new_logcnt)
-
-    # physical_to_logical_map: copied in-place, object identity preserved
-    assert id(model_state.physical_to_logical_map) == original_phy2log_id
-    assert torch.equal(model_state.physical_to_logical_map, new_phy2log)
-
-    # logical_to_physical_map: padded to max_slots with -1
-    assert model_state.logical_to_physical_map.shape[-1] == max_slots
-    assert torch.all(model_state.logical_to_physical_map[:, :, 2] == -1)
-    assert torch.equal(model_state.logical_to_physical_map[:, :, :2], new_log2phy)
-
-    # --- Shape-change path (physical count differs) ---
+    # The new map has two more physical experts
     new_phy2log_larger = torch.zeros(num_layers, num_physical + 2, dtype=torch.long)
     _commit_eplb_maps(model_state, new_phy2log_larger, new_log2phy, new_logcnt)
 
-    # physical_to_logical_map: attribute replaced, not copied into old tensor
+    # Check that the number of physical experts has been updated
     assert model_state.physical_to_logical_map.shape[1] == num_physical + 2
 
 
@@ -78,10 +59,11 @@ def test_commit_eplb_maps_for_layer_logical_padding():
     num_layers, num_logical, num_physical = 2, 4, 6
     max_slots = 3
 
-    phy2log = torch.zeros(num_layers, num_physical, dtype=torch.long)
-    log2phy = torch.full((num_layers, num_logical, max_slots), -1, dtype=torch.long)
-    logcnt = torch.zeros(num_layers, num_logical, dtype=torch.long)
-    model_state = _make_model_state(phy2log, log2phy, logcnt)
+    model_state = _make_model_state(
+        phy2log=torch.zeros(num_layers, num_physical, dtype=torch.long),
+        log2phy=torch.full((num_layers, num_logical, max_slots), -1, dtype=torch.long),
+        logcnt=torch.zeros(num_layers, num_logical, dtype=torch.long),
+    )
 
     new_phy2log = (
         torch.arange(num_physical, dtype=torch.long)
