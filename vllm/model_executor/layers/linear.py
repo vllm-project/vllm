@@ -873,7 +873,22 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
 
         current_shard_offset = 0
         shard_offsets: list[tuple[int, int, int]] = []
-        output_sizes = output_sizes or self.output_sizes
+        if output_sizes is None:
+            output_sizes = self.output_sizes
+            # For block-quantized scale parameters (e.g., FP8
+            # weight_scale_inv), adjust output sizes to account for block
+            # quantization before computing shard offsets. Without this,
+            # the raw output sizes (e.g., 2048) would exceed the
+            # block-scale dimension (e.g., 96). When output_sizes is
+            # explicitly passed, it is expected to already be adjusted
+            # by the caller (e.g., weight_loader_v2).
+            if isinstance(param, BlockQuantScaleParameter):
+                weight_block_size = getattr(self, "weight_block_size", None)
+                output_sizes = [
+                    adjust_block_scale_shard(weight_block_size, size, 0)[0]
+                    for size in output_sizes
+                ]
+
         for i, output_size in enumerate(output_sizes):
             shard_offsets.append((i, current_shard_offset, output_size))
             current_shard_offset += output_size
@@ -1100,6 +1115,17 @@ class QKVParallelLinear(ColumnParallelLinear):
             ):
                 shard_size, shard_offset = param.adjust_shard_indexes_for_packing(
                     shard_size=shard_size, shard_offset=shard_offset
+                )
+
+            # For block-quantized scale parameters (e.g., FP8
+            # weight_scale_inv), adjust shard sizes/offsets to account
+            # for block quantization. Without this, the raw sizes would
+            # exceed the block-scale dimension for models with fused QKV
+            # on disk.
+            if isinstance(param, BlockQuantScaleParameter):
+                weight_block_size = getattr(self, "weight_block_size", None)
+                shard_size, shard_offset = adjust_block_scale_shard(
+                    weight_block_size, shard_size, shard_offset
                 )
 
             loaded_weight_shard = loaded_weight.narrow(
