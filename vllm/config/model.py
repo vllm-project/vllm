@@ -1992,9 +1992,14 @@ def _get_and_verify_max_len(
 
                 if rope_type == "yarn":
                     derived_max_model_len = rp["original_max_position_embeddings"]
-        # TODO: Remove this workaround once transformers handles null factor
-        #       in HF config (E.g., cooerce None to 1.0)
         if scaling_factor is None:
+            # Fallback the factor to 1.0 if a user assigned `null`
+            logger.warning(
+                "The model's rope_scaling configuration has a null scaling "
+                "factor which is unexpected. This likely indicates a bug "
+                "in the model's HuggingFace config.json. Please notify the "
+                "model vendor. Falling back the value to 1.0. "
+            )
             scaling_factor = 1.0
         # Do this outside loop since all layer types should have the same scaling
         derived_max_model_len *= scaling_factor
