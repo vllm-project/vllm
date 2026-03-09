@@ -30,27 +30,15 @@ class VerifyAndUpdateConfig:
 class AnyModelConfig(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
-        """Normalize block_configs and patch ``_model_info`` from base arch.
-
-        1. Convert ``block_configs`` entries from plain dicts to
-           :class:`_AttrDict` so downstream code can use attribute access
-           (e.g. ``bc.attention.no_op``).
-        2. Override ``model_config._model_info`` with the capabilities of
-           the base architecture (``base_architecture`` in the HF config)
-           so that the rest of ``ModelConfig.__init__`` sees correct flags
-           (``supports_multimodal``, ``is_hybrid``, etc.) with
-           ``has_noops=True``.
-        """
+        """Normalize block_configs to _AttrDict and patch _model_info from base arch."""
         from dataclasses import replace
 
         from vllm.model_executor.models.anymodel import _AttrDict
 
         hf_config = model_config.hf_config
+        # For VL models block_configs lives on text_config, not hf_config.
         text_config = hf_config.get_text_config()
 
-        # --- 1. Normalize block_configs to _AttrDict ----------------------
-        # For VL models (e.g. Qwen3VL), block_configs lives on text_config
-        # rather than the top-level hf_config.
         block_configs = getattr(text_config, "block_configs", None)
         if block_configs:
             assert len(block_configs) == text_config.num_hidden_layers, (
@@ -67,18 +55,14 @@ class AnyModelConfig(VerifyAndUpdateConfig):
 
             text_config.block_configs = [_to_attrdict(bc) for bc in block_configs]
 
-        # --- 2. Patch _model_info from base architecture ------------------
         base_arch = getattr(hf_config, "base_architecture", None)
         if base_arch:
             base_info = model_config.registry._try_inspect_model_cls(base_arch)
             if base_info is not None:
                 model_config._model_info = replace(base_info, has_noops=True)
 
-                # "AnyModel" ends with "Model" → auto-resolves to
-                # ("pooling", "embed") via _SUFFIX_TO_DEFAULTS.  Correct
-                # runner_type/convert_type when the base arch is a
-                # text-generation model and the user did not explicitly set
-                # --runner.
+                # "AnyModel" suffix auto-resolves to pooling/embed; fix that
+                # when the base arch is a text-generation model.
                 if (
                     model_config.runner == "auto"
                     and base_info.is_text_generation_model

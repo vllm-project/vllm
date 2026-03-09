@@ -349,7 +349,6 @@ class GptOssModel(nn.Module):
         loaded_params: set[str] = set()
 
         use_ep = self.parallel_config.enable_expert_parallel
-        num_experts = self.config.num_local_experts
 
         # In MoE, we need to flatten the tensor parallel size across the data
         # parallel size when EP is disabled.
