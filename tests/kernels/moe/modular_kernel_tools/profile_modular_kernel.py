@@ -34,7 +34,7 @@ def do_profile(
         record_shapes=True,
     ) as tprof:
         fn(**fn_kwargs)
-        torch.cuda.synchronize(torch.cuda.current_device())
+        torch.accelerator.synchronize(torch.cuda.current_device())
 
     # TODO (varun): Add a descriptive trace file name
     tprof.export_chrome_trace(
@@ -72,7 +72,7 @@ def profile_modular_kernel(
         "apply_router_weight_on_input": config.topk == 1,
     }
 
-    do_profile(mk.forward, mk_kwargs, pgi, config)
+    do_profile(mk.apply, mk_kwargs, pgi, config)
 
 
 def rank_worker(
@@ -125,7 +125,7 @@ if __name__ == "__main__":
         description=(
             "Run single prepare-finalize & fused-experts combination test"
             "Example : python3 -m tests.kernels.moe.modular_kernel_tools.profile_modular_kernel "  # noqa: E501
-            "--pf-type PplxPrepareAndFinalize --experts-type BatchedTritonExperts"
+            "--pf-type DeepEPLLPrepareAndFinalize --experts-type BatchedTritonExperts"
         )
     )
     args = parser.parse_args()

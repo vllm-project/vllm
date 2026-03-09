@@ -11,6 +11,7 @@ from typing import Final, Literal, TypeAlias, TypeVar, cast
 
 import numpy as np
 from fastapi import Request
+from soundfile import LibsndfileError
 from transformers import PreTrainedTokenizerBase
 
 import vllm.envs as envs
@@ -41,7 +42,11 @@ from vllm.exceptions import VLLMValidationError
 from vllm.inputs import ProcessorInputs
 from vllm.logger import init_logger
 from vllm.logprobs import FlatLogprobs, Logprob
-from vllm.model_executor.models import SupportsTranscription, supports_transcription
+from vllm.model_executor.models import (
+    SupportsTranscription,
+    supports_transcription,
+)
+from vllm.multimodal.audio import split_audio
 from vllm.outputs import RequestOutput
 from vllm.renderers.inputs import DictPrompt, EncoderDecoderDictPrompt
 from vllm.renderers.inputs.preprocess import parse_enc_dec_prompt, parse_model_prompt
@@ -52,6 +57,14 @@ try:
     import librosa
 except ImportError:
     librosa = PlaceholderModule("librosa")  # type: ignore[assignment]
+
+# Public libsndfile error codes exposed via `soundfile.LibsndfileError.code`, soundfile
+# being librosa's main backend. Used to validate if an audio loading error is due to a
+# server error vs a client error (invalid audio file).
+# 1 = unrecognised format      (file is not a supported audio container)
+# 3 = malformed file           (corrupt or structurally invalid audio)
+# 4 = unsupported encoding     (codec not supported by this libsndfile build)
+_BAD_SF_CODES = {1, 3, 4}
 
 SpeechToTextResponse: TypeAlias = TranscriptionResponse | TranslationResponse
 SpeechToTextResponseVerbose: TypeAlias = (
@@ -84,7 +97,6 @@ class OpenAISpeechToText(OpenAIServing):
         request_logger: RequestLogger | None,
         return_tokens_as_token_ids: bool = False,
         task_type: Literal["transcribe", "translate"] = "transcribe",
-        log_error_stack: bool = False,
         enable_force_include_usage: bool = False,
     ):
         super().__init__(
@@ -92,7 +104,6 @@ class OpenAISpeechToText(OpenAIServing):
             models=models,
             request_logger=request_logger,
             return_tokens_as_token_ids=return_tokens_as_token_ids,
-            log_error_stack=log_error_stack,
         )
 
         self.default_sampling_params = self.model_config.get_diff_sampling_param()
@@ -190,7 +201,7 @@ class OpenAISpeechToText(OpenAIServing):
     def _warmup_input_processor(self) -> None:
         """Warm up input processor with dummy audio to avoid first-request latency.
 
-        The first call to input_processor.process_inputs() with multimodal audio
+        The first call to renderer.render_cmpl() with multimodal audio
         triggers multimodal processing initialization which can take ~2.5s.
         This method processes a dummy audio request to warm up the pipeline.
         """
@@ -242,10 +253,57 @@ class OpenAISpeechToText(OpenAIServing):
         model_cls = get_model_cls(self.model_config)
         return cast(type[SupportsTranscription], model_cls)
 
+    async def _detect_language(
+        self,
+        audio_chunk: np.ndarray,
+        request_id: str,
+    ) -> str:
+        """Auto-detect the spoken language from an audio chunk.
+
+        Delegates prompt construction and output parsing to the model class
+        via ``get_language_detection_prompt`` and
+        ``parse_language_detection_output``.
+        """
+        from vllm.sampling_params import SamplingParams
+
+        prompt = self.model_cls.get_language_detection_prompt(
+            audio_chunk,
+            self.asr_config,
+        )
+        allowed_token_ids = self.model_cls.get_language_token_ids(
+            self.tokenizer,
+        )
+        sampling_params = SamplingParams(
+            max_tokens=1,
+            temperature=0.0,
+            allowed_token_ids=allowed_token_ids,
+        )
+
+        result_generator = self.engine_client.generate(
+            prompt,
+            sampling_params,
+            request_id,
+        )
+
+        final_output: RequestOutput
+        async for final_output in result_generator:
+            if final_output.finished:
+                break
+
+        token_ids = list(final_output.outputs[0].token_ids)
+        lang = self.model_cls.parse_language_detection_output(
+            token_ids,
+            self.tokenizer,
+        )
+
+        logger.info("Auto-detected language: '%s'", lang)
+        return lang
+
     async def _preprocess_speech_to_text(
         self,
         request: SpeechToTextRequest,
         audio_data: bytes,
+        request_id: str,
     ) -> tuple[list[ProcessorInputs], float]:
         # Validate request
         language = self.model_cls.validate_language(request.language)
@@ -264,16 +322,44 @@ class OpenAISpeechToText(OpenAIServing):
             )
 
         with io.BytesIO(audio_data) as bytes_:
-            # NOTE resample to model SR here for efficiency. This is also a
-            # pre-requisite for chunking, as it assumes Whisper SR.
-            y, sr = librosa.load(bytes_, sr=self.asr_config.sample_rate)
+            try:
+                # NOTE resample to model SR here for efficiency. This is also a
+                # pre-requisite for chunking, as it assumes Whisper SR.
+                y, sr = librosa.load(bytes_, sr=self.asr_config.sample_rate)
+            except LibsndfileError as exc:
+                # Distinguish client errors (invalid audio) from server errors
+                if exc.code in _BAD_SF_CODES:
+                    raise ValueError("Invalid or unsupported audio file.") from exc
+                raise
 
         duration = librosa.get_duration(y=y, sr=sr)
         do_split_audio = (
             self.asr_config.allow_audio_chunking
             and duration > self.asr_config.max_audio_clip_s
         )
-        chunks = [y] if not do_split_audio else self._split_audio(y, int(sr))
+
+        if not do_split_audio:
+            chunks = [y]
+        else:
+            assert self.asr_config.max_audio_clip_s is not None
+            assert self.asr_config.min_energy_split_window_size is not None
+            chunks = split_audio(
+                audio_data=y,
+                sample_rate=int(sr),
+                max_clip_duration_s=self.asr_config.max_audio_clip_s,
+                overlap_duration_s=self.asr_config.overlap_chunk_second,
+                min_energy_window_size=self.asr_config.min_energy_split_window_size,
+            )
+
+        if language is None and getattr(
+            self.model_cls, "supports_explicit_language_detection", False
+        ):
+            # Auto-detect language from the first chunk.
+            language = await self._detect_language(
+                chunks[0], f"{request_id}-lang_detect"
+            )
+            request.language = language
+
         parsed_prompts: list[DictPrompt] = []
         for chunk in chunks:
             # The model has control over the construction, as long as it
@@ -429,68 +515,61 @@ class OpenAISpeechToText(OpenAIServing):
         if raw_request:
             raw_request.state.request_metadata = request_metadata
 
-        try:
-            lora_request = self._maybe_get_adapters(request)
+        lora_request = self._maybe_get_adapters(request)
 
-            engine_prompts, duration_s = await self._preprocess_speech_to_text(
-                request=request,
-                audio_data=audio_data,
-            )
-
-        except ValueError as e:
-            logger.exception("Error in preprocessing prompt inputs")
-            return self.create_error_response(e)
+        engine_prompts, duration_s = await self._preprocess_speech_to_text(
+            request=request,
+            audio_data=audio_data,
+            request_id=request_id,
+        )
 
         # Schedule the request and get the result generator.
         max_model_len = self.model_config.max_model_len
         list_result_generator: list[AsyncGenerator[RequestOutput, None]] | None = None
-        try:
-            # Unlike most decoder-only models, whisper generation length is not
-            # constrained by the size of the input audio, which is mapped to a
-            # fixed-size log-mel-spectogram. Still, allow for fewer tokens to be
-            # generated by respecting the extra completion tokens arg.
-            max_tokens = get_max_tokens(
-                max_model_len,
-                request.max_completion_tokens,
-                0,
-                self.default_sampling_params,
+        # Unlike most decoder-only models, whisper generation length is not
+        # constrained by the size of the input audio, which is mapped to a
+        # fixed-size log-mel-spectogram. Still, allow for fewer tokens to be
+        # generated by respecting the extra completion tokens arg.
+        max_tokens = get_max_tokens(
+            max_model_len,
+            request.max_completion_tokens,
+            0,
+            self.default_sampling_params,
+        )
+
+        sampling_params = request.to_sampling_params(
+            max_tokens,
+            self.default_sampling_params,
+        )
+        if request.response_format == "verbose_json":
+            sampling_params.logprobs = 1
+
+        list_result_generator = []
+        for i, engine_prompt in enumerate(engine_prompts):
+            request_id_item = f"{request_id}_{i}"
+
+            self._log_inputs(
+                request_id_item,
+                engine_prompt,
+                params=sampling_params,
+                lora_request=lora_request,
             )
 
-            sampling_params = request.to_sampling_params(
-                max_tokens,
-                self.default_sampling_params,
+            trace_headers = (
+                None
+                if raw_request is None
+                else await self._get_trace_headers(raw_request.headers)
             )
-            if request.response_format == "verbose_json":
-                sampling_params.logprobs = 1
 
-            list_result_generator = []
-            for i, engine_prompt in enumerate(engine_prompts):
-                request_id_item = f"{request_id}_{i}"
+            generator = self.engine_client.generate(
+                engine_prompt,
+                sampling_params,
+                request_id_item,
+                lora_request=lora_request,
+                trace_headers=trace_headers,
+            )
 
-                self._log_inputs(
-                    request_id_item,
-                    engine_prompt,
-                    params=sampling_params,
-                    lora_request=lora_request,
-                )
-
-                trace_headers = (
-                    None
-                    if raw_request is None
-                    else await self._get_trace_headers(raw_request.headers)
-                )
-
-                generator = self.engine_client.generate(
-                    engine_prompt,
-                    sampling_params,
-                    request_id_item,
-                    lora_request=lora_request,
-                    trace_headers=trace_headers,
-                )
-
-                list_result_generator.append(generator)
-        except ValueError as e:
-            return self.create_error_response(e)
+            list_result_generator.append(generator)
 
         if request.stream:
             return stream_generator_method(
@@ -574,8 +653,6 @@ class OpenAISpeechToText(OpenAIServing):
             return final_response
         except asyncio.CancelledError:
             return self.create_error_response("Client disconnected")
-        except ValueError as e:
-            return self.create_error_response(e)
 
     async def _speech_to_text_stream_generator(
         self,
@@ -694,55 +771,3 @@ class OpenAISpeechToText(OpenAIServing):
             yield f"data: {data}\n\n"
         # Send the final done message after all response.n are finished
         yield "data: [DONE]\n\n"
-
-    def _split_audio(
-        self, audio_data: np.ndarray, sample_rate: int
-    ) -> list[np.ndarray]:
-        assert self.asr_config.max_audio_clip_s is not None, (
-            f"{self.asr_config.max_audio_clip_s=} cannot be None to"
-            " split audio into chunks."
-        )
-        chunk_size = sample_rate * self.asr_config.max_audio_clip_s
-        overlap_size = sample_rate * self.asr_config.overlap_chunk_second
-        chunks = []
-        i = 0
-        while i < audio_data.shape[-1]:
-            if i + chunk_size >= audio_data.shape[-1]:
-                # handle last chunk
-                chunks.append(audio_data[..., i:])
-                break
-
-            # Find the best split point in the overlap region
-            search_start = i + chunk_size - overlap_size
-            search_end = min(i + chunk_size, audio_data.shape[-1])
-            split_point = self._find_split_point(audio_data, search_start, search_end)
-
-            # Extract chunk up to the split point
-            chunks.append(audio_data[..., i:split_point])
-            i = split_point
-        return chunks
-
-    def _find_split_point(self, wav: np.ndarray, start_idx: int, end_idx: int) -> int:
-        """Find the best point to split audio by
-        looking for silence or low amplitude.
-        Args:
-            wav: Audio tensor [1, T]
-            start_idx: Start index of search region
-            end_idx: End index of search region
-        Returns:
-            Index of best splitting point
-        """
-        segment = wav[start_idx:end_idx]
-
-        # Calculate RMS energy in small windows
-        min_energy = math.inf
-        quietest_idx = 0
-        min_energy_window = self.asr_config.min_energy_split_window_size
-        assert min_energy_window is not None
-        for i in range(0, len(segment) - min_energy_window, min_energy_window):
-            window = segment[i : i + min_energy_window]
-            energy = (window**2).mean() ** 0.5
-            if energy < min_energy:
-                quietest_idx = i + start_idx
-                min_energy = energy
-        return quietest_idx

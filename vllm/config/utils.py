@@ -7,6 +7,7 @@ import enum
 import hashlib
 import inspect
 import json
+import os
 import pathlib
 import textwrap
 from collections.abc import Callable, Mapping, Sequence, Set
@@ -21,6 +22,7 @@ from pydantic.fields import Field as PydanticField
 from pydantic.fields import FieldInfo
 from typing_extensions import dataclass_transform, runtime_checkable
 
+import vllm.envs as envs
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -380,3 +382,66 @@ def handle_deprecated(
 
     for new_name in new_names:
         setattr(config, new_name, old_val)
+
+
+def get_from_deprecated_env_if_set(
+    env_name: str,
+    removal_version: str,
+    field_name: str | None = None,
+) -> str | None:
+    """
+    Get value from deprecated environment variable with warning.
+
+    Args:
+        env_name: Name of the deprecated environment variable
+        removal_version: Version when it will be removed
+        field_name: Name of the field to suggest as alternative
+
+    Returns:
+        The environment variable value if set, None otherwise
+    """
+    if envs.is_set(env_name):
+        value = os.environ.get(env_name)
+        alt_msg = f" Please use {field_name} instead." if field_name else ""
+        logger.warning_once(
+            "Using %s environment variable is deprecated and will be removed in %s.%s",
+            env_name,
+            removal_version,
+            alt_msg,
+        )
+        return value
+    return None
+
+
+def set_from_deprecated_env_if_set(
+    config: ConfigT,
+    env_name: str,
+    removal_version: str,
+    field_name: str,
+    to_bool: bool = False,
+    to_int: bool = False,
+) -> None:
+    """
+    Set object field from deprecated environment variable with warning.
+
+    Args:
+        config: Config object to set the field on
+        env_name: Name of the deprecated environment variable
+        removal_version: Version when the env var will be removed
+        field_name: Name of the field to set
+        to_bool: Whether to convert the environment variable value to boolean
+        to_int: Whether to convert the environment variable value to integer
+    Returns:
+        None
+    """
+    if to_bool and to_int:
+        raise ValueError("Cannot convert to both boolean and integer.")
+
+    env_value = get_from_deprecated_env_if_set(env_name, removal_version, field_name)
+    if env_value is not None:
+        field_value: str | bool | int = env_value
+        if to_bool:
+            field_value = env_value.lower() in ("1", "true")
+        elif to_int:
+            field_value = int(env_value)
+        setattr(config, field_name, field_value)
