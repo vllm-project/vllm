@@ -177,16 +177,12 @@ def flash_attn_supports_mla():
                 is_fa_version_supported,
             )
 
-            # FA3 on Hopper (SM90) supports MLA via headdim_v parameter.
-            # FA4 CuteDSL supports MLA's diff headdims (192/128) natively
-            # by inferring head_dim_v from the V tensor shape.
-            if is_fa_version_supported(
+            return is_fa_version_supported(
                 3
-            ) and current_platform.is_device_capability_family(90):
-                return True
+            ) and current_platform.is_device_capability_family(90)
 
-            if is_fa_version_supported(4):
-                return True
+            # NOTE(Lucas): FA4 CuteDSL does NOT currently support MLA's non-standard
+            # head dimensions (576 for qk, 512 for v) due to TMEM capacity limits.
 
         except (ImportError, AssertionError):
             pass
