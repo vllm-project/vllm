@@ -576,11 +576,13 @@ def _build_serving_chat(engine: AsyncLLM) -> OpenAIServingChat:
         engine_client=engine,
         base_model_paths=BASE_MODEL_PATHS,
     )
+    openai_serving_render = _build_serving_render(engine)
+
     serving_chat = OpenAIServingChat(
         engine,
         models,
         response_role="assistant",
-        openai_serving_render=_build_serving_render(engine),
+        openai_serving_render=openai_serving_render,
         chat_template=CHAT_TEMPLATE,
         chat_template_content_format="auto",
         request_logger=None,
@@ -600,23 +602,14 @@ class MockEngine:
 async def _async_serving_chat_init():
     engine = MockEngine()
 
-    from vllm.entrypoints.serve.render.serving import OpenAIServingRender
-
-    serving_render = OpenAIServingRender(
-        model_config=engine.model_config,
-        renderer=engine.renderer,
-        io_processor=engine.io_processor,
-        served_model_names=[mp.name for mp in BASE_MODEL_PATHS],
-        request_logger=None,
-        chat_template=CHAT_TEMPLATE,
-        chat_template_content_format="auto",
-    )
     models = OpenAIServingModels(engine, BASE_MODEL_PATHS)
+    openai_serving_render = _build_serving_render(engine)
+
     serving_completion = OpenAIServingChat(
         engine,
         models,
         response_role="assistant",
-        openai_serving_render=serving_render,
+        openai_serving_render=openai_serving_render,
         chat_template=CHAT_TEMPLATE,
         chat_template_content_format="auto",
         request_logger=None,
@@ -1716,12 +1709,14 @@ async def test_tool_choice_validation_without_parser():
         engine_client=mock_engine,
         base_model_paths=BASE_MODEL_PATHS,
     )
+    openai_serving_render = _build_serving_render(mock_engine)
+
     # Create serving_chat without tool_parser (enable_auto_tools=False)
     serving_chat = OpenAIServingChat(
         mock_engine,
         models,
         response_role="assistant",
-        openai_serving_render=_build_serving_render(mock_engine),
+        openai_serving_render=openai_serving_render,
         chat_template=CHAT_TEMPLATE,
         chat_template_content_format="auto",
         request_logger=None,
