@@ -31,6 +31,10 @@ class AiterMLABackend(MLACommonBackend):
         "fp8_e5m2",
     ]
 
+    @classmethod
+    def get_supported_head_sizes(cls) -> list[int]:
+        return []
+
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
         return [1]
