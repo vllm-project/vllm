@@ -562,8 +562,9 @@ class LLMEngine:
         """Add a processed request to the engine's request pool.
         return the created sequence group.
         """
-        if isinstance(params, SamplingParams) and (params.n > 1 or params.tree_search_params.enable_tree_search):
-            assert params.n == 1 or not params.tree_search_params.enable_tree_search
+        enable_tree_search = params.tree_search_params is not None and params.tree_search_params.enable_tree_search
+        if isinstance(params, SamplingParams) and (params.n > 1 or enable_tree_search):
+            assert params.n == 1 or not enable_tree_search
             ParallelSampleSequenceGroup.add_request(
                 request_id,
                 self,
@@ -1443,7 +1444,7 @@ class LLMEngine:
             logger.debug("Stopping remote worker execution loop.")
             self.model_executor.stop_remote_worker_execution_loop()
 
-        if self._should_enable_tree_decoding():
+        if self._should_enable_tree_decoding(seq_group_metadata_list):
             self._process_tree_decoding(
                 outputs, seq_group_metadata_list)
             # for branch_group in new_branch_groups:
@@ -1454,10 +1455,10 @@ class LLMEngine:
 
         return ctx.request_outputs
 
-    def _should_enable_tree_decoding(self):
+    def _should_enable_tree_decoding(self, seq_group_metadata_list):
         """检查是否有序列组启用了tree decoding"""
-        for group in self.seq_id_to_seq_group.values():
-            if group.assembled_seq_group.sampling_params.tree_search_params.enable_tree_search:
+        for group in seq_group_metadata_list:
+            if group.sampling_params.tree_search_params is not None:
                 return True
         return False
     
@@ -1468,6 +1469,8 @@ class LLMEngine:
             if request_id not in self.seq_id_to_seq_group:
                 continue
             sampling_params = seq_group_metadata.sampling_params
+            if sampling_params.tree_search_params is None:
+                continue
             num_branches = sampling_params.tree_search_params.branching_factor
             # 获取当前序列组的logprobs
             if hasattr(outputs[0], 'logprobs'):

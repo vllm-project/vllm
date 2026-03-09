@@ -255,7 +255,7 @@ class SamplingParams(
     _bad_words_token_ids: Optional[list[list[int]]] = None
 
     # params for Tree search
-    tree_search_params: TreeSearchParams = TreeSearchParams()
+    tree_search_params: Optional[TreeSearchParams] = None
 
     @staticmethod
     def from_optional(
