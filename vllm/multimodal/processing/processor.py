@@ -72,11 +72,12 @@ def _cached_encode(
     add_special_tokens: bool = True,
 ) -> list[int]:
     # Handle different tokenizer signatures
-    sig = inspect.signature(tokenizer.encode)
-    if "add_special_tokens" in sig.parameters:
-        return tokenizer.encode(text, add_special_tokens=add_special_tokens)
-    # TikTokenTokenizer uses bos/eos instead
-    return tokenizer.encode(text, bos=add_special_tokens, eos=add_special_tokens)
+    # Some tokenizers use bos/eos instead of add_special_tokens
+    try:
+        return tokenizer.encode(text, add_special_tokens=add_special_tokens)  # type: ignore[call-arg]
+    except TypeError:
+        # Fallback for tokenizers that use bos/eos parameters
+        return tokenizer.encode(text, bos=add_special_tokens, eos=add_special_tokens)  # type: ignore[call-arg]
 
 
 @lru_cache(maxsize=2048)
@@ -125,11 +126,12 @@ def _seq2tokens(
 
         if not use_cache:
             # Handle different tokenizer signatures
-            sig = inspect.signature(tokenizer.encode)
-            if "add_special_tokens" in sig.parameters:
-                return tokenizer.encode(seq, add_special_tokens=False)
-            # TikTokenTokenizer uses bos/eos instead
-            return tokenizer.encode(seq, bos=False, eos=False)
+            # Some tokenizers use bos/eos instead of add_special_tokens
+            try:
+                return tokenizer.encode(seq, add_special_tokens=False)  # type: ignore[call-arg]
+            except TypeError:
+                # Fallback for tokenizers that use bos/eos parameters
+                return tokenizer.encode(seq, bos=False, eos=False)  # type: ignore[call-arg]
 
         return _cached_encode(tokenizer, seq, add_special_tokens=False)
 
