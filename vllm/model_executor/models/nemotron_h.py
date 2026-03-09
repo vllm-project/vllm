@@ -349,7 +349,7 @@ class NemotronHMoEDecoderLayer(nn.Module):
         super().__init__()
         self.config = config
 
-        # Get per-layer config for heterogeneous models if exsist
+        # Get per-layer config for heterogeneous models if exists
         get_layer_config = getattr(config, "get_nemotron_h_config_for_layer", None)
         layer_config = get_layer_config(layer_idx) if get_layer_config else config
 
@@ -517,7 +517,7 @@ class NemotronHAttentionDecoderLayer(nn.Module):
     ) -> None:
         super().__init__()
 
-        # Get per-layer config for heterogeneous models if exsist
+        # Get per-layer config for heterogeneous models if exists
         get_layer_config = getattr(config, "get_nemotron_h_config_for_layer", None)
         layer_config = get_layer_config(layer_idx) if get_layer_config else config
 
