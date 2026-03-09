@@ -17,7 +17,7 @@ def _deep_merge_mm_kwargs(
     base: dict[str, object], override: Mapping[str, object]
 ) -> dict[str, object]:
     """Recursively merge override into base so nested keys are merged, not replaced."""
-    result = copy.deepcopy(base)
+    result = base.copy()
     for k, v in override.items():
         if (
             k in result
