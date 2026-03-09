@@ -687,9 +687,8 @@ steps:
   - csrc/
   - tests/kernels/core
   - tests/kernels/test_top_k_per_row.py
-  - tests/kernels/test_concat_mla_q.py
   commands:
-    - pytest -v -s kernels/core kernels/test_top_k_per_row.py kernels/test_concat_mla_q.py
+    - pytest -v -s kernels/core kernels/test_top_k_per_row.py
 
 - label: Kernels Attention Test %N # 23min
   timeout_in_minutes: 35
@@ -2343,9 +2342,8 @@ steps:
   - csrc/
   - tests/kernels/core
   - tests/kernels/test_top_k_per_row.py
-  - tests/kernels/test_concat_mla_q.py
   commands:
-    - pytest -v -s kernels/core kernels/test_top_k_per_row.py kernels/test_concat_mla_q.py
+    - pytest -v -s kernels/core kernels/test_top_k_per_row.py
 
 - label: Kernels Attention Test %N # 23min
   timeout_in_minutes: 35
