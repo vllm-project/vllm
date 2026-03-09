@@ -31,6 +31,8 @@ from vllm.config import (
 from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.layers.linear import ColumnParallelLinear
+from vllm.model_executor.layers.quantization.fp8 import Fp8Config
+from vllm.model_executor.layers.quantization.modelopt import ModelOptNvFp4Config
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8StaticTensorSym,
@@ -92,6 +94,7 @@ class MLAAttentionQuantPatternModel(torch.nn.Module):
             kv_lora_rank=kv_lora_rank,
             kv_b_proj=kv_b_proj,
             cache_config=vllm_config.cache_config,
+            quant_config=self.quant_config,
             prefix="model.layers.0.self_attn.attn",
         )
         self.mla_attn._k_scale = self.mla_attn._k_scale.to(device)
@@ -167,6 +170,7 @@ class TestMLAAttentionFp8StaticQuantPatternModel(MLAAttentionQuantPatternModel):
     """Test model for MLA Attention + FP8 static quant fusion."""
 
     quant_key = kFp8StaticTensorSym
+    quant_config = Fp8Config()
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -210,6 +214,11 @@ class TestMLAAttentionNvfp4QuantPatternModel(MLAAttentionQuantPatternModel):
     """Test model for MLA Attention + NVFP4 quant fusion."""
 
     quant_key = kNvfp4Dynamic
+    quant_config = ModelOptNvFp4Config(
+        is_checkpoint_nvfp4_serialized=False,
+        kv_cache_quant_algo=None,
+        exclude_modules=[],
+    )
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)

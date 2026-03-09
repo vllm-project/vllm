@@ -449,6 +449,16 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             compile_native=True,
         )
 
+        # Preallocated BF16 buffer for fused output quantization.
+        # Sized to max_num_batched_tokens so we avoid per-forward allocation.
+        if self.quant_config is not None:
+            self._quant_bf16_buf = torch.empty(
+                self._vllm_config.scheduler_config.max_num_batched_tokens,
+                self.num_heads * self.v_head_dim,
+                dtype=dtype,
+                device=self.kv_b_proj.weight.device,
+            )
+
     @property
     def chunked_prefill_workspace_size(self) -> int:
         if self._chunked_prefill_workspace_size is None:
@@ -544,16 +554,15 @@ class MLAAttention(nn.Module, AttentionLayerBase):
     ) -> torch.Tensor:
         assert output is not None, "Output tensor must be provided."
 
-        needs_quant = output_scale is not None or output_block_scale is not None
-        if needs_quant:
+        use_quant = output_scale is not None or output_block_scale is not None
+        if use_quant:
             # The fusion pass has allocated output with quantized dtype
             # (FP8 or uint8 for FP4). We can't write BF16 into it directly,
             # so we swap in a temp BF16 buffer for computation, then quantize
             # into the real output at the end.
+            # NOTE(carl-you): this is temporary until kernels support fp8 output
             quant_output = output
-            quant_output_padded = output
-            bf16_shape = (output.shape[0], self.num_heads * self.v_head_dim)
-            output = torch.empty(bf16_shape, dtype=q.dtype, device=output.device)
+            output = self._quant_bf16_buf[: output.shape[0]]
 
         if attn_metadata is None:
             # During the profile run try to simulate to worse case output size
@@ -572,7 +581,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             # The zero fill is required when used with DP + EP
             # to ensure all ranks within a DP group compute the
             # same expert outputs.
-            if needs_quant:
+            if use_quant:
                 return quant_output.fill_(0)
             return output.fill_(0)
 
@@ -714,27 +723,19 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             # v_up projection
             self._v_up_proj(attn_out, out=mqa_output_slice)
 
-        if needs_quant:
+        if use_quant:
             # Quantize the BF16 computation result into the quantized output
-            actual = output[:num_actual_toks].reshape(
-                -1, self.num_heads * self.v_head_dim
-            )
+            actual = output[:num_actual_toks]
             if output_block_scale is not None:
                 # NVFP4: two FP4 values packed into one uint8
-                from vllm._custom_ops import scaled_fp4_quant
-
-                fp4_data, fp4_scales = scaled_fp4_quant(actual, output_scale)
-                quant_output[:num_actual_toks].copy_(
-                    fp4_data.view(quant_output[:num_actual_toks].shape)
-                )
+                fp4_data, fp4_scales = ops.scaled_fp4_quant(actual, output_scale)
+                quant_output[:num_actual_toks].copy_(fp4_data)
                 output_block_scale.copy_(fp4_scales)
             else:
                 # Static FP8 quantization
-                quant_actual = quant_output[:num_actual_toks].reshape(
-                    -1, self.num_heads * self.v_head_dim
-                )
+                quant_actual = quant_output[:num_actual_toks]
                 torch.ops._C.static_scaled_fp8_quant(quant_actual, actual, output_scale)
-            return quant_output_padded
+            return quant_output
 
         return output_padded
 
