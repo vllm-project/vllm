@@ -24,7 +24,10 @@ from transformers.utils import CONFIG_NAME as HF_CONFIG_NAME
 from vllm import envs
 from vllm.logger import init_logger
 from vllm.transformers_utils.repo_utils import is_mistral_model_repo
-from vllm.transformers_utils.utils import parse_safetensors_file_metadata
+from vllm.transformers_utils.utils import (
+    parse_safetensors_file_metadata,
+    without_trust_remote_code,
+)
 
 from .config_parser_base import ConfigParserBase
 from .gguf_utils import (
@@ -82,7 +85,6 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     deepseek_v32="DeepseekV3Config",
     flex_olmo="FlexOlmoConfig",
     funaudiochat="FunAudioChatConfig",
-    glm_ocr="GlmOcrConfig",
     hunyuan_vl="HunYuanVLConfig",
     isaac="IsaacConfig",
     kimi_linear="KimiLinearConfig",
@@ -98,6 +100,7 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     speculators="SpeculatorsConfig",
     nemotron="NemotronConfig",
     olmo3="Olmo3Config",
+    olmo_hybrid="OlmoHybridConfig",
     ovis="OvisConfig",
     ultravox="UltravoxConfig",
     step3_vl="Step3VLConfig",
@@ -140,11 +143,12 @@ class HFConfigParser(ConfigParserBase):
         **kwargs,
     ) -> tuple[dict, PretrainedConfig]:
         kwargs["local_files_only"] = huggingface_hub.constants.HF_HUB_OFFLINE
+        trust_remote_code |= kwargs.get("trust_remote_code", False)
+        kwargs = without_trust_remote_code(kwargs)
         config_dict, _ = PretrainedConfig.get_config_dict(
             model,
             revision=revision,
             code_revision=code_revision,
-            trust_remote_code=trust_remote_code,
             **kwargs,
         )
         # Use custom model class if it's in our registry
@@ -225,7 +229,7 @@ class MistralConfigParser(ConfigParserBase):
                 model,
                 revision=revision,
                 code_revision=code_revision,
-                **kwargs,
+                **without_trust_remote_code(kwargs),
             )
         except OSError:  # Not found
             hf_config_dict = {}
@@ -521,8 +525,7 @@ def maybe_override_with_speculators(
     config_dict, _ = PretrainedConfig.get_config_dict(
         model if gguf_model_repo is None else gguf_model_repo,
         revision=revision,
-        trust_remote_code=trust_remote_code,
-        **kwargs,
+        **without_trust_remote_code(kwargs),
     )
     speculators_config = config_dict.get("speculators_config")
 

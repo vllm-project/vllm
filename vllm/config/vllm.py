@@ -41,7 +41,7 @@ from .offload import OffloadConfig
 from .parallel import ParallelConfig
 from .profiler import ProfilerConfig
 from .scheduler import SchedulerConfig
-from .speculative import EagleModelTypes, SpeculativeConfig
+from .speculative import EagleModelTypes, NgramGPUTypes, SpeculativeConfig
 from .structured_outputs import StructuredOutputsConfig
 from .utils import SupportsHash, config, replace
 from .weight_transfer import WeightTransferConfig
@@ -327,6 +327,12 @@ class VllmConfig:
     weight_transfer_config: WeightTransferConfig | None = None
     """The configurations for weight transfer during RL training."""
 
+    shutdown_timeout: int = Field(default=0, ge=0)
+    """Shutdown grace period for in-flight requests. Shutdown will be delayed for
+    up to this amount of time to allow already-running requests to complete. Any
+    remaining requests are aborted once the timeout is reached.
+    """
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
@@ -592,7 +598,7 @@ class VllmConfig:
 
         If the user configuration does not specify a value for a default field
         and if the default field is still None after all user selections are
-        applied, then default values will be applied to the field. User speciied
+        applied, then default values will be applied to the field. User specified
         fields will not be overridden by the default.
 
         Args:
@@ -668,8 +674,6 @@ class VllmConfig:
 
             self.parallel_config.is_moe_model = self.model_config.is_moe
 
-        self.cache_config.verify_with_parallel_config(self.parallel_config)
-
         if self.lora_config is not None:
             self.lora_config.verify_with_model_config(self.model_config)
 
@@ -692,11 +696,13 @@ class VllmConfig:
             if self.speculative_config is not None:
                 if (
                     self.speculative_config.method not in get_args(EagleModelTypes)
+                    and self.speculative_config.method not in get_args(NgramGPUTypes)
                     and self.speculative_config.method != "draft_model"
                 ):
                     raise ValueError(
                         "Currently, async scheduling is only supported "
-                        "with EAGLE/MTP/Draft Model kind of speculative decoding."
+                        "with EAGLE/MTP/Draft Model/NGram GPU kind of "
+                        "speculative decoding"
                     )
                 if self.speculative_config.disable_padded_drafter_batch:
                     raise ValueError(
@@ -714,6 +720,7 @@ class VllmConfig:
             if (
                 self.speculative_config is not None
                 and self.speculative_config.method not in get_args(EagleModelTypes)
+                and self.speculative_config.method not in get_args(NgramGPUTypes)
             ):
                 logger.warning_once(
                     "Async scheduling not supported with %s-based "
@@ -860,7 +867,7 @@ class VllmConfig:
                 self.compilation_config.pass_config.fuse_gemm_comms = False
             else:
                 # Compute SP threshold early; disable if None (model too
-                # small) before +rms_norm gets forced into custom_ops.
+                # small for SP to be beneficial).
                 pass_config = self.compilation_config.pass_config
                 if pass_config.sp_min_token_num is None:
                     from vllm.compilation.passes.fusion.sequence_parallelism import (
@@ -883,15 +890,13 @@ class VllmConfig:
                     self.compilation_config.pass_config.enable_sp = False
                     self.compilation_config.pass_config.fuse_gemm_comms = False
 
-        if self.compilation_config.pass_config.enable_sp:
-            if "-rms_norm" in self.compilation_config.custom_ops:
-                logger.warning(
-                    "RMS norm force disabled, sequence parallelism might break"
-                )
-            else:
-                self.compilation_config.custom_ops.append("+rms_norm")
+        from vllm.utils.torch_utils import HAS_OPAQUE_TYPE
 
-        if self.compilation_config.fast_moe_cold_start is None:
+        if HAS_OPAQUE_TYPE:
+            # On torch >= 2.11 the hoisted OpaqueObject approach supersedes
+            # fast_moe_cold_start, so force it off.
+            self.compilation_config.fast_moe_cold_start = False
+        elif self.compilation_config.fast_moe_cold_start is None:
             # resolve default behavior: try to be as safe as possible
             # this config is unsafe if any spec decoding draft model has a MOE.
             # We'll conservatively turn it off if we see spec decoding.
@@ -926,6 +931,33 @@ class VllmConfig:
                     self.compilation_config.cudagraph_mode = (
                         CUDAGraphMode.FULL_DECODE_ONLY
                     )
+
+            # Check if KV connector requires PIECEWISE mode for CUDA graphs
+            if (
+                self.kv_transfer_config is not None
+                and self.kv_transfer_config.is_kv_transfer_instance
+                and self.compilation_config.cudagraph_mode.has_full_cudagraphs()
+            ):
+                # Lazy import to avoid circular dependencies
+                from vllm.distributed.kv_transfer.kv_connector.factory import (
+                    KVConnectorFactory,
+                )
+
+                connector_cls = KVConnectorFactory.get_connector_class(
+                    self.kv_transfer_config
+                )
+                if connector_cls.requires_piecewise_for_cudagraph(
+                    self.kv_transfer_config.kv_connector_extra_config
+                ):
+                    logger.warning_once(
+                        "KV connector %s requires PIECEWISE CUDA graph mode "
+                        "due to layerwise async operations that cannot be "
+                        "captured in CUDA graphs. "
+                        "Overriding cudagraph_mode from %s to PIECEWISE.",
+                        connector_cls.__name__,
+                        self.compilation_config.cudagraph_mode.name,
+                    )
+                    self.compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
 
             # disable cudagraph when enforce eager execution
             if self.model_config is not None and self.model_config.enforce_eager:
@@ -1240,6 +1272,9 @@ class VllmConfig:
 
         # Handle the KV connector configs
         self._post_init_kv_transfer_config()
+
+        # Log the custom passes that are enabled
+        self.compilation_config.pass_config.log_enabled_passes()
 
     def update_sizes_for_sequence_parallelism(self, possible_sizes: list) -> list:
         # remove the sizes that not multiple of tp_size when
@@ -1620,6 +1655,8 @@ class VllmConfig:
             f"tensor_parallel_size={self.parallel_config.tensor_parallel_size}, "  # noqa
             f"pipeline_parallel_size={self.parallel_config.pipeline_parallel_size}, "  # noqa
             f"data_parallel_size={self.parallel_config.data_parallel_size}, "  # noqa
+            f"decode_context_parallel_size={self.parallel_config.decode_context_parallel_size}, "  # noqa
+            f"dcp_comm_backend={self.parallel_config.dcp_comm_backend}, "  # noqa
             f"disable_custom_all_reduce={self.parallel_config.disable_custom_all_reduce}, "  # noqa
             f"quantization={self.model_config.quantization}, "
             f"enforce_eager={self.model_config.enforce_eager}, "
@@ -1758,5 +1795,6 @@ def get_layers_from_vllm_config(
     return {
         layer_name: forward_context[layer_name]
         for layer_name in layer_names
-        if isinstance(forward_context[layer_name], layer_type)
+        if layer_name in forward_context
+        and isinstance(forward_context[layer_name], layer_type)
     }
