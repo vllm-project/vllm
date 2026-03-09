@@ -5,7 +5,11 @@
 import torch
 
 from vllm import _custom_ops as ops
-from vllm._aiter_ops import rocm_aiter_ops
+from vllm._aiter_ops import (
+    is_per_token_w8a8_gemm_tuned,
+    is_shuffled_per_token_w8a8_gemm_tuned,
+    rocm_aiter_ops,
+)
 from vllm.logger import init_logger
 from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
@@ -143,25 +147,32 @@ class AiterShuffledPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
             c.activation_quant_key.scale.group_shape.is_per_token()
             and c.weight_quant_key.scale.group_shape.is_per_channel()
         )
+        if c.out_dtype is not torch.bfloat16:
+            return False, "requires bfloat16 ouput dtype."
+
         if not is_ptpc:
             return (
                 False,
                 "requires per token activation scales and per channel weight scales.",
             )
+
         N, K = c.weight_shape
+
         if not (N % 16 == 0 and K % 16 == 0):
             return (
                 False,
                 f"requires N and K dimensions to be divisible by 16, recieved "
                 f"N={N} and K={K}.",
             )
-        if c.out_dtype is not torch.bfloat16:
-            return False, "requires bfloat16 ouput dtype."
+
+        if not is_shuffled_per_token_w8a8_gemm_tuned(N, K):
+            return False, f"requires a tuned configarion for N: {N} and K: {K}."
+
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        w_name, _, _, _ = self.layer_param_names
-        w, _, _, _ = self._get_layer_params(layer)
+        w_name, *_ = self.layer_param_names
+        w, *_ = self._get_layer_params(layer)
 
         replace_parameter(
             layer,
@@ -206,10 +217,15 @@ class AiterPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
                 False,
                 "requires per token activation scales and per channel weight scales.",
             )
+
+        N, K = c.weight_shape
+        if not is_per_token_w8a8_gemm_tuned(N, K):
+            return False, f"requires a tuned configarion for N: {N} and K: {K}."
+
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        w_name, _, _, _ = self.layer_param_names
+        w_name, *_ = self.layer_param_names
         w, *_ = self._get_layer_params(layer)
 
         replace_parameter(
