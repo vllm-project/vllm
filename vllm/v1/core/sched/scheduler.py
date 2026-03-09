@@ -1926,14 +1926,6 @@ class Scheduler(SchedulerInterface):
         used_slots = ecm.cache_size - ecm.num_free_slots
         return used_slots / ecm.cache_size
 
-    def _get_encoder_cache_usage(self) -> float:
-        """Get encoder cache usage as a fraction (0.0 to 1.0)."""
-        ecm = self.encoder_cache_manager
-        if ecm.cache_size == 0:
-            return 0.0
-        used_slots = ecm.cache_size - ecm.num_free_slots
-        return used_slots / ecm.cache_size
-
     def make_spec_decoding_stats(
         self,
         spec_decoding_stats: SpecDecodingStats | None,
