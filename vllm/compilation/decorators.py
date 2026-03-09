@@ -47,6 +47,11 @@ IGNORE_COMPILE_KEY = "_ignore_compile_vllm"
 _T = TypeVar("_T", bound=nn.Module)
 
 
+def should_torch_compile_mm_encoder(vllm_config: VllmConfig) -> bool:
+    """Callable to be passed to `@support_torch_compile`'s `enable_if` argument."""
+    return vllm_config.compilation_config.compile_mm_encoder
+
+
 def ignore_torch_compile(cls: type[_T]) -> type[_T]:
     """
     A decorator to ignore support_torch_compile decorator

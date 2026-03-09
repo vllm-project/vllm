@@ -31,7 +31,10 @@ from transformers.models.llama4.image_processing_llama4_fast import (
     get_best_fit,
 )
 
-from vllm.compilation.decorators import support_torch_compile
+from vllm.compilation.decorators import (
+    should_torch_compile_mm_encoder,
+    support_torch_compile,
+)
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import get_tensor_model_parallel_world_size
@@ -49,7 +52,6 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.model_loader.utils import initialize_model
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.module_mapping import MultiModelKeys
-from vllm.model_executor.models.vision import should_torch_compile_mm_vit
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalDataDict,
@@ -454,7 +456,7 @@ class Llama4UnfoldConvolution(nn.Module):
 
 
 @support_torch_compile(
-    dynamic_arg_dims={"images_flattened": 0}, enable_if=should_torch_compile_mm_vit
+    dynamic_arg_dims={"images_flattened": 0}, enable_if=should_torch_compile_mm_encoder
 )
 class Llama4VisionModel(nn.Module):
     def __init__(
