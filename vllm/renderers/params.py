@@ -55,7 +55,7 @@ class ChatParams:
 
     media_io_kwargs: dict[str, dict[str, Any]] | None = None
     """Per-modality kwargs for media I/O (loading/decoding images, videos, etc.)."""
-    
+
     mm_processor_kwargs: dict[str, Any] | None = None
     """The kwargs to pass to the multi-modal processor."""
 
@@ -65,7 +65,11 @@ class ChatParams:
         default_media_io_kwargs: dict[str, dict[str, Any]] | None = None,
         default_mm_processor_kwargs: dict[str, Any] | None = None,
     ):
-        if not default_chat_template_kwargs and not default_media_io_kwargs and not default_mm_processor_kwargs:
+        if (
+            not default_chat_template_kwargs
+            and not default_media_io_kwargs
+            and not default_mm_processor_kwargs
+        ):
             return self
 
         return ChatParams(
