@@ -6,6 +6,7 @@ from typing import Any
 import pytest
 import torch._dynamo.config as dynamo_config
 
+from tests.utils import large_gpu_mark, single_gpu_only
 from vllm import SamplingParams
 from vllm.logprobs import Logprob
 from vllm.platforms import current_platform
@@ -31,11 +32,11 @@ example_prompts = [first_prompt, "In one word, the capital of France is "] + [
 default_params = dict(
     temperature=0.0,  # greedy
     max_tokens=30,
-    # spec decoding currently doesn't support min_tokens
-    # min_tokens=28,
+    min_tokens=28,
 )
 
 
+@single_gpu_only
 def test_without_spec_decoding(
     sample_json_schema,
     monkeypatch: pytest.MonkeyPatch,
@@ -95,7 +96,9 @@ def test_without_spec_decoding(
     run_tests(monkeypatch, MODEL, test_configs, test_sampling_params)
 
 
-def test_with_spec_decoding(sample_json_schema, monkeypatch: pytest.MonkeyPatch):
+@single_gpu_only
+@large_gpu_mark(min_gb=16)
+def test_with_eagle3_spec_decoding(sample_json_schema, monkeypatch: pytest.MonkeyPatch):
     """Test consistency and acceptance rates with some different combos of
     preemption, executor, async scheduling, prefill chunking,
     spec decoding model length.
@@ -149,6 +152,42 @@ def test_with_spec_decoding(sample_json_schema, monkeypatch: pytest.MonkeyPatch)
         test_sampling_params,
         is_testing_with_spec_decoding=True,
     )
+
+
+def test_with_ngram_gpu_spec_decoding(monkeypatch: pytest.MonkeyPatch):
+    """Test ngram_gpu speculative decoding with different configurations.
+
+    This test specifically validates ngram_gpu behavior with various:
+    - Number of speculative tokens (2-6)
+    - Prompt lookup window sizes (min/max)
+    - Async scheduling enabled (as in production)
+    - Different executors and chunking settings
+    """
+
+    # Variant with larger speculation window
+    ngram_gpu_config = {
+        "method": "ngram_gpu",
+        "num_speculative_tokens": 3,
+        "prompt_lookup_max": 3,
+        "prompt_lookup_min": 2,
+    }
+
+    # Test configurations covering various scenarios
+    # test_preemption, executor, async_scheduling,
+    # spec_config, test_prefill_chunking
+    test_configs = [
+        (False, "mp", False, None, False),
+        (False, "mp", False, ngram_gpu_config, False),
+        (True, "mp", False, ngram_gpu_config, True),
+        (False, "mp", True, ngram_gpu_config, False),
+        (True, "mp", True, ngram_gpu_config, False),
+        (True, "uni", True, ngram_gpu_config, False),
+        (True, "mp", True, ngram_gpu_config, True),
+    ]
+
+    # Use MODEL (Qwen) for ngram_gpu tests as it's lighter weight
+    # and ngram_gpu doesn't require a specific draft model
+    run_tests(monkeypatch, MODEL, test_configs, [{}])
 
 
 @dynamo_config.patch(cache_size_limit=16)
@@ -279,11 +318,12 @@ def run_test(
         else dict(gpu_memory_utilization=0.9)
     )
     spec_mml = (spec_config or {}).get("max_model_len")
+    spec_method = (spec_config or {}).get("method", "none")
     test_config = (
         f"executor={executor}, preemption={test_preemption}, "
         f"async_sched={async_scheduling}, "
         f"chunk_prefill={test_prefill_chunking}, "
-        f"spec_decoding={spec_decoding}, spec_mml={spec_mml}"
+        f"spec_decoding={spec_decoding}, spec_method={spec_method}, spec_mml={spec_mml}"
     )
     print("-" * 80)
     print(f"---- TESTING {test_str}: {test_config}")
@@ -291,7 +331,7 @@ def run_test(
 
     with VllmRunner(
         model,
-        max_model_len=512,
+        max_model_len=4096,
         enable_chunked_prefill=test_prefill_chunking,
         # Force prefill chunking
         max_num_batched_tokens=48 if test_prefill_chunking else None,

@@ -141,7 +141,7 @@ Every plugin has three parts:
     - triton ops
       Custom way doesn't work for triton ops now.
 
-7. (optional) Implement other plugable modules, such as lora, graph backend, quantization, mamba attention backend, etc.
+7. (optional) Implement other pluggable modules, such as lora, graph backend, quantization, mamba attention backend, etc.
 
 ## Compatibility Guarantee
 
@@ -155,3 +155,4 @@ The interface for the model/module may change during vLLM's development. If you 
     - `use_v1` parameter in `Platform.get_attn_backend_cls` is deprecated. It has been removed in v0.13.0.
     - `_Backend` in `vllm.attention` is deprecated. It has been removed in v0.13.0. Please use `vllm.v1.attention.backends.registry.register_backend` to add new attention backend to `AttentionBackendEnum` instead.
     - `seed_everything` platform interface is deprecated. It has been removed in v0.16.0. Please use `vllm.utils.torch_utils.set_random_seed` instead.
+    - `prompt` in `Platform.validate_request` is deprecated. It has been removed in v0.18.0.

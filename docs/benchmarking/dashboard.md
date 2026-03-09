@@ -60,12 +60,12 @@ Here is an example using the script to compare result_a and result_b with max co
 
 ***Output Tput (tok/s) — Model : [ meta-llama/Llama-3.1-8B-Instruct ] , Dataset Name : [ random ] , Input Len : [ 2048.0 ] , Output Len : [ 2048.0 ]***
 
-|    | # of max concurrency | qps  | results_a/benchmark_results.json | results_b/benchmark_results.json | perf_ratio        |
-|----|------|-----|-----------|----------|----------|
-| 0  | 12 | inf | 24.98   | 186.03 |  7.45 |
-| 1  | 16 | inf|  25.49  | 246.92 | 9.69 |
-| 2  | 24 | inf| 27.74  | 293.34 |  10.57 |
-| 3  | 32 | inf| 28.61  |306.69 | 10.72 |
+| | # of max concurrency | qps | results_a/benchmark_results.json | results_b/benchmark_results.json | perf_ratio |
+| | -------------------- | --- | -------------------------------- | -------------------------------- | ---------- |
+| 0 | 12 | inf | 24.98 | 186.03 |  7.45 |
+| 1 | 16 | inf |  25.49 | 246.92 | 9.69 |
+| 2 | 24 | inf | 27.74 | 293.34 |  10.57 |
+| 3 | 32 | inf | 28.61 |306.69 | 10.72 |
 
 ***compare-json-results.py – Command-Line Parameters***  
 
