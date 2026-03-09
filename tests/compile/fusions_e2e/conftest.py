@@ -46,10 +46,10 @@ def run_model(compile_config: int | CompilationConfig, model: str, **model_kwarg
         generated_text = output.outputs[0].text
         print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
 
-    # Get the compile ranges split points after vllm config post init
+    # Get the compile ranges endpoints after vllm config post init
     # in order to compute compile ranges correctly
-    compilation_config.compile_ranges_split_points = (
-        llm.llm_engine.vllm_config.compilation_config.compile_ranges_split_points
+    compilation_config.compile_ranges_endpoints = (
+        llm.llm_engine.vllm_config.compilation_config.compile_ranges_endpoints
     )
 
 
