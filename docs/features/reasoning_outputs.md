@@ -257,10 +257,10 @@ If `thinking_token_budget` is not specified, no explicit reasoning limit is appl
 `--reasoning-config` accepts a JSON object corresponding to  
 [ReasoningConfig][vllm.config.ReasoningConfig] with the following fields:
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `think_start_str` | `str \| null` | String that marks the start of reasoning content |
-| `think_end_str` | `str \| null` | String that marks the end of reasoning content. Can be the reasoning parser's think end token alone (e.g., `</think>`), or a phrase that includes it as a suffix (e.g., `I have to give the solution based on the thinking directly now.</think>`). |
+| Field             | Type           | Description                                      |
+|-------------------|----------------|--------------------------------------------------|
+| `think_start_str` | `str \| null`  | String that marks the start of reasoning content |
+| `think_end_str`   | `str \| null`  | String that marks the end of reasoning content   |
 
 !!! note
     `think_end_str` can include a transition phrase before the think end token. For example, setting `think_end_str` to `"I have to give the solution based on the thinking directly now.</think>"` instructs the model to emit that phrase when the budget is exhausted, making the reasoning termination more natural.
