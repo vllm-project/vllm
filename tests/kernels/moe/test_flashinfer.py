@@ -598,12 +598,17 @@ def test_flashinfer_cutlass_moe_bf16_no_graph(
         assert not flashinfer_experts.use_deepseek_fp8_block_scale
 
         w1_fi = swap_w13_to_w31(w1) if activation.is_gated else w1
-        kernel = mk.FusedMoEModularKernel(
-            MoEPrepareAndFinalizeNoEP(),
+        kernel = mk.FusedMoEKernel(
+            maybe_make_prepare_finalize(
+                moe=moe_config,
+                quant_config=FUSED_MOE_UNQUANTIZED_CONFIG,
+                allow_new_interface=True,
+                use_monolithic=False,
+            ),
             flashinfer_experts,
             inplace=False,
         )
-        flashinfer_cutlass_output = kernel(
+        flashinfer_cutlass_output = kernel.apply(
             hidden_states,
             w1_fi,
             w2,
@@ -708,12 +713,17 @@ def test_flashinfer_cutlass_moe_fp8_block_scale_no_graph(
         )
         assert flashinfer_experts.use_deepseek_fp8_block_scale
 
-        kernel = mk.FusedMoEModularKernel(
-            MoEPrepareAndFinalizeNoEP(),
+        kernel = mk.FusedMoEKernel(
+            maybe_make_prepare_finalize(
+                moe=moe_config,
+                quant_config=quant_config,
+                allow_new_interface=True,
+                use_monolithic=False,
+            ),
             flashinfer_experts,
             inplace=False,
         )
-        flashinfer_cutlass_output = kernel(
+        flashinfer_cutlass_output = kernel.apply(
             hidden_states,
             w1_fi,
             w2,
