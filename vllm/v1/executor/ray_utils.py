@@ -7,6 +7,8 @@ from collections import defaultdict
 from concurrent.futures import Future
 from typing import TYPE_CHECKING, Union
 
+import numpy as np
+
 import vllm.platforms
 from vllm.config import ParallelConfig
 from vllm.distributed import get_pp_group
@@ -192,12 +194,7 @@ def detach_zero_copy_from_model_runner_output(output: "ModelRunnerOutput") -> No
     Copy read-only numpy arrays so the returned output no longer retains
     references to Ray's shared-memory buffers.
     """
-    if output is None or getattr(output, "logprobs", None) is None:
-        return
-
-    try:
-        import numpy as np  # type: ignore
-    except Exception:
+    if output.logprobs is None:
         return
 
     token_ids, logprobs, ranks, cu_num_tokens = output.logprobs
