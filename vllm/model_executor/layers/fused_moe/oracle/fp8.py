@@ -94,6 +94,10 @@ def _get_priority_backends(
         else:
             _move_to_front(_AVAILABLE_BACKENDS, Fp8MoeBackend.TRITON)
 
+    if current_platform.is_xpu():
+        # XPU support Triton and XPU,  move XPU to the front.
+        _move_to_front(_AVAILABLE_BACKENDS, Fp8MoeBackend.XPU)
+
     return _AVAILABLE_BACKENDS
 
 
