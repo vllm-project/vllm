@@ -20,7 +20,6 @@ def test_preemption_metrics_basic():
         block_size=16,
         num_blocks=11,  # Limited blocks to force preemption
         enable_prefix_caching=False,
-        log_stats=True,  # Enable stats logging
     )
 
     # Create two requests with different priorities
@@ -83,7 +82,6 @@ def test_preemption_metrics_multiple():
         block_size=16,
         num_blocks=6,  # Very limited blocks
         enable_prefix_caching=False,
-        log_stats=True,
     )
 
     # Create 3 requests
