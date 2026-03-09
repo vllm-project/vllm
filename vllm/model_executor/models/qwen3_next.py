@@ -652,7 +652,8 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         # ============================================================
         # Part 2: Core Attention (Custom Op)
         # ============================================================
-        # NOTE: semantics unchanged vs torch.zeros(...) — still guaranteed zero init.
+        # Note: we should not use torch.empty here like other attention backends,
+        # see discussions in https://github.com/vllm-project/vllm/pull/28182
         core_attn_out = self._get_zeroed_core_attn_out(
             num_tokens,
             dtype=hidden_states.dtype,
