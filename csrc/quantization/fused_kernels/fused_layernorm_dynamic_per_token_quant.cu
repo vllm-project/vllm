@@ -187,6 +187,7 @@ void rms_norm_dynamic_per_token_quant(
   TORCH_CHECK(scales.dtype() == torch::kFloat32);
   if (residual) {
     TORCH_CHECK(residual->scalar_type() == input.scalar_type());
+    TORCH_CHECK(residual->is_contiguous());
   }
 
   VLLM_DISPATCH_FLOATING_TYPES(
