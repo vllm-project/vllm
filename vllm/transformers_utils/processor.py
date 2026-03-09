@@ -145,7 +145,6 @@ def get_processor_cls_name_from_config(
     processor_name: str,
     revision: str | None = "main",
 ) -> str | None:
-    """Get processor class name from HuggingFace config files."""
     config_file = [
         "processor_config.json",
         "preprocessor_config.json",
