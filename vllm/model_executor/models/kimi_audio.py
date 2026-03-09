@@ -476,9 +476,11 @@ class KimiAudioForConditionalGeneration(
     ) -> torch.Tensor:
         """Embed input IDs and fuse with audio embeddings.
 
-        Kimi-Audio fusion: inputs_embeds = text_emb + whisper_emb × √2
+        Kimi-Audio fusion: inputs_embeds = (text_emb + audio_emb) × √2
+
+        For PP compatibility, we compute positions carefully and use masked_scatter_.
         """
-        # Get text embeddings
+        # Get text embeddings - use embed_tokens directly like original
         inputs_embeds = self.language_model.model.embed_tokens(input_ids)
 
         if multimodal_embeddings is None or len(multimodal_embeddings) == 0:
@@ -500,10 +502,19 @@ class KimiAudioForConditionalGeneration(
                 audio_len = audio_embeds.shape[0]
                 end_pos = pos + audio_len
 
+                # Get text embeddings at audio positions
+                text_embeds = inputs_embeds[pos:end_pos]
+
                 # Fuse: (text_emb + audio_emb) * √2
-                text_embeds = inputs_embeds[pos:end_pos, :]
                 fused_embeds = (text_embeds + audio_embeds) * scale_factor
-                inputs_embeds[pos:end_pos, :] = fused_embeds
+
+                # PP-safe: use masked_scatter instead of in-place slice assignment
+                # Create update mask for the audio region
+                update_mask = torch.zeros_like(audio_mask)
+                update_mask[pos:end_pos] = True
+                inputs_embeds = inputs_embeds.masked_scatter(
+                    update_mask.unsqueeze(-1), fused_embeds
+                )
 
         return inputs_embeds
 
