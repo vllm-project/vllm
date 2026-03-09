@@ -293,7 +293,7 @@ llm = LLM(
 Based on the configuration, the content of the multi-modal caches on `P0` and `P1` are as follows:
 
 | mm_processor_cache_type | Cache Type | `P0` Cache | `P1` Engine Cache | `P1` Worker Cache | Max. Memory |
-|-------------------|-------------|------------|------------|-------------|-------------|
+| ----------------- | ----------- | ---------- | ---------- | ----------- | ----------- |
 | lru | Processor Caching | K + V | N/A | N/A | `mm_processor_cache_gb * data_parallel_size` |
 | lru | Key-Replicated Caching | K | K + V | N/A | `mm_processor_cache_gb * api_server_count` |
 | shm | Shared Memory Caching | K | N/A | V | `mm_processor_cache_gb * api_server_count` |
