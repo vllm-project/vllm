@@ -1443,14 +1443,14 @@ class LLMEngine:
             logger.debug("Stopping remote worker execution loop.")
             self.model_executor.stop_remote_worker_execution_loop()
 
-            if self._should_enable_tree_decoding():
-                self._process_tree_decoding(
-                    outputs, seq_group_metadata_list)
-                # for branch_group in new_branch_groups:
-                #     self._add_branch_to_scheduler(branch_group, virtual_engine)
-                # for branch_group in branch_groups_to_delete:
-                    # self._delete_branch_from_scheduler(branch_group, virtual_engine)
-                #     self.abort_request(branch_group.request_id)
+        if self._should_enable_tree_decoding():
+            self._process_tree_decoding(
+                outputs, seq_group_metadata_list)
+            # for branch_group in new_branch_groups:
+            #     self._add_branch_to_scheduler(branch_group, virtual_engine)
+            # for branch_group in branch_groups_to_delete:
+                # self._delete_branch_from_scheduler(branch_group, virtual_engine)
+            #     self.abort_request(branch_group.request_id)
 
         return ctx.request_outputs
 
@@ -1485,6 +1485,7 @@ class LLMEngine:
         if seq.tree_depth >= sampling_params.tree_search_params.max_tree_depth:
             return False
         entropy = self._calculate_entropy(logprobs)
+        print("entropy:", entropy)
         return entropy > sampling_params.tree_search_params.entropy_threshold
     
     def _calculate_entropy(self, logprobs):
