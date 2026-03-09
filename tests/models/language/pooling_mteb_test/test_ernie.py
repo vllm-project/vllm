@@ -12,6 +12,7 @@ MODELS = [
     EmbedModelInfo(
         "shibing624/text2vec-base-chinese-sentence",
         architecture="ErnieModel",
+        mteb_score=0.536523112,
         seq_pooling_type="MEAN",
         attn_type="encoder_only",
         is_prefix_caching_supported=False,
