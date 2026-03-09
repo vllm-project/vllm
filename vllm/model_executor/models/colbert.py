@@ -31,7 +31,7 @@ from .interfaces import SupportsLateInteraction
 from .interfaces_base import default_pooling_type
 
 
-class ColBERTMixin(SupportsLateInteraction):
+class ColBERTMixin(nn.Module, SupportsLateInteraction):
     """Mixin that adds ColBERT late interaction support to any embedding model.
 
     ColBERT (Contextualized Late Interaction over BERT) uses per-token

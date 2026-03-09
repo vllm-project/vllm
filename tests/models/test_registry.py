@@ -65,7 +65,7 @@ def test_registry_imports(model_arch):
         ("XLMRobertaForSequenceClassification", False, False, "cross-encoder"),
         ("GteNewModel", False, False, "bi-encoder"),
         ("GteNewForSequenceClassification", False, False, "cross-encoder"),
-        ("HF_ColBERT", False, False, "late-interaction")
+        ("HF_ColBERT", False, False, "late-interaction"),
     ],
 )
 def test_registry_model_property(model_arch, is_mm, init_cuda, score_type):
