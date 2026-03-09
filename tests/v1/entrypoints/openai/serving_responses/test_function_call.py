@@ -267,8 +267,7 @@ async def test_function_calling_with_streaming_types(
     input_list = [
         {
             "role": "user",
-            "content": "Can you tell me what the current weather is in Berlin and the "
-            "forecast for the next 5 days, in fahrenheit?",
+            "content": "Can you tell me what the current weather is in Berlin?",
         }
     ]
     stream_response = await client.responses.create(

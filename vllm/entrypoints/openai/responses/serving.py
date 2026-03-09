@@ -1270,14 +1270,15 @@ class OpenAIServingResponses(OpenAIServing):
         tool_call_text_started = False
         previous_text = ""
         previous_token_ids: list[int] = []
+        prompt_is_reasoning_end = None
         first_delta_sent = False
         previous_delta_messages: list[DeltaMessage] = []
         async for ctx in result_generator:
             assert isinstance(ctx, SimpleContext)
             if ctx.last_output is None:
                 continue
-            if reasoning_parser:
-                reasoning_ended = reasoning_parser.is_reasoning_end(
+            if reasoning_parser and prompt_is_reasoning_end is None:
+                prompt_is_reasoning_end = reasoning_parser.is_reasoning_end(
                     ctx.last_output.prompt_token_ids
                 )
             if ctx.last_output.outputs:
@@ -1290,6 +1291,8 @@ class OpenAIServingResponses(OpenAIServing):
                 current_token_ids = previous_token_ids + delta_token_ids
 
                 if reasoning_parser and tool_parser:
+                    if prompt_is_reasoning_end:
+                        reasoning_ended = True
                     if not reasoning_ended:
                         delta_message = reasoning_parser.extract_reasoning_streaming(
                             previous_text=previous_text,
