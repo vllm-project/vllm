@@ -74,8 +74,6 @@ RENDERER_REGISTRY = RendererRegistry(
 
 
 def renderer_from_config(config: "VllmConfig", **kwargs):
-    from vllm.model_executor.model_loader import get_model_cls
-
     model_config = config.model_config
 
     tokenizer_mode, tokenizer_name, args, kwargs = tokenizer_args_from_config(
@@ -83,16 +81,7 @@ def renderer_from_config(config: "VllmConfig", **kwargs):
     )
 
     # Override tokenizer_mode for Kimi-Audio models
-    import contextlib
-
-    model_cls = None
-    with contextlib.suppress(Exception):
-        model_cls = get_model_cls(model_config)
-
-    if model_cls is not None and model_cls.__name__ in (
-        "KimiAudioForConditionalGeneration",
-        "MoonshotKimiaForCausalLM",
-    ):
+    if model_config.architecture == "MoonshotKimiaForCausalLM":
         tokenizer_mode = "kimi_audio"
         # Update model_config so other components (e.g., multimodal registry)
         # also use the correct tokenizer mode
