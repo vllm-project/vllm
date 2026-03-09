@@ -906,8 +906,8 @@ class MultiModalContentParser(BaseMultiModalContentParser):
             and self._mm_processor_kwargs
             and self._mm_processor_kwargs.get("use_audio_in_video", False)
         ):
-            audio_coro = self._audio_with_uuid_async(video_url, uuid)
-            audio_placeholder = self._tracker.add("audio", audio_coro)
+            audio = self._connector.fetch_audio(video_url) if video_url else None
+            audio_placeholder = self._tracker.add("audio", (audio, uuid))
             self._add_placeholder("audio", audio_placeholder)
 
 
