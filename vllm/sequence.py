@@ -1575,6 +1575,12 @@ class ParallelSampleSequenceGroup(SequenceGroupBase):
             seq_group.seqs[0].parent_req_id = parent_req_id
             self.assembled_seq_group.seqs.append(seq_group.seqs[0])
 
+    def get_unfinished_seqs(self) -> list[Sequence]:
+        unfinished_seqs = []
+        for seq in self.assembled_seq_group.seqs:
+            if not seq.is_finished():
+                unfinished_seqs.append(seq)
+        return unfinished_seqs
 
     def maybe_assemble_group(
             self, seq_group: SequenceGroup) -> Optional[SequenceGroup]:
