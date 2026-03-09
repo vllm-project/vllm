@@ -741,9 +741,19 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         layer.w2_weight = layer.w2_qweight
 
         # Repack scales
+        # For transposed w13 (gate_up_proj), the actual K dimension is hidden_size,
+        # not intermediate_size_per_partition. Passing intermediate_size_per_partition
+        # would cause group_size < size_k to be False when they are equal (e.g.,
+        # group_size=128, intermediate_size_per_partition=128 with high TP), resulting
+        # in the wrong single-group scale permutation being applied.
         marlin_w13_scales = marlin_moe_permute_scales(
             s=layer.w13_scales,
-            size_k=layer.intermediate_size_per_partition,
+            size_k=layer.w13_scales.shape[1]
+            * (
+                self.quant_config.group_size
+                if self.quant_config.group_size != -1
+                else self.quant_config.pack_factor
+            ),
             size_n=layer.w13_scales.shape[2],
             group_size=self.quant_config.group_size,
             is_a_8bit=is_a_8bit,
