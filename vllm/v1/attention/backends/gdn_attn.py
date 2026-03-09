@@ -300,7 +300,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
 
                 # Move cumsum operations to CPU, then async transfer to device
                 spec_query_start_loc_cpu = torch.zeros(
-                    num_spec_decodes + 1, dtype=torch.int32
+                    num_spec_decodes + 1, dtype=torch.int32, pin_memory=True
                 )
                 torch.cumsum(
                     query_lens_cpu[spec_sequence_masks_cpu],
