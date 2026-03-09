@@ -106,9 +106,7 @@ class Llama4PythonicToolParser(ToolParser):
                     content=None,
                 )
             else:
-                raise UnexpectedAstError(
-                    "Tool output must be a list of function calls"
-                )
+                raise UnexpectedAstError("Tool output must be a list of function calls")
         except Exception:
             logger.exception("Error in extracting tool call from response.")
             # Treat as regular text
@@ -147,9 +145,7 @@ class Llama4PythonicToolParser(ToolParser):
             if not isinstance(parsed, ast.List) or not all(
                 isinstance(e, ast.Call) for e in parsed.elts
             ):
-                raise UnexpectedAstError(
-                    "Tool output must be a list of function calls"
-                )
+                raise UnexpectedAstError("Tool output must be a list of function calls")
             tool_calls = [
                 handle_single_tool(e)  # type: ignore
                 for e in parsed.elts

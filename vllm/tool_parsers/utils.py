@@ -262,9 +262,7 @@ def get_parameter_value(val: ast.expr) -> Any:
                 "Dict argument keys are not all literals: %s",
                 ast.dump(val),
             )
-            raise UnexpectedAstError(
-                "Dict tool call arguments must have literal keys"
-            )
+            raise UnexpectedAstError("Dict tool call arguments must have literal keys")
         return {
             k.value: get_parameter_value(v)  # type: ignore
             for k, v in zip(val.keys, val.values)
@@ -395,13 +393,12 @@ def compute_tool_delta(
     new_call_args = new_call.function.arguments
     if withheld_suffix:
         if not new_call_args.endswith(withheld_suffix):
-            logger.error(
-                "Tool call arguments '%s' do not end with expected "
-                "withheld suffix '%s'",
-                new_call_args,
-                withheld_suffix,
+            msg = (
+                f"Tool call arguments '{new_call_args}' do not end with "
+                f"expected withheld suffix '{withheld_suffix}'"
             )
-        assert new_call_args.endswith(withheld_suffix)
+            logger.error(msg)
+            raise ValueError(msg)
         new_call_args = new_call_args[: -len(withheld_suffix)]
     if not previously_sent_args:
         return DeltaToolCall(

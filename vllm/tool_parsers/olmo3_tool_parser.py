@@ -116,9 +116,7 @@ class Olmo3PythonicToolParser(ToolParser):
                     content=None,
                 )
             else:
-                raise UnexpectedAstError(
-                    "Tool output must be a list of function calls"
-                )
+                raise UnexpectedAstError("Tool output must be a list of function calls")
         except Exception:
             logger.exception("Error in extracting tool call from response.")
             # Treat as regular text
