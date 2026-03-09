@@ -125,11 +125,8 @@ class KimiAudioProcessingInfo(BaseProcessingInfo):
             subfolder=KIMIA_WHISPER_SUBFOLDER,
         )
 
-        # Load tokenizer directly (custom TikTokenTokenizer)
-        tokenizer = KimiAudioTokenizer.from_pretrained(
-            self.ctx.model_config.model,
-            trust_remote_code=self.ctx.model_config.trust_remote_code,
-        )
+        # Use vLLM's standard tokenizer loading (respects tokenizer_mode)
+        tokenizer = self.get_tokenizer()
 
         # Construct processor directly
         return KimiAudioProcessor(
