@@ -9,6 +9,7 @@ import operator
 import os
 import pprint
 import time
+from collections import defaultdict
 from collections.abc import Callable, Generator, Sequence
 from contextlib import contextmanager
 from copy import deepcopy
@@ -405,6 +406,58 @@ class SplitItem:
     graph: fx.GraphModule
 
 
+def _is_empty_allocation_node(node: fx.Node) -> bool:
+    if node.op == "call_method":
+        return node.target == "new_empty"
+
+    if node.op != "call_function":
+        return False
+
+    target = node.target
+    if target in (torch.empty, torch.empty_like, torch.empty_strided):
+        return True
+
+    if isinstance(target, torch._ops.OpOverloadPacket):
+        packet_name = target._qualified_op_name
+    elif isinstance(target, torch._ops.OpOverload):
+        packet_name = target.name()
+    else:
+        return False
+
+    return packet_name.startswith("aten::empty") or packet_name.startswith(
+        "aten::new_empty"
+    )
+
+
+def _merge_empty_only_subgraphs(
+    node_to_subgraph_id: dict[fx.Node, int],
+) -> None:
+    """
+    Merge a partition that only contains an empty allocation op into the
+    previous partition. This avoids generating standalone empty submodules,
+    which can lead to empty cudagraph captures.
+    """
+
+    nodes_by_subgraph_id: dict[int, list[fx.Node]] = defaultdict(list)
+    subgraph_id_order: list[int] = []
+    for node, subgraph_id in node_to_subgraph_id.items():
+        if subgraph_id not in nodes_by_subgraph_id:
+            subgraph_id_order.append(subgraph_id)
+        nodes_by_subgraph_id[subgraph_id].append(node)
+
+    prev_subgraph_id: int | None = None
+    for subgraph_id in subgraph_id_order:
+        nodes = nodes_by_subgraph_id[subgraph_id]
+        if (
+            len(nodes) == 1
+            and _is_empty_allocation_node(nodes[0])
+            and prev_subgraph_id is not None
+        ):
+            node_to_subgraph_id[nodes[0]] = prev_subgraph_id
+            continue
+        prev_subgraph_id = subgraph_id
+
+
 def split_graph(
     graph: fx.GraphModule, splitting_ops: list[str]
 ) -> tuple[fx.GraphModule, list[SplitItem]]:
@@ -442,6 +495,8 @@ def split_graph(
                 subgraph_id += 1
         else:
             node_to_subgraph_id[node] = subgraph_id
+
+    _merge_empty_only_subgraphs(node_to_subgraph_id)
 
     # `keep_original_order` is important!
     # otherwise pytorch might reorder the nodes and
@@ -906,6 +961,13 @@ class VllmBackend:
 
         # Honors opt-outs such as CompilationMode.NONE or VLLM_DISABLE_COMPILE_CACHE.
         disable_cache = not is_compile_cache_enabled(self.inductor_config)
+
+        # TODO(patchy): ngram gpu kernel will cause vllm torch compile cache errors.
+        is_ngram_gpu_enabled = (
+            vllm_config.speculative_config is not None
+            and vllm_config.speculative_config.use_ngram_gpu()
+        )
+        disable_cache = disable_cache or is_ngram_gpu_enabled
 
         if disable_cache:
             logger.info_once("vLLM's torch.compile cache is disabled.", scope="local")

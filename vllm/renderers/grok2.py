@@ -49,6 +49,7 @@ class Grok2Renderer(BaseRenderer[Grok2Tokenizer]):
             messages,
             self.model_config,
             content_format="string",
+            media_io_kwargs=params.media_io_kwargs,
         )
 
         prompt_raw = tokenizer.apply_chat_template(
@@ -75,6 +76,7 @@ class Grok2Renderer(BaseRenderer[Grok2Tokenizer]):
             messages,
             self.model_config,
             content_format="string",
+            media_io_kwargs=params.media_io_kwargs,
         )
 
         prompt_raw = tokenizer.apply_chat_template(

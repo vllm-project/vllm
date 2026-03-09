@@ -5,7 +5,7 @@ import torch
 
 from vllm.model_executor.models.interfaces import SupportsMultiModal
 from vllm.multimodal.inputs import MultiModalKwargsItem
-from vllm.multimodal.utils import group_mm_kwargs_by_modality
+from vllm.multimodal.utils import group_and_batch_mm_kwargs
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.utils import sanity_check_mm_encoder_outputs
 
@@ -53,14 +53,12 @@ class EncoderRunner:
         mm_kwargs: list[tuple[str, MultiModalKwargsItem]],
     ) -> list[torch.Tensor]:
         encoder_outputs: list[torch.Tensor] = []
-        for modality, num_items, mm_kwargs_group in group_mm_kwargs_by_modality(
+        for modality, num_items, mm_kwargs_batch in group_and_batch_mm_kwargs(
             mm_kwargs, device=self.device, pin_memory=False
         ):
-            curr_group_outputs = self.model.embed_multimodal(**mm_kwargs_group)
-            sanity_check_mm_encoder_outputs(
-                curr_group_outputs, expected_num_items=num_items
-            )
-            encoder_outputs.extend(curr_group_outputs)
+            batch_outputs = self.model.embed_multimodal(**mm_kwargs_batch)
+            sanity_check_mm_encoder_outputs(batch_outputs, expected_num_items=num_items)
+            encoder_outputs.extend(batch_outputs)
         return encoder_outputs
 
     def gather_mm_embeddings(

@@ -4,7 +4,7 @@
 import enum
 from collections import Counter
 from collections.abc import Callable
-from dataclasses import field
+from dataclasses import field, fields
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
@@ -269,6 +269,24 @@ class PassConfig:
             )
             self.fuse_rope_kvcache = False
 
+    def log_enabled_passes(self) -> None:
+        """
+        Log the enabled custom fusion passes.
+        This is called at the end of VLLMConfig post_init,
+        after all defaults are finalized.
+        TODO also log the compile ranges for which this is enabled.
+        """
+        enabled_fusions = [
+            f.name[len("fuse_") :]
+            for f in fields(self)
+            if getattr(self, f.name) and f.name.startswith("fuse_")
+        ]
+
+        if enabled_fusions:
+            logger.info_once(
+                "Enabled custom fusions: %s", ", ".join(enabled_fusions), scope="global"
+            )
+
 
 class DynamicShapesType(str, enum.Enum):
     """Types of dynamic shapes handling in torch.compile().
@@ -341,7 +359,8 @@ class CompilationConfig:
     VLLMConfig's post_init does further initialization. If used outside of the
     VLLMConfig, some fields will be left in an improper state.
 
-    It has three parts:
+    It contains PassConfig, which controls the custom fusion/transformation passes.
+    The rest has three parts:
 
     - Top-level Compilation control:
         - [`mode`][vllm.config.CompilationConfig.mode]
@@ -666,6 +685,7 @@ class CompilationConfig:
         "vllm::linear_attention",
         "vllm::plamo2_mamba_mixer",
         "vllm::gdn_attention_core",
+        "vllm::olmo_hybrid_gdn_full_forward",
         "vllm::kda_attention",
         "vllm::sparse_attn_indexer",
         "vllm::rocm_aiter_sparse_attn_indexer",
@@ -872,7 +892,7 @@ class CompilationConfig:
                 )
 
         # Currently only eager and inductor backend are supported.
-        # for piecewise compilation. Custom backends are not suppported for
+        # for piecewise compilation. Custom backends are not supported for
         # piecewise compilation. Update when more backends are supported.
         if self.mode == CompilationMode.VLLM_COMPILE and self.backend not in [
             "",
