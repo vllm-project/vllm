@@ -1,23 +1,24 @@
-# --8<-- [start:installation]
+<!-- markdownlint-disable MD041 MD051 -->
+--8<-- [start:installation]
 
 vLLM supports AMD GPUs with ROCm 6.3 or above. Pre-built wheels are available for ROCm 7.0.
 
-# --8<-- [end:installation]
-# --8<-- [start:requirements]
+--8<-- [end:installation]
+--8<-- [start:requirements]
 
 - GPU: MI200s (gfx90a), MI300 (gfx942), MI350 (gfx950), Radeon RX 7900 series (gfx1100/1101), Radeon RX 9000 series (gfx1200/1201), Ryzen AI MAX / AI 300 Series (gfx1151/1150)
 - ROCm 6.3 or above
     - MI350 requires ROCm 7.0 or above
     - Ryzen AI MAX / AI 300 Series requires ROCm 7.0.2 or above
 
-# --8<-- [end:requirements]
-# --8<-- [start:set-up-using-python]
+--8<-- [end:requirements]
+--8<-- [start:set-up-using-python]
 
 The vLLM wheel bundles PyTorch and all required dependencies, and you should use the included PyTorch for compatibility. Because vLLM compiles many ROCm kernels to ensure a validated, high‑performance stack, the resulting binaries may not be compatible with other ROCm or PyTorch builds.
 If you need a different ROCm version or want to use an existing PyTorch installation, you’ll need to build vLLM from source.  See [below](#build-wheel-from-source) for more details.
 
-# --8<-- [end:set-up-using-python]
-# --8<-- [start:pre-built-wheels]
+--8<-- [end:set-up-using-python]
+--8<-- [start:pre-built-wheels]
 
 To install the latest version of vLLM for Python 3.12, ROCm 7.0 and `glibc >= 2.35`.
 
@@ -34,7 +35,7 @@ To install a specific version and ROCm variant of vLLM wheel.
 uv pip install vllm --extra-index-url https://wheels.vllm.ai/rocm/0.15.0/rocm700
 ```
 
-!!! warning "Caveats for using `pip`" 
+!!! warning "Caveats for using `pip`"
 
     We recommend leveraging `uv` to install vLLM wheel. Using `pip` to install from custom indices is cumbersome, because `pip` combines packages from `--extra-index-url` and the default index, choosing only the latest version, which makes it difficult to install wheel from custom index if exact versions of all packages are specified exactly. In contrast, `uv` gives the extra index [higher priority than the default index](https://docs.astral.sh/uv/pip/compatibility/#packages-that-exist-on-multiple-indexes).
 
@@ -44,8 +45,8 @@ uv pip install vllm --extra-index-url https://wheels.vllm.ai/rocm/0.15.0/rocm700
     pip install vllm==0.15.0+rocm700 --extra-index-url https://wheels.vllm.ai/rocm/0.15.0/rocm700
     ```
 
-# --8<-- [end:pre-built-wheels]
-# --8<-- [start:build-wheel-from-source]
+--8<-- [end:pre-built-wheels]
+--8<-- [start:build-wheel-from-source]
 
 !!! tip
     - If you found that the following installation step does not work for you, please refer to [docker/Dockerfile.rocm_base](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.rocm_base). Dockerfile is a form of installation steps.
@@ -104,7 +105,6 @@ uv pip install vllm --extra-index-url https://wheels.vllm.ai/rocm/0.15.0/rocm700
     !!! note
         - The validated `$FA_BRANCH` can be found in the [docker/Dockerfile.rocm_base](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.rocm_base).
 
-
 3. Optionally, if you choose to build AITER yourself to use a certain branch or commit, you can build AITER using the following steps:
 
     ```bash
@@ -120,7 +120,6 @@ uv pip install vllm --extra-index-url https://wheels.vllm.ai/rocm/0.15.0/rocm700
         - You will need to config the `$AITER_BRANCH_OR_COMMIT` for your purpose.
         - The validated `$AITER_BRANCH_OR_COMMIT` can be found in the [docker/Dockerfile.rocm_base](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.rocm_base).
 
-
 4. Optionally, if you want to use MORI for EP or PD disaggregation, you can install [MORI](https://github.com/ROCm/mori) using the following steps:
 
     ```bash
@@ -134,7 +133,6 @@ uv pip install vllm --extra-index-url https://wheels.vllm.ai/rocm/0.15.0/rocm700
     !!! note
         - You will need to config the `$MORI_BRANCH_OR_COMMIT` for your purpose.
         - The validated `$MORI_BRANCH_OR_COMMIT` can be found in the [docker/Dockerfile.rocm_base](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.rocm_base).
-
 
 5. Build vLLM. For example, vLLM on ROCM 7.0 can be built with the following steps:
 
@@ -171,8 +169,8 @@ uv pip install vllm --extra-index-url https://wheels.vllm.ai/rocm/0.15.0/rocm700
     - For MI300x (gfx942) users, to achieve optimal performance, please refer to [MI300x tuning guide](https://rocm.docs.amd.com/en/latest/how-to/tuning-guides/mi300x/index.html) for performance optimization and tuning tips on system and workflow level.
       For vLLM, please refer to [vLLM performance optimization](https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/vllm-optimization.html).
 
-# --8<-- [end:build-wheel-from-source]
-# --8<-- [start:pre-built-images]
+--8<-- [end:build-wheel-from-source]
+--8<-- [start:pre-built-images]
 
 vLLM offers an official Docker image for deployment.
 The image can be used to run OpenAI compatible server and is available on Docker Hub as [vllm/vllm-openai-rocm](https://hub.docker.com/r/vllm/vllm-openai-rocm/tags).
@@ -217,8 +215,8 @@ rocm/vllm-dev:nightly
     Please check [LLM inference performance validation on AMD Instinct MI300X](https://rocm.docs.amd.com/en/latest/how-to/performance-validation/mi300x/vllm-benchmark.html)
     for instructions on how to use this prebuilt docker image.
 
-# --8<-- [end:pre-built-images]
-# --8<-- [start:build-image-from-source]
+--8<-- [end:pre-built-images]
+--8<-- [start:build-image-from-source]
 
 You can build and run vLLM from source via the provided [docker/Dockerfile.rocm](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.rocm).
 
@@ -271,7 +269,6 @@ To build vllm on ROCm 7.0 for MI200 and MI300 series, you can use the default (w
 DOCKER_BUILDKIT=1 docker build -f docker/Dockerfile.rocm -t vllm/vllm-openai-rocm .
 ```
 
-
 To run vLLM with the custom-built Docker image:
 
 ```bash
@@ -308,9 +305,9 @@ To use the docker image as base for development, you can launch it in interactiv
         vllm/vllm-openai-rocm
     ```
 
-# --8<-- [end:build-image-from-source]
-# --8<-- [start:supported-features]
+--8<-- [end:build-image-from-source]
+--8<-- [start:supported-features]
 
 See [Feature x Hardware](../../features/README.md#feature-x-hardware) compatibility matrix for feature support information.
 
-# --8<-- [end:supported-features]
+--8<-- [end:supported-features]
