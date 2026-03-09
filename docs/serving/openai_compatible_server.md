@@ -439,6 +439,8 @@ you can use the [official OpenAI Python client](https://github.com/openai/openai
 
 Code example: [examples/online_serving/openai_transcription_client.py](../../examples/online_serving/openai_transcription_client.py)
 
+NOTE: beam search is currently supported in the transcriptions endpoint for encoder-decoder multimodal models, e.g., whisper, but highly inefficient as work for handling the encoder/decoder cache is actively ongoing. This is an active point of ongoing optimization and will be handled properly in the very near future.
+
 #### API Enforced Limits
 
 Set the maximum audio file size (in MB) that VLLM will accept, via the

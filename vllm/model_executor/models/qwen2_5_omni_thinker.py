@@ -78,7 +78,11 @@ from vllm.multimodal.parse import (
     ModalityDataItems,
     MultiModalDataItems,
 )
-from vllm.multimodal.processing import BaseDummyInputsBuilder
+from vllm.multimodal.processing import (
+    BaseDummyInputsBuilder,
+    ProcessorInputs,
+    TimingContext,
+)
 from vllm.multimodal.processing.processor import (
     BaseMultiModalProcessor,
     MultiModalPromptUpdates,
@@ -810,6 +814,16 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
                 replacement=video_replacement_fn,
             ),
         ]
+
+    def _cached_apply_hf_processor(
+        self,
+        inputs: ProcessorInputs,
+        timing_ctx: TimingContext,
+    ):
+        mm_processor_kwargs = inputs.hf_processor_mm_kwargs
+        if mm_processor_kwargs.get("use_audio_in_video", False):
+            return self._apply_hf_processor(inputs, timing_ctx)
+        return super()._cached_apply_hf_processor(inputs, timing_ctx)
 
     def _apply_hf_processor_main(
         self,
