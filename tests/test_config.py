@@ -59,24 +59,56 @@ def test_async_scheduling_with_pipeline_parallelism_is_allowed():
     assert cfg.scheduler_config.async_scheduling is True
 
 
-def test_enable_allreduce_rms_fusion_disabled_for_pp():
-    cfg = VllmConfig(
-        parallel_config=ParallelConfig(
-            tensor_parallel_size=2,
-            pipeline_parallel_size=1,
-            data_parallel_size=1,
-        )
-    )
+@pytest.mark.parametrize(
+    ("parallel_config", "should_be_enabled"),
+    [
+        (
+            ParallelConfig(
+                tensor_parallel_size=2,
+                pipeline_parallel_size=1,
+                data_parallel_size=1,
+            ),
+            True,
+        ),
+        (
+            ParallelConfig(
+                tensor_parallel_size=1,
+                pipeline_parallel_size=1,
+                data_parallel_size=1,
+            ),
+            False,
+        ),
+        (
+            ParallelConfig(
+                tensor_parallel_size=2,
+                pipeline_parallel_size=2,
+                data_parallel_size=1,
+            ),
+            False,
+        ),
+        (
+            ParallelConfig(
+                tensor_parallel_size=2,
+                pipeline_parallel_size=1,
+                data_parallel_size=2,
+            ),
+            False,
+        ),
+    ],
+    ids=["TP-only", "No-TP", "With-PP", "With-DP"],
+)
+def test_enable_allreduce_rms_fusion_gating(
+    parallel_config: ParallelConfig,
+    should_be_enabled: bool,
+):
+    cfg = VllmConfig(parallel_config=parallel_config)
 
     with (
         patch("vllm.utils.flashinfer.has_flashinfer", return_value=True),
         patch.object(current_platform, "is_cuda", return_value=True),
         patch.object(current_platform, "is_device_capability", return_value=True),
     ):
-        assert enable_allreduce_rms_fusion(cfg)
-
-        cfg.parallel_config.pipeline_parallel_size = 2
-        assert not enable_allreduce_rms_fusion(cfg)
+        assert enable_allreduce_rms_fusion(cfg) is should_be_enabled
 
 
 @dataclass

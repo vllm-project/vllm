@@ -421,7 +421,9 @@ class CompletionRequest(OpenAIBaseModel):
         prompt = data.get("prompt")
         prompt_embeds = data.get("prompt_embeds")
 
-        prompt_is_empty = prompt is None or (isinstance(prompt, str) and prompt == "")
+        prompt_is_empty = prompt is None or (
+            isinstance(prompt, (str, list)) and len(prompt) == 0
+        )
         embeds_is_empty = prompt_embeds is None or (
             isinstance(prompt_embeds, list) and len(prompt_embeds) == 0
         )
