@@ -6,6 +6,7 @@ from collections.abc import Callable, Iterable
 import torch
 import torch.nn as nn
 from transformers import PretrainedConfig
+from safetensors.torch import load_file
 
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.decorators import support_torch_compile
@@ -68,7 +69,8 @@ class DeepSeekMultiTokenPredictorLayer(nn.Module):
         self.enorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.hnorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.eh_proj = nn.Linear(config.hidden_size * 2, config.hidden_size, bias=False)
-
+        self.weights = load_file(vllm_config.additional_config['rot_path'])
+        self.rot_weight = self.weights['rot'].npu()
         self.device = current_platform.device_type
 
         self.is_v32 = hasattr(config, "index_topk")
@@ -105,6 +107,7 @@ class DeepSeekMultiTokenPredictorLayer(nn.Module):
         # masking inputs at position 0, as not needed by MTP
         inputs_embeds = torch.where(positions.unsqueeze(-1) == 0, 0, inputs_embeds)
         inputs_embeds = self.enorm(inputs_embeds)
+        previous_hidden_states = torch.matmul(previous_hidden_states, self.rot_weight)
         previous_hidden_states = self.hnorm(previous_hidden_states)
 
         hidden_states = self.eh_proj(
