@@ -21,6 +21,8 @@
 #   MODEL_NAME          - target model (default: meta-llama/Llama-3.1-8B-Instruct)
 #   NUM_SPEC_TOKENS     - number of speculative tokens (default: 3)
 #   GPU_MEMORY_UTILIZATION - (default: 0.7)
+#   ATTENTION_BACKEND   - attention backend to use (default: FLASH_ATTN)
+#                         Supported: FLASH_ATTN, ROCM_ATTN, FLASHINFER
 set -x
 
 # ── Model & spec decode config ──────────────────────────────────────────
@@ -33,6 +35,11 @@ MAX_MODEL_LEN="${MAX_MODEL_LEN:-16384}"
 
 PREFILL_SPEC_CONFIG="{\"method\":\"${SD_METHOD}\",\"model\":\"${SD_MODEL}\",\"num_speculative_tokens\":1,\"max_model_len\":${MAX_MODEL_LEN}}"
 DECODE_SPEC_CONFIG="{\"method\":\"${SD_METHOD}\",\"model\":\"${SD_MODEL}\",\"num_speculative_tokens\":${NUM_SPEC_TOKENS},\"max_model_len\":${MAX_MODEL_LEN}}"
+
+# ── Attention backend config ─────────────────────────────────────────────
+
+ATTENTION_BACKEND="${ATTENTION_BACKEND:-FLASH_ATTN}"
+echo "Using attention backend: ${ATTENTION_BACKEND}"
 
 # ── Test matrix ──────────────────────────────────────────────────────────
 
@@ -50,6 +57,17 @@ BLOCK_SIZE=${BLOCK_SIZE:-16}
 GIT_ROOT=$(git rev-parse --show-toplevel)
 
 SMI_BIN=$(which nvidia-smi || which rocm-smi || echo "")
+
+# ── Detect platform (NVIDIA vs ROCm) ────────────────────────────────────
+
+if [[ "$SMI_BIN" == *"rocm"* ]]; then
+  GPU_PLATFORM="rocm"
+  GPU_DEVICE_VAR="HIP_VISIBLE_DEVICES"
+else
+  GPU_PLATFORM="nvidia"
+  GPU_DEVICE_VAR="CUDA_VISIBLE_DEVICES"
+fi
+echo "Detected GPU platform: ${GPU_PLATFORM} (using ${GPU_DEVICE_VAR})"
 
 cleanup_instances() {
   echo ""
@@ -84,13 +102,16 @@ wait_for_server() {
 
 # ── Resolve GPU list ─────────────────────────────────────────────────────
 
-if [[ -n "${CUDA_VISIBLE_DEVICES:-}" ]]; then
-  IFS=',' read -ra ALL_GPUS <<< "$CUDA_VISIBLE_DEVICES"
+# Accept either CUDA_VISIBLE_DEVICES or HIP_VISIBLE_DEVICES
+VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-${HIP_VISIBLE_DEVICES:-}}"
+
+if [[ -n "${VISIBLE_DEVICES}" ]]; then
+  IFS=',' read -ra ALL_GPUS <<< "$VISIBLE_DEVICES"
 else
   ALL_GPUS=()
-  if [[ "$SMI_BIN" == *"nvidia"* ]]; then
+  if [[ "$GPU_PLATFORM" == "nvidia" ]]; then
     num=$($SMI_BIN --query-gpu=name --format=csv,noheader | wc -l)
-  elif [[ "$SMI_BIN" == *"rocm"* ]]; then
+  elif [[ "$GPU_PLATFORM" == "rocm" ]]; then
     num=$($SMI_BIN -l | grep -c GPU)
   else
     num=1
@@ -100,7 +121,7 @@ fi
 
 TOTAL_GPUS_NEEDED=$(( (NUM_PREFILL_INSTANCES * PREFILLER_TP_SIZE) + (NUM_DECODE_INSTANCES * DECODER_TP_SIZE) ))
 if [[ ${#ALL_GPUS[@]} -lt $TOTAL_GPUS_NEEDED ]]; then
-  echo "FAIL: Need $TOTAL_GPUS_NEEDED GPUs but only have ${#ALL_GPUS[@]} (CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-not set})"
+  echo "FAIL: Need $TOTAL_GPUS_NEEDED GPUs but only have ${#ALL_GPUS[@]} (visible devices=${VISIBLE_DEVICES:-not set})"
   exit 1
 fi
 
@@ -119,12 +140,14 @@ run_test_for_device() {
   echo "================================================================"
   echo "NixlConnector PD + Spec Decode Acceptance Test (kv_buffer_device=${kv_device})"
   echo "================================================================"
-  echo "Model:            ${MODEL_NAME}"
-  echo "SD method:        ${SD_METHOD}"
-  echo "SD model:         ${SD_MODEL}"
-  echo "Spec tokens:      ${NUM_SPEC_TOKENS}"
-  echo "KV buffer device: ${kv_device}"
-  echo "GPUs available:   ${ALL_GPUS[*]}"
+  echo "Model:              ${MODEL_NAME}"
+  echo "SD method:          ${SD_METHOD}"
+  echo "SD model:           ${SD_MODEL}"
+  echo "Spec tokens:        ${NUM_SPEC_TOKENS}"
+  echo "KV buffer device:   ${kv_device}"
+  echo "Attention backend:  ${ATTENTION_BACKEND}"
+  echo "GPU platform:       ${GPU_PLATFORM}"
+  echo "GPUs available:     ${ALL_GPUS[*]}"
   echo "================================================================"
 
   local PREFILL_HOSTS=()
@@ -146,7 +169,8 @@ run_test_for_device() {
     local SIDE_CHANNEL_PORT=$((5559 + i))
 
     echo "Starting prefill instance $i on GPU $GPU_ID, port $PORT"
-    CUDA_VISIBLE_DEVICES=$GPU_ID \
+    env \
+    ${GPU_DEVICE_VAR}=$GPU_ID \
     VLLM_KV_CACHE_LAYOUT='HND' \
     UCX_NET_DEVICES=all \
     VLLM_NIXL_SIDE_CHANNEL_PORT=$SIDE_CHANNEL_PORT \
@@ -159,7 +183,7 @@ run_test_for_device() {
       --tensor-parallel-size $PREFILLER_TP_SIZE \
       --kv-transfer-config "$kv_config" \
       --speculative-config "$PREFILL_SPEC_CONFIG" \
-      --attention-backend FLASH_ATTN &
+      --attention-backend $ATTENTION_BACKEND &
 
     PREFILL_HOSTS+=("localhost")
     PREFILL_PORTS+=("$PORT")
@@ -178,7 +202,8 @@ run_test_for_device() {
     local SIDE_CHANNEL_PORT=$((5659 + i * $DECODER_TP_SIZE))
 
     echo "Starting decode instance $i on GPU $GPU_ID, port $PORT"
-    CUDA_VISIBLE_DEVICES=$GPU_ID \
+    env \
+    ${GPU_DEVICE_VAR}=$GPU_ID \
     VLLM_KV_CACHE_LAYOUT='HND' \
     UCX_NET_DEVICES=all \
     VLLM_NIXL_SIDE_CHANNEL_PORT=$SIDE_CHANNEL_PORT \
@@ -191,7 +216,7 @@ run_test_for_device() {
       --tensor-parallel-size $DECODER_TP_SIZE \
       --kv-transfer-config "$kv_config" \
       --speculative-config "$DECODE_SPEC_CONFIG" \
-      --attention-backend FLASH_ATTN &
+      --attention-backend $ATTENTION_BACKEND &
 
     DECODE_HOSTS+=("localhost")
     DECODE_PORTS+=("$PORT")
@@ -218,7 +243,7 @@ run_test_for_device() {
   sleep 5
 
   # Run test
-  echo "Running spec decode acceptance test (kv_buffer_device=${kv_device})..."
+  echo "Running spec decode acceptance test (kv_buffer_device=${kv_device}, backend=${ATTENTION_BACKEND})..."
   DECODE_PORT=${DECODE_PORTS[0]} \
   TEST_MODEL=$MODEL_NAME \
   python3 -m pytest -s -x "${GIT_ROOT}/tests/v1/kv_connector/nixl_integration/test_spec_decode_acceptance.py"
@@ -234,4 +259,4 @@ for device in $KV_BUFFER_DEVICES; do
   run_test_for_device "$device"
 done
 
-echo "=== All spec decode acceptance tests passed ==="
+echo "=== All spec decode acceptance tests passed (backend=${ATTENTION_BACKEND}) ==="

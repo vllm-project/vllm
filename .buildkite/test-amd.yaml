@@ -421,6 +421,23 @@ steps:
   - pytest -v -s distributed/test_eplb_spec_decode.py
 
 
+- label: Elastic EP Scaling Test # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
+  agent_pool: mi325_4
+  num_gpus: 4
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/distributed/
+  - vllm/engine/
+  - vllm/executor/
+  - vllm/compilation/
+  - tests/distributed/
+  commands:
+  - pytest -v -s distributed/test_elastic_ep.py
+
+
 - label: Metrics, Tracing (2 GPUs) # 5.7m
   timeout_in_minutes: 9
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
@@ -1510,6 +1527,19 @@ steps:
   - bash weight_loading/run_model_weight_loading_test.sh -c weight_loading/models-large-amd.txt
 
 
+- label: Ray Dependency Compatibility Check # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
+  agent_pool: mi325_1
+  optional: true
+  working_dir: "/"
+  source_file_dependencies:
+  - requirements/
+  - setup.py
+  commands:
+  - bash /vllm-workspace/.buildkite/scripts/check-ray-compatibility.sh
+
+
 - label: Distributed NixlConnector PD accuracy (4 GPUs)  # 27.4m
   timeout_in_minutes: 44
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
@@ -1538,6 +1568,21 @@ steps:
   commands:
   - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
   - DP_EP=1 ROCM_ATTN=1 bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
+
+
+- label: NixlConnector PD + Spec Decode acceptance (2 GPUs) # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
+  agent_pool: mi325_2
+  num_gpus: 2
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/distributed/kv_transfer/kv_connector/v1/nixl_connector.py
+  - vllm/v1/worker/kv_connector_model_runner_mixin.py
+  - tests/v1/kv_connector/nixl_integration/
+  commands:
+  - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
+  - ROCM_ATTN=1 bash v1/kv_connector/nixl_integration/spec_decode_acceptance_test.sh
 
 
 - label: CrossLayer KV layout Distributed NixlConnector PD accuracy tests (4 GPUs) # TBD
@@ -1619,6 +1664,31 @@ steps:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-small.txt
 
 
+- label: LM Eval Small Models (B200-MI325) # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
+  agent_pool: mi325_2
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - csrc/
+  - vllm/model_executor/layers/quantization
+  commands:
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-mi3xx-fp8.txt
+
+
+- label: LM Eval Large Models (H200-MI325) # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
+  agent_pool: mi325_8
+  optional: true
+  num_gpus: 8
+  working_dir: "/vllm-workspace/tests"
+  commands:
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-mi3xx.txt
+
+
 - label: LM Eval Large Models (4 GPUs)(FP8) # 24.8m
   timeout_in_minutes: 42
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
@@ -1661,23 +1731,19 @@ steps:
   - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large-rocm.txt --tp-size=8
 
 
-- label: GPT-OSS Eval # 10.3m
-  timeout_in_minutes: 19
+- label: GPQA Eval (GPT-OSS) (H100-MI325) # TBD
+  timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
-  agent_pool: mi325_1
-  grade: Blocking
-  working_dir: "/vllm-workspace"
+  agent_pool: mi325_2
+  num_gpus: 2
+  optional: true
   source_file_dependencies:
-  - tests/evals/gpt_oss
-  - vllm/model_executor/models/gpt_oss.py
-  - vllm/model_executor/layers/quantization/mxfp4.py
-  - vllm/v1/attention/backends/triton_attn.py
-  - vllm/v1/attention/backends/rocm_attn.py
-  - vllm/v1/attention/backends/rocm_aiter_fa.py
-  - vllm/v1/attention/backends/rocm_aiter_unified_attn.py
+  - csrc/
+  - vllm/model_executor/layers/quantization
+  - tests/evals/gpt_oss/
   commands:
-  - uv pip install --system 'gpt-oss[eval]==0.0.5'
-  - pytest -s -v tests/evals/gpt_oss/test_gpqa_correctness.py --config-list-file=tests/evals/gpt_oss/configs/gpt-oss-20b-rocm.yaml
+    - uv pip install --system 'gpt-oss[eval]==0.0.5'
+    - pytest -s -v evals/gpt_oss/test_gpqa_correctness.py --config-list-file=configs/models-gfx942.txt
 
 
 - label: DeepSeek V2-Lite Accuracy # 6.7m
@@ -1689,6 +1755,17 @@ steps:
   working_dir: "/vllm-workspace"
   commands:
   - bash .buildkite/scripts/scheduled_integration_test/deepseek_v2_lite_ep_eplb.sh 0.25 200 8010
+
+
+- label: DeepSeek V2-Lite Prefetch Offload Accuracy (H100-MI325) # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
+  agent_pool: mi325_1
+  num_gpus: 1
+  optional: true
+  working_dir: "/vllm-workspace"
+  commands:
+  - bash .buildkite/scripts/scheduled_integration_test/deepseek_v2_lite_prefetch_offload.sh 0.25 200 8030
 
 
 - label: Qwen3-30B-A3B-FP8-block Accuracy # 6.4m
@@ -2098,6 +2175,23 @@ steps:
   commands:
   - pytest -v -s distributed/test_eplb_execute.py
   - pytest -v -s distributed/test_eplb_spec_decode.py
+
+
+- label: Elastic EP Scaling Test # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  agent_pool: mi355_4
+  num_gpus: 4
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/distributed/
+  - vllm/engine/
+  - vllm/executor/
+  - vllm/compilation/
+  - tests/distributed/
+  commands:
+  - pytest -v -s distributed/test_elastic_ep.py
 
 
 - label: Metrics, Tracing (2 GPUs) # TBD
@@ -3151,6 +3245,19 @@ steps:
   - bash weight_loading/run_model_weight_loading_test.sh -c weight_loading/models-large-amd.txt
 
 
+- label: Ray Dependency Compatibility Check # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  agent_pool: mi355_1
+  optional: true
+  working_dir: "/"
+  source_file_dependencies:
+  - requirements/
+  - setup.py
+  commands:
+  - bash /vllm-workspace/.buildkite/scripts/check-ray-compatibility.sh
+
+
 - label: Distributed NixlConnector PD accuracy (4 GPUs) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
@@ -3194,6 +3301,21 @@ steps:
   commands:
   - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
   - CROSS_LAYERS_BLOCKS=True ROCM_ATTN=1 bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
+
+
+- label: NixlConnector PD + Spec Decode acceptance (2 GPUs) # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  agent_pool: mi355_2
+  num_gpus: 2
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/distributed/kv_transfer/kv_connector/v1/nixl_connector.py
+  - vllm/v1/worker/kv_connector_model_runner_mixin.py
+  - tests/v1/kv_connector/nixl_integration/
+  commands:
+  - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
+  - ROCM_ATTN=1 bash v1/kv_connector/nixl_integration/spec_decode_acceptance_test.sh
 
 
 - label: Distributed Tests (4 GPUs)(A100-MI355) # TBD
@@ -3261,6 +3383,31 @@ steps:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-small.txt
 
 
+- label: LM Eval Small Models (B200-MI355) # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  agent_pool: mi355_2
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - csrc/
+  - vllm/model_executor/layers/quantization
+  commands:
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-mi3xx-fp8.txt
+
+
+- label: LM Eval Large Models (H200-MI355) # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  agent_pool: mi355_8
+  optional: true
+  num_gpus: 8
+  working_dir: "/vllm-workspace/tests"
+  commands:
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-mi3xx.txt
+
+
 - label: LM Eval Large Models (4 GPUs)(FP8) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
@@ -3302,20 +3449,19 @@ steps:
   - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large-rocm.txt --tp-size=8
 
 
-- label: GPT-OSS Eval # TBD
+- label: GPQA Eval (GPT-OSS) (B200-MI355) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
-  agent_pool: mi355_1
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx955nightly, amdmi355]
+  agent_pool: mi355_2
+  num_gpus: 2
   optional: true
-  working_dir: "/vllm-workspace"
   source_file_dependencies:
-  - tests/evals/gpt_oss
-  - vllm/model_executor/models/gpt_oss.py
-  - vllm/model_executor/layers/quantization/mxfp4.py
-  - vllm/v1/attention/backends/flashinfer.py
+  - csrc/
+  - vllm/model_executor/layers/quantization
+  - tests/evals/gpt_oss/
   commands:
-  - uv pip install --system 'gpt-oss[eval]==0.0.5'
-  - pytest -s -v tests/evals/gpt_oss/test_gpqa_correctness.py --config-list-file=tests/evals/gpt_oss/configs/gpt-oss-20b-rocm.yaml
+    - uv pip install --system 'gpt-oss[eval]==0.0.5'
+    - pytest -s -v evals/gpt_oss/test_gpqa_correctness.py --config-list-file=configs/models-gfx950.txt
 
 
 - label: DeepSeek V2-Lite Accuracy # TBD
@@ -3327,6 +3473,17 @@ steps:
   working_dir: "/vllm-workspace"
   commands:
   - bash .buildkite/scripts/scheduled_integration_test/deepseek_v2_lite_ep_eplb.sh 0.25 200 8010
+
+
+- label: DeepSeek V2-Lite Prefetch Offload Accuracy (H100-MI355) # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  agent_pool: mi355_1
+  num_gpus: 1
+  optional: true
+  working_dir: "/vllm-workspace"
+  commands:
+  - bash .buildkite/scripts/scheduled_integration_test/deepseek_v2_lite_prefetch_offload.sh 0.25 200 8030
 
 
 - label: Qwen3-30B-A3B-FP8-block Accuracy (B200-MI355) # TBD

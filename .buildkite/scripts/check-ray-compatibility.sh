@@ -16,6 +16,23 @@ RAY_BASE_URL="https://raw.githubusercontent.com/ray-project/ray/master/python"
 WORK_DIR=$(mktemp -d)
 trap 'rm -rf "$WORK_DIR"' EXIT
 
+# ── Detect PyTorch index URL ─────────────────────────────────────────────
+
+if python3 -c "import torch; assert torch.version.hip" 2>/dev/null; then
+    ROCM_VER=$(python3 -c "import torch; print(torch.version.hip.rsplit('.', 1)[0])")
+    CANDIDATE_URL="https://download.pytorch.org/whl/rocm${ROCM_VER}"
+    if curl -fsSL --head "${CANDIDATE_URL}/" >/dev/null 2>&1; then
+        TORCH_INDEX_URL="${CANDIDATE_URL}"
+    else
+        echo ">>> WARNING: ROCm ${ROCM_VER} wheel index not found at ${CANDIDATE_URL}"
+        echo ">>>          Falling back to default PyPI (resolution may be incomplete)"
+        TORCH_INDEX_URL=""
+    fi
+else
+    TORCH_INDEX_URL="https://download.pytorch.org/whl/cu129"
+fi
+echo ">>> Using PyTorch index: ${TORCH_INDEX_URL:-PyPI default}"
+
 # Fetch all Ray requirement files used in the LLM depset pipeline
 echo ">>> Fetching Ray requirement files"
 RAY_FILES=(
@@ -116,6 +133,11 @@ echo "============================================================"
 echo ">>> Resolving: Can Ray generate compatible lock files?"
 echo "============================================================"
 
+EXTRA_INDEX_ARGS=()
+if [[ -n "${TORCH_INDEX_URL}" ]]; then
+    EXTRA_INDEX_ARGS+=(--extra-index-url "${TORCH_INDEX_URL}")
+fi
+
 set +e
 uv pip compile \
     "${WORK_DIR}/requirements.txt" \
@@ -126,7 +148,7 @@ uv pip compile \
     -c "${WORK_DIR}/vllm-constraints.txt" \
     --python-version 3.12 \
     --python-platform x86_64-manylinux_2_31 \
-    --extra-index-url https://download.pytorch.org/whl/cu129 \
+    "${EXTRA_INDEX_ARGS[@]}" \
     --index-strategy unsafe-best-match \
     --unsafe-package setuptools \
     --unsafe-package ray \
