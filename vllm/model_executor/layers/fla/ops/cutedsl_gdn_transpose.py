@@ -21,17 +21,8 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
-
-def is_cutedsl_transpose_gdn_available() -> bool:
-    return True
-
-
-def get_cutedsl_transpose_gdn_unavailable_reason() -> str | None:
-    return None
-
-
 _MAX_DLPACK_CACHE_SIZE = 256
-_MAX_CACHED_TENSOR_BYTES = 16 * 1024 * 1024
+_MAX_CACHED_TENSOR_BYTES = 64 * 1024 * 1024
 
 
 def _to_cute_tensor_cached(tensor: torch.Tensor):
@@ -78,8 +69,6 @@ if _USE_PACKED_F32X2:
         rnd=nvvm.RoundingModeKind.RN,
     )
 else:
-    logger.info_once("Using scalar fallback for cutedsl transpose GDN ops (SM<100).")
-
     # For SM<100, define scalar operations that work with single values
     # The packed functions return tuples, so we mimic that interface
     def fma_packed_f32x2(a, b, c):

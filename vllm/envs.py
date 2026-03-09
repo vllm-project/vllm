@@ -16,7 +16,7 @@ if TYPE_CHECKING:
     VLLM_PORT: int | None = None
     VLLM_RPC_BASE_PATH: str = tempfile.gettempdir()
     VLLM_USE_MODELSCOPE: bool = False
-    VLLM_GDN_DECODE_BACKEND: Literal["triton", "cutedsl_transpose"] = "triton"
+    VLLM_GDN_DECODE_BACKEND: Literal["triton", "cutedsl"] = "triton"
     VLLM_RINGBUFFER_WARNING_INTERVAL: int = 60
     VLLM_NCCL_SO_PATH: str | None = None
     LD_LIBRARY_PATH: str | None = None
@@ -563,7 +563,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_GDN_DECODE_BACKEND": env_with_choices(
         "VLLM_GDN_DECODE_BACKEND",
         "triton",
-        ["triton", "cutedsl_transpose"],
+        ["triton", "cutedsl"],
         case_sensitive=False,
     ),
     # Interval in seconds to log a warning message when the ring buffer is full

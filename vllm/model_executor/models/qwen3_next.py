@@ -550,29 +550,28 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         self.chunk_gated_delta_rule = ChunkGatedDeltaRule()
         self._use_cutedsl_transpose_decode = False
         gdn_decode_backend = envs.VLLM_GDN_DECODE_BACKEND.lower()
-        if gdn_decode_backend == "cutedsl_transpose":
+        if gdn_decode_backend == "cutedsl":
             is_supported_sm = current_platform.is_cuda() and (
                 current_platform.is_device_capability_family(90)
                 or current_platform.is_device_capability_family(100)
             )
             if not is_supported_sm:
                 logger.warning_once(
-                    "Ignoring VLLM_GDN_DECODE_BACKEND=cutedsl_transpose: "
-                    "cutedsl_transpose decode is only enabled on sm90/sm100."
+                    "Ignoring VLLM_GDN_DECODE_BACKEND=cutedsl: "
+                    "cutedsl decode is only enabled on sm90/sm100."
                 )
             elif self.head_k_dim != self.head_v_dim or self.head_k_dim not in (
                 128,
                 256,
             ):
                 raise ValueError(
-                    "cutedsl_transpose decode backend requires K=V in {128, 256}; "
+                    "cutedsl decode backend requires K=V in {128, 256}; "
                     f"got K={self.head_k_dim}, V={self.head_v_dim}."
                 )
             else:
                 self._use_cutedsl_transpose_decode = True
                 logger.info_once(
-                    "Using cutedsl_transpose GDN decode kernel "
-                    "(VLLM_GDN_DECODE_BACKEND=cutedsl_transpose)."
+                    "Using cutedsl GDN decode kernel (VLLM_GDN_DECODE_BACKEND=cutedsl)."
                 )
         self.decode_gated_delta_rule = DecodeGatedDeltaRule(
             use_cutedsl_transpose=self._use_cutedsl_transpose_decode
