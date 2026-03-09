@@ -16,6 +16,16 @@ class LateInteractionParams(
     omit_defaults=True,  # type: ignore[call-arg]
     array_like=True,
 ):  # type: ignore[call-arg]
+    """Metadata for worker-side late-interaction scoring.
+
+    Attributes:
+        mode:
+            - "cache_query": cache query token embeddings
+            - "score_doc": score a document against a cached query.
+        query_key: stable key used for both DP routing and worker cache lookup.
+        query_uses: expected number of document requests
+    """
+
     mode: str
     query_key: str
     query_uses: int | None = None
