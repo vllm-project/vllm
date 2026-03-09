@@ -5,8 +5,8 @@ vLLM has experimental support for macOS with Apple Silicon. For now, users must 
 
 Currently the CPU implementation for macOS supports FP32 and FP16 datatypes.
 
-!!! tip "GPU-Accelerated Inference with vLLM-Metal"
-    For GPU-accelerated inference on Apple Silicon using Metal, check out [vllm-metal](https://github.com/vllm-project/vllm-metal), a community-maintained hardware plugin that uses MLX as the compute backend.
+!!! tip "GPU-Accelerated Inference with MPS"
+    For GPU-accelerated inference on Apple Silicon using Metal, see the [GPU installation guide](gpu.md) and select the "Apple MPS" tab.
 
 --8<-- [end:installation]
 --8<-- [start:requirements]

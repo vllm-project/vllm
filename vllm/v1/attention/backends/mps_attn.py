@@ -292,7 +292,8 @@ class MPSAttentionBackendImpl(AttentionImpl):
             blocks = block_table[i, :num_blocks_needed]
 
             # Gather K,V from paged cache
-            # key_cache[blocks]: [num_blocks_needed, num_kv_heads, block_size, head_size]
+            # key_cache[blocks]:
+            #   [num_blocks_needed, num_kv_heads, block_size, head_size]
             # Transpose to [num_kv_heads, num_blocks_needed, block_size, head_size]
             # then reshape to merge blocks×block_size into the sequence dim.
             k_paged = (
@@ -306,9 +307,11 @@ class MPSAttentionBackendImpl(AttentionImpl):
                 .reshape(self.num_kv_heads, -1, self.head_size)[:, :seq_len, :]
             )
 
-            # query slice: [q_len, num_heads, head_size] -> [1, num_heads, q_len, head_size]
+            # query: [q_len, num_heads, head_size]
+            #     -> [1, num_heads, q_len, head_size]
             q = query[q_start:q_end].transpose(0, 1).unsqueeze(0)
-            # k,v: [num_kv_heads, seq_len, head_size] -> [1, num_kv_heads, seq_len, head_size]
+            # k,v: [num_kv_heads, seq_len, head_size]
+            #   -> [1, num_kv_heads, seq_len, head_size]
             k = k_paged.unsqueeze(0)
             v = v_paged.unsqueeze(0)
 

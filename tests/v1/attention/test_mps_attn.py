@@ -45,7 +45,10 @@ def create_kv_cache_hnd(
     dtype: torch.dtype,
     device: torch.device,
 ) -> torch.Tensor:
-    """Create KV cache in HND layout: (2, num_blocks, num_kv_heads, block_size, head_size)."""
+    """Create KV cache in HND layout.
+
+    Shape: (2, num_blocks, num_kv_heads, block_size, head_size).
+    """
     return torch.zeros(
         2,
         num_blocks,
@@ -102,7 +105,6 @@ def sdpa_reference(
     for i in range(len(seq_lens)):
         q_len = query_lens[i]
         s_len = seq_lens[i]
-        context_len = s_len - q_len
 
         q = query[q_start : q_start + q_len]  # [q_len, num_heads, head_size]
         # Full key/value includes context + query tokens
@@ -277,9 +279,6 @@ class TestMPSAttentionCorrectness:
         batch_spec = BATCH_SPECS[batch_name]
 
         num_tokens = sum(batch_spec.query_lens)
-        total_context_tokens = sum(
-            s - q for s, q in zip(batch_spec.seq_lens, batch_spec.query_lens)
-        )
 
         # Generate full Q, K, V for reference computation
         # Full K, V = context + query tokens for each sequence
@@ -479,7 +478,9 @@ class TestMPSBackendSelection:
         attention_config = AttentionConfig(backend=AttentionBackendEnum.MPS_ATTN)
         vllm_config = VllmConfig(attention_config=attention_config)
 
-        with set_current_vllm_config(vllm_config):
-            with patch("vllm.platforms.current_platform", MpsPlatform()):
-                backend = get_attn_backend(64, torch.float16, None)
+        with (
+            set_current_vllm_config(vllm_config),
+            patch("vllm.platforms.current_platform", MpsPlatform()),
+        ):
+            backend = get_attn_backend(64, torch.float16, None)
         assert backend.get_name() == "MPS_ATTN"
