@@ -18,6 +18,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
     KVConnectorRole,
     KVConnectorWorkerMetadata,
+    SupportsHMA,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     KVConnectorPromMetrics,
@@ -443,7 +444,12 @@ class MultiConnector(KVConnectorBase_V1):
         async_saves = 0
         kv_txfer_params = None
         for c in self._connectors:
-            async_save, txfer_params = c.request_finished(request, blocks)
+            if isinstance(c, SupportsHMA):
+                async_save, txfer_params = c.request_finished_all_groups(
+                    request, (blocks,)
+                )
+            else:
+                async_save, txfer_params = c.request_finished(request, blocks)
             if async_save:
                 async_saves += 1
             if txfer_params is not None:
