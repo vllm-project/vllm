@@ -1479,8 +1479,7 @@ class LLMEngine:
                 original_parallel_seq_group = self.seq_id_to_seq_group[request_id]
                 unfinished_seqs = original_parallel_seq_group.get_unfinished_seqs()
                 for i, seq in enumerate(unfinished_seqs):
-                    if self._should_create_branches(
-                        seq, logprobs[i], sampling_params):
+                    if self._should_create_branches(seq, logprobs[i], sampling_params):
                         probs = torch.exp(logprobs[i])
                         _, new_token_ids = torch.topk(probs, num_branches, dim=-1)
                         new_token_ids = new_token_ids.tolist()
