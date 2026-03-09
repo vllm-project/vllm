@@ -692,15 +692,22 @@ def pack_rows(
     return q_res
 
 
+def _unwrap_size_n(size_n) -> int:
+    """Safely unwrap traced size_n tuples from PyTorch to prevent NumPy TypeErrors."""
+    if isinstance(size_n, tuple):
+        if not size_n:
+            raise ValueError("size_n tuple from tracer cannot be empty.")
+        size_n = size_n[0]
+    return int(size_n)
+
+
 def pack_cols(
     q_w: torch.Tensor,
     num_bits: int,
     size_k: int,
     size_n: int,
 ):
-    if isinstance(size_n, tuple):
-        size_n = size_n[0]
-    size_n = int(size_n)
+    size_n = _unwrap_size_n(size_n)
     assert q_w.shape == (size_k, size_n)
 
     pack_factor = get_pack_factor(num_bits)
@@ -727,9 +734,7 @@ def unpack_cols(
     size_k: int,
     size_n: int,
 ):
-    if isinstance(size_n, tuple):
-        size_n = size_n[0]
-    size_n = int(size_n)
+    size_n = _unwrap_size_n(size_n)
     pack_factor = get_pack_factor(num_bits)
     assert size_n % pack_factor == 0
     assert packed_q_w.shape == (size_k, size_n // pack_factor), (
