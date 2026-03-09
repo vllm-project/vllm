@@ -241,12 +241,13 @@ def get_processor_kwargs_type(
         call_kwargs_annotations = call_kwargs.annotation if call_kwargs else None
 
         # if the processor has explicit kwargs annotation, use it
-        if call_kwargs_annotations not in (None, inspect._empty):
+        if call_kwargs_annotations not in (None, inspect._empty):  # noqa: SIM102
             # get_type_hints will parse all type annotations at runtime,
             # and if an annotation refers to a type or
             # name that hasn’t been imported or defined, it will raise an error.
             # So we use __annotations__ to get the raw annotations directly.
-            return get_args(call_kwargs_annotations)[0]
+            if anno_args := get_args(call_kwargs_annotations):
+                return anno_args[0]
 
         # otherwise, try to get from ProcessorKwargs
         module_name = type(processor).__module__
@@ -266,7 +267,13 @@ def get_processor_kwargs_keys(
     kwargs_cls: type[processing_utils.ProcessingKwargs],
 ) -> set[str]:
     dynamic_kwargs: set[str] = set()
-    modality_kwargs = {"text_kwargs", "images_kwargs", "videos_kwargs", "audio_kwargs"}
+    modality_kwargs = {
+        "text_kwargs",
+        "images_kwargs",
+        "videos_kwargs",
+        "audio_kwargs",
+        "common_kwargs",
+    }
 
     try:
         # get kwargs annotations in processor
