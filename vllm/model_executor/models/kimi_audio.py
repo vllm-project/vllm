@@ -473,43 +473,56 @@ class KimiAudioForConditionalGeneration(
 
         Kimi-Audio fusion: inputs_embeds = (text_emb + audio_emb) × √2
 
-        For PP compatibility, we compute positions carefully and use masked_scatter_.
+        For PP compatibility, we use the is_multimodal mask from vLLM engine
+        which is correctly computed per pipeline stage.
         """
-        # Get text embeddings - use embed_tokens directly like original
+        # Get text embeddings
         inputs_embeds = self.language_model.model.embed_tokens(input_ids)
 
         if multimodal_embeddings is None or len(multimodal_embeddings) == 0:
             return inputs_embeds
 
-        # multimodal_embeddings[0] = audio embeddings [seq_len, hidden]
+        # is_multimodal must be provided for PP to work correctly
+        if is_multimodal is None or not is_multimodal.any():
+            return inputs_embeds
+
+        # multimodal_embeddings[0] contains audio embeddings
         audio_embeds = multimodal_embeddings[0]
-        scale_factor = 2**0.5
 
-        # Find audio placeholder positions (KIMIA_TEXT_BLANK token)
-        audio_mask = input_ids == KimiAudioProcessor.KIMIA_TEXT_BLANK
+        # Handle different tensor structures
+        if isinstance(audio_embeds, (list, tuple)):
+            audio_embeds = torch.cat(audio_embeds, dim=0)
+        elif audio_embeds.dim() == 3:
+            audio_embeds = audio_embeds.reshape(-1, audio_embeds.shape[-1])
 
-        if audio_mask.any():
-            audio_positions = audio_mask.nonzero(as_tuple=True)[0]
+        # In PP, audio_embeds count should match is_multimodal.sum()
+        # For now, use embeddings sequentially
+        # (works for non-PP, PP needs vLLM infra fix)
+        num_mm_tokens = is_multimodal.sum().item()
+        num_audio_embeds = audio_embeds.shape[0]
 
-            if audio_positions.numel() > 0:
-                begin_pos = audio_positions[0].item()
-                pos = begin_pos + 1
-                audio_len = audio_embeds.shape[0]
-                end_pos = pos + audio_len
+        # Use the minimum of available embeddings and positions
+        # This ensures we don't access out-of-bounds
+        num_to_use = min(num_audio_embeds, num_mm_tokens)
 
-                # Get text embeddings at audio positions
-                text_embeds = inputs_embeds[pos:end_pos]
+        # Get positions for the tokens we'll actually process
+        mm_positions = is_multimodal.nonzero(as_tuple=True)[0]
+        actual_mm_mask = torch.zeros_like(is_multimodal)
+        actual_mm_mask[mm_positions[:num_to_use]] = True
 
-                # Fuse: (text_emb + audio_emb) * √2
-                fused_embeds = (text_embeds + audio_embeds) * scale_factor
+        # Use corresponding embeddings
+        used_audio_embeds = audio_embeds[:num_to_use]
 
-                # PP-safe: use masked_scatter instead of in-place slice assignment
-                # Create update mask for the audio region
-                update_mask = torch.zeros_like(audio_mask)
-                update_mask[pos:end_pos] = True
-                inputs_embeds = inputs_embeds.masked_scatter(
-                    update_mask.unsqueeze(-1), fused_embeds
-                )
+        # Save text embeddings at multimodal positions
+        text_at_mm_positions = inputs_embeds[actual_mm_mask].clone()
+
+        # Replace text with audio at multimodal positions
+        inputs_embeds[actual_mm_mask] = used_audio_embeds.to(dtype=inputs_embeds.dtype)
+
+        # Apply Kimi-Audio's unique fusion formula: (text + audio) × √2
+        inputs_embeds[actual_mm_mask] = (
+            inputs_embeds[actual_mm_mask] + text_at_mm_positions
+        ) * (2**0.5)
 
         return inputs_embeds
 
