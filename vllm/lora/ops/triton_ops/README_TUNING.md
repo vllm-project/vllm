@@ -72,4 +72,4 @@ The following keys are supported in the JSON config entries for `fused_moe_lora`
 | `NUM_WARPS`   | int     | 4       | Number of warps per thread block                                 |
 | `NUM_STAGES`  | int     | 3       | Number of pipeline stages for async memory copies                |
 | `SPLIT_K`     | int     | 1       | Number of K-dimension splits for reduction                       |
-| `USE_TMA`     | bool    | true    | Whether to use Tensor Memory 
+| `USE_TMA`     | bool    | true    | Whether to use Tensor Memory Accelerator (TMA) for data loading  |
