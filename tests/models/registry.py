@@ -837,6 +837,14 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "Kwai-Keye/Keye-VL-1_5-8B",
         trust_remote_code=True,
     ),
+    "KimiAudioForConditionalGeneration": _HfExamplesInfo(
+        "moonshotai/Kimi-Audio-7B-Instruct",
+        trust_remote_code=True,
+    ),
+    "KimiK25ForConditionalGeneration": _HfExamplesInfo(
+        "moonshotai/Kimi-K2.5",
+        trust_remote_code=True,
+    ),
     "KimiVLForConditionalGeneration": _HfExamplesInfo(
         "moonshotai/Kimi-VL-A3B-Instruct",
         extras={"thinking": "moonshotai/Kimi-VL-A3B-Thinking"},
@@ -849,14 +857,6 @@ _MULTIMODAL_EXAMPLE_MODELS = {
                 "https://huggingface.co/moonshotai/Kimi-VL-A3B-Instruct/discussions/31"
             )
         },
-    ),
-    "KimiK25ForConditionalGeneration": _HfExamplesInfo(
-        "moonshotai/Kimi-K2.5",
-        trust_remote_code=True,
-    ),
-    "KimiAudioForConditionalGeneration": _HfExamplesInfo(
-        "moonshotai/Kimi-Audio-7B-Instruct",
-        trust_remote_code=True,
     ),
     "LightOnOCRForConditionalGeneration": _HfExamplesInfo(
         "lightonai/LightOnOCR-1B-1025"
