@@ -557,7 +557,12 @@ class Scheduler(SchedulerInterface):
                 # try to promote blocked statuses while traversing skipped queue.
                 if self._is_blocked_waiting_status(
                     request.status
-                ) and not self._try_promote_skipped_request(request):
+                ) and not self._try_promote_blocked_waiting_request(request):
+                    if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
+                        logger.debug(
+                            "%s is still in WAITING_FOR_REMOTE_KVS state.",
+                            request_id,
+                        )
                     request_queue.pop_request()
                     step_skipped_waiting.prepend_request(request)
                     continue
@@ -2024,9 +2029,9 @@ class Scheduler(SchedulerInterface):
 
         self.finished_recving_kv_req_ids.remove(request.request_id)
 
-    def _try_promote_skipped_request(self, request: Request) -> bool:
+    def _try_promote_blocked_waiting_request(self, request: Request) -> bool:
         """
-        Try to promote a skipped waiting request back to schedulable states.
+        Try to promote a blocked waiting request back to schedulable states.
         """
         if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
             if request.request_id not in self.finished_recving_kv_req_ids:
@@ -2049,7 +2054,10 @@ class Scheduler(SchedulerInterface):
             assert not request.streaming_queue
             return False
 
-        return request.status in (RequestStatus.WAITING, RequestStatus.PREEMPTED)
+        raise AssertionError(
+            "Unexpected blocked waiting status in promotion: "
+            f"{request.status.name} for request {request.request_id}"
+        )
 
     def _update_from_kv_xfer_finished(self, kv_connector_output: KVConnectorOutput):
         """
