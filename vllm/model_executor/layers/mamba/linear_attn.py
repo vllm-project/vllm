@@ -159,18 +159,29 @@ def linear_attention_prefill_and_mix(
     layer_idx: int | None = None,
 ) -> torch.Tensor:
     hidden = []
-    for _prefill_idx in range(getattr(attn_metadata, "num_prefills", 0)):
+    
+    # Handle chunked prefill support for long context optimization
+    num_prefills = getattr(attn_metadata, "num_prefills", 0)
+    num_decode_tokens = getattr(attn_metadata, "num_decode_tokens", 0)
+    
+    for _prefill_idx in range(num_prefills):
         if _prefill_idx >= len(attn_metadata.query_start_loc):
             break
         if _prefill_idx >= len(state_indices_tensor):
             break
-        offset = attn_metadata.num_decode_tokens
+            
+        offset = num_decode_tokens
         _start = attn_metadata.query_start_loc[offset + _prefill_idx]
         _end = attn_metadata.query_start_loc[offset + _prefill_idx + 1]
+        
+        # In chunked prefill, state_indices_tensor might map to the whole request
+        # but we are only processing a chunk.
         slot_id = state_indices_tensor[offset + _prefill_idx]
+        
         qs = q[_start:_end].transpose(0, 1).contiguous()
         ks = k[_start:_end].transpose(0, 1).contiguous()
         vs = v[_start:_end].transpose(0, 1).contiguous()
+        
         slice_layer_cache = kv_cache[slot_id, ...]
         out_slice = prefix_fn(
             qs,
@@ -183,7 +194,7 @@ def linear_attention_prefill_and_mix(
         )
         hidden.append(out_slice.contiguous())
 
-    if attn_metadata.num_decode_tokens > 0:
+    if num_decode_tokens > 0:
         hidden_decode = decode_fn(
             q, k, v, kv_cache, state_indices_tensor, attn_metadata
         )
@@ -233,6 +244,8 @@ class MiniMaxText01LinearAttention(nn.Module, MambaBase):
     def get_state_dtype(self) -> tuple[torch.dtype]:
         assert self.model_config is not None
         assert self.cache_config is not None
+        if self.cache_config.cache_dtype == "fp8":
+            return (torch.float8_e4m3fn,)
         return MambaStateDtypeCalculator.linear_attention_state_dtype(
             self.model_config.dtype,
             self.cache_config.mamba_cache_dtype,
@@ -419,12 +432,12 @@ class MiniMaxText01LinearAttention(nn.Module, MambaBase):
                 kv_cache, state_indices_tensor, attn_metadata
             )
 
-        decode_only = getattr(attn_metadata, "num_prefills", 0) == 0
         if attn_metadata is None:
             hidden = torch.empty(
                 (q.shape[0], q.shape[1] * q.shape[2]), device=q.device, dtype=q.dtype
             )
         else:
+            decode_only = getattr(attn_metadata, "num_prefills", 0) == 0
             if not decode_only:
                 hidden = self._prefill_and_mix_infer(
                     q, k, v, kv_cache, state_indices_tensor, attn_metadata

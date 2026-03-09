@@ -582,6 +582,9 @@ class MiniMaxText01Model(nn.Module):
         self._dtype = _dummy.dtype
         del _dummy
 
+        if cache_config and cache_config.cache_dtype == "fp8":
+            self._dtype = torch.float8_e4m3fn
+
         norm_kwargs = {}
         if hasattr(config, "rms_norm_eps"):
             norm_kwargs["eps"] = config.rms_norm_eps
@@ -699,12 +702,16 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid):
         return
 
     def copy_inputs_before_cuda_graphs(self, input_buffers, **kwargs):
-        return self.model.minimax_cache.copy_inputs_before_cuda_graphs(
-            input_buffers, **kwargs
-        )
+        if hasattr(self.model, "minimax_cache"):
+            return self.model.minimax_cache.copy_inputs_before_cuda_graphs(
+                input_buffers, **kwargs
+            )
+        return
 
     def get_seqlen_agnostic_capture_inputs(self, batch_size: int):
-        return self.model.minimax_cache.get_seqlen_agnostic_capture_inputs(batch_size)
+        if hasattr(self.model, "minimax_cache"):
+            return self.model.minimax_cache.get_seqlen_agnostic_capture_inputs(batch_size)
+        return []
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
