@@ -47,8 +47,10 @@ class TestAllReduceRMSNormModel(torch.nn.Module):
         super().__init__()
         self.hidden_size = hidden_size
         self.eps = eps
-        self.norm = [RMSNorm(hidden_size, eps) for _ in range(4)]
-        self.w = [torch.rand(hidden_size, hidden_size) for _ in range(3)]
+        self.norm = torch.nn.ModuleList([RMSNorm(hidden_size, eps) for _ in range(4)])
+        self.w = torch.nn.ParameterList(
+            [torch.nn.Parameter(torch.rand(hidden_size, hidden_size)) for _ in range(3)]
+        )
 
     def forward(self, x):
         z = torch.relu(x)
