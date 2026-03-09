@@ -13,6 +13,24 @@ from vllm.utils.hashing import safe_hash
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 
+def _deep_merge_mm_kwargs(
+    base: dict[str, object], override: Mapping[str, object]
+) -> dict[str, object]:
+    """Recursively merge override into base so nested keys are merged, not replaced."""
+    result = copy.deepcopy(base)
+    for k, v in override.items():
+        if (
+            k in result
+            and isinstance(result[k], dict)
+            and isinstance(v, Mapping)
+            and not isinstance(v, (str, bytes))
+        ):
+            result[k] = _deep_merge_mm_kwargs(dict(result[k]), v)
+        else:
+            result[k] = copy.deepcopy(v)
+    return result
+
+
 @dataclass
 class BaseDummyOptions:
     """Base options for generating dummy data during profiling."""
@@ -274,9 +292,12 @@ class MultiModalConfig:
         """
         Get the keyword arguments to pass to the multi-modal processor
         according to the extra arguments passed during inference.
+        Recursively merges so request-level only overrides the keys it
+        provides (e.g. only size.longest_edge) without blanking sibling
+        keys (e.g. size.shortest_edge) from the global config.
         """
-        kwargs = copy.deepcopy(self.mm_processor_kwargs or {})
-        return kwargs | dict(inference_kwargs)
+        base = copy.deepcopy(self.mm_processor_kwargs or {})
+        return _deep_merge_mm_kwargs(base, inference_kwargs)
 
     def is_multimodal_pruning_enabled(self):
         return self.video_pruning_rate is not None and self.video_pruning_rate > 0
