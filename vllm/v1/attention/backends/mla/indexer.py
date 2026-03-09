@@ -211,7 +211,10 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         kv_cache_spec: AttentionSpec,
     ) -> AttentionCGSupport:
         if current_platform.is_cuda() and not is_deep_gemm_supported():
-            # The torch fallback (fp8_paged_mqa_logits_torch) is not CG compatible
+            logger.warning_once(
+                "DeepGEMM is not available. Disabling CUDA graph support "
+                "for sparse attention indexer. This may reduce performance.",
+            )
             return AttentionCGSupport.NEVER
         return AttentionCGSupport.UNIFORM_BATCH
 
