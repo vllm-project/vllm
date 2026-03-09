@@ -1546,6 +1546,7 @@ class ParallelSampleSequenceGroup(SequenceGroupBase):
         parent_seq = parent_seq_group.seqs[0]
         old_tokens = parent_seq.get_token_ids()
         parent_seq.status = SequenceStatus.FINISHED_STOPPED
+        self.finish_seq(parent_seq_group)
         for i, token_id in enumerate(new_token_ids):
             new_tokens = old_tokens[:-1] + [token_id]
             processed_inputs = token_inputs(
