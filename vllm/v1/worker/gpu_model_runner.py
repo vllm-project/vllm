@@ -1433,13 +1433,6 @@ class GPUModelRunner(
 
         return indices_match
 
-    def _copy_input_ids_to_gpu(self, num_tokens: int) -> None:
-        """Copy input_ids (and prompt-embed metadata) from CPU to GPU."""
-        self.input_ids.copy_to_gpu(num_tokens)
-        if self.enable_prompt_embeds:
-            self.inputs_embeds.copy_to_gpu(num_tokens)
-            self.is_token_ids.copy_to_gpu(num_tokens)
-
     def _prepare_input_ids(
         self,
         scheduler_output: "SchedulerOutput",
@@ -1460,7 +1453,10 @@ class GPUModelRunner(
 
         if self.input_batch.prev_sampled_token_ids is None:
             # Normal scheduling case
-            self._copy_input_ids_to_gpu(total_num_scheduled_tokens)
+            self.input_ids.copy_to_gpu(total_num_scheduled_tokens)
+            if self.enable_prompt_embeds:
+                self.inputs_embeds.copy_to_gpu(total_num_scheduled_tokens)
+                self.is_token_ids.copy_to_gpu(total_num_scheduled_tokens)
             return
 
         # Async scheduling case, where some decode requests from the previous
@@ -1522,7 +1518,10 @@ class GPUModelRunner(
         if num_common_tokens < total_without_spec:
             # If not all requests are decodes from the last iteration,
             # we need to copy the input_ids_cpu to the GPU first.
-            self._copy_input_ids_to_gpu(total_num_scheduled_tokens)
+            self.input_ids.copy_to_gpu(total_num_scheduled_tokens)
+            if self.enable_prompt_embeds:
+                self.inputs_embeds.copy_to_gpu(total_num_scheduled_tokens)
+                self.is_token_ids.copy_to_gpu(total_num_scheduled_tokens)
         if num_common_tokens == 0:
             # No requests in common with the previous iteration.
             # input_ids.cpu has all the input ids.
