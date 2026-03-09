@@ -28,14 +28,6 @@ from vllm.utils.func_utils import get_allowed_kwarg_only_overrides
 
 logger = init_logger(__name__)
 
-# Map model types to vLLM registered processors for models without
-# processor_class in HF config. This allows vLLM to use custom processors
-# even when the HF repo doesn't define processor_class.
-_MODEL_TYPE_TO_PROCESSOR: dict[str, str] = {
-    "kimi_audio": "KimiAudioProcessor",
-    "qwen3_asr": "Qwen3ASRProcessor",
-}
-
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
 
@@ -166,17 +158,6 @@ def get_processor_cls_name_from_config(
     return None
 
 
-def get_model_type_from_config(
-    model_name: str,
-    revision: str | None = "main",
-) -> str | None:
-    """Get model type from HuggingFace config.json."""
-    config = get_hf_file_to_dict("config.json", model_name, revision=revision)
-    if config and "model_type" in config:
-        return config["model_type"]
-    return None
-
-
 def get_processor(
     processor_name: str,
     *args: Any,
@@ -193,13 +174,6 @@ def get_processor(
         registered_cls_name = get_processor_cls_name_from_config(
             processor_name, revision=revision
         )
-
-        # If HF config doesn't have processor_class, try model type mapping
-        if registered_cls_name is None:
-            model_type = get_model_type_from_config(processor_name, revision=revision)
-            if model_type:
-                registered_cls_name = _MODEL_TYPE_TO_PROCESSOR.get(model_type)
-
         registered_processor_cls = (
             getattr(processors, registered_cls_name, None)
             if registered_cls_name
@@ -244,7 +218,6 @@ def get_processor(
         else:
             raise e
 
-    # Validate processor type
     if not isinstance(processor, processor_cls):
         raise TypeError(
             "Invalid type of HuggingFace processor. "

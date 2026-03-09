@@ -166,19 +166,13 @@ class OpenAISpeechToText(OpenAIServing):
             _ = librosa.get_duration(y=dummy_audio, sr=self.asr_config.sample_rate)
 
             # Warm up mel-spectrogram computation with model-specific parameters
-            from vllm.transformers_utils.processor import cached_processor_from_config
+            from vllm.transformers_utils.processor import (
+                cached_feature_extractor_from_config,
+            )
 
-            processor = cached_processor_from_config(self.model_config)
-            feature_extractor = None
-            if hasattr(processor, "feature_extractor"):
-                feature_extractor = processor.feature_extractor
-            elif hasattr(processor, "audio_processor"):
-                # For models like GraniteSpeech that use audio_processor
-                audio_proc = processor.audio_processor
-                if hasattr(audio_proc, "feature_extractor"):
-                    feature_extractor = audio_proc.feature_extractor
-                # If audio_processor doesn't have feature_extractor,
-                # skip mel-spectrogram warmup for these models
+            # Load feature extractor directly (no need for full processor)
+            # This avoids processor type checking issues with custom tokenizers
+            feature_extractor = cached_feature_extractor_from_config(self.model_config)
 
             if feature_extractor is not None:
                 _ = librosa.feature.melspectrogram(
