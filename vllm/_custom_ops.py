@@ -2672,6 +2672,21 @@ def cp_gather_and_upconvert_fp8_kv_cache(
     )
 
 
+def concat_mla_q(
+    ql_nope: torch.Tensor,
+    q_pe: torch.Tensor,
+    q_out: torch.Tensor,
+) -> None:
+    """Concatenate query nope and rope for MLA/DSA attention.
+
+    Args:
+        ql_nope: Query nope component [num_tokens, num_heads, nope_dim]
+        q_pe: Query rope component [num_tokens, num_heads, rope_dim]
+        q_out: Output tensor [num_tokens, num_heads, nope_dim + rope_dim]
+    """
+    torch.ops._C_cache_ops.concat_mla_q(ql_nope, q_pe, q_out)
+
+
 def indexer_k_quant_and_cache(
     k: torch.Tensor,
     kv_cache: torch.Tensor,
@@ -3106,7 +3121,7 @@ def cpu_attn_get_scheduler_metadata(
     isa: str,
     enable_kv_split: bool,
 ) -> torch.Tensor:
-    sheduler_metadata = torch.ops._C.get_scheduler_metadata(
+    scheduler_metadata = torch.ops._C.get_scheduler_metadata(
         num_reqs,
         num_heads,
         num_kv_heads,
@@ -3119,7 +3134,7 @@ def cpu_attn_get_scheduler_metadata(
         isa,
         enable_kv_split,
     )
-    return sheduler_metadata
+    return scheduler_metadata
 
 
 def cpu_attn_reshape_and_cache(
