@@ -45,6 +45,7 @@ from vllm.v1.engine.input_processor import InputProcessor
 from vllm.v1.engine.output_processor import OutputProcessor, RequestOutputCollector
 from vllm.v1.engine.parallel_sampling import ParentRequest
 from vllm.v1.executor import Executor
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.loggers import (
     StatLoggerFactory,
     StatLoggerManager,
@@ -284,6 +285,11 @@ class AsyncLLM(EngineClient):
             self._supported_tasks = await self.engine_core.get_supported_tasks_async()
 
         return self._supported_tasks
+
+    async def get_kv_cache_config(self) -> KVCacheConfig:
+        if not hasattr(self, "_kv_cache_config"):
+            self._kv_cache_config = await self.engine_core.get_kv_cache_config_async()
+        return self._kv_cache_config
 
     async def add_request(
         self,

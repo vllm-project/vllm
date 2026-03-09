@@ -21,6 +21,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.tasks import SupportedTask
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.input_processor import InputProcessor
+from vllm.v1.kv_cache_interface import KVCacheConfig
 
 if TYPE_CHECKING:
     from vllm.v1.engine import PauseMode
@@ -223,6 +224,10 @@ class EngineClient(ABC):
 
     async def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         """Get supported tasks"""
+        raise NotImplementedError
+
+    async def get_kv_cache_config(self) -> KVCacheConfig:
+        """Return the runtime KV cache configuration."""
         raise NotImplementedError
 
     async def init_weight_transfer_engine(

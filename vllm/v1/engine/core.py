@@ -291,6 +291,9 @@ class EngineCore:
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         return self.model_executor.supported_tasks
 
+    def get_kv_cache_config(self) -> KVCacheConfig:
+        return self.scheduler.kv_cache_config
+
     def add_request(self, request: Request, request_wave: int = 0):
         """Add request to the scheduler.
 
