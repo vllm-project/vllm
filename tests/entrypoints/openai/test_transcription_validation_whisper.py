@@ -370,3 +370,19 @@ async def test_whisper_beam_search_multibeam(mary_had_lamb, whisper_client):
     assert text is not None
     assert len(text) > 0
     assert "mary had a little lamb" in text.lower()
+
+
+@pytest.mark.asyncio
+async def test_stream_with_beams_raises(winning_call, whisper_client):
+    """Test that stream=True + beam search raises bad request for now."""
+    with pytest.raises(openai.BadRequestError):
+        await whisper_client.audio.transcriptions.create(
+            model=MODEL_NAME,
+            file=winning_call,
+            language="en",
+            stream=True,
+            extra_body=dict(
+                use_beam_search=True,
+                n=2,
+            ),
+        )

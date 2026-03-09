@@ -500,6 +500,11 @@ class OpenAISpeechToText(OpenAIServing):
     ) -> T | V | AsyncGenerator[str, None] | ErrorResponse:
         """Base method for speech-to-text operations like transcription and
         translation."""
+        if request.stream and request.use_beam_search:
+            return self.create_error_response(
+                "Streaming is not currently supported with beam search"
+            )
+
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             return error_check_ret
@@ -612,8 +617,7 @@ class OpenAISpeechToText(OpenAIServing):
 
             list_result_generator.append(generator)
 
-        # We don't allow streaming for beam search
-        if request.stream and not request.use_beam_search:
+        if request.stream:
             return stream_generator_method(
                 request, list_result_generator, request_id, request_metadata, duration_s
             )
