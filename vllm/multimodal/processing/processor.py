@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import inspect
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from collections.abc import Callable, Generator, ItemsView, Iterable, Mapping, Sequence
@@ -71,13 +70,7 @@ def _cached_encode(
     *,
     add_special_tokens: bool = True,
 ) -> list[int]:
-    # Handle different tokenizer signatures
-    # Some tokenizers use bos/eos instead of add_special_tokens
-    try:
-        return tokenizer.encode(text, add_special_tokens=add_special_tokens)  # type: ignore[call-arg]
-    except TypeError:
-        # Fallback for tokenizers that use bos/eos parameters
-        return tokenizer.encode(text, bos=add_special_tokens, eos=add_special_tokens)  # type: ignore[call-arg]
+    return tokenizer.encode(text, add_special_tokens=add_special_tokens)
 
 
 @lru_cache(maxsize=2048)
@@ -87,13 +80,7 @@ def _cached_decode(
     *,
     skip_special_tokens: bool = False,
 ) -> str:
-    # Some tokenizers (e.g., TikTokenTokenizer) don't support skip_special_tokens
-    sig = inspect.signature(tokenizer.decode)
-    if "skip_special_tokens" in sig.parameters:
-        return tokenizer.decode(
-            list(token_ids), skip_special_tokens=skip_special_tokens
-        )
-    return tokenizer.decode(list(token_ids))
+    return tokenizer.decode(list(token_ids), skip_special_tokens=skip_special_tokens)
 
 
 def _seq2text(
@@ -125,13 +112,7 @@ def _seq2tokens(
             raise ValueError("You cannot encode text when `skip_tokenizer_init=True`")
 
         if not use_cache:
-            # Handle different tokenizer signatures
-            # Some tokenizers use bos/eos instead of add_special_tokens
-            try:
-                return tokenizer.encode(seq, add_special_tokens=False)  # type: ignore[call-arg]
-            except TypeError:
-                # Fallback for tokenizers that use bos/eos parameters
-                return tokenizer.encode(seq, bos=False, eos=False)  # type: ignore[call-arg]
+            return tokenizer.encode(seq, add_special_tokens=False)
 
         return _cached_encode(tokenizer, seq, add_special_tokens=False)
 
