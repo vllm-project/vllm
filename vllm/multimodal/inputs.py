@@ -1090,6 +1090,12 @@ class MultiModalInputs(_InputOptions):
     `prompt_token_ids`.
     """
 
+    mm_preprocess_time_s: NotRequired[float]
+    """Time in seconds spent in multimodal preprocessing."""
+
+    mm_cache_time_s: NotRequired[float]
+    """Time in seconds spent in multimodal cache operations."""
+
 
 def mm_inputs(
     prompt_token_ids: list[int],

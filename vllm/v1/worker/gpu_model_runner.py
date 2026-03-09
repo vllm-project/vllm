@@ -640,6 +640,11 @@ class GPUModelRunner(
         self.encoder_timing_registry: dict[str, EncoderTimingStats] = {}
         self._encoder_timing_lock = threading.Lock()
 
+        # Non-blocking CUDA events for always-on MM encoder timing.
+        self._mm_encoder_events: (
+            tuple[torch.cuda.Event, torch.cuda.Event, set[str]] | None
+        ) = None
+
         # Persistent buffers for CUDA graphs.
         self.input_ids = self._make_buffer(self.max_num_tokens, dtype=torch.int32)
         self.positions = self._make_buffer(self.max_num_tokens, dtype=torch.int64)
@@ -2473,6 +2478,10 @@ class GPUModelRunner(
         if not mm_kwargs:
             return []
 
+        # Non-blocking CUDA event for encoder timing (always-on).
+        mm_start_event = torch.cuda.Event(enable_timing=True)
+        mm_start_event.record()
+
         should_time = bool(
             self.observability_config
             and self.observability_config.enable_mm_processor_stats
@@ -2613,6 +2622,12 @@ class GPUModelRunner(
             self.encoder_cache[mm_hash] = output
             logger.debug("Finish execute for mm hash %s", mm_hash)
             self.maybe_save_ec_to_connector(self.encoder_cache, mm_hash)
+
+        # Store events for deferred readback in sample_tokens().
+        mm_end_event = torch.cuda.Event(enable_timing=True)
+        mm_end_event.record()
+        mm_req_ids = set(scheduler_output.scheduled_encoder_inputs.keys())
+        self._mm_encoder_events = (mm_start_event, mm_end_event, mm_req_ids)
 
         return encoder_outputs
 
@@ -4009,6 +4024,23 @@ class GPUModelRunner(
                 else:
                     logger.error("RoutedExpertsCapturer not initialized.")
 
+            # Read deferred MM encoder timing (CUDA events).
+            # By this point the full model forward pass has completed,
+            # so end_evt.synchronize() returns immediately (no GPU wait).
+            mm_encoder_time_s: dict[str, float] | None = None
+            if self._mm_encoder_events is not None:
+                start_evt, end_evt, encoder_req_ids = self._mm_encoder_events
+                end_evt.synchronize()
+                total_ms = start_evt.elapsed_time(end_evt)
+                num_reqs = len(encoder_req_ids)
+                per_req_s = (
+                    (total_ms / 1000.0 / num_reqs) if num_reqs else 0.0
+                )
+                mm_encoder_time_s = {
+                    req_id: per_req_s for req_id in encoder_req_ids
+                }
+                self._mm_encoder_events = None
+
             output = ModelRunnerOutput(
                 req_ids=req_ids_output_copy,
                 req_id_to_index=req_id_to_index_output_copy,
@@ -4021,6 +4053,7 @@ class GPUModelRunner(
                 else None,
                 num_nans_in_logits=num_nans_in_logits,
                 cudagraph_stats=cudagraph_stats,
+                mm_encoder_time_s=mm_encoder_time_s,
             )
 
         if not self.use_async_scheduling:

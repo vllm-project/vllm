@@ -337,6 +337,10 @@ class InputProcessor:
                     )
                 )
 
+        # Extract MM timing metrics from processing results.
+        mm_preprocess_time_s = decoder_inputs.get("mm_preprocess_time_s", 0.0)
+        mm_cache_time_s = decoder_inputs.get("mm_cache_time_s", 0.0)
+
         return EngineCoreRequest(
             request_id=request_id,
             prompt_token_ids=prompt_token_ids,
@@ -351,6 +355,8 @@ class InputProcessor:
             data_parallel_rank=data_parallel_rank,
             trace_headers=trace_headers,
             resumable=resumable,
+            mm_preprocess_time_s=mm_preprocess_time_s,
+            mm_cache_time_s=mm_cache_time_s,
         )
 
     def _validate_prompt_len(

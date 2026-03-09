@@ -175,6 +175,10 @@ class RequestState:
 
         self.stats = RequestStateStats(arrival_time=arrival_time) if log_stats else None
 
+        # Multimodal timing metrics (set externally).
+        self.mm_preprocess_time_s: float = 0.0
+        self.mm_cache_time_s: float = 0.0
+
         # Stream Interval
         self.stream_interval = stream_interval
         self.sent_tokens_offset = 0  # Offset of sent tokens
@@ -243,7 +247,7 @@ class RequestState:
             output_kind = request.pooling_params.output_kind
 
         assert request.external_req_id is not None
-        return cls(
+        state = cls(
             request_id=request.request_id,
             external_req_id=request.external_req_id,
             parent_req=parent_req,
@@ -265,6 +269,15 @@ class RequestState:
             stream_interval=stream_interval,
             stream_input=request.resumable,
         )
+
+        # Forward MM timing from request to state (and stats).
+        state.mm_preprocess_time_s = request.mm_preprocess_time_s
+        state.mm_cache_time_s = request.mm_cache_time_s
+        if state.stats is not None:
+            state.stats.mm_preprocess_time_s = request.mm_preprocess_time_s
+            state.stats.mm_cache_time_s = request.mm_cache_time_s
+
+        return state
 
     def make_request_output(
         self,

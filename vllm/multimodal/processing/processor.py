@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import time
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from collections.abc import Callable, Generator, ItemsView, Iterable, Mapping, Sequence
@@ -1433,7 +1434,10 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
         _, passthrough_data = self._get_hf_mm_data(inputs.mm_data_items)
         if cache is None or passthrough_data:
+            self._last_cache_time_s = 0.0
             return self._apply_hf_processor(inputs, timing_ctx)
+
+        _cache_start = time.monotonic()
 
         with timing_ctx.record("get_mm_hashes"):
             mm_hashes = inputs.get_mm_hashes(self.info.model_id)
@@ -1444,6 +1448,8 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                 mm_data_items=inputs.mm_data_items,
                 mm_hashes=mm_hashes,
             )
+
+        _cache_lookup_time = time.monotonic() - _cache_start
 
         # NOTE: `prompt` does not correspond to `mm_missing_data_items`,
         # so we can't apply prompt updates until the new multimodal
@@ -1474,6 +1480,8 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             mm_missing_kwargs,
         )
 
+        _cache_merge_start = time.monotonic()
+
         with timing_ctx.record("merge_mm_kwargs"):
             mm_kwargs, mm_prompt_updates = self._merge_mm_kwargs(
                 cache,
@@ -1482,6 +1490,9 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                 mm_missing_kwargs=mm_missing_kwargs,
                 mm_missing_prompt_updates=mm_missing_prompt_updates,
             )
+
+        _cache_merge_time = time.monotonic() - _cache_merge_start
+        self._last_cache_time_s = _cache_lookup_time + _cache_merge_time
 
         mm_info = MultiModalProcessingInfo(
             kwargs=mm_kwargs,
@@ -1681,12 +1692,19 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             for modality, placeholders in mm_placeholders.items()
         }
 
-        return mm_inputs(
+        result = mm_inputs(
             prompt_token_ids=prompt_ids,
             mm_kwargs=mm_info.kwargs,
             mm_hashes=mm_info.hashes,
             mm_placeholders=mm_placeholder_ranges,
         )
+
+        cache_time = getattr(self, "_last_cache_time_s", 0.0)
+        if cache_time > 0.0:
+            result["mm_cache_time_s"] = cache_time
+            self._last_cache_time_s = 0.0
+
+        return result
 
 
 class EncDecMultiModalProcessor(BaseMultiModalProcessor[_I]):

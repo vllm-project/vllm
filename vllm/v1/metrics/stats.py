@@ -218,6 +218,11 @@ class RequestStateStats:
     # Track if this request is corrupted (NaNs in logits)
     is_corrupted: bool = False
 
+    # Multimodal timing metrics (seconds).
+    mm_preprocess_time_s: float = 0.0
+    mm_cache_time_s: float = 0.0
+    mm_encoder_time_s: float = 0.0
+
 
 @dataclass
 class FinishedRequestStats:
@@ -362,6 +367,10 @@ class IterationStats:
             and output.num_nans_in_logits > 0
         ):
             req_stats.is_corrupted = True
+
+        # Propagate MM encoder timing.
+        if output.mm_encoder_time_s > 0.0:
+            req_stats.mm_encoder_time_s = output.mm_encoder_time_s
 
         # Process request-level engine core events
         if output.events is not None:

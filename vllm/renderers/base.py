@@ -560,8 +560,14 @@ class BaseRenderer(ABC, Generic[_T]):
         )
         mm_timing_ctx = self._mm_timing_registry.get(mm_req_id)
 
+        _preprocess_start = time.monotonic()
+
         with set_default_torch_num_threads():
             mm_inputs = mm_processor.apply(mm_processor_inputs, mm_timing_ctx)
+
+        _preprocess_elapsed = time.monotonic() - _preprocess_start
+        if _preprocess_elapsed > 0.0:
+            mm_inputs["mm_preprocess_time_s"] = _preprocess_elapsed
 
         self.update_mm_cache_stats()
 
