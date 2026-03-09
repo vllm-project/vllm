@@ -1116,7 +1116,7 @@ def _step_until_done(
 
 
 def _num_waiting_requests(scheduler: Scheduler) -> int:
-    return len(scheduler.waiting) + len(scheduler.blocked_waiting)
+    return len(scheduler.waiting) + len(scheduler.skipped_waiting)
 
 
 def _step_until_kv_transfer_finished(scheduler: Scheduler, req_ids: list[str]):
@@ -1610,7 +1610,7 @@ def test_kv_connector_handles_preemption(is_async, use_ec_connector, ec_role):
     if is_async:
         waiting_req_ids = [
             req.request_id
-            for req in scheduler.blocked_waiting
+            for req in scheduler.skipped_waiting
             if req.status == RequestStatus.WAITING_FOR_REMOTE_KVS
         ]
         assert len(waiting_req_ids) == 1
@@ -2448,7 +2448,7 @@ def test_schedule_skip_tokenizer_init_structured_output_request():
     assert len(output.scheduled_new_reqs) == 0
     assert len(scheduler.running) == 0
     assert len(scheduler.waiting) == 0
-    assert len(scheduler.blocked_waiting) == 1
+    assert len(scheduler.skipped_waiting) == 1
 
 
 @pytest.mark.parametrize(
@@ -3637,7 +3637,7 @@ def test_prepend_skipped_requests_order():
         req.status = RequestStatus.WAITING_FOR_REMOTE_KVS
     scheduler.waiting.remove_requests(expected_waiting_reqs[:2])
     for req in expected_waiting_reqs[:2]:
-        scheduler.blocked_waiting.add_request(req)
+        scheduler.skipped_waiting.add_request(req)
 
     # schedule step
     # expect the first 2 waiting to be skipped, the third running,
@@ -3648,7 +3648,7 @@ def test_prepend_skipped_requests_order():
     expected_waiting_reqs.pop(2)
 
     # verify waiting order is preserved
-    waiting_reqs = list(scheduler.blocked_waiting) + list(scheduler.waiting)
+    waiting_reqs = list(scheduler.skipped_waiting) + list(scheduler.waiting)
     assert waiting_reqs == expected_waiting_reqs
 
 
@@ -3672,9 +3672,9 @@ def test_remote_kv_promotion_keeps_fcfs_with_fsm_prefix():
     # simulate a remote-KV request that is ready to be promoted now.
     req_remote.status = RequestStatus.WAITING_FOR_REMOTE_KVS
     scheduler.waiting.remove_requests([req_fsm_1, req_fsm_2, req_remote])
-    scheduler.blocked_waiting.add_request(req_fsm_1)
-    scheduler.blocked_waiting.add_request(req_fsm_2)
-    scheduler.blocked_waiting.add_request(req_remote)
+    scheduler.skipped_waiting.add_request(req_fsm_1)
+    scheduler.skipped_waiting.add_request(req_fsm_2)
+    scheduler.skipped_waiting.add_request(req_remote)
     scheduler.finished_recving_kv_req_ids.add(req_remote.request_id)
     scheduler._update_waiting_for_remote_kv = Mock()
 

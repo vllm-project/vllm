@@ -19,7 +19,7 @@ pytestmark = pytest.mark.cpu_test
 
 
 def _num_waiting_requests(scheduler) -> int:
-    return len(scheduler.waiting) + len(scheduler.blocked_waiting)
+    return len(scheduler.waiting) + len(scheduler.skipped_waiting)
 
 
 def test_basic_lifecycle():
@@ -59,7 +59,7 @@ def test_basic_lifecycle():
 
     # Req waiting for KVs with no computed/scheduled toks ...
     assert _num_waiting_requests(scheduler) == 1
-    assert request in scheduler.blocked_waiting
+    assert request in scheduler.skipped_waiting
     assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
     assert request.num_computed_tokens == NUM_TOKENS
 
