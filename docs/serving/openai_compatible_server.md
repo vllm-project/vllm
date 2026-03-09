@@ -84,7 +84,7 @@ In order for the language model to support chat protocol, vLLM requires the mode
 a chat template in its tokenizer configuration. The chat template is a Jinja2 template that
 specifies how roles, messages, and other chat-specific tokens are encoded in the input.
 
-An example chat template for `NousResearch/Meta-Llama-3-8B-Instruct` can be found [here](https://github.com/meta-llama/llama3?tab=readme-ov-file#instruction-tuned-models)
+An example chat template for `NousResearch/Meta-Llama-3-8B-Instruct` can be found [here](https://llama.com/docs/model-cards-and-prompt-formats/meta-llama-3/#prompt-template-for-meta-llama-3)
 
 Some models do not provide a chat template even though they are instruction/chat fine-tuned. For those models,
 you can manually specify their chat template in the `--chat-template` parameter with the file path to the chat
@@ -190,7 +190,7 @@ vllm serve NousResearch/Meta-Llama-3-8B-Instruct --enable-offline-docs
 Our Completions API is compatible with [OpenAI's Completions API](https://platform.openai.com/docs/api-reference/completions);
 you can use the [official OpenAI Python client](https://github.com/openai/openai-python) to interact with it.
 
-Code example: [examples/online_serving/openai_completion_client.py](../../examples/online_serving/openai_completion_client.py)
+Code example: [examples/basic/online_serving/openai_completion_client.py](../../examples/basic/online_serving/openai_completion_client.py)
 
 #### Extra parameters
 
@@ -221,7 +221,7 @@ see our [Multimodal Inputs](../features/multimodal_inputs.md) guide for more inf
 
 - *Note: `image_url.detail` parameter is not supported.*
 
-Code example: [examples/online_serving/openai_chat_completion_client.py](../../examples/online_serving/openai_chat_completion_client.py)
+Code example: [examples/basic/online_serving/openai_chat_completion_client.py](../../examples/basic/online_serving/openai_chat_completion_client.py)
 
 #### Extra parameters
 
@@ -439,6 +439,8 @@ you can use the [official OpenAI Python client](https://github.com/openai/openai
 
 Code example: [examples/online_serving/openai_transcription_client.py](../../examples/online_serving/openai_transcription_client.py)
 
+NOTE: beam search is currently supported in the transcriptions endpoint for encoder-decoder multimodal models, e.g., whisper, but highly inefficient as work for handling the encoder/decoder cache is actively ongoing. This is an active point of ongoing optimization and will be handled properly in the very near future.
+
 #### API Enforced Limits
 
 Set the maximum audio file size (in MB) that VLLM will accept, via the
@@ -596,7 +598,7 @@ Audio must be sent as base64-encoded PCM16 audio at 16kHz sample rate, mono chan
 #### Client → Server Events
 
 | Event | Description |
-|-------|-------------|
+| ----- | ----------- |
 | `input_audio_buffer.append` | Send base64-encoded audio chunk: `{"type": "input_audio_buffer.append", "audio": "<base64>"}` |
 | `input_audio_buffer.commit` | Trigger transcription processing or end: `{"type": "input_audio_buffer.commit", "final": bool}` |
 | `session.update` | Configure session: `{"type": "session.update", "model": "model-name"}` |
@@ -604,7 +606,7 @@ Audio must be sent as base64-encoded PCM16 audio at 16kHz sample rate, mono chan
 #### Server → Client Events
 
 | Event | Description |
-|-------|-------------|
+| ----- | ----------- |
 | `session.created` | Connection established with session ID and timestamp |
 | `transcription.delta` | Incremental transcription text: `{"type": "transcription.delta", "delta": "text"}` |
 | `transcription.done` | Final transcription with usage stats |

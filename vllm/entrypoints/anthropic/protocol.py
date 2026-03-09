@@ -34,7 +34,7 @@ class AnthropicUsage(BaseModel):
 class AnthropicContentBlock(BaseModel):
     """Content block in message"""
 
-    type: Literal["text", "image", "tool_use", "tool_result"]
+    type: Literal["text", "image", "tool_use", "tool_result", "thinking"]
     text: str | None = None
     # For image content
     source: dict[str, Any] | None = None
@@ -45,6 +45,9 @@ class AnthropicContentBlock(BaseModel):
     input: dict[str, Any] | None = None
     content: str | list[dict[str, Any]] | None = None
     is_error: bool | None = None
+    # For thinking content
+    thinking: str | None = None
+    signature: str | None = None
 
 
 class AnthropicMessage(BaseModel):
@@ -74,7 +77,7 @@ class AnthropicTool(BaseModel):
 class AnthropicToolChoice(BaseModel):
     """Tool Choice definition"""
 
-    type: Literal["auto", "any", "tool"]
+    type: Literal["auto", "any", "tool", "none"]
     name: str | None = None
 
     @model_validator(mode="after")
@@ -118,9 +121,14 @@ class AnthropicMessagesRequest(BaseModel):
 class AnthropicDelta(BaseModel):
     """Delta for streaming responses"""
 
-    type: Literal["text_delta", "input_json_delta"] | None = None
+    type: (
+        Literal["text_delta", "input_json_delta", "thinking_delta", "signature_delta"]
+        | None
+    ) = None
     text: str | None = None
+    thinking: str | None = None
     partial_json: str | None = None
+    signature: str | None = None
 
     # Message delta
     stop_reason: (
@@ -167,3 +175,33 @@ class AnthropicMessagesResponse(BaseModel):
     def model_post_init(self, __context):
         if not self.id:
             self.id = f"msg_{int(time.time() * 1000)}"
+
+
+class AnthropicContextManagement(BaseModel):
+    """Context management information for token counting."""
+
+    original_input_tokens: int
+
+
+class AnthropicCountTokensRequest(BaseModel):
+    """Anthropic messages.count_tokens request"""
+
+    model: str
+    messages: list[AnthropicMessage]
+    system: str | list[AnthropicContentBlock] | None = None
+    tool_choice: AnthropicToolChoice | None = None
+    tools: list[AnthropicTool] | None = None
+
+    @field_validator("model")
+    @classmethod
+    def validate_model(cls, v):
+        if not v:
+            raise ValueError("Model is required")
+        return v
+
+
+class AnthropicCountTokensResponse(BaseModel):
+    """Anthropic messages.count_tokens response"""
+
+    input_tokens: int
+    context_management: AnthropicContextManagement | None = None
