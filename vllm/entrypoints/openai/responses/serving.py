@@ -116,6 +116,7 @@ from vllm.parser import ParserManager
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.tokenizers import TokenizerLike
 from vllm.utils import random_uuid
+from vllm.utils.collection_utils import as_list
 
 logger = init_logger(__name__)
 
@@ -1275,18 +1276,20 @@ class OpenAIServingResponses(OpenAIServing):
             assert isinstance(ctx, SimpleContext)
             if ctx.last_output is None:
                 continue
+            if reasoning_parser:
+                reasoning_ended = reasoning_parser.is_reasoning_end(
+                    ctx.last_output.prompt_token_ids
+                )
             if ctx.last_output.outputs:
                 output = ctx.last_output.outputs[0]
                 # finish_reason='error' indicates a retryable error
                 self._raise_if_error(output.finish_reason, request.request_id)
                 delta_text = output.text
-                delta_token_ids = list(output.token_ids)
+                delta_token_ids = as_list(output.token_ids)
                 current_text = previous_text + delta_text
                 current_token_ids = previous_token_ids + delta_token_ids
 
                 if reasoning_parser and tool_parser:
-                    # Both reasoning and tool calls: reasoning
-                    # first, then tool calls after reasoning ends.
                     if not reasoning_ended:
                         delta_message = reasoning_parser.extract_reasoning_streaming(
                             previous_text=previous_text,
@@ -1298,9 +1301,6 @@ class OpenAIServingResponses(OpenAIServing):
                         )
                         if reasoning_parser.is_reasoning_end(delta_token_ids):
                             reasoning_ended = True
-                            # Reset text/token state so the tool
-                            # parser sees a fresh stream after
-                            # reasoning.
                             current_token_ids = reasoning_parser.extract_content_ids(
                                 delta_token_ids
                             )
@@ -1683,7 +1683,7 @@ class OpenAIServingResponses(OpenAIServing):
                     assert pm.tool_calls[0].function is not None, (
                         "Tool call without function is not supported"
                     )
-                    parts.append(pm.tool_calls[0].function.arguments)
+                    parts.append(pm.tool_calls[0].function.arguments or "")
 
             tool_call_arguments = "".join(parts)
             if tool_call_arguments:
