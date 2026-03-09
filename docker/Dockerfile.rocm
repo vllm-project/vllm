@@ -418,11 +418,6 @@ RUN --mount=type=bind,from=export_vllm,src=/,target=/install \
     && pip uninstall -y vllm \
     && uv pip install --system *.whl
 
-# Install DeepEP wheel
-RUN --mount=type=bind,from=build_deep,src=/app/deep_install,target=/deep_install \
-    uv pip install --system /deep_install/*.whl
-COPY --from=build_deep /opt/rocshmem /opt/rocshmem
-
 ARG COMMON_WORKDIR
 ARG BASE_IMAGE
 
