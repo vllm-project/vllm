@@ -196,7 +196,6 @@ __forceinline__ __device__ u32x8_t ld256_cs(const u32x8_t* addr) {
   return val;
 #else
   assert(false && "ld256_cs requires SM100+ with CUDA 12.9+");
-  return {};
 #endif
 }
 
@@ -211,23 +210,51 @@ __forceinline__ __device__ void st256_cs(u32x8_t* addr, u32x8_t val) {
 #endif
 }
 
-// 32-bit cache-streaming (.cs) load / store  — SM100+ only.
+// 32-bit load / store.
+__device__ __forceinline__ int ld32(const int* addr) { return __ldg(addr); }
+
+__device__ __forceinline__ void st32(int* addr, int val) { *addr = val; }
+
+// 32-bit cache-streaming (.cs) load / store.
+// Falls back to ld32/st32 on ROCm (no .cs hint).
 __forceinline__ __device__ int ld32_cs(const int* addr) {
-#if VLLM_256B_PTX_ENABLED
   int val;
+#ifndef USE_ROCM
   asm volatile("ld.global.cs.b32 %0, [%1];" : "=r"(val) : "l"(addr));
-  return val;
 #else
-  assert(false && "ld32_cs requires SM100+ with CUDA 12.9+");
-  return 0;
+  val = ld32(addr);
 #endif
+  return val;
 }
 
 __forceinline__ __device__ void st32_cs(int* addr, int val) {
-#if VLLM_256B_PTX_ENABLED
+#ifndef USE_ROCM
   asm volatile("st.global.cs.b32 [%0], %1;" ::"l"(addr), "r"(val));
 #else
-  assert(false && "st32_cs requires SM100+ with CUDA 12.9+");
+  st32(addr, val);
+#endif
+}
+
+// 128-bit cache-streaming (.cs) load / store.
+// Falls back to ld128/st128 on ROCm (no .cs hint).
+__forceinline__ __device__ int4 ld128_cs(const int4* addr) {
+  int4 val;
+#ifndef USE_ROCM
+  asm volatile("ld.global.cs.v4.u32 {%0,%1,%2,%3}, [%4];"
+               : "=r"(val.x), "=r"(val.y), "=r"(val.z), "=r"(val.w)
+               : "l"(addr));
+#else
+  ld128(val, addr);
+#endif
+  return val;
+}
+
+__forceinline__ __device__ void st128_cs(int4* addr, int4 val) {
+#ifndef USE_ROCM
+  asm volatile("st.global.cs.v4.u32 [%0], {%1,%2,%3,%4};" ::"l"(addr),
+               "r"(val.x), "r"(val.y), "r"(val.z), "r"(val.w));
+#else
+  st128(val, addr);
 #endif
 }
 
@@ -260,7 +287,7 @@ __device__ __forceinline__ void ld256_cg_or_zero(u32x8_t& val, const void* ptr,
 
 __device__ __forceinline__ void ld128_cg_or_zero(uint4& val, const void* ptr,
                                                  bool pred) {
-#if VLLM_256B_PTX_ENABLED
+#ifndef USE_ROCM
   uint32_t r0, r1, r2, r3;
 
   asm volatile(
@@ -278,7 +305,7 @@ __device__ __forceinline__ void ld128_cg_or_zero(uint4& val, const void* ptr,
 
   val = uint4{r0, r1, r2, r3};
 #else
-  assert(false && "ld128_cg_or_zero requires SM100+ with CUDA 12.9+");
+  assert(false && "ld128_cg_or_zero is not supported on ROCm");
 #endif
 }
 
