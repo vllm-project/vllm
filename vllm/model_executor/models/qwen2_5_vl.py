@@ -195,6 +195,8 @@ class Qwen2_5_VLVideoPixelInputs(TensorSchema):
         - second_per_grid_ts: The video time interval (in seconds) for each
           grid along the temporal dimension in the 3D position IDs. Returned
           when `videos` is not `None`.
+        - timestamps: List of timestamp values (in seconds) for each frame
+          after merging. Length equals the temporal dimension after merging.
     """
 
     type: Literal["pixel_values_videos"]
@@ -214,6 +216,8 @@ class Qwen2_5_VLVideoPixelInputs(TensorSchema):
         TensorShape("nv"),
     ]
 
+    timestamps: list[list[float]] | None = None
+
 
 class Qwen2_5_VLVideoEmbeddingInputs(TensorSchema):
     """
@@ -232,6 +236,8 @@ class Qwen2_5_VLVideoEmbeddingInputs(TensorSchema):
         - second_per_grid_ts: The video time interval (in seconds) for each
           grid along the temporal dimension in the 3D position IDs. Returned
           when `videos` is not `None`.
+        - timestamps: List of timestamp values (in seconds) for each frame
+          after merging. Length equals the temporal dimension after merging.
     """
 
     type: Literal["video_embeds"]
@@ -250,6 +256,7 @@ class Qwen2_5_VLVideoEmbeddingInputs(TensorSchema):
         torch.Tensor | None,
         TensorShape("nv"),
     ] = None
+    timestamps: list[list[float]] | None = None
 
 
 Qwen2_5_VLVideoInputs: TypeAlias = (
@@ -357,6 +364,7 @@ class Qwen2_5_VisionAttention(nn.Module):
         rotary_pos_emb_cos: torch.Tensor,
         rotary_pos_emb_sin: torch.Tensor,
         max_seqlen: torch.Tensor,  # Only used for Flash Attention
+        sequence_lengths: torch.Tensor,  # Only used for FlashInfer CuDNN backend
     ) -> torch.Tensor:
         # [s, b, c] --> [s, b, head * 3 * head_dim]
         x, _ = self.qkv(x)
@@ -398,6 +406,7 @@ class Qwen2_5_VisionAttention(nn.Module):
             value=v,
             cu_seqlens=cu_seqlens,
             max_seqlen=max_seqlen,
+            sequence_lengths=sequence_lengths,
         )
 
         context_layer = einops.rearrange(
@@ -463,6 +472,7 @@ class Qwen2_5_VisionBlock(nn.Module):
             rotary_pos_emb_cos=rotary_pos_emb_cos,
             rotary_pos_emb_sin=rotary_pos_emb_sin,
             max_seqlen=max_seqlen,
+            sequence_lengths=None,
         )
         x_fused_norm, residual = self.norm2(x, residual=x_attn)
         x = residual + self.mlp(x_fused_norm)

@@ -15,7 +15,7 @@ from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.utils import report_usage_stats
 from vllm.v1.worker.gpu_worker import Worker, init_worker_distributed_environment
 from vllm.v1.worker.workspace import init_workspace_manager
-from vllm.v1.worker.xpu_model_runner import XPUModelRunner
+from vllm.v1.worker.xpu_model_runner import XPUModelRunner, XPUModelRunnerV2
 
 from .utils import request_memory
 
@@ -62,7 +62,7 @@ class XPUWorker(Worker):
             self.device = torch.device(f"xpu:{self.local_rank}")
             current_platform.set_device(self.device)
             current_platform.check_if_supports_dtype(self.model_config.dtype)
-            torch.xpu.empty_cache()
+            torch.accelerator.empty_cache()
             self.init_gpu_memory = torch.xpu.get_device_properties(
                 self.local_rank
             ).total_memory
@@ -90,7 +90,7 @@ class XPUWorker(Worker):
 
         # Now take memory snapshot after NCCL is initialized
         gc.collect()
-        torch.xpu.empty_cache()
+        torch.accelerator.empty_cache()
 
         # take current memory snapshot
         self.init_snapshot = init_snapshot = MemorySnapshot(device=self.device)
@@ -105,7 +105,8 @@ class XPUWorker(Worker):
         init_workspace_manager(self.device, num_ubatches)
 
         # Construct the model runner
-        self.model_runner = XPUModelRunner(  # type: ignore
+        model_runner = XPUModelRunnerV2 if self.use_v2_model_runner else XPUModelRunner
+        self.model_runner = model_runner(  # type: ignore
             self.vllm_config, self.device
         )
 

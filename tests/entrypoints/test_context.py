@@ -236,6 +236,44 @@ def test_reasoning_tokens_counting(mock_parser):
     assert context.num_output_tokens == 4
 
 
+def test_preamble_tokens_not_counted_as_reasoning(mock_parser):
+    """Preambles (commentary with no recipient) are visible user text,
+    not hidden reasoning. They must NOT inflate num_reasoning_tokens."""
+    context = HarmonyContext(messages=[], available_tools=[])
+
+    mock_parser.current_channel = "commentary"
+    mock_parser.current_recipient = None  # preamble
+
+    mock_output = create_mock_request_output(
+        prompt_token_ids=[1, 2, 3],
+        output_token_ids=[4, 5, 6],
+        num_cached_tokens=0,
+    )
+    context.append_output(mock_output)
+
+    assert context.num_reasoning_tokens == 0
+    assert context.num_output_tokens == 3
+
+
+def test_commentary_with_recipient_counted_as_reasoning(mock_parser):
+    """Commentary directed at a tool (recipient != None) is hidden from
+    the user, so it should still count as reasoning tokens."""
+    context = HarmonyContext(messages=[], available_tools=[])
+
+    mock_parser.current_channel = "commentary"
+    mock_parser.current_recipient = "python"
+
+    mock_output = create_mock_request_output(
+        prompt_token_ids=[1, 2, 3],
+        output_token_ids=[4, 5, 6],
+        num_cached_tokens=0,
+    )
+    context.append_output(mock_output)
+
+    assert context.num_reasoning_tokens == 3
+    assert context.num_output_tokens == 3
+
+
 def test_zero_tokens_edge_case():
     """Test behavior with all zero token counts."""
     context = HarmonyContext(messages=[], available_tools=[])

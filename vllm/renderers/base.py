@@ -75,6 +75,7 @@ class BaseRenderer(ABC, Generic[_T]):
 
         self.config = config
         self.model_config = config.model_config
+        self.api_process_rank = config.parallel_config._api_process_rank
 
         self.tokenizer = tokenizer
 
@@ -156,6 +157,56 @@ class BaseRenderer(ABC, Generic[_T]):
 
         if self._mm_cache_stats is not None:
             self._mm_cache_stats.reset = True
+
+    def warmup(self, chat_params: ChatParams) -> None:
+        """
+        Warm up this renderer to avoid first-request latency.
+
+        For chat requests:
+        - Jinja2 template compilation
+
+        For multi-modal requests:
+        - Importing libraries such as librosa triggers JIT compilation.
+        """
+        try:
+            logger.info("Warming up chat template processing...")
+            start_time = time.perf_counter()
+
+            self.render_chat([[{"role": "user", "content": "warmup"}]], chat_params)
+
+            elapsed = time.perf_counter() - start_time
+            logger.info("Chat template warmup completed in %.3fs", elapsed)
+        except Exception:
+            logger.exception("Chat template warmup failed")
+
+        if self.mm_processor:
+            from vllm.multimodal.processing import TimingContext
+
+            model_config = self.model_config
+            mm_config = model_config.get_multimodal_config()
+            processor = self.mm_processor
+            mm_limits = processor.info.allowed_mm_limits
+
+            try:
+                logger.info("Warming up multi-modal processing...")
+                start_time = time.perf_counter()
+
+                processor_inputs = processor.dummy_inputs.get_dummy_processor_inputs(
+                    seq_len=model_config.max_model_len,
+                    mm_counts=dict.fromkeys(mm_limits, 1),
+                    mm_options=mm_config.limit_per_prompt,
+                )
+                _ = processor.apply(
+                    processor_inputs,
+                    timing_ctx=TimingContext(enabled=False),
+                )
+
+                elapsed = time.perf_counter() - start_time
+                logger.info("Multi-modal warmup completed in %.3fs", elapsed)
+            except Exception:
+                logger.exception("Multi-modal warmup failed")
+            finally:
+                self.clear_mm_cache()
 
     def shutdown(self) -> None:
         mm_processor_cache = self.mm_processor_cache
@@ -539,7 +590,7 @@ class BaseRenderer(ABC, Generic[_T]):
         from vllm.multimodal.parse import parse_mm_uuids
         from vllm.multimodal.processing import ProcessorInputs as MMProcessorInputs
 
-        mm_req_id = f"renderer-mm-{self._mm_req_counter.inc(1)}"
+        mm_req_id = f"renderer{self.api_process_rank}-mm-{self._mm_req_counter.inc(1)}"
 
         mm_processor = self.get_mm_processor()
 
