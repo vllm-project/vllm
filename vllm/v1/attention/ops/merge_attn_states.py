@@ -14,6 +14,7 @@ def merge_attn_states(
     suffix_lse: torch.Tensor,
     output_lse: torch.Tensor | None = None,
     prefill_tokens_with_context: int | None = None,
+    output_scale: torch.Tensor | None = None,
 ) -> None:
     """Merge partial attention outputs from prefix (KV cache) and suffix
     (new tokens) into a single output tensor using the log-sum-exp (LSE)
@@ -41,27 +42,31 @@ def merge_attn_states(
             >= this value are decode or context-free prefill tokens whose
             output is taken directly from suffix_output. If None, all tokens
             are treated as having context.
+        output_scale: Optional scalar tensor for FP8 static quantization.
+            When provided, output must be FP8 dtype.
     """
 
     # NOTE(DefTruth): Currently, custom merge_attn_states CUDA kernel
-    # does not support FP8 dtype, fallback to use Triton kernel.
-    def supported_dtypes(o: torch.Tensor) -> bool:
-        return o.dtype in [torch.float32, torch.half, torch.bfloat16]
+    # does not support FP8 dtype for inputs, fallback to use Triton kernel.
+    # However, when output_scale is provided, the inputs are still BF16/FP16
+    # and the output is FP8 — both CUDA and Triton support this.
+    def supported_dtypes(prefix: torch.Tensor) -> bool:
+        return prefix.dtype in [torch.float32, torch.half, torch.bfloat16]
 
     # NOTE(DefTruth): Currently, custom merge_attn_states CUDA
     # kernel load/store 128b(16 bytes) per memory issue within
     # thread. Namely, the headsize(headdim) must be multiple of
-    # pack_size (float32 -> 4, half/bfloat16 -> 8).
-    def supported_headdim(o: torch.Tensor) -> bool:
-        headdim = o.shape[2]  # [NUM_TOKENS, NUM_HEADS, HEAD_SIZE]
-        if o.dtype == torch.float32:
+    # pack_size based on input dtype (float32 -> 4, half/bfloat16 -> 8).
+    def supported_headdim(prefix: torch.Tensor) -> bool:
+        headdim = prefix.shape[2]  # [NUM_TOKENS, NUM_HEADS, HEAD_SIZE]
+        if prefix.dtype == torch.float32:
             return headdim % 4 == 0
         return headdim % 8 == 0
 
     if (
         current_platform.is_cuda()
-        and supported_dtypes(output)
-        and supported_headdim(output)
+        and supported_dtypes(prefix_output)
+        and supported_headdim(prefix_output)
     ):
         from vllm._custom_ops import merge_attn_states
 
@@ -73,9 +78,12 @@ def merge_attn_states(
             suffix_lse,
             output_lse,
             prefill_tokens_with_context,
+            output_scale,
         )
     else:
-        from vllm.v1.attention.ops.triton_merge_attn_states import merge_attn_states
+        from vllm.v1.attention.ops.triton_merge_attn_states import (
+            merge_attn_states,
+        )
 
         return merge_attn_states(
             output,
@@ -85,4 +93,5 @@ def merge_attn_states(
             suffix_lse,
             output_lse,
             prefill_tokens_with_context,
+            output_scale,
         )
