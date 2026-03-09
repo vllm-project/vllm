@@ -34,7 +34,7 @@ deployment methods:
 Both platforms provide equivalent monitoring capabilities:
 
 | Dashboard | Description |
-|-----------|-------------|
+| --------- | ----------- |
 | **Performance Statistics** | Tracks latency, throughput, and performance metrics |
 | **Query Statistics** | Monitors request volume, query performance, and KPIs |
 
