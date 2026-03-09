@@ -441,7 +441,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             },
         )
 
-        # selective projection used to make dt, B and C input dependant
+        # selective projection used to make dt, B and C input dependent
 
         # time step projection (discretization)
         # instantiate once and copy inv_dt in init_weights of PretrainedModel
