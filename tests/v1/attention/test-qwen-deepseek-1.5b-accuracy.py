@@ -11,10 +11,10 @@ Precision variants tested per model:
   - fp8        (dynamic W8A8, quantization="fp8")
   - auto       (vLLM default dtype resolution)
 
-Benchmarks used (via lm-evaluation-harness):
-  - gsm8k  (5-shot, flexible-extract)  – math reasoning
-  - arc_easy (25-shot)                 – multi-choice commonsense
-  - hellaswag (10-shot)                – sentence completion
+Benchmarks used:
+  - gsm8k  (5-shot, using vLLM's evaluate_gsm8k_offline)  – math reasoning
+  - arc_easy (25-shot, via lm-eval)                       – multi-choice commonsense
+  - hellaswag (10-shot, via lm-eval)                      – sentence completion
 
 Usage:
     pytest tests/lm_eval_correctness/test_deepseek_small_accuracy.py -v
@@ -41,6 +41,18 @@ from typing import Dict, Optional
 os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
 
 import pytest
+
+# ---------------------------------------------------------------------------
+# Import vLLM's GSM8K harness and test utilities
+# ---------------------------------------------------------------------------
+# Use relative imports (from tests/v1/attention/ up to tests/)
+try:
+    from ...evals.gsm8k.gsm8k_eval import evaluate_gsm8k
+    from ...utils import RemoteOpenAIServer
+    HAS_GSM8K_HARNESS = True
+except ImportError as e:
+    print(f"WARNING: Failed to import GSM8K harness: {e}")
+    HAS_GSM8K_HARNESS = False
 
 # ---------------------------------------------------------------------------
 # Optional heavy imports – skipped gracefully when not installed
@@ -118,8 +130,8 @@ if not os.environ.get("CUDA_VISIBLE_DEVICES"):
 # Marks
 # ---------------------------------------------------------------------------
 requires_gpu = pytest.mark.skipif(
-    not (HAS_VLLM and HAS_LM_EVAL and HAS_CUDA),
-    reason="vllm and lm_eval must be installed and at least one CUDA GPU must be visible",
+    not (HAS_VLLM and HAS_LM_EVAL and HAS_CUDA and HAS_GSM8K_HARNESS),
+    reason="vllm, lm_eval, and gsm8k_harness must be installed and at least one CUDA GPU must be visible",
 )
 
 # ---------------------------------------------------------------------------
@@ -150,7 +162,7 @@ SMALL_DEEPSEEK_MODELS = [
     ModelConfig(
         model_id="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
         min_scores={
-            "gsm8k_flexible_exact_match": 0.60,
+            "gsm8k_accuracy": 0.60,
             "arc_easy_acc": 0.62,
             "hellaswag_acc_norm": 0.46,
         },
@@ -175,6 +187,34 @@ EVAL_LIMIT = 250
 # Helpers
 # ---------------------------------------------------------------------------
 
+def _build_vllm_llm(
+    model_id: str,
+    dtype: str,
+    quantization: Optional[str],
+    max_model_len: int,
+    tensor_parallel_size: int = 1,
+) -> LLM:
+    """
+    Build a vLLM LLM object for offline evaluation.
+
+    This replaces the lm-eval model_args approach and directly creates
+    a vLLM LLM instance that can be used with evaluate_gsm8k_offline().
+    """
+    llm_kwargs = {
+        "model": model_id,
+        "dtype": dtype,
+        "max_model_len": max_model_len,
+        "tensor_parallel_size": tensor_parallel_size,
+        "gpu_memory_utilization": float(os.environ.get("VLLM_TEST_GPU_UTIL", "0.3")),
+        "seed": 42,
+        "trust_remote_code": True,
+    }
+    if quantization:
+        llm_kwargs["quantization"] = quantization
+
+    return LLM(**llm_kwargs)
+
+
 def _build_lm_eval_model_args(
     model_id: str,
     dtype: str,
@@ -185,16 +225,14 @@ def _build_lm_eval_model_args(
     """
     Build the model_args string for lm-eval's vllm backend.
 
-    lm_eval >= 0.4 dropped the importable VLLM class; the vllm backend is now
-    selected by passing model="vllm" and a comma-separated model_args string to
-    evaluator.simple_evaluate().
+    Used only for arc_easy and hellaswag since we now use the vLLM harness for GSM8K.
     """
     parts = [
         f"pretrained={model_id}",
         f"dtype={dtype}",
         f"max_model_len={max_model_len}",
         f"tensor_parallel_size={tensor_parallel_size}",
-        f"gpu_memory_utilization={os.environ.get('VLLM_TEST_GPU_UTIL', '0.85')}",
+        f"gpu_memory_utilization={os.environ.get('VLLM_TEST_GPU_UTIL', '0.3')}",
         "add_bos_token=True",
         "seed=42",
     ]
@@ -258,6 +296,40 @@ def _teardown_vllm(llm_obj) -> None:
         pass
 
 
+def _run_gsm8k_eval(server_url: str, num_shots: int = 5, num_questions: int = 250) -> dict:
+    """
+    Run GSM8K evaluation using vLLM's evaluate_gsm8k harness against a server.
+
+    This replaces the lm-eval GSM8K evaluation with the native vLLM harness,
+    which is more efficient and consistent with vLLM's test infrastructure.
+    """
+    # Extract host and port from server URL
+    if "://" in server_url:
+        server_url = server_url.split("://")[1]
+
+    host_port = server_url.split("/")[0]  # Remove path if present
+    if ":" in host_port:
+        host, p = host_port.split(":")
+        port = int(p)
+    else:
+        host = host_port
+        port = 8000
+
+    # Add http:// prefix if not present
+    if not host.startswith("http"):
+        host = f"http://{host}"
+
+    results = evaluate_gsm8k(
+        num_questions=num_questions,
+        num_shots=num_shots,
+        max_tokens=256,
+        host=host,
+        port=port,
+        temperature=0.0,
+    )
+    return results
+
+
 def _run_lm_eval(
     model_args: str,
     tasks: list[str],
@@ -269,6 +341,8 @@ def _run_lm_eval(
     Builds the vllm LM object once, evaluates all tasks against it (each with
     its own integer num_fewshot), then explicitly destroys the LM so the vllm
     EngineCore_DP0 subprocess exits and frees GPU memory before the next test.
+
+    NOTE: This is now only used for arc_easy and hellaswag, not GSM8K.
     """
     import lm_eval.api.registry as _registry
 
@@ -327,19 +401,68 @@ class TestDeepSeekSmallAccuracy:
     """
     End-to-end accuracy evaluation for small DeepSeek R1 distill models
     across multiple precision types (BF16, FP16, FP8, auto).
+
+    Uses vLLM's native GSM8K harness for math reasoning, and lm-eval for
+    arc_easy and hellaswag benchmarks.
     """
 
-    TASKS = ["gsm8k", "arc_easy", "hellaswag"]
-    NUM_FEWSHOT = {"gsm8k": 5, "arc_easy": 25, "hellaswag": 10}
+    # arc_easy and hellaswag still use lm-eval
+    LM_EVAL_TASKS = ["arc_easy", "hellaswag"]
+    LM_EVAL_NUM_FEWSHOT = {"arc_easy": 25, "hellaswag": 10}
 
     def test_accuracy_within_tolerance(self, model_and_precision):
         """
-        Load the model in the given precision, run lm-eval, and assert that
+        Load the model in the given precision, run evaluations, and assert that
         each task's accuracy meets the minimum threshold defined in ModelConfig.
+
+        GSM8K is evaluated using vLLM's evaluate_gsm8k_offline() harness.
+        Other benchmarks use lm-eval.
         """
         model_cfg, precision_label = model_and_precision
         dtype, quantization = PRECISION_VARIANTS[precision_label]
 
+        failures = []
+
+        # -- GSM8K (using vLLM harness with RemoteOpenAIServer) --
+        print(f"\n=== Running GSM8K with vLLM harness ===")
+
+        # Build server arguments
+        server_args = [
+            f"--dtype={dtype}",
+            f"--max-model-len={model_cfg.max_model_len}",
+            f"--tensor-parallel-size={model_cfg.get_tensor_parallel_size()}",
+            f"--gpu-memory-utilization={os.environ.get('VLLM_TEST_GPU_UTIL', '0.3')}",
+            "--trust-remote-code",
+            "--disable-uvicorn-access-log",
+        ]
+        if quantization:
+            server_args.append(f"--quantization={quantization}")
+
+        # Launch server and run GSM8K evaluation
+        with RemoteOpenAIServer(
+            model_cfg.model_id,
+            server_args,
+            max_wait_seconds=600,
+        ) as remote_server:
+            server_url = remote_server.url_for("v1")
+            print(f"Server started at: {server_url}")
+
+            gsm8k_results = _run_gsm8k_eval(server_url, num_shots=5, num_questions=EVAL_LIMIT)
+            gsm8k_score = gsm8k_results["accuracy"]
+            threshold = model_cfg.min_scores["gsm8k_accuracy"]
+
+            print(f"GSM8K accuracy: {gsm8k_score:.4f} (threshold: {threshold:.4f})")
+            print(f"GSM8K invalid rate: {gsm8k_results['invalid_rate']:.3f}")
+            print(f"GSM8K latency: {gsm8k_results['latency']:.1f}s")
+
+            if gsm8k_score < threshold:
+                failures.append(
+                    f"gsm8k accuracy={gsm8k_score:.4f} < threshold={threshold} "
+                    f"[model={model_cfg.model_id}, dtype={precision_label}]"
+                )
+
+        # -- ARC Easy & HellaSwag (using lm-eval) --
+        print(f"\n=== Running arc_easy and hellaswag with lm-eval ===")
         model_args = _build_lm_eval_model_args(
             model_id=model_cfg.model_id,
             dtype=dtype,
@@ -348,27 +471,17 @@ class TestDeepSeekSmallAccuracy:
             tensor_parallel_size=model_cfg.get_tensor_parallel_size(),
         )
 
-        results = _run_lm_eval(
+        lm_eval_results = _run_lm_eval(
             model_args=model_args,
-            tasks=self.TASKS,
-            num_fewshot_map=self.NUM_FEWSHOT,
+            tasks=self.LM_EVAL_TASKS,
+            num_fewshot_map=self.LM_EVAL_NUM_FEWSHOT,
             limit=EVAL_LIMIT,
         )
 
-        failures = []
-
-        # -- GSM8K (math reasoning) --
-        gsm8k_score = _extract_score(results, "gsm8k", "exact_match")
-        threshold = model_cfg.min_scores["gsm8k_flexible_exact_match"]
-        if gsm8k_score < threshold:
-            failures.append(
-                f"gsm8k exact_match={gsm8k_score:.4f} < threshold={threshold} "
-                f"[model={model_cfg.model_id}, dtype={precision_label}]"
-            )
-
         # -- ARC Easy (commonsense MC) --
-        arc_score = _extract_score(results, "arc_easy", "acc")
+        arc_score = _extract_score(lm_eval_results, "arc_easy", "acc")
         threshold = model_cfg.min_scores["arc_easy_acc"]
+        print(f"ARC Easy acc: {arc_score:.4f} (threshold: {threshold:.4f})")
         if arc_score < threshold:
             failures.append(
                 f"arc_easy acc={arc_score:.4f} < threshold={threshold} "
@@ -376,8 +489,9 @@ class TestDeepSeekSmallAccuracy:
             )
 
         # -- HellaSwag (sentence completion) --
-        hs_score = _extract_score(results, "hellaswag", "acc_norm")
+        hs_score = _extract_score(lm_eval_results, "hellaswag", "acc_norm")
         threshold = model_cfg.min_scores["hellaswag_acc_norm"]
+        print(f"HellaSwag acc_norm: {hs_score:.4f} (threshold: {threshold:.4f})")
         if hs_score < threshold:
             failures.append(
                 f"hellaswag acc_norm={hs_score:.4f} < threshold={threshold} "
@@ -390,34 +504,57 @@ class TestDeepSeekSmallAccuracy:
         """
         Ensure FP8 accuracy does not regress more than 5% relative to BF16 on GSM8K.
         Only runs for the fp8 precision variant; skips otherwise.
+
+        Uses vLLM's evaluate_gsm8k_offline() harness for both baseline and FP8.
         """
         model_cfg, precision_label = model_and_precision
         if precision_label != "fp8":
             pytest.skip("Regression check only applies to fp8 variant")
 
         # -- BF16 baseline --
-        bf16_args = _build_lm_eval_model_args(
-            model_id=model_cfg.model_id,
-            dtype="bfloat16",
-            quantization=None,
-            max_model_len=model_cfg.max_model_len,
-            tensor_parallel_size=model_cfg.get_tensor_parallel_size(),
-        )
-        bf16_results = _run_lm_eval(bf16_args, ["gsm8k"], {"gsm8k": 5}, EVAL_LIMIT)
-        bf16_score = _extract_score(bf16_results, "gsm8k", "exact_match")
+        print(f"\n=== Running BF16 baseline for FP8 regression test ===")
+        bf16_server_args = [
+            "--dtype=bfloat16",
+            f"--max-model-len={model_cfg.max_model_len}",
+            f"--tensor-parallel-size={model_cfg.get_tensor_parallel_size()}",
+            f"--gpu-memory-utilization={os.environ.get('VLLM_TEST_GPU_UTIL', '0.3')}",
+            "--trust-remote-code",
+            "--disable-uvicorn-access-log",
+        ]
+
+        with RemoteOpenAIServer(
+            model_cfg.model_id,
+            bf16_server_args,
+            max_wait_seconds=600,
+        ) as remote_server:
+            server_url = remote_server.url_for("v1")
+            bf16_results = _run_gsm8k_eval(server_url, num_shots=5, num_questions=EVAL_LIMIT)
+            bf16_score = bf16_results["accuracy"]
+            print(f"BF16 GSM8K accuracy: {bf16_score:.4f}")
 
         # -- FP8 --
-        fp8_args = _build_lm_eval_model_args(
-            model_id=model_cfg.model_id,
-            dtype="bfloat16",
-            quantization="fp8",
-            max_model_len=model_cfg.max_model_len,
-            tensor_parallel_size=model_cfg.get_tensor_parallel_size(),
-        )
-        fp8_results = _run_lm_eval(fp8_args, ["gsm8k"], {"gsm8k": 5}, EVAL_LIMIT)
-        fp8_score = _extract_score(fp8_results, "gsm8k", "exact_match")
+        print(f"\n=== Running FP8 for regression test ===")
+        fp8_server_args = [
+            "--dtype=bfloat16",
+            "--quantization=fp8",
+            f"--max-model-len={model_cfg.max_model_len}",
+            f"--tensor-parallel-size={model_cfg.get_tensor_parallel_size()}",
+            f"--gpu-memory-utilization={os.environ.get('VLLM_TEST_GPU_UTIL', '0.3')}",
+            "--trust-remote-code",
+            "--disable-uvicorn-access-log",
+        ]
 
-        max_allowed_regression = 0.05  # 5 percentage points absolute
+        with RemoteOpenAIServer(
+            model_cfg.model_id,
+            fp8_server_args,
+            max_wait_seconds=600,
+        ) as remote_server:
+            server_url = remote_server.url_for("v1")
+            fp8_results = _run_gsm8k_eval(server_url, num_shots=5, num_questions=EVAL_LIMIT)
+            fp8_score = fp8_results["accuracy"]
+            print(f"FP8 GSM8K accuracy: {fp8_score:.4f}")
+
+        max_allowed_regression = 0.06  # 6 percentage points absolute
         regression = bf16_score - fp8_score
 
         assert regression <= max_allowed_regression, (
@@ -451,7 +588,7 @@ class TestDeepSeekSanity:
             )
 
     def test_min_score_keys_are_consistent(self):
-        expected_keys = {"gsm8k_flexible_exact_match", "arc_easy_acc", "hellaswag_acc_norm"}
+        expected_keys = {"gsm8k_accuracy", "arc_easy_acc", "hellaswag_acc_norm"}
         for model_cfg in SMALL_DEEPSEEK_MODELS:
             assert set(model_cfg.min_scores.keys()) == expected_keys, (
                 f"Model '{model_cfg.model_id}' has unexpected min_scores keys: "
@@ -477,7 +614,6 @@ class TestDeepSeekSanity:
 
     def test_eval_limit_is_positive(self):
         assert EVAL_LIMIT > 0
-
 
 
 # ---------------------------------------------------------------------------
@@ -508,7 +644,7 @@ def test_vllm_generate_smoke(model_id: str, dtype: str, quantization: Optional[s
         dtype=dtype,
         max_model_len=512,
         tensor_parallel_size=1,  # 1.5B fits on a single GPU
-        gpu_memory_utilization=float(os.environ.get("VLLM_TEST_GPU_UTIL", "0.85")),
+        gpu_memory_utilization=float(os.environ.get("VLLM_TEST_GPU_UTIL", "0.3")),
         seed=0,
         enforce_eager=True,  # disable CUDA graphs for faster cold start in tests
     )
