@@ -6,6 +6,7 @@ from dataclasses import field
 from typing import Any, Literal, get_args
 
 from vllm.config.utils import config
+from vllm.platforms import current_platform
 from vllm.utils.hashing import safe_hash
 
 KVProducer = Literal["kv_producer", "kv_both"]
@@ -24,9 +25,10 @@ class KVTransferConfig:
     engine_id: str | None = None
     """The engine id for KV transfers."""
 
-    kv_buffer_device: str = "cuda"
-    """The device used by kv connector to buffer the KV cache. Choices are 
-    'cuda' and 'cpu'."""
+    kv_buffer_device: str | None = current_platform.device_type
+    """The device used by kv connector to buffer the KV cache. Choices are
+    'cuda','cpu' and 'xpu'. If None, an appropriate default is selected based on
+    the current platform."""
 
     kv_buffer_size: float = 1e9
     """The buffer size for TorchDistributedConnector. Measured in number of
