@@ -1467,7 +1467,7 @@ class LLMEngine:
     def _process_tree_decoding(self, outputs, seq_group_metadata_list):
         """处理tree decoding逻辑"""
         original_parallel_seq_group = next(iter(self.seq_id_to_seq_group.values()))
-        unfinished_seqs = original_parallel_seq_group.get_unfinished_seqs()
+        # unfinished_seqs = original_parallel_seq_group.get_unfinished_seqs()
         assert hasattr(outputs[0], 'logprobs')
         logprobs = outputs[0].logprobs
 
@@ -1479,8 +1479,10 @@ class LLMEngine:
             if sampling_params.tree_search_params is None:
                 continue
             num_branches = sampling_params.tree_search_params.branching_factor
+            seq_index = original_parallel_seq_group.seq_id_to_index[request_id]
+            seq = original_parallel_seq_group.assembled_seq_group.seqs[seq_index]
             if self._should_create_branches(
-                unfinished_seqs[i], logprobs[i], sampling_params):
+                seq, logprobs[i], sampling_params):
                 probs = torch.exp(logprobs[i])
                 _, new_token_ids = torch.topk(probs, num_branches, dim=-1)
                 new_token_ids = new_token_ids.tolist()
