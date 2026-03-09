@@ -560,12 +560,7 @@ if has_flashinfer():
             rounded_m, rounded_n, dtype=torch.uint8, device=a.device
         )
 
-    @torch.library.custom_op(
-        "vllm::flashinfer_rmsnorm_fp4quant",
-        mutates_args=["output", "output_scale"],
-        device_types="cuda",
-    )
-    def flashinfer_rmsnorm_fp4quant(
+    def _flashinfer_rmsnorm_fp4quant(
         output: torch.Tensor,
         output_scale: torch.Tensor,
         input: torch.Tensor,
@@ -587,10 +582,7 @@ if has_flashinfer():
             is_sf_swizzled_layout=True,
         )
 
-    @torch.library.register_fake(
-        "vllm::flashinfer_rmsnorm_fp4quant",
-    )
-    def flashinfer_rmsnorm_fp4quant_fake(
+    def _flashinfer_rmsnorm_fp4quant_fake(
         output: torch.Tensor,
         output_scale: torch.Tensor,
         input: torch.Tensor,
@@ -600,12 +592,14 @@ if has_flashinfer():
     ) -> None:
         return
 
-    @torch.library.custom_op(
-        "vllm::flashinfer_add_rmsnorm_fp4quant",
-        mutates_args=["output", "output_scale", "residual"],
-        device_types="cuda",
+    direct_register_custom_op(
+        op_name="flashinfer_rmsnorm_fp4quant",
+        op_func=_flashinfer_rmsnorm_fp4quant,
+        mutates_args=["output", "output_scale"],
+        fake_impl=_flashinfer_rmsnorm_fp4quant_fake,
     )
-    def flashinfer_add_rmsnorm_fp4quant(
+
+    def _flashinfer_add_rmsnorm_fp4quant(
         output: torch.Tensor,
         output_scale: torch.Tensor,
         residual: torch.Tensor,
@@ -631,10 +625,7 @@ if has_flashinfer():
             is_sf_swizzled_layout=True,
         )
 
-    @torch.library.register_fake(
-        "vllm::flashinfer_add_rmsnorm_fp4quant",
-    )
-    def flashinfer_add_rmsnorm_fp4quant_fake(
+    def _flashinfer_add_rmsnorm_fp4quant_fake(
         output: torch.Tensor,
         output_scale: torch.Tensor,
         residual: torch.Tensor,
@@ -644,6 +635,13 @@ if has_flashinfer():
         epsilon: float,
     ) -> None:
         return
+
+    direct_register_custom_op(
+        op_name="flashinfer_add_rmsnorm_fp4quant",
+        op_func=_flashinfer_add_rmsnorm_fp4quant,
+        mutates_args=["output", "output_scale", "residual"],
+        fake_impl=_flashinfer_add_rmsnorm_fp4quant_fake,
+    )
 
     @torch.library.custom_op(
         "vllm::mm_mxfp8",
