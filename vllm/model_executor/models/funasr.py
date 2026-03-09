@@ -50,7 +50,7 @@ from vllm.multimodal.processing import (
     PromptUpdate,
 )
 from vllm.transformers_utils.processor import cached_processor_from_config
-from vllm.transformers_utils.processors.funasr_processor import FunASRFeatureExtractor
+from vllm.transformers_utils.processors.funasr import FunASRFeatureExtractor
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (
@@ -975,7 +975,6 @@ class FunASRForConditionalGeneration(
         multimodal_embeddings: MultiModalEmbeddings | None = None,
         *,
         is_multimodal: torch.Tensor | None = None,
-        handle_oov_mm_token: bool = False,
     ) -> torch.Tensor:
         inputs_embeds = self.model.decoder.embed_input_ids(input_ids)
 
