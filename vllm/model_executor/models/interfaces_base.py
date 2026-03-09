@@ -194,12 +194,15 @@ class VllmModelForPooling(VllmModel[T_co], Protocol[T_co]):
     [vllm.config.model.ModelConfig.score_type][]
     to use by default.
     
-    score_type defaults to bi-encoder, meaning the Score API uses the "embed" task.
+    Score API handles score/rerank for:
+    - "score" task (score_type: cross-encoder models)
+    - "embed" task (score_type: bi-encoder models)
+    - "token_embed" task (score_type: late interaction models)
     
+    score_type defaults to bi-encoder, then the Score API uses the "embed" task.
     If you set score_type to cross-encoder via 
     [vllm.model_executor.models.interfaces_base.SupportsCrossEncoding][], 
     then the Score API uses the "score" task.
-    
     If you set score_type to late-interaction via 
     [vllm.model_executor.models.interfaces_base.SupportsLateInteraction][], 
     then the Score API uses the "token_embed" task.    
