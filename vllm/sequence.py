@@ -507,9 +507,8 @@ class Sequence:
         self.tokens: Optional[list[str]] = None
 
         # Tree decoding related fields
-        self.tree_branch_id = None  # 分支标识
         self.tree_depth = 0
-        self.parent_seq_id = None
+        self.parent_req_id = None
 
     @property
     def n_blocks(self) -> int:
@@ -1541,9 +1540,9 @@ class ParallelSampleSequenceGroup(SequenceGroupBase):
         group.streaming = params.output_kind == RequestOutputKind.DELTA
         group.output_produced = False
 
-    def add_tree_branches(self, parent_seq_id: str, new_token_ids: list[int], engine):
+    def add_tree_branches(self, parent_req_id: str, new_token_ids: list[int], engine):
         original_seqs_length = len(self.assembled_seq_group.seqs)
-        parent_seq_group = self.to_be_finished[parent_seq_id]
+        parent_seq_group = self.to_be_finished[parent_req_id]
         parent_seq = parent_seq_group.seqs[0]
         old_tokens = parent_seq.get_token_ids()
         parent_seq_group.seqs[0].status = SequenceStatus.FINISHED_STOPPED
@@ -1554,7 +1553,7 @@ class ParallelSampleSequenceGroup(SequenceGroupBase):
                 token_type_ids=None,  # 如果有token_type_ids，可以从seq获取
                 prompt=None,  # 如果需要原始prompt
             )
-            request_id_i = f"{parent_seq_id}_branch{i}"
+            request_id_i = f"{parent_req_id}_branch{i}"
             self.seq_id_to_index[request_id_i] = i + original_seqs_length
             params = self.assembled_seq_group.sampling_params.clone()
             params.n = 1
@@ -1572,6 +1571,8 @@ class ParallelSampleSequenceGroup(SequenceGroupBase):
             assert seq_group is not None
             engine.seq_id_to_seq_group[request_id_i] = self
             self.to_be_finished[request_id_i] = seq_group
+            seq_group.seqs[0].tree_depth = parent_seq.tree_depth + 1
+            seq_group.seqs[0].parent_req_id = parent_req_id
             self.assembled_seq_group.seqs.append(seq_group.seqs[0])
 
 

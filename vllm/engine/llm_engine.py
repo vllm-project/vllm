@@ -1444,10 +1444,8 @@ class LLMEngine:
             self.model_executor.stop_remote_worker_execution_loop()
 
             if self._should_enable_tree_decoding(seq_group_metadata_list):
-                new_branch_groups, branch_groups_to_delete = self._process_tree_decoding(
+                self._process_tree_decoding(
                     outputs, seq_group_metadata_list)
-                print("len_new:",len(new_branch_groups))
-                print("len_old:",len(branch_groups_to_delete))
                 # for branch_group in new_branch_groups:
                 #     self._add_branch_to_scheduler(branch_group, virtual_engine)
                 # for branch_group in branch_groups_to_delete:
@@ -1504,22 +1502,22 @@ class LLMEngine:
         entropy = -torch.sum(probs * logprobs, dim=-1)
         return entropy.item()
 
-    def _add_branch_to_scheduler(self, branch_group, virtual_engine):
-        """将分支序列组添加到调度器"""
-        # 添加到等待队列
-        self.scheduler[virtual_engine].add_seq_group(branch_group)
+    # def _add_branch_to_scheduler(self, branch_group, virtual_engine):
+    #     """将分支序列组添加到调度器"""
+    #     # 添加到等待队列
+    #     self.scheduler[virtual_engine].add_seq_group(branch_group)
         
-        # 更新序列ID映射
-        self.seq_id_to_seq_group[branch_group.request_id] = branch_group
+    #     # 更新序列ID映射
+    #     self.seq_id_to_seq_group[branch_group.request_id] = branch_group
 
-    def _delete_branch_from_scheduler(self, branch_group, virtual_engine):
-        """从调度器中删除分支序列组"""
-        # 从等待队列中删除
-        self.scheduler[virtual_engine].abort_seq_group(branch_group.request_id)
+    # def _delete_branch_from_scheduler(self, branch_group, virtual_engine):
+    #     """从调度器中删除分支序列组"""
+    #     # 从等待队列中删除
+    #     self.scheduler[virtual_engine].abort_seq_group(branch_group.request_id)
         
-        # 更新序列ID映射
-        if branch_group.request_id in self.seq_id_to_seq_group:
-            del self.seq_id_to_seq_group[branch_group.request_id]
+    #     # 更新序列ID映射
+    #     if branch_group.request_id in self.seq_id_to_seq_group:
+    #         del self.seq_id_to_seq_group[branch_group.request_id]
 
     def _abort_and_cache_schedule(
             self, request_id: str, virtual_engine: int,
