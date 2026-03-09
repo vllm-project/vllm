@@ -8,6 +8,13 @@ import torch
 from compressed_tensors.transform import deterministic_hadamard_matrix
 
 from vllm import _custom_ops as ops
+from vllm.platforms import current_platform
+
+if current_platform.is_rocm():
+    pytest.skip(
+        "These tests require hadacore_transform, not supported on ROCm.",
+        allow_module_level=True,
+    )
 
 
 @pytest.mark.parametrize("batch_size", [1, 32])

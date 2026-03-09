@@ -21,30 +21,20 @@ The mental model is that server-level metrics help explain the values of request
 
 ### v1 Metrics
 
-In v1, the following metrics are exposed via a Prometheus-compatible `/metrics` endpoint using the `vllm:` prefix:
+In v1, an extensive set of metrics are exposed via a Prometheus-compatible `/metrics` endpoint using the `vllm:` prefix, for example:
 
 - `vllm:num_requests_running` (Gauge) - Number of requests currently running.
-- `vllm:num_requests_waiting` (Gauge) - Number of requests currently waiting.
 - `vllm:kv_cache_usage_perc` (Gauge) - Fraction of used KV cache blocks (0–1).
 - `vllm:prefix_cache_queries` (Counter) - Number of prefix cache queries.
 - `vllm:prefix_cache_hits` (Counter) - Number of prefix cache hits.
-- `vllm:mm_cache_queries` (Counter) - (For multimodal models) Number of multimodal cache queries.
-- `vllm:mm_cache_hits` (Counter) - (For multimodal models) Number of multimodal cache hits.
-- `vllm:num_preemptions_total` (Counter) - Number of preemptions.
 - `vllm:prompt_tokens_total` (Counter) - Total number of prompt tokens processed.
 - `vllm:generation_tokens_total` (Counter) - Total number of generated tokens.
-- `vllm:iteration_tokens_total` (Histogram) - Histogram of tokens processed in each engine step.
-- `vllm:cache_config_info` (Gauge) - Information about the cache configuration.
 - `vllm:request_success_total` (Counter) - Number of finished requests (by finish reason).
 - `vllm:request_prompt_tokens` (Histogram) - Histogram of input prompt token counts.
 - `vllm:request_generation_tokens` (Histogram) - Histogram of generation token counts.
-- `vllm:request_params_n` (Histogram) - Histogram of request parameter n.
-- `vllm:request_params_max_tokens` - (Histogram) - Histogram of max_tokens parameter in requests.
 - `vllm:time_to_first_token_seconds` (Histogram) - Time to first token (TTFT).
 - `vllm:inter_token_latency_seconds` (Histogram) - Inter-token latency.
 - `vllm:e2e_request_latency_seconds` (Histogram) - End-to-end request latency.
-- `vllm:request_queue_time_seconds` (Histogram) - Time spent in the queue.
-- `vllm:request_inference_time_seconds` (Histogram) - Request inference time.
 - `vllm:request_prefill_time_seconds` (Histogram) - Request prefill time.
 - `vllm:request_decode_time_seconds` (Histogram) - Request decode time.
 
@@ -59,7 +49,7 @@ The subset of metrics exposed in the Grafana dashboard gives us an indication of
 - `vllm:e2e_request_latency_seconds_bucket` - End to end request latency measured in seconds.
 - `vllm:prompt_tokens` - Prompt tokens.
 - `vllm:generation_tokens` - Generation tokens.
-- `vllm:time_per_output_token_seconds` - Inter-token latency (Time Per Output Token, TPOT) in seconds.
+- `vllm:inter_token_latency_seconds` - Inter-token latency (Time Per Output Token, TPOT) in seconds.
 - `vllm:time_to_first_token_seconds` - Time to First Token (TTFT) latency in seconds.
 - `vllm:num_requests_running` (also, `_swapped` and `_waiting`) - Number of requests in the RUNNING, WAITING, and SWAPPED states.
 - `vllm:kv_cache_usage_perc` - Percentage of used cache blocks by vLLM.
@@ -517,10 +507,10 @@ longer relevant in v1:
 - `vllm:num_requests_swapped`
 - `vllm:cpu_cache_usage_perc`
 
-In this mode, when a request is preempted (e.g. to make room in KV
-cache to complete other requests), we swap kv cache blocks out to CPU
-memory. This is also known as "KV cache offloading" and is configured
-with `--swap-space` and `--preemption-mode`.
+In this mode, when a request was preempted (e.g. to make room in KV
+cache to complete other requests), kv cache blocks were swapped out to
+CPU memory. The `--swap-space` flag has been removed as this feature
+is no longer used in V1.
 
 Historically, [vLLM has long supported beam search](https://github.com/vllm-project/vllm/issues/6226). The
 SequenceGroup encapsulated the idea of N Sequences which
@@ -666,7 +656,7 @@ vLLM has support for OpenTelemetry tracing:
 - Added by <https://github.com/vllm-project/vllm/pull/4687> and reinstated by <https://github.com/vllm-project/vllm/pull/20372>
 - Configured with `--oltp-traces-endpoint` and `--collect-detailed-traces`
 - [OpenTelemetry blog post](https://opentelemetry.io/blog/2024/llm-observability/)
-- [User-facing docs](../examples/online_serving/opentelemetry.md)
+- [User-facing docs](../../examples/online_serving/opentelemetry/README.md)
 - [Blog post](https://medium.com/@ronen.schaffer/follow-the-trail-supercharging-vllm-with-opentelemetry-distributed-tracing-aa655229b46f)
 - [IBM product docs](https://www.ibm.com/docs/en/instana-observability/current?topic=mgaa-monitoring-large-language-models-llms-vllm-public-preview)
 

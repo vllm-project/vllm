@@ -1,12 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
+from itertools import islice
 
 import regex as re
 from transformers import PreTrainedTokenizerBase
 
-from vllm.entrypoints.openai.protocol import ChatCompletionRequest, DeltaMessage
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionRequest,
+)
+from vllm.entrypoints.openai.engine.protocol import DeltaMessage
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParser
 
@@ -97,11 +101,19 @@ class Step3ReasoningParser(ReasoningParser):
 
             return reasoning, content
 
-    def is_reasoning_end(self, input_ids: list[int]) -> bool:
+    def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
         return self.think_end_token_id in input_ids
 
+    def is_reasoning_end_streaming(
+        self, input_ids: Sequence[int], delta_ids: Iterable[int]
+    ) -> bool:
+        end_token_id = self.think_end_token_id
+        return end_token_id in delta_ids
+
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
-        if self.think_end_token_id not in input_ids[:-1]:
+        if self.think_end_token_id not in islice(
+            input_ids, 0, max(0, len(input_ids) - 1)
+        ):
             return []
         else:
             return input_ids[input_ids.index(self.think_end_token_id) + 1 :]

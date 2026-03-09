@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import logging
 from collections.abc import Sequence
 
 import torch
@@ -17,6 +18,20 @@ class RequestLogger:
     def __init__(self, *, max_log_len: int | None) -> None:
         self.max_log_len = max_log_len
 
+        if not logger.isEnabledFor(logging.INFO):
+            logger.warning_once(
+                "`--enable-log-requests` is set but "
+                "the minimum log level is higher than INFO. "
+                "No request information will be logged."
+            )
+        elif not logger.isEnabledFor(logging.DEBUG):
+            logger.info_once(
+                "`--enable-log-requests` is set but "
+                "the minimum log level is higher than DEBUG. "
+                "Only limited information will be logged to minimize overhead. "
+                "To view more details, set `VLLM_LOGGING_LEVEL=DEBUG`."
+            )
+
     def log_inputs(
         self,
         request_id: str,
@@ -26,23 +41,24 @@ class RequestLogger:
         params: SamplingParams | PoolingParams | BeamSearchParams | None,
         lora_request: LoRARequest | None,
     ) -> None:
-        max_log_len = self.max_log_len
-        if max_log_len is not None:
-            if prompt is not None:
-                prompt = prompt[:max_log_len]
+        if logger.isEnabledFor(logging.DEBUG):
+            max_log_len = self.max_log_len
+            if max_log_len is not None:
+                if prompt is not None:
+                    prompt = prompt[:max_log_len]
 
-            if prompt_token_ids is not None:
-                prompt_token_ids = prompt_token_ids[:max_log_len]
+                if prompt_token_ids is not None:
+                    prompt_token_ids = prompt_token_ids[:max_log_len]
 
-        logger.debug(
-            "Request %s details: prompt: %r, "
-            "prompt_token_ids: %s, "
-            "prompt_embeds shape: %s.",
-            request_id,
-            prompt,
-            prompt_token_ids,
-            prompt_embeds.shape if prompt_embeds is not None else None,
-        )
+            logger.debug(
+                "Request %s details: prompt: %r, "
+                "prompt_token_ids: %s, "
+                "prompt_embeds shape: %s.",
+                request_id,
+                prompt,
+                prompt_token_ids,
+                prompt_embeds.shape if prompt_embeds is not None else None,
+            )
 
         logger.info(
             "Received request %s: params: %s, lora_request: %s.",

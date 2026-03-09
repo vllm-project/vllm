@@ -14,8 +14,8 @@ import torch.nn as nn
 from transformers import PretrainedConfig
 from transformers.utils import torch_int
 
-from vllm.attention.layer import MultiHeadAttention
 from vllm.model_executor.layers.activation import get_act_fn
+from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.conv import Conv2dLayer
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
@@ -170,6 +170,7 @@ class InternSdpaAttention(nn.Module):
         config: PretrainedConfig,
         *,
         num_dummy_heads: int = 0,
+        prefix: str = "",
     ) -> None:
         super().__init__()
 
@@ -214,8 +215,13 @@ class InternSdpaAttention(nn.Module):
 
         self.projection_layer = nn.Linear(self.dummy_dim, self.embed_dim)
 
-        # Use unified MultiHeadAttention with automatic backend selection
-        self.attn = MultiHeadAttention(self.num_heads, self.head_dim, self.scale)
+        # Use unified MMEncoderAttention with automatic backend selection
+        self.attn = MMEncoderAttention(
+            self.num_heads,
+            self.head_dim,
+            self.scale,
+            prefix=f"{prefix}.attn",
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """x shape: (B, N, C)"""
@@ -228,7 +234,7 @@ class InternSdpaAttention(nn.Module):
             q = self.q_norm(q)
             k = self.k_norm(k)
 
-        # Use unified MultiHeadAttention with automatic backend selection
+        # Use unified MMEncoderAttention with automatic backend selection
         x = self.attn(q, k, v)
 
         x = self.projection_layer(x)
@@ -313,7 +319,11 @@ class InternS1VisionLayer(nn.Module):
         num_dummy_heads: int,
         prefix: str = "",
     ):
-        return InternSdpaAttention(config, num_dummy_heads=num_dummy_heads)
+        return InternSdpaAttention(
+            config,
+            num_dummy_heads=num_dummy_heads,
+            prefix=prefix,
+        )
 
     def forward(
         self,

@@ -55,7 +55,7 @@ def test_get_draft_quant_config_without_draft_model():
 
 @torch.inference_mode()
 @pytest.mark.parametrize("device", DEVICES)
-def test_fc_layer_quant_config_usage(dist_init, device) -> None:
+def test_fc_layer_quant_config_usage(default_vllm_config, dist_init, device) -> None:
     import torch
 
     from vllm.model_executor.layers.linear import ReplicatedLinear

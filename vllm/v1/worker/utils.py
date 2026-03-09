@@ -1,131 +1,34 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import math
 from collections import defaultdict
 from dataclasses import dataclass, field
 
 import torch
 
-from vllm.attention.backends.abstract import AttentionBackend
-from vllm.attention.layer import Attention
-from vllm.config import ModelConfig, SchedulerConfig, VllmConfig
+from vllm.config import CacheConfig, VllmConfig
+from vllm.logger import init_logger
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 from vllm.model_executor.models.utils import extract_layer_index
-from vllm.multimodal.cache import processor_only_cache_from_config
-from vllm.multimodal.registry import MultiModalRegistry
 from vllm.platforms import current_platform
-from vllm.v1.attention.backends.utils import AttentionMetadataBuilder
-from vllm.v1.core.encoder_cache_manager import compute_mm_encoder_budget
-from vllm.v1.kv_cache_interface import KVCacheGroupSpec, KVCacheSpec
+from vllm.utils.mem_utils import MemorySnapshot, format_gib
+from vllm.v1.attention.backend import (
+    AttentionBackend,
+    AttentionMetadataBuilder,
+    MultipleOf,
+)
+from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
+    EncoderOnlyAttentionSpec,
+    KVCacheConfig,
+    KVCacheGroupSpec,
+    KVCacheSpec,
+    MambaSpec,
+    UniformTypeKVCacheSpecs,
+)
 
-
-class MultiModalBudget:
-    """Helper class to calculate budget information for multi-modal models."""
-
-    def __init__(
-        self,
-        model_config: ModelConfig,
-        scheduler_config: SchedulerConfig,
-        mm_registry: MultiModalRegistry,
-    ) -> None:
-        super().__init__()
-
-        self.model_config = model_config
-        self.scheduler_config = scheduler_config
-        self.mm_registry = mm_registry
-        self.cache = cache = processor_only_cache_from_config(model_config, mm_registry)
-
-        self.max_model_len = model_config.max_model_len
-        self.max_num_reqs = scheduler_config.max_num_seqs
-
-        self.mm_limits = mm_registry.get_mm_limits_per_prompt(model_config, cache=cache)
-
-        max_tokens_by_modality = mm_registry.get_max_tokens_per_item_by_modality(
-            model_config,
-            cache=cache,
-            profiler_limits=self.mm_limits,
-        )
-
-        encoder_compute_budget, encoder_cache_size = compute_mm_encoder_budget(
-            scheduler_config,
-            max_tokens_by_modality,
-        )
-
-        self.encoder_compute_budget = encoder_compute_budget
-        self.encoder_cache_size = encoder_cache_size
-
-        max_items_per_prompt_by_modality = dict[str, int]()
-        max_items_per_batch_by_modality = dict[str, int]()
-
-        for modality, max_tokens in max_tokens_by_modality.items():
-            (
-                max_items_per_prompt,
-                max_items_per_batch,
-            ) = self.get_max_items(modality, max_tokens)
-
-            max_items_per_prompt_by_modality[modality] = max_items_per_prompt
-            max_items_per_batch_by_modality[modality] = max_items_per_batch
-
-        self.max_tokens_by_modality = max_tokens_by_modality
-        self.max_items_per_prompt_by_modality = max_items_per_prompt_by_modality
-        self.max_items_per_batch_by_modality = max_items_per_batch_by_modality
-
-    def get_modality_with_max_tokens(self) -> str:
-        max_tokens_by_modality = self.max_tokens_by_modality
-        modality, _ = max(max_tokens_by_modality.items(), key=lambda x: x[1])
-
-        return modality
-
-    def get_encoder_budget(self) -> int:
-        return min(self.encoder_compute_budget, self.encoder_cache_size)
-
-    def get_max_items(
-        self,
-        modality: str,
-        max_tokens_per_item: int,
-    ) -> tuple[int, int]:
-        if max_tokens_per_item == 0:
-            return 0, 0
-
-        # Check how many items of this modality can be supported by
-        # the encoder budget.
-        encoder_budget = self.get_encoder_budget()
-
-        # TODO: handle encoder-decoder models once we support them.
-        if encoder_budget == 0:
-            return 0, 0
-
-        max_encoder_items_per_batch = encoder_budget // max_tokens_per_item
-
-        # Check how many items of this modality can be supported by
-        # the decoder budget.
-        mm_limit = self.mm_limits[modality]
-
-        max_items_per_prompt = max(
-            1,
-            min(mm_limit, self.max_model_len // max_tokens_per_item),
-        )
-
-        scheduler_config = self.scheduler_config
-        max_num_reqs = self.max_num_reqs
-
-        if not scheduler_config.enable_chunked_prefill:
-            max_num_reqs = min(
-                max_num_reqs,
-                scheduler_config.max_num_batched_tokens // max_tokens_per_item,
-            )
-
-        max_decoder_items_per_batch = max_num_reqs * max_items_per_prompt
-
-        max_items_per_batch = max(
-            1,
-            min(max_encoder_items_per_batch, max_decoder_items_per_batch),
-        )
-
-        return max_items_per_prompt, max_items_per_batch
-
-    def reset_cache(self) -> None:
-        if self.cache is not None:
-            self.cache.clear_cache()
+logger = init_logger(__name__)
 
 
 @dataclass
@@ -135,7 +38,7 @@ class AttentionGroup:
     kv_cache_spec: KVCacheSpec
     kv_cache_group_id: int
     # When ubatching is enabled we will have a metadata builder for each ubatch
-    # so that if they use internal persistant buffers for cudagraphs, and they
+    # so that if they use internal persistent buffers for cudagraphs, and they
     # won't have to worry about conflicting with the other ubatches.
     metadata_builders: list[AttentionMetadataBuilder] = field(
         default_factory=lambda: []
@@ -145,7 +48,7 @@ class AttentionGroup:
         self,
         vllm_config,
         device,
-        kernel_block_size: int | None,
+        kernel_block_size: int | None = None,
         num_metadata_builders: int = 1,
     ):
         kv_cache_spec_builder = (
@@ -166,6 +69,119 @@ class AttentionGroup:
     def get_metadata_builder(self, ubatch_id: int = 0) -> AttentionMetadataBuilder:
         assert len(self.metadata_builders) > ubatch_id
         return self.metadata_builders[ubatch_id]
+
+
+def select_common_block_size(
+    kv_manager_block_size: int, attn_groups: list[AttentionGroup]
+) -> int:
+    """
+    Select a block size that is supported by all backends and is a factor of
+    kv_manager_block_size.
+
+    If kv_manager_block_size is supported by all backends, return it directly.
+    Otherwise, return the max supported size.
+
+    Args:
+        kv_manager_block_size: Block size of KV cache.
+        attn_groups: List of attention groups.
+
+    Returns:
+        The selected block size.
+
+    Raises:
+        ValueError: If no valid block size found.
+    """
+
+    def block_size_is_supported(
+        backends: list[type[AttentionBackend]], block_size: int
+    ) -> bool:
+        """Check if the block size is supported by all backends."""
+        for backend in backends:
+            is_supported = False
+            for supported_size in backend.get_supported_kernel_block_sizes():
+                if isinstance(supported_size, int):
+                    if block_size == supported_size:
+                        is_supported = True
+                elif isinstance(supported_size, MultipleOf):
+                    if block_size % supported_size.base == 0:
+                        is_supported = True
+                else:
+                    raise ValueError(f"Unknown supported size: {supported_size}")
+            if not is_supported:
+                return False
+        return True
+
+    backends = [group.backend for group in attn_groups]
+
+    # Case 1: if the block_size of kv cache manager is supported by all backends,
+    # return it directly.
+    if block_size_is_supported(backends, kv_manager_block_size):
+        return kv_manager_block_size
+
+    # Case 2: otherwise, the block_size must be an `int`-format supported size of
+    # at least one backend. Iterate over all `int`-format supported sizes in
+    # descending order and return the first one that is supported by all backends.
+    # Simple proof:
+    # If the supported size b is in MultipleOf(x_i) format for all attention
+    # backends i, and b a factor of kv_manager_block_size, then
+    # kv_manager_block_size also satisfies MultipleOf(x_i) for all i. We will
+    # return kv_manager_block_size in case 1.
+    all_int_supported_sizes = set(
+        supported_size
+        for backend in backends
+        for supported_size in backend.get_supported_kernel_block_sizes()
+        if isinstance(supported_size, int)
+    )
+
+    for supported_size in sorted(all_int_supported_sizes, reverse=True):
+        if kv_manager_block_size % supported_size != 0:
+            continue
+        if block_size_is_supported(backends, supported_size):
+            return supported_size
+    raise ValueError(f"No common block size for {kv_manager_block_size}. ")
+
+
+def prepare_kernel_block_sizes(
+    kv_cache_config: KVCacheConfig, attn_groups: list[list[AttentionGroup]]
+) -> list[int]:
+    """
+    Generate kernel_block_sizes that matches each block_size.
+
+    For attention backends that support virtual block splitting,
+    use the supported block sizes from the backend.
+    For other backends (like Mamba), use the same block size (no splitting).
+
+    Args:
+        kv_cache_config: The KV cache configuration.
+        attn_groups: Attention groups indexed by KV cache group id.
+
+    Returns:
+        List of kernel block sizes for each cache group.
+    """
+    kernel_block_sizes = []
+    for kv_cache_gid, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
+        kv_cache_spec = kv_cache_group.kv_cache_spec
+        if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
+            # All layers in the UniformTypeKVCacheSpecs have the same type,
+            # pick an arbitrary one to dispatch.
+            kv_cache_spec = next(iter(kv_cache_spec.kv_cache_specs.values()))
+        if isinstance(kv_cache_spec, EncoderOnlyAttentionSpec):
+            continue
+        if isinstance(kv_cache_spec, AttentionSpec):
+            # This is an attention backend that supports virtual block splitting.
+            kv_manager_block_size = kv_cache_group.kv_cache_spec.block_size
+            selected_kernel_size = select_common_block_size(
+                kv_manager_block_size, attn_groups[kv_cache_gid]
+            )
+            kernel_block_sizes.append(selected_kernel_size)
+        elif isinstance(kv_cache_spec, MambaSpec):
+            # This is likely Mamba or other non-attention cache, no splitting.
+            kernel_block_sizes.append(kv_cache_spec.block_size)
+        else:
+            raise NotImplementedError(
+                f"unknown kv cache spec {kv_cache_group.kv_cache_spec}"
+            )
+    return kernel_block_sizes
 
 
 def sanity_check_mm_encoder_outputs(
@@ -198,48 +214,27 @@ def sanity_check_mm_encoder_outputs(
     )
 
 
-def scatter_mm_placeholders(
-    embeds: torch.Tensor,
-    is_embed: torch.Tensor | None,
-) -> torch.Tensor:
+def request_memory(init_snapshot: MemorySnapshot, cache_config: CacheConfig) -> int:
     """
-    Scatter the multimodal embeddings into a contiguous tensor that represents
-    the placeholder tokens.
-
-    [`vllm.multimodal.processing.PromptUpdateDetails.is_embed`][].
-
-    Args:
-        embeds: The multimodal embeddings.
-            Shape: `(num_embeds, embed_dim)`
-        is_embed: A boolean mask indicating which positions in the placeholder
-            tokens need to be filled with multimodal embeddings.
-            Shape: `(num_placeholders, num_embeds)`
+    Calculate the amount of memory required by vLLM, then validate
+    that the current amount of free memory is sufficient for that.
     """
-    if is_embed is None:
-        return embeds
-
-    placeholders = embeds.new_full(
-        (is_embed.shape[0], embeds.shape[-1]),
-        fill_value=torch.nan,
+    requested_memory = math.ceil(
+        init_snapshot.total_memory * cache_config.gpu_memory_utilization
     )
-    placeholders[is_embed] = embeds
-    return placeholders
 
+    if init_snapshot.free_memory < requested_memory:
+        raise ValueError(
+            f"Free memory on device {init_snapshot.device_} "
+            f"({format_gib(init_snapshot.free_memory)}/"
+            f"{format_gib(init_snapshot.total_memory)} GiB) on startup "
+            f"is less than desired GPU memory utilization "
+            f"({cache_config.gpu_memory_utilization}, "
+            f"{format_gib(requested_memory)} GiB). Decrease GPU memory "
+            f"utilization or reduce GPU memory used by other processes."
+        )
 
-def gather_mm_placeholders(
-    placeholders: torch.Tensor,
-    is_embed: torch.Tensor | None,
-) -> torch.Tensor:
-    """
-    Reconstructs the embeddings from the placeholder tokens.
-
-    This is the operation of [`scatter_mm_placeholders`]
-    [vllm.v1.worker.utils.scatter_mm_placeholders].
-    """
-    if is_embed is None:
-        return placeholders
-
-    return placeholders[is_embed]
+    return requested_memory
 
 
 def add_kv_sharing_layers_to_kv_cache_groups(
@@ -313,15 +308,19 @@ def bind_kv_cache(
             # TODO - analyze where runner_kv_caches is used and the right
             # way to ensure it properly reflects multiple attention layers
             # in the same decoder block.
-            if current_platform.is_cuda_alike() or current_platform.is_xpu():
-                # We know that the GPU runner is not impacted by this
+            if (
+                current_platform.is_cuda_alike()
+                or current_platform.is_xpu()
+                or current_platform.is_cpu()
+            ):
+                # We know that the GPU / CPU runner is not impacted by this
                 # case. Some test code depends on runner_kv_caches, but
                 # not in a way that's impacted by ignoring this.
                 pass
             else:
                 raise NotImplementedError
-        layer_name = layer_names[0]
-        runner_kv_caches.append(kv_caches[layer_name])
+        for layer_name in layer_names:
+            runner_kv_caches.append(kv_caches[layer_name])
 
     # Bind kv_caches to forward context
     for layer_name, kv_cache in kv_caches.items():
@@ -337,7 +336,7 @@ def is_residual_scattered_for_sp(
     The residual tensor is scattered across tensor parallel ranks when sequence
     parallelism and tensor parallelism is enabled.
 
-    This follows the same logic as SequenceParallelismPass.is_applicable():
+    This follows the same logic as SequenceParallelismPass.is_applicable_for_range():
     - In full-graph compilation mode (no splitting ops or using inductor graph
       partition), SP is always applied
     - Otherwise, SP is only applied for specific shapes in compile_sizes

@@ -9,12 +9,12 @@ import torch
 from torch import nn
 from transformers import FalconH1Config
 
-from vllm.attention.layer import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.model_executor.layers.activation import SiluAndMul
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -24,6 +24,8 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
 from vllm.model_executor.layers.mamba.mamba_utils import (
+    MambaStateCopyFunc,
+    MambaStateCopyFuncCalculator,
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
 )
@@ -33,7 +35,10 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.model_loader.weight_utils import (
+    default_weight_loader,
+    maybe_remap_kv_scale_name,
+)
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.config import set_default_rope_theta
 
@@ -242,14 +247,11 @@ class FalconH1AttentionDecoderLayer(nn.Module):
         self.scaling = self.head_dim**-0.5
         self.max_position_embeddings = max_position_embeddings
 
-        if hasattr(config, "attn_rotary_emb"):
-            rotary_dim = config.attn_rotary_emb  # for backward compatibility
-        else:
-            rotary_dim = self.head_dim  # default
+        rotary_dim = getattr(config, "attn_rotary_emb", self.head_dim)
+        config.rope_parameters["partial_rotary_factor"] = rotary_dim / self.head_dim
 
         self.rotary_emb = get_rope(
             head_size=self.head_dim,
-            rotary_dim=rotary_dim,
             max_position=max_position_embeddings,
             rope_parameters=config.rope_parameters,
             is_neox_style=True,
@@ -279,6 +281,7 @@ class FalconH1AttentionDecoderLayer(nn.Module):
             self.scaling,
             num_kv_heads=self.num_kv_heads,
             cache_config=cache_config,
+            quant_config=quant_config,
             prefix=f"{prefix}.attn",
         )
         self.key_multiplier = config.key_multiplier
@@ -361,7 +364,9 @@ class FalconH1ParallelHybrid(nn.Module):
         self.attention_in_multiplier = config.attention_in_multiplier
         self.attn_out_multiplier = config.attention_out_multiplier
 
-        self.feed_forward = FalconH1MLP(config, prefix=f"{prefix}.feed_forward")
+        self.feed_forward = FalconH1MLP(
+            config, quant_config=quant_config, prefix=f"{prefix}.feed_forward"
+        )
 
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.pre_ff_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -460,7 +465,7 @@ class FalconH1Model(nn.Module):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
@@ -554,6 +559,10 @@ class FalconH1ForCausalLM(
             conv_kernel=hf_config.mamba_d_conv,
         )
 
+    @classmethod
+    def get_mamba_state_copy_func(cls) -> tuple[MambaStateCopyFunc, MambaStateCopyFunc]:
+        return MambaStateCopyFuncCalculator.mamba2_state_copy_func()
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         config = vllm_config.model_config.hf_config
         self.vllm_config = vllm_config
@@ -599,7 +608,7 @@ class FalconH1ForCausalLM(
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
@@ -643,6 +652,12 @@ class FalconH1ForCausalLM(
 
             if "mamba" in name:
                 name = name.replace("mamba", "mamba.mamba")
+
+            if "scale" in name:
+                # Remapping the name of kv-scale.
+                name = maybe_remap_kv_scale_name(name, params_dict)
+                if name is None:
+                    continue
 
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:

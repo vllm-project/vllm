@@ -104,7 +104,6 @@ def run_benchmark_with_batch_invariant(
     random.seed(seed)
 
     # Set environment variables
-    os.environ["VLLM_ATTENTION_BACKEND"] = backend
     if batch_invariant:
         os.environ["VLLM_BATCH_INVARIANT"] = "1"
     else:
@@ -140,6 +139,7 @@ def run_benchmark_with_batch_invariant(
             max_model_len=max_model_len,
             dtype="bfloat16",
             tensor_parallel_size=tp_size,
+            attention_config={"backend": backend},
             enable_prefix_caching=False,
         )
         init_time = time.perf_counter() - start_init

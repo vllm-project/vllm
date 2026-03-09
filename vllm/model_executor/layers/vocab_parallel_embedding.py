@@ -181,6 +181,7 @@ def get_masked_input_and_mask(
     return input_, ~vocab_mask
 
 
+# --8<-- [start:vocab_parallel_embedding]
 @CustomOp.register("vocab_parallel_embedding")
 class VocabParallelEmbedding(CustomOp):
     """Embedding parallelized in the vocabulary dimension.
@@ -220,6 +221,8 @@ class VocabParallelEmbedding(CustomOp):
         quant_config: quant config for the layer
         prefix: full name of the layer in the state dict
     """  # noqa: E501
+
+    # --8<-- [end:vocab_parallel_embedding]
 
     def __init__(
         self,
@@ -492,6 +495,7 @@ class VocabParallelEmbedding(CustomOp):
         return s
 
 
+# --8<-- [start:parallel_lm_head]
 @CustomOp.register("parallel_lm_head")
 class ParallelLMHead(VocabParallelEmbedding):
     """Parallelized LM head.
@@ -508,6 +512,8 @@ class ParallelLMHead(VocabParallelEmbedding):
         org_num_embeddings: original vocabulary size (without LoRA).
         padding_size: padding size for the vocabulary.
     """
+
+    # --8<-- [end:parallel_lm_head]
 
     def __init__(
         self,

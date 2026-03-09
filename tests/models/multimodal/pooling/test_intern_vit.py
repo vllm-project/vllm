@@ -73,7 +73,9 @@ def run_intern_vit_test(
     ],
 )
 @pytest.mark.parametrize("dtype", ["half"])
-def test_models(dist_init, image_assets, model_id, dtype: str) -> None:
+def test_models(
+    default_vllm_config, dist_init, image_assets, model_id, dtype: str
+) -> None:
     run_intern_vit_test(
         image_assets,
         model_id,

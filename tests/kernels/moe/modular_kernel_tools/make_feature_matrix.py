@@ -10,7 +10,7 @@ from tqdm import tqdm
 
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.fused_moe.config import FUSED_MOE_UNQUANTIZED_CONFIG
-from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_random_seed
 
 from .common import (
     Config,
@@ -40,7 +40,7 @@ def rank_worker(
     config: Config,
     weights: WeightTensors,
 ):
-    current_platform.seed_everything(pgi.rank)
+    set_random_seed(pgi.rank)
 
     # sanity check
     from vllm import envs

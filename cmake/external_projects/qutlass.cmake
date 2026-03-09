@@ -31,10 +31,15 @@ if(NOT qutlass_SOURCE_DIR)
 endif()
 message(STATUS "[QUTLASS] QuTLASS is available at ${qutlass_SOURCE_DIR}")
 
-cuda_archs_loose_intersection(QUTLASS_ARCHS "12.0a;10.0a" "${CUDA_ARCHS}")
-if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.8 AND QUTLASS_ARCHS)
+if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
+  cuda_archs_loose_intersection(QUTLASS_ARCHS "12.0a;10.0f" "${CUDA_ARCHS}")
+else()
+  cuda_archs_loose_intersection(QUTLASS_ARCHS "12.0a;10.0a;10.3a" "${CUDA_ARCHS}")
+endif()
 
-  if(QUTLASS_ARCHS MATCHES "10\\.0a")
+if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8 AND QUTLASS_ARCHS)
+
+  if(QUTLASS_ARCHS MATCHES "10\\.(0a|3a|0f)")
     set(QUTLASS_TARGET_CC 100)
   elseif(QUTLASS_ARCHS MATCHES "12\\.0a")
     set(QUTLASS_TARGET_CC 120)

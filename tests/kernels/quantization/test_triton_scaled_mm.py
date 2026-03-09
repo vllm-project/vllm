@@ -11,6 +11,7 @@ import pytest
 import torch
 
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_random_seed
 
 device = "cuda"
 
@@ -85,7 +86,7 @@ def test_scaled_mm(
 ):
     is_floating_point_type = lambda t: torch.tensor([1, 1], dtype=t).is_floating_point()
 
-    current_platform.seed_everything(0)
+    set_random_seed(0)
 
     # NOTE: There are cases, where if the matrix is large enough, an output
     # like 65504.4 can be produced, and can easily turn into inf when

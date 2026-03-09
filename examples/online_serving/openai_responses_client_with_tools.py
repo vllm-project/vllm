@@ -3,7 +3,7 @@
 """
 Set up this example by starting a vLLM OpenAI-compatible server with tool call
 options enabled.
-Reasoning models can be used through the Responses API as seen here 
+Reasoning models can be used through the Responses API as seen here
 https://platform.openai.com/docs/api-reference/responses
 For example:
 vllm serve Qwen/Qwen3-1.7B --reasoning-parser qwen3 \

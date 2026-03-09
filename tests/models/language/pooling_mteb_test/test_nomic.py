@@ -4,30 +4,38 @@
 import pytest
 
 from tests.models.language.pooling.embed_utils import correctness_test_embed_models
-from tests.models.utils import CLSPoolingEmbedModelInfo, EmbedModelInfo
+from tests.models.utils import EmbedModelInfo
 
-from .mteb_utils import mteb_test_embed_models
+from .mteb_embed_utils import mteb_test_embed_models
 
 MODELS = [
-    CLSPoolingEmbedModelInfo(
+    EmbedModelInfo(
         "nomic-ai/nomic-embed-text-v1",
         architecture="NomicBertModel",
         mteb_score=0.737568559,
         enable_test=True,
+        seq_pooling_type="MEAN",
+        attn_type="encoder_only",
+        is_prefix_caching_supported=False,
+        is_chunked_prefill_supported=False,
     ),
-    CLSPoolingEmbedModelInfo(
+    EmbedModelInfo(
         "nomic-ai/nomic-embed-text-v1.5",
         architecture="NomicBertModel",
         enable_test=False,
     ),
-    CLSPoolingEmbedModelInfo(
+    EmbedModelInfo(
         "nomic-ai/CodeRankEmbed", architecture="NomicBertModel", enable_test=False
     ),
-    CLSPoolingEmbedModelInfo(
+    EmbedModelInfo(
         "nomic-ai/nomic-embed-text-v2-moe",
         architecture="NomicBertModel",
         mteb_score=0.715488912,
         enable_test=True,
+        seq_pooling_type="MEAN",
+        attn_type="encoder_only",
+        is_prefix_caching_supported=False,
+        is_chunked_prefill_supported=False,
     ),
 ]
 

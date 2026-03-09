@@ -5,7 +5,6 @@
 
 import numpy as np
 import torch
-from transformers import AutoProcessor
 from transformers.feature_extraction_utils import BatchFeature
 from transformers.image_utils import ImageInput
 from transformers.processing_utils import ProcessorMixin
@@ -23,7 +22,6 @@ class HunYuanVLProcessor(ProcessorMixin):
         self,
         image_processor=None,
         tokenizer=None,
-        video_processor=None,
         chat_template=None,
         **kwargs,
     ):
@@ -42,9 +40,7 @@ class HunYuanVLProcessor(ProcessorMixin):
         )
         self.pad_id = 120002  # self.tokenizer.pad_token_id
 
-        super().__init__(
-            image_processor, tokenizer, video_processor, chat_template=chat_template
-        )
+        super().__init__(image_processor, tokenizer, chat_template=chat_template)
 
     def __call__(
         self,
@@ -148,8 +144,8 @@ class HunYuanVLProcessor(ProcessorMixin):
         assert 0
 
     def apply_chat_template(self, *args, **kwargs):
-        token_ids = self.tokenizer.apply_chat_template(*args, **kwargs)
-        return token_ids
+        kwargs["return_dict"] = False
+        return self.tokenizer.apply_chat_template(*args, **kwargs)
 
     def get_imgs_pos(self, doc_ids):
         doc_ids = np.array(doc_ids, dtype=np.int64)
@@ -228,6 +224,3 @@ def split_image_into_patch_blocks(
     patches = img.reshape(-1, 3, patch_size, patch_size)
 
     return patches
-
-
-AutoProcessor.register("HunYuanVLProcessor", HunYuanVLProcessor)

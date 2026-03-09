@@ -25,6 +25,9 @@ The class provides the following primitives:
 
     Worker-side: runs in each worker, loads/saves KV cache to/from
     the Connector based on the metadata.
+        handle_preemptions() - called if there are preempted requests,
+            before their blocks are overwritten
+
         start_load_kv() - starts loading all KVs (maybe async)
         wait_for_layer_load() - blocks until layer i load is done
 
@@ -38,18 +41,18 @@ The class provides the following primitives:
 import enum
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable
-from typing import TYPE_CHECKING, Any, ClassVar, Literal, Optional
+from typing import TYPE_CHECKING, Any, Literal
 
 import torch
 
-from vllm.attention.backends.abstract import AttentionBackend, AttentionMetadata
 from vllm.logger import init_logger
+from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import KVConnectorOutput
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
-    from vllm.distributed.kv_events import KVCacheEvent
+    from vllm.distributed.kv_events import KVCacheEvent, KVConnectorKVEvents
     from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
         KVConnectorPromMetrics,
         KVConnectorStats,
@@ -126,7 +129,7 @@ class KVConnectorRole(enum.Enum):
 class KVConnectorHandshakeMetadata(ABC):  # noqa: B024
     """
     Metadata used for out of band connector handshake between
-    P/D workers. This needs to serializeable.
+    P/D workers. This needs to serializable.
     """
 
     pass
@@ -144,21 +147,21 @@ class KVConnectorMetadata(ABC):  # noqa: B024
 class KVConnectorBase_V1(ABC):
     """
     Base class for KV connectors.
-
-    Attributes:
-        prefer_cross_layer_blocks (bool): Indicates whether this connector
-            prefers KV blocks that hold KV data for all layers (for speeding
-            up KV data transfers).
-            Defaults to False.
     """
 
-    prefer_cross_layer_blocks: ClassVar[bool] = False
+    @property
+    def prefer_cross_layer_blocks(self) -> bool:
+        """
+        Indicates whether this connector prefers KV blocks that hold KV data for all
+        layers, which can speed up KV data transfers. Defaults to False.
+        """
+        return False
 
     def __init__(
         self,
         vllm_config: "VllmConfig",
         role: KVConnectorRole,
-        kv_cache_config: Optional["KVCacheConfig"] = None,
+        kv_cache_config: "KVCacheConfig | None" = None,
     ):
         logger.warning(
             "Initializing KVConnectorBase_V1. This API is experimental and "
@@ -239,7 +242,7 @@ class KVConnectorBase_V1(ABC):
         return
 
     def register_cross_layers_kv_cache(
-        self, kv_cache: torch.Tensor, attn_backend: type[AttentionBackend]
+        self, kv_cache: torch.Tensor, attn_backend: type["AttentionBackend"]
     ):
         """
         Initialize with a single KV cache tensor used by all layers.
@@ -259,6 +262,13 @@ class KVConnectorBase_V1(ABC):
         """
         Set the xPU-specific ops for copying KV between host and device.
         Needed when host buffer is used for kv transfer (e.g., in NixlConnector)
+        """
+        return
+
+    def handle_preemptions(self, preempted_req_ids: set[str]):
+        """
+        Handle preempted requests BEFORE their blocks are overwritten.
+        Needed for connectors which use async saves (e.g., OffloadingConnector)
         """
         return
 
@@ -373,9 +383,17 @@ class KVConnectorBase_V1(ABC):
         """
         return None
 
-    def get_kv_connector_stats(self) -> Optional["KVConnectorStats"]:
+    def get_kv_connector_stats(self) -> "KVConnectorStats | None":
         """
         Get the KV connector stats collected during the last interval.
+        """
+        return None
+
+    def get_kv_connector_kv_cache_events(self) -> "KVConnectorKVEvents | None":
+        """
+        Get the KV connector kv cache events collected during the last interval.
+        This function should be called by the model runner every time after the
+        model execution and before cleanup.
         """
         return None
 
@@ -525,6 +543,28 @@ class KVConnectorBase_V1(ABC):
             )
         return None
 
+    @classmethod
+    def requires_piecewise_for_cudagraph(cls, extra_config: dict[str, Any]) -> bool:
+        """
+        Check if this connector requires PIECEWISE CUDA graph mode.
+
+        Connectors that use asynchronous layer-by-layer operations
+        (wait_for_layer_load/save_kv_layer) should override this method
+        to return True when those operations are enabled. These operations
+        cannot be captured in CUDA graphs and will be skipped during replay,
+        causing data races. PIECEWISE mode allows Python code to execute
+        between graph pieces, ensuring proper synchronization.
+
+        Args:
+            extra_config: The kv_connector_extra_config dict from
+                KVTransferConfig.
+
+        Returns:
+            True if this connector requires PIECEWISE CUDA graph mode,
+            False otherwise.
+        """
+        return False
+
     def get_finished_count(self) -> int | None:
         """
         Get the count of requests expected to complete send/receive operations
@@ -540,7 +580,7 @@ class KVConnectorBase_V1(ABC):
     @classmethod
     def build_kv_connector_stats(
         cls, data: dict[str, Any] | None = None
-    ) -> Optional["KVConnectorStats"]:
+    ) -> "KVConnectorStats | None":
         """
         KVConnectorStats resolution method. This method allows dynamically
         registered connectors to return their own KVConnectorStats object,
@@ -566,10 +606,24 @@ class KVConnectorBase_V1(ABC):
         metric_types: dict[type["PromMetric"], type["PromMetricT"]],
         labelnames: list[str],
         per_engine_labelvalues: dict[int, list[object]],
-    ) -> Optional["KVConnectorPromMetrics"]:
+    ) -> "KVConnectorPromMetrics | None":
         """
         Create a KVConnectorPromMetrics subclass which should register
         per-connector Prometheus metrics and implement observe() to
         expose connector transfer stats via Prometheus.
         """
+        return None
+
+    def reset_cache(self) -> bool | None:
+        """
+        Reset the connector's internal cache.
+
+        Returns:
+            bool: True if the cache was successfully reset, False otherwise.
+        """
+        logger.debug(
+            "Connector cache reset requested, but %s does not implement reset_cache().",
+            type(self).__name__,
+        )
+
         return None

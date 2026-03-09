@@ -5,8 +5,6 @@ set -ex
 
 # FlashInfer configuration
 FLASHINFER_GIT_REPO="https://github.com/flashinfer-ai/flashinfer.git"
-FLASHINFER_GIT_REF="${FLASHINFER_GIT_REF}"
-CUDA_VERSION="${CUDA_VERSION}"
 BUILD_WHEEL="${BUILD_WHEEL:-true}"
 
 if [[ -z "${FLASHINFER_GIT_REF}" ]]; then
@@ -23,7 +21,7 @@ echo "🏗️  Building FlashInfer ${FLASHINFER_GIT_REF} for CUDA ${CUDA_VERSION
 
 # Clone FlashInfer
 git clone --depth 1 --recursive --shallow-submodules \
-    --branch ${FLASHINFER_GIT_REF} \
+    --branch "${FLASHINFER_GIT_REF}" \
     ${FLASHINFER_GIT_REPO} flashinfer
 
 # Set CUDA arch list based on CUDA version
@@ -32,16 +30,19 @@ if [[ "${CUDA_VERSION}" == 11.* ]]; then
     FI_TORCH_CUDA_ARCH_LIST="7.5 8.0 8.9"
 elif [[ "${CUDA_VERSION}" == 12.[0-7]* ]]; then
     FI_TORCH_CUDA_ARCH_LIST="7.5 8.0 8.9 9.0a"
+elif [[ "${CUDA_VERSION}" == 12.[8-9]* ]]; then
+    # CUDA 12.8–12.9
+    FI_TORCH_CUDA_ARCH_LIST="7.5 8.0 8.9 9.0a 10.0a 10.3a 12.0"
 else
-    # CUDA 12.8+ supports 10.0a and 12.0
-    FI_TORCH_CUDA_ARCH_LIST="7.5 8.0 8.9 9.0a 10.0a 12.0"
+    # CUDA 13.0+
+    FI_TORCH_CUDA_ARCH_LIST="7.5 8.0 8.9 9.0a 10.0f 12.0"
 fi
 
 echo "🏗️ Building FlashInfer AOT for arches: ${FI_TORCH_CUDA_ARCH_LIST}"
 
 pushd flashinfer
     # Make sure the wheel is built for the correct CUDA version
-    export UV_TORCH_BACKEND=cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
+    export UV_TORCH_BACKEND=cu$(echo "$CUDA_VERSION" | cut -d. -f1,2 | tr -d '.')
 
     # Build AOT kernels
     export TORCH_CUDA_ARCH_LIST="${FI_TORCH_CUDA_ARCH_LIST}"

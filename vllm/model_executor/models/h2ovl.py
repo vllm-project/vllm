@@ -16,17 +16,19 @@ from transformers import PretrainedConfig
 
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import MultiModalKwargsItems, MultiModalUUIDDict
+from vllm.multimodal.inputs import MultiModalKwargsItems
 from vllm.multimodal.parse import (
     ImageEmbeddingItems,
     ImageProcessorItems,
     MultiModalDataItems,
 )
-from vllm.multimodal.processing import (
+from vllm.multimodal.processing.processor import (
     MultiModalProcessingInfo,
+    ProcessorInputs,
     PromptReplacement,
     PromptUpdate,
     PromptUpdateDetails,
+    TimingContext,
 )
 from vllm.tokenizers import TokenizerLike
 
@@ -424,12 +426,9 @@ class H2OVLProcessingInfo(BaseInternVLProcessingInfo):
         *,
         image_width: int,
         image_height: int,
-        processor: H2OVLProcessor | None,
+        processor: H2OVLProcessor,
         use_msac: bool | None = None,
     ) -> int:
-        if processor is None:
-            processor = self.get_hf_processor()
-
         return processor.get_num_image_tokens(
             image_width=image_width,
             image_height=image_height,
@@ -492,32 +491,17 @@ class H2OVLMultiModalProcessor(BaseInternVLMultiModalProcessor[H2OVLProcessingIn
 
     def _cached_apply_hf_processor(
         self,
-        prompt: str | list[int],
-        mm_data_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
-        tokenization_kwargs: Mapping[str, object],
-        mm_uuids: MultiModalUUIDDict | None = None,
+        inputs: ProcessorInputs,
+        timing_ctx: TimingContext,
     ) -> tuple[list[int], MultiModalProcessingInfo, bool]:
         # The processor logic is different for len(images) <= 1 vs > 1
         # Since the processing cache assumes that the processor output is
         # invariant of how many images are passed per prompt, we only
         # perform caching for the most common case
-        if mm_data_items.get_count("image", strict=False) > 1:
-            return self._apply_hf_processor(
-                prompt=prompt,
-                mm_data_items=mm_data_items,
-                hf_processor_mm_kwargs=hf_processor_mm_kwargs,
-                tokenization_kwargs=tokenization_kwargs,
-                mm_uuids=mm_uuids,
-            )
+        if inputs.mm_data_items.get_count("image", strict=False) > 1:
+            return self._apply_hf_processor(inputs, timing_ctx)
 
-        return super()._cached_apply_hf_processor(
-            prompt=prompt,
-            mm_data_items=mm_data_items,
-            hf_processor_mm_kwargs=hf_processor_mm_kwargs,
-            tokenization_kwargs=tokenization_kwargs,
-            mm_uuids=mm_uuids,
-        )
+        return super()._cached_apply_hf_processor(inputs, timing_ctx)
 
 
 @MULTIMODAL_REGISTRY.register_processor(

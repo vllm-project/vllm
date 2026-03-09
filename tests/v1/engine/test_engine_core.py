@@ -40,15 +40,20 @@ TOKENIZER = AutoTokenizer.from_pretrained(MODEL_NAME)
 PROMPT = "I am Gyoubu Masataka Oniwa"
 PROMPT_TOKENS = TOKENIZER(PROMPT).input_ids
 
+_REQUEST_COUNTER = 0
+
 
 def make_request() -> EngineCoreRequest:
+    global _REQUEST_COUNTER
+    _REQUEST_COUNTER += 1
+    request_id = f"request-{_REQUEST_COUNTER}"
     return EngineCoreRequest(
-        request_id=str(uuid.uuid4()),
+        request_id=request_id,
+        external_req_id=f"{request_id}-{uuid.uuid4()}",
         prompt_token_ids=PROMPT_TOKENS,
         mm_features=None,
         sampling_params=SamplingParams(),
         pooling_params=None,
-        eos_token_id=None,
         arrival_time=time.time(),
         lora_request=None,
         cache_salt=None,
@@ -501,13 +506,12 @@ def test_encoder_instance_zero_kv_cache(
     cache_config = CacheConfig(
         block_size=16,
         gpu_memory_utilization=gpu_memory_utilization,
-        swap_space=0,
         cache_dtype="auto",
         enable_prefix_caching=enable_prefix_caching,
     )
     kv_transfer_config = (
         KVTransferConfig(
-            kv_connector="SharedStorageConnector",
+            kv_connector="ExampleConnector",
             kv_role="kv_both",
             kv_connector_extra_config={"shared_storage_path": "local_storage"},
         )
@@ -515,7 +519,7 @@ def test_encoder_instance_zero_kv_cache(
         else None
     )
     ec_transfer_config = ECTransferConfig(
-        ec_connector="ECSharedStorageConnector",
+        ec_connector="ECExampleConnector",
         ec_role=ec_role,
         ec_connector_extra_config={"shared_storage_path": "/tmp/ec_test_encoder"},
     )

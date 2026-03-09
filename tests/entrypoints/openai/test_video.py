@@ -7,18 +7,18 @@ import openai
 import pytest
 import pytest_asyncio
 
-from vllm.multimodal.utils import encode_video_base64, fetch_video
+from vllm.multimodal.utils import encode_video_url, fetch_video
+from vllm.platforms import current_platform
 
 from ...utils import RemoteOpenAIServer
 
 MODEL_NAME = "llava-hf/llava-onevision-qwen2-0.5b-ov-hf"
-MAXIMUM_VIDEOS = 4
+MAXIMUM_VIDEOS = 3
 
 TEST_VIDEO_URLS = [
-    "http://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4",
-    "http://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ElephantsDream.mp4",
-    "http://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4",
-    "http://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerFun.mp4",
+    "https://www.bogotobogo.com/python/OpenCV_Python/images/mean_shift_tracking/slow_traffic_small.mp4",
+    "https://github.com/opencv/opencv/raw/refs/tags/4.12.0/samples/data/vtest.avi",
+    "https://github.com/opencv/opencv/raw/refs/tags/4.12.0/samples/data/Megamind.avi",
 ]
 
 
@@ -35,9 +35,20 @@ def server():
         "--trust-remote-code",
         "--limit-mm-per-prompt",
         json.dumps({"video": MAXIMUM_VIDEOS}),
+        "--media-io-kwargs",
+        json.dumps({"video": {"num_frames": 32}}),
     ]
 
-    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
+    # ROCm: Increase timeouts to handle potential network delays and slower
+    # video processing when downloading multiple videos from external sources
+    env_overrides = {}
+    if current_platform.is_rocm():
+        env_overrides = {
+            "VLLM_VIDEO_FETCH_TIMEOUT": "120",
+            "VLLM_ENGINE_ITERATION_TIMEOUT_S": "300",
+        }
+
+    with RemoteOpenAIServer(MODEL_NAME, args, env_dict=env_overrides) as remote_server:
         yield remote_server
 
 
@@ -48,9 +59,9 @@ async def client(server):
 
 
 @pytest.fixture(scope="session")
-def base64_encoded_video() -> dict[str, str]:
+def url_encoded_video() -> dict[str, str]:
     return {
-        video_url: encode_video_base64(fetch_video(video_url)[0])
+        video_url: encode_video_url(fetch_video(video_url)[0])
         for video_url in TEST_VIDEO_URLS
     }
 
@@ -120,6 +131,73 @@ async def test_single_chat_session_video(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
+@pytest.mark.parametrize("video_url", [TEST_VIDEO_URLS[0]])
+async def test_request_media_io_kwargs_override_uses_fewer_video_frames(
+    client: openai.AsyncOpenAI, model_name: str, video_url: str
+):
+    messages = dummy_messages_from_video_url(video_url)
+
+    default_resp = await client.chat.completions.create(
+        model=model_name,
+        messages=messages,
+        max_completion_tokens=1,
+        temperature=0.0,
+    )
+    override_resp = await client.chat.completions.create(
+        model=model_name,
+        messages=messages,
+        max_completion_tokens=1,
+        temperature=0.0,
+        extra_body={
+            "media_io_kwargs": {
+                "video": {
+                    "num_frames": 4,
+                }
+            }
+        },
+    )
+
+    assert default_resp.usage is not None
+    assert override_resp.usage is not None
+    assert override_resp.usage.prompt_tokens < default_resp.usage.prompt_tokens
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+@pytest.mark.parametrize("video_url", [TEST_VIDEO_URLS[0]])
+async def test_invalid_num_frames_request_recoverable(
+    client: openai.AsyncOpenAI, model_name: str, video_url: str
+):
+    messages = dummy_messages_from_video_url(video_url)
+
+    with pytest.raises((openai.BadRequestError, openai.APIStatusError)):
+        await client.chat.completions.create(
+            model=model_name,
+            messages=messages,
+            max_completion_tokens=1,
+            temperature=0.0,
+            extra_body={
+                "media_io_kwargs": {
+                    "video": {
+                        "num_frames": "invalid",
+                    }
+                }
+            },
+        )
+
+    # Server should still handle subsequent requests after the failed one.
+    recovery_resp = await client.chat.completions.create(
+        model=model_name,
+        messages=messages,
+        max_completion_tokens=1,
+        temperature=0.0,
+    )
+    recovery_msg = recovery_resp.choices[0].message
+    assert recovery_msg.content is not None and len(recovery_msg.content) >= 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
 @pytest.mark.parametrize("video_url", TEST_VIDEO_URLS)
 async def test_error_on_invalid_video_url_type(
     client: openai.AsyncOpenAI, model_name: str, video_url: str
@@ -175,11 +253,9 @@ async def test_single_chat_session_video_base64encoded(
     client: openai.AsyncOpenAI,
     model_name: str,
     video_url: str,
-    base64_encoded_video: dict[str, str],
+    url_encoded_video: dict[str, str],
 ):
-    messages = dummy_messages_from_video_url(
-        f"data:video/jpeg;base64,{base64_encoded_video[video_url]}"
-    )
+    messages = dummy_messages_from_video_url(url_encoded_video[video_url])
 
     # test single completion
     chat_completion = await client.chat.completions.create(
@@ -223,11 +299,9 @@ async def test_single_chat_session_video_base64encoded_beamsearch(
     client: openai.AsyncOpenAI,
     model_name: str,
     video_url: str,
-    base64_encoded_video: dict[str, str],
+    url_encoded_video: dict[str, str],
 ):
-    messages = dummy_messages_from_video_url(
-        f"data:video/jpeg;base64,{base64_encoded_video[video_url]}"
-    )
+    messages = dummy_messages_from_video_url(url_encoded_video[video_url])
 
     chat_completion = await client.chat.completions.create(
         model=model_name,
@@ -290,6 +364,11 @@ async def test_chat_streaming_video(
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 @pytest.mark.parametrize(
     "video_urls", [TEST_VIDEO_URLS[:i] for i in range(2, len(TEST_VIDEO_URLS))]
+)
+@pytest.mark.flaky(
+    reruns=2,
+    reruns_delay=5,
+    condition=current_platform.is_rocm(),
 )
 async def test_multi_video_input(
     client: openai.AsyncOpenAI, model_name: str, video_urls: list[str]
