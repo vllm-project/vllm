@@ -1141,6 +1141,19 @@ class NixlConnectorWorker:
         expected_engine_id: str,
     ) -> dict[int, str]:
         """Do a NIXL handshake with a remote instance."""
+
+        # the first time we connect to a remote agent.
+        # be careful, the handshake happens in a background thread.
+        # it does not have an active cuda context until any cuda runtime
+        # call is made. when UCX fails to find a valid cuda context, it will
+        # disable any cuda ipc communication, essentially disabling any NVLink
+        # communication.
+        # when we are using device buffers, we need to set the device
+        # explicitly to make sure the handshake background thread has a valid
+        # cuda context.
+        if not self.use_host_buffer:
+            current_platform.set_device(self.device_id)
+
         # When target instance TP > local TP, we need to perform multiple
         # handshakes. Do it in a single background job for simplicity.
         # Regardless, only handshake with the remote TP rank(s) that current
