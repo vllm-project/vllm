@@ -791,11 +791,15 @@ class OpenAIServing:
 
         if max_tokens is not None and token_num + max_tokens > max_model_len:
             raise VLLMValidationError(
-                "'max_tokens' or 'max_completion_tokens' is too large: "
-                f"{max_tokens}. This model's maximum context length is "
-                f"{max_model_len} tokens and your request has "
-                f"{token_num} input tokens ({max_tokens} > {max_model_len}"
-                f" - {token_num}).",
+                f"This model's maximum context length is "
+                f"{max_model_len} tokens. However, you requested "
+                f"{max_tokens} output tokens and your prompt contains "
+                f"{token_num} input tokens, for a total of "
+                f"{token_num + max_tokens} tokens "
+                f"({token_num} + {max_tokens} = "
+                f"{token_num + max_tokens} > {max_model_len}). "
+                f"Please reduce the length of the input prompt or the "
+                f"number of requested output tokens.",
                 parameter="max_tokens",
                 value=max_tokens,
             )
@@ -896,10 +900,15 @@ class OpenAIServing:
             ),
         )
 
+        mm_config = self.model_config.multimodal_config
+
         tok_params = request.build_tok_params(self.model_config)
         chat_params = request.build_chat_params(
             default_template, default_template_content_format
-        ).with_defaults(default_template_kwargs)
+        ).with_defaults(
+            default_template_kwargs,
+            default_media_io_kwargs=(mm_config.media_io_kwargs if mm_config else None),
+        )
 
         (conversation,), (engine_prompt,) = await renderer.render_chat_async(
             [messages],
