@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import contextlib
 import importlib
 import inspect
 from functools import lru_cache
@@ -217,12 +218,27 @@ def get_processor(
         else:
             raise e
 
+    # If loaded processor is not the expected type, check if there's a
+    # registered vLLM processor class we can use instead
     if not isinstance(processor, processor_cls):
-        raise TypeError(
-            "Invalid type of HuggingFace processor. "
-            f"Expected type: {processor_cls}, but "
-            f"found type: {type(processor)}"
-        )
+        # Try to use vLLM's registered processor if available
+        if registered_processor_cls is not None:
+            with contextlib.suppress(Exception):
+                processor = registered_processor_cls.from_pretrained(
+                    processor_name,
+                    *args,
+                    revision=revision,
+                    trust_remote_code=trust_remote_code,
+                    **kwargs,
+                )
+
+        # If still not the expected type, raise error
+        if not isinstance(processor, processor_cls):
+            raise TypeError(
+                "Invalid type of HuggingFace processor. "
+                f"Expected type: {processor_cls}, but "
+                f"found type: {type(processor)}"
+            )
 
     return processor
 
