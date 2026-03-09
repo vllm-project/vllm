@@ -84,6 +84,7 @@ def sparse_attn_indexer(
     # out-of-bounds reads in the kernel.
     num_tokens = slot_mapping.shape[0]
     k = k[:num_tokens]
+
     ops.indexer_k_quant_and_cache(
         k,
         kv_cache,
@@ -112,7 +113,6 @@ def sparse_attn_indexer(
                 chunk.block_table,
                 chunk.cu_seq_lens,
             )
-
             if is_deep_gemm_supported():
                 logits = fp8_mqa_logits(
                     q_fp8[chunk.token_start : chunk.token_end],
@@ -131,6 +131,7 @@ def sparse_attn_indexer(
                     chunk.cu_seqlen_ke,
                 )
             num_rows = logits.shape[0]
+
             topk_indices = topk_indices_buffer[
                 chunk.token_start : chunk.token_end, :topk_tokens
             ]
