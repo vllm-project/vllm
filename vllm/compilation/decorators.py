@@ -339,6 +339,7 @@ def _support_torch_compile(
     cls.__bases__ = cls.__bases__ + (TorchCompileWithNoGuardsWrapper,)
 
     old_init = cls.__init__
+    cls_name = cls.__name__
 
     setattr(cls, IGNORE_COMPILE_KEY, False)
 
@@ -381,10 +382,9 @@ def _support_torch_compile(
         self.compiled = False
 
         # Handled by monkeypatching `TorchCompileWithNoGuardsWrapper` into base class
-        compile_prefix = cls.__name__ if is_encoder else ""
         TorchCompileWithNoGuardsWrapper.__init__(
             self,
-            compile_prefix=compile_prefix,
+            compile_prefix=cls_name,
             is_encoder=is_encoder,
         )
 
