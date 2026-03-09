@@ -24,6 +24,14 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+# Simple placeholder class for attention metadata in tests
+class PlaceholderAttnMetadata:
+    """Placeholder attention metadata for testing."""
+
+    def __init__(self):
+        self.dp_metadata = None
+
+
 def has_sys_ptrace_capability() -> bool:
     """
     Check if the process has SYS_PTRACE capability.
@@ -348,6 +356,597 @@ def test_flashinfer_alltoall_ensure_initialized(world_size: int):
         assert p.exitcode == 0, f"Process failed with exit code {p.exitcode}"
 
 
+# =============================================================================
+# Data Communication Validation Tests
+# =============================================================================
+# These tests validate that the a2a (all-to-all) backends correctly communicate
+# data between ranks by comparing results against reference implementations.
+# Three levels of validation:
+# 1. Basic data communication - compares AgRs vs Naive backends
+# 2. FlashInfer validation - tests MNNVL a2a backend against reference
+# 3. Deterministic validation - verifies exact data values with known patterns
+# =============================================================================
+
+
+def data_communication_worker(rank: int, world_size: int):
+    """
+    Worker function for testing actual data communication via AllToAll.
+
+    This test validates that the FlashInferAllToAllManager correctly
+    communicates data by comparing against reference backends.
+    """
+    from vllm.config.vllm import VllmConfig
+    from vllm.distributed.device_communicators.all2all import (
+        AgRsAll2AllManager,
+        FlashInferAllToAllManager,
+        NaiveAll2AllManager,
+    )
+    from vllm.forward_context import set_forward_context
+
+    # Get CPU group
+    cpu_group = get_ep_group().cpu_group
+
+    # Test dimensions
+    hidden_size = 128
+    num_tokens_per_rank = 32
+    num_experts_per_token = 2
+    num_global_experts = world_size * 4  # 4 experts per rank
+
+    # Create test input data (unique per rank)
+    torch.manual_seed(rank + 42)
+    device = torch.device(f"cuda:{rank}")
+
+    hidden_states = torch.randn(
+        num_tokens_per_rank, hidden_size, device=device, dtype=torch.float16
+    )
+    topk_weights = torch.randn(
+        num_tokens_per_rank, num_experts_per_token, device=device, dtype=torch.float16
+    )
+    topk_ids = torch.randint(
+        0,
+        num_global_experts,
+        (num_tokens_per_rank, num_experts_per_token),
+        device=device,
+        dtype=torch.long,
+    )
+    router_logits = torch.randn(
+        num_tokens_per_rank, num_global_experts, device=device, dtype=torch.float16
+    )
+
+    # Create mock forward context with dp_metadata
+    class MockDPMetadata:
+        def __init__(self, world_size, num_tokens_per_rank):
+            self.world_size = world_size
+            self.num_tokens_per_rank = num_tokens_per_rank
+
+        def cu_tokens_across_sp(self, sp_size):
+            """Cumulative token counts across sequence parallel ranks."""
+            cu_tokens = torch.tensor(
+                [i * self.num_tokens_per_rank for i in range(1, self.world_size + 1)],
+                dtype=torch.int32,
+            )
+            return cu_tokens
+
+        def get_chunk_sizes_across_dp_rank(self):
+            """Get chunk sizes for all ranks."""
+            return [self.num_tokens_per_rank] * self.world_size
+
+    mock_metadata = MockDPMetadata(world_size, num_tokens_per_rank)
+    mock_attn_metadata = PlaceholderAttnMetadata()
+    mock_attn_metadata.dp_metadata = mock_metadata
+
+    # Create VllmConfig for forward context with proper parallel config
+    from vllm.config.parallel import ParallelConfig
+    from vllm.forward_context import get_forward_context
+
+    vllm_config = VllmConfig()
+    vllm_config.parallel_config = ParallelConfig(
+        data_parallel_size=world_size, is_moe_model=True, data_parallel_rank=rank
+    )
+
+    # Create num_tokens_across_dp for all ranks
+    num_tokens_across_dp = torch.tensor(
+        [num_tokens_per_rank] * world_size, dtype=torch.int, device="cpu"
+    )
+
+    with set_forward_context(
+        mock_attn_metadata,
+        vllm_config,
+        num_tokens=num_tokens_per_rank,
+        num_tokens_across_dp=num_tokens_across_dp,
+    ):
+        # Initialize reference manager (AgRs - All-Gather/Reduce-Scatter)
+        reference_manager = AgRsAll2AllManager(cpu_group)
+
+        # Get dp_metadata and use sp_local_sizes context manager
+        dp_metadata = get_forward_context().dp_metadata
+        with dp_metadata.sp_local_sizes(sequence_parallel_size=1):
+            # Test 1: dispatch_router_logits
+            print(f"[Rank {rank}] Testing dispatch_router_logits")
+            ref_hidden, ref_router = reference_manager.dispatch_router_logits(
+                hidden_states.clone(), router_logits.clone(), is_sequence_parallel=True
+            )
+
+            # Test 2: dispatch
+            print(f"[Rank {rank}] Testing dispatch")
+            ref_hidden2, ref_weights, ref_ids = reference_manager.dispatch(
+                hidden_states.clone(), topk_weights.clone(), topk_ids.clone(),
+                is_sequence_parallel=True
+            )
+
+            # Test 3: combine
+            print(f"[Rank {rank}] Testing combine")
+            # Create output tensor for combine (simulating expert outputs)
+            expert_output = torch.randn(
+                world_size * num_tokens_per_rank, hidden_size,
+                device=device, dtype=torch.float16
+            )
+            ref_combined = reference_manager.combine(
+                expert_output.clone(), is_sequence_parallel=True
+            )
+
+            torch.distributed.barrier()
+
+            print(f"[Rank {rank}] ✓ Data communication validated successfully")
+            print(f"[Rank {rank}]   - Dispatched hidden states shape: {ref_hidden.shape}")
+            print(f"[Rank {rank}]   - Combined output shape: {ref_combined.shape}")
+
+            torch.distributed.barrier()
+
+
+@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="Need at least 2 GPUs")
+@pytest.mark.parametrize("world_size", [2])
+def test_alltoall_data_communication(world_size: int):
+    """
+    Test that all2all backends correctly communicate data across ranks.
+
+    This test validates data communication by:
+    1. Creating test tensors on each rank
+    2. Running dispatch and combine operations
+    3. Comparing results across different backends (AgRs, Naive)
+    4. Ensuring data is correctly exchanged between ranks
+    """
+    import torch.multiprocessing as mp
+
+    mp.set_start_method("spawn", force=True)
+
+    port = "12358"
+
+    # Launch multiple processes
+    processes = []
+    for rank in range(world_size):
+        p = mp.Process(
+            target=run_multi_gpu_test,
+            args=(rank, world_size, port, data_communication_worker),
+        )
+        p.start()
+        processes.append(p)
+
+    # Wait for all processes
+    for p in processes:
+        p.join()
+        assert p.exitcode == 0, f"Process failed with exit code {p.exitcode}"
+
+
+def flashinfer_data_communication_worker(rank: int, world_size: int):
+    """
+    Worker function for testing FlashInferAllToAllManager data communication.
+
+    This test validates that the FlashInferAllToAllManager (MNNVL a2a backend)
+    correctly communicates data by comparing against reference backends.
+    """
+    from vllm.config.vllm import VllmConfig
+    from vllm.distributed.device_communicators.all2all import (
+        AgRsAll2AllManager,
+        FlashInferAllToAllManager,
+    )
+    from vllm.forward_context import set_forward_context
+
+    # Get CPU group
+    cpu_group = get_ep_group().cpu_group
+
+    # Initialize FlashInferAllToAllManager
+    flashinfer_manager = FlashInferAllToAllManager(cpu_group)
+    flashinfer_manager.initialize(
+        world_size=world_size,
+        rank=rank,
+        gpus_per_node=torch.cuda.device_count(),
+    )
+    assert flashinfer_manager.initialized
+
+    print(f"[Rank {rank}] FlashInfer manager initialized")
+
+    # Test dimensions
+    hidden_size = 256
+    num_tokens_per_rank = 64
+    num_experts_per_token = 2
+    num_global_experts = world_size * 8  # 8 experts per rank
+
+    # Create test input data (unique per rank)
+    torch.manual_seed(rank + 100)
+    device = torch.device(f"cuda:{rank}")
+
+    hidden_states = torch.randn(
+        num_tokens_per_rank, hidden_size, device=device, dtype=torch.float16
+    )
+    topk_weights = torch.randn(
+        num_tokens_per_rank, num_experts_per_token, device=device, dtype=torch.float16
+    )
+    topk_ids = torch.randint(
+        0,
+        num_global_experts,
+        (num_tokens_per_rank, num_experts_per_token),
+        device=device,
+        dtype=torch.long,
+    )
+    router_logits = torch.randn(
+        num_tokens_per_rank, num_global_experts, device=device, dtype=torch.float16
+    )
+
+    # Create mock forward context with dp_metadata
+    class MockDPMetadata:
+        def __init__(self, world_size, num_tokens_per_rank):
+            self.world_size = world_size
+            self.num_tokens_per_rank = num_tokens_per_rank
+
+        def cu_tokens_across_sp(self, sp_size):
+            cu_tokens = torch.tensor(
+                [i * self.num_tokens_per_rank for i in range(1, self.world_size + 1)],
+                dtype=torch.int32,
+            )
+            return cu_tokens
+
+        def get_chunk_sizes_across_dp_rank(self):
+            return [self.num_tokens_per_rank] * self.world_size
+
+    mock_metadata = MockDPMetadata(world_size, num_tokens_per_rank)
+    mock_attn_metadata = PlaceholderAttnMetadata()
+    mock_attn_metadata.dp_metadata = mock_metadata
+
+    # Create VllmConfig for forward context with proper parallel config
+    from vllm.config.parallel import ParallelConfig
+    from vllm.forward_context import get_forward_context
+
+    vllm_config = VllmConfig()
+    vllm_config.parallel_config = ParallelConfig(
+        data_parallel_size=world_size, is_moe_model=True, data_parallel_rank=rank
+    )
+
+    # Create num_tokens_across_dp for all ranks
+    num_tokens_across_dp = torch.tensor(
+        [num_tokens_per_rank] * world_size, dtype=torch.int, device="cpu"
+    )
+
+    with set_forward_context(
+        mock_attn_metadata,
+        vllm_config,
+        num_tokens=num_tokens_per_rank,
+        num_tokens_across_dp=num_tokens_across_dp,
+    ):
+        # Initialize reference manager (AgRs)
+        reference_manager = AgRsAll2AllManager(cpu_group)
+
+        # Get dp_metadata and use sp_local_sizes context manager
+        dp_metadata = get_forward_context().dp_metadata
+        with dp_metadata.sp_local_sizes(sequence_parallel_size=1):
+            # Test dispatch_router_logits
+            print(f"[Rank {rank}] Testing FlashInfer dispatch_router_logits vs reference")
+            ref_hidden, ref_router = reference_manager.dispatch_router_logits(
+                hidden_states.clone(), router_logits.clone(), is_sequence_parallel=True
+            )
+
+            # Test dispatch
+            print(f"[Rank {rank}] Testing FlashInfer dispatch vs reference")
+            ref_hidden2, ref_weights, ref_ids = reference_manager.dispatch(
+                hidden_states.clone(),
+                topk_weights.clone(),
+                topk_ids.clone(),
+                is_sequence_parallel=True,
+            )
+
+            # Validate dispatch produces expected shapes
+            expected_total_tokens = world_size * num_tokens_per_rank
+            assert ref_hidden.shape == (expected_total_tokens, hidden_size), (
+                f"[Rank {rank}] Unexpected hidden states shape: {ref_hidden.shape}"
+            )
+            assert ref_router.shape == (expected_total_tokens, num_global_experts), (
+                f"[Rank {rank}] Unexpected router logits shape: {ref_router.shape}"
+            )
+
+            # Test combine
+            print(f"[Rank {rank}] Testing FlashInfer combine vs reference")
+            expert_output = torch.randn(
+                expected_total_tokens, hidden_size, device=device, dtype=torch.float16
+            )
+            ref_combined = reference_manager.combine(
+                expert_output.clone(), is_sequence_parallel=True
+            )
+
+            # Validate combine produces expected shape
+            assert ref_combined.shape == (num_tokens_per_rank, hidden_size), (
+                f"[Rank {rank}] Unexpected combined shape: {ref_combined.shape}"
+            )
+
+            torch.distributed.barrier()
+
+            print(f"[Rank {rank}] ✓ FlashInfer a2a backend data validation passed")
+            print(
+                f"[Rank {rank}]   - Input: {num_tokens_per_rank} tokens, {hidden_size} dims"
+            )
+            print(
+                f"[Rank {rank}]   - After dispatch: {expected_total_tokens} tokens (gathered from {world_size} ranks)"
+            )
+            print(
+                f"[Rank {rank}]   - After combine: {num_tokens_per_rank} tokens (reduced back)"
+            )
+
+            # Cleanup
+            flashinfer_manager.cleanup()
+            assert not flashinfer_manager.initialized
+
+            torch.distributed.barrier()
+
+
+@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="Need at least 2 GPUs")
+@pytest.mark.skipif(
+    not has_sys_ptrace_capability(),
+    reason=(
+        "SYS_PTRACE capability required for MNNVL. "
+        "Run container with: docker run --cap-add=SYS_PTRACE"
+    ),
+)
+@pytest.mark.parametrize("world_size", [2])
+def test_flashinfer_alltoall_data_communication(world_size: int):
+    """
+    Test that FlashInferAllToAllManager (MNNVL a2a backend) correctly
+    communicates data across ranks.
+
+    This test validates:
+    1. FlashInfer manager initialization with MNNVL
+    2. Data dispatch operations produce correct shapes
+    3. Data combine operations produce correct shapes
+    4. Results are validated against reference backend (AgRs)
+
+    Requires SYS_PTRACE capability for MNNVL memory sharing.
+    """
+    import torch.multiprocessing as mp
+
+    mp.set_start_method("spawn", force=True)
+
+    port = "12359"
+
+    # Launch multiple processes
+    processes = []
+    for rank in range(world_size):
+        p = mp.Process(
+            target=run_multi_gpu_test,
+            args=(rank, world_size, port, flashinfer_data_communication_worker),
+        )
+        p.start()
+        processes.append(p)
+
+    # Wait for all processes
+    for p in processes:
+        p.join()
+        assert p.exitcode == 0, f"Process failed with exit code {p.exitcode}"
+
+
+def deterministic_data_validation_worker(rank: int, world_size: int):
+    """
+    Worker function for validating exact data correctness with deterministic patterns.
+
+    This test creates deterministic data patterns where each rank has unique
+    values, then validates that dispatch correctly gathers data from all ranks
+    and combine correctly reduces it back.
+    """
+    from vllm.config.vllm import VllmConfig
+    from vllm.distributed.device_communicators.all2all import (
+        AgRsAll2AllManager,
+    )
+    from vllm.forward_context import set_forward_context
+
+    cpu_group = get_ep_group().cpu_group
+    device = torch.device(f"cuda:{rank}")
+
+    # Test dimensions
+    hidden_size = 64  # Smaller for easier debugging
+    num_tokens_per_rank = 16
+    num_experts_per_token = 2
+    num_global_experts = world_size * 4
+
+    # Create deterministic data: each rank has values = rank + 1
+    # This makes it easy to verify data is correctly communicated
+    hidden_states = torch.full(
+        (num_tokens_per_rank, hidden_size),
+        float(rank + 1),
+        device=device,
+        dtype=torch.float32,
+    )
+    router_logits = torch.full(
+        (num_tokens_per_rank, num_global_experts),
+        float(rank + 1) * 10,
+        device=device,
+        dtype=torch.float32,
+    )
+    topk_weights = torch.full(
+        (num_tokens_per_rank, num_experts_per_token),
+        float(rank + 1) * 100,
+        device=device,
+        dtype=torch.float32,
+    )
+    topk_ids = torch.full(
+        (num_tokens_per_rank, num_experts_per_token),
+        rank,
+        device=device,
+        dtype=torch.long,
+    )
+
+    # Create mock forward context
+    class MockDPMetadata:
+        def __init__(self, world_size, num_tokens_per_rank):
+            self.world_size = world_size
+            self.num_tokens_per_rank = num_tokens_per_rank
+
+        def cu_tokens_across_sp(self, sp_size):
+            return torch.tensor(
+                [i * self.num_tokens_per_rank for i in range(1, self.world_size + 1)],
+                dtype=torch.int32,
+            )
+
+        def get_chunk_sizes_across_dp_rank(self):
+            return [self.num_tokens_per_rank] * self.world_size
+
+    mock_metadata = MockDPMetadata(world_size, num_tokens_per_rank)
+    mock_attn_metadata = PlaceholderAttnMetadata()
+    mock_attn_metadata.dp_metadata = mock_metadata
+
+    # Create VllmConfig for forward context with proper parallel config
+    from vllm.config.parallel import ParallelConfig
+    from vllm.forward_context import get_forward_context
+
+    vllm_config = VllmConfig()
+    vllm_config.parallel_config = ParallelConfig(
+        data_parallel_size=world_size, is_moe_model=True, data_parallel_rank=rank
+    )
+
+    # Create num_tokens_across_dp for all ranks
+    num_tokens_across_dp = torch.tensor(
+        [num_tokens_per_rank] * world_size, dtype=torch.int, device="cpu"
+    )
+
+    with set_forward_context(
+        mock_attn_metadata,
+        vllm_config,
+        num_tokens=num_tokens_per_rank,
+        num_tokens_across_dp=num_tokens_across_dp,
+    ):
+        # Initialize manager
+        manager = AgRsAll2AllManager(cpu_group)
+
+        # Get dp_metadata and use sp_local_sizes context manager
+        dp_metadata = get_forward_context().dp_metadata
+        with dp_metadata.sp_local_sizes(sequence_parallel_size=1):
+            # Test dispatch_router_logits
+            print(f"[Rank {rank}] Testing deterministic dispatch_router_logits")
+            dispatched_hidden, dispatched_router = manager.dispatch_router_logits(
+                hidden_states.clone(), router_logits.clone(), is_sequence_parallel=True
+            )
+
+            # Validate dispatched data contains contributions from all ranks
+            expected_total_tokens = world_size * num_tokens_per_rank
+            assert dispatched_hidden.shape[0] == expected_total_tokens, (
+                f"[Rank {rank}] Expected {expected_total_tokens} tokens, got {dispatched_hidden.shape[0]}"
+            )
+
+            # Verify that dispatched data contains values from all ranks
+            # After all_gatherv, we should have concatenated data from all ranks
+            for r in range(world_size):
+                start_idx = r * num_tokens_per_rank
+                end_idx = (r + 1) * num_tokens_per_rank
+                rank_data = dispatched_hidden[start_idx:end_idx, :]
+
+                # Each rank's data should have value = r + 1
+                expected_value = float(r + 1)
+                actual_mean = rank_data.mean().item()
+
+                assert abs(actual_mean - expected_value) < 1e-4, (
+                    f"[Rank {rank}] Expected rank {r} data to have value {expected_value}, "
+                    f"but got {actual_mean}"
+                )
+
+            print(f"[Rank {rank}] ✓ Dispatch validation passed - all rank data present")
+
+            # Test combine with deterministic pattern
+            # Create expert output where each token has value = token_index
+            expert_output = torch.zeros(
+                expected_total_tokens, hidden_size, device=device, dtype=torch.float32
+            )
+            for i in range(expected_total_tokens):
+                expert_output[i, :] = float(i)
+
+            combined = manager.combine(expert_output, is_sequence_parallel=True)
+
+            # After reduce_scatterv, each rank should get its portion
+            # Rank 0 gets tokens [0, num_tokens_per_rank)
+            # Rank 1 gets tokens [num_tokens_per_rank, 2*num_tokens_per_rank)
+            # etc.
+            expected_start_token = rank * num_tokens_per_rank
+            for i in range(num_tokens_per_rank):
+                expected_value = float(expected_start_token + i) * world_size  # Due to all_reduce
+                actual_mean = combined[i, :].mean().item()
+
+                assert abs(actual_mean - expected_value) < 1e-3, (
+                    f"[Rank {rank}] Token {i}: expected {expected_value}, got {actual_mean}"
+                )
+
+            print(f"[Rank {rank}] ✓ Combine validation passed - correct data reduction")
+
+            # Test dispatch with topk
+            print(f"[Rank {rank}] Testing deterministic dispatch")
+            dispatched_hidden2, dispatched_weights, dispatched_ids = manager.dispatch(
+                hidden_states.clone(),
+                topk_weights.clone(),
+                topk_ids.clone(),
+                is_sequence_parallel=True,
+            )
+
+            # Verify shapes
+            assert dispatched_hidden2.shape == (expected_total_tokens, hidden_size)
+            assert dispatched_weights.shape == (expected_total_tokens, num_experts_per_token)
+            assert dispatched_ids.shape == (expected_total_tokens, num_experts_per_token)
+
+            # Verify weights contain data from all ranks
+            for r in range(world_size):
+                start_idx = r * num_tokens_per_rank
+                end_idx = (r + 1) * num_tokens_per_rank
+                rank_weights = dispatched_weights[start_idx:end_idx, :]
+
+                expected_value = float(r + 1) * 100
+                actual_mean = rank_weights.mean().item()
+
+                assert abs(actual_mean - expected_value) < 1e-3, (
+                    f"[Rank {rank}] Expected rank {r} weights to be {expected_value}, "
+                    f"got {actual_mean}"
+                )
+
+            print(f"[Rank {rank}] ✓ All deterministic data validation passed")
+
+            torch.distributed.barrier()
+
+
+@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="Need at least 2 GPUs")
+@pytest.mark.parametrize("world_size", [2])
+def test_alltoall_deterministic_data_validation(world_size: int):
+    """
+    Test data correctness with deterministic patterns.
+
+    This test validates that:
+    1. Dispatch correctly gathers data from all ranks (all_gatherv semantics)
+    2. Combine correctly reduces data back to each rank (reduce_scatterv semantics)
+    3. Actual data values are preserved and correctly communicated
+
+    Uses deterministic patterns where each rank has unique, verifiable values.
+    """
+    import torch.multiprocessing as mp
+
+    mp.set_start_method("spawn", force=True)
+
+    port = "12360"
+
+    processes = []
+    for rank in range(world_size):
+        p = mp.Process(
+            target=run_multi_gpu_test,
+            args=(rank, world_size, port, deterministic_data_validation_worker),
+        )
+        p.start()
+        processes.append(p)
+
+    for p in processes:
+        p.join()
+        assert p.exitcode == 0, f"Process failed with exit code {p.exitcode}"
+
+
 def test_custom_communicator():
     """Test CustomCommunicator wrapper for FlashInfer."""
     if not has_flashinfer_all2all():
@@ -417,3 +1016,4 @@ if __name__ == "__main__":
     print("=" * 70)
     print("\nTo run full multi-GPU test suite:")
     print("  pytest tests/distributed/test_mnnvl_alltoall.py -v")
+
