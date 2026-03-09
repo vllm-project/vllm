@@ -168,9 +168,13 @@ class Qwen3_5GatedDeltaNet(Qwen3NextGatedDeltaNet):
         z = z.reshape(z.size(0), -1, self.head_v_dim)
         ba, _ = self.in_proj_ba(hidden_states)
         b, a = ba.chunk(2, dim=-1)
-
-        b = b.contiguous()
-        a = a.contiguous()
+        # in_proj_ba is replicated (disable_tp=True), so b and a each
+        # contain all num_v_heads.  Slice to the local TP rank's portion.
+        v_heads_per_rank = self.num_v_heads // self.tp_size
+        start = self.tp_rank * v_heads_per_rank
+        end = start + v_heads_per_rank
+        b = b[:, start:end].contiguous()
+        a = a[:, start:end].contiguous()
 
         # ============================================================
         # Part 2: Core Attention (Custom Op)
