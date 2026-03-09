@@ -1133,6 +1133,8 @@ class NixlConnectorWorker:
             "enforce_handshake_compat", True
         )
 
+        self.has_connected_agents = False
+
     def _nixl_handshake(
         self,
         host: str,
@@ -1690,6 +1692,20 @@ class NixlConnectorWorker:
             self._tp_size[engine_id] = remote_tp_size
         if engine_id not in self._block_size:
             self._block_size[engine_id] = nixl_agent_meta.block_size
+
+        if not self.has_connected_agents:
+            self.has_connected_agents = True
+            # the first time we connect to a remote agent.
+            # be careful, the handshake happens in a background thread.
+            # it does not have an active cuda context until any cuda runtime
+            # call is made. when UCX fails to find a valid cuda context, it will
+            # disable any cuda ipc communication, essentially disabling any NVLink
+            # communication.
+            # when we are using device buffers, we need to set the device
+            # explicitly to make sure the handshake background thread has a valid
+            # cuda context.
+            if not self.use_host_buffer:
+                current_platform.set_device(self.device_id)
 
         remote_agent_name = self.nixl_wrapper.add_remote_agent(
             nixl_agent_meta.agent_metadata
