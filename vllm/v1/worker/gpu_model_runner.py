@@ -216,7 +216,7 @@ def _update_num_computed_tokens_for_batch_change(
 ) -> None:
     """Correct num_computed_tokens for async spec decode drift.
 
-    Requests that had drafts (D > 0): corrected = prev_gpu + V.
+    Requests that had drafts: corrected = prev_gpu + valid_count.
     New requests or non-draft (e.g. prefills): use CPU value directly.
     """
     gather_indices = prev_positions.clamp(min=0)
