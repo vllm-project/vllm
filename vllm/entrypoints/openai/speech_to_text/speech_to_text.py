@@ -166,13 +166,19 @@ class OpenAISpeechToText(OpenAIServing):
             _ = librosa.get_duration(y=dummy_audio, sr=self.asr_config.sample_rate)
 
             # Warm up mel-spectrogram computation with model-specific parameters
-            from vllm.transformers_utils.processor import (
-                cached_feature_extractor_from_config,
-            )
+            from vllm.transformers_utils.processor import cached_processor_from_config
 
-            # Load feature extractor directly (no need for full processor)
-            # This avoids processor type checking issues with custom tokenizers
-            feature_extractor = cached_feature_extractor_from_config(self.model_config)
+            processor = cached_processor_from_config(self.model_config)
+            feature_extractor = None
+            if hasattr(processor, "feature_extractor"):
+                feature_extractor = processor.feature_extractor
+            elif hasattr(processor, "audio_processor"):
+                # For models like GraniteSpeech that use audio_processor
+                audio_proc = processor.audio_processor
+                if hasattr(audio_proc, "feature_extractor"):
+                    feature_extractor = audio_proc.feature_extractor
+                # If audio_processor doesn't have feature_extractor,
+                # skip mel-spectrogram warmup for these models
 
             if feature_extractor is not None:
                 _ = librosa.feature.melspectrogram(
@@ -417,11 +423,7 @@ class OpenAISpeechToText(OpenAIServing):
         in this implementation and will be None. See docs for details.
         """
         BASE_OFFSET = 0.02
-        # Handle TikTokenTokenizer which uses bos/eos instead of add_special_tokens
-        try:
-            init_token = self.tokenizer.encode("<|0.00|>", add_special_tokens=False)[0]  # type: ignore[call-arg]
-        except TypeError:
-            init_token = self.tokenizer.encode("<|0.00|>", bos=False, eos=False)[0]  # type: ignore[call-arg]
+        init_token = self.tokenizer.encode("<|0.00|>", add_special_tokens=False)[0]
         if tokens[-1] == self.tokenizer.eos_token_id:
             tokens = tokens[:-1]
 
