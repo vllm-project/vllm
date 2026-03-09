@@ -34,9 +34,9 @@ class CPUModelRunner(GPUModelRunner):
         def replace_tensor(obj: Any, cpu_attr_name: str, device_attr_name) -> None:
             cpu_tensor = getattr(obj, cpu_attr_name, None)
             device_tensor = getattr(obj, device_attr_name, None)
-            if cpu_tensor is not None and device_tensor is not None:
-                assert isinstance(cpu_tensor, torch.Tensor)
-                assert isinstance(device_tensor, torch.Tensor)
+            if isinstance(cpu_tensor, torch.Tensor) and isinstance(
+                device_tensor, torch.Tensor
+            ):
                 setattr(obj, device_attr_name, cpu_tensor)
 
         for v in vars(self).values():
