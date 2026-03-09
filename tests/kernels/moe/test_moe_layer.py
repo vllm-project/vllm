@@ -143,6 +143,118 @@ def tp_chunk_gate_up(
     return torch.cat([gate, up], dim=dim)
 
 
+def apply_test_filter(
+    *,
+    use_routed_input_transform: bool = False,
+    use_shared_experts: bool = False,
+    use_gate: bool = False,
+    quantization: str | None = None,
+    k: int | None = None,
+    world_size: int | None = None,
+    num_gpus: int | None = None,
+    reduce_results: bool = False,
+    backend: str | None = None,
+    use_ep: bool = False,
+    num_experts: int | None = None,
+    dp_size: int | None = None,
+    enable_eplb: bool = False,
+) -> None:
+    """Apply common pytest.skip conditions for MOE layer tests.
+
+    Args:
+        use_routed_input_transform: Whether routed_input_transform is used
+        use_shared_experts: Whether shared_experts is used
+        use_gate: Whether gate is used
+        quantization: Quantization method being tested
+        k: Hidden dimension size
+        world_size: Total number of GPUs in the test
+        num_gpus: Number of available GPUs
+        reduce_results: Whether reduce_results is enabled
+        backend: MOE backend being tested
+        use_ep: Whether expert parallelism is enabled
+        num_experts: Number of experts
+        dp_size: Data parallel size
+    """
+    # routed_input_transform only makes sense with shared_experts (latent MoE)
+    if use_routed_input_transform and not use_shared_experts:
+        pytest.skip("routed_input_transform requires shared_experts")
+
+    # gate requires shared_experts (use_overlapped mode)
+    if use_gate and not use_shared_experts:
+        pytest.skip("gate requires shared_experts (use_overlapped mode)")
+
+    # routed_input_transform + quantization + high hidden dimensions
+    if (
+        k is not None
+        and use_routed_input_transform
+        and quantization is not None
+        and k >= 2048
+    ):
+        pytest.skip(
+            "routed_input_transform + quantization + higher hidden dimensions "
+            "leads to large differences."
+        )
+
+    # Skip modelopt_fp4 on H100 (compute capability 9.0)
+    if quantization == "modelopt_fp4" and current_platform.has_device_capability(90):
+        pytest.skip("modelopt_fp4 not supported on H100+ GPUs")
+
+    # Skip modelopt_fp4 if not on B100+ (compute capability 10.0+)
+    if quantization == "modelopt_fp4" and not current_platform.has_device_capability(
+        100
+    ):
+        pytest.skip("modelopt_fp4 not supported on H100+ GPUs")
+
+    # Skip flashinfer_all2allv if not on B100+ (compute capability 10.0+)
+    if backend == "flashinfer_all2allv" and not current_platform.has_device_capability(
+        100
+    ):
+        pytest.skip("flashinfer_all2allv not supported on H100+ GPUs")
+
+    # Check if enough GPUs available
+    if world_size is not None and num_gpus is not None and world_size > num_gpus:
+        pytest.skip(f"Not enough GPUs got {num_gpus}, expected {world_size}.")
+
+    # reduce_results incompatibilities
+    if reduce_results and use_shared_experts:
+        pytest.skip("reduce_results=True is not compatible with shared_experts=True")
+
+    if reduce_results and world_size == 1:
+        pytest.skip("reduce_results=True only makes sense for multi-GPU tests")
+
+    if reduce_results and quantization is not None:
+        pytest.skip(
+            "reduce_results=True only tested with unquantized data types in order "
+            "to limit number of tests run"
+        )
+
+    # Backend-specific checks
+    if backend is not None:
+        supported_quants = BACKEND_SUPPORTED_QUANTS.get(backend)
+        if supported_quants is not None and quantization not in supported_quants:
+            pytest.skip(f"{backend} does not support quantization={quantization}")
+
+        if backend == "flashinfer_all2allv" and use_ep:
+            pytest.skip("flashinfer_all2allv EP not yet supported.")
+
+        if backend == "deepep_low_latency" and k is not None:
+            from vllm.model_executor.layers.fused_moe.deepep_ll_prepare_finalize import (  # noqa: E501
+                DeepEPLLPrepareAndFinalize,
+            )
+
+            if k not in DeepEPLLPrepareAndFinalize.SUPPORTED_HIDDEN_SIZES:
+                pytest.skip(f"Skipping unsupported K {k} in {backend} w/o EP.")
+
+    # EPLB-specific checks
+    if (
+        enable_eplb
+        and num_experts is not None
+        and dp_size is not None
+        and num_experts % dp_size != 0
+    ):
+        pytest.skip("EPLB requires num_experts divisible by ep_size")
+
+
 def chunk_scales_by_rank(
     t: torch.Tensor | None,
     r: int,
@@ -939,23 +1051,13 @@ def test_moe_layer_no_parallel(
 
     Backend doesn't matter when there's no parallelism, so we don't parametrize on it.
     """
-    # Skip modelopt_fp4 on H100 (compute capability 9.0)
-    if quantization == "modelopt_fp4" and current_platform.has_device_capability(90):
-        pytest.skip("modelopt_fp4 not supported on H100+ GPUs")
-
-    # routed_input_transform only makes sense with shared_experts (latent MoE)
-    if use_routed_input_transform and not use_shared_experts:
-        pytest.skip("routed_input_transform requires shared_experts")
-
-    # gate requires shared_experts (use_overlapped mode)
-    if use_gate and not use_shared_experts:
-        pytest.skip("gate requires shared_experts (use_overlapped mode)")
-
-    if use_routed_input_transform and quantization is not None and k >= 2048:
-        pytest.skip(
-            "routed_input_transform + quantization + higher hidden dimensions "
-            "leads to large differences."
-        )
+    apply_test_filter(
+        use_routed_input_transform=use_routed_input_transform,
+        use_shared_experts=use_shared_experts,
+        use_gate=use_gate,
+        quantization=quantization,
+        k=k,
+    )
 
     set_random_seed(7)
 
@@ -1161,58 +1263,18 @@ def test_moe_layer(
 
     assert world_size > 1
 
-    if world_size > num_gpus:
-        pytest.skip(f"Not enough GPUs got {num_gpus}, expected {world_size}.")
-
-    if reduce_results and use_shared_experts:
-        pytest.skip("reduce_results=True is not compatible with shared_experts=True")
-
-    if reduce_results and world_size == 1:
-        pytest.skip("reduce_results=True only makes sense for multi-GPU tests")
-
-    if reduce_results and quantization is not None:
-        pytest.skip("reduce_results=True only tested with unquantized data types")
-
-    # routed_input_transform only makes sense with shared_experts (latent MoE)
-    if use_routed_input_transform and not use_shared_experts:
-        pytest.skip("routed_input_transform requires shared_experts")
-
-    # gate requires shared_experts (use_overlapped mode)
-    if use_gate and not use_shared_experts:
-        pytest.skip("gate requires shared_experts (use_overlapped mode)")
-
-    if use_routed_input_transform and quantization is not None and k >= 2048:
-        pytest.skip(
-            "routed_input_transform + quantization + higher hidden dimensions "
-            "leads to large differences."
-        )
-
-    # Skip modelopt_fp4 on H100 (compute capability 9.0)
-    if quantization == "modelopt_fp4" and not current_platform.has_device_capability(
-        100
-    ):
-        pytest.skip("modelopt_fp4 not supported on H100+ GPUs")
-
-    # Skip flashinfer_all2allv on H100 (compute capability 9.0)
-    if backend == "flashinfer_all2allv" and not current_platform.has_device_capability(
-        100
-    ):
-        pytest.skip("flashinfer_all2allv not supported on H100+ GPUs")
-
-    supported_quants = BACKEND_SUPPORTED_QUANTS.get(backend)
-    if supported_quants is not None and quantization not in supported_quants:
-        pytest.skip(f"{backend} does not support quantization={quantization}")
-
-    if backend == "flashinfer_all2allv" and use_ep:
-        pytest.skip("flashinfer_all2allv EP not yet supported.")
-
-    if backend == "deepep_low_latency":
-        from vllm.model_executor.layers.fused_moe.deepep_ll_prepare_finalize import (  # noqa: E501
-            DeepEPLLPrepareAndFinalize,
-        )
-
-        if k not in DeepEPLLPrepareAndFinalize.SUPPORTED_HIDDEN_SIZES:
-            pytest.skip(f"Skipping unsupported K {k} in {backend} w/o EP.")
+    apply_test_filter(
+        use_routed_input_transform=use_routed_input_transform,
+        use_shared_experts=use_shared_experts,
+        use_gate=use_gate,
+        quantization=quantization,
+        k=k,
+        world_size=world_size,
+        num_gpus=num_gpus,
+        reduce_results=reduce_results,
+        backend=backend,
+        use_ep=use_ep,
+    )
 
     test_env = dict()
     test_env["VLLM_MOE_DP_CHUNK_SIZE"] = "128"
@@ -1404,46 +1466,22 @@ def test_moe_layer_eplb(
     num_gpus = cuda_device_count_stateless()
     world_size = tp_size * dp_size
 
-    if world_size > num_gpus:
-        pytest.skip(f"Not enough GPUs got {num_gpus}, expected {world_size}.")
+    assert world_size > 1
 
-    if reduce_results and use_shared_experts:
-        pytest.skip("reduce_results=True is not compatible with shared_experts=True")
-
-    if reduce_results and world_size == 1:
-        pytest.skip("reduce_results=True only makes sense for multi-GPU tests")
-
-    if reduce_results and quantization is not None:
-        pytest.skip("reduce_results=True only tested with unquantized data types")
-
-    # routed_input_transform only makes sense with shared_experts (latent MoE)
-    if use_routed_input_transform and not use_shared_experts:
-        pytest.skip("routed_input_transform requires shared_experts")
-
-    # gate requires shared_experts (use_overlapped mode)
-    if use_gate and not use_shared_experts:
-        pytest.skip("gate requires shared_experts (use_overlapped mode)")
-
-    if use_routed_input_transform and quantization is not None and k >= 2048:
-        pytest.skip(
-            "routed_input_transform + quantization + higher hidden dimensions "
-            "leads to large differences."
-        )
-
-    # Skip modelopt_fp4 on H100 (compute capability 9.0)
-    if quantization == "modelopt_fp4" and not current_platform.has_device_capability(
-        100
-    ):
-        pytest.skip("modelopt_fp4 not supported on H100+ GPUs")
-
-    # Skip flashinfer_all2allv on H100 (compute capability 9.0)
-    if backend == "flashinfer_all2allv" and not current_platform.has_device_capability(
-        100
-    ):
-        pytest.skip("flashinfer_all2allv not supported on H100+ GPUs")
-
-    if num_experts % dp_size != 0:
-        pytest.skip("EPLB requires num_experts divisible by ep_size")
+    apply_test_filter(
+        use_routed_input_transform=use_routed_input_transform,
+        use_shared_experts=use_shared_experts,
+        use_gate=use_gate,
+        quantization=quantization,
+        k=k,
+        world_size=world_size,
+        num_gpus=num_gpus,
+        reduce_results=reduce_results,
+        backend=backend,
+        num_experts=num_experts,
+        dp_size=dp_size,
+        enable_eplb=True,
+    )
 
     test_env = dict()
     test_env["VLLM_MOE_DP_CHUNK_SIZE"] = "128"
