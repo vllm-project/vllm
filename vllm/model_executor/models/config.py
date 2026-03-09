@@ -700,46 +700,12 @@ class VoyageQwen3BidirectionalEmbedModelConfig(VerifyAndUpdateConfig):
         model_config.hf_config.embedding_size = model_config.hf_config.num_labels
 
 
-class AnyModelConfig(VerifyAndUpdateConfig):
-    @staticmethod
-    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
-        """Validate block_configs and normalize entries to attr-accessible dicts.
-
-        HuggingFace deserializes unknown nested fields as plain dicts.
-        Code in ``model.py`` (e.g. ``get_num_layers_by_block_type``)
-        accesses ``bc.attention.no_op`` via attribute access, so we
-        convert dicts to :class:`_AttrDict` here.  Unlike
-        ``types.SimpleNamespace``, ``_AttrDict`` is a ``dict`` subclass
-        and therefore remains JSON-serializable (required for config
-        hashing via ``to_json_string()``).
-        """
-        from vllm.model_executor.models.anymodel import _AttrDict
-
-        hf_config = model_config.hf_config
-        block_configs = getattr(hf_config, "block_configs", None)
-        if not block_configs:
-            return
-
-        assert len(block_configs) == hf_config.num_hidden_layers, (
-            f"block_configs length ({len(block_configs)}) must match "
-            f"num_hidden_layers ({hf_config.num_hidden_layers})"
-        )
-
-        def _to_attrdict(obj):
-            if isinstance(obj, dict):
-                return _AttrDict({k: _to_attrdict(v) for k, v in obj.items()})
-            if isinstance(obj, list):
-                return [_to_attrdict(item) for item in obj]
-            return obj
-
-        hf_config.block_configs = [_to_attrdict(bc) for bc in block_configs]
-
-
 MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "AnyModel": AnyModelConfig,
-    "GteModel": SnowflakeGteNewModelConfig,
-    "GteNewModel": GteNewModelConfig,
-    "GteNewForSequenceClassification": GteNewModelConfig,
+    "ColBERTJinaRobertaModel": JinaRobertaModelConfig,
+    "DeepseekV32ForCausalLM": DeepseekV32ForCausalLM,
+    "Ernie4_5_VLMoeForConditionalGeneration": Ernie4_5_VLMoeForConditionalGenerationConfig,  # noqa: E501
+    "FalconMambaForCausalLM": MambaModelConfig,
     "Gemma3TextModel": Gemma3TextModelConfig,
     "GptOssForCausalLM": GptOssForCausalLMConfig,
     "GteModel": SnowflakeGteNewModelConfig,
