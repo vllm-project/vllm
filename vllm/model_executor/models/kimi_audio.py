@@ -114,21 +114,28 @@ class KimiAudioWhisperEncoder(WhisperEncoder):
 class KimiAudioProcessingInfo(BaseProcessingInfo):
     """Processing info for vLLM registry."""
 
-    _processor = None
-
     def get_hf_config(self):
         return self.ctx.model_config.hf_config
 
     def get_hf_processor(self, **kwargs: object) -> KimiAudioProcessor:
-        """Get or create the KimiAudioProcessor."""
-        if KimiAudioProcessingInfo._processor is None:
-            # Use from_pretrained() which handles TikTokenTokenizer properly
-            KimiAudioProcessingInfo._processor = KimiAudioProcessor.from_pretrained(
-                self.ctx.model_config.model,
-                trust_remote_code=self.ctx.model_config.trust_remote_code,
-            )
+        """Get KimiAudioProcessor with feature extractor and tokenizer."""
+        # Use vLLM's cached loader for feature extractor
+        feature_extractor = cached_feature_extractor_from_config(
+            self.ctx.model_config,
+            subfolder=KIMIA_WHISPER_SUBFOLDER,
+        )
 
-        return KimiAudioProcessingInfo._processor
+        # Load tokenizer directly (custom TikTokenTokenizer)
+        tokenizer = KimiAudioTokenizer.from_pretrained(
+            self.ctx.model_config.model,
+            trust_remote_code=self.ctx.model_config.trust_remote_code,
+        )
+
+        # Construct processor directly
+        return KimiAudioProcessor(
+            feature_extractor=feature_extractor,
+            tokenizer=tokenizer,
+        )
 
     def get_feature_extractor(self, **kwargs: object):
         """Get feature extractor using vLLM's cached loader."""

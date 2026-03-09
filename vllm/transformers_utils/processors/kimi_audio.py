@@ -69,44 +69,12 @@ class KimiAudioProcessor(ProcessorMixin):
     AUDIO_SEQ_LEN: int = 376
 
     def __init__(self, feature_extractor=None, tokenizer=None, **kwargs):
-        # Store values before calling parent init
-        self.feature_extractor = feature_extractor
-        self.tokenizer = tokenizer
         # Pass feature_extractor and tokenizer to parent ProcessorMixin
-        kwargs["feature_extractor"] = feature_extractor
-        kwargs["tokenizer"] = tokenizer
-        super().__init__(**kwargs)
-
-    @classmethod
-    def from_pretrained(
-        cls,
-        pretrained_model_name_or_path: str,
-        revision: str | None = None,
-        trust_remote_code: bool = False,
-        **kwargs: Any,
-    ) -> "KimiAudioProcessor":
-        """
-        Load KimiAudioProcessor with proper feature extractor and tokenizer.
-
-        This overrides ProcessorMixin.from_pretrained() to handle TikTokenTokenizer
-        which doesn't inherit from PreTrainedTokenizerBase.
-        """
-        # Load feature extractor from whisper-large-v3 subfolder
-        feature_extractor = AutoFeatureExtractor.from_pretrained(
-            pretrained_model_name_or_path,
-            subfolder="whisper-large-v3",
-            revision=revision,
-            trust_remote_code=trust_remote_code,
+        super().__init__(
+            feature_extractor=feature_extractor,
+            tokenizer=tokenizer,
+            **kwargs,
         )
-
-        # Load KimiAudioTokenizer directly
-        tokenizer = KimiAudioTokenizer.from_pretrained(
-            pretrained_model_name_or_path,
-            revision=revision,
-            trust_remote_code=trust_remote_code,
-        )
-
-        return cls(feature_extractor=feature_extractor, tokenizer=tokenizer)
 
     def check_argument_for_proper_class(self, attribute_name: str, argument: Any):
         """Override to skip class validation for custom tokenizer."""
