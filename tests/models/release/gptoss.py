@@ -167,7 +167,8 @@ async def test_online_serving_v1_completions(
 
     # Assertions for batch completion
     assert len(batch_completion.choices) == len(test_prompts), (
-        f"Batch should return {len(test_prompts)} choices, got {len(batch_completion.choices)}"
+        f"Batch should return {len(test_prompts)} choices, "
+        f"got {len(batch_completion.choices)}"
     )
 
     for i, choice in enumerate(batch_completion.choices):
@@ -505,14 +506,18 @@ async def test_online_serving_concurrent_requests(
     print(f"Chat requests: {len(chat_results)}")
     print(f"Average latency per request: {total_time / 10:.2f}s")
 
-    for result in completion_results[:3]:  # Show first 3
+    # Show first 3 completion results
+    for result in completion_results[:3]:
         print(
-            f"  Completion {result['id']}: {result['latency']:.2f}s, {result['tokens']} tokens"
+            f"  Completion {result['id']}: {result['latency']:.2f}s, "
+            f"{result['tokens']} tokens"
         )
 
-    for result in chat_results[:3]:  # Show first 3
+    # Show first 3 chat results
+    for result in chat_results[:3]:
         print(
-            f"  Chat {result['id']}: {result['latency']:.2f}s, {result['tokens']} tokens"
+            f"  Chat {result['id']}: {result['latency']:.2f}s, "
+            f"{result['tokens']} tokens"
         )
 
     print(f"\n{'=' * 60}")
