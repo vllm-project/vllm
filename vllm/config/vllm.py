@@ -680,11 +680,11 @@ class VllmConfig:
             multimodal_config = self.model_config.multimodal_config
             if (
                 multimodal_config is not None
-                and multimodal_config.multimodal_tensor_ipc == "torch_shm"
+                and multimodal_config.mm_tensor_ipc == "torch_shm"
                 and self.parallel_config.data_parallel_size > 1
             ):
                 raise ValueError(
-                    "multimodal_tensor_ipc='torch_shm' is not supported "
+                    "mm_tensor_ipc='torch_shm' is not supported "
                     "with data_parallel_size > 1."
                 )
 

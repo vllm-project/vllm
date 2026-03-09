@@ -538,7 +538,7 @@ def cpu_tensor_ipc_decoder_process(
 
 
 def test_cpu_tensor_ipc():
-    """Test CPU tensor sharing via IPC queue when multimodal_tensor_ipc is enabled."""
+    """Test CPU tensor sharing via IPC queue when mm_tensor_ipc is enabled."""
     # Set up single queue and synchronization
     tensor_queue = torch_mp.Queue()
     result_queue: mp.Queue = mp.Queue()
