@@ -404,20 +404,11 @@ class NemotronNasModelArchConfigConvertor(ModelArchConfigConvertorBase):
 
 
 class AnyModelArchConfigConvertor(ModelArchConfigConvertorBase):
-    """Convertor for NAS-optimized models with heterogeneous block_configs.
-
-    Reads per-layer num_key_value_heads from block_configs, falling back
-    to the global config value.  For MoE models, returns the max expert
-    count across layers so that weight buffers are large enough.
-    """
+    """Convertor for NAS-optimized models with heterogeneous block_configs."""
 
     def get_total_num_kv_heads(self) -> int:
-        # block_configs are normalized to _AttrDict by
-        # AnyModelConfig.verify_and_update_model_config before
-        # this method is called.
-        #
-        # Return the *maximum* KV head count across non-no-op layers so
-        # that the KV cache is allocated large enough for every layer.
+        # Return the max KV head count across non-no-op layers so the KV
+        # cache is allocated large enough for every layer.
         block_configs = getattr(self.hf_text_config, "block_configs", None)
         if block_configs:
             max_kv = 0

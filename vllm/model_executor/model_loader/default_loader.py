@@ -177,8 +177,8 @@ class DefaultModelLoader(BaseModelLoader):
             hf_weights_files = filter_files_not_needed_for_inference(hf_weights_files)
 
         if len(hf_weights_files) == 0 and is_local:
-            hf_weights_files, use_safetensors = (
-                self._weights_from_index(hf_folder, index_file)
+            hf_weights_files, use_safetensors = self._weights_from_index(
+                hf_folder, index_file
             )
 
         if len(hf_weights_files) == 0:
@@ -189,13 +189,8 @@ class DefaultModelLoader(BaseModelLoader):
         return hf_folder, hf_weights_files, use_safetensors
 
     @staticmethod
-    def _weights_from_index(
-        hf_folder: str, index_file: str
-    ) -> tuple[list[str], bool]:
-        """Discover weight files via the safetensors index.
-
-        Fallback used when the standard glob finds no files, e.g. when
-        weights live in a subdirectory referenced by the index."""
+    def _weights_from_index(hf_folder: str, index_file: str) -> tuple[list[str], bool]:
+        """Discover weight files via the safetensors index file."""
         index_path = os.path.join(hf_folder, index_file)
         if not os.path.isfile(index_path):
             return [], False
