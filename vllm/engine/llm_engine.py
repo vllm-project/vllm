@@ -1449,7 +1449,6 @@ class LLMEngine:
                 outputs, seq_group_metadata_list)
             for scheduler in self.scheduler:
                 scheduler.free_finished_seq_groups()
-            # self._process_model_outputs(ctx=ctx)
             # for branch_group in new_branch_groups:
             #     self._add_branch_to_scheduler(branch_group, virtual_engine)
             # for branch_group in branch_groups_to_delete:
@@ -1467,6 +1466,8 @@ class LLMEngine:
     
     def _process_tree_decoding(self, outputs, seq_group_metadata_list):
         """处理tree decoding逻辑"""
+        # if len(self.seq_id_to_seq_group) == 0:
+        #     return
         original_parallel_seq_group = next(iter(self.seq_id_to_seq_group.values()))
         # unfinished_seqs = original_parallel_seq_group.get_unfinished_seqs()
         assert hasattr(outputs[0], 'logprobs')
