@@ -564,7 +564,9 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
         return self.model_cls.get_placeholder_str(modality, num_items)
 
     @abstractmethod
-    def create_parser(self, mm_processor_kwargs: dict[str, Any] | None = None) -> "BaseMultiModalContentParser":
+    def create_parser(
+        self, mm_processor_kwargs: dict[str, Any] | None = None
+    ) -> "BaseMultiModalContentParser":
         raise NotImplementedError
 
 
@@ -690,7 +692,9 @@ class MultiModalItemTracker(BaseMultiModalItemTracker[tuple[object, str | None]]
             dict(self._items_by_modality), self.mm_processor, self._modality_order
         )
 
-    def create_parser(self, mm_processor_kwargs: dict[str, Any] | None = None) -> "BaseMultiModalContentParser":
+    def create_parser(
+        self, mm_processor_kwargs: dict[str, Any] | None = None
+    ) -> "BaseMultiModalContentParser":
         return MultiModalContentParser(self, mm_processor_kwargs=mm_processor_kwargs)
 
 
@@ -712,8 +716,12 @@ class AsyncMultiModalItemTracker(
             resolved_items_by_modality, self.mm_processor, self._modality_order
         )
 
-    def create_parser(self, mm_processor_kwargs: dict[str, Any] | None = None) -> "BaseMultiModalContentParser":
-        return AsyncMultiModalContentParser(self, mm_processor_kwargs=mm_processor_kwargs)
+    def create_parser(
+        self, mm_processor_kwargs: dict[str, Any] | None = None
+    ) -> "BaseMultiModalContentParser":
+        return AsyncMultiModalContentParser(
+            self, mm_processor_kwargs=mm_processor_kwargs
+        )
 
 
 class BaseMultiModalContentParser(ABC):
@@ -778,7 +786,11 @@ class BaseMultiModalContentParser(ABC):
 
 
 class MultiModalContentParser(BaseMultiModalContentParser):
-    def __init__(self, tracker: MultiModalItemTracker, mm_processor_kwargs: dict[str, Any] | None = None) -> None:
+    def __init__(
+        self,
+        tracker: MultiModalItemTracker,
+        mm_processor_kwargs: dict[str, Any] | None = None,
+    ) -> None:
         super().__init__()
 
         self._tracker = tracker
@@ -789,7 +801,7 @@ class MultiModalContentParser(BaseMultiModalContentParser):
             allowed_local_media_path=tracker.allowed_local_media_path,
             allowed_media_domains=tracker.allowed_media_domains,
         )
-        
+
         self._mm_processor_kwargs = mm_processor_kwargs
 
     @property
@@ -890,7 +902,11 @@ class MultiModalContentParser(BaseMultiModalContentParser):
 
 
 class AsyncMultiModalContentParser(BaseMultiModalContentParser):
-    def __init__(self, tracker: AsyncMultiModalItemTracker, mm_processor_kwargs: dict[str, Any] | None = None,) -> None:
+    def __init__(
+        self,
+        tracker: AsyncMultiModalItemTracker,
+        mm_processor_kwargs: dict[str, Any] | None = None,
+    ) -> None:
         super().__init__()
 
         self._tracker = tracker
