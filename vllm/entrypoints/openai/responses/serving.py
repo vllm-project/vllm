@@ -97,8 +97,6 @@ from vllm.entrypoints.openai.responses.protocol import (
 from vllm.entrypoints.openai.responses.streaming_events import (
     StreamingState,
     emit_content_delta_events,
-    emit_function_call_delta_events,
-    emit_function_call_done_events,
     emit_previous_item_done_events,
     emit_tool_action_events,
 )
@@ -1327,7 +1325,7 @@ class OpenAIServingResponses(OpenAIServing):
                             previous_token_ids=previous_token_ids,
                             current_token_ids=current_token_ids,
                             delta_token_ids=delta_token_ids,
-                            request=request,
+                            request=request,  # type: ignore[arg-type]
                         )
                 elif reasoning_parser:
                     delta_message = reasoning_parser.extract_reasoning_streaming(
@@ -1346,7 +1344,7 @@ class OpenAIServingResponses(OpenAIServing):
                         previous_token_ids=previous_token_ids,
                         current_token_ids=current_token_ids,
                         delta_token_ids=delta_token_ids,
-                        request=request,
+                        request=request,  # type: ignore[arg-type]
                     )
                 else:
                     delta_message = DeltaMessage(
@@ -1360,6 +1358,15 @@ class OpenAIServingResponses(OpenAIServing):
                     current_item_id = random_uuid()
                     if delta_message.tool_calls:
                         current_tool_call_id = f"call_{random_uuid()}"
+                        assert len(delta_message.tool_calls) == 1, (
+                            "Multiple tool calls in one delta is not supported"
+                        )
+                        assert delta_message.tool_calls[0].function is not None, (
+                            "Tool call without function is not supported"
+                        )
+                        assert delta_message.tool_calls[0].function.name is not None, (
+                            "Tool call without function name is not supported"
+                        )
                         current_tool_call_name = delta_message.tool_calls[
                             0
                         ].function.name
@@ -1667,11 +1674,21 @@ class OpenAIServingResponses(OpenAIServing):
                 previous_delta_messages.append(delta_message)
 
         if previous_delta_messages:
-            tool_call_arguments = "".join(
-                pm.tool_calls[0].function.arguments
-                for pm in previous_delta_messages
-                if pm.tool_calls
-            )
+            parts = []
+            for pm in previous_delta_messages:
+                if pm.tool_calls:
+                    assert len(pm.tool_calls) == 1, (
+                        "Multiple tool calls in one delta is not supported"
+                    )
+                    assert pm.tool_calls[0].function is not None, (
+                        "Tool call without function is not supported"
+                    )
+                    assert pm.tool_calls[0].function.name is not None, (
+                        "Tool call without function name is not supported"
+                    )
+                    parts.append(pm.tool_calls[0].function.arguments)
+
+            tool_call_arguments = "".join(parts)
             if tool_call_arguments:
                 yield _increment_sequence_number_and_return(
                     ResponseFunctionCallArgumentsDoneEvent(
