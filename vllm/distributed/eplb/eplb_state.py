@@ -1081,7 +1081,7 @@ def _node_count_with_rank_mapping(
     return next_node_id
 
 
-def _pad_out_tensor(src, dst):
+def _pad_out_tensor(src: torch.Tensor, dst: torch.Tensor) -> None:
     src_padding = dst.shape[-1] - src.shape[-1]
     assert src_padding >= 0
     new_src = torch.nn.functional.pad(src, (0, src_padding), value=-1)
