@@ -14,7 +14,6 @@ import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.utils.network_utils import get_distributed_init_method, get_ip, get_open_port
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
-from vllm.v1.engine import ReconfigureDistributedRequest, ReconfigureRankType
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.outputs import AsyncModelRunnerOutput, DraftTokenIds, ModelRunnerOutput
 from vllm.v1.serial_utils import run_method
@@ -26,7 +25,7 @@ logger = init_logger(__name__)
 class UniProcExecutor(Executor):
     def _init_executor(self) -> None:
         """Initialize the worker and load the model."""
-        self.driver_worker = WorkerWrapperBase(vllm_config=self.vllm_config, rpc_rank=0)
+        self.driver_worker = WorkerWrapperBase(rpc_rank=0)
         distributed_init_method, rank, local_rank = self._distributed_args()
         kwargs = dict(
             vllm_config=self.vllm_config,
@@ -43,9 +42,11 @@ class UniProcExecutor(Executor):
                 max_workers=1, thread_name_prefix="WorkerAsyncOutput"
             )
 
+        is_eep_new_worker = envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH
         self.driver_worker.init_worker(all_kwargs=[kwargs])
-        self.driver_worker.init_device()
-        self.driver_worker.load_model()
+        if not is_eep_new_worker:
+            self.driver_worker.init_device()
+            self.driver_worker.load_model()
 
     def _distributed_args(self) -> tuple[str, int, int]:
         """Return (distributed_init_method, rank, local_rank)."""
@@ -67,7 +68,7 @@ class UniProcExecutor(Executor):
         kwargs: dict | None = None,
         non_block: bool = False,
         single_value: bool = False,
-    ) -> Any | list[Any] | Future[Any | list[Any]]:
+    ) -> Any:
         if kwargs is None:
             kwargs = {}
 
@@ -79,10 +80,13 @@ class UniProcExecutor(Executor):
             result = run_method(self.driver_worker, method, args, kwargs)
             if isinstance(result, AsyncModelRunnerOutput):
                 if (async_thread := self.async_output_thread) is not None:
-                    get_output = result.get_output
-                    if not single_value:
-                        get_output = lambda go=result.get_output: [go()]
-                    return async_thread.submit(get_output)
+                    if single_value:
+                        return async_thread.submit(result.get_output)
+
+                    def get_output_list() -> list[Any]:
+                        return [result.get_output()]
+
+                    return async_thread.submit(get_output_list)
                 result = result.get_output()
             future = Future[Any]()
             future.set_result(result if single_value else [result])
@@ -118,16 +122,6 @@ class UniProcExecutor(Executor):
         # UniProcExecutor will always be healthy as long as
         # it's running.
         return
-
-    def reinitialize_distributed(
-        self, reconfig_request: ReconfigureDistributedRequest
-    ) -> None:
-        self.driver_worker.reinitialize_distributed(reconfig_request)
-        if (
-            reconfig_request.new_data_parallel_rank
-            == ReconfigureRankType.SHUTDOWN_CURRENT_RANK
-        ):
-            self.shutdown()
 
     def shutdown(self) -> None:
         if worker := self.driver_worker:

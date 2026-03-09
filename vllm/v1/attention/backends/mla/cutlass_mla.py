@@ -7,22 +7,23 @@ from typing import ClassVar
 import torch
 
 import vllm._custom_ops as ops
-from vllm.attention.backends.abstract import (
-    AttentionLayer,
-    AttentionType,
-    MultipleOf,
-    is_quantized_kv_cache,
-)
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
-from vllm.platforms.interface import DeviceCapability
-from vllm.v1.attention.backends.mla.common import (
+from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonBackend,
     MLACommonImpl,
     MLACommonMetadata,
     MLACommonMetadataBuilder,
 )
-from vllm.v1.attention.backends.utils import AttentionCGSupport
+from vllm.platforms.interface import DeviceCapability
+from vllm.utils.platform_utils import num_compute_units
+from vllm.v1.attention.backend import (
+    AttentionCGSupport,
+    AttentionLayer,
+    AttentionType,
+    MultipleOf,
+    is_quantized_kv_cache,
+)
 
 logger = init_logger(__name__)
 
@@ -38,6 +39,7 @@ class CutlassMLABackend(MLACommonBackend):
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
         "auto",
+        "bfloat16",
         "fp8",
         "fp8_e4m3",
     ]
@@ -73,8 +75,7 @@ class SM100Workspace:
 
         # Pre-compute sm_count to avoid recomputing it. Use device 0 as a proxy
         # (assumes all devices are similar)
-        properties = torch.cuda.get_device_properties(torch.device("cuda:0"))
-        self._sm_count = properties.multi_processor_count
+        self._sm_count = num_compute_units(0)
 
     def get_buf(self):
         return self._workspace_buf
@@ -243,7 +244,7 @@ class CutlassMLAImpl(MLACommonImpl[MLACommonMetadata]):
 
         return out, lse
 
-    def _forward_decode(
+    def forward_mqa(
         self,
         q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
         kv_c_and_k_pe_cache: torch.Tensor,

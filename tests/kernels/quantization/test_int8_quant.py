@@ -7,7 +7,7 @@ import torch
 from tests.kernels.quant_utils import ref_dynamic_per_token_quant
 from tests.kernels.utils import opcheck
 from vllm._custom_ops import scaled_int8_quant
-from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_random_seed
 
 DTYPES = [torch.bfloat16, torch.float]
 HIDDEN_SIZES = [17, 1024, 1025, 1026, 5137, 8193]
@@ -46,7 +46,7 @@ def opcheck_int8_quant_dynamic(output, input, symmetric=True):
 def test_dynamic_scaled_int8_quant(
     num_tokens: int, hidden_size: int, dtype: torch.dtype, seed: int
 ) -> None:
-    current_platform.seed_everything(seed)
+    set_random_seed(seed)
 
     x = torch.rand(num_tokens, hidden_size, dtype=dtype, device="cuda") * 1000
 
@@ -70,7 +70,7 @@ def test_dynamic_scaled_int8_quant(
 def test_dynamic_scaled_int8_azp_quant(
     num_tokens: int, hidden_size: int, dtype: torch.dtype, seed: int
 ) -> None:
-    current_platform.seed_everything(seed)
+    set_random_seed(seed)
     int8_traits = torch.iinfo(torch.int8)
 
     x = torch.rand(num_tokens, hidden_size, dtype=dtype, device="cuda") * 1000 - 300
@@ -111,7 +111,7 @@ def test_dynamic_scaled_int8_azp_quant(
 def test_static_scaled_int8_quant(
     num_tokens: int, hidden_size: int, dtype: torch.dtype, seed: int, scale: float
 ) -> None:
-    current_platform.seed_everything(seed)
+    set_random_seed(seed)
     int8_traits = torch.iinfo(torch.int8)
 
     x = torch.rand(num_tokens, hidden_size, dtype=dtype, device="cuda") * 1000
@@ -144,7 +144,7 @@ def test_static_scaled_int8_azp_quant(
     scale: float,
     azp: int,
 ) -> None:
-    current_platform.seed_everything(seed)
+    set_random_seed(seed)
     int8_traits = torch.iinfo(torch.int8)
 
     x = torch.rand(num_tokens, hidden_size, dtype=dtype, device="cuda") * 1000 - 300

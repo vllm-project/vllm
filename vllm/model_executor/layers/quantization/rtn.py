@@ -638,3 +638,4 @@ def init_workspace(device):
     global workspace
     if workspace is None:
         workspace = marlin_make_workspace_new(device, 4)
+

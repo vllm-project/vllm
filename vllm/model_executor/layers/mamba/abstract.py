@@ -5,10 +5,10 @@ from collections.abc import Iterable
 
 import torch
 
-from vllm.attention.backends.abstract import AttentionBackend
-from vllm.attention.selector import get_mamba_attn_backend
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+from vllm.v1.attention.backend import AttentionBackend
+from vllm.v1.attention.selector import get_mamba_attn_backend
 from vllm.v1.kv_cache_interface import KVCacheSpec, MambaSpec
 
 
@@ -41,13 +41,6 @@ class MambaBase(AttentionLayerBase):
         pass
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec | None:
-        if (
-            vllm_config.speculative_config is not None
-            and vllm_config.model_config.hf_config.model_type not in ["qwen3_next"]
-        ):
-            raise NotImplementedError(
-                "Mamba with speculative decoding is not supported yet."
-            )
         mamba_block_size = vllm_config.cache_config.mamba_block_size
         page_size_padded = vllm_config.cache_config.mamba_page_size_padded
         return MambaSpec(
@@ -56,6 +49,7 @@ class MambaBase(AttentionLayerBase):
             block_size=mamba_block_size,
             page_size_padded=page_size_padded,
             mamba_type=self.mamba_type,
+            mamba_cache_mode=vllm_config.cache_config.mamba_cache_mode,
             num_speculative_blocks=(
                 vllm_config.speculative_config.num_speculative_tokens
                 if vllm_config.speculative_config

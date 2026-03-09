@@ -16,6 +16,7 @@ class AbstractEplbPolicy(ABC):
         num_groups: int,
         num_nodes: int,
         num_ranks: int,
+        old_global_expert_indices: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Entry point for expert-parallelism load balancer.
@@ -28,7 +29,9 @@ class AbstractEplbPolicy(ABC):
             num_groups: number of expert groups
             num_nodes: number of server nodes
             num_ranks: number of ranks, must be a multiple of `num_nodes`
-
+            old_global_expert_indices: [layers, num_logical_experts], the old global
+                expert indices. Used to avoid unnecessary weight copying
+                for experts moving within one rank.
         Returns:
             physical_to_logical_map: [layers, num_replicas], the expert
                 index of each replica

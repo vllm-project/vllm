@@ -16,12 +16,11 @@ import soundfile as sf
 from ...utils import RemoteOpenAIServer
 
 MODEL_NAME = "openai/whisper-large-v3-turbo"
-SERVER_ARGS = ["--enforce-eager"]
 
 
 @pytest.fixture(scope="module")
 def server():
-    with RemoteOpenAIServer(MODEL_NAME, SERVER_ARGS) as remote_server:
+    with RemoteOpenAIServer(MODEL_NAME, []) as remote_server:
         yield remote_server
 
 
@@ -32,24 +31,20 @@ async def whisper_client(server):
 
 
 @pytest.mark.asyncio
-async def test_basic_audio(mary_had_lamb):
-    server_args = ["--enforce-eager"]
-
+async def test_basic_audio(whisper_client, mary_had_lamb):
     # Based on https://github.com/openai/openai-cookbook/blob/main/examples/Whisper_prompting_guide.ipynb.
-    with RemoteOpenAIServer(MODEL_NAME, server_args) as remote_server:
-        client = remote_server.get_async_client()
-        transcription = await client.audio.transcriptions.create(
-            model=MODEL_NAME,
-            file=mary_had_lamb,
-            language="en",
-            response_format="text",
-            temperature=0.0,
-        )
-        out = json.loads(transcription)
-        out_text = out["text"]
-        out_usage = out["usage"]
-        assert "Mary had a little lamb," in out_text
-        assert out_usage["seconds"] == 16, out_usage["seconds"]
+    transcription = await whisper_client.audio.transcriptions.create(
+        model=MODEL_NAME,
+        file=mary_had_lamb,
+        language="en",
+        response_format="text",
+        temperature=0.0,
+    )
+    out = json.loads(transcription)
+    out_text = out["text"]
+    out_usage = out["usage"]
+    assert "Mary had a little lamb," in out_text
+    assert out_usage["seconds"] == 16, out_usage["seconds"]
 
 
 @pytest.mark.asyncio
@@ -114,20 +109,33 @@ async def test_long_audio_request(mary_had_lamb, whisper_client):
 
 
 @pytest.mark.asyncio
+async def test_invalid_audio_file(whisper_client):
+    """Corrupted audio should surface as HTTP 400."""
+    invalid_audio = io.BytesIO(b"not a valid audio file")
+    invalid_audio.name = "invalid.wav"
+
+    with pytest.raises(openai.BadRequestError) as exc_info:
+        await whisper_client.audio.transcriptions.create(
+            model=MODEL_NAME,
+            file=invalid_audio,
+            language="en",
+        )
+
+    assert exc_info.value.status_code == 400
+    assert "Invalid or unsupported audio file" in exc_info.value.message
+
+
+@pytest.mark.asyncio
 async def test_completion_endpoints(whisper_client):
     # text to text model
-    res = await whisper_client.chat.completions.create(
-        model=MODEL_NAME,
-        messages=[{"role": "system", "content": "You are a helpful assistant."}],
-    )
-    err = res.error
-    assert err["code"] == 400
-    assert err["message"] == "The model does not support Chat Completions API"
+    with pytest.raises(openai.NotFoundError):
+        await whisper_client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=[{"role": "system", "content": "You are a helpful assistant."}],
+        )
 
-    res = await whisper_client.completions.create(model=MODEL_NAME, prompt="Hello")
-    err = res.error
-    assert err["code"] == 400
-    assert err["message"] == "The model does not support Completions API"
+    with pytest.raises(openai.NotFoundError):
+        await whisper_client.completions.create(model=MODEL_NAME, prompt="Hello")
 
 
 @pytest.mark.asyncio
@@ -248,3 +256,133 @@ async def test_audio_with_timestamp(mary_had_lamb, whisper_client):
     )
     assert transcription.segments is not None
     assert len(transcription.segments) > 0
+    assert transcription.segments[0].avg_logprob is not None
+    assert transcription.segments[0].compression_ratio is not None
+
+
+@pytest.mark.asyncio
+async def test_audio_with_max_tokens(whisper_client, mary_had_lamb):
+    transcription = await whisper_client.audio.transcriptions.create(
+        model=MODEL_NAME,
+        file=mary_had_lamb,
+        language="en",
+        response_format="text",
+        temperature=0.0,
+        extra_body={"max_completion_tokens": 1},
+    )
+    out = json.loads(transcription)
+    out_text = out["text"]
+    from transformers import AutoTokenizer
+
+    tok = AutoTokenizer.from_pretrained(MODEL_NAME)
+    out_tokens = tok(out_text, add_special_tokens=False)["input_ids"]
+    assert len(out_tokens) == 1
+    # max_completion_tokens > max_model_len
+    transcription = await whisper_client.audio.transcriptions.create(
+        model=MODEL_NAME,
+        file=mary_had_lamb,
+        language="en",
+        response_format="text",
+        temperature=0.0,
+        extra_body={"max_completion_tokens": int(1e6)},
+    )
+    out = json.loads(transcription)
+    out_text = out["text"]
+    out_tokens = tok(out_text, add_special_tokens=False)["input_ids"]
+    assert len(out_tokens) < 450  # ~Whisper max output len
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("fixture_name", "expected_lang", "expected_text"),
+    [
+        ("mary_had_lamb", "en", ["Mary had a little lamb"]),
+        ("foscolo", "it", ["zacinto", "sacre"]),
+    ],
+    ids=["english", "italian"],
+)
+async def test_language_auto_detect(
+    whisper_client, fixture_name, expected_lang, expected_text, request
+):
+    """Auto-detect language when no language param is provided."""
+    audio_file = request.getfixturevalue(fixture_name)
+    transcription = await whisper_client.audio.transcriptions.create(
+        model=MODEL_NAME,
+        file=audio_file,
+        response_format="verbose_json",
+        temperature=0.0,
+    )
+    assert transcription.language == expected_lang
+    text_lower = transcription.text.lower()
+    assert any(word.lower() in text_lower for word in expected_text), (
+        f"Expected {expected_lang} text but got: {transcription.text}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_whisper_beam_search_single_beam(mary_had_lamb, whisper_client):
+    """Test beam search with encoder-decoder model (Whisper) on transcriptions with
+    one beam aligns with greedy decoding.
+    """
+    beam_transcription = await whisper_client.audio.transcriptions.create(
+        model=MODEL_NAME,
+        file=mary_had_lamb,
+        language="en",
+        response_format="text",
+        temperature=0.0,
+        extra_body=dict(
+            use_beam_search=True,
+            n=1,
+        ),
+    )
+
+    greedy_transcription = await whisper_client.audio.transcriptions.create(
+        model=MODEL_NAME,
+        file=mary_had_lamb,
+        response_format="text",
+        temperature=0.0,
+    )
+
+    greedy_res = json.loads(greedy_transcription)["text"]
+    beam_res = json.loads(beam_transcription)["text"]
+    assert greedy_res == beam_res
+
+
+@pytest.mark.asyncio
+async def test_whisper_beam_search_multibeam(mary_had_lamb, whisper_client):
+    """Test n>1 for beam search returns one transcription (best beam)."""
+    transcription = await whisper_client.audio.transcriptions.create(
+        model=MODEL_NAME,
+        file=mary_had_lamb,
+        language="en",
+        response_format="text",
+        temperature=0.0,
+        extra_body=dict(
+            use_beam_search=True,
+            n=2,
+        ),
+    )
+
+    result = json.loads(transcription)
+
+    text = result["text"]
+
+    assert text is not None
+    assert len(text) > 0
+    assert "mary had a little lamb" in text.lower()
+
+
+@pytest.mark.asyncio
+async def test_stream_with_beams_raises(winning_call, whisper_client):
+    """Test that stream=True + beam search raises bad request for now."""
+    with pytest.raises(openai.BadRequestError):
+        await whisper_client.audio.transcriptions.create(
+            model=MODEL_NAME,
+            file=winning_call,
+            language="en",
+            stream=True,
+            extra_body=dict(
+                use_beam_search=True,
+                n=2,
+            ),
+        )

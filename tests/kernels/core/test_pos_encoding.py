@@ -9,7 +9,7 @@ import torch
 
 from tests.kernels.allclose_default import get_default_atol, get_default_rtol
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_random_seed
 
 IS_NEOX_STYLE = [True, False]
 DTYPES = [torch.bfloat16, torch.float]
@@ -62,6 +62,7 @@ TENSORS_SHAPES_FN = [
 @pytest.mark.parametrize("use_key", USE_KEY)
 @torch.inference_mode()
 def test_rotary_embedding(
+    default_vllm_config,
     is_neox_style: bool,
     tensor_shape_fn: Callable[[int, int, int, int], tuple[int, ...]],
     batch_size: int,
@@ -79,22 +80,23 @@ def test_rotary_embedding(
     if rotary_dim is None:
         rotary_dim = head_size
 
-    current_platform.seed_everything(seed)
+    set_random_seed(seed)
     torch.set_default_device(device)
     if rotary_dim is None:
         rotary_dim = head_size
-    rope_parameters = {"rope_type": "default", "rope_theta": rope_theta}
-    rope = get_rope(head_size, rotary_dim, max_position, is_neox_style, rope_parameters)
+    rope_parameters = {
+        "rope_type": "default",
+        "rope_theta": rope_theta,
+        "partial_rotary_factor": rotary_dim / head_size,
+    }
+    rope = get_rope(head_size, max_position, is_neox_style, rope_parameters)
     rope = rope.to(dtype=dtype, device=torch.get_default_device())
 
     positions = torch.randint(0, max_position, (batch_size, seq_len))
     query_shape = tensor_shape_fn(batch_size, seq_len, num_heads, head_size)
-    query = torch.randn(query_shape, dtype=dtype)
-    key = torch.randn_like(query) if use_key else None
-
     # slice tensor if required, noop otherwise
-    query = query[..., :head_size]
-    key = key[..., :head_size] if use_key else None
+    query = torch.randn(query_shape, dtype=dtype)[..., :head_size]
+    key = torch.randn_like(query)[..., :head_size] if use_key else None
 
     # NOTE(woosuk): The reference implementation should be executed first
     # because the custom kernel is in-place.
@@ -119,7 +121,7 @@ def test_rotary_embedding(
 
 
 @torch.inference_mode()
-def test_rope_module_cache():
+def test_rope_module_cache(default_vllm_config):
     MAX_POSITIONS = [123, 1234]
     ROPE_THETAS = [10000, 1000000]
     ROPE_PARAMETERS = (
@@ -150,9 +152,9 @@ def test_rope_module_cache():
         if rotary_dim is None:
             rotary_dim = head_size
         rope_parameters["rope_theta"] = rope_theta
+        rope_parameters["partial_rotary_factor"] = rotary_dim / head_size
         rope = get_rope(
             head_size,
-            rotary_dim,
             max_position,
             is_neox_style,
             rope_parameters,
@@ -177,9 +179,9 @@ def test_rope_module_cache():
         if rotary_dim is None:
             rotary_dim = head_size
         rope_parameters["rope_theta"] = rope_theta
+        rope_parameters["partial_rotary_factor"] = rotary_dim / head_size
         rope = get_rope(
             head_size,
-            rotary_dim,
             max_position,
             is_neox_style,
             rope_parameters,

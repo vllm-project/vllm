@@ -617,7 +617,7 @@ struct MacheteCollectiveMma {
 
   // Same as upstream, should be kept the same when possible, not formatted for
   // easier comparison
-  //   with `SwapAB ? N : M -> M` since we dont support SwapAB
+  //   with `SwapAB ? N : M -> M` since we don't support SwapAB
   // clang-format off
   template<class ProblemShape>
   static bool

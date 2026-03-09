@@ -43,10 +43,22 @@ If you are only developing vLLM's Python code, install vLLM using:
 VLLM_USE_PRECOMPILED=1 uv pip install -e .
 ```
 
-If you are developing vLLM's Python and CUDA/C++ code, install vLLM using:
+If you are developing vLLM's Python and CUDA/C++ code, install Pytorch first:
 
 ```bash
-uv pip install -e .
+uv pip install torch torchvision torchaudio --extra-index-url https://download.pytorch.org/whl/cu129
+```
+
+Then install the necessary build dependencies from `requirements/build.txt`, skipping `torch` as it was installed in the previous step:
+
+```bash
+grep -v '^torch==' requirements/build.txt | uv pip install -r -
+```
+
+Finally install vLLM using:
+
+```bash
+uv pip install -e . --no-build-isolation
 ```
 
 For more details about installing from source and installing for other hardware, check out the [installation instructions](../getting_started/installation/README.md) for your hardware and head to the "Build wheel from source" section.
@@ -82,7 +94,6 @@ vLLM's `pre-commit` hooks will now run automatically every time you commit.
     Some `pre-commit` hooks only run in CI. If you need to, you can run them locally with:
 
     ```bash
-    pre-commit run --hook-stage manual markdownlint
     pre-commit run --hook-stage manual mypy-3.10
     ```
 

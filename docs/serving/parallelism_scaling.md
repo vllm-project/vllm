@@ -62,11 +62,17 @@ If a single node lacks sufficient GPUs to hold the model, deploy vLLM across mul
 
 ### What is Ray?
 
-Ray is a distributed computing framework for scaling Python programs. Multi-node vLLM deployments require Ray as the runtime engine.
+Ray is a distributed computing framework for scaling Python programs. Multi-node vLLM deployments can use Ray as the runtime engine.
 
 vLLM uses Ray to manage the distributed execution of tasks across multiple nodes and control where execution happens.
 
 Ray also offers high-level APIs for large-scale [offline batch inference](https://docs.ray.io/en/latest/data/working-with-llms.html) and [online serving](https://docs.ray.io/en/latest/serve/llm) that can leverage vLLM as the engine. These APIs add production-grade fault tolerance, scaling, and distributed observability to vLLM workloads.
+
+Ray is an optional dependency. Install it explicitly before using Ray-based execution, for example:
+
+```bash
+pip install "ray[cgraph]"
+```
 
 For details, see the [Ray documentation](https://docs.ray.io/en/latest/index.html).
 
@@ -130,9 +136,31 @@ vllm serve /path/to/the/model/in/the/container \
      --distributed-executor-backend ray
 ```
 
+### Running vLLM with MultiProcessing
+
+Besides Ray, Multi-node vLLM deployments can also use `multiprocessing` as the runtime engine. Here's an example to deploy model across 2 nodes (8 GPUs per node) with `tp_size=8` and `pp_size=2`.
+
+Choose one node as the head node and run:
+
+```bash
+vllm serve /path/to/the/model/in/the/container \
+  --tensor-parallel-size 8 --pipeline-parallel-size 2 \
+  --nnodes 2 --node-rank 0 \
+  --master-addr <HEAD_NODE_IP>
+```
+
+On the other worker node, run:
+
+```bash
+vllm serve /path/to/the/model/in/the/container \
+  --tensor-parallel-size 8 --pipeline-parallel-size 2 \
+  --nnodes 2 --node-rank 1 \
+  --master-addr <HEAD_NODE_IP> --headless
+```
+
 ## Optimizing network communication for tensor parallelism
 
-Efficient tensor parallelism requires fast inter-node communication, preferably through high-speed network adapters such as InfiniBand.
+Efficient tensor parallelism requires fast internode communication, preferably through high-speed network adapters such as InfiniBand.
 To set up the cluster to use InfiniBand, append additional arguments like `--privileged -e NCCL_IB_HCA=mlx5` to the
 [examples/online_serving/run_cluster.sh](../../examples/online_serving/run_cluster.sh) helper script.
 Contact your system administrator for more information about the required flags.

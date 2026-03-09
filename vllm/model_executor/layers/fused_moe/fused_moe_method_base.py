@@ -2,18 +2,18 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import abstractmethod
-from collections.abc import Callable
 
 import torch
 
+import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
 )
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
-    FusedMoEPermuteExpertsUnpermute,
-    FusedMoEPrepareAndFinalize,
+    FusedMoEExpertsModular,
+    FusedMoEPrepareAndFinalizeModular,
 )
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizeMethodBase,
@@ -27,6 +27,21 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         super().__init__()
         self.moe: FusedMoEConfig = moe
         self.moe_quant_config: FusedMoEQuantConfig | None = None
+        self.moe_kernel: mk.FusedMoEKernel | None = None
+
+    @property
+    def supports_internal_mk(self) -> bool:
+        # NOTE(rob): temporary attribute to indicate support for
+        # completed migration to the new internal MK interface.
+        return self.moe_kernel is not None
+
+    @property
+    def mk_owns_shared_expert(self) -> bool:
+        # NOTE(rob): temporary attribute to indicate support for
+        # completed migration to the new internal MK interface.
+        return (
+            self.moe_kernel is not None and self.moe_kernel.shared_experts is not None
+        )
 
     @abstractmethod
     def create_weights(
@@ -53,23 +68,25 @@ class FusedMoEMethodBase(QuantizeMethodBase):
     def maybe_make_prepare_finalize(
         self,
         routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
-    ) -> FusedMoEPrepareAndFinalize | None:
+    ) -> FusedMoEPrepareAndFinalizeModular | None:
         from .all2all_utils import maybe_make_prepare_finalize
 
-        return maybe_make_prepare_finalize(
+        pf = maybe_make_prepare_finalize(
             self.moe, self.moe_quant_config, routing_tables
         )
+        assert pf is None or isinstance(pf, FusedMoEPrepareAndFinalizeModular)
+        return pf
 
     def select_gemm_impl(
         self,
-        prepare_finalize: FusedMoEPrepareAndFinalize,
+        prepare_finalize: FusedMoEPrepareAndFinalizeModular,
         layer: torch.nn.Module,
-    ) -> FusedMoEPermuteExpertsUnpermute:
+    ) -> FusedMoEExpertsModular:
         # based on the all2all implementation, select the appropriate
         # gemm implementation
-        raise NotImplementedError(
-            f"{self.__class__.__name__} must select appropriate gemm "
-            "implementation based on the prepare_finalize"
+        raise ValueError(
+            f"{self.__class__.__name__} uses the new modular kernel initialization "
+            "logic. This function should not be called."
         )
 
     @abstractmethod
@@ -80,6 +97,8 @@ class FusedMoEMethodBase(QuantizeMethodBase):
 
     @property
     def topk_indices_dtype(self) -> torch.dtype | None:
+        if self.moe_kernel is not None:
+            return self.moe_kernel.prepare_finalize.topk_indices_dtype()
         return None
 
     @property
@@ -87,36 +106,32 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         return False
 
     @property
-    def allow_inplace(self) -> bool:
-        return False
-
-    @property
     def method_name(self) -> str:
         return self.__class__.__name__
 
-    @abstractmethod
+    @property
+    def is_monolithic(self) -> bool:
+        if self.moe_kernel is None:
+            if hasattr(self, "experts_cls"):
+                return self.experts_cls.is_monolithic()
+            else:
+                return False
+        return self.moe_kernel.is_monolithic
+
     def apply(
         self,
         layer: "FusedMoE",  # type: ignore[name-defined] # noqa: F821
         x: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        shared_experts_input: torch.Tensor | None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        raise NotImplementedError
+
+    def apply_monolithic(
+        self,
+        layer: "FusedMoE",  # type: ignore[name-defined] # noqa: F821
+        x: torch.Tensor,
         router_logits: torch.Tensor,
-        top_k: int,
-        renormalize: bool,
-        use_grouped_topk: bool = False,
-        topk_group: int | None = None,
-        num_expert_group: int | None = None,
-        global_num_experts: int = -1,
-        expert_map: torch.Tensor | None = None,
-        custom_routing_function: Callable | None = None,
-        scoring_func: str = "softmax",
-        routed_scaling_factor: float = 1.0,
-        e_score_correction_bias: torch.Tensor | None = None,
-        apply_router_weight_on_input: bool = False,
-        activation: str = "silu",
-        enable_eplb: bool = False,
-        eplb_static: bool = False,
-        expert_load_view: torch.Tensor | None = None,
-        logical_to_physical_map: torch.Tensor | None = None,
-        logical_replica_count: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         raise NotImplementedError

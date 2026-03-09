@@ -469,3 +469,4 @@ class XPUFp8MoEMethod(FusedMoEMethodBase):
             num_expert_group,
             custom_routing_function=custom_routing_function,
         )
+

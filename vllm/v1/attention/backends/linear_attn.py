@@ -4,18 +4,25 @@ from dataclasses import dataclass
 
 import torch
 
-from vllm.attention.backends.abstract import AttentionBackend
 from vllm.config import VllmConfig
-from vllm.v1.attention.backends.utils import (
+from vllm.v1.attention.backend import (
+    AttentionBackend,
     AttentionCGSupport,
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
+)
+from vllm.v1.attention.backends.utils import (
+    mamba_get_block_table_tensor,
     split_decodes_and_prefills,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec
 
 
 class LinearAttentionBackend(AttentionBackend):
+    @staticmethod
+    def get_name() -> str:
+        return "LINEAR_ATTN"
+
     @staticmethod
     def get_builder_cls() -> type["LinearAttentionMetadataBuilder"]:
         return LinearAttentionMetadataBuilder
@@ -57,7 +64,12 @@ class LinearAttentionMetadataBuilder(AttentionMetadataBuilder[LinearAttentionMet
         query_start_loc = common_attn_metadata.query_start_loc
         seq_lens = common_attn_metadata.seq_lens
 
-        state_indices_tensor = common_attn_metadata.block_table_tensor[:, 0]
+        state_indices_tensor = mamba_get_block_table_tensor(
+            common_attn_metadata.block_table_tensor,
+            common_attn_metadata.seq_lens,
+            self.kv_cache_spec,
+            self.vllm_config.cache_config.mamba_cache_mode,
+        )[:, 0]
 
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
             split_decodes_and_prefills(

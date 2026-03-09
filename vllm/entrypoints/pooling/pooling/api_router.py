@@ -2,11 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from http import HTTPStatus
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from typing_extensions import assert_never
 
-from vllm.entrypoints.openai.protocol import ErrorResponse
+from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.openai.utils import validate_json_request
 from vllm.entrypoints.pooling.pooling.protocol import (
     IOProcessorResponse,
@@ -21,7 +21,7 @@ router = APIRouter()
 
 
 def pooling(request: Request) -> OpenAIServingPooling | None:
-    return request.app.state.openai_serving_pooling
+    return request.app.state.serving_pooling
 
 
 @router.post(
@@ -41,12 +41,9 @@ async def create_pooling(request: PoolingRequest, raw_request: Request):
         return base_server.create_error_response(
             message="The model does not support Pooling API"
         )
-    try:
-        generator = await handler.create_pooling(request, raw_request)
-    except Exception as e:
-        raise HTTPException(
-            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value, detail=str(e)
-        ) from e
+
+    generator = await handler.create_pooling(request, raw_request)
+
     if isinstance(generator, ErrorResponse):
         return JSONResponse(
             content=generator.model_dump(), status_code=generator.error.code
@@ -55,8 +52,8 @@ async def create_pooling(request: PoolingRequest, raw_request: Request):
         return JSONResponse(content=generator.model_dump())
     elif isinstance(generator, PoolingBytesResponse):
         return StreamingResponse(
-            content=generator.body,
-            headers={"metadata": generator.metadata},
+            content=generator.content,
+            headers=generator.headers,
             media_type=generator.media_type,
         )
 

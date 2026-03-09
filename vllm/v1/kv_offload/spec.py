@@ -6,13 +6,14 @@ from typing import TYPE_CHECKING
 
 import torch
 
-from vllm.attention.backends.abstract import AttentionBackend
 from vllm.logger import init_logger
+from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.kv_offload.abstract import LoadStoreSpec, OffloadingManager
 from vllm.v1.kv_offload.worker.worker import OffloadingHandler
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+    from vllm.v1.kv_cache_interface import KVCacheConfig
 
 logger = init_logger(__name__)
 
@@ -20,12 +21,15 @@ logger = init_logger(__name__)
 class OffloadingSpec(ABC):
     """Spec for an offloading connector"""
 
-    def __init__(self, vllm_config: "VllmConfig"):
+    def __init__(
+        self, vllm_config: "VllmConfig", kv_cache_config: "KVCacheConfig | None"
+    ):
         logger.warning(
             "Initializing OffloadingSpec. This API is experimental and "
             "subject to change in the future as we iterate the design."
         )
         self.vllm_config = vllm_config
+        self.kv_cache_config = kv_cache_config
 
         kv_transfer_config = vllm_config.kv_transfer_config
         assert kv_transfer_config is not None

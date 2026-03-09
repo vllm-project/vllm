@@ -70,7 +70,7 @@ This method applies to models with the [`transformers` library tag](https://hugg
 
     ![Locate deploy button](../../assets/deployment/hf-inference-endpoints-locate-deploy-button.png)
 
-3. Click to **Deploy** button > **HF Inference Endpoints**. You will be taken to the Inference Endpoints interface to configure the deployment.
+3. Click the **Deploy** button > **HF Inference Endpoints**. You will be taken to the Inference Endpoints interface to configure the deployment.
 
     ![Click deploy button](../../assets/deployment/hf-inference-endpoints-click-deploy-button.png)
 

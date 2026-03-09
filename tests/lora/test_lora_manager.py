@@ -15,10 +15,11 @@ from vllm.lora.layers import (
     MergedColumnParallelLinearWithLoRA,
     RowParallelLinearWithLoRA,
 )
+from vllm.lora.lora_model import LoRAModel
 from vllm.lora.lora_weights import LoRALayerWeights, PackedLoRALayerWeights
-from vllm.lora.models import (
+from vllm.lora.model_manager import (
+    DEFAULT_LANGUAGE_WRAPPER_KEY,
     LoRAMapping,
-    LoRAModel,
     LoRAModelManager,
     LRUCacheLoRAModelManager,
 )
@@ -110,7 +111,7 @@ def create_packed_lora(
     return LoRAModel(lora_id, 8, loras)
 
 
-def test_replace_submodules(dist_init, dummy_model):
+def test_replace_submodules(default_vllm_config, dist_init, dummy_model):
     model = dummy_model
     manager = LoRAModelManager(
         model,
@@ -132,7 +133,7 @@ def test_replace_submodules(dist_init, dummy_model):
 
 
 @pytest.mark.parametrize("device", DEVICES)
-def test_lora_model_manager(dist_init, dummy_model, device):
+def test_lora_model_manager(default_vllm_config, dist_init, dummy_model, device):
     model = dummy_model
     model_lora1 = create_lora(
         1, model, ["layer1.dense1", "dense2", "lm_head"], device=device
@@ -183,9 +184,11 @@ def test_lora_model_manager(dist_init, dummy_model, device):
     assert manager.activate_adapter(2)
     assert manager.lora_index_to_id[0] == 3
     assert manager.lora_index_to_id[1] == 2
-
     assert manager.device == device
-    assert manager.punica_wrapper.device == device
+    assert (
+        manager.punica_wrapper_mapping.get(DEFAULT_LANGUAGE_WRAPPER_KEY).device
+        == device
+    )
     assert hasattr(manager, "supported_lora_modules")
     assert sorted(manager.supported_lora_modules) == [
         "dense1",
@@ -196,7 +199,9 @@ def test_lora_model_manager(dist_init, dummy_model, device):
 
 
 @pytest.mark.parametrize("device", DEVICES)
-def test_lora_lru_cache_model_manager(dist_init, dummy_model, device):
+def test_lora_lru_cache_model_manager(
+    default_vllm_config, dist_init, dummy_model, device
+):
     model = dummy_model
     model_lora1 = create_lora(
         1, model, ["layer1.dense1", "dense2", "lm_head"], device=device
@@ -278,13 +283,15 @@ def test_lora_lru_cache_model_manager(dist_init, dummy_model, device):
     assert manager.remove_adapter(3)
     with pytest.raises(ValueError):
         assert manager.pin_adapter(3)
-
-    assert manager.punica_wrapper.device == device
+    assert (
+        manager.punica_wrapper_mapping.get(DEFAULT_LANGUAGE_WRAPPER_KEY).device
+        == device
+    )
     assert manager.device == device
 
 
 @pytest.mark.parametrize("device", DEVICES)
-def test_lru_lora_model_manager(dist_init, dummy_model, device):
+def test_lru_lora_model_manager(default_vllm_config, dist_init, dummy_model, device):
     # This tests just the LRU cache functionality, everything else is
     # tested in test_lora_model_manager
     model = dummy_model
@@ -402,12 +409,17 @@ def test_lru_lora_model_manager(dist_init, dummy_model, device):
         assert manager.remove_oldest_adapter()
 
     assert set(manager.list_adapters()) == {1}
-    assert manager.punica_wrapper.device == device
+    assert (
+        manager.punica_wrapper_mapping.get(DEFAULT_LANGUAGE_WRAPPER_KEY).device
+        == device
+    )
     assert manager.device == device
 
 
 @pytest.mark.parametrize("device", DEVICES)
-def test_lru_cache_worker_adapter_manager(dist_init, dummy_model, device, tmp_path):
+def test_lru_cache_worker_adapter_manager(
+    default_vllm_config, dist_init, dummy_model, device, tmp_path
+):
     lora_config = LoRAConfig(
         max_lora_rank=8, max_cpu_loras=4, max_loras=4, lora_dtype=DEFAULT_DTYPE
     )
@@ -514,11 +526,16 @@ def test_lru_cache_worker_adapter_manager(dist_init, dummy_model, device, tmp_pa
         )
 
     assert worker_adapter_manager.device == device
-    assert worker_adapter_manager._adapter_manager.punica_wrapper.device == device
+    punica_wrapper = worker_adapter_manager._adapter_manager.punica_wrapper_mapping.get(
+        DEFAULT_LANGUAGE_WRAPPER_KEY
+    )
+    assert punica_wrapper.device == device
 
 
 @pytest.mark.parametrize("device", DEVICES)
-def test_worker_adapter_manager(dist_init, dummy_model_gate_up, device, tmp_path):
+def test_worker_adapter_manager(
+    default_vllm_config, dist_init, dummy_model_gate_up, device, tmp_path
+):
     # Should remove every LoRA not specified in the request.
     lora_config = LoRAConfig(
         max_lora_rank=8, max_cpu_loras=4, max_loras=4, lora_dtype=DEFAULT_DTYPE
@@ -618,11 +635,14 @@ def test_worker_adapter_manager(dist_init, dummy_model_gate_up, device, tmp_path
         )
 
     assert worker_adapter_manager.device == device
-    assert worker_adapter_manager._adapter_manager.punica_wrapper.device == device
+    punica_wrapper = worker_adapter_manager._adapter_manager.punica_wrapper_mapping.get(
+        DEFAULT_LANGUAGE_WRAPPER_KEY
+    )
+    assert punica_wrapper.device == device
 
 
 @pytest.mark.parametrize("device", DEVICES)
-def test_packed_loras(dist_init, dummy_model_gate_up, device):
+def test_packed_loras(default_vllm_config, dist_init, dummy_model_gate_up, device):
     model = dummy_model_gate_up
     model_lora = create_packed_lora(
         1,

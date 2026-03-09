@@ -3,7 +3,7 @@
 
 import pytest
 
-from vllm.entrypoints.openai.protocol import ChatCompletionRequest
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 
 
 def test_chat_completion_request_with_no_tools():

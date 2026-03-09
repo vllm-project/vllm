@@ -33,8 +33,6 @@ class NewLineFormatter(logging.Formatter):
             model_executor/.../quantization/utils/fp8_utils.py
             vllm/model_executor/layers/quantization/awq.py ->
             model_executor/layers/quantization/awq.py
-            vllm/v1/attention/backends/mla/common.py ->
-            v1/attention/backends/mla/common.py
 
             Args:
                 relpath (Path): The relative path to be shortened.

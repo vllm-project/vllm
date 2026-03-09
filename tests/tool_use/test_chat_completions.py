@@ -151,3 +151,45 @@ async def test_chat_completion_with_tools(
     assert chunk.choices[0].finish_reason != "tool_calls"
     assert len(chunks)
     assert "".join(chunks) == output_text
+
+
+# Regression test for https://github.com/vllm-project/vllm/issues/32006
+# Engine crash when combining response_format: json_object with
+# tool_choice: required
+@pytest.mark.asyncio
+@pytest.mark.timeout(120)
+async def test_response_format_with_tool_choice_required(
+    client: openai.AsyncOpenAI, server_config: ServerConfig
+):
+    """
+    Test that combining response_format: json_object with tool_choice: required
+    doesn't crash the engine.
+
+    Before the fix, this would cause a validation error:
+    "You can only use one kind of structured outputs constraint but multiple
+    are specified" because both json_object and json (from tool schema) would
+    be set in StructuredOutputsParams.
+    """
+    models = await client.models.list()
+    model_name: str = models.data[0].id
+
+    # This combination previously crashed the engine
+    chat_completion = await client.chat.completions.create(
+        messages=ensure_system_prompt(
+            [{"role": "user", "content": "What is the weather in Dallas, Texas?"}],
+            server_config,
+        ),
+        temperature=0,
+        max_completion_tokens=150,
+        model=model_name,
+        tools=[WEATHER_TOOL],
+        tool_choice="required",
+        response_format={"type": "json_object"},
+    )
+
+    # The fix clears response_format when tool_choice forces tool calling,
+    # so the request should complete successfully with tool calls
+    choice = chat_completion.choices[0]
+    assert choice.finish_reason == "tool_calls"
+    assert choice.message.tool_calls is not None
+    assert len(choice.message.tool_calls) > 0
