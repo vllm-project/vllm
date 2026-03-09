@@ -1411,27 +1411,20 @@ class GPUModelRunner(
 
         return cu_num_tokens
 
-    def _compute_prev_positions(self, num_reqs: int) -> bool:
+    def _compute_prev_positions(self, num_reqs: int) -> None:
         """Build prev_positions mapping: current pos -> previous pos (-1 if new).
 
         Populates self.prev_positions.np[:num_reqs] with the mapping.
-        Returns True if all requests are continuing with unchanged indices.
         """
         prev_req_id_to_index = self.input_batch.prev_req_id_to_index
         prev_positions = self.prev_positions.np[:num_reqs]
 
         if not prev_req_id_to_index:
             prev_positions.fill(-1)
-            return False
+            return
 
-        indices_match = True
         for i, req_id in enumerate(self.input_batch.req_ids[:num_reqs]):
-            prev_index = prev_req_id_to_index.get(req_id, -1)
-            prev_positions[i] = prev_index
-            if prev_index != i:
-                indices_match = False
-
-        return indices_match
+            prev_positions[i] = prev_req_id_to_index.get(req_id, -1)
 
     def _prepare_input_ids(
         self,
@@ -1439,7 +1432,6 @@ class GPUModelRunner(
         num_reqs: int,
         total_num_scheduled_tokens: int,
         cu_num_tokens: np.ndarray,
-        indices_match: bool,
     ) -> None:
         """Prepare the input IDs for the current batch.
 
@@ -1744,7 +1736,7 @@ class GPUModelRunner(
         # Build prev_positions mapping: current pos -> prev pos (-1 if new).
         # Used for gathering from previous iteration's GPU tensors.
         prev_req_id_to_index = self.input_batch.prev_req_id_to_index
-        indices_match = self._compute_prev_positions(num_reqs)
+        self._compute_prev_positions(num_reqs)
 
         num_tokens = [self.requests[r].num_tokens for r in self.input_batch.req_ids]
         num_tokens_np = np.array(num_tokens, dtype=np.int32)
@@ -1837,7 +1829,6 @@ class GPUModelRunner(
             num_reqs,
             total_num_scheduled_tokens,
             cu_num_tokens,
-            indices_match,
         )
 
         if self.uses_mrope:
