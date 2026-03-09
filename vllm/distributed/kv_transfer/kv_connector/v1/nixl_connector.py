@@ -561,7 +561,6 @@ class NixlConnectorScheduler:
 
         # Background thread for handling new handshake requests.
         self._nixl_handshake_listener_t: threading.Thread | None = None
-        self._encoded_xfer_handshake_metadata: dict[int, Any] = {}
         self._stop_event = threading.Event()
 
         # Requests that need to start recv/send.
