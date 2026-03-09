@@ -128,6 +128,11 @@ class OpenAIServingCompletion(OpenAIServing):
             - suffix (the language models we currently support do not support
             suffix)
         """
+        if request.stream and request.use_beam_search:
+            return self.create_error_response(
+                "Streaming is not currently supported with beam search"
+            )
+
         result = await self.render_completion_request(request)
         if isinstance(result, ErrorResponse):
             return result
@@ -210,13 +215,10 @@ class OpenAIServingCompletion(OpenAIServing):
         model_name = self.models.model_name(lora_request)
         num_prompts = len(engine_inputs)
 
-        # We do not stream the results when using beam search.
-        stream = request.stream and not request.use_beam_search
-
         # Streaming response
         tokenizer = self.renderer.tokenizer
 
-        if stream:
+        if request.stream:
             return self.completion_stream_generator(
                 request,
                 engine_inputs,
