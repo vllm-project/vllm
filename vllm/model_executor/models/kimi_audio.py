@@ -56,7 +56,6 @@ from vllm.transformers_utils.processors.kimi_audio import (
     KimiAudioProcessor,
     _get_feat_extract_output_lengths,
 )
-from vllm.transformers_utils.tokenizer import get_tokenizer
 from vllm.v1.sample.metadata import SamplingMetadata
 
 # Kimi-Audio constants
@@ -112,25 +111,10 @@ class KimiAudioProcessingInfo(BaseProcessingInfo):
     def get_hf_processor(self, **kwargs: object) -> KimiAudioProcessor:
         """Get or create the KimiAudioProcessor."""
         if KimiAudioProcessingInfo._processor is None:
-            # Load feature extractor and tokenizer
-            feature_extractor = cached_feature_extractor_from_config(
-                self.ctx.model_config, subfolder=KIMIA_WHISPER_SUBFOLDER
-            )
-            tokenizer = KimiAudioTokenizer.from_pretrained(
+            # Use from_pretrained() which handles TikTokenTokenizer properly
+            KimiAudioProcessingInfo._processor = KimiAudioProcessor.from_pretrained(
                 self.ctx.model_config.model,
                 trust_remote_code=self.ctx.model_config.trust_remote_code,
-            )
-
-            # Verify special tokens exist
-            assert tokenizer.added_tokens_decoder.get(
-                KimiAudioProcessor.KIMIA_MEDIA_BEGIN
-            ), "Missing <|im_media_begin|> token"
-            assert tokenizer.added_tokens_decoder.get(
-                KimiAudioProcessor.KIMIA_TEXT_BLANK
-            ), "Missing <|im_kimia_text_blank|> token"
-
-            KimiAudioProcessingInfo._processor = KimiAudioProcessor(
-                feature_extractor=feature_extractor, tokenizer=tokenizer
             )
 
         return KimiAudioProcessingInfo._processor
@@ -651,21 +635,19 @@ class KimiAudioForConditionalGeneration(
         cls, model_config: ModelConfig, task_type: str
     ) -> SpeechToTextConfig:
         """Get speech-to-text config with custom processor."""
+        # Use from_pretrained() to validate processor loads correctly
+        # This also validates feature extractor and tokenizer compatibility
+        _ = KimiAudioProcessor.from_pretrained(
+            model_config.model,
+            trust_remote_code=model_config.trust_remote_code,
+        )
+
+        # Load feature extractor for config values
         feature_extractor = AutoFeatureExtractor.from_pretrained(
             model_config.model,
             trust_remote_code=model_config.trust_remote_code,
             subfolder=KIMIA_WHISPER_SUBFOLDER,
         )
-
-        # Get tokenizer (this handles the TikTokenTokenizer properly)
-        tokenizer = get_tokenizer(
-            model_config.tokenizer,
-            tokenizer_mode=model_config.tokenizer_mode,
-            trust_remote_code=model_config.trust_remote_code,
-        )
-
-        # Manually instantiate processor to validate it works
-        _ = KimiAudioProcessor(feature_extractor=feature_extractor, tokenizer=tokenizer)
 
         return SpeechToTextConfig(
             max_audio_clip_s=feature_extractor.chunk_length,

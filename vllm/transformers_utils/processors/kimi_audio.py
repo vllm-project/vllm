@@ -24,9 +24,11 @@ from typing import Any
 
 import numpy as np
 import torch
-from transformers import BatchFeature, ProcessorMixin
+from transformers import AutoFeatureExtractor, BatchFeature, ProcessorMixin
 from transformers.audio_utils import AudioInput
 from transformers.tokenization_utils_base import TextInput
+
+from vllm.tokenizers.kimi_audio import KimiAudioTokenizer
 
 
 def _get_feat_extract_output_lengths(input_lengths: torch.Tensor) -> torch.Tensor:
@@ -74,6 +76,37 @@ class KimiAudioProcessor(ProcessorMixin):
         kwargs["feature_extractor"] = feature_extractor
         kwargs["tokenizer"] = tokenizer
         super().__init__(**kwargs)
+
+    @classmethod
+    def from_pretrained(
+        cls,
+        pretrained_model_name_or_path: str,
+        revision: str | None = None,
+        trust_remote_code: bool = False,
+        **kwargs: Any,
+    ) -> "KimiAudioProcessor":
+        """
+        Load KimiAudioProcessor with proper feature extractor and tokenizer.
+
+        This overrides ProcessorMixin.from_pretrained() to handle TikTokenTokenizer
+        which doesn't inherit from PreTrainedTokenizerBase.
+        """
+        # Load feature extractor from whisper-large-v3 subfolder
+        feature_extractor = AutoFeatureExtractor.from_pretrained(
+            pretrained_model_name_or_path,
+            subfolder="whisper-large-v3",
+            revision=revision,
+            trust_remote_code=trust_remote_code,
+        )
+
+        # Load KimiAudioTokenizer directly
+        tokenizer = KimiAudioTokenizer.from_pretrained(
+            pretrained_model_name_or_path,
+            revision=revision,
+            trust_remote_code=trust_remote_code,
+        )
+
+        return cls(feature_extractor=feature_extractor, tokenizer=tokenizer)
 
     def check_argument_for_proper_class(self, attribute_name: str, argument: Any):
         """Override to skip class validation for custom tokenizer."""
