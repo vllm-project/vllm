@@ -1161,6 +1161,7 @@ class AsyncMPClient(MPClient):
         Set VLLM_HEALTH_CHECK_TIMEOUT=0 to disable the ping (default: 60s).
         """
         import vllm.envs as envs
+
         timeout = envs.VLLM_HEALTH_CHECK_TIMEOUT
         if timeout <= 0:
             return

@@ -859,8 +859,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Timeout in seconds for the health check ping to EngineCore.
     # If the engine does not respond within this time, it is considered hung.
     # Set higher for large models with long forward passes. Set to 0 to disable.
-    "VLLM_HEALTH_CHECK_TIMEOUT":
-        lambda: int(os.getenv("VLLM_HEALTH_CHECK_TIMEOUT", "60")),
+    "VLLM_HEALTH_CHECK_TIMEOUT": lambda: int(
+        os.getenv("VLLM_HEALTH_CHECK_TIMEOUT", "60")
+    ),
     # Timeout in seconds for keeping HTTP connections alive in API server
     "VLLM_HTTP_TIMEOUT_KEEP_ALIVE": lambda: int(
         os.environ.get("VLLM_HTTP_TIMEOUT_KEEP_ALIVE", "5")
