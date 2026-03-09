@@ -83,6 +83,7 @@ class FlashMLASparseBackend(AttentionBackend):
         "auto",
         "bfloat16",
         "fp8_ds_mla",
+        "fp8",  # alias for fp8_ds_mla
     ]
 
     @staticmethod
@@ -570,6 +571,11 @@ class FlashMLASparseImpl(SparseMLAAttentionImpl[FlashMLASparseMetadata]):
         vllm_config = get_current_vllm_config()
         max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
         q_concat_shape = (max_tokens, num_heads, head_size)
+        if kv_cache_dtype.startswith("fp8"):
+            assert kv_cache_dtype == "fp8_ds_mla", (
+                "FlashMLA Sparse Attention backend fp8 only supports "
+                "fp8_ds_mla kv-cache dtype"
+            )
 
         if kv_cache_dtype == "fp8_ds_mla":
             # Reserve workspace during initialization

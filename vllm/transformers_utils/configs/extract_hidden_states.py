@@ -7,6 +7,8 @@ import os
 
 from transformers import PretrainedConfig
 
+from vllm.transformers_utils.utils import without_trust_remote_code
+
 
 class ExtractHiddenStatesConfig(PretrainedConfig):
     model_type = "extract_hidden_states"
@@ -42,7 +44,7 @@ class ExtractHiddenStatesConfig(PretrainedConfig):
         **kwargs,
     ) -> "ExtractHiddenStatesConfig":
         config_dict, kwargs = cls.get_config_dict(
-            pretrained_model_name_or_path, **kwargs
+            pretrained_model_name_or_path, **without_trust_remote_code(kwargs)
         )
         return cls.from_dict(config_dict, **kwargs)
 
