@@ -194,7 +194,7 @@ class InputProcessingContext:
             typ = ProcessorMixin
 
         tokenizer = self.tokenizer
-        if is_mistral_tokenizer(tokenizer):
+        if tokenizer is not None and is_mistral_tokenizer(tokenizer):
             tokenizer = tokenizer.transformers_tokenizer
 
         merged_kwargs = self.get_merged_mm_kwargs(kwargs)

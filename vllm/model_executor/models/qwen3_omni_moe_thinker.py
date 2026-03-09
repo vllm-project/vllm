@@ -1213,10 +1213,13 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
         mm_data = dict(mm_data)
         audios = mm_data.pop("audios", [])
 
-        # Merge use_audio_in_video from global --mm-processor-kwargs (request-level is often empty)
+        # Fall back to global use_audio_in_video when not set per-request.
         mm_config = self.info.ctx.model_config.get_multimodal_config()
         global_mm_kwargs = mm_config.mm_processor_kwargs or {}
-        if "use_audio_in_video" not in mm_kwargs and "use_audio_in_video" in global_mm_kwargs:
+        if (
+            mm_kwargs.get("use_audio_in_video") is None
+            and "use_audio_in_video" in global_mm_kwargs
+        ):
             mm_kwargs = dict(mm_kwargs)
             mm_kwargs["use_audio_in_video"] = global_mm_kwargs["use_audio_in_video"]
 
@@ -1487,7 +1490,7 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
             mm_config = self.info.ctx.model_config.get_multimodal_config()
             global_mm_kwargs = mm_config.mm_processor_kwargs or {}
             use_audio_in_video = global_mm_kwargs.get("use_audio_in_video", False)
-        # Disable interleaving when there is no audio (e.g. warmup) to avoid AssertionError
+        # Disable interleaving when no audio (e.g. warmup) to avoid AssertionError.
         if use_audio_in_video and not audio_output_lengths:
             use_audio_in_video = False
         thinker_config = self.info.get_hf_config()
