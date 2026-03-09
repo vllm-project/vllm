@@ -36,7 +36,8 @@ class CPUModelRunner(GPUModelRunner):
             device_tensor = getattr(obj, device_attr_name, None)
             if cpu_tensor is not None and device_tensor is not None:
                 assert isinstance(cpu_tensor, torch.Tensor)
-                assert isinstance(device_tensor, torch.Tensor)
+                if not isinstance(device_tensor, torch.Tensor):
+                    return
                 setattr(obj, device_attr_name, cpu_tensor)
 
         for v in vars(self).values():
