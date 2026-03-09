@@ -72,6 +72,7 @@ from vllm.logprobs import Logprob
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.parser import ParserManager
 from vllm.reasoning import ReasoningParser
+from vllm.renderers import ChatParams
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers import ToolParser
@@ -171,44 +172,14 @@ class OpenAIServingChat(OpenAIServing):
         self.supports_code_interpreter = False
         self.python_tool = None
 
-    async def warmup(self) -> None:
-        """
-        Warm up the chat template processing to avoid first-request latency.
-
-        This method triggers Jinja2 template compilation and content format
-        detection that would otherwise happen on the first real request,
-        causing increased latency on the first request.
-        """
-        logger.info("Warming up chat template processing...")
-        start_time = time.perf_counter()
-
-        try:
-            # Create a minimal dummy request
-            dummy_request = ChatCompletionRequest(
-                messages=[{"role": "user", "content": "warmup"}],
-                model=None,
-                max_completion_tokens=1,
+    def warmup(self) -> None:
+        self.renderer.warmup(
+            ChatParams(
+                chat_template=self.chat_template,
+                chat_template_content_format=self.chat_template_content_format,
+                chat_template_kwargs=self.default_chat_template_kwargs,
             )
-
-            # Call _preprocess_chat to trigger template compilation
-            # This forces:
-            # 1. Chat template content format detection
-            # 2. Jinja2 template compilation
-            # 3. Tokenizer initialization for chat
-            await self._preprocess_chat(
-                dummy_request,
-                dummy_request.messages,
-                default_template=self.chat_template,
-                default_template_content_format=self.chat_template_content_format,
-                default_template_kwargs=self.default_chat_template_kwargs,
-            )
-
-            elapsed = (time.perf_counter() - start_time) * 1000
-            logger.info("Chat template warmup completed in %.1fms", elapsed)
-
-        except Exception:
-            # Log but don't fail server startup if warmup fails
-            logger.exception("Chat template warmup failed")
+        )
 
     async def render_chat_request(
         self,
