@@ -397,7 +397,7 @@ class LLM:
         self.io_processor = self.llm_engine.io_processor
         self.input_processor = self.llm_engine.input_processor
         self.chat_template_config = ChatTemplateConfig(chat_template=self.chat_template)
-        self.init_pooling_io_processors = init_pooling_io_processors(
+        self.pooling_io_processors = init_pooling_io_processors(
             supported_tasks=supported_tasks,
             model_config=self.model_config,
             renderer=self.renderer,
@@ -1174,8 +1174,8 @@ class LLM:
                     )
                     raise ValueError(msg)
 
-            if pooling_task in self.init_pooling_io_processors:
-                io_processor = self.init_pooling_io_processors[pooling_task]
+            if pooling_task in self.pooling_io_processors:
+                io_processor = self.pooling_io_processors[pooling_task]
                 processor_inputs = io_processor.pre_process_offline(
                     prompts_seq, tokenization_kwargs
                 )
@@ -1194,7 +1194,7 @@ class LLM:
                 outputs = self._run_engine(
                     use_tqdm=use_tqdm, output_type=PoolingRequestOutput
                 )
-                outputs = io_processor.post_process(outputs)
+                outputs = io_processor.post_process_offline(outputs)
             else:
                 outputs = self._run_completion(
                     prompts=prompts_seq,

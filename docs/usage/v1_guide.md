@@ -83,13 +83,13 @@ based on assigned priority, with FCFS as a tie-breaker), configurable via the
 
 ### Hardware
 
-| Hardware         | Status                                        |
-|------------------|-----------------------------------------------|
-| **NVIDIA**       | <nobr>🟢</nobr>                               |
-| **AMD**          | <nobr>🟢</nobr>                               |
-| **INTEL GPU**    | <nobr>🟢</nobr>                               |
-| **TPU**          | <nobr>🟢</nobr>                               |
-| **CPU**          | <nobr>🟢</nobr>                               |
+| Hardware      | Status          |
+| --------------| --------------- |
+| **NVIDIA**    | <nobr>🟢</nobr> |
+| **AMD**       | <nobr>🟢</nobr> |
+| **INTEL GPU** | <nobr>🟢</nobr> |
+| **TPU**       | <nobr>🟢</nobr> |
+| **CPU**       | <nobr>🟢</nobr> |
 
 !!! note
 
@@ -104,13 +104,13 @@ based on assigned priority, with FCFS as a tie-breaker), configurable via the
 
 ### Models
 
-| Model Type                  | Status                                                                  |
-|-----------------------------|-------------------------------------------------------------------------|
-| **Decoder-only Models**     | <nobr>🟢</nobr>                                                         |
-| **Encoder-Decoder Models**  | <nobr>🟢 (Whisper), 🔴 (Others) </nobr>                                |
-| **Pooling Models**          | <nobr>🟢</nobr>                                                         |
-| **Mamba Models**            | <nobr>🟢</nobr>                                                         |
-| **Multimodal Models**       | <nobr>🟢</nobr>                                                         |
+| Model Type                 | Status                                  |
+| -------------------------- | --------------------------------------- |
+| **Decoder-only Models**    | <nobr>🟢</nobr>                         |
+| **Encoder-Decoder Models** | <nobr>🟢 (Whisper), 🔴 (Others) </nobr> |
+| **Pooling Models**         | <nobr>🟢</nobr>                         |
+| **Mamba Models**           | <nobr>🟢</nobr>                         |
+| **Multimodal Models**      | <nobr>🟢</nobr>                         |
 
 See below for the status of models that are not yet supported or have more features planned in V1.
 
@@ -145,7 +145,7 @@ following a similar pattern by implementing support through the [plugin system](
 ### Features
 
 | Feature                                     | Status                                                                            |
-|---------------------------------------------|-----------------------------------------------------------------------------------|
+| ------------------------------------------- | --------------------------------------------------------------------------------- |
 | **Prefix Caching**                          | <nobr>🟢 Functional</nobr>                                                        |
 | **Chunked Prefill**                         | <nobr>🟢 Functional</nobr>                                                        |
 | **LoRA**                                    | <nobr>🟢 Functional</nobr>                                                        |
