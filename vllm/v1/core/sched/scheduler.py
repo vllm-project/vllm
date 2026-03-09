@@ -1801,8 +1801,8 @@ class Scheduler(SchedulerInterface):
             return len(self.running)
         num_waiting = (
             len(self.waiting)
-            - self.num_waiting_for_streaming_input
             + len(self.skipped_waiting)
+            - self.num_waiting_for_streaming_input
         )
         return num_waiting + len(self.running)
 
