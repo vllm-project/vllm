@@ -20,12 +20,14 @@ from __future__ import annotations
 import copy
 import functools
 import importlib
+import importlib.util
 import inspect
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from dataclasses import fields as dataclass_fields
 from typing import ClassVar
 
+import regex as re
 import torch
 from torch import nn
 
@@ -36,6 +38,45 @@ from .interfaces import HasNoOps
 from .utils import PPMissingLayer, maybe_prefix
 
 logger = init_logger(__name__)
+
+# Security: all config-supplied module paths must resolve within this package.
+_VLLM_MODELS_PKG = "vllm.model_executor.models"
+# Security: only simple identifier segments allowed in layers_path.
+_SAFE_ATTR_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
+
+
+def _validate_layers_path(layers_path: str) -> None:
+    """Reject dunder or non-identifier segments in a config-supplied layers_path."""
+    for part in layers_path.split("."):
+        if not _SAFE_ATTR_RE.match(part):
+            raise ValueError(
+                f"Security: invalid attribute segment in layers_path: {part!r}"
+            )
+        if part.startswith("__"):
+            raise ValueError(
+                f"Security: dunder attributes not allowed in layers_path: {part!r}"
+            )
+
+
+def _validate_config_arch_info(arch_info: ArchInfo) -> None:
+    """Ensure config-supplied module paths resolve inside vllm.model_executor.models."""
+    for field_name in ("decoder_layer_module", "base_model_module"):
+        val = getattr(arch_info, field_name, None)
+        if val is None:
+            continue
+        try:
+            abs_name = importlib.util.resolve_name(val, _VLLM_MODELS_PKG)
+        except (ImportError, ValueError) as exc:
+            raise ValueError(
+                f"Security: ArchInfo.{field_name} is not a valid relative "
+                f"module path: {val!r}"
+            ) from exc
+        if not abs_name.startswith(_VLLM_MODELS_PKG + "."):
+            raise ValueError(
+                f"Security: ArchInfo.{field_name} must resolve within "
+                f"'{_VLLM_MODELS_PKG}'. Got resolved name: {abs_name!r}"
+            )
+    _validate_layers_path(arch_info.layers_path)
 
 
 class _AttrDict(dict):
@@ -458,7 +499,9 @@ def _arch_info_from_config(hf_config) -> ArchInfo | None:
     if not isinstance(data, dict):
         data = vars(data)
     known = {f.name for f in dataclass_fields(ArchInfo)}
-    return ArchInfo(**{k: v for k, v in data.items() if k in known})
+    arch_info = ArchInfo(**{k: v for k, v in data.items() if k in known})
+    _validate_config_arch_info(arch_info)
+    return arch_info
 
 
 def _make_wrapper_cls(arch_name: str, arch_info: ArchInfo) -> type:
