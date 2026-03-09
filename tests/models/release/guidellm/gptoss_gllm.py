@@ -117,7 +117,7 @@ def _run_guidellm_benchmark(
     print(f"\nRunning guidellm benchmark → output: {output_filename}\n")
 
     try:
-        result = subprocess.run(
+        subprocess.run(
             cmd,
             capture_output=True,
             text=True,
@@ -134,18 +134,20 @@ def _run_guidellm_benchmark(
         return output_filename
 
     except subprocess.TimeoutExpired:
-        raise RuntimeError(f"Guidellm benchmark timed out after {timeout} seconds")
-    except subprocess.CalledProcessError as e:
         raise RuntimeError(
-            f"Guidellm benchmark failed with exit code {e.returncode}:\n"
-            f"stdout: {e.stdout}\n"
-            f"stderr: {e.stderr}"
-        )
+            f"Guidellm benchmark timed out after {timeout} seconds"
+        ) from None
+    except subprocess.CalledProcessError as err:
+        raise RuntimeError(
+            f"Guidellm benchmark failed with exit code {err.returncode}:\n"
+            f"stdout: {err.stdout}\n"
+            f"stderr: {err.stderr}"
+        ) from None
     except FileNotFoundError:
         raise RuntimeError(
             "guidellm command not found. Please install guidellm:\n"
             "  pip install guidellm"
-        )
+        ) from None
 
 
 def _get_benchmark(data: dict) -> dict:
@@ -187,7 +189,6 @@ def _extract_benchmark_metrics(benchmark: dict) -> dict[str, float]:
                 output_tokens = int(v)
 
     successful = totals.get("successful", 0)
-    errored = totals.get("errored", 0)
     total_input = successful * prompt_tokens
     total_output = successful * output_tokens
     req_per_s = (
@@ -362,14 +363,16 @@ def test_compare_guidellm_results(
                 failures.append(
                     f"REGRESSION [{metric_label}]: "
                     f"current={current_val:.4f}, baseline={baseline_val:.4f}, "
-                    f"degraded by {diff_pct * 100:.1f}% (threshold: +{THRESHOLD * 100:.0f}%)"
+                    f"degraded by {diff_pct * 100:.1f}% "
+                    f"(threshold: +{THRESHOLD * 100:.0f}%)"
                 )
         else:
             if diff_pct < -THRESHOLD:
                 failures.append(
                     f"REGRESSION [{metric_label}]: "
                     f"current={current_val:.4f}, baseline={baseline_val:.4f}, "
-                    f"degraded by {abs(diff_pct) * 100:.1f}% (threshold: -{THRESHOLD * 100:.0f}%)"
+                    f"degraded by {abs(diff_pct) * 100:.1f}% "
+                    f"(threshold: -{THRESHOLD * 100:.0f}%)"
                 )
 
     # --- Correctness check: 100% success rate ---
