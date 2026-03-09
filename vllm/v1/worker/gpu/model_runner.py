@@ -473,6 +473,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # SP is not supported yet.
         return num_scheduled_tokens
 
+    def profile_cudagraph_memory(self) -> int:
+        # NOTE(woosuk): It is TBD whether we keep this API or not.
+        return 0
+
     @torch.inference_mode()
     def capture_model(self) -> int:
         if not self.cudagraph_manager.needs_capture():
