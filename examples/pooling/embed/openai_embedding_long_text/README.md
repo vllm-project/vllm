@@ -34,7 +34,7 @@ python client.py
 ## 📁 Files
 
 | File | Description |
-|------|-------------|
+| ---- | ----------- |
 | `service.sh` | Server startup script with chunked processing enabled |
 | `client.py` | Comprehensive test client for long text embedding |
 
@@ -61,7 +61,7 @@ The key parameters for chunked processing are in the `--pooler-config`:
 Chunked processing uses **MEAN aggregation** for cross-chunk combination when input exceeds the model's native maximum length:
 
 | Component | Behavior | Description |
-|-----------|----------|-------------|
+| --------- | -------- | ----------- |
 | **Within chunks** | Model's native pooling | Uses the model's configured pooling strategy |
 | **Cross-chunk aggregation** | Always MEAN | Weighted averaging based on chunk token counts |
 | **Performance** | Optimal | All chunks processed for complete semantic coverage |
@@ -69,7 +69,7 @@ Chunked processing uses **MEAN aggregation** for cross-chunk combination when in
 ### Environment Variables
 
 | Variable | Default | Description |
-|----------|---------|-------------|
+| -------- | ------- | ----------- |
 | `MODEL_NAME` | `intfloat/multilingual-e5-large` | Embedding model to use (supports multiple models) |
 | `PORT` | `31090` | Server port |
 | `GPU_COUNT` | `1` | Number of GPUs to use |
@@ -106,7 +106,7 @@ With `MAX_EMBED_LEN=3072000`, you can process:
 ### Chunked Processing Performance
 
 | Aspect | Behavior | Performance |
-|--------|----------|-------------|
+| ------ | -------- | ----------- |
 | **Chunk Processing** | All chunks processed with native pooling | Consistent with input length |
 | **Cross-chunk Aggregation** | MEAN weighted averaging | Minimal overhead |
 | **Memory Usage** | Proportional to number of chunks | Moderate, scalable |
