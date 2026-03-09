@@ -1141,6 +1141,7 @@ def compute_logical_maps(
     assert len(physical_to_logical_map_view.shape) == 2
     num_layers, num_physical = physical_to_logical_map_view.shape
 
+    valid_mask = physical_to_logical_map_view >= 0
     logical_replica_count = torch.zeros(
         num_layers,
         num_logical_experts,
@@ -1148,7 +1149,9 @@ def compute_logical_maps(
         device=device,
     )
     logical_replica_count.scatter_add_(
-        1, physical_to_logical_map_view, torch.ones_like(physical_to_logical_map_view)
+        1,
+        physical_to_logical_map_view.clamp(min=0),
+        valid_mask.to(dtype),
     )
 
     max_replicas = int(logical_replica_count.max().item())
@@ -1162,10 +1165,20 @@ def compute_logical_maps(
     running_count = torch.zeros_like(logical_replica_count)
     layer_indices = torch.arange(num_layers, device=device)
     for phys_idx in range(num_physical):
-        expert_ids = physical_to_logical_map_view[:, phys_idx]  # [num_layers]
-        replica_idx = running_count[layer_indices, expert_ids]  # [num_layers]
-        logical_to_physical_map_out[layer_indices, expert_ids, replica_idx] = phys_idx
-        running_count[layer_indices, expert_ids] += 1
+        # Logical expert at physical slot phys_idx for each layer
+        logical_expert_ids = physical_to_logical_map_view[:, phys_idx]  # [num_layers]
+
+        # Only consider "valid" experts. I.E not -1
+        valid_expert_mask = logical_expert_ids >= 0
+        if not valid_expert_mask.any():
+            continue
+        valid_layers = layer_indices[valid_expert_mask]
+        valid_experts = logical_expert_ids[valid_expert_mask]
+
+        # Use the current running count as the replica index, then increment it.
+        replica_idx = running_count[valid_layers, valid_experts]
+        logical_to_physical_map_out[valid_layers, valid_experts, replica_idx] = phys_idx
+        running_count[valid_layers, valid_experts] += 1
 
     # If computing maps for a single layer, squeeze out the extra layer dimension
     # before returning
