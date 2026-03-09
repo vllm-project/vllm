@@ -1464,7 +1464,12 @@ class LLMEngine:
     
     def _process_tree_decoding(self, outputs, seq_group_metadata_list):
         """处理tree decoding逻辑"""
-        for seq_group_metadata in seq_group_metadata_list:
+        original_parallel_seq_group = next(iter(self.seq_id_to_seq_group.values()))
+        unfinished_seqs = original_parallel_seq_group.get_unfinished_seqs()
+        assert hasattr(outputs[0], 'logprobs')
+        logprobs = outputs[0].logprobs
+
+        for i, seq_group_metadata in enumerate(seq_group_metadata_list):
             request_id = seq_group_metadata.request_id
             if request_id not in self.seq_id_to_seq_group:
                 continue
@@ -1472,21 +1477,12 @@ class LLMEngine:
             if sampling_params.tree_search_params is None:
                 continue
             num_branches = sampling_params.tree_search_params.branching_factor
-            # 获取当前序列组的logprobs
-            if hasattr(outputs[0], 'logprobs'):
-                new_token_ids_list = []
-                logprobs = outputs[0].logprobs
-                original_parallel_seq_group = self.seq_id_to_seq_group[request_id]
-                unfinished_seqs = original_parallel_seq_group.get_unfinished_seqs()
-                for i, seq in enumerate(unfinished_seqs):
-                    if self._should_create_branches(
-                        seq, logprobs[i], sampling_params):
-                        probs = torch.exp(logprobs[i])
-                        _, new_token_ids = torch.topk(probs, num_branches, dim=-1)
-                        new_token_ids = new_token_ids.tolist()
-                        new_token_ids_list.append(new_token_ids)
-                for ids in new_token_ids_list:
-                    original_parallel_seq_group.add_tree_branches(request_id, ids, self)
+            if self._should_create_branches(
+                unfinished_seqs[i], logprobs[i], sampling_params):
+                probs = torch.exp(logprobs[i])
+                _, new_token_ids = torch.topk(probs, num_branches, dim=-1)
+                new_token_ids = new_token_ids.tolist()
+                original_parallel_seq_group.add_tree_branches(request_id, new_token_ids, self)
 
     def _should_create_branches(self, seq, logprobs, sampling_params):
         if seq.tree_depth >= sampling_params.tree_search_params.max_tree_depth:
