@@ -2034,6 +2034,9 @@ class Scheduler(SchedulerInterface):
         Try to promote a blocked waiting request back to schedulable states.
         """
         if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
+            # finished_recving_kv_req_ids is populated during
+            # update_from_output(), based on worker-side connector signals
+            # in KVConnectorOutput.finished_recving
             if request.request_id not in self.finished_recving_kv_req_ids:
                 return False
             self._update_waiting_for_remote_kv(request)
