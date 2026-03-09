@@ -43,23 +43,20 @@ async def test_completion_render_basic(client):
     assert response.status_code == 200
     data = response.json()
 
-    # Verify response structure
+    # Verify response structure - list of GenerateRequest
     assert isinstance(data, list)
     assert len(data) > 0
 
-    # Verify first prompt
+    # Verify first prompt is a GenerateRequest
     first_prompt = data[0]
-    assert "prompt_token_ids" in first_prompt
-    assert "prompt" in first_prompt
-    assert isinstance(first_prompt["prompt_token_ids"], list)
-    assert len(first_prompt["prompt_token_ids"]) > 0
-    assert isinstance(first_prompt["prompt"], str)
-
-    # Verify prompt text is preserved
-    assert (
-        "When should a chat-completions handler return an empty string?"
-        in first_prompt["prompt"]
-    )
+    assert "token_ids" in first_prompt
+    assert "sampling_params" in first_prompt
+    assert "model" in first_prompt
+    assert "request_id" in first_prompt
+    assert isinstance(first_prompt["token_ids"], list)
+    assert len(first_prompt["token_ids"]) > 0
+    assert first_prompt["model"] == MODEL_NAME
+    assert first_prompt["request_id"].startswith("cmpl-")
 
 
 @pytest.mark.asyncio
@@ -110,15 +107,18 @@ async def test_completion_render_multiple_prompts(client):
     assert response.status_code == 200
     data = response.json()
 
-    # Should return two prompts
+    # Should return two GenerateRequest items
     assert isinstance(data, list)
     assert len(data) == 2
 
-    # Verify both prompts have required fields
+    # Verify both prompts have GenerateRequest fields
     for prompt in data:
-        assert "prompt_token_ids" in prompt
-        assert "prompt" in prompt
-        assert len(prompt["prompt_token_ids"]) > 0
+        assert "token_ids" in prompt
+        assert "sampling_params" in prompt
+        assert "model" in prompt
+        assert "request_id" in prompt
+        assert len(prompt["token_ids"]) > 0
+        assert prompt["request_id"].startswith("cmpl-")
 
 
 @pytest.mark.asyncio

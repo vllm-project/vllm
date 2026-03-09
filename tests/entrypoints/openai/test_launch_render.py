@@ -107,11 +107,13 @@ async def test_completion_render_basic(client):
     assert len(data) > 0
 
     first_prompt = data[0]
-    assert "prompt_token_ids" in first_prompt
-    assert "prompt" in first_prompt
-    assert isinstance(first_prompt["prompt_token_ids"], list)
-    assert len(first_prompt["prompt_token_ids"]) > 0
-    assert "Once upon a time" in first_prompt["prompt"]
+    assert "token_ids" in first_prompt
+    assert "sampling_params" in first_prompt
+    assert "model" in first_prompt
+    assert "request_id" in first_prompt
+    assert isinstance(first_prompt["token_ids"], list)
+    assert len(first_prompt["token_ids"]) > 0
+    assert first_prompt["request_id"].startswith("cmpl-")
 
 
 @pytest.mark.asyncio
@@ -131,9 +133,12 @@ async def test_completion_render_multiple_prompts(client):
     assert len(data) == 2
 
     for prompt in data:
-        assert "prompt_token_ids" in prompt
-        assert "prompt" in prompt
-        assert len(prompt["prompt_token_ids"]) > 0
+        assert "token_ids" in prompt
+        assert "sampling_params" in prompt
+        assert "model" in prompt
+        assert "request_id" in prompt
+        assert len(prompt["token_ids"]) > 0
+        assert prompt["request_id"].startswith("cmpl-")
 
 
 @pytest.mark.asyncio

@@ -302,6 +302,57 @@ class OpenAIServingRender:
 
         return engine_prompts
 
+    async def render_completion(
+        self,
+        request: CompletionRequest,
+    ) -> list[GenerateRequest] | ErrorResponse:
+        """Render a completion request into a list of GenerateRequest DTOs.
+
+        This is a pure preprocessing step: it does not generate text.
+        """
+        result = await self.render_completion_request(request)
+        if isinstance(result, ErrorResponse):
+            return result
+
+        generate_requests: list[GenerateRequest] = []
+        for engine_prompt in result:
+            prompt_components = extract_prompt_components(
+                self.model_config, engine_prompt
+            )
+            token_ids = prompt_components.token_ids
+            if not token_ids:
+                return self.create_error_response("No token_ids rendered")
+            token_ids = list(token_ids)
+
+            input_length = extract_prompt_len(self.model_config, engine_prompt)
+            max_tokens = get_max_tokens(
+                self.model_config.max_model_len,
+                request.max_tokens,
+                input_length,
+                self.default_sampling_params,
+                self.override_max_tokens,
+            )
+            params = request.to_sampling_params(
+                max_tokens, self.default_sampling_params
+            )
+
+            request_id = f"cmpl-{random_uuid()}"
+
+            generate_requests.append(
+                GenerateRequest(
+                    request_id=request_id,
+                    token_ids=token_ids,
+                    sampling_params=params,
+                    model=request.model,
+                    stream=bool(request.stream),
+                    stream_options=(request.stream_options if request.stream else None),
+                    cache_salt=request.cache_salt,
+                    priority=request.priority,
+                )
+            )
+
+        return generate_requests
+
     def _make_request_with_harmony(
         self,
         request: ChatCompletionRequest,

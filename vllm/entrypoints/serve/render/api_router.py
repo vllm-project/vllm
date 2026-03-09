@@ -57,7 +57,7 @@ async def render_chat_completion(request: ChatCompletionRequest, raw_request: Re
 @router.post(
     "/v1/completions/render",
     dependencies=[Depends(validate_json_request)],
-    response_model=list,
+    response_model=list[GenerateRequest],
     responses={
         HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
         HTTPStatus.NOT_FOUND.value: {"model": ErrorResponse},
@@ -76,12 +76,12 @@ async def render_completion(request: CompletionRequest, raw_request: Request):
             status_code=HTTPStatus.NOT_FOUND, content=error.model_dump()
         )
 
-    result = await handler.render_completion_request(request)
+    result = await handler.render_completion(request)
 
     if isinstance(result, ErrorResponse):
         return JSONResponse(content=result.model_dump(), status_code=result.error.code)
 
-    return JSONResponse(content=result)
+    return JSONResponse(content=[item.model_dump() for item in result])
 
 
 def attach_router(app: FastAPI) -> None:
