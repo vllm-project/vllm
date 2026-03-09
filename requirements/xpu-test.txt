@@ -11,6 +11,12 @@ pytest-forked==1.6.0
 pytest-rerunfailures==14.0
 pytest-shard==0.1.2
 
+grpcio-tools>=1.76.0
+protobuf==6.33.5
+nanobind
+
+arctic-inference==0.1.1
+
 # Audio processing dependencies
 audioread==3.0.1
     # via librosa
@@ -38,8 +44,6 @@ pystemmer==3.0.0
 
 # Multi-modal processing
 blobfile==3.0.0
-    # Multi-Modal Models Test
-decord==0.6.0
     # video processing, required by entrypoints/openai/test_video.py
 rapidfuzz==3.12.1
 
