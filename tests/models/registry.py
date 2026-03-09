@@ -1000,7 +1000,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     ),
     "KimiAudioForConditionalGeneration": _HfExamplesInfo(
         "moonshotai/Kimi-Audio-7B-Instruct",
-        max_model_len=4096,
+        trust_remote_code=True,
     ),
     "Qwen2AudioForConditionalGeneration": _HfExamplesInfo(
         "Qwen/Qwen2-Audio-7B-Instruct"
