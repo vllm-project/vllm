@@ -153,9 +153,10 @@ def fi_chunk_gated_delta_rule(
 class ChunkGatedDeltaRule(CustomOp):
     def __init__(self) -> None:
         super().__init__()
-        if current_platform.is_cuda() and current_platform.is_device_capability(90):
+        if current_platform.is_cuda() and current_platform.has_device_capability(90):
             logger.info_once(
-                "Using FlashInfer GDN prefill kernel on CUDA compute capability 90"
+                "Using FlashInfer GDN prefill kernel on CUDA compute "
+                "capability 90+"
             )
             self._forward_method = self.forward_cuda
         else:
@@ -463,6 +464,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             group_size=None,
             norm_before_gate=True,
             device=current_platform.current_device(),
+            dtype=config.dtype,
         )
 
         self.out_proj = RowParallelLinear(
@@ -1017,6 +1019,7 @@ class Qwen3NextDecoderLayer(nn.Module):
                     1,
                     1,
                     config.hidden_size,
+                    dtype=config.dtype,
                 ),
             )
             self.ffn_layer_scale = torch.nn.Parameter(
@@ -1024,6 +1027,7 @@ class Qwen3NextDecoderLayer(nn.Module):
                     1,
                     1,
                     config.hidden_size,
+                    dtype=config.dtype,
                 ),
             )
 

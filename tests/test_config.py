@@ -26,6 +26,7 @@ from vllm.config.utils import get_field
 from vllm.config.vllm import (
     OPTIMIZATION_LEVEL_TO_CONFIG,
     OptimizationLevel,
+    enable_allreduce_rms_fusion,
 )
 from vllm.platforms import current_platform
 
@@ -56,6 +57,26 @@ def test_async_scheduling_with_pipeline_parallelism_is_allowed():
         ),
     )
     assert cfg.scheduler_config.async_scheduling is True
+
+
+def test_enable_allreduce_rms_fusion_disabled_for_pp():
+    cfg = VllmConfig(
+        parallel_config=ParallelConfig(
+            tensor_parallel_size=2,
+            pipeline_parallel_size=1,
+            data_parallel_size=1,
+        )
+    )
+
+    with (
+        patch("vllm.utils.flashinfer.has_flashinfer", return_value=True),
+        patch.object(current_platform, "is_cuda", return_value=True),
+        patch.object(current_platform, "is_device_capability", return_value=True),
+    ):
+        assert enable_allreduce_rms_fusion(cfg)
+
+        cfg.parallel_config.pipeline_parallel_size = 2
+        assert not enable_allreduce_rms_fusion(cfg)
 
 
 @dataclass
