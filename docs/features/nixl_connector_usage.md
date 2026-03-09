@@ -222,6 +222,52 @@ To enable this feature:
 --kv-transfer-config '{..., "kv_connector_extra_config": {"enable_cross_layers_blocks": "True"}}'
 ```
 
+### Speculative Decoding (EAGLE3)
+
+Disaggregated prefilling works with EAGLE3 speculative decoding. Both prefill and decode instances need `--speculative-config`, but with different `num_speculative_tokens`:
+
+- **Prefill**: set `num_speculative_tokens=1` (drafter runs minimally to populate its KV cache for transfer)
+- **Decode**: set `num_speculative_tokens=N` (full speculative decoding)
+
+```bash
+# Prefill instance
+CUDA_VISIBLE_DEVICES=0 \
+VLLM_KV_CACHE_LAYOUT=HND \
+UCX_NET_DEVICES=all \
+VLLM_NIXL_SIDE_CHANNEL_PORT=5559 \
+vllm serve meta-llama/Llama-3.1-8B-Instruct \
+  --port 8100 \
+  --enforce-eager \
+  --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' \
+  --speculative-config '{"method":"eagle3","model":"RedHatAI/Llama-3.1-8B-Instruct-speculator.eagle3","num_speculative_tokens":1,"max_model_len":16384}'
+
+# Decode instance
+CUDA_VISIBLE_DEVICES=1 \
+VLLM_KV_CACHE_LAYOUT=HND \
+UCX_NET_DEVICES=all \
+VLLM_NIXL_SIDE_CHANNEL_PORT=5659 \
+vllm serve meta-llama/Llama-3.1-8B-Instruct \
+  --port 8200 \
+  --enforce-eager \
+  --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' \
+  --speculative-config '{"method":"eagle3","model":"RedHatAI/Llama-3.1-8B-Instruct-speculator.eagle3","num_speculative_tokens":3,"max_model_len":16384}'
+```
+
+!!! note
+    `VLLM_KV_CACHE_LAYOUT=HND` is required for both instances when using speculative decoding with NixlConnector.
+
+#### Verified Configurations
+
+Tested on H100 with MT-Bench (80 prompts, 256 output tokens, temperature=0), `kv_buffer_device=cuda`:
+
+| Model | Drafter | Attn Backend | Acceptance Length |
+| --- | --- | --- | --- |
+| meta-llama/Llama-3.1-8B-Instruct | RedHatAI/Llama-3.1-8B-Instruct-speculator.eagle3 | FLASH_ATTN | 2.56 |
+| Qwen/Qwen3-8B | RedHatAI/Qwen3-8B-speculator.eagle3 | FLASH_ATTN | 2.25 |
+| openai/gpt-oss-20b | RedHatAI/gpt-oss-20b-speculator.eagle3 | TRITON_ATTN | 2.54 |
+
+See [spec_decode_acceptance_test.sh](../../tests/v1/kv_connector/nixl_integration/spec_decode_acceptance_test.sh) for the full test script.
+
 ## Example Scripts/Code
 
 Refer to these example scripts in the vLLM repository:

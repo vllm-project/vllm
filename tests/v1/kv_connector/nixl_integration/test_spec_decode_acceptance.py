@@ -12,8 +12,10 @@ Baselines from tests/v1/spec_decode/test_acceptance_length.py
 PD disaggregation via NixlConnector should match within tolerance.
 
 Environment variables (set by spec_decode_acceptance_test.sh):
-    TEST_MODEL   - target model name
+    TEST_CONFIG  - config id (e.g. "llama3-8b-eagle3")
+    TEST_MODEL   - target model name (fallback if TEST_CONFIG not set)
     DECODE_PORT  - port of the decode vLLM server (for /metrics)
+    PROXY_PORT   - port of the proxy server (default: 8192)
 """
 
 import os
@@ -27,9 +29,11 @@ from transformers import AutoTokenizer
 
 from vllm.benchmarks.datasets import get_samples
 
-PROXY_BASE_URL = "http://localhost:8192/v1"
-DECODE_PORT = os.environ.get("DECODE_PORT", "8200")
+TEST_CONFIG = os.environ.get("TEST_CONFIG", "")
 MODEL_NAME = os.environ.get("TEST_MODEL", "meta-llama/Llama-3.1-8B-Instruct")
+DECODE_PORT = os.environ.get("DECODE_PORT", "8200")
+PROXY_PORT = os.environ.get("PROXY_PORT", "8192")
+PROXY_BASE_URL = f"http://localhost:{PROXY_PORT}/v1"
 
 
 @dataclass
@@ -40,17 +44,35 @@ class Eagle3ModelConfig:
     expected_acceptance_lengths_per_pos: list[float] = field(default_factory=list)
     id: str = ""
     rtol: float | None = None
+    attention_backend: str = "FLASH_ATTN"
+    max_model_len: int = 16384
+    num_spec_tokens: int = 3
 
 
 # Standalone EAGLE3 baselines (MT-Bench, 80 prompts, 256 tokens, temp=0).
 # Source: tests/v1/spec_decode/test_acceptance_length.py
 EAGLE3_MODEL_CONFIGS = [
     Eagle3ModelConfig(
+        id="llama3-8b-eagle3",
         verifier="meta-llama/Llama-3.1-8B-Instruct",
         drafter="RedHatAI/Llama-3.1-8B-Instruct-speculator.eagle3",
         expected_acceptance_length=2.60,
         expected_acceptance_lengths_per_pos=[0.7296, 0.5208, 0.3545],
-        id="llama3-8b-eagle3",
+    ),
+    Eagle3ModelConfig(
+        id="qwen3-8b-eagle3",
+        verifier="Qwen/Qwen3-8B",
+        drafter="RedHatAI/Qwen3-8B-speculator.eagle3",
+        expected_acceptance_length=2.26,
+        expected_acceptance_lengths_per_pos=[0.6541, 0.3993, 0.2020],
+    ),
+    Eagle3ModelConfig(
+        id="gpt-oss-20b-eagle3",
+        verifier="openai/gpt-oss-20b",
+        drafter="RedHatAI/gpt-oss-20b-speculator.eagle3",
+        expected_acceptance_length=2.56,
+        expected_acceptance_lengths_per_pos=[0.7165, 0.5120, 0.3337],
+        attention_backend="TRITON_ATTN",
     ),
 ]
 
@@ -60,13 +82,14 @@ DEFAULT_RTOL = 0.05
 
 
 def _get_model_config() -> Eagle3ModelConfig:
-    """Get the model config matching MODEL_NAME."""
+    """Get the model config matching TEST_CONFIG or TEST_MODEL."""
     for config in EAGLE3_MODEL_CONFIGS:
-        if config.verifier == MODEL_NAME:
+        if config.id == TEST_CONFIG or config.verifier == MODEL_NAME:
             return config
     raise ValueError(
-        f"No Eagle3ModelConfig found for model {MODEL_NAME}. "
-        f"Available: {[c.verifier for c in EAGLE3_MODEL_CONFIGS]}"
+        f"No Eagle3ModelConfig for TEST_CONFIG={TEST_CONFIG!r}, "
+        f"TEST_MODEL={MODEL_NAME!r}. "
+        f"Available: {[c.id for c in EAGLE3_MODEL_CONFIGS]}"
     )
 
 
