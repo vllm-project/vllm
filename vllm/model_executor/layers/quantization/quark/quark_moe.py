@@ -734,7 +734,8 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
             current_platform.supports_mx()
             and self.ocp_mx_scheme.startswith("w_mxfp4")
             and self.mxfp4_backend is not None
-            and self.use_rocm_aiter_moe)
+            and self.use_rocm_aiter_moe
+        )
 
         # CK's pre-compiled MXFP4 MoE GEMM kernel instances have dimension
         # alignment requirements. When violated (e.g. MiniMax-M2.1 with
