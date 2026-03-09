@@ -1006,15 +1006,11 @@ class CompilationConfig:
                 self.splitting_ops = list(self._attention_ops)
 
                 # unified_kv_cache_update has a string param that prevents
-                # Inductor from reusing piecewise graphs. When
-                # fast_kv_cache_cold_start is not explicitly disabled, the
-                # sentinel pattern handles this, so we don't need to split
-                # the op out. Otherwise, fall back to the old workaround.
-                # https://github.com/vllm-project/vllm/issues/33267
-                if (
-                    not self.use_inductor_graph_partition
-                    and self.fast_kv_cache_cold_start is False
-                ):
+                # Inductor from reusing piecewise graphs. Remove it from
+                # the compiled graph. This has the side-effect of excluding
+                # cache from cudagraphs but that doesn't seem to affect
+                # performance.
+                if not self.use_inductor_graph_partition:
                     self.splitting_ops.append("vllm::unified_kv_cache_update")
                     self.splitting_ops.append("vllm::unified_mla_kv_cache_update")
 
