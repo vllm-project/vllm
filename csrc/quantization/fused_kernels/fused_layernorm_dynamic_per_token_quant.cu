@@ -15,13 +15,13 @@ __device__ void rms_norm_dynamic_per_token_quant_vec(
     scalar_t const* __restrict__ input,   // [..., hidden_size]
     scalar_t const* __restrict__ weight,  // [hidden_size]
     float const* scale_ub, float const var_epsilon, int32_t const hidden_size,
-    scalar_t* __restrict__ residual = nullptr) {
+    int32_t const input_stride, scalar_t* __restrict__ residual = nullptr) {
   float rms = 0.0f;
   float token_scale = 0.0f;
 
   // Compute rms
   vllm::vectorized::compute_rms<scalar_t, has_residual>(
-      &rms, input, hidden_size, var_epsilon, residual);
+      &rms, input, hidden_size, input_stride, var_epsilon, residual);
 
   // Compute scale
   vllm::vectorized::compute_dynamic_per_token_scales<scalar_t, scalar_out_t,
@@ -33,13 +33,15 @@ __device__ void rms_norm_dynamic_per_token_quant_vec(
   if constexpr (std::is_same_v<scalar_out_t, int8_t>) {
     token_scale = 1.0f / token_scale;
     vllm::vectorized::norm_and_quant<scalar_t, scalar_out_t, true,
-                                     has_residual>(
-        out, input, weight, rms, &token_scale, hidden_size, residual);
+                                     has_residual>(out, input, weight, rms,
+                                                   &token_scale, hidden_size,
+                                                   input_stride, residual);
   } else {
     // FP8 - Do not invert token_scale for exact match with FBGemm
     vllm::vectorized::norm_and_quant<scalar_t, scalar_out_t, false,
-                                     has_residual>(
-        out, input, weight, rms, &token_scale, hidden_size, residual);
+                                     has_residual>(out, input, weight, rms,
+                                                   &token_scale, hidden_size,
+                                                   input_stride, residual);
   }
 }
 
@@ -51,7 +53,7 @@ __global__ void rms_norm_dynamic_per_token_quant_kernel(
     scalar_t const* __restrict__ input,   // [..., hidden_size]
     scalar_t const* __restrict__ weight,  // [hidden_size]
     float const* scale_ub, float const var_epsilon, int32_t const hidden_size,
-    scalar_t* __restrict__ residual = nullptr) {
+    int32_t const input_stride, scalar_t* __restrict__ residual = nullptr) {
   // For vectorization, token_input and token_output pointers need to be
   // aligned at 8-byte and 4-byte addresses respectively.
   bool const can_vectorize = hidden_size % 4 == 0;
@@ -60,15 +62,15 @@ __global__ void rms_norm_dynamic_per_token_quant_kernel(
     return rms_norm_dynamic_per_token_quant_vec<scalar_t, scalar_out_t,
                                                 has_residual>(
         out, scales, input, weight, scale_ub, var_epsilon, hidden_size,
-        residual);
+        input_stride, residual);
   }
 
   float rms = 0.0f;
   float token_scale = 0.0f;
 
   // Compute RMS
-  vllm::compute_rms<scalar_t, has_residual>(&rms, input, hidden_size,
-                                            var_epsilon, residual);
+  vllm::compute_rms<scalar_t, has_residual>(
+      &rms, input, hidden_size, input_stride, var_epsilon, residual);
   // Compute Scale
   vllm::compute_dynamic_per_token_scales<scalar_t, scalar_out_t, has_residual>(
       &token_scale, scales, input, weight, rms, scale_ub, hidden_size,
@@ -78,11 +80,13 @@ __global__ void rms_norm_dynamic_per_token_quant_kernel(
   if constexpr (std::is_same_v<scalar_out_t, int8_t>) {
     token_scale = 1.0f / token_scale;
     vllm::norm_and_quant<scalar_t, scalar_out_t, true, has_residual>(
-        out, input, weight, rms, &token_scale, hidden_size, residual);
+        out, input, weight, rms, &token_scale, hidden_size, input_stride,
+        residual);
   } else {
     // FP8 - Do not invert s_token_scale for exact match with FBGemm
     vllm::norm_and_quant<scalar_t, scalar_out_t, false, has_residual>(
-        out, input, weight, rms, &token_scale, hidden_size, residual);
+        out, input, weight, rms, &token_scale, hidden_size, input_stride,
+        residual);
   }
 }
 
@@ -97,12 +101,13 @@ __global__ void rms_norm_per_block_quant_kernel(
     scalar_t const* __restrict__ input,   // [..., hidden_size]
     scalar_t const* __restrict__ weight,  // [hidden_size]
     float const* scale_ub, float const var_epsilon, int32_t const hidden_size,
-    scalar_t* __restrict__ residual = nullptr, int64_t outer_scale_stride = 1) {
+    int32_t const input_stride, scalar_t* __restrict__ residual = nullptr,
+    int64_t outer_scale_stride = 1) {
   float rms;
   // Compute RMS
   // Always able to vectorize due to constraints on hidden_size
   vllm::vectorized::compute_rms<scalar_t, has_residual>(
-      &rms, input, hidden_size, var_epsilon, residual);
+      &rms, input, hidden_size, input_stride, var_epsilon, residual);
 
   // Compute Scale
   // Always able to vectorize due to constraints on hidden_size and group_size
@@ -120,7 +125,7 @@ __global__ void rms_norm_per_block_quant_kernel(
   vllm::vectorized::norm_and_quant<
       scalar_t, scalar_out_t, std::is_same_v<scalar_out_t, int8_t>,
       has_residual, is_scale_transposed, group_size>(
-      out, input, weight, rms, scales, hidden_size, residual,
+      out, input, weight, rms, scales, hidden_size, input_stride, residual,
       outer_scale_stride);
 }
 
@@ -137,6 +142,7 @@ void rms_norm_dynamic_per_token_quant_dispatch(
     std::optional<at::Tensor> const& scale_ub,
     std::optional<at::Tensor>& residual) {
   int32_t hidden_size = input.size(-1);
+  int32_t input_stride = input.view({-1, hidden_size}).stride(0);
   auto num_tokens = input.numel() / hidden_size;
 
   dim3 grid(num_tokens);
@@ -153,7 +159,7 @@ void rms_norm_dynamic_per_token_quant_dispatch(
                   out.data_ptr<scalar_t>(), scales.data_ptr<float>(),
                   input.data_ptr<scalar_in_t>(), weight.data_ptr<scalar_in_t>(),
                   scale_ub.has_value() ? scale_ub->data_ptr<float>() : nullptr,
-                  var_epsilon, hidden_size,
+                  var_epsilon, hidden_size, input_stride,
                   has_residual ? residual->data_ptr<scalar_in_t>() : nullptr);
         });
   });
@@ -170,7 +176,9 @@ void rms_norm_dynamic_per_token_quant(
                                         ? c10::ScalarType::Float8_e4m3fn
                                         : c10::ScalarType::Float8_e4m3fnuz;
   TORCH_CHECK(out.dtype() == kFp8Type || out.dtype() == torch::kInt8);
-  TORCH_CHECK(out.is_contiguous() && input.is_contiguous());
+  TORCH_CHECK(out.is_contiguous());
+  TORCH_CHECK(input.stride(-1) == 1,
+              "Input must be contiguous in the last dimension");
 
   if (scale_ub.has_value()) {
     TORCH_CHECK(out.dtype() == kFp8Type);
@@ -200,6 +208,7 @@ void rms_norm_per_block_quant_dispatch(
     std::optional<at::Tensor> const& scale_ub,
     std::optional<at::Tensor>& residual, bool is_scale_transposed) {
   int32_t hidden_size = input.size(-1);
+  int32_t input_stride = input.view({-1, hidden_size}).stride(0);
   auto num_tokens = input.numel() / hidden_size;
 
   dim3 grid(num_tokens);
@@ -225,7 +234,7 @@ void rms_norm_per_block_quant_dispatch(
                             weight.data_ptr<scalar_in_t>(),
                             scale_ub.has_value() ? scale_ub->data_ptr<float>()
                                                  : nullptr,
-                            var_epsilon, hidden_size,
+                            var_epsilon, hidden_size, input_stride,
                             has_residual ? residual->data_ptr<scalar_in_t>()
                                          : nullptr,
                             scales.stride(1));
@@ -246,7 +255,9 @@ void rms_norm_per_block_quant(torch::Tensor& out, torch::Tensor const& input,
                                         ? c10::ScalarType::Float8_e4m3fn
                                         : c10::ScalarType::Float8_e4m3fnuz;
   TORCH_CHECK(out.dtype() == kFp8Type || out.dtype() == torch::kInt8);
-  TORCH_CHECK(out.is_contiguous() && input.is_contiguous());
+  TORCH_CHECK(out.is_contiguous());
+  TORCH_CHECK(input.stride(-1) == 1,
+              "Input must be contiguous in the last dimension");
 
   if (scale_ub.has_value()) {
     TORCH_CHECK(out.dtype() == kFp8Type);

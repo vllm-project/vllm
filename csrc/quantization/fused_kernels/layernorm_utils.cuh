@@ -16,9 +16,10 @@ namespace vllm {
 // has_residual must be true, if residual is not a nullptr
 template <typename scalar_t, bool has_residual = false>
 __device__ void compute_rms(float* rms, scalar_t const* __restrict__ input,
-                            int32_t const hidden_size, float const epsilon,
+                            int32_t const hidden_size,
+                            int32_t const input_stride, float const epsilon,
                             scalar_t const* __restrict__ residual = nullptr) {
-  int64_t const token_offset = blockIdx.x * static_cast<int64_t>(hidden_size);
+  int64_t const token_offset = blockIdx.x * static_cast<int64_t>(input_stride);
   // sum of squares
   float ss = 0.0f;
 
@@ -185,9 +186,10 @@ template <typename scalar_t, typename scalar_out_t, bool is_scale_inverted,
 __device__ void norm_and_quant(
     scalar_out_t* __restrict__ output, scalar_t const* __restrict__ input,
     scalar_t const* __restrict__ weight, float const rms, float* const scale,
-    int32_t const hidden_size, scalar_t* __restrict__ residual = nullptr,
-    int32_t const group_size = 0, int64_t outer_scale_stride = 1) {
-  int64_t const token_offset = blockIdx.x * static_cast<int64_t>(hidden_size);
+    int32_t const hidden_size, int32_t const input_stride,
+    scalar_t* __restrict__ residual = nullptr, int32_t const group_size = 0,
+    int64_t outer_scale_stride = 1) {
+  int64_t const token_offset = blockIdx.x * static_cast<int64_t>(input_stride);
 
   for (auto i = threadIdx.x; i < hidden_size; i += blockDim.x) {
     float x = static_cast<float>(input[token_offset + i]);
@@ -224,9 +226,10 @@ namespace vectorized {
 // hidden_size must be a multiple of 4
 template <typename scalar_t, bool has_residual = false>
 __device__ void compute_rms(float* rms, scalar_t const* __restrict__ input,
-                            int32_t const hidden_size, float const epsilon,
+                            int32_t const hidden_size,
+                            int32_t const input_stride, float const epsilon,
                             scalar_t const* __restrict__ residual = nullptr) {
-  int64_t const token_offset = blockIdx.x * static_cast<int64_t>(hidden_size);
+  int64_t const token_offset = blockIdx.x * static_cast<int64_t>(input_stride);
 
   // Vectorized input/output to better utilize memory bandwidth.
   vec4_t<scalar_t> const* vec_input =
@@ -462,14 +465,12 @@ __device__ void compute_dynamic_per_token_scales(
 template <typename scalar_t, typename scalar_out_t, bool is_scale_inverted,
           bool has_residual = false, bool is_scale_transposed = false,
           int32_t group_size = 0>
-__device__ void norm_and_quant(scalar_out_t* __restrict__ output,
-                               scalar_t const* __restrict__ input,
-                               scalar_t const* __restrict__ weight,
-                               float const rms, float* const scale,
-                               int32_t const hidden_size,
-                               scalar_t* __restrict__ residual = nullptr,
-                               int64_t outer_scale_stride = 1) {
-  int64_t const token_offset = blockIdx.x * static_cast<int64_t>(hidden_size);
+__device__ void norm_and_quant(
+    scalar_out_t* __restrict__ output, scalar_t const* __restrict__ input,
+    scalar_t const* __restrict__ weight, float const rms, float* const scale,
+    int32_t const hidden_size, int32_t const input_stride,
+    scalar_t* __restrict__ residual = nullptr, int64_t outer_scale_stride = 1) {
+  int64_t const token_offset = blockIdx.x * static_cast<int64_t>(input_stride);
 
   // Vectorized input/output/weight/residual to better utilize memory bandwidth.
   vec4_t<scalar_t> const* vec_input =
