@@ -109,32 +109,40 @@ else:
 VLLM_PATH = Path(__file__).parent.parent
 """Path to root of the vLLM repository."""
 
+# ROCm: disable skinny GEMM to avoid non-deterministic results from
+# atomic reductions in wvSplitKrc kernel.
+# See: https://github.com/vllm-project/vllm/pull/33493#issuecomment-3906083975
+ROCM_ENV_OVERRIDES = (
+    {"VLLM_ROCM_USE_SKINNY_GEMM": "0"} if current_platform.is_rocm() else {}
+)
+# ROCm: disable prefix caching and eliminate batch variance to reduce
+# test flakiness.
+ROCM_EXTRA_ARGS = (
+    ["--no-enable-prefix-caching", "--max-num-seqs", "1"]
+    if current_platform.is_rocm()
+    else []
+)
 
-class RemoteOpenAIServer:
+
+class RemoteVLLMServer:
+    """Base class for launching vLLM server subprocesses for testing.
+
+    Subclasses must override ``_create_cli_subcommand`` and
+    ``_start_server``.
+    """
+
     DUMMY_API_KEY = "token-abc123"  # vLLM's OpenAI server does not need API key
+    proc: subprocess.Popen
+
+    def _create_cli_subcommand(self):
+        """Return a CLISubcommand instance used to parse CLI args."""
+        raise NotImplementedError
 
     def _start_server(
         self, model: str, vllm_serve_args: list[str], env_dict: dict[str, str] | None
     ) -> None:
         """Subclasses override this method to customize server process launch"""
-        env = os.environ.copy()
-        # the current process might initialize cuda,
-        # to be safe, we should use spawn method
-        env["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
-        if env_dict is not None:
-            env.update(env_dict)
-        serve_cmd = ["vllm", "serve", model, *vllm_serve_args]
-        print(f"Launching RemoteOpenAIServer with: {' '.join(serve_cmd)}")
-        print(f"Environment variables: {env}")
-        self.proc: subprocess.Popen = subprocess.Popen(
-            serve_cmd,
-            env=env,
-            stdout=sys.stdout,
-            stderr=sys.stderr,
-            # Create a dedicated process group so we can kill
-            # the entire tree (parent + EngineCore + workers) at once.
-            start_new_session=True,
-        )
+        raise NotImplementedError
 
     def __init__(
         self,
@@ -171,9 +179,9 @@ class RemoteOpenAIServer:
                 json.dumps(override_hf_configs),
             ]
 
-        parser = FlexibleArgumentParser(description="vLLM's remote OpenAI server.")
+        parser = FlexibleArgumentParser(description="vLLM's remote server.")
         subparsers = parser.add_subparsers(required=False, dest="subparser")
-        parser = ServeSubcommand().subparser_init(subparsers)
+        parser = self._create_cli_subcommand().subparser_init(subparsers)
         args = parser.parse_args(["--model", model, *vllm_serve_args])
         self.uds = args.uds
         if args.uds:
@@ -183,7 +191,9 @@ class RemoteOpenAIServer:
             self.host = str(args.host or "127.0.0.1")
             self.port = int(args.port)
 
-        self.show_hidden_metrics = args.show_hidden_metrics_for_version is not None
+        self.show_hidden_metrics = (
+            getattr(args, "show_hidden_metrics_for_version", None) is not None
+        )
 
         # download the model before starting the server to avoid timeout
         is_local = os.path.isdir(model)
@@ -201,7 +211,8 @@ class RemoteOpenAIServer:
         if self._pre_server_gpu_memory is not None:
             pre_gb = self._pre_server_gpu_memory / 1e9
             print(
-                f"[RemoteOpenAIServer] GPU memory before server start: {pre_gb:.2f} GB"
+                f"[{type(self).__name__}] GPU memory before server start: "
+                f"{pre_gb:.2f} GB"
             )
 
         self._start_server(model, vllm_serve_args, env_dict)
@@ -450,6 +461,62 @@ class RemoteOpenAIServer:
         return anthropic.AsyncAnthropic(
             base_url=self.url_for(), api_key=self.DUMMY_API_KEY, max_retries=0, **kwargs
         )
+
+
+class RemoteOpenAIServer(RemoteVLLMServer):
+    """Launches ``vllm serve`` for testing OpenAI-compatible endpoints."""
+
+    def _create_cli_subcommand(self):
+        return ServeSubcommand()
+
+    def _start_server(
+        self, model: str, vllm_serve_args: list[str], env_dict: dict[str, str] | None
+    ) -> None:
+        env = os.environ.copy()
+        # the current process might initialize cuda,
+        # to be safe, we should use spawn method
+        env["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+        if env_dict is not None:
+            env.update(env_dict)
+        serve_cmd = ["vllm", "serve", model, *vllm_serve_args]
+        print(f"Launching RemoteOpenAIServer with: {' '.join(serve_cmd)}")
+        print(f"Environment variables: {env}")
+        self.proc: subprocess.Popen = subprocess.Popen(
+            serve_cmd,
+            env=env,
+            stdout=sys.stdout,
+            stderr=sys.stderr,
+            # Create a dedicated process group so we can kill
+            # the entire tree (parent + EngineCore + workers) at once.
+            start_new_session=True,
+        )
+
+
+class RemoteLaunchRenderServer(RemoteVLLMServer):
+    """Launches ``vllm launch render`` for GPU-less serving tests."""
+
+    def _create_cli_subcommand(self):
+        return ServeSubcommand()
+
+    def _start_server(
+        self, model: str, vllm_serve_args: list[str], env_dict: dict[str, str] | None
+    ) -> None:
+        env = os.environ.copy()
+        env["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+        if env_dict is not None:
+            env.update(env_dict)
+        serve_cmd = ["vllm", "launch", "render", model, *vllm_serve_args]
+        print(f"Launching RemoteLaunchRenderServer with: {' '.join(serve_cmd)}")
+        self.proc: subprocess.Popen = subprocess.Popen(
+            serve_cmd,
+            env=env,
+            stdout=sys.stdout,
+            stderr=sys.stderr,
+            start_new_session=True,
+        )
+
+    def _wait_for_gpu_memory_release(self, timeout: float = 30.0):
+        pass  # No GPU used
 
 
 class RemoteOpenAIServerCustom(RemoteOpenAIServer):
