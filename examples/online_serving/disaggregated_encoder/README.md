@@ -95,7 +95,7 @@ If you enable prefill instance (`--prefill-servers-urls` not disabled), you will
 ## Proxy Instance Flags (`disagg_epd_proxy.py`)
 
 | Flag | Description |
-|------|-------------|
+| ---- | ----------- |
 | `--encode-servers-urls` | Comma-separated list of encoder endpoints. Every multimodal item extracted from the request is fanned out to one of these URLs in a round-robin fashion. |
 | `--prefill-servers-urls` | Comma-separated list of prefill endpoints. Set to `disable`, `none`, or `""` to skip the dedicated prefill phase and run E+PD (encoder + combined prefill/decode). |
 | `--decode-servers-urls` | Comma-separated list of decode endpoints. Non-stream and stream paths both round-robin over this list. |

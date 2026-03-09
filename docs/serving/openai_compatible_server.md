@@ -596,7 +596,7 @@ Audio must be sent as base64-encoded PCM16 audio at 16kHz sample rate, mono chan
 #### Client → Server Events
 
 | Event | Description |
-|-------|-------------|
+| ----- | ----------- |
 | `input_audio_buffer.append` | Send base64-encoded audio chunk: `{"type": "input_audio_buffer.append", "audio": "<base64>"}` |
 | `input_audio_buffer.commit` | Trigger transcription processing or end: `{"type": "input_audio_buffer.commit", "final": bool}` |
 | `session.update` | Configure session: `{"type": "session.update", "model": "model-name"}` |
@@ -604,7 +604,7 @@ Audio must be sent as base64-encoded PCM16 audio at 16kHz sample rate, mono chan
 #### Server → Client Events
 
 | Event | Description |
-|-------|-------------|
+| ----- | ----------- |
 | `session.created` | Connection established with session ID and timestamp |
 | `transcription.delta` | Incremental transcription text: `{"type": "transcription.delta", "delta": "text"}` |
 | `transcription.done` | Final transcription with usage stats |

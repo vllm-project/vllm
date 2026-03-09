@@ -49,7 +49,7 @@ chart **including persistent volumes** and deletes the release.
 The following table describes configurable parameters of the chart in `values.yaml`:
 
 | Key | Type | Default | Description |
-|-----|------|---------|-------------|
+| --- | ---- | ------- | ----------- |
 | autoscaling | object | {"enabled":false,"maxReplicas":100,"minReplicas":1,"targetCPUUtilizationPercentage":80} | Autoscaling configuration |
 | autoscaling.enabled | bool | false | Enable autoscaling |
 | autoscaling.maxReplicas | int | 100 | Maximum replicas |

@@ -5,12 +5,12 @@ TL;DR:
 - use tlparse to acquire torch.compile logs. Include these logs in bug reports and/or support asks.
 - The vLLM-torch.compile integration is multiple pieces. vLLM exposes flags to turn off each piece:
 
-| Online Flag | Offline Flag   |      Result |
-|----------|----------|-------------|
-| --enforce-eager | enforce_eager=True |  Turn off torch.compile and CUDAGraphs |
-| -cc.mode=0 | mode=CompilationMode.NONE |  Turn off torch.compile only |
-| -cc.cudagraph_mode=NONE | compilation_config=CompilationConfig(cudagraph_mode=CUDAGraphMode.NONE) |  Turn off CUDAGraphs only |
-| -cc.backend=eager | compilation_config=CompilationConfig(backend='eager') |  Turn off TorchInductor |
+| Online Flag | Offline Flag | Result |
+| ----------- | ------------ | ------ |
+| --enforce-eager | enforce_eager=True | Turn off torch.compile and CUDAGraphs |
+| -cc.mode=0 | mode=CompilationMode.NONE | Turn off torch.compile only |
+| -cc.cudagraph_mode=NONE | compilation_config=CompilationConfig(cudagraph_mode=CUDAGraphMode.NONE) | Turn off CUDAGraphs only |
+| -cc.backend=eager | compilation_config=CompilationConfig(backend='eager') | Turn off TorchInductor |
 
 ## vLLM-torch.compile overview
 

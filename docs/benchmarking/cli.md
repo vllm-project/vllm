@@ -18,7 +18,7 @@ th {
 </style>
 
 | Dataset | Online | Offline | Data Path |
-|---------|--------|---------|-----------|
+| ------- | ------ | ------- | --------- |
 | ShareGPT | ✅ | ✅ | `wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json` |
 | ShareGPT4V (Image) | ✅ | ✅ | `wget https://huggingface.co/datasets/Lin-Chen/ShareGPT4V/resolve/main/sharegpt4v_instruct_gpt4-vision_cap100k.json`<br>Note that the images need to be downloaded separately. For example, to download COCO's 2017 Train images:<br>`wget http://images.cocodataset.org/zips/train2017.zip` |
 | ShareGPT4Video (Video) | ✅ | ✅ | `git clone https://huggingface.co/datasets/ShareGPT4Video/ShareGPT4Video` |
@@ -383,14 +383,14 @@ The `--burstiness` parameter mathematically controls request arrival patterns us
 
 Load Pattern Recommendations by Use Case:
 
-| Use Case           | Burstiness   | Request Rate    | Max Concurrency | Description                                               |
-| ---                | ---          | ---             | ---             | ---                                                       |
+| Use Case           | Burstiness   | Request Rate    | Max Concurrency | Description                                                                        |
+| ---                | ---          | ---             | ---             | ---                                                                                |
 | Maximum Throughput | N/A          | Infinite        | Limited         | **Most common**: Simulates load balancer/gateway limits with unlimited user demand |
-| Realistic Testing  | 1.0          | Moderate (5-20) | Infinite        | Natural Poisson traffic patterns for baseline performance |
-| Stress Testing     | 0.1-0.5      | High (20-100)   | Infinite        | Challenging burst patterns to test resilience             |
-| Latency Profiling  | 2.0-5.0      | Low (1-10)      | Infinite        | Uniform load for consistent timing analysis               |
-| Capacity Planning  | 1.0          | Variable        | Limited         | Test resource limits with realistic constraints           |
-| SLA Validation     | 1.0          | Target rate     | SLA limit       | Production-like constraints for compliance testing        |
+| Realistic Testing  | 1.0          | Moderate (5-20) | Infinite        | Natural Poisson traffic patterns for baseline performance                          |
+| Stress Testing     | 0.1-0.5      | High (20-100)   | Infinite        | Challenging burst patterns to test resilience                                      |
+| Latency Profiling  | 2.0-5.0      | Low (1-10)      | Infinite        | Uniform load for consistent timing analysis                                        |
+| Capacity Planning  | 1.0          | Variable        | Limited         | Test resource limits with realistic constraints                                    |
+| SLA Validation     | 1.0          | Target rate     | SLA limit       | Production-like constraints for compliance testing                                 |
 
 These load patterns help evaluate different aspects of your vLLM deployment, from basic performance characteristics to resilience under challenging traffic conditions.
 
@@ -941,7 +941,7 @@ Benchmark per-stage latency of the multimodal (MM) input processor pipeline, inc
 The benchmark measures the following stages for each request:
 
 | Stage | Description |
-|-------|-------------|
+| ----- | ----------- |
 | `get_mm_hashes_secs` | Time spent hashing multimodal inputs |
 | `get_cache_missing_items_secs` | Time spent looking up the processor cache |
 | `apply_hf_processor_secs` | Time spent in the HuggingFace processor |

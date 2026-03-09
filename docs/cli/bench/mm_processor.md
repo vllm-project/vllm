@@ -29,7 +29,7 @@ vllm bench mm-processor \
 ## Measured Stages
 
 | Stage | Description |
-|-------|-------------|
+| ----- | ----------- |
 | `get_mm_hashes_secs` | Time spent hashing multimodal inputs |
 | `get_cache_missing_items_secs` | Time spent looking up the processor cache |
 | `apply_hf_processor_secs` | Time spent in the HuggingFace processor |
