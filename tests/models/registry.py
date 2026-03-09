@@ -854,6 +854,10 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "moonshotai/Kimi-K2.5",
         trust_remote_code=True,
     ),
+    "KimiAudioForConditionalGeneration": _HfExamplesInfo(
+        "moonshotai/Kimi-Audio-7B-Instruct",
+        trust_remote_code=True,
+    ),
     "LightOnOCRForConditionalGeneration": _HfExamplesInfo(
         "lightonai/LightOnOCR-1B-1025"
     ),
@@ -997,10 +1001,6 @@ _MULTIMODAL_EXAMPLE_MODELS = {
             "hf": "HF model uses deprecated imports which have been removed."
         },  # noqa: E501
         hf_overrides={"architectures": ["QwenVLForConditionalGeneration"]},
-    ),
-    "KimiAudioForConditionalGeneration": _HfExamplesInfo(
-        "moonshotai/Kimi-Audio-7B-Instruct",
-        trust_remote_code=True,
     ),
     "Qwen2AudioForConditionalGeneration": _HfExamplesInfo(
         "Qwen/Qwen2-Audio-7B-Instruct"
