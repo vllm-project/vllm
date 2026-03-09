@@ -892,6 +892,7 @@ class OpenAIServing:
         ).with_defaults(
             default_template_kwargs,
             default_media_io_kwargs=(mm_config.media_io_kwargs if mm_config else None),
+            default_mm_processor_kwargs=getattr(request, "mm_processor_kwargs", None),
         )
 
         (conversation,), (engine_prompt,) = await renderer.render_chat_async(
