@@ -1781,9 +1781,9 @@ class GPUModelRunner(
 
         # Update num_computed_tokens on GPU.
         # For async spec decode, the CPU values are optimistic (assume all
-        # draft tokens accepted). For requests that had drafts (D > 0), we
-        # correct via: prev_gpu + V. For requests without previous drafts
-        # (e.g. prefills, D = 0), CPU values are already correct.
+        # draft tokens accepted). For requests that had drafts, we
+        # correct via: prev_gpu + valid_count. For requests without previous drafts
+        # (e.g. prefills), CPU values are already correct.
         # For non-async paths, all CPU values are already corrected.
         if (
             self.use_async_spec_decode
