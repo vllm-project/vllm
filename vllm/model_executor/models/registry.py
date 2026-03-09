@@ -212,19 +212,14 @@ _EMBEDDING_MODELS = {
     # [Text-only]
     "BertModel": ("bert", "BertEmbeddingModel"),
     "BertSpladeSparseEmbeddingModel": ("bert", "BertSpladeSparseEmbeddingModel"),
-    "HF_ColBERT": ("colbert", "ColBERTModel"),
-    "ColBERTModernBertModel": ("colbert", "ColBERTModernBertModel"),
-    "ColBERTJinaRobertaModel": ("colbert", "ColBERTJinaRobertaModel"),
+    "BgeM3EmbeddingModel": ("roberta", "BgeM3EmbeddingModel"),
     "DeciLMForCausalLM": ("nemotron_nas", "DeciLMForCausalLM"),
     "Gemma2Model": ("gemma2", "Gemma2ForCausalLM"),
     "Gemma3TextModel": ("gemma3", "Gemma3Model"),
     "GlmForCausalLM": ("glm", "GlmForCausalLM"),
-    "GPT2ForSequenceClassification": ("gpt2", "GPT2ForSequenceClassification"),
     "GritLM": ("gritlm", "GritLM"),
     "GteModel": ("bert_with_rope", "SnowflakeGteNewModel"),
     "GteNewModel": ("bert_with_rope", "GteNewModel"),
-    "InternLM2ForRewardModel": ("internlm2", "InternLM2ForRewardModel"),
-    "JambaForSequenceClassification": ("jamba", "JambaForSequenceClassification"),  # noqa: E501
     "LlamaBidirectionalModel": ("llama", "LlamaBidirectionalModel"),
     "LlamaModel": ("llama", "LlamaForCausalLM"),
     **{
@@ -239,8 +234,6 @@ _EMBEDDING_MODELS = {
     "Phi3ForCausalLM": ("phi3", "Phi3ForCausalLM"),
     "Qwen2Model": ("qwen2", "Qwen2ForCausalLM"),
     "Qwen2ForCausalLM": ("qwen2", "Qwen2ForCausalLM"),
-    "Qwen2ForRewardModel": ("qwen2_rm", "Qwen2ForRewardModel"),
-    "Qwen2ForProcessRewardModel": ("qwen2_rm", "Qwen2ForProcessRewardModel"),
     "RobertaForMaskedLM": ("roberta", "RobertaEmbeddingModel"),
     "RobertaModel": ("roberta", "RobertaEmbeddingModel"),
     "TeleChatForCausalLM": ("telechat2", "TeleChat2ForCausalLM"),
@@ -250,19 +243,14 @@ _EMBEDDING_MODELS = {
         "VoyageQwen3BidirectionalEmbedModel",
     ),
     "XLMRobertaModel": ("roberta", "RobertaEmbeddingModel"),
-    "BgeM3EmbeddingModel": ("roberta", "BgeM3EmbeddingModel"),
     # [Multimodal]
     "CLIPModel": ("clip", "CLIPEmbeddingModel"),
-    "ColModernVBertForRetrieval": ("colmodernvbert", "ColModernVBertForRetrieval"),
     "LlavaNextForConditionalGeneration": (
         "llava_next",
         "LlavaNextForConditionalGeneration",
     ),
     "Phi3VForCausalLM": ("phi3v", "Phi3VForCausalLM"),
     "Qwen2VLForConditionalGeneration": ("qwen2_vl", "Qwen2VLForConditionalGeneration"),  # noqa: E501
-    "ColQwen3": ("colqwen3", "ColQwen3Model"),
-    "OpsColQwen3Model": ("colqwen3", "ColQwen3Model"),
-    "Qwen3VLNemotronEmbedModel": ("colqwen3", "ColQwen3Model"),
     "SiglipModel": ("siglip", "SiglipEmbeddingModel"),
     "LlamaNemotronVLModel": (
         "nemotron_vl",
@@ -275,34 +263,58 @@ _EMBEDDING_MODELS = {
     "Terratorch": ("terratorch", "Terratorch"),
 }
 
-_CROSS_ENCODER_MODELS = {
-    "BertForSequenceClassification": ("bert", "BertForSequenceClassification"),
+_LATE_INTERACTION_MODELS = {
+    # [Text-only]
+    "HF_ColBERT": ("colbert", "ColBERTModel"),
+    "ColBERTModernBertModel": ("colbert", "ColBERTModernBertModel"),
+    "ColBERTJinaRobertaModel": ("colbert", "ColBERTJinaRobertaModel"),
+    # [Multimodal]
+    "ColModernVBertForRetrieval": ("colmodernvbert", "ColModernVBertForRetrieval"),
+    "ColQwen3": ("colqwen3", "ColQwen3Model"),
+    "OpsColQwen3Model": ("colqwen3", "ColQwen3Model"),
+    "Qwen3VLNemotronEmbedModel": ("colqwen3", "ColQwen3Model"),
+}
+
+_REWARD_MODELS = {
+    "InternLM2ForRewardModel": ("internlm2", "InternLM2ForRewardModel"),
+    "Qwen2ForRewardModel": ("qwen2_rm", "Qwen2ForRewardModel"),
+    "Qwen2ForProcessRewardModel": ("qwen2_rm", "Qwen2ForProcessRewardModel"),
+}
+
+_TOKEN_CLASSIFICATION_MODELS = {
     "BertForTokenClassification": ("bert", "BertForTokenClassification"),
+    "ModernBertForTokenClassification": (
+        "modernbert",
+        "ModernBertForTokenClassification",
+    ),
+}
+
+_SEQUENCE_CLASSIFICATION_MODELS = {
+    "BertForSequenceClassification": ("bert", "BertForSequenceClassification"),
+    "GPT2ForSequenceClassification": ("gpt2", "GPT2ForSequenceClassification"),
     "GteNewForSequenceClassification": (
         "bert_with_rope",
         "GteNewForSequenceClassification",
     ),
-    "JinaVLForRanking": ("jina_vl", "JinaVLForSequenceClassification"),
+    "JambaForSequenceClassification": ("jamba", "JambaForSequenceClassification"),  # noqa: E501
     "LlamaBidirectionalForSequenceClassification": (
         "llama",
         "LlamaBidirectionalForSequenceClassification",
-    ),
-    "LlamaNemotronVLForSequenceClassification": (
-        "nemotron_vl",
-        "LlamaNemotronVLForSequenceClassification",
     ),
     "ModernBertForSequenceClassification": (
         "modernbert",
         "ModernBertForSequenceClassification",
     ),
-    "ModernBertForTokenClassification": (
-        "modernbert",
-        "ModernBertForTokenClassification",
-    ),
     "RobertaForSequenceClassification": ("roberta", "RobertaForSequenceClassification"),
     "XLMRobertaForSequenceClassification": (
         "roberta",
         "RobertaForSequenceClassification",
+    ),
+    # [Multimodal]
+    "JinaVLForRanking": ("jina_vl", "JinaVLForSequenceClassification"),
+    "LlamaNemotronVLForSequenceClassification": (
+        "nemotron_vl",
+        "LlamaNemotronVLForSequenceClassification",
     ),
 }
 
@@ -604,7 +616,10 @@ _TRANSFORMERS_BACKEND_MODELS = {
 _VLLM_MODELS = {
     **_TEXT_GENERATION_MODELS,
     **_EMBEDDING_MODELS,
-    **_CROSS_ENCODER_MODELS,
+    **_LATE_INTERACTION_MODELS,
+    **_REWARD_MODELS,
+    **_TOKEN_CLASSIFICATION_MODELS,
+    **_SEQUENCE_CLASSIFICATION_MODELS,
     **_MULTIMODAL_MODELS,
     **_SPECULATIVE_DECODING_MODELS,
     **_TRANSFORMERS_SUPPORTED_MODELS,
