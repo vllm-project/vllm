@@ -2,15 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import zlib
-from typing import Any
 
 import torch
 
-from vllm.pooling_params import PoolingParams
-
-LATE_INTERACTION_MODE_KEY = "late_interaction_mode"
-LATE_INTERACTION_QUERY_KEY = "late_interaction_query_key"
-LATE_INTERACTION_QUERY_USES_KEY = "late_interaction_query_uses"
+from vllm.pooling_params import LateInteractionParams, PoolingParams
 
 LATE_INTERACTION_MODE_CACHE_QUERY = "cache_query"
 LATE_INTERACTION_MODE_SCORE_DOC = "score_doc"
@@ -20,18 +15,18 @@ def get_late_interaction_engine_index(
     pooling_params: PoolingParams | None,
     num_engines: int,
 ) -> int | None:
-    if pooling_params is None or pooling_params.extra_kwargs is None:
+    if pooling_params is None or pooling_params.late_interaction_params is None:
         return None
 
-    extra_kwargs = pooling_params.extra_kwargs
-    mode = extra_kwargs.get(LATE_INTERACTION_MODE_KEY)
+    late_interaction_params = pooling_params.late_interaction_params
+    mode = late_interaction_params.mode
     if mode not in (
         LATE_INTERACTION_MODE_CACHE_QUERY,
         LATE_INTERACTION_MODE_SCORE_DOC,
     ):
         return None
 
-    query_key = extra_kwargs.get(LATE_INTERACTION_QUERY_KEY)
+    query_key = late_interaction_params.query_key
     if not isinstance(query_key, str) or not query_key:
         return None
 
@@ -40,26 +35,24 @@ def get_late_interaction_engine_index(
     return zlib.crc32(query_key.encode("utf-8")) % num_engines
 
 
-def build_late_interaction_query_kwargs(
+def build_late_interaction_query_params(
     query_key: str,
     query_uses: int,
-    base: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    kwargs = {} if base is None else dict(base)
-    kwargs[LATE_INTERACTION_MODE_KEY] = LATE_INTERACTION_MODE_CACHE_QUERY
-    kwargs[LATE_INTERACTION_QUERY_KEY] = query_key
-    kwargs[LATE_INTERACTION_QUERY_USES_KEY] = max(1, int(query_uses))
-    return kwargs
+) -> LateInteractionParams:
+    return LateInteractionParams(
+        mode=LATE_INTERACTION_MODE_CACHE_QUERY,
+        query_key=query_key,
+        query_uses=max(1, int(query_uses)),
+    )
 
 
-def build_late_interaction_doc_kwargs(
+def build_late_interaction_doc_params(
     query_key: str,
-    base: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    kwargs = {} if base is None else dict(base)
-    kwargs[LATE_INTERACTION_MODE_KEY] = LATE_INTERACTION_MODE_SCORE_DOC
-    kwargs[LATE_INTERACTION_QUERY_KEY] = query_key
-    return kwargs
+) -> LateInteractionParams:
+    return LateInteractionParams(
+        mode=LATE_INTERACTION_MODE_SCORE_DOC,
+        query_key=query_key,
+    )
 
 
 def compute_maxsim_score(

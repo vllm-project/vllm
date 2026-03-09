@@ -24,7 +24,7 @@ from vllm import SamplingParams
 from vllm.distributed.kv_events import BlockStored, KVEventBatch, ZmqEventPublisher
 from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
-from vllm.pooling_params import PoolingParams
+from vllm.pooling_params import LateInteractionParams, PoolingParams
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.torch_utils import set_default_torch_num_threads
 from vllm.v1.engine import EngineCoreRequest
@@ -39,9 +39,7 @@ from vllm.v1.engine.utils import CoreEngineProcManager
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.pool.late_interaction import (
     LATE_INTERACTION_MODE_CACHE_QUERY,
-    LATE_INTERACTION_MODE_KEY,
     LATE_INTERACTION_MODE_SCORE_DOC,
-    LATE_INTERACTION_QUERY_KEY,
 )
 
 from ...distributed.conftest import MockSubscriber
@@ -175,19 +173,22 @@ def test_mp_client_uses_env_timeout(monkeypatch: pytest.MonkeyPatch):
 def _make_pooling_request(
     request_id: str, *, mode: str | None = None, query_key: str | None = None
 ) -> EngineCoreRequest:
-    extra_kwargs = None
+    late_interaction_params = None
     if mode is not None and query_key is not None:
-        extra_kwargs = {
-            LATE_INTERACTION_MODE_KEY: mode,
-            LATE_INTERACTION_QUERY_KEY: query_key,
-        }
+        late_interaction_params = LateInteractionParams(
+            mode=mode,
+            query_key=query_key,
+        )
 
     return EngineCoreRequest(
         request_id=request_id,
         prompt_token_ids=[1, 2, 3],
         mm_features=None,
         sampling_params=None,
-        pooling_params=PoolingParams(task="token_embed", extra_kwargs=extra_kwargs),
+        pooling_params=PoolingParams(
+            task="token_embed",
+            late_interaction_params=late_interaction_params,
+        ),
         arrival_time=time.time(),
         lora_request=None,
         cache_salt=None,

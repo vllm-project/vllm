@@ -11,6 +11,16 @@ from vllm.sampling_params import RequestOutputKind
 from vllm.tasks import PoolingTask
 
 
+class LateInteractionParams(
+    msgspec.Struct,
+    omit_defaults=True,  # type: ignore[call-arg]
+    array_like=True,
+):  # type: ignore[call-arg]
+    mode: str
+    query_key: str
+    query_uses: int | None = None
+
+
 class PoolingParams(
     msgspec.Struct,
     omit_defaults=True,  # type: ignore[call-arg]
@@ -46,6 +56,7 @@ class PoolingParams(
     task: PoolingTask | None = None
     requires_token_ids: bool = False
     skip_reading_prefix_cache: bool | None = None
+    late_interaction_params: LateInteractionParams | None = None
     extra_kwargs: dict[str, Any] | None = None
     output_kind: RequestOutputKind = RequestOutputKind.FINAL_ONLY
 
@@ -193,6 +204,7 @@ class PoolingParams(
             f"returned_token_ids={self.returned_token_ids}, "
             f"requires_token_ids={self.requires_token_ids}, "
             f"skip_reading_prefix_cache={self.skip_reading_prefix_cache}, "
+            f"late_interaction_params={self.late_interaction_params}, "
             f"extra_kwargs={self.extra_kwargs})"
         )
 

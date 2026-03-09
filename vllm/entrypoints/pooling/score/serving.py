@@ -43,8 +43,8 @@ from vllm.tokenizers import TokenizerLike
 from vllm.utils.async_utils import make_async, merge_async_iterators
 from vllm.utils.mistral import is_mistral_tokenizer
 from vllm.v1.pool.late_interaction import (
-    build_late_interaction_doc_kwargs,
-    build_late_interaction_query_kwargs,
+    build_late_interaction_doc_params,
+    build_late_interaction_query_params,
 )
 
 logger = init_logger(__name__)
@@ -272,10 +272,11 @@ class ServingScores(OpenAIServing):
         for i, engine_prompt in enumerate(query_prompts):
             request_id_item = f"{request_id}-query-{i}"
             pooling_params = default_pooling_params.clone()
-            pooling_params.extra_kwargs = build_late_interaction_query_kwargs(
-                query_key=query_keys[i],
-                query_uses=query_uses[i],
-                base=pooling_params.extra_kwargs,
+            pooling_params.late_interaction_params = (
+                build_late_interaction_query_params(
+                    query_key=query_keys[i],
+                    query_uses=query_uses[i],
+                )
             )
 
             self._log_inputs(
@@ -310,9 +311,8 @@ class ServingScores(OpenAIServing):
             request_id_item = f"{request_id}-doc-{i}"
             query_idx = 0 if len(query_prompts) == 1 else i
             pooling_params = default_pooling_params.clone()
-            pooling_params.extra_kwargs = build_late_interaction_doc_kwargs(
-                query_key=query_keys[query_idx],
-                base=pooling_params.extra_kwargs,
+            pooling_params.late_interaction_params = build_late_interaction_doc_params(
+                query_key=query_keys[query_idx]
             )
 
             self._log_inputs(

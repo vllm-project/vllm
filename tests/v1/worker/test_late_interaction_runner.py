@@ -4,21 +4,23 @@
 import pytest
 import torch
 
-from vllm.pooling_params import PoolingParams
+from vllm.pooling_params import LateInteractionParams, PoolingParams
 from vllm.v1.pool.late_interaction import (
     LATE_INTERACTION_MODE_CACHE_QUERY,
-    LATE_INTERACTION_MODE_KEY,
-    LATE_INTERACTION_QUERY_KEY,
-    LATE_INTERACTION_QUERY_USES_KEY,
-    build_late_interaction_doc_kwargs,
-    build_late_interaction_query_kwargs,
+    build_late_interaction_doc_params,
+    build_late_interaction_query_params,
     compute_maxsim_score,
 )
 from vllm.v1.worker.gpu.pool.late_interaction_runner import LateInteractionRunner
 
 
-def _make_pooling_params(extra_kwargs: dict[str, object]) -> PoolingParams:
-    return PoolingParams(task="token_embed", extra_kwargs=extra_kwargs)
+def _make_pooling_params(
+    late_interaction_params: LateInteractionParams,
+) -> PoolingParams:
+    return PoolingParams(
+        task="token_embed",
+        late_interaction_params=late_interaction_params,
+    )
 
 
 def test_postprocess_scores_and_releases_query_cache():
@@ -28,7 +30,7 @@ def test_postprocess_scores_and_releases_query_cache():
     doc_emb = torch.tensor([[1.0, 0.0], [0.5, 0.5], [0.0, 1.0]], dtype=torch.float32)
 
     query_params = _make_pooling_params(
-        build_late_interaction_query_kwargs(query_key=query_key, query_uses=1)
+        build_late_interaction_query_params(query_key=query_key, query_uses=1)
     )
     query_output = runner.postprocess_pooler_output(
         raw_pooler_output=[query_emb],
@@ -41,7 +43,7 @@ def test_postprocess_scores_and_releases_query_cache():
     assert query_output[0].shape == torch.Size([])
 
     doc_params = _make_pooling_params(
-        build_late_interaction_doc_kwargs(query_key=query_key)
+        build_late_interaction_doc_params(query_key=query_key)
     )
     doc_output = runner.postprocess_pooler_output(
         raw_pooler_output=[doc_emb],
@@ -69,7 +71,7 @@ def test_finished_request_releases_unscored_doc_use():
     doc_emb = torch.tensor([[1.0, 0.0], [0.0, 1.0]], dtype=torch.float32)
 
     query_params = _make_pooling_params(
-        build_late_interaction_query_kwargs(query_key=query_key, query_uses=1)
+        build_late_interaction_query_params(query_key=query_key, query_uses=1)
     )
     runner.postprocess_pooler_output(
         raw_pooler_output=[query_emb],
@@ -79,7 +81,7 @@ def test_finished_request_releases_unscored_doc_use():
     )
 
     doc_params = _make_pooling_params(
-        build_late_interaction_doc_kwargs(query_key=query_key)
+        build_late_interaction_doc_params(query_key=query_key)
     )
     runner.register_request("doc-req", doc_params)
     runner.on_requests_finished({"doc-req"})
@@ -95,13 +97,12 @@ def test_finished_request_releases_unscored_doc_use():
 
 def test_invalid_query_uses_raises():
     runner = LateInteractionRunner()
-    bad_query_params = _make_pooling_params(
-        {
-            LATE_INTERACTION_MODE_KEY: LATE_INTERACTION_MODE_CACHE_QUERY,
-            LATE_INTERACTION_QUERY_KEY: "query-bad",
-            LATE_INTERACTION_QUERY_USES_KEY: "bad-int",
-        }
+    bad_meta = LateInteractionParams(
+        mode=LATE_INTERACTION_MODE_CACHE_QUERY,
+        query_key="query-bad",
     )
+    bad_meta.query_uses = "bad-int"  # type: ignore[assignment]
+    bad_query_params = _make_pooling_params(bad_meta)
 
     with pytest.raises(ValueError, match="must be an integer value"):
         runner.postprocess_pooler_output(

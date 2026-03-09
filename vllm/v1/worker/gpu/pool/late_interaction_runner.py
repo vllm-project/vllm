@@ -8,10 +8,7 @@ from vllm.pooling_params import PoolingParams
 from vllm.v1.outputs import PoolerOutput
 from vllm.v1.pool.late_interaction import (
     LATE_INTERACTION_MODE_CACHE_QUERY,
-    LATE_INTERACTION_MODE_KEY,
     LATE_INTERACTION_MODE_SCORE_DOC,
-    LATE_INTERACTION_QUERY_KEY,
-    LATE_INTERACTION_QUERY_USES_KEY,
     compute_maxsim_score,
 )
 
@@ -71,10 +68,7 @@ class LateInteractionRunner:
 
         if not any(finished_mask):
             return raw_pooler_output
-        if not any(
-            p.extra_kwargs and LATE_INTERACTION_MODE_KEY in p.extra_kwargs
-            for p in pooling_params
-        ):
+        if not any(p.late_interaction_params is not None for p in pooling_params):
             return raw_pooler_output
 
         outputs: list[torch.Tensor | None] = list(raw_pooler_output)
@@ -128,23 +122,23 @@ class LateInteractionRunner:
     def _parse_late_interaction_meta(
         pooling_params: PoolingParams | None,
     ) -> tuple[str | None, str | None, int | None]:
-        if pooling_params is None:
+        if pooling_params is None or pooling_params.late_interaction_params is None:
             return None, None, None
 
-        extra_kwargs = pooling_params.extra_kwargs or {}
-        mode = extra_kwargs.get(LATE_INTERACTION_MODE_KEY)
-        if mode is None:
-            return None, None, None
+        late_interaction_params = pooling_params.late_interaction_params
+        mode = late_interaction_params.mode
 
-        query_key = extra_kwargs.get(LATE_INTERACTION_QUERY_KEY)
+        query_key = late_interaction_params.query_key
         if not isinstance(query_key, str) or not query_key:
             raise ValueError(
                 "late-interaction request is missing a valid query key in "
-                "pooling_params.extra_kwargs."
+                "pooling_params.late_interaction_params."
             )
 
         if mode == LATE_INTERACTION_MODE_CACHE_QUERY:
-            query_uses_raw = extra_kwargs.get(LATE_INTERACTION_QUERY_USES_KEY, 1)
+            query_uses_raw = late_interaction_params.query_uses
+            if query_uses_raw is None:
+                query_uses_raw = 1
             try:
                 query_uses = max(1, int(query_uses_raw))
             except (TypeError, ValueError) as exc:
