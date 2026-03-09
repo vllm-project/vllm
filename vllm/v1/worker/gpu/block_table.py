@@ -18,9 +18,9 @@ class BlockTables:
         max_num_batched_tokens: int,
         max_model_len: int,
         device: torch.device,
-        cp_size: int = 1,
-        cp_rank: int = 0,
-        cp_interleave: int = 1,
+        cp_size: int | list[int] = 1,
+        cp_rank: int | list[int] = 0,
+        cp_interleave: int | list[int] = 1,
     ):
         self.block_sizes = block_sizes
         self.max_num_reqs = max_num_reqs
@@ -28,19 +28,31 @@ class BlockTables:
         self.max_model_len = max_model_len
         self.device = device
 
-        self.cp_size = cp_size
-        self.cp_rank = cp_rank
-        self.cp_interleave = cp_interleave
-
         self.num_kv_cache_groups = len(self.block_sizes)
+        self.cp_sizes = self._normalize_group_values(cp_size, "cp_size")
+        self.cp_ranks = self._normalize_group_values(cp_rank, "cp_rank")
+        self.cp_interleaves = self._normalize_group_values(
+            cp_interleave, "cp_interleave"
+        )
+        self.cp_sizes_tensor = torch.tensor(
+            self.cp_sizes, dtype=torch.int32, device=self.device
+        )
+        self.cp_ranks_tensor = torch.tensor(
+            self.cp_ranks, dtype=torch.int32, device=self.device
+        )
+        self.cp_interleaves_tensor = torch.tensor(
+            self.cp_interleaves, dtype=torch.int32, device=self.device
+        )
+
         # num_kv_cache_groups x [max_num_reqs, max_num_blocks]
         self.block_tables: list[StagedWriteTensor] = []
         for i in range(self.num_kv_cache_groups):
             block_size = self.block_sizes[i]
+            cp_size_i = self.cp_sizes[i]
             # When using DCP, each request's KV cache is sharded among different ranks.
             # As a result, one block on the current rank covers `block_size * cp_size`
             # tokens in the full, global (unsharded) sequence.
-            max_num_blocks = cdiv(self.max_model_len, block_size * self.cp_size)
+            max_num_blocks = cdiv(self.max_model_len, block_size * cp_size_i)
             block_table = StagedWriteTensor(
                 (self.max_num_reqs, max_num_blocks),
                 dtype=torch.int32,
@@ -77,6 +89,20 @@ class BlockTables:
             dtype=torch.int64,
             device=self.device,
         )
+
+    def _normalize_group_values(
+        self,
+        values: int | list[int],
+        name: str,
+    ) -> list[int]:
+        if isinstance(values, int):
+            return [values] * self.num_kv_cache_groups
+        if len(values) != self.num_kv_cache_groups:
+            raise ValueError(
+                f"{name} length ({len(values)}) must match the number of "
+                f"kv cache groups ({self.num_kv_cache_groups})."
+            )
+        return values
 
     def _make_ptr_tensor(self, x: Iterable[torch.Tensor]) -> torch.Tensor:
         # NOTE(woosuk): Use uint64 instead of int64 to cover all possible addresses.
@@ -143,11 +169,11 @@ class BlockTables:
             self.block_table_ptrs,
             self.block_table_strides,
             self.block_sizes_tensor,
+            self.cp_sizes_tensor,
+            self.cp_ranks_tensor,
+            self.cp_interleaves_tensor,
             self.slot_mappings,
             self.slot_mappings.stride(0),
-            self.cp_rank,
-            CP_SIZE=self.cp_size,
-            CP_INTERLEAVE=self.cp_interleave,
             PAD_ID=PAD_SLOT_ID,
             TRITON_BLOCK_SIZE=1024,  # type: ignore
         )
@@ -205,11 +231,11 @@ def _compute_slot_mappings_kernel(
     block_table_ptrs,  # [num_kv_cache_groups]
     block_table_strides,  # [num_kv_cache_groups]
     block_sizes,  # [num_kv_cache_groups]
+    cp_sizes,  # [num_kv_cache_groups]
+    cp_ranks,  # [num_kv_cache_groups]
+    cp_interleaves,  # [num_kv_cache_groups]
     slot_mappings_ptr,  # [num_kv_cache_groups, max_num_tokens]
     slot_mappings_stride,
-    cp_rank,
-    CP_SIZE: tl.constexpr,
-    CP_INTERLEAVE: tl.constexpr,
     PAD_ID: tl.constexpr,
     TRITON_BLOCK_SIZE: tl.constexpr,
 ):
@@ -228,6 +254,9 @@ def _compute_slot_mappings_kernel(
     block_table_ptr = _load_ptr(block_table_ptrs + group_id, tl.int32)
     block_table_stride = tl.load(block_table_strides + group_id)
     block_size = tl.load(block_sizes + group_id)
+    cp_size = tl.load(cp_sizes + group_id)
+    cp_rank = tl.load(cp_ranks + group_id)
+    cp_interleave = tl.load(cp_interleaves + group_id)
 
     req_state_idx = tl.load(idx_mapping + batch_idx)
     start_idx = tl.load(query_start_loc + batch_idx)
@@ -236,21 +265,21 @@ def _compute_slot_mappings_kernel(
         offset = i + tl.arange(0, TRITON_BLOCK_SIZE)
         positions = tl.load(pos + offset, mask=offset < end_idx, other=0)
 
-        block_indices = positions // (block_size * CP_SIZE)
-        block_offsets = positions % (block_size * CP_SIZE)
+        block_indices = positions // (block_size * cp_size)
+        block_offsets = positions % (block_size * cp_size)
         block_numbers = tl.load(
             block_table_ptr + req_state_idx * block_table_stride + block_indices
         )
 
-        if CP_SIZE == 1:
+        if cp_size == 1:
             # Common case: Context parallelism is not used.
             slot_ids = block_numbers * block_size + block_offsets
         else:
             # Context parallelism is used.
-            is_local = block_offsets // CP_INTERLEAVE % CP_SIZE == cp_rank
-            rounds = block_offsets // (CP_INTERLEAVE * CP_SIZE)
-            remainder = block_offsets % CP_INTERLEAVE
-            local_offsets = rounds * CP_INTERLEAVE + remainder
+            is_local = block_offsets // cp_interleave % cp_size == cp_rank
+            rounds = block_offsets // (cp_interleave * cp_size)
+            remainder = block_offsets % cp_interleave
+            local_offsets = rounds * cp_interleave + remainder
             slot_ids = block_numbers * block_size + local_offsets
             slot_ids = tl.where(is_local, slot_ids, PAD_ID)
 

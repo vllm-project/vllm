@@ -285,6 +285,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             kv_cache_group.kv_cache_spec.block_size
             for kv_cache_group in kv_cache_config.kv_cache_groups
         ]
+        cp_sizes = [
+            self.dcp_size if kv_cache_group.kv_cache_spec.supports_dcp else 1
+            for kv_cache_group in kv_cache_config.kv_cache_groups
+        ]
+        cp_ranks = [self.dcp_rank if cp_size > 1 else 0 for cp_size in cp_sizes]
+        cp_interleaves = [
+            self.cp_interleave if cp_size > 1 else 1 for cp_size in cp_sizes
+        ]
 
         self.block_tables = BlockTables(
             block_sizes=block_sizes,
@@ -292,9 +300,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             max_num_batched_tokens=self.max_num_tokens,
             max_model_len=self.max_model_len,
             device=self.device,
-            cp_size=self.dcp_size,
-            cp_rank=self.dcp_rank,
-            cp_interleave=self.cp_interleave,
+            cp_size=cp_sizes,
+            cp_rank=cp_ranks,
+            cp_interleave=cp_interleaves,
         )
 
         self.attn_backends, self.attn_groups = init_attn_backend(

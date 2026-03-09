@@ -26,6 +26,10 @@ class KVCacheSpec:
     block_size: int
 
     @property
+    def supports_dcp(self) -> bool:
+        return False
+
+    @property
     def page_size_bytes(self) -> int:
         """
         The size of a page with `block_size` tokens in bytes.
@@ -109,6 +113,10 @@ class FullAttentionSpec(AttentionSpec):
     def __post_init__(self):
         if self.head_size_v is None:
             object.__setattr__(self, "head_size_v", self.head_size)
+
+    @property
+    def supports_dcp(self) -> bool:
+        return True
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
         max_model_len = vllm_config.model_config.max_model_len

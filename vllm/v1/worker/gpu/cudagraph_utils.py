@@ -401,14 +401,26 @@ def prepare_inputs_to_capture(
     )
 
     # HACK(woosuk): Special handling for DCP.
-    if block_tables.cp_size > 1:
+    dcp_group_ids = [
+        i for i, cp_size in enumerate(block_tables.cp_sizes) if cp_size > 1
+    ]
+    if dcp_group_ids:
+        dcp_group_id = dcp_group_ids[0]
+        dcp_size = block_tables.cp_sizes[dcp_group_id]
+        dcp_rank = block_tables.cp_ranks[dcp_group_id]
+        cp_interleave = block_tables.cp_interleaves[dcp_group_id]
+        assert all(block_tables.cp_sizes[i] == dcp_size for i in dcp_group_ids)
+        assert all(block_tables.cp_ranks[i] == dcp_rank for i in dcp_group_ids)
+        assert all(
+            block_tables.cp_interleaves[i] == cp_interleave for i in dcp_group_ids
+        )
         prepare_dcp_local_seq_lens(
             input_buffers.dcp_local_seq_lens,
             input_batch.seq_lens,
             num_reqs,
-            block_tables.cp_size,
-            block_tables.cp_rank,
-            block_tables.cp_interleave,
+            dcp_size,
+            dcp_rank,
+            cp_interleave,
         )
         input_batch.dcp_local_seq_lens = input_buffers.dcp_local_seq_lens[:num_reqs]
 

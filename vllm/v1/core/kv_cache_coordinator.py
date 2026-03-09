@@ -17,11 +17,7 @@ from vllm.v1.core.single_type_kv_cache_manager import (
     SingleTypeKVCacheManager,
     get_manager_for_kv_cache_spec,
 )
-from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
-    KVCacheConfig,
-    KVCacheSpec,
-)
+from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheSpec
 from vllm.v1.request import Request
 
 
@@ -56,17 +52,30 @@ class KVCacheCoordinator(ABC):
 
         # Needs special handling for find_longest_cache_hit if eagle is enabled
         self.use_eagle = use_eagle
+        self.group_dcp_world_sizes = tuple(
+            self._get_effective_group_dcp_world_size(
+                kv_cache_group.kv_cache_spec, dcp_world_size
+            )
+            for kv_cache_group in self.kv_cache_config.kv_cache_groups
+        )
         self.single_type_managers = tuple(
             get_manager_for_kv_cache_spec(
                 kv_cache_spec=kv_cache_group.kv_cache_spec,
                 block_pool=self.block_pool,
                 enable_caching=enable_caching,
                 kv_cache_group_id=i,
-                dcp_world_size=dcp_world_size,
+                dcp_world_size=self.group_dcp_world_sizes[i],
                 pcp_world_size=pcp_world_size,
             )
             for i, kv_cache_group in enumerate(self.kv_cache_config.kv_cache_groups)
         )
+
+    @staticmethod
+    def _get_effective_group_dcp_world_size(
+        kv_cache_spec: KVCacheSpec,
+        dcp_world_size: int,
+    ) -> int:
+        return dcp_world_size if kv_cache_spec.supports_dcp else 1
 
     def get_num_blocks_to_allocate(
         self,
@@ -331,10 +340,10 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
         )
         self.kv_cache_spec = self.kv_cache_config.kv_cache_groups[0].kv_cache_spec
         self.block_size = self.kv_cache_spec.block_size
-        self.dcp_world_size = dcp_world_size
+        self.dcp_world_size = self.group_dcp_world_sizes[0]
         self.pcp_world_size = pcp_world_size
-        if dcp_world_size > 1:
-            self.block_size *= dcp_world_size
+        if self.dcp_world_size > 1:
+            self.block_size *= self.dcp_world_size
         if pcp_world_size > 1:
             self.block_size *= pcp_world_size
         # For models using only Mamba, block_size is set to max_model_len when
