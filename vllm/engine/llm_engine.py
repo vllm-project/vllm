@@ -47,7 +47,7 @@ from vllm.outputs import (PoolingRequestOutput, RequestOutput,
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import RequestOutputKind, SamplingParams
-from vllm.sequence import (ExecuteModelRequest, Logprob, ParallelSampleSequenceGroup, TreeSequenceGroup,
+from vllm.sequence import (ExecuteModelRequest, Logprob, ParallelSampleSequenceGroup,
                            PoolingSequenceGroupOutput, Sequence, SequenceGroup,
                            SequenceGroupBase, SequenceGroupMetadata,
                            SequenceGroupOutput, SequenceStatus)
@@ -562,7 +562,7 @@ class LLMEngine:
         """Add a processed request to the engine's request pool.
         return the created sequence group.
         """
-        if isinstance(params, SamplingParams):
+        if isinstance(params, SamplingParams) and (params.n > 1 or params.tree_search_params.enable_tree_search):
             assert params.n == 1 or not params.tree_search_params.enable_tree_search
             ParallelSampleSequenceGroup.add_request(
                 request_id,
@@ -1443,40 +1443,35 @@ class LLMEngine:
             logger.debug("Stopping remote worker execution loop.")
             self.model_executor.stop_remote_worker_execution_loop()
 
-            if self._should_enable_tree_decoding(seq_group_metadata_list):
-                self._process_tree_decoding(
-                    outputs, seq_group_metadata_list)
-                # for branch_group in new_branch_groups:
-                #     self._add_branch_to_scheduler(branch_group, virtual_engine)
-                # for branch_group in branch_groups_to_delete:
-                    # self._delete_branch_from_scheduler(branch_group, virtual_engine)
-                #     self.abort_request(branch_group.request_id)
+        if self._should_enable_tree_decoding():
+            self._process_tree_decoding(
+                outputs, seq_group_metadata_list)
+            # for branch_group in new_branch_groups:
+            #     self._add_branch_to_scheduler(branch_group, virtual_engine)
+            # for branch_group in branch_groups_to_delete:
+                # self._delete_branch_from_scheduler(branch_group, virtual_engine)
+            #     self.abort_request(branch_group.request_id)
 
         return ctx.request_outputs
 
-    def _should_enable_tree_decoding(self, seq_group_metadata_list):
+    def _should_enable_tree_decoding(self):
         """检查是否有序列组启用了tree decoding"""
-        return any(
-            seq_group_metadata.sampling_params.tree_search_params.enable_tree_search 
-            for seq_group_metadata in seq_group_metadata_list
-        )
+        for group in self.seq_id_to_seq_group.values():
+            if group.assembled_seq_group.sampling_params.tree_search_params.enable_tree_search:
+                return True
+        return False
     
-    # todo
     def _process_tree_decoding(self, outputs, seq_group_metadata_list):
         """处理tree decoding逻辑"""
         for seq_group_metadata in seq_group_metadata_list:
-            sampling_params = seq_group_metadata.sampling_params
-            
-            if not sampling_params.tree_search_params.enable_tree_search:
+            request_id = seq_group_metadata.request_id
+            if request_id not in self.seq_id_to_seq_group:
                 continue
+            sampling_params = seq_group_metadata.sampling_params
             num_branches = sampling_params.tree_search_params.branching_factor
             # 获取当前序列组的logprobs
             if hasattr(outputs[0], 'logprobs'):
                 logprobs = outputs[0].logprobs
-                # 可能有bug，要获取seq_id
-                request_id = seq_group_metadata.request_id
-                if request_id not in self.seq_id_to_seq_group:
-                    continue
                 original_parallel_seq_group = self.seq_id_to_seq_group[request_id]
                 for i, seq in enumerate(original_parallel_seq_group.assembled_seq_group.seqs):
                     if self._should_create_branches(
@@ -1486,12 +1481,11 @@ class LLMEngine:
                         new_token_ids = new_token_ids.tolist()
                         original_parallel_seq_group.add_tree_branches(request_id, new_token_ids, self)
 
-        return
-
     def _should_create_branches(self, seq, logprobs, sampling_params):
         if seq.tree_depth >= sampling_params.tree_search_params.max_tree_depth:
             return False
         entropy = self._calculate_entropy(logprobs)
+        print("entropy:", entropy)
         return entropy > sampling_params.tree_search_params.entropy_threshold
     
     def _calculate_entropy(self, logprobs):
