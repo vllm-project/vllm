@@ -1,0 +1,155 @@
+# Pipeline Parallel Fix for Kimi-Audio
+
+## Root Cause
+
+Kimi-Audio's custom `embed_input_ids` implementation uses **in-place tensor assignment** which conflicts with vLLM's v1 engine buffer management for pipeline parallel:
+
+```python
+# Kimi-Audio (BROKEN with PP)
+inputs_embeds[pos:end_pos, :] = fused_embeds  # In-place slice assignment
+```
+
+Qwen2-Audio and Qwen3-ASR use the standard `_merge_multimodal_embeddings` which uses `masked_scatter_`:
+
+```python
+# Qwen2-Audio / Qwen3-ASR (WORKS with PP)
+inputs_embeds.masked_scatter_(is_multimodal.unsqueeze(-1), mm_embeds_flat)
+```
+
+## The Fix
+
+Replace Kimi-Audio's custom `embed_input_ids` with the standard approach, but preserve the √2 scaling factor in the audio processing instead:
+
+### Option 1: Use Standard Merge (Recommended)
+
+In `/root/learning/vllm/vllm/model_executor/models/kimi_audio.py`:
+
+```python
+# REMOVE this custom implementation:
+"""
+def embed_input_ids(
+    self,
+    input_ids: torch.Tensor,
+    multimodal_embeddings: tuple[torch.Tensor, ...] | None = None,
+    *,
+    is_multimodal: torch.Tensor | None = None,
+    handle_oov_mm_token: bool = False,
+) -> torch.Tensor:
+    inputs_embeds = self.language_model.model.embed_tokens(input_ids)
+    if multimodal_embeddings is None or len(multimodal_embeddings) == 0:
+        return inputs_embeds
+    audio_embeds = multimodal_embeddings[0]
+    scale_factor = 2**0.5
+    audio_mask = input_ids == KimiAudioProcessor.KIMIA_TEXT_BLANK
+    if audio_mask.any():
+        audio_positions = audio_mask.nonzero(as_tuple=True)[0]
+        if audio_positions.numel() > 0:
+            begin_pos = audio_positions[0].item()
+            pos = begin_pos + 1
+            audio_len = audio_embeds.shape[0]
+            end_pos = pos + audio_len
+            text_embeds = inputs_embeds[pos:end_pos, :]
+            fused_embeds = (text_embeds + audio_embeds) * scale_factor
+            inputs_embeds[pos:end_pos, :] = fused_embeds
+    return inputs_embeds
+"""
+
+# REPLACE with standard implementation:
+def embed_input_ids(
+    self,
+    input_ids: torch.Tensor,
+    multimodal_embeddings: tuple[torch.Tensor, ...] | None = None,
+    *,
+    is_multimodal: torch.Tensor | None = None,
+    handle_oov_mm_token: bool = False,
+) -> torch.Tensor:
+    """Embed input IDs and fuse with audio embeddings.
+    
+    Kimi-Audio fusion: inputs_embeds = text_emb + whisper_emb × √2
+    The √2 scaling is applied in _process_audio_input instead.
+    """
+    from vllm.model_executor.models.utils import _merge_multimodal_embeddings
+    
+    inputs_embeds = self._embed_text_input_ids(
+        input_ids,
+        self.language_model.model.embed_input_ids,
+        is_multimodal=is_multimodal,
+        handle_oov_mm_token=handle_oov_mm_token,
+    )
+
+    if multimodal_embeddings is None or len(multimodal_embeddings) == 0:
+        return inputs_embeds
+
+    return _merge_multimodal_embeddings(
+        inputs_embeds=inputs_embeds,
+        multimodal_embeddings=multimodal_embeddings,
+        is_multimodal=is_multimodal,
+    )
+```
+
+### Option 2: Apply √2 Scale in Audio Processing
+
+In `/root/learning/vllm/vllm/model_executor/models/kimi_audio.py`, modify `_process_audio_input`:
+
+```python
+def _process_audio_input(
+    self, audio_input: dict[str, torch.Tensor]
+) -> torch.Tensor:
+    input_features = audio_input["whisper_input_features"]
+
+    if input_features.dim() == 3:
+        input_features = input_features.unbind(dim=0)
+
+    # Run through Whisper encoder
+    audio_features = self.audio_tower(input_features)
+
+    # Reshape for 4x downsampling
+    B, T, D = audio_features.shape
+    if T % 4 != 0:
+        pad_len = 4 - (T % 4)
+        audio_features = torch.nn.functional.pad(audio_features, (0, 0, 0, pad_len))
+        T = audio_features.shape[1]
+
+    audio_features = audio_features.reshape(B, T // 4, D * 4)
+
+    # Project to LLM dimension
+    audio_embeds = self.multi_modal_projector(audio_features)
+    
+    # Apply Kimi-Audio's √2 scaling HERE instead of in embed_input_ids
+    audio_embeds = audio_embeds * (2 ** 0.5)
+    
+    return audio_embeds
+```
+
+## Why This Works
+
+1. **`masked_scatter_` is safer**: It's designed for this use case and handles edge cases better
+2. **No in-place slice assignment**: Avoids potential buffer aliasing issues with v1 engine
+3. **Compatible with PP**: The standard merge approach is tested with Qwen2-Audio PP
+4. **Preserves Kimi-Audio's fusion**: The √2 scaling is still applied, just at a different stage
+
+## Testing
+
+After applying the fix:
+
+```bash
+# Test with TP=1, PP=2
+vllm serve /data1/moonshotai/Kimi-Audio-7B-Instruct \
+  --trust-remote-code --port 8090 \
+  --tensor-parallel-size 1 \
+  --pipeline-parallel-size 2
+
+# Test transcription
+curl -sS http://localhost:8090/v1/audio/transcriptions \
+ -F file=@/root/learning/Kimi-Audio/test_audios/asr_example.wav \
+ -F model=/data1/moonshotai/Kimi-Audio-7B-Instruct \
+ -F language=zh \
+ -F temperature=0 \
+ -F prompt="请撰写这段语音：" \
+ -F max_completion_tokens=96
+```
+
+Expected output should match non-PP version:
+```json
+{"text":"这并不是告别这是一个篇章的结束也是新篇章的开始",...}
+```

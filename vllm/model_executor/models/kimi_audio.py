@@ -11,7 +11,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from safetensors import safe_open
-from transformers import AutoFeatureExtractor, BatchFeature
+from transformers import BatchFeature
 from transformers import WhisperConfig as HFWhisperConfig
 
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
@@ -666,17 +666,9 @@ class KimiAudioForConditionalGeneration(
         cls, model_config: ModelConfig, task_type: str
     ) -> SpeechToTextConfig:
         """Get speech-to-text config with custom processor."""
-        # Use from_pretrained() to validate processor loads correctly
-        # This also validates feature extractor and tokenizer compatibility
-        _ = KimiAudioProcessor.from_pretrained(
-            model_config.model,
-            trust_remote_code=model_config.trust_remote_code,
-        )
-
         # Load feature extractor for config values
-        feature_extractor = AutoFeatureExtractor.from_pretrained(
-            model_config.model,
-            trust_remote_code=model_config.trust_remote_code,
+        feature_extractor = cached_feature_extractor_from_config(
+            model_config,
             subfolder=KIMIA_WHISPER_SUBFOLDER,
         )
 
