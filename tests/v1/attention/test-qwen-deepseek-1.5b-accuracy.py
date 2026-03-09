@@ -17,7 +17,7 @@ Benchmarks used:
   - hellaswag (10-shot, via lm-eval)                      – sentence completion
 
 Usage:
-    pytest tests/lm_eval_correctness/test_deepseek_small_accuracy.py -v
+    pytest tests/v1/attention/test-qwen-deepseek-1.5b-accuracy.py -v
 
 Requirements:
     pip install lm_eval vllm
