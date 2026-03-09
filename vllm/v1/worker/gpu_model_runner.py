@@ -104,7 +104,7 @@ from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
 from vllm.tracing import instrument
 from vllm.triton_utils import tl, triton
 from vllm.utils import length_from_prompt_token_ids_or_embeds
-from vllm.utils.math_utils import cdiv, round_up
+from vllm.utils.math_utils import cdiv, largest_power_of_2_divisor, round_up
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.nvtx_pytorch_hooks import PytHooks
 from vllm.utils.platform_utils import is_pin_memory_available, num_compute_units
@@ -1050,8 +1050,7 @@ class GPUModelRunner(
             if group.kv_cache_group_id >= len(kernel_block_sizes):
                 continue
             kernel_bs = kernel_block_sizes[group.kv_cache_group_id]
-            mgr_bs = spec.block_size
-            ratio = mgr_bs // kernel_bs
+            ratio = spec.block_size // kernel_bs
             block_dim = group.backend.get_kv_cache_block_dim(
                 kernel_bs,
                 spec.num_kv_heads,
@@ -1103,8 +1102,7 @@ class GPUModelRunner(
 
         # Pick largest power-of-2 dividing page_size_el as Triton BLOCK_SIZE
         # (capped at 1024), and pre-allocate pinned + GPU buffers for block IDs.
-        alignment = page_size_el & (-page_size_el)
-        blk_size = min(alignment, 1024)
+        blk_size = min(largest_power_of_2_divisor(page_size_el), 1024)
         self._kv_zero_id_cap = 8192
         self._kv_zero_ids_pinned = torch.empty(
             self._kv_zero_id_cap,
