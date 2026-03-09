@@ -875,6 +875,8 @@ class AsyncLLM(EngineClient):
         logger.debug("Called check_health.")
         if self.errored:
             raise self.dead_error
+        # Ping EngineCore to detect alive-but-hung state.
+        await self.engine_core.check_health_async()
 
     async def start_profile(self, profile_prefix: str | None = None) -> None:
         coros = [self.engine_core.profile_async(True, profile_prefix)]

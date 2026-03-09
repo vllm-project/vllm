@@ -258,6 +258,9 @@ class EngineCoreClient(ABC):
     ) -> None:
         raise NotImplementedError
 
+    async def check_health_async(self) -> None:
+        raise NotImplementedError
+
     async def collective_rpc_async(
         self,
         method: str | Callable[..., _R],
@@ -356,6 +359,10 @@ class InprocClient(EngineCoreClient):
         kwargs: dict[str, Any] | None = None,
     ) -> list[_R]:
         return self.engine_core.collective_rpc(method, timeout, args, kwargs)
+
+    async def check_health_async(self) -> None:
+        # In-process: always healthy if reachable (no IPC to hang).
+        return
 
     def dp_engines_running(self) -> bool:
         return False
@@ -1143,6 +1150,31 @@ class AsyncMPClient(MPClient):
         return await self.call_utility_async(
             "collective_rpc", method, timeout, args, kwargs
         )
+
+    async def check_health_async(self) -> None:
+        """Ping EngineCore to verify liveness via UTILITY mechanism.
+
+        A successful round-trip proves: subprocess is alive, the busy loop
+        is running, and the IPC channel is working. Raises EngineDeadError
+        if the engine does not respond within the timeout.
+
+        Set VLLM_HEALTH_CHECK_TIMEOUT=0 to disable the ping (default: 60s).
+        """
+        import vllm.envs as envs
+        timeout = envs.VLLM_HEALTH_CHECK_TIMEOUT
+        if timeout <= 0:
+            return
+
+        try:
+            await asyncio.wait_for(
+                self.call_utility_async("health_ping"),
+                timeout=timeout,
+            )
+        except asyncio.TimeoutError:
+            raise EngineDeadError(
+                f"EngineCore did not respond to health ping within "
+                f"{timeout}s. It may be stuck in a long operation or hung."
+            )
 
 
 class DPAsyncMPClient(AsyncMPClient):
