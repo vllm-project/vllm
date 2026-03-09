@@ -19,31 +19,9 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
-_MAX_DLPACK_CACHE_SIZE = 256
-_MAX_CACHED_TENSOR_BYTES = 64 * 1024 * 1024
 
-
-def _to_cute_tensor_cached(tensor: torch.Tensor):
-    """Cache CuTe tensor wrappers to reduce per-call from_dlpack overhead."""
-    if tensor.numel() * tensor.element_size() > _MAX_CACHED_TENSOR_BYTES:
-        return from_dlpack(tensor.detach(), assumed_align=16)
-
-    key = (
-        tensor.data_ptr(),
-        tuple(tensor.shape),
-        tuple(tensor.stride()),
-        tensor.dtype,
-        tensor.device,
-    )
-    cache = cutedsl_transpose_fused_sigmoid_gated_delta_rule_update.dlpack_cache
-    cached = cache.get(key)
-    if cached is not None:
-        return cached
-    wrapped = from_dlpack(tensor.detach(), assumed_align=16)
-    if len(cache) >= _MAX_DLPACK_CACHE_SIZE:
-        cache.clear()
-    cache[key] = wrapped
-    return wrapped
+def _to_cute_tensor(tensor: torch.Tensor):
+    return from_dlpack(tensor.detach(), assumed_align=16)
 
 
 def _supports_f32x2_intrinsics() -> bool:
@@ -496,19 +474,19 @@ def cutedsl_transpose_fused_sigmoid_gated_delta_rule_update(
     B, T, H, K, V = *k_launch.shape, v_launch.shape[-1]
     HV = v_launch.shape[-2]
 
-    q_ = _to_cute_tensor_cached(q_launch)
-    k_ = _to_cute_tensor_cached(k_launch)
-    v_ = _to_cute_tensor_cached(v_launch)
-    h_ = _to_cute_tensor_cached(initial_state_source)
-    b_ = _to_cute_tensor_cached(b_launch)
-    ind_ = _to_cute_tensor_cached(initial_state_indices)
+    q_ = _to_cute_tensor(q_launch)
+    k_ = _to_cute_tensor(k_launch)
+    v_ = _to_cute_tensor(v_launch)
+    h_ = _to_cute_tensor(initial_state_source)
+    b_ = _to_cute_tensor(b_launch)
+    ind_ = _to_cute_tensor(initial_state_indices)
     if cu_seqlens_launch is not None:
-        cu_seqlens_ = _to_cute_tensor_cached(cu_seqlens_launch)
+        cu_seqlens_ = _to_cute_tensor(cu_seqlens_launch)
     else:
         cu_seqlens_ = None
-    A_log_ = _to_cute_tensor_cached(A_log)
-    a_ = _to_cute_tensor_cached(a_launch)
-    dt_bias_ = _to_cute_tensor_cached(dt_bias)
+    A_log_ = _to_cute_tensor(A_log)
+    a_ = _to_cute_tensor(a_launch)
+    dt_bias_ = _to_cute_tensor(dt_bias)
 
     o = torch.empty_like(v_launch)
     o_ = from_dlpack(o.detach(), assumed_align=16)
@@ -572,4 +550,3 @@ def cutedsl_transpose_fused_sigmoid_gated_delta_rule_update(
 
 
 cutedsl_transpose_fused_sigmoid_gated_delta_rule_update.compile_cache = {}
-cutedsl_transpose_fused_sigmoid_gated_delta_rule_update.dlpack_cache = {}
