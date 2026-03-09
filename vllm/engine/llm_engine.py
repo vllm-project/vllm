@@ -47,7 +47,7 @@ from vllm.outputs import (PoolingRequestOutput, RequestOutput,
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import RequestOutputKind, SamplingParams
-from vllm.sequence import (ExecuteModelRequest, Logprob, ParallelSampleSequenceGroup, TreeSequenceGroup,
+from vllm.sequence import (ExecuteModelRequest, Logprob, ParallelSampleSequenceGroup,
                            PoolingSequenceGroupOutput, Sequence, SequenceGroup,
                            SequenceGroupBase, SequenceGroupMetadata,
                            SequenceGroupOutput, SequenceStatus)
