@@ -303,12 +303,16 @@ def create_error_response(
     if isinstance(message, Exception):
         exc = message
 
-        from vllm.exceptions import VLLMValidationError
+        from vllm.exceptions import VLLMNotFoundError, VLLMValidationError
 
         if isinstance(exc, VLLMValidationError):
             err_type = "BadRequestError"
             status_code = HTTPStatus.BAD_REQUEST
             param = exc.parameter
+        elif isinstance(exc, VLLMNotFoundError):
+            err_type = "NotFoundError"
+            status_code = HTTPStatus.NOT_FOUND
+            param = None
         elif isinstance(exc, (ValueError, TypeError, OverflowError)):
             # Common validation errors from user input
             err_type = "BadRequestError"

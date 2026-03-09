@@ -4,13 +4,15 @@
 from typing import TypeAlias
 
 import numpy as np
+from fastapi.responses import JSONResponse
 
-from vllm import ClassificationOutput
 from vllm.config import ModelConfig
 from vllm.entrypoints.chat_utils import ChatTemplateConfig
 from vllm.entrypoints.openai.engine.protocol import UsageInfo
-from vllm.entrypoints.pooling.base.serving import PoolingServeContext, PoolingServing
+from vllm.entrypoints.pooling.base.serving import PoolingServing
+from vllm.entrypoints.pooling.typing import PoolingServeContext
 from vllm.logger import init_logger
+from vllm.outputs import ClassificationOutput
 from vllm.renderers import BaseRenderer
 
 from .io_processor import ClassifyIOProcessor
@@ -44,15 +46,11 @@ class ServingClassification(PoolingServing):
     async def _build_response(
         self,
         ctx: ClassificationServeContext,
-    ) -> ClassificationResponse:
-        final_res_batch_checked = await self.io_processor.post_process_async(
-            ctx.final_res_batch
-        )
-
+    ) -> JSONResponse:
         id2label = getattr(self.model_config.hf_config, "id2label", {})
         num_prompt_tokens = 0
         items: list[ClassificationData] = []
-        for idx, final_res in enumerate(final_res_batch_checked):
+        for idx, final_res in enumerate(ctx.final_res_batch):
             classify_res = ClassificationOutput.from_base(final_res.outputs)
 
             probs = classify_res.probs
@@ -75,10 +73,12 @@ class ServingClassification(PoolingServing):
             total_tokens=num_prompt_tokens,
         )
 
-        return ClassificationResponse(
+        response = ClassificationResponse(
             id=ctx.request_id,
             created=ctx.created_time,
             model=ctx.model_name,
             data=items,
             usage=usage,
         )
+
+        return JSONResponse(content=response.model_dump())

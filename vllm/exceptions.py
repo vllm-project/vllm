@@ -34,3 +34,9 @@ class VLLMValidationError(ValueError):
         if self.value is not None:
             extras.append(f"value={self.value}")
         return f"{base} ({', '.join(extras)})" if extras else base
+
+
+class VLLMNotFoundError(ValueError):
+    """vLLM-specific NotFoundError"""
+
+    pass
