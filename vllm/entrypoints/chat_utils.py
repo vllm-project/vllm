@@ -899,7 +899,7 @@ class MultiModalContentParser(BaseMultiModalContentParser):
 
         placeholder = self._tracker.add("video", (video, uuid))
         self._add_placeholder("video", placeholder)
-        
+
         # Extract audio from video if use_audio_in_video is True
         if (
             video_url
