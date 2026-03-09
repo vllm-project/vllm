@@ -793,6 +793,9 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "naver-hyperclovax/HyperCLOVAX-SEED-Vision-Instruct-3B",
         trust_remote_code=True,
     ),
+    "HyperCLOVAXForCausalLM": _HfExamplesInfo(
+        "meta-llama/Llama-3.2-1B-Instruct",
+    ),
     "HCXVisionV2ForCausalLM": _HfExamplesInfo(
         "naver-hyperclovax/HyperCLOVAX-SEED-Think-32B",
         trust_remote_code=True,

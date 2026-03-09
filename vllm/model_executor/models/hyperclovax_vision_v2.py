@@ -185,9 +185,9 @@ class HCXVisionV2DummyInputsBuilder(BaseDummyInputsBuilder[HCXVisionV2Processing
         self,
         mm_counts: Mapping[str, int],
     ) -> str:
-        # This method is not used when get_dummy_processor_inputs is overridden,
-        # but we keep it for compatibility.
-        return ""
+        num_images = mm_counts.get("image", 0)
+        num_videos = mm_counts.get("video", 0)
+        return V2_IMAGE_TOKEN * num_images + V2_VIDEO_TOKEN * num_videos
 
     def get_dummy_processor_inputs(
         self,
@@ -196,27 +196,10 @@ class HCXVisionV2DummyInputsBuilder(BaseDummyInputsBuilder[HCXVisionV2Processing
         mm_options: Mapping[str, BaseDummyOptions] | None = None,
         mm_processor_kwargs: Mapping[str, object] | None = None,
     ) -> ProcessorInputs:
-        """
-        Override to use token IDs directly instead of text strings.
-
-        This avoids the tokenizer issue where <|IMAGE_PAD|> might not be
-        recognized as a special token and gets split into multiple tokens.
-        By passing token IDs directly, we ensure the correct token (128060)
-        is used for prompt replacement matching.
-        """
+        """Build dummy processor inputs for memory profiling."""
         num_images = mm_counts.get("image", 0)
         num_videos = mm_counts.get("video", 0)
-
-        hf_config = self.info.get_hf_config()
-
-        # Use token IDs directly to avoid tokenizer issues with special tokens
-        image_token_id = hf_config.image_token_id  # 128060
-        video_token_id = hf_config.video_token_id  # 128061
-
-        # Create prompt as token ID list instead of text string
-        prompt_ids: list[int] = [image_token_id] * num_images + [
-            video_token_id
-        ] * num_videos
+        prompt_text = V2_IMAGE_TOKEN * num_images + V2_VIDEO_TOKEN * num_videos
 
         dummy_mm_data = self.get_dummy_mm_data(
             seq_len,
@@ -227,7 +210,7 @@ class HCXVisionV2DummyInputsBuilder(BaseDummyInputsBuilder[HCXVisionV2Processing
         dummy_mm_items = self.info.parse_mm_data(dummy_mm_data, validate=False)
 
         return ProcessorInputs(
-            prompt=prompt_ids,
+            prompt=prompt_text,
             mm_data_items=dummy_mm_items,
             hf_processor_mm_kwargs=mm_processor_kwargs or {},
             tokenization_kwargs={"truncation": False},
