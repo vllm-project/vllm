@@ -998,6 +998,10 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         },  # noqa: E501
         hf_overrides={"architectures": ["QwenVLForConditionalGeneration"]},
     ),
+    "KimiAudioForConditionalGeneration": _HfExamplesInfo(
+        "moonshotai/Kimi-Audio-7B-Instruct",
+        max_model_len=4096,
+    ),
     "Qwen2AudioForConditionalGeneration": _HfExamplesInfo(
         "Qwen/Qwen2-Audio-7B-Instruct"
     ),
