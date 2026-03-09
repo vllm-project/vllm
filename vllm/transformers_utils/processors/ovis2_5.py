@@ -6,7 +6,7 @@ from functools import cached_property
 import numpy as np
 import PIL
 import torch
-from transformers import AutoProcessor, BatchFeature
+from transformers import BatchFeature
 from transformers.image_utils import ImageInput
 from transformers.processing_utils import ProcessingKwargs, ProcessorMixin, Unpack
 from transformers.tokenization_utils_base import PreTokenizedInput, TextInput
@@ -402,7 +402,7 @@ class Ovis2_5Processor(ProcessorMixin):
                 images = [images]
         elif video is not None:
             is_video = True
-            # type of vidoe in dummy_mm_data is np.ndarray
+            # type of video in dummy_mm_data is np.ndarray
             if isinstance(video, np.ndarray):
                 images = []
                 for i in range(video.shape[0]):
@@ -476,6 +476,3 @@ class Ovis2_5Processor(ProcessorMixin):
             visual_placeholders,
             torch.tensor([[grid_t, grid_h, grid_w]]),
         )
-
-
-AutoProcessor.register("Ovis2_5Processor", Ovis2_5Processor)
