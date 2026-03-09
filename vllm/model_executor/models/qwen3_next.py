@@ -411,14 +411,17 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             quant_config=quant_config,
             prefix=f"{prefix}.in_proj_qkvz",
         )
-        # ba_proj doesn't support blockwise fp8 quantization.
-        # # in_proj_ba is defined as MergedColumnParallelLinear for
-        # compatibility with Qwen3_5.
+        # in_proj_ba output dimension (2 * num_v_heads) is too small for
+        # TP-sharded quantization (e.g. Marlin requires MIN_THREAD_N=64).
+        # Use disable_tp=True so every rank holds the full projection,
+        # and quant_config=None to avoid quantization constraints on this
+        # tiny layer.  The local TP slice is taken in forward().
         self.in_proj_ba = MergedColumnParallelLinear(
             input_size=self.hidden_size,
             output_sizes=[self.num_v_heads] * 2,
             bias=False,
-            quant_config=quant_config,
+            quant_config=None,
+            disable_tp=True,
             prefix=f"{prefix}.in_proj_ba",
         )
 
@@ -515,8 +518,11 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                 // self.num_k_heads
             ),
         )
+        # in_proj_ba is replicated (disable_tp=True), so mixed_ba has
+        # the full num_k_heads groups.  Reshape over all groups, then
+        # take the local TP slice after splitting b and a.
         new_tensor_shape_ba = mixed_qkvz.size()[:-1] + (
-            self.num_k_heads // self.tp_size,
+            self.num_k_heads,
             2 * self.num_v_heads // self.num_k_heads,
         )
 
@@ -543,8 +549,14 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         # [b, sq, ng, np/ng * hn] -> [b, sq, np, hn]
         value = value.reshape(value.size(0), -1, self.head_v_dim)
         z = z.reshape(z.size(0), -1, self.head_v_dim)
-        b = b.reshape(b.size(0), self.num_v_heads // self.tp_size)
-        a = a.reshape(a.size(0), self.num_v_heads // self.tp_size)
+        # b, a are full (all heads); reshape then take the local TP slice.
+        b = b.reshape(-1, self.num_v_heads)
+        a = a.reshape(-1, self.num_v_heads)
+        v_heads_per_rank = self.num_v_heads // self.tp_size
+        start = self.tp_rank * v_heads_per_rank
+        end = start + v_heads_per_rank
+        b = b[:, start:end]
+        a = a[:, start:end]
 
         return query, key, value, z, b, a
 
