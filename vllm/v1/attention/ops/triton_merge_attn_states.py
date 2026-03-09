@@ -5,6 +5,10 @@ import torch
 
 from vllm.triton_utils import tl, triton
 
+# FP8 E4M3 range constants (must be constexpr for use in @jit kernels)
+FP8_E4M3_MAX = tl.constexpr(448.0)
+FP8_E4M3_MIN = tl.constexpr(-448.0)
+
 
 # Implements section 2.2 of https://www.arxiv.org/pdf/2501.01005
 # can be used to combine partial attention results (in the split-KV case)
@@ -15,16 +19,22 @@ def merge_attn_states(
     suffix_output: torch.Tensor,
     suffix_lse: torch.Tensor,
     output_lse: torch.Tensor | None = None,
+    output_scale: torch.Tensor | None = None,
 ) -> None:
-    num_tokens = output.shape[0]
-    num_query_heads = output.shape[1]
-    head_size = output.shape[2]
+    num_tokens = prefix_output.shape[0]
+    num_query_heads = prefix_output.shape[1]
+    head_size = prefix_output.shape[2]
     padded_head_size = triton.next_power_of_2(head_size)
     # We assume the output stride on num_head is not always as same as the
-    # `suffix_output` and `prefix_output`, as them might be padded by the attention
-    # backend.
+    # `suffix_output` and `prefix_output`, as them might be padded by the
+    # attention backend.
     prefix_head_stride = prefix_output.stride(1)
     output_head_stride = output.stride(1)
+
+    use_fp8 = output_scale is not None
+    # Pre-invert scale: multiplication is faster than division in Triton
+    output_scale_inv = (1.0 / output_scale.item()) if use_fp8 else 0.0
+
     # TODO(woosuk): Use CUDA kernel instead of Triton to minimize CPU overhead.
     merge_attn_states_kernel[(num_tokens, num_query_heads)](
         output,
@@ -35,9 +45,11 @@ def merge_attn_states(
         suffix_lse,
         prefix_head_stride,
         output_head_stride,
+        output_scale_inv,
         head_size,
         padded_head_size,
         output_lse is not None,
+        use_fp8,
     )
 
 
@@ -51,9 +63,11 @@ def merge_attn_states_kernel(
     suffix_lse,  # [NUM_HEADS, NUM_TOKENS]
     prefix_head_stride,
     output_head_stride,
+    output_scale_inv,
     HEAD_SIZE: tl.constexpr,
     PADDED_HEAD_SIZE: tl.constexpr,
     OUTPUT_LSE: tl.constexpr,
+    USE_FP8: tl.constexpr,
 ):
     token_idx = tl.program_id(0)
     num_tokens = tl.num_programs(0)
@@ -106,11 +120,16 @@ def merge_attn_states_kernel(
     p_scale = p_se / out_se
     s_scale = s_se / out_se
     out = p_out * p_scale + s_out * s_scale
+
+    if USE_FP8:
+        out = out * output_scale_inv
+        out = tl.clamp(out, FP8_E4M3_MIN, FP8_E4M3_MAX)
+
     tl.store(
         output
         + token_idx * num_heads * output_head_stride
         + head_idx * output_head_stride
         + head_arange,
-        out,
+        out.to(output.dtype.element_ty),
         mask=head_mask,
     )
