@@ -15,6 +15,9 @@ from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import fused_topk
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+from vllm.model_executor.layers.fused_moe.all2all_utils import (
+    maybe_make_prepare_finalize,
+)
 from vllm.model_executor.layers.fused_moe.config import (
     FUSED_MOE_UNQUANTIZED_CONFIG,
     FusedMoEConfig,
@@ -27,9 +30,6 @@ from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
     FlashInferExperts,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts
-from vllm.model_executor.layers.fused_moe.prepare_finalize import (
-    MoEPrepareAndFinalizeNoEP,
-)
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     apply_fi_trtllm_fp8_per_tensor_moe,
     register_scales_for_trtllm_fp8_per_tensor_moe,
@@ -475,8 +475,13 @@ def test_flashinfer_cutlass_moe_fp8_no_graph(
             routing_method=RoutingMethodType.TopK,
         )
 
-        kernel = mk.FusedMoEModularKernel(
-            MoEPrepareAndFinalizeNoEP(),
+        kernel = mk.FusedMoEKernel(
+            maybe_make_prepare_finalize(
+                moe=moe_config,
+                quant_config=quant_config,
+                allow_new_interface=True,
+                use_monolithic=False,
+            ),
             FlashInferExperts(
                 moe_config=moe_config,
                 quant_config=quant_config,
@@ -484,7 +489,7 @@ def test_flashinfer_cutlass_moe_fp8_no_graph(
             inplace=False,
         )
 
-        flashinfer_cutlass_output = kernel(
+        flashinfer_cutlass_output = kernel.apply(
             td.hidden_states,
             td.layer.w13_weight,
             td.layer.w2_weight,
@@ -573,12 +578,17 @@ def test_flashinfer_cutlass_moe_bf16_no_graph(
         assert not flashinfer_experts.use_deepseek_fp8_block_scale
 
         w1_fi = swap_w13_to_w31(w1) if activation.is_gated else w1
-        kernel = mk.FusedMoEModularKernel(
-            MoEPrepareAndFinalizeNoEP(),
+        kernel = mk.FusedMoEKernel(
+            maybe_make_prepare_finalize(
+                moe=moe_config,
+                quant_config=FUSED_MOE_UNQUANTIZED_CONFIG,
+                allow_new_interface=True,
+                use_monolithic=False,
+            ),
             flashinfer_experts,
             inplace=False,
         )
-        flashinfer_cutlass_output = kernel(
+        flashinfer_cutlass_output = kernel.apply(
             hidden_states,
             w1_fi,
             w2,
@@ -683,12 +693,17 @@ def test_flashinfer_cutlass_moe_fp8_block_scale_no_graph(
         )
         assert flashinfer_experts.use_deepseek_fp8_block_scale
 
-        kernel = mk.FusedMoEModularKernel(
-            MoEPrepareAndFinalizeNoEP(),
+        kernel = mk.FusedMoEKernel(
+            maybe_make_prepare_finalize(
+                moe=moe_config,
+                quant_config=quant_config,
+                allow_new_interface=True,
+                use_monolithic=False,
+            ),
             flashinfer_experts,
             inplace=False,
         )
-        flashinfer_cutlass_output = kernel(
+        flashinfer_cutlass_output = kernel.apply(
             hidden_states,
             w1_fi,
             w2,
