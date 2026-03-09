@@ -2204,7 +2204,7 @@ class AsyncEngineArgs(EngineArgs):
             "--enable-log-requests",
             action=argparse.BooleanOptionalAction,
             default=AsyncEngineArgs.enable_log_requests,
-            help="Enable logging request information, dependant on log level:\n"
+            help="Enable logging request information, dependent on log level:\n"
             "- INFO: Request ID, parameters and LoRA request.\n"
             "- DEBUG: Prompt inputs (e.g: text, token IDs).\n"
             "You can set the minimum log level via `VLLM_LOGGING_LEVEL`.",
