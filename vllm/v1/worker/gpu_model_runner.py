@@ -1464,22 +1464,6 @@ class GPUModelRunner(
         # on the GPU from prev_sampled_token_ids.
         prev_positions = self.prev_positions.np[:num_reqs]
         scheduled_spec_tokens = scheduler_output.scheduled_spec_decode_tokens
-
-        # Fast path: batch unchanged, pure decode, no draft tokens.
-        # Skip the loop and use a direct slice copy.
-        if (
-            indices_match
-            and not scheduled_spec_tokens
-            and total_num_scheduled_tokens == num_reqs
-        ):
-            self.input_ids.gpu[:num_reqs].copy_(
-                self.input_batch.prev_sampled_token_ids[:num_reqs, 0],
-                non_blocking=True,
-            )
-            if self.enable_prompt_embeds:
-                self.is_token_ids.gpu[:num_reqs] = True
-            return
-
         sample_flattened_indices: list[int] = []
         spec_flattened_indices: list[int] = []
         prev_draft_token_indices: list[int] = []
