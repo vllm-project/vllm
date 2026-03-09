@@ -481,10 +481,7 @@ class SpecDecodeBaseProposer:
             positions = self.mrope_positions[:, token_indices_to_sample]
         else:
             positions = self.positions[token_indices_to_sample]
-        if self.method == "mtp":
-            hidden_states = self.hidden_states[token_indices_to_sample]
-        else:
-            hidden_states = hidden_states[token_indices_to_sample]
+        hidden_states = hidden_states[token_indices_to_sample]
 
         if isinstance(attn_metadata, TreeAttentionMetadata):
             # Draft using tree attention - requires full logits for top-k
