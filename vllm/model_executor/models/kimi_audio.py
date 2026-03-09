@@ -52,14 +52,25 @@ from vllm.sequence import IntermediateTensors
 from vllm.tokenizers import cached_get_tokenizer
 from vllm.tokenizers.kimi_audio import KimiAudioTokenizer
 from vllm.transformers_utils.processor import cached_feature_extractor_from_config
-from vllm.transformers_utils.processors.kimi_audio import (
-    KimiAudioProcessor,
-    _get_feat_extract_output_lengths,
-)
+from vllm.transformers_utils.processors.kimi_audio import KimiAudioProcessor
 from vllm.v1.sample.metadata import SamplingMetadata
 
 # Kimi-Audio constants
 KIMIA_WHISPER_SUBFOLDER = "whisper-large-v3"
+
+
+def _get_feat_extract_output_lengths(input_lengths: torch.Tensor) -> torch.Tensor:
+    """Compute output lengths after Whisper feature extraction.
+
+    Whisper processes audio through multiple conv layers with stride=2,
+    producing 13 output features per 100 input samples.
+    """
+    input_lengths_leave = input_lengths % 100
+    feat_lengths = (input_lengths_leave - 1) // 2 + 1
+    output_lengths = (
+        ((feat_lengths - 1) // 2 + 1 - 1) // 2 + 1 + (input_lengths // 100) * 13
+    )
+    return output_lengths
 
 
 class KimiAudioWhisperEncoder(WhisperEncoder):
