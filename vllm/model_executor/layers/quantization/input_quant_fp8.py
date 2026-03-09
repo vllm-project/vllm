@@ -165,6 +165,16 @@ class QuantFP8(CustomOp):
         # Fallback to CUDA implementation
         return self.forward_cuda(x, scale, scale_ub)
 
+    def forward_xpu(
+        self,
+        x: torch.Tensor,
+        scale: torch.Tensor | None = None,
+        scale_ub: torch.Tensor | None = None,
+        use_triton: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        # XPU currently only supports native implementation.
+        return self.forward_cuda(x, scale, scale_ub, use_triton)
+
     def forward_native(
         self,
         x: torch.Tensor,
