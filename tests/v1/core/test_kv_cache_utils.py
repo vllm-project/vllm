@@ -24,6 +24,8 @@ from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     FreeKVCacheBlockQueue,
     KVCacheBlock,
+    _merge_layers_from_attn_grouping,
+    _split_layers_from_attn_grouping,
     estimate_max_model_len,
     generate_block_hash_extra_keys,
     generate_scheduler_kv_cache_config,
@@ -2101,6 +2103,80 @@ def test_unify_hybrid_kv_cache_specs():
 
     with pytest.raises(ValueError):
         kv_cache_utils.unify_hybrid_kv_cache_specs(kv_cache_spec)
+
+
+def test_merge_layers_from_attn_grouping():
+    attn_group_size = 2
+
+    hybrid_kv_cache_specs = {
+        "layer_1": new_mamba_spec(),
+        "layer_2": new_kv_cache_spec(head_size=32),
+        "layer_3": new_kv_cache_spec(head_size=32),
+    }
+    merged_kv_cache_specs = _merge_layers_from_attn_grouping(
+        attn_group_size, hybrid_kv_cache_specs
+    )
+    assert merged_kv_cache_specs == {
+        "layer_1": new_mamba_spec(),
+        "layer_2+layer_3": new_kv_cache_spec(head_size=32, group_size=2),
+    }
+
+    hybrid_kv_cache_specs = {
+        "layer_1": new_mamba_spec(),
+        "layer_2": new_kv_cache_spec(head_size=32),
+        "layer_3": new_kv_cache_spec(head_size=32),
+        "layer_4": new_kv_cache_spec(head_size=32),
+    }
+    merged_kv_cache_specs = _merge_layers_from_attn_grouping(
+        attn_group_size, hybrid_kv_cache_specs
+    )
+    assert merged_kv_cache_specs == {
+        "layer_1": new_mamba_spec(),
+        "layer_2+layer_3": new_kv_cache_spec(head_size=32, group_size=2),
+        "layer_4": new_kv_cache_spec(head_size=32, group_size=2),
+    }
+
+
+def test_split_layers_from_attn_grouping():
+    attn_group_size = 2
+    expected_page_size = new_mamba_spec().page_size_bytes
+
+    kv_cache_config = KVCacheConfig(
+        num_blocks=20,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=expected_page_size * 20,
+                shared_by=["layer_1", "layer_2+layer_3"],
+            ),
+        ],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["layer_1"], new_mamba_spec()),
+            KVCacheGroupSpec(
+                ["layer_2+layer_3"],
+                new_kv_cache_spec(head_size=32, group_size=2),
+            ),
+        ],
+    )
+    split_kv_cache_config = _split_layers_from_attn_grouping(
+        attn_group_size, kv_cache_config
+    )
+
+    assert split_kv_cache_config == KVCacheConfig(
+        num_blocks=20,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=expected_page_size * 20,
+                shared_by=["layer_1", "layer_2", "layer_3"],
+            ),
+        ],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["layer_1"], new_mamba_spec()),
+            KVCacheGroupSpec(
+                ["layer_2", "layer_3"],
+                new_kv_cache_spec(head_size=32, group_size=2),
+            ),
+        ],
+    )
 
 
 def test_get_kv_cache_configs_with_mamba():
