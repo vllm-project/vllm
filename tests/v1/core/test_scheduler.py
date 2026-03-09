@@ -3682,12 +3682,52 @@ def test_remote_kv_promotion_keeps_fcfs_with_fsm_prefix():
 
     assert output.scheduled_new_reqs
     assert output.scheduled_new_reqs[0].req_id == req_fsm_1.request_id
-    waiting_req_ids = [req.request_id for req in scheduler.waiting]
+    waiting_req_ids = [
+        req.request_id
+        for req in list(scheduler.skipped_waiting) + list(scheduler.waiting)
+    ]
     assert waiting_req_ids == [
         req_fsm_2.request_id,
         req_remote.request_id,
         req_tail.request_id,
     ]
+
+
+def test_fcfs_mixed_skipped_waiting_types_keep_order():
+    scheduler = create_scheduler(max_num_batched_tokens=20)
+    scheduler._update_waiting_for_remote_kv = Mock()
+
+    mk_req = lambda req_id, num_tokens=1: create_requests(  # noqa: E731
+        num_requests=1, num_tokens=num_tokens, req_ids=[req_id]
+    )[0]
+    req_fsm, req_remote, req_stream = mk_req("fsm"), mk_req("remote"), mk_req("stream")
+    req_regular, req_tail = mk_req("regular", 20), mk_req("tail")
+    req_fsm.status = RequestStatus.WAITING_FOR_FSM
+    req_fsm.structured_output_request = Mock(grammar=None)
+    req_remote.status = RequestStatus.WAITING_FOR_REMOTE_KVS
+    req_stream.status = RequestStatus.WAITING_FOR_STREAMING_REQ
+
+    for req in (req_fsm, req_remote, req_stream, req_regular, req_tail):
+        scheduler.add_request(req)
+    scheduler.schedule()
+    assert list(scheduler.skipped_waiting) == [req_fsm, req_remote, req_stream]
+
+    scheduler.finish_requests(req_regular.request_id, RequestStatus.FINISHED_ABORTED)
+    assert not scheduler.running
+
+    req_fsm.structured_output_request = Mock(grammar=object())
+    scheduler.finished_recving_kv_req_ids.add(req_remote.request_id)
+    req_stream.status = RequestStatus.WAITING
+
+    second_output = scheduler.schedule()
+    expected_order = [
+        req_fsm.request_id,
+        req_remote.request_id,
+        req_stream.request_id,
+        req_tail.request_id,
+    ]
+    assert [req.req_id for req in second_output.scheduled_new_reqs] == expected_order
+    assert [req.request_id for req in scheduler.running] == expected_order
     scheduler._update_waiting_for_remote_kv.assert_called_once_with(req_remote)
 
 
