@@ -6,9 +6,11 @@ from collections.abc import Callable
 import torch
 
 from vllm.distributed.eplb.eplb_state import EplbLayerState
+from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe.router.fused_moe_router import (
     FusedMoERouter,
 )
+from vllm.model_executor.layers.fused_moe.utils import collect_expert_usage_histogram
 from vllm.platforms import current_platform
 
 if current_platform.is_cuda_alike():
@@ -114,6 +116,7 @@ class BaseRouter(FusedMoERouter):
         # TODO(bnell): Once the MK is constructed at layer init time, we
         # can make this a plain value instead of a callback.
         indices_type_getter: Callable[[], torch.dtype | None] | None = None,
+        layer_index: int = 0,
     ):
         """
         Note: the indices dtype might not be available at router construction
@@ -127,6 +130,7 @@ class BaseRouter(FusedMoERouter):
         self.eplb_state = eplb_state
         self.enable_eplb = enable_eplb
         self.indices_type_getter = indices_type_getter
+        self.layer_index = layer_index
         self.capture_fn: Callable[[torch.Tensor], None] | None = None
 
     def set_capture_fn(self, capture_fn: Callable[[torch.Tensor], None] | None) -> None:
@@ -245,5 +249,12 @@ class BaseRouter(FusedMoERouter):
 
         # Step 5: Convert indices dtype
         topk_ids = self._convert_indices_dtype(topk_ids, indices_type)
+
+        # Collect expert usage.
+        expert_usage_histogram = get_forward_context().expert_usage_histogram
+        if expert_usage_histogram is not None:
+            collect_expert_usage_histogram(
+                topk_ids, expert_usage_histogram[self.layer_index]
+            )
 
         return topk_weights, topk_ids

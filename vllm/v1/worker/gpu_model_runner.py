@@ -730,24 +730,6 @@ class GPUModelRunner(
                 device=self.device,
             )
 
-        self.expert_usage_histogram: torch.Tensor | None = None
-
-        if envs.VLLM_COLLECT_EXPERT_USAGE_HISTOGRAM:
-            self.expert_histogram_iter = 0
-
-            logger.warning_once(
-                "Collecting expert routing histogram per layer, "
-                "this can affect performance negatively"
-            )
-
-            self.expert_usage_histogram = torch.zeros(
-                model_config.get_total_num_moe_layers(),
-                model_config.get_num_experts()
-                + self.parallel_config.eplb_config.num_redundant_experts,
-                dtype=torch.int32,
-                device=self.device,
-            )
-
         # Layer pairings for cross-layer KV sharing.
         # If an Attention layer `layer_name` is in the keys of this dict, it
         # means this layer will perform attention using the keys and values
@@ -2879,7 +2861,6 @@ class GPUModelRunner(
     def expert_logging(self) -> tuple[torch.Tensor | None, torch.Tensor | None]:
         if not envs.VLLM_COLLECT_EXPERT_USAGE_HISTOGRAM:
             return None, None
-
         self.expert_histogram_iter += 1
 
         if self.expert_histogram_iter < envs.VLLM_EXPERT_USAGE_HISTOGRAM_SAVE_INTERVAL:
@@ -2888,10 +2869,7 @@ class GPUModelRunner(
         assert self.expert_usage_histogram is not None
         expert_usage_histogram_cpu: torch.Tensor | None = None
         per_ep_rank_tokens_histogram_cpu: torch.Tensor | None = None
-        should_all_reduce = get_tp_group().world_size > 1 and (
-            envs.VLLM_ALL2ALL_BACKEND == "deepep_low_latency"
-            or envs.VLLM_ALL2ALL_BACKEND == "deepep_high_throughput"
-        )
+        should_all_reduce = get_tp_group().world_size > 1 
 
         # Collect expert selection stats per rank.
         hist_shape = self.expert_usage_histogram.shape
