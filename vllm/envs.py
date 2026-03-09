@@ -1635,6 +1635,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS": lambda: bool(
         int(os.getenv("VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS", "0"))
     ),
+    # Timeout in ms for the engine core step.
+    # If the engine core step takes longer than this, it will timeout.
+    "VLLM_ENGINE_STEP_TIMEOUT_MS": lambda: int(
+        os.getenv("VLLM_ENGINE_STEP_TIMEOUT_MS", "10000")
+    ),
 }
 
 

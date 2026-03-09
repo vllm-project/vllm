@@ -7,7 +7,7 @@ import threading
 import time
 from collections import defaultdict, deque
 from collections.abc import Callable, Generator
-from concurrent.futures import Future
+from concurrent.futures import Future, TimeoutError as FutureTimeoutError
 from contextlib import ExitStack, contextmanager
 from enum import IntEnum
 from functools import partial
@@ -492,16 +492,25 @@ class EngineCore:
 
         # Block until the next result is available.
         future, scheduler_output, exec_model_fut = batch_queue.pop()
-        with (
-            self.log_error_detail(scheduler_output),
-            self.log_iteration_details(scheduler_output),
-        ):
-            model_output = future.result()
-            if model_output is None:
-                # None from sample_tokens() implies that the original execute_model()
-                # call failed - raise that exception.
-                exec_model_fut.result()
-                raise RuntimeError("unexpected error")
+
+        timeout = envs.VLLM_ENGINE_STEP_TIMEOUT_MS / 1000.0
+        try:
+            with (
+                self.log_error_detail(scheduler_output),
+                self.log_iteration_details(scheduler_output),
+            ):
+                model_output = future.result(timeout=timeout)
+                if model_output is None:
+                    # None from sample_tokens() implies that the original execute_model()
+                    # call failed - raise that exception.
+                    exec_model_fut.result()
+                    raise RuntimeError("unexpected error")
+        except FutureTimeoutError:
+            logger.error(
+                "Engine step timed out after %.2fs. "
+                "This might indicate a stuck GPU or deadlock.", timeout
+            )
+            raise
 
         # Before processing the model output, process any aborts that happened
         # during the model execution.
