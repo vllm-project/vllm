@@ -21,7 +21,7 @@ router = APIRouter()
 
 
 def pooling(request: Request) -> OpenAIServingPooling | None:
-    return request.app.state.openai_serving_pooling
+    return request.app.state.serving_pooling
 
 
 @router.post(
@@ -41,10 +41,8 @@ async def create_pooling(request: PoolingRequest, raw_request: Request):
         return base_server.create_error_response(
             message="The model does not support Pooling API"
         )
-    try:
-        generator = await handler.create_pooling(request, raw_request)
-    except Exception as e:
-        generator = handler.create_error_response(e)
+
+    generator = await handler.create_pooling(request, raw_request)
 
     if isinstance(generator, ErrorResponse):
         return JSONResponse(

@@ -30,13 +30,10 @@ SEPARATE_GROUPS = [
     # v0 related
     "vllm/lora",
     "vllm/model_executor",
-    # v1 related
-    "vllm/v1/kv_offload",
 ]
 
 # TODO(woosuk): Include the code from Megatron and HuggingFace.
 EXCLUDE = [
-    "vllm/model_executor/parallel_utils",
     "vllm/model_executor/models",
     "vllm/model_executor/layers/fla/ops",
     # Ignore triton kernels in ops.
@@ -44,10 +41,7 @@ EXCLUDE = [
     # TODO: Remove these entries after fixing mypy errors.
     "vllm/benchmarks",
     "vllm/config",
-    "vllm/device_allocator",
-    "vllm/profiler",
     "vllm/reasoning",
-    "vllm/tool_parser",
 ]
 
 

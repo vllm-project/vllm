@@ -489,11 +489,11 @@ def invoke_moe_batched_triton_kernel(
     )
 
 
-class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
+class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
     """
     A reference prepare/finalize class that reorganizes the tokens into
     expert batched format, i.e. E x max_num_tokens x K.  This is the format
-    that the PPLX dispatch/combine kernels use.
+    that the batched dispatch/combine kernels use.
     """
 
     def __init__(
@@ -645,10 +645,10 @@ class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         )
 
 
-class NaiveBatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
+class NaiveBatchedExperts(mk.FusedMoEExpertsModular):
     """
     A reference MoE expert class that operates on expert batched format,
-    i.e. E x max_num_tokens x K.  This is the format that the pplx
+    i.e. E x max_num_tokens x K.  This is the format that the batched
     dispatch/combine kernels use.
     """
 
@@ -877,10 +877,10 @@ def batched_moe_kernel_quantize_input(
         return A_q, A_q_scale
 
 
-class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
+class BatchedTritonExperts(mk.FusedMoEExpertsModular):
     """
     A Triton based MoE expert class that operates on expert batched format,
-    i.e. E x max_num_tokens x K.  This is the format that the pplx
+    i.e. E x max_num_tokens x K.  This is the format that the batched
     dispatch/combine kernels use.
     """
 
@@ -912,7 +912,7 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:
-        return False
+        return True
 
     @staticmethod
     def _supports_quant_scheme(

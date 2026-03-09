@@ -85,7 +85,7 @@ class CPUWorker(Worker):
             self.local_omp_cpuid = omp_cpuids_list[self.rank]
 
         if self.local_omp_cpuid != "nobind":
-            ret = torch.ops._C_utils.init_cpu_threads_env(self.local_omp_cpuid)
+            ret = torch.ops._C.init_cpu_threads_env(self.local_omp_cpuid)
             if ret:
                 logger.info(ret)
 
@@ -118,11 +118,12 @@ class CPUWorker(Worker):
     def determine_available_memory(self) -> int:
         return self.cache_config.cpu_kvcache_space_bytes or 0
 
-    def compile_or_warm_up_model(self) -> None:
+    def compile_or_warm_up_model(self) -> float:
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
         set_random_seed(self.model_config.seed)
         self.model_runner.warming_up_model()
+        return self.compilation_config.compilation_time
 
     def _get_autobind_cpu_ids(
         self, cpu_selector: Callable[[list[LogicalCPUInfo]], list[LogicalCPUInfo]]
@@ -143,12 +144,10 @@ class CPUWorker(Worker):
         allowed_numa_nodes, logical_cpu_list = (
             CpuPlatform.get_allowed_cpu_core_node_list()
         )
-        assert (
-            len(allowed_numa_nodes) >= self.parallel_config.world_size
-            or sim_multi_numa_nodes
-        ), (
+        local_world_size = self.parallel_config.local_world_size
+        assert len(allowed_numa_nodes) >= local_world_size or sim_multi_numa_nodes, (
             f"Not enough allowed NUMA nodes to bind threads of "
-            f"{self.parallel_config.world_size} CPUWorkers. "
+            f"{local_world_size} local CPUWorkers. "
             f"Allowed NUMA nodes are {allowed_numa_nodes}. "
             "Please try to bind threads manually."
         )

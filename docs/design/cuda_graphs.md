@@ -98,7 +98,7 @@ The goal of this structure is to uniquely identify a (padded) batch with minimal
 
 ### `CudagraphDispatcher`
 
-The [CudagraphDispatcher][vllm.v1.cudagraph_dispatcher.CudagraphDispatcher] takes responsibility for maintaining two sets of valid dispatching keys, one set for `FULL` runtime mode and one set for `PIECEWISE` runtime mode, and dispatches the correct runtime mode and the dispatching keys before executing the model's forwards. It will take in the initial key (a rough batch_descriptor for the padded input) and return the selected runtime mode and the final batch_descriptor, then tell the CUDAGraphWarpper instances that decision through forward contexts. Notice that `CudagraphDispatcher` is the only source of truth for available CUDA Graph keys and `CUDAGraphWrapper` instances can blindly trust the forward context on what CUDA Graphs to dispatch to. This lets us simplify the wrapper code and centralize the logic in the dispatcher.
+The [CudagraphDispatcher][vllm.v1.cudagraph_dispatcher.CudagraphDispatcher] takes responsibility for maintaining two sets of valid dispatching keys, one set for `FULL` runtime mode and one set for `PIECEWISE` runtime mode, and dispatches the correct runtime mode and the dispatching keys before executing the model's forwards. It will take in the initial key (a rough batch_descriptor for the padded input) and return the selected runtime mode and the final batch_descriptor, then tell the CUDAGraphWrapper instances that decision through forward contexts. Notice that `CudagraphDispatcher` is the only source of truth for available CUDA Graph keys and `CUDAGraphWrapper` instances can blindly trust the forward context on what CUDA Graphs to dispatch to. This lets us simplify the wrapper code and centralize the logic in the dispatcher.
 
 The dispatching keys are initialized through the dispatcher's `initialize_cudagraph_keys` method, which is called by the gpu_model_runner after all possible attention backends are initialized. This is where we can get much fancier in the future and “prepare” all kinds of CUDA Graphs combinations. For now, we just append available keys based on the valid combos of `decode_mode`/`mixed_mode` of `cudagraph_mode` and `cudagraph_capture_sizes` in the compilation config.
 
@@ -174,17 +174,18 @@ Suppose we have hybrid attention backends (e.g., in mamba mixer models). In that
 The following table lists backends that support full CUDA Graphs at the time of writing.
 
 | Attention Backend | cudagraph_support | Comments |
-|:---|:---|:---|
+| :---------------- | :---------------- | :------- |
 | FlashAttention v2 | `UNIFORM_BATCH` | Actually `ALWAYS` but workaround to fallback to `FULL_AND_PIECEWISE` for performance reason |
 | FlashAttention v3 | `ALWAYS` | has unified routine for both batches, so `FULL` mode is good |
 | Triton Attention | `ALWAYS` | prefer `FULL_AND_PIECEWISE` since it has different kernels for prefill/mixed and pure decode batches |
-| AITER FlashAttention | `UNIFORM_BATCH`| |
+| AITER FlashAttention | `UNIFORM_BATCH` | |
 | FlashInfer | `UNIFORM_SINGLE_TOKEN_DECODE` | Will be set to `UNIFORM_BATCH` when using TRTLLM attention on Blackwell |
 | FlashMLA | `UNIFORM_BATCH` | |
 | FlashInferMLA | `UNIFORM_BATCH` | |
+| FlashInferMLASparse | `UNIFORM_BATCH` | |
 | AITER MLA | `UNIFORM_SINGLE_TOKEN_DECODE` | |
 | CUTLASS MLA | `UNIFORM_SINGLE_TOKEN_DECODE` | |
-| Mamba attention| `UNIFORM_SINGLE_TOKEN_DECODE` | |
+| Mamba attention | `UNIFORM_SINGLE_TOKEN_DECODE` | |
 
 Unlisted backends are all declared as `NEVER`.
 

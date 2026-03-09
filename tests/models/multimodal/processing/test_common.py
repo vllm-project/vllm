@@ -23,7 +23,7 @@ from vllm.multimodal.cache import MultiModalProcessorOnlyCache
 from vllm.multimodal.inputs import MultiModalInputs, batched_tensors_equal
 from vllm.multimodal.processing import BaseMultiModalProcessor, InputProcessingContext
 from vllm.tokenizers import TokenizerLike, cached_tokenizer_from_config
-from vllm.tokenizers.mistral import MistralTokenizer
+from vllm.utils.mistral import is_mistral_tokenizer
 
 from ....multimodal.utils import random_audio, random_image, random_video
 from ...registry import (
@@ -33,32 +33,9 @@ from ...registry import (
 )
 
 
-def glm4_1v_patch_mm_data(mm_data: MultiModalDataDict) -> MultiModalDataDict:
+def add_video_metadata(mm_data: MultiModalDataDict) -> MultiModalDataDict:
     """
-    Patch the multimodal data for GLM4.1V model.
-    """
-    # Ensure video metadata is included
-    if "video" in mm_data:
-        # GLM4.1V doesn't support multiple videos
-        video = mm_data["video"]
-        num_frames = len(video)
-        mm_data["video"] = (
-            video,
-            {
-                "total_num_frames": num_frames,
-                "fps": num_frames,
-                "duration": 1,
-                "frames_indices": [i for i in range(num_frames)],
-                "video_backend": "opencv",
-                "do_sample_frames": True,
-            },
-        )
-    return mm_data
-
-
-def qwen3_vl_patch_mm_data(mm_data: MultiModalDataDict) -> MultiModalDataDict:
-    """
-    Patch the multimodal data for Qwen3-VL model.
+    Add metadata to video mm_data
     """
 
     def create_metadata(frames: np.ndarray):
@@ -119,16 +96,7 @@ _IGNORE_MM_KEYS = {
 }
 
 MM_DATA_PATCHES = {
-    # Ernie4.5-VL, GLM4.1V and Qwen3-VL requires video metadata
-    "ernie4_5_moe_vl": qwen3_vl_patch_mm_data,
-    "glm4v": glm4_1v_patch_mm_data,
-    "glm4v_moe": glm4_1v_patch_mm_data,
-    "glm_ocr": glm4_1v_patch_mm_data,
     "glmasr": glmasr_patch_mm_data,
-    "interns1_pro": qwen3_vl_patch_mm_data,
-    "molmo2": qwen3_vl_patch_mm_data,
-    "qwen3_vl": qwen3_vl_patch_mm_data,
-    "qwen3_vl_moe": qwen3_vl_patch_mm_data,
 }
 
 
@@ -174,6 +142,9 @@ def get_text_token_prompts(
     tokenizer: TokenizerLike = processor.info.get_tokenizer()
     model_config = processor.info.ctx.model_config
 
+    if processor.info.data_parser.video_needs_metadata:
+        mm_data = add_video_metadata(mm_data)
+
     model_type = model_config.hf_config.model_type
     if model_type in MM_DATA_PATCHES:
         mm_data = MM_DATA_PATCHES[model_type](mm_data)
@@ -183,7 +154,7 @@ def get_text_token_prompts(
 
     text_prompt: str | None
     token_prompt: list[int]
-    if isinstance(tokenizer, MistralTokenizer):
+    if is_mistral_tokenizer(tokenizer):
         # ChatCompletionRequest only supports ImageChunk natively;
         # for other modalities (e.g. audio), fall back to the model's
         # own dummy inputs builder which knows the right placeholders.
@@ -195,6 +166,7 @@ def get_text_token_prompts(
             inputs = dummy_inputs.get_dummy_processor_inputs(
                 model_config.max_model_len,
                 mm_counts,
+                mm_options={},
             )
             text_prompt = None
             token_prompt = (
@@ -224,6 +196,7 @@ def get_text_token_prompts(
         inputs = dummy_inputs.get_dummy_processor_inputs(
             model_config.max_model_len,
             mm_counts,
+            mm_options={},
         )
         assert isinstance(inputs.prompt, str)
 
@@ -331,10 +304,12 @@ def _test_processing_correctness(
 
     rng = np.random.RandomState(0)
 
+    # GLM-ASR requires a minimum audio length of 70ms
+    min_audio_len = 512 if model_config.hf_config.model_type != "glmasr" else 1120
     input_to_hit = {
         "image": Image.new("RGB", size=(128, 128)),
         "video": np.zeros((4, 128, 128, 3), dtype=np.uint8),
-        "audio": (np.zeros((512,)), 16000),
+        "audio": (np.zeros((min_audio_len,)), 16000),
         "vision_chunk": {"type": "image", "image": Image.new("RGB", size=(128, 128))},
     }
     input_factory = {
@@ -342,7 +317,13 @@ def _test_processing_correctness(
         "video": partial(
             random_video, rng, min_frames=2, max_frames=16, min_wh=128, max_wh=256
         ),
-        "audio": partial(random_audio, rng, min_len=512, max_len=1024, sr=16000),
+        "audio": partial(
+            random_audio,
+            rng,
+            min_len=min_audio_len,
+            max_len=min_audio_len + 512,
+            sr=16000,
+        ),
         "vision_chunk": partial(
             random_vision_chunk, rng, min_wh=128, max_wh=256, min_frames=1, max_frames=1
         ),
@@ -387,13 +368,13 @@ def _test_processing_correctness_one(
     mm_items = baseline_processor.info.parse_mm_data(mm_data)
     ignore_mm_keys = _IGNORE_MM_KEYS.get(model_type, set[str]())
 
-    baseline_tokenized_result = baseline_processor.apply(
+    baseline_tokenized_result = baseline_processor(
         token_prompt,
         mm_items=mm_items,
         hf_processor_mm_kwargs={},
     )
 
-    cached_tokenized_result = cached_processor.apply(
+    cached_tokenized_result = cached_processor(
         token_prompt,
         mm_items=mm_items,
         hf_processor_mm_kwargs={},
@@ -407,12 +388,12 @@ def _test_processing_correctness_one(
     )
 
     if text_prompt is not None:
-        baseline_text_result = baseline_processor.apply(
+        baseline_text_result = baseline_processor(
             text_prompt,
             mm_items=mm_items,
             hf_processor_mm_kwargs={},
         )
-        cached_text_result = cached_processor.apply(
+        cached_text_result = cached_processor(
             text_prompt,
             mm_items=mm_items,
             hf_processor_mm_kwargs={},
@@ -450,8 +431,6 @@ def test_processing_correctness(
     num_batches: int,
     simplify_rate: float,
 ):
-    if model_id == "allendou/Fun-ASR-Nano-2512-vllm":
-        pytest.skip("Cached audio `input_features` not matched. Fix later.")
     if model_id == "google/gemma-3n-E2B-it":
         pytest.skip("Fix later")
     if model_id == "OpenGVLab/InternVL2-2B":
@@ -489,8 +468,9 @@ def _assert_inputs_equal(
     if ignore_mm_keys is None:
         ignore_mm_keys = set()
 
-    a_rest = {k: v for k, v in a.items() if k != "mm_kwargs"}
-    b_rest = {k: v for k, v in b.items() if k != "mm_kwargs"}
+    ignore_prompt_keys = ("prompt", "mm_kwargs")
+    a_rest = {k: v for k, v in a.items() if k not in ignore_prompt_keys}
+    b_rest = {k: v for k, v in b.items() if k not in ignore_prompt_keys}
 
     assert a_rest == b_rest, msg
 

@@ -15,11 +15,11 @@ DTYPE_FILTER="${DTYPE_FILTER:-}"
 check_gpus() {
   if command -v nvidia-smi; then
     # check the number of GPUs and GPU type.
-    declare -g gpu_count=$(nvidia-smi --list-gpus | wc -l)
+    declare -g gpu_count=$(nvidia-smi --list-gpus | grep -c . || true)
   elif command -v amd-smi; then
-    declare -g gpu_count=$(amd-smi list | grep 'GPU' | wc -l)
+    declare -g gpu_count=$(amd-smi list | grep -c 'GPU' || true)
   elif command -v hl-smi; then
-    declare -g gpu_count=$(hl-smi --list | grep -i "Module ID" | wc -l)
+    declare -g gpu_count=$(hl-smi --list | grep -ci "Module ID" || true)
   fi
 
   if [[ $gpu_count -gt 0 ]]; then
@@ -47,7 +47,7 @@ check_cpus() {
   declare -g numa_count=$(lscpu | grep "NUMA node(s):" | awk '{print $3}')
   if [[ $numa_count -gt 0 ]]; then
     echo "NUMA found."
-    echo $numa_count
+    echo "$numa_count"
   else
     echo "Need at least 1 NUMA to run benchmarking."
     exit 1
@@ -434,7 +434,7 @@ run_serving_tests() {
 
       # iterate over different max_concurrency
       for max_concurrency in $max_concurrency_list; do
-        new_test_name=$test_name"_qps_"$qps"_concurrency_"$max_concurrency
+        new_test_name="${test_name}_qps_${qps}_concurrency_${max_concurrency}"
         echo " new test name $new_test_name"
         # pass the tensor parallel size, the compilation mode, and the optimization
         # level to the client so that they can be used on the benchmark dashboard
@@ -471,7 +471,7 @@ run_serving_tests() {
 
     # clean up
     if [[ "${DRY_RUN:-0}" != "1" ]]; then
-      kill -9 $server_pid
+      kill -9 "$server_pid"
       kill_gpu_processes
     fi
   done
