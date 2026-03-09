@@ -1204,17 +1204,26 @@ class FusedMoE(CustomOp):
             # Determine per-tensor weight scale patterns based on variant
             # Use the dedicated method instead of brittle string matching
             uses_weight_scale_2 = self.quant_method.uses_weight_scale_2_pattern()
+            quant_method = getattr(param, "quant_method", None)
 
             # Call _load_per_tensor_weight_scale() to load per-tensor (scalar)
             # weights scales.
             # Input scales are always per-tensor.
             # Weight scales: FP4 uses "weight_scale_2" and FP8 uses
             # "weight_scale" for per-tensor scales.
+            # NOTE: ModelOpt MXFP8 MoE uses block scales in weight_scale
+            # tensors (quant_method=BLOCK), so those must not be treated
+            # as per-tensor scalars here.
+            is_block_weight_scale = (
+                "weight_scale" in weight_name
+                and quant_method == FusedMoeWeightScaleSupported.BLOCK.value
+            )
             is_per_tensor = (
                 "weight_scale_2" in weight_name
                 if uses_weight_scale_2
                 else "weight_scale" in weight_name
             ) or "input_scale" in weight_name
+            is_per_tensor = is_per_tensor and not is_block_weight_scale
             if is_per_tensor:
                 self._load_per_tensor_weight_scale(
                     shard_id=shard_id,
