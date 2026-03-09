@@ -853,7 +853,7 @@ class SpecDecodeBaseProposer:
         """
         # Precompute get_token_id for when there is no valid next token
         num_reqs = gpu_input_batch.num_reqs
-        seq_lens_list = seq_lens[:num_reqs].tolist()
+        seq_lens_list = seq_lens_cpu[:num_reqs].tolist()
         self.backup_next_token_ids.np[:num_reqs] = np.array(
             [
                 requests[gpu_input_batch.req_ids[i]].get_token_id(seq_lens_list[i])
