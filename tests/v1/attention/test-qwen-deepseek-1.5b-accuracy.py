@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 Accuracy evaluation tests for small DeepSeek model family in vLLM.
 
@@ -25,11 +27,11 @@ Requirements:
 
 from __future__ import annotations
 
+import contextlib
 import gc
 import os
 import sys
 from dataclasses import dataclass
-from typing import Dict, Optional
 
 # ---------------------------------------------------------------------------
 # CRITICAL: set multiprocessing start method BEFORE any CUDA-touching import.
@@ -49,6 +51,7 @@ import pytest
 try:
     from ...evals.gsm8k.gsm8k_eval import evaluate_gsm8k
     from ...utils import RemoteOpenAIServer
+
     HAS_GSM8K_HARNESS = True
 except ImportError as e:
     print(f"WARNING: Failed to import GSM8K harness: {e}")
@@ -62,12 +65,14 @@ try:
 except ImportError:
     try:
         import subprocess
+
         subprocess.check_call([sys.executable, "-m", "pip", "install", "lm_eval"])
     except Exception:
         pass
 
 try:
     from lm_eval import evaluator
+
     HAS_LM_EVAL = True
 except ImportError:
     HAS_LM_EVAL = False
@@ -82,6 +87,7 @@ except ImportError:
 # ---------------------------------------------------------------------------
 # GPU availability detection
 # ---------------------------------------------------------------------------
+
 
 def _cuda_device_count() -> int:
     """Return number of visible CUDA GPUs WITHOUT initialising the CUDA context.
@@ -102,12 +108,17 @@ def _cuda_device_count() -> int:
     # 2. Query nvidia-smi without initialising CUDA.
     try:
         import subprocess
+
         result = subprocess.run(
             ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
         if result.returncode == 0:
-            lines = [l for l in result.stdout.strip().splitlines() if l.strip()]
+            lines = [
+                line for line in result.stdout.strip().splitlines() if line.strip()
+            ]
             return len(lines)
     except Exception:
         pass
@@ -124,32 +135,38 @@ HAS_CUDA = _NUM_GPUS > 0
 # We expose all GPUs and pass tensor_parallel_size explicitly so large models
 # (7B) can use multi-GPU tensor parallelism when needed.
 if not os.environ.get("CUDA_VISIBLE_DEVICES"):
-    os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(i) for i in range(max(_NUM_GPUS, 1)))
+    os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(
+        str(i) for i in range(max(_NUM_GPUS, 1))
+    )
 
 # ---------------------------------------------------------------------------
 # Marks
 # ---------------------------------------------------------------------------
 requires_gpu = pytest.mark.skipif(
     not (HAS_VLLM and HAS_LM_EVAL and HAS_CUDA and HAS_GSM8K_HARNESS),
-    reason="vllm, lm_eval, and gsm8k_harness must be installed and at least one CUDA GPU must be visible",
+    reason=(
+        "vllm, lm_eval, and gsm8k_harness must be installed and at "
+        "least one CUDA GPU must be visible"
+    ),
 )
 
 # ---------------------------------------------------------------------------
 # Test configuration
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class ModelConfig:
     model_id: str
     # Minimum acceptable scores per (task, metric) pair.
     # These are conservative lower bounds; a fully-loaded model should exceed them.
-    min_scores: Dict[str, float]
+    min_scores: dict[str, float]
     # Some tiny models need a higher max_model_len to avoid OOM on long contexts
     max_model_len: int = 4096
     # Reasoning models benefit from stripping chain-of-thought before scoring
-    think_end_token: Optional[str] = "<|end_of_thought|>"
+    think_end_token: str | None = "<|end_of_thought|>"
     # How many GPUs to shard across; None = auto-select based on _NUM_GPUS
-    tensor_parallel_size: Optional[int] = None
+    tensor_parallel_size: int | None = None
 
     def get_tensor_parallel_size(self) -> int:
         """Return the tensor parallel size to use, defaulting to all available GPUs."""
@@ -173,11 +190,14 @@ SMALL_DEEPSEEK_MODELS = [
 ]
 
 # dtype → (vllm_dtype_arg, quantization_arg)
-PRECISION_VARIANTS: Dict[str, tuple[str, Optional[str]]] = {
+PRECISION_VARIANTS: dict[str, tuple[str, str | None]] = {
     "bfloat16": ("bfloat16", None),
-    "float16":  ("float16",  None),
-    "fp8":      ("bfloat16", "fp8"),   # FP8 dynamic quant; weights in BF16, activations in FP8
-    "auto":     ("auto",     None),
+    "float16": ("float16", None),
+    "fp8": (
+        "bfloat16",
+        "fp8",
+    ),  # FP8 dynamic quant; weights in BF16, activations in FP8
+    "auto": ("auto", None),
 }
 
 # Evaluation sample limit – keeps CI fast while still being statistically meaningful
@@ -187,10 +207,11 @@ EVAL_LIMIT = 250
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _build_vllm_llm(
     model_id: str,
     dtype: str,
-    quantization: Optional[str],
+    quantization: str | None,
     max_model_len: int,
     tensor_parallel_size: int = 1,
 ) -> LLM:
@@ -218,7 +239,7 @@ def _build_vllm_llm(
 def _build_lm_eval_model_args(
     model_id: str,
     dtype: str,
-    quantization: Optional[str],
+    quantization: str | None,
     max_model_len: int,
     tensor_parallel_size: int = 1,
 ) -> str:
@@ -261,19 +282,18 @@ def _teardown_vllm(llm_obj) -> None:
         for attr in ("shutdown", "close", "stop", "abort"):
             fn = getattr(core, attr, None)
             if callable(fn):
-                try:
+                with contextlib.suppress(Exception):
                     fn()
-                except Exception:
-                    pass
                 break
         # vllm v0/v1 fallback: abort all requests then stop engine
-        for attr in ("abort_all_requests", "_stop_remote_worker_execution_loop"):
+        for attr in (
+            "abort_all_requests",
+            "_stop_remote_worker_execution_loop",
+        ):
             fn = getattr(engine, attr, None)
             if callable(fn):
-                try:
+                with contextlib.suppress(Exception):
                     fn()
-                except Exception:
-                    pass
 
     del llm_obj
     gc.collect()
@@ -283,20 +303,25 @@ def _teardown_vllm(llm_obj) -> None:
     # next test's worker spawn.
     try:
         import torch.distributed as dist
+
         if dist.is_available() and dist.is_initialized():
             dist.destroy_process_group()
     except Exception:
         pass
 
     try:
-        import torch
-        torch.cuda.empty_cache()
-        torch.cuda.synchronize()
+        from torch import cuda
+
+        cuda.empty_cache()
+        cuda.synchronize()
+        gc.collect()
     except Exception:
         pass
 
 
-def _run_gsm8k_eval(server_url: str, num_shots: int = 5, num_questions: int = 250) -> dict:
+def _run_gsm8k_eval(
+    server_url: str, num_shots: int = 5, num_questions: int = 250
+) -> dict:
     """
     Run GSM8K evaluation using vLLM's evaluate_gsm8k harness against a server.
 
@@ -347,7 +372,9 @@ def _run_lm_eval(
     import lm_eval.api.registry as _registry
 
     # Build the LM once for all tasks in this precision variant.
-    lm = _registry.get_model("vllm").create_from_arg_string(model_args, {"batch_size": "auto"})
+    lm = _registry.get_model("vllm").create_from_arg_string(
+        model_args, {"batch_size": "auto"}
+    )
 
     all_results: dict = {}
     try:
@@ -374,16 +401,22 @@ def _extract_score(results: dict, task: str, metric: str) -> float:
     for key, val in task_results.items():
         if metric in key:
             return float(val)
-    raise KeyError(f"Metric '{metric}' not found in task '{task}'. Available: {list(task_results)}")
+    raise KeyError(
+        f"Metric '{metric}' not found in task '{task}'. Available: {list(task_results)}"
+    )
 
 
 # ---------------------------------------------------------------------------
 # Parametrize matrix: (model_config, precision_label)
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture(
     params=[
-        pytest.param((model_cfg, precision), id=f"{model_cfg.model_id.split('/')[-1]}-{precision}")
+        pytest.param(
+            (model_cfg, precision),
+            id=f"{model_cfg.model_id.split('/')[-1]}-{precision}",
+        )
         for model_cfg in SMALL_DEEPSEEK_MODELS
         for precision in PRECISION_VARIANTS
     ]
@@ -395,6 +428,7 @@ def model_and_precision(request):
 # ---------------------------------------------------------------------------
 # Core accuracy test
 # ---------------------------------------------------------------------------
+
 
 @requires_gpu
 class TestDeepSeekSmallAccuracy:
@@ -424,7 +458,7 @@ class TestDeepSeekSmallAccuracy:
         failures = []
 
         # -- GSM8K (using vLLM harness with RemoteOpenAIServer) --
-        print(f"\n=== Running GSM8K with vLLM harness ===")
+        print("\n=== Running GSM8K with vLLM harness ===")
 
         # Build server arguments
         server_args = [
@@ -447,7 +481,9 @@ class TestDeepSeekSmallAccuracy:
             server_url = remote_server.url_for("v1")
             print(f"Server started at: {server_url}")
 
-            gsm8k_results = _run_gsm8k_eval(server_url, num_shots=5, num_questions=EVAL_LIMIT)
+            gsm8k_results = _run_gsm8k_eval(
+                server_url, num_shots=5, num_questions=EVAL_LIMIT
+            )
             gsm8k_score = gsm8k_results["accuracy"]
             threshold = model_cfg.min_scores["gsm8k_accuracy"]
 
@@ -462,7 +498,7 @@ class TestDeepSeekSmallAccuracy:
                 )
 
         # -- ARC Easy & HellaSwag (using lm-eval) --
-        print(f"\n=== Running arc_easy and hellaswag with lm-eval ===")
+        print("\n=== Running arc_easy and hellaswag with lm-eval ===")
         model_args = _build_lm_eval_model_args(
             model_id=model_cfg.model_id,
             dtype=dtype,
@@ -512,7 +548,7 @@ class TestDeepSeekSmallAccuracy:
             pytest.skip("Regression check only applies to fp8 variant")
 
         # -- BF16 baseline --
-        print(f"\n=== Running BF16 baseline for FP8 regression test ===")
+        print("\n=== Running BF16 baseline for FP8 regression test ===")
         bf16_server_args = [
             "--dtype=bfloat16",
             f"--max-model-len={model_cfg.max_model_len}",
@@ -528,12 +564,14 @@ class TestDeepSeekSmallAccuracy:
             max_wait_seconds=600,
         ) as remote_server:
             server_url = remote_server.url_for("v1")
-            bf16_results = _run_gsm8k_eval(server_url, num_shots=5, num_questions=EVAL_LIMIT)
+            bf16_results = _run_gsm8k_eval(
+                server_url, num_shots=5, num_questions=EVAL_LIMIT
+            )
             bf16_score = bf16_results["accuracy"]
             print(f"BF16 GSM8K accuracy: {bf16_score:.4f}")
 
         # -- FP8 --
-        print(f"\n=== Running FP8 for regression test ===")
+        print("\n=== Running FP8 for regression test ===")
         fp8_server_args = [
             "--dtype=bfloat16",
             "--quantization=fp8",
@@ -550,7 +588,9 @@ class TestDeepSeekSmallAccuracy:
             max_wait_seconds=600,
         ) as remote_server:
             server_url = remote_server.url_for("v1")
-            fp8_results = _run_gsm8k_eval(server_url, num_shots=5, num_questions=EVAL_LIMIT)
+            fp8_results = _run_gsm8k_eval(
+                server_url, num_shots=5, num_questions=EVAL_LIMIT
+            )
             fp8_score = fp8_results["accuracy"]
             print(f"FP8 GSM8K accuracy: {fp8_score:.4f}")
 
@@ -567,6 +607,7 @@ class TestDeepSeekSmallAccuracy:
 # ---------------------------------------------------------------------------
 # Lightweight sanity tests (no GPU / lm-eval required)
 # ---------------------------------------------------------------------------
+
 
 class TestDeepSeekSanity:
     """
@@ -599,17 +640,18 @@ class TestDeepSeekSanity:
         for model_cfg in SMALL_DEEPSEEK_MODELS:
             for key, score in model_cfg.min_scores.items():
                 assert 0.0 <= score <= 1.0, (
-                    f"min_score for '{key}' in '{model_cfg.model_id}' is out of range: {score}"
+                    f"min_score for '{key}' in '{model_cfg.model_id}' "
+                    f"is out of range: {score}"
                 )
 
     @pytest.mark.parametrize("precision", list(PRECISION_VARIANTS))
     def test_fp8_uses_bf16_base_dtype(self, precision):
-        """FP8 dynamic quantization in vllm requires bf16 base weights, not float16."""
+        """FP8 dynamic quantization requires bf16 base weights."""
         dtype, quantization = PRECISION_VARIANTS[precision]
         if quantization == "fp8":
             assert dtype == "bfloat16", (
-                "FP8 dynamic quantization should use bfloat16 as the base dtype in vllm. "
-                f"Got: {dtype}"
+                "FP8 dynamic quantization should use bfloat16 as the "
+                f"base dtype in vllm. Got: {dtype}"
             )
 
     def test_eval_limit_is_positive(self):
@@ -620,17 +662,20 @@ class TestDeepSeekSanity:
 # vLLM-direct smoke test (no lm-eval dependency)
 # ---------------------------------------------------------------------------
 
-@pytest.mark.skipif(not (HAS_VLLM and HAS_CUDA), reason="vllm not installed or no CUDA GPU visible")
+
+@pytest.mark.skipif(
+    not (HAS_VLLM and HAS_CUDA), reason="vllm not installed or no CUDA GPU visible"
+)
 @pytest.mark.parametrize(
     "model_id,dtype,quantization",
     [
         ("deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B", "bfloat16", None),
-        ("deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B", "float16",  None),
+        ("deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B", "float16", None),
         ("deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B", "bfloat16", "fp8"),
     ],
     ids=["1.5B-bf16", "1.5B-fp16", "1.5B-fp8"],
 )
-def test_vllm_generate_smoke(model_id: str, dtype: str, quantization: Optional[str]):
+def test_vllm_generate_smoke(model_id: str, dtype: str, quantization: str | None):
     """
     Smoke-test: load model in the given precision and run a short generation.
     Checks that outputs are non-empty strings and that the model does not crash
