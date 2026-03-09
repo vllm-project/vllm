@@ -27,7 +27,7 @@ __device__ void rms_norm_dynamic_per_token_quant_vec(
   vllm::vectorized::compute_dynamic_per_token_scales<scalar_t, scalar_out_t,
                                                      has_residual>(
       &token_scale, scales, input, weight, rms, scale_ub, hidden_size,
-      residual);
+      input_stride, residual);
 
   // RMS Norm + Quant
   if constexpr (std::is_same_v<scalar_out_t, int8_t>) {
@@ -74,7 +74,7 @@ __global__ void rms_norm_dynamic_per_token_quant_kernel(
   // Compute Scale
   vllm::compute_dynamic_per_token_scales<scalar_t, scalar_out_t, has_residual>(
       &token_scale, scales, input, weight, rms, scale_ub, hidden_size,
-      residual);
+      input_stride, residual);
 
   // RMS Norm + Quant
   if constexpr (std::is_same_v<scalar_out_t, int8_t>) {
@@ -113,8 +113,8 @@ __global__ void rms_norm_per_block_quant_kernel(
   // Always able to vectorize due to constraints on hidden_size and group_size
   vllm::vectorized::compute_dynamic_per_token_scales<
       scalar_t, scalar_out_t, has_residual, is_scale_transposed, group_size>(
-      nullptr, scales, input, weight, rms, scale_ub, hidden_size, residual,
-      outer_scale_stride);
+      nullptr, scales, input, weight, rms, scale_ub, hidden_size, input_stride,
+      residual, outer_scale_stride);
 
   // RMS Norm + Quant
   // Always able to vectorize due to constraints on hidden_size
@@ -266,6 +266,7 @@ void rms_norm_per_block_quant(torch::Tensor& out, torch::Tensor const& input,
   TORCH_CHECK(scales.dtype() == torch::kFloat32);
   if (residual) {
     TORCH_CHECK(residual->scalar_type() == input.scalar_type());
+    TORCH_CHECK(residual->is_contiguous());
   }
 
   TORCH_CHECK(group_size == 128 || group_size == 64,
