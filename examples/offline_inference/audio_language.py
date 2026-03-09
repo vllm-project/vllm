@@ -607,10 +607,7 @@ def main(args):
     # We set temperature to 0.2 so that outputs can be different
     # even when all prompts are identical when running batch inference.
     sampling_params = SamplingParams(
-        temperature=0.2,
-        max_tokens=128,
-        stop_token_ids=req_data.stop_token_ids,
-        repetition_penalty=1.1,
+        temperature=0.2, max_tokens=64, stop_token_ids=req_data.stop_token_ids
     )
 
     def get_input(start, end):
