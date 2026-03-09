@@ -498,7 +498,9 @@ curl -s http://localhost:8000/pooling -H "Content-Type: application/json" -d '{
 - Multi-vector retrieval: [examples/pooling/token_embed/colqwen3_token_embed_online.py](../../examples/pooling/token_embed/colqwen3_token_embed_online.py)
 - Reranking (text + multi-modal): [examples/pooling/score/colqwen3_rerank_online.py](../../examples/pooling/score/colqwen3_rerank_online.py)
 
-### Llama Nemotron Multimodal Embedding Models
+### Llama Nemotron Multimodal
+
+#### Embedding Model
 
 Llama Nemotron VL Embedding models combine the bidirectional Llama embedding backbone
 (from `nvidia/llama-nemotron-embed-1b-v2`) with SigLIP as the vision encoder to produce
@@ -559,6 +561,70 @@ curl -s http://localhost:8000/v1/embeddings -H "Content-Type: application/json" 
 }'
 ```
 
+#### Reranker Model
+
+Llama Nemotron VL reranker models combine the same bidirectional Llama + SigLIP
+backbone with a sequence-classification head for cross-encoder scoring and reranking.
+
+| Architecture | Backbone | Example HF Models |
+|---|---|---|
+| `LlamaNemotronVLForSequenceClassification` | Bidirectional Llama + SigLIP | `nvidia/llama-nemotron-rerank-vl-1b-v2` |
+
+Start the server:
+
+```shell
+vllm serve nvidia/llama-nemotron-rerank-vl-1b-v2 \
+    --runner pooling \
+    --trust-remote-code \
+    --chat-template examples/pooling/score/template/nemotron-vl-rerank.jinja
+```
+
+!!! note
+    The chat template bundled with this checkpoint's tokenizer is not suitable
+    for the Score/Rerank APIs. Use the provided override template when serving:
+    `examples/pooling/score/template/nemotron-vl-rerank.jinja`.
+
+Score a text query against an image document:
+
+```shell
+curl -s http://localhost:8000/score -H "Content-Type: application/json" -d '{
+    "model": "nvidia/llama-nemotron-rerank-vl-1b-v2",
+    "data_1": "Find diagrams about autonomous robots",
+    "data_2": [
+        {
+            "content": [
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,<BASE64>"}},
+                {"type": "text", "text": "Robotics workflow diagram."}
+            ]
+        }
+    ]
+}'
+```
+
+Rerank image documents by a text query:
+
+```shell
+curl -s http://localhost:8000/rerank -H "Content-Type: application/json" -d '{
+    "model": "nvidia/llama-nemotron-rerank-vl-1b-v2",
+    "query": "Find diagrams about autonomous robots",
+    "documents": [
+        {
+            "content": [
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,<BASE64_1>"}},
+                {"type": "text", "text": "Robotics workflow diagram."}
+            ]
+        },
+        {
+            "content": [
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,<BASE64_2>"}},
+                {"type": "text", "text": "General skyline photo."}
+            ]
+        }
+    ],
+    "top_n": 2
+}'
+```
+
 ### BAAI/bge-m3
 
 The `BAAI/bge-m3` model comes with extra weights for sparse and colbert embeddings but unfortunately in its `config.json`
@@ -575,7 +641,7 @@ Then you obtain the sparse embeddings like this:
 curl -s http://localhost:8000/pooling -H "Content-Type: application/json" -d '{
      "model": "BAAI/bge-m3",
      "task": "token_classify",
-     "input": ["What is BGE M3?", "Defination of BM25"]
+     "input": ["What is BGE M3?", "Definition of BM25"]
 }'
 ```
 
@@ -591,7 +657,7 @@ You can obtain the colbert embeddings like this:
 curl -s http://localhost:8000/pooling -H "Content-Type: application/json" -d '{
      "model": "BAAI/bge-m3",
      "task": "token_embed",
-     "input": ["What is BGE M3?", "Defination of BM25"]
+     "input": ["What is BGE M3?", "Definition of BM25"]
 }'
 ```
 

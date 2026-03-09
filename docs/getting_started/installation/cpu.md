@@ -75,6 +75,8 @@ For example, the nightly build index is: `https://wheels.vllm.ai/nightly/cpu/`.
 
 #### Set up using Python-only build (without compilation) {#python-only-build}
 
+This method requires [pre-built wheels](#pre-built-wheels) for your platform.
+
 Please refer to the instructions for [Python-only build on GPU](./gpu.md#python-only-build), and replace the build commands with:
 
 ```bash
