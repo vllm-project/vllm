@@ -229,8 +229,6 @@ class DecodeGatedDeltaRule(CustomOp):
         v: torch.Tensor,
         a: torch.Tensor,
         b: torch.Tensor,
-        g: torch.Tensor,
-        beta: torch.Tensor,
         A_log: torch.Tensor,
         dt_bias: torch.Tensor,
         initial_state: torch.Tensor,
@@ -238,7 +236,6 @@ class DecodeGatedDeltaRule(CustomOp):
         cu_seqlens: torch.LongTensor | None = None,
         use_qk_l2norm_in_kernel: bool = True,
     ):
-        del g, beta
         output = cutedsl_transpose_fused_sigmoid_gated_delta_rule_update(
             A_log=A_log,
             dt_bias=dt_bias,
@@ -263,8 +260,6 @@ class DecodeGatedDeltaRule(CustomOp):
         v: torch.Tensor,
         a: torch.Tensor,
         b: torch.Tensor,
-        g: torch.Tensor,
-        beta: torch.Tensor,
         A_log: torch.Tensor,
         dt_bias: torch.Tensor,
         initial_state: torch.Tensor,
@@ -272,13 +267,14 @@ class DecodeGatedDeltaRule(CustomOp):
         cu_seqlens: torch.LongTensor | None = None,
         use_qk_l2norm_in_kernel: bool = True,
     ):
-        del a, b, A_log, dt_bias
         return fused_sigmoid_gating_delta_rule_update(
+            A_log=A_log,
+            a=a,
+            b=b,
+            dt_bias=dt_bias,
             q=q,
             k=k,
             v=v,
-            g=g,
-            beta=beta,
             initial_state=initial_state,
             inplace_final_state=True,
             cu_seqlens=cu_seqlens,
@@ -904,8 +900,6 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                 v=value_non_spec,
                 a=a,
                 b=b,
-                g=g_non_spec,
-                beta=beta_non_spec,
                 A_log=self.A_log,
                 dt_bias=self.dt_bias,
                 initial_state=ssm_state,
