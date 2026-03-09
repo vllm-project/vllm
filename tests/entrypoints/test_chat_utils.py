@@ -1480,7 +1480,10 @@ def test_parse_chat_messages_openai_format_image_url(
     assert conversation == [
         {
             "role": "user",
-            "content": content,
+            "content": [
+                {"type": "image"},
+                {"type": "text", "text": "What's in the image?"},
+            ],
         }
     ]
     _assert_mm_data_is_image_input(mm_data, 1)
