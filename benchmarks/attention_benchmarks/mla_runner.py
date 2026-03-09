@@ -283,6 +283,7 @@ def _get_backend_config(backend: str) -> dict:
     Returns:
         Dict with backend configuration
     """
+    from vllm.v1.attention.backend import MultipleOf
     from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
     try:
@@ -299,8 +300,8 @@ def _get_backend_config(backend: str) -> dict:
     block_sizes = backend_class.get_supported_kernel_block_sizes()
     # Use first supported block size (backends typically support one for MLA)
     block_size = block_sizes[0] if block_sizes else None
-    if hasattr(block_size, "value"):
-        # Handle MultipleOf enum
+    if isinstance(block_size, MultipleOf):
+        # No fixed block size; fall back to config value
         block_size = None
 
     # Check if sparse via class method if available
