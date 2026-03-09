@@ -21,6 +21,7 @@ import functools
 import gc
 import time
 from copy import deepcopy
+from typing import Any, NamedTuple
 
 import numpy as np
 import torch
@@ -44,7 +45,7 @@ from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
-from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
+from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.worker.cp_utils import check_attention_cp_compatibility
 from vllm.v1.worker.gpu.async_utils import AsyncOutput, AsyncPoolingOutput
 from vllm.v1.worker.gpu.attn_utils import (
@@ -96,11 +97,7 @@ logger = init_logger(__name__)
 
 
 class GPUModelRunner(LoRAModelRunnerMixin):
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        device: torch.device,
-    ):
+    def __init__(self, vllm_config: VllmConfig, device: torch.device):
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
         self.cache_config = vllm_config.cache_config
@@ -217,7 +214,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.pooling_runner: PoolingRunner | None = None
 
         # For transferring state from execute_model to subsequent sample_tokens call.
-        self.execute_model_state: tuple | None = None
+        self.execute_model_state: ExecuteModelState | None = None
 
     def update_max_model_len(self, max_model_len: int) -> None:
         self.max_model_len = max_model_len
@@ -379,16 +376,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             return None, None
 
         assert self.execute_model_state is not None
-        (
-            input_batch,
-            model_inputs,
-            attn_metadata,
-            slot_mappings_by_layer,
-            hidden_states,
-            aux_hidden_states,
-            kv_connector_output,
-            num_tokens_across_dp,
-        ) = self.execute_model_state
+        input_batch = self.execute_model_state.input_batch
+        attn_metadata = self.execute_model_state.attn_metadata
+        slot_mappings_by_layer = self.execute_model_state.slot_mappings_by_layer
+        hidden_states = self.execute_model_state.hidden_states
+        aux_hidden_states = self.execute_model_state.aux_hidden_states
+        num_tokens_across_dp = self.execute_model_state.num_tokens_across_dp
         self.execute_model_state = None
 
         # dummy run the eagle speculator's propose to ensure DP/EP sync.
@@ -461,7 +454,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             else:
                 self._dummy_pooler_run(hidden_states)
 
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         del hidden_states, sample_hidden_states
         gc.collect()
 
@@ -476,6 +469,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def _get_num_input_tokens(self, num_scheduled_tokens: int) -> int:
         # SP is not supported yet.
         return num_scheduled_tokens
+
+    def profile_cudagraph_memory(self) -> int:
+        # NOTE(woosuk): It is TBD whether we keep this API or not.
+        return 0
 
     @torch.inference_mode()
     def capture_model(self) -> int:
@@ -529,7 +526,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # to trigger JIT compilation.
         if all("FLASHINFER" in b.get_name() for b in self.attn_backends.values()):
             self._dummy_run(self.max_num_tokens, skip_attn=False)
-            torch.cuda.synchronize()
+            torch.accelerator.synchronize()
 
     def finish_requests(self, scheduler_output: SchedulerOutput) -> None:
         finished_req_ids = scheduler_output.finished_req_ids
@@ -627,9 +624,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 num_reqs, dtype=torch.int32, device=self.device
             )
         else:
-            num_draft_tokens = np.array(
-                [len(draft_tokens.get(req_id, ())) for req_id in req_ids],
+            num_draft_tokens = np.fromiter(
+                (len(draft_tokens.get(req_id, ())) for req_id in req_ids),
                 dtype=np.int32,
+                count=num_reqs,
             )
             total_num_draft_tokens = int(num_draft_tokens.sum())
             total_num_logits = num_reqs + total_num_draft_tokens
@@ -782,9 +780,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         if input_batch.num_draft_tokens == 0:
             # No draft tokens (common case).
-            num_sampled = torch.ones(
-                input_batch.num_reqs, dtype=torch.int32, device=self.device
-            )
+            num_sampled = input_batch.seq_lens.new_ones(input_batch.num_reqs)
         else:
             # Rejection sampling for spec decoding.
             sampled_tokens, num_sampled = rejection_sample(
@@ -990,15 +986,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     aux_hidden_states = None
 
         kv_connector_output = self.kv_connector.post_forward(scheduler_output)
-        self.execute_model_state = (
-            input_batch,
-            model_inputs,
-            attn_metadata,
-            slot_mappings_by_layer,
-            hidden_states,
-            aux_hidden_states,
-            kv_connector_output,
-            num_tokens_across_dp,
+        self.execute_model_state = ExecuteModelState(
+            input_batch=input_batch,
+            attn_metadata=attn_metadata,
+            slot_mappings_by_layer=slot_mappings_by_layer,
+            hidden_states=hidden_states,
+            aux_hidden_states=aux_hidden_states,
+            kv_connector_output=kv_connector_output,
+            num_tokens_across_dp=num_tokens_across_dp,
         )
 
         if not self.is_last_pp_rank:
@@ -1017,16 +1012,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if self.execute_model_state is None:
             # The prior execute_model call must have failed.
             return None
-        (
-            input_batch,
-            model_inputs,
-            attn_metadata,
-            slot_mappings_by_layer,
-            hidden_states,
-            aux_hidden_states,
-            kv_connector_output,
-            num_tokens_across_dp,
-        ) = self.execute_model_state
+
+        input_batch = self.execute_model_state.input_batch
+        attn_metadata = self.execute_model_state.attn_metadata
+        slot_mappings_by_layer = self.execute_model_state.slot_mappings_by_layer
+        hidden_states = self.execute_model_state.hidden_states
+        aux_hidden_states = self.execute_model_state.aux_hidden_states
+        kv_connector_output = self.execute_model_state.kv_connector_output
+        num_tokens_across_dp = self.execute_model_state.num_tokens_across_dp
         self.execute_model_state = None
 
         if not self.is_last_pp_rank:
@@ -1117,9 +1110,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # The prior execute_model call must have failed.
             return None
 
-        input_batch, _, _, _, hidden_states, _, kv_connector_output = (
-            self.execute_model_state
-        )
+        input_batch = self.execute_model_state.input_batch
+        hidden_states = self.execute_model_state.hidden_states
+        kv_connector_output = self.execute_model_state.kv_connector_output
         self.execute_model_state = None
 
         if not self.is_last_pp_rank:
@@ -1165,3 +1158,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         np.minimum(
             computed_prefill, self.req_states.prefill_len.np, out=computed_prefill
         )
+
+
+class ExecuteModelState(NamedTuple):
+    input_batch: InputBatch
+    attn_metadata: dict[str, Any] | None
+    slot_mappings_by_layer: dict[str, torch.Tensor] | None
+    hidden_states: torch.Tensor | IntermediateTensors
+    aux_hidden_states: list[torch.Tensor] | None
+    kv_connector_output: KVConnectorOutput | None
+    num_tokens_across_dp: torch.Tensor | None
