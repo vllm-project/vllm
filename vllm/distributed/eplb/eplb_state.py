@@ -1168,7 +1168,8 @@ def compute_logical_maps(
         # Logical expert at physical slot phys_idx for each layer
         logical_expert_ids = physical_to_logical_map_view[:, phys_idx]  # [num_layers]
 
-        # Only consider "valid" experts. I.E not -1
+        # Scale up will set the logical expert ids to -1 for all new physical experts.
+        # Only consider "valid" experts when setting up the logical_to_physical map.
         valid_expert_mask = logical_expert_ids >= 0
         if not valid_expert_mask.any():
             continue
