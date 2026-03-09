@@ -1413,7 +1413,7 @@ class ModelConfig:
         return self._model_info.requires_raw_input_tokens
 
     @property
-    def score_type(self)-> ScoreType:
+    def score_type(self) -> ScoreType:
         return self._model_info.score_type
 
     @property
