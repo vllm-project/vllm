@@ -8,8 +8,9 @@ steps:
   - csrc/
   - tests/kernels/core
   - tests/kernels/test_top_k_per_row.py
+  - tests/kernels/test_concat_mla_q.py
   commands:
-    - pytest -v -s kernels/core kernels/test_top_k_per_row.py
+    - pytest -v -s kernels/core kernels/test_top_k_per_row.py kernels/test_concat_mla_q.py
 
 - label: Kernels Attention Test %N
   timeout_in_minutes: 35
