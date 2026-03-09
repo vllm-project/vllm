@@ -1484,6 +1484,8 @@ class GPUModelRunner(
         spec_flattened_indices: list[int] = []
         prev_draft_token_indices: list[int] = []
         prev_indices: list[int] = []
+        common_indices_match = True
+        max_flattened_index = -1
         total_num_spec_tokens = 0
 
         for cur_index in range(num_reqs):
@@ -1512,6 +1514,8 @@ class GPUModelRunner(
             # draft_len of each request [1, 2, 1]
             # then prev_draft_token_indices is [0,   2, 3,   4]
             prev_draft_token_indices.extend(range(start, start + draft_len))
+            common_indices_match &= prev_index == flattened_index
+            max_flattened_index = max(max_flattened_index, flattened_index)
 
         num_common_tokens = len(sample_flattened_indices)
         total_without_spec = total_num_scheduled_tokens - total_num_spec_tokens
@@ -1523,8 +1527,20 @@ class GPUModelRunner(
                 self.inputs_embeds.copy_to_gpu(total_num_scheduled_tokens)
                 self.is_token_ids.copy_to_gpu(total_num_scheduled_tokens)
         if num_common_tokens == 0:
-            # No requests in common with the previous iteration.
-            # input_ids.cpu has all the input ids.
+            # No requests in common with the previous iteration
+            # So input_ids.cpu will have all the input ids.
+            return
+        if common_indices_match and max_flattened_index == (num_common_tokens - 1):
+            # Common-case optimization: the batch is unchanged
+            # and no reordering happened.
+            # The indices are both the same permutation of 0..N-1 so
+            # we can copy directly using a single slice.
+            self.input_ids.gpu[:num_common_tokens].copy_(
+                self.input_batch.prev_sampled_token_ids[:num_common_tokens, 0],
+                non_blocking=True,
+            )
+            if self.enable_prompt_embeds:
+                self.is_token_ids.gpu[:num_common_tokens] = True
             return
         # Upload the index tensors asynchronously so the scatter can be non-blocking.
         sampled_tokens_index_tensor = torch.tensor(
