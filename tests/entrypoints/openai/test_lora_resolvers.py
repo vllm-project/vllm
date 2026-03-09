@@ -145,8 +145,19 @@ def mock_serving_setup():
         base_model_paths=BASE_MODEL_PATHS,
     )
 
+    from vllm.entrypoints.serve.render.serving import OpenAIServingRender
+
+    serving_render = OpenAIServingRender(
+        model_config=mock_engine.model_config,
+        renderer=mock_engine.renderer,
+        io_processor=mock_engine.io_processor,
+        served_model_names=[mp.name for mp in BASE_MODEL_PATHS],
+        request_logger=None,
+        chat_template=None,
+        chat_template_content_format="auto",
+    )
     serving_completion = OpenAIServingCompletion(
-        mock_engine, models, request_logger=None
+        mock_engine, models, openai_serving_render=serving_render, request_logger=None
     )
 
     return mock_engine, serving_completion

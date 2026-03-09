@@ -80,14 +80,26 @@ def _build_renderer(model_config: MockModelConfig):
 
 
 def _build_serving_chat(engine: AsyncLLM) -> OpenAIServingChat:
+    from vllm.entrypoints.serve.render.serving import OpenAIServingRender
+
     models = OpenAIServingModels(
         engine_client=engine,
         base_model_paths=BASE_MODEL_PATHS,
+    )
+    serving_render = OpenAIServingRender(
+        model_config=engine.model_config,
+        renderer=engine.renderer,
+        io_processor=engine.io_processor,
+        served_model_names=[mp.name for mp in BASE_MODEL_PATHS],
+        request_logger=None,
+        chat_template=None,
+        chat_template_content_format="auto",
     )
     serving_chat = OpenAIServingChat(
         engine,
         models,
         response_role="assistant",
+        openai_serving_render=serving_render,
         request_logger=None,
         chat_template=None,
         chat_template_content_format="auto",
@@ -100,7 +112,9 @@ def _build_serving_chat(engine: AsyncLLM) -> OpenAIServingChat:
             [{"prompt_token_ids": [1, 2, 3]}],
         )
 
-    serving_chat._preprocess_chat = AsyncMock(side_effect=_fake_preprocess_chat)
+    serving_chat.openai_serving_render._preprocess_chat = AsyncMock(
+        side_effect=_fake_preprocess_chat
+    )
     return serving_chat
 
 
