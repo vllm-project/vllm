@@ -16,6 +16,7 @@ import msgspec
 import torch
 
 from vllm.inputs import SingletonInputs
+from vllm.inputs.data import token_inputs
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MultiModalKwargs, MultiModalPlaceholderDict
 from vllm.pooling_params import PoolingParams
@@ -505,6 +506,11 @@ class Sequence:
         # Input + output tokens
         self.tokens: Optional[list[str]] = None
 
+        # Tree decoding related fields
+        self.tree_branch_id = None  # 分支标识
+        self.tree_depth = 0
+        self.parent_seq_id = None
+
     @property
     def n_blocks(self) -> int:
         return (self.get_len() + self.block_size - 1) // self.block_size
@@ -763,11 +769,6 @@ class SequenceGroup:
         self.priority = priority
 
         self.cached_request_output = None
-
-        # Tree decoding related fields
-        self.tree_branch_id = 0  # 分支标识
-        self.tree_depth = 0
-        self.parent_seq_group_id = None
 
     @property
     def prompt(self) -> Optional[str]:
@@ -1500,7 +1501,10 @@ class ParallelSampleSequenceGroup(SequenceGroupBase):
         group = ParallelSampleSequenceGroup(request_id)
         seqs = []
         for i in range(original_params.n):
-            request_id_i = f"{request_id}_parallel_sample_{i}"
+            if original_params.n > 1:
+                request_id_i = f"{request_id}_parallel_sample_{i}"
+            else:
+                request_id_i = request_id
             group.seq_id_to_index[request_id_i] = i
             params = original_params.clone()
             params.n = 1
@@ -1536,6 +1540,40 @@ class ParallelSampleSequenceGroup(SequenceGroupBase):
 
         group.streaming = params.output_kind == RequestOutputKind.DELTA
         group.output_produced = False
+
+    def add_tree_branches(self, parent_seq_id: str, new_token_ids: list[int], engine):
+        original_seqs_length = len(self.assembled_seq_group.seqs)
+        parent_seq_group = self.to_be_finished[parent_seq_id]
+        parent_seq = parent_seq_group.seqs[0]
+        old_tokens = parent_seq.get_token_ids()
+        parent_seq_group.seqs[0].status = SequenceStatus.FINISHED_STOPPED
+        for i, token_id in enumerate(new_token_ids):
+            new_tokens = old_tokens[:-1] + [token_id]
+            processed_inputs = token_inputs(
+                prompt_token_ids=new_tokens,
+                token_type_ids=None,  # 如果有token_type_ids，可以从seq获取
+                prompt=None,  # 如果需要原始prompt
+            )
+            request_id_i = f"{parent_seq_id}_branch{i}"
+            self.seq_id_to_index[request_id_i] = i + original_seqs_length
+            params = self.assembled_seq_group.sampling_params.clone()
+            params.n = 1
+            params.tree_search_params.enable_tree_search = False
+            seq_group = engine._add_processed_request(
+                request_id_i,
+                processed_inputs=processed_inputs,
+                params=params,
+                arrival_time=self.assembled_seq_group.arrival_time,
+                lora_request=self.assembled_seq_group.lora_request,
+                prompt_adapter_request=self.assembled_seq_group.prompt_adapter_request,
+                trace_headers=self.assembled_seq_group.trace_headers,
+                priority=self.assembled_seq_group.priority,
+            ) 
+            assert seq_group is not None
+            engine.seq_id_to_seq_group[request_id_i] = self
+            self.to_be_finished[request_id_i] = seq_group
+            self.assembled_seq_group.seqs.append(seq_group.seqs[0])
+
 
     def maybe_assemble_group(
             self, seq_group: SequenceGroup) -> Optional[SequenceGroup]:
