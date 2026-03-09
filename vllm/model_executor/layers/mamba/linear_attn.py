@@ -158,12 +158,19 @@ def linear_attention_prefill_and_mix(
     prefix_fn: Callable[..., torch.Tensor],
     layer_idx: int | None = None,
 ) -> torch.Tensor:
-    hidden = []
+    # Pre-allocate output tensor to avoid list append overhead and memory fragmentation
+    # especially for large context sizes (192k) on multiple GPUs
+    hidden = torch.empty(
+        (q.size(0), q.size(1) * q.size(2)), 
+        device=q.device, 
+        dtype=q.dtype
+    )
     
     # Handle chunked prefill support for long context optimization
     num_prefills = getattr(attn_metadata, "num_prefills", 0)
     num_decode_tokens = getattr(attn_metadata, "num_decode_tokens", 0)
     
+    # Process prefill chunks
     for _prefill_idx in range(num_prefills):
         if _prefill_idx >= len(attn_metadata.query_start_loc):
             break
@@ -192,18 +199,16 @@ def linear_attention_prefill_and_mix(
             block_size,
             layer_idx=layer_idx,
         )
-        hidden.append(out_slice.contiguous())
+        # Direct write to pre-allocated buffer
+        hidden[_start:_end] = out_slice.contiguous()
 
+    # Process decode tokens if any
     if num_decode_tokens > 0:
         hidden_decode = decode_fn(
             q, k, v, kv_cache, state_indices_tensor, attn_metadata
         )
-        hidden.insert(0, hidden_decode)
+        hidden[:num_decode_tokens] = hidden_decode
 
-    if not hidden:
-        return torch.empty((0, q.size(-1)), device=q.device, dtype=q.dtype)
-
-    hidden = torch.concat(hidden, dim=0).contiguous()
     return hidden
 
 
@@ -420,6 +425,8 @@ class MiniMaxText01LinearAttention(nn.Module, MambaBase):
         else:
             num_actual_tokens = hidden_states.shape[0]
 
+        # Compute gate early to allow overlap with linear attention and reduce critical path
+        gate, _ = self.output_gate(hidden_states[:num_actual_tokens])
         qkv, _ = self.qkv_proj(hidden_states[:num_actual_tokens])
         qkv32 = qkv.to(torch.float32)
         qkvact = torch.nn.functional.silu(qkv32)
@@ -447,7 +454,7 @@ class MiniMaxText01LinearAttention(nn.Module, MambaBase):
                     q, k, v, kv_cache, state_indices_tensor, attn_metadata
                 )
         hidden = self.norm._forward(hidden)
-        gate, _ = self.output_gate(hidden_states[:num_actual_tokens])
+        # gate, _ = self.output_gate(hidden_states[:num_actual_tokens]) # Computed early
         hidden = F.sigmoid(gate) * hidden
         hidden = hidden.to(hidden_states.dtype)
 
