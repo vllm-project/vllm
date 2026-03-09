@@ -31,20 +31,13 @@ class VerifyAndUpdateConfig:
 class DeepseekV32ForCausalLM(VerifyAndUpdateConfig):
     @classmethod
     def verify_and_update_config(cls, vllm_config: "VllmConfig") -> None:
-        """
-        Updated fp8 cache to custom "fp8_ds_mla" format for DeepSeekV32
-        """
         hf_config = vllm_config.model_config.hf_config
 
         # Mirror the check in vllm/model_executor/models/deepseek_v2.py
         is_v32 = hasattr(hf_config, "index_topk")
         assert is_v32
 
-        # For DeepSeekV3.2, a custom fp8 format is used when fp8 kv-cache is enabled.
         cache_config = vllm_config.cache_config
-        if cache_config.cache_dtype.startswith("fp8"):
-            cache_config.cache_dtype = "fp8_ds_mla"
-            logger.info("Using custom fp8 kv-cache format for DeepSeekV3.2")
         if cache_config.cache_dtype == "bfloat16":
             cache_config.cache_dtype = "auto"
             logger.info("Using bfloat16 kv-cache for DeepSeekV3.2")
@@ -224,10 +217,9 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
                 mamba_page_size, kernel_block_alignment_size * attn_page_size_1_token
             )
 
-        # override attention block size if either (a) the
-        # user has not set it or (b) the user has set it
-        # too small.
-        if cache_config.block_size is None or cache_config.block_size < attn_block_size:
+        # override attention block size if it is too small,
+        # even if the user has explicitly set it
+        if cache_config.block_size < attn_block_size:
             cache_config.block_size = attn_block_size
             logger.info(
                 "Setting attention block size to %d tokens "
