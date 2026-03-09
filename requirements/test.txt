@@ -930,7 +930,7 @@ referencing==0.35.1
     # via
     #   jsonschema
     #   jsonschema-specifications
-regex==2024.9.11
+regex==2026.2.28
     # via
     #   diffusers
     #   nltk
@@ -1229,7 +1229,7 @@ tqdm==4.67.3
     #   tacoreader
     #   terratorch
     #   transformers
-transformers @ git+https://github.com/huggingface/transformers.git@4f91111b8ef37bd227f33c7facb92c41aa77604d
+transformers @ git+https://github.com/huggingface/transformers.git@1a50a3b13b6d17c2637fe19e94a8c459bd4208a5
     # via
     #   -r requirements/test.in
     #   genai-perf
