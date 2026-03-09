@@ -32,8 +32,13 @@ def merge_attn_states(
     output_head_stride = output.stride(1)
 
     use_fp8 = output_scale is not None
-    # Pre-invert scale: multiplication is faster than division in Triton
-    output_scale_inv = (1.0 / output_scale.item()) if use_fp8 else 0.0
+    if use_fp8:
+        scale_val = output_scale.item()
+        assert scale_val != 0.0, "output_scale must be non-zero"
+        # Pre-invert: multiplication is faster than division in Triton
+        output_scale_inv = 1.0 / scale_val
+    else:
+        output_scale_inv = 0.0
 
     # TODO(woosuk): Use CUDA kernel instead of Triton to minimize CPU overhead.
     merge_attn_states_kernel[(num_tokens, num_query_heads)](

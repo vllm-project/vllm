@@ -110,17 +110,24 @@ __global__ void merge_attn_states_kernel(
     input_pack_t s_out_pack = reinterpret_cast<const input_pack_t*>(
         suffix_head_ptr)[pack_offset / pack_size];
 
+    // Compute merged values in float32
+    float o_out_f[pack_size];
+#pragma unroll
+    for (uint i = 0; i < pack_size; ++i) {
+      const float p_out_f =
+          vllm::to_float(reinterpret_cast<const scalar_t*>(&p_out_pack)[i]);
+      const float s_out_f =
+          vllm::to_float(reinterpret_cast<const scalar_t*>(&s_out_pack)[i]);
+      o_out_f[i] = p_out_f * p_scale + (s_out_f * s_scale);
+    }
+
+    // Convert and store
     if constexpr (FP8_OUTPUT) {
       out_t o_out_pack[pack_size];
 #pragma unroll
       for (uint i = 0; i < pack_size; ++i) {
-        const float p_out_f =
-            vllm::to_float(reinterpret_cast<const scalar_t*>(&p_out_pack)[i]);
-        const float s_out_f =
-            vllm::to_float(reinterpret_cast<const scalar_t*>(&s_out_pack)[i]);
-        const float o_out_f = p_out_f * p_scale + (s_out_f * s_scale);
         o_out_pack[i] =
-            vllm::scaled_fp8_conversion<false, out_t>(o_out_f, fp8_scale);
+            vllm::scaled_fp8_conversion<false, out_t>(o_out_f[i], fp8_scale);
       }
       reinterpret_cast<output_pack_t*>(
           output_head_ptr)[pack_offset / pack_size] =
@@ -129,12 +136,8 @@ __global__ void merge_attn_states_kernel(
       output_pack_t o_out_pack;
 #pragma unroll
       for (uint i = 0; i < pack_size; ++i) {
-        const float p_out_f =
-            vllm::to_float(reinterpret_cast<const scalar_t*>(&p_out_pack)[i]);
-        const float s_out_f =
-            vllm::to_float(reinterpret_cast<const scalar_t*>(&s_out_pack)[i]);
-        const float o_out_f = p_out_f * p_scale + (s_out_f * s_scale);
-        vllm::from_float(reinterpret_cast<scalar_t*>(&o_out_pack)[i], o_out_f);
+        vllm::from_float(reinterpret_cast<scalar_t*>(&o_out_pack)[i],
+                         o_out_f[i]);
       }
       reinterpret_cast<output_pack_t*>(
           output_head_ptr)[pack_offset / pack_size] = o_out_pack;
@@ -252,6 +255,17 @@ void merge_attn_states(torch::Tensor& output,
                        const torch::Tensor& suffix_output,
                        const torch::Tensor& suffix_lse,
                        const std::optional<torch::Tensor>& output_scale) {
+  if (output_scale.has_value()) {
+    TORCH_CHECK(output.scalar_type() == at::ScalarType::Float8_e4m3fn ||
+                    output.scalar_type() == at::ScalarType::Float8_e4m3fnuz,
+                "output must be FP8 when output_scale is provided, got: ",
+                output.scalar_type());
+  } else {
+    TORCH_CHECK(output.scalar_type() == prefix_output.scalar_type(),
+                "output dtype (", output.scalar_type(),
+                ") must match prefix_output dtype (",
+                prefix_output.scalar_type(), ") when output_scale is not set");
+  }
   // Always dispatch on prefix_output (input) dtype
   DISPATCH_BY_SCALAR_DTYPE(prefix_output.dtype(),
                            CALL_MERGE_ATTN_STATES_LAUNCHER);

@@ -19,6 +19,12 @@ def merge_attn_states(
     # does not support FP8 dtype for inputs, fallback to use Triton kernel.
     # However, when output_scale is provided, the inputs are still BF16/FP16
     # and the output is FP8 — both CUDA and Triton support this.
+    # FP8 output requires output_scale to be set.
+    if output.dtype not in (torch.float32, torch.half, torch.bfloat16):
+        assert output_scale is not None, (
+            f"output_scale is required when output is {output.dtype}"
+        )
+
     def supported_dtypes(prefix: torch.Tensor) -> bool:
         return prefix.dtype in [torch.float32, torch.half, torch.bfloat16]
 
