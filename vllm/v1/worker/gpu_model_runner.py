@@ -2869,7 +2869,7 @@ class GPUModelRunner(
         assert self.expert_usage_histogram is not None
         expert_usage_histogram_cpu: torch.Tensor | None = None
         per_ep_rank_tokens_histogram_cpu: torch.Tensor | None = None
-        should_all_reduce = get_tp_group().world_size > 1 
+        should_all_reduce = get_tp_group().world_size > 1
 
         # Collect expert selection stats per rank.
         hist_shape = self.expert_usage_histogram.shape
@@ -4082,7 +4082,6 @@ class GPUModelRunner(
         # self.kv_connector_output may be modified during drafting
         kv_connector_output = self.kv_connector_output
         self.kv_connector_output = None
-
 
         with record_function_or_nullcontext("gpu_model_runner: expert_logging"):
             # Get the expert usage histogram for MoEs

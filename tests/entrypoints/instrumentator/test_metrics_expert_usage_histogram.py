@@ -24,13 +24,19 @@ pytestmark = [
 @pytest.fixture(scope="module")
 def server():
     args = [
-        "--dtype", "bfloat16",
-        "--max-model-len", "256",
+        "--dtype",
+        "bfloat16",
+        "--max-model-len",
+        "256",
         "--enforce-eager",
-        "--max-num-seqs", "16",
-        "--load-format", "dummy",
-        "--data-parallel-size", "2",
-        "--tensor-parallel-size", "1",
+        "--max-num-seqs",
+        "16",
+        "--load-format",
+        "dummy",
+        "--data-parallel-size",
+        "2",
+        "--tensor-parallel-size",
+        "1",
         "--enable-expert-parallel",
     ]
     env = {
@@ -49,7 +55,6 @@ async def client(server):
 
 @pytest.mark.asyncio
 async def test_moe_expert_selection_counter(server, client):
-
     num_requests = 3
     for _ in range(num_requests):
         await client.completions.create(
@@ -67,24 +72,17 @@ async def test_moe_expert_selection_counter(server, client):
             samples = list(family.samples)
             break
 
-    assert len(samples) > 0, (
-        "vllm:moe_expert_selection_counter not found in /metrics"
-    )
+    assert len(samples) > 0, "vllm:moe_expert_selection_counter not found in /metrics"
 
     for sample in samples:
         assert "layer" in sample.labels, f"Missing 'layer' label: {sample}"
         assert "expert" in sample.labels, f"Missing 'expert' label: {sample}"
 
     total = sum(s.value for s in samples)
-    assert total > 0, (
-        "Expected non-zero total expert selections, "
-        f"but got {total}"
-    )
+    assert total > 0, f"Expected non-zero total expert selections, but got {total}"
 
     layers = {s.labels["layer"] for s in samples}
-    assert len(layers) == 32, (
-        f"Expected 32 MoE layers, but only found layers: {layers}"
-    )
+    assert len(layers) == 32, f"Expected 32 MoE layers, but only found layers: {layers}"
 
 
 @pytest.mark.asyncio
@@ -116,14 +114,11 @@ async def test_moe_per_rank_expert_selection_counter(server, client):
 
     total = sum(s.value for s in samples)
     assert total > 0, (
-        "Expected non-zero total per-rank expert selections, "
-        f"but got {total}"
+        f"Expected non-zero total per-rank expert selections, but got {total}"
     )
 
     layers = {s.labels["layer"] for s in samples}
-    assert len(layers) == 32, (
-        f"Expected 32 MoE layers, but only found layers: {layers}"
-    )
+    assert len(layers) == 32, f"Expected 32 MoE layers, but only found layers: {layers}"
 
     ranks = {s.labels["rank"] for s in samples}
     assert len(ranks) == 2, (

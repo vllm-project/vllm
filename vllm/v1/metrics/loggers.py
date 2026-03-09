@@ -1014,7 +1014,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                 labelnames=labelnames + ["layer", "expert"],
             )
 
-            # No need to distingush between DP engines for this EP metric.
+            # No need to distinguish between DP engines for this EP metric.
             labelvalues = [
                 vllm_config.model_config.served_model_name,
                 str(engine_indexes[0]),

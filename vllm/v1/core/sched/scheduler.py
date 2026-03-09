@@ -8,7 +8,6 @@ from dataclasses import replace
 from typing import Any
 
 import numpy as np
-
 import torch
 
 from vllm import envs
@@ -1521,7 +1520,8 @@ class Scheduler(SchedulerInterface):
             stats := self.make_stats(
                 spec_decoding_stats,
                 kv_connector_stats,
-                cudagraph_stats, perf_stats,
+                cudagraph_stats,
+                perf_stats,
                 model_runner_output.expert_usage_histogram_cpu,
                 model_runner_output.per_ep_rank_tokens_histogram_cpu,
             )
