@@ -93,15 +93,26 @@ class OpenAIServingRender:
         self,
         request: ChatCompletionRequest,
     ) -> tuple[list[ConversationMessage], list[ProcessorInputs]] | ErrorResponse:
-        """Copied from OpenAIServingChat.render_chat_request.
+        """Validate the model and preprocess a chat completion request.
 
-        Differences: engine_client.errored check removed (no engine client).
+        This is the authoritative implementation used directly by the
+        GPU-less render server and delegated to by OpenAIServingChat.
         """
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             logger.error("Error with model %s", error_check_ret)
             return error_check_ret
+        return await self._preprocess_chat_request(request)
 
+    async def _preprocess_chat_request(
+        self,
+        request: ChatCompletionRequest,
+    ) -> tuple[list[ConversationMessage], list[ProcessorInputs]] | ErrorResponse:
+        """Core preprocessing logic for chat requests (no model/engine check).
+
+        Called directly by render_chat_request and delegated to by
+        OpenAIServingChat.render_chat_request after its engine-aware checks.
+        """
         try:
             tokenizer = self.renderer.tokenizer
 
@@ -184,14 +195,25 @@ class OpenAIServingRender:
         self,
         request: CompletionRequest,
     ) -> list[ProcessorInputs] | ErrorResponse:
-        """Copied from OpenAIServingCompletion.render_completion_request.
+        """Validate the model and preprocess a completion request.
 
-        Differences: engine_client.errored check removed (no engine client).
+        This is the authoritative implementation used directly by the
+        GPU-less render server and delegated to by OpenAIServingCompletion.
         """
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             return error_check_ret
+        return await self._preprocess_completion_request(request)
 
+    async def _preprocess_completion_request(
+        self,
+        request: CompletionRequest,
+    ) -> list[ProcessorInputs] | ErrorResponse:
+        """Core preprocessing logic for completion requests (no model/engine check).
+
+        Called directly by render_completion_request and delegated to by
+        OpenAIServingCompletion.render_completion_request after its engine-aware checks.
+        """
         # Return error for unsupported features.
         if request.suffix is not None:
             return self.create_error_response("suffix is not currently supported")
@@ -221,7 +243,6 @@ class OpenAIServingRender:
         request: ChatCompletionRequest,
         should_include_tools: bool = True,
     ):
-        """Copied from OpenAIServingChat._make_request_with_harmony."""
         messages: list[OpenAIMessage] = []
 
         # because of issues with pydantic we need to potentially
