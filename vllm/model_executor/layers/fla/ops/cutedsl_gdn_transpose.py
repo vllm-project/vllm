@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-# SPDX-FileCopyrightText: Copyright contributors to the sglang project
-# ruff: noqa: E501
 
 """CuTe DSL GDN transpose decode kernel (ported from sglang)."""
 
@@ -449,7 +447,8 @@ def cutedsl_transpose_fused_sigmoid_gated_delta_rule_update(
     # for best performance.
     if initial_state_source.stride()[-2] != 1:
         warnings.warn(
-            "Expected initial_state_source with K-contiguous layout (stride[-2] == 1), e.g. ssm_state.transpose(-2, -1).",
+            "Expected initial_state_source with K-contiguous "
+            "layout (stride[-2] == 1), e.g. ssm_state.transpose(-2, -1).",
             RuntimeWarning,
             stacklevel=2,
         )
