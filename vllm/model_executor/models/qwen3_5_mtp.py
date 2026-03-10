@@ -7,10 +7,6 @@ from collections.abc import Callable, Iterable
 
 import torch
 from torch import nn
-from transformers.models.qwen3_5.configuration_qwen3_5 import Qwen3_5TextConfig
-from transformers.models.qwen3_5_moe.configuration_qwen3_5_moe import (
-    Qwen3_5MoeTextConfig,
-)
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
@@ -27,6 +23,8 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.qwen3_5 import Qwen3_5DecoderLayer, Qwen3_5RMSNorm
 from vllm.model_executor.models.qwen3_next import QwenNextMixtureOfExperts
 from vllm.sequence import IntermediateTensors
+from vllm.transformers_utils.configs.qwen3_5 import Qwen3_5TextConfig
+from vllm.transformers_utils.configs.qwen3_5_moe import Qwen3_5MoeTextConfig
 
 from .interfaces import (
     MultiModalEmbeddings,

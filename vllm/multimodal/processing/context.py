@@ -21,6 +21,7 @@ from vllm.multimodal.parse import (
     MultiModalDataItems,
     MultiModalDataParser,
 )
+from vllm.renderers import TokenizeParams
 from vllm.tokenizers import TokenizerLike
 from vllm.transformers_utils.processor import cached_processor_from_config
 from vllm.utils.func_utils import get_allowed_kwarg_only_overrides
@@ -91,110 +92,6 @@ class MultiModalProcessorTimingStats:
             "prompt_update_time": self.prompt_update_time,
             "preprocessor_total_time": self.preprocessor_total_time,
         }
-
-
-def get_timing_stats_from_engine_client(
-    engine_client: Any,
-) -> dict[str, dict[str, float]]:
-    """
-    Get all multimodal timing stats from the engine client.
-
-    Collects both preprocessing stats (HF processor, hashing, cache lookup,
-    prompt update) and encoder forward pass timing, merged by request_id.
-
-    Args:
-        engine_client: The engine client (has input_processor and workers).
-
-    Returns:
-        Dictionary mapping request_id to merged stats dict containing
-        both preprocessing and encoder timing metrics.
-
-    Example:
-        {
-            'request-123': {
-                'hf_processor_time': 0.45,
-                'hashing_time': 0.02,
-                'cache_lookup_time': 0.01,
-                'prompt_update_time': 0.03,
-                'preprocessor_total_time': 0.51,
-                'encoder_forward_time': 0.23,
-                'num_encoder_calls': 1
-            }
-        }
-    """
-    try:
-        if not engine_client.vllm_config.observability_config.enable_mm_processor_stats:
-            return {}
-    except (AttributeError, RuntimeError):
-        return {}
-
-    preprocessing_stats = {}
-    try:
-        input_processor = engine_client.input_processor
-        input_preprocessor = input_processor.input_preprocessor
-
-        if hasattr(input_preprocessor, "_get_mm_processor"):
-            mm_processor = input_preprocessor._get_mm_processor()
-            if mm_processor is not None and hasattr(mm_processor, "info"):
-                ctx = mm_processor.info.ctx
-                preprocessing_stats = ctx.get_all_timing_stats()
-    except (AttributeError, RuntimeError):
-        pass
-
-    encoder_stats = {}
-    try:
-        if hasattr(engine_client, "collective_rpc"):
-            encoder_stats_results = engine_client.collective_rpc(
-                "get_encoder_timing_stats"
-            )
-            if encoder_stats_results and len(encoder_stats_results) > 0:
-                for worker_stats in encoder_stats_results:
-                    if not worker_stats:
-                        continue
-                    for request_id, stats_dict in worker_stats.items():
-                        if request_id not in encoder_stats:
-                            encoder_stats[request_id] = dict(stats_dict)
-                        else:
-                            # Aggregate timing metrics across workers
-                            current_time = encoder_stats[request_id].get(
-                                "encoder_forward_time", 0.0
-                            )
-                            new_time = stats_dict.get("encoder_forward_time", 0.0)
-                            encoder_stats[request_id]["encoder_forward_time"] = max(
-                                current_time, new_time
-                            )
-
-                            current_calls = encoder_stats[request_id].get(
-                                "num_encoder_calls", 0
-                            )
-                            new_calls = stats_dict.get("num_encoder_calls", 0)
-                            encoder_stats[request_id]["num_encoder_calls"] = max(
-                                current_calls, new_calls
-                            )
-    except (AttributeError, RuntimeError):
-        pass
-
-    merged_stats = {}
-
-    for request_id, prep_dict in preprocessing_stats.items():
-        merged_stats[request_id] = dict(prep_dict)
-
-    for request_id, enc_dict in encoder_stats.items():
-        if request_id in merged_stats:
-            merged_stats[request_id].update(enc_dict)
-            continue
-
-        # In V1 engine, the request_id in encoder_stats has a suffix
-        # appended to the original request_id (which is used in
-        # preprocessing_stats).
-        # We try to strip the suffix to find the matching request.
-        possible_original_id = request_id.rpartition("-")[0]
-        if possible_original_id and possible_original_id in merged_stats:
-            merged_stats[possible_original_id].update(enc_dict)
-        else:
-            merged_stats[request_id] = dict(enc_dict)
-
-    return merged_stats
 
 
 @contextmanager
@@ -409,6 +306,10 @@ class InputProcessingContext:
 
         return json_map_leaves(_postprocess_one, output)
 
+    def get_merged_mm_kwargs(self, kwargs: Mapping[str, object]):
+        mm_config = self.model_config.get_multimodal_config()
+        return mm_config.merge_mm_processor_kwargs(kwargs)
+
     def call_hf_processor(
         self,
         hf_processor: ProcessorMixin,
@@ -424,8 +325,7 @@ class InputProcessingContext:
         """
         assert callable(hf_processor)
 
-        mm_config = self.model_config.get_multimodal_config()
-        merged_kwargs = mm_config.merge_mm_processor_kwargs(kwargs)
+        merged_kwargs = self.get_merged_mm_kwargs(kwargs)
 
         allowed_kwargs = get_allowed_kwarg_only_overrides(
             hf_processor,
@@ -572,6 +472,21 @@ class BaseProcessingInfo:
         specific kwargs from model config or user inputs.
         """
         return self.ctx.get_hf_processor(**kwargs)
+
+    def get_default_tok_params(self) -> TokenizeParams:
+        """Construct the default parameters for tokenization."""
+        model_config = self.ctx.model_config
+        encoder_config = model_config.encoder_config or {}
+
+        return TokenizeParams(
+            max_total_tokens=model_config.max_model_len,
+            do_lower_case=encoder_config.get("do_lower_case", False),
+            add_special_tokens=True,
+        )
+
+    @cached_property
+    def default_tok_params(self) -> TokenizeParams:
+        return self.get_default_tok_params()
 
     def _get_expected_hidden_size(self) -> int | None:
         """

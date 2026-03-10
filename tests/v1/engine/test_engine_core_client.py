@@ -8,6 +8,7 @@ import os
 import signal
 import time
 import uuid
+from concurrent.futures import Future
 from dataclasses import dataclass
 from threading import Thread
 from types import SimpleNamespace
@@ -69,7 +70,6 @@ def make_request(
         mm_features=None,
         sampling_params=params,
         pooling_params=None,
-        eos_token_id=None,
         arrival_time=time.time(),
         lora_request=None,
         cache_salt=None,
@@ -279,6 +279,24 @@ def echo_dc_nested(
     return structures.get(structure_type, val)
 
 
+def future_echo(self, value: Any, num_wait_loops: int = 2) -> Future:
+    """Utility that returns a Future completed by a per_step_hook after
+    num_wait_loops engine steps (tests deferred utility path).
+    """
+    future: Future = Future()
+    remaining = [num_wait_loops]
+
+    def _step(engine: EngineCore) -> bool:
+        remaining[0] -= 1
+        if remaining[0] <= 0:
+            future.set_result(value)
+            return True  # remove hook
+        return False
+
+    self.per_step_hooks.add(_step)
+    return future
+
+
 # --- Fixtures for subprocess patching ---
 # These create sitecustomize.py files that patch EngineCore in spawned
 # subprocesses. This is necessary because ROCm requires 'spawn' multiprocessing
@@ -375,6 +393,28 @@ def subprocess_echo_dc_nested_patch(monkeypatch, tmp_path):
                 "from vllm.v1.engine.core import EngineCore",
                 inspect.getsource(echo_dc_nested),
                 "EngineCore.echo_dc_nested = echo_dc_nested",
+            ]
+        )
+    )
+    monkeypatch.setenv(
+        "PYTHONPATH",
+        os.pathsep.join(filter(None, [str(tmp_path), os.getenv("PYTHONPATH")])),
+    )
+
+
+@pytest.fixture
+def subprocess_future_echo_patch(monkeypatch, tmp_path):
+    """Create sitecustomize.py so spawned subprocesses have future_echo method."""
+    sc = tmp_path / "sitecustomize.py"
+    sc.write_text(
+        "\n".join(
+            [
+                "from concurrent.futures import Future",
+                "from typing import Any",
+                "",
+                "from vllm.v1.engine.core import EngineCore",
+                inspect.getsource(future_echo),
+                "EngineCore.future_echo = future_echo",
             ]
         )
     )
@@ -783,6 +823,48 @@ async def test_engine_core_client_util_method_nested_structures(
                 for val in item.values():
                     assert val is None
 
+        finally:
+            client.shutdown()
+
+
+@pytest.mark.asyncio(loop_scope="function")
+async def test_engine_core_client_future_utility_async(
+    monkeypatch: pytest.MonkeyPatch,
+    subprocess_future_echo_patch,
+):
+    """Test that a utility returning a Future (completed by a per_step_hook
+    after N steps) completes when the future is done (engine uses add_done_callback).
+    """
+    with monkeypatch.context() as m:
+        m.setattr(EngineCore, "future_echo", future_echo, raising=False)
+
+        engine_args = EngineArgs(model=MODEL_NAME, enforce_eager=True)
+        vllm_config = engine_args.create_engine_config(
+            usage_context=UsageContext.UNKNOWN_CONTEXT
+        )
+        executor_class = Executor.get_class(vllm_config)
+
+        with set_default_torch_num_threads(1):
+            client = EngineCoreClient.make_client(
+                multiprocess_mode=True,
+                asyncio_mode=True,
+                vllm_config=vllm_config,
+                executor_class=executor_class,
+                log_stats=True,
+            )
+
+        try:
+            core_client: AsyncMPClient = client
+
+            # Completes after 2 engine steps (num_wait_loops=2)
+            result = await core_client.call_utility_async(
+                "future_echo", "future_result", 2
+            )
+            assert result == "future_result"
+
+            # None is a valid result (num_wait_loops=0 → completes on first step)
+            result = await core_client.call_utility_async("future_echo", None, 0)
+            assert result is None
         finally:
             client.shutdown()
 

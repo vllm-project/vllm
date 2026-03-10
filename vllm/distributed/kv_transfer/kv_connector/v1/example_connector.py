@@ -145,7 +145,6 @@ class ExampleConnector(KVConnectorBase_V1):
                     num_pages * page_size, -1
                 )
                 dst_kv_cache_layer[slot_mapping, ...] = src_kv_cache
-                dst_kv_cache_layer.reshape(dst_kv_cache_layer_shape)
             else:
                 num_pages = dst_kv_cache_layer_shape[1]
                 page_size = dst_kv_cache_layer_shape[2]
@@ -153,17 +152,10 @@ class ExampleConnector(KVConnectorBase_V1):
                     2, num_pages * page_size, -1
                 )
                 dst_kv_cache_layer[:, slot_mapping, ...] = src_kv_cache
-                dst_kv_cache_layer.reshape(dst_kv_cache_layer_shape)
 
         # Get the metadata
         metadata: KVConnectorMetadata = self._get_connector_metadata()
         assert isinstance(metadata, ExampleConnectorMetadata)
-
-        if metadata is None:
-            logger.warning(
-                "In connector.start_load_kv, but the connector metadata is None"
-            )
-            return
 
         attn_metadata = forward_context.attn_metadata
         if attn_metadata is None:

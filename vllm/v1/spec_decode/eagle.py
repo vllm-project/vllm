@@ -1286,6 +1286,7 @@ class SpecDecodeBaseProposer:
             model = get_model(
                 vllm_config=self.vllm_config,
                 model_config=self.speculative_config.draft_model_config,
+                load_config=self.speculative_config.draft_load_config,
             )
         return model
 
@@ -1504,6 +1505,24 @@ class SpecDecodeBaseProposer:
             if hasattr(self.model, "lm_head"):
                 del self.model.lm_head
             self.model.lm_head = target_language_model.lm_head
+
+            # MTP models call compute_logits via shared_head.head (a
+            # ParallelLMHead inside each MTP layer), not self.model.lm_head.
+            # If the checkpoint omits a copy of the lm_head weights at the
+            # MTP layer path, shared_head.head stays uninitialised and
+            # produces NaN logits. Always share it explicitly.
+            inner = getattr(self.model, "model", None)
+            layers = getattr(inner, "layers", None) if inner else None
+            if layers is not None:
+                items = layers.values() if isinstance(layers, nn.ModuleDict) else layers
+                for layer in items:
+                    sh = getattr(layer, "shared_head", None)
+                    if sh is not None and hasattr(sh, "head"):
+                        del sh.head
+                        sh.head = target_language_model.lm_head
+                        logger.info(
+                            "Shared target model lm_head with MTP shared_head.head."
+                        )
 
     @torch.inference_mode()
     def dummy_run(

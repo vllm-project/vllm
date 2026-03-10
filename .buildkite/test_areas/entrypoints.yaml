@@ -24,6 +24,11 @@ steps:
   - pytest -v -s entrypoints/llm --ignore=entrypoints/llm/test_generate.py --ignore=entrypoints/llm/test_collective_rpc.py
   - pytest -v -s entrypoints/llm/test_generate.py # it needs a clean process
   - pytest -v -s entrypoints/offline_mode # Needs to avoid interference with other tests
+  mirror:
+    amd:
+      device: mi325_1
+      depends_on:
+      - image-build-amd
 
 - label: Entrypoints Integration (API Server 1)
   timeout_in_minutes: 130
@@ -42,15 +47,13 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
-  - tests/tool_use
-  - tests/entrypoints/sleep
-  - tests/entrypoints/instrumentator
   - tests/entrypoints/rpc
+  - tests/entrypoints/instrumentator
+  - tests/tool_use
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - PYTHONPATH=/vllm-workspace pytest -v -s entrypoints/rpc
   - pytest -v -s entrypoints/instrumentator
-  - pytest -v -s entrypoints/sleep
+  - PYTHONPATH=/vllm-workspace pytest -v -s entrypoints/rpc
   - pytest -v -s tool_use
 
 - label: Entrypoints Integration (Pooling)

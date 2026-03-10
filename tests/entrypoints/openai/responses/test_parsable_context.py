@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import importlib
+import importlib.util
 import json
 
 import pytest
@@ -172,19 +172,26 @@ async def test_mcp_tool_call(client: OpenAI, model_name: str):
 
     assert response is not None
     assert response.status == "completed"
-    assert response.output[0].type == "reasoning"
-    assert response.output[1].type == "mcp_call"
-    assert type(response.output[1].arguments) is str
-    assert type(response.output[1].output) is str
-    assert response.output[2].type == "reasoning"
-    # make sure the correct math is in the final output
-    assert response.output[3].type == "message"
-    assert "56088" in response.output[3].content[0].text
 
-    # test raw input_messages / output_messages
+    # The model may produce multiple reasoning/mcp_call rounds before the
+    # final message, so validate structurally rather than by exact index.
+    output_types = [o.type for o in response.output]
+    assert "reasoning" in output_types
+    mcp_calls = [o for o in response.output if o.type == "mcp_call"]
+    assert len(mcp_calls) >= 1
+    assert type(mcp_calls[0].arguments) is str
+    assert type(mcp_calls[0].output) is str
+
+    # The final output should be a message containing the correct answer
+    assert response.output[-1].type == "message"
+    assert any(s in response.output[-1].content[0].text for s in ("56088", "56,088"))
+
+    # Test raw input_messages / output_messages
     assert len(response.input_messages) == 1
-    assert len(response.output_messages) == 3
-    assert "56088" in response.output_messages[2]["message"]
+    assert len(response.output_messages) >= 3
+    assert any(
+        s in response.output_messages[-1]["message"] for s in ("56088", "56,088")
+    )
 
 
 @pytest.mark.asyncio

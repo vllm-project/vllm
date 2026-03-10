@@ -723,10 +723,11 @@ class Glm4vVisionTransformer(nn.Module):
         cu_seqlens: torch.Tensor,
     ) -> torch.Tensor | None:
         max_seqlen = None
-        if (
-            self.attn_backend == AttentionBackendEnum.FLASH_ATTN
-            or self.attn_backend == AttentionBackendEnum.ROCM_AITER_FA
-        ):
+        if self.attn_backend in {
+            AttentionBackendEnum.FLASH_ATTN,
+            AttentionBackendEnum.ROCM_AITER_FA,
+            AttentionBackendEnum.TRITON_ATTN,
+        }:
             max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
         return max_seqlen
 
@@ -869,9 +870,28 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
 
         return preprocessed_size, num_vision_tokens
 
+    def _get_image_max_pixels(self) -> int:
+        """Read max_pixels from the HF image processor config.
+
+        Despite the name, ``longest_edge`` is a pixel **area** (total pixel
+        count), not an edge length.  The HF processor passes it directly to
+        ``smart_resize`` as the ``max_pixels`` argument, which constrains
+        ``t_bar * h_bar * w_bar <= max_pixels``.
+        """
+        return self.get_image_processor().size["longest_edge"]
+
     def get_image_size_with_most_features(self) -> ImageSize:
+        # Use num_frames=1 for single-image budget estimation.
+        # _get_vision_info defaults to num_frames=16 (video), which
+        # makes smart_resize constrain 16*H*W <= max_pixels, vastly
+        # underestimating the spatial budget for a single image and
+        # causing encoder cache overflow for large images
+        # (see https://github.com/vllm-project/vllm/issues/34040).
         max_image_size, _ = self._get_vision_info(
-            image_width=9999999, image_height=9999999
+            image_width=9999999,
+            image_height=9999999,
+            num_frames=1,
+            max_image_pixels=self._get_image_max_pixels(),
         )
         return max_image_size
 
@@ -884,7 +904,8 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
         _, num_image_tokens = self._get_vision_info(
             image_width=image_width,
             image_height=image_height,
-            max_image_pixels=28 * 28 * 2 * 6144,
+            num_frames=1,
+            max_image_pixels=self._get_image_max_pixels(),
         )
         return num_image_tokens
 
@@ -1143,6 +1164,7 @@ class Glm4vDummyInputsBuilder(BaseDummyInputsBuilder[Glm4vProcessingInfo]):
         seq_len: int,
         mm_counts: Mapping[str, int],
         mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_processor_kwargs: Mapping[str, object] | None = None,
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
         num_videos = mm_counts.get("video", 0)

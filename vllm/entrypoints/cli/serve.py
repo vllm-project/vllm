@@ -108,6 +108,7 @@ class ServeSubcommand(CLISubcommand):
             run_multi_api_server(args)
         else:
             # Single API server (this process).
+            args.api_server_count = None
             uvloop.run(run_server(args))
 
     def validate(self, args: argparse.Namespace) -> None:

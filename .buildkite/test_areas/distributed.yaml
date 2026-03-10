@@ -165,6 +165,7 @@ steps:
   num_devices: 2
   num_nodes: 2
   no_plugin: true
+  optional: true # TODO: revert once infra issue solved
   source_file_dependencies:
   - vllm/distributed/
   - vllm/engine/
@@ -196,6 +197,17 @@ steps:
   commands:
     - uv pip install --system -r /vllm-workspace/requirements/kv_connectors.txt
     - DP_EP=1 bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
+
+- label: CrossLayer KV layout Distributed NixlConnector PD accuracy tests (4 GPUs)
+  timeout_in_minutes: 30
+  working_dir: "/vllm-workspace/tests"
+  num_devices: 4
+  source_file_dependencies:
+    - vllm/distributed/kv_transfer/kv_connector/v1/nixl_connector.py
+    - tests/v1/kv_connector/nixl_integration/
+  commands:
+    - uv pip install --system -r /vllm-workspace/requirements/kv_connectors.txt
+    - CROSS_LAYERS_BLOCKS=True bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
 
 - label: Pipeline + Context Parallelism (4 GPUs))
   timeout_in_minutes: 60

@@ -358,12 +358,14 @@ class Qwen2_5OmniThinkerDummyInputsBuilder(
         seq_len: int,
         mm_counts: Mapping[str, int],
         mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_processor_kwargs: Mapping[str, object] | None = None,
     ) -> MultiModalDataDict:
         num_audios = mm_counts.get("audio", 0)
         num_images = mm_counts.get("image", 0)
         num_videos = mm_counts.get("video", 0)
 
-        feature_extractor = self.info.get_feature_extractor()
+        mm_processor_kwargs = mm_processor_kwargs or {}
+        feature_extractor = self.info.get_feature_extractor(**mm_processor_kwargs)
 
         target_audio_length = (
             min(
@@ -372,7 +374,10 @@ class Qwen2_5OmniThinkerDummyInputsBuilder(
             )
             * feature_extractor.sampling_rate
         )
-        target_width, target_height = self.info.get_image_size_with_most_features()
+
+        target_width, target_height = self.info.get_image_size_with_most_features(
+            max_pixels=mm_processor_kwargs.get("max_pixels", None),
+        )
         target_num_frames = self.info.get_num_frames_with_most_features(
             seq_len, mm_counts
         )

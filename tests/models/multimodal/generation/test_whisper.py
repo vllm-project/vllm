@@ -117,7 +117,6 @@ def check_model_available(model: str) -> None:
 @pytest.mark.parametrize("dtype", ["half", "float"])
 @pytest.mark.parametrize("num_logprobs", [5])
 @pytest.mark.parametrize("enforce_eager", [True, False])
-@create_new_process_for_each_test("spawn")
 def test_models(
     hf_runner,
     vllm_runner,

@@ -30,9 +30,8 @@ from vllm.v1.kv_cache_interface import (
 def create_chunked_local_attention_backend(
     underlying_attn_backend: AttentionBackend,
     attention_chunk_size: int,
-    block_size: int,
 ) -> type[AttentionBackend]:
-    prefix = f"ChunkedLocalAttention_{attention_chunk_size}_{block_size}_"
+    prefix = f"ChunkedLocalAttention_{attention_chunk_size}_"
 
     underlying_builder = underlying_attn_backend.get_builder_cls()
     assert issubclass(underlying_builder, AttentionMetadataBuilder)
@@ -55,7 +54,9 @@ def create_chunked_local_attention_backend(
             fast_build: bool = False,
         ):
             cm, make_virtual_batches_block_table = make_local_attention_virtual_batches(
-                attention_chunk_size, common_attn_metadata, block_size
+                attention_chunk_size,
+                common_attn_metadata,
+                self.kv_cache_spec.block_size,
             )
             metadata = super().build(common_prefix_len, cm, fast_build)
             metadata.make_virtual_batches_block_table = make_virtual_batches_block_table
@@ -97,13 +98,13 @@ class ChunkedLocalAttention(Attention):
             block_size = cache_config.block_size
         else:
             kv_cache_dtype = "auto"
-            block_size = 16
+            block_size = None
 
         underlying_attn_backend = get_attn_backend(
             head_size, dtype, kv_cache_dtype, block_size
         )
         attn_backend = create_chunked_local_attention_backend(
-            underlying_attn_backend, attention_chunk_size, block_size
+            underlying_attn_backend, attention_chunk_size
         )
 
         super().__init__(

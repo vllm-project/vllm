@@ -59,7 +59,6 @@ from vllm.multimodal.processing import (
     BaseProcessingInfo,
     PromptReplacement,
     PromptUpdate,
-    PromptUpdateDetails,
 )
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
@@ -187,16 +186,21 @@ class Qwen2AudioDummyInputsBuilder(BaseDummyInputsBuilder[Qwen2AudioProcessingIn
 
         hf_processor = self.info.get_hf_processor()
         audio_token = hf_processor.audio_token
+        audio_bos_token = hf_processor.audio_bos_token
+        audio_eos_token = hf_processor.audio_eos_token
 
-        return audio_token * num_audios
+        return (audio_bos_token + audio_token + audio_eos_token) * num_audios
 
     def get_dummy_mm_data(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
         mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_processor_kwargs: Mapping[str, object] | None = None,
     ) -> MultiModalDataDict:
-        feature_extractor = self.info.get_feature_extractor()
+        feature_extractor = self.info.get_feature_extractor(
+            **(mm_processor_kwargs or {})
+        )
 
         sampling_rate = feature_extractor.sampling_rate
         audio_len = feature_extractor.chunk_length * sampling_rate
@@ -259,17 +263,7 @@ class Qwen2AudioMultiModalProcessor(BaseMultiModalProcessor[Qwen2AudioProcessing
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
         processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
-        tokenizer = self.info.get_tokenizer()
-        vocab = tokenizer.get_vocab()
-
-        # Use getattr with default to be compatible with transformers<4.48
-        audio_token = getattr(processor, "audio_token", "<|AUDIO|>")
-        audio_bos_token = getattr(processor, "audio_bos_token", "<|audio_bos|>")
-        audio_eos_token = getattr(processor, "audio_eos_token", "<|audio_eos|>")
-
-        audio_token_id = vocab[audio_token]
-        audio_bos_id = vocab[audio_bos_token]
-        audio_eos_id = vocab[audio_eos_token]
+        audio_token_id = processor.audio_token_id
 
         out_mm_data = out_mm_kwargs.get_data()
         feature_attention_mask = out_mm_data.get("feature_attention_mask")
@@ -300,17 +294,12 @@ class Qwen2AudioMultiModalProcessor(BaseMultiModalProcessor[Qwen2AudioProcessing
                     "to be represented inside the model"
                 )
 
-            audio_tokens = [audio_token_id] * num_features
-
-            return PromptUpdateDetails.select_token_id(
-                [audio_bos_id] + audio_tokens + [audio_eos_id],
-                embed_token_id=audio_token_id,
-            )
+            return [audio_token_id] * num_features
 
         return [
             PromptReplacement(
                 modality="audio",
-                target=audio_token,
+                target=[audio_token_id],
                 replacement=get_replacement_qwen2_audio,
             )
         ]

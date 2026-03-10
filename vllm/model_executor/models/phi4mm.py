@@ -558,10 +558,8 @@ class Phi4MMProcessingInfo(BaseProcessingInfo):
 
     def get_dynamic_hd(
         self,
-        processor: ProcessorMixin | None = None,
+        processor: ProcessorMixin,
     ) -> int:
-        if processor is None:
-            processor = self.get_hf_processor()
         image_processor = processor.image_processor
         return image_processor.dynamic_hd
 
@@ -715,7 +713,7 @@ class Phi4MMProcessingInfo(BaseProcessingInfo):
         *,
         image_width: int,
         image_height: int,
-        processor: ProcessorMixin | None = None,
+        processor: ProcessorMixin,
     ) -> int:
         hf_config = self.get_hf_config()
         vision_encoder_name = hf_config.img_processor
@@ -739,10 +737,9 @@ class Phi4MMProcessingInfo(BaseProcessingInfo):
 
         return image_num_tokens
 
-    def get_image_size_with_most_features(
-        self,
-        processor: ProcessorMixin | None = None,
-    ) -> ImageSize:
+    def get_image_size_with_most_features(self) -> ImageSize:
+        processor = self.get_hf_processor()
+
         hf_config = self.get_hf_config()
         vision_encoder_name = hf_config.img_processor
         if vision_encoder_name is None:
@@ -826,6 +823,7 @@ class Phi4MMDummyInputsBuilder(BaseDummyInputsBuilder[Phi4MMProcessingInfo]):
         seq_len: int,
         mm_counts: Mapping[str, int],
         mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_processor_kwargs: Mapping[str, object] | None = None,
     ) -> MultiModalDataDict:
         num_audios = mm_counts.get("audio", 0)
         num_images = mm_counts.get("image", 0)
@@ -873,9 +871,12 @@ class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
             prompt, mm_data, mm_kwargs, tok_kwargs
         )
 
+        hf_processor = self.info.get_hf_processor(**mm_kwargs)
         num_img_tokens = [
             self.info.get_num_image_tokens(
-                image_width=img_size[0], image_height=img_size[1]
+                image_width=img_size[0],
+                image_height=img_size[1],
+                processor=hf_processor,
             )
             for img_size in processed_outputs["image_sizes"]
         ]

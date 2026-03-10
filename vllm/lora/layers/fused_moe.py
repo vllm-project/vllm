@@ -219,7 +219,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                     self.max_loras,
                     self.adapter_enabled,
                     expert_map,
-                    naive_block_assignment,
+                    naive_block_assignment=naive_block_assignment,
                 )
 
                 moe_state_dict["sorted_token_ids_lora"] = sorted_token_ids_lora
@@ -338,8 +338,9 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         fused_experts.moe_sum = moe_sum_decorator(
             self.base_layer, fused_experts.moe_sum
         )
-        self.base_layer.quant_method = FusedMoEModularMethod(
-            self.base_layer.quant_method, m_fused_moe_fn
+        # TODO(bnell): find a less intrusive way to handle this.
+        self.base_layer._replace_quant_method(
+            FusedMoEModularMethod(self.base_layer.quant_method, m_fused_moe_fn)
         )
 
     def _create_lora_a_weights(

@@ -53,7 +53,7 @@ if hasattr(torch.ops._xpu_C, "int4_gemm_w4a16"):
         return torch.empty((M, N), dtype=input.dtype, device=input.device)
 
 
-class ipex_ops:
+class xpu_ops:
     @staticmethod
     def flash_attn_varlen_func(
         q: torch.Tensor,
@@ -73,7 +73,7 @@ class ipex_ops:
         cu_seqlens_k: torch.Tensor | None = None,
         # passed in qwen vl
         dropout_p: float = 0.0,
-        # The following parameters are not used in ipex kernel currently,
+        # The following parameters are not used in xpu kernel currently,
         # we keep API compatible to CUDA's.
         scheduler_metadata=None,
         fa_version: int = 2,
@@ -153,6 +153,6 @@ class ipex_ops:
         sm_margin=0,  # Can be tuned if some SMs are used for communication
     ) -> None:
         logger.warning_once(
-            "get_scheduler_metadata is not implemented for ipex_ops, returning None."
+            "get_scheduler_metadata is not implemented for xpu_ops, returning None."
         )
         return None

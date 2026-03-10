@@ -311,7 +311,8 @@ def test_get_logprobs_and_prompt_logprobs(
       temperature: "temperature" sampling parameter
       example_prompts: example prompt fixture
     """
-    do_apc = vllm_model.llm.llm_engine.cache_config.enable_prefix_caching
+    vllm_config = vllm_model.llm.llm_engine.vllm_config
+    do_apc = vllm_config.cache_config.enable_prefix_caching
     if do_apc and (temperature < 2.0 or batch_logprobs_composition != SAMPLE_PROMPT):
         # Skip some test-cases to save time.
         pytest.skip()

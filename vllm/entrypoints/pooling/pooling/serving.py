@@ -6,7 +6,7 @@ import json
 import time
 from collections.abc import AsyncGenerator, Callable, Sequence
 from functools import partial
-from typing import Any, Final, Literal, cast
+from typing import Final, Literal, cast
 
 import jinja2
 from fastapi import Request
@@ -33,10 +33,9 @@ from vllm.entrypoints.pooling.utils import (
     encode_pooling_output_base64,
     encode_pooling_output_float,
 )
-from vllm.inputs import PromptType
+from vllm.inputs import ProcessorInputs
 from vllm.logger import init_logger
 from vllm.outputs import PoolingRequestOutput
-from vllm.renderers.inputs import TokPrompt
 from vllm.renderers.inputs.preprocess import prompt_to_seq
 from vllm.utils.async_utils import merge_async_iterators
 from vllm.utils.serial_utils import EmbedDType, EncodingFormat, Endianness
@@ -85,7 +84,6 @@ class OpenAIServingPooling(OpenAIServing):
         request_id = f"pool-{self._base_request_id(raw_request)}"
         created_time = int(time.time())
 
-        is_io_processor_request = isinstance(request, IOProcessorRequest)
         try:
             lora_request = self._maybe_get_adapters(request)
 
@@ -94,8 +92,8 @@ class OpenAIServingPooling(OpenAIServing):
                     "dimensions is currently not supported"
                 )
 
-            engine_prompts: Sequence[PromptType | TokPrompt]
-            if is_io_processor_request:
+            engine_prompts: Sequence[ProcessorInputs]
+            if use_io_processor := isinstance(request, IOProcessorRequest):
                 if self.io_processor is None:
                     raise ValueError(
                         "No IOProcessor plugin installed. Please refer "
@@ -104,12 +102,15 @@ class OpenAIServingPooling(OpenAIServing):
                         "offline inference example for more details."
                     )
 
-                validated_prompt = self.io_processor.parse_request(request)
+                validated_prompt = self.io_processor.parse_data(request.data)
 
                 raw_prompts = await self.io_processor.pre_process_async(
                     prompt=validated_prompt, request_id=request_id
                 )
-                engine_prompts = prompt_to_seq(raw_prompts)
+                engine_prompts = await self._preprocess_cmpl(
+                    request,
+                    prompt_to_seq(raw_prompts),
+                )
             elif isinstance(request, PoolingChatRequest):
                 error_check_ret = self._validate_chat_template(
                     request_chat_template=request.chat_template,
@@ -141,13 +142,14 @@ class OpenAIServingPooling(OpenAIServing):
         # Schedule the request and get the result generator.
         generators: list[AsyncGenerator[PoolingRequestOutput, None]] = []
         try:
-            if is_io_processor_request:
-                assert self.io_processor is not None and isinstance(
-                    request, IOProcessorRequest
-                )
-                pooling_params = self.io_processor.validate_or_generate_params()
+            if use_io_processor:
+                assert self.io_processor is not None
+
+                pooling_params = self.io_processor.merge_pooling_params()
+                if pooling_params.task is None:
+                    pooling_params.task = "plugin"
             else:
-                pooling_params = request.to_pooling_params()
+                pooling_params = request.to_pooling_params()  # type: ignore
 
             for i, engine_prompt in enumerate(engine_prompts):
                 request_id_item = f"{request_id}-{i}"
@@ -165,18 +167,11 @@ class OpenAIServingPooling(OpenAIServing):
                     else await self._get_trace_headers(raw_request.headers)
                 )
 
-                if is_io_processor_request:
-                    tokenization_kwargs: dict[str, Any] = {}
-                else:
-                    tok_params = request.build_tok_params(self.model_config)  # type: ignore
-                    tokenization_kwargs = tok_params.get_encode_kwargs()
-
                 generator = self.engine_client.encode(
                     engine_prompt,
                     pooling_params,
                     request_id_item,
                     lora_request=lora_request,
-                    tokenization_kwargs=tokenization_kwargs,
                     trace_headers=trace_headers,
                     priority=request.priority,
                 )
@@ -187,13 +182,31 @@ class OpenAIServingPooling(OpenAIServing):
 
         result_generator = merge_async_iterators(*generators)
 
-        if is_io_processor_request:
+        if use_io_processor:
             assert self.io_processor is not None
             output = await self.io_processor.post_process_async(
-                model_output=result_generator,
+                result_generator,
                 request_id=request_id,
             )
-            return self.io_processor.output_to_response(output)
+
+            if callable(
+                output_to_response := getattr(
+                    self.io_processor, "output_to_response", None
+                )
+            ):
+                logger.warning_once(
+                    "`IOProcessor.output_to_response` is deprecated. To ensure "
+                    "consistency between offline and online APIs, "
+                    "`IOProcessorResponse` will become a transparent wrapper "
+                    "around output data from v0.19 onwards.",
+                )
+
+                if hasattr(output, "request_id") and output.request_id is None:
+                    output.request_id = request_id  # type: ignore
+
+                return output_to_response(output)  # type: ignore
+
+            return IOProcessorResponse(request_id=request_id, data=output)
 
         assert isinstance(request, (PoolingCompletionRequest, PoolingChatRequest))
         num_prompts = len(engine_prompts)

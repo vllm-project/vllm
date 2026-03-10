@@ -53,6 +53,7 @@ def get_attn_backend(
     use_sparse: bool = False,
     use_mm_prefix: bool = False,
     attn_type: str | None = None,
+    num_heads: int | None = None,
 ) -> type[AttentionBackend]:
     """Selects which attention backend to use and lazily imports it."""
 
@@ -66,7 +67,6 @@ def get_attn_backend(
     from vllm.config import get_current_vllm_config
 
     vllm_config = get_current_vllm_config()
-    backend_enum = vllm_config.attention_config.backend
 
     attn_selector_config = AttentionSelectorConfig(
         head_size=head_size,
@@ -81,8 +81,9 @@ def get_attn_backend(
     )
 
     return _cached_get_attn_backend(
-        backend=backend_enum,
+        backend=vllm_config.attention_config.backend,
         attn_selector_config=attn_selector_config,
+        num_heads=num_heads,
     )
 
 
@@ -90,12 +91,14 @@ def get_attn_backend(
 def _cached_get_attn_backend(
     backend,
     attn_selector_config: AttentionSelectorConfig,
+    num_heads: int | None = None,
 ) -> type[AttentionBackend]:
     from vllm.platforms import current_platform
 
     attention_cls = current_platform.get_attn_backend_cls(
         backend,
         attn_selector_config=attn_selector_config,
+        num_heads=num_heads,
     )
     if not attention_cls:
         raise ValueError(

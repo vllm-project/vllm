@@ -4,7 +4,6 @@ import functools
 from math import prod
 
 import torch
-import torch.nn.functional as F
 
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
@@ -22,6 +21,9 @@ from vllm.model_executor.layers.quantization.utils.mxfp6_utils import (
 )
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     mxfp8_e4m3_quantize,
+)
+from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
+    per_tensor_dequantize,
 )
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv
@@ -241,7 +243,27 @@ def moe_kernel_quantize_input(
     per_act_token_quant: bool,
     block_shape: list[int] | None = None,
     is_fp4_scale_swizzled: bool = True,
+    ocp_mx_scheme: str | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
+    # Handle OCP MX scheme that requires QDQ (quantize-dequantize) for emulation
+    if ocp_mx_scheme is not None:
+        if ocp_mx_scheme in {"w_mxfp4", "w_mxfp4_a_mxfp4"}:
+            pass  # No QDQ needed for these schemes
+        elif ocp_mx_scheme.endswith("a_fp8"):
+            # Perform QDQ (quantize and dequantize) on activation for emulation
+            # purpose, because there is no native kernel for weight in ocp_mx_scheme
+            # and activation in FP8. The implementation is based on existing
+            # non-emulation ops.
+            qA, qA_scale = ops.scaled_fp8_quant(
+                A, A_scale, use_per_token_if_dynamic=False
+            )
+            A = per_tensor_dequantize(qA, qA_scale).to(A.dtype)
+            # After QDQ, we don't need further quantization
+            return A, None
+        # else: For other schemes (e.g., *_a_mxfp6_e3m2, *_a_mxfp6_e2m3),
+        # weights are already dequantized, and we proceed with normal
+        # activation quantization below.
+
     if quant_dtype == torch.float8_e4m3fn:
         return _fp8_quantize(A, A_scale, per_act_token_quant, block_shape)
     elif quant_dtype == torch.int8:
@@ -316,65 +338,6 @@ def _validate_scale_shape(
         assert block_shape is not None
         expected = (a.shape[0], cdiv(a.shape[1], block_shape[1]))
         assert a_scale.shape == expected, f"{a_scale.shape} == {expected}"
-
-
-def activation_without_mul(activation: str) -> str:
-    return activation + "_no_mul"
-
-
-RELU2_NO_MUL: str = activation_without_mul("relu2")
-SILU_NO_MUL: str = activation_without_mul("silu")
-GELU_NO_MUL: str = activation_without_mul("gelu")
-
-
-def apply_moe_activation(
-    activation: str,
-    output: torch.Tensor,
-    input: torch.Tensor,
-) -> torch.Tensor:
-    """
-    Apply MoE activation function.
-
-    For *_and_mul activations (silu, gelu, swigluoai):
-        - Expects output.size(-1) * 2 == input.size(-1)
-
-    For *_no_mul activations (silu_no_mul, gelu_no_mul, relu2_no_mul):
-        - Expects output.size(-1) == input.size(-1)
-    """
-    is_no_mul = activation.endswith("_no_mul")
-    if is_no_mul:
-        assert output.size(-1) == input.size(-1), (
-            f"{activation} expects equal sizes: {output.size(-1)} vs {input.size(-1)}"
-        )
-    else:
-        assert output.size(-1) * 2 == input.size(-1), (
-            f"{activation} expects 2x ratio: {output.size(-1) * 2} vs {input.size(-1)}"
-        )
-
-    # Activations with gated multiplication (gate × activation(up))
-    if activation == "silu":
-        torch.ops._C.silu_and_mul(output, input)
-    elif activation == "gelu":
-        torch.ops._C.gelu_and_mul(output, input)
-    elif activation == "swigluoai":
-        torch.ops._C.swigluoai_and_mul(output, input)
-    elif activation == "swiglustep":
-        from vllm.model_executor.layers.activation import swiglustep_and_mul_triton
-
-        swiglustep_and_mul_triton(output, input)
-
-    # Activations without gated multiplication
-    elif activation == SILU_NO_MUL:
-        output.copy_(F.silu(input))
-    elif activation == GELU_NO_MUL:
-        output.copy_(F.gelu(input))
-    elif activation == RELU2_NO_MUL:
-        F.relu(input, inplace=True)
-        torch.square(input, out=output)
-    else:
-        raise ValueError(f"Unsupported FusedMoe activation: {activation}")
-
-    return output
 
 
 # Torch custom ops can't deal with outputs aliasing inputs so we need to

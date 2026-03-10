@@ -23,12 +23,11 @@ if current_platform.is_cuda():
 
 elif current_platform.is_xpu():
     from vllm import _custom_ops as ops
+    from vllm._xpu_ops import xpu_ops
 
     reshape_and_cache_flash = ops.reshape_and_cache_flash
-    from vllm._ipex_ops import ipex_ops
-
-    flash_attn_varlen_func = ipex_ops.flash_attn_varlen_func  # type: ignore[assignment]
-    get_scheduler_metadata = ipex_ops.get_scheduler_metadata  # type: ignore[assignment]
+    flash_attn_varlen_func = xpu_ops.flash_attn_varlen_func  # type: ignore[assignment]
+    get_scheduler_metadata = xpu_ops.get_scheduler_metadata  # type: ignore[assignment]
 elif current_platform.is_rocm():
     try:
         from flash_attn import flash_attn_varlen_func  # type: ignore[no-redef]
@@ -153,7 +152,7 @@ def is_flash_attn_varlen_func_available() -> bool:
 
     Platform-specific sources:
     - CUDA: vllm.vllm_flash_attn.flash_attn_varlen_func
-    - XPU: ipex_ops.flash_attn_varlen_func
+    - XPU: xpu_ops.flash_attn_varlen_func
     - ROCm: upstream flash_attn.flash_attn_varlen_func (if available)
 
     Note: This is separate from the AITER flash attention backend (rocm_aiter_fa.py)

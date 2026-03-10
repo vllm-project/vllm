@@ -88,9 +88,8 @@ class Qwen2VLTester:
         # Validate outputs
         for generated, expected in zip(generated_texts, expected_outputs):
             assert expected.startswith(generated), (
-                f"Generated text {generated} doesn't "
+                f"Generated text {generated} doesn't match expected pattern {expected}"
             )
-            f"match expected pattern {expected}"
 
     def run_beam_search_test(
         self,
@@ -118,11 +117,14 @@ class Qwen2VLTester:
             inputs, beam_search_params, lora_request=lora_request
         )
 
-        for output_obj, expected_outs in zip(outputs, expected_outputs):
+        for output_obj, expected_texts in zip(outputs, expected_outputs):
             output_texts = [seq.text for seq in output_obj.sequences]
-            assert output_texts == expected_outs, (
-                f"Generated texts {output_texts} do not match expected {expected_outs}"
-            )  # noqa: E501
+
+            for output_text, expected_text in zip(output_texts, expected_texts):
+                # NOTE beam search .text contains the whole text including inputs
+                assert output_text.endswith(expected_text), (
+                    f"Generated {output_text} does not match expected {expected_text}"
+                )
 
 
 TEST_IMAGES = [
@@ -151,11 +153,10 @@ EXPECTED_OUTPUTS_VISION_NO_CONNECTOR = [
     "A closeup shot of the Tokyo Skytree with pink flowers in the foreground.",
 ]
 
-# NOTE - beam search .text contains the whole text
 EXPECTED_BEAM_SEARCH_OUTPUTS = [
     [
-        "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>What is in the image?<|im_end|>\n<|im_start|>assistant\nA majestic skyscraper stands",  # noqa: E501
-        "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>What is in the image?<|im_end|>\n<|im_start|>assistant\nA majestic tower stands tall",  # noqa: E501
+        "A majestic skyscraper stands",
+        "A majestic tower stands tall",
     ],
 ]
 

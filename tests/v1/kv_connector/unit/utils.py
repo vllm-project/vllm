@@ -212,6 +212,7 @@ def create_request(
 
     max_tokens = 1 if do_remote_decode else max_tokens
     sampling_params = SamplingParams(max_tokens=max_tokens)
+    sampling_params.update_from_generation_config({}, EOS_TOKEN_ID)
 
     common_prefix = [1] * common_prefix_len if common_prefix_len > 0 else []
     suffix = [i * request_id for i in range(num_tokens - common_prefix_len)]
@@ -223,7 +224,6 @@ def create_request(
         sampling_params=sampling_params,
         pooling_params=None,
         mm_features=None,
-        eos_token_id=EOS_TOKEN_ID,
         block_hasher=get_request_block_hasher(block_size, hash_fn),
     )
     req.kv_transfer_params = kv_transfer_params

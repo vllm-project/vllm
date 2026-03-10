@@ -82,6 +82,7 @@ def test_get_image_size_with_most_features(
         image_width=max_image_size.width,
         image_height=max_image_size.height,
         image_processor=hf_processor.image_processor,
+        mm_kwargs=hf_processor_mm_kwargs,
     )
 
     prompt = "<|vision_start|><|image_pad|><|vision_end|>"

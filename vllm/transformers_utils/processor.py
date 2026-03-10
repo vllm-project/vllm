@@ -18,9 +18,12 @@ from transformers.processing_utils import ProcessorMixin
 from transformers.video_processing_utils import BaseVideoProcessor
 from typing_extensions import TypeVar
 
+from vllm.logger import init_logger
 from vllm.transformers_utils.gguf_utils import is_gguf
 from vllm.transformers_utils.utils import convert_model_repo_to_path
 from vllm.utils.func_utils import get_allowed_kwarg_only_overrides
+
+logger = init_logger(__name__)
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
@@ -68,7 +71,13 @@ def _collect_dynamic_keys_from_processing_kwargs(kwargs_cls: type) -> set[str]:
     kwargs_type_annotations = get_type_hints(kwargs_cls)
     for kw_type in ("text_kwargs", "images_kwargs", "videos_kwargs", "audio_kwargs"):
         if kw_type in kwargs_type_annotations:
-            kw_annotations = get_type_hints(kwargs_type_annotations[kw_type])
+            # Use __annotations__ instead of get_type_hints() to avoid
+            # NameError from unresolved forward references (e.g.
+            # PILImageResampling). We only need key names, not types.
+            kw_cls = kwargs_type_annotations[kw_type]
+            kw_annotations: dict[str, Any] = {}
+            for base in reversed(kw_cls.__mro__):
+                kw_annotations.update(getattr(base, "__annotations__", {}))
             for kw_name in kw_annotations:
                 dynamic_kwargs.add(kw_name)
     dynamic_kwargs |= {"text_kwargs", "images_kwargs", "videos_kwargs", "audio_kwargs"}
@@ -195,6 +204,7 @@ def get_processor_kwargs_from_processor(processor: _P) -> set[str]:
                     )
             return processor_kwargs
     except Exception:
+        logger.exception("Failed to collect processor kwargs")
         return set()
 
 

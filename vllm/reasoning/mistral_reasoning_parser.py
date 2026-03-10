@@ -43,8 +43,8 @@ class MistralReasoningParser(BaseThinkingReasoningParser):
                 "constructor during construction."
             )
 
-        self.start_token_id = tokenizer.tokenizer.get_control_token(self.start_token)
-        self.end_token_id = tokenizer.tokenizer.get_control_token(self.end_token)
+        self.start_token_id = tokenizer.tokenizer.get_special_token(self.start_token)
+        self.end_token_id = tokenizer.tokenizer.get_special_token(self.end_token)
 
         if self.start_token_id is None or self.end_token_id is None:
             raise RuntimeError(
