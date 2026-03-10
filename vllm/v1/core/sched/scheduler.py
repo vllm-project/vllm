@@ -48,7 +48,7 @@ from vllm.v1.core.sched.output import (
 from vllm.v1.core.sched.request_queue import SchedulingPolicy, create_request_queue
 from vllm.v1.core.sched.utils import check_stop, remove_all
 from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
-from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.perf import ModelMetrics, PerfStats
 from vllm.v1.metrics.stats import PrefixCacheStats, SchedulerStats
 from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
@@ -233,13 +233,8 @@ class Scheduler(SchedulerInterface):
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
         self.use_v2_model_runner = envs.VLLM_USE_V2_MODEL_RUNNER
 
-        def has_mamba_layers(kv_cache_config: KVCacheConfig) -> bool:
-            return any(
-                isinstance(group_spec.kv_cache_spec, MambaSpec)
-                for group_spec in kv_cache_config.kv_cache_groups
-            )
-
-        self.has_mamba_layers = has_mamba_layers(kv_cache_config)
+        self.has_mamba_layers = kv_cache_config.has_mamba_layers
+        self.needs_kv_cache_zeroing = kv_cache_config.needs_kv_cache_zeroing
         self.need_mamba_block_aligned_split = (
             self.has_mamba_layers and self.cache_config.mamba_cache_mode == "align"
         )
@@ -890,6 +885,12 @@ class Scheduler(SchedulerInterface):
         self.prev_step_scheduled_req_ids.clear()
         self.prev_step_scheduled_req_ids.update(num_scheduled_tokens.keys())
 
+        new_block_ids_to_zero = (
+            (self.kv_cache_manager.take_new_block_ids() or None)
+            if self.needs_kv_cache_zeroing
+            else None
+        )
+
         scheduler_output = SchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
             scheduled_cached_reqs=cached_reqs_data,
@@ -905,6 +906,7 @@ class Scheduler(SchedulerInterface):
             # the previous and the current steps.
             finished_req_ids=self.finished_req_ids,
             free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
+            new_block_ids_to_zero=new_block_ids_to_zero,
         )
 
         # NOTE(Kuntai): this function is designed for multiple purposes:
