@@ -14,6 +14,7 @@ from vllm.distributed.kv_transfer.kv_connector.utils import yield_req_data
 from vllm.distributed.kv_transfer.kv_connector.v1 import (
     KVConnectorBase_V1,
     KVConnectorRole,
+    SupportsHMA,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
@@ -113,7 +114,7 @@ class OffloadingConnectorMetadata(KVConnectorMetadata):
     reqs_to_store: dict[ReqId, TransferSpec]
 
 
-class OffloadingConnector(KVConnectorBase_V1):
+class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
     @property
     def prefer_cross_layer_blocks(self) -> bool:
         return True
@@ -208,6 +209,14 @@ class OffloadingConnector(KVConnectorBase_V1):
     ) -> tuple[bool, dict[str, Any] | None]:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.request_finished(request, block_ids)
+
+    def request_finished_all_groups(
+        self,
+        request: "Request",
+        block_ids: tuple[list[int], ...],
+    ) -> tuple[bool, dict[str, Any] | None]:
+        # Offloading only manages group 0 (attention) blocks.
+        return self.request_finished(request, block_ids[0])
 
     def take_events(self) -> Iterable[KVCacheEvent]:
         assert self.connector_scheduler is not None
@@ -596,11 +605,15 @@ class OffloadingConnectorWorker:
         layers = get_layers_from_vllm_config(
             self.spec.vllm_config, Attention, layer_names
         )
+        # Only register handlers for attention layers. Non-attention layers
+        # (e.g. Mamba/SSM) are not managed by the offloading connector.
+        attn_layer_names = list(layers.keys())
         attn_backends = {
             layer_name: layers[layer_name].get_attn_backend()
-            for layer_name in layer_names
+            for layer_name in attn_layer_names
         }
-        self._register_handlers(kv_caches, attn_backends)
+        attn_kv_caches = {name: kv_caches[name] for name in attn_layer_names}
+        self._register_handlers(attn_kv_caches, attn_backends)
 
     def register_cross_layers_kv_cache(
         self, kv_cache: torch.Tensor, attn_backend: type[AttentionBackend]
