@@ -158,7 +158,7 @@ extract_yaml_commands() {
 # Main
 ###############################################################################
 
-default_image_name="xpu/vllm-ci:${BUILDKITE_COMMIT}"
+default_image_name="${REGISTRY}/${REPO}:${BUILDKITE_COMMIT}-xpu"
 image_name="${IMAGE_TAG_XPU:-${default_image_name}}"
 container_name="xpu_${BUILDKITE_COMMIT}_$(tr -dc A-Za-z0-9 < /dev/urandom | head -c 10; echo)"
 
