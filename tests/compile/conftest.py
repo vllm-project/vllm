@@ -24,8 +24,7 @@ def mock_cuda_platform():
     def _mock_platform(is_cuda: bool = True, capability: tuple[int, int] | None = None):
         mock_platform = MagicMock()
         mock_platform.is_cuda.return_value = is_cuda
-        # Non-CUDA platforms use get_sp_min_token_num_default(); base returns None
-        mock_platform.get_sp_min_token_num_default.return_value = None
+
         if capability is not None:
             mock_platform.get_device_capability.return_value = DeviceCapability(
                 *capability

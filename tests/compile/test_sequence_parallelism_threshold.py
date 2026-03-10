@@ -13,13 +13,15 @@ from vllm.compilation.passes.fusion.sequence_parallelism import (
 class TestGetSequenceParallelismThreshold:
     """Tests for get_sequence_parallelism_threshold function."""
 
-    def test_non_cuda_returns_none(self, mock_cuda_platform):
-        """Non-CUDA platforms should return None."""
-        with mock_cuda_platform(is_cuda=False):
-            result = get_sequence_parallelism_threshold(
+    def test_non_cuda_delegates_to_platform_default(self, mock_cuda_platform):
+        """Non-CUDA platforms delegate to get_sp_min_token_num_default()."""
+        with mock_cuda_platform(is_cuda=False) as mock_platform:
+            get_sequence_parallelism_threshold(
                 hidden_size=8192, tp_size=2, element_size=2
             )
-        assert result is None
+            mock_platform.get_sp_min_token_num_default.assert_called_once_with(
+                8192, 2, 2
+            )
 
     def test_unsupported_device_capability_returns_none(self, mock_cuda_platform):
         """Unsupported device capabilities (e.g., sm80) should return None."""
