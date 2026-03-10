@@ -8,8 +8,6 @@
 #   1) VLLM_TEST_COMMANDS env var (preferred, preserves quoting)
 #   2) Positional args (legacy)
 #   3) One or more YAML files with a commands list (test-area style)
-#
-# Multi-node support is detected but not implemented for Intel yet.
 ###############################################################################
 set -o pipefail
 
@@ -160,7 +158,8 @@ extract_yaml_commands() {
 # Main
 ###############################################################################
 
-image_name="xpu/vllm-ci:${BUILDKITE_COMMIT}"
+default_image_name="xpu/vllm-ci:${BUILDKITE_COMMIT}"
+image_name="${IMAGE_TAG_XPU:-${default_image_name}}"
 container_name="xpu_${BUILDKITE_COMMIT}_$(tr -dc A-Za-z0-9 < /dev/urandom | head -c 10; echo)"
 
 # ---- Command source selection ----
@@ -239,8 +238,14 @@ fi
 # --- Docker housekeeping ---
 cleanup_docker
 
-# --- Build test image ---
-docker build -t "${image_name}" -f docker/Dockerfile.xpu .
+# --- Build or pull test image ---
+if [[ -n "${IMAGE_TAG_XPU:-}" ]]; then
+  echo "Using prebuilt XPU image: ${IMAGE_TAG_XPU}"
+  docker pull "${IMAGE_TAG_XPU}"
+else
+  echo "No IMAGE_TAG_XPU provided, building local XPU image"
+  docker build -t "${image_name}" -f docker/Dockerfile.xpu .
+fi
 
 remove_docker_container() {
   docker rm -f "${container_name}" || true
@@ -263,7 +268,7 @@ docker run \
     -v /dev/dri/by-path:/dev/dri/by-path \
     --entrypoint="" \
     -e "HF_TOKEN=${HF_TOKEN:-}" \
-    -e "ZE_AFFINITY_MASK=${ZE_AFFINITY_MASK}" \
+    -e "ZE_AFFINITY_MASK=${ZE_AFFINITY_MASK:-}" \
     --name "${container_name}" \
     "${image_name}" \
     bash -c "set -e; echo \"${ZE_AFFINITY_MASK:-}\"; ${commands}"
