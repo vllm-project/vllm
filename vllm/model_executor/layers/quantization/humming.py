@@ -6,13 +6,6 @@ from typing import TYPE_CHECKING, Any
 import regex as re
 import torch
 
-from humming.layer import HummingMethod
-from humming.schema import (
-    BaseInputSchema,
-    BaseWeightSchema,
-    HummingInputSchema,
-    HummingWeightSchema,
-)
 from vllm import envs
 from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
 from vllm.model_executor.layers.fused_moe.activation import (
@@ -53,6 +46,23 @@ from vllm.model_executor.utils import set_weight_attrs
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.utils import WeightsMapper
+
+
+try:
+    from humming.layer import HummingMethod
+    from humming.schema import (
+        BaseInputSchema,
+        BaseWeightSchema,
+        HummingInputSchema,
+        HummingWeightSchema,
+    )
+except ImportError:
+    HummingMethod = None
+
+
+def assert_humming_available():
+    err_msg = "humming is not avaiable, please run 'pip install humming' to install."
+    assert HummingMethod is not None, err_msg
 
 
 def prepare_padded_shape(shape, x):
@@ -163,8 +173,8 @@ def compressed_tensors_get_config(config: dict[str, Any], key: str) -> dict[str,
 class HummingLayerQuantizationConfig(QuantizationConfig):
     def __init__(
         self,
-        weight_schema: BaseWeightSchema,
-        input_schema: BaseInputSchema | None = None,
+        weight_schema: "BaseWeightSchema",
+        input_schema: "BaseInputSchema" | None = None,
     ):
         self.weight_schema = weight_schema
         if input_schema is None:
@@ -200,6 +210,7 @@ class HummingLayerQuantizationConfig(QuantizationConfig):
 
 class HummingConfig(QuantizationConfig):
     def __init__(self, full_config: dict[str, Any] | None = None):
+        assert_humming_available()
         self.full_config: dict[str, Any] = full_config or {}
         keys = ["ignored_layers", "ignore", "modules_to_not_convert"]
         self.ignored_layers = self.get_from_keys_or(full_config, keys, []) or []
@@ -250,7 +261,7 @@ class HummingConfig(QuantizationConfig):
 
     def get_layer_weight_schema(
         self, config: dict[str, Any], prefix: str
-    ) -> BaseWeightSchema | None:
+    ) -> "BaseWeightSchema" | None:
         if self.is_layer_skipped(config, prefix):
             return None
 
@@ -275,7 +286,7 @@ class HummingConfig(QuantizationConfig):
 
     def get_layer_input_schema(
         self, config: dict[str, Any], prefix: str
-    ) -> BaseInputSchema | None:
+    ) -> "BaseInputSchema" | None:
         if config["quant_method"] in ["compressed-tensors", "modelopt"]:
             group_config = compressed_tensors_get_config(config, "input_activations")
             if group_config is None:
@@ -289,6 +300,8 @@ class HummingConfig(QuantizationConfig):
     def get_quant_config_for_layer(
         self, prefix: str, layer_type: str
     ) -> HummingLayerQuantizationConfig | None:
+        assert HummingMethod is not None, ""
+
         weight_schema = self.get_layer_weight_schema(self.full_config, prefix)
 
         if not self.full_config:
