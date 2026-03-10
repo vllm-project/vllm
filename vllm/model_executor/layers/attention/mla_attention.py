@@ -458,7 +458,10 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         # Support both FP4 and FP8 variants based on GPU capabilities
         self.use_atom_fused_decode = (
             current_platform.is_rocm()  # AMD GPU only
-            and (self.is_aiter_triton_fp4_bmm_enabled or self.is_aiter_triton_fp8_bmm_enabled)  # FP4 or FP8 BMM available
+            and (
+                self.is_aiter_triton_fp4_bmm_enabled
+                or self.is_aiter_triton_fp8_bmm_enabled
+            )  # FP4 or FP8 BMM available
             and envs.VLLM_USE_ATOM_FUSED_DECODE  # Feature flag enabled
             and cos_cache is not None  # RoPE caches available
             and sin_cache is not None
@@ -468,38 +471,42 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             # Choose FP4 or FP8 variant based on GPU support (ATOM pattern)
             if self.is_aiter_triton_fp4_bmm_enabled:
                 logger.info_once(
-                    "Using AITER fused FP4 decode kernel for MLA (ROCm FP4 decode path)",
-                    scope="local"
+                    "Using AITER fused FP4 decode kernel for MLA "
+                    "(ROCm FP4 decode path)",
+                    scope="local",
                 )
                 try:
                     from aiter.ops.triton.fusions.fused_bmm_rope_kv_cache import (
                         fused_fp4_bmm_rope_cat_and_cache_mla,
                     )
+
                     self._fused_decode_kernel = fused_fp4_bmm_rope_cat_and_cache_mla
                     self._fused_kernel_type = "fp4"
                 except ImportError as e:
                     logger.warning_once(
                         f"AITER fused FP4 decode kernel not available: {e}, "
                         "falling back to separate ops",
-                        scope="local"
+                        scope="local",
                     )
                     self.use_atom_fused_decode = False
             else:
                 logger.info_once(
-                    "Using AITER fused FP8 decode kernel for MLA (ROCm FP8 decode path)",
-                    scope="local"
+                    "Using AITER fused FP8 decode kernel for MLA "
+                    "(ROCm FP8 decode path)",
+                    scope="local",
                 )
                 try:
                     from aiter.ops.triton.fusions.fused_bmm_rope_kv_cache import (
                         fused_fp8_bmm_rope_cat_and_cache_mla,
                     )
+
                     self._fused_decode_kernel = fused_fp8_bmm_rope_cat_and_cache_mla
                     self._fused_kernel_type = "fp8"
                 except ImportError as e:
                     logger.warning_once(
                         f"AITER fused FP8 decode kernel not available: {e}, "
                         "falling back to separate ops",
-                        scope="local"
+                        scope="local",
                     )
                     self.use_atom_fused_decode = False
 
@@ -549,7 +556,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             # Check if we should skip KV cache update (AITER fused kernel handles it)
             # Only skip for decode-only batches when fused kernel is enabled
             is_decode_only = (
-                hasattr(attn_metadata, 'num_prefills')
+                hasattr(attn_metadata, "num_prefills")
                 and attn_metadata.num_prefills == 0
             )
             skip_kv_cache_update = (
@@ -579,9 +586,12 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     self_kv_cache,
                     attn_metadata,
                     output=output,
-                    positions=positions,  # Pass positions for AITER fused kernel
-                    slot_mapping=slot_mapping.get(self.layer_name),  # Pass slot_mapping for AITER fused kernel
-                    rope_applied=rope_applied,  # Pass RoPE status
+                    # Pass positions for AITER fused kernel
+                    positions=positions,
+                    # Pass slot_mapping for AITER fused kernel
+                    slot_mapping=slot_mapping.get(self.layer_name),
+                    # Pass RoPE status
+                    rope_applied=rope_applied,
                 )
                 return output
             else:
@@ -591,9 +601,12 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     k_pe,
                     self_kv_cache,
                     attn_metadata,
-                    positions=positions,  # Pass positions for AITER fused kernel
-                    slot_mapping=slot_mapping.get(self.layer_name),  # Pass slot_mapping for AITER fused kernel
-                    rope_applied=rope_applied,  # Pass RoPE status
+                    # Pass positions for AITER fused kernel
+                    positions=positions,
+                    # Pass slot_mapping for AITER fused kernel
+                    slot_mapping=slot_mapping.get(self.layer_name),
+                    # Pass RoPE status
+                    rope_applied=rope_applied,
                 )
         else:
             kv_cache_dummy_dep = torch.ops.vllm.unified_mla_kv_cache_update(
@@ -730,34 +743,39 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             # 2. RoPE NOT pre-applied (fused kernel applies it internally)
             # 3. Decode-only batch (no prefill tokens, i.e., num_mha_tokens == 0)
             # 4. Required inputs available (positions, slot_mapping)
-            is_decode_only = (num_mha_tokens == 0)
+            is_decode_only = num_mha_tokens == 0
             use_fused_decode = (
                 self.use_atom_fused_decode
                 and not rope_applied  # RoPE must NOT be pre-applied
-                and is_decode_only    # Only decode tokens, no prefill
+                and is_decode_only  # Only decode tokens, no prefill
                 and positions is not None
                 and slot_mapping is not None
             )
 
             if use_fused_decode:
-                # Use AITER fused kernel: BMM + RoPE + concat + KV cache write in ONE kernel
+                # Use AITER fused kernel: BMM + RoPE + concat + KV cache
+                # write in ONE kernel
                 # Get decode slices
                 mqa_k_c_normed = k_c_normed[:num_mqa_tokens]
                 mqa_k_pe = k_pe[:num_mqa_tokens]
+                # Type assertion for mypy
+                assert positions is not None
+                assert slot_mapping is not None
                 mqa_positions = positions[:num_mqa_tokens]
                 mqa_slot_mapping = slot_mapping[:num_mqa_tokens]
 
                 # Call fused kernel
                 mqa_ql_nope, mqa_q_pe_rotated = self._run_atom_fused_decode(
-                    mqa_q_nope,           # [num_heads, batch, qk_nope_head_dim]
-                    mqa_q_pe,             # [batch, num_heads, qk_rope_head_dim] - NO RoPE yet!
-                    mqa_k_c_normed,       # [batch, kv_lora_rank]
-                    mqa_k_pe,             # [batch, 1, qk_rope_head_dim] - NO RoPE yet!
+                    mqa_q_nope,  # [num_heads, batch, qk_nope_head_dim]
+                    mqa_q_pe,  # [batch, num_heads, qk_rope_head_dim] - NO RoPE yet!
+                    mqa_k_c_normed,  # [batch, kv_lora_rank]
+                    mqa_k_pe,  # [batch, 1, qk_rope_head_dim] - NO RoPE yet!
                     kv_cache,
                     mqa_slot_mapping,
                     mqa_positions,
                 )
-                # Fused kernel output: mqa_ql_nope has BMM result, mqa_q_pe_rotated has RoPE applied
+                # Fused kernel output: mqa_ql_nope has BMM result,
+                # mqa_q_pe_rotated has RoPE applied
                 # Assign to mqa_q_pe for subsequent concat/quant code
                 mqa_q_pe = mqa_q_pe_rotated
 
@@ -841,32 +859,31 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
     def _run_atom_fused_decode(
         self,
-        mqa_q_nope: torch.Tensor,     # [num_heads, batch, qk_nope_head_dim]
-        mqa_q_pe: torch.Tensor,       # [batch, num_heads, qk_rope_head_dim]
-        k_c_normed: torch.Tensor,     # [batch, kv_lora_rank]
-        k_pe: torch.Tensor,           # [batch, 1, qk_rope_head_dim]
+        mqa_q_nope: torch.Tensor,
+        mqa_q_pe: torch.Tensor,
+        k_c_normed: torch.Tensor,
+        k_pe: torch.Tensor,
         kv_cache: torch.Tensor,
         slot_mapping: torch.Tensor,
         positions: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """
-        Run AITER fused decode operation.
+        """Run AITER fused decode operation.
 
         Fuses: FP4/FP8 BMM + RoPE + concat + KV cache write in ONE kernel.
         Chooses FP4 or FP8 variant based on GPU capabilities.
 
         Args:
-            mqa_q_nope: Query nope part, shape [num_heads, batch, qk_nope_head_dim]
-            mqa_q_pe: Query pe part (NO RoPE yet!), shape [batch, num_heads, qk_rope_head_dim]
-            k_c_normed: Compressed KV, shape [batch, kv_lora_rank]
-            k_pe: Key pe part (NO RoPE yet!), shape [batch, 1, qk_rope_head_dim]
+            mqa_q_nope: [num_heads, batch, qk_nope_head_dim]
+            mqa_q_pe: [batch, num_heads, qk_rope_head_dim] NO RoPE!
+            k_c_normed: [batch, kv_lora_rank]
+            k_pe: [batch, 1, qk_rope_head_dim] NO RoPE!
             kv_cache: KV cache tensor
             slot_mapping: Slot mapping for cache write
             positions: Position IDs for RoPE
 
         Returns:
-            - mqa_ql_nope: Latent Q after BMM, shape [batch, num_heads, kv_lora_rank]
-            - mqa_q_pe_rotated: Q PE after RoPE, shape [batch, num_heads, qk_rope_head_dim]
+            mqa_ql_nope: [batch, num_heads, kv_lora_rank]
+            mqa_q_pe_rotated: [batch, num_heads, qk_rope_head_dim]
         """
         # Reshape K for fused kernel
         k_nope_3d = k_c_normed.view(-1, self.num_kv_heads, self.kv_lora_rank)
@@ -876,21 +893,21 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         if self._fused_kernel_type == "fp4":
             # FP4 variant has different parameters
             q_fused, _, _, _ = self._fused_decode_kernel(
-                mqa_q_nope,           # [num_heads, batch, qk_nope_head_dim]
-                self.W_K,             # [num_heads, kv_lora_rank, qk_nope_head_dim] - FP4
-                self.W_K_scale,       # FP4 scale
-                mqa_q_pe,             # [batch, num_heads, qk_rope_head_dim] - NO RoPE!
-                k_nope_3d,            # [batch, num_kv_heads, kv_lora_rank]
-                k_rope_3d,            # [batch, num_kv_heads, qk_rope_head_dim] - NO RoPE!
-                kv_cache,             # KV cache tensor
-                slot_mapping,         # [batch]
-                positions,            # [batch]
-                self.cos_cache,       # RoPE cos cache
-                self.sin_cache,       # RoPE sin cache
-                y=None,               # FP4-specific
+                mqa_q_nope,  # [num_heads, batch, qk_nope_head_dim]
+                self.W_K,  # [num_heads, kv_lora_rank, qk_nope_head_dim] - FP4
+                self.W_K_scale,  # FP4 scale
+                mqa_q_pe,  # [batch, num_heads, qk_rope_head_dim] - NO RoPE!
+                k_nope_3d,  # [batch, num_kv_heads, kv_lora_rank]
+                k_rope_3d,  # [batch, num_kv_heads, qk_rope_head_dim] - NO RoPE!
+                kv_cache,  # KV cache tensor
+                slot_mapping,  # [batch]
+                positions,  # [batch]
+                self.cos_cache,  # RoPE cos cache
+                self.sin_cache,  # RoPE sin cache
+                y=None,  # FP4-specific
                 transpose_bm=True,
-                prequant=True,        # FP4-specific
-                y_scale=None,         # FP4-specific
+                prequant=True,  # FP4-specific
+                y_scale=None,  # FP4-specific
                 k_scale=self._k_scale,
                 is_neox=self.is_neox_style,
                 q_out_dtype=kv_cache.dtype,
@@ -899,18 +916,18 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         else:  # fp8
             # FP8 variant has group_size parameter
             q_fused, _, _, _ = self._fused_decode_kernel(
-                mqa_q_nope,           # [num_heads, batch, qk_nope_head_dim]
-                self.W_K,             # [num_heads, kv_lora_rank, qk_nope_head_dim] - FP8
-                self.W_K_scale,       # [1,] - FP8 scale
-                mqa_q_pe,             # [batch, num_heads, qk_rope_head_dim] - NO RoPE!
-                k_nope_3d,            # [batch, num_kv_heads, kv_lora_rank]
-                k_rope_3d,            # [batch, num_kv_heads, qk_rope_head_dim] - NO RoPE!
-                kv_cache,             # KV cache tensor
-                slot_mapping,         # [batch]
-                positions,            # [batch]
-                self.cos_cache,       # RoPE cos cache
-                self.sin_cache,       # RoPE sin cache
-                group_size=128,       # FP8-specific
+                mqa_q_nope,  # [num_heads, batch, qk_nope_head_dim]
+                self.W_K,  # [num_heads, kv_lora_rank, qk_nope_head_dim] - FP8
+                self.W_K_scale,  # [1,] - FP8 scale
+                mqa_q_pe,  # [batch, num_heads, qk_rope_head_dim] - NO RoPE!
+                k_nope_3d,  # [batch, num_kv_heads, kv_lora_rank]
+                k_rope_3d,  # [batch, num_kv_heads, qk_rope_head_dim] - NO RoPE!
+                kv_cache,  # KV cache tensor
+                slot_mapping,  # [batch]
+                positions,  # [batch]
+                self.cos_cache,  # RoPE cos cache
+                self.sin_cache,  # RoPE sin cache
+                group_size=128,  # FP8-specific
                 transpose_bm=True,
                 k_scale=self._k_scale,
                 is_neox=self.is_neox_style,
@@ -921,8 +938,12 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         # q_fused: [batch, num_heads, kv_lora_rank + qk_rope_head_dim]
         # Contains both ql_nope and q_pe_rotated
         # Split into components
-        mqa_ql_nope = q_fused[..., :self.kv_lora_rank]  # [batch, num_heads, kv_lora_rank]
-        mqa_q_pe_rotated = q_fused[..., self.kv_lora_rank:]  # [batch, num_heads, qk_rope_head_dim]
+        mqa_ql_nope = q_fused[
+            ..., : self.kv_lora_rank
+        ]  # [batch, num_heads, kv_lora_rank]
+        mqa_q_pe_rotated = q_fused[
+            ..., self.kv_lora_rank :
+        ]  # [batch, num_heads, qk_rope_head_dim]
 
         return mqa_ql_nope, mqa_q_pe_rotated
 

@@ -185,7 +185,8 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
         )
 
         if self.rotary_emb is not None and not skip_rope_for_fused_kernel:
-            # Normal path: Apply RoPE here (prefill, mixed batches, or fused kernel disabled)
+            # Normal path: Apply RoPE here
+            # (prefill, mixed batches, or fused kernel disabled)
             q[..., self.qk_nope_head_dim :], k_pe = self.rotary_emb(
                 positions, q[..., self.qk_nope_head_dim :], k_pe
             )
@@ -205,7 +206,9 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
             k_pe,
             output_shape=(hidden_states.shape[0], self.num_heads * self.v_head_dim),
             positions=positions,  # Pass positions for AITER fused kernel
-            rope_applied=(not skip_rope_for_fused_kernel),  # Indicate if RoPE was pre-applied
+            rope_applied=(
+                not skip_rope_for_fused_kernel
+            ),  # Indicate if RoPE was pre-applied
         )
 
         return self.o_proj(attn_out)[0]
