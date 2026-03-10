@@ -218,8 +218,10 @@ def register_forward_hook_for_model(
         pp_rank,
         skip_passes,
     )
-    top_level_module_name = os.getenv("TENSOR_DUMP_TOP_LEVEL_MODULE_NAME", "model")
-    layers_module_name = os.getenv("TENSOR_DUMP_LAYERS_MODULE_NAME", "layers")
+    import vllm.envs as envs
+
+    top_level_module_name = envs.VLLM_DEBUG_TENSOR_DUMP_TOP_LEVEL_MODULE_NAME
+    layers_module_name = envs.VLLM_DEBUG_TENSOR_DUMP_LAYERS_MODULE_NAME
     model_top_level_module_matched, _ = tensor_dumper._add_hook_recursive(
         model,
         "",

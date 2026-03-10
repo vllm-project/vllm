@@ -36,6 +36,8 @@ output tensors (on CPU).
 | `VLLM_DEBUG_TENSOR_DUMP_OUTPUT_FOLDER` | `str` | (unset) | Output directory. Feature is disabled when unset. |
 | `VLLM_DEBUG_TENSOR_DUMP_LAYERS` | `str` | (unset) | Comma-separated layer indices to dump (e.g. `"0,1,31"`). All layers when unset. |
 | `VLLM_DEBUG_TENSOR_DUMP_SKIP_PASSES` | `int` | `0` | Number of initial forward passes to skip (useful for skipping warmup passes). |
+| `VLLM_DEBUG_TENSOR_DUMP_TOP_LEVEL_MODULE_NAME` | `str` | `"model"` | Name of the top-level sub-module inside the model to hook. |
+| `VLLM_DEBUG_TENSOR_DUMP_LAYERS_MODULE_NAME` | `str` | `"layers"` | Name of the layers container inside the top-level module. |
 
 ## Notes
 
