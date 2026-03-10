@@ -1732,7 +1732,7 @@ class SpecDecodeBaseProposer:
         They might indicate this by setting "use_aux_hidden_state" to False
         inside the "eagle_config" dict of their hf_config.
         """
-        iif self.method not in ("eagle3", "dflash"):
+        if self.method not in ("eagle3", "dflash"):
             return False
         use_aux_hidden_state = True
         eagle_config = getattr(self.draft_model_config.hf_config, "eagle_config", None)
