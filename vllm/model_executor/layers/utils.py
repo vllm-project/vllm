@@ -141,7 +141,11 @@ def rocm_unquantized_gemm_impl(
     # Given the above, how many CUs would we need?
     CuNeeded = rndup_cus * GrpsShrB
     # candidate for atomic reduce count splitk?
-    fits_wvsplitkrc = CuNeeded <= cu_count
+    fits_wvsplitkrc = (
+        N_p2 * m * ((k + 512 - 1) // 512)
+    ) <= 128 * 1024 * 12  # deterministic
+    fits_wvsplitkrc &= CuNeeded <= cu_count
+
     use_skinny_reduce_counting = (
         envs.VLLM_ROCM_USE_SKINNY_GEMM
         and on_gfx950()
@@ -151,7 +155,6 @@ def rocm_unquantized_gemm_impl(
             and k % 8 == 0
             and k > 512
             and m % 16 == 0
-            and m * n <= 128 * 1024  # max reduce buffer
             and fits_wvsplitkrc
             and weight.is_contiguous()
         )
