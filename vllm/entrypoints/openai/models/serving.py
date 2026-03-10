@@ -5,6 +5,7 @@ from asyncio import Lock
 from collections import defaultdict
 from http import HTTPStatus
 
+from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.openai.engine.protocol import (
     ErrorInfo,
@@ -38,15 +39,20 @@ class OpenAIServingModels:
 
     def __init__(
         self,
-        engine_client: EngineClient,
+        engine_client: EngineClient | None,
         base_model_paths: list[BaseModelPath],
         *,
+        model_config: ModelConfig | None = None,
         lora_modules: list[LoRAModulePath] | None = None,
     ):
-        super().__init__()
-
         self.engine_client = engine_client
         self.base_model_paths = base_model_paths
+        if model_config is not None:
+            self.model_config = model_config
+        elif engine_client is not None:
+            self.model_config = engine_client.model_config
+        else:
+            raise ValueError("model_config must be provided when engine_client is None")
 
         self.static_lora_modules = lora_modules
         self.lora_requests: dict[str, LoRARequest] = {}
@@ -58,11 +64,6 @@ class OpenAIServingModels:
                 LoRAResolverRegistry.get_resolver(lora_resolver_name)
             )
         self.lora_resolver_lock: dict[str, Lock] = defaultdict(Lock)
-
-        self.model_config = self.engine_client.model_config
-        self.renderer = self.engine_client.renderer
-        self.io_processor = self.engine_client.io_processor
-        self.input_processor = self.engine_client.input_processor
 
     async def init_static_loras(self):
         """Loads all static LoRA modules.
@@ -94,6 +95,19 @@ class OpenAIServingModels:
             return lora_request.lora_name
         return self.base_model_paths[0].name
 
+    async def check_model(self, model_name: str | None) -> ErrorResponse | None:
+        """Return an ErrorResponse if model_name is not served, else None."""
+        if not model_name or self.is_base_model(model_name):
+            return None
+        if model_name in self.lora_requests:
+            return None
+        return create_error_response(
+            message=f"The model `{model_name}` does not exist.",
+            err_type="NotFoundError",
+            status_code=HTTPStatus.NOT_FOUND,
+            param="model",
+        )
+
     async def show_available_models(self) -> ModelList:
         """Show available models. This includes the base model and all adapters."""
         max_model_len = self.model_config.max_model_len
@@ -124,6 +138,13 @@ class OpenAIServingModels:
     async def load_lora_adapter(
         self, request: LoadLoRAAdapterRequest, base_model_name: str | None = None
     ) -> ErrorResponse | str:
+        if self.engine_client is None:
+            return create_error_response(
+                message="LoRA adapters are not supported in render-only mode.",
+                err_type="BadRequestError",
+                status_code=HTTPStatus.BAD_REQUEST,
+            )
+
         lora_name = request.lora_name
 
         # Ensure atomicity based on the lora name
@@ -240,6 +261,13 @@ class OpenAIServingModels:
             ErrorResponse (404) if no resolver finds the adapter.
             ErrorResponse (400) if adapter(s) are found but none load.
         """
+        if self.engine_client is None:
+            return create_error_response(
+                message="LoRA adapters are not supported in render-only mode.",
+                err_type="BadRequestError",
+                status_code=HTTPStatus.BAD_REQUEST,
+            )
+
         async with self.lora_resolver_lock[lora_name]:
             # First check if this LoRA is already loaded
             if lora_name in self.lora_requests:
@@ -298,11 +326,13 @@ def create_error_response(
     message: str,
     err_type: str = "BadRequestError",
     status_code: HTTPStatus = HTTPStatus.BAD_REQUEST,
+    param: str | None = None,
 ) -> ErrorResponse:
     return ErrorResponse(
         error=ErrorInfo(
             message=sanitize_message(message),
             type=err_type,
             code=status_code.value,
+            param=param,
         )
     )

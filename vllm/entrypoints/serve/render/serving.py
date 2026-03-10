@@ -20,10 +20,9 @@ from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.entrypoints.openai.engine.protocol import (
     ErrorInfo,
     ErrorResponse,
-    ModelCard,
     ModelList,
-    ModelPermission,
 )
+from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.openai.parser.harmony_utils import (
     get_developer_message,
     get_system_message,
@@ -50,7 +49,7 @@ class OpenAIServingRender:
         model_config: ModelConfig,
         renderer: BaseRenderer,
         io_processor: Any,
-        served_model_names: list[str],
+        models: OpenAIServingModels,
         *,
         request_logger: RequestLogger | None,
         chat_template: str | None,
@@ -65,7 +64,7 @@ class OpenAIServingRender:
         self.model_config = model_config
         self.renderer = renderer
         self.io_processor = io_processor
-        self.served_model_names = served_model_names
+        self.models = models
         self.request_logger = request_logger
         self.chat_template = chat_template
         self.chat_template_content_format: ChatTemplateContentFormatOption = (
@@ -264,18 +263,7 @@ class OpenAIServingRender:
 
     async def show_available_models(self) -> ModelList:
         """Returns the models served by this render server."""
-        max_model_len = self.model_config.max_model_len
-        return ModelList(
-            data=[
-                ModelCard(
-                    id=name,
-                    max_model_len=max_model_len,
-                    root=self.model_config.model,
-                    permission=[ModelPermission()],
-                )
-                for name in self.served_model_names
-            ]
-        )
+        return await self.models.show_available_models()
 
     def create_error_response(
         self,
@@ -333,23 +321,11 @@ class OpenAIServingRender:
             )
         )
 
-    def _is_model_supported(self, model_name: str) -> bool:
-        """Simplified from OpenAIServing._is_model_supported (no LoRA support)."""
-        return model_name in self.served_model_names
-
     async def _check_model(
         self,
         request: Any,
     ) -> ErrorResponse | None:
-        """Simplified from OpenAIServing._check_model (no LoRA support)."""
-        if self._is_model_supported(request.model):
-            return None
-        return self.create_error_response(
-            message=f"The model `{request.model}` does not exist.",
-            err_type="NotFoundError",
-            status_code=HTTPStatus.NOT_FOUND,
-            param="model",
-        )
+        return await self.models.check_model(request.model)
 
     def _validate_chat_template(
         self,

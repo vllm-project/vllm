@@ -65,7 +65,7 @@ class PoolingServing:
         )
         self.io_processor = self.init_io_processor(
             model_config=models.model_config,
-            renderer=models.renderer,
+            renderer=engine_client.renderer,
             chat_template_config=self.chat_template_config,
         )
 

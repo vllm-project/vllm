@@ -414,11 +414,16 @@ async def init_render_app_state(
     directly from the :class:`~vllm.config.VllmConfig`.
     """
     from vllm.entrypoints.chat_utils import load_chat_template
+    from vllm.entrypoints.openai.models.protocol import BaseModelPath
+    from vllm.entrypoints.openai.models.serving import OpenAIServingModels
     from vllm.entrypoints.serve.render.serving import OpenAIServingRender
     from vllm.plugins.io_processors import get_io_processor
     from vllm.renderers import renderer_from_config
 
     served_model_names = args.served_model_name or [args.model]
+    base_model_paths = [
+        BaseModelPath(name=name, model_path=args.model) for name in served_model_names
+    ]
 
     if args.enable_log_requests:
         request_logger = RequestLogger(max_log_len=args.max_log_len)
@@ -431,11 +436,17 @@ async def init_render_app_state(
     )
     resolved_chat_template = load_chat_template(args.chat_template)
 
+    state.openai_serving_models = OpenAIServingModels(
+        engine_client=None,
+        base_model_paths=base_model_paths,
+        model_config=vllm_config.model_config,
+    )
+
     state.openai_serving_render = OpenAIServingRender(
         model_config=vllm_config.model_config,
         renderer=renderer,
         io_processor=io_processor,
-        served_model_names=served_model_names,
+        models=state.openai_serving_models,
         request_logger=request_logger,
         chat_template=resolved_chat_template,
         chat_template_content_format=args.chat_template_content_format,
@@ -446,9 +457,6 @@ async def init_render_app_state(
         default_chat_template_kwargs=args.default_chat_template_kwargs,
         log_error_stack=args.log_error_stack,
     )
-
-    # Expose models endpoint via the render handler.
-    state.openai_serving_models = state.openai_serving_render
 
     state.vllm_config = vllm_config
     # Disable stats logging — there is no engine to poll.
