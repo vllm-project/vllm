@@ -210,6 +210,12 @@ void rms_norm_per_block_quant_dispatch(
     std::optional<at::Tensor>& residual, bool is_scale_transposed) {
   int32_t hidden_size = input.size(-1);
   int32_t input_stride = input.view({-1, hidden_size}).stride(0);
+
+  TORCH_CHECK(hidden_size % 4 == 0,
+              "Hidden size must be divisible by 4 for vectorized access");
+  TORCH_CHECK(input_stride % 4 == 0,
+              "Input stride must be divisible by 4 for vectorized access");
+
   auto num_tokens = input.numel() / hidden_size;
 
   dim3 grid(num_tokens);

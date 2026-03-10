@@ -186,7 +186,7 @@ def test_rms_norm(
 
     if group_size is not None and hidden_size % group_size[1] != 0:
         # skip
-        return
+        pytest.skip("Skip non-divisible group sizes")
 
     if group_size is not None and has_scale_ub:
         # blockwise baseline doesn't support scale_ub
@@ -222,8 +222,13 @@ def test_rms_norm(
     last_dim = 2 * hidden_size if strided_input else hidden_size
     x = torch.randn(num_tokens, last_dim, dtype=dtype) * scale
     x = x[:, :hidden_size]
-    assert x.is_contiguous() != strided_input
-    # Residual must be contiguous since the kernel requires it.
+
+    # dim 1 gets special-cased
+    x_is_strided = strided_input and num_tokens != 1
+    # check that the input is strided iff we expect it to be
+    assert x.is_contiguous() != x_is_strided
+
+    # Residual must still be contiguous
     residual = (
         torch.randn(num_tokens, hidden_size, dtype=dtype) * scale
         if add_residual
@@ -272,14 +277,28 @@ def test_rms_norm(
     if add_residual:
         assert torch.allclose(ref_residual, ops_residual)
 
-    # opcheck uses contiguous tensors (strided inputs are tested above).
-    if not strided_input:
-        output = torch.empty(x.shape, dtype=quant_dtype, device=x.device)
-        scales = torch.empty(
-            (x.numel() // x.shape[-1], 1), device=x.device, dtype=torch.float32
-        )
+    output = torch.empty(x.shape, dtype=quant_dtype, device=x.device)
+    scales = torch.empty(
+        (x.numel() // x.shape[-1], 1), device=x.device, dtype=torch.float32
+    )
 
+    if group_size is None:
         opcheck(
             torch.ops._C.rms_norm_dynamic_per_token_quant,
             (output, x, layer.weight, scales, 1e-5, scale_ub, residual),
+        )
+    else:
+        opcheck(
+            torch.ops._C.rms_norm_per_block_quant,
+            (
+                output,
+                x,
+                layer.weight,
+                scales,
+                1e-5,
+                scale_ub,
+                residual,
+                group_size[1],
+                True,  # is_scale_transposed
+            ),
         )
