@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import time
-import warnings
 from collections.abc import Mapping
 from typing import Any, Literal
 
@@ -23,13 +22,13 @@ from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
 )
 from vllm.multimodal.utils import argsort_mm_positions
+from vllm.platforms import current_platform
 from vllm.pooling_params import PoolingParams
 from vllm.renderers import BaseRenderer, renderer_from_config
 from vllm.sampling_params import SamplingParams
 from vllm.tasks import GENERATION_TASKS, POOLING_TASKS, SupportedTask
 from vllm.tokenizers import TokenizerLike
 from vllm.utils import length_from_prompt_token_ids_or_embeds, random_uuid
-from vllm.utils.func_utils import supports_kw
 from vllm.utils.jsontree import json_iter_leaves
 from vllm.v1.engine import EngineCoreRequest
 
@@ -74,33 +73,6 @@ class InputProcessor:
             mm_registry=mm_registry,
         )
 
-        from vllm.platforms import current_platform
-
-        platform_validate_request = current_platform.validate_request
-        if supports_kw(platform_validate_request, "prompt"):
-            logger.warning_once(
-                "The signature of Platform.validate_request has changed from "
-                "`(cls, prompt, params, processed_inputs) -> None` to "
-                "`(cls, processed_inputs, params) -> None`. The old signature "
-                "will no longer be supported starting from v0.18."
-            )
-
-            orig_validate_request = platform_validate_request
-
-            def compat_validate_request(
-                processed_inputs: ProcessorInputs,
-                params: SamplingParams | PoolingParams,
-            ):
-                return orig_validate_request(
-                    processed_inputs,
-                    params,
-                    processed_inputs,  # type: ignore
-                )  # type: ignore
-
-            platform_validate_request = compat_validate_request
-
-        self._platform_validate_request = platform_validate_request
-
     @property
     def tokenizer(self) -> TokenizerLike | None:
         return self.renderer.tokenizer
@@ -114,16 +86,6 @@ class InputProcessor:
         supported_tasks: tuple[SupportedTask, ...],
     ) -> None:
         """Raise `ValueError` if SamplingParams or PoolingParams is not valid."""
-        if params.truncate_prompt_tokens is not None:
-            params_type = type(params).__name__
-            warnings.warn(
-                f"The `truncate_prompt_tokens` parameter in `{params_type}` "
-                "is deprecated and will be removed in v0.17. "
-                "Please pass it via `tokenization_kwargs` instead.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-
         if isinstance(params, SamplingParams):
             supported_generation_tasks = [
                 task for task in supported_tasks if task in GENERATION_TASKS
@@ -205,7 +167,7 @@ class InputProcessor:
     @staticmethod
     def assign_request_id(request: EngineCoreRequest):
         """Replace the externally supplied request ID with an internal request ID
-        that adds 8 random characters in order to ensure uniquness.
+        that adds 8 random characters in order to ensure uniqueness.
         """
         if request.external_req_id is not None:
             raise ValueError(
@@ -276,7 +238,7 @@ class InputProcessor:
                 tokenization_kwargs=tokenization_kwargs,
             )
 
-        self._platform_validate_request(processed_inputs, params)
+        current_platform.validate_request(processed_inputs, params)
 
         encoder_inputs, decoder_inputs = split_enc_dec_inputs(processed_inputs)
         self._validate_model_inputs(encoder_inputs, decoder_inputs)

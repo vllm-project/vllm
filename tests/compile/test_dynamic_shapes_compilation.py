@@ -99,8 +99,8 @@ def test_dynamic_shapes_compilation(
     # Clean up GPU memory
     del model
     gc.collect()
-    torch.cuda.empty_cache()
-    torch.cuda.synchronize()
+    torch.accelerator.empty_cache()
+    torch.accelerator.synchronize()
     print("GPU memory cleared")
 
 

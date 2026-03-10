@@ -1736,7 +1736,7 @@ def fused_experts_impl(
     intermediate_cache3 = cache13[: M * top_k_num * K].view(M, top_k_num, K)
 
     # This needs separate memory since it's used concurrently with cache1
-    activation_out_dim = mk.FusedMoEPermuteExpertsUnpermute.adjust_N_for_activation(
+    activation_out_dim = mk.FusedMoEExpertsModular.adjust_N_for_activation(
         N, activation_enum
     )
     intermediate_cache2 = torch.empty(
@@ -1924,7 +1924,7 @@ def fused_experts_impl(
     return out_hidden_states
 
 
-class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
+class TritonExperts(mk.FusedMoEExpertsModular):
     """Triton-based fused MoE expert implementation."""
 
     def __init__(
@@ -1944,7 +1944,7 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:
-        return False
+        return True
 
     @staticmethod
     def _supports_quant_scheme(
@@ -1983,6 +1983,9 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
             MoEActivation.GELU,
             MoEActivation.SWIGLUOAI,
             MoEActivation.SWIGLUSTEP,
+            MoEActivation.SILU_NO_MUL,
+            MoEActivation.GELU_NO_MUL,
+            MoEActivation.RELU2_NO_MUL,
         ]
 
     @staticmethod
