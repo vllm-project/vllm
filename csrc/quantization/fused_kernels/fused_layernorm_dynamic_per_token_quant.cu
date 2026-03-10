@@ -56,7 +56,7 @@ __global__ void rms_norm_dynamic_per_token_quant_kernel(
     int32_t const input_stride, scalar_t* __restrict__ residual = nullptr) {
   // For vectorization, token_input and token_output pointers need to be
   // aligned at 8-byte and 4-byte addresses respectively.
-  bool const can_vectorize = hidden_size % 4 == 0;
+  bool const can_vectorize = hidden_size % 4 == 0 and input_stride % 4 == 0;
 
   if (can_vectorize) {
     return rms_norm_dynamic_per_token_quant_vec<scalar_t, scalar_out_t,
