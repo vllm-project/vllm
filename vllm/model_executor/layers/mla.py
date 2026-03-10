@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import torch
 
 from vllm.config import CacheConfig
+from vllm.forward_context import get_forward_context
 from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -174,14 +175,28 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
         k_pe = k_pe.unsqueeze(1)
 
         # Determine if we should skip RoPE (AITER fused kernel will apply it)
-        # IMPORTANT: Only skip RoPE when fused kernel is enabled
-        # The fused kernel applies RoPE internally for decode tokens
-        # WARNING: This assumes decode-only batches. Mixed batches (prefill+decode)
-        # will fall back to regular path in forward_impl which expects RoPE pre-applied.
+        # IMPORTANT: Only skip RoPE when fused kernel is enabled AND it's
+        # a decode-only batch. The fused kernel applies RoPE internally
+        # for decode tokens. For mixed batches (prefill+decode), we must
+        # apply RoPE here because the fallback path in forward_impl
+        # expects RoPE to be pre-applied.
+        forward_context = get_forward_context()
+        attn_metadata = forward_context.attn_metadata
+        if isinstance(attn_metadata, dict):
+            # In unified model runner, attn_metadata is a dict.
+            attn_metadata = attn_metadata.get(self.mla_attn.layer_name)
+
+        is_decode_only = (
+            attn_metadata is not None
+            and hasattr(attn_metadata, "num_prefills")
+            and attn_metadata.num_prefills == 0
+        )
+
         skip_rope_for_fused_kernel = (
             self.rotary_emb is not None
             and hasattr(self.mla_attn, "use_atom_fused_decode")
             and self.mla_attn.use_atom_fused_decode
+            and is_decode_only
         )
 
         if self.rotary_emb is not None and not skip_rope_for_fused_kernel:
