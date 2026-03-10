@@ -37,10 +37,10 @@ def register_pooling_api_routers(
 
         app.include_router(embed_router)
 
-    # Score/rerank endpoints are available for:
-    # - "score" task (cross-encoder models)
-    # - "embed" task (bi-encoder models)
-    # - "token_embed" task (late interaction models like ColBERT)
+    # Score API handles score/rerank for:
+    # - "score" task (score_type: cross-encoder models)
+    # - "embed" task (score_type: bi-encoder models)
+    # - "token_embed" task (score_type: late interaction models)
     if any(t in supported_tasks for t in ("score", "embed", "token_embed")):
         from vllm.entrypoints.pooling.score.api_router import router as score_router
 
@@ -56,14 +56,14 @@ def init_pooling_state(
 ):
     from vllm.entrypoints.chat_utils import load_chat_template
     from vllm.entrypoints.pooling.classify.serving import ServingClassification
-    from vllm.entrypoints.pooling.embed.serving import OpenAIServingEmbedding
+    from vllm.entrypoints.pooling.embed.serving import ServingEmbedding
     from vllm.entrypoints.pooling.pooling.serving import OpenAIServingPooling
     from vllm.entrypoints.pooling.score.serving import ServingScores
     from vllm.tasks import POOLING_TASKS
 
     resolved_chat_template = load_chat_template(args.chat_template)
 
-    state.openai_serving_pooling = (
+    state.serving_pooling = (
         (
             OpenAIServingPooling(
                 engine_client,
@@ -72,26 +72,24 @@ def init_pooling_state(
                 chat_template=resolved_chat_template,
                 chat_template_content_format=args.chat_template_content_format,
                 trust_request_chat_template=args.trust_request_chat_template,
-                log_error_stack=args.log_error_stack,
             )
         )
         if any(t in supported_tasks for t in POOLING_TASKS)
         else None
     )
-    state.openai_serving_embedding = (
-        OpenAIServingEmbedding(
+    state.serving_embedding = (
+        ServingEmbedding(
             engine_client,
             state.openai_serving_models,
             request_logger=request_logger,
             chat_template=resolved_chat_template,
             chat_template_content_format=args.chat_template_content_format,
             trust_request_chat_template=args.trust_request_chat_template,
-            log_error_stack=args.log_error_stack,
         )
         if "embed" in supported_tasks
         else None
     )
-    state.openai_serving_classification = (
+    state.serving_classification = (
         ServingClassification(
             engine_client,
             state.openai_serving_models,
@@ -99,23 +97,21 @@ def init_pooling_state(
             chat_template=resolved_chat_template,
             chat_template_content_format=args.chat_template_content_format,
             trust_request_chat_template=args.trust_request_chat_template,
-            log_error_stack=args.log_error_stack,
         )
         if "classify" in supported_tasks
         else None
     )
-    # ServingScores handles score/rerank for:
-    # - "score" task (cross-encoder models)
-    # - "embed" task (bi-encoder models)
-    # - "token_embed" task (late interaction models like ColBERT)
-    state.openai_serving_scores = (
+    # Score API handles score/rerank for:
+    # - "score" task (score_type: cross-encoder models)
+    # - "embed" task (score_type: bi-encoder models)
+    # - "token_embed" task (score_type: late interaction models)
+    state.serving_scores = (
         ServingScores(
             engine_client,
             state.openai_serving_models,
             request_logger=request_logger,
             score_template=resolved_chat_template,
             log_error_stack=args.log_error_stack,
-            use_gpu_for_pooling_score=getattr(args, "use_gpu_for_pooling_score", False),
         )
         if any(t in supported_tasks for t in ("embed", "score", "token_embed"))
         else None
