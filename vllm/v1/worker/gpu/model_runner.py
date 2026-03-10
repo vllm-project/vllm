@@ -222,6 +222,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.is_pooling_model = self.model_config.runner_type == "pooling"
         self.pooling_runner: PoolingRunner | None = None
 
+        # Pre-allocated read-only buffers.
+        int32_buf_kwargs = dict(dtype=torch.int32, device=self.device)
+        self.arange_np = np.arange(self.max_num_reqs + 1, dtype=np.int32)
+        self.arange_gpu = torch.arange(self.max_num_reqs + 1, **int32_buf_kwargs)
+        self.zeros_gpu = torch.zeros(self.max_num_reqs, **int32_buf_kwargs)
+
         # For transferring state from execute_model to subsequent sample_tokens call.
         self.execute_model_state: ExecuteModelState | None = None
 
@@ -425,13 +431,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def _dummy_sampler_run(self, hidden_states: torch.Tensor) -> None:
         num_reqs = hidden_states.shape[0]
         logits = self.model.compute_logits(hidden_states)
-        idx_mapping = torch.arange(num_reqs, dtype=torch.int32, device=self.device)
-        idx_mapping_np = np.arange(num_reqs, dtype=np.int32)
+        idx_mapping = self.arange_gpu[:num_reqs]
+        idx_mapping_np = self.arange_np[:num_reqs]
         pos = torch.zeros(num_reqs, dtype=torch.int64, device=self.device)
-        dummy_input_ids = torch.zeros(num_reqs, dtype=torch.int32, device=self.device)
-        expanded_local_pos = torch.zeros(
-            num_reqs, dtype=torch.int32, device=self.device
-        )
+        dummy_input_ids = self.zeros_gpu[:num_reqs]
+        expanded_local_pos = self.zeros_gpu[:num_reqs]
         # NOTE(woosuk): During the initial memory profiling, the sampler may skip
         # top_k, top_p, and logprobs, using less GPU memory than what is possible
         # during actual execution.
@@ -627,14 +631,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # No draft token scheduled (common case).
             total_num_draft_tokens = 0
             total_num_logits = num_reqs
-            cu_num_logits_np = np.arange(num_reqs + 1, dtype=np.int32)
-            cu_num_logits = torch.arange(
-                num_reqs + 1, device=self.device, dtype=torch.int32
-            )
+            cu_num_logits_np = self.arange_np[: num_reqs + 1]
+            cu_num_logits = self.arange_gpu[: num_reqs + 1]
             expanded_idx_mapping = idx_mapping
-            expanded_local_pos = torch.zeros(
-                num_reqs, dtype=torch.int32, device=self.device
-            )
+            expanded_local_pos = self.zeros_gpu[:num_reqs]
         else:
             num_draft_tokens = np.fromiter(
                 (len(draft_tokens.get(req_id, ())) for req_id in req_ids),
