@@ -8,7 +8,7 @@ NOTE:
          --runner pooling \
          --max-model-len 5000 \
          --limit-mm-per-prompt.video 1 \
-         --hf-overrides '{"text_config": {"architectures": ["Qwen2_5_VLForSequenceClassification"]}}'
+         --hf-overrides '{"architectures": ["Qwen2_5_VLForSequenceClassification"]}'
 """
 
 import argparse
