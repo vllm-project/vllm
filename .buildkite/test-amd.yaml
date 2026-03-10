@@ -1629,7 +1629,7 @@ steps:
 
 - label: ROCm GPT-OSS Eval
   timeout_in_minutes: 60
-  working_dir: "/vllm-workspace/"
+  working_dir: "/vllm-workspace/tests"
   agent_pool: mi325_1
   mirror_hardwares: [amdexperimental, amdproduction]
   optional: true # run on nightlies
@@ -3286,7 +3286,7 @@ steps:
 
 - label: ROCm GPT-OSS Eval
   timeout_in_minutes: 60
-  working_dir: "/vllm-workspace/"
+  working_dir: "/vllm-workspace/tests"
   agent_pool: mi355_1
   mirror_hardwares: [amdexperimental, amdproduction]
   optional: true # run on nightlies
