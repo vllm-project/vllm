@@ -3,7 +3,7 @@
 # evaluation against a local vLLM server.
 #
 # Usage:
-#   # Run with defaults (gpt-oss-20b, live_simple)
+#   # Run with defaults (gpt-oss-20b, multi_turn)
 #   bash .buildkite/scripts/tool_call/run-bfcl-eval.sh
 #
 #   # Run with gpt-oss-120b and multiple test categories
@@ -21,7 +21,8 @@
 #   BFCL_MODEL          - HF model name (default: openai/gpt-oss-20b)
 #   BFCL_API_TYPE       - API type: "chat_completions" or "responses" (default: chat_completions)
 #   BFCL_OUTPUT_DIR     - Directory for BFCL results (default: current working directory)
-#   BFCL_TEST_CATEGORY  - BFCL test categories (default: live_simple)
+#   BFCL_TEST_CATEGORY  - BFCL test categories (default: multi_turn)
+#   BFCL_TOOL_CALL_PARSER - Tool call parser name (default: openai)
 #   BFCL_NUM_THREADS    - Threads for BFCL generate (default: 8)
 #   BFCL_TP_SIZE        - Tensor parallel size (default: 1)
 #   BFCL_MAX_MODEL_LEN  - Max model length (default: 4096)
@@ -34,7 +35,8 @@ set -euo pipefail
 MODEL="${BFCL_MODEL:-openai/gpt-oss-20b}"
 API_TYPE="${BFCL_API_TYPE:-chat_completions}"
 OUTPUT_DIR="${BFCL_OUTPUT_DIR:-}"
-TEST_CATEGORY="${BFCL_TEST_CATEGORY:-live_simple}"
+TEST_CATEGORY="${BFCL_TEST_CATEGORY:-multi_turn}"
+TOOL_CALL_PARSER="${BFCL_TOOL_CALL_PARSER:-openai}"
 NUM_THREADS="${BFCL_NUM_THREADS:-8}"
 TP_SIZE="${BFCL_TP_SIZE:-1}"
 MAX_MODEL_LEN="${BFCL_MAX_MODEL_LEN:-4096}"
@@ -51,7 +53,7 @@ echo "============================================"
 echo "BFCL Tool Call Correctness Evaluation"
 echo "============================================"
 echo "Model:          $MODEL"
-echo "Tool parser:    openai"
+echo "Tool parser:    $TOOL_CALL_PARSER"
 echo "API type:       $API_TYPE"
 echo "Output dir:     ${OUTPUT_DIR:-<cwd>}"
 echo "Test category:  $TEST_CATEGORY"
@@ -90,7 +92,7 @@ SERVE_ARGS=(
     "$MODEL"
     --port "$PORT"
     --enable-auto-tool-choice
-    --tool-call-parser openai
+    --tool-call-parser "$TOOL_CALL_PARSER"
     --tensor-parallel-size "$TP_SIZE"
     --max-model-len "$MAX_MODEL_LEN"
     --enforce-eager
@@ -220,7 +222,7 @@ if command -v buildkite-agent &>/dev/null; then
     buildkite-agent annotate --style "$STYLE" --context "bfcl-results" <<EOF
 ### BFCL Tool Call Correctness - ${STATUS}
 - **Model:** \`${MODEL}\`
-- **Parser:** \`openai\`
+- **Parser:** \`${TOOL_CALL_PARSER}\`
 - **API type:** \`${API_TYPE}\`
 - **Test category:** \`${TEST_CATEGORY}\`
 EOF
