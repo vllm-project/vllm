@@ -18,7 +18,7 @@ VLLM_DEBUG_TENSOR_DUMP_OUTPUT_FOLDER=./dump \
 After sending requests, the dump directory will contain per-worker
 sub-directories with `.pt` files:
 
-```
+```text
 dump/
   TP0_PP0_Rank0_pid12345/
     Pass00000.pt
@@ -32,7 +32,7 @@ output tensors (on CPU).
 ## Environment Variables
 
 | Variable | Type | Default | Description |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `VLLM_DEBUG_TENSOR_DUMP_OUTPUT_FOLDER` | `str` | (unset) | Output directory. Feature is disabled when unset. |
 | `VLLM_DEBUG_TENSOR_DUMP_LAYERS` | `str` | (unset) | Comma-separated layer indices to dump (e.g. `"0,1,31"`). All layers when unset. |
 | `VLLM_DEBUG_TENSOR_DUMP_SKIP_PASSES` | `int` | `0` | Number of initial forward passes to skip (useful for skipping warmup passes). |
