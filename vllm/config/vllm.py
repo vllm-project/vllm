@@ -749,7 +749,9 @@ class VllmConfig:
                 )
                 self.scheduler_config.async_scheduling = False
             else:
-                self.scheduler_config.async_scheduling = True
+                # Disable async scheduling by default for now due to stability issues.
+                # See https://github.com/vllm-project/vllm/issues/35989
+                self.scheduler_config.async_scheduling = False
 
         logger.info_once(
             "Asynchronous scheduling is %s.",
