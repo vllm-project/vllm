@@ -126,6 +126,10 @@ def test_models(
 
     if use_rocm_aiter and (model in AITER_MODEL_LIST):
         monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
+        if model == "TitanML/tiny-mixtral":
+            # Untrained model: near-uniform logits make argmax sensitive to
+            # AITER's bfloat16 rounding error in plain rms_norm.
+            monkeypatch.setenv("VLLM_ROCM_USE_AITER_RMSNORM", "0")
     elif use_rocm_aiter and model not in AITER_MODEL_LIST:
         # Skip model that are not using AITER tests.
         # When more AITER kernels are added, this list will not be
