@@ -418,6 +418,7 @@ class MoETestData:
     gate: torch.nn.Module | None
     routed_input_transform: torch.nn.Module | None
     routed_output_transform: torch.nn.Module | None
+    routed_expert_hidden_size: int
 
 
 class SimpleGate(torch.nn.Module):
@@ -460,6 +461,46 @@ class SimpleRoutedInputTransform(torch.nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return torch.nn.functional.linear(x, self.weight)
+
+
+def create_shared_experts_from_config(
+    shared_experts_config: SharedExpertsConfig | None,
+    in_dtype: torch.dtype,
+    tp_size: int = 1,
+    tp_rank: int = 0,
+    device: torch.device | str | None = None,
+) -> TestMLP | None:
+    """Create TestMLP for shared experts from config.
+
+    Args:
+        shared_experts_config: Configuration for shared experts
+        in_dtype: Output data type
+        tp_size: Tensor parallel size (for weight chunking)
+        tp_rank: Tensor parallel rank (for weight chunking)
+        device: Device to move weights to (optional)
+
+    Returns:
+        TestMLP instance or None if config is None
+    """
+    if shared_experts_config is None:
+        return None
+
+    s_w1 = shared_experts_config.w1
+    s_w2 = shared_experts_config.w2
+
+    # Apply TP chunking if needed
+    if tp_size > 1:
+        s_w1 = tp_chunk_gate_up(s_w1, tp_rank, tp_size, dim=1, device=device)
+        s_w2 = chunk_by_rank(s_w2, tp_rank, tp_size, dim=0, device=device)
+    else:
+        s_w1 = s_w1.to(device)
+        s_w2 = s_w2.to(device)
+
+    return TestMLP(
+        w1=s_w1,
+        w2=s_w2,
+        out_dtype=in_dtype,
+    ).to(device)
 
 
 def setup_moe_test_data(
@@ -555,6 +596,7 @@ def setup_moe_test_data(
         gate=gate,
         routed_input_transform=routed_input_transform,
         routed_output_transform=routed_output_transform,
+        routed_expert_hidden_size=routed_expert_hidden_size,
     )
 
 
@@ -750,14 +792,7 @@ def make_fake_moe_layer(
         w1_s = None
         w2_s = None
 
-    if shared_experts_config is not None:
-        shared_experts = TestMLP(
-            shared_experts_config.w1,
-            shared_experts_config.w2,
-            in_dtype,
-        )
-    else:
-        shared_experts = None
+    shared_experts = create_shared_experts_from_config(shared_experts_config, in_dtype)
 
     quant_config = FusedMoEQuantConfig.make(
         quant_dtype,
@@ -1049,21 +1084,9 @@ def _test_loop(
 
     with set_current_vllm_config(vllm_config):
         # Setup shared experts if needed
-        if shared_experts_config is not None:
-            s_w1 = shared_experts_config.w1.to(device)
-            s_w2 = shared_experts_config.w2.to(device)
-
-            if tp_size > 1:
-                s_w1 = tp_chunk_gate_up(s_w1, tp_rank, tp_size, dim=1, device=device)
-                s_w2 = chunk_by_rank(s_w2, tp_rank, tp_size, dim=0, device=device)
-
-            shared_experts = TestMLP(
-                w1=s_w1,
-                w2=s_w2,
-                out_dtype=in_dtype,
-            )
-        else:
-            shared_experts = None
+        shared_experts = create_shared_experts_from_config(
+            shared_experts_config, in_dtype, tp_size, tp_rank, device
+        )
 
         # Determine hidden size for MoE layer
         # When using routed_input_transform, experts operate in latent space
@@ -1203,10 +1226,6 @@ def test_moe_layer_no_parallel(
 
     in_dtype = torch.bfloat16
 
-    # Determine dimensions for routed experts (may be transformed)
-    latent_size = k // 2 if use_routed_input_transform else k
-    routed_expert_hidden_size = latent_size
-
     # Setup test data and transforms (includes creating w1 and w2)
     test_data = setup_moe_test_data(
         m=m,
@@ -1253,17 +1272,9 @@ def test_moe_layer_no_parallel(
 
     with set_current_vllm_config(vllm_config):
         # Setup shared experts if needed
-        if test_data.shared_experts_config is not None:
-            s_w1 = test_data.shared_experts_config.w1
-            s_w2 = test_data.shared_experts_config.w2
-
-            shared_experts = TestMLP(
-                w1=s_w1,
-                w2=s_w2,
-                out_dtype=in_dtype,
-            )
-        else:
-            shared_experts = None
+        shared_experts = create_shared_experts_from_config(
+            test_data.shared_experts_config, in_dtype
+        )
 
         # Create MoE layer
         # Use routed_expert_hidden_size (not k) when routed_input_transform is used
@@ -1271,7 +1282,7 @@ def test_moe_layer_no_parallel(
         moe_fn, moe_layer = make_fused_moe_layer(
             quantization=quantization,
             use_ep=use_ep,
-            hidden_size=routed_expert_hidden_size,
+            hidden_size=test_data.routed_expert_hidden_size,
             intermediate_size=n,
             in_dtype=in_dtype,
             tp_size=tp_size,
@@ -1407,23 +1418,6 @@ def test_moe_layer(
 
     in_dtype = torch.bfloat16
 
-    # Determine dimensions for routed experts (may be transformed)
-    latent_size = k // 2 if use_routed_input_transform else k
-    routed_expert_hidden_size = latent_size
-
-    # Note: For latent MoE, routed experts operate entirely in latent space
-    # (k//2). The routed_output_transform then projects back to k before
-    # adding with shared experts.
-    # w1: (E, 2*N, latent_size) - input latent_size
-    # w2: (E, latent_size, N) - output latent_size (fused_experts returns
-    # same shape as input)
-    (w1, _, _, _), (w2, _, _, _) = make_test_weights(
-        num_experts,
-        n,
-        routed_expert_hidden_size,  # Both w1 input and w2 output use latent_size
-        in_dtype=in_dtype,
-    )
-
     # Create all tensors on CPU first (for safe pickling to subprocess workers)
     test_data = setup_moe_test_data(
         m=m,
@@ -1448,8 +1442,8 @@ def test_moe_layer(
 
     with set_current_vllm_config(baseline_vllm_config):
         baseline_layer = make_fake_moe_layer(
-            w1=w1,
-            w2=w2,
+            w1=test_data.w1,
+            w2=test_data.w2,
             top_k=top_k,
             global_num_experts=num_experts,
             in_dtype=in_dtype,
@@ -1490,8 +1484,8 @@ def test_moe_layer(
             tp_size,
             test_data.hidden_states,
             test_data.router_logits,
-            w1,
-            w2,
+            test_data.w1,
+            test_data.w2,
             num_experts,
             m,
             n,
@@ -1600,23 +1594,6 @@ def test_moe_layer_eplb(
 
     in_dtype = torch.bfloat16
 
-    # Determine dimensions for routed experts (may be transformed)
-    latent_size = k // 2 if use_routed_input_transform else k
-    routed_expert_hidden_size = latent_size
-
-    # Note: For latent MoE, routed experts operate entirely in latent space
-    # (k//2). The routed_output_transform then projects back to k before
-    # adding with shared experts.
-    # w1: (E, 2*N, latent_size) - input latent_size
-    # w2: (E, latent_size, N) - output latent_size (fused_experts returns
-    # same shape as input)
-    (w1, _, _, _), (w2, _, _, _) = make_test_weights(
-        num_experts,
-        n,
-        routed_expert_hidden_size,  # Both w1 input and w2 output use latent_size
-        in_dtype=in_dtype,
-    )
-
     # Setup test data and transforms
     test_data = setup_moe_test_data(
         m=m,
@@ -1640,8 +1617,8 @@ def test_moe_layer_eplb(
             tp_size,
             test_data.hidden_states,
             test_data.router_logits,
-            w1,
-            w2,
+            test_data.w1,
+            test_data.w2,
             num_experts,
             m,
             n,
