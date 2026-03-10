@@ -25,7 +25,7 @@ from vllm.v1.attention.backend import (
 from vllm.v1.attention.backends.mla.flashmla_sparse import (
     triton_convert_req_index_to_global_index,
 )
-from vllm.v1.attention.ops.triton_mla_sparse import triton_bf16_mla_sparse_interface
+from vllm.v1.attention.ops.xpu_mla_sparse import triton_bf16_mla_sparse_interface
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 if TYPE_CHECKING:

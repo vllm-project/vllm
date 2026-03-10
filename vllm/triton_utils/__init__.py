@@ -17,7 +17,7 @@ else:
     tl = TritonLanguagePlaceholder()
     tldevice = TritonLanguagePlaceholder()
 
-LOG2E = tl.constexpr(1.4426950408889634)
-LOGE2 = tl.constexpr(0.6931471805599453)
+LOG2E = 1.4426950408889634
+LOGE2 = 0.6931471805599453
 
 __all__ = ["HAS_TRITON", "triton", "tl", "tldevice", "LOG2E", "LOGE2"]
