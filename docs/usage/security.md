@@ -224,7 +224,7 @@ The most effective approach is to deploy vLLM behind a reverse proxy (such as ng
 A malicious website visited in a user's browser can attempt to interact with a vLLM instance that the user has network access to — whether it is running on `localhost`, on an internal network, or on any host reachable from the user's machine. There are two distinct attack vectors, and vLLM provides a corresponding defense for each:
 
 | Attack | How it works | `Host` header | Defense |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | **DNS rebinding** | Attacker's domain temporarily resolves to the target IP, bypassing the browser's same-origin policy | Carries the attacker's domain (e.g., `evil.com`) | `--allowed-hosts` rejects the request |
 | **Cross-origin requests (CSRF)** | Attacker's page directly sends requests to the vLLM server; if CORS allows it, the browser lets JavaScript read the response | The server's real hostname (valid) | `--allowed-origins` restricts which origins may make cross-origin requests |
 
