@@ -320,6 +320,7 @@ class BatchProgressTracker:
 async def read_file(path_or_url: str) -> str:
     if path_or_url.startswith("http://") or path_or_url.startswith("https://"):
         async with aiohttp.ClientSession() as session, session.get(path_or_url) as resp:
+            resp.raise_for_status()
             return await resp.text()
     else:
         with open(path_or_url, encoding="utf-8") as f:
