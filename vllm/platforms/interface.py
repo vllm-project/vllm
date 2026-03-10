@@ -408,7 +408,7 @@ class Platform:
         pass
 
     @classmethod
-    def get_sp_min_token_num_default(cls) -> int | None:
+    def get_sp_min_token_num_default(cls, hidden_size: int, tp_size: int, element_size: int) -> int | None:
         """
         Return None by default to keep SP disabled.
         """
