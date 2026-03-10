@@ -72,7 +72,9 @@ class GPTBigCodeAttention(nn.Module):
         assert total_num_heads % self.tensor_model_parallel_world_size == 0
         self.num_heads = total_num_heads // self.tensor_model_parallel_world_size
         self.head_dim = self.hidden_size // total_num_heads
-        self.scale = self.head_dim**-0.5
+        self.scale = (
+            self.head_dim**-0.5 if getattr(config, "scale_attn_weights", True) else 1.0
+        )
 
         self.multi_query = config.multi_query
         if self.multi_query:
@@ -210,6 +212,8 @@ class GPTBigCodeModel(nn.Module):
 
         self.config = config
         assert not config.add_cross_attention
+        assert not config.scale_attn_by_inverse_layer_idx
+        assert not config.reorder_and_upcast_attn
 
         self.embed_dim = config.hidden_size
 
