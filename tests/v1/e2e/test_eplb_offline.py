@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import pytest
-import torch
 
 from vllm import LLM
 from vllm.distributed import cleanup_dist_env_and_memory
