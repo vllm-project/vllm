@@ -9,7 +9,8 @@ images_crop tensor with shape (0, 3, 640, 640). The _parse_and_validate_image_in
 method must correctly read image_size from this tensor's shape rather than
 falling back to base_size, which would cause a TensorSchema mismatch.
 
-Run with: pytest tests/multimodal/test_deepseek_ocr_empty_crop_unit.py -v
+Run with:
+  pytest tests/models/multimodal/processing/test_deepseek_ocr_empty_crop_unit.py -v
 """
 
 import pytest
