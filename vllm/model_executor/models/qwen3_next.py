@@ -635,11 +635,17 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         When the first real inference triggers the autotuner it OOMs
         because there is not enough memory left for benchmarking.
 
-        This method runs a minimal forward pass through
-        ``chunk_gated_delta_rule`` with small dummy tensors (B=1, T=64)
-        to force autotuning while GPU memory is still plentiful.  The
-        autotuner results are cached globally, so only the first layer
-        incurs actual benchmarking cost.
+        This method runs minimal forward passes through
+        ``chunk_gated_delta_rule`` with small dummy tensors to force
+        autotuning while GPU memory is still plentiful.  The autotuner
+        results are cached globally, so only the first layer incurs
+        actual benchmarking cost.
+
+        Most kernels use a fixed ``BT = chunk_size`` (64), but
+        ``chunk_fwd_kernel_o`` recomputes ``BT`` from the sequence
+        length: ``min(64, max(16, next_power_of_2(T)))``.  Since ``BT``
+        is part of its autotune key, we run warmup passes with T = 16,
+        32, and 64 to cover all possible ``BT`` values.
 
         The decode path uses ``fused_sigmoid_gating_delta_rule_update``
         which has fixed kernel parameters (no autotuning), so only the
@@ -651,58 +657,66 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
 
         device = mixed_qkv.device
         dtype = mixed_qkv.dtype
-        # Use T=64 to match the chunk_size used by chunk_gated_delta_rule.
-        T = 64
         num_k_heads = self.num_k_heads // self.tp_size
         num_v_heads = self.num_v_heads // self.tp_size
 
-        # Tensor shapes mirror what _forward_core feeds into
-        # chunk_gated_delta_rule during prefill (IS_VARLEN=True path):
-        #   q/k : [1, T, num_k_heads/tp, head_k_dim]
-        #   v   : [1, T, num_v_heads/tp, head_v_dim]
-        #   g/β : [1, T, num_v_heads/tp]
-        #   state: [N, num_v_heads/tp, head_v_dim, head_k_dim]
-        q = torch.randn(1, T, num_k_heads, self.head_k_dim, device=device, dtype=dtype)
-        k = torch.randn(1, T, num_k_heads, self.head_k_dim, device=device, dtype=dtype)
-        v = torch.randn(1, T, num_v_heads, self.head_v_dim, device=device, dtype=dtype)
-        g = torch.randn(1, T, num_v_heads, device=device, dtype=dtype)
-        beta = torch.randn(1, T, num_v_heads, device=device, dtype=dtype)
-        state = torch.zeros(
-            1,
-            num_v_heads,
-            self.head_v_dim,
-            self.head_k_dim,
-            device=device,
-            dtype=torch.float32,
-        )
-        cu_seqlens = torch.tensor([0, T], device=device, dtype=torch.long)
+        # Run warmup for each possible BT value of chunk_fwd_kernel_o:
+        #   T=16 → BT=16, T=32 → BT=32, T=64 → BT=64.
+        # Other kernels always use BT=chunk_size(64), so their autotune
+        # cache is populated on the first pass and reused thereafter.
+        for T in (16, 32, 64):
+            q = torch.randn(
+                1, T, num_k_heads, self.head_k_dim, device=device, dtype=dtype
+            )
+            k = torch.randn(
+                1, T, num_k_heads, self.head_k_dim, device=device, dtype=dtype
+            )
+            v = torch.randn(
+                1, T, num_v_heads, self.head_v_dim, device=device, dtype=dtype
+            )
+            g = torch.randn(1, T, num_v_heads, device=device, dtype=dtype)
+            beta = torch.randn(1, T, num_v_heads, device=device, dtype=dtype)
+            state = torch.zeros(
+                1,
+                num_v_heads,
+                self.head_v_dim,
+                self.head_k_dim,
+                device=device,
+                dtype=torch.float32,
+            )
+            cu_seqlens = torch.tensor([0, T], device=device, dtype=torch.long)
 
-        try:
-            self.chunk_gated_delta_rule(
-                q=q,
-                k=k,
-                v=v,
-                g=g,
-                beta=beta,
-                initial_state=state,
-                output_final_state=False,
-                cu_seqlens=cu_seqlens,
-                use_qk_l2norm_in_kernel=True,
-            )
-            logger.info(
-                "GDN prefill kernel warmup completed for layer %s",
-                self.prefix,
-            )
-        except Exception:
-            logger.warning(
-                "GDN prefill kernel warmup failed for layer %s. "
-                "First inference may OOM due to autotuner.",
-                self.prefix,
-                exc_info=True,
-            )
-        finally:
-            del q, k, v, g, beta, state, cu_seqlens
-            torch.accelerator.empty_cache()
+            try:
+                self.chunk_gated_delta_rule(
+                    q=q,
+                    k=k,
+                    v=v,
+                    g=g,
+                    beta=beta,
+                    initial_state=state,
+                    output_final_state=False,
+                    cu_seqlens=cu_seqlens,
+                    use_qk_l2norm_in_kernel=True,
+                )
+            except Exception:
+                logger.warning(
+                    "GDN prefill kernel warmup (T=%d) failed for "
+                    "layer %s. First inference may OOM due to "
+                    "autotuner.",
+                    T,
+                    self.prefix,
+                    exc_info=True,
+                )
+            else:
+                logger.debug(
+                    "GDN prefill kernel warmup (T=%d) completed for layer %s",
+                    T,
+                    self.prefix,
+                )
+            finally:
+                del q, k, v, g, beta, state, cu_seqlens
+
+        torch.accelerator.empty_cache()
 
     def _forward_core(
         self,
