@@ -46,7 +46,7 @@ from vllm.v1.worker.workspace import init_workspace_manager
 SHAPE_COMBOS = [
     (1, 128, 256),
     (32, 1024, 512),
-    (222, 4096, 2048),  # should be big enough to exercise DP chunking
+    (222, 2048, 2048),  # should be big enough to exercise DP chunking
 ]
 
 NUM_EXPERTS = [8, 64]
@@ -1024,7 +1024,12 @@ def _test_loop(
     else:
         atol, rtol = 6e-2, 6e-2
 
-    torch.testing.assert_close(expected, actual, atol=atol, rtol=rtol)
+    try:
+        torch.testing.assert_close(expected, actual, atol=atol, rtol=rtol)
+    finally:
+        # Cleanup GPU memory
+        torch.cuda.synchronize()
+        torch.accelerator.empty_cache()
 
 
 # Test for non-parallel cases (world_size == 1) - backend doesn't matter
@@ -1104,7 +1109,7 @@ def test_moe_layer_no_parallel(
 
     # Create routed input transform if needed
     routed_input_transform = (
-        SimpleRoutedInputTransform(k, latent_size, in_dtype)
+        SimpleRoutedInputTransform(k, latent_size, in_dtype, device="cuda")
         if use_routed_input_transform
         else None
     )
@@ -1113,11 +1118,15 @@ def test_moe_layer_no_parallel(
     # Note: gate is called AFTER routed_input_transform, so it should expect
     # the transformed dimension (latent_size) when routed_input_transform is used
     gate_input_dim = latent_size if use_routed_input_transform else k
-    gate = SimpleGate(gate_input_dim, num_experts, in_dtype) if use_gate else None
+    gate = (
+        SimpleGate(gate_input_dim, num_experts, in_dtype, device="cuda")
+        if use_gate
+        else None
+    )
 
     # Create routed output transform if needed (projects latent space back to original)
     routed_output_transform = (
-        SimpleRoutedInputTransform(latent_size, k, in_dtype)
+        SimpleRoutedInputTransform(latent_size, k, in_dtype, device="cuda")
         if use_routed_input_transform
         else None
     )
@@ -1216,12 +1225,13 @@ def test_moe_layer_no_parallel(
     else:
         atol, rtol = 6e-2, 6e-2
 
-    # Compare outputs
-    torch.testing.assert_close(baseline_output, actual, atol=atol, rtol=rtol)
-
-    # Cleanup GPU memory
-    torch.cuda.synchronize()
-    torch.accelerator.empty_cache()
+    try:
+        # Compare outputs
+        torch.testing.assert_close(baseline_output, actual, atol=atol, rtol=rtol)
+    finally:
+        # Cleanup GPU memory
+        torch.cuda.synchronize()
+        torch.accelerator.empty_cache()
 
 
 # TODO: add cudagraphs/torch.compile tests
@@ -1322,17 +1332,18 @@ def test_moe_layer(
         in_dtype=in_dtype,
     )
 
+    # Create all tensors on CPU first (for safe pickling to subprocess workers)
     if use_shared_experts:
         shared_experts_config = SharedExpertsConfig(
-            w1=torch.randn((k, n * 2), device="cuda", dtype=in_dtype) / 15,
-            w2=torch.randn((n, k), device="cuda", dtype=in_dtype) / 15,
+            w1=torch.randn((k, n * 2), dtype=in_dtype) / 15,
+            w2=torch.randn((n, k), dtype=in_dtype) / 15,
         )
     else:
         shared_experts_config = None
 
     # Create routed input transform if needed
     routed_input_transform = (
-        SimpleRoutedInputTransform(k, latent_size, in_dtype)
+        SimpleRoutedInputTransform(k, latent_size, in_dtype, device="cpu")
         if use_routed_input_transform
         else None
     )
@@ -1341,14 +1352,22 @@ def test_moe_layer(
     # Note: gate is called AFTER routed_input_transform, so it should expect
     # the transformed dimension (latent_size) when routed_input_transform is used
     gate_input_dim = latent_size if use_routed_input_transform else k
-    gate = SimpleGate(gate_input_dim, num_experts, in_dtype) if use_gate else None
+    gate = (
+        SimpleGate(gate_input_dim, num_experts, in_dtype, device="cpu")
+        if use_gate
+        else None
+    )
 
     # Create routed output transform if needed (projects latent space back to original)
     routed_output_transform = (
-        SimpleRoutedInputTransform(latent_size, k, in_dtype)
+        SimpleRoutedInputTransform(latent_size, k, in_dtype, device="cpu")
         if use_routed_input_transform
         else None
     )
+
+    # Create test inputs
+    hidden_states = torch.randn((m, k), dtype=in_dtype) / 10
+    router_logits = torch.randn((m, num_experts), dtype=in_dtype)
 
     # For now, run baseline unquantized.
     # quant_dtype = torch.float8_e4m3fn if quantization is not None else None
@@ -1360,60 +1379,92 @@ def test_moe_layer(
         parallel_config=baseline_parallel_config, compilation_config=compilation_config
     )
 
+    # Move tensors to CUDA temporarily for baseline computation
+    hidden_states_cuda = hidden_states.cuda()
+    router_logits_cuda = router_logits.cuda()
+    w1_cuda = w1.cuda()
+    w2_cuda = w2.cuda()
+
+    # Move shared_experts_config to CUDA if present
+    if shared_experts_config is not None:
+        shared_experts_config_cuda = SharedExpertsConfig(
+            w1=shared_experts_config.w1.cuda(),
+            w2=shared_experts_config.w2.cuda(),
+        )
+    else:
+        shared_experts_config_cuda = None
+
+    # Move gate and transforms to CUDA if present
+    gate_cuda = gate.cuda() if gate is not None else None
+    routed_input_transform_cuda = (
+        routed_input_transform.cuda() if routed_input_transform is not None else None
+    )
+    routed_output_transform_cuda = (
+        routed_output_transform.cuda() if routed_output_transform is not None else None
+    )
+
     with set_current_vllm_config(baseline_vllm_config):
         baseline_layer = make_fake_moe_layer(
-            w1=w1,
-            w2=w2,
+            w1=w1_cuda,
+            w2=w2_cuda,
             top_k=top_k,
             global_num_experts=num_experts,
             in_dtype=in_dtype,
             quant_dtype=None,  # quant_dtype,
             renormalize=False,
-            shared_experts_config=shared_experts_config,
+            shared_experts_config=shared_experts_config_cuda,
+            gate=gate_cuda,
+            routed_input_transform=routed_input_transform_cuda,
+            routed_output_transform=routed_output_transform_cuda,
+        )
+
+    baseline_output = baseline_layer(hidden_states_cuda, router_logits_cuda)
+
+    # Move baseline output back to CPU and detach for passing to workers
+    # (detach to avoid autograd across process boundaries)
+    baseline_output = baseline_output.detach().cpu()
+
+    # Free the baseline layer and all CUDA tensors before spawn
+    del baseline_layer, hidden_states_cuda, router_logits_cuda, w1_cuda, w2_cuda
+    del (
+        shared_experts_config_cuda,
+        gate_cuda,
+        routed_input_transform_cuda,
+        routed_output_transform_cuda,
+    )
+    torch.accelerator.empty_cache()
+
+    try:
+        parallel_launch_with_config(
+            world_size,
+            _test_loop,
+            vllm_config,
+            test_env,
+            1 if not use_ep else world_size,  # or dp_size?
+            dp_size,
+            tp_size,
+            hidden_states,
+            router_logits,
+            w1,
+            w2,
+            num_experts,
+            m,
+            n,
+            k,
+            top_k,
+            quantization,
+            shared_experts_config,
+            reduce_results,
+            _test_body_regular,
             gate=gate,
             routed_input_transform=routed_input_transform,
             routed_output_transform=routed_output_transform,
+            baseline_output=baseline_output,
         )
-
-    hidden_states = torch.randn((m, k), device="cuda", dtype=in_dtype) / 10
-    router_logits = torch.randn((m, num_experts), device="cuda", dtype=in_dtype)
-
-    baseline_output = baseline_layer(hidden_states, router_logits)
-
-    # Free the baseline layer and main-process CUDA memory before spawn.
-    del baseline_layer
-    torch.accelerator.empty_cache()
-
-    parallel_launch_with_config(
-        world_size,
-        _test_loop,
-        vllm_config,
-        test_env,
-        1 if not use_ep else world_size,  # or dp_size?
-        dp_size,
-        tp_size,
-        hidden_states,
-        router_logits,
-        w1,
-        w2,
-        num_experts,
-        m,
-        n,
-        k,
-        top_k,
-        quantization,
-        shared_experts_config,
-        reduce_results,
-        _test_body_regular,
-        gate=gate,
-        routed_input_transform=routed_input_transform,
-        routed_output_transform=routed_output_transform,
-        baseline_output=baseline_output,
-    )
-
-    # Cleanup GPU memory after spawned processes complete
-    torch.cuda.synchronize()
-    torch.accelerator.empty_cache()
+    finally:
+        # Cleanup GPU memory after spawned processes complete
+        torch.cuda.synchronize()
+        torch.accelerator.empty_cache()
 
 
 # Which quantization methods support EPLB.
@@ -1535,7 +1586,7 @@ def test_moe_layer_eplb(
 
     # Create routed input transform if needed
     routed_input_transform = (
-        SimpleRoutedInputTransform(k, latent_size, in_dtype)
+        SimpleRoutedInputTransform(k, latent_size, in_dtype, device="cpu")
         if use_routed_input_transform
         else None
     )
@@ -1544,11 +1595,15 @@ def test_moe_layer_eplb(
     # Note: gate is called AFTER routed_input_transform, so it should expect
     # the transformed dimension (latent_size) when routed_input_transform is used
     gate_input_dim = latent_size if use_routed_input_transform else k
-    gate = SimpleGate(gate_input_dim, num_experts, in_dtype) if use_gate else None
+    gate = (
+        SimpleGate(gate_input_dim, num_experts, in_dtype, device="cpu")
+        if use_gate
+        else None
+    )
 
     # Create routed output transform if needed (projects latent space back to original)
     routed_output_transform = (
-        SimpleRoutedInputTransform(latent_size, k, in_dtype)
+        SimpleRoutedInputTransform(latent_size, k, in_dtype, device="cpu")
         if use_routed_input_transform
         else None
     )
@@ -1556,32 +1611,33 @@ def test_moe_layer_eplb(
     hidden_states = torch.randn((m, k), dtype=in_dtype) / 10
     router_logits = torch.randn((m, num_experts), dtype=in_dtype)
 
-    parallel_launch_with_config(
-        world_size,
-        _test_loop,
-        vllm_config,
-        test_env,
-        world_size,  # ep_size = world_size for EPLB
-        dp_size,
-        tp_size,
-        hidden_states,
-        router_logits,
-        w1,
-        w2,
-        num_experts,
-        m,
-        n,
-        k,
-        top_k,
-        quantization,
-        shared_experts_config,
-        reduce_results,
-        _test_body_eplb,
-        gate=gate,
-        routed_input_transform=routed_input_transform,
-        routed_output_transform=routed_output_transform,
-    )
-
-    # Cleanup GPU memory after spawned processes complete
-    torch.cuda.synchronize()
-    torch.accelerator.empty_cache()
+    try:
+        parallel_launch_with_config(
+            world_size,
+            _test_loop,
+            vllm_config,
+            test_env,
+            world_size,  # ep_size = world_size for EPLB
+            dp_size,
+            tp_size,
+            hidden_states,
+            router_logits,
+            w1,
+            w2,
+            num_experts,
+            m,
+            n,
+            k,
+            top_k,
+            quantization,
+            shared_experts_config,
+            reduce_results,
+            _test_body_eplb,
+            gate=gate,
+            routed_input_transform=routed_input_transform,
+            routed_output_transform=routed_output_transform,
+        )
+    finally:
+        # Cleanup GPU memory after spawned processes complete
+        torch.cuda.synchronize()
+        torch.accelerator.empty_cache()

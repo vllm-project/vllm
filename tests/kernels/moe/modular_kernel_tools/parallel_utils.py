@@ -11,7 +11,11 @@ from torch.multiprocessing import spawn  # pyright: ignore[reportPrivateImportUs
 from typing_extensions import ParamSpec
 
 from vllm.config import VllmConfig, set_current_vllm_config
-from vllm.distributed import init_distributed_environment, initialize_model_parallel
+from vllm.distributed import (
+    cleanup_dist_env_and_memory,
+    init_distributed_environment,
+    initialize_model_parallel,
+)
 from vllm.utils.network_utils import get_open_port
 
 ## Parallel Processes Utils
@@ -112,7 +116,8 @@ def _worker_parallel_launch(
         traceback.print_exc()
         raise
     finally:
-        torch.distributed.destroy_process_group()
+        cleanup_dist_env_and_memory()
+        # torch.distributed.destroy_process_group()
 
 
 def parallel_launch_with_config(
