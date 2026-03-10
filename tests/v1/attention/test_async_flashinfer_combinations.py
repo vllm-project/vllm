@@ -94,6 +94,7 @@ class TestAsyncFlashInferBaseline:
             enforce_eager=True,
             gpu_memory_utilization=0.3,
             disable_log_stats=True,
+            async_scheduling=False,
         )
 
         sampling_params = SamplingParams(
