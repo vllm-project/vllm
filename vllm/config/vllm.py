@@ -749,7 +749,8 @@ class VllmConfig:
                 )
                 self.scheduler_config.async_scheduling = False
             else:
-                self.scheduler_config.async_scheduling = True
+                # TODO(woosuk): Enable async scheduling by default once it is stable.
+                self.scheduler_config.async_scheduling = False
 
         logger.info_once(
             "Asynchronous scheduling is %s.",
