@@ -51,6 +51,12 @@ class ServeSubcommand(CLISubcommand):
         if hasattr(args, "model_tag") and args.model_tag is not None:
             args.model = args.model_tag
 
+        if getattr(args, "grpc", False):
+            from vllm.entrypoints.grpc_server import serve_grpc
+
+            uvloop.run(serve_grpc(args))
+            return
+
         if args.headless:
             if args.api_server_count is not None and args.api_server_count > 0:
                 raise ValueError(
@@ -127,6 +133,13 @@ class ServeSubcommand(CLISubcommand):
         )
 
         serve_parser = make_arg_parser(serve_parser)
+        serve_parser.add_argument(
+            "--grpc",
+            action="store_true",
+            default=False,
+            help="Launch a gRPC server instead of the HTTP OpenAI-compatible "
+            "server. Requires: pip install vllm[grpc].",
+        )
         serve_parser.epilog = VLLM_SUBCMD_PARSER_EPILOG.format(subcmd=self.name)
         return serve_parser
 
@@ -224,12 +237,6 @@ def run_multi_api_server(args: argparse.Namespace):
     assert not args.headless
     num_api_servers: int = args.api_server_count
     assert num_api_servers > 0
-
-    if num_api_servers > 1 and getattr(args, "use_gpu_for_pooling_score", False):
-        # TODO(wentao): remove this once well tested
-        raise ValueError(
-            "--use-gpu-for-pooling-score cannot be used with api_server_count > 1 now"
-        )
 
     if num_api_servers > 1:
         setup_multiprocess_prometheus()
