@@ -138,10 +138,8 @@ class BlockTables:
         num_tokens_padded: int,
     ) -> torch.Tensor:
         num_reqs = idx_mapping.shape[0]
-        num_tokens = positions.shape[0]
         num_groups = self.num_kv_cache_groups
         _compute_slot_mappings_kernel[(num_groups, num_reqs + 1)](
-            num_tokens,
             self.max_num_batched_tokens,
             idx_mapping,
             query_start_loc,
@@ -213,7 +211,6 @@ def _gather_block_tables_kernel(
 
 @triton.jit
 def _compute_slot_mappings_kernel(
-    num_tokens,
     max_num_tokens,
     idx_mapping,  # [num_reqs]
     query_start_loc,  # [num_reqs + 1]
