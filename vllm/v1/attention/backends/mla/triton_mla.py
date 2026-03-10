@@ -17,6 +17,7 @@ from vllm.platforms.interface import DeviceCapability
 from vllm.v1.attention.backend import (
     AttentionLayer,
     AttentionType,
+    MultipleOf,
     is_quantized_kv_cache,
 )
 from vllm.v1.attention.ops.triton_decode_attention import decode_attention_fwd
@@ -30,6 +31,20 @@ class TritonMLABackend(MLACommonBackend):
         "auto",
         "bfloat16",
     ]
+
+    @classmethod
+    def get_supported_head_sizes(cls) -> list[int]:
+        return []
+
+    @staticmethod
+    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+        return [MultipleOf(16)]
+
+    @classmethod
+    def supports_block_size(cls, block_size: int | None) -> bool:
+        if block_size is None:
+            return True
+        return block_size % 16 == 0
 
     @staticmethod
     def get_name() -> str:
