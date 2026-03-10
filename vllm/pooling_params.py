@@ -82,6 +82,7 @@ class PoolingParams(
             "score": ["use_activation"],
             "token_embed": ["dimensions", "use_activation"],
             "token_classify": ["use_activation"],
+            "embed&token_classify": ["dimensions", "use_activation"],
         }
 
     def clone(self) -> "PoolingParams":
@@ -122,7 +123,7 @@ class PoolingParams(
             # If prefix caching is enabled,
             # the output of all pooling may less than n_prompt_tokens,
             # we need to skip reading cache at this request.
-            if self.task in ["token_embed", "token_classify"]:
+            if self.task in ["token_embed", "token_classify", "embed&token_classify"]:
                 self.skip_reading_prefix_cache = True
             else:
                 self.skip_reading_prefix_cache = False
@@ -156,7 +157,7 @@ class PoolingParams(
                     setattr(self, k, getattr(pooler_config, k))
 
     def _set_default_parameters(self, model_config: ModelConfig):
-        if self.task in ["embed", "token_embed"]:
+        if self.task in ["embed", "token_embed", "embed&token_classify"]:
             if self.use_activation is None:
                 self.use_activation = True
 
