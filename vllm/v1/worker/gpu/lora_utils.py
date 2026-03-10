@@ -1,11 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
-LoRA utilities for the v1 GPU model runner and cudagraph.
+LoRA utilities for the Model Runner V2 and cudagraph.
 
-Consolidates LoRA-related logic to minimize LoC in the common code path
-(model_runner.py, cudagraph_utils.py). The less common the feature,
-the fewer lines it should appear in common code.
 """
 
 import bisect
