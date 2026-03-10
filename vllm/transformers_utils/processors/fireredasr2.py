@@ -8,7 +8,6 @@ import torch
 import torch.nn.functional as F
 from transformers import (
     AutoFeatureExtractor,
-    AutoProcessor,
     BatchFeature,
 )
 from transformers.feature_extraction_sequence_utils import SequenceFeatureExtractor
@@ -345,4 +344,3 @@ class FireRedASR2Processor(ProcessorMixin):
 AutoFeatureExtractor.register(
     "FireRedASR2FeatureExtractor", FireRedASR2FeatureExtractor
 )
-AutoProcessor.register("FireRedASR2Processor", FireRedASR2Processor)

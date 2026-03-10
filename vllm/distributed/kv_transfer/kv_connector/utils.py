@@ -24,6 +24,9 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 EngineId = str
+# block ids as returned by the hybrid KV cache manager. list[list[int]] are allow
+# mutability and are for connector internal use only.
+BlockIds = tuple[list[int], ...] | list[list[int]]
 
 
 def get_kv_connector_cache_layout():
@@ -348,6 +351,7 @@ class TpKVTopology:
                     include_num_layers_dimension=self._cross_layers_blocks
                 )
             except (AttributeError, NotImplementedError):
+                assert self.tensor_shape is not None
                 kv_cache_stride_order = tuple(range(len(self.tensor_shape)))
 
             # In case of cross layers permute kv_cache_shape according to
@@ -497,7 +501,6 @@ def get_current_attn_backend(vllm_config: VllmConfig):
             head_size=vllm_config.model_config.get_head_size(),
             dtype=vllm_config.model_config.dtype,
             kv_cache_dtype=vllm_config.cache_config.cache_dtype,
-            block_size=vllm_config.cache_config.block_size,
             use_mla=vllm_config.model_config.use_mla,
         )
     return backend

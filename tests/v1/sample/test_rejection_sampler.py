@@ -726,7 +726,7 @@ def test_frequency_penalties(rejection_sampler):
     spec_tokens = [[1, 1, 1], [], [1, 1, 1]]
     output_tokens = [[1, 1, 1, 1], [7], [1, 1, 1, 1]]  # 1, 7 and 1 are the bonus tokens
 
-    num_requsts = len(spec_tokens)
+    num_requests = len(spec_tokens)
     logits = create_logits_tensor(output_tokens, token_idx_to_override=15)
     metadata = create_sampling_metadata(
         all_greedy=True,
@@ -734,8 +734,8 @@ def test_frequency_penalties(rejection_sampler):
         spec_token_ids=spec_tokens,
         prompt_token_ids=torch.tensor([[5, 6, 7], [6, 7, 8], [7, 8, 9]], device=DEVICE),
         frequency_penalties=[1.5, 1.5, 0.7],
-        presence_penalties=[0.0] * num_requsts,
-        repetition_penalties=[1.0] * num_requsts,
+        presence_penalties=[0.0] * num_requests,
+        repetition_penalties=[1.0] * num_requests,
     )
     bonus_token_tensor = torch.tensor(
         [output_tokens[i][-1] for i in range(len(output_tokens))], device=logits.device
