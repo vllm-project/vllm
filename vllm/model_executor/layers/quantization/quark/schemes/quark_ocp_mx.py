@@ -185,14 +185,13 @@ class QuarkOCP_MX(QuarkScheme):
         self.input_quant_spec = input_quant_spec
         self.dynamic_mxfp4_quant = dynamic_mxfp4_quant
         self.weight_dtype = weight_quant_spec["dtype"].replace("fp", "mxfp")
+        self.input_dtype: str | None = None
         if input_quant_spec is not None:
             input_quant = input_quant_spec["dtype"]
             if input_quant == "fp8_e4m3":
                 self.input_dtype = "fp8"
             else:
                 self.input_dtype = input_quant.replace("fp", "mxfp")
-        else:
-            self.input_dtype = None
 
         self.ocp_mx_scheme = OCP_MX_Scheme.from_quant_dtype(
             self.input_dtype, self.weight_dtype
@@ -208,7 +207,9 @@ class QuarkOCP_MX(QuarkScheme):
             )
 
         if self.input_dtype is None:
-            self.quant_dequant_func = lambda x: x  # no input Q/DQ for weight-only
+            self.quant_dequant_func: Callable[[torch.Tensor], torch.Tensor] = (
+                lambda x: x
+            )  # no input Q/DQ for weight-only
         elif self.input_dtype == "mxfp4":
             self.quant_dequant_func = quant_dequant_mxfp4
         else:
