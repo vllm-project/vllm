@@ -16,7 +16,6 @@ from openai.types.responses import (
 from pydantic import ConfigDict, TypeAdapter
 from starlette.datastructures import Headers
 
-import vllm.envs as envs
 from vllm.beam_search import BeamSearchSequence, create_sort_beams_key_function
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
@@ -613,31 +612,7 @@ class OpenAIServing:
         self,
         request: AnyRequest,
     ) -> ErrorResponse | None:
-        error_response = None
-
-        if self._is_model_supported(request.model):
-            return None
-        if request.model in self.models.lora_requests:
-            return None
-        if (
-            envs.VLLM_ALLOW_RUNTIME_LORA_UPDATING
-            and request.model
-            and (load_result := await self.models.resolve_lora(request.model))
-        ):
-            if isinstance(load_result, LoRARequest):
-                return None
-            if (
-                isinstance(load_result, ErrorResponse)
-                and load_result.error.code == HTTPStatus.BAD_REQUEST.value
-            ):
-                error_response = load_result
-
-        return error_response or self.create_error_response(
-            message=f"The model `{request.model}` does not exist.",
-            err_type="NotFoundError",
-            status_code=HTTPStatus.NOT_FOUND,
-            param="model",
-        )
+        return await self.models.check_model(request.model)
 
     def _get_active_default_mm_loras(self, request: AnyRequest) -> LoRARequest | None:
         """Determine if there are any active default multimodal loras."""
@@ -1197,8 +1172,6 @@ class OpenAIServing:
         return tokenizer.decode([token_id])
 
     def _is_model_supported(self, model_name: str | None) -> bool:
-        if not model_name:
-            return True
         return self.models.is_base_model(model_name)
 
 

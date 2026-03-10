@@ -5,6 +5,7 @@ from asyncio import Lock
 from collections import defaultdict
 from http import HTTPStatus
 
+import vllm.envs as envs
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.openai.engine.protocol import (
@@ -80,7 +81,9 @@ class OpenAIServingModels:
             if isinstance(load_result, ErrorResponse):
                 raise ValueError(load_result.error.message)
 
-    def is_base_model(self, model_name) -> bool:
+    def is_base_model(self, model_name: str | None) -> bool:
+        if not model_name:
+            return True
         return any(model.name == model_name for model in self.base_model_paths)
 
     def model_name(self, lora_request: LoRARequest | None = None) -> str:
@@ -96,12 +99,31 @@ class OpenAIServingModels:
         return self.base_model_paths[0].name
 
     async def check_model(self, model_name: str | None) -> ErrorResponse | None:
-        """Return an ErrorResponse if model_name is not served, else None."""
-        if not model_name or self.is_base_model(model_name):
+        """Return an ErrorResponse if model_name is not served, else None.
+
+        When VLLM_ALLOW_RUNTIME_LORA_UPDATING is set and the model is not
+        already known, attempts to resolve and load it as a LoRA adapter.
+        """
+        error_response = None
+
+        if self.is_base_model(model_name):
             return None
         if model_name in self.lora_requests:
             return None
-        return create_error_response(
+        if (
+            envs.VLLM_ALLOW_RUNTIME_LORA_UPDATING
+            and model_name
+            and (load_result := await self.resolve_lora(model_name))
+        ):
+            if isinstance(load_result, LoRARequest):
+                return None
+            if (
+                isinstance(load_result, ErrorResponse)
+                and load_result.error.code == HTTPStatus.BAD_REQUEST.value
+            ):
+                error_response = load_result
+
+        return error_response or create_error_response(
             message=f"The model `{model_name}` does not exist.",
             err_type="NotFoundError",
             status_code=HTTPStatus.NOT_FOUND,
