@@ -13,7 +13,7 @@ repos:
     args: [--output-format, github, --fix]
   - id: ruff-format
 - repo: https://github.com/crate-ci/typos
-  rev: v1.38.1
+  rev: v1.43.5
   hooks:
   - id: typos
     args: [--force-exclude]
@@ -24,12 +24,12 @@ repos:
     exclude: 'csrc/(moe/topk_softmax_kernels.cu|quantization/gguf/(ggml-common.h|dequantize.cuh|vecdotq.cuh|mmq.cuh|mmvq.cuh))|vllm/third_party/.*'
     types_or: [c++, cuda]
     args: [--style=file, --verbose]
-- repo: https://github.com/igorshubovych/markdownlint-cli
-  rev: v0.45.0
+- repo: https://github.com/DavidAnson/markdownlint-cli2
+  rev: v0.21.0
   hooks:
-  - id: markdownlint
-    exclude: '.*\.inc\.md'
-    stages: [manual] # Only run in CI
+  - id: markdownlint-cli2
+    language_version: lts
+    args: [--fix]
 - repo: https://github.com/rhysd/actionlint
   rev: v1.7.7
   hooks:
@@ -55,7 +55,7 @@ repos:
       language: python
       types_or: [python, pyi]
       require_serial: true
-      additional_dependencies: [mypy==1.11.1, regex, types-cachetools, types-setuptools, types-PyYAML, types-requests, types-torch, pydantic]
+      additional_dependencies: ["mypy[faster-cache]==1.19.1", regex, types-cachetools, types-setuptools, types-PyYAML, types-requests, types-torch, pydantic]
   - id: mypy-3.10 # TODO: Use https://github.com/pre-commit/mirrors-mypy when mypy setup is less awkward
     name: Run mypy for Python 3.10
     entry: python tools/pre_commit/mypy.py 1 "3.10"
@@ -124,6 +124,13 @@ repos:
   - id: check-forbidden-imports
     name: Check for forbidden imports
     entry: python tools/pre_commit/check_forbidden_imports.py
+    language: python
+    types: [python]
+    additional_dependencies: [regex]
+  # prevent use torch.cuda APIs
+  - id: check-torch-cuda-call
+    name: "Prevent new 'torch.cuda' APIs call"
+    entry: python tools/pre_commit/check_torch_cuda.py
     language: python
     types: [python]
     additional_dependencies: [regex]
