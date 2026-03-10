@@ -427,7 +427,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
         # unsqueeze to fit conv1d weights shape into the linear weights shape.
         # Can't do this in `weight_loader` since it already exists in
         # `ColumnParallelLinear` and `MergedColumnParallelLinear`,
-        # and `set_weight_attrs` doesn't allow to override it
+        # and `set_weight_attrs` doesn't allow overriding it
         self.conv1d.weight.data = self.conv1d.weight.data.unsqueeze(1)
         conv_weights = self.conv1d.weight.view(
             self.conv1d.weight.size(0), self.conv1d.weight.size(2)
