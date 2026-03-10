@@ -408,6 +408,13 @@ class Platform:
         pass
 
     @classmethod
+    def get_sp_min_token_num_default(cls) -> int | None:
+        """
+        Return None by default to keep SP disabled.
+        """
+        return None
+
+    @classmethod
     def check_and_update_config(cls, vllm_config: "VllmConfig") -> None:
         """
         Check and update the configuration for the current platform.
