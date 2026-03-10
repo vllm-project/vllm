@@ -16,6 +16,8 @@
 
 #include <torch/all.h>
 
+#include "nvfp4_utils.cuh"
+
 #if (defined(ENABLE_NVFP4_SM100) && ENABLE_NVFP4_SM100) || \
     (defined(ENABLE_NVFP4_SM120) && ENABLE_NVFP4_SM120)
 void scaled_fp4_quant_sm1xxa(torch::Tensor const& output,
@@ -68,7 +70,6 @@ std::tuple<torch::Tensor, torch::Tensor> scaled_fp4_quant_func(
     bool is_sf_swizzled_layout) {
   int64_t n = input.size(-1);
   int64_t m = input.numel() / n;
-  int64_t block_size = 16;
   auto device = input.device();
 
   // Two fp4 values packed into a uint8
@@ -77,16 +78,13 @@ std::tuple<torch::Tensor, torch::Tensor> scaled_fp4_quant_func(
 
   torch::Tensor output_sf;
   if (is_sf_swizzled_layout) {
-    auto round_up = [](int64_t x, int64_t y) { return (x + y - 1) / y * y; };
-    int64_t rounded_m = round_up(m, 128);
-    int64_t scale_n = n / block_size;
-    int64_t rounded_n = round_up(scale_n, 4);
+    auto [sf_m, sf_n] = vllm::computeSwizzledSFShape(m, n);
     output_sf = torch::empty(
-        {rounded_m, rounded_n / 4},
+        {sf_m, sf_n},
         torch::TensorOptions().device(device).dtype(torch::kInt32));
   } else {
     output_sf = torch::empty(
-        {m, n / block_size},
+        {m, n / CVT_FP4_SF_VEC_SIZE},
         torch::TensorOptions().device(device).dtype(torch::kUInt8));
   }
 
