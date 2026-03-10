@@ -98,8 +98,11 @@ class DefaultModelState(ModelState):
             req_states.prefill_len.np[input_batch.idx_mapping_np],
             req_states.num_computed_prefill_tokens[input_batch.idx_mapping_np],
         )
+        # Use unpadded input_ids to match is_mm_embed size (num_tokens).
+        # input_batch.input_ids may be padded for CUDA graphs.
+        input_ids_unpadded = input_batch.input_ids[: input_batch.num_tokens]
         inputs_embeds = self.encoder_runner.get_inputs_embeds(
-            input_batch.input_ids, mm_embeds, is_mm_embed
+            input_ids_unpadded, mm_embeds, is_mm_embed
         )
         return inputs_embeds[: input_batch.num_tokens_after_padding]
 
