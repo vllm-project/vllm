@@ -128,6 +128,28 @@ def test_nemotron_v3_without_thinking_returns_content(
     assert content == "This is plain content"
 
 
+def test_nemotron_v3_force_nonempty_content_returns_content(
+    tokenizer: FakeNemotronTokenizer,
+):
+    parser_cls = ReasoningParserManager.get_reasoning_parser(parser_name)
+    parser = parser_cls(tokenizer)
+    request = ChatCompletionRequest(
+        model="test-model",
+        messages=[],
+        chat_template_kwargs={"force_nonempty_content": True},
+    )
+
+    reasoning, content = run_reasoning_extraction(
+        parser,
+        ["<think>This is plain content"],
+        request=request,
+        streaming=False,
+    )
+
+    assert reasoning is None
+    assert content == "This is plain content"
+
+
 def test_nemotron_v3_with_thinking_keeps_truncated_reasoning(
     tokenizer: FakeNemotronTokenizer,
 ):
