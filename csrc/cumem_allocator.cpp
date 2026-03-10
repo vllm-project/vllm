@@ -534,6 +534,9 @@ void my_free(void* ptr, ssize_t size, int device, CUstream stream) {
   if (error_code == no_error) {
     CUDA_CHECK(cuMemAddressFree(d_mem, recv_size));
   } else {
+    std::cerr << "WARNING: unmap_and_release failed, leaking virtual address "
+                 "range at "
+              << d_mem << " (" << recv_size << " bytes)." << std::endl;
     error_code = no_error;
   }
 #ifndef USE_ROCM

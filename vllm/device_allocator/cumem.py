@@ -9,7 +9,6 @@
 # not sure why, they are created from a different context.
 # the only successful approach is to call cuda driver API in C.
 import dataclasses
-import gc
 import os
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -231,8 +230,6 @@ class CuMemAllocator:
         )
 
         self.sleeping = True
-#        gc.collect()
-#        torch.cuda.empty_cache()
 
     def wake_up(self, tags: list[str] | None = None) -> None:
         """
