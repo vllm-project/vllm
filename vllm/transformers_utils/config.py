@@ -161,9 +161,11 @@ class HFConfigParser(ConfigParserBase):
             elif callable(hf_overrides):
                 # If hf_overrides doesn't modify model_type, it will be passed straight
                 # through and remain unchanged by this elif block
-                dummy_kwargs = dict(architectures=[""], model_type=model_type)
+                dummy_model_type = f"dummy_{model_type}"
+                dummy_kwargs = dict(architectures=[""], model_type=dummy_model_type)
                 dummy_config = PretrainedConfig(**dummy_kwargs)
-                model_type = hf_overrides(dummy_config).model_type
+                dummy_model_type = hf_overrides(dummy_config).model_type
+                model_type = dummy_model_type.removeprefix("dummy_")
 
         if model_type in _CONFIG_REGISTRY:
             config_class = _CONFIG_REGISTRY[model_type]
