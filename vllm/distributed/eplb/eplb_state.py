@@ -730,12 +730,6 @@ class EplbState:
             )
             assert global_expert_load_windows is not None
         else:
-            should_save_eplb_state = (
-                self.parallel_config.eplb_config.save_load_window
-                and not is_profile
-                and not load_initial_load_window
-            )
-
             # Map the physical expert load to global logical experts
             global_expert_load_windows = []
             for eplb_model_state in self.model_states.values():
@@ -763,6 +757,11 @@ class EplbState:
                 global_expert_load_window = logical_expert_load_window.sum(dim=0)
                 global_expert_load_windows.append(global_expert_load_window)
 
+            should_save_eplb_state = (
+                self.parallel_config.eplb_config.save_load_window
+                and not is_profile
+                and not load_initial_load_window
+            )
             if is_main_rank and should_save_eplb_state:
                 assert self.parallel_config.eplb_config.save_dir is not None
                 save_eplb_state(
