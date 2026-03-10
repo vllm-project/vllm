@@ -816,7 +816,14 @@ class SpecDecodeBaseProposer:
 
         # [batch_size, num_speculative_tokens]
         draft_token_ids = torch.stack(draft_token_ids_list, dim=1)
-        
+
+        # Pad to full num_speculative_tokens width if DSL early exit produced
+        # fewer tokens — downstream (GDN attention, scheduler) expects fixed shape.
+        if draft_token_ids.shape[1] < self.num_speculative_tokens:
+            pad_width = self.num_speculative_tokens - draft_token_ids.shape[1]
+            draft_token_ids = torch.nn.functional.pad(
+                draft_token_ids, (0, pad_width), value=0)
+
         # Update token count only on full completion (early exit already counted above)
         if dsl_enabled and not dsl_did_early_exit:
             actual_tokens_generated = len(draft_token_ids_list) - 1  # Exclude first token
