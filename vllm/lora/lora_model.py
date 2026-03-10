@@ -12,7 +12,9 @@ from vllm.lora.peft_helper import PEFTHelper
 from vllm.lora.utils import (
     get_lora_id,
     is_base_embedding_weights,
+    is_trainable_tokens_delta,
     parse_fine_tuned_lora_name,
+    parse_trainable_tokens_delta_name,
 )
 from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 from vllm.model_executor.models.utils import WeightsMapper
@@ -91,6 +93,73 @@ class LoRAModel:
             # Skip modules based on model-defined prefixes (e.g., MTP layers)
             if skip_prefixes and cls._should_skip_module(tensor_name, skip_prefixes):
                 continue
+
+            # Handle PEFT trainable_tokens_delta: convert the dense
+            # per-token delta into an equivalent rank-N LoRA embedding
+            # so the existing forward path can be reused unchanged.
+            if is_trainable_tokens_delta(tensor_name):
+                module_name = parse_trainable_tokens_delta_name(
+                    tensor_name, weights_mapper
+                )
+                delta = tensor.to(device=device, dtype=dtype)  # [N, emb_dim]
+                num_tokens = delta.shape[0]
+
+                # Look up the token indices from the PEFT config
+                embed_key = module_name.rsplit(".", 1)[-1]
+                token_indices = (peft_helper.trainable_token_indices or {}).get(
+                    embed_key
+                )
+                if token_indices is None:
+                    raise ValueError(
+                        f"trainable_tokens_delta found for '{embed_key}' "
+                        f"but trainable_token_indices not set in adapter "
+                        f"config"
+                    )
+                if len(token_indices) != num_tokens:
+                    raise ValueError(
+                        f"trainable_tokens_delta has {num_tokens} entries "
+                        f"but trainable_token_indices has "
+                        f"{len(token_indices)} indices"
+                    )
+                if model_vocab_size is None:
+                    raise ValueError(
+                        "model_vocab_size is required to load trainable_tokens_delta"
+                    )
+
+                # Build sparse one-hot lora_a: [N, vocab_size]
+                lora_a = torch.zeros(
+                    num_tokens,
+                    model_vocab_size,
+                    device=device,
+                    dtype=dtype,
+                )
+                idx_tensor = torch.tensor(
+                    token_indices, device=device, dtype=torch.long
+                )
+                lora_a[torch.arange(num_tokens, device=device), idx_tensor] = 1.0
+
+                # lora_b = delta transposed: [embedding_dim, N]
+                lora_b = delta.T.contiguous()
+
+                if module_name in loras:
+                    raise NotImplementedError(
+                        "Combining trainable_token_indices with embedding "
+                        "LoRA on the same module is not yet supported"
+                    )
+
+                loras[module_name] = LoRALayerWeights(
+                    module_name=module_name,
+                    rank=num_tokens,
+                    lora_alpha=num_tokens,
+                    lora_a=lora_a,
+                    lora_b=lora_b,
+                    scaling=1.0,
+                )
+                if pin_memory:
+                    loras[module_name].lora_a = loras[module_name].lora_a.pin_memory()
+                    loras[module_name].lora_b = loras[module_name].lora_b.pin_memory()
+                continue
+
             module_name, is_lora_a = parse_fine_tuned_lora_name(
                 tensor_name, weights_mapper
             )
@@ -167,6 +236,10 @@ class LoRAModel:
                 # Handle PEFT file format where experts.base_layer is the
                 # gate_up_proj and experts is the down_proj
                 if "base_layer" in lora_module:
+                    continue
+                # Skip PEFT trainable_tokens_delta weights (handled
+                # separately during loading)
+                if is_trainable_tokens_delta(lora_module):
                     continue
                 # Skip modules based on model-defined prefixes
                 if skip_prefixes and cls._should_skip_module(

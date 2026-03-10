@@ -35,6 +35,9 @@ class PEFTHelper:
     use_rslora: bool = field(default=False)
     # True to use Weight-Decomposed Low-Rank Adaptation (DoRA, see: https://arxiv.org/abs/2402.09353)
     use_dora: bool = field(default=False)
+    # Maps embedding module names to lists of token indices for trainable
+    # token embeddings (PEFT's trainable_token_indices feature)
+    trainable_token_indices: dict[str, list[int]] | None = field(default=None)
     # Extra vllm field, start with 'vllm_' to avoid conflict
     vllm_lora_scaling_factor: float = field(default=1.0)
     vllm_max_position_embeddings: int | None = field(default=False)
