@@ -29,6 +29,7 @@ def register_op(f: Callable[..., Any]) -> "IrOp": ...
 def register_op(
     *,
     name: str | None = None,
+    has_reduction: bool = False,
 ) -> Callable[[Callable[..., Any]], "IrOp"]: ...
 
 
@@ -36,12 +37,14 @@ def register_op(
     f: Callable | None = None,
     *,
     name: str | None = None,
+    has_reduction: bool = False,
 ) -> "IrOp | Callable[[Callable], IrOp]":
     """
     Register a new vLLM IR op.
 
     :param f: the native implementation of the op
     :param name: the name of the op, defaults to the function name
+    :param has_reduction: is this op is a reduction op, which affects batch-invariance
     :return: the IrOp object if f is provided, otherwise a decorator
 
     Example usage:
@@ -58,7 +61,7 @@ def register_op(
     def decorator(_f: Callable):
         op_name: str = _f.__name__ if name is None else name
         assert name not in IrOp.registry
-        op = IrOp(op_name, _f)
+        op = IrOp(op_name, has_reduction, _f)
         IrOp.registry[op_name] = op
         return op
 
@@ -72,9 +75,10 @@ class IrOp:
     registry: ClassVar[dict[str, "IrOp"]] = {}
 
     name: str
+    has_reduction: bool
     impls: dict[str, "IrOpImpl"]
 
-    def __init__(self, name: str, native_impl: Callable):
+    def __init__(self, name: str, has_reduction: bool, native_impl: Callable):
         self._py_signature = inspect.signature(native_impl)
         if any(
             p.kind == inspect.Parameter.KEYWORD_ONLY
@@ -86,13 +90,22 @@ class IrOp:
             )
 
         self.name = name
+        self.has_reduction = has_reduction
         self.impls: dict[str, IrOpImpl] = {}
         self._priority_impls: list[IrOpImpl] = []
         self._schema_str = infer_schema(native_impl, mutates_args=[])
 
         # native implementation
         self.impls["native"] = IrOpImpl(
-            self, "native", native_impl, supported=True, supports_args=None
+            self,
+            "native",
+            native_impl,
+            # always supported
+            supported=True,
+            supports_args=None,
+            # Native implementation is always batch-invariant
+            # (batch invariance is controlled at the torch level)
+            batch_invariant=True,
         )
 
         # By default, fake routes directly to native,
@@ -132,12 +145,14 @@ class IrOp:
         *,
         supported: bool = True,
         supports_args: Callable[..., bool] | None = None,
+        batch_invariant: bool | None = None,
     ):
         """
         Register an implementation for this custom op.
         :param provider: The name of the provider, must be unique.
         :param supported: Static support check, use this to check platform support.
         :param supports_args: Dynamic arg support check, used for types and shapes.
+        :param batch_invariant: is this implementation is batch-invariant.
         :return: A decorator that registers the implementation.
 
         The decorated function must have the same semantics and signature as
@@ -158,13 +173,25 @@ class IrOp:
         def my_provider_impl(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor: ...
         ```
 
+        Default behavior of batch_invariant depends on op.has_reduction:
+        - op.has_reduction == True: batch_invariant = False
+        - op.has_reduction == False: batch_invariant = True
+
+        This is because ops without reductions are always batch-invariant.
+        Ops with reductions have to opt-in, as they are not batch-invariant by default.
+
         """
         assert provider not in RESERVED_PROVIDERS, (
             f"Provider name {provider} is reserved."
         )
 
+        if batch_invariant is None:
+            batch_invariant = not self.has_reduction
+
         def _register_impl(f: Callable):
-            impl = IrOpImpl(self, provider, f, supported, supports_args)
+            impl = IrOpImpl(
+                self, provider, f, supported, supports_args, batch_invariant
+            )
             self.impls[provider] = impl
 
             if self.get_priority():
@@ -291,6 +318,7 @@ class IrOpImpl:
         impl_fn: Callable,
         supported: bool,
         supports_args: Callable[..., bool] | None,
+        batch_invariant: bool,
     ):
         assert provider not in op.impls, (
             f"Implementation for provider {provider} already registered."

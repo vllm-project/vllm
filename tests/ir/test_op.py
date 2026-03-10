@@ -43,7 +43,7 @@ def test_registration_overloads():
     def _custom_div(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
         return x / y
 
-    custom_div = IrOp("_custom_div", _custom_div)
+    custom_div = IrOp("_custom_div", False, _custom_div)
     assert custom_div.name == "_custom_div"
     assert "_custom_div" not in IrOp.registry
 
