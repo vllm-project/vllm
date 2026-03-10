@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 from vllm.config import ModelConfig
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionLogProbs
 from vllm.entrypoints.openai.engine.protocol import (
+    MultiModalFeatures,
     SamplingParams,
     StreamOptions,
 )
@@ -28,10 +29,8 @@ class GenerateRequest(BaseModel):
     token_ids: list[int]
     """The token ids to generate text from."""
 
-    # features: MultiModalFeatureSpec
-    # TODO (NickLucche): implement once Renderer work is completed
-    features: str | None = None
-    """The processed MM inputs for the model."""
+    features: MultiModalFeatures | None = None
+    """Multimodal hashes and placeholder positions (populated for MM inputs)."""
 
     sampling_params: SamplingParams
     """The sampling parameters for the model."""

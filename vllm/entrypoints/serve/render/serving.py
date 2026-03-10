@@ -23,6 +23,8 @@ from vllm.entrypoints.openai.engine.protocol import (
     ModelCard,
     ModelList,
     ModelPermission,
+    MultiModalFeatures,
+    PlaceholderRangeInfo,
 )
 from vllm.entrypoints.openai.parser.harmony_utils import (
     get_developer_message,
@@ -167,6 +169,7 @@ class OpenAIServingRender:
         return GenerateRequest(
             request_id=request_id,
             token_ids=token_ids,
+            features=self._extract_mm_features(engine_prompt),
             sampling_params=params,
             model=request.model,
             stream=bool(request.stream),
@@ -342,6 +345,7 @@ class OpenAIServingRender:
                 GenerateRequest(
                     request_id=request_id,
                     token_ids=token_ids,
+                    features=self._extract_mm_features(engine_prompt),
                     sampling_params=params,
                     model=request.model,
                     stream=bool(request.stream),
@@ -352,6 +356,33 @@ class OpenAIServingRender:
             )
 
         return generate_requests
+
+    @staticmethod
+    def _extract_mm_features(
+        engine_prompt: ProcessorInputs,
+    ) -> MultiModalFeatures | None:
+        """Extract multimodal metadata from a rendered engine prompt.
+
+        Returns ``None`` for text-only prompts.
+        """
+        if engine_prompt.get("type") != "multimodal":
+            return None
+
+        mm_hashes: dict[str, list[str]] = engine_prompt["mm_hashes"]  # type: ignore[typeddict-item]
+        raw_placeholders: dict[str, list] = engine_prompt["mm_placeholders"]  # type: ignore[typeddict-item]
+
+        mm_placeholders = {
+            modality: [
+                PlaceholderRangeInfo(offset=p.offset, length=p.length)
+                for p in ranges
+            ]
+            for modality, ranges in raw_placeholders.items()
+        }
+
+        return MultiModalFeatures(
+            mm_hashes=mm_hashes,
+            mm_placeholders=mm_placeholders,
+        )
 
     def _make_request_with_harmony(
         self,
