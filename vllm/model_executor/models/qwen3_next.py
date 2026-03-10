@@ -624,27 +624,30 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         core_attn_out = rearrange(core_attn_out, "... h d -> ... (h d)")
         output[:num_tokens], _ = self.out_proj(core_attn_out)
 
-    @torch.no_grad()
-    def _warmup_triton_kernels(self, mixed_qkv: torch.Tensor) -> None:
-        """Trigger Triton autotuner warmup for GDN prefill kernels.
+    def _warmup_prefill_kernels(self, mixed_qkv: torch.Tensor) -> None:
+        """Warm up GDN prefill kernels during V1 profiling.
 
         During V1 profile runs, ``_forward_core`` returns early because
-        ``attn_metadata`` is ``None``, so the Triton-autotuned kernels
-        (``solve_tril``, ``chunk_scaled_dot_kkt``, etc.) are never
-        invoked during profiling. After profiling, vLLM allocates KV
-        cache using most of the remaining GPU memory.  When the first
-        real inference triggers the Triton autotuner it OOMs because
-        there is not enough memory left for benchmarking.
+        ``attn_metadata`` is ``None``, so the autotuned kernels used by
+        ``chunk_gated_delta_rule`` (e.g. ``solve_tril``,
+        ``chunk_scaled_dot_kkt``) are never invoked.  After profiling,
+        vLLM allocates KV cache using most of the remaining GPU memory.
+        When the first real inference triggers the autotuner it OOMs
+        because there is not enough memory left for benchmarking.
 
         This method runs a minimal forward pass through
         ``chunk_gated_delta_rule`` with small dummy tensors (B=1, T=64)
         to force autotuning while GPU memory is still plentiful.  The
-        autotuner results are cached globally by Triton, so only the
-        first layer incurs actual benchmarking cost.
+        autotuner results are cached globally, so only the first layer
+        incurs actual benchmarking cost.
+
+        The decode path uses ``fused_sigmoid_gating_delta_rule_update``
+        which has fixed kernel parameters (no autotuning), so only the
+        prefill (chunked) path needs warming up.
         """
-        if hasattr(self, "_triton_kernels_warmed_up"):
+        if hasattr(self, "_prefill_kernels_warmed_up"):
             return
-        self._triton_kernels_warmed_up = True
+        self._prefill_kernels_warmed_up = True
 
         device = mixed_qkv.device
         dtype = mixed_qkv.dtype
@@ -686,11 +689,14 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                 cu_seqlens=cu_seqlens,
                 use_qk_l2norm_in_kernel=True,
             )
-            logger.info("GDN Triton kernel warmup completed for layer %s", self.prefix)
+            logger.info(
+                "GDN prefill kernel warmup completed for layer %s",
+                self.prefix,
+            )
         except Exception:
             logger.warning(
-                "GDN Triton kernel warmup failed for layer %s. "
-                "First inference may OOM due to Triton autotuner.",
+                "GDN prefill kernel warmup failed for layer %s. "
+                "First inference may OOM due to autotuner.",
                 self.prefix,
                 exc_info=True,
             )
@@ -712,9 +718,9 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         attn_metadata: AttentionMetadata = forward_context.attn_metadata
 
         if attn_metadata is None:
-            # V1 profile run — trigger Triton autotuner warmup so that
+            # V1 profile run — warm up prefill kernels so that
             # autotuning completes before KV cache allocation.
-            self._warmup_triton_kernels(mixed_qkv)
+            self._warmup_prefill_kernels(mixed_qkv)
             return
 
         assert isinstance(attn_metadata, dict)
