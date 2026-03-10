@@ -15,8 +15,8 @@ from vllm.config import VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.cli.types import CLISubcommand
 from vllm.entrypoints.openai.api_server import (
-    build_and_serve,
-    init_app_state,
+    build_and_serve_renderer,
+    init_render_app_state,
     setup_server,
 )
 from vllm.entrypoints.openai.cli_args import (
@@ -31,7 +31,6 @@ from vllm.grpc import (  # type: ignore[attr-defined]
 from vllm.grpc.render_servicer import RenderGrpcServicer
 from vllm.logger import init_logger
 from vllm.utils.argparse_utils import FlexibleArgumentParser
-from vllm.v1.engine.launch import LaunchEngineClient
 
 logger = init_logger(__name__)
 
@@ -136,15 +135,14 @@ def cmd_init() -> list[CLISubcommand]:
 
 async def run_launch_grpc(args: argparse.Namespace) -> None:
     """Run the render serving layer with gRPC (no GPU inference)."""
-    # 1. Create LaunchEngineClient (no GPU)
+    # 1. Create VllmConfig
     engine_args = AsyncEngineArgs.from_cli_args(args)
     model_config = engine_args.create_model_config()
     vllm_config = VllmConfig(model_config=model_config)
-    engine_client = LaunchEngineClient.from_vllm_config(vllm_config)
 
-    # 2. Initialize app state (reuses init_app_state like HTTP path)
+    # 2. Initialize app state
     state = State()
-    await init_app_state(engine_client, state, args, ("generate",))
+    await init_render_app_state(vllm_config, state, args)
 
     # 3. Create servicer and gRPC server
     start_time = time.time()
@@ -195,14 +193,13 @@ async def run_launch_http(args: argparse.Namespace) -> None:
     # 1. Socket binding
     listen_address, sock = setup_server(args)
 
-    # 2. Create LaunchEngineClient (no GPU)
+    # 2. Build and serve the API server
     engine_args = AsyncEngineArgs.from_cli_args(args)
     model_config = engine_args.create_model_config()
     vllm_config = VllmConfig(model_config=model_config)
-    engine_client = LaunchEngineClient.from_vllm_config(vllm_config)
-
-    # 3. Build app, initialize state, and start serving
-    shutdown_task = await build_and_serve(engine_client, listen_address, sock, args)
+    shutdown_task = await build_and_serve_renderer(
+        vllm_config, listen_address, sock, args
+    )
     try:
         await shutdown_task
     finally:

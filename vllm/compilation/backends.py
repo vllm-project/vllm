@@ -9,6 +9,7 @@ import operator
 import os
 import pprint
 import time
+from collections import defaultdict
 from collections.abc import Callable, Generator, Sequence
 from contextlib import contextmanager
 from copy import deepcopy
@@ -221,10 +222,28 @@ class CompilerManager:
     ) -> Callable[..., Any] | None:
         if (compile_range, graph_index, self.compiler.name) not in self.cache:
             return None
-        handle = self.cache[(compile_range, graph_index, self.compiler.name)]
+
+        def parse_value(value: Any) -> tuple[tuple[str, str], str]:
+            assert isinstance(value, dict)
+            handle = value["graph_handle"]
+            assert isinstance(handle[0], str)
+            assert isinstance(handle[1], str)
+            cache_key = value["cache_key"]
+            return handle, cache_key
+
+        try:
+            handle, cache_key = parse_value(
+                self.cache[(compile_range, graph_index, self.compiler.name)]
+            )
+        except Exception:
+            # When the cache is outdated, we should ignore the existing file.
+            # This should cause the correct cache to be generated again.
+            return None
+
         compiled_graph = self.compiler.load(
             handle, graph, example_inputs, graph_index, compile_range
         )
+        self.loaded_artifacts[cache_key] = compiled_graph
         logger.debug(
             "Directly load the %s-th graph for compile range %sfrom %s via handle %s",
             graph_index,
@@ -341,7 +360,10 @@ class CompilerManager:
 
         # store the artifact in the cache
         if is_compile_cache_enabled(additional_inductor_config) and handle is not None:
-            self.cache[(compile_range, graph_index, self.compiler.name)] = handle
+            self.cache[(compile_range, graph_index, self.compiler.name)] = {
+                "graph_handle": handle,
+                "cache_key": cache_key,
+            }
             compilation_counter.num_cache_entries_updated += 1
             self.is_cache_updated = True
             if graph_index == 0:
@@ -384,6 +406,58 @@ class SplitItem:
     graph: fx.GraphModule
 
 
+def _is_empty_allocation_node(node: fx.Node) -> bool:
+    if node.op == "call_method":
+        return node.target == "new_empty"
+
+    if node.op != "call_function":
+        return False
+
+    target = node.target
+    if target in (torch.empty, torch.empty_like, torch.empty_strided):
+        return True
+
+    if isinstance(target, torch._ops.OpOverloadPacket):
+        packet_name = target._qualified_op_name
+    elif isinstance(target, torch._ops.OpOverload):
+        packet_name = target.name()
+    else:
+        return False
+
+    return packet_name.startswith("aten::empty") or packet_name.startswith(
+        "aten::new_empty"
+    )
+
+
+def _merge_empty_only_subgraphs(
+    node_to_subgraph_id: dict[fx.Node, int],
+) -> None:
+    """
+    Merge a partition that only contains an empty allocation op into the
+    previous partition. This avoids generating standalone empty submodules,
+    which can lead to empty cudagraph captures.
+    """
+
+    nodes_by_subgraph_id: dict[int, list[fx.Node]] = defaultdict(list)
+    subgraph_id_order: list[int] = []
+    for node, subgraph_id in node_to_subgraph_id.items():
+        if subgraph_id not in nodes_by_subgraph_id:
+            subgraph_id_order.append(subgraph_id)
+        nodes_by_subgraph_id[subgraph_id].append(node)
+
+    prev_subgraph_id: int | None = None
+    for subgraph_id in subgraph_id_order:
+        nodes = nodes_by_subgraph_id[subgraph_id]
+        if (
+            len(nodes) == 1
+            and _is_empty_allocation_node(nodes[0])
+            and prev_subgraph_id is not None
+        ):
+            node_to_subgraph_id[nodes[0]] = prev_subgraph_id
+            continue
+        prev_subgraph_id = subgraph_id
+
+
 def split_graph(
     graph: fx.GraphModule, splitting_ops: list[str]
 ) -> tuple[fx.GraphModule, list[SplitItem]]:
@@ -421,6 +495,8 @@ def split_graph(
                 subgraph_id += 1
         else:
             node_to_subgraph_id[node] = subgraph_id
+
+    _merge_empty_only_subgraphs(node_to_subgraph_id)
 
     # `keep_original_order` is important!
     # otherwise pytorch might reorder the nodes and
@@ -809,8 +885,8 @@ class VllmBackend:
                     "splitting_ops": list_to_str(cc.splitting_ops),
                     "cudagraph_mode": str(cc.cudagraph_mode),
                     "compile_sizes": list_to_str(cc.compile_sizes),
-                    "compile_ranges_split_points": list_to_str(
-                        cc.compile_ranges_split_points
+                    "compile_ranges_endpoints": list_to_str(
+                        cc.compile_ranges_endpoints
                     ),
                     "use_inductor_graph_partition": cc.use_inductor_graph_partition,
                     "inductor_passes": list_to_str(list(cc.inductor_passes.keys())),
@@ -885,6 +961,13 @@ class VllmBackend:
 
         # Honors opt-outs such as CompilationMode.NONE or VLLM_DISABLE_COMPILE_CACHE.
         disable_cache = not is_compile_cache_enabled(self.inductor_config)
+
+        # TODO(patchy): ngram gpu kernel will cause vllm torch compile cache errors.
+        is_ngram_gpu_enabled = (
+            vllm_config.speculative_config is not None
+            and vllm_config.speculative_config.use_ngram_gpu()
+        )
+        disable_cache = disable_cache or is_ngram_gpu_enabled
 
         if disable_cache:
             logger.info_once("vLLM's torch.compile cache is disabled.", scope="local")
