@@ -320,17 +320,16 @@ def test_eagle3_acceptance_length(
 @dataclass
 class MTPModelConfig:
     """Model configuration for MTP acceptance length tests."""
+
     verifier: str
     expected_acceptance_length: float
-    expected_acceptance_lengths_per_pos: list[float] = field(
-        default_factory=list)
+    expected_acceptance_lengths_per_pos: list[float] = field(default_factory=list)
     id: str = ""
     num_speculative_tokens: int = 1
     tensor_parallel_size: int = 1
     max_model_len: int = DEFAULT_MAX_MODEL_LEN
     gpu_memory_utilization: float = 0.7
-    excluded_backends: set[AttentionBackendEnum] = field(
-        default_factory=set)
+    excluded_backends: set[AttentionBackendEnum] = field(default_factory=set)
     marks: list = field(default_factory=list)
     rtol: float | None = None
 
@@ -364,8 +363,7 @@ MTP_MODEL_CONFIGS = [
         for config in MTP_MODEL_CONFIGS
     ],
 )
-@pytest.mark.parametrize("attention_backend",
-                         get_attention_backend_params())
+@pytest.mark.parametrize("attention_backend", get_attention_backend_params())
 def test_mtp_acceptance_length(
     model_config: MTPModelConfig,
     attention_backend: str,
@@ -381,8 +379,7 @@ def test_mtp_acceptance_length(
     """
     backend_enum = AttentionBackendEnum[attention_backend]
     if backend_enum in model_config.excluded_backends:
-        pytest.skip(
-            f"{attention_backend} incompatible with {model_config.id}")
+        pytest.skip(f"{attention_backend} incompatible with {model_config.id}")
 
     num_spec_tokens = model_config.num_speculative_tokens
 
@@ -403,35 +400,27 @@ def test_mtp_acceptance_length(
             trust_remote_code=True,
         ) as vllm_runner:
             tokenizer = vllm_runner.llm.get_tokenizer()
-            prompt_ids = get_mt_bench_prompts(
-                tokenizer, DEFAULT_NUM_PROMPTS)
+            prompt_ids = get_mt_bench_prompts(tokenizer, DEFAULT_NUM_PROMPTS)
 
             sampling_params = SamplingParams(
                 temperature=0,
                 max_tokens=DEFAULT_OUTPUT_LEN,
             )
             vllm_runner.llm.generate(
-                [TokensPrompt(prompt_token_ids=ids)
-                 for ids in prompt_ids],
+                [TokensPrompt(prompt_token_ids=ids) for ids in prompt_ids],
                 sampling_params=sampling_params,
             )
 
             metrics = vllm_runner.llm.get_metrics()
-            results = extract_acceptance_metrics(
-                metrics, num_spec_tokens)
+            results = extract_acceptance_metrics(metrics, num_spec_tokens)
 
             actual = results["acceptance_length"]
             expected = model_config.expected_acceptance_length
             actual_per_pos = results["acceptance_lengths_per_pos"]
-            expected_per_pos = (
-                model_config.expected_acceptance_lengths_per_pos)
+            expected_per_pos = model_config.expected_acceptance_lengths_per_pos
 
             rel_error = abs(actual - expected) / expected
-            rtol = (
-                model_config.rtol
-                if model_config.rtol is not None
-                else DEFAULT_RTOL
-            )
+            rtol = model_config.rtol if model_config.rtol is not None else DEFAULT_RTOL
 
             assert rel_error <= rtol, (
                 f"MTP acceptance length regression for "
@@ -441,16 +430,14 @@ def test_mtp_acceptance_length(
                 f"  Relative error: {rel_error:.2%} "
                 f"(tolerance: {rtol:.2%})\n"
                 f"  Drafts: {results['num_drafts']}, "
-                f"Accepted: {results['num_accepted_tokens']}")
+                f"Accepted: {results['num_accepted_tokens']}"
+            )
 
-            if (expected_per_pos
-                    and len(expected_per_pos) == len(actual_per_pos)):
-                rtol = (model_config.rtol
-                        if model_config.rtol is not None
-                        else DEFAULT_RTOL)
-                for pos, (act, exp) in enumerate(
-                    zip(actual_per_pos, expected_per_pos)
-                ):
+            if expected_per_pos and len(expected_per_pos) == len(actual_per_pos):
+                rtol = (
+                    model_config.rtol if model_config.rtol is not None else DEFAULT_RTOL
+                )
+                for pos, (act, exp) in enumerate(zip(actual_per_pos, expected_per_pos)):
                     if exp > 0:
                         pos_err = abs(act - exp) / exp
                         assert pos_err <= rtol, (
@@ -459,7 +446,8 @@ def test_mtp_acceptance_length(
                             f"  Expected: {exp:.3f}\n"
                             f"  Actual:   {act:.3f}\n"
                             f"  Error: {pos_err:.2%} "
-                            f"(tolerance: {rtol:.2%})")
+                            f"(tolerance: {rtol:.2%})"
+                        )
 
             print(
                 f"\n{model_config.id} "
@@ -467,11 +455,8 @@ def test_mtp_acceptance_length(
                 f"backend={attention_backend}]: "
                 f"acceptance_length={actual:.3f}"
                 f" (expected={expected:.3f}, "
-                f"rel_error={rel_error:.2%})")
-            print(
-                f"  Per-position: "
-                f"{[f'{v:.3f}' for v in actual_per_pos]}")
+                f"rel_error={rel_error:.2%})"
+            )
+            print(f"  Per-position: {[f'{v:.3f}' for v in actual_per_pos]}")
             if expected_per_pos:
-                print(
-                    f"  Expected:     "
-                    f"{[f'{v:.3f}' for v in expected_per_pos]}")
+                print(f"  Expected:     {[f'{v:.3f}' for v in expected_per_pos]}")
