@@ -12,6 +12,7 @@
 #include "../cuda_compat.h"
 #include "dispatch_utils.h"
 #include "quantization/w8a8/fp8/common.cuh"
+#include "core/batch_invariant.hpp"
 
 // TODO(rasmith): The kernels in this file are susceptible to integer overflow
 // issues, do not take strides, and are unable to handle PyTorch tensors that
@@ -1230,8 +1231,8 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
     wvSplitKrc_(const int actlN, const int K, const int Kap, const int M,
                 const int Bx, const int By, const scalar_t* __restrict__ A,
                 const scalar_t* __restrict__ B,
-                const scalar_t* __restrict__ BIAS, float* glbl, scalar_t* C,
-                const int CuCount) {
+                const scalar_t* __restrict__ BIAS, float* glbl, int* cntr,
+                scalar_t* C, const int CuCount) {
   constexpr int NTILE = 16;
   constexpr int APAD = 1;
   constexpr int ASTRD = 64;
@@ -1308,8 +1309,6 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
   const uint32_t k_str = (m0 / Mmod) * kFit * kfitsPerRdc;
   uint32_t k_end = (m0 / Mmod + 1) * kFit * kfitsPerRdc;
   const uint32_t k_rnd = (K + kFit * kfitsPerRdc - 1) / (kFit * kfitsPerRdc);
-
-  int* cntr = DTRMNSTC ? (int*)(&glbl[M * N * k_rnd]) : (int*)(&glbl[M * N]);
 
   scalar8 sum4[N / NTILE / GrpsShrB][1] = {0};
   bigType bigB_[YTILE / GrpsShrB / CHUNKK][UNRL];
@@ -1570,15 +1569,15 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
     int adr_ = mindx + M * nindx_ / 4;
     my_cntr = atomicAdd(&cntr[adr_], 1);
 
-    if (DTRMNSTC)
-      __syncthreads();  // make sure LDS is free for write out staging
+    // make sure LDS is free for write out staging
+    if (DTRMNSTC) __syncthreads();
 
     // Update the complete counter
     flt4 vals[N / NTILE / GrpsShrB] = {};
     // If we're the last k-shard, read back the value and convert...
     if (my_cntr + 1 == k_rnd) {
       cntr[adr_] = 0;  // clear for next round
-      if (DTRMNSTC) {
+      if constexpr (DTRMNSTC) {
   #pragma unroll
         for (int ks = 0; ks < k_rnd; ks++) {
           for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++) {
@@ -1590,8 +1589,6 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
                 &(((float4*)s)[(threadIdx.y * THRDS) + ks * THRDS * 4 +
                                nt * THRDS * 4 * k_rnd]),
                 16, 0, 0);
-            *(float4*)(&glbl[g_adr + M * N * ks]) =
-                {};  // clear out for next round
           }
         }
         if (BIAS)
@@ -1663,13 +1660,14 @@ __global__ void wvSplitKrc_(const int actlN, const int K, const int Kap,
                             const int M, const int Bx, const int By,
                             const scalar_t* B, const scalar_t* __restrict__ A,
                             const scalar_t* __restrict__ BIAS, float* glbl,
-                            scalar_t* C, const int CuCount){UNREACHABLE_CODE}
+                            int* cntr, scalar_t* C,
+                            const int CuCount){UNREACHABLE_CODE}
 #endif  // defined(__HIP__GFX9__) TODO: Add NAVI support
 
 torch::Tensor wvSplitKrc(const at::Tensor& in_a, const at::Tensor& in_b,
                          const std::optional<at::Tensor>& in_bias,
                          const int64_t CuCount) {
-  int constexpr _DTRMNSTC = 0;
+  int _DTRMNSTC = vllm::vllm_is_batch_invariant();
 
   auto M_in = in_b.size(0);
   auto N_in = in_a.size(0);
@@ -1721,18 +1719,30 @@ torch::Tensor wvSplitKrc(const at::Tensor& in_a, const at::Tensor& in_b,
 
   static torch::Tensor axl_glbl =
       torch::zeros(
-          128 * 1024 * 1.25 * (_DTRMNSTC ? 12 : 1),
+          128 * 1024 * (_DTRMNSTC ? 12 : 1),
           torch::TensorOptions().dtype(torch::kFloat32).device(in_a.device()))
           .detach();
+  static torch::Tensor axl_cntr =
+      torch::zeros(
+          128 * 1024 * (_DTRMNSTC ? 12 : 1) / 4,
+          torch::TensorOptions().dtype(torch::kInt).device(in_a.device()))
+          .detach();
   auto glbl = axl_glbl.data_ptr<float>();
-  // auto cntr = axl_cntr.data_ptr<int>();
+  auto cntr = axl_cntr.data_ptr<int>();
 
-#define WVSPLITKrc(_N, _GrpsShrB, _CHUNKK)                                   \
-  {                                                                          \
-    dim3 block(64, 4);                                                       \
-    wvSplitKrc_<fptype, 64, 16, 4, 8, 1, _N, _GrpsShrB, _CHUNKK, _DTRMNSTC>  \
-        <<<grid, block, 0, stream>>>(N_in, K_in, Kap_in, M_in, Bx_in, By_in, \
-                                     af4, bf4, biasf4, glbl, c, CuCount);    \
+#define WVSPLITKrc(_N, _GrpsShrB, _CHUNKK)                                     \
+  {                                                                            \
+    dim3 block(64, 4);                                                         \
+    if (_DTRMNSTC)                                                             \
+      wvSplitKrc_<fptype, 64, 16, 4, 8, 1, _N, _GrpsShrB, _CHUNKK, 1>          \
+          <<<grid, block, 0, stream>>>(N_in, K_in, Kap_in, M_in, Bx_in, By_in, \
+                                       af4, bf4, biasf4, glbl, cntr, c,        \
+                                       CuCount);                               \
+    else                                                                       \
+      wvSplitKrc_<fptype, 64, 16, 4, 8, 1, _N, _GrpsShrB, _CHUNKK, 0>          \
+          <<<grid, block, 0, stream>>>(N_in, K_in, Kap_in, M_in, Bx_in, By_in, \
+                                       af4, bf4, biasf4, glbl, cntr, c,        \
+                                       CuCount);                               \
   }
 
   AT_DISPATCH_REDUCED_FLOATING_TYPES(in_a.scalar_type(), "wvSplitKrc", [&] {
@@ -1749,15 +1759,11 @@ torch::Tensor wvSplitKrc(const at::Tensor& in_a, const at::Tensor& in_b,
       case 16:
         WVSPLITKrc(16, 1, 1) break;
       case 32:
-        if (chunkk == 2)
-          WVSPLITKrc(32, 2, 2) else if (chunkk == 1) WVSPLITKrc(32, 2, 1) break;
+        if (chunkk == 2) WVSPLITKrc(32, 2, 2) else WVSPLITKrc(32, 2, 1) break;
       case 64:
-        if (chunkk == 2)
-          WVSPLITKrc(64, 4, 2) else if (chunkk == 1) WVSPLITKrc(64, 4, 1) break;
+        if (chunkk == 2) WVSPLITKrc(64, 4, 2) else WVSPLITKrc(64, 4, 1) break;
       case 128:
-        if (chunkk == 2)
-          WVSPLITKrc(128, 4, 2) else if (chunkk == 1)
-              WVSPLITKrc(128, 4, 1) break;
+        if (chunkk == 2) WVSPLITKrc(128, 4, 2) else WVSPLITKrc(128, 4, 1) break;
       default:
         throw std::runtime_error(
             "Unsupported N value: " + std::to_string(M_in) + "," +

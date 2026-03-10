@@ -141,7 +141,10 @@ def test_rocm_wvsplitkrc_kernel(xnorm, n, k, m, dtype, seed, padded_a, bias_mode
     # Given the above, how many CUs would we need?
     CuNeeded = rndup_cus * GrpsShrB
     # candidate for atomic reduce count splitk?
-    fits_wvsplitkrc = CuNeeded <= cu_count
+    fits_wvsplitkrc = (
+        N_p2 * m * ((k + 512 - 1) // 512)
+    ) <= 128 * 1024 * 12
+    fits_wvsplitkrc &= CuNeeded <= cu_count
 
     if not fits_wvsplitkrc:
         pytest.skip("Too large for wvSplitKrc")
