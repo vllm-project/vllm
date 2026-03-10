@@ -5114,6 +5114,18 @@ class GPUModelRunner(
                 self.query_start_loc.copy_to_gpu()
 
                 pad_attn = cudagraph_runtime_mode == CUDAGraphMode.FULL
+                # populate buffers so that GDN attention triggers JIT complication
+                # of spce-decode before graph capture
+                if (
+                    uniform_decode
+                    and self.speculative_config is not None
+                    and max_query_len > 1
+                ):
+                    self.input_batch.num_accepted_tokens_cpu[:num_reqs] = max_query_len
+                    self.num_decode_draft_tokens.np[:num_reqs] = max_query_len - 1
+                    self.num_decode_draft_tokens.np[num_reqs:].fill(-1)
+                    self.num_decode_draft_tokens.copy_to_gpu()
+
                 attn_metadata, _ = self._build_attention_metadata(
                     num_tokens=num_tokens_unpadded,
                     num_tokens_padded=num_tokens_padded if pad_attn else None,
