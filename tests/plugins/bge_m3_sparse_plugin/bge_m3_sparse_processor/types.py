@@ -23,8 +23,9 @@ class SparseEmbeddingTokenWeight(BaseModel):
 
 class SparseEmbeddingResponseData(BaseModel):
     index: int
-    object: str = "sparse-embedding"
+    object: str = "sparse&dense"
     sparse_embedding: list[SparseEmbeddingTokenWeight]
+    dense_embedding: list[float]
 
 
 class SparseEmbeddingResponse(BaseModel):

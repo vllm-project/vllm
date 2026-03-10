@@ -41,7 +41,7 @@ class BgeM3SparseEmbeddingsProcessor(
         if params is None:
             params = PoolingParams()
         # refer to PoolingCompletionRequest.to_pooling_params
-        params.task = "token_classify"
+        params.task = "embed&token_classify"
         return params
 
     def parse_request(
@@ -105,11 +105,13 @@ class BgeM3SparseEmbeddingsProcessor(
             mo = model_output[idx]
             sparse_embedding: dict[int, float] = {}
             num_prompt_tokens += len(mo.prompt_token_ids)
-            if len(mo.prompt_token_ids) != len(mo.outputs.data):
+            dense_embedding = mo.outputs.data[:1024].tolist()
+            sparse_weights = mo.outputs.data[1024:].tolist()
+            if len(mo.prompt_token_ids) != len(sparse_weights):
                 # this is the case that add_special_tokens is True,
                 # which means first token and last token are special tokens
                 mo.prompt_token_ids = mo.prompt_token_ids[1:]
-            for token_id, weight in zip(mo.prompt_token_ids, mo.outputs.data.tolist()):
+            for token_id, weight in zip(mo.prompt_token_ids, sparse_weights):
                 sparse_embedding[token_id] = max(
                     weight, sparse_embedding.get(token_id, 0.0)
                 )
@@ -120,6 +122,7 @@ class BgeM3SparseEmbeddingsProcessor(
                         sparse_embedding,
                         return_tokens,
                     ),
+                    dense_embedding=dense_embedding,
                 )
             )
 
