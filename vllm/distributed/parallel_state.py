@@ -1964,6 +1964,7 @@ def in_the_same_node_as(
             if rank == source_rank:
                 # create a shared memory segment
                 shm = shared_memory.SharedMemory(create=True, size=128)
+                assert shm.buf is not None, "Buffer was not created"
                 shm.buf[: len(magic_message)] = magic_message
                 if isinstance(pg, ProcessGroup):
                     torch.distributed.broadcast_object_list(
@@ -1990,6 +1991,7 @@ def in_the_same_node_as(
                     lambda *args, **kwargs: None,
                 ):
                     shm = shared_memory.SharedMemory(name=name)
+                assert shm.buf is not None, "Buffer was not opened"
                 if shm.buf[: len(magic_message)] == magic_message:
                     is_in_the_same_node[rank] = 1
     except Exception as e:
