@@ -52,6 +52,7 @@ from vllm.v1.engine.utils import (
     launch_core_engines,
 )
 from vllm.v1.executor import Executor
+from vllm.v1.pool.late_interaction import get_late_interaction_engine_index
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder, bytestr
 
 logger = init_logger(__name__)
@@ -1360,7 +1361,11 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
 
     def get_core_engine_for_request(self, request: EngineCoreRequest) -> EngineIdentity:
         # Engines are in rank order.
-        if (eng_index := request.data_parallel_rank) is None:
+        if (eng_index := request.data_parallel_rank) is None and (
+            eng_index := get_late_interaction_engine_index(
+                request.pooling_params, len(self.core_engines)
+            )
+        ) is None:
             current_counts = self.lb_engines
             # TODO use P2C alg for larger DP sizes
             num_engines = len(current_counts)

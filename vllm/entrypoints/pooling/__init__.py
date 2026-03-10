@@ -111,7 +111,7 @@ def init_pooling_state(
             state.openai_serving_models,
             request_logger=request_logger,
             score_template=resolved_chat_template,
-            use_gpu_for_pooling_score=getattr(args, "use_gpu_for_pooling_score", False),
+            log_error_stack=args.log_error_stack,
         )
         if any(t in supported_tasks for t in ("embed", "score", "token_embed"))
         else None
