@@ -1500,11 +1500,11 @@ class rocm_aiter_ops:
         return torch.ops.vllm.rocm_aiter_triton_rotary_embedding.default
 
     @staticmethod
-    def get_fused_allreduce_rmsnorm() -> OpOverload:
+    def get_fused_allreduce_rmsnorm_op() -> OpOverload:
         return torch.ops.vllm.rocm_aiter_fused_allreduce_rmsnorm.default
 
     @staticmethod
-    def get_fused_allreduce_add_rmsnorm() -> OpOverload:
+    def get_fused_allreduce_add_rmsnorm_op() -> OpOverload:
         return torch.ops.vllm.rocm_aiter_fused_allreduce_add_rmsnorm.default
 
     @staticmethod

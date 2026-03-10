@@ -6,6 +6,7 @@ import torch
 from torch.distributed import ProcessGroup
 
 import vllm.envs as envs
+from vllm.config import get_cached_compilation_config
 from vllm.distributed.device_communicators.all_reduce_utils import (
     should_nccl_symm_mem_allreduce,
 )
@@ -51,10 +52,16 @@ class CudaCommunicator(DeviceCommunicatorBase):
             from vllm._aiter_ops import rocm_aiter_ops
             from vllm.distributed.parallel_state import _ENABLE_CUSTOM_ALL_REDUCE
 
+            fuse_allreduce_rms_enabled = (
+                get_cached_compilation_config().pass_config.fuse_allreduce_rms
+            )
+
             use_custom_allreduce = _ENABLE_CUSTOM_ALL_REDUCE
             use_torch_symm_mem = envs.VLLM_ALLREDUCE_USE_SYMM_MEM
             use_flashinfer_allreduce = envs.VLLM_ALLREDUCE_USE_FLASHINFER
-            use_aiter_allreduce = rocm_aiter_ops.is_enabled()
+            use_aiter_allreduce = (
+                rocm_aiter_ops.is_enabled() and fuse_allreduce_rms_enabled
+            )
 
         self.use_custom_allreduce = use_custom_allreduce
         self.use_torch_symm_mem = use_torch_symm_mem

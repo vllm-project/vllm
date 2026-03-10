@@ -10,6 +10,7 @@ import torch.fx as fx
 from torch._higher_order_ops.auto_functionalize import auto_functionalized
 from torch._inductor.pattern_matcher import PatternMatcherPass
 
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig
 from vllm.config.utils import Range
 from vllm.distributed import get_tp_group, tensor_model_parallel_all_reduce
@@ -860,3 +861,150 @@ class AllReduceFusionPass(VllmPatternMatcherPass):
             return
         with contextlib.suppress(Exception):
             destroy_fi_ar_workspace()
+
+
+class AiterAllreduceFusedRMSNormPattern:
+    FUSED_AR_RMSNORM_OP = rocm_aiter_ops.get_fused_allreduce_rmsnorm_op()
+
+    def __init__(
+        self, epsilon: float, dtype: torch.dtype, use_aiter_rmsnorm: bool = True
+    ) -> None:
+        self.dtype = dtype
+        self.epsilon = epsilon
+        self.rmsnorm_matcher = MatcherRMSNorm(
+            epsilon, match_rocm_aiter=use_aiter_rmsnorm
+        )
+
+    def get_inputs(self) -> list[torch.Tensor]:
+        input, weight = self.rmsnorm_matcher.inputs()
+
+        # input goes through allreduce first, always 16-bit
+        return [input.to(self.dtype), weight]
+
+    def register(self, pm_pass: PatternMatcherPass) -> None:
+        def pattern(
+            input: torch.Tensor, weight: torch.Tensor
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            allreduce_output = tensor_model_parallel_all_reduce(input)
+            rms = self.rmsnorm_matcher(allreduce_output, weight)
+
+            return rms, allreduce_output
+
+        def replacement(
+            input: torch.Tensor, weight: torch.Tensor
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            allreduce = self.FUSED_AR_RMSNORM_OP(
+                input_=input,
+                weight=weight,
+                epsilon=self.epsilon,
+            )
+            return allreduce[0], allreduce[1]
+
+        pm.register_replacement(
+            pattern, replacement, self.get_inputs(), pm.fwd_only, pm_pass
+        )
+
+
+class AiterAllreduceFusedAddRMSNormPattern:
+    FUSED_AR_RMSNORM_OP = rocm_aiter_ops.get_fused_allreduce_add_rmsnorm_op()
+
+    def __init__(
+        self, epsilon: float, dtype: torch.dtype, use_aiter_rmsnorm: bool = True
+    ) -> None:
+        self.epsilon = epsilon
+        self.dtype = dtype
+        self.rmsnorm_matcher = MatcherFusedAddRMSNorm(
+            epsilon, match_rocm_aiter=use_aiter_rmsnorm
+        )
+
+    def get_inputs(self) -> list[torch.Tensor]:
+        input, residual, weight = self.rmsnorm_matcher.inputs()
+
+        # input goes through allreduce first, always 16-bit
+        return [residual, input.to(self.dtype), weight]
+
+    def register(self, pm_pass: PatternMatcherPass) -> None:
+        def pattern(
+            residual: torch.Tensor, input: torch.Tensor, weight: torch.Tensor
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            allreduce_output = tensor_model_parallel_all_reduce(input)
+            rms, residual = self.rmsnorm_matcher(allreduce_output, weight, residual)
+
+            return rms, residual
+
+        def replacement(
+            residual: torch.Tensor, input: torch.Tensor, weight: torch.Tensor
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            allreduce = self.FUSED_AR_RMSNORM_OP(
+                input_=input,
+                weight=weight,
+                epsilon=self.epsilon,
+                residual=residual,
+            )
+            return allreduce[0], allreduce[1]
+
+        pm.register_replacement(
+            pattern, replacement, self.get_inputs(), pm.fwd_only, pm_pass
+        )
+
+
+class RocmAiterAllReduceFusionPass(VllmPatternMatcherPass):
+    def __init__(self, config: VllmConfig) -> None:
+        super().__init__(config)
+        self.disabled = True
+        self.tp_size = get_tensor_model_parallel_world_size()
+        if self.tp_size <= 1:
+            logger.warning_once("AllReduce fusion pass is disabled for tp_size <= 1.")
+            return
+
+        if config.model_config is None:
+            logger.warning_once(
+                "AllReduce fusion pass is disabled for missing model_config."
+            )
+            return
+
+        self.patterns: PatternMatcherPass = PatternMatcherPass(
+            pass_name="rocm_aiter_allreduce_rmsnorm_fusion_pass"
+        )
+
+        self.register_patterns()
+        self.dump_patterns(config, self.patterns)
+
+    @enable_fake_mode
+    def register_patterns(self):
+        for epsilon in [1e-5, 1e-6]:
+            AiterAllreduceFusedRMSNormPattern(
+                epsilon,
+                self.model_dtype,
+            ).register(self.patterns)
+
+            AiterAllreduceFusedAddRMSNormPattern(
+                epsilon,
+                self.model_dtype,
+            ).register(self.patterns)
+
+            # WARNING: This is a hack to clear the pattern matcher cache
+            # and allow multiple values of epsilon.
+            torch._inductor.pattern_matcher._seen_patterns.clear()
+
+        self.disabled = False
+
+    @VllmInductorPass.time_and_log
+    def __call__(self, graph: fx.Graph):
+        if self.disabled:
+            logger.debug("ROCmAiterAllReduceRMSNormFusionPass disabled")
+            return
+
+        self.matched_count = self.patterns.apply(graph)
+        logger.debug("Replaced %s patterns", self.matched_count)
+
+    def __del__(self) -> None:
+        if getattr(self, "disabled", True):
+            return
+
+    def uuid(self) -> str:
+        return VllmInductorPass.hash_source(
+            self,
+            AiterAllreduceFusedRMSNormPattern,
+            AiterAllreduceFusedAddRMSNormPattern,
+        )
