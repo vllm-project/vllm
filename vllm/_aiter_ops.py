@@ -78,22 +78,6 @@ def _check_kernel_tuned(N: int, K: int, q_dtype_w: torch.dtype, csv_path: str) -
     return any((N, K, M) in configs for M in l_m)
 
 
-def is_shuffled_per_token_w8a8_gemm_tuned(
-    N: int, K: int, q_dtype_w: torch.dtype
-) -> bool:
-    import aiter.ops.gemm_op_a8w8 as aiter_gemm_a8w8_ops
-
-    csv_path = aiter_gemm_a8w8_ops.AITER_CONFIGS.AITER_CONFIG_GEMM_A8W8_BPRESHUFFLE_FILE
-    return _check_kernel_tuned(N, K, q_dtype_w, csv_path)
-
-
-def is_per_token_w8a8_gemm_tuned(N: int, K: int, q_dtype_w: torch.dtype) -> bool:
-    import aiter.ops.gemm_op_a8w8 as aiter_gemm_a8w8_ops
-
-    csv_path = aiter_gemm_a8w8_ops.AITER_CONFIGS.AITER_CONFIG_GEMM_A8W8_FILE
-    return _check_kernel_tuned(N, K, q_dtype_w, csv_path)
-
-
 def if_aiter_supported(func: Callable) -> Callable:
     """Decorator that only executes the function if
     ROCm AITER package is supported and enabled on gfx9 archs.
@@ -463,7 +447,7 @@ def _rocm_aiter_mla_decode_fwd_fake(
     pass
 
 
-def _rocm_aiter_gemm_a8w8_impl(
+def _rocm_aiter_per_token_w8a8_gemm_impl(
     A: torch.Tensor,
     B: torch.Tensor,
     As: torch.Tensor,
@@ -480,7 +464,7 @@ def _rocm_aiter_gemm_a8w8_impl(
     return gemm_a8w8_CK(A, B, As, Bs, bias, output_dtype)
 
 
-def _rocm_aiter_gemm_a8w8_fake(
+def _rocm_aiter_per_token_w8a8_gemm_fake(
     A: torch.Tensor,
     B: torch.Tensor,
     As: torch.Tensor,
@@ -494,7 +478,7 @@ def _rocm_aiter_gemm_a8w8_fake(
     return Y
 
 
-def _rocm_aiter_gemm_a8w8_bpreshuffle_impl(
+def _rocm_aiter_shuffled_per_token_w8a8_gemm_impl(
     A: torch.Tensor,
     B: torch.Tensor,
     As: torch.Tensor,
@@ -510,7 +494,7 @@ def _rocm_aiter_gemm_a8w8_bpreshuffle_impl(
     return output
 
 
-def _rocm_aiter_gemm_a8w8_bpreshuffle_fake(
+def _rocm_aiter_shuffled_per_token_w8a8_gemm_fake(
     A: torch.Tensor,
     B: torch.Tensor,
     As: torch.Tensor,
@@ -1304,17 +1288,15 @@ class rocm_aiter_ops:
             )
 
             direct_register_custom_op(
-                op_name="rocm_aiter_gemm_a8w8",
-                op_func=_rocm_aiter_gemm_a8w8_impl,
-                mutates_args=[],
-                fake_impl=_rocm_aiter_gemm_a8w8_fake,
-                dispatch_key=current_platform.dispatch_key,
+                op_name="rocm_aiter_per_token_w8a8_gemm",
+                op_func=_rocm_aiter_per_token_w8a8_gemm_impl,
+                fake_impl=_rocm_aiter_per_token_w8a8_gemm_fake,
             )
 
             direct_register_custom_op(
-                op_name="rocm_aiter_gemm_a8w8_bpreshuffle",
-                op_func=_rocm_aiter_gemm_a8w8_bpreshuffle_impl,
-                fake_impl=_rocm_aiter_gemm_a8w8_bpreshuffle_fake,
+                op_name="_rocm_aiter_shuffled_per_token_w8a8_gemm",
+                op_func=_rocm_aiter_shuffled_per_token_w8a8_gemm_impl,
+                fake_impl=_rocm_aiter_shuffled_per_token_w8a8_gemm_fake,
             )
 
             direct_register_custom_op(
@@ -1482,7 +1464,7 @@ class rocm_aiter_ops:
         )
 
     @staticmethod
-    def gemm_a8w8(
+    def per_token_w8a8_gemm(
         A: torch.Tensor,
         B: torch.Tensor,
         As: torch.Tensor,
@@ -1490,10 +1472,12 @@ class rocm_aiter_ops:
         bias: torch.Tensor | None = None,
         output_dtype: torch.dtype = torch.float16,
     ) -> torch.Tensor:
-        return torch.ops.vllm.rocm_aiter_gemm_a8w8(A, B, As, Bs, bias, output_dtype)
+        return torch.ops.vllm.rocm_aiter_per_token_w8a8_gemm(
+            A, B, As, Bs, bias, output_dtype
+        )
 
     @staticmethod
-    def gemm_a8w8_bpreshuffle(
+    def shuffled_per_token_w8a8_gemm(
         A: torch.Tensor,
         B: torch.Tensor,
         As: torch.Tensor,
@@ -1501,7 +1485,7 @@ class rocm_aiter_ops:
         bias: torch.Tensor | None = None,
         output_dtype: torch.dtype = torch.float16,
     ) -> torch.Tensor:
-        return torch.ops.vllm.rocm_aiter_gemm_a8w8_bpreshuffle(
+        return torch.ops.vllm._rocm_aiter_shuffled_per_token_w8a8_gemm(
             A, B, As, Bs, bias, output_dtype
         )
 
@@ -1897,6 +1881,24 @@ class rocm_aiter_ops:
             (8192, 14336),
             (8192, 3584),
         ]
+
+    @staticmethod
+    def is_shuffled_per_token_w8a8_gemm_tuned(
+        N: int, K: int, q_dtype_w: torch.dtype
+    ) -> bool:
+        import aiter.ops.gemm_op_a8w8 as aiter_gemm_a8w8_ops
+
+        csv_path = (
+            aiter_gemm_a8w8_ops.AITER_CONFIGS.AITER_CONFIG_GEMM_A8W8_BPRESHUFFLE_FILE
+        )
+        return _check_kernel_tuned(N, K, q_dtype_w, csv_path)
+
+    @staticmethod
+    def is_per_token_w8a8_gemm_tuned(N: int, K: int, q_dtype_w: torch.dtype) -> bool:
+        import aiter.ops.gemm_op_a8w8 as aiter_gemm_a8w8_ops
+
+        csv_path = aiter_gemm_a8w8_ops.AITER_CONFIGS.AITER_CONFIG_GEMM_A8W8_FILE
+        return _check_kernel_tuned(N, K, q_dtype_w, csv_path)
 
     @staticmethod
     def shuffle_weight(

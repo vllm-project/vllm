@@ -6,8 +6,6 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm._aiter_ops import (
-    is_per_token_w8a8_gemm_tuned,
-    is_shuffled_per_token_w8a8_gemm_tuned,
     rocm_aiter_ops,
 )
 from vllm.logger import init_logger
@@ -167,7 +165,7 @@ class AiterShuffledPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
                 f"N={N} and K={K}.",
             )
 
-        if not is_shuffled_per_token_w8a8_gemm_tuned(N, K, fp8_dtype):
+        if not rocm_aiter_ops.is_shuffled_per_token_w8a8_gemm_tuned(N, K, fp8_dtype):
             return (
                 False,
                 f"requires a tuned configarion for N: {N} and K: {K} "
@@ -200,7 +198,9 @@ class AiterShuffledPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         bias: torch.Tensor | None,
         output_shape: list,
     ) -> torch.Tensor:
-        return rocm_aiter_ops.gemm_a8w8_bpreshuffle(A, B, As, Bs, bias, out_dtype)
+        return rocm_aiter_ops.shuffled_per_token_w8a8_gemm(
+            A, B, As, Bs, bias, out_dtype
+        )
 
 
 class AiterPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
@@ -227,7 +227,7 @@ class AiterPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
                 "requires per token activation scales and per channel weight scales.",
             )
 
-        if not is_per_token_w8a8_gemm_tuned(N, K, fp8_dtype):
+        if not rocm_aiter_ops.is_per_token_w8a8_gemm_tuned(N, K, fp8_dtype):
             return (
                 False,
                 f"requires a tuned configarion for N: {N} and K: {K} "
@@ -256,6 +256,6 @@ class AiterPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         bias: torch.Tensor | None,
         output_shape: list,
     ) -> torch.Tensor:
-        return rocm_aiter_ops.gemm_a8w8(A, B.t(), As, Bs, bias, out_dtype).view(
-            *output_shape
-        )
+        return rocm_aiter_ops.per_token_w8a8_gemm(
+            A, B.t(), As, Bs, bias, out_dtype
+        ).view(*output_shape)
