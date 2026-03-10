@@ -43,6 +43,7 @@ from vllm.entrypoints.serve.tokenize.protocol import (
 from vllm.entrypoints.utils import get_max_tokens, sanitize_message
 from vllm.inputs.data import ProcessorInputs, PromptType, SingletonPrompt, TokensPrompt
 from vllm.logger import init_logger
+from vllm.multimodal.inputs import MultiModalHashes, MultiModalPlaceholderDict
 from vllm.parser import ParserManager
 from vllm.renderers import BaseRenderer, merge_kwargs
 from vllm.renderers.inputs.preprocess import (
@@ -368,13 +369,13 @@ class OpenAIServingRender:
         if engine_prompt.get("type") != "multimodal":
             return None
 
-        mm_hashes: dict[str, list[str]] = engine_prompt["mm_hashes"]  # type: ignore[typeddict-item]
-        raw_placeholders: dict[str, list] = engine_prompt["mm_placeholders"]  # type: ignore[typeddict-item]
+        # At this point engine_prompt is a MultiModalInputs TypedDict.
+        mm_hashes: MultiModalHashes = engine_prompt["mm_hashes"]  # type: ignore[typeddict-item]
+        raw_placeholders: MultiModalPlaceholderDict = engine_prompt["mm_placeholders"]  # type: ignore[typeddict-item]
 
         mm_placeholders = {
             modality: [
-                PlaceholderRangeInfo(offset=p.offset, length=p.length)
-                for p in ranges
+                PlaceholderRangeInfo(offset=p.offset, length=p.length) for p in ranges
             ]
             for modality, ranges in raw_placeholders.items()
         }
