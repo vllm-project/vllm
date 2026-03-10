@@ -243,8 +243,8 @@ if [[ -n "${IMAGE_TAG_XPU:-}" ]]; then
   echo "Using prebuilt XPU image: ${IMAGE_TAG_XPU}"
   docker pull "${IMAGE_TAG_XPU}"
 else
-  echo "No IMAGE_TAG_XPU provided, building local XPU image"
-  docker build -t "${image_name}" -f docker/Dockerfile.xpu .
+  echo "Using prebuilt XPU image: ${image_name}"
+  docker pull "${image_name}"
 fi
 
 remove_docker_container() {
