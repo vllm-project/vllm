@@ -661,6 +661,8 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         if attn_metadata is None:
             # V1 profile run
             return
+        if torch.cuda.is_current_stream_capturing():
+            return
 
         assert isinstance(attn_metadata, dict)
         attn_metadata = attn_metadata[self.prefix]
