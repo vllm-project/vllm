@@ -255,7 +255,8 @@ class Qwen3NextConfig(PretrainedConfig):
             ]
         layer_type_validation(self.layer_types)
 
-        # linear attention part
+        # linear attention part (Gated Delta Net with chunk_size=64)
+        self.mamba_chunk_size = 64
         self.linear_conv_kernel_dim = linear_conv_kernel_dim
         self.linear_key_head_dim = linear_key_head_dim
         self.linear_value_head_dim = linear_value_head_dim
