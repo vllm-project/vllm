@@ -26,6 +26,11 @@ class KimiAudioRenderer(HfRenderer):
         if model_config.skip_tokenizer_init:
             tokenizer = None
         else:
+            # Extract tokenizer_name from kwargs (already processed by
+            # tokenizer_args_from_config for ModelScope/GGUF/etc)
+            tokenizer_name = tokenizer_kwargs.pop(
+                "tokenizer_name", model_config.tokenizer
+            )
             # Remove tokenizer_cls from kwargs to avoid duplicate argument
             tokenizer_kwargs = {
                 k: v for k, v in tokenizer_kwargs.items() if k != "tokenizer_cls"
@@ -35,7 +40,7 @@ class KimiAudioRenderer(HfRenderer):
             tokenizer = cast(
                 HfTokenizer,
                 get_tokenizer(
-                    model_config.tokenizer,
+                    tokenizer_name,
                     tokenizer_cls=KimiAudioTokenizer,  # type: ignore[arg-type]
                     **tokenizer_kwargs,
                 ),

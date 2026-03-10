@@ -95,15 +95,6 @@ def renderer_from_config(config: "VllmConfig", **kwargs):
     else:
         renderer_mode = tokenizer_mode
 
-    # KimiAudioRenderer.from_config() uses model_config.tokenizer directly
-    # so we don't need to pass tokenizer_name in kwargs
-    if renderer_mode == "kimi_audio":
-        return RENDERER_REGISTRY.load_renderer(
-            renderer_mode,
-            config,
-            tokenizer_kwargs=kwargs,
-        )
-
     return RENDERER_REGISTRY.load_renderer(
         renderer_mode,
         config,
