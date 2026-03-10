@@ -149,8 +149,7 @@ deepseek_v3_fp8 = ModelFusionInfo(
         # - q_a_layernorm + q_b_proj (inside MLA wrapper)
         # - post_attn_layernorm + MLP
         # 2 per MoE layer (remaining) due to MoE wrapping
-        rms_quant_fusion=n_layers * 2
-        + min(3, n_layers),  # add extra for 3 dense layers
+        rms_quant_fusion=n_layers * 2 + min(3, n_layers),  # add for 3 dense layers
         # TODO silu+block quant
         #  act_quant_fusion=min(3, n_layers), # dense layers only
         # MLA attn + quant not supported yet:
