@@ -41,7 +41,6 @@ class StructuredOutputsParams:
     grammar: str | None = None
     json_object: bool | None = None
     # These are other options that can be set.
-    disable_fallback: bool = False
     disable_any_whitespace: bool = False
     disable_additional_properties: bool = False
     whitespace_pattern: str | None = None
