@@ -154,6 +154,10 @@ class TestMTPAsyncFlashInfer:
         # For now, we test with standard configuration to ensure async + FlashInfer
         # work together (MTP-specific features may need additional setup)
 
+        spec_config = {
+            "method": "mtp",
+            "num_speculative_tokens": 4,
+        }
         llm = LLM(
             model=TEST_MODEL,
             tensor_parallel_size=1,
@@ -161,8 +165,7 @@ class TestMTPAsyncFlashInfer:
             enforce_eager=True,
             gpu_memory_utilization=0.4,
             disable_log_stats=True,
-            # MTP configuration would go here when available
-            # For now, test that the combination doesn't break anything
+            speculative_config=spec_config,
         )
 
         print("✓ MTP + Async + FlashInfer LLM initialized")
