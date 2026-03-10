@@ -105,6 +105,6 @@ The `names`, `dtype_names`, and `shapes` lists describe each parameter. These mu
 
 ## Examples
 
-- [RLHF with NCCL weight syncing (offline, Ray)](../../examples/offline_inference/weight_syncing.md#rlhf-nccl) - Trainer on one GPU, 2x tensor-parallel vLLM engine on two others, with packed NCCL weight broadcast
-- [RLHF with async weight syncing (offline, Ray)](../../examples/offline_inference/weight_syncing.md#rlhf-async-new-apis) - Async generation with mid-flight pause, weight sync, resume, and validation against a fresh model
-- [RLHF with NCCL weight syncing (online serving, HTTP)](../../examples/online_serving/weight_syncing.md#rlhf-http-nccl) - Weight transfer with a running vLLM HTTP server using HTTP control plane and NCCL data plane
+- [RLHF with NCCL weight syncing (offline, Ray)](../../examples/rl/rlhf_nccl.md) - Trainer on one GPU, 2x tensor-parallel vLLM engine on two others, with packed NCCL weight broadcast
+- [RLHF with async weight syncing (offline, Ray)](../../examples/rl/rlhf_async_new_apis.md) - Async generation with mid-flight pause, weight sync, resume, and validation against a fresh model
+- [RLHF with NCCL weight syncing (online serving, HTTP)](../../examples/rl/rlhf_http_nccl.md) - Weight transfer with a running vLLM HTTP server using HTTP control plane and NCCL data plane

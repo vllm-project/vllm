@@ -10,7 +10,7 @@ The IPC weight transfer engine uses **CUDA IPC** (Inter-Process Communication) h
 ## How It Works
 
 1. The trainer creates CUDA tensors for each weight and generates IPC handles using `torch.multiprocessing.reductions.reduce_tensor`.
-2. IPC handles are sent to the inference engine via **Ray RPC** or **HTTP POST**.
+2. IPC handles are sent to the inference engine via **Ray.remote()** or **HTTP POST**.
 3. The inference worker reconstructs the tensors from the handles, reading directly from the trainer's GPU memory.
 
 !!! warning
@@ -69,5 +69,5 @@ See [`IPCTrainerSendWeightsArgs`](https://github.com/vllm-project/vllm/blob/main
 
 ## Examples
 
-- [RLHF with IPC weight syncing (offline, Ray)](../../examples/offline_inference/weight_syncing.md#rlhf-ipc) - Colocated training and inference on a single GPU using Ray placement groups and CUDA IPC handles
-- [RLHF with IPC weight syncing (online serving, HTTP)](../../examples/online_serving/weight_syncing.md#rlhf-http-ipc) - Weight transfer with a vLLM HTTP server where both server and trainer share the same GPU
+- [RLHF with IPC weight syncing (offline, Ray)](../../examples/rl/rlhf_ipc.md) - Colocated training and inference on a single GPU using Ray placement groups and CUDA IPC handles
+- [RLHF with IPC weight syncing (online serving, HTTP)](../../examples/rl/rlhf_http_ipc.md) - Weight transfer with a vLLM HTTP server where both server and trainer share the same GPU

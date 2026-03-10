@@ -51,13 +51,13 @@ When using the vLLM HTTP server, the same functionality is available via:
 A typical async RL loop with weight syncing looks like this:
 
 1. Start generating rollouts from the current policy
-2. Once enough tokens have been generated (or a batch is ready), pause generation with `mode="keep"`
+2. Once trainer has new weights to update to, pause generation with `mode="keep"`
 3. Sync the updated weights from the trainer to the inference engine (see [Weight Transfer](weight_transfer/README.md))
 4. Resume generation -- in-flight requests continue with the new weights
 5. Repeat
 
-The key insight is that requests paused with `mode="keep"` will produce tokens from the **old** weights before the pause and tokens from the **new** weights after resume.
+The key insight is that requests paused with `mode="keep"` will produce tokens from the **old** weights before the pause and tokens from the **new** weights after resume. The `clear_cache` parameter controls whether the KV cache is invalidated during the pause. When `clear_cache=True`, previously cached key-value entries are discarded, so all tokens generated after resume will be computed entirely with the new weights. When `clear_cache=False`, existing KV cache entries are retained, meaning some tokens in context may still reflect the old weights (stale KV cache).
 
 ## Example
 
-The [async RLHF example](../examples/offline_inference/weight_syncing.md#rlhf-async-new-apis) demonstrates this pattern with `vllm.AsyncLLMEngine`, NCCL weight transfer, and mid-flight pause/resume with validation.
+The [async RLHF example](../examples/rl/rlhf_async_new_apis.md) demonstrates this pattern with `vllm.AsyncLLMEngine`, NCCL weight transfer, and mid-flight pause/resume with validation.
