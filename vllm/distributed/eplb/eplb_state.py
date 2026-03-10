@@ -730,21 +730,13 @@ class EplbState:
             )
             assert global_expert_load_windows is not None
         elif global_expert_loads is None:
-            # Map the physical expert load to global logical experts
-            global_expert_load_windows = []
             should_save_eplb_state = (
                 self.parallel_config.eplb_config.save_load_window
                 and not is_profile
                 and not load_initial_load_window
             )
-            if not execute_shuffle:
-                num_models = torch.tensor(
-                    [len(self.model_states)], dtype=torch.int32, device="cpu"
-                )
-                torch.distributed.broadcast(
-                    num_models, group=get_ep_group().cpu_group, group_src=0
-                )
-
+            # Map the physical expert load to global logical experts
+            global_expert_load_windows = []
             for eplb_model_state in self.model_states.values():
                 logical_expert_load_window = torch.zeros(
                     self.expert_load_window_size,
@@ -761,22 +753,8 @@ class EplbState:
                     src=eplb_model_state.expert_load_window,
                 )
 
-                if not execute_shuffle:
-                    metadata = torch.tensor(
-                        [
-                            eplb_model_state.model.num_moe_layers,
-                            eplb_model_state.model.num_logical_experts,
-                            eplb_model_state.physical_to_logical_map.shape[1],
-                        ],
-                        dtype=torch.int32,
-                        device="cpu",
-                    )
-                    torch.distributed.broadcast(
-                        metadata, group=get_ep_group().cpu_group, group_src=0
-                    )
-
-            global_expert_load_window = logical_expert_load_window.sum(dim=0)
-            global_expert_load_windows.append(global_expert_load_window)
+                global_expert_load_window = logical_expert_load_window.sum(dim=0)
+                global_expert_load_windows.append(global_expert_load_window)
 
             if is_main_rank and should_save_eplb_state:
                 assert self.parallel_config.eplb_config.save_dir is not None

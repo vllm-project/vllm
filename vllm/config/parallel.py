@@ -79,6 +79,7 @@ class EPLBConfig:
     """
     Whether to use non-blocking EPLB.
     """
+
     policy: EPLBPolicyOption = "default"
     """The policy type for expert parallel load balancing (EPLB)."""
     load_initial_load_window: bool = False
