@@ -686,6 +686,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                 cu_seqlens=cu_seqlens,
                 use_qk_l2norm_in_kernel=True,
             )
+            logger.info("GDN Triton kernel warmup completed for layer %s", self.prefix)
         except Exception:
             logger.warning(
                 "GDN Triton kernel warmup failed for layer %s. "
@@ -696,8 +697,6 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         finally:
             del q, k, v, g, beta, state, cu_seqlens
             torch.accelerator.empty_cache()
-
-        logger.info("GDN Triton kernel warmup completed for layer %s", self.prefix)
 
     def _forward_core(
         self,
