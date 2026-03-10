@@ -161,7 +161,6 @@ def compressed_tensors_get_config(config: dict[str, Any], key: str) -> dict[str,
 
     if target_group_config is None:
         return None
-    target_group_config.pop("dynamic", None)
     target_group_config["quant_method"] = config["quant_method"]
     if config["quant_method"] == "compressed-tensors":
         target_group_config["format"] = config["format"]
@@ -171,15 +170,11 @@ def compressed_tensors_get_config(config: dict[str, Any], key: str) -> dict[str,
 
 
 class HummingLayerQuantizationConfig(QuantizationConfig):
-    def __init__(
-        self,
-        weight_schema: "BaseWeightSchema",
-        input_schema: "BaseInputSchema" | None = None,
-    ):
-        self.weight_schema = weight_schema
+    def __init__(self, weight_schema, input_schema = None,):
+        self.weight_schema: BaseWeightSchema = weight_schema
         if input_schema is None:
             input_schema = HummingInputSchema()
-        self.input_schema = input_schema
+        self.input_schema: BaseInputSchema = input_schema
 
     @classmethod
     def from_config(cls, config):
@@ -259,9 +254,7 @@ class HummingConfig(QuantizationConfig):
 
         return False
 
-    def get_layer_weight_schema(
-        self, config: dict[str, Any], prefix: str
-    ) -> "BaseWeightSchema" | None:
+    def get_layer_weight_schema(self, config: dict[str, Any], prefix: str):
         if self.is_layer_skipped(config, prefix):
             return None
 
@@ -272,7 +265,10 @@ class HummingConfig(QuantizationConfig):
             config = group_config
 
         layer_config = config
-        for regex, override_config in config.get("dynamic", {}).items():
+        layer_dynmaic = config.get("dynamic", {})
+        if not isinstance(layer_dynmaic, dict):
+            layer_dynmaic = {}
+        for regex, override_config in layer_dynmaic:
             if regex[:1] != "+":
                 continue
             if re.match(regex[2:], prefix):
@@ -284,9 +280,7 @@ class HummingConfig(QuantizationConfig):
             return BaseWeightSchema.from_config(layer_config)
         return None
 
-    def get_layer_input_schema(
-        self, config: dict[str, Any], prefix: str
-    ) -> "BaseInputSchema" | None:
+    def get_layer_input_schema(self, config: dict[str, Any], prefix: str):
         if config["quant_method"] in ["compressed-tensors", "modelopt"]:
             group_config = compressed_tensors_get_config(config, "input_activations")
             if group_config is None:
@@ -403,8 +397,6 @@ class HummingLinearMethod(LinearMethodBase):
         )
 
         tensors_attrs = weight_tensor_attrs | input_tensor_attrs
-
-        print(self.input_schema, tensors_attrs)
 
         for name, attrs in tensors_attrs.items():
             tensor = torch.empty(attrs["shape"], dtype=attrs["dtype"])
