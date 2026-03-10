@@ -185,9 +185,6 @@ class TrtLlmFp8Experts(mk.FusedMoEExpertsMonolithic):
         if self.routing_method_type == RoutingMethodType.DeepSeekV3:
             router_logits = router_logits.to(torch.float32)
 
-        if e_score_correction_bias is not None:
-            e_score_correction_bias = e_score_correction_bias.to(router_logits.dtype)
-
         assert self.topk <= global_num_experts
         assert self.topk <= 10
         assert global_num_experts % 4 == 0
