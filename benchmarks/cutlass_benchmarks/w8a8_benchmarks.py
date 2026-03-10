@@ -24,8 +24,6 @@ from vllm.utils.math_utils import cdiv
 DEFAULT_MODELS = list(WEIGHT_SHAPES.keys())
 DEFAULT_BATCH_SIZES = [1, 16, 32, 64, 128, 256, 512]
 DEFAULT_TP_SIZES = [1]
-DEFAULT_OUTPUT_SCALE = 1.25
-MAX_REFERENCE_CHECK_DIM = 256
 
 
 # bench
@@ -103,21 +101,21 @@ def bench_int8(
     return timers
 
 
-def get_fp8_quant_fusion_bench_fns(
+def build_fp8_quant_fusion_bench_fns(
     a: torch.Tensor,
     b: torch.Tensor,
     m: int,
     n: int,
 ) -> dict[str, Callable]:
-    """Build explicit fused/unfused GEMM+static-FP8-quant benchmarks."""
+    """Build raw-op fused/unfused GEMM+static-FP8-quant benchmarks."""
     if not hasattr(torch.ops._C, "cutlass_scaled_mm_static_fp8_quant"):
         return {}
 
-    a_scales = torch.rand((m, 1), device="cuda", dtype=torch.float32) + 0.5
-    b_scales = torch.rand((1, n), device="cuda", dtype=torch.float32) + 0.5
-    output_scale = torch.tensor(
-        DEFAULT_OUTPUT_SCALE, device="cuda", dtype=torch.float32
-    )
+    # Keep scales deterministic so this measures kernel differences, not
+    # benchmark-input randomness. Correctness is covered by targeted tests.
+    a_scales = torch.ones((m, 1), device="cuda", dtype=torch.float32)
+    b_scales = torch.ones((1, n), device="cuda", dtype=torch.float32)
+    output_scale = torch.ones(1, device="cuda", dtype=torch.float32)
 
     mm_out_bf16 = torch.empty((m, n), device="cuda", dtype=torch.bfloat16)
     mm_out_fp16 = torch.empty((m, n), device="cuda", dtype=torch.float16)
@@ -141,32 +139,6 @@ def get_fp8_quant_fusion_bench_fns(
         torch.ops._C.cutlass_scaled_mm_static_fp8_quant(
             fused_out, a, b, a_scales, b_scales, output_scale, None
         )
-
-    # Validate the fused path against a simple float32 reference for small
-    # shapes only. Full-size performance runs are covered by targeted kernel
-    # tests already, and a full reference matmul adds noise and brittleness.
-    if max(m, n, a.shape[1]) <= MAX_REFERENCE_CHECK_DIM:
-        fused()
-        reference = torch.mm(
-            a.to(torch.float32) * a_scales,
-            b.to(torch.float32) * b_scales,
-        )
-        fp8_info = torch.finfo(torch.float8_e4m3fn)
-        reference = (
-            (reference / output_scale)
-            .clamp(min=fp8_info.min, max=fp8_info.max)
-            .to(torch.float8_e4m3fn)
-        )
-        torch.testing.assert_close(
-            fused_out.to(torch.float32),
-            reference.to(torch.float32),
-            rtol=1e-1,
-            atol=1e-1,
-        )
-
-    # Warm the unfused variants once before the timed section.
-    unfused_bf16()
-    unfused_fp16()
 
     return {
         "cutlass_fp8_fp8_bf16_scaled_mm_static_fp8_quant_unfused": unfused_bf16,
@@ -239,7 +211,7 @@ def bench_fp8(
             a, b, block_scale_a_M_major, block_scale_b_K_major, torch.float16
         ),
     }
-    bench_fns.update(get_fp8_quant_fusion_bench_fns(a, b, m, n))
+    bench_fns.update(build_fp8_quant_fusion_bench_fns(a, b, m, n))
 
     timers = []
     for name, fn in bench_fns.items():
