@@ -21,7 +21,6 @@ from vllm.model_executor.layers.batch_invariant import (
     vllm_is_batch_invariant,
 )
 from vllm.platforms.interface import DeviceCapability
-from vllm.utils.platform_utils import num_compute_units
 from vllm.v1.attention.backend import (
     AttentionCGSupport,
     AttentionLayer,
@@ -127,25 +126,7 @@ class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
             vllm_config.parallel_config
         )
 
-        self.cg_buf_tile_scheduler_metadata = None
-        self.cg_buf_num_splits = None
         self.is_fp8_kvcache = vllm_config.cache_config.cache_dtype.startswith("fp8")
-
-        num_sms = num_compute_units(self.device.index)
-
-        if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
-            self.cg_buf_tile_scheduler_metadata = torch.zeros(
-                # Upper bound on size (<= #SMs, TileSchedulerMetaDataSize)
-                # TileSchedulerMetaDataSize = 8
-                (num_sms, 8),
-                device=self.device,
-                dtype=torch.int32,
-            )
-            self.cg_buf_num_splits = torch.empty(
-                (vllm_config.scheduler_config.max_num_seqs + 1),
-                device=self.device,
-                dtype=torch.int32,
-            )
 
     def _build_decode(
         self,
@@ -167,14 +148,12 @@ class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
             1,  # MQA for the decode path
             is_fp8_kvcache=self.is_fp8_kvcache,
         )
-        if self.is_fp8_kvcache:
-            tile_scheduler_metadata, num_splits = get_mla_metadata_dense_fp8(
-                seq_lens_device,
-                num_q_tokens_per_head_k,
-                1,  # MQA for the decode path
-            )
-            scheduler_metadata.tile_scheduler_metadata = tile_scheduler_metadata
-            scheduler_metadata.num_splits = num_splits
+        # NOTE: For FP8, we do NOT call get_mla_metadata_dense_fp8 here.
+        # The FP8 tile scheduler metadata must be computed inside
+        # forward_mqa so that it is captured by CUDAGraph. Computing it
+        # here (outside the captured graph) would cause the FP8 kernel to
+        # read stale scheduling metadata during CUDAGraph replay, leading
+        # to incorrect output.
 
         return FlashMLADecodeMetadata(
             block_table=block_table_tensor,
@@ -286,14 +265,25 @@ class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
             scheduler_metadata.num_splits = num_splits
 
         if self.kv_cache_dtype.startswith("fp8"):
+            # Compute FP8 tile scheduler metadata here (inside forward_mqa)
+            # so that it is captured by CUDAGraph and recomputed on replay.
+            # The metadata depends on cache_seqlens which changes each step.
+            # num_q_tokens_per_head_k = seq_len_q * num_heads_q / num_heads_k
+            # For MLA, num_heads_k = 1
+            num_q_tokens_per_head_k = q.shape[1] * q.shape[2]
+            tile_scheduler_metadata, num_splits = get_mla_metadata_dense_fp8(
+                attn_metadata.decode.seq_lens,
+                num_q_tokens_per_head_k,
+                1,  # MQA for the decode path
+            )
             o, lse = flash_mla_with_kvcache_fp8(
                 q=q,
                 k_cache=kv_c_and_k_pe_cache.unsqueeze(-2),  # Add head dim of 1
                 block_table=attn_metadata.decode.block_table,
                 cache_seqlens=attn_metadata.decode.seq_lens,
                 head_dim_v=self.kv_lora_rank,
-                tile_scheduler_metadata=scheduler_metadata.tile_scheduler_metadata,
-                num_splits=scheduler_metadata.num_splits,
+                tile_scheduler_metadata=tile_scheduler_metadata,
+                num_splits=num_splits,
                 softmax_scale=self.scale,
                 causal=True,
                 descale_q=layer._q_scale.reshape(1),
