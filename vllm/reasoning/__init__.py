@@ -68,6 +68,10 @@ _REASONING_PARSERS_TO_REGISTER = {
         "mistral_reasoning_parser",
         "MistralReasoningParser",
     ),
+    "nemotron_v3": (
+        "nemotron_v3_reasoning_parser",
+        "NemotronV3ReasoningParser",
+    ),
     "olmo3": (
         "olmo3_reasoning_parser",
         "Olmo3ReasoningParser",
