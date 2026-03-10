@@ -624,6 +624,81 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         core_attn_out = rearrange(core_attn_out, "... h d -> ... (h d)")
         output[:num_tokens], _ = self.out_proj(core_attn_out)
 
+    @torch.no_grad()
+    def _warmup_triton_kernels(self, mixed_qkv: torch.Tensor) -> None:
+        """Trigger Triton autotuner warmup for GDN prefill kernels.
+
+        During V1 profile runs, ``_forward_core`` returns early because
+        ``attn_metadata`` is ``None``, so the Triton-autotuned kernels
+        (``solve_tril``, ``chunk_scaled_dot_kkt``, etc.) are never
+        invoked during profiling. After profiling, vLLM allocates KV
+        cache using most of the remaining GPU memory.  When the first
+        real inference triggers the Triton autotuner it OOMs because
+        there is not enough memory left for benchmarking.
+
+        This method runs a minimal forward pass through
+        ``chunk_gated_delta_rule`` with small dummy tensors (B=1, T=64)
+        to force autotuning while GPU memory is still plentiful.  The
+        autotuner results are cached globally by Triton, so only the
+        first layer incurs actual benchmarking cost.
+        """
+        if hasattr(self, "_triton_kernels_warmed_up"):
+            return
+        self._triton_kernels_warmed_up = True
+
+        device = mixed_qkv.device
+        dtype = mixed_qkv.dtype
+        # Use T=64 to match the chunk_size used by chunk_gated_delta_rule.
+        T = 64
+        num_k_heads = self.num_k_heads // self.tp_size
+        num_v_heads = self.num_v_heads // self.tp_size
+
+        # Tensor shapes mirror what _forward_core feeds into
+        # chunk_gated_delta_rule during prefill (IS_VARLEN=True path):
+        #   q/k : [1, T, num_k_heads/tp, head_k_dim]
+        #   v   : [1, T, num_v_heads/tp, head_v_dim]
+        #   g/β : [1, T, num_v_heads/tp]
+        #   state: [N, num_v_heads/tp, head_v_dim, head_k_dim]
+        q = torch.randn(1, T, num_k_heads, self.head_k_dim, device=device, dtype=dtype)
+        k = torch.randn(1, T, num_k_heads, self.head_k_dim, device=device, dtype=dtype)
+        v = torch.randn(1, T, num_v_heads, self.head_v_dim, device=device, dtype=dtype)
+        g = torch.randn(1, T, num_v_heads, device=device, dtype=dtype)
+        beta = torch.randn(1, T, num_v_heads, device=device, dtype=dtype)
+        state = torch.zeros(
+            1,
+            num_v_heads,
+            self.head_v_dim,
+            self.head_k_dim,
+            device=device,
+            dtype=torch.float32,
+        )
+        cu_seqlens = torch.tensor([0, T], device=device, dtype=torch.long)
+
+        try:
+            self.chunk_gated_delta_rule(
+                q=q,
+                k=k,
+                v=v,
+                g=g,
+                beta=beta,
+                initial_state=state,
+                output_final_state=False,
+                cu_seqlens=cu_seqlens,
+                use_qk_l2norm_in_kernel=True,
+            )
+        except Exception:
+            logger.warning(
+                "GDN Triton kernel warmup failed for layer %s. "
+                "First inference may OOM due to Triton autotuner.",
+                self.prefix,
+                exc_info=True,
+            )
+        finally:
+            del q, k, v, g, beta, state, cu_seqlens
+            torch.accelerator.empty_cache()
+
+        logger.info("GDN Triton kernel warmup completed for layer %s", self.prefix)
+
     def _forward_core(
         self,
         mixed_qkv: torch.Tensor,
@@ -638,7 +713,9 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         attn_metadata: AttentionMetadata = forward_context.attn_metadata
 
         if attn_metadata is None:
-            # V1 profile run
+            # V1 profile run — trigger Triton autotuner warmup so that
+            # autotuning completes before KV cache allocation.
+            self._warmup_triton_kernels(mixed_qkv)
             return
 
         assert isinstance(attn_metadata, dict)
