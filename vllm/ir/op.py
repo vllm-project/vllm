@@ -91,10 +91,9 @@ class IrOp:
         self._schema_str = infer_schema(native_impl, mutates_args=[])
 
         # native implementation
-        self._native_impl = IrOpImpl(
+        self.impls["native"] = IrOpImpl(
             self, "native", native_impl, supported=True, supports_args=None
         )
-        self.impls["native"] = self._native_impl
 
         # By default, fake routes directly to native,
         # can be overridden by register_fake
