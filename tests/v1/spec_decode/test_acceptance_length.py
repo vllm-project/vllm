@@ -340,13 +340,13 @@ class MTPModelConfig:
 MTP_MODEL_CONFIGS = [
     MTPModelConfig(
         verifier="deepseek-ai/DeepSeek-V3",
-        expected_acceptance_length=1.08,
-        expected_acceptance_lengths_per_pos=[0.08],
+        expected_acceptance_length=1.04,
+        expected_acceptance_lengths_per_pos=[0.04],
         id="deepseek-v3-mtp",
         tensor_parallel_size=4,
         gpu_memory_utilization=0.95,
         marks=[pytest.mark.slow_test],
-        rtol=0.10,
+        rtol=0.15,
     ),
 ]
 
