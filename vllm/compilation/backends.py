@@ -447,7 +447,6 @@ def _merge_empty_only_subgraphs(
         nodes_by_subgraph_id[subgraph_id].append(node)
 
     splitting_subgraphs = set(split_op_graphs)
-    prev_subgraph_id: int | None = None
     prev_non_splitting_subgraph_id: int | None = None
 
     for subgraph_id in subgraph_id_order:
@@ -456,14 +455,8 @@ def _merge_empty_only_subgraphs(
         merged = False
 
         if is_empty_only_subgraph:
-            # Prefer merging into the most recent non-splitting subgraph.
-            # Fallback to legacy behavior (merge into previous subgraph)
-            # when no non-splitting predecessor exists.
-            target_subgraph_id = (
-                prev_non_splitting_subgraph_id
-                if prev_non_splitting_subgraph_id is not None
-                else prev_subgraph_id
-            )
+            # Only merge into the most recent non-splitting subgraph.
+            target_subgraph_id = prev_non_splitting_subgraph_id
 
             if (
                 target_subgraph_id is not None
@@ -479,8 +472,6 @@ def _merge_empty_only_subgraphs(
 
         if merged:
             continue
-
-        prev_subgraph_id = subgraph_id
         if subgraph_id not in splitting_subgraphs:
             prev_non_splitting_subgraph_id = subgraph_id
 

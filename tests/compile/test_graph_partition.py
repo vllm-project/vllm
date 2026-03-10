@@ -186,10 +186,10 @@ def test_consecutive_ops_in_split():
     ] + ["output"]
 
 
-def test_empty_only_partition_is_merged():
+def test_empty_only_partition_not_merged_without_safe_predecessor():
     """
-    Test that an empty-allocation-only partition is merged into its previous
-    partition during Dynamo FX splitting.
+    Empty-only subgraphs should not be merged when the only predecessor is
+    a splitting-op subgraph.
     """
 
     def model_fn(x: torch.Tensor) -> torch.Tensor:
@@ -204,9 +204,73 @@ def test_empty_only_partition_is_merged():
     split_ops = ["aten::sin", "aten::cos.out"]
     split_gm, split_items = split_graph(gm, split_ops)
 
-    # Without the merge, this graph is split into 3 partitions where the
-    # middle partition contains only aten::empty_like.
-    assert len(split_items) == 2, "Empty-only partition should be merged"
+    # Graph partitioning for this pattern is:
+    # [sin], [empty_like], [cos.out].
+    # The empty_like subgraph is intentionally kept standalone to avoid
+    # merging into a splitting-op subgraph.
+    assert len(split_items) == 3, (
+        "Empty-only partition should not merge into splitting-op subgraph"
+    )
+
+    splitting_items = [item for item in split_items if item.is_splitting_graph]
+    for split_item in splitting_items:
+        empty_nodes = [
+            node
+            for node in split_item.graph.graph.nodes
+            if _is_empty_allocation_node(node)
+        ]
+        assert len(empty_nodes) == 0, (
+            f"{split_item.submod_name} should not contain empty allocation nodes: "
+            f"{[node.name for node in empty_nodes]}"
+        )
+
+    output_original = gm(x)
+    output_split = split_gm(x)
+    assert torch.allclose(output_original, output_split), "Output mismatch after split"
+
+
+def test_empty_only_partition_is_merged_with_non_splitting_predecessor():
+    """
+    Empty-only subgraphs should still be merged when a non-splitting predecessor
+    exists. The merged empty node must remain outside splitting-op subgraphs.
+    """
+
+    def model_fn(x: torch.Tensor) -> torch.Tensor:
+        base = x + 1
+        y = torch.sin(base)
+        out = torch.empty_like(base)
+        torch.ops.aten.cos.out(base, out=out)
+        return out + y
+
+    x = torch.randn(4, 3)
+    gm = make_fx(model_fn)(x)
+    split_gm, split_items = split_graph(gm, ["aten::sin", "aten::cos.out"])
+
+    # Partitioning should be:
+    # [add, empty_like], [sin], [cos.out], [add].
+    assert len(split_items) == 4, (
+        "Empty-only partition should be merged into non-splitting predecessor"
+    )
+
+    empty_counts_by_split_flag = {
+        True: 0,
+        False: 0,
+    }
+    for split_item in split_items:
+        empty_nodes = [
+            node
+            for node in split_item.graph.graph.nodes
+            if _is_empty_allocation_node(node)
+        ]
+        empty_counts_by_split_flag[split_item.is_splitting_graph] += len(empty_nodes)
+
+    assert empty_counts_by_split_flag[True] == 0, (
+        "Splitting-op subgraphs should not contain empty allocation nodes"
+    )
+    assert empty_counts_by_split_flag[False] == 1, (
+        "Exactly one empty allocation node should be merged into a non-splitting "
+        "subgraph"
+    )
 
     output_original = gm(x)
     output_split = split_gm(x)
@@ -239,7 +303,7 @@ def test_builtin_empty_only_partition_is_merged():
     assert torch.allclose(output_original, output_split), "Output mismatch after split"
 
 
-def test_empty_only_partition_not_merged_into_splitting_subgraph():
+def test_empty_only_partition_avoids_splitting_subgraph_merge():
     """
     Empty-only subgraphs should not be merged into splitting-op subgraphs.
     This avoids changing splitting graph contents in ways that can affect
