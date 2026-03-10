@@ -51,7 +51,7 @@ class ECTransferConfig:
     """The EC connector port, used to build distributed connection."""
 
     ec_connector_extra_config: dict[str, Any] = field(default_factory=dict)
-    """any extra config that the connector may need."""
+    """Any extra config that the connector may need."""
 
     ec_connector_module_path: str | None = None
     """The Python module path to dynamically load the EC connector from.

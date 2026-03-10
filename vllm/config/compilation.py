@@ -630,7 +630,7 @@ class CompilationConfig:
     """Configuration for dynamic shapes options"""
 
     local_cache_dir: str = field(default=None, init=False)  # type: ignore
-    """local cache dir for each rank"""
+    """Local cache dir for each rank"""
 
     fast_moe_cold_start: bool | None = None
     """Optimization for fast MOE cold start.
@@ -658,13 +658,13 @@ class CompilationConfig:
 
     # keep track of enabled and disabled custom ops
     enabled_custom_ops: Counter[str] = field(default_factory=Counter, init=False)
-    """custom ops that are enabled"""
+    """Custom ops that are enabled"""
     disabled_custom_ops: Counter[str] = field(default_factory=Counter, init=False)
-    """custom ops that are disabled"""
+    """Custom ops that are disabled"""
     traced_files: set[str] = field(default_factory=set, init=False)
-    """files that are traced for compilation"""
+    """Files that are traced for compilation"""
     compilation_time: float = field(default=0.0, init=False)
-    """time taken for compilation"""
+    """Time taken for compilation"""
 
     static_forward_context: dict[str, Any] = field(default_factory=dict, init=False)
     """Per-model forward context

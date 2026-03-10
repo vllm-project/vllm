@@ -199,7 +199,7 @@ class ParallelConfig:
     """Ray runtime environment to pass to distributed workers."""
 
     placement_group: PlacementGroup | None = None
-    """ray distributed model workers placement group."""
+    """Ray distributed model workers placement group."""
 
     distributed_executor_backend: (
         str | DistributedExecutorBackend | type[Executor] | None
@@ -225,16 +225,16 @@ class ParallelConfig:
     new attributes and methods to the worker class for use in collective_rpc
     calls."""
     master_addr: str = "127.0.0.1"
-    """distributed master address for multi-node distributed 
+    """Distributed master address for multi-node distributed 
     inference when distributed_executor_backend is mp."""
     master_port: int = 29501
-    """distributed master port for multi-node distributed 
+    """Distributed master port for multi-node distributed 
     inference when distributed_executor_backend is mp."""
     node_rank: int = 0
-    """distributed node rank for multi-node distributed 
+    """Distributed node rank for multi-node distributed 
     inference when distributed_executor_backend is mp."""
     nnodes: int = 1
-    """num of nodes for multi-node distributed
+    """Number of nodes for multi-node distributed
     inference when distributed_executor_backend is mp."""
 
     distributed_timeout_seconds: int | None = None
@@ -244,7 +244,7 @@ class ParallelConfig:
     Increase this for multi-node setups where model downloads may be slow."""
 
     world_size: int = Field(init=False)
-    """world_size is TPxPP, it affects the number of workers we create."""
+    """World size is TPxPP, it affects the number of workers we create."""
 
     rank: int = 0
     """Global rank in distributed setup."""
@@ -416,7 +416,7 @@ class ParallelConfig:
 
     @property
     def world_size_across_dp(self) -> int:
-        """world_size_across_dp is TPxPPxDP, it is the size of the world
+        """World_size_across_dp is TPxPPxDP, it is the size of the world
         including data parallelism."""
         return self.world_size * self.data_parallel_size
 
