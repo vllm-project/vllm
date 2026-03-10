@@ -747,6 +747,13 @@ steps:
     - pytest -v -s kernels/moe --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
   parallelism: 2
 
+- label: Kernels FP8 MoE Test
+  timeout_in_minutes: 60
+  mirror_hardwares: [amdexperimental, amdproduction]
+  agent_pool: mi325_2
+  commands:
+    - pytest -v -s kernels/moe/test_deepep_moe.py
+
 - label: Kernels Mamba Test # 31min
   timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental, amdproduction]
@@ -2421,6 +2428,13 @@ steps:
   commands:
     - pytest -v -s kernels/moe --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
   parallelism: 2
+
+- label: Kernels FP8 MoE Test
+  timeout_in_minutes: 60
+  mirror_hardwares: [amdexperimental, amdproduction]
+  agent_pool: mi355_2
+  commands:
+    - pytest -v -s kernels/moe/test_deepep_moe.py
 
 - label: Kernels Mamba Test # 31min
   timeout_in_minutes: 45
