@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import TYPE_CHECKING, Literal, Optional
+from typing import TYPE_CHECKING, Literal
 
 import torch
 
@@ -727,7 +727,7 @@ def cutlass_scaled_mm_static_fp8_quant(
     a_scales: torch.Tensor,
     b_scales: torch.Tensor,
     output_scale: torch.Tensor,
-    bias: Optional[torch.Tensor] = None,
+    bias: torch.Tensor | None = None,
 ) -> torch.Tensor:
     assert current_platform.is_cuda(), "CUTLASS FP8 quant fusion is CUDA only"
     assert bias is None, "bias is not supported for cutlass_scaled_mm_static_fp8_quant"
@@ -739,7 +739,9 @@ def cutlass_scaled_mm_static_fp8_quant(
     a = a.view(-1, a.shape[-1])
 
     cutlass_compatible_b = b.shape[0] % 16 == 0 and b.shape[1] % 16 == 0
-    assert cutlass_compatible_b, "cutlass_scaled_mm_static_fp8_quant requires CUTLASS-compatible B"
+    assert cutlass_compatible_b, (
+        "cutlass_scaled_mm_static_fp8_quant requires CUTLASS-compatible B"
+    )
 
     out = torch.empty(
         (a.shape[0], b.shape[1]),
@@ -762,9 +764,10 @@ if hasattr(torch.ops._C, "cutlass_scaled_mm_static_fp8_quant"):
         a_scales: torch.Tensor,
         b_scales: torch.Tensor,
         output_scale: torch.Tensor,
-        bias: Optional[torch.Tensor] = None,
+        bias: torch.Tensor | None = None,
     ) -> None:
         return None
+
 
 def cutlass_scaled_mm(
     a: torch.Tensor,
