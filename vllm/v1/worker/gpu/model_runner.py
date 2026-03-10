@@ -893,6 +893,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
         num_tokens_across_dp = None
 
+        skip_compiled = False
+        if self.is_encoder_decoder and scheduler_output.scheduled_encoder_inputs:
+            # Encoder-decoder models should run eager/non-compiled when encoder
+            # inputs are scheduled, because this step updates cross-attention cache
+            # with dynamic encoder outputs.
+            skip_compiled = True
+            batch_desc = BatchExecutionDescriptor(
+                cg_mode=CUDAGraphMode.NONE,
+                num_tokens=num_toks,
+                num_reqs=num_reqs,
+            )
+
         if self.dp_size > 1:
             batch_desc, num_tokens_across_dp = sync_cudagraph_and_dp_padding(
                 self.cudagraph_manager,
@@ -937,14 +949,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 slot_mappings = None
             # FIXME(woosuk): Fix warmup for LoRA.
 
-        skip_compiled = False
-        if self.is_encoder_decoder and scheduler_output.scheduled_encoder_inputs:
-            # Encoder-decoder models should run eager/non-compiled when encoder
-            # inputs are scheduled, because this step updates cross-attention cache
-            # with dynamic encoder outputs.
-            skip_compiled = True
-            cudagraph_runtime_mode = CUDAGraphMode.NONE
-
         attn_metadata = None
         slot_mappings_by_layer = None
         if not (dummy_run and skip_attn_for_dummy_run):
@@ -955,6 +959,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             assert block_tables is not None
             attn_metadata = self.model_state.prepare_attn(
                 input_batch,
+                batch_desc.cg_mode,
                 block_tables,
                 slot_mappings,
                 self.attn_groups,
