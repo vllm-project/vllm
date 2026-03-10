@@ -4,7 +4,7 @@
 import contextlib
 import os
 import weakref
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from dataclasses import dataclass
 from enum import Enum, auto
 from multiprocessing import Process, connection
@@ -23,6 +23,7 @@ from vllm.ray.ray_env import get_env_vars_to_copy
 from vllm.utils.network_utils import get_open_zmq_ipc_path, zmq_socket_ctx
 from vllm.utils.system_utils import get_mp_context
 from vllm.v1.engine.coordinator import DPCoordinator
+from vllm.v1.engine.core import EngineCoreProc
 from vllm.v1.executor import Executor
 from vllm.v1.utils import get_engine_client_zmq_addr, shutdown
 
@@ -85,7 +86,6 @@ class CoreEngineProcManager:
 
     def __init__(
         self,
-        target_fn: Callable,
         local_engine_count: int,
         start_index: int,
         local_start_index: int,
@@ -108,6 +108,7 @@ class CoreEngineProcManager:
         if client_handshake_address:
             common_kwargs["client_handshake_address"] = client_handshake_address
 
+        is_dp = vllm_config.parallel_config.data_parallel_size > 1
         self.processes: list[BaseProcess] = []
         local_dp_ranks = []
         for index in range(local_engine_count):
@@ -118,13 +119,10 @@ class CoreEngineProcManager:
             local_dp_ranks.append(local_index)
             self.processes.append(
                 context.Process(
-                    target=target_fn,
-                    name=f"EngineCore_DP{global_index}",
+                    target=EngineCoreProc.run_engine_core,
+                    name=f"EngineCore_DP{global_index}" if is_dp else "EngineCore",
                     kwargs=common_kwargs
-                    | {
-                        "dp_rank": global_index,
-                        "local_dp_rank": local_index,
-                    },
+                    | {"dp_rank": global_index, "local_dp_rank": local_index},
                 )
             )
 
@@ -926,12 +924,9 @@ def launch_core_engines(
     with zmq_socket_ctx(
         local_handshake_address, zmq.ROUTER, bind=True
     ) as handshake_socket:
-        from vllm.v1.engine.core import EngineCoreProc
-
         # Start local engines.
         if local_engine_count:
             local_engine_manager = CoreEngineProcManager(
-                EngineCoreProc.run_engine_core,
                 vllm_config=vllm_config,
                 executor_class=executor_class,
                 log_stats=log_stats,
