@@ -60,6 +60,11 @@ logger = init_logger(__name__)
 
 
 class SpecDecodeBaseProposer:
+    # Subclasses that support DSL (confidence-threshold early exit) must set
+    # this to True.  Defaults to False so EAGLE and other proposers are not
+    # accidentally affected by a non-zero draft_confidence_threshold.
+    _supports_dsl: bool = False
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -625,7 +630,7 @@ class SpecDecodeBaseProposer:
         # This saves computation while maintaining quality.
         # Policy: Conservative - exits if ANY request in batch is low confidence.
         # Rationale: Synchronous generation requires all requests to proceed together.
-        dsl_enabled = self.draft_confidence_threshold > 0
+        dsl_enabled = self._supports_dsl and self.draft_confidence_threshold > 0
         initial_tokens_requested = self.num_speculative_tokens - 1
         dsl_did_early_exit = False  # Tracks whether early exit fired this proposal
         
