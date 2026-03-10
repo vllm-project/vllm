@@ -735,9 +735,13 @@ class EplbState:
                 and not is_profile
                 and not load_initial_load_window
             )
+
             # Map the physical expert load to global logical experts
             global_expert_load_windows = []
             for eplb_model_state in self.model_states.values():
+                expert_load_window = eplb_model_state.expert_load_window[
+                    :, :, : self.num_valid_physical_experts
+                ]
                 logical_expert_load_window = torch.zeros(
                     self.expert_load_window_size,
                     eplb_model_state.model.num_moe_layers,
@@ -747,10 +751,13 @@ class EplbState:
                 )
                 logical_expert_load_window.scatter_add_(
                     dim=-1,
-                    index=eplb_model_state.physical_to_logical_map.unsqueeze(0)
-                    .expand_as(eplb_model_state.expert_load_window)
+                    index=eplb_model_state.physical_to_logical_map[
+                        :, : self.num_valid_physical_experts
+                    ]
+                    .unsqueeze(0)
+                    .expand_as(expert_load_window)
                     .long(),
-                    src=eplb_model_state.expert_load_window,
+                    src=expert_load_window,
                 )
 
                 global_expert_load_window = logical_expert_load_window.sum(dim=0)

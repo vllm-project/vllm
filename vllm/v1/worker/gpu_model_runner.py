@@ -2811,7 +2811,7 @@ class GPUModelRunner(
         """
         Step for the EPLB (Expert Parallelism Load Balancing) state.
         """
-        if not self.parallel_config.enable_eplb:
+        if not self.parallel_config.enable_eplb or self.eep_eplb_suppressed:
             return
         if self.parallel_config.eplb_config.load_initial_load_window and is_profile:
             return
