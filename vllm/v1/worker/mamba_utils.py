@@ -3,7 +3,7 @@
 import dataclasses
 import itertools
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import torch
 
@@ -13,14 +13,13 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
 )
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv
+from vllm.v1.attention.backends.mamba_attn import BaseMambaAttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.gpu_input_batch import CachedRequestState
 from vllm.v1.worker.lora_model_runner_mixin import GPUInputBatch
-
-if TYPE_CHECKING:
-    from vllm.v1.worker.utils import AttentionGroup
+from vllm.v1.worker.utils import AttentionGroup
 
 
 @triton.jit
@@ -218,27 +217,24 @@ def preprocess_mamba(
 
 
 def clear_stale_mamba_states(
-    attn_metadata: dict[str, Any],
+    attn_metadata: list[dict[str, Any]] | dict[str, Any],
     attn_groups: list[list["AttentionGroup"]],
     forward_context: dict[str, Any],
 ) -> None:
-    """Zero Mamba states for new requests in the decode batch.
+    """Clear Mamba states for new requests in the decode batch.
 
-    Runs outside the CUDA graph so zeroing is not recorded.
     New requests (has_initial_states=False) would otherwise read stale
     state from a recycled cache slot.
     """
-    from vllm.v1.attention.backends.mamba_attn import BaseMambaAttentionMetadata
+    if not isinstance(attn_metadata, dict):
+        return
 
     for kv_cache_groups in attn_groups:
         for attn_group in kv_cache_groups:
             if not isinstance(attn_group.kv_cache_spec, MambaSpec):
                 continue
 
-            first_layer = attn_group.layer_names[0]
-            if first_layer not in attn_metadata:
-                continue
-            metadata = attn_metadata[first_layer]
+            metadata = attn_metadata.get(attn_group.layer_names[0])
             if not isinstance(metadata, BaseMambaAttentionMetadata):
                 continue
 
@@ -246,13 +242,9 @@ def clear_stale_mamba_states(
             if has_initial_states_d is None:
                 continue
 
-            num_decodes = metadata.num_decodes
-            indices = metadata.state_indices_tensor_d[:num_decodes]
-
-            # Keep only new-request slots
-            new_indices = indices[~has_initial_states_d[:num_decodes]]
-            if new_indices.numel() == 0:
-                continue
+            assert metadata.state_indices_tensor_d is not None
+            indices = metadata.state_indices_tensor_d[: metadata.num_decodes]
+            new_indices = indices[~has_initial_states_d[: metadata.num_decodes]]
 
             for layer_name in attn_group.layer_names:
                 layer = forward_context[layer_name]
