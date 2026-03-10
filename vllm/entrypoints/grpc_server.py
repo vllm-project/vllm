@@ -114,10 +114,19 @@ async def serve_grpc(args: argparse.Namespace):
         logger.info("Server is ready to accept requests")
 
         # Handle shutdown signals
+        # First signal → graceful drain. Second signal → force immediate exit.
         loop = asyncio.get_running_loop()
         stop_event = asyncio.Event()
+        force_exit = False
 
         def signal_handler():
+            nonlocal force_exit
+            if stop_event.is_set():
+                logger.warning("Received second shutdown signal, forcing exit.")
+                force_exit = True
+                # Shorten the grace period if server.stop is already running.
+                loop.create_task(server.stop(0))
+                return
             logger.info("Received shutdown signal")
             stop_event.set()
 
@@ -130,7 +139,10 @@ async def serve_grpc(args: argparse.Namespace):
             logger.info("Interrupted by user")
     finally:
         logger.info("Shutting down vLLM gRPC server...")
-        await server.stop(grace=5.0)
+
+        # Stop gRPC server
+        grace = 0.0 if force_exit else 5.0
+        await server.stop(grace=grace)
         logger.info("gRPC server stopped")
         async_llm.shutdown()
         logger.info("AsyncLLM engine stopped")
