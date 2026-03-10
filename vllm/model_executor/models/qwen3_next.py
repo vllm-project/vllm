@@ -10,6 +10,7 @@ from einops import rearrange
 from torch import nn
 from transformers.activations import ACT2FN
 
+from vllm import envs
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import (
     CacheConfig,
@@ -34,6 +35,7 @@ from vllm.model_executor.layers.fla.ops import (
     chunk_gated_delta_rule as fla_chunk_gated_delta_rule,
 )
 from vllm.model_executor.layers.fla.ops import (
+    fused_recurrent_gated_delta_rule_packed_decode_fwd,
     fused_sigmoid_gating_delta_rule_update,
 )
 from vllm.model_executor.layers.fla.ops.chunk import l2norm_fwd
@@ -474,6 +476,14 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         )
 
         self.chunk_gated_delta_rule = ChunkGatedDeltaRule()
+        self.enable_packed_recurrent_decode = (
+            envs.VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE
+        )
+        self._forward_core_impl = (
+            self._forward_core_packed
+            if self.enable_packed_recurrent_decode
+            else self._forward_core_baseline
+        )
 
         compilation_config = get_current_vllm_config().compilation_config
         if prefix in compilation_config.static_forward_context:
@@ -646,6 +656,15 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         output[:num_tokens], _ = self.out_proj(core_attn_out)
 
     def _forward_core(
+        self,
+        mixed_qkv: torch.Tensor,
+        b: torch.Tensor,
+        a: torch.Tensor,
+        core_attn_out: torch.Tensor,
+    ):
+        return self._forward_core_impl(mixed_qkv, b, a, core_attn_out)
+
+    def _forward_core_baseline(
         self,
         mixed_qkv: torch.Tensor,
         b: torch.Tensor,
@@ -848,6 +867,78 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             core_attn_out[:num_actual_tokens] = core_attn_out_spec.squeeze(0)
         else:
             core_attn_out[:num_actual_tokens] = core_attn_out_non_spec.squeeze(0)
+
+    def _forward_core_packed(
+        self,
+        mixed_qkv: torch.Tensor,
+        b: torch.Tensor,
+        a: torch.Tensor,
+        core_attn_out: torch.Tensor,
+    ):
+        """
+        Core attention computation with a packed non-spec decode fast path.
+        """
+        forward_context = get_forward_context()
+        attn_metadata: AttentionMetadata = forward_context.attn_metadata
+
+        if attn_metadata is None:
+            return
+
+        assert isinstance(attn_metadata, dict)
+        attn_metadata = attn_metadata[self.prefix]
+        assert isinstance(attn_metadata, GDNAttentionMetadata)
+        spec_sequence_masks = attn_metadata.spec_sequence_masks
+        if (
+            spec_sequence_masks is not None
+            or attn_metadata.num_prefills > 0
+            or attn_metadata.num_decodes == 0
+        ):
+            return self._forward_core_baseline(mixed_qkv, b, a, core_attn_out)
+
+        non_spec_state_indices_tensor = attn_metadata.non_spec_state_indices_tensor  # noqa: E501
+        self_kv_cache = self.kv_cache[forward_context.virtual_engine]
+        conv_state = self_kv_cache[0].transpose(-1, -2)
+        ssm_state = self_kv_cache[1]
+        num_actual_tokens = attn_metadata.num_actual_tokens
+
+        mixed_qkv = mixed_qkv[:num_actual_tokens]
+        b = b[:num_actual_tokens]
+        a = a[:num_actual_tokens]
+
+        conv_weights = self.conv1d.weight.view(
+            self.conv1d.weight.size(0), self.conv1d.weight.size(2)
+        )
+        mixed_qkv_non_spec = causal_conv1d_update(
+            mixed_qkv,
+            conv_state,
+            conv_weights,
+            self.conv1d.bias,
+            self.activation,
+            conv_state_indices=non_spec_state_indices_tensor[:num_actual_tokens],
+            validate_data=False,
+        )
+        try:
+            out_buf = core_attn_out[:num_actual_tokens].unsqueeze(1)
+            fused_recurrent_gated_delta_rule_packed_decode_fwd(
+                mixed_qkv=mixed_qkv_non_spec,
+                a=a,
+                b=b,
+                A_log=self.A_log,
+                dt_bias=self.dt_bias,
+                scale=self.head_k_dim**-0.5,
+                initial_state=ssm_state,
+                out=out_buf,
+                ssm_state_indices=non_spec_state_indices_tensor[:num_actual_tokens],
+                use_qk_l2norm_in_kernel=True,
+            )
+            return
+        except ValueError as exc:
+            logger.warning_once(
+                "Packed recurrent decode fast path unavailable; falling back "
+                "to default path: %s",
+                exc,
+            )
+            return self._forward_core_baseline(mixed_qkv, b, a, core_attn_out)
 
 
 class Qwen3NextAttention(nn.Module):
