@@ -103,38 +103,6 @@ def extract_intermediate_diff(curr: str, old: str) -> str:
     return diff
 
 
-def build_partial_args_json(
-    param_pairs: list[tuple[str, Any]],
-    is_complete: bool,
-) -> str:
-    """Build a JSON object string from ``(name, value)`` pairs.
-
-    Returns ``""`` if there are no pairs and ``is_complete`` is False.
-    Otherwise returns a partial (``{"a": 1``) or complete (``{"a": 1}``)
-    JSON object depending on *is_complete*.
-
-    Example::
-
-        >>> build_partial_args_json([("city", "SF")], is_complete=False)
-        '{"city": "SF"'
-        >>> build_partial_args_json([("city", "SF")], is_complete=True)
-        '{"city": "SF"}'
-    """
-    if not param_pairs and not is_complete:
-        return ""
-
-    parts: list[str] = []
-    for i, (name, value) in enumerate(param_pairs):
-        serialized = json.dumps(value, ensure_ascii=False)
-        sep = ", " if i > 0 else ""
-        parts.append(f"{sep}{json.dumps(name, ensure_ascii=False)}: {serialized}")
-
-    result = "{" + "".join(parts)
-    if is_complete:
-        result += "}"
-    return result
-
-
 # partial_json_parser doesn't support extra data and
 # JSONDecoder.raw_decode doesn't support partial JSON
 def partial_json_loads(input_str: str, flags: Allow) -> tuple[Any, int]:
