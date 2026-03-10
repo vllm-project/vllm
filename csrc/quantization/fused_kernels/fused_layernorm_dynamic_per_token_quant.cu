@@ -215,6 +215,8 @@ void rms_norm_per_block_quant_dispatch(
               "Hidden size must be divisible by 4 for vectorized access");
   TORCH_CHECK(input_stride % 4 == 0,
               "Input stride must be divisible by 4 for vectorized access");
+  TORCH_CHECK(group_size % 4 == 0,
+              "Group size must be divisible by 4 for vectorized access");
 
   auto num_tokens = input.numel() / hidden_size;
 
