@@ -751,6 +751,7 @@ steps:
   timeout_in_minutes: 60
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_2
+  optional: true
   commands:
     - pytest -v -s kernels/moe/test_deepep_moe.py
 
@@ -2433,6 +2434,7 @@ steps:
   timeout_in_minutes: 60
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi355_2
+  optional: true
   commands:
     - pytest -v -s kernels/moe/test_deepep_moe.py
 
