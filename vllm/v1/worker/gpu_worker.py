@@ -1001,7 +1001,7 @@ class Worker(WorkerBase):
 
         # NCCL broadcast/packed path are asynchronous.
         # Sync here so the next step uses the new weights.
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
 
     def shutdown(self) -> None:
         # has_kv_transfer_group can be None during interpreter shutdown.
