@@ -242,9 +242,7 @@ class ViTPatchGenerator(nn.Module):
             # Video with temporal compression
             # Must pass in `imgs_sizes` whether it's a single video or multiple videos
             # Each video always uses a fixed HW (but can be different between videos)
-            patches = self._embed_video_dynamic(
-                x, imgs_sizes, num_frames_per_video
-            )
+            patches = self._embed_video_dynamic(x, imgs_sizes, num_frames_per_video)
             tubelet_sizes = compute_tubelet_imgs_sizes(
                 imgs_sizes, num_frames_per_video, T
             )
@@ -274,9 +272,7 @@ class ViTPatchGenerator(nn.Module):
             return patches, pos_enc
         return patches
 
-    def forward_video(
-        self, x: torch.Tensor, num_frames: int
-    ) -> torch.Tensor:
+    def forward_video(self, x: torch.Tensor, num_frames: int) -> torch.Tensor:
         """Process video frames with temporal compression.
 
         Groups T consecutive frames into tubelets before embedding.
@@ -308,7 +304,7 @@ class ViTPatchGenerator(nn.Module):
         num_tublets = N_padded // T
         patches = rearrange(
             patches,
-            '(tubelets frames) spatial feat -> tubelets spatial (frames feat)',
+            "(tubelets frames) spatial feat -> tubelets spatial (frames feat)",
             tubelets=num_tublets,
             frames=T,
             spatial=num_spatial,
@@ -375,7 +371,7 @@ class ViTPatchGenerator(nn.Module):
             # (num_tubelets, num_spatial, T * 3*P*P)
             stacked = rearrange(
                 stacked,
-                '(tubelets frames) spatial feat -> tubelets spatial (frames feat)',
+                "(tubelets frames) spatial feat -> tubelets spatial (frames feat)",
                 tubelets=num_tubelets,
                 frames=T,
                 spatial=num_spatial,
@@ -579,8 +575,8 @@ class ViTPatchGenerator(nn.Module):
         if self.cpe_mode:
             assert not self.training, (
                 "RADIO CPE position encoding is in training mode during inference. "
-                "This introduces random position augmentation that corrupts embeddings. "
-                "Ensure model.eval() is called before inference."
+                "This introduces random position augmentation that corrupts embeddings."
+                " Ensure model.eval() is called before inference."
             )
             if self.training:
                 min_scale = math.sqrt(0.1)
@@ -885,7 +881,9 @@ class RadioInternVisionModel(nn.Module):
 
         # Unpack back to original batch shape if we packed for video
         if packed_batch_size is not None:
-            encoder_outputs = encoder_outputs.reshape(packed_batch_size, seq_per_tubelet, -1)
+            encoder_outputs = encoder_outputs.reshape(
+                packed_batch_size, seq_per_tubelet, -1
+            )
 
         return encoder_outputs
 

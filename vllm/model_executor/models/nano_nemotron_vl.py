@@ -340,8 +340,8 @@ def _get_video_target_size_and_feature_size(
 ) -> tuple[int, int, int]:
     """Compute target (width, height) and feature_size for video resize and token count.
 
-    Used by video_to_pixel_values (resize) and get_video_replacement_internvl (seq length calc)
-    so both use the same dimensions.
+    Used by video_to_pixel_values (resize) and get_video_replacement_internvl
+    (seq length calc) so both use the same dimensions.
     """
     if maintain_aspect_ratio:
         target_w, target_h = _compute_aspect_preserving_size(
@@ -358,9 +358,8 @@ def _get_video_target_size_and_feature_size(
         target_w = side * patch_size
         target_h = side * patch_size
 
-    feature_size = (
-        int((target_h // patch_size) * downsample_ratio)
-        * int((target_w // patch_size) * downsample_ratio)
+    feature_size = int((target_h // patch_size) * downsample_ratio) * int(
+        (target_w // patch_size) * downsample_ratio
     )
     return target_w, target_h, feature_size
 
@@ -578,8 +577,8 @@ class DynamicResolutionImageTiler:
             "Dynamic resolution is only supported for image media"
         )
         orig_width, orig_height = media.width, media.height
-        closest_patch_height = round(orig_height / self._patch_size + 0.5)
-        closest_patch_width = round(orig_width / self._patch_size + 0.5)
+        closest_patch_height = math.ceil(orig_height / self._patch_size)
+        closest_patch_width = math.ceil(orig_width / self._patch_size)
         patches = closest_patch_height * closest_patch_width
 
         factor = min(
@@ -983,7 +982,7 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
         if target_num_patches is not None:
             self.video_target_num_patches: int | None = target_num_patches
         elif target_img_size is not None:
-            base_patches = round(target_img_size / config.patch_size + 0.5)
+            base_patches = math.ceil(target_img_size / config.patch_size)
             self.video_target_num_patches = base_patches * base_patches
         else:
             self.video_target_num_patches = None
@@ -1269,8 +1268,10 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
                         make sure the total number of tokens is correct.
         - EVS real (called from get_real_video_repl_for_evs) - different value per frame
         Args:
-            tokens_per_frame (list[int]): number of tokens per frame (one per tubelet when T > 1)
-            frames_indices (list[int]): orig. frame indices (one per frame, before tubelet subsampling)
+            tokens_per_frame (list[int]): number of tokens per frame
+                (one per tubelet when T > 1)
+            frames_indices (list[int]): orig. frame indices
+                (one per frame, before tubelet subsampling)
             frame_duration_ms (int): duration of each frame in milliseconds
             tokenizer (TokenizerLike): tokenizer to use for tokenizing frame separators
             img_start_token_ids (list[int]): pre-tokenized IMG_START tokens
@@ -1286,24 +1287,25 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
         num_frames = len(frames_indices)
 
         if T > 1 and timestamps_enabled:
-            assert video_prompt_format == 2, "Only video prompt format 2 is currently supported"
-            all_timestamps = calculate_timestamps(
-                frames_indices, frame_duration_ms
+            assert video_prompt_format == 2, (
+                "Only video prompt format 2 is currently supported"
             )
+            all_timestamps = calculate_timestamps(frames_indices, frame_duration_ms)
 
             frame_separators = []
             for i in range(0, num_frames, T):  # Every group
                 group_frames = []
                 for j in range(T):  # Every frame in the group
                     frame_idx = i + j
-                    if frame_idx < num_frames:  # Valid idx (haven't padded to mult. of T yet)
+                    if frame_idx < num_frames:
+                        # Valid idx (haven't padded to mult. of T yet)
                         ts = all_timestamps[frame_idx]
                         frame_str = "Frame" if j == 0 else "frame"
                         group_frames.append(
                             f"{frame_str} {frame_idx + 1} sampled at {ts:.2f} seconds"
                         )
                 if group_frames:
-                    # Join by " and " if there are >1 frame, otherwise there's no " and "
+                    # Join by `and` if there are >1 frame, otherwise no `and`
                     frame_separators.append(" and ".join(group_frames) + ": ")
         elif timestamps_enabled:
             timestamps = calculate_timestamps(frames_indices, frame_duration_ms)
@@ -1741,11 +1743,7 @@ class NanoNemotronVLMultiModalProcessor(
             downsample_ratio = hf_processor.config.downsample_ratio
             target_patches = hf_processor.video_target_num_patches
 
-            if (
-                target_patches is not None
-                and video is not None
-                and video.shape[0] > 0
-            ):
+            if target_patches is not None and video is not None and video.shape[0] > 0:
                 orig_h, orig_w = video.shape[1], video.shape[2]
                 _, _, feature_size = _get_video_target_size_and_feature_size(
                     orig_w=orig_w,
@@ -2015,14 +2013,16 @@ class NemotronH_Nano_VL_V2(
             vit_hidden_size = config.vit_hidden_size
             vision_projection_hidden_size = config.projector_hidden_size
             llm_hidden_size = config.text_config.hidden_size
-
+            mlp_in_features = (
+                vit_hidden_size * int(round(1 / self.downsample_ratio)) ** 2
+            )
             mlp1 = nn.Sequential(
                 RMSNorm(
-                    hidden_size=vit_hidden_size * int(round(1 / self.downsample_ratio)) ** 2,
+                    hidden_size=mlp_in_features,
                     eps=1e-5,
                 ),
                 nn.Linear(
-                    vit_hidden_size * int(round(1 / self.downsample_ratio)) ** 2,
+                    mlp_in_features,
                     vision_projection_hidden_size,
                     bias=False,
                 ),
@@ -2166,7 +2166,9 @@ class NemotronH_Nano_VL_V2(
             else:
                 _, vit_embeds = self.vision_model(chunk)
             vit_embeds = vit_embeds.to(dtype=torch.bfloat16)
-            vit_embeds = vit_embeds.reshape(vit_embeds.shape[0], H_patches, W_patches, -1)
+            vit_embeds = vit_embeds.reshape(
+                vit_embeds.shape[0], H_patches, W_patches, -1
+            )
             vit_embeds = self.pixel_shuffle(
                 vit_embeds, scale_factor=self.downsample_ratio
             )
@@ -2273,7 +2275,9 @@ class NemotronH_Nano_VL_V2(
             original_frames_indices = video_frames_indices[i].tolist()
             frame_duration_ms = video_input["frame_duration_ms"][i].item()
 
-            num_tubelets = math.ceil(original_num_frames / T) if T > 1 else original_num_frames
+            num_tubelets = (
+                math.ceil(original_num_frames / T) if T > 1 else original_num_frames
+            )
             assert single_video_embeddings.shape[0] % num_tubelets == 0
 
             if video_pruning_rate is not None and video_pruning_rate > 0.0:
@@ -2295,7 +2299,7 @@ class NemotronH_Nano_VL_V2(
                 )
                 # End of EVS-specific code
             else:
-                feature_size = (single_video_embeddings.shape[0] // num_tubelets)
+                feature_size = single_video_embeddings.shape[0] // num_tubelets
                 num_tokens_per_frame = [feature_size] * num_tubelets
 
             final_video_embeddings += (
@@ -2633,9 +2637,7 @@ class NemotronH_Nano_VL_V2(
         vision_args.pop("temporal_patch_dim", None)
         vision_args.pop("separate_video_embedder", None)
 
-        temporal_patch_dim = getattr(
-            hf_config_vision, "video_temporal_patch_size", 1
-        )
+        temporal_patch_dim = getattr(hf_config_vision, "video_temporal_patch_size", 1)
         separate_video_embedder = getattr(
             hf_config_vision, "separate_video_embedder", False
         )
