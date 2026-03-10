@@ -42,6 +42,7 @@ steps:
   mirror_hardwares: [amdexperimental, amdproduction, amdtentative]
   agent_pool: mi325_1
   grade: Blocking
+  optional: true
   soft_fail: true
   source_file_dependencies:
   - requirements/nightly_torch_test.txt
@@ -67,6 +68,7 @@ steps:
   timeout_in_minutes: 30
   mirror_hardwares: [amdexperimental, amdproduction, amdtentative]
   agent_pool: mi325_1
+  optional: true
   # grade: Blocking
   source_file_dependencies:
   - vllm/
@@ -97,6 +99,7 @@ steps:
   timeout_in_minutes: 20
   mirror_hardwares: [amdexperimental]
   agent_pool: mi325_1
+  optional: true
   # grade: Blocking
   source_file_dependencies:
   - tests/standalone_tests/python_only_compile.sh
@@ -140,6 +143,7 @@ steps:
   timeout_in_minutes: 40
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_1
+  optional: true
   # grade: Blocking
   working_dir: "/vllm-workspace/tests"
   fast_check: true
@@ -503,6 +507,7 @@ steps:
   mirror_hardwares: [amdexperimental, amdproduction, amdtentative]
   agent_pool: mi325_1
   grade: Blocking
+  optional: true
   source_file_dependencies:
     - vllm/
     - tests/v1
@@ -520,6 +525,7 @@ steps:
   timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_1
+  optional: true
   # grade: Blocking
   working_dir: "/vllm-workspace/examples"
   source_file_dependencies:
@@ -823,6 +829,7 @@ steps:
   timeout_in_minutes: 90
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_1
+  optional: true
   # grade: Blocking
   source_file_dependencies:
   - csrc/
@@ -936,6 +943,7 @@ steps:
   timeout_in_minutes: 25
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_1
+  optional: true
   # grade: Blocking
   torch_nightly: true
   source_file_dependencies:
@@ -1046,6 +1054,7 @@ steps:
   timeout_in_minutes: 60
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_1
+  optional: true
   source_file_dependencies:
   - vllm/
   - tests/models/multimodal
@@ -1059,6 +1068,7 @@ steps:
   timeout_in_minutes: 60
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_1
+  optional: true
   # grade: Blocking
   source_file_dependencies:
   - vllm/
@@ -1072,6 +1082,7 @@ steps:
   timeout_in_minutes: 100
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_1
+  optional: true
   # grade: Blocking
   torch_nightly: true
   source_file_dependencies:
@@ -1090,6 +1101,7 @@ steps:
   timeout_in_minutes: 10
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_1
+  optional: true
   # grade: Blocking
   working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
   source_file_dependencies:
@@ -1355,6 +1367,7 @@ steps:
   timeout_in_minutes: 60
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_2
+  optional: true
   # grade: Blocking
   working_dir: "/vllm-workspace/tests"
   num_gpus: 2
@@ -1393,6 +1406,7 @@ steps:
   timeout_in_minutes: 60
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_4
+  optional: true
   # grade: Blocking
   working_dir: "/vllm-workspace/tests"
   num_gpus: 4
@@ -1410,6 +1424,7 @@ steps:
   timeout_in_minutes: 30
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_4
+  optional: true
   # grade: Blocking
   num_gpus: 4
   source_file_dependencies:
@@ -1461,6 +1476,7 @@ steps:
 - label: NixlConnector PD accuracy tests (Distributed) # 30min
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_4
+  optional: true
   # grade: Blocking
   timeout_in_minutes: 30
   working_dir: "/vllm-workspace/tests"
@@ -1475,6 +1491,7 @@ steps:
 - label: DP EP NixlConnector PD accuracy tests (Distributed) # 15min
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_4
+  optional: true
   # grade: Blocking
   timeout_in_minutes: 15
   working_dir: "/vllm-workspace/tests"
@@ -1779,6 +1796,7 @@ steps:
   # in /vllm/tools/pre_commit/generate_nightly_torch_test.py
   mirror_hardwares: [amdexperimental, amdproduction, amdtentative]
   agent_pool: mi355_1
+  optional: true
   soft_fail: true
   source_file_dependencies:
   - requirements/nightly_torch_test.txt
@@ -1789,6 +1807,7 @@ steps:
   timeout_in_minutes: 15
   mirror_hardwares: [amdexperimental, amdproduction, amdtentative]
   agent_pool: mi355_1
+  optional: true
   source_file_dependencies:
   - vllm/
   - tests/multimodal
@@ -1801,6 +1820,7 @@ steps:
   timeout_in_minutes: 30
   mirror_hardwares: [amdexperimental, amdproduction, amdtentative]
   agent_pool: mi355_1
+  optional: true
   source_file_dependencies:
   - vllm/
   - tests/test_inputs.py
@@ -1830,6 +1850,7 @@ steps:
   timeout_in_minutes: 20
   mirror_hardwares: [amdexperimental]
   agent_pool: mi355_1
+  optional: true
   source_file_dependencies:
   - tests/standalone_tests/python_only_compile.sh
   - setup.py
@@ -1840,6 +1861,7 @@ steps:
   timeout_in_minutes: 30
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi355_1
+  optional: true
   fast_check: true
   torch_nightly: true
   source_file_dependencies:
@@ -1870,6 +1892,7 @@ steps:
   timeout_in_minutes: 40
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi355_1
+  optional: true
   working_dir: "/vllm-workspace/tests"
   fast_check: true
   torch_nightly: true
@@ -1887,6 +1910,7 @@ steps:
   timeout_in_minutes: 130
   mirror_hardwares: [amdexperimental]
   agent_pool: mi355_1
+  optional: true
   working_dir: "/vllm-workspace/tests"
   fast_check: true
   torch_nightly: true
@@ -1903,6 +1927,7 @@ steps:
   timeout_in_minutes: 50
   mirror_hardwares: [amdexperimental]
   agent_pool: mi355_1
+  optional: true
   working_dir: "/vllm-workspace/tests"
   fast_check: true
   torch_nightly: true
@@ -1921,6 +1946,7 @@ steps:
   timeout_in_minutes: 50
   mirror_hardwares: [amdexperimental]
   agent_pool: mi355_1
+  optional: true
   working_dir: "/vllm-workspace/tests"
   fast_check: true
   torch_nightly: true
@@ -1935,6 +1961,7 @@ steps:
   timeout_in_minutes: 50
   mirror_hardwares: [amdexperimental]
   agent_pool: mi355_1
+  optional: true
   working_dir: "/vllm-workspace/tests"
   fast_check: true
   torch_nightly: true
@@ -2013,6 +2040,7 @@ steps:
   timeout_in_minutes: 10
   mirror_hardwares: [amdexperimental]
   agent_pool: mi355_8
+  optional: true
   gpu: h100
   num_gpus: 8
   working_dir: "/vllm-workspace/tests"
@@ -2033,6 +2061,7 @@ steps:
 - label: EPLB Algorithm Test # 5min
   mirror_hardwares: [amdexperimental, amdproduction, amdtentative]
   agent_pool: mi355_1
+  optional: true
   timeout_in_minutes: 15
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
@@ -2044,6 +2073,7 @@ steps:
 - label: EPLB Execution Test # 10min
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi355_4
+  optional: true
   timeout_in_minutes: 20
   working_dir: "/vllm-workspace/tests"
   num_gpus: 4
@@ -2058,6 +2088,7 @@ steps:
   timeout_in_minutes: 20
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi355_2
+  optional: true
   num_gpus: 2
   source_file_dependencies:
   - vllm/
@@ -2099,12 +2130,13 @@ steps:
   commands:
   - pytest -v -s engine test_sequence.py test_config.py test_logger.py test_vllm_port.py
 
+
 - label: V1 Test e2e + engine # 65min
   timeout_in_minutes: 90
   mirror_hardwares: [amdexperimental]
-  # The test uses 4 GPUs, but we schedule it on 8-GPU machines for stability.
-  # See discussion here: https://github.com/vllm-project/vllm/pull/31040
-  agent_pool: mi355_8
+  agent_pool: mi355_1
+  optional: true
+  # grade: Blocking
   source_file_dependencies:
     - vllm/
     - tests/v1
@@ -2114,10 +2146,39 @@ steps:
     - pytest -v -s v1/e2e
     - pytest -v -s v1/engine
 
+- label: V1 Test e2e (2 GPUs) # 65min
+  timeout_in_minutes: 90
+  mirror_hardwares: [amdexperimental]
+  agent_pool: mi355_2
+  optional: true
+  # grade: Blocking
+  source_file_dependencies:
+    - vllm/
+    - tests/v1
+  commands:
+    # Only run tests that need exactly 2 GPUs
+    - pytest -v -s v1/e2e/test_spec_decode.py -k "tensor_parallelism"
+
+- label: V1 Test e2e (4 GPUs) # 65min
+  timeout_in_minutes: 90
+  mirror_hardwares: [amdexperimental]
+  # The test uses 4 GPUs, but we schedule it on 8-GPU machines for stability.
+  # See discussion here: https://github.com/vllm-project/vllm/pull/31040
+  agent_pool: mi355_4
+  optional: true
+  # grade: Blocking
+  source_file_dependencies:
+    - vllm/
+    - tests/v1
+  commands:
+    # Only run tests that need 4 GPUs
+    - pytest -v -s v1/e2e/test_spec_decode.py -k "eagle_correctness_heavy"
+
 - label: V1 Test entrypoints # 35min
   timeout_in_minutes: 50
   mirror_hardwares: [amdexperimental, amdproduction, amdtentative]
   agent_pool: mi355_1
+  optional: true
   source_file_dependencies:
     - vllm/
     - tests/v1
@@ -2128,6 +2189,7 @@ steps:
   timeout_in_minutes: 60
   mirror_hardwares: [amdexperimental]
   agent_pool: mi355_1
+  optional: true
   source_file_dependencies:
     - vllm/
     - tests/v1
@@ -2150,7 +2212,19 @@ steps:
     - pip install -U git+https://github.com/robertgshaw2-redhat/lm-evaluation-harness.git@streaming-api
     - pytest -v -s entrypoints/openai/correctness/test_lmeval.py::test_lm_eval_accuracy_v1_engine
 
-# TODO: Add the "V1 Test attention (MI300)" test group
+- label: V1 Test attention (H100) # 10min
+  mirror_hardwares: [amdexperimental]
+  agent_pool: mi355_1
+  optional: true
+  timeout_in_minutes: 30
+  gpu: h100
+  source_file_dependencies:
+    - vllm/config/attention.py
+    - vllm/model_executor/layers/attention
+    - vllm/v1/attention
+    - tests/v1/attention
+  commands:
+    - pytest -v -s v1/attention
 
 - label: Batch Invariance Tests (H100) # 10min
   mirror_hardwares: [amdexperimental]
@@ -2200,6 +2274,7 @@ steps:
   timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi355_1
+  optional: true
   working_dir: "/vllm-workspace/examples"
   source_file_dependencies:
   - vllm/entrypoints
@@ -2234,6 +2309,7 @@ steps:
   timeout_in_minutes: 15
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi355_1
+  optional: true
   source_file_dependencies:
   - vllm/
   - tests/cuda
@@ -2245,6 +2321,7 @@ steps:
   timeout_in_minutes: 75
   mirror_hardwares: [amdexperimental]
   agent_pool: mi355_1
+  optional: true
   source_file_dependencies:
   - vllm/model_executor/layers
   - vllm/sampling_metadata.py
@@ -2277,6 +2354,7 @@ steps:
   timeout_in_minutes: 30
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi355_1
+  optional: true
   torch_nightly: true
   source_file_dependencies:
     - vllm/
@@ -2293,6 +2371,7 @@ steps:
   timeout_in_minutes: 30
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi355_1
+  optional: true
   torch_nightly: true
   source_file_dependencies:
   - vllm/
@@ -2308,6 +2387,7 @@ steps:
   timeout_in_minutes: 40
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi355_1
+  optional: true
   # grade: Blocking
   torch_nightly: true
   source_file_dependencies:
@@ -2325,6 +2405,7 @@ steps:
   timeout_in_minutes: 20
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi355_1
+  optional: true
   source_file_dependencies:
   - tests/v1/cudagraph
   - vllm/v1/cudagraph_dispatcher.py
@@ -2338,6 +2419,7 @@ steps:
   timeout_in_minutes: 75
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi355_1
+  optional: true
   source_file_dependencies:
   - csrc/
   - tests/kernels/core
@@ -2349,6 +2431,7 @@ steps:
   timeout_in_minutes: 35
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi355_1
+  optional: true
   source_file_dependencies:
   - csrc/attention/
   - vllm/v1/attention
@@ -2363,6 +2446,7 @@ steps:
   timeout_in_minutes: 90
   mirror_hardwares: [amdexperimental]
   agent_pool: mi355_1
+  optional: true
   source_file_dependencies:
   - csrc/quantization/
   - vllm/model_executor/layers/quantization
@@ -2375,6 +2459,7 @@ steps:
   timeout_in_minutes: 60
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi355_1
+  optional: true
   source_file_dependencies:
   - csrc/quantization/cutlass_w8a8/moe/
   - csrc/moe/
@@ -2391,6 +2476,7 @@ steps:
   timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi355_1
+  optional: true
   source_file_dependencies:
   - csrc/mamba/
   - tests/kernels/mamba
@@ -2422,6 +2508,7 @@ steps:
   timeout_in_minutes: 30
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi355_1
+  optional: true
   source_file_dependencies:
   - vllm/utils/import_utils.py
   - tests/kernels/helion/
@@ -2434,6 +2521,7 @@ steps:
   torch_nightly: true
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi355_1
+  optional: true
   source_file_dependencies:
   - vllm/engine/arg_utils.py
   - vllm/config/model.py
@@ -2450,6 +2538,7 @@ steps:
   timeout_in_minutes: 20
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi355_1
+  optional: true
   working_dir: "/vllm-workspace/.buildkite"
   source_file_dependencies:
   - benchmarks/
@@ -2460,6 +2549,7 @@ steps:
   timeout_in_minutes: 20
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi355_1
+  optional: true
   source_file_dependencies:
   - vllm/
   - tests/benchmarks/
@@ -2470,6 +2560,7 @@ steps:
   timeout_in_minutes: 90
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi355_1
+  optional: true
   source_file_dependencies:
   - csrc/
   - vllm/model_executor/layers/quantization
@@ -2490,6 +2581,7 @@ steps:
   timeout_in_minutes: 75
   mirror_hardwares: [amdexperimental]
   agent_pool: mi355_1
+  optional: true
   source_file_dependencies:
   - csrc/
   - vllm/model_executor/layers/quantization
@@ -2501,6 +2593,7 @@ steps:
   timeout_in_minutes: 15
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi355_1
+  optional: true
   source_file_dependencies:
   - csrc/
   - vllm/entrypoints/openai/
@@ -2517,6 +2610,7 @@ steps:
   timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi355_1
+  optional: true
   torch_nightly: true
   source_file_dependencies:
   - vllm/
@@ -2529,6 +2623,7 @@ steps:
   timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi355_1
+  optional: true
   torch_nightly: true
   source_file_dependencies:
   - vllm/model_executor/models/
@@ -2548,6 +2643,7 @@ steps:
   timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental]
   agent_pool: mi355_1
+  optional: true
   torch_nightly: true
   source_file_dependencies:
   - vllm/
@@ -2560,6 +2656,7 @@ steps:
 - label: Basic Models Test (Other CPU) # 5min
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi355_1
+  optional: true
   timeout_in_minutes: 10
   torch_nightly: true
   source_file_dependencies:
@@ -2574,6 +2671,7 @@ steps:
   timeout_in_minutes: 25
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi355_1
+  optional: true
   torch_nightly: true
   source_file_dependencies:
   - vllm/
@@ -2587,6 +2685,7 @@ steps:
   timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental]
   agent_pool: mi355_1
+  optional: true
   torch_nightly: true
   source_file_dependencies:
   - vllm/model_executor/models/
@@ -2607,6 +2706,7 @@ steps:
   timeout_in_minutes: 75
   mirror_hardwares: [amdexperimental]
   agent_pool: mi355_1
+  optional: true
   torch_nightly: true
   source_file_dependencies:
   - vllm/
@@ -2676,6 +2776,7 @@ steps:
   timeout_in_minutes: 60
   mirror_hardwares: [amdexperimental]
   agent_pool: mi355_1
+  optional: true
   source_file_dependencies:
   - vllm/
   - tests/models/multimodal
@@ -2688,6 +2789,7 @@ steps:
   timeout_in_minutes: 60
   mirror_hardwares: [amdexperimental]
   agent_pool: mi355_1
+  optional: true
   source_file_dependencies:
   - vllm/
   - tests/models/multimodal
@@ -2699,6 +2801,7 @@ steps:
   timeout_in_minutes: 100
   mirror_hardwares: [amdexperimental]
   agent_pool: mi355_1
+  optional: true
   torch_nightly: true
   source_file_dependencies:
   - vllm/
@@ -2716,6 +2819,7 @@ steps:
   timeout_in_minutes: 10
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi355_1
+  optional: true
   working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
   source_file_dependencies:
   - vllm/multimodal/
@@ -2772,6 +2876,7 @@ steps:
   timeout_in_minutes: 60
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi355_1
+  optional: true
   source_file_dependencies:
   - vllm/model_executor/layers/quantization
   - tests/models/quantization
@@ -2923,6 +3028,7 @@ steps:
   timeout_in_minutes: 20
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi355_2
+  optional: true
   working_dir: "/vllm-workspace/tests"
   num_gpus: 2
   source_file_dependencies:
@@ -3005,6 +3111,7 @@ steps:
   timeout_in_minutes: 50
   mirror_hardwares: [amdexperimental]
   agent_pool: mi355_2
+  optional: true
   working_dir: "/vllm-workspace/tests"
   num_gpus: 2
   source_file_dependencies:
@@ -3026,6 +3133,7 @@ steps:
   timeout_in_minutes: 60
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi355_2
+  optional: true
   working_dir: "/vllm-workspace/tests"
   num_gpus: 2
   source_file_dependencies:
@@ -3063,6 +3171,7 @@ steps:
   timeout_in_minutes: 60
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi355_4
+  optional: true
   working_dir: "/vllm-workspace/tests"
   num_gpus: 4
   source_file_dependencies:
@@ -3079,6 +3188,7 @@ steps:
   timeout_in_minutes: 30
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi355_4
+  optional: true
   num_gpus: 4
   source_file_dependencies:
   - vllm/lora
@@ -3127,6 +3237,7 @@ steps:
 - label: NixlConnector PD accuracy tests (Distributed) # 30min
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi355_4
+  optional: true
   timeout_in_minutes: 30
   working_dir: "/vllm-workspace/tests"
   num_gpus: 4
@@ -3140,6 +3251,7 @@ steps:
 - label: DP EP NixlConnector PD accuracy tests (Distributed) # 15min
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi355_4
+  optional: true
   timeout_in_minutes: 15
   working_dir: "/vllm-workspace/tests"
   num_gpus: 4
@@ -3278,6 +3390,7 @@ steps:
 - label: ROCm LM Eval Large Models (8 Card)
   mirror_hardwares: [amdproduction]
   agent_pool: mi355_8
+  optional: true
   num_gpus: 8
   working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
   commands:
