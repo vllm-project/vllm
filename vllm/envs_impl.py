@@ -636,9 +636,6 @@ class Envs:
     VLLM_DP_SIZE: int
     """World size of the data parallel setting."""
 
-    VLLM_USE_STANDALONE_COMPILE: bool
-    """Feature flag to enable/disable Inductor standalone compile."""
-
     VLLM_DP_MASTER_IP: str
     """IP address of the master node in the data parallel setting."""
 
@@ -1306,7 +1303,7 @@ class Envs:
         "VLLM_DP_RANK": lambda: int(os.getenv("VLLM_DP_RANK", "0")),
         # Default to VLLM_DP_RANK when not explicitly set
         "VLLM_DP_RANK_LOCAL": lambda: int(
-            os.getenv("VLLM_DP_RANK_LOCAL", os.getenv("VLLM_DP_RANK", "0"))
+            os.getenv("VLLM_DP_RANK_LOCAL") or os.getenv("VLLM_DP_RANK") or "0"
         ),
         "VLLM_DP_SIZE": lambda: int(os.getenv("VLLM_DP_SIZE", "1")),
         "VLLM_DP_MASTER_IP": lambda: os.getenv("VLLM_DP_MASTER_IP", "127.0.0.1"),
