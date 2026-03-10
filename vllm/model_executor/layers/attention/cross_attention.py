@@ -188,10 +188,8 @@ class CrossAttention(Attention):
 
         if cache_config is not None:
             kv_cache_dtype = cache_config.cache_dtype
-            block_size = cache_config.block_size
         else:
             kv_cache_dtype = "auto"
-            block_size = 16
 
         if attn_type is not None:
             assert attn_type == AttentionType.ENCODER_DECODER, (
@@ -202,7 +200,6 @@ class CrossAttention(Attention):
             head_size,
             dtype,
             kv_cache_dtype,
-            block_size,
             attn_type=AttentionType.ENCODER_DECODER,
         )
         attn_backend = create_cross_attention_backend(underlying_attn_backend)

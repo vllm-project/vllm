@@ -489,3 +489,11 @@ class KVCacheConfig:
     For models with multiple types of attention, there will be multiple groups,
     see `_get_kv_cache_config_uniform_page_size` for more details.
     """
+
+    @property
+    def has_mamba_layers(self) -> bool:
+        return any(isinstance(g.kv_cache_spec, MambaSpec) for g in self.kv_cache_groups)
+
+    @property
+    def needs_kv_cache_zeroing(self) -> bool:
+        return self.has_mamba_layers
