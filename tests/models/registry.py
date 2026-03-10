@@ -1243,12 +1243,11 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         trust_remote_code=True,
         speculative_model="baidu/ERNIE-4.5-21B-A3B-PT",
     ),
-    # TODO: Re-enable once it supports prefix caching
-    # "ExaoneMoeMTP": _HfExamplesInfo(
-    #     "LGAI-EXAONE/K-EXAONE-236B-A23B",
-    #     speculative_model="LGAI-EXAONE/K-EXAONE-236B-A23B",
-    #     min_transformers_version="5.1.0",
-    # ),
+    "ExaoneMoeMTP": _HfExamplesInfo(
+        "LGAI-EXAONE/K-EXAONE-236B-A23B",
+        speculative_model="LGAI-EXAONE/K-EXAONE-236B-A23B",
+        min_transformers_version="5.1.0",
+    ),
     "ExtractHiddenStatesModel": _HfExamplesInfo(
         "Qwen/Qwen3-8B",
         speculative_method="extract_hidden_states",
