@@ -729,7 +729,7 @@ class EplbState:
                 list(self.model_states.values()),
             )
             assert global_expert_load_windows is not None
-        elif global_expert_loads is None:
+        else:
             should_save_eplb_state = (
                 self.parallel_config.eplb_config.save_load_window
                 and not is_profile
