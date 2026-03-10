@@ -165,6 +165,7 @@ if TYPE_CHECKING:
     VLLM_USE_FLASHINFER_MOE_FP8: bool = False
     VLLM_USE_FLASHINFER_MOE_FP4: bool = False
     VLLM_USE_FLASHINFER_MOE_INT4: bool = False
+    VLLM_GDN_PREFILL_BACKEND: Literal["auto", "flashinfer", "triton"] = "auto"
     VLLM_FLASHINFER_MOE_BACKEND: Literal["throughput", "latency", "masked_gemm"] = (
         "latency"
     )
@@ -1244,6 +1245,17 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # BF16 (activation) x MXFP4 (weight) MoE backend.
     "VLLM_USE_FLASHINFER_MOE_MXFP4_BF16": lambda: bool(
         int(os.getenv("VLLM_USE_FLASHINFER_MOE_MXFP4_BF16", "0"))
+    ),
+    # GDN prefill backend selector.
+    # Available options:
+    # - "auto": Keep current default behavior (FlashInfer on CUDA sm90,
+    #           Triton/FLA otherwise).
+    # - "flashinfer": Force FlashInfer backend when CUDA is available.
+    # - "triton": Force Triton/FLA backend.
+    "VLLM_GDN_PREFILL_BACKEND": env_with_choices(
+        "VLLM_GDN_PREFILL_BACKEND",
+        "auto",
+        ["auto", "flashinfer", "triton"],
     ),
     # Control the cache sized used by the xgrammar compiler. The default
     # of 512 MB should be enough for roughly 1000 JSON schemas.

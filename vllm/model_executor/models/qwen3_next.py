@@ -10,6 +10,7 @@ from einops import rearrange
 from torch import nn
 from transformers.activations import ACT2FN
 
+from vllm import envs
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import (
     CacheConfig,
@@ -153,13 +154,30 @@ def fi_chunk_gated_delta_rule(
 class ChunkGatedDeltaRule(CustomOp):
     def __init__(self) -> None:
         super().__init__()
-        if current_platform.is_cuda() and current_platform.is_device_capability(90):
+        backend = envs.VLLM_GDN_PREFILL_BACKEND
+        use_flashinfer = (
+            current_platform.is_cuda() and current_platform.is_device_capability(90)
+        )
+
+        if backend == "flashinfer":
+            use_flashinfer = current_platform.is_cuda()
+            if not use_flashinfer:
+                logger.warning_once(
+                    "VLLM_GDN_PREFILL_BACKEND=flashinfer is set but "
+                    "can not use this kernel on current platform.s "
+                    "Falling back to Triton/FLA."
+                )
+        elif backend == "triton":
+            use_flashinfer = False
+
+        if use_flashinfer and backend == "auto":
             logger.info_once(
                 "Using FlashInfer GDN prefill kernel on CUDA compute capability 90"
             )
-            self._forward_method = self.forward_cuda
-        else:
-            self._forward_method = self.forward_native
+
+        self._forward_method = (
+            self.forward_cuda if use_flashinfer else self.forward_native
+        )
 
     def forward_cuda(
         self,
