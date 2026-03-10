@@ -3,7 +3,6 @@
 """Tests for vllm.debug.tensor_dump."""
 
 import os
-import tempfile
 
 import pytest
 import torch
@@ -136,9 +135,7 @@ class TestRegisterForwardHook:
     def test_dump_layers_filter(self, tmp_path):
         model = SimpleModel()
         # Only dump layer 0.
-        register_forward_hook_for_model(
-            model, str(tmp_path), dump_layers=[0]
-        )
+        register_forward_hook_for_model(model, str(tmp_path), dump_layers=[0])
         x = torch.randn(2, 4)
         model(x)
         pt_files = list(tmp_path.rglob("*.pt"))
