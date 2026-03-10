@@ -24,17 +24,23 @@ from vllm import SamplingParams
 from vllm.distributed.kv_events import BlockStored, KVEventBatch, ZmqEventPublisher
 from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
+from vllm.pooling_params import LateInteractionParams, PoolingParams
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.torch_utils import set_default_torch_num_threads
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.core import EngineCore
 from vllm.v1.engine.core_client import (
     AsyncMPClient,
+    DPLBAsyncMPClient,
     EngineCoreClient,
     SyncMPClient,
 )
 from vllm.v1.engine.utils import CoreEngineProcManager
 from vllm.v1.executor.abstract import Executor
+from vllm.v1.pool.late_interaction import (
+    LATE_INTERACTION_MODE_CACHE_QUERY,
+    LATE_INTERACTION_MODE_SCORE_DOC,
+)
 
 from ...distributed.conftest import MockSubscriber
 from ...utils import create_new_process_for_each_test
@@ -164,6 +170,71 @@ def test_mp_client_uses_env_timeout(monkeypatch: pytest.MonkeyPatch):
         client.shutdown()
 
 
+def _make_pooling_request(
+    request_id: str, *, mode: str | None = None, query_key: str | None = None
+) -> EngineCoreRequest:
+    late_interaction_params = None
+    if mode is not None and query_key is not None:
+        late_interaction_params = LateInteractionParams(
+            mode=mode,
+            query_key=query_key,
+        )
+
+    return EngineCoreRequest(
+        request_id=request_id,
+        prompt_token_ids=[1, 2, 3],
+        mm_features=None,
+        sampling_params=None,
+        pooling_params=PoolingParams(
+            task="token_embed",
+            late_interaction_params=late_interaction_params,
+        ),
+        arrival_time=time.time(),
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+    )
+
+
+def test_dplb_late_interaction_sticky_routing():
+    client = object.__new__(DPLBAsyncMPClient)
+    client.client_count = 1
+    client.reqs_in_flight = {}
+    client.core_engines = [b"\x00\x00", b"\x01\x00", b"\x02\x00"]
+    client.lb_engines = [[0, 0], [0, 0], [0, 0]]
+    client.eng_start_index = 0
+
+    query_key = "rerank-abc-query-0"
+    query_request = _make_pooling_request(
+        "query-req", mode=LATE_INTERACTION_MODE_CACHE_QUERY, query_key=query_key
+    )
+    doc_request = _make_pooling_request(
+        "doc-req", mode=LATE_INTERACTION_MODE_SCORE_DOC, query_key=query_key
+    )
+
+    query_engine = client.get_core_engine_for_request(query_request)
+    doc_engine = client.get_core_engine_for_request(doc_request)
+
+    assert query_engine == doc_engine
+    assert client.reqs_in_flight["query-req"] == query_engine
+    assert client.reqs_in_flight["doc-req"] == doc_engine
+
+
+def test_dplb_non_late_interaction_still_uses_lb():
+    client = object.__new__(DPLBAsyncMPClient)
+    client.client_count = 1
+    client.reqs_in_flight = {}
+    client.core_engines = [b"\x00\x00", b"\x01\x00", b"\x02\x00"]
+    client.lb_engines = [[2, 1], [0, 0], [1, 0]]
+    client.eng_start_index = 0
+
+    request = make_request(SamplingParams(max_tokens=1))
+    chosen_engine = client.get_core_engine_for_request(request)
+
+    assert chosen_engine == client.core_engines[1]
+    assert client.lb_engines[1][0] == 1
+
+
 def loop_until_done(client: EngineCoreClient, outputs: dict):
     while True:
         engine_core_outputs = client.get_output().outputs
@@ -280,20 +351,15 @@ def echo_dc_nested(
 
 
 def future_echo(self, value: Any, num_wait_loops: int = 2) -> Future:
-    """Utility that returns a Future completed by a per_step_hook after
-    num_wait_loops engine steps (tests deferred utility path).
+    """Utility that returns a Future completed once the engine is idle
+    (tests deferred utility path).
     """
     future: Future = Future()
-    remaining = [num_wait_loops]
 
-    def _step(engine: EngineCore) -> bool:
-        remaining[0] -= 1
-        if remaining[0] <= 0:
-            future.set_result(value)
-            return True  # remove hook
-        return False
+    def idle(engine: EngineCore):
+        future.set_result(value)
 
-    self.per_step_hooks.add(_step)
+    self._idle_state_callbacks.append(idle)
     return future
 
 
@@ -832,8 +898,8 @@ async def test_engine_core_client_future_utility_async(
     monkeypatch: pytest.MonkeyPatch,
     subprocess_future_echo_patch,
 ):
-    """Test that a utility returning a Future (completed by a per_step_hook
-    after N steps) completes when the future is done (engine uses add_done_callback).
+    """Test that a utility returning a Future completes when the future is done
+    (engine uses add_done_callback).
     """
     with monkeypatch.context() as m:
         m.setattr(EngineCore, "future_echo", future_echo, raising=False)

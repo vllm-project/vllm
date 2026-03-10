@@ -11,7 +11,7 @@ from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
-from vllm.utils.platform_utils import get_cu_count
+from vllm.utils.platform_utils import num_compute_units
 from vllm.utils.torch_utils import direct_register_custom_op
 
 logger = init_logger(__name__)
@@ -29,27 +29,6 @@ def is_layer_moe_router_gate(prefix: str) -> bool:
     if not prefix:
         return False
     return prefix.rsplit(".", 1)[-1] in MOE_LAYER_ROUTER_GATE_SUFFIXES
-
-
-def shuffle_weight(w: torch.Tensor) -> torch.Tensor:
-    # Shuffle weight along the last dimension so that
-    # we folded the weights to adjance location
-    # Example:
-    # input:
-    #       [[1, 2, 3, 4, 5, 6],
-    #        [7, 8, 9, 10, 11, 12]]
-    # output:
-    #       [[1, 4, 2, 5, 3, 6],
-    #        [7, 10, 8, 11, 9, 12]]
-    # This will be used together with triton swiglu kernel
-    shape = w.shape
-    N = shape[-1]
-    first = w[..., : N // 2]
-    second = w[..., N // 2 :]
-
-    stacked = torch.stack((first, second), dim=-1)
-    w_shuffled = stacked.reshape(shape)
-    return w_shuffled
 
 
 def get_token_bin_counts_and_mask(
@@ -149,11 +128,7 @@ def rocm_unquantized_gemm_impl(
     m = weight.shape[0]
     k = weight.shape[1]
 
-    cu_count = get_cu_count()
-    if use_aiter_triton_gemm(n, m, k, x.dtype):
-        from aiter.ops.triton.gemm_a16w16 import gemm_a16w16
-
-        return gemm_a16w16(x, weight, bias)
+    cu_count = num_compute_units()
 
     # Next ^2 of n
     N_p2 = 1 << (n - 1).bit_length()
@@ -166,7 +141,10 @@ def rocm_unquantized_gemm_impl(
     # Given the above, how many CUs would we need?
     CuNeeded = rndup_cus * GrpsShrB
     # candidate for atomic reduce count splitk?
-    fits_wvsplitkrc = CuNeeded <= cu_count
+    fits_wvsplitkrc = (
+        N_p2 * m * ((k + 512 - 1) // 512)
+    ) <= 128 * 1024 * 12  # deterministic
+    fits_wvsplitkrc &= CuNeeded <= cu_count
 
     use_skinny_reduce_counting = (
         envs.VLLM_ROCM_USE_SKINNY_GEMM
@@ -178,20 +156,22 @@ def rocm_unquantized_gemm_impl(
             and k > 512
             and m % 16 == 0
             and fits_wvsplitkrc
-            and x.is_contiguous()
+            and weight.is_contiguous()
         )
     )
     if use_skinny_reduce_counting:
-        x_view = x.reshape(-1, x.size(-1))
-        out = ops.wvSplitKrc(weight, x_view, cu_count, bias)
-        return out.reshape(*x.shape[:-1], weight.shape[0])
+        return ops.wvSplitKrc(x, weight, cu_count, bias)
+
+    if use_aiter_triton_gemm(n, m, k, x.dtype):
+        from aiter.ops.triton.gemm_a16w16 import gemm_a16w16
+
+        return gemm_a16w16(x, weight, bias)
 
     use_skinny = (
         envs.VLLM_ROCM_USE_SKINNY_GEMM
         and on_gfx9()
         and x.dtype in [torch.float16, torch.bfloat16]
         and k % 8 == 0
-        and x.is_contiguous()
     )
 
     if use_skinny is not True:
@@ -199,7 +179,7 @@ def rocm_unquantized_gemm_impl(
 
     x_view = x.reshape(-1, x.size(-1))
     if m > 8 and 0 < n <= 4:
-        cu_count = get_cu_count()
+        cu_count = num_compute_units()
         out = ops.wvSplitK(weight, x_view, cu_count, bias)
         return out.reshape(*x.shape[:-1], weight.shape[0])
     elif m % 4 == 0 and n == 1 and k <= 8192 and bias is None:

@@ -7,6 +7,7 @@ import argparse
 from vllm import LLM
 from vllm.sampling_params import SamplingParams
 from vllm.assets.image import ImageAsset
+from vllm.multimodal.utils import encode_image_url
 
 # This script is an offline demo for running Mistral-Small-3.1
 #
@@ -79,8 +80,10 @@ def run_simple_demo(args: argparse.Namespace):
             "content": [
                 {"type": "text", "text": prompt},
                 {
-                    "type": "image_pil",
-                    "image_pil": ImageAsset("cherry_blossom").pil_image,
+                    "type": "image_url",
+                    "image_url": {
+                        "url": encode_image_url(ImageAsset("cherry_blossom").pil_image)
+                    },
                 },
             ],
         },
