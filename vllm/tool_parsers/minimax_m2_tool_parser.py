@@ -323,6 +323,7 @@ class MinimaxM2ToolParser(ToolParser):
                     "arguments": json.loads(args_json),
                 }
             )
+            self.streamed_args_for_tool.append(args_json)
             delta_tool_calls.append(
                 DeltaToolCall(
                     index=idx,
@@ -415,6 +416,7 @@ class MinimaxM2ToolParser(ToolParser):
         if not previous_text or tool_call_starting:
             self.current_tool_index = 0
             self.prev_tool_call_arr.clear()
+            self.streamed_args_for_tool.clear()
             self.is_tool_call_started = tool_call_starting
 
         # Pass through content before any tool call.
@@ -433,7 +435,7 @@ class MinimaxM2ToolParser(ToolParser):
         if delta_tool_calls or content_before:
             return DeltaMessage(
                 content=content_before,
-                tool_calls=delta_tool_calls or None,
+                tool_calls=delta_tool_calls,
             )
 
         # EOS and </minimax:tool_call> both arrive as special tokens with
