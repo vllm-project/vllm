@@ -20,8 +20,9 @@ class LaunchParams(NamedTuple):
 
     src_ptr_table: torch.Tensor
     dst_ptr_table: torch.Tensor
+    wpb_table: torch.Tensor  # [num_layers] int64 words-per-block per layer
     num_layers: int
-    words_per_block: int
+    max_words_per_block: int  # max across layers, for kernel config
     block_size: int
     num_warps: int
     num_sms: int
@@ -40,10 +41,11 @@ def _compute_launch_params(
 def _copy_blocks_kernel(
     src_ptrs,
     dst_ptrs,
+    wpb_ptr,
     mapping_ptr,
     total_jobs,  # type: ignore[name-defined]
     num_pairs,  # type: ignore[name-defined]
-    words_per_block: tl.constexpr,  # type: ignore[name-defined]
+    max_words_per_block: tl.constexpr,  # type: ignore[name-defined]
     BLOCK_SIZE: tl.constexpr,  # type: ignore[name-defined]
 ):
     """
@@ -58,10 +60,11 @@ def _copy_blocks_kernel(
     Args:
         src_ptrs: Pointer to uint64 tensor [num_layers] of source base addrs
         dst_ptrs: Pointer to uint64 tensor [num_layers] of dest base addrs
+        wpb_ptr: Pointer to int64 tensor [num_layers] of words-per-block
         mapping_ptr: Pointer to int64 tensor [N * 2] of (src_id, dst_id) pairs
         total_jobs: num_pairs * num_layers
         num_pairs: Number of (src, dst) block pairs
-        words_per_block: Number of int64 words per block (stride-based)
+        max_words_per_block: Max words-per-block across layers (loop bound)
         BLOCK_SIZE: Triton block size for vectorization
     """
     pid = tl.program_id(0)
@@ -81,15 +84,18 @@ def _copy_blocks_kernel(
         src_base = tl.load(src_ptrs + layer_id).to(tl.pointer_type(tl.int64))
         dst_base = tl.load(dst_ptrs + layer_id).to(tl.pointer_type(tl.int64))
 
-        # Compute offsets using stride-based addressing
-        src_off = src_block * words_per_block
-        dst_off = dst_block * words_per_block
+        # Per-layer words_per_block (supports varying page sizes)
+        wpb = tl.load(wpb_ptr + layer_id)
 
-        # Copy in chunks of BLOCK_SIZE
+        # Compute offsets using stride-based addressing
+        src_off = src_block * wpb
+        dst_off = dst_block * wpb
+
+        # Copy in chunks of BLOCK_SIZE, masked by this layer's wpb
         offsets = tl.arange(0, BLOCK_SIZE)
-        for start in range(0, words_per_block, BLOCK_SIZE):
+        for start in range(0, max_words_per_block, BLOCK_SIZE):
             idx = start + offsets
-            mask = idx < words_per_block
+            mask = idx < wpb
             data = tl.load(src_base + src_off + idx, mask=mask, other=0)
             tl.store(dst_base + dst_off + idx, data, mask=mask)
 
@@ -125,22 +131,19 @@ def build_launch_params(
     dst_tensors = list(dst_caches.values())
     num_layers = len(src_tensors)
 
-    first_tensor = src_tensors[0]
-    words_per_block = first_tensor.stride(0) * first_tensor.element_size() // 8
+    # Build per-layer words_per_block table. Layers may have different
+    # page sizes (e.g., UniformTypeKVCacheSpecs with varying head_size).
+    wpb_list: list[int] = []
+    for src_t, dst_t in zip(src_tensors, dst_tensors):
+        src_wpb = src_t.stride(0) * src_t.element_size() // 8
+        dst_wpb = dst_t.stride(0) * dst_t.element_size() // 8
+        assert src_wpb == dst_wpb, (
+            f"src/dst stride mismatch for layer: {src_wpb} vs {dst_wpb}"
+        )
+        wpb_list.append(src_wpb)
 
-    # Verify all layers have the same stride-based block size
-    for t in src_tensors[1:]:
-        wpb = t.stride(0) * t.element_size() // 8
-        assert wpb == words_per_block, (
-            f"Layer stride mismatch: expected {words_per_block} "
-            f"int64 words/block, got {wpb}"
-        )
-    for t in dst_tensors:
-        wpb = t.stride(0) * t.element_size() // 8
-        assert wpb == words_per_block, (
-            f"Layer stride mismatch: expected {words_per_block} "
-            f"int64 words/block, got {wpb}"
-        )
+    max_wpb = max(wpb_list)
+    wpb_table = torch.tensor(wpb_list, device="cuda", dtype=torch.int64)
 
     src_ptr_table = torch.tensor(
         [t.data_ptr() for t in src_tensors], device="cuda", dtype=torch.uint64
@@ -149,12 +152,13 @@ def build_launch_params(
         [t.data_ptr() for t in dst_tensors], device="cuda", dtype=torch.uint64
     )
 
-    block_size, num_warps = _compute_launch_params(words_per_block)
+    block_size, num_warps = _compute_launch_params(max_wpb)
     return LaunchParams(
         src_ptr_table=src_ptr_table,
         dst_ptr_table=dst_ptr_table,
+        wpb_table=wpb_table,
         num_layers=num_layers,
-        words_per_block=words_per_block,
+        max_words_per_block=max_wpb,
         block_size=block_size,
         num_warps=num_warps,
         num_sms=num_sms,
@@ -197,10 +201,11 @@ def copy_blocks(
     _copy_blocks_kernel[(grid_size,)](
         launch_params.src_ptr_table,
         launch_params.dst_ptr_table,
+        launch_params.wpb_table,
         mapping_flat,
         total_jobs,
         num_pairs,
-        launch_params.words_per_block,
+        launch_params.max_words_per_block,
         BLOCK_SIZE=launch_params.block_size,
         num_warps=launch_params.num_warps,
     )

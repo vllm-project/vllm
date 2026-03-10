@@ -136,20 +136,15 @@ class SimpleCPUOffloadScheduler:
         from vllm.v1.kv_cache_interface import KVCacheConfig as KVCacheConfigCls
         from vllm.v1.kv_cache_interface import KVCacheTensor
 
-        page_sizes = {
-            g.kv_cache_spec.page_size_bytes for g in gpu_config.kv_cache_groups
-        }
-        assert len(page_sizes) == 1, (
-            f"Expected uniform page_size_bytes, got {page_sizes}"
-        )
-        page_size_bytes = next(iter(page_sizes))
-        num_tensors = len(gpu_config.kv_cache_tensors)
-        assert num_tensors > 0
+        assert len(gpu_config.kv_cache_tensors) > 0
 
-        num_cpu_blocks = max(1, cpu_capacity_bytes // num_tensors // page_size_bytes)
+        num_gpu_blocks = gpu_config.num_blocks
+        gpu_total_bytes = sum(t.size for t in gpu_config.kv_cache_tensors)
+        num_cpu_blocks = max(1, num_gpu_blocks * cpu_capacity_bytes // gpu_total_bytes)
+        # Create CPU kv_cache_tensors mirroring GPU by scaling size proportionally.
         cpu_tensors = [
             KVCacheTensor(
-                size=page_size_bytes * num_cpu_blocks,
+                size=t.size // num_gpu_blocks * num_cpu_blocks,
                 shared_by=list(t.shared_by),
             )
             for t in gpu_config.kv_cache_tensors

@@ -106,20 +106,21 @@ class SimpleCPUOffloadWorker:
                 tensor = tensor.view(num_blocks, -1)
             unique_gpu_caches[name] = tensor
 
-        first = next(iter(unique_gpu_caches.values()))
-        bytes_per_block = first.stride(0) * first.element_size()
-        num_unique_tensors = len(unique_gpu_caches)
+        # Compute per-tensor bytes_per_block. Tensors may have different
+        # page_size_bytes (e.g., UniformTypeKVCacheSpecs with varying head_size).
+        per_tensor_bpb = [
+            t.stride(0) * t.element_size() for t in unique_gpu_caches.values()
+        ]
+        total_bytes_per_block = sum(per_tensor_bpb)
 
-        self.num_cpu_blocks = max(
-            1, self.cpu_capacity_bytes // (bytes_per_block * num_unique_tensors)
-        )
+        self.num_cpu_blocks = max(1, self.cpu_capacity_bytes // total_bytes_per_block)
 
         logger.info(
             "SimpleCPUOffloadWorker: %d unique GPU KV tensors, "
             "allocating %d CPU blocks (%.2f GB)",
-            num_unique_tensors,
+            len(unique_gpu_caches),
             self.num_cpu_blocks,
-            (self.num_cpu_blocks * bytes_per_block * num_unique_tensors) / (1024**3),
+            (self.num_cpu_blocks * total_bytes_per_block) / (1024**3),
         )
 
         pin_memory = is_pin_memory_available()
