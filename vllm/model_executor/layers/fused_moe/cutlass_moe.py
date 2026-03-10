@@ -1331,7 +1331,7 @@ def run_cutlass_moe_w4a16_bf16(
     )
 
 
-class CutlassExpertsW4A16Bf16(mk.FusedMoEPermuteExpertsUnpermute):
+class CutlassExpertsW4A16Bf16(mk.FusedMoEExpertsModular):
     def __init__(
         self,
         out_dtype: torch.dtype | None,
@@ -1574,8 +1574,8 @@ def cutlass_moe_w4a16_bf16(
 
     num_experts = global_num_experts if global_num_experts != -1 else w1_q.size(0)
 
-    fn = mk.FusedMoEModularKernel(
-        MoEPrepareAndFinalizeNoEP(),
+    fn = mk.FusedMoEKernel(
+        MoEPrepareAndFinalizeNoDPEPModular(),
         CutlassExpertsW4A16Bf16(
             out_dtype=a.dtype,
             a_strides1=a_strides1,

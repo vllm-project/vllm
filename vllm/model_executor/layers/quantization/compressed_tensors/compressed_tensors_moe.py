@@ -2762,7 +2762,7 @@ class CompressedTensorsW4A16CutlassMoEMethod(CompressedTensorsMoEMethod):
     def maybe_make_prepare_finalize(
         self,
         routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
-    ) -> mk.FusedMoEPrepareAndFinalize | None:
+    ) -> mk.FusedMoEPrepareAndFinalizeModular | None:
         return super().maybe_make_prepare_finalize(routing_tables)
 
     def get_fused_moe_quant_config(
@@ -2778,9 +2778,9 @@ class CompressedTensorsW4A16CutlassMoEMethod(CompressedTensorsMoEMethod):
 
     def select_gemm_impl(
         self,
-        prepare_finalize: mk.FusedMoEPrepareAndFinalize,
+        prepare_finalize: mk.FusedMoEPrepareAndFinalizeModular,
         layer: torch.nn.Module,
-    ) -> mk.FusedMoEPermuteExpertsUnpermute:
+    ) -> mk.FusedMoEExpertsModular:
         assert self.moe_quant_config is not None
         assert (
             prepare_finalize.activation_format == FusedMoEActivationFormat.Standard
@@ -2788,7 +2788,7 @@ class CompressedTensorsW4A16CutlassMoEMethod(CompressedTensorsMoEMethod):
 
         from vllm.model_executor.layers.fused_moe import CutlassExpertsW4A16Bf16
 
-        experts: FusedMoEPermuteExpertsUnpermute
+        experts: FusedMoEExpertsModular
 
         logger.debug("CutlassExpertsW4A16Bf16(%s)", self.__class__.__name__)
         experts = CutlassExpertsW4A16Bf16(
