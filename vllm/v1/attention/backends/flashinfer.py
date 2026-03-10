@@ -574,8 +574,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         # if TRTLLM attention kernel is not used when building attn metadata
         can_use_trtllm = can_use_trtllm_attention(self.num_qo_heads, self.num_kv_heads)
 
-        self._kv_transfer_enabled = vllm_config.kv_transfer_config is not None
-
         if (
             can_use_trtllm
             and not vllm_config.attention_config.disable_flashinfer_q_quantization
@@ -849,9 +847,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             has_sinks=self.has_sinks,
             has_spec=uses_spec_reorder,
         )
-        # KV transfer requires non-contiguous KV cache views, incompatible with TRTLLM
-        if self._kv_transfer_enabled:
-            prefill_use_trtllm = False
         decode_use_trtllm = (
             self.use_trtllm_decode_attention and self.dcp_world_size <= 1
         )
