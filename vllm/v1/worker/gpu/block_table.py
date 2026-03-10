@@ -235,8 +235,13 @@ def _compute_slot_mappings_kernel(
     slot_mapping_ptr = slot_mappings_ptr + group_id * slot_mappings_stride
 
     if batch_idx == tl.num_programs(1) - 1:
-        # Pad remaining slots to -1. This is needed for CUDA graphs.
-        for i in range(num_tokens, max_num_tokens, TRITON_BLOCK_SIZE):
+        # Pad remaining slots to PAD_ID. This is needed for CUDA graphs.
+        # Start from actual token count (not padded) to cover the gap
+        # between actual tokens and padded tokens that can contain stale
+        # valid slot IDs from previous chunks during chunked prefill.
+        num_reqs = tl.num_programs(1) - 1
+        actual_num_tokens = tl.load(query_start_loc + num_reqs)
+        for i in range(actual_num_tokens, max_num_tokens, TRITON_BLOCK_SIZE):
             offset = i + tl.arange(0, TRITON_BLOCK_SIZE)
             tl.store(slot_mapping_ptr + offset, PAD_ID, mask=offset < max_num_tokens)
         return
