@@ -14,12 +14,7 @@
 #
 # Build arguments:
 #   PYTHON_VERSION=3.13|3.12 (default)|3.11|3.10
-#   VLLM_CPU_DISABLE_AVX512=false (default)|true
-#   VLLM_CPU_AVX2=false (default)|true (for cross-compilation)
-#   VLLM_CPU_AVX512=false (default)|true (for cross-compilation)
-#   VLLM_CPU_AVX512BF16=false (default)|true (for cross-compilation)
-#   VLLM_CPU_AVX512VNNI=false (default)|true (for cross-compilation)
-#   VLLM_CPU_AMXBF16=false (default)|true (for cross-compilation)
+#   VLLM_CPU_X86=false (default)|true (for cross-compilation)
 #   VLLM_CPU_ARM_BF16=false (default)|true (for cross-compilation)
 #
 
@@ -91,24 +86,9 @@ ARG max_jobs=32
 ENV MAX_JOBS=${max_jobs}
 
 ARG GIT_REPO_CHECK=0
-# Support for building with non-AVX512 vLLM: docker build --build-arg VLLM_CPU_DISABLE_AVX512="true" ...
-ARG VLLM_CPU_DISABLE_AVX512=0
-ENV VLLM_CPU_DISABLE_AVX512=${VLLM_CPU_DISABLE_AVX512}
-# Support for cross-compilation with AVX2 ISA: docker build --build-arg VLLM_CPU_AVX2="1" ...
-ARG VLLM_CPU_AVX2=0
-ENV VLLM_CPU_AVX2=${VLLM_CPU_AVX2}
-# Support for cross-compilation with AVX512 ISA: docker build --build-arg VLLM_CPU_AVX512="1" ...
-ARG VLLM_CPU_AVX512=0
-ENV VLLM_CPU_AVX512=${VLLM_CPU_AVX512}
-# Support for building with AVX512BF16 ISA: docker build --build-arg VLLM_CPU_AVX512BF16="true" ...
-ARG VLLM_CPU_AVX512BF16=0
-ENV VLLM_CPU_AVX512BF16=${VLLM_CPU_AVX512BF16}
-# Support for building with AVX512VNNI ISA: docker build --build-arg VLLM_CPU_AVX512VNNI="true" ...
-ARG VLLM_CPU_AVX512VNNI=0
-ENV VLLM_CPU_AVX512VNNI=${VLLM_CPU_AVX512VNNI}
-# Support for building with AMXBF16 ISA: docker build --build-arg VLLM_CPU_AMXBF16="true" ...
-ARG VLLM_CPU_AMXBF16=1
-ENV VLLM_CPU_AMXBF16=${VLLM_CPU_AMXBF16}
+# Support for cross-compilation with x86 ISA including AVX2 and AVX512: docker build --build-arg VLLM_CPU_X86="true" ...
+ARG VLLM_CPU_X86=0
+ENV VLLM_CPU_X86=${VLLM_CPU_X86}
 # Support for cross-compilation with ARM BF16 ISA: docker build --build-arg VLLM_CPU_ARM_BF16="true" ...
 ARG VLLM_CPU_ARM_BF16=0
 ENV VLLM_CPU_ARM_BF16=${VLLM_CPU_ARM_BF16}
@@ -116,7 +96,7 @@ ENV VLLM_CPU_ARM_BF16=${VLLM_CPU_ARM_BF16}
 WORKDIR /vllm-workspace
 
 # Validate build arguments - prevent mixing incompatible ISA flags
-RUN if [ "$TARGETARCH" = "arm64" ] && { [ "$VLLM_CPU_AVX2" != "0" ] || [ "$VLLM_CPU_AVX512" != "0" ] || [ "$VLLM_CPU_AVX512BF16" != "0" ] || [ "$VLLM_CPU_AVX512VNNI" != "0" ]; }; then \
+RUN if [ "$TARGETARCH" = "arm64" ] && [ "$VLLM_CPU_X86" != "0" ]; then \
         echo "ERROR: Cannot use x86-specific ISA flags (AVX2, AVX512, etc.) when building for ARM64 (--platform=linux/arm64)"; \
         exit 1; \
     fi && \
@@ -232,22 +212,12 @@ LABEL org.opencontainers.image.source="https://github.com/vllm-project/vllm"
 
 # Build configuration labels
 ARG TARGETARCH
-ARG VLLM_CPU_DISABLE_AVX512
-ARG VLLM_CPU_AVX2
-ARG VLLM_CPU_AVX512
-ARG VLLM_CPU_AVX512BF16
-ARG VLLM_CPU_AVX512VNNI
-ARG VLLM_CPU_AMXBF16
+ARG VLLM_CPU_X86
 ARG VLLM_CPU_ARM_BF16
 ARG PYTHON_VERSION
 
 LABEL ai.vllm.build.target-arch="${TARGETARCH}"
-LABEL ai.vllm.build.cpu-disable-avx512="${VLLM_CPU_DISABLE_AVX512:-false}"
-LABEL ai.vllm.build.cpu-avx2="${VLLM_CPU_AVX2:-false}"
-LABEL ai.vllm.build.cpu-avx512="${VLLM_CPU_AVX512:-false}"
-LABEL ai.vllm.build.cpu-avx512bf16="${VLLM_CPU_AVX512BF16:-false}"
-LABEL ai.vllm.build.cpu-avx512vnni="${VLLM_CPU_AVX512VNNI:-false}"
-LABEL ai.vllm.build.cpu-amxbf16="${VLLM_CPU_AMXBF16:-false}"
+LABEL ai.vllm.build.cpu-x86="${VLLM_CPU_X86:-false}"
 LABEL ai.vllm.build.cpu-arm-bf16="${VLLM_CPU_ARM_BF16:-false}"
 LABEL ai.vllm.build.python-version="${PYTHON_VERSION:-3.12}"
 
