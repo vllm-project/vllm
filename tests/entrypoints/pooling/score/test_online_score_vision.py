@@ -25,7 +25,7 @@ ROCM_ATTN_BACKENDS = [
     "FLEX_ATTENTION",
 ]
 
-ATTN_BACKENDS = ROCM_ATTN_BACKENDS if current_platform.is_rocm() else []
+ATTN_BACKENDS = ROCM_ATTN_BACKENDS if current_platform.is_rocm() else ["auto"]
 
 # Per-backend tolerance with explicit entries; "default" is the fallback
 BACKEND_TOL: dict[str, float] = {
@@ -105,13 +105,16 @@ def server(request):
         "8192",
         "--chat-template",
         str(VLLM_PATH / "examples/pooling/score/template/qwen3_vl_reranker.jinja"),
-        "--attention-config",
-        json.dumps({"backend": backend}),
-    ] + ROCM_EXTRA_ARGS
+    ]
 
-    env = dict(ROCM_ENV_OVERRIDES)
-    if backend != "ROCM_AITER_FA":
-        env["VLLM_ROCM_USE_AITER"] = "0"
+    env = dict()
+    if backend != "auto":
+        args += ["--attention-config", json.dumps({"backend": backend})]
+        args += ROCM_EXTRA_ARGS
+
+        env = dict(ROCM_ENV_OVERRIDES)
+        if backend != "ROCM_AITER_FA":
+            env["VLLM_ROCM_USE_AITER"] = "0"
 
     with RemoteOpenAIServer(
         MODEL_NAME, args, override_hf_configs=HF_OVERRIDES, env_dict=env

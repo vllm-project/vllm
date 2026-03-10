@@ -313,6 +313,10 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "HunYuanMoEV1ForCausalLM": _HfExamplesInfo(
         "tencent/Hunyuan-A13B-Instruct", trust_remote_code=True
     ),
+    "HyperCLOVAXForCausalLM": _HfExamplesInfo(
+        "naver-hyperclovax/HyperCLOVAX-SEED-Think-32B",
+        trust_remote_code=True,
+    ),
     "InternLMForCausalLM": _HfExamplesInfo(
         "internlm/internlm-chat-7b", trust_remote_code=True
     ),
@@ -347,7 +351,11 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     ),
     "Lfm2ForCausalLM": _HfExamplesInfo("LiquidAI/LFM2-1.2B"),
     "Lfm2MoeForCausalLM": _HfExamplesInfo(
-        "LiquidAI/LFM2-8B-A1B", min_transformers_version="4.58"
+        "LiquidAI/LFM2-8B-A1B",
+        min_transformers_version="5.0.0",
+        use_original_num_layers=True,
+        # Initialize at least one MoE layer
+        hf_overrides={"num_hidden_layers": 4},
     ),
     "LlamaForCausalLM": _HfExamplesInfo(
         "meta-llama/Llama-3.2-1B-Instruct",
@@ -507,9 +515,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         "stepfun-ai/Step-3.5-Flash",
         use_original_num_layers=True,
         # Initialize at least one MoE layer
-        hf_overrides={
-            "num_hidden_layers": 4,
-        },
+        hf_overrides={"num_hidden_layers": 4},
     ),
     "Step3TextForCausalLM": _HfExamplesInfo("stepfun-ai/step3", trust_remote_code=True),
     "SolarForCausalLM": _HfExamplesInfo(
@@ -791,6 +797,10 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     ),
     "HCXVisionForCausalLM": _HfExamplesInfo(
         "naver-hyperclovax/HyperCLOVAX-SEED-Vision-Instruct-3B",
+        trust_remote_code=True,
+    ),
+    "HCXVisionV2ForCausalLM": _HfExamplesInfo(
+        "naver-hyperclovax/HyperCLOVAX-SEED-Think-32B",
         trust_remote_code=True,
     ),
     "HunYuanVLForConditionalGeneration": _HfExamplesInfo(
@@ -1225,9 +1235,7 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         speculative_model="stepfun-ai/Step-3.5-Flash",
         use_original_num_layers=True,
         # Initialize at least one MoE layer
-        hf_overrides={
-            "num_hidden_layers": 4,
-        },
+        hf_overrides={"num_hidden_layers": 4},
         is_available_online=False,
     ),
 }
