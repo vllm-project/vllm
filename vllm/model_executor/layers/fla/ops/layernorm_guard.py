@@ -18,6 +18,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 
+from vllm.model_executor.custom_op import CustomOp
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv, next_power_of_2
 from vllm.utils.platform_utils import num_compute_units
@@ -371,10 +372,12 @@ class LayerNormGated(nn.Module):
         )
 
 
-class RMSNormGated(nn.Module):
+@CustomOp.register("rms_norm_gated")
+class RMSNormGated(CustomOp):
     def __init__(
         self,
-        hidden_size,
+        hidden_size: int,
+        elementwise_affine: bool = True,
         eps: float = 1e-5,
         group_size: int | None = None,
         norm_before_gate: bool = False,
@@ -387,26 +390,108 @@ class RMSNormGated(nn.Module):
         """
         factory_kwargs = {"device": device, "dtype": dtype}
         super().__init__()
+        self.hidden_size = hidden_size
+        self.elementwise_affine = elementwise_affine
         self.eps = eps
         self.activation = activation
-        self.weight = nn.Parameter(torch.empty(hidden_size, **factory_kwargs))
-        self.register_parameter("bias", None)
         self.group_size = group_size
         self.norm_before_gate = norm_before_gate
+
+        if self.activation not in ["swish", "silu", "sigmoid"]:
+            raise ValueError(f"Unsupported activation: {self.activation}")
+
+        if self.elementwise_affine:
+            self.weight = nn.Parameter(torch.empty(hidden_size, **factory_kwargs))
+        else:
+            self.register_parameter("weight", None)
+
+        self.register_parameter("bias", None)
         self.reset_parameters()
 
     def reset_parameters(self):
-        torch.nn.init.ones_(self.weight)
+        if self.elementwise_affine:
+            torch.nn.init.ones_(self.weight)
 
-    def forward(self, x, z=None):
-        """If z is not None, we do norm(x) * silu(z) if norm_before_gate, else norm(x * silu(z))"""
-        return rmsnorm_fn(
-            x,
-            self.weight,
-            self.bias,
-            z=z,
-            eps=self.eps,
-            group_size=self.group_size,
-            norm_before_gate=self.norm_before_gate,
-            activation=self.activation,
-        )
+    def forward_native(
+        self,
+        x: torch.Tensor,
+        g: torch.Tensor | None = None,
+        z: torch.Tensor | None = None,
+        residual: torch.Tensor | None = None,
+        prenorm: bool = False,
+        residual_in_fp32: bool = False,
+    ) -> torch.Tensor:
+        """Decomposed PyTorch ops for torch.compile/inductor fusion."""
+        gate = g if g is not None else z
+
+        # Fall back to cuda kernel for residual/prenorm/group_size path
+        if (
+            residual is not None
+            or prenorm
+            or self.group_size is not None
+            or self.norm_before_gate
+        ):
+            return self.forward_cuda(
+                x,
+                g=g,
+                z=z,
+                residual=residual,
+                prenorm=prenorm,
+                residual_in_fp32=residual_in_fp32,
+            )
+
+        x_float = x.float()
+        variance = x_float.pow(2).mean(dim=-1, keepdim=True)
+        x_normed = x_float * torch.rsqrt(variance + self.eps)
+        if self.weight is not None:
+            x_normed = x_normed * self.weight.float()
+
+        if gate is not None:
+            g_float = gate.float()
+            if self.activation in ("swish", "silu"):
+                out = x_normed * g_float * torch.sigmoid(g_float)
+            else:  # sigmoid
+                out = x_normed * torch.sigmoid(g_float)
+        else:
+            out = x_normed
+
+        return out.to(x.dtype)
+
+    def forward_cuda(
+        self,
+        x: torch.Tensor,
+        g: torch.Tensor | None = None,
+        z: torch.Tensor | None = None,
+        residual: torch.Tensor | None = None,
+        prenorm: bool = False,
+        residual_in_fp32: bool = False,
+    ) -> torch.Tensor:
+        """If z or g is not None, we do norm(x) * act(gate)"""
+        gate = g if g is not None else z
+
+        if residual is not None or prenorm or residual_in_fp32:
+            # Local import to avoid circular dependency
+            from .kda import rms_norm_gated
+
+            return rms_norm_gated(
+                x,
+                gate,
+                self.weight,
+                self.bias,
+                self.activation,
+                residual=residual,
+                eps=self.eps,
+                prenorm=prenorm,
+                residual_in_fp32=residual_in_fp32,
+            )
+        else:
+            return rmsnorm_fn(
+                x,
+                self.weight,
+                self.bias,
+                z=gate,
+                eps=self.eps,
+                group_size=self.group_size,
+                norm_before_gate=self.norm_before_gate,
+                activation=self.activation,
+            )

@@ -10,9 +10,7 @@
 
 
 import torch
-import torch.nn as nn
 
-from vllm.model_executor.custom_op import CustomOp
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv, next_power_of_2
 
@@ -430,81 +428,6 @@ def rms_norm_gated(
     )
     y = y.reshape(x_shape_og)
     return y if not prenorm else (y, residual_out.reshape(x_shape_og))
-
-
-@CustomOp.register("fused_rms_norm_gated")
-class FusedRMSNormGated(CustomOp):
-    def __init__(
-        self,
-        hidden_size: int,
-        elementwise_affine: bool = True,
-        eps: float = 1e-5,
-        activation: str = "swish",
-        device: torch.device | None = None,
-        dtype: torch.dtype | None = None,
-    ) -> None:
-        factory_kwargs = {"device": device, "dtype": dtype}
-        super().__init__()
-
-        self.hidden_size = hidden_size
-        self.elementwise_affine = elementwise_affine
-        self.eps = eps
-        self.activation = activation
-
-        if self.activation not in ["swish", "silu", "sigmoid"]:
-            raise ValueError(f"Unsupported activation: {self.activation}")
-
-        if elementwise_affine:
-            self.weight = nn.Parameter(torch.empty(hidden_size, **factory_kwargs))
-        else:
-            self.register_parameter("weight", None)
-        self.register_parameter("bias", None)
-
-    def forward_native(
-        self,
-        x: torch.Tensor,
-        g: torch.Tensor,
-        residual: torch.Tensor | None = None,
-        prenorm: bool = False,
-        residual_in_fp32: bool = False,
-    ) -> torch.Tensor:
-        """Decomposed PyTorch ops for torch.compile/inductor fusion."""
-        # TODO(https://github.com/vllm-project/vllm/issues/36175): implement
-        # native residual/prenorm path and unify with RMSNormGated.
-        # For now, fall back to the triton kernel.
-        if residual is not None or prenorm:
-            return self.forward_cuda(x, g, residual, prenorm, residual_in_fp32)
-        x_float = x.float()
-        variance = x_float.pow(2).mean(dim=-1, keepdim=True)
-        x_normed = x_float * torch.rsqrt(variance + self.eps)
-        if self.weight is not None:
-            x_normed = x_normed * self.weight.float()
-        g_float = g.float()
-        if self.activation in ("swish", "silu"):
-            out = x_normed * g_float * torch.sigmoid(g_float)
-        else:  # sigmoid
-            out = x_normed * torch.sigmoid(g_float)
-        return out.to(x.dtype)
-
-    def forward_cuda(
-        self,
-        x: torch.Tensor,
-        g: torch.Tensor,
-        residual: torch.Tensor | None = None,
-        prenorm: bool = False,
-        residual_in_fp32: bool = False,
-    ) -> torch.Tensor:
-        return rms_norm_gated(
-            x,
-            g,
-            self.weight,
-            self.bias,
-            self.activation,
-            residual=residual,
-            eps=self.eps,
-            prenorm=prenorm,
-            residual_in_fp32=residual_in_fp32,
-        )
 
 
 @triton.heuristics({"IS_VARLEN": lambda args: args["cu_seqlens"] is not None})
