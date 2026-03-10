@@ -35,11 +35,13 @@ logger = init_logger(__name__)
 
 hermes_grammar = r"""
 
-    tool_calls: TC_START tool_call+ TC_END
+    output: (text+|tagged_tool_call)+
+    tagged_tool_call: TC_START tool_call TC_END
     tool_call: _LBRACE tool_name _COMMA tool_arguments _RBRACE
              | _LBRACE tool_arguments _COMMA tool_name _RBRACE
     tool_name: NAME _COLON string
     tool_arguments: ARGUMENTS _COLON value
+    text: TEXT -> text
 
     ?value: dict
           | list
@@ -55,7 +57,8 @@ hermes_grammar = r"""
     string: STRING -> string
 
     %declare TC_START TC_END NAME ARGUMENTS STRING FLOAT TRUE FALSE NULL
-    %declare _LBRACE _RBRACE _LBRACK _RBRACK _COMMA _COLON SKIP
+    %declare _LBRACE _RBRACE _LBRACK _RBRACK _COMMA _COLON TEXT SKIP
+    %ignore SKIP
 """
 
 
@@ -87,17 +90,51 @@ class HermesLexer(Lexer):
             f"(?P<{name}>{pattern})" for name, pattern in delimiters + self.PATTERNS
         )
         self.regex = re.compile(pattern)
+        self.start_regex = re.compile(f"(?P<TC_START>{self.tc_start()})")
         self.buffer = ""
+        self.done = False
 
-    def lex(self, stream):
-        self.buffer = ""
+    def wait_for_content(self, stream):
+        try:
+            while True:
+                self.buffer = stream.send(self.buffer)
+                if not self.buffer:
+                    yield Token("SKIP", "")
+                else:
+                    return False
+        except StopIteration:
+            return True
+
+    def consume_buffer(self, length: int | None = None) -> str:
+        length = len(self.buffer) if length is None else length
+        text = self.buffer[:length]
+        self.buffer = self.buffer[length:]
+        return text
+
+    def consume_text(self, stream):
+        while True:
+            self.done = yield from self.wait_for_content(stream)
+            if self.done:
+                return
+            match = self.start_regex.search(self.buffer, partial=True)
+            if match is not None and match.end() > match.start():
+                text = self.consume_buffer(match.start())
+                if text:
+                    yield Token("TEXT", text)
+                if match.partial:
+                    if not text:  # No need to send another token
+                        yield Token("SKIP", "")
+                else:
+                    return
+            else:
+                yield Token("TEXT", self.consume_buffer())
+
+    def consume_tool_call(self, stream):
         self.dict_dept = 0
-
-        for chunk in stream:
-            self.buffer += chunk
-            if not self.buffer:
-                yield Token("SKIP", "")  # Possible partial match
-                continue
+        while True:
+            self.done = yield from self.wait_for_content(stream)
+            if self.done:
+                return
             while self.buffer:
                 if (match := self.regex.match(self.buffer, partial=True)) is not None:
                     token_type = match.lastgroup
@@ -105,24 +142,33 @@ class HermesLexer(Lexer):
                         yield Token("SKIP", "")  # Possible partial match
                         break
                     if token_type == "WS":  # skip whitespace
-                        self.buffer = self.buffer[match.end() :]
+                        self.consume_buffer(match.end())
                         continue
                     value = match.group() if token_type in ["STRING", "FLOAT"] else ""
                     if token_type == "_LBRACE":
                         self.dict_dept += 1
-                    if token_type == "_RBRACE":
+                    elif token_type == "_RBRACE":
                         self.dict_dept -= 1
-                    if token_type == "STRING":
+                    elif token_type == "STRING":
                         if value == '"name"' and self.dict_dept == 1:
                             token_type = "NAME"
                             value = ""
                         elif value == '"arguments"' and self.dict_dept == 1:
                             token_type = "ARGUMENTS"
                             value = ""
+                    self.consume_buffer(match.end())
                     yield Token(token_type, value)
-                    self.buffer = self.buffer[match.end() :]
+                    if token_type == "TC_END":
+                        return
                 else:
                     raise UnexpectedCharacters(self.buffer, 0, 0, 0)
+
+    def lex(self, stream):
+        self.buffer = ""
+        self.done = False
+        while not self.done:
+            yield from self.consume_text(stream)
+            yield from self.consume_tool_call(stream)
 
 
 class HermesTransformer(Transformer):
@@ -130,7 +176,6 @@ class HermesTransformer(Transformer):
         super().__init__()
         self.parsed_tool_names = list[str]()
         self.parsed_tool_calls = list[dict[str, dict[str, Any]]]()
-        self.finished = False
 
     def tool_name(self, items):
         self.parsed_tool_names.append(items[1])
@@ -139,15 +184,18 @@ class HermesTransformer(Transformer):
     def tool_arguments(self, items):
         return items[1]
 
+    def tagged_tool_call(self, items):
+        return items[1]
+
     def tool_call(self, items):
         tc = {"name": items[0], "arguments": items[1]}
         self.parsed_tool_calls.append(tc)
         self.validate()
         return tc
 
-    def tool_calls(self, items):
-        self.finish()
-        return items[1:-1]
+    def text(self, items):
+        chunk = str(items[0])
+        return chunk
 
     dict = dict
     list = list
@@ -175,7 +223,6 @@ class HermesTransformer(Transformer):
 
     def finish(self):
         self.validate(operator.eq)
-        self.finished = True
 
 
 # Avoid compiling the grammar every time. It's about an order of magnitude faster
@@ -184,7 +231,7 @@ class HermesTransformer(Transformer):
 def _make_parser_proto(lexer_class=HermesLexer):
     new_hermes_parser = Lark(
         hermes_grammar,
-        start="tool_calls",
+        start="output",
         lexer=lexer_class,
         parser="lalr",
         transformer=HermesTransformer(),
@@ -202,23 +249,37 @@ def make_parser(lexer_class=HermesLexer):
 
 
 class HermesToolCallParser:
-    def __init__(self, tool_name_callback, tool_call_callback, lexer_class=HermesLexer):
+    def __init__(
+        self,
+        tool_name_callback,
+        tool_call_callback,
+        text_callback,
+        lexer_class=HermesLexer,
+    ):
         self.parser = make_parser(lexer_class)
 
         self.tool_name_callback = tool_name_callback
         self.tool_call_callback = tool_call_callback
+        self.text_callback = text_callback
         self.tool_names_found = 0
         self.tool_found = 0
+        self.text_ptr = 0
+        self.finished = False
 
         self.food = ""
 
         def generator():
-            while not self.finished():
+            yield ""
+            while not self.finished:
                 food = self.food
                 self.food = ""
-                yield food
+                push_back = yield food
+                self.food = push_back + self.food
 
-        self.interactive = self.parser.parse_interactive(generator())
+        gen = generator()
+        next(gen)
+
+        self.interactive = self.parser.parse_interactive(gen)
         self.transformer = self.parser.parser.options.transformer
         self.token_stream = self.interactive.lexer_thread.lex(
             self.interactive.parser_state
@@ -227,32 +288,30 @@ class HermesToolCallParser:
         self.start_token = lexer.tc_start()
         self.end_token = lexer.tc_end()
 
+    def _invoke_callbacks(self):
+        if len(self.transformer.parsed_tool_names) > self.tool_names_found:
+            self.tool_name_callback(self.transformer.parsed_tool_names[-1])
+            self.tool_names_found += 1
+        if len(self.transformer.parsed_tool_calls) > self.tool_found:
+            self.tool_call_callback(self.transformer.parsed_tool_calls[-1])
+            self.tool_found += 1
+
     def feed(self, chunk: str):
-        if self.transformer.finished:
-            raise ValueError("Parser is finished")
         self.food += chunk
         while True:
             token = next(self.token_stream)
+            if token.type == "TEXT":
+                self.text_callback(str(token))
             if token.type == "SKIP":  # waiting for more input
                 break
             self.interactive.result = self.interactive.feed_token(token)
-            if len(self.transformer.parsed_tool_names) > self.tool_names_found:
-                self.tool_name_callback(self.transformer.parsed_tool_names[-1])
-                self.tool_names_found += 1
-            if len(self.transformer.parsed_tool_calls) > self.tool_found:
-                self.tool_call_callback(self.transformer.parsed_tool_calls[-1])
-                self.tool_found += 1
+            self._invoke_callbacks()
 
     def finish(self) -> list[tuple[str, Any]]:
-        if self.transformer.finished:
-            raise ValueError("Parser is finished")
-        tree = self.interactive.feed_eof()
-        if not self.transformer.finished:
-            raise ValueError("The tool call end token wasn't found")
-        return tree
-
-    def finished(self):
-        return self.transformer.finished
+        self.finished = True
+        result = self.interactive.feed_eof()
+        self._invoke_callbacks()
+        return result
 
 
 def dump_args(args: None | dict[str, Any] | str) -> str | None:
@@ -270,17 +329,17 @@ class Granite4ToolParser(ToolParser):
         self.current_tool_id: int = -1
         self.streamed_args_for_tool = list[str]()
         self.streamed_tool_names = list[str]()
+        self.streamed_text_chunks = list[str]()
 
         self.tool_names = list[str]()
         self.tool_calls = list[dict[str, dict[str, Any]]]()
+        self.parsed_text_chunks = list[str]()
 
         self.parser = HermesToolCallParser(
             lambda x: self.tool_names.append(x),
             lambda x: self.tool_calls.append(x),
+            lambda x: self.parsed_text_chunks.append(x),
         )
-        self.start_found = False
-        self.start_regex = re.compile(self.parser.start_token)
-        self.look_ahead = ""
 
     def adjust_request(self, request: ChatCompletionRequest) -> ChatCompletionRequest:
         request = super().adjust_request(request)
@@ -296,40 +355,41 @@ class Granite4ToolParser(ToolParser):
         model_output: str,
         request: ChatCompletionRequest,
     ) -> ExtractedToolCallInformation:
-        start_token_pos = model_output.find(self.parser.start_token)
-        end_token_pos = model_output.find(self.parser.end_token)
-
         msg = ExtractedToolCallInformation(
             tools_called=False, tool_calls=[], content=model_output
         )
-
-        if start_token_pos != -1 and end_token_pos != -1:
-            try:
-                content = model_output[:start_token_pos]
-                tc_portion = model_output[
-                    start_token_pos : end_token_pos + len(self.parser.end_token)
-                ]
-
-                self.parser.feed(tc_portion)
-                self.parser.finish()
-
-                tool_calls = [
-                    ToolCall(
-                        type="function",
-                        function=FunctionCall(
-                            name=tc["name"],
-                            # function call args are JSON but as a string
-                            arguments=dump_args(tc["arguments"]),
-                        ),
-                    )
-                    for tc in self.tool_calls
-                ]
-                msg.tools_called = True
-                msg.tool_calls = tool_calls
-                msg.content = content if content else None
-            except Exception:
-                logger.exception("Error in extracting tool call from response.")
+        try:
+            self.parser.feed(model_output)
+            self.parser.finish()
+            tool_calls = [
+                ToolCall(
+                    type="function",
+                    function=FunctionCall(
+                        name=tc["name"],
+                        # function call args are JSON but as a string
+                        arguments=dump_args(tc["arguments"]),
+                    ),
+                )
+                for tc in self.tool_calls
+            ]
+            msg.tools_called = bool(tool_calls)
+            msg.tool_calls = tool_calls
+            msg.content = "".join(self.parsed_text_chunks) or None
+        except Exception:
+            logger.exception("Error in extracting tool call from response.")
         return msg
+
+    def collect_unstreamed_text(self) -> str:
+        n_streamed_chunks = len(self.streamed_text_chunks)
+        n_parsed_chunks = len(self.parsed_text_chunks)
+        unstreamed = []
+
+        if n_streamed_chunks < n_parsed_chunks:
+            n_unstreamed = n_parsed_chunks - n_streamed_chunks
+            unstreamed = self.parsed_text_chunks[-n_unstreamed:]
+            self.streamed_text_chunks.extend(unstreamed)
+        ret = "".join(unstreamed)
+        return ret
 
     def collect_tool_calls(self) -> list[DeltaToolCall]:
         tool_calls = list[DeltaToolCall]()
@@ -381,74 +441,13 @@ class Granite4ToolParser(ToolParser):
         delta_token_ids: Sequence[int],
         request: ChatCompletionRequest,
     ) -> DeltaMessage | None:
-        if self.look_ahead:
-            delta_text = self.look_ahead + delta_text
-            previous_text = previous_text[: -len(self.look_ahead)]
-            current_text = previous_text + delta_text
-            self.look_ahead = ""
-
-        start_token_pos = -1
-        if start_match := self.start_regex.search(current_text, partial=True):
-            match_length = start_match.end() - start_match.start()
-            if not start_match.partial:
-                start_token_pos = start_match.start()
-            elif match_length > 0:
-                start_token_pos = -2
-        end_token_pos = (
-            None if (pos := current_text.find(self.parser.end_token)) == -1 else pos
-        )
-
         try:
             msg = DeltaMessage()
 
-            if start_token_pos < 0:
-                # just streaming text so far
-                msg.content = delta_text
-                if start_token_pos == -2:
-                    # There is a partial match
-                    msg.content = delta_text[:-match_length]
-                    self.look_ahead = current_text[:-match_length]
-                else:
-                    msg.content = delta_text
-
-            elif not self.start_found:
-                # this is the first time we find the beginning
-                self.start_found = True
-                self.parser.feed(current_text[start_token_pos:end_token_pos])
-                remainder = ""
-                if end_token_pos is not None:
-                    self.parser.finish()
-                    remainder = current_text[
-                        end_token_pos + len(self.parser.end_token) :
-                    ]
-                msg.tool_calls = self.collect_tool_calls()
-                # append the remainder here instead of pushing to lookahead
-                # because it's not clear if chat completion server will call this
-                # method again.
-                msg.content = current_text[:start_token_pos] + remainder
-
-            elif end_token_pos is None:
-                # we're in between the start and the end token
-                self.parser.feed(delta_text)
-
-            elif not self.parser.finished():
-                # if the end token was found, it was because of the
-                # concatenation of the delta with the previous text
-                # this means that the token could actually start
-                # in the previous text
-                pos_after = (
-                    end_token_pos + len(self.parser.end_token) - len(previous_text)
-                )
-                assert pos_after > 0
-                self.parser.feed(delta_text[:pos_after])
-                self.parser.finish()
-                msg.content = delta_text[pos_after:]
-            else:
-                # here we're past the end token
-                msg.content = delta_text
-
+            self.parser.feed(delta_text)
             msg.tool_calls = self.collect_tool_calls()
-            assert len(self.look_ahead) <= len(delta_text)
+            msg.content = self.collect_unstreamed_text()
+
             if msg.content or msg.tool_calls:
                 return msg
             else:

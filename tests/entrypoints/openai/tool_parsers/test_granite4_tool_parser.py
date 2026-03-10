@@ -12,9 +12,31 @@ from vllm.tool_parsers.granite4_tool_parser import HermesLexer, HermesToolCallPa
 from ....utils import RemoteOpenAIServer
 
 
-def lex_input(input_text):
+def lex_input(input_text, tc_part_only=True):
     tokens = []
-    for tok in HermesLexer(None).lex(c for c in input_text):
+
+    push_back = ""
+
+    def generator():
+        nonlocal push_back
+        yield ""
+        for c in input_text:
+            push_back = yield push_back + c
+            push_back = push_back or ""
+        while push_back:
+            push_back = yield push_back
+
+    gen = generator()
+    next(gen)
+
+    lexer = HermesLexer(None)
+
+    def lex_tc_only(stream):
+        yield from lexer.consume_tool_call(stream)
+
+    lex_func = lex_tc_only if tc_part_only else lexer.lex
+
+    for tok in lex_func(gen):
         tokens.append(tok)
     return tokens
 
@@ -88,15 +110,57 @@ def test_lexer_valid_input():
     ]
 
 
+def test_lexer_tool_calls_with_text():
+    # Test that the lexer switches correctly from free text mode to
+    # tool calling mode and back
+    result = collect_skipping(lex_input('"Hello"', tc_part_only=False))
+    assert result == [Token("TEXT", c) for c in '"Hello"']
+
+    result = collect_skipping(lex_input('111 "Hello"', tc_part_only=False))
+    assert result == [Token("TEXT", c) for c in '111 "Hello"']
+
+    result = collect_skipping(lex_input('<tool_call> "Hello"', tc_part_only=False))
+    assert result == [Token("TC_START", ""), Token("STRING", '"Hello"')]
+
+    result = collect_skipping(lex_input('<tool_call> 111 "Hello"', tc_part_only=False))
+    assert result == [
+        Token("TC_START", ""),
+        Token("FLOAT", "111"),
+        Token("STRING", '"Hello"'),
+    ]
+
+    result = collect_skipping(
+        lex_input('<tool_call> 111 </tool_call> "Hello"', tc_part_only=False)
+    )
+    assert result == [
+        Token("TC_START", ""),
+        Token("FLOAT", "111"),
+        Token("TC_END", ""),
+    ] + [Token("TEXT", c) for c in ' "Hello"']
+
+    result = collect_skipping(
+        lex_input(
+            '<tool_call> 111 </tool_call> "Hello" <tool_call> "Hello"',
+            tc_part_only=False,
+        )
+    )
+    assert result == [
+        Token("TC_START", ""),
+        Token("FLOAT", "111"),
+        Token("TC_END", ""),
+    ] + [Token("TEXT", c) for c in ' "Hello" '] + [
+        Token("TC_START", ""),
+        Token("STRING", '"Hello"'),
+    ]
+
+
 def test_parser_invalid_input():
     def build_parser():
         return HermesToolCallParser(
             lambda x: None,
             lambda x: None,
+            lambda x: None,
         )
-
-    with pytest.raises(UnexpectedCharacters):
-        build_parser().feed("invalid")
 
     with pytest.raises(UnexpectedCharacters):
         build_parser().feed(chunk="<tool_call> aaa")
@@ -113,6 +177,29 @@ def test_parser_invalid_input():
         )
 
 
+# Test that we get the text right away
+def test_text_pipeline_depth():
+    parsed_text = []
+
+    parser = HermesToolCallParser(
+        lambda x: None,
+        lambda x: None,
+        lambda x: parsed_text.append(x),
+    )
+
+    parser.feed(chunk="Hello ")
+    assert "".join(parsed_text) == "Hello "
+
+    parser.feed(chunk="my ")
+    assert "".join(parsed_text) == "Hello my "
+
+    parser.feed(chunk="name ")
+    assert "".join(parsed_text) == "Hello my name "
+
+    parser.feed(chunk="is ")
+    assert "".join(parsed_text) == "Hello my name is "
+
+
 def test_valid_input():
     tool_names = []
     tool_calls = []
@@ -120,35 +207,29 @@ def test_valid_input():
     parser = HermesToolCallParser(
         lambda x: tool_names.append(x),
         lambda x: tool_calls.append(x),
+        lambda x: None,
     )
 
     parser.feed(chunk="<tool_call> ")
     assert len(tool_names) == 0
     assert len(tool_calls) == 0
-    assert not parser.finished()
 
     parser.feed(chunk='{"name": "foo", ')
     assert tool_names == ["foo"]
     assert len(tool_calls) == 0
-    assert not parser.finished()
 
     parser.feed(chunk=' "arguments"')
     assert len(tool_names) == 1
     assert len(tool_calls) == 0
-    assert not parser.finished()
 
     parser.feed(chunk=': {"a": 1}}')
     assert len(tool_names) == 1
     assert len(tool_calls) == 0
-    assert not parser.finished()
 
     parser.feed(chunk=" </tool_call>")
     assert tool_names == ["foo"]
     assert tool_calls == [{"name": "foo", "arguments": {"a": 1}}]
-    assert not parser.finished()
-
     parser.finish()
-    assert parser.finished()
 
 
 def create_complex_input():
@@ -174,27 +255,45 @@ def create_complex_input():
 def test_tool_call_parser_complex():
     tool_names = []
     tool_calls = []
+    streamed_text_chunks = []
 
     parser = HermesToolCallParser(
         lambda x: tool_names.append(x),
         lambda x: tool_calls.append(x),
+        lambda x: streamed_text_chunks.append(x),
     )
     print(parser.parser.options.lexer)
     input_dicts = create_complex_input()
     print(input_dicts)
+
+    formatted_tcs = [
+        "<tool_call> " + json.dumps(call) + " </tool_call>" for call in input_dicts
+    ]
+
+    text_messages = [
+        "Here goes the bbox call: \n",
+        " Now the stock price call: \n ",
+        " Now another bbox call: \n ",
+        " See? I'm a helpful assistant.",
+    ]
+
     test_input = (
-        "<tool_call> "
-        + " ".join(json.dumps(call) for call in input_dicts)
-        + " </tool_call>"
+        text_messages[0]
+        + formatted_tcs[0]
+        + text_messages[1]
+        + formatted_tcs[1]
+        + text_messages[2]
+        + formatted_tcs[2]
+        + text_messages[3]
     )
     print(test_input)
     parser.feed(test_input)
+
+    streamed_text = "".join(streamed_text_chunks)
     assert tool_names == ["find_bbox", "get_stock_price", "find_bbox"]
     assert tool_calls == input_dicts
-    assert not parser.finished()
-
+    assert streamed_text == "".join(text_messages)
     parser.finish()
-    assert parser.finished()
 
 
 MODEL = "ibm-granite/granite-4.0-h-tiny"
