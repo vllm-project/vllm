@@ -34,6 +34,7 @@ class NvFp4LinearBackend(Enum):
     FBGEMM = "fbgemm"
     MARLIN = "marlin"
     EMULATION = "emulation"
+    TORCH = "torch"
 
 
 def select_nvfp4_linear_backend() -> NvFp4LinearBackend:
@@ -88,6 +89,12 @@ def select_nvfp4_linear_backend() -> NvFp4LinearBackend:
         assert cutlass_fp4_supported(), f"Cutlass is required for {backend}"
     elif backend == NvFp4LinearBackend.MARLIN:
         assert is_fp4_marlin_supported(), f"Marlin is required for {backend}"
+    elif backend == NvFp4LinearBackend.TORCH:
+        from vllm.utils.torch_utils import is_torch_equal_or_newer
+
+        assert is_torch_equal_or_newer("2.8"), (
+            "torch backend requires PyTorch >= 2.8 for _scaled_mm with FP4 support"
+        )
     elif backend is None:
         raise ValueError(
             f"No NVFP4 GEMM backend selected, "
@@ -172,6 +179,11 @@ def convert_to_nvfp4_linear_kernel_format(
         )
         layer.weight = torch.nn.Parameter(weight, requires_grad=False)
         layer.weight_scale = torch.nn.Parameter(weight_scale, requires_grad=False)
+    elif backend == NvFp4LinearBackend.TORCH:
+        weight = layer.weight.data.view(torch.float4_e2m1fn_x2)
+        weight_scale = swizzle_blockscale(layer.weight_scale.data)
+        layer.weight = torch.nn.Parameter(weight, requires_grad=False)
+        layer.weight_scale = torch.nn.Parameter(weight_scale, requires_grad=False)
     elif backend in (
         NvFp4LinearBackend.VLLM_CUTLASS,
         NvFp4LinearBackend.FLASHINFER_CUTLASS,
@@ -228,6 +240,26 @@ def apply_nvfp4_linear(
     output_dtype = x.dtype
     output_shape = [*x.shape[:-1], output_size]
 
+    if backend == NvFp4LinearBackend.TORCH:
+        # NOTE: torch._scaled_mm applies blockscales internally before
+        # returning, so fp16 output can overflow before the external alpha
+        # correction. Other backends (e.g. CUTLASS) fold alpha into their
+        # epilogue in fp32, avoiding this. Use bfloat16 activations instead.
+        assert output_dtype != torch.float16, (
+            "TORCH nvfp4 backend does not support float16 — use bfloat16"
+        )
+        return _apply_nvfp4_linear_torch(
+            x=x,
+            weight=weight,
+            weight_scale=weight_scale,
+            input_global_scale_inv=input_global_scale_inv,
+            alpha=alpha,
+            output_dtype=output_dtype,
+            output_shape=output_shape,
+            output_size=output_size,
+            bias=bias,
+        )
+
     # Quantize BF16 or FP16 to (FP4 and interleaved block scale)
     x_fp4, x_blockscale = scaled_fp4_quant(
         x, input_global_scale_inv, is_sf_swizzled_layout=True, backend=backend.value
@@ -273,6 +305,50 @@ def apply_nvfp4_linear(
         out = cutlass_scaled_fp4_mm(*mm_args)
 
     # Slice output to remove N-dimension padding
+    out = slice_nvfp4_output(out, output_size)
+
+    if bias is not None:
+        out = out + bias
+
+    return out.view(*output_shape)
+
+
+def _apply_nvfp4_linear_torch(
+    *,
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    input_global_scale_inv: torch.Tensor,
+    alpha: torch.Tensor,
+    output_dtype: torch.dtype,
+    output_shape: list[int],
+    output_size: int,
+    bias: torch.Tensor | None,
+) -> torch.Tensor:
+    """FP4 linear via torch._scaled_mm, routed through inductor for autotuning.
+
+    NOTE: update to torch._scaled_mm_v2 once it has an inductor lowering
+    supporting FP4.
+    """
+    x_fp4, x_blockscale = scaled_fp4_quant(
+        x, input_global_scale_inv, is_sf_swizzled_layout=True, backend="cutlass"
+    )
+
+    a = x_fp4.view(torch.float4_e2m1fn_x2)
+    b = weight.T
+
+    scale_a = x_blockscale.reshape(-1)
+    scale_b = weight_scale.reshape(-1)
+
+    out = torch._scaled_mm(
+        a,
+        b,
+        scale_a=scale_a,
+        scale_b=scale_b,
+        out_dtype=output_dtype,
+    )
+
+    out = out * alpha
     out = slice_nvfp4_output(out, output_size)
 
     if bias is not None:
