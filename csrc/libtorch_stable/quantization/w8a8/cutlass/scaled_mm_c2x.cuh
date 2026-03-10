@@ -1,8 +1,9 @@
 #pragma once
 #include <stddef.h>
-#include <torch/all.h>
+#include <torch/csrc/stable/tensor.h>
+#include <torch/csrc/stable/ops.h>
 
-#include <ATen/cuda/CUDAContext.h>
+#include "libtorch_stable/torch_utils.h"
 
 // clang-format will break include orders
 // clang-format off
@@ -95,8 +96,9 @@ struct cutlass_2x_gemm {
 };
 
 template <typename Gemm, typename... EpilogueArgs>
-inline void cutlass_gemm_caller(torch::Tensor& out, torch::Tensor const& a,
-                                torch::Tensor const& b,
+inline void cutlass_gemm_caller(torch::stable::Tensor& out,
+                                torch::stable::Tensor const& a,
+                                torch::stable::Tensor const& b,
                                 EpilogueArgs&&... epilogue_params) {
   using ElementAB = typename Gemm::ElementAB;
   using ElementD = typename Gemm::ElementD;
@@ -149,11 +151,12 @@ inline void cutlass_gemm_caller(torch::Tensor& out, torch::Tensor const& a,
   // Launch the CUTLASS GEMM kernel.
   typename Gemm::Op gemm_op;
   size_t workspace_size = gemm_op.get_workspace_size(args);
-  auto const workspace_options =
-      torch::TensorOptions().dtype(torch::kUInt8).device(a.device());
-  auto workspace = torch::empty(workspace_size, workspace_options);
+  auto device = a.device();
+  auto workspace =
+      torch::stable::empty(workspace_size, torch::headeronly::ScalarType::Byte,
+                           std::nullopt, device);
 
-  auto stream = at::cuda::getCurrentCUDAStream(a.get_device());
+  auto stream = get_current_cuda_stream(device.index());
 
   CUTLASS_CHECK(gemm_op.can_implement(args));
   cutlass::Status status = gemm_op(args, workspace.data_ptr(), stream);
@@ -161,9 +164,9 @@ inline void cutlass_gemm_caller(torch::Tensor& out, torch::Tensor const& a,
 }
 
 template <typename Gemm, typename FallbackGemm, typename... EpilogueArgs>
-inline void fallback_cutlass_gemm_caller(torch::Tensor& out,
-                                         torch::Tensor const& a,
-                                         torch::Tensor const& b,
+inline void fallback_cutlass_gemm_caller(torch::stable::Tensor& out,
+                                         torch::stable::Tensor const& a,
+                                         torch::stable::Tensor const& b,
                                          EpilogueArgs&&... args) {
   // In some cases, the GPU isn't able to accommodate the
   // shared memory requirements of the Gemm. In such cases, use
@@ -180,8 +183,8 @@ inline void fallback_cutlass_gemm_caller(torch::Tensor& out,
     return cutlass_gemm_caller<Gemm>(out, a, b,
                                      std::forward<EpilogueArgs>(args)...);
   } else {
-    TORCH_CHECK(fallback_gemm_shared_mem_size <=
-                max_shared_mem_per_block_opt_in);
+    STD_TORCH_CHECK(fallback_gemm_shared_mem_size <=
+                    max_shared_mem_per_block_opt_in);
     return cutlass_gemm_caller<FallbackGemm>(
         out, a, b, std::forward<EpilogueArgs>(args)...);
   }

@@ -1,5 +1,7 @@
 #pragma once
 
+#include <torch/headeronly/util/shim_utils.h>
+
 #include "cuda_utils.h"
 #include "cutlass/cutlass.h"
 #include "cutlass/numeric_types.h"
@@ -138,10 +140,10 @@ struct sm120_blockwise_fp8_config_M64 {
 };
 
 template <typename Gemm>
-void cutlass_gemm_caller_blockwise(torch::Tensor& out, torch::Tensor const& a,
-                                   torch::Tensor const& b,
-                                   torch::Tensor const& a_scales,
-                                   torch::Tensor const& b_scales) {
+void cutlass_gemm_caller_blockwise(torch::stable::Tensor& out, torch::stable::Tensor const& a,
+                                   torch::stable::Tensor const& b,
+                                   torch::stable::Tensor const& a_scales,
+                                   torch::stable::Tensor const& b_scales) {
   using GemmKernel = typename Gemm::GemmKernel;
   using StrideA = typename Gemm::GemmKernel::StrideA;
   using StrideB = typename Gemm::GemmKernel::StrideB;
@@ -196,11 +198,11 @@ void cutlass_gemm_caller_blockwise(torch::Tensor& out, torch::Tensor const& a,
 }
 
 template <typename OutType>
-void cutlass_gemm_blockwise_sm120_fp8_dispatch(torch::Tensor& out,
-                                               torch::Tensor const& a,
-                                               torch::Tensor const& b,
-                                               torch::Tensor const& a_scales,
-                                               torch::Tensor const& b_scales) {
+void cutlass_gemm_blockwise_sm120_fp8_dispatch(torch::stable::Tensor& out,
+                                               torch::stable::Tensor const& a,
+                                               torch::stable::Tensor const& b,
+                                               torch::stable::Tensor const& a_scales,
+                                               torch::stable::Tensor const& b_scales) {
   int M = a.size(0);
   if (M <= 256) {
     using Gemm = typename sm120_blockwise_fp8_config_M64<OutType>::Gemm;

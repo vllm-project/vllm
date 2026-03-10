@@ -6,6 +6,7 @@
 #include "cutlass/epilogue/collective/collective_builder.hpp"
 #include "cutlass/gemm/device/gemm_universal_adapter.h"
 
+#include <torch/csrc/stable/ops.h>
 #include "cutlass_extensions/epilogue/scaled_mm_epilogues_c3x.hpp"
 #include "cutlass_extensions/common.hpp"
 #include "get_group_starts.cuh"
@@ -84,13 +85,17 @@ struct cutlass_3x_group_gemm {
 };
 
 template <typename Gemm>
-void cutlass_group_gemm_caller(
-    torch::Tensor& out_tensors, torch::Tensor const& a_tensors,
-    torch::Tensor const& b_tensors, torch::Tensor const& a_scales,
-    torch::Tensor const& b_scales, torch::Tensor const& expert_offsets,
-    torch::Tensor const& problem_sizes, torch::Tensor const& a_strides,
-    torch::Tensor const& b_strides, torch::Tensor const& c_strides,
-    bool per_act_token, bool per_out_ch) {
+void cutlass_group_gemm_caller(torch::stable::Tensor& out_tensors,
+                               torch::stable::Tensor const& a_tensors,
+                               torch::stable::Tensor const& b_tensors,
+                               torch::stable::Tensor const& a_scales,
+                               torch::stable::Tensor const& b_scales,
+                               torch::stable::Tensor const& expert_offsets,
+                               torch::stable::Tensor const& problem_sizes,
+                               torch::stable::Tensor const& a_strides,
+                               torch::stable::Tensor const& b_strides,
+                               torch::stable::Tensor const& c_strides,
+                               bool per_act_token, bool per_out_ch) {
   static constexpr bool swap_ab = Gemm::swap_ab;
 
   using ElementAB = typename Gemm::ElementAB;
@@ -98,16 +103,20 @@ void cutlass_group_gemm_caller(
 
   int num_experts = static_cast<int>(expert_offsets.size(0));
 
-  auto stream = at::cuda::getCurrentCUDAStream(a_tensors.device().index());
+  auto stream = get_current_cuda_stream(a_tensors.get_device_index());
 
-  auto options_int =
-      torch::TensorOptions().dtype(torch::kInt64).device(a_tensors.device());
+  auto device = a_tensors.device();
 
-  torch::Tensor a_ptrs = torch::empty(num_experts, options_int);
-  torch::Tensor b_ptrs = torch::empty(num_experts, options_int);
-  torch::Tensor out_ptrs = torch::empty(num_experts, options_int);
-  torch::Tensor a_scales_ptrs = torch::empty(num_experts, options_int);
-  torch::Tensor b_scales_ptrs = torch::empty(num_experts, options_int);
+  torch::stable::Tensor a_ptrs = torch::stable::empty(
+      {num_experts}, torch::headeronly::ScalarType::Long, std::nullopt, device);
+  torch::stable::Tensor b_ptrs = torch::stable::empty(
+      {num_experts}, torch::headeronly::ScalarType::Long, std::nullopt, device);
+  torch::stable::Tensor out_ptrs = torch::stable::empty(
+      {num_experts}, torch::headeronly::ScalarType::Long, std::nullopt, device);
+  torch::stable::Tensor a_scales_ptrs = torch::stable::empty(
+      {num_experts}, torch::headeronly::ScalarType::Long, std::nullopt, device);
+  torch::stable::Tensor b_scales_ptrs = torch::stable::empty(
+      {num_experts}, torch::headeronly::ScalarType::Long, std::nullopt, device);
 
   run_get_group_gemm_starts(expert_offsets, a_ptrs, b_ptrs, out_ptrs,
                             a_scales_ptrs, b_scales_ptrs, a_tensors, b_tensors,
@@ -156,7 +165,7 @@ void cutlass_group_gemm_caller(
       static_cast<ElementD**>(out_ptrs.data_ptr()),
       static_cast<StrideC*>(c_strides.data_ptr())};
 
-  int device_id = a_tensors.device().index();
+  int device_id = a_tensors.get_device_index();
   static const cutlass::KernelHardwareInfo hw_info{
       device_id, cutlass::KernelHardwareInfo::query_device_multiprocessor_count(
                      device_id)};
@@ -170,9 +179,9 @@ void cutlass_group_gemm_caller(
   CUTLASS_CHECK(gemm_op.can_implement(args));
 
   size_t workspace_size = gemm_op.get_workspace_size(args);
-  auto const workspace_options =
-      torch::TensorOptions().dtype(torch::kUInt8).device(a_tensors.device());
-  auto workspace = torch::empty(workspace_size, workspace_options);
+  auto workspace =
+      torch::stable::empty(workspace_size, torch::headeronly::ScalarType::Byte,
+                           std::nullopt, device);
 
   cutlass::Status status = gemm_op.run(args, workspace.data_ptr(), stream);
   CUTLASS_CHECK(status);

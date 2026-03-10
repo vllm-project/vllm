@@ -1,9 +1,11 @@
 #include <cudaTypedefs.h>
 
-#include <c10/cuda/CUDAGuard.h>
-#include <torch/all.h>
+#include "libtorch_stable/torch_utils.h"
+#include <torch/csrc/stable/tensor.h>
+#include <torch/csrc/stable/ops.h>
+#include <torch/headeronly/core/ScalarType.h>
 
-#include "dispatch_utils.h"
+#include "libtorch_stable/dispatch_utils.h"
 
 #include <iostream>
 
@@ -110,19 +112,22 @@ __global__ void compute_arg_sorts(const int32_t* __restrict__ topk_ids,
 }
 
 namespace {
-inline void launch_compute_problem_sizes(
-    const torch::Tensor& topk_ids, torch::Tensor& problem_sizes1,
-    torch::Tensor& problem_sizes2, torch::Tensor& atomic_buffer,
-    int64_t num_experts, int64_t n, int64_t k, cudaStream_t stream,
-    const bool swap_ab, const bool is_gated) {
+inline void launch_compute_problem_sizes(const torch::stable::Tensor& topk_ids,
+                                         torch::stable::Tensor& problem_sizes1,
+                                         torch::stable::Tensor& problem_sizes2,
+                                         torch::stable::Tensor& atomic_buffer,
+                                         int64_t num_experts, int64_t n,
+                                         int64_t k, cudaStream_t stream,
+                                         const bool swap_ab,
+                                         const bool is_gated) {
   int num_threads = min(THREADS_PER_EXPERT, topk_ids.numel());
 
-  auto const* topk_ptr = topk_ids.data_ptr<int32_t>();
-  auto* ps1_ptr = problem_sizes1.data_ptr<int32_t>();
-  auto* ps2_ptr = problem_sizes2.data_ptr<int32_t>();
-  auto* atomic_ptr = atomic_buffer.data_ptr<int32_t>();
+  auto const* topk_ptr = topk_ids.const_data_ptr<int32_t>();
+  auto* ps1_ptr = problem_sizes1.mutable_data_ptr<int32_t>();
+  auto* ps2_ptr = problem_sizes2.mutable_data_ptr<int32_t>();
+  auto* atomic_ptr = atomic_buffer.mutable_data_ptr<int32_t>();
 
-  VLLM_DISPATCH_BOOL(swap_ab, SwapAB, [&] {
+  VLLM_STABLE_DISPATCH_BOOL(swap_ab, SwapAB, [&] {
     compute_problem_sizes<SwapAB><<<num_experts, num_threads, 0, stream>>>(
         topk_ptr, ps1_ptr, ps2_ptr, atomic_ptr,
         static_cast<int>(topk_ids.numel()), static_cast<int>(n),
@@ -171,46 +176,53 @@ __global__ void compute_problem_sizes_from_expert_offsets(
 }
 
 void get_cutlass_moe_mm_problem_sizes_from_expert_offsets_caller(
-    const torch::Tensor& expert_first_token_offset,
-    torch::Tensor& problem_sizes1, torch::Tensor& problem_sizes2,
-    const int64_t n, const int64_t k, const bool swap_ab) {
-  TORCH_CHECK(expert_first_token_offset.is_cuda(),
-              "expert_first_token_offset must be a CUDA tensor");
-  TORCH_CHECK(expert_first_token_offset.dtype() == torch::kInt64,
-              "expert_first_token_offset must be int64");
+    const torch::stable::Tensor& expert_first_token_offset,
+    torch::stable::Tensor& problem_sizes1,
+    torch::stable::Tensor& problem_sizes2, const int64_t n, const int64_t k,
+    const bool swap_ab) {
+  STD_TORCH_CHECK(expert_first_token_offset.is_cuda(),
+                  "expert_first_token_offset must be a CUDA tensor");
+  STD_TORCH_CHECK(expert_first_token_offset.scalar_type() ==
+                      torch::headeronly::ScalarType::Long,
+                  "expert_first_token_offset must be int64");
 
-  TORCH_CHECK(problem_sizes1.is_cuda() && problem_sizes2.is_cuda(),
-              "problem_sizes must be CUDA tensors");
-  TORCH_CHECK(problem_sizes1.dtype() == torch::kInt32 &&
-                  problem_sizes2.dtype() == torch::kInt32,
-              "problem_sizes must be int32");
-  TORCH_CHECK(problem_sizes1.is_contiguous() && problem_sizes2.is_contiguous(),
-              "problem_sizes must be contiguous");
-  TORCH_CHECK(problem_sizes1.dim() == 2 && problem_sizes2.dim() == 2,
-              "problem_sizes must be 2D tensors");
-  TORCH_CHECK(problem_sizes1.size(1) == 3 && problem_sizes2.size(1) == 3,
-              "problem_sizes second dim must be 3");
-  TORCH_CHECK(problem_sizes1.sizes() == problem_sizes2.sizes(),
-              "problem_sizes1 and problem_sizes2 must have same shape");
+  STD_TORCH_CHECK(problem_sizes1.is_cuda() && problem_sizes2.is_cuda(),
+                  "problem_sizes must be CUDA tensors");
+  STD_TORCH_CHECK(
+      problem_sizes1.scalar_type() == torch::headeronly::ScalarType::Int &&
+          problem_sizes2.scalar_type() == torch::headeronly::ScalarType::Int,
+      "problem_sizes must be int32");
+  STD_TORCH_CHECK(
+      problem_sizes1.is_contiguous() && problem_sizes2.is_contiguous(),
+      "problem_sizes must be contiguous");
+  STD_TORCH_CHECK(problem_sizes1.dim() == 2 && problem_sizes2.dim() == 2,
+                  "problem_sizes must be 2D tensors");
+  STD_TORCH_CHECK(problem_sizes1.size(1) == 3 && problem_sizes2.size(1) == 3,
+                  "problem_sizes second dim must be 3");
+  STD_TORCH_CHECK(problem_sizes1.size(0) == problem_sizes2.size(0) &&
+                      problem_sizes1.size(1) == problem_sizes2.size(1),
+                  "problem_sizes1 and problem_sizes2 must have same shape");
 
   int64_t const num_experts64 = problem_sizes1.size(0);
-  TORCH_CHECK(expert_first_token_offset.numel() == num_experts64 + 1,
-              "expert_first_token_offset must have num_experts + 1 elements");
-  TORCH_CHECK(num_experts64 <= INT32_MAX, "num_experts must fit in int32");
-  TORCH_CHECK(n <= INT32_MAX && k <= INT32_MAX, "n and k must fit in int32");
+  STD_TORCH_CHECK(
+      expert_first_token_offset.numel() == num_experts64 + 1,
+      "expert_first_token_offset must have num_experts + 1 elements");
+  STD_TORCH_CHECK(num_experts64 <= INT32_MAX, "num_experts must fit in int32");
+  STD_TORCH_CHECK(n <= INT32_MAX && k <= INT32_MAX,
+                  "n and k must fit in int32");
 
   int const num_experts = static_cast<int>(num_experts64);
-  auto stream = at::cuda::getCurrentCUDAStream(
-      expert_first_token_offset.device().index());
+  auto stream =
+      get_current_cuda_stream(expert_first_token_offset.get_device_index());
 
   int const threads = (num_experts < 256) ? num_experts : 256;
   int const blocks = (num_experts + threads - 1) / threads;
 
-  auto const* offsets_ptr = expert_first_token_offset.data_ptr<int64_t>();
-  auto* ps1_ptr = problem_sizes1.data_ptr<int32_t>();
-  auto* ps2_ptr = problem_sizes2.data_ptr<int32_t>();
+  auto const* offsets_ptr = expert_first_token_offset.const_data_ptr<int64_t>();
+  auto* ps1_ptr = problem_sizes1.mutable_data_ptr<int32_t>();
+  auto* ps2_ptr = problem_sizes2.mutable_data_ptr<int32_t>();
 
-  VLLM_DISPATCH_BOOL(swap_ab, SwapAB, [&] {
+  VLLM_STABLE_DISPATCH_BOOL(swap_ab, SwapAB, [&] {
     compute_problem_sizes_from_expert_offsets<SwapAB>
         <<<blocks, threads, 0, stream>>>(offsets_ptr, ps1_ptr, ps2_ptr,
                                          num_experts, static_cast<int>(n),
@@ -219,16 +231,19 @@ void get_cutlass_moe_mm_problem_sizes_from_expert_offsets_caller(
 }
 
 void get_cutlass_moe_mm_data_caller(
-    const torch::Tensor& topk_ids, torch::Tensor& expert_offsets,
-    torch::Tensor& problem_sizes1, torch::Tensor& problem_sizes2,
-    torch::Tensor& input_permutation, torch::Tensor& output_permutation,
-    const int64_t num_experts, const int64_t n, const int64_t k,
-    const std::optional<torch::Tensor>& blockscale_offsets,
+    const torch::stable::Tensor& topk_ids,
+    torch::stable::Tensor& expert_offsets,
+    torch::stable::Tensor& problem_sizes1,
+    torch::stable::Tensor& problem_sizes2,
+    torch::stable::Tensor& input_permutation,
+    torch::stable::Tensor& output_permutation, const int64_t num_experts,
+    const int64_t n, const int64_t k,
+    const std::optional<torch::stable::Tensor>& blockscale_offsets,
     const bool is_gated) {
-  auto stream = at::cuda::getCurrentCUDAStream(topk_ids.device().index());
-  auto options_int32 =
-      torch::TensorOptions().dtype(torch::kInt32).device(topk_ids.device());
-  torch::Tensor atomic_buffer = torch::zeros(num_experts, options_int32);
+  auto device = topk_ids.device();
+  auto stream = get_current_cuda_stream(device.index());
+  torch::stable::Tensor atomic_buffer = torch::stable::new_zeros(
+      topk_ids, {num_experts}, torch::headeronly::ScalarType::Int);
 
   int num_threads = min(THREADS_PER_EXPERT, topk_ids.numel());
 
@@ -290,11 +305,13 @@ __global__ void compute_batched_moe_data(
 }
 
 void get_cutlass_batched_moe_mm_data_caller(
-    torch::Tensor& expert_offsets, torch::Tensor& problem_sizes1,
-    torch::Tensor& problem_sizes2, const torch::Tensor& expert_num_tokens,
+    torch::stable::Tensor& expert_offsets,
+    torch::stable::Tensor& problem_sizes1,
+    torch::stable::Tensor& problem_sizes2,
+    const torch::stable::Tensor& expert_num_tokens,
     const int64_t num_local_experts, const int64_t padded_m, const int64_t n,
     const int64_t k) {
-  auto stream = at::cuda::getCurrentCUDAStream(expert_offsets.device().index());
+  auto stream = get_current_cuda_stream(expert_offsets.get_device_index());
 
   if (num_local_experts * padded_m > SWAP_AB_THRESHOLD) {
     compute_batched_moe_data<false><<<1, num_local_experts, 0, stream>>>(
