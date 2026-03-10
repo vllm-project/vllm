@@ -1116,7 +1116,7 @@ def _step_until_done(
 
 
 def _step_until_kv_transfer_finished(scheduler: Scheduler, req_ids: list[str]):
-    """Cycle requests through a KV transfer cyle."""
+    """Cycle requests through a KV transfer cycle."""
 
     # Requests should first transition to WAITING_FOR_REMOTE_KVS
     output = scheduler.schedule()
@@ -1776,7 +1776,6 @@ def create_scheduler_with_priority(
     cache_config = CacheConfig(
         block_size=block_size,
         gpu_memory_utilization=0.9,
-        swap_space=0,
         cache_dtype="auto",
         enable_prefix_caching=enable_prefix_caching,
     )
@@ -2714,7 +2713,7 @@ def _assert_right_encoder_inputs(
         if expected_total_reqs == 0:
             return
 
-    # Number of expected enocder inputs should match number of requests
+    # Number of expected encoder inputs should match number of requests
     if expected_encoder_inputs:
         assert check_exist and requests is not None  # only support expect input exist
         assert len(requests) == len(expected_encoder_inputs)
@@ -2964,7 +2963,7 @@ def test_ec_connector_with_partial_cache_hit_multi_round(use_kv_connector):
     )
     scheduler.update_from_output(output, model_output)
 
-    # request1 is finished after outputing 1 token
+    # request1 is finished after outputting 1 token
     # Finish request
     scheduler.finish_requests(request1.request_id, RequestStatus.FINISHED_LENGTH_CAPPED)
 
@@ -3060,14 +3059,14 @@ def test_ec_connector_schedule_multiple_requests(cache_exist, use_kv_connector):
     for request in requests:
         scheduler.add_request(request)
 
-    # Set up to test different encoder cache exsistence scenario after preemption
+    # Set up to test different encoder cache existence scenario after preemption
     # Order of getting encoder cache should be: local cache -> connector-> compute
     scheduler.ec_connector.update_state_after_alloc = Mock(
         wraps=scheduler.ec_connector.update_state_after_alloc
     )
 
     if cache_exist == "local":
-        # Allocate cache to cache manager manually to mimick
+        # Allocate cache to cache manager manually to mimic
         for req in requests:
             scheduler.encoder_cache_manager.allocate(req, 0)
     else:
@@ -3384,13 +3383,13 @@ def test_priority_scheduling_ec_connector_preemption_and_resumption(
         pooler_output=[],
     )
     # Finish the requests to make room for the preempted requests to resume
-    # req_high is finished after outputing 2 tokens
+    # req_high is finished after outputting 2 tokens
     scheduler.update_from_output(output, model_output)
     scheduler.finish_requests(
         request_high.request_id, RequestStatus.FINISHED_LENGTH_CAPPED
     )
 
-    # Set up to test different encoder cache exsistence scenario after preemption
+    # Set up to test different encoder cache existence scenario after preemption
     # Order of getting encoder cache should be: local cache -> connector-> compute
     # By default, the cache should still exist in local in this test case
     if cache_exist != "local":
@@ -3483,7 +3482,7 @@ def test_ec_connector_allocate_encoder_tokens_with_external_load(use_kv_connecto
         ec_role="ec_consumer",
     )
 
-    # Limit the number of availiable slots of EncoderCacheManager
+    # Limit the number of available slots of EncoderCacheManager
     scheduler.encoder_cache_manager = EncoderCacheManager(cache_size=32)
 
     # Create MM request1
@@ -3574,7 +3573,7 @@ def test_ec_connector_allocate_encoder_tokens_with_external_load(use_kv_connecto
     )
     scheduler.update_from_output(output, model_output)
 
-    # request1 is finished after outputing 1 token
+    # request1 is finished after outputting 1 token
     # Finish request
     scheduler.finish_requests(request1.request_id, RequestStatus.FINISHED_LENGTH_CAPPED)
     assert scheduler.get_num_unfinished_requests() == 1
@@ -3726,7 +3725,6 @@ def _create_encoder_decoder_scheduler(
     cache_config = CacheConfig(
         block_size=block_size,
         gpu_memory_utilization=0.9,
-        swap_space=0,
         cache_dtype="auto",
         enable_prefix_caching=False,
     )

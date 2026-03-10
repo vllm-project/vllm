@@ -90,17 +90,19 @@ class KimiK25Config(PretrainedConfig):
     ):
         # Vision config
         if vision_config is None:
-            vision_config = KimiK25VisionConfig()
+            self.vision_config = KimiK25VisionConfig()
         elif isinstance(vision_config, dict):
-            vision_config = KimiK25VisionConfig(**vision_config)
-        self.vision_config: KimiK25VisionConfig = vision_config
+            self.vision_config = KimiK25VisionConfig(**vision_config)
+        else:
+            self.vision_config = vision_config
 
         # Text config
         if text_config is None:
-            text_config = DeepseekV3Config()
+            self.text_config = DeepseekV3Config()
         elif isinstance(text_config, dict):
-            text_config = DeepseekV3Config(**text_config)
-        self.text_config: DeepseekV3Config = text_config
+            self.text_config = DeepseekV3Config(**text_config)
+        else:
+            self.text_config = text_config
 
         # Set mm_hidden_size to text hidden size if not explicitly set
         if self.vision_config.mm_hidden_size == self.vision_config.hidden_size:

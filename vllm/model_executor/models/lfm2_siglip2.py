@@ -10,7 +10,10 @@ from torch import nn
 from torch.nn import functional as F
 from transformers import Siglip2VisionConfig
 
-from vllm.compilation.decorators import support_torch_compile
+from vllm.compilation.decorators import (
+    should_torch_compile_mm_encoder,
+    support_torch_compile,
+)
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.attention import MMEncoderAttention
@@ -25,7 +28,6 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from .vision import (
     is_vit_use_data_parallel,
     resolve_visual_encoder_outputs,
-    should_torch_compile_mm_vit,
 )
 
 
@@ -269,7 +271,7 @@ class Siglip2MLP(nn.Module):
 
 @support_torch_compile(
     dynamic_arg_dims={"hidden_states": [0, 1], "cu_seqlens": 0},
-    enable_if=should_torch_compile_mm_vit,
+    enable_if=should_torch_compile_mm_encoder,
 )
 class Siglip2EncoderLayer(nn.Module):
     def __init__(
