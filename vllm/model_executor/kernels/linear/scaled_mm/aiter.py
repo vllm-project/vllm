@@ -165,6 +165,8 @@ class AiterShuffledPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
                 f"N={N} and K={K}.",
             )
 
+        # Aiter's shuffled per-token Gemm performs better than torch oonly when its
+        # tuned.
         if not rocm_aiter_ops.is_shuffled_per_token_w8a8_gemm_tuned(N, K, fp8_dtype):
             return (
                 False,
@@ -227,6 +229,8 @@ class AiterPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
                 "requires per token activation scales and per channel weight scales.",
             )
 
+        # Aiter's per-token Gemm performs better than torch oonly when its
+        # tuned.
         if not rocm_aiter_ops.is_per_token_w8a8_gemm_tuned(N, K, fp8_dtype):
             return (
                 False,
@@ -256,6 +260,4 @@ class AiterPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         bias: torch.Tensor | None,
         output_shape: list,
     ) -> torch.Tensor:
-        return rocm_aiter_ops.per_token_w8a8_gemm(
-            A, B.t(), As, Bs, bias, out_dtype
-        ).view(*output_shape)
+        return rocm_aiter_ops.per_token_w8a8_gemm(A, B, As, Bs, bias, out_dtype)

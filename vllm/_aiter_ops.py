@@ -3,6 +3,7 @@
 import functools
 from collections.abc import Callable
 
+import pandas as pd
 import torch
 from torch._ops import OpOverload
 
@@ -60,11 +61,12 @@ def is_aiter_found_and_supported() -> bool:
 def _load_gemm_tuned_configs(
     q_dtype_w: torch.dtype, csv_path: str
 ) -> set[tuple[int, int, int]]:
-    import pandas as pd
-
-    df = pd.read_csv(csv_path).drop_duplicates()
-    df = df[df["q_dtype_w"] == str(q_dtype_w)]
-    return set(zip(df["N"].astype(int), df["K"].astype(int), df["M"].astype(int)))
+    try:
+        df = pd.read_csv(csv_path).drop_duplicates()
+        df = df[df["q_dtype_w"] == str(q_dtype_w)]
+        return set(zip(df["N"].astype(int), df["K"].astype(int), df["M"].astype(int)))
+    except Exception:
+        return set()
 
 
 def _check_kernel_tuned(N: int, K: int, q_dtype_w: torch.dtype, csv_path: str) -> bool:
