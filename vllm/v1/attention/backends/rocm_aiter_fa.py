@@ -1184,6 +1184,8 @@ class AiterFlashAttentionImpl(AttentionImpl):
                         k_descale=layer._k_scale.expand(descale_shape),
                         v_descale=layer._v_scale.expand(descale_shape),
                     )
+
+                    output[:num_decode_tokens].nan_to_num_()
                     return
 
                 # The ll4mi kernel in paged_attention_v1 requires
@@ -1303,7 +1305,8 @@ class AiterFlashAttentionImpl(AttentionImpl):
             raise NotImplementedError(
                 "Cascade attention is not implemented for ROCM AITER"
             )
-
+        
+        output[:num_actual_tokens].nan_to_num_()
         return output
 
     def do_kv_cache_update(
