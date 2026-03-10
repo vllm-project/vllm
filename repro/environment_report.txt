@@ -1,0 +1,212 @@
+Repo: villum
+Repo commit: ff1f83b056aedcf3e2d978d267011b2b79c08aca
+
+Python:
+Python 3.12.13
+
+Pip:
+pip 26.0.1 from /holly/villum/.venv-pd-cu128/lib/python3.12/site-packages/pip (python 3.12)
+
+Platform:
+Linux node0.villum.microfastpath-pg0.wisc.cloudlab.us 5.15.0-168-generic #178-Ubuntu SMP Fri Jan 9 19:05:03 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux
+
+GPU / Driver:
+Mon Mar  9 16:44:51 2026       
++---------------------------------------------------------------------------------------+
+| NVIDIA-SMI 535.288.01             Driver Version: 535.288.01   CUDA Version: 12.2     |
+|-----------------------------------------+----------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id        Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |         Memory-Usage | GPU-Util  Compute M. |
+|                                         |                      |               MIG M. |
+|=========================================+======================+======================|
+|   0  NVIDIA A30                     Off | 00000000:25:00.0 Off |                    0 |
+| N/A   26C    P0              28W / 165W |      0MiB / 24576MiB |      0%      Default |
+|                                         |                      |             Disabled |
++-----------------------------------------+----------------------+----------------------+
+                                                                                         
++---------------------------------------------------------------------------------------+
+| Processes:                                                                            |
+|  GPU   GI   CI        PID   Type   Process name                            GPU Memory |
+|        ID   ID                                                             Usage      |
+|=======================================================================================|
+|  No running processes found                                                           |
++---------------------------------------------------------------------------------------+
+
+CUDA compiler:
+nvcc: NVIDIA (R) Cuda compiler driver
+Copyright (c) 2005-2023 NVIDIA Corporation
+Built on Tue_Aug_15_22:02:13_PDT_2023
+Cuda compilation tools, release 12.2, V12.2.140
+Build cuda_12.2.r12.2/compiler.33191640_0
+
+Installed packages:
+aiohappyeyeballs==2.6.1
+aiohttp==3.13.3
+aiosignal==1.4.0
+annotated-doc==0.0.4
+annotated-types==0.7.0
+anthropic==0.84.0
+anyio==4.12.1
+apache-tvm-ffi==0.1.9
+astor==0.8.1
+attrs==25.4.0
+blake3==1.0.8
+build==1.4.0
+cachetools==7.0.3
+cbor2==5.8.0
+certifi==2026.2.25
+cffi==2.0.0
+charset-normalizer==3.4.5
+click==8.3.1
+cloudpickle==3.1.2
+cmake==4.2.3
+compressed-tensors==0.13.0
+cryptography==46.0.5
+cuda-bindings==12.9.4
+cuda-pathfinder==1.4.1
+cuda-python==12.9.4
+cuda-toolkit==12.8.1
+cupy-cuda12x==14.0.1
+depyf==0.20.0
+dill==0.4.1
+diskcache==5.6.3
+distro==1.9.0
+dnspython==2.8.0
+docstring_parser==0.17.0
+einops==0.8.2
+email-validator==2.3.0
+fastapi==0.135.1
+fastapi-cli==0.0.24
+fastapi-cloud-cli==0.14.1
+fastar==0.8.0
+filelock==3.20.3
+flashinfer-python==0.6.3
+frozenlist==1.8.0
+fsspec==2026.2.0
+gguf==0.18.0
+grpcio==1.78.0
+grpcio-reflection==1.78.0
+grpcio-tools==1.78.0
+h11==0.16.0
+hf-xet==1.3.2
+httpcore==1.0.9
+httptools==0.7.1
+httpx==0.28.1
+httpx-sse==0.4.3
+huggingface_hub==0.36.2
+idna==3.11
+ijson==3.5.0
+interegular==0.3.3
+Jinja2==3.1.6
+jiter==0.13.0
+jmespath==1.1.0
+jsonschema==4.26.0
+jsonschema-specifications==2025.9.1
+lark==1.2.2
+llguidance==1.3.0
+llvmlite==0.44.0
+lm-format-enforcer==0.11.3
+loguru==0.7.3
+markdown-it-py==4.0.0
+MarkupSafe==3.0.2
+mcp==1.26.0
+mdurl==0.1.2
+mistral_common==1.9.1
+model-hosting-container-standards==0.1.13
+mpmath==1.3.0
+msgpack==1.1.2
+msgspec==0.20.0
+multidict==6.7.1
+networkx==3.6.1
+ninja==1.13.0
+nixl==0.10.1
+nixl-cu12==0.10.1
+numba==0.61.2
+numpy==2.2.6
+nvidia-cublas-cu12==12.8.4.1
+nvidia-cuda-cupti-cu12==12.8.90
+nvidia-cuda-nvrtc-cu12==12.8.93
+nvidia-cuda-runtime-cu12==12.8.90
+nvidia-cudnn-cu12==9.10.2.21
+nvidia-cudnn-frontend==1.18.0
+nvidia-cufft-cu12==11.3.3.83
+nvidia-cufile-cu12==1.13.1.3
+nvidia-curand-cu12==10.3.9.90
+nvidia-cusolver-cu12==11.7.3.90
+nvidia-cusparse-cu12==12.5.8.93
+nvidia-cusparselt-cu12==0.7.1
+nvidia-cutlass-dsl==4.4.1
+nvidia-cutlass-dsl-libs-base==4.4.1
+nvidia-ml-py==13.590.48
+nvidia-nccl-cu12==2.27.5
+nvidia-nvjitlink-cu12==12.8.93
+nvidia-nvshmem-cu12==3.4.5
+nvidia-nvtx-cu12==12.8.90
+openai==2.26.0
+openai-harmony==0.0.8
+opencv-python-headless==4.13.0.92
+outlines_core==0.2.11
+packaging==26.0
+partial-json-parser==0.2.1.1.post7
+pillow==12.1.1
+prometheus-fastapi-instrumentator==7.1.0
+prometheus_client==0.24.1
+propcache==0.4.1
+protobuf==6.33.5
+psutil==7.2.2
+py-cpuinfo==9.0.0
+pybase64==1.4.3
+pycountry==26.2.16
+pycparser==3.0
+pydantic==2.12.5
+pydantic-extra-types==2.11.0
+pydantic-settings==2.13.1
+pydantic_core==2.41.5
+Pygments==2.19.2
+PyJWT==2.11.0
+pyproject_hooks==1.2.0
+python-dotenv==1.2.2
+python-json-logger==4.0.0
+python-multipart==0.0.22
+PyYAML==6.0.3
+pyzmq==27.1.0
+ray==2.54.0
+referencing==0.37.0
+regex==2026.2.28
+requests==2.32.5
+rich==14.3.3
+rich-toolkit==0.19.7
+rignore==0.7.6
+rpds-py==0.30.0
+safetensors==0.7.0
+sentencepiece==0.2.1
+sentry-sdk==2.54.0
+setproctitle==1.3.7
+setuptools==78.1.0
+setuptools-scm==9.2.2
+shellingham==1.5.4
+six==1.17.0
+sniffio==1.3.1
+sse-starlette==3.3.2
+starlette==0.52.1
+supervisor==4.3.0
+sympy==1.14.0
+tabulate==0.10.0
+tiktoken==0.12.0
+tokenizers==0.22.2
+torch==2.10.0
+tqdm==4.67.3
+transformers==4.57.6
+triton==3.6.0
+typer==0.24.1
+typing-inspection==0.4.2
+typing_extensions==4.15.0
+urllib3==2.6.3
+uvicorn==0.41.0
+uvloop==0.22.1
+-e git+ssh://git@github.com/hcasalet/villum.git@ff1f83b056aedcf3e2d978d267011b2b79c08aca#egg=vllm
+watchfiles==1.1.1
+websockets==16.0
+wheel==0.46.3
+xgrammar==0.1.29
+yarl==1.23.0
