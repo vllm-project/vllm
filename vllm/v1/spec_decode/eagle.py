@@ -618,18 +618,13 @@ class SpecDecodeBaseProposer:
             if self.pass_hidden_states_to_model:
                 model_kwargs["hidden_states"] = self.hidden_states[:input_batch_size]
 
-            slot_view = self._slot_mapping_buffer[:input_batch_size]
-            slot_mapping = {
-                name: slot_view
-                for name in self.attn_layer_names + self.indexer_layer_names
-            }
             with set_forward_context(
                 per_layer_attn_metadata,
                 self.vllm_config,
                 num_tokens=input_batch_size,
                 num_tokens_across_dp=batch_size_across_dp,
                 cudagraph_runtime_mode=cudagraph_runtime_mode,
-                slot_mapping=slot_mapping,
+                slot_mapping=self._get_slot_mapping(input_batch_size),
             ):
                 ret_hidden_states = self.model(**model_kwargs)
                 if not self.model_returns_tuple():
