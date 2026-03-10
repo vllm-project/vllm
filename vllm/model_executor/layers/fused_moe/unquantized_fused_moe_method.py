@@ -9,6 +9,7 @@ from torch.nn import Module
 from torch.nn.parameter import Parameter
 
 import vllm.envs as envs
+import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
@@ -69,6 +70,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         self.rocm_aiter_moe_enabled = (
             rocm_aiter_ops.is_fused_moe_enabled() and moe.is_act_and_mul
         )
+        self.kernel: mk.FusedMoEKernel | None = None
         self._is_monolithic = (
             current_platform.is_cpu()
             or self.unquantized_backend == UnquantizedMoeBackend.FLASHINFER_TRTLLM
@@ -222,7 +224,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         assert self.moe_quant_config is not None
 
-        self.moe_kernel = make_unquantized_moe_kernel(
+        self.kernel = make_unquantized_moe_kernel(
             backend=self.unquantized_backend,
             quant_config=self.moe_quant_config,
             moe_config=self.moe,
@@ -321,9 +323,9 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         topk_ids: torch.Tensor,
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        assert self.moe_kernel is not None
+        assert self.kernel is not None
 
-        return self.moe_kernel.apply(
+        return self.kernel.apply(
             hidden_states=x,
             w1=layer.w13_weight,
             w2=layer.w2_weight,
