@@ -606,8 +606,6 @@ class EngineArgs:
     kv_offloading_backend: KVOffloadingBackend = CacheConfig.kv_offloading_backend
     tokens_only: bool = False
 
-    shutdown_timeout: int = 0
-
     weight_transfer_config: WeightTransferConfig | None = get_field(
         VllmConfig,
         "weight_transfer_config",
@@ -1310,14 +1308,6 @@ class EngineArgs:
             default=False,
             action=argparse.BooleanOptionalAction,
         )
-
-        parser.add_argument(
-            "--shutdown-timeout",
-            type=int,
-            default=0,
-            help="Shutdown timeout in seconds. 0 = abort, >0 = wait.",
-        )
-
         return parser
 
     @classmethod
@@ -1926,7 +1916,6 @@ class EngineArgs:
             optimization_level=self.optimization_level,
             performance_mode=self.performance_mode,
             weight_transfer_config=self.weight_transfer_config,
-            shutdown_timeout=self.shutdown_timeout,
         )
 
         return config
@@ -2204,7 +2193,7 @@ class AsyncEngineArgs(EngineArgs):
             "--enable-log-requests",
             action=argparse.BooleanOptionalAction,
             default=AsyncEngineArgs.enable_log_requests,
-            help="Enable logging request information, dependant on log level:\n"
+            help="Enable logging request information, dependent on log level:\n"
             "- INFO: Request ID, parameters and LoRA request.\n"
             "- DEBUG: Prompt inputs (e.g: text, token IDs).\n"
             "You can set the minimum log level via `VLLM_LOGGING_LEVEL`.",
