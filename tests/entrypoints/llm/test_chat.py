@@ -200,7 +200,7 @@ def test_chat_batch_failure_cleanup(llm_for_failure_test):
     batch_2 = [valid_msg, valid_msg]
     sampling_params = SamplingParams(temperature=0, max_tokens=10)
 
-    with pytest.raises(ValueError, match="context length is only"):
+    with pytest.raises(ValueError, match="maximum context length is"):
         llm.chat(batch_1, sampling_params=sampling_params)
     assert llm.llm_engine.get_num_unfinished_requests() == 0
 

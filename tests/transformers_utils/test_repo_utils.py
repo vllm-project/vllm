@@ -34,10 +34,10 @@ def test_list_filtered_repo_files(
         subfolder.mkdir()
         (path_tmp_dir / "json_file.json").touch()
         (path_tmp_dir / "correct_2.txt").touch()
-        (path_tmp_dir / "uncorrect.txt").touch()
-        (path_tmp_dir / "uncorrect.jpeg").touch()
+        (path_tmp_dir / "incorrect.txt").touch()
+        (path_tmp_dir / "incorrect.jpeg").touch()
         (subfolder / "correct.txt").touch()
-        (subfolder / "uncorrect_sub.txt").touch()
+        (subfolder / "incorrect_sub.txt").touch()
 
         def _glob_path() -> list[str]:
             return [
@@ -86,7 +86,7 @@ def test_one_filtered_repo_files(allow_patterns: list[str], expected_bool: bool)
         path_tmp_dir = Path(tmp_dir)
         subfolder = path_tmp_dir / "subfolder"
         subfolder.mkdir()
-        (path_tmp_dir / "uncorrect.jpeg").touch()
+        (path_tmp_dir / "incorrect.jpeg").touch()
         (subfolder / "correct.txt").touch()
 
         def _glob_path() -> list[str]:

@@ -52,6 +52,7 @@ from vllm.v1.engine.utils import (
     launch_core_engines,
 )
 from vllm.v1.executor import Executor
+from vllm.v1.pool.late_interaction import get_late_interaction_engine_index
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder, bytestr
 
 logger = init_logger(__name__)
@@ -609,8 +610,13 @@ class MPClient(EngineCoreClient):
                     timeout=VLLM_ENGINE_READY_TIMEOUT_S * 1000  # convert to ms
                 ):
                     raise TimeoutError(
-                        "Timed out waiting for engines to send "
-                        "initial message on input socket."
+                        f"Timed out waiting for engine core processes to "
+                        f"start. This is often caused by slow weight loading "
+                        f"for large models. Waited "
+                        f"{VLLM_ENGINE_READY_TIMEOUT_S}s (configured by "
+                        f"VLLM_ENGINE_READY_TIMEOUT_S). To increase the "
+                        f"timeout, set the environment variable: "
+                        f"VLLM_ENGINE_READY_TIMEOUT_S=<seconds>"
                     )
                 identity, _ = sync_input_socket.recv_multipart()
                 identities.remove(identity)
@@ -1355,7 +1361,11 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
 
     def get_core_engine_for_request(self, request: EngineCoreRequest) -> EngineIdentity:
         # Engines are in rank order.
-        if (eng_index := request.data_parallel_rank) is None:
+        if (eng_index := request.data_parallel_rank) is None and (
+            eng_index := get_late_interaction_engine_index(
+                request.pooling_params, len(self.core_engines)
+            )
+        ) is None:
             current_counts = self.lb_engines
             # TODO use P2C alg for larger DP sizes
             num_engines = len(current_counts)
@@ -1586,8 +1596,12 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
                 timeout=VLLM_ENGINE_READY_TIMEOUT_S * 1000  # convert to ms
             ):
                 raise TimeoutError(
-                    "Timed out waiting for new engines to send initial "
-                    "message on input socket."
+                    f"Timed out waiting for new engine core processes to "
+                    f"start. Waited "
+                    f"{VLLM_ENGINE_READY_TIMEOUT_S}s (configured by "
+                    f"VLLM_ENGINE_READY_TIMEOUT_S). To increase the "
+                    f"timeout, set the environment variable: "
+                    f"VLLM_ENGINE_READY_TIMEOUT_S=<seconds>"
                 )
             identity, _ = sync_input_socket.recv_multipart()
             new_engine_identities.discard(identity)

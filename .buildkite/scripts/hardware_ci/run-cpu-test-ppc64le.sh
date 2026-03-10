@@ -27,7 +27,7 @@ function cpu_tests() {
   podman exec -it "$container_id" bash -c "
     export TORCH_COMPILE_DISABLE=1
     set -xve
-    python3 examples/offline_inference/basic/generate.py --model facebook/opt-125m" >> "$HOME"/test_basic.log
+    python3 examples/basic/offline_inference/generate.py --model facebook/opt-125m" >> "$HOME"/test_basic.log
 
   # Run basic model test
   podman exec -it "$container_id" bash -c "
