@@ -110,7 +110,8 @@ def main():
         if (idx + 1) % 100 == 0 and num_evaluated > 0:
             current_accuracy = correct / num_evaluated * 100
             print(
-                f"Processed {idx + 1}/{total}, Evaluated: {num_evaluated}, Current accuracy: {current_accuracy:.2f}%"
+                f"Processed {idx + 1}/{total}, Evaluated: {num_evaluated},"
+	        f" Current accuracy: {current_accuracy:.2f}%"
             )
 
     accuracy = correct / num_evaluated * 100 if num_evaluated > 0 else 0
