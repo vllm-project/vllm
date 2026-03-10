@@ -90,7 +90,7 @@ class VllmIRLoweringPass(VllmInductorPass):
         # TODO(luka): Cache the fx_replacement to avoid re-tracing the same impl
 
         # Defaults not present on node.args but required for replacement tracing
-        bound_args = ir_op._signature.bind(*node.args)
+        bound_args = ir_op._py_signature.bind(*node.args)
         bound_args.apply_defaults()
         match.replace_by_example(ir_op_impl.impl_fn, bound_args.args)
 

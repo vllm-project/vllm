@@ -56,7 +56,7 @@ def register_op(
         return x * y"""
 
     def decorator(_f: Callable):
-        op_name = _f.__name__ if name is None else name
+        op_name: str = _f.__name__ if name is None else name
         assert name not in IrOp.registry
         op = IrOp(op_name, _f)
         IrOp.registry[op_name] = op
@@ -71,11 +71,14 @@ def register_op(
 class IrOp:
     registry: ClassVar[dict[str, "IrOp"]] = {}
 
+    name: str
+    impls: dict[str, "IrOpImpl"]
+
     def __init__(self, name: str, native_impl: Callable):
-        signature = inspect.signature(native_impl)
+        self._py_signature = inspect.signature(native_impl)
         if any(
             p.kind == inspect.Parameter.KEYWORD_ONLY
-            for p in signature.parameters.values()
+            for p in self._py_signature.parameters.values()
         ):
             raise ValueError(
                 f"Op {name} has keyword-only arguments which are not currently "
@@ -93,12 +96,14 @@ class IrOp:
         )
         self.impls["native"] = self._native_impl
 
+        # By default, fake routes directly to native,
+        # can be overridden by register_fake
         self._fake_fn = native_impl
-        self._signature = signature
 
         # torch registration
         vllm_ir_lib.define(self.name + self._schema_str)
-        # CompositeExplicitAutograd is not decomposed by autograd
+        # CompositeExplicitAutograd is not decomposed
+        # by ATen IR normalization in AOTAutograd
         vllm_ir_lib.impl(
             self.name, self._inner_call, dispatch_key="CompositeExplicitAutograd"
         )
@@ -133,7 +138,7 @@ class IrOp:
         Register an implementation for this custom op.
         :param provider: The name of the provider, must be unique.
         :param supported: Static support check, use this to check platform support.
-        :param supports_args: Dynamic arg support check.
+        :param supports_args: Dynamic arg support check, used for types and shapes.
         :return: A decorator that registers the implementation.
 
         The decorated function must have the same semantics and signature as
@@ -175,7 +180,10 @@ class IrOp:
         return _register_impl
 
     def _inner_call(self, *args, **kwargs) -> Any:
-        """Direct call to torch op, could also skip the torch layer if eager?"""
+        """
+        Eager call to torch op lands here. In the future, direct dispatch might
+        route straight here instead of going through torch op dispatching.
+        """
         impl = self.dispatch(*args, **kwargs)
         return impl.impl_fn(*args, **kwargs)
 
@@ -187,7 +195,7 @@ class IrOp:
         SHOULD NOT BE USED IN THE DISPATCH PATH (SLOW).
         Only for Inductor lowering.
         """
-        bound_args = self._signature.bind(*args)
+        bound_args = self._py_signature.bind(*args)
         bound_args.apply_defaults()
         return bound_args.args
 
@@ -195,6 +203,8 @@ class IrOp:
         """
         Dispatch to the appropriate implementation based on current priority
         and argument support checks. Returns the selected IrOpImpl.
+
+        THIS FUNCTION IS ON THE HOT PATH (OP DISPATCH), MUST BE FAST.
         """
         if not self._priority_impls:
             logger.warning_once(
@@ -244,9 +254,9 @@ class IrOp:
             for p in p_list:
                 impl = self.impls[p]
                 if not impl.supported:
+                    # Skip unsupported implementations
                     continue
 
-                # Skip unsupported implementations
                 filtered_impls.append(impl)
 
                 # If all args are supported, skip other implementations
@@ -289,7 +299,8 @@ class IrOpImpl:
         # Native also uses this path, so we allow it here.
         assert provider == "native" or provider not in RESERVED_PROVIDERS
 
-        # check schema matches native impl
+        # Enforce the exact same schema as the native implementation.
+        # This takes care of names, types, and defaults.
         schema = infer_schema(impl_fn, mutates_args=[])
         if schema != op._schema_str:
             raise ValueError(
@@ -302,6 +313,10 @@ class IrOpImpl:
                 raise ValueError(
                     f"supports_args for provider {provider} must be a callable"
                 )
+
+            # We also manually validate the supports_args signature.
+            # Matching signatures allow faster dispatch on the hotpath.
+
             # Check that supports_args does not have keyword-only parameters
             supports_args_signature = inspect.signature(supports_args)
             params = supports_args_signature.parameters
@@ -312,7 +327,7 @@ class IrOpImpl:
                 )
 
             # Check that supports_args has the same total number of parameters
-            op_params = op._signature.parameters
+            op_params = op._py_signature.parameters
             if len(params) != len(op_params):
                 raise ValueError(
                     f"supports_args for provider {provider} must have the same number "
@@ -320,6 +335,7 @@ class IrOpImpl:
                     f"({len(op_params)})"
                 )
 
+            # Check that names and defaults match for supports_args
             for p, op_p in zip(params.values(), op_params.values()):
                 if p.name != op_p.name:
                     raise ValueError(
