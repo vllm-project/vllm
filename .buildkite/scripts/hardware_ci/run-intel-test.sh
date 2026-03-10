@@ -269,6 +269,7 @@ docker run \
     --entrypoint="" \
     -e "HF_TOKEN=${HF_TOKEN:-}" \
     -e "ZE_AFFINITY_MASK=${ZE_AFFINITY_MASK:-}" \
+    -e "CMDS=${commands}" \
     --name "${container_name}" \
     "${image_name}" \
-    bash -c "set -e; echo \"${ZE_AFFINITY_MASK:-}\"; ${commands}"
+    bash -c 'set -e; echo "${ZE_AFFINITY_MASK:-}"; eval "$CMDS"'
