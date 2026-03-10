@@ -979,7 +979,7 @@ class InputBatch:
             num_to_replace = min(num_sampled_ids, num_placeholders)
             del new_ids[num_to_replace:]
             req_output_token_ids[first_placeholder:] = new_ids
-            # ^ Implicitly deletes entries beyond (first_placeholder + num_to_replace)
+            # ^ Implicitly resizes to (first_placeholder + num_to_replace)
 
     def update_async_spec_token_ids(self, draft_token_ids: list[list[int]]) -> None:
         """
