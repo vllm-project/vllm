@@ -421,9 +421,7 @@ def fused_recurrent_gated_delta_rule_packed_decode_fwd(
         )
     q_dim = qk_dim // 2
     if q_dim % K != 0:
-        raise ValueError(
-            f"Invalid packed Q size {q_dim}: must be divisible by K={K}."
-        )
+        raise ValueError(f"Invalid packed Q size {q_dim}: must be divisible by K={K}.")
     H = q_dim // K
     if H <= 0 or HV % H != 0:
         raise ValueError(
