@@ -609,13 +609,14 @@ class WorkerProc:
         )
 
         # Load model
-        is_eep_new_worker = envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH
-        if not is_eep_new_worker:
-            self.worker.init_device()
-            # Update process title now that parallel groups are initialized
-            self.setup_proc_title_and_log_prefix(
-                enable_ep=vllm_config.parallel_config.enable_expert_parallel
-            )
+        self.worker.init_device()
+        # Update process title now that parallel groups are initialized
+        self.setup_proc_title_and_log_prefix(
+            enable_ep=vllm_config.parallel_config.enable_expert_parallel
+        )
+        if envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH:
+            self.worker.elastic_ep_execute("load_model")
+        else:
             self.worker.load_model()
 
         # Set block size based on the attention backends
