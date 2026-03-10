@@ -34,10 +34,11 @@ from vllm.inputs.data import PromptType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.mamba.mamba_utils import MambaStateCopyFunc
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.tasks import ScoreType
 from vllm.utils.collection_utils import common_prefix
 from vllm.utils.func_utils import supports_kw
 
-from .interfaces_base import VllmModel, is_pooling_model
+from .interfaces_base import VllmModel
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -969,29 +970,7 @@ def supports_mamba_prefix_caching(
 class SupportsCrossEncoding(Protocol):
     """The interface required for all models that support cross encoding."""
 
-    supports_cross_encoding: ClassVar[Literal[True]] = True
-
-
-@overload
-def supports_cross_encoding(
-    model: type[object],
-) -> TypeIs[type[SupportsCrossEncoding]]: ...
-
-
-@overload
-def supports_cross_encoding(model: object) -> TypeIs[SupportsCrossEncoding]: ...
-
-
-def _supports_cross_encoding(
-    model: type[object] | object,
-) -> TypeIs[type[SupportsCrossEncoding]] | TypeIs[SupportsCrossEncoding]:
-    return getattr(model, "supports_cross_encoding", False)
-
-
-def supports_cross_encoding(
-    model: type[object] | object,
-) -> TypeIs[type[SupportsCrossEncoding]] | TypeIs[SupportsCrossEncoding]:
-    return is_pooling_model(model) and _supports_cross_encoding(model)
+    score_type: ClassVar[ScoreType] = "cross-encoder"
 
 
 @runtime_checkable
@@ -1003,29 +982,7 @@ class SupportsLateInteraction(Protocol):
     MaxSim (max over document tokens, sum over query tokens).
     """
 
-    supports_late_interaction: ClassVar[Literal[True]] = True
-
-
-@overload
-def supports_late_interaction(
-    model: type[object],
-) -> TypeIs[type[SupportsLateInteraction]]: ...
-
-
-@overload
-def supports_late_interaction(model: object) -> TypeIs[SupportsLateInteraction]: ...
-
-
-def _supports_late_interaction(
-    model: type[object] | object,
-) -> TypeIs[type[SupportsLateInteraction]] | TypeIs[SupportsLateInteraction]:
-    return getattr(model, "supports_late_interaction", False)
-
-
-def supports_late_interaction(
-    model: type[object] | object,
-) -> TypeIs[type[SupportsLateInteraction]] | TypeIs[SupportsLateInteraction]:
-    return is_pooling_model(model) and _supports_late_interaction(model)
+    score_type: ClassVar[ScoreType] = "late-interaction"
 
 
 class SupportsQuant:
