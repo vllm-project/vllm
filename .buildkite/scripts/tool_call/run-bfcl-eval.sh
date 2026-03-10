@@ -194,7 +194,7 @@ def _get_default_kwargs(function):
 print(f"=== BFCL generate: model={model} test_category={test_category} ===")
 gen_kwargs = _get_default_kwargs(generate)
 gen_kwargs["model"] = [model]
-gen_kwargs["test_category"] = test_category
+gen_kwargs["test_category"] = [c.strip() for c in test_category.split(",")]
 gen_kwargs["skip_server_setup"] = True
 gen_kwargs["num_threads"] = num_threads
 generate(**gen_kwargs)
@@ -203,7 +203,7 @@ generate(**gen_kwargs)
 print(f"=== BFCL evaluate: model={model} test_category={test_category} ===")
 eval_kwargs = _get_default_kwargs(evaluate)
 eval_kwargs["model"] = [model]
-eval_kwargs["test_category"] = test_category
+eval_kwargs["test_category"] = [c.strip() for c in test_category.split(",")]
 evaluate(**eval_kwargs)
 
 print("=== BFCL evaluation completed successfully ===")
