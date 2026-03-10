@@ -3,7 +3,6 @@
 
 import contextlib
 import os
-import threading
 import weakref
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
@@ -152,12 +151,11 @@ class CoreEngineProcManager:
         finally:
             # Kill other procs if not all are running.
             if self.finished_procs():
-                self.shutdown()
+                self.close()
 
-    def shutdown(self, timeout: float | None = None) -> None:
-        """Shutdown engine core processes with configurable timeout."""
-        if self._finalizer.detach() is not None:
-            shutdown(self.processes, timeout=timeout)
+    def close(self):
+        """Shutdown all procs."""
+        self._finalizer()
 
     def join_first(self):
         """Wait for any process to exit."""
@@ -173,33 +171,6 @@ class CoreEngineProcManager:
             for proc in self.processes
             if proc.exitcode is not None
         }
-
-
-class SignalCallback:
-    """Safely trigger a callback from signal handler context via a dedicated thread."""
-
-    def __init__(self, callback: Callable[[], None]):
-        self._callback = callback
-        self._event = threading.Event()
-        self._stopped = False
-        self._thread = threading.Thread(
-            target=self._run,
-            daemon=True,
-            name="signal-callback",
-        )
-        self._thread.start()
-
-    def _run(self):
-        self._event.wait()
-        if not self._stopped:
-            self._callback()
-
-    def trigger(self):
-        self._event.set()
-
-    def stop(self):
-        self._stopped = True
-        self._event.set()
 
 
 @contextlib.contextmanager
@@ -458,9 +429,9 @@ class CoreEngineActorManager:
             )
 
             # if we need multiple nodes per dp group, we require for now that
-            # available nodes are homogenous
+            # available nodes are homogeneous
             assert set(n_node_devices) == {max_device_per_node}, (
-                f"Nodes are not homogenous, {nodes}"
+                f"Nodes are not homogeneous, {nodes}"
             )
             assert world_size % max_device_per_node == 0, (
                 f"For multi-node data parallel groups, world_size ({world_size}) must "
@@ -797,7 +768,7 @@ class CoreEngineActorManager:
     def get_run_refs(self):
         return self.run_refs
 
-    def shutdown(self, timeout: float | None = None) -> None:
+    def close(self):
         import ray
 
         for actor in self.local_engine_actors + self.remote_engine_actors:
