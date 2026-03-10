@@ -429,9 +429,9 @@ class CoreEngineActorManager:
             )
 
             # if we need multiple nodes per dp group, we require for now that
-            # available nodes are homogenous
+            # available nodes are homogeneous
             assert set(n_node_devices) == {max_device_per_node}, (
-                f"Nodes are not homogenous, {nodes}"
+                f"Nodes are not homogeneous, {nodes}"
             )
             assert world_size % max_device_per_node == 0, (
                 f"For multi-node data parallel groups, world_size ({world_size}) must "
