@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import contextlib
 import os
 import queue
 import signal
@@ -118,22 +117,7 @@ class EngineCore:
             self._eep_scale_up_before_kv_init()
 
         # Setup KV Caches and update CacheConfig after profiling.
-        try:
-            num_gpu_blocks, num_cpu_blocks, kv_cache_config = (
-                self._initialize_kv_caches(vllm_config)
-            )
-        except Exception:
-            logger.exception(
-                "EngineCore failed during KV cache initialization; "
-                "shutting down executor."
-            )
-            self.model_executor.shutdown()
-            raise
-
-        vllm_config.cache_config.num_gpu_blocks = num_gpu_blocks
-        vllm_config.cache_config.num_cpu_blocks = num_cpu_blocks
-        self.collective_rpc("initialize_cache", args=(num_gpu_blocks, num_cpu_blocks))
-
+        kv_cache_config = self._initialize_kv_caches(vllm_config)
         self.structured_output_manager = StructuredOutputManager(vllm_config)
 
         # Setup scheduler.
@@ -238,9 +222,7 @@ class EngineCore:
         enable_envs_cache()
 
     @instrument(span_name="Prepare model")
-    def _initialize_kv_caches(
-        self, vllm_config: VllmConfig
-    ) -> tuple[int, int, KVCacheConfig]:
+    def _initialize_kv_caches(self, vllm_config: VllmConfig) -> KVCacheConfig:
         start = time.time()
 
         # Get all kv cache needed by the model
@@ -281,8 +263,14 @@ class EngineCore:
             self.collective_rpc("update_max_model_len", args=(max_model_len_after,))
 
         scheduler_kv_cache_config = generate_scheduler_kv_cache_config(kv_cache_configs)
-        num_gpu_blocks = scheduler_kv_cache_config.num_blocks
-        num_cpu_blocks = 0
+        vllm_config.cache_config.num_gpu_blocks = scheduler_kv_cache_config.num_blocks
+        kv_cache_groups = scheduler_kv_cache_config.kv_cache_groups
+        if kv_cache_groups:
+            vllm_config.cache_config.block_size = min(
+                g.kv_cache_spec.block_size for g in kv_cache_groups
+            )
+
+        vllm_config.validate_block_size()
 
         # Initialize kv cache and warmup the execution
         self.model_executor.initialize_from_config(kv_cache_configs)
@@ -293,7 +281,7 @@ class EngineCore:
             elapsed,
             scope="local",
         )
-        return num_gpu_blocks, num_cpu_blocks, scheduler_kv_cache_config
+        return scheduler_kv_cache_config
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         return self.model_executor.supported_tasks
@@ -967,49 +955,29 @@ class EngineCoreProc(EngineCore):
             addresses = self.startup_handshake(
                 handshake_socket, local_client, headless, parallel_config_to_update
             )
-            exc_during_init = False
-            try:
-                yield addresses
-            except Exception:
-                exc_during_init = True
-                raise
-            finally:
-                if exc_during_init:
-                    # Send FAILED status so the front-end detects init
-                    # failure immediately via ZMQ instead of waiting for
-                    # process sentinel (which may be delayed by cleanup).
-                    with contextlib.suppress(Exception):
-                        handshake_socket.send(
-                            msgspec.msgpack.encode(
-                                {
-                                    "status": "FAILED",
-                                    "local": local_client,
-                                    "headless": headless,
-                                }
-                            )
-                        )
-                else:
-                    # Send ready message.
-                    num_gpu_blocks = vllm_config.cache_config.num_gpu_blocks
-                    # We pass back the coordinator stats update address
-                    # here for the external LB case for our colocated
-                    # front-end to use (coordinator only runs with rank 0).
-                    dp_stats_address = self.frontend_stats_publish_address
+            yield addresses
 
-                    # Include config hash for DP configuration validation
-                    ready_msg = {
-                        "status": "READY",
-                        "local": local_client,
-                        "headless": headless,
-                        "num_gpu_blocks": num_gpu_blocks,
-                        "dp_stats_address": dp_stats_address,
-                    }
-                    if vllm_config.parallel_config.data_parallel_size > 1:
-                        ready_msg["parallel_config_hash"] = (
-                            vllm_config.parallel_config.compute_hash()
-                        )
+            # Send ready message.
+            num_gpu_blocks = vllm_config.cache_config.num_gpu_blocks
+            # We pass back the coordinator stats update address here for the
+            # external LB case for our colocated front-end to use (coordinator
+            # only runs with rank 0).
+            dp_stats_address = self.frontend_stats_publish_address
 
-                    handshake_socket.send(msgspec.msgpack.encode(ready_msg))
+            # Include config hash for DP configuration validation
+            ready_msg = {
+                "status": "READY",
+                "local": local_client,
+                "headless": headless,
+                "num_gpu_blocks": num_gpu_blocks,
+                "dp_stats_address": dp_stats_address,
+            }
+            if vllm_config.parallel_config.data_parallel_size > 1:
+                ready_msg["parallel_config_hash"] = (
+                    vllm_config.parallel_config.compute_hash()
+                )
+
+            handshake_socket.send(msgspec.msgpack.encode(ready_msg))
 
     @staticmethod
     def startup_handshake(

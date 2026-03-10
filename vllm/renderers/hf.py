@@ -5,7 +5,7 @@ import itertools
 from collections import defaultdict, deque
 from collections.abc import Set
 from functools import lru_cache
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Literal, cast, overload
 
 import jinja2
 import jinja2.ext
@@ -439,6 +439,28 @@ def resolve_chat_template_kwargs(
     return {k: v for k, v in chat_template_kwargs.items() if k in accept_vars}
 
 
+@overload
+def safe_apply_chat_template(
+    model_config: "ModelConfig",
+    tokenizer: HfTokenizer,
+    conversation: list[ConversationMessage],
+    *,
+    tools: list[dict[str, Any]] | None = ...,
+    chat_template: str | None = ...,
+    tokenize: Literal[True] = ...,
+    **kwargs,
+) -> list[int]: ...
+@overload
+def safe_apply_chat_template(
+    model_config: "ModelConfig",
+    tokenizer: HfTokenizer,
+    conversation: list[ConversationMessage],
+    *,
+    tools: list[dict[str, Any]] | None = ...,
+    chat_template: str | None = ...,
+    tokenize: Literal[False] = ...,
+    **kwargs,
+) -> str: ...
 def safe_apply_chat_template(
     model_config: "ModelConfig",
     tokenizer: HfTokenizer,
@@ -635,6 +657,8 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
                 tokenizer=tokenizer,
                 model_config=model_config,
             ),
+            media_io_kwargs=params.media_io_kwargs,
+            mm_processor_kwargs=params.mm_processor_kwargs,
         )
 
         prompt_raw = safe_apply_chat_template(
@@ -689,6 +713,8 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
                 tokenizer=tokenizer,
                 model_config=model_config,
             ),
+            media_io_kwargs=params.media_io_kwargs,
+            mm_processor_kwargs=params.mm_processor_kwargs,
         )
 
         prompt_raw = safe_apply_chat_template(

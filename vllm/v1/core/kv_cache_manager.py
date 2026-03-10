@@ -84,6 +84,18 @@ class KVCacheBlocks:
         assert len(self.blocks) == 1, "Only one group is supported"
         return [block.block_id for block in self.blocks[0] if block.block_hash is None]
 
+    def get_unhashed_block_ids_all_groups(self) -> list[list[int]]:
+        """Get block_ids of unhashed blocks from KVCacheBlocks instance."""
+        # Skip padding blocks.
+        return [
+            [
+                block.block_id
+                for block in group
+                if block.block_hash is None and not block.is_null
+            ]
+            for group in self.blocks
+        ]
+
     def new_empty(self) -> "KVCacheBlocks":
         """
         Creates a new KVCacheBlocks instance with no blocks.
@@ -488,6 +500,13 @@ class KVCacheManager:
     ) -> KVCacheBlocks:
         # Only create new KVCacheBlocks for non-empty blocks
         return KVCacheBlocks(blocks) if any(blocks) else self.empty_kv_cache_blocks
+
+    def take_new_block_ids(self) -> list[int]:
+        """Drain and return new attention block IDs for zeroing."""
+        ids: list[int] = []
+        for mgr in self.coordinator.single_type_managers:
+            ids.extend(mgr.take_new_block_ids())
+        return ids
 
     def new_step_starts(self) -> None:
         """Called when a new step is started."""
