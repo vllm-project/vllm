@@ -148,7 +148,6 @@ class TokenizeParams:
                 f"Please request fewer output tokens.",
                 parameter=self.max_output_tokens_param,
                 value=max_output_tokens,
-                http_status=HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
             )
 
         if (
@@ -163,7 +162,6 @@ class TokenizeParams:
                 f"Please request a smaller truncation size.",
                 parameter=self.truncate_prompt_tokens_param,
                 value=truncate_prompt_tokens,
-                http_status=HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
             )
 
     def with_kwargs(self, tokenization_kwargs: dict[str, Any] | None):
