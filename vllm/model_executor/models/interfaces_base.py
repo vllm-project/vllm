@@ -274,4 +274,10 @@ def get_attn_type(model: type[object] | object) -> AttnTypeStr:
 
 
 def get_score_type(model: type[object] | object) -> ScoreType:
-    return getattr(model, "score_type", "bi-encoder")
+    score_types = []
+    for m in model.__mro__:
+        score_type = getattr(m, "score_type", "bi-encoder")
+        if score_type != "bi-encoder":
+            score_types.append(score_type)
+    assert len(score_types) < 2
+    return "bi-encoder" if not score_types else score_types[0]

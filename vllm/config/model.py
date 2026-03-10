@@ -1414,6 +1414,12 @@ class ModelConfig:
 
     @property
     def score_type(self) -> ScoreType:
+        """
+        Score API handles score/rerank for:
+        - "score" task (score_type: cross-encoder models)
+        - "embed" task (score_type: bi-encoder models)
+        - "token_embed" task (score_type: late interaction models)
+        """
         # fixme: self._model_info.score_type is the score type before
         #  as_seq_cls_model, which is "bi-encoder", rather than the
         #  score type after as_seq_cls_model, which is "cross-encoder".
