@@ -9,7 +9,6 @@ from typing import Any, Literal
 import msgspec
 import numpy as np
 import torch
-from typing_extensions import deprecated
 
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import MultiModalFeatureSpec
@@ -109,17 +108,6 @@ class EngineCoreRequest(
             return self.sampling_params
         assert self.pooling_params is not None
         return self.pooling_params
-
-    @property
-    @deprecated(
-        "EngineCoreRequest.eos_token_id will be removed in v0.18. "
-        "Please use EngineCoreRequest.sampling_params.eos_token_id instead."
-    )
-    def eos_token_id(self) -> int | None:
-        if self.sampling_params is None:
-            return None
-
-        return self.sampling_params.eos_token_id
 
 
 class EngineCoreEventType(enum.IntEnum):
@@ -238,6 +226,8 @@ class EngineCoreRequestType(enum.Enum):
     UTILITY = b"\x03"
     # Sentinel used within EngineCoreProc.
     EXECUTOR_FAILED = b"\x04"
+    # Sentinel to wake up input_queue.get() during shutdown.
+    WAKEUP = b"\x05"
 
 
 class ReconfigureDistributedRequest(msgspec.Struct):

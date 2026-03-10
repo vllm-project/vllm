@@ -98,8 +98,11 @@ class DefaultModelState(ModelState):
             req_states.prefill_len.np[input_batch.idx_mapping_np],
             req_states.num_computed_prefill_tokens[input_batch.idx_mapping_np],
         )
+        # Use unpadded input_ids to match is_mm_embed size (num_tokens).
+        # input_batch.input_ids may be padded for CUDA graphs.
+        input_ids_unpadded = input_batch.input_ids[: input_batch.num_tokens]
         inputs_embeds = self.encoder_runner.get_inputs_embeds(
-            input_batch.input_ids, mm_embeds, is_mm_embed
+            input_ids_unpadded, mm_embeds, is_mm_embed
         )
         return inputs_embeds[: input_batch.num_tokens_after_padding]
 
@@ -142,12 +145,15 @@ class DefaultModelState(ModelState):
         attn_groups: list[list[AttentionGroup]],
         kv_cache_config: KVCacheConfig,
     ) -> dict[str, Any]:
+        # Use padded sizes - padding is handled by model_runner.prepare_attn.
+        num_reqs = input_batch.num_reqs_after_padding
+        num_tokens = input_batch.num_tokens_after_padding
         query_start_loc_cpu = torch.from_numpy(input_batch.query_start_loc_np)
         max_query_len = input_batch.num_scheduled_tokens.max().item()
         attn_metadata = build_attn_metadata(
             attn_groups=attn_groups,
-            num_reqs=input_batch.num_reqs,
-            num_tokens=input_batch.num_tokens,
+            num_reqs=num_reqs,
+            num_tokens=num_tokens,
             query_start_loc_gpu=input_batch.query_start_loc,
             query_start_loc_cpu=query_start_loc_cpu,
             max_query_len=max_query_len,
