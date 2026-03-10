@@ -922,6 +922,7 @@ class Scheduler(SchedulerInterface):
         self.encoder_cache_manager.free(request)
         request.status = RequestStatus.PREEMPTED
         request.num_computed_tokens = 0
+        request.num_cached_tokens = -1
         if request.spec_token_ids:
             request.spec_token_ids = []
         request.num_preemptions += 1
@@ -1987,6 +1988,9 @@ class Scheduler(SchedulerInterface):
                 # There may be a local cache hit on retry.
                 self.kv_cache_manager.free(request)
 
+            # Reset so num_cached_tokens is re-captured on reschedule,
+            # consistent with the (potentially changed) external token count.
+            request.num_cached_tokens = -1
             self.failed_recving_kv_req_ids.remove(request.request_id)
         else:
             # Now that the blocks are ready, actually cache them.
@@ -2123,7 +2127,10 @@ class Scheduler(SchedulerInterface):
                     req_num_computed_tokens - request.num_computed_tokens
                 )
                 total_affected_tokens += num_affected_tokens
-                request.num_external_computed_tokens -= num_affected_tokens
+                request.num_external_computed_tokens = max(
+                    0,
+                    request.num_external_computed_tokens - num_affected_tokens,
+                )
                 # collect invalid block and all downstream dependent blocks
                 if evict_blocks:
                     blocks_to_evict.update(req_block_ids[idx:])

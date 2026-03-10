@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import pytest
+
 from vllm.v1.engine import FinishReason
 from vllm.v1.metrics.stats import IterationStats, PromptTokenStats, RequestStateStats
 
@@ -209,3 +211,82 @@ def test_prompt_token_stats_full_external_transfer_recompute():
     assert stats.local_cache_hit == 0
     assert stats.external_kv_transfer == 1000
     assert stats.recomputed_tokens == 1
+
+
+def test_prompt_token_stats_negative_external_clamped():
+    """Negative num_external_computed_tokens is clamped to 0.
+
+    This can happen when KV load failures cause
+    num_external_computed_tokens to be over-subtracted in
+    _update_requests_with_invalid_blocks (GitHub issue #36533).
+    """
+    stats = PromptTokenStats()
+    stats.update_from_output(
+        num_cached_tokens=500,
+        num_external_computed_tokens=-100,
+        prompt_len=1000,
+    )
+    assert stats.external_kv_transfer == 0
+    assert stats.local_cache_hit == 500
+    assert stats.computed == 500
+    assert stats.total == 1000
+
+
+def test_prompt_token_stats_external_exceeds_cached():
+    """num_external_computed_tokens > num_cached_tokens is clamped.
+
+    This can happen when num_cached_tokens is stale after retry
+    while num_external_computed_tokens is re-queried from connector.
+    """
+    stats = PromptTokenStats()
+    stats.update_from_output(
+        num_cached_tokens=300,
+        num_external_computed_tokens=500,
+        prompt_len=1000,
+    )
+    # external clamped to cached (no recomputed token in this case)
+    assert stats.external_kv_transfer == 300
+    assert stats.local_cache_hit == 0
+    assert stats.computed == 700
+    assert stats.total == 1000
+
+
+def test_prompt_token_stats_negative_cached_clamped():
+    """Negative num_cached_tokens (e.g. sentinel -1) is clamped to 0."""
+    stats = PromptTokenStats()
+    stats.update_from_output(
+        num_cached_tokens=-1,
+        num_external_computed_tokens=0,
+        prompt_len=1000,
+    )
+    assert stats.cached_tokens == 0
+    assert stats.computed == 1000
+    assert stats.local_cache_hit == 0
+    assert stats.external_kv_transfer == 0
+
+
+@pytest.mark.parametrize(
+    "num_cached,num_external,prompt_len",
+    [
+        (0, 0, 100),
+        (50, -50, 100),  # negative external
+        (-10, 0, 100),  # negative cached
+        (50, 100, 100),  # external > cached
+        (-5, -5, 100),  # both negative
+        (99, 100, 100),  # full cache, external > cached
+    ],
+)
+def test_prompt_token_stats_all_non_negative(num_cached, num_external, prompt_len):
+    """All PromptTokenStats fields must be non-negative after update."""
+    stats = PromptTokenStats()
+    stats.update_from_output(
+        num_cached_tokens=num_cached,
+        num_external_computed_tokens=num_external,
+        prompt_len=prompt_len,
+    )
+    assert stats.computed >= 0
+    assert stats.local_cache_hit >= 0
+    assert stats.external_kv_transfer >= 0
+    assert stats.cached_tokens >= 0
+    assert stats.recomputed_tokens >= 0
+    assert stats.total >= 0
