@@ -391,8 +391,6 @@ class RocmAiterRMSNormQuantFusionPass(VllmPatternMatcherPass):
         # as the latter is a subset of the former in torch ops
         for epsilon in [1e-5, 1e-6]:
             # Patterns for per_tensor quant.
-            # match_aiter_quant is not used as it creates duplicate patterns when
-            # "-rms_norm" is used and errors.
             AiterFusedAddRMSNormStaticQuantPattern(epsilon, FP8_DTYPE).register(
                 self.patterns
             )

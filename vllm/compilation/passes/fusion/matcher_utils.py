@@ -352,13 +352,7 @@ class MatcherQuantFP8(MatcherCustomOp):
         scale: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         quant_key_group_shape = self.quant_key.scale.group_shape
-        if quant_key_group_shape == GroupShape.PER_TENSOR:
-            return self.QUANT_OP(
-                x=input,
-                quant_dtype=self.quant_key.dtype,
-                scale=scale,
-            )
-        if quant_key_group_shape == GroupShape.PER_TOKEN:
+        if quant_key_group_shape in {GroupShape.PER_TOKEN, GroupShape.PER_TENSOR}:
             return self.QUANT_OP(  # type: ignore[no-any-return]
                 x=input,
                 quant_dtype=self.quant_key.dtype,
