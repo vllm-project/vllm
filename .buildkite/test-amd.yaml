@@ -529,12 +529,12 @@ steps:
   commands:
     - pip install tensorizer # for tensorizer test
     # for basic
-    - python3 offline_inference/basic/chat.py
-    - python3 offline_inference/basic/generate.py --model facebook/opt-125m
-    - python3 offline_inference/basic/generate.py --model meta-llama/Llama-2-13b-chat-hf --cpu-offload-gb 10
-    - python3 offline_inference/basic/classify.py
-    - python3 offline_inference/basic/embed.py
-    - python3 offline_inference/basic/score.py
+    - python3 basic/offline_inference/chat.py --attention-backend TRITON_ATTN
+    - python3 basic/offline_inference/generate.py --model facebook/opt-125m
+    - python3 basic/offline_inference/generate.py --model meta-llama/Llama-2-13b-chat-hf --cpu-offload-gb 10
+    - python3 basic/offline_inference/classify.py
+    - python3 basic/offline_inference/embed.py
+    - python3 basic/offline_inference/score.py
     # for multi-modal models
     - python3 offline_inference/audio_language.py --seed 0
     - python3 offline_inference/vision_language.py --seed 0
@@ -1169,7 +1169,7 @@ steps:
     - pytest -v -s tests/models/test_transformers.py
     # - pytest -v -s tests/models/multimodal/processing/
     - pytest -v -s tests/models/multimodal/test_mapping.py -k 'not (Gemma3 or Qwen2VL or Qwen2_5_VL)'
-    - python3 examples/offline_inference/basic/chat.py
+    - python3 examples/basic/offline_inference/chat.py
     # - python3 examples/offline_inference/vision_language.py --model-type qwen2_5_vl
     # Whisper needs spawn method to avoid deadlock
     - VLLM_WORKER_MULTIPROC_METHOD=spawn python3 examples/offline_inference/audio_language.py --model-type whisper
@@ -1639,8 +1639,8 @@ steps:
   - vllm/model_executor/layers/quantization/mxfp4.py
   - vllm/v1/attention/backends/flashinfer.py
   commands:
-    - uv pip install --system 'gpt-oss[eval]==0.0.5'
-    - VLLM_ROCM_USE_AITER_MHA=0 VLLM_ROCM_USE_AITER=1 VLLM_USE_AITER_UNIFIED_ATTENTION=1 pytest -s -v tests/evals/gpt_oss/test_gpqa_correctness.py --model openai/gpt-oss-20b --metric 0.58
+  - uv pip install --system 'gpt-oss[eval]==0.0.5'
+  - pytest -s -v evals/gpt_oss/test_gpqa_correctness.py --config-list-file=configs/models-gfx942.txt
 
 ##### EPLB Accuracy Tests #####
 - label: DeepSeek V2-Lite Accuracy
@@ -2208,12 +2208,12 @@ steps:
   commands:
     - pip install tensorizer # for tensorizer test
     # for basic
-    - python3 offline_inference/basic/chat.py
-    - python3 offline_inference/basic/generate.py --model facebook/opt-125m
-    - python3 offline_inference/basic/generate.py --model meta-llama/Llama-2-13b-chat-hf --cpu-offload-gb 10
-    - python3 offline_inference/basic/classify.py
-    - python3 offline_inference/basic/embed.py
-    - python3 offline_inference/basic/score.py
+    - python3 basic/offline_inference/chat.py --attention-backend TRITON_ATTN
+    - python3 basic/offline_inference/generate.py --model facebook/opt-125m
+    - python3 basic/offline_inference/generate.py --model meta-llama/Llama-2-13b-chat-hf --cpu-offload-gb 10
+    - python3 basic/offline_inference/classify.py
+    - python3 basic/offline_inference/embed.py
+    - python3 basic/offline_inference/score.py
     # for multi-modal models
     - python3 offline_inference/audio_language.py --seed 0
     - python3 offline_inference/vision_language.py --seed 0
@@ -2789,7 +2789,7 @@ steps:
     - pytest -v -s tests/models/test_transformers.py
     # - pytest -v -s tests/models/multimodal/processing/
     - pytest -v -s tests/models/multimodal/test_mapping.py -k 'not (Gemma3 or Qwen2VL or Qwen2_5_VL)'
-    - python3 examples/offline_inference/basic/chat.py
+    - python3 examples/basic/offline_inference/chat.py
     # - python3 examples/offline_inference/vision_language.py --model-type qwen2_5_vl
     # Whisper needs spawn method to avoid deadlock
     - VLLM_WORKER_MULTIPROC_METHOD=spawn python3 examples/offline_inference/audio_language.py --model-type whisper
@@ -2816,7 +2816,7 @@ steps:
   - vllm/platforms/cuda.py
   commands:
     - rocm-smi
-    - python3 examples/offline_inference/basic/chat.py
+    - python3 examples/basic/offline_inference/chat.py
     # Attention
     # num_heads2 broken by https://github.com/flashinfer-ai/flashinfer/issues/1353
     - pytest -v -s tests/kernels/attention/test_attention_selector.py 
@@ -3296,8 +3296,8 @@ steps:
   - vllm/model_executor/layers/quantization/mxfp4.py
   - vllm/v1/attention/backends/flashinfer.py
   commands:
-    - uv pip install --system 'gpt-oss[eval]==0.0.5'
-    - VLLM_ROCM_USE_AITER_MHA=0 VLLM_ROCM_USE_AITER=1 VLLM_USE_AITER_UNIFIED_ATTENTION=1 pytest -s -v tests/evals/gpt_oss/test_gpqa_correctness.py --model openai/gpt-oss-20b --metric 0.58
+  - uv pip install --system 'gpt-oss[eval]==0.0.5'
+  - pytest -s -v evals/gpt_oss/test_gpqa_correctness.py --config-list-file=configs/models-gfx950.txt
 
 ##### EPLB Accuracy Tests #####
 - label: DeepSeek V2-Lite Accuracy
