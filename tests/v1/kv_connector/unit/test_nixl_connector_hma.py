@@ -75,9 +75,7 @@ def test_logical_to_kernel_block_ids_with_hma():
     # So each logical block maps to 2 kernel blocks eg [0]->[0,1]
     worker._physical_blocks_per_logical_kv_block = 2
     # FA + SW groups (neither is MambaSpec, so both get expanded)
-    worker.kv_cache_config = make_kv_cache_config(
-        block_size=16, hma_enabled=True
-    )
+    worker.kv_cache_config = make_kv_cache_config(block_size=16, hma_enabled=True)
 
     # Test conversion: FA + SW group
     logical_block_ids = [[0, 1, 2], [3, 4]]

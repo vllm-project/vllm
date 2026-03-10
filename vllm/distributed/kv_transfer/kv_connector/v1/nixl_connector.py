@@ -60,9 +60,10 @@ from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata
 from vllm.v1.attention.backends.utils import get_kv_cache_layout
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
     MambaSpec,
     SlidingWindowSpec,
-    UniformTypeKVCacheSpecs, FullAttentionSpec,
+    UniformTypeKVCacheSpecs,
 )
 from vllm.v1.worker.block_table import BlockTable
 from vllm.v1.worker.utils import select_common_block_size
@@ -1491,7 +1492,8 @@ class NixlConnectorWorker:
         print("NUM_BLOCKS: ", self.num_blocks, "\n\n", flush=True)
         # vs = next(iter(kv_caches.values()))
         # len(vs)=2, [torch.Size([18525, 3, 3328]), torch.Size([18525, 48, 64, 128])]
-        # print(f"{next(iter(kv_caches.keys()))}:{len(vs)=}, {[v.shape for v in vs]}\n\n")
+        # print(f"{next(iter(kv_caches.keys()))}:{len(vs)=},"
+        #       f" {[v.shape for v in vs]}\n\n")
         self.kv_topo = TpKVTopology(
             tp_rank=self.tp_rank,
             engine_id=self.engine_id,
@@ -1575,7 +1577,8 @@ class NixlConnectorWorker:
                 if isinstance(layer_spec, MambaSpec)
                 else self.num_blocks
             )
-            # `page_size`` accounts for physical blocks, st KVCache is always [`num_blocks` * `page_size`]
+            # `page_size` accounts for physical blocks, st KVCache is always
+            # [`num_blocks` * `page_size`]
             if not isinstance(layer_spec, MambaSpec):
                 self.block_len_per_layer.append(page_size)
             curr_tensor_size_bytes = num_blocks * page_size
@@ -1628,7 +1631,8 @@ class NixlConnectorWorker:
         self.kv_caches_base_addr[self.engine_id][self.tp_rank] = seen_base_addresses
         self.num_regions = len(caches_data)
         print(
-            f"{self.num_regions=}, {self.hma_group_size=}, {self.kv_topo.is_kv_layout_blocks_first=}\n\n",
+            f"{self.num_regions=}, {self.hma_group_size=},"
+            f" {self.kv_topo.is_kv_layout_blocks_first=}\n\n",
             flush=True,
         )
         # TODO (NickLucche) Adapt to different descs views (engine_id->tp_rank) to
@@ -1703,9 +1707,10 @@ class NixlConnectorWorker:
         data copy correctness.
         """
         assert self.kv_topo is not None
+        kv_topo = self.kv_topo
 
         block_size_ratio = self.block_size // block_size
-        blocks_data = []
+        blocks_data: list[tuple[int, int, int]] = []
         local_base_addresses = self.kv_caches_base_addr[self.engine_id][self.tp_rank]
 
         def register_blocks(blocks_data: list[tuple[int, int, int]], mamba: bool):
@@ -1732,7 +1737,7 @@ class NixlConnectorWorker:
                     # (addr, len, device id)
                     blocks_data.append((addr, kv_block_len, self.device_id))
 
-                if self.kv_topo.is_kv_layout_blocks_first:
+                if kv_topo.is_kv_layout_blocks_first:
                     second_split = self.get_backend_aware_kv_block_len(
                         layer_idx=i, first_split=False, mamba_view=mamba
                     )
@@ -1746,7 +1751,8 @@ class NixlConnectorWorker:
                         v_addr = addr + kv_block_len
                         blocks_data.append((v_addr, second_split, self.device_id))
             logger.info(
-                "[INFO] Created %s blocks for src engine %s and rank %s on device id %s",
+                "[INFO] Created %s blocks for src engine %s"
+                " and rank %s on device id %s",
                 len(blocks_data),
                 self.engine_id,
                 self.tp_rank,
@@ -1840,7 +1846,8 @@ class NixlConnectorWorker:
         # local origin:|          0|          1|          8|         12|
         # local mapped:| 0| 1| 2| 3| 4| 5| 6| 7| 8| 9|10|11|12|13|14|15|
         assert self.kv_topo is not None
-        block_size_ratio = self.kv_topo.block_size_ratio_from_engine_id(engine_id)
+        kv_topo = self.kv_topo
+        block_size_ratio = kv_topo.block_size_ratio_from_engine_id(engine_id)
 
         if engine_id not in self.dst_num_blocks:
             self.dst_num_blocks[engine_id] = nixl_agent_meta.num_blocks
@@ -1945,7 +1952,7 @@ class NixlConnectorWorker:
                         (addr, local_block_len, nixl_agent_meta.device_id)
                     )
 
-                if self.kv_topo.is_kv_layout_blocks_first:
+                if kv_topo.is_kv_layout_blocks_first:
                     # With FlashInfer index V separately to allow head splitting.
                     second_split = self.get_backend_aware_kv_block_len(
                         layer_idx=i, first_split=False, mamba_view=mamba
@@ -1959,7 +1966,8 @@ class NixlConnectorWorker:
                         )
 
             logger.debug(
-                "Created %s blocks for dst engine %s with remote rank %s and local rank %s",
+                "Created %s blocks for dst engine %s"
+                " with remote rank %s and local rank %s",
                 len(blocks_data),
                 engine_id,
                 remote_tp_rank,
@@ -2733,7 +2741,7 @@ class NixlConnectorWorker:
         block, as K and V are in separate regions.
         For FlashInfer, this is half the length of the whole block, as K and V
         share the same region.
-        Similary, for SSM-based models, state and conv are interleaved, but crucially
+        Similarly, for SSM-based models, state and conv are interleaved, but crucially
         the their size differs.
         Reference diagram:
                             KVCacheTensor (Shared)
@@ -2760,7 +2768,6 @@ class NixlConnectorWorker:
         if self.kv_topo.is_kv_layout_blocks_first:
             # For indexing only half (either just the K or V part).
             if mamba_view:
-                # block_len = self._mamba_ssm_size[1] if first_split else self.block_len_per_layer[layer_idx] - self._mamba_ssm_size[1]
                 # NOTE (NickLucche) Mamba Opt: this is already skipping the padding so
                 # we're only transferring the minimum required bytes.
                 block_len = self._mamba_ssm_size[first_split]

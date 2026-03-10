@@ -370,17 +370,18 @@ class TpKVTopology:
     def __post_init__(self):
         # Figure out whether the first dimension of the cache is K/V
         # or num_blocks. This is used to register the memory regions correctly.
+        attn_backend = self.attn_backends[0]
         if not self.is_mamba:
             _MOCK_BLOCK_SIZE = 16
-            kv_cache_shape: tuple[int, ...] = self.attn_backends[0].get_kv_cache_shape(
+            kv_cache_shape: tuple[int, ...] = attn_backend.get_kv_cache_shape(
                 num_blocks=1, block_size=_MOCK_BLOCK_SIZE, num_kv_heads=1, head_size=1
             )
             logger.debug("Test kv_cache_shape: %s", kv_cache_shape)
         # Non-MLA backends caches have 5 dims [2, num_blocks, H,N,D],
         # we just mock num_blocks to 1 for the dimension check below.
         # Hybrid SSM models assume a single blocks_first layout
-        self._is_kv_layout_blocks_first = (
-            self.is_mamba or (len(kv_cache_shape) == 5 and kv_cache_shape[0] == 1)
+        self._is_kv_layout_blocks_first = self.is_mamba or (
+            len(kv_cache_shape) == 5 and kv_cache_shape[0] == 1
         )
 
         self._cross_layers_blocks = False
@@ -396,7 +397,7 @@ class TpKVTopology:
             _MOCK_NUM_LAYERS = 80
             kv_cache_shape = (_MOCK_NUM_LAYERS,) + kv_cache_shape
             try:
-                kv_cache_stride_order = self.attn_backend.get_kv_cache_stride_order(
+                kv_cache_stride_order = attn_backend.get_kv_cache_stride_order(
                     include_num_layers_dimension=self._cross_layers_blocks
                 )
             except (AttributeError, NotImplementedError):
@@ -526,6 +527,7 @@ class TpKVTopology:
         also accounting for hybrid SSM models specificities.
         """
         from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
+
         if isinstance(layer_spec, MambaSpec):
             # Register the whole kv cache shared tensor, including SSM/Conv. This is
             # similar to FI with the difference that SSM/Conv have different sizes
@@ -533,9 +535,11 @@ class TpKVTopology:
             return [ssm]
 
         # TODO (NickLucche) generalize check to non-natively blocks-first backends.
-        if self.is_mamba and any(backend==FlashAttentionBackend for backend in self.attn_backends):
+        if self.is_mamba and any(
+            backend == FlashAttentionBackend for backend in self.attn_backends
+        ):
             # When MAMBA is present, all backends are blocks first, so that blocks
-            # can be shared between attention layers and mamba layers. KV manager 
+            # can be shared between attention layers and mamba layers. KV manager
             # already adjusted strides for FlashAttn so its num_blocks first.
             # Swap [2<>num_blocks] dims to get required layout for hybrid SSM.
             cache = cache.transpose(0, 1)
