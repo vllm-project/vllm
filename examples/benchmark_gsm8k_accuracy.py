@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import argparse
-import re
+import regex as re
 
 import requests
 from datasets import load_dataset
@@ -35,7 +37,10 @@ def parse_args():
         "--temperature", type=float, default=0.0, help="Sampling temperature"
     )
     parser.add_argument(
-        "--hf-endpoint", type=str, default=None, help="HuggingFace mirror endpoint"
+        "--hf-endpoint",
+        type=str,
+        default=None,
+        help="HuggingFace mirror endpoint",
     )
     return parser.parse_args()
 
@@ -105,13 +110,13 @@ def main():
         if (idx + 1) % 100 == 0 and num_evaluated > 0:
             current_accuracy = correct / num_evaluated * 100
             print(
-                f"Processed {idx+1}/{total}, Evaluated: {num_evaluated}, Current accuracy: {current_accuracy:.2f}%"
+                f"Processed {idx + 1}/{total}, Evaluated: {num_evaluated}, Current accuracy: {current_accuracy:.2f}%"
             )
 
     accuracy = correct / num_evaluated * 100 if num_evaluated > 0 else 0
-    print(f"\n{'='*40}")
+    print(f"\n{'=' * 40}")
     print(f"Final accuracy: {correct}/{num_evaluated} = {accuracy:.2f}%")
 
 
 if __name__ == "__main__":
-    main()
+    main() 
