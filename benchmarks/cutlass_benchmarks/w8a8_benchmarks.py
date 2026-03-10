@@ -24,6 +24,19 @@ from vllm.utils.math_utils import cdiv
 DEFAULT_MODELS = list(WEIGHT_SHAPES.keys())
 DEFAULT_BATCH_SIZES = [1, 16, 32, 64, 128, 256, 512]
 DEFAULT_TP_SIZES = [1]
+DEFAULT_FP8_QUANT_FUSION_SHAPES = [
+    (128, 128, 128),
+    (32, 4096, 4096),
+    (128, 4096, 4096),
+    (512, 4096, 4096),
+    (128, 4096, 11008),
+    (512, 4096, 11008),
+]
+DEFAULT_FP8_QUANT_FUSION_KERNELS = [
+    "cutlass_fp8_fp8_bf16_scaled_mm_static_fp8_quant_unfused",
+    "cutlass_fp8_fp8_fp16_scaled_mm_static_fp8_quant_unfused",
+    "cutlass_fp8_fp8_static_fp8_quant_fused",
+]
 
 
 # bench
@@ -239,6 +252,23 @@ def bench(
     raise ValueError("unsupported type")
 
 
+def parse_mkn_shape(shape: str) -> tuple[int, int, int]:
+    parts = shape.lower().split("x")
+    if len(parts) != 3:
+        raise argparse.ArgumentTypeError(
+            f"invalid shape '{shape}'; expected MxKxN"
+        )
+
+    try:
+        m, k, n = (int(part) for part in parts)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            f"invalid shape '{shape}'; expected integer MxKxN"
+        ) from exc
+
+    return (m, k, n)
+
+
 # runner
 def print_timers(timers: Iterable[TMeasurement]):
     compare = TBenchmark.Compare(timers)
@@ -340,6 +370,20 @@ def run_model_bench(args):
         pkl.dump(all_data, f)
 
 
+def run_fp8_quant_fusion_bench(args):
+    if args.dtype != torch.float8_e4m3fn:
+        raise ValueError("fp8_quant_fusion_bench only supports --dtype fp8")
+    if not hasattr(torch.ops._C, "cutlass_scaled_mm_static_fp8_quant"):
+        raise RuntimeError(
+            "fp8_quant_fusion_bench requires cutlass_scaled_mm_static_fp8_quant"
+        )
+
+    MKNs = list(args.shapes)
+    kernels = args.kernels or DEFAULT_FP8_QUANT_FUSION_KERNELS
+    data = run(args.dtype, MKNs, bench_kernels=kernels)
+    make_output(data, MKNs, f"fp8_quant_fusion_bench-{args.dtype}")
+
+
 if __name__ == "__main__":
 
     def to_torch_dtype(dt):
@@ -361,6 +405,9 @@ Benchmark Cutlass GEMM.
     
     To run dimensions from a model:
         python3 ./benchmarks/cutlass_benchmarks/w8a8_benchmarks.py --dtype fp8 model_bench --models meta-llama/Llama-2-7b-hf --batch-sizes 16 --tp-sizes 1
+
+    To run the default fused-vs-unfused static FP8 output quant suite:
+        python3 ./benchmarks/cutlass_benchmarks/w8a8_benchmarks.py --dtype fp8 fp8_quant_fusion_bench
     
     Output:
         - a .pkl file, that is a list of raw torch.benchmark.utils.Measurements for the pytorch and cutlass implementations for the various GEMMs.
@@ -414,6 +461,16 @@ Benchmark Cutlass GEMM.
         "--batch-sizes", nargs="+", type=int, default=DEFAULT_BATCH_SIZES
     )
     model_parser.set_defaults(func=run_model_bench)
+
+    fusion_parser = subparsers.add_parser("fp8_quant_fusion_bench")
+    fusion_parser.add_argument(
+        "--shapes",
+        nargs="+",
+        type=parse_mkn_shape,
+        default=DEFAULT_FP8_QUANT_FUSION_SHAPES,
+        help="Irregular GEMM shapes in MxKxN form.",
+    )
+    fusion_parser.set_defaults(func=run_fp8_quant_fusion_bench)
 
     args = parser.parse_args()
     args.func(args)
