@@ -313,6 +313,10 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "HunYuanMoEV1ForCausalLM": _HfExamplesInfo(
         "tencent/Hunyuan-A13B-Instruct", trust_remote_code=True
     ),
+    "HyperCLOVAXForCausalLM": _HfExamplesInfo(
+        "naver-hyperclovax/HyperCLOVAX-SEED-Think-32B",
+        trust_remote_code=True,
+    ),
     "InternLMForCausalLM": _HfExamplesInfo(
         "internlm/internlm-chat-7b", trust_remote_code=True
     ),
@@ -347,7 +351,11 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     ),
     "Lfm2ForCausalLM": _HfExamplesInfo("LiquidAI/LFM2-1.2B"),
     "Lfm2MoeForCausalLM": _HfExamplesInfo(
-        "LiquidAI/LFM2-8B-A1B", min_transformers_version="4.58"
+        "LiquidAI/LFM2-8B-A1B",
+        min_transformers_version="5.0.0",
+        use_original_num_layers=True,
+        # Initialize at least one MoE layer
+        hf_overrides={"num_hidden_layers": 4},
     ),
     "LlamaForCausalLM": _HfExamplesInfo(
         "meta-llama/Llama-3.2-1B-Instruct",
@@ -420,6 +428,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "OlmoForCausalLM": _HfExamplesInfo("allenai/OLMo-1B-hf"),
     "Olmo2ForCausalLM": _HfExamplesInfo("allenai/OLMo-2-0425-1B"),
     "Olmo3ForCausalLM": _HfExamplesInfo("allenai/Olmo-3-7B-Instruct"),
+    "OlmoHybridForCausalLM": _HfExamplesInfo("allenai/Olmo-Hybrid-7B"),
     "OlmoeForCausalLM": _HfExamplesInfo("allenai/OLMoE-1B-7B-0924-Instruct"),
     "OPTForCausalLM": _HfExamplesInfo(
         "facebook/opt-125m", {"1b": "facebook/opt-iml-max-1.3b"}
@@ -479,6 +488,18 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         min_transformers_version="4.56.3",
     ),
     "RWForCausalLM": _HfExamplesInfo("tiiuae/falcon-40b"),
+    "SarvamMoEForCausalLM": _HfExamplesInfo(
+        "sarvamai/sarvam-30b",
+        trust_remote_code=True,
+        max_model_len=4096,
+        is_available_online=True,
+    ),
+    "SarvamMLAForCausalLM": _HfExamplesInfo(
+        "sarvamai/sarvam-105b",
+        trust_remote_code=True,
+        max_model_len=4096,
+        is_available_online=True,
+    ),
     "SeedOssForCausalLM": _HfExamplesInfo(
         "ByteDance-Seed/Seed-OSS-36B-Instruct",
         trust_remote_code=True,
@@ -494,9 +515,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         "stepfun-ai/Step-3.5-Flash",
         use_original_num_layers=True,
         # Initialize at least one MoE layer
-        hf_overrides={
-            "num_hidden_layers": 4,
-        },
+        hf_overrides={"num_hidden_layers": 4},
     ),
     "Step3TextForCausalLM": _HfExamplesInfo("stepfun-ai/step3", trust_remote_code=True),
     "SolarForCausalLM": _HfExamplesInfo(
@@ -780,6 +799,10 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "naver-hyperclovax/HyperCLOVAX-SEED-Vision-Instruct-3B",
         trust_remote_code=True,
     ),
+    "HCXVisionV2ForCausalLM": _HfExamplesInfo(
+        "naver-hyperclovax/HyperCLOVAX-SEED-Think-32B",
+        trust_remote_code=True,
+    ),
     "HunYuanVLForConditionalGeneration": _HfExamplesInfo(
         "tencent/HunyuanOCR",
         hf_overrides={"num_experts": 0},
@@ -1019,18 +1042,15 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         min_transformers_version="4.57",
     ),
     "Qwen3ASRForConditionalGeneration": _HfExamplesInfo(
-        "Qwen/Qwen3-ASR-1.7B",
+        "Qwen/Qwen3-ASR-0.6B",
         max_model_len=4096,
         min_transformers_version="4.57",
-        is_available_online=False,
     ),
     "Qwen3ASRRealtimeGeneration": _HfExamplesInfo(
-        "Qwen/Qwen3-ASR-1.7B",
+        "Qwen/Qwen3-ASR-0.6B",
         max_model_len=4096,
         min_transformers_version="4.57",
-        enforce_eager=True,
         hf_overrides={"architectures": ["Qwen3ASRRealtimeGeneration"]},
-        is_available_online=False,
     ),
     "RForConditionalGeneration": _HfExamplesInfo("YannQi/R-4B", trust_remote_code=True),
     "SkyworkR1VChatModel": _HfExamplesInfo(
@@ -1215,9 +1235,7 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         speculative_model="stepfun-ai/Step-3.5-Flash",
         use_original_num_layers=True,
         # Initialize at least one MoE layer
-        hf_overrides={
-            "num_hidden_layers": 4,
-        },
+        hf_overrides={"num_hidden_layers": 4},
         is_available_online=False,
     ),
 }
