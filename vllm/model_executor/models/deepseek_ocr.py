@@ -452,7 +452,7 @@ class DeepseekOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, Supports
         # support arbitrary resolutions via pos-encoding interpolation,
         # so Tiny/Small/Base/Large variants all work with the same weights.
         base_size = pixel_values.shape[-1]
-        if images_crop is not None and images_crop.numel() > 0:
+        if images_crop is not None:
             image_size = images_crop.shape[-1]
         else:
             image_size = base_size
