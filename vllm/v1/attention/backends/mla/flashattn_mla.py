@@ -21,7 +21,6 @@ from vllm.model_executor.layers.batch_invariant import (
     vllm_is_batch_invariant,
 )
 from vllm.platforms.interface import DeviceCapability
-from vllm.utils.math_utils import round_up
 from vllm.v1.attention.backend import (
     AttentionCGSupport,
     AttentionLayer,
