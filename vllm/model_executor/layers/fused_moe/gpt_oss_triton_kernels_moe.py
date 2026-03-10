@@ -189,7 +189,7 @@ def triton_kernel_moe_forward(
         and quant_config.use_mxfp4_w4a8
         and rocm_aiter_ops.is_enabled()
     ):
-        from aiter.ops.triton.moe_routing.routing import routing as aiter_routing
+        from aiter.ops.triton.moe.moe_routing.routing import routing as aiter_routing
 
         routing_data, gather_idx, scatter_idx = aiter_routing(
             gating_output, topk, sm_first=not renormalize
@@ -405,8 +405,8 @@ def triton_kernel_fused_mxfp4_w4a8_experts(
 
     gammas = routing_data.gate_scal if routing_data else None
 
-    from aiter.ops.triton.moe_op_gemm_a8w4 import moe_gemm_a8w4
-    from aiter.ops.triton.quant_moe import downcast_to_static_fp8
+    from aiter.ops.triton.moe.moe_op_gemm_a8w4 import moe_gemm_a8w4
+    from aiter.ops.triton.moe.quant_moe import downcast_to_static_fp8
 
     assert quant_config.w1_precision is not None, (
         "w1_precision in quant config can't be None"

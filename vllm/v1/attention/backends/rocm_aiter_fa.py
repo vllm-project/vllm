@@ -1157,7 +1157,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
                         "Shuffle KV cache layout is not supported with "
                         "speculative decoding (multi-token decode)."
                     )
-                    from aiter.ops.triton.unified_attention import (
+                    from aiter.ops.triton.attention.unified_attention import (
                         unified_attention,
                     )
 
@@ -1199,7 +1199,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
                         "unified_attention fallback with shuffle layout "
                         "is not supported yet."
                     )
-                    from aiter.ops.triton.unified_attention import (
+                    from aiter.ops.triton.attention.unified_attention import (
                         unified_attention,
                     )
 
