@@ -13,13 +13,11 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
 )
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv
-from vllm.v1.attention.backends.mamba_attn import BaseMambaAttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.gpu_input_batch import CachedRequestState
 from vllm.v1.worker.lora_model_runner_mixin import GPUInputBatch
-from vllm.v1.worker.utils import AttentionGroup
 
 
 @triton.jit
@@ -214,42 +212,6 @@ def preprocess_mamba(
             )
             input_batch.num_accepted_tokens_cpu[i] = 1
     do_mamba_copy_block(copy_bufs)
-
-
-def clear_stale_mamba_states(
-    attn_metadata: list[dict[str, Any]] | dict[str, Any],
-    attn_groups: list[list["AttentionGroup"]],
-    forward_context: dict[str, Any],
-) -> None:
-    """Clear Mamba states for new requests in the decode batch.
-
-    New requests (has_initial_states=False) would otherwise read stale
-    state from a recycled cache slot.
-    """
-    if not isinstance(attn_metadata, dict):
-        return
-
-    for kv_cache_groups in attn_groups:
-        for attn_group in kv_cache_groups:
-            if not isinstance(attn_group.kv_cache_spec, MambaSpec):
-                continue
-
-            metadata = attn_metadata.get(attn_group.layer_names[0])
-            if not isinstance(metadata, BaseMambaAttentionMetadata):
-                continue
-
-            has_initial_states_d = metadata.has_initial_states_d
-            if has_initial_states_d is None:
-                continue
-
-            assert metadata.state_indices_tensor_d is not None
-            indices = metadata.state_indices_tensor_d[: metadata.num_decodes]
-            new_indices = indices[~has_initial_states_d[: metadata.num_decodes]]
-
-            for layer_name in attn_group.layer_names:
-                layer = forward_context[layer_name]
-                for state in layer.kv_cache[0]:
-                    state[new_indices] = 0
 
 
 def postprocess_mamba(
