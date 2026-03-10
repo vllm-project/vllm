@@ -150,7 +150,7 @@ class AiterShuffledPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         fp8_dtype = current_platform.fp8_dtype()
 
         if c.out_dtype is not torch.bfloat16:
-            return False, "requires bfloat16 ouput dtype."
+            return False, "requires bfloat16 output dtype."
 
         if not is_ptpc:
             return (
@@ -161,11 +161,11 @@ class AiterShuffledPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         if not (N % 16 == 0 and K % 16 == 0):
             return (
                 False,
-                f"requires N and K dimensions divisible by 16, recieved "
+                f"requires N and K dimensions divisible by 16, received "
                 f"N={N} and K={K}.",
             )
 
-        # Aiter's shuffled per-token Gemm performs better than torch oonly when its
+        # Aiter's shuffled per-token Gemm performs better than torch only when its
         # tuned.
         if not rocm_aiter_ops.is_shuffled_per_token_w8a8_gemm_tuned(N, K, fp8_dtype):
             return (
