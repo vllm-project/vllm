@@ -61,7 +61,7 @@ if current_platform.is_cuda_alike():
 
         topk_ids = physical_ids
 
-        if eplb_static:
+        if not eplb_static:
             # 2. Record expert load metrics.
 
             # TODO(bowen): When using `FusedMoEModularKernel`, this
