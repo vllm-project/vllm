@@ -19,7 +19,6 @@ import torch
 from vllm import LLM, SamplingParams
 from vllm.platforms import current_platform
 
-
 # Test configuration
 TEST_MODEL = "facebook/opt-125m"  # Small model for fast testing
 TEST_PROMPTS = [
@@ -52,8 +51,8 @@ class TestAsyncFlashInferBaseline:
         )
 
         # Verify async scheduling is enabled
-        # The logs show "Chunked prefill is enabled" and "Asynchronous scheduling is enabled"
-        # which means async is working
+        # The logs show "Chunked prefill is enabled" and
+        # "Asynchronous scheduling is enabled" which means async is working
         print("✓ Async scheduling enabled (check logs for confirmation)")
         print("✓ LLM initialized successfully")
 
@@ -106,7 +105,7 @@ class TestAsyncFlashInferBaseline:
         ref_texts = [output.outputs[0].text for output in outputs_ref]
 
         del llm_ref
-        torch.cuda.empty_cache()
+        current_platform.empty_cache()
 
         # Test: Run with async + FlashInfer
         print("[Test] Phase 2: Async + FlashInfer implementation...")
@@ -123,7 +122,7 @@ class TestAsyncFlashInferBaseline:
         test_texts = [output.outputs[0].text for output in outputs_test]
 
         del llm_test
-        torch.cuda.empty_cache()
+        current_platform.empty_cache()
 
         # Compare outputs
         print("[Test] Phase 3: Comparing outputs...")
@@ -176,7 +175,7 @@ class TestMTPAsyncFlashInfer:
             speculative_config=spec_config,
         )
 
-        print("✓ Ngram speculative decoding (MTP-like) + Async + FlashInfer LLM initialized")
+        print("✓ Ngram spec (MTP-like) + Async + FlashInfer LLM initialized")
 
         # Run basic inference to verify it works
         sampling_params = SamplingParams(
@@ -202,7 +201,7 @@ class TestMTPAsyncFlashInfer:
         """
         assert torch.cuda.is_available(), "CUDA required for this test"
 
-        print("\n[Test] Testing ngram spec (MTP-like) + async + FlashInfer correctness...")
+        print("\n[Test] Testing ngram spec (MTP-like) + async + FI correctness...")
         print("[Note] MTP not yet supported - using ngram speculative decoding")
 
         # Reference: Standard generation
@@ -226,7 +225,7 @@ class TestMTPAsyncFlashInfer:
         ref_texts = [output.outputs[0].text for output in outputs_ref]
 
         del llm_ref
-        torch.cuda.empty_cache()
+        current_platform.empty_cache()
 
         # Test: With ngram speculative decoding (MTP-like)
         print("[Test] Phase 2: Ngram spec (MTP-like) + async + FlashInfer...")
@@ -250,7 +249,7 @@ class TestMTPAsyncFlashInfer:
         mtp_texts = [output.outputs[0].text for output in outputs_mtp]
 
         del llm_mtp
-        torch.cuda.empty_cache()
+        current_platform.empty_cache()
 
         # Compare outputs
         print("[Test] Phase 3: Comparing outputs...")
@@ -267,7 +266,7 @@ class TestMTPAsyncFlashInfer:
             assert len(mtp) > 0, f"Empty output for prompt {i}"
 
         if all_match:
-            print("✓ All outputs match - ngram spec (MTP-like) + async + FlashInfer validated")
+            print("✓ All outputs match - ngram spec (MTP-like) + async + FI validated")
         else:
             print("⚠ Some outputs differ (expected with speculative decoding)")
             print("✓ All outputs non-empty - basic correctness validated")
@@ -360,7 +359,7 @@ class TestEAGLE3AsyncFlashInfer:
         ref_texts = [output.outputs[0].text for output in outputs_ref]
 
         del llm_ref
-        torch.cuda.empty_cache()
+        current_platform.empty_cache()
 
         # Test: With EAGLE3/speculative decoding enabled
         print("[Test] Phase 2: EAGLE3 + async + FlashInfer...")
@@ -384,7 +383,7 @@ class TestEAGLE3AsyncFlashInfer:
         eagle_texts = [output.outputs[0].text for output in outputs_eagle]
 
         del llm_eagle
-        torch.cuda.empty_cache()
+        current_platform.empty_cache()
 
         # Compare outputs
         print("[Test] Phase 3: Comparing outputs...")
@@ -430,11 +429,11 @@ class TestEAGLE3AsyncFlashInfer:
         )
 
         start = time.time()
-        outputs_baseline = llm_baseline.generate(TEST_PROMPTS, sampling_params)
+        _ = llm_baseline.generate(TEST_PROMPTS, sampling_params)
         baseline_time = time.time() - start
 
         del llm_baseline
-        torch.cuda.empty_cache()
+        current_platform.empty_cache()
 
         # EAGLE3: Speculative generation
         print("[Test] Measuring EAGLE3 performance...")
@@ -455,11 +454,11 @@ class TestEAGLE3AsyncFlashInfer:
         )
 
         start = time.time()
-        outputs_eagle = llm_eagle.generate(TEST_PROMPTS, sampling_params)
+        _ = llm_eagle.generate(TEST_PROMPTS, sampling_params)
         eagle_time = time.time() - start
 
         del llm_eagle
-        torch.cuda.empty_cache()
+        current_platform.empty_cache()
 
         # Analyze speedup
         speedup = baseline_time / eagle_time
