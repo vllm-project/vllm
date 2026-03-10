@@ -28,7 +28,7 @@ from vllm.model_executor.models.llama import LlamaForCausalLM
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.spec_decode.draft_model import DraftModelProposer
-from vllm.v1.spec_decode.eagle import EagleProposer
+from vllm.v1.spec_decode.eagle import EagleProposer, SpecDecodeBaseProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
@@ -286,8 +286,8 @@ def _make_dsl_proposer_for_unit_test(
     generated: int,
     requested: int,
     threshold: float = 0.0,
-) -> EagleProposer:
-    proposer = EagleProposer.__new__(EagleProposer)
+) -> SpecDecodeBaseProposer:
+    proposer = SpecDecodeBaseProposer.__new__(SpecDecodeBaseProposer)
     proposer.dsl_total_proposals = total
     proposer.dsl_early_exits = exits
     proposer.dsl_tokens_generated = generated
