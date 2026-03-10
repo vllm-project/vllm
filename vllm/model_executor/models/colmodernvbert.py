@@ -9,7 +9,6 @@ Reference: https://huggingface.co/ModernVBERT/colmodernvbert-merged
 """
 
 from collections.abc import Iterable, Mapping, Sequence
-from typing import ClassVar, Literal
 
 import torch
 from torch import nn
@@ -37,7 +36,11 @@ from vllm.multimodal.processing import (
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.colmodernvbert import ColModernVBertConfig
 
-from .interfaces import MultiModalEmbeddings, SupportsMultiModal
+from .interfaces import (
+    MultiModalEmbeddings,
+    SupportsLateInteraction,
+    SupportsMultiModal,
+)
 from .interfaces_base import default_pooling_type
 from .modernbert import ModernBertEmbeddings, ModernBertLayer
 from .siglip import SiglipVisionModel
@@ -234,7 +237,9 @@ class ColModernVBertMultiModalProcessor(
     dummy_inputs=ColModernVBertDummyInputsBuilder,
 )
 @default_pooling_type(seq_pooling_type="CLS", tok_pooling_type="ALL")
-class ColModernVBertForRetrieval(nn.Module, SupportsMultiModal):
+class ColModernVBertForRetrieval(
+    nn.Module, SupportsMultiModal, SupportsLateInteraction
+):
     """ColModernVBERT multimodal late-interaction retrieval model.
 
     Architecture:
@@ -248,7 +253,6 @@ class ColModernVBertForRetrieval(nn.Module, SupportsMultiModal):
     """
 
     is_pooling_model = True
-    supports_late_interaction: ClassVar[Literal[True]] = True
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()

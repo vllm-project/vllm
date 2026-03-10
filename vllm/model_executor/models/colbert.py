@@ -18,7 +18,6 @@ Reference: https://arxiv.org/abs/2004.12832
 """
 
 from collections.abc import Iterable
-from typing import ClassVar, Literal
 
 import torch
 from torch import nn
@@ -28,16 +27,16 @@ from vllm.model_executor.layers.pooler import Pooler
 from vllm.model_executor.layers.pooler.tokwise import pooler_for_token_embed
 
 from .bert import BertEmbeddingModel, BertModel
+from .interfaces import SupportsLateInteraction
 from .interfaces_base import default_pooling_type
 
 
-class ColBERTMixin:
+class ColBERTMixin(nn.Module, SupportsLateInteraction):
     """Mixin that adds ColBERT late interaction support to any embedding model.
 
     ColBERT (Contextualized Late Interaction over BERT) uses per-token
     embeddings with a linear projection layer.  This mixin provides:
 
-    - ``supports_late_interaction`` class-var
     - ColBERT linear projection initialisation / lazy creation
     - Weight loading helpers for the projection layer
     - A builder for the token-embedding pooler
@@ -51,8 +50,6 @@ class ColBERTMixin:
     3. In ``load_weights``: use :meth:`_load_colbert_weights` to separate
        the ColBERT projection weight, then delegate the rest to the backbone.
     """
-
-    supports_late_interaction: ClassVar[Literal[True]] = True
 
     # Set during _init_colbert_components
     colbert_dim: int | None

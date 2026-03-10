@@ -37,10 +37,10 @@ def register_pooling_api_routers(
 
         app.include_router(embed_router)
 
-    # Score/rerank endpoints are available for:
-    # - "score" task (cross-encoder models)
-    # - "embed" task (bi-encoder models)
-    # - "token_embed" task (late interaction models like ColBERT)
+    # Score API handles score/rerank for:
+    # - "score" task (score_type: cross-encoder models)
+    # - "embed" task (score_type: bi-encoder models)
+    # - "token_embed" task (score_type: late interaction models)
     if any(t in supported_tasks for t in ("score", "embed", "token_embed")):
         from vllm.entrypoints.pooling.score.api_router import router as score_router
 
@@ -101,10 +101,10 @@ def init_pooling_state(
         if "classify" in supported_tasks
         else None
     )
-    # ServingScores handles score/rerank for:
-    # - "score" task (cross-encoder models)
-    # - "embed" task (bi-encoder models)
-    # - "token_embed" task (late interaction models like ColBERT)
+    # Score API handles score/rerank for:
+    # - "score" task (score_type: cross-encoder models)
+    # - "embed" task (score_type: bi-encoder models)
+    # - "token_embed" task (score_type: late interaction models)
     state.serving_scores = (
         ServingScores(
             engine_client,
