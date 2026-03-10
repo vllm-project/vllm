@@ -3683,8 +3683,6 @@ class GPUModelRunner(
                 )
             )
 
-            # New mamba requests classified as decodes
-            # would read stale state from recycled cache slots.
             mamba_utils.clear_stale_mamba_states(
                 attn_metadata,
                 self.attn_groups,
