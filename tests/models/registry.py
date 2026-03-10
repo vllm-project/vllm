@@ -843,6 +843,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     ),
     "MoonshotKimiaForCausalLM": _HfExamplesInfo(
         "moonshotai/Kimi-Audio-7B-Instruct",
+        tokenizer_mode="kimi_audio",
         trust_remote_code=True,
     ),
     "KimiK25ForConditionalGeneration": _HfExamplesInfo(
