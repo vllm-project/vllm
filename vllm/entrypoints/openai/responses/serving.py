@@ -1673,7 +1673,6 @@ class OpenAIServingResponses(OpenAIServing):
                         )
                     )
 
-                current_content_index += 1
                 previous_delta_messages.append(delta_message)
 
         if previous_delta_messages:
