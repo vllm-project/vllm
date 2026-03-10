@@ -120,7 +120,11 @@ class EngineCore:
         num_gpu_blocks, num_cpu_blocks, kv_cache_config = self._initialize_kv_caches(
             vllm_config
         )
-
+        if kv_cache_config.kv_cache_groups:
+            vllm_config.cache_config.block_size = min(
+                g.kv_cache_spec.block_size for g in kv_cache_config.kv_cache_groups
+            )
+        vllm_config.validate_block_size()
         vllm_config.cache_config.num_gpu_blocks = num_gpu_blocks
         vllm_config.cache_config.num_cpu_blocks = num_cpu_blocks
         self.collective_rpc("initialize_cache", args=(num_gpu_blocks, num_cpu_blocks))
@@ -1539,18 +1543,18 @@ class DPEngineCoreProc(EngineCoreProc):
 
     def _init_data_parallel(self, vllm_config: VllmConfig):
         # Configure GPUs and stateless process group for data parallel.
-        dp_rank = vllm_config.parallel_config.data_parallel_rank
-        dp_size = vllm_config.parallel_config.data_parallel_size
-        local_dp_rank = vllm_config.parallel_config.data_parallel_rank_local
+        parallel_config = vllm_config.parallel_config
+        dp_rank = parallel_config.data_parallel_rank
+        dp_size = parallel_config.data_parallel_size
+        local_dp_rank = parallel_config.data_parallel_rank_local
 
         assert dp_size > 1
         assert local_dp_rank is not None
         assert 0 <= local_dp_rank <= dp_rank < dp_size
 
         self.dp_rank = dp_rank
-        self.dp_group, self.dp_store = (
-            vllm_config.parallel_config.stateless_init_dp_group(return_store=True)
-        )
+        dp_group, dp_store = parallel_config.stateless_init_dp_group(return_store=True)
+        self.dp_group, self.dp_store = dp_group, dp_store
 
     def shutdown(self):
         super().shutdown()
@@ -1724,11 +1728,11 @@ class DPEngineCoreProc(EngineCoreProc):
         """
         Send notifications to EngineCoreClient, which can then forward
         the notifications to other engine core processes. It is used for:
-        1) In scale up: new core engines to notify exisiting core engines
+        1) In scale up: new core engines to notify existing core engines
            that they are ready;
         2) In scale down: removing core engines to notify EngineCoreClient
            so EngineCoreClient can release their ray placement groups;
-        3) Both scale up/down: to notify EngineCoreClient that exisiting
+        3) Both scale up/down: to notify EngineCoreClient that existing
            core engines have already switched to the new parallel setup.
         """
         if vllm_config is None:
