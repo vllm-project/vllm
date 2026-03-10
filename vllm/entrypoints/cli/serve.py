@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import argparse
+import os
 import signal
 import time
 
@@ -170,12 +171,15 @@ def run_headless(args: argparse.Namespace):
     shutdown_requested = False
 
     # Catch SIGTERM and SIGINT to allow graceful shutdown.
+    # First signal → graceful drain. Second signal → force immediate exit.
     def signal_handler(signum, frame):
         nonlocal shutdown_requested
         logger.debug("Received %d signal.", signum)
-        if not shutdown_requested:
-            shutdown_requested = True
-            raise SystemExit
+        if shutdown_requested:
+            logger.warning("Received second shutdown signal, forcing exit.")
+            os._exit(1)
+        shutdown_requested = True
+        raise SystemExit
 
     signal.signal(signal.SIGTERM, signal_handler)
     signal.signal(signal.SIGINT, signal_handler)
@@ -242,12 +246,15 @@ def run_multi_api_server(args: argparse.Namespace):
     shutdown_requested = False
 
     # Catch SIGTERM and SIGINT to allow graceful shutdown.
+    # First signal → graceful drain. Second signal → force immediate exit.
     def signal_handler(signum, frame):
         nonlocal shutdown_requested
         logger.debug("Received %d signal.", signum)
-        if not shutdown_requested:
-            shutdown_requested = True
-            raise SystemExit
+        if shutdown_requested:
+            logger.warning("Received second shutdown signal, forcing exit.")
+            os._exit(1)
+        shutdown_requested = True
+        raise SystemExit
 
     signal.signal(signal.SIGTERM, signal_handler)
     signal.signal(signal.SIGINT, signal_handler)
