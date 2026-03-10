@@ -57,15 +57,18 @@ def is_aiter_found_and_supported() -> bool:
 
 
 @functools.cache
-def _load_gemm_tuned_configs(csv_path: str) -> set[tuple[int, int, int]]:
+def _load_gemm_tuned_configs(
+    q_dtype_w: torch.dtype, csv_path: str
+) -> set[tuple[int, int, int]]:
     import pandas as pd
 
     df = pd.read_csv(csv_path).drop_duplicates()
+    df = df[df["q_dtype_w"] == str(q_dtype_w)]
     return set(zip(df["N"].astype(int), df["K"].astype(int), df["M"].astype(int)))
 
 
-def _check_kernel_tuned(N: int, K: int, csv_path: str) -> bool:
-    configs = _load_gemm_tuned_configs(csv_path)
+def _check_kernel_tuned(N: int, K: int, q_dtype_w: torch.dtype, csv_path: str) -> bool:
+    configs = _load_gemm_tuned_configs(q_dtype_w, csv_path)
     l_m = (
         [1, 2, 4]
         + list(range(8, 513, 8))
@@ -75,18 +78,20 @@ def _check_kernel_tuned(N: int, K: int, csv_path: str) -> bool:
     return any((N, K, M) in configs for M in l_m)
 
 
-def is_shuffled_per_token_w8a8_gemm_tuned(N: int, K: int) -> bool:
+def is_shuffled_per_token_w8a8_gemm_tuned(
+    N: int, K: int, q_dtype_w: torch.dtype
+) -> bool:
     import aiter.ops.gemm_op_a8w8 as aiter_gemm_a8w8_ops
 
     csv_path = aiter_gemm_a8w8_ops.AITER_CONFIGS.AITER_CONFIG_GEMM_A8W8_BPRESHUFFLE_FILE
-    return _check_kernel_tuned(N, K, csv_path)
+    return _check_kernel_tuned(N, K, q_dtype_w, csv_path)
 
 
-def is_per_token_w8a8_gemm_tuned(N: int, K: int) -> bool:
+def is_per_token_w8a8_gemm_tuned(N: int, K: int, q_dtype_w: torch.dtype) -> bool:
     import aiter.ops.gemm_op_a8w8 as aiter_gemm_a8w8_ops
 
     csv_path = aiter_gemm_a8w8_ops.AITER_CONFIGS.AITER_CONFIG_GEMM_A8W8_FILE
-    return _check_kernel_tuned(N, K, csv_path)
+    return _check_kernel_tuned(N, K, q_dtype_w, csv_path)
 
 
 def if_aiter_supported(func: Callable) -> Callable:

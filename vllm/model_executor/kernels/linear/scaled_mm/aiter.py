@@ -147,6 +147,10 @@ class AiterShuffledPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
             c.activation_quant_key.scale.group_shape.is_per_token()
             and c.weight_quant_key.scale.group_shape.is_per_channel()
         )
+
+        N, K = c.weight_shape
+        fp8_dtype = current_platform.fp8_dtype()
+
         if c.out_dtype is not torch.bfloat16:
             return False, "requires bfloat16 ouput dtype."
 
@@ -156,17 +160,19 @@ class AiterShuffledPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
                 "requires per token activation scales and per channel weight scales.",
             )
 
-        N, K = c.weight_shape
-
         if not (N % 16 == 0 and K % 16 == 0):
             return (
                 False,
-                f"requires N and K dimensions to be divisible by 16, recieved "
+                f"requires N and K dimensions divisible by 16, recieved "
                 f"N={N} and K={K}.",
             )
 
-        if not is_shuffled_per_token_w8a8_gemm_tuned(N, K):
-            return False, f"requires a tuned configarion for N: {N} and K: {K}."
+        if not is_shuffled_per_token_w8a8_gemm_tuned(N, K, fp8_dtype):
+            return (
+                False,
+                f"requires a tuned configarion for N: {N} and K: {K} "
+                f"and fp8 dtype {fp8_dtype}.",
+            )
 
         return True, None
 
@@ -212,16 +218,21 @@ class AiterPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
             c.activation_quant_key.scale.group_shape.is_per_token()
             and c.weight_quant_key.scale.group_shape.is_per_channel()
         )
+        N, K = c.weight_shape
+        fp8_dtype = current_platform.fp8_dtype()
+
         if not is_ptpc:
             return (
                 False,
                 "requires per token activation scales and per channel weight scales.",
             )
 
-        N, K = c.weight_shape
-        if not is_per_token_w8a8_gemm_tuned(N, K):
-            return False, f"requires a tuned configarion for N: {N} and K: {K}."
-
+        if not is_per_token_w8a8_gemm_tuned(N, K, fp8_dtype):
+            return (
+                False,
+                f"requires a tuned configarion for N: {N} and K: {K} "
+                f"and fp8 dtype {fp8_dtype}.",
+            )
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
