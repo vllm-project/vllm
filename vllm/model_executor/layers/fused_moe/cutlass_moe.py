@@ -1592,7 +1592,7 @@ def cutlass_moe_w4a16_bf16(
         ),
     )
 
-    return fn(
+    return fn.apply(
         a,
         w1_q,
         w2_q,
