@@ -233,7 +233,9 @@ def parse_chat_input_to_harmony_message(
 
     if not isinstance(chat_msg, dict):
         # Handle Pydantic models
-        chat_msg = chat_msg.model_dump(exclude_none=True)
+        # IMPORTANT: do not exclude None, as some fields like 'content'
+        # are expected to be present even if None by downstream logic.
+        chat_msg = chat_msg.model_dump(exclude_none=False)
 
     role = chat_msg.get("role")
     msgs: list[Message] = []
