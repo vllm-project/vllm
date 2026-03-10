@@ -410,6 +410,8 @@ class SharedExpertsConfig:
 class MoETestData:
     """Container for MOE test data and transforms."""
 
+    w1: torch.Tensor
+    w2: torch.Tensor
     hidden_states: torch.Tensor
     router_logits: torch.Tensor
     shared_experts_config: SharedExpertsConfig | None
@@ -490,6 +492,23 @@ def setup_moe_test_data(
     # For latent MoE: latent_size = k // 2
     latent_size = k // 2
 
+    # Determine dimensions for routed experts (may be transformed)
+    # For latent MoE, routed experts operate entirely in latent space
+    # (k//2). The routed_output_transform then projects back to k before
+    # adding with shared experts.
+    # w1: (E, 2*N, latent_size) - input latent_size
+    # w2: (E, latent_size, N) - output latent_size (fused_experts returns
+    # same shape as input)
+    routed_expert_hidden_size = latent_size if use_routed_input_transform else k
+
+    # Create expert weights
+    (w1, _, _, _), (w2, _, _, _) = make_test_weights(
+        num_experts,
+        n,
+        routed_expert_hidden_size,  # Both w1 input and w2 output use latent_size
+        in_dtype=in_dtype,
+    )
+
     # Create shared experts config if needed
     if use_shared_experts:
         shared_experts_config = SharedExpertsConfig(
@@ -528,6 +547,8 @@ def setup_moe_test_data(
     router_logits = torch.randn((m, num_experts), device=device, dtype=in_dtype)
 
     return MoETestData(
+        w1=w1,
+        w2=w2,
         hidden_states=hidden_states,
         router_logits=router_logits,
         shared_experts_config=shared_experts_config,
@@ -1186,20 +1207,7 @@ def test_moe_layer_no_parallel(
     latent_size = k // 2 if use_routed_input_transform else k
     routed_expert_hidden_size = latent_size
 
-    # Note: For latent MoE, routed experts operate entirely in latent space
-    # (k//2). The routed_output_transform then projects back to k before
-    # adding with shared experts.
-    # w1: (E, 2*N, latent_size) - input latent_size
-    # w2: (E, latent_size, N) - output latent_size (fused_experts returns
-    # same shape as input)
-    (w1, _, _, _), (w2, _, _, _) = make_test_weights(
-        num_experts,
-        n,
-        routed_expert_hidden_size,  # Both w1 input and w2 output use latent_size
-        in_dtype=in_dtype,
-    )
-
-    # Setup test data and transforms
+    # Setup test data and transforms (includes creating w1 and w2)
     test_data = setup_moe_test_data(
         m=m,
         k=k,
@@ -1214,8 +1222,8 @@ def test_moe_layer_no_parallel(
 
     with set_current_vllm_config(vllm_config):
         baseline_layer = make_fake_moe_layer(
-            w1=w1,
-            w2=w2,
+            w1=test_data.w1,
+            w2=test_data.w2,
             top_k=top_k,
             global_num_experts=num_experts,
             in_dtype=in_dtype,
@@ -1270,8 +1278,8 @@ def test_moe_layer_no_parallel(
             ep_size=ep_size,
             dp_size=dp_size,
             reduce_results=False,
-            w1=w1,
-            w2=w2,
+            w1=test_data.w1,
+            w2=test_data.w2,
             top_k=top_k,
             global_num_experts=num_experts,
             shared_experts=shared_experts,
