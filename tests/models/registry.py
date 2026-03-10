@@ -313,6 +313,10 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "HunYuanMoEV1ForCausalLM": _HfExamplesInfo(
         "tencent/Hunyuan-A13B-Instruct", trust_remote_code=True
     ),
+    "HyperCLOVAXForCausalLM": _HfExamplesInfo(
+        "naver-hyperclovax/HyperCLOVAX-SEED-Think-32B",
+        trust_remote_code=True,
+    ),
     "InternLMForCausalLM": _HfExamplesInfo(
         "internlm/internlm-chat-7b", trust_remote_code=True
     ),
@@ -791,6 +795,10 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     ),
     "HCXVisionForCausalLM": _HfExamplesInfo(
         "naver-hyperclovax/HyperCLOVAX-SEED-Vision-Instruct-3B",
+        trust_remote_code=True,
+    ),
+    "HCXVisionV2ForCausalLM": _HfExamplesInfo(
+        "naver-hyperclovax/HyperCLOVAX-SEED-Think-32B",
         trust_remote_code=True,
     ),
     "HunYuanVLForConditionalGeneration": _HfExamplesInfo(
