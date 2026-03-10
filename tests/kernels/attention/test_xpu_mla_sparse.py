@@ -4,7 +4,7 @@
 import pytest
 import torch
 
-from vllm.v1.attention.ops.triton_mla_sparse import triton_bf16_mla_sparse_interface
+from vllm.v1.attention.ops.xpu_mla_sparse import triton_bf16_mla_sparse_interface
 
 
 # https://github.com/deepseek-ai/FlashMLA/blob/main/tests/ref.py#L7
@@ -75,17 +75,12 @@ def reference_mla_sparse_prefill(
     return (out.to(torch.bfloat16), out, max_logits, orig_lse)
 
 
-@pytest.mark.parametrize("device_str", ["cuda", "xpu"])
+@pytest.mark.parametrize("device_str", ["xpu"])
 @pytest.mark.skipif(
-    not torch.cuda.is_available() and not torch.xpu.is_available(),
-    reason="CUDA or XPU is required",
+    not torch.xpu.is_available(),
+    reason="XPU is required",
 )
 def test_bf16_triton_sparse_mla(device_str):
-    if device_str == "cuda" and not torch.cuda.is_available():
-        pytest.skip("CUDA is not available")
-    if device_str == "xpu" and not torch.xpu.is_available():
-        pytest.skip("XPU is not available")
-
     device = torch.device(device_str)
     s_q = 1
     s_kv = 256

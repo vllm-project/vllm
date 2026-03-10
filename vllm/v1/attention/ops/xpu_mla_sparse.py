@@ -3,7 +3,7 @@
 
 import torch
 
-from vllm.triton_utils import tl, triton
+from vllm.triton_utils import LOG2E, LOGE2, tl, triton
 
 
 @triton.jit
@@ -173,6 +173,7 @@ def _bf16_mla_sparse_kernel(
     tl.store(max_logits_ptr + offs_lse, max_logits, mask=mask_h)
 
 
+# reference implementation of bf16 sparse prefill kernel
 def triton_bf16_mla_sparse_interface(
     q: torch.Tensor,  # [num_tokens, num_heads_q, dim_qk]
     kv: torch.Tensor,  # [num_tokens, num_heads_kv, dim_qk]
@@ -206,8 +207,6 @@ def triton_bf16_mla_sparse_interface(
     assert num_heads_kv == 1, "only support kv head = 1 for now"
     assert index_topk % BLOCK_N == 0, "index_topk must be multiple of BLOCK_N"
 
-    LOG2E = 1.4426950408889634
-    LOGE2 = 0.6931471805599453
     sm_scale *= LOG2E
 
     kv_group_num = num_heads_q // num_heads_kv
