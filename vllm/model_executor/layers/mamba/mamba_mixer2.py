@@ -832,9 +832,6 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 state_indices_tensor_d_input = state_indices_tensor_d
                 state_indices_tensor_d_output = state_indices_tensor_d
 
-            # Clear stale state for new requests classified as decodes.
-            # Uses gather-multiply-scatter (fixed-shape ops) instead of
-            # boolean indexing to stay compatible with CUDA graph capture.
             if has_initial_states_d is not None:
                 indices = state_indices_tensor_d_input
 
