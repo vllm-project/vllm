@@ -544,3 +544,52 @@ def test_arc_manager_full_scenario():
     # verify events
     events = list(arc_manager.take_events())
     assert len(events) > 0  # should have store and eviction events
+
+
+def test_filter_reused_manager():
+    """
+    Tests FilterReusedOffloadingManager with a CPUBackend.
+    """
+    block_size = 256
+    cpu_backend = CPUBackend(block_size=block_size, num_blocks=4)
+    lru_manager = LRUOffloadingManager(cpu_backend, enable_events=True)
+
+    from vllm.v1.kv_offload.reuse_manager import FilterReusedOffloadingManager
+
+    manager = FilterReusedOffloadingManager(
+        backing=lru_manager, store_threshold=2, max_tracker_size=3
+    )
+
+    # Lookup [1, 2] -> 1st time, added to tracker but not eligible for store yet
+    assert manager.lookup(to_hashes([1, 2])) == 0
+
+    # prepare store [1, 2] -> should be filtered
+    prepare_store_output = manager.prepare_store(to_hashes([1, 2]))
+    assert prepare_store_output is not None
+    assert prepare_store_output.block_hashes_to_store == []
+
+    # Lookup [1] -> 2nd time, eligible now
+    assert manager.lookup(to_hashes([1])) == 0
+
+    # prepare store [1, 2] -> [1] should be eligible, [2] should be filtered
+    prepare_store_output = manager.prepare_store(to_hashes([1, 2]))
+    assert prepare_store_output is not None
+    assert prepare_store_output.block_hashes_to_store == to_hashes([1])
+
+    # Lookup [3, 4] -> 1st time
+    # (evicts [2] from tracker since max_size is 3 and tracker has [1])
+    assert manager.lookup(to_hashes([3, 4])) == 0
+    # Verify [2] was evicted from the tracker (tracker now has: [1], [3], [4])
+    assert to_hashes([2])[0] not in manager.counts
+
+    # Lookup [2] again -> (this adds [2] back to the tracker as 1st time)
+    assert manager.lookup(to_hashes([2])) == 0
+    # Verify [2] was re-added with count=1 (not eligible yet)
+    assert manager.counts.get(to_hashes([2])[0]) == 1
+
+    # prepare store [2] -> should still be filtered out since count was reset
+    prepare_store_output = manager.prepare_store(to_hashes([2]))
+    assert prepare_store_output is not None
+    assert prepare_store_output.block_hashes_to_store == []
+
+    manager.complete_store(to_hashes([1]))
