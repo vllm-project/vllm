@@ -128,7 +128,7 @@ class EngineCoreClient(ABC):
         return AsyncMPClient(*client_args)
 
     @abstractmethod
-    def shutdown(self, timeout: float | None = None) -> None: ...
+    def shutdown(self): ...
 
     def get_output(self) -> EngineCoreOutputs:
         raise NotImplementedError
@@ -298,7 +298,7 @@ class InprocClient(EngineCoreClient):
         if len(request_ids) > 0:
             self.engine_core.abort_requests(request_ids)
 
-    def shutdown(self, timeout: float | None = None) -> None:
+    def shutdown(self) -> None:
         self.engine_core.shutdown()
 
     def profile(self, is_start: bool = True, profile_prefix: str | None = None) -> None:
@@ -390,9 +390,9 @@ class BackgroundResources:
 
         self.engine_dead = True
         if self.engine_manager is not None:
-            self.engine_manager.shutdown()
+            self.engine_manager.close()
         if self.coordinator is not None:
-            self.coordinator.shutdown()
+            self.coordinator.close()
 
         if isinstance(self.output_socket, zmq.asyncio.Socket):
             # Async case.
@@ -637,12 +637,9 @@ class MPClient(EngineCoreClient):
             if not success:
                 self._finalizer()
 
-    def shutdown(self, timeout: float | None = None) -> None:
-        """Shutdown engine manager under timeout and clean up resources."""
-        self._finalizer.detach()
-        if self.resources.engine_manager is not None:
-            self.resources.engine_manager.shutdown(timeout=timeout)
-        self.resources()
+    def shutdown(self):
+        # Terminate background resources.
+        self._finalizer()
 
     def _format_exception(self, e: Exception) -> Exception:
         """If errored, use EngineDeadError so root cause is clear."""
