@@ -1604,21 +1604,26 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Output directory for debug tensor dumps of intermediate activations.
     # When set, forward hooks are registered on every leaf module to capture
     # activations. Each forward pass produces a .pt file.
-    "VLLM_DEBUG_TENSOR_DUMP_OUTPUT_FOLDER":
-        lambda: os.environ.get("VLLM_DEBUG_TENSOR_DUMP_OUTPUT_FOLDER", None),
+    "VLLM_DEBUG_TENSOR_DUMP_OUTPUT_FOLDER": lambda: os.environ.get(
+        "VLLM_DEBUG_TENSOR_DUMP_OUTPUT_FOLDER", None
+    ),
     # Comma-separated layer indices to dump (e.g. "0,1,31").
     # When unset all layers are dumped.
-    "VLLM_DEBUG_TENSOR_DUMP_LAYERS":
-        lambda: os.environ.get("VLLM_DEBUG_TENSOR_DUMP_LAYERS", None),
+    "VLLM_DEBUG_TENSOR_DUMP_LAYERS": lambda: os.environ.get(
+        "VLLM_DEBUG_TENSOR_DUMP_LAYERS", None
+    ),
     # Number of initial forward passes to skip before recording.
-    "VLLM_DEBUG_TENSOR_DUMP_SKIP_PASSES":
-        lambda: int(os.environ.get("VLLM_DEBUG_TENSOR_DUMP_SKIP_PASSES", "0")),
+    "VLLM_DEBUG_TENSOR_DUMP_SKIP_PASSES": lambda: int(
+        os.environ.get("VLLM_DEBUG_TENSOR_DUMP_SKIP_PASSES", "0")
+    ),
     # Name of the top-level sub-module inside the model (default "model").
-    "VLLM_DEBUG_TENSOR_DUMP_TOP_LEVEL_MODULE_NAME":
-        lambda: os.environ.get("VLLM_DEBUG_TENSOR_DUMP_TOP_LEVEL_MODULE_NAME", "model"),
+    "VLLM_DEBUG_TENSOR_DUMP_TOP_LEVEL_MODULE_NAME": lambda: os.environ.get(
+        "VLLM_DEBUG_TENSOR_DUMP_TOP_LEVEL_MODULE_NAME", "model"
+    ),
     # Name of the layers container inside the top-level module (default "layers").
-    "VLLM_DEBUG_TENSOR_DUMP_LAYERS_MODULE_NAME":
-        lambda: os.environ.get("VLLM_DEBUG_TENSOR_DUMP_LAYERS_MODULE_NAME", "layers"),
+    "VLLM_DEBUG_TENSOR_DUMP_LAYERS_MODULE_NAME": lambda: os.environ.get(
+        "VLLM_DEBUG_TENSOR_DUMP_LAYERS_MODULE_NAME", "layers"
+    ),
     # Disable using pytorch's pin memory for CPU offloading.
     "VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY": lambda: bool(
         int(os.getenv("VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY", "0"))
