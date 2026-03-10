@@ -61,7 +61,7 @@ def get_sequence_parallelism_threshold(
     from vllm.platforms import current_platform
 
     if not current_platform.is_cuda():
-        # Non-CUDA platforms: let platform provide default
+        # Non-CUDA platforms: let platform provide default sp_min_token_num
         return current_platform.get_sp_min_token_num_default(
             hidden_size, tp_size, element_size
         )

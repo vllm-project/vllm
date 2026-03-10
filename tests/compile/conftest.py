@@ -24,7 +24,6 @@ def mock_cuda_platform():
     def _mock_platform(is_cuda: bool = True, capability: tuple[int, int] | None = None):
         mock_platform = MagicMock()
         mock_platform.is_cuda.return_value = is_cuda
-
         if capability is not None:
             mock_platform.get_device_capability.return_value = DeviceCapability(
                 *capability
