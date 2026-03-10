@@ -2215,8 +2215,8 @@ class Molmo2MultiModalProcessor(BaseMultiModalProcessor[Molmo2ProcessingInfo]):
             nrows, ncols = self.info.get_base_grid_size(video_processor)
 
             if use_frame_special_tokens:
-                start_id = hf_config.frame_start_token_id
-                end_id = hf_config.frame_end_token_id
+                start_id = frame_start_id
+                end_id = frame_end_id
             else:
                 start_id = img_start_id
                 end_id = img_end_id
