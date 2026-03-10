@@ -313,7 +313,11 @@ class KimiK25MultiModalProcessor(BaseMultiModalProcessor[KimiK25ProcessingInfo])
     dummy_inputs=KimiK25DummyInputsBuilder,
 )
 class KimiK25ForConditionalGeneration(
-    nn.Module, SupportsMultiModal, SupportsPP, SupportsQuant, SupportsEagle,
+    nn.Module,
+    SupportsMultiModal,
+    SupportsPP,
+    SupportsQuant,
+    SupportsEagle,
     SupportsEagle3,
 ):
     """Kimi-K2.5 model for conditional generation.
