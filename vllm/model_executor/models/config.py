@@ -206,6 +206,27 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
             chunk_size = lcm(base_chunk_size, kernel_block_alignment_size)
             attn_block_size = chunk_size * cdiv(attn_tokens_per_mamba_state, chunk_size)
             cache_config.mamba_block_size = attn_block_size
+        elif cache_config.mamba_cache_mode == "align":
+            # In "align" mode with prefix caching, keep attention block size
+            # small for effective prefix caching. The mamba layers will use
+            # non-uniform page sizes (separate tensors from attention layers)
+            # so we don't need attn_page_size >= mamba_page_size.
+            # Set mamba_block_size to the attention block size for alignment.
+            attn_block_size = kernel_block_alignment_size
+            cache_config.mamba_block_size = cache_config.block_size
+            # Don't inflate block_size or pad mamba page size.
+            # The KV cache allocator will handle non-uniform page sizes
+            # by creating separate tensors for groups with different page
+            # sizes.
+            logger.info(
+                "Using non-uniform page sizes for hybrid model in "
+                "'align' mode: attention block_size=%d, "
+                "mamba_block_size=%d. Mamba and attention groups will "
+                "use separate memory pools.",
+                cache_config.block_size,
+                cache_config.mamba_block_size,
+            )
+            return
         else:
             # Without prefix caching, select minimum valid attention block size
             # to minimize mamba state padding
