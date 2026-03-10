@@ -2,7 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import math
 from collections import defaultdict
+from collections.abc import Iterable
 from dataclasses import dataclass, field
+from itertools import product as iprod
+from typing import Any
 
 import torch
 
@@ -12,6 +15,8 @@ from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.platforms import current_platform
+from vllm.triton_utils import tl, triton
+from vllm.utils.math_utils import largest_power_of_2_divisor
 from vllm.utils.mem_utils import MemorySnapshot, format_gib
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -21,6 +26,7 @@ from vllm.v1.attention.backend import (
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     EncoderOnlyAttentionSpec,
+    FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheSpec,
@@ -29,6 +35,186 @@ from vllm.v1.kv_cache_interface import (
 )
 
 logger = init_logger(__name__)
+
+
+@triton.jit
+def _zero_kv_blocks_kernel(
+    seg_addrs_ptr,
+    block_ids_ptr,
+    n_blocks,
+    N_SEGS: tl.constexpr,
+    PAGE_SIZE_EL: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    """Zero KV cache blocks across all segments in a single launch.
+
+    Each segment is a contiguous region of one block's data.  For backends
+    where blocks are outermost (block_dim=0) there is one segment per
+    buffer.  For backends where K/V is outermost (block_dim=1) there are
+    two segments per buffer (one for K, one for V).
+
+    seg_addrs_ptr holds absolute byte addresses (int64) for each segment,
+    allowing segments to live in different CUDA allocations.
+
+    Programs are mapped as (block_index, seg_index, chunk_index).
+    """
+    pid = tl.program_id(0)
+    chunks = PAGE_SIZE_EL // BLOCK_SIZE
+    work_per_block = N_SEGS * chunks
+    block_index = pid // work_per_block
+    if block_index >= n_blocks:
+        return
+    remainder = pid % work_per_block
+    seg_index = remainder // chunks
+    chunk_index = remainder % chunks
+    block_id = tl.load(block_ids_ptr + block_index)
+    seg_addr = tl.load(seg_addrs_ptr + seg_index)
+    ptr = tl.cast(seg_addr, tl.pointer_type(tl.int32))
+    offset = (
+        block_id.to(tl.int64) * PAGE_SIZE_EL + chunk_index.to(tl.int64) * BLOCK_SIZE
+    )
+    cols = tl.arange(0, BLOCK_SIZE).to(tl.int64)
+    tl.store(ptr + offset + cols, tl.zeros([BLOCK_SIZE], dtype=tl.int32))
+
+
+class KVBlockZeroer:
+    """Manages efficient zeroing of KV cache blocks via a Triton kernel.
+
+    Call :meth:`init_meta` once after KV caches are allocated to precompute
+    segment addresses, then call :meth:`zero_block_ids` each step to zero
+    newly-allocated blocks.
+    """
+
+    def __init__(self, device: torch.device, pin_memory: bool):
+        self.device = device
+        self.pin_memory = pin_memory
+        self._meta: tuple[torch.Tensor, int, int, int] | None = None
+        self._id_cap: int = 0
+        self._ids_pinned: torch.Tensor | None = None
+        self._ids_gpu: torch.Tensor | None = None
+
+    def init_meta(
+        self,
+        attn_groups_iter: Iterable["AttentionGroup"],
+        kernel_block_sizes: list[int],
+        cache_dtype: str,
+        runner_only_attn_layers: set[str],
+        static_forward_context: dict[str, Any],
+    ) -> None:
+        """One-time precomputation for zero_block_ids.
+
+        Builds absolute-address table for the Triton zeroing kernel.
+        Each entry is the absolute byte address of a segment start on the
+        GPU, so segments in different CUDA allocations work correctly.
+
+        Block IDs from the scheduler reference logical blocks whose size
+        may differ from the kernel block size (virtual block splitting).
+        PAGE_SIZE_EL accounts for this ratio so that
+        ``block_id * PAGE_SIZE_EL`` lands at the correct offset.
+
+        Only AttentionSpec layers are processed; Mamba layers are skipped.
+        """
+        seen_ptrs: set[int] = set()
+        seg_addrs: list[int] = []
+        page_size_el: int | None = None
+
+        for group in attn_groups_iter:
+            spec = group.kv_cache_spec
+            if type(spec) is not FullAttentionSpec:
+                continue
+            if group.kv_cache_group_id >= len(kernel_block_sizes):
+                continue
+            kernel_bs = kernel_block_sizes[group.kv_cache_group_id]
+            ratio = spec.block_size // kernel_bs
+            block_dim = group.backend.get_kv_cache_block_dim(
+                kernel_bs,
+                spec.num_kv_heads,
+                spec.head_size,
+                cache_dtype_str=cache_dtype,
+            )
+
+            for layer_name in group.layer_names:
+                if layer_name in runner_only_attn_layers:
+                    continue
+                kv = static_forward_context[layer_name].kv_cache[0]
+                if isinstance(kv, list):
+                    continue
+                dp = kv.data_ptr()
+                if dp in seen_ptrs:
+                    continue
+                seen_ptrs.add(dp)
+
+                el = kv.element_size()
+                cur_bytes = kv.stride(block_dim) * el
+                assert cur_bytes % 4 == 0
+                kernel_block_el = cur_bytes // 4
+                cur_page_el = kernel_block_el * ratio
+                if page_size_el is None:
+                    page_size_el = cur_page_el
+                else:
+                    assert page_size_el == cur_page_el, (
+                        f"Non-uniform page sizes: {page_size_el} vs {cur_page_el}"
+                    )
+
+                block_stride_bytes = cur_bytes
+                outer_dims = [
+                    d
+                    for d in range(block_dim)
+                    if kv.stride(d) * el > block_stride_bytes
+                ]
+                outer_strides = [kv.stride(d) * el for d in outer_dims]
+                for outer in iprod(*(range(kv.shape[d]) for d in outer_dims)):
+                    off_bytes = sum(i * s for i, s in zip(outer, outer_strides))
+                    seg_addrs.append(dp + off_bytes)
+
+        if not seg_addrs or page_size_el is None:
+            self._meta = None
+            return
+
+        blk_size = min(largest_power_of_2_divisor(page_size_el), 1024)
+        self._id_cap = 8192
+        self._ids_pinned = torch.empty(
+            self._id_cap,
+            dtype=torch.int64,
+            pin_memory=self.pin_memory,
+        )
+        self._ids_gpu = torch.empty(self._id_cap, dtype=torch.int64, device=self.device)
+        self._meta = (
+            torch.tensor(seg_addrs, dtype=torch.int64, device=self.device),
+            page_size_el,
+            blk_size,
+            len(seg_addrs),
+        )
+
+    def zero_block_ids(self, block_ids: list[int]) -> None:
+        """Zero the KV cache memory for the given block IDs."""
+        if not block_ids or self._meta is None:
+            return
+        seg_addrs, page_size_el, blk_size, n_segs = self._meta
+        n_blocks = len(block_ids)
+        if n_blocks > self._id_cap:
+            self._id_cap = n_blocks * 2
+            self._ids_pinned = torch.empty(
+                self._id_cap,
+                dtype=torch.int64,
+                pin_memory=self.pin_memory,
+            )
+            self._ids_gpu = torch.empty(
+                self._id_cap, dtype=torch.int64, device=self.device
+            )
+        assert self._ids_pinned is not None and self._ids_gpu is not None
+        self._ids_pinned[:n_blocks].numpy()[:] = block_ids
+        idx = self._ids_gpu[:n_blocks]
+        idx.copy_(self._ids_pinned[:n_blocks], non_blocking=True)
+        grid = (n_blocks * n_segs * (page_size_el // blk_size),)
+        _zero_kv_blocks_kernel[grid](
+            seg_addrs,
+            idx,
+            n_blocks,
+            N_SEGS=n_segs,
+            PAGE_SIZE_EL=page_size_el,
+            BLOCK_SIZE=blk_size,
+        )
 
 
 @dataclass

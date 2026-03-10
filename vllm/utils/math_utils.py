@@ -30,3 +30,8 @@ def round_up(x: int, y: int) -> int:
 def round_down(x: int, y: int) -> int:
     """Round down x to the nearest multiple of y."""
     return (x // y) * y
+
+
+def largest_power_of_2_divisor(n: int) -> int:
+    """Return the largest power-of-2 that divides *n* (isolate lowest set bit)."""
+    return n & (-n)
