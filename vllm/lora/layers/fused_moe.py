@@ -49,6 +49,9 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         assert not self.base_layer.use_ep, (
             "EP support for Fused MoE LoRA is not implemented yet."
         )
+        assert self.base_layer.quant_method.moe_quant_config is not None, (
+            "Fused MoE LoRA requires the base layer to have a moe_quant_config."
+        )
         self.tp_size = get_tensor_model_parallel_world_size()
         self.tp_rank = get_tensor_model_parallel_rank()
         self.device = _get_lora_device(base_layer)
@@ -57,7 +60,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         self._w13_slices = 2 if base_layer.moe_config.is_act_and_mul else 1
         self._inject_lora_into_fused_moe()
 
-    def _normalize_keys(self, config: dict[str, int | None]) -> dict[str, int | None]:
+    def _normalize_keys(self, config: dict[str, int]) -> dict[str, int]:
         normalized_config = {}
         for key, value in config.items():
             if key.islower():
@@ -107,6 +110,9 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                 moe_intermediate_size=intermediate_size,  # lora_b_stacked.shape[-2],
             )
         else:  # fall back to the default config
+            assert layer.quant_method.moe_quant_config is not None, (
+                "Fused MoE LoRA requires the base layer to have a moe_quant_config."
+            )
             get_config_func = functools.partial(
                 try_get_optimal_moe_lora_config,
                 w1_shape=layer.w13_weight.size(),

@@ -439,6 +439,7 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
         input_tokens: list[int],
         mm_features: list[MultiModalFeatureSpec],
     ) -> tuple[torch.Tensor, int]:
+        print(f"{mm_features=}")
         kwargs = MultiModalFeatureSpec.gather_kwargs(
             mm_features,
             {
