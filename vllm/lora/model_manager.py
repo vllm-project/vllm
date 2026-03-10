@@ -742,7 +742,7 @@ class LoRAModelManager:
         if self.is_pooling_model and not lora_model.check_lora_name(module_name):
             # If it's a pool model, and the layer name is not found,
             # remove the prefix 'model.' and search again.
-            module_name = module_name.replace("model.", "")
+            module_name = module_name.removeprefix("model.")
             if lora_model.check_lora_name(module_name):
                 org_module_name = module_name
                 logger.info_once(
