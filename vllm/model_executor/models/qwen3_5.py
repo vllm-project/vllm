@@ -547,7 +547,14 @@ class Qwen3_5ForCausalLMBase(
         ],
         "gate_up_proj": ["gate_proj", "up_proj"],
         # GDN fused projections.
-        "in_proj_qkvz": ["in_proj_qkv", "in_proj_z"],
+        # `in_proj_qkv` spans the first three slices, while `in_proj_z`
+        # occupies the fourth slice in the fused projection.
+        "in_proj_qkvz": [
+            "in_proj_qkv",
+            "in_proj_qkv",
+            "in_proj_qkv",
+            "in_proj_z",
+        ],
         "in_proj_ba": ["in_proj_b", "in_proj_a"],
     }
 
@@ -650,7 +657,12 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
     supports_multimodal_pruning = False
 
     packed_modules_mapping = Qwen3VLForConditionalGeneration.packed_modules_mapping | {
-        "in_proj_qkvz": ["in_proj_qkv", "in_proj_z"],
+        "in_proj_qkvz": [
+            "in_proj_qkv",
+            "in_proj_qkv",
+            "in_proj_qkv",
+            "in_proj_z",
+        ],
         "in_proj_ba": ["in_proj_b", "in_proj_a"],
     }
 
