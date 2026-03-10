@@ -299,6 +299,11 @@ def maybe_setup_tensor_dump(
             patched_classes.add(cls)
 
     logger.info("Tensor dump enabled: torch.compile and CUDAGraph disabled.")
+    logger.warning(
+        "Tensor dump patches __call__ at the class level. "
+        "This is a global, irreversible change within the process and is "
+        "NOT safe for multi-model serving."
+    )
 
     # --- Parse env vars and register hooks -----------------------------
     from vllm.distributed import get_pp_group, get_tp_group

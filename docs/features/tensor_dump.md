@@ -44,6 +44,11 @@ output tensors (on CPU).
 - When tensor dump is enabled, `torch.compile` and CUDA graph capture
   are automatically disabled.  This has a significant performance impact
   and should only be used for debugging.
+- **Not safe for multi-model serving.** Enabling tensor dump removes the
+  custom `__call__` from `@support_torch_compile` classes at the Python
+  class level.  This is a global, irreversible change within the process
+  and will affect all models loaded in the same worker.  Only use this
+  feature in single-model debugging scenarios.
 - Tensors are moved to CPU immediately inside the forward hook, which
   adds overhead per forward pass.
 - The dump directory is organized by TP/PP rank and process ID, so
