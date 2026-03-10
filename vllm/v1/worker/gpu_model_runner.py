@@ -12,6 +12,7 @@ from contextlib import contextmanager
 from copy import copy, deepcopy
 from dataclasses import dataclass
 from functools import reduce
+from math import prod
 from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias, cast
 
 import numpy as np
@@ -5866,7 +5867,16 @@ class GPUModelRunner(
             corresponding memory buffer for KV cache.
         """
         kv_caches: dict[str, torch.Tensor] = {}
+
+        # Pre-scan to determine whether there are attn / mamba layers.
         has_attn, has_mamba = False, False
+        for group in self._kv_cache_spec_attn_group_iterator():
+            kv_cache_spec = group.kv_cache_spec
+            if isinstance(kv_cache_spec, AttentionSpec):
+                has_attn = True
+            elif isinstance(kv_cache_spec, MambaSpec):
+                has_mamba = True
+
         for group in self._kv_cache_spec_attn_group_iterator():
             kv_cache_spec = group.kv_cache_spec
             attn_backend = group.backend
@@ -5881,7 +5891,6 @@ class GPUModelRunner(
                 assert raw_tensor.numel() % kv_cache_spec.page_size_bytes == 0
                 num_blocks = raw_tensor.numel() // kv_cache_spec.page_size_bytes
                 if isinstance(kv_cache_spec, AttentionSpec):
-                    has_attn = True
                     num_blocks_per_kv_block = (
                         kv_cache_spec.block_size // kernel_block_size
                     )
@@ -5908,44 +5917,31 @@ class GPUModelRunner(
                     kv_cache_shape = tuple(
                         kv_cache_shape[i] for i in kv_cache_stride_order
                     )
+                    kv_cache_stride = tuple(torch.empty(kv_cache_shape).stride())
+                    storage_offset = 0
                     # Maintain original KV shape view.
                     inv_order = [
                         kv_cache_stride_order.index(i)
                         for i in range(len(kv_cache_stride_order))
                     ]
-                    if (
-                        isinstance(kv_cache_spec, FullAttentionSpec)
-                        and (attn_group_size := kv_cache_spec.group_size) > 1
-                    ):
-                        attn_group_idx = layer_idx % attn_group_size
-                        ori_stride = list(torch.empty(kv_cache_shape).stride())
-                        kernel_blocks_idx = kv_cache_shape.index(kernel_num_blocks)
-                        ori_stride[kernel_blocks_idx] *= attn_group_size
-                        target_stride = tuple(ori_stride)
-                        dtype_size = get_dtype_size(dtype)
-                        num_element_per_page = (
-                            kv_cache_spec.page_size_bytes // dtype_size
+                    if has_mamba:
+                        kv_cache_stride, storage_offset = (
+                            self._get_hybrid_attention_mamba_layout(
+                                kv_cache_shape=kv_cache_shape,
+                                kv_cache_stride=kv_cache_stride,
+                                kv_cache_spec=kv_cache_spec,
+                                layer_idx=layer_idx,
+                                kernel_num_blocks=kernel_num_blocks,
+                                kernel_block_size=kernel_block_size,
+                            )
                         )
-                        num_element_per_attn_group = (
-                            num_element_per_page
-                            // num_blocks_per_kv_block
-                            // attn_group_size
-                        )
-                        kv_caches[layer_name] = torch.as_strided(
-                            kv_cache_raw_tensors[layer_name].view(dtype),
-                            size=kv_cache_shape,
-                            stride=target_stride,
-                            storage_offset=attn_group_idx * num_element_per_attn_group,
-                        ).permute(*inv_order)
-                    else:
-                        kv_caches[layer_name] = (
-                            kv_cache_raw_tensors[layer_name]
-                            .view(dtype)
-                            .view(kv_cache_shape)
-                            .permute(*inv_order)
-                        )
+                    kv_caches[layer_name] = torch.as_strided(
+                        raw_tensor.view(dtype),
+                        size=kv_cache_shape,
+                        stride=kv_cache_stride,
+                        storage_offset=storage_offset,
+                    ).permute(*inv_order)
                 elif isinstance(kv_cache_spec, MambaSpec):
-                    has_mamba = True
                     raw_tensor = kv_cache_raw_tensors[layer_name]
                     state_tensors = []
                     storage_offset_bytes = 0
@@ -5975,6 +5971,57 @@ class GPUModelRunner(
             self._update_hybrid_attention_mamba_layout(kv_caches)
 
         return kv_caches
+
+    def _get_hybrid_attention_mamba_layout(
+        self,
+        kv_cache_shape: tuple[int, ...],
+        kv_cache_stride: tuple[int, ...],
+        kv_cache_spec: AttentionSpec,
+        layer_idx: int,
+        kernel_num_blocks: int,
+        kernel_block_size: int,
+    ) -> tuple[tuple[int, ...], int]:
+        """
+        Compute the stride and storage offset for the hybrid attention+mamba layout.
+
+        Args:
+            kv_cache_shape: The shape of the KV cache tensor.
+            kv_cache_stride: The stride of the KV cache tensor.
+            kv_cache_spec: The specification of the KV cache.
+            layer_idx: The index of the layer.
+            kernel_num_blocks: The number of kernel blocks.
+            kernel_block_size: The size of the kernel block.
+        Returns:
+            A tuple containing the target stride and storage offset.
+        """
+        target_stride_list = list(kv_cache_stride)
+        storage_offset = 0
+
+        attn_group_size = kv_cache_spec.group_size
+        kernel_blocks_idx = kv_cache_shape.index(kernel_num_blocks)
+        if kv_cache_shape[0] == 2:
+            # Hybrid attention+mamba uses (2, num_blocks, ...) logical shape but
+            # (num_blocks, 2, ...) physical layout.
+            assert kv_cache_shape[1] != 2, (
+                "Fail to determine whether the layout is "
+                "(2, num_blocks, ...) or (num_blocks, 2, ...) for "
+                f"a tensor of shape {kv_cache_shape}"
+            )
+            assert kernel_blocks_idx == 1
+            hidden_size = prod(kv_cache_shape[2:])
+            target_stride_list[0] = hidden_size
+            target_stride_list[1] = 2 * hidden_size
+        if attn_group_size > 1:
+            target_stride_list[kernel_blocks_idx] *= attn_group_size
+            dtype_size = get_dtype_size(kv_cache_spec.dtype)
+            num_element_per_page = kv_cache_spec.page_size_bytes // dtype_size
+            num_blocks_per_kv_block = kv_cache_spec.block_size // kernel_block_size
+            num_element_per_attn_group = (
+                num_element_per_page // num_blocks_per_kv_block // attn_group_size
+            )
+            attn_group_idx = layer_idx % attn_group_size
+            storage_offset = attn_group_idx * num_element_per_attn_group
+        return tuple(target_stride_list), storage_offset
 
     def _update_hybrid_attention_mamba_layout(
         self, kv_caches: dict[str, torch.Tensor]
