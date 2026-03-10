@@ -14,7 +14,7 @@ BUILDKITE_COMMIT=$3
 aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin "$REGISTRY"
 
 # skip build if image already exists
-if [[ -z $(docker manifest inspect "$REGISTRY"/"$REPO":"$BUILDKITE_COMMIT"-xpu) ]]; then
+if ! docker manifest inspect "$REGISTRY"/"$REPO":"$BUILDKITE_COMMIT"-xpu &> /dev/null; then
   echo "Image not found, proceeding with build..."
 else
   echo "Image found"
