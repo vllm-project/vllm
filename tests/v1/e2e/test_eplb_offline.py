@@ -13,7 +13,7 @@ from vllm.engine.arg_utils import EPLBConfig
 @pytest.mark.parametrize(
     "model_setup",
     [
-        ("Qwen/Qwen3-Next-80B-A3B-Instruct", 4),
+        ("deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct", 2),
     ],
 )
 def test_eplb_model(
@@ -39,7 +39,6 @@ def test_eplb_model(
     llm = LLM(eplb_config=eplb_config_save, **llm_args)
     llm.generate(test_prompt)
     del llm
-    torch.cuda.empty_cache()
     cleanup_dist_env_and_memory()
 
     # Load EPLB statistics from disk
@@ -51,5 +50,3 @@ def test_eplb_model(
     llm = LLM(eplb_config=eplb_config_load, **llm_args)
     llm.generate(test_prompt)
     del llm
-    torch.cuda.empty_cache()
-    cleanup_dist_env_and_memory()
