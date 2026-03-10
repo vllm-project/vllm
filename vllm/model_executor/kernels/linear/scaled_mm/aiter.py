@@ -170,7 +170,7 @@ class AiterShuffledPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         if not rocm_aiter_ops.is_shuffled_per_token_w8a8_gemm_tuned(N, K, fp8_dtype):
             return (
                 False,
-                f"requires a tuned configarion for N: {N} and K: {K} "
+                f"requires a tuned configuration for N: {N} and K: {K} "
                 f"and fp8 dtype {fp8_dtype}.",
             )
 
@@ -234,7 +234,7 @@ class AiterPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         if not rocm_aiter_ops.is_per_token_w8a8_gemm_tuned(N, K, fp8_dtype):
             return (
                 False,
-                f"requires a tuned configarion for N: {N} and K: {K} "
+                f"requires a tuned configuration for N: {N} and K: {K} "
                 f"and fp8 dtype {fp8_dtype}.",
             )
         return True, None
