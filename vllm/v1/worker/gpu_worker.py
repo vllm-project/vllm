@@ -1039,12 +1039,20 @@ def init_worker_distributed_environment(
         and parallel_config.world_size > 2
     ):
         cuda_visible_devices = envs.CUDA_VISIBLE_DEVICES
+        physical_device_ids = []
         if cuda_visible_devices:
             try:
-                physical_device_ids = [int(i) for i in cuda_visible_devices.split(",")]
+                physical_device_ids = [
+                    int(i.strip()) for i in cuda_visible_devices.split(",") if i.strip()
+                ]
             except ValueError:
-                physical_device_ids = []
-        else:
+                logger.warning(
+                    "Failed to parse CUDA_VISIBLE_DEVICES=%s. "
+                    "Falling back to assuming all devices are visible.",
+                    cuda_visible_devices,
+                )
+
+        if not physical_device_ids:
             physical_device_ids = list(range(cuda_device_count_stateless()))
         physical_device_ids = physical_device_ids[: parallel_config.world_size]
         is_fully_connected = current_platform.is_fully_connected(physical_device_ids)
