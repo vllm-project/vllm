@@ -10,6 +10,9 @@ import torch.nn.functional as F
 
 from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
 from vllm.logger import init_logger
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    get_fp8_min_max,
+)
 from vllm.model_executor.parameter import (
     GroupQuantScaleParameter,
     PackedvLLMParameter,
@@ -48,6 +51,9 @@ class QuarkW4A8_MXFP4_FP8(QuarkScheme):
 
         self.is_static_input_scheme = not input_quant_spec.get("is_dynamic")
         self.input_qscheme = input_quant_spec.get("qscheme")  # "per_tensor"
+
+        self.fp8_min, self.fp8_max = get_fp8_min_max()
+        self.fp8_dtype = current_platform.fp8_dtype()
 
         if not self.is_static_input_scheme:
             raise NotImplementedError(
@@ -175,8 +181,7 @@ class QuarkW4A8_MXFP4_FP8(QuarkScheme):
         out_dtype = x.dtype if self.out_dtype is None else self.out_dtype
 
         input_scale = layer.input_scale
-        finfo = torch.finfo(torch.float8_e4m3fn)  # [-448, 448]
-        x_fp8 = (x / input_scale).clamp(finfo.min, finfo.max).to(torch.float8_e4m3fn)
+        x_fp8 = (x / input_scale).clamp(self.fp8_min, self.fp8_max).to(self.fp8_dtype)
 
         # Broadcast per-tensor scale to per-row (M, 1) for Aiter kernel
         x_scales = input_scale.expand(M, 1).to(dtype=torch.float32, device=x.device)
@@ -207,8 +212,7 @@ class QuarkW4A8_MXFP4_FP8(QuarkScheme):
         )
 
         input_scale = layer.input_scale
-        finfo = torch.finfo(torch.float8_e4m3fn)  # [-448, 448]
-        x_fp8 = (x / input_scale).clamp(finfo.min, finfo.max).to(torch.float8_e4m3fn)
+        x_fp8 = (x / input_scale).clamp(self.fp8_min, self.fp8_max).to(self.fp8_dtype)
         x_dq = (x_fp8.to(x.dtype) * input_scale).to(x.dtype)
 
         return F.linear(x_dq, weight_dq, bias)

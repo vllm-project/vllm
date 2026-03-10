@@ -871,7 +871,7 @@ def _rocm_aiter_gemm_a8wfp4_impl(
     from aiter.ops.triton.gemm_a8wfp4 import gemm_a8wfp4
 
     M, N = x.shape[0], w.shape[0]
-    y = torch.zeros(M, N, dtype=out_dtype, device=x.device)
+    y = torch.empty(M, N, dtype=out_dtype, device=x.device)
     gemm_a8wfp4(
         x=x,
         w=w,
