@@ -20,6 +20,7 @@ from vllm.config.scheduler import RunnerType
 from vllm.config.utils import config, getattr_iter
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.tasks import ScoreType
 from vllm.transformers_utils.config import (
     ConfigFormat,
     get_config,
@@ -1412,15 +1413,22 @@ class ModelConfig:
         return self._model_info.requires_raw_input_tokens
 
     @property
-    def is_cross_encoder(self) -> bool:
+    def score_type(self) -> ScoreType:
+        """
+        Score API handles score/rerank for:
+        - "score" task (score_type: cross-encoder models)
+        - "embed" task (score_type: bi-encoder models)
+        - "token_embed" task (score_type: late interaction models)
+        """
+        # fixme: self._model_info.score_type is the score type before
+        #  as_seq_cls_model, which is "bi-encoder", rather than the
+        #  score type after as_seq_cls_model, which is "cross-encoder".
+        #  Therefore, the following logic is required.
         return (
-            self._model_info.supports_cross_encoding or self.convert_type == "classify"
+            "cross-encoder"
+            if self.convert_type == "classify"
+            else self._model_info.score_type
         )
-
-    @property
-    def is_late_interaction(self) -> bool:
-        """Check if model uses late interaction (ColBERT-style) scoring."""
-        return self._model_info.supports_late_interaction
 
     @property
     def is_pp_supported(self) -> bool:
