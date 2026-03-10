@@ -27,7 +27,7 @@ pull_request_rules:
         Hi @{{author}}, the pre-commit checks have failed. Please run:
 
         ```bash 
-        uv pip install pre-commit
+        uv pip install -r requirements/lint.txt
         pre-commit install
         pre-commit run --all-files
         ```
