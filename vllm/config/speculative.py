@@ -46,7 +46,9 @@ MTPModelTypes = Literal[
     "pangu_ultra_moe_mtp",
     "step3p5_mtp",
 ]
-EagleModelTypes = Literal["eagle", "eagle3", "extract_hidden_states", MTPModelTypes]
+DFlashModelTypes = Literal["dflash"]
+EagleModelTypes = Literal["eagle", "eagle3", MTPModelTypes, DFlashModelTypes]
+
 NgramGPUTypes = Literal["ngram_gpu"]
 SpeculativeMethod = Literal[
     "ngram",
