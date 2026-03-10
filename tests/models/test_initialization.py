@@ -88,9 +88,15 @@ def can_initialize(
             [10 * GiB_bytes],
         )
         scheduler_kv_cache_config = generate_scheduler_kv_cache_config(kv_cache_configs)
+        vllm_config.cache_config.num_gpu_blocks = scheduler_kv_cache_config.num_blocks
+        kv_cache_groups = scheduler_kv_cache_config.kv_cache_groups
+        if kv_cache_groups:
+            vllm_config.cache_config.block_size = min(
+                g.kv_cache_spec.block_size for g in kv_cache_groups
+            )
 
-        # gpu_blocks (> 0), cpu_blocks, scheduler_kv_cache_config
-        return 1, 0, scheduler_kv_cache_config
+        vllm_config.validate_block_size()
+        return scheduler_kv_cache_config
 
     if model_arch == "MiniMaxVL01ForConditionalGeneration":
         pytest.skip(
