@@ -118,7 +118,7 @@ async def test_multi_chunk_streaming(
             # JIT compilation
             warmup_done = False
             while not warmup_done:
-                event = await receive_event(ws, timeout=360.0)
+                event = await receive_event(ws, timeout=600.0)
                 if event["type"] in ("transcription.done", "error"):
                     warmup_done = True
 
