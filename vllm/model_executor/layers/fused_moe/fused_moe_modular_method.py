@@ -57,6 +57,25 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
             ),
         )
 
+    def reinit(
+        self,
+        moe_layer: torch.nn.Module,
+        prepare_finalize: FusedMoEPrepareAndFinalize,
+    ) -> None:
+        """Reinitialize the modular kernel with new prepare_finalize.
+
+        Called during elastic EP scale-down to update the MK with new
+        communication buffers and configuration.
+        """
+        self.moe_mk = FusedMoEModularKernel(
+            prepare_finalize,
+            self.old_quant_method.select_gemm_impl(prepare_finalize, moe_layer),
+            self.moe_mk.shared_experts,
+            moe_parallel_config=moe_layer.moe_parallel_config,
+        )
+        # Update disable_expert_map based on new MK
+        self.disable_expert_map = not self.moe_mk.supports_expert_map()
+
     @property
     def supports_eplb(self) -> bool:
         return self.old_quant_method.supports_eplb

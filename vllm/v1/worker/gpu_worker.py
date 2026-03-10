@@ -802,6 +802,7 @@ class Worker(WorkerBase):
             ), "All MoE modules must have the same number of experts"
             for module in moe_modules:
                 module.moe_config.num_experts = num_local_experts * new_ep_size
+                # 这里做了修改，但是 DeepEP 的 EP 没变，导致出现问题
                 module.global_num_experts = module.moe_config.num_experts
                 module.moe_parallel_config = FusedMoEParallelConfig.make(
                     tp_size_=get_tp_group().world_size,
@@ -859,9 +860,22 @@ class Worker(WorkerBase):
             parallel_config.eplb_config.num_redundant_experts = (
                 new_physical_experts - global_expert_loads[0].shape[1]
             )
-        prepare_communication_buffer_for_model(self.model_runner.model)
+        debug(f"calling prepare_communication_buffer_for_model with force=False")
+        prepare_communication_buffer_for_model(self.model_runner.model, force=False)
         if drafter_model is not None:
-            prepare_communication_buffer_for_model(drafter_model)
+            prepare_communication_buffer_for_model(drafter_model, force=False)
+
+        for name, module in self.model_runner.model.named_modules():
+            if hasattr(module, "prepare_finalize"):
+                pf = getattr(module, "prepare_finalize", None)
+                if pf is None or not hasattr(pf, "buffer"):
+                    continue
+                buf = getattr(pf, "buffer", None)
+                assert buf is not None
+                debug(f"Updating low latency buffer for module {name} with new_ep_size {new_ep_size}, {old_ep_size=}")
+                for ep_rank in range(new_ep_size, old_ep_size):
+                    buf.low_latency_update_mask_buffer(ep_rank, True)
+
         self.model_runner.model.update_physical_experts_metadata(
             num_physical_experts=new_physical_experts,
             num_local_physical_experts=num_local_physical_experts,

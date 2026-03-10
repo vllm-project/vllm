@@ -296,11 +296,12 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
         # Dispatch
         dispatch_topk_ids = self._map_global_to_physical_ids(topk_ids)
+        debug(f"before low_latency_dispatch {num_experts=}")
         expert_x, expert_num_tokens, handle, _, hook = self.buffer.low_latency_dispatch(
             a1,
             dispatch_topk_ids,
             self.max_tokens_per_rank,
-            num_experts,
+            256,
             use_fp8=self.use_fp8_dispatch,
             round_scale=self.use_ue8m0_dispatch,
             use_ue8m0=self.use_ue8m0_dispatch,

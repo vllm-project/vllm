@@ -632,10 +632,13 @@ class FusedMoE(CustomOp):
     # prepare_communication_buffer_for_model.
     # This is called after all weight loading and post-processing, so it
     # should be safe to swap out the quant_method.
-    def maybe_init_modular_kernel(self) -> None:
+    def maybe_init_modular_kernel(self, force: bool = False) -> None:
         # NOTE(rob): WIP refactor. For quant methods that own the MK
         # we create the MK during process_weights_after_loading.
-        if self.quant_method.supports_internal_mk or self.quant_method.is_monolithic:
+        debug(f"{self.quant_method.supports_internal_mk=} {self.quant_method.is_monolithic=} {force=}")
+        if not force and (
+            self.quant_method.supports_internal_mk or self.quant_method.is_monolithic
+        ):
             return None
 
         self.ensure_moe_quant_config_init()
@@ -649,9 +652,14 @@ class FusedMoE(CustomOp):
             logger.debug(
                 "%s for %s(%s)", prepare_finalize.__class__.__name__, self, id(self)
             )
-            self.quant_method = FusedMoEModularMethod.make(
-                self, self.quant_method, prepare_finalize, self.shared_experts
-            )
+            if force and hasattr(self.quant_method, "reinit"):
+                # Reinitialize existing FusedMoEModularMethod
+                self.quant_method.reinit(self, prepare_finalize)
+            else:
+                # Create new FusedMoEModularMethod
+                self.quant_method = FusedMoEModularMethod.make(
+                    self, self.quant_method, prepare_finalize, self.shared_experts
+                )
 
     @property
     def shared_experts(self) -> torch.nn.Module | None:
@@ -776,6 +784,7 @@ class FusedMoE(CustomOp):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
         # Currently routing_tables only needed for round-robin expert placement
         # with DeepEP-ll all2all backend.
+        # TODO(zsj): 支持 EPLB 么？
         if (
             self.expert_placement_strategy != "round_robin"
             or not self.use_deepep_ll_kernels

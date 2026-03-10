@@ -189,6 +189,7 @@ def maybe_make_prepare_finalize(
             num_global_experts=moe.num_experts,
             num_local_experts=moe.num_experts // all2all_manager.world_size,
         )
+        debug(f"all_to_all_args for DeepEP LL: {all_to_all_args}")
         handle = all2all_manager.get_handle(all_to_all_args)
 
         # Note: We may want to use FP8 dispatch just to reduce
@@ -251,4 +252,5 @@ def maybe_make_prepare_finalize(
             num_dispatchers=all2all_manager.world_size,
         )
 
+    debug(f"Created prepare_finalize: {type(prepare_finalize).__name__} for moe config")
     return prepare_finalize

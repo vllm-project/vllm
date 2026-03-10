@@ -1140,6 +1140,7 @@ class FusedMoEModularKernel(torch.nn.Module):
         apply_router_weight_on_input: bool,
         expert_tokens_meta: ExpertTokensMetadata | None,
     ) -> torch.Tensor:
+        debug(f"{a1q.size()=} {w1.size()=} {w2.size()=} {topk_ids.size()=}")
         _, M_full, N, K, top_k = self.fused_experts.moe_problem_size(
             a1q, w1, w2, topk_ids
         )

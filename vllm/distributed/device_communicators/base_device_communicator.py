@@ -23,6 +23,10 @@ class Cache:
                 instance = func(**kwargs)
                 self._cache[key] = instance
             return instance
+        
+    def clear(self):
+        with self._lock:
+            self._cache.clear()
 
 
 class All2AllManagerBase:
@@ -278,9 +282,16 @@ class DeviceCommunicatorBase:
     def destroy(self):
         pass
 
-    def prepare_communication_buffer_for_model(self, model: torch.nn.Module) -> None:
+    def prepare_communication_buffer_for_model(
+        self, model: torch.nn.Module, force: bool = False
+    ) -> None:
         """
         Prepare the communication buffer for the model.
+
+        Args:
+            model: The model to prepare buffers for.
+            force: If True, force reinitialization of modular kernels even
+                   if they already exist. Used during elastic EP scale-down.
         """
         if not self.is_ep_communicator:
             return
@@ -296,7 +307,7 @@ class DeviceCommunicatorBase:
             )
         ]
         for module in moe_modules:
-            module.maybe_init_modular_kernel()
+            module.maybe_init_modular_kernel(force=force)
 
     def dispatch_router_logits(
         self,

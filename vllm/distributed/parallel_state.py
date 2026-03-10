@@ -996,9 +996,15 @@ class GroupCoordinator:
         if self.mq_broadcaster is not None:
             self.mq_broadcaster = None
 
-    def prepare_communication_buffer_for_model(self, model: torch.nn.Module):
+    def prepare_communication_buffer_for_model(
+        self, model: torch.nn.Module, force: bool = False
+    ):
+        debug(f"Preparing communication buffer, {self.unique_name}")
         if self.device_communicator is not None:
-            self.device_communicator.prepare_communication_buffer_for_model(model)
+            debug(f"calling device communicator to prepare communication buffer, {self.unique_name}")
+            self.device_communicator.prepare_communication_buffer_for_model(
+                model, force=force
+            )
 
     def dispatch_router_logits(
         self,
@@ -1497,23 +1503,30 @@ def ensure_model_parallel_initialized(
     )
 
 
-def prepare_communication_buffer_for_model(model: torch.nn.Module):
+def prepare_communication_buffer_for_model(
+    model: torch.nn.Module, force: bool = False
+):
     """Prepare the communication buffer for the model.
     Traditional communication libraries like NCCL are almost
     model agnostic. However, emerging new communication libraries like
     MoE all2all (DeepEP) usually allocate the communication buffer
     based on the model shape for optimal performance.
+
+    Args:
+        model: The model to prepare buffers for.
+        force: If True, force reinitialization of modular kernels even
+               if they already exist. Used during elastic EP scale-down.
     """
     if _TP is not None:
-        _TP.prepare_communication_buffer_for_model(model)
+        _TP.prepare_communication_buffer_for_model(model, force=force)
     if _PCP is not None:
-        _PCP.prepare_communication_buffer_for_model(model)
+        _PCP.prepare_communication_buffer_for_model(model, force=force)
     if _PP is not None:
-        _PP.prepare_communication_buffer_for_model(model)
+        _PP.prepare_communication_buffer_for_model(model, force=force)
     if _DP is not None:
-        _DP.prepare_communication_buffer_for_model(model)
+        _DP.prepare_communication_buffer_for_model(model, force=force)
     if _EP is not None:
-        _EP.prepare_communication_buffer_for_model(model)
+        _EP.prepare_communication_buffer_for_model(model, force=force)
 
 
 def model_parallel_is_initialized():
