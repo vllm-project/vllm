@@ -310,7 +310,7 @@ def _get_backend_priorities(
     use_mla: bool,
     use_sparse: bool,
 ) -> list[AttentionBackendEnum]:
-    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
 
     if use_sparse:
         return [AttentionBackendEnum.ROCM_AITER_MLA_SPARSE]
@@ -327,28 +327,15 @@ def _get_backend_priorities(
                 AttentionBackendEnum.TRITON_MLA,
             ]
 
-    backends = []
-
-    # Priority 1: Check for AITER Unified Attention (must check before MHA)
-    if envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION:
-        backends.append(AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN)
-
-    # Priority 2: Check for AITER MHA (Flash Attention)
-    if envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_MHA:
+    backends = [
+        AttentionBackendEnum.ROCM_ATTN,
+    ]
+    if rocm_aiter_ops.is_mha_enabled():
         backends.append(AttentionBackendEnum.ROCM_AITER_FA)
-
-    # Priority 3: Check for ROCM_ATTN (prefill-decode split)
-    from vllm.config import get_current_vllm_config_or_none
-
-    vllm_config = get_current_vllm_config_or_none()
-    if (
-        vllm_config is not None
-        and vllm_config.attention_config.use_prefill_decode_attention
-    ):
-        backends.append(AttentionBackendEnum.ROCM_ATTN)
-
-    # Default: Triton Unified Attention
+    if is_aiter_found_and_supported():
+        backends.append(AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN)
     backends.append(AttentionBackendEnum.TRITON_ATTN)
+
     return backends
 
 

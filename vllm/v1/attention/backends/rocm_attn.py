@@ -204,7 +204,7 @@ class RocmAttentionBackend(AttentionBackend):
 
     @classmethod
     def supports_sink(cls) -> bool:
-        return True
+        return False
 
     forward_includes_kv_cache_update: bool = False
 
