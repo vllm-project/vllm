@@ -43,6 +43,7 @@ class BaseMambaAttentionMetadata:
     # The following tensors are used for decode requests and
     # speculative decoding compatibility, and will be None if the batch
     # has no decode requests.
+    has_initial_states_d: torch.Tensor | None
     state_indices_tensor_d: torch.Tensor | None
     query_start_loc_d: torch.Tensor | None  # shape: [num_decodes + 1,]
 
@@ -364,6 +365,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
 
         # Need flags to indicate if there are initial states
         has_initial_states_p = None
+        has_initial_states_d = None
         query_start_loc_p = None
         query_start_loc_d = None
         num_computed_tokens = None
@@ -414,6 +416,19 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             ]
             state_indices_tensor_p = state_indices_tensor_p[:, 0]
 
+        # Only set when there are genuinely new decode requests
+        # (num_computed_tokens == 0, seq_lens > 0). Padded CG slots
+        # (seq_lens == 0) are excluded so their PAD_SLOT_ID doesn't
+        # cause zeroing of the last real cache slot.
+        if num_decodes > 0:
+            if num_computed_tokens is None:
+                num_computed_tokens = common_attn_metadata.compute_num_computed_tokens()
+            has_initial_states_d = (num_computed_tokens[:num_decodes] > 0) | (
+                common_attn_metadata.seq_lens[:num_decodes] == 0
+            )
+            if has_initial_states_d.all():
+                has_initial_states_d = None
+
         if num_decodes > 0 and self.use_spec_decode:
             assert num_accepted_tokens is not None
             query_start_loc_d = common_attn_metadata.query_start_loc[: num_decodes + 1]
@@ -459,6 +474,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             num_decode_tokens=num_decode_tokens,
             query_start_loc_p=query_start_loc_p,
             has_initial_states_p=has_initial_states_p,
+            has_initial_states_d=has_initial_states_d,
             state_indices_tensor_p=state_indices_tensor_p,
             state_indices_tensor_d=state_indices_tensor_d,
             num_accepted_tokens=num_accepted_tokens,

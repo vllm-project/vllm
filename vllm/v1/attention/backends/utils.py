@@ -356,7 +356,6 @@ def make_local_attention_virtual_batches(
         causal=True,
         _seq_lens_cpu=seq_lens_cpu,
         _num_computed_tokens_cpu=torch.from_numpy(num_computed_tokens_local),
-        has_context=torch.from_numpy(num_computed_tokens_local > 0),
     ), make_block_table
 
 
@@ -413,7 +412,6 @@ def make_kv_sharing_fast_prefill_common_attn_metadata(
         block_table_tensor=common_attn_metadata.block_table_tensor,
         slot_mapping=common_attn_metadata.slot_mapping,
         causal=True,
-        has_context=common_attn_metadata.has_context,
         _seq_lens_cpu=common_attn_metadata._seq_lens_cpu,
         _num_computed_tokens_cpu=common_attn_metadata._num_computed_tokens_cpu,
     )
@@ -515,22 +513,13 @@ def split_decodes_and_prefills(
     num_tokens = common_attn_metadata.num_actual_tokens
     query_start_loc = common_attn_metadata.query_start_loc_cpu
 
-    query_lens = query_start_loc[1:] - query_start_loc[:-1]
-
-    # A new request has no prior context (num_computed_tokens == 0).
-    # New requests need prefill treatment even if
-    # query_lens <= decode_threshold (e.g., for Mamba state init).
-    has_context = common_attn_metadata.has_context
-    assert has_context is not None
-    is_new_request = ~has_context[:num_reqs] & (query_lens > 0)
-
-    if (
-        max_query_len <= decode_threshold
-        and (not require_uniform or decode_threshold <= 1)
-        and not torch.any(is_new_request)
+    if max_query_len <= decode_threshold and (
+        not require_uniform or decode_threshold <= 1
     ):
         return num_reqs, 0, num_tokens, 0
-    if query_lens[0].item() > decode_threshold or is_new_request[0].item():
+
+    query_lens = query_start_loc[1:] - query_start_loc[:-1]
+    if query_lens[0].item() > decode_threshold:
         # first request is not decode, so no decode requests
         return 0, num_reqs, 0, num_tokens
 
@@ -541,9 +530,9 @@ def split_decodes_and_prefills(
         if torch.all((query_lens == query_lens[0]) | (query_lens == 0)):
             assert num_reqs * query_lens[0] == num_tokens, "tokens not padded correctly"
             return num_reqs, 0, num_tokens, 0  # all decodes
-        is_prefill = (query_lens != query_lens[0]) | is_new_request
+        is_prefill = query_lens != query_lens[0]
     else:
-        is_prefill = (query_lens > decode_threshold) | is_new_request
+        is_prefill = query_lens > decode_threshold
 
     if not torch.any(is_prefill):
         return num_reqs, 0, num_tokens, 0

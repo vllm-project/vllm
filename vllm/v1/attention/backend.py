@@ -333,10 +333,6 @@ class CommonAttentionMetadata:
     dcp_local_seq_lens_cpu: torch.Tensor | None = None
     """Sequence lengths of the local rank in decode context parallelism world"""
 
-    has_context: torch.Tensor | None = None
-    """(batch_size,) bool CPU tensor. True if the request has prior computed
-    context (num_computed_tokens > 0), False for brand-new requests."""
-
     # WARNING: Deprecated fields. Will be removed in a future release (v0.15.0)
     _seq_lens_cpu: torch.Tensor | None = None
     _num_computed_tokens_cpu: torch.Tensor | None = None
@@ -404,9 +400,6 @@ class CommonAttentionMetadata:
             else None,
             _num_computed_tokens_cpu=self._num_computed_tokens_cpu[:num_actual_reqs]
             if self._num_computed_tokens_cpu is not None
-            else None,
-            has_context=self.has_context[:num_actual_reqs]
-            if self.has_context is not None
             else None,
             num_reqs=num_actual_reqs,
             num_actual_tokens=num_actual_tokens,

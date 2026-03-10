@@ -394,6 +394,7 @@ class MambaMixer(MambaBase, PluggableLayer):
             else:
                 state_indices_tensor_d_input = state_indices_tensor_d
                 state_indices_tensor_d_output = state_indices_tensor_d
+
             # 2. Convolution sequence transformation
             conv_out_d = causal_conv1d_update(
                 hidden_states_BC_d.transpose(0, 1),
