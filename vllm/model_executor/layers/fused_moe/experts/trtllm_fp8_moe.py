@@ -21,7 +21,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
 )
 from vllm.platforms import current_platform
-from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
 
 
 class TrtLlmFp8Experts(mk.FusedMoEExpertsMonolithic):
@@ -72,11 +71,8 @@ class TrtLlmFp8Experts(mk.FusedMoEExpertsMonolithic):
     def _supports_current_device() -> bool:
         """Supports only Blackwell-family GPUs."""
         p = current_platform
-        return (
-            p.is_cuda()
-            and p.is_device_capability_family(100)
-            and has_flashinfer_trtllm_fused_moe()
-        )
+        # Add check flashinfer trtllm is available
+        return p.is_cuda() and p.is_device_capability_family(100)
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:
