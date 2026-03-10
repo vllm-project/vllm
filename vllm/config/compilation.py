@@ -119,6 +119,8 @@ class PassConfig:
     """Fuse the custom SiluMul + quant ops."""
     fuse_attn_quant: bool = Field(default=None)
     """Fuse the custom attention + quant ops."""
+    fuse_gemm_quant: bool = Field(default=None)
+    """Fuse CUTLASS GEMM + static FP8 quantization."""
     eliminate_noops: bool = Field(default=True)
     """Eliminate no-op ops."""
     enable_sp: bool = Field(default=None)
@@ -212,6 +214,7 @@ class PassConfig:
         "fuse_norm_quant",
         "fuse_act_quant",
         "fuse_attn_quant",
+        "fuse_gemm_quant",
         "enable_sp",
         "fuse_gemm_comms",
         "fuse_allreduce_rms",
@@ -240,6 +243,11 @@ class PassConfig:
                     "Fusion enabled but reshape elimination disabled. "
                     "Attention + quant (fp8) fusion might not work"
                 )
+            if self.fuse_gemm_quant:
+                logger.warning_once(
+                    "Fusion enabled but reshape elimination disabled. "
+                    "GEMM + static FP8 quant fusion might not work"
+                )
             if self.fuse_allreduce_rms:
                 logger.warning_once(
                     "Fusion enabled but reshape elimination disabled. "
@@ -256,6 +264,18 @@ class PassConfig:
                 "CUDA or ROCm. The fusion will be disabled."
             )
             self.enable_qk_norm_rope_fusion = False
+        if self.fuse_gemm_quant and not current_platform.is_cuda():
+            logger.warning_once(
+                "GEMM + static FP8 quant fusion is only enabled on CUDA. "
+                "The fusion will be disabled."
+            )
+            self.fuse_gemm_quant = False
+        if self.fuse_gemm_quant and not current_platform.has_device_capability(89):
+            logger.warning_once(
+                "GEMM + static FP8 quant fusion currently requires SM89+. "
+                "The fusion will be disabled."
+            )
+            self.fuse_gemm_quant = False
         if self.fuse_act_padding and not current_platform.is_rocm():
             logger.warning_once(
                 "Padding fusion enabled but the current platform is not ROCm. "

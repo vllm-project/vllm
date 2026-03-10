@@ -188,6 +188,10 @@ void cutlass_scaled_mm_sm120_fp8_epilogue(torch::Tensor& out,
     return cutlass_gemm_sm120_fp8_dispatch<cutlass::float_e4m3_t,
                                            cutlass::bfloat16_t, Epilogue>(
         out, a, b, std::forward<EpilogueArgs>(epilogue_args)...);
+  } else if (out.dtype() == torch::kFloat8_e4m3fn) {
+    return cutlass_gemm_sm120_fp8_dispatch<cutlass::float_e4m3_t,
+                                          cutlass::float_e4m3_t, Epilogue>(
+        out, a, b, std::forward<EpilogueArgs>(epilogue_args)...);
   } else {
     TORCH_CHECK(out.dtype() == torch::kFloat16);
     return cutlass_gemm_sm120_fp8_dispatch<cutlass::float_e4m3_t,

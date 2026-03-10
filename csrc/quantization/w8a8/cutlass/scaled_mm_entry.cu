@@ -243,6 +243,40 @@ void cutlass_scaled_mm(torch::Tensor& c, torch::Tensor const& a,
       version_num);
 }
 
+void cutlass_scaled_mm_static_fp8_quant(
+    torch::Tensor& out,
+    torch::Tensor const& a,
+    torch::Tensor const& b,
+    torch::Tensor const& a_scales,
+    torch::Tensor const& b_scales,
+    torch::Tensor const& output_scale,
+    std::optional<torch::Tensor> const& bias) {
+  TORCH_CHECK(a.dtype() == torch::kFloat8_e4m3fn,
+              "cutlass_scaled_mm_static_fp8_quant requires FP8 A input");
+  TORCH_CHECK(b.dtype() == torch::kFloat8_e4m3fn,
+              "cutlass_scaled_mm_static_fp8_quant requires FP8 B input");
+  TORCH_CHECK(out.dtype() == torch::kFloat8_e4m3fn,
+              "cutlass_scaled_mm_static_fp8_quant requires FP8 output");
+  TORCH_CHECK(!bias.has_value(),
+              "cutlass_scaled_mm_static_fp8_quant does not support bias");
+  TORCH_CHECK(output_scale.device() == a_scales.device(),
+              "output_scale must be on the same device as a_scales");
+  TORCH_CHECK(output_scale.scalar_type() == torch::kFloat,
+              "output_scale must have dtype float32");
+  TORCH_CHECK(output_scale.numel() == 1,
+              "cutlass_scaled_mm_static_fp8_quant only supports per-tensor "
+              "output scale");
+
+  int32_t version_num = get_sm_version_num();
+  TORCH_CHECK(cutlass_scaled_mm_supports_fp8(version_num),
+              "cutlass_scaled_mm_static_fp8_quant requires CUTLASS FP8 "
+              "kernels on SM89+, got SM",
+              version_num);
+
+  auto combined_a_scales = a_scales * output_scale.reciprocal();
+  cutlass_scaled_mm(out, a, b, combined_a_scales, b_scales, std::nullopt);
+}
+
 void cutlass_moe_mm(
     torch::Tensor& out_tensors, torch::Tensor const& a_tensors,
     torch::Tensor const& b_tensors, torch::Tensor const& a_scales,

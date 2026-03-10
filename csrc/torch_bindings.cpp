@@ -450,6 +450,14 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "                  Tensor b_scales, Tensor? bias) -> ()");
   ops.impl("cutlass_scaled_mm", torch::kCUDA, &cutlass_scaled_mm);
 
+  ops.def(
+      "cutlass_scaled_mm_static_fp8_quant(Tensor! out, Tensor a,"
+      "                                   Tensor b, Tensor a_scales,"
+      "                                   Tensor b_scales, Tensor output_scale,"
+      "                                   Tensor? bias) -> ()");
+  ops.impl("cutlass_scaled_mm_static_fp8_quant", torch::kCUDA,
+           &cutlass_scaled_mm_static_fp8_quant);
+
   // CUTLASS w8a8 GEMM, supporting asymmetric per-tensor or per-row/column
   // quantization.
   ops.def(

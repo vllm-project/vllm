@@ -26,6 +26,7 @@ if rocm_aiter_ops.is_enabled():
 if current_platform.is_cuda_alike():
     from .fusion.act_quant_fusion import ActivationQuantFusionPass
     from .fusion.attn_quant_fusion import AttnFusionPass
+    from .fusion.gemm_quant_fusion import GemmQuantFusionPass
     from .fusion.qk_norm_rope_fusion import QKNormRoPEFusionPass
     from .fusion.rms_quant_fusion import RMSNormQuantFusionPass
     from .fusion.rope_kvcache_fusion import RopeKVCacheFusionPass
@@ -120,6 +121,8 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
                 self.passes += [SequenceParallelismPass(config)]
                 if self.pass_config.fuse_gemm_comms:
                     self.passes += [AsyncTPPass(config)]
+            if self.pass_config.fuse_gemm_quant:
+                self.passes += [GemmQuantFusionPass(config)]
 
             if self.pass_config.fuse_allreduce_rms:
                 self.passes += [AllReduceFusionPass(config)]

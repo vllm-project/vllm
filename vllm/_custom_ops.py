@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, Optional
 
 import torch
 
@@ -720,6 +720,51 @@ def cutlass_scaled_mm_supports_fp8(cuda_device_capability: int) -> bool:
 def cutlass_scaled_mm_supports_block_fp8(cuda_device_capability: int) -> bool:
     return torch.ops._C.cutlass_scaled_mm_supports_block_fp8(cuda_device_capability)
 
+
+def cutlass_scaled_mm_static_fp8_quant(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    a_scales: torch.Tensor,
+    b_scales: torch.Tensor,
+    output_scale: torch.Tensor,
+    bias: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    assert current_platform.is_cuda(), "CUTLASS FP8 quant fusion is CUDA only"
+    assert bias is None, "bias is not supported for cutlass_scaled_mm_static_fp8_quant"
+    assert output_scale.numel() == 1, "output_scale must be scalar"
+    assert a.dtype == current_platform.fp8_dtype()
+    assert b.dtype == current_platform.fp8_dtype()
+
+    target_shape = (*a.shape[:-1], b.shape[1])
+    a = a.view(-1, a.shape[-1])
+
+    cutlass_compatible_b = b.shape[0] % 16 == 0 and b.shape[1] % 16 == 0
+    assert cutlass_compatible_b, "cutlass_scaled_mm_static_fp8_quant requires CUTLASS-compatible B"
+
+    out = torch.empty(
+        (a.shape[0], b.shape[1]),
+        device=a.device,
+        dtype=current_platform.fp8_dtype(),
+    )
+    torch.ops._C.cutlass_scaled_mm_static_fp8_quant(
+        out, a, b, a_scales, b_scales, output_scale, bias
+    )
+    return out.view(*target_shape)
+
+
+if hasattr(torch.ops._C, "cutlass_scaled_mm_static_fp8_quant"):
+
+    @register_fake("_C::cutlass_scaled_mm_static_fp8_quant")
+    def cutlass_scaled_mm_static_fp8_quant_fake(
+        out: torch.Tensor,
+        a: torch.Tensor,
+        b: torch.Tensor,
+        a_scales: torch.Tensor,
+        b_scales: torch.Tensor,
+        output_scale: torch.Tensor,
+        bias: Optional[torch.Tensor] = None,
+    ) -> None:
+        return None
 
 def cutlass_scaled_mm(
     a: torch.Tensor,
