@@ -75,6 +75,7 @@ from .interfaces import (
     IsHybrid,
     MixtureOfExperts,
     MultiModalEmbeddings,
+    SupportsEagle3,
     SupportsLoRA,
     SupportsPP,
     _require_is_multimodal,
@@ -335,6 +336,8 @@ class Qwen3_5Model(Qwen3NextModel):
         else:
             self.norm = PPMissingLayer()
 
+        self.aux_hidden_state_layers: tuple[int, ...] = ()
+
     def load_fused_expert_weights(
         self,
         name: str,
@@ -518,6 +521,7 @@ class Qwen3_5Model(Qwen3NextModel):
 class Qwen3_5ForCausalLMBase(
     nn.Module,
     HasInnerState,
+    SupportsEagle3,
     SupportsLoRA,
     SupportsPP,
 ):
@@ -573,6 +577,13 @@ class Qwen3_5ForCausalLMBase(
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
+
+    def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
+        self.model.aux_hidden_state_layers = layers
+
+    def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:
+        num_layers = len(self.model.layers)
+        return (2, num_layers // 2, num_layers - 3)
 
     def forward(
         self,
