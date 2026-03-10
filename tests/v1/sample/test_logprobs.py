@@ -36,15 +36,13 @@ SAMPLE_PROMPT = BatchLogprobsComposition.SAMPLE_PROMPT
 # non-associative and sensitive to batch geometry. The ref LLM (no spec
 # decode, default scheduling) and the spec-decode LLM (chunked prefill,
 # different effective batch sizes) follow different reduction orders,
-# producing numerically divergent logprobs that get mis-attributed to
+# producing numerically divergent logprobs that get misattributed to
 # spec-decode incorrectness.
 #
 # Force LLM instances into an identical, deterministic execution
 # mode so the test isolates spec-decode correctness only:
 ROCM_DETERMINISM_KWARGS: dict = (
-    dict(
-        max_num_seqs=1,
-    )
+    dict(max_num_seqs=1, attention_backend="TRITON_ATTN")
     if current_platform.is_rocm()
     else {}
 )
