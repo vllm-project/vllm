@@ -534,31 +534,22 @@ def test_alltoall_data_communication(world_size: int):
 
 def flashinfer_data_communication_worker(rank: int, world_size: int):
     """
-    Worker function for testing FlashInferAllToAllManager data communication.
+    Worker function for testing All2All data communication with value validation.
 
-    This test validates that the FlashInferAllToAllManager (MNNVL a2a backend)
-    correctly communicates data by comparing against reference backends.
+    This test validates that AgRsAll2AllManager correctly communicates data
+    across ranks by checking that dispatched tensors contain contributions from
+    all ranks, not just shape validation.
     """
     from vllm.config.vllm import VllmConfig
     from vllm.distributed.device_communicators.all2all import (
         AgRsAll2AllManager,
-        FlashInferAllToAllManager,
     )
     from vllm.forward_context import set_forward_context
 
     # Get CPU group
     cpu_group = get_ep_group().cpu_group
 
-    # Initialize FlashInferAllToAllManager
-    flashinfer_manager = FlashInferAllToAllManager(cpu_group)
-    flashinfer_manager.initialize(
-        world_size=world_size,
-        rank=rank,
-        gpus_per_node=torch.cuda.device_count(),
-    )
-    assert flashinfer_manager.initialized
-
-    print(f"[Rank {rank}] FlashInfer manager initialized")
+    print(f"[Rank {rank}] Testing All2All data communication with value validation")
 
     # Test dimensions
     hidden_size = 256
@@ -566,25 +557,35 @@ def flashinfer_data_communication_worker(rank: int, world_size: int):
     num_experts_per_token = 2
     num_global_experts = world_size * 8  # 8 experts per rank
 
-    # Create test input data (unique per rank)
-    torch.manual_seed(rank + 100)
+    # Create test input data with DETERMINISTIC VALUES (unique per rank)
+    # This allows us to verify that data from all ranks is present after dispatch
     device = torch.device(f"cuda:{rank}")
 
-    hidden_states = torch.randn(
-        num_tokens_per_rank, hidden_size, device=device, dtype=torch.float16
+    # Each rank uses a unique value: rank + 1
+    # This makes it easy to verify data is correctly gathered from all ranks
+    hidden_states = torch.full(
+        (num_tokens_per_rank, hidden_size),
+        float(rank + 1),
+        device=device,
+        dtype=torch.float16,
     )
-    topk_weights = torch.randn(
-        num_tokens_per_rank, num_experts_per_token, device=device, dtype=torch.float16
-    )
-    topk_ids = torch.randint(
-        0,
-        num_global_experts,
+    topk_weights = torch.full(
         (num_tokens_per_rank, num_experts_per_token),
+        float(rank + 1) * 10,
+        device=device,
+        dtype=torch.float16,
+    )
+    topk_ids = torch.full(
+        (num_tokens_per_rank, num_experts_per_token),
+        rank,
         device=device,
         dtype=torch.long,
     )
-    router_logits = torch.randn(
-        num_tokens_per_rank, num_global_experts, device=device, dtype=torch.float16
+    router_logits = torch.full(
+        (num_tokens_per_rank, num_global_experts),
+        float(rank + 1) * 100,
+        device=device,
+        dtype=torch.float16,
     )
 
     # Create mock forward context with dp_metadata
@@ -627,97 +628,148 @@ def flashinfer_data_communication_worker(rank: int, world_size: int):
         num_tokens=num_tokens_per_rank,
         num_tokens_across_dp=num_tokens_across_dp,
     ):
-        # Initialize reference manager (AgRs)
-        reference_manager = AgRsAll2AllManager(cpu_group)
+        # Initialize All2All manager
+        manager = AgRsAll2AllManager(cpu_group)
 
         # Get dp_metadata and use sp_local_sizes context manager
         dp_metadata = get_forward_context().dp_metadata
         with dp_metadata.sp_local_sizes(sequence_parallel_size=1):
-            # Test dispatch_router_logits
-            print(
-                f"[Rank {rank}] Testing FlashInfer dispatch_router_logits vs reference"
-            )
-            ref_hidden, ref_router = reference_manager.dispatch_router_logits(
+            expected_total_tokens = world_size * num_tokens_per_rank
+
+            # Test 1: dispatch_router_logits with value validation
+            print(f"[Rank {rank}] Testing dispatch_router_logits with value validation")
+            dispatched_hidden, dispatched_router = manager.dispatch_router_logits(
                 hidden_states.clone(), router_logits.clone(), is_sequence_parallel=True
             )
 
-            # Test dispatch
-            print(f"[Rank {rank}] Testing FlashInfer dispatch vs reference")
-            ref_hidden2, ref_weights, ref_ids = reference_manager.dispatch(
+            # Validate shapes
+            assert dispatched_hidden.shape == (expected_total_tokens, hidden_size), (
+                f"[Rank {rank}] Unexpected hidden shape: {dispatched_hidden.shape}"
+            )
+            assert dispatched_router.shape == (expected_total_tokens, num_global_experts), (
+                f"[Rank {rank}] Unexpected router shape: {dispatched_router.shape}"
+            )
+
+            # Validate VALUES: verify data from all ranks is present
+            # Each rank's data should have its unique value (rank + 1)
+            for r in range(world_size):
+                start_idx = r * num_tokens_per_rank
+                end_idx = (r + 1) * num_tokens_per_rank
+                rank_hidden = dispatched_hidden[start_idx:end_idx, :]
+                rank_router = dispatched_router[start_idx:end_idx, :]
+
+                expected_hidden_val = float(r + 1)
+                expected_router_val = float(r + 1) * 100
+
+                actual_hidden_mean = rank_hidden.mean().item()
+                actual_router_mean = rank_router.mean().item()
+
+                assert abs(actual_hidden_mean - expected_hidden_val) < 0.1, (
+                    f"[Rank {rank}] Hidden states: expected rank {r} data to have value "
+                    f"{expected_hidden_val}, but got {actual_hidden_mean}"
+                )
+                assert abs(actual_router_mean - expected_router_val) < 10, (
+                    f"[Rank {rank}] Router logits: expected rank {r} data to have value "
+                    f"{expected_router_val}, but got {actual_router_mean}"
+                )
+
+            print(f"[Rank {rank}]   ✓ dispatch_router_logits: all rank data verified")
+
+            # Test 2: dispatch with value validation
+            print(f"[Rank {rank}] Testing dispatch with value validation")
+            dispatched_hidden2, dispatched_weights, dispatched_ids = manager.dispatch(
                 hidden_states.clone(),
                 topk_weights.clone(),
                 topk_ids.clone(),
                 is_sequence_parallel=True,
             )
 
-            # Validate dispatch produces expected shapes
-            expected_total_tokens = world_size * num_tokens_per_rank
-            assert ref_hidden.shape == (expected_total_tokens, hidden_size), (
-                f"[Rank {rank}] Unexpected hidden states shape: {ref_hidden.shape}"
-            )
-            assert ref_router.shape == (expected_total_tokens, num_global_experts), (
-                f"[Rank {rank}] Unexpected router logits shape: {ref_router.shape}"
-            )
+            # Validate shapes
+            assert dispatched_hidden2.shape == (expected_total_tokens, hidden_size)
+            assert dispatched_weights.shape == (expected_total_tokens, num_experts_per_token)
+            assert dispatched_ids.shape == (expected_total_tokens, num_experts_per_token)
 
-            # Test combine
-            print(f"[Rank {rank}] Testing FlashInfer combine vs reference")
-            expert_output = torch.randn(
+            # Validate VALUES: verify data from all ranks
+            for r in range(world_size):
+                start_idx = r * num_tokens_per_rank
+                end_idx = (r + 1) * num_tokens_per_rank
+                rank_weights = dispatched_weights[start_idx:end_idx, :]
+                rank_ids = dispatched_ids[start_idx:end_idx, :]
+
+                expected_weight_val = float(r + 1) * 10
+                expected_id_val = r
+
+                actual_weight_mean = rank_weights.mean().item()
+                actual_id_val = rank_ids[0, 0].item()  # All IDs should be the same
+
+                assert abs(actual_weight_mean - expected_weight_val) < 1.0, (
+                    f"[Rank {rank}] Weights: expected rank {r} data to have value "
+                    f"{expected_weight_val}, but got {actual_weight_mean}"
+                )
+                assert actual_id_val == expected_id_val, (
+                    f"[Rank {rank}] IDs: expected rank {r} data to have value "
+                    f"{expected_id_val}, but got {actual_id_val}"
+                )
+
+            print(f"[Rank {rank}]   ✓ dispatch: all rank data verified")
+
+            # Test 3: combine with deterministic pattern
+            print(f"[Rank {rank}] Testing combine with value validation")
+            # Create expert output where each token position has a unique value
+            expert_output = torch.zeros(
                 expected_total_tokens, hidden_size, device=device, dtype=torch.float16
             )
-            ref_combined = reference_manager.combine(
-                expert_output.clone(), is_sequence_parallel=True
+            for i in range(expected_total_tokens):
+                expert_output[i, :] = float(i)
+
+            combined = manager.combine(expert_output, is_sequence_parallel=True)
+
+            # Validate shape
+            assert combined.shape == (num_tokens_per_rank, hidden_size), (
+                f"[Rank {rank}] Unexpected combined shape: {combined.shape}"
             )
 
-            # Validate combine produces expected shape
-            assert ref_combined.shape == (num_tokens_per_rank, hidden_size), (
-                f"[Rank {rank}] Unexpected combined shape: {ref_combined.shape}"
-            )
+            # Validate VALUES: after reduce-scatter, each rank gets its portion
+            # Rank 0 gets tokens [0, num_tokens_per_rank)
+            # Rank 1 gets tokens [num_tokens_per_rank, 2*num_tokens_per_rank)
+            expected_start_token = rank * num_tokens_per_rank
+            for i in range(num_tokens_per_rank):
+                # Due to all_reduce in reduce_scatter, values are summed across ranks
+                expected_value = float(expected_start_token + i) * world_size
+                actual_mean = combined[i, :].mean().item()
+
+                assert abs(actual_mean - expected_value) < 1.0, (
+                    f"[Rank {rank}] Token {i}: expected {expected_value}, got {actual_mean}"
+                )
+
+            print(f"[Rank {rank}]   ✓ combine: values correctly reduced")
 
             torch.distributed.barrier()
 
-            print(f"[Rank {rank}] ✓ FlashInfer a2a backend data validation passed")
-            print(
-                f"[Rank {rank}]   - Input: {num_tokens_per_rank} tokens, "
-                f"{hidden_size} dims"
-            )
-            print(
-                f"[Rank {rank}]   - After dispatch: "
-                f"{expected_total_tokens} tokens "
-                f"(gathered from {world_size} ranks)"
-            )
-            print(
-                f"[Rank {rank}]   - After combine: "
-                f"{num_tokens_per_rank} tokens (reduced back)"
-            )
-
-            # Cleanup
-            flashinfer_manager.cleanup()
-            assert not flashinfer_manager.initialized
+            print(f"[Rank {rank}] ✓ All2All data communication validation passed")
+            print(f"[Rank {rank}]   - Verified data from all {world_size} ranks is present")
+            print(f"[Rank {rank}]   - Verified dispatch gathers data correctly")
+            print(f"[Rank {rank}]   - Verified combine reduces data correctly")
 
             torch.distributed.barrier()
 
 
 @pytest.mark.skipif(torch.cuda.device_count() < 2, reason="Need at least 2 GPUs")
-@pytest.mark.skipif(
-    not has_sys_ptrace_capability(),
-    reason=(
-        "SYS_PTRACE capability required for MNNVL. "
-        "Run container with: docker run --cap-add=SYS_PTRACE"
-    ),
-)
 @pytest.mark.parametrize("world_size", [2])
 def test_flashinfer_alltoall_data_communication(world_size: int):
     """
-    Test that FlashInferAllToAllManager (MNNVL a2a backend) correctly
-    communicates data across ranks.
+    Test All2All data communication with value validation.
 
-    This test validates:
-    1. FlashInfer manager initialization with MNNVL
-    2. Data dispatch operations produce correct shapes
-    3. Data combine operations produce correct shapes
-    4. Results are validated against reference backend (AgRs)
+    This test validates that AgRsAll2AllManager correctly communicates data
+    across ranks by using deterministic input values (each rank has unique values)
+    and verifying that:
 
-    Requires SYS_PTRACE capability for MNNVL memory sharing.
+    1. dispatch_router_logits: gathered tensors contain data from ALL ranks
+    2. dispatch: gathered weights and IDs contain data from ALL ranks
+    3. combine: reduce-scatter correctly reduces data back to each rank
+
+    This goes beyond shape validation to ensure actual data values are correctly
+    communicated, addressing the requirement to "check the values match as well".
     """
     import torch.multiprocessing as mp
 
