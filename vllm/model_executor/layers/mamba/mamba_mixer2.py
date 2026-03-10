@@ -580,6 +580,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
             conv_state = self_kv_cache[0].transpose(-1, -2)
             ssm_state = self_kv_cache[1]
             has_initial_states_p = attn_metadata.has_initial_states_p
+            has_initial_states_d = attn_metadata.has_initial_states_d
             prep_initial_states = attn_metadata.prep_initial_states
             chunk_size = attn_metadata.chunk_size
             seq_idx_p = attn_metadata.seq_idx_p
@@ -830,6 +831,22 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 # Without caching, read and write in-place to the same blocks:
                 state_indices_tensor_d_input = state_indices_tensor_d
                 state_indices_tensor_d_output = state_indices_tensor_d
+
+            # Clear stale state for new requests classified as decodes.
+            # Uses gather-multiply-scatter (fixed-shape ops) instead of
+            # boolean indexing to stay compatible with CUDA graph capture.
+            if has_initial_states_d is not None:
+                indices = state_indices_tensor_d_input
+
+                ssm_gathered = ssm_state[indices]
+                keep_ssm = has_initial_states_d.to(ssm_gathered.dtype)
+                keep_ssm = keep_ssm.view(-1, *([1] * (ssm_gathered.dim() - 1)))
+                ssm_state[indices] = ssm_gathered * keep_ssm
+
+                conv_gathered = conv_state[indices]
+                keep_conv = has_initial_states_d.to(conv_gathered.dtype)
+                keep_conv = keep_conv.view(-1, *([1] * (conv_gathered.dim() - 1)))
+                conv_state[indices] = conv_gathered * keep_conv
 
             # 2. Convolution sequence transformation
             hidden_states_B_C_d = causal_conv1d_update(
