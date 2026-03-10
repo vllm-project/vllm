@@ -72,7 +72,9 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
         # Stop strings
         params = request.sampling_params
         assert params is not None
-        if isinstance(params.stop, str):
+        if params.stop is None:
+            self.stop = []
+        elif isinstance(params.stop, str):
             self.stop = [params.stop]
         else:
             self.stop = params.stop

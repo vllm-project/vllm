@@ -202,10 +202,10 @@ class SamplingParams(
     Set to 0 to disable this."""
     seed: int | None = None
     """Random seed to use for the generation."""
-    stop: str | list[str] = msgspec.field(default_factory=list)
+    stop: str | list[str] | None = None
     """String(s) that stop the generation when they are generated. The returned
     output will not contain the stop strings."""
-    stop_token_ids: list[int] = msgspec.field(default_factory=list)
+    stop_token_ids: list[int] | None = None
     """Token IDs that stop the generation when they are generated. The returned
     output will contain the stop tokens unless the stop tokens are special
     tokens."""
@@ -274,7 +274,7 @@ class SamplingParams(
     implementations."""
 
     # Fields used for bad words
-    bad_words: list[str] = msgspec.field(default_factory=list)
+    bad_words: list[str] | None = None
     """Words that are not allowed to be generated. More precisely, only the
     last token of a corresponding token sequence is not allowed when the next
     generated token can complete the sequence."""
@@ -533,6 +533,7 @@ class SamplingParams(
             if eos_ids:
                 self._all_stop_token_ids.update(eos_ids)
                 if not self.ignore_eos:
+                    assert self.stop_token_ids is not None
                     eos_ids.update(self.stop_token_ids)
                     self.stop_token_ids = list(eos_ids)
 
