@@ -23,6 +23,7 @@ from vllm.config import (
     VllmConfig,
     set_current_vllm_config,
 )
+from vllm.distributed import tensor_model_parallel_all_reduce
 from vllm.distributed.eplb.rebalance_execute import rearrange_expert_weights_inplace
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.fused_moe import FusedMoE, SharedFusedMoE, fused_experts
@@ -606,6 +607,11 @@ def make_fake_moe_layer(
     gate: torch.nn.Module | None = None,
     routed_input_transform: torch.nn.Module | None = None,
     routed_output_transform: torch.nn.Module | None = None,
+    use_ep: bool = False,
+    tp_size: int = 1,
+    dp_size: int = 1,
+    ep_size: int = 1,
+    reduce_results: bool = False,
 ) -> Callable:
     activation = MoEActivation.from_str(activation)
 
@@ -701,6 +707,10 @@ def make_fake_moe_layer(
         if shared_experts is not None:
             assert shared_output is not None
             output += shared_output
+
+        # Apply TP/DP reduction if not already reduced
+        if False and reduce_results and (tp_size > 1 or dp_size > 1):
+            output = tensor_model_parallel_all_reduce(output)
 
         return output
 
@@ -803,6 +813,7 @@ def _test_body_eplb(
         routed_output_transform=routed_output_transform,
     )
 
+    # Is this necessary?
     if moe_layer._expert_map is not None:
         moe_layer._expert_map = moe_layer._expert_map.to(device)
 
@@ -970,6 +981,7 @@ def _test_loop(
             routed_output_transform=routed_output_transform,
         )
 
+        # Is this necessary?
         if moe_layer._expert_map is not None:
             moe_layer._expert_map = moe_layer._expert_map.to(device)
 
@@ -1270,7 +1282,7 @@ def test_moe_layer(
 
     num_gpus = cuda_device_count_stateless()
     world_size = tp_size * dp_size
-
+    ep_size = 1 if not use_ep else world_size  # or dp_size?
     assert world_size > 1
 
     apply_test_filter(
@@ -1416,6 +1428,11 @@ def test_moe_layer(
             gate=gate_cuda,
             routed_input_transform=routed_input_transform_cuda,
             routed_output_transform=routed_output_transform_cuda,
+            use_ep=use_ep,
+            tp_size=tp_size,
+            ep_size=ep_size,
+            dp_size=dp_size,
+            reduce_results=reduce_results,
         )
 
     baseline_output = baseline_layer(hidden_states_cuda, router_logits_cuda)
@@ -1440,7 +1457,7 @@ def test_moe_layer(
             _test_loop,
             vllm_config,
             test_env,
-            1 if not use_ep else world_size,  # or dp_size?
+            ep_size,
             dp_size,
             tp_size,
             hidden_states,
