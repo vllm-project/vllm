@@ -837,10 +837,6 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "Kwai-Keye/Keye-VL-1_5-8B",
         trust_remote_code=True,
     ),
-    "KimiAudioForConditionalGeneration": _HfExamplesInfo(
-        "moonshotai/Kimi-Audio-7B-Instruct",
-        trust_remote_code=True,
-    ),
     "MoonshotKimiaForCausalLM": _HfExamplesInfo(
         "moonshotai/Kimi-Audio-7B-Instruct",
         tokenizer_mode="kimi_audio",
