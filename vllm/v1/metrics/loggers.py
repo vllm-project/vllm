@@ -597,8 +597,12 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             counter_num_preempted_reqs, engine_indexes, model_name
         )
 
-        # Dynamic counter for preemptions by priority (created on-demand)
-        self.counter_preemptions_by_priority: dict[int, dict[int, Counter]] = {}
+        counter_preemptions_by_priority = self._counter_cls(
+            name="vllm:scheduler_preemptions_by_priority",
+            documentation=("Number of preemptions grouped by request priority."),
+            labelnames=labelnames + ["priority"],
+        )
+        self.counter_preemptions_by_priority = counter_preemptions_by_priority
 
         gauge_max_preemption_count = self._gauge_cls(
             name="vllm:scheduler_max_preemption_count",
@@ -1105,20 +1109,9 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
 
                 # Update preemptions by priority counters
                 for priority, count in preempt_stats.preemptions_by_priority.items():
-                    if priority not in self.counter_preemptions_by_priority:
-                        self.counter_preemptions_by_priority[priority] = {
-                            idx: self._counter_cls(
-                                name="vllm:scheduler_preemptions_by_priority",
-                                documentation=(
-                                    "Number of preemptions grouped by request priority."
-                                ),
-                                labelnames=["model_name", "engine_index", "priority"],
-                            ).labels(self.model_name, str(idx), str(priority))
-                            for idx in self.engine_indexes
-                        }
-                    self.counter_preemptions_by_priority[priority][engine_idx].inc(
-                        count
-                    )
+                    self.counter_preemptions_by_priority.labels(
+                        self.model_name, str(engine_idx), str(priority)
+                    ).inc(count)
 
             if (
                 self.kv_cache_metrics_enabled
