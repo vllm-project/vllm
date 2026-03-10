@@ -116,7 +116,7 @@ class AiterInt8ScaledMMLinearKernel(CutlassInt8ScaledMMLinearKernel):
         # a to be [M, K]
         # b to be [N, K]
         # CutlassInt8ScaledMMLinearKernel prepare weight `w_q` in [K, N] format
-        return rocm_aiter_ops.gemm_a8w8(x_q, w_q.t(), x_s, w_s, bias, out_dtype)
+        return rocm_aiter_ops.w8a8_gemm(x_q, w_q.t(), x_s, w_s, bias, out_dtype)
 
 
 class AiterShuffledPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
@@ -260,4 +260,4 @@ class AiterPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         bias: torch.Tensor | None,
         output_shape: list,
     ) -> torch.Tensor:
-        return rocm_aiter_ops.per_token_w8a8_gemm(A, B, As, Bs, bias, out_dtype)
+        return rocm_aiter_ops.w8a8_gemm(A, B, As, Bs, bias, out_dtype)

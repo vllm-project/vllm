@@ -449,7 +449,7 @@ def _rocm_aiter_mla_decode_fwd_fake(
     pass
 
 
-def _rocm_aiter_per_token_w8a8_gemm_impl(
+def _rocm_aiter_w8a8_gemm_impl(
     A: torch.Tensor,
     B: torch.Tensor,
     As: torch.Tensor,
@@ -466,7 +466,7 @@ def _rocm_aiter_per_token_w8a8_gemm_impl(
     return gemm_a8w8_CK(A, B, As, Bs, bias, output_dtype)
 
 
-def _rocm_aiter_per_token_w8a8_gemm_fake(
+def _rocm_aiter_w8a8_gemm_fake(
     A: torch.Tensor,
     B: torch.Tensor,
     As: torch.Tensor,
@@ -1290,9 +1290,9 @@ class rocm_aiter_ops:
             )
 
             direct_register_custom_op(
-                op_name="rocm_aiter_per_token_w8a8_gemm",
-                op_func=_rocm_aiter_per_token_w8a8_gemm_impl,
-                fake_impl=_rocm_aiter_per_token_w8a8_gemm_fake,
+                op_name="rocm_aiter_w8a8_gemm",
+                op_func=_rocm_aiter_w8a8_gemm_impl,
+                fake_impl=_rocm_aiter_w8a8_gemm_fake,
             )
 
             direct_register_custom_op(
@@ -1466,7 +1466,7 @@ class rocm_aiter_ops:
         )
 
     @staticmethod
-    def per_token_w8a8_gemm(
+    def w8a8_gemm(
         A: torch.Tensor,
         B: torch.Tensor,
         As: torch.Tensor,
@@ -1474,9 +1474,7 @@ class rocm_aiter_ops:
         bias: torch.Tensor | None = None,
         output_dtype: torch.dtype = torch.float16,
     ) -> torch.Tensor:
-        return torch.ops.vllm.rocm_aiter_per_token_w8a8_gemm(
-            A, B, As, Bs, bias, output_dtype
-        )
+        return torch.ops.vllm.rocm_aiter_w8a8_gemm(A, B, As, Bs, bias, output_dtype)
 
     @staticmethod
     def shuffled_per_token_w8a8_gemm(
