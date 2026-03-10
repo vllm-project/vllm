@@ -320,6 +320,7 @@ class ModelCudaGraphManager(CudaGraphManager):
                     model_inputs = {
                         "input_ids": input_buffers.input_ids[:num_tokens],
                         "positions": input_buffers.positions[:num_tokens],
+                        **model_state.prepare_dummy_inputs(num_reqs, num_tokens),
                     }
                     model_output = model(**model_inputs)
                     if self.use_aux_hidden_state_outputs:
@@ -383,6 +384,7 @@ def prepare_inputs_to_capture(
 
     attn_metadata = model_state.prepare_attn(
         input_batch,
+        CUDAGraphMode.NONE,
         input_block_tables,
         slot_mappings,
         attn_groups,
