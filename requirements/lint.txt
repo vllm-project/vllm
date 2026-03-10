@@ -1,2 +1,2 @@
 # formatting
-pre-commit==4.0.1
+pre-commit==4.5.1
