@@ -219,6 +219,10 @@ class TestMTPAsyncFlashInfer:
 
         # Test: With MTP configuration
         print("[Test] Phase 2: MTP + async + FlashInfer...")
+        spec_config = {
+            "method": "mtp",
+            "num_speculative_tokens": 4,
+        }
         llm_mtp = LLM(
             model=TEST_MODEL,
             tensor_parallel_size=1,
@@ -226,7 +230,7 @@ class TestMTPAsyncFlashInfer:
             enforce_eager=True,
             gpu_memory_utilization=0.3,
             disable_log_stats=True,
-            # MTP configuration would go here
+            speculative_config=spec_config,
         )
 
         outputs_mtp = llm_mtp.generate(TEST_PROMPTS, sampling_params)
