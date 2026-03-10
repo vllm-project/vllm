@@ -5,7 +5,6 @@ from typing import TYPE_CHECKING
 
 import torch
 import torch.nn.functional as F
-from torch._higher_order_ops.scan import scan as torch_scan
 
 import vllm.envs as envs
 from vllm.distributed import (
@@ -655,10 +654,9 @@ class DefaultMoERunner(MoERunner):
         num_chunks: int = cdiv(max_tokens_across, max_tokens)
         num_tokens: int = full_hidden_states.size(0)
         H: int = full_hidden_states.size(-1)
-        E: int = full_router_logits.size(-1)
 
         # ------------------------------------------------------------------
-        # Pre-stage: build (num_chunks, max_tokens, H/E) tensors.
+        # Pre-stage: build (num_chunks, max_tokens, feat) tensors.
         # Re-use the pre-allocated staging buffers when they fit; otherwise
         # allocate fresh tensors (avoids crashes on unexpected large batches).
         # ------------------------------------------------------------------
@@ -672,7 +670,31 @@ class DefaultMoERunner(MoERunner):
             return buf
 
         chunked_hidden = _make_staged(full_hidden_states, H)
-        chunked_router = _make_staged(full_router_logits, E)
+
+        # Pre-compute routing from real tokens only (before zero-padding).
+        # Calling select_experts inside chunk_fn on zero-padded router_logits
+        # produces uniform softmax → topk_ids=[0,1,...] for all padding tokens,
+        # creating phantom expert traffic that corrupts outputs.
+        full_topk_weights, full_topk_ids = self.router.select_experts(
+            hidden_states=full_hidden_states,
+            router_logits=full_router_logits,
+        )
+        topk_K = full_topk_ids.size(1)
+        # Padding positions get weight=0 → zero expert contribution.
+        chunked_topk_weights = _make_staged(full_topk_weights, topk_K)
+        # Stage topk_ids: fill padding with last real token's routing instead of
+        # zeros.  Zero-initialized ids produce topk_ids=[0,0,...] which sends all
+        # padding tokens to expert 0 with duplicate entries — invalid for DeepEP-LL.
+        # Using the last real token mirrors what forward_impl_chunked does for its
+        # filler iterations (skip_result_store=True).  The combine output for these
+        # positions is zeroed out by the zero weights above, so the final result is
+        # still correct (padding positions contribute nothing).
+        total_padded = num_chunks * max_tokens
+        _buf_ids = full_topk_ids.new_empty(total_padded, topk_K)
+        _buf_ids[:] = full_topk_ids[-1]  # broadcast-fill with last real routing
+        _copy_len = min(num_tokens, total_padded)
+        _buf_ids[:_copy_len].copy_(full_topk_ids[:_copy_len], non_blocking=True)
+        chunked_topk_ids = _buf_ids.reshape(num_chunks, max_tokens, topk_K)
 
         if full_shared_input is not None:
             H_shared = full_shared_input.size(-1)
@@ -682,109 +704,76 @@ class DefaultMoERunner(MoERunner):
         else:
             chunked_shared = None
 
-        # Dummy carry: a single scalar that threads through scan iterations.
-        # Chunks are independent, so we carry no real state.
-        dummy_carry = full_hidden_states.new_zeros(1)
-
-        # Capture references for the closure (these are module-level constants
-        # for a given forward pass, not iteration-varying data).
-        _layer = layer
-        _runner = self
-        _has_sep_shared = has_separate_shared_experts
-        _mk_owns_shared = self.quant_method.mk_owns_shared_expert
-        _has_chunked_shared = chunked_shared is not None
-
-        # Wrap quant_method.apply() so dynamo treats it as an opaque leaf.
-        #
-        # torch.scan compiles chunk_fn with fullgraph=True.  For the DeepEP-LL
-        # path, quant_method.apply() calls buffer.low_latency_dispatch() on a
-        # deep_ep.Buffer C++ extension object.  Dynamo cannot trace into that
-        # method, and the opaque handle object it returns cannot be represented
-        # as an FX proxy.  Capturing _layer and _runner in the closure (instead
-        # of passing them as arguments) avoids exposing any non-tensor objects
-        # as FX graph inputs.
-        #
-        # allow_in_graph stops tracing INTO the function (Phase 1), but dynamo
-        # still calls it with FakeTensors to infer output shapes (Phase 2).
-        # The is_fake guard handles Phase 2 without executing any CUDA kernels.
-        def _apply_chunk(
-            x: torch.Tensor,
-            topk_weights: torch.Tensor,
-            topk_ids: torch.Tensor,
-            shared_input: torch.Tensor,
-        ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-            from torch._subclasses.fake_tensor import is_fake
-
-            if is_fake(x):
-                # Shape-propagation call: return correctly-shaped outputs
-                # without executing CUDA kernels (FakeTensors have no memory).
-                if _has_sep_shared or _mk_owns_shared:
-                    return torch.empty_like(shared_input), torch.empty_like(x)
-                return torch.empty_like(x)
-
-            out = _runner.quant_method.apply(
-                layer=_layer,
-                x=x,
-                topk_weights=topk_weights,
-                topk_ids=topk_ids,
-                shared_experts_input=shared_input,
-            )
-            if _has_sep_shared:
-                assert _runner.shared_experts is not None
-                assert not isinstance(out, tuple)
-                shared_out = _runner.shared_experts(shared_input)
-                return shared_out, out
-            return out
-
-        _apply_chunk = torch._dynamo.allow_in_graph(_apply_chunk)
-
-        def chunk_fn(
-            carry: torch.Tensor,
-            xs: tuple[torch.Tensor, ...],
-        ) -> tuple[torch.Tensor, torch.Tensor | tuple[torch.Tensor, torch.Tensor]]:
-            if _has_chunked_shared:
-                chunk_h, chunk_r, chunk_s = xs
-            else:
-                chunk_h, chunk_r = xs
-                chunk_s = chunk_h  # shared_input falls back to hidden_states
-
-            topk_weights, topk_ids = _runner.router.select_experts(
-                hidden_states=chunk_h,
-                router_logits=chunk_r,
-            )
-
-            chunk_out = _apply_chunk(
-                chunk_h,
-                topk_weights,
-                topk_ids,
-                chunk_s,
-            )
-
-            # Must clone carry to avoid input-output aliasing, which HOPs forbid.
-            return carry.clone(), chunk_out
-
-        xs_tuple: tuple[torch.Tensor, ...]
-        if chunked_shared is not None:
-            xs_tuple = (chunked_hidden, chunked_router, chunked_shared)
-        else:
-            xs_tuple = (chunked_hidden, chunked_router)
-
-        _, stacked = torch_scan(chunk_fn, init=dummy_carry, xs=xs_tuple, dim=0)
-
         # ------------------------------------------------------------------
-        # Unpack stacked outputs: (num_chunks, max_tokens, H) -> (N, H)
+        # Chunk loop: process each (num_chunks, max_tokens, feat) slice.
+        #
+        # NOTE: torch.scan is intentionally NOT used here yet.  Blocker 1
+        # (the outer torch.ops.vllm.moe_forward custom op) makes the entire
+        # function opaque to torch.compile regardless, so switching to
+        # torch.scan would add the generic_scan pre-allocation call — an
+        # extra RDMA dispatch+combine round trip per forward pass that
+        # corrupts DeepEP-LL protocol state — with no compile benefit.
+        # Once Blocker 1 is resolved, replace this loop with torch.scan.
         # ------------------------------------------------------------------
         mk_owns_shared = self.quant_method.mk_owns_shared_expert
-        if has_separate_shared_experts or mk_owns_shared:
-            assert isinstance(stacked, tuple)
-            stacked_shared, stacked_fused = stacked
+        has_two_outputs = has_separate_shared_experts or mk_owns_shared
+
+        if has_two_outputs:
+            H_shared = (
+                chunked_shared.size(-1)
+                if chunked_shared is not None
+                else full_hidden_states.size(-1)
+            )
+            stacked_shared = full_hidden_states.new_zeros(
+                num_chunks, max_tokens, H_shared
+            )
+            stacked_fused = full_hidden_states.new_zeros(num_chunks, max_tokens, H)
+        else:
+            stacked_out = full_hidden_states.new_zeros(num_chunks, max_tokens, H)
+
+        for chunk_idx in range(num_chunks):
+            chunk_h = chunked_hidden[chunk_idx]
+            chunk_tw = chunked_topk_weights[chunk_idx]
+            chunk_ti = chunked_topk_ids[chunk_idx]
+            chunk_s = (
+                chunked_shared[chunk_idx]
+                if chunked_shared is not None
+                else chunk_h
+            )
+
+            out = self.quant_method.apply(
+                layer=layer,
+                x=chunk_h,
+                topk_weights=chunk_tw,
+                topk_ids=chunk_ti,
+                shared_experts_input=chunk_s,
+            )
+
+            if has_separate_shared_experts:
+                assert self.shared_experts is not None
+                assert not isinstance(out, tuple)
+                shared_out = self.shared_experts(chunk_s)
+                stacked_shared[chunk_idx].copy_(shared_out, non_blocking=True)
+                stacked_fused[chunk_idx].copy_(out, non_blocking=True)
+            elif mk_owns_shared:
+                assert isinstance(out, tuple)
+                shared_out, fused_out = out
+                stacked_shared[chunk_idx].copy_(shared_out, non_blocking=True)
+                stacked_fused[chunk_idx].copy_(fused_out, non_blocking=True)
+            else:
+                assert isinstance(out, torch.Tensor)
+                stacked_out[chunk_idx].copy_(out, non_blocking=True)
+
+        # ------------------------------------------------------------------
+        # Trim stacked (num_chunks, max_tokens, feat) -> (num_tokens, feat)
+        # ------------------------------------------------------------------
+        if has_two_outputs:
             return (
-                stacked_shared.reshape(-1, stacked_shared.size(-1))[:num_tokens],
-                stacked_fused.reshape(-1, stacked_fused.size(-1))[:num_tokens],
+                stacked_shared.reshape(-1, H_shared)[:num_tokens],
+                stacked_fused.reshape(-1, H)[:num_tokens],
             )
         else:
-            assert isinstance(stacked, torch.Tensor)
-            return stacked.reshape(-1, H)[:num_tokens]
+            return stacked_out.reshape(-1, H)[:num_tokens]
 
     def forward_impl(
         self,
