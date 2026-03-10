@@ -17,11 +17,11 @@ from functools import cached_property
 from typing import Annotated, Any, Literal, TypeAlias, TypeVar
 
 import einops
+import numpy as np
 import numpy.typing as npt
 import regex as re
 import torch
 import torch.nn as nn
-import torchvision.transforms as T
 from PIL import Image
 from transformers import BatchFeature, PretrainedConfig, TensorType
 
@@ -59,9 +59,11 @@ from vllm.multimodal.inputs import (
     AudioItem,
     MultiModalDataDict,
     MultiModalFieldConfig,
+    MultiModalInputs,
     MultiModalKwargsItems,
     VideoItem,
 )
+from vllm.multimodal.media.audio import extract_audio_from_video_bytes
 from vllm.multimodal.parse import (
     AudioProcessorItems,
     ImageEmbeddingItems,
@@ -69,8 +71,13 @@ from vllm.multimodal.parse import (
     ImageSize,
     MultiModalDataItems,
     MultiModalDataParser,
+    VideoProcessorItems,
 )
-from vllm.multimodal.processing import BaseDummyInputsBuilder
+from vllm.multimodal.processing import (
+    BaseDummyInputsBuilder,
+    ProcessorInputs,
+    TimingContext,
+)
 from vllm.multimodal.processing.processor import (
     BaseMultiModalProcessor,
     BaseProcessingInfo,
@@ -207,7 +214,12 @@ NanoNemotronVLVideoInputs: TypeAlias = (
 
 
 def dynamic_preprocess(
-    image, *, image_size=512, max_num_tiles=12, use_thumbnail=True, idx=0
+    image,
+    *,
+    image_size=512,
+    max_num_tiles=12,
+    use_thumbnail=True,
+    idx=0,
 ):
     orig_width, orig_height = image.size
 
@@ -220,35 +232,44 @@ def dynamic_preprocess(
         image_size=image_size,
         use_thumbnail=False,
     )
-    # resize the image
-    resized_img = image.resize((target_width, target_height))
-    processed_images = []
-    for i in range(blocks):
-        box = (
-            (i % (target_width // image_size)) * image_size,
-            (i // (target_width // image_size)) * image_size,
-            ((i % (target_width // image_size)) + 1) * image_size,
-            ((i // (target_width // image_size)) + 1) * image_size,
-        )
-        # split the image
-        split_img = resized_img.crop(box)
-        processed_images.append(split_img)
-    assert len(processed_images) == blocks
-    if use_thumbnail and len(processed_images) != 1:
-        thumbnail_img = image.resize((image_size, image_size))
-        processed_images.append(thumbnail_img)
 
-    processed_images = [
-        img.convert("RGB") if img.mode != "RGB" else img for img in processed_images
-    ]
-    processed_images = [
-        T.Resize((image_size, image_size), interpolation=T.InterpolationMode.BICUBIC)(
-            img
+    image = np.asarray(
+        image.convert("RGB") if image.mode != "RGB" else image, dtype=np.uint8
+    )
+
+    image = torch.from_numpy(image).unsqueeze(0)  # (1, H, W, 3)
+    image = image.permute(0, 3, 1, 2)  # (1, 3, H, W)
+
+    resized_img = torch.nn.functional.interpolate(
+        image,
+        size=(target_height, target_width),
+        mode="bicubic",
+        align_corners=False,
+        antialias=True,
+    )
+    B, C, H, W = resized_img.shape
+    hp, wp = H // image_size, W // image_size
+    patches = (
+        resized_img.reshape(B, C, hp, image_size, wp, image_size)
+        .permute(0, 2, 4, 1, 3, 5)
+        .reshape(B * hp * wp, C, image_size, image_size)
+        / 255.0
+    )
+
+    if use_thumbnail and patches.shape[0] > 1:
+        thumb = (
+            torch.nn.functional.interpolate(
+                image,
+                size=(image_size, image_size),
+                mode="bicubic",
+                align_corners=False,
+                antialias=True,
+            )
+            / 255.0
         )
-        for img in processed_images
-    ]
-    processed_images = [T.ToTensor()(img) for img in processed_images]
-    return processed_images
+        patches = torch.cat([patches, thumb], dim=0)
+
+    return list(patches)
 
 
 def image_to_pixel_values(
@@ -280,22 +301,21 @@ def video_to_pixel_values(
 ) -> torch.Tensor:
     assert max_num_tiles == 1, "Video modality always uses one tile"
 
-    # Convert each frame to a single resized tile tensor consistent
-    # with image path
-    frames_tensors: list[torch.Tensor] = []
-    for frame in video:
-        pil_frame = dynamic_preprocess(
-            Image.fromarray(frame, mode="RGB"),
-            image_size=input_size,
-            max_num_tiles=max_num_tiles,
-            use_thumbnail=use_thumbnail,
-            idx=0,
-        )
-        # dynamic_preprocess returns tensors already; take the single tile
-        assert len(pil_frame) >= 1
-        frames_tensors.append(pil_frame[-1])
+    # (num_frames, H, W, C) -> (num_frames, C, H, W)
+    video_tensor = torch.from_numpy(video).permute(0, 3, 1, 2)
 
-    return torch.stack(frames_tensors)
+    if video_tensor.shape[2] != input_size or video_tensor.shape[3] != input_size:
+        video_tensor = torch.nn.functional.interpolate(
+            video_tensor,
+            size=(input_size, input_size),
+            mode="bicubic",
+            align_corners=False,
+            antialias=True,
+        )
+
+    video_tensor = video_tensor / 255.0
+
+    return video_tensor
 
 
 def input_conditioner(x, norm_mean, norm_std):
@@ -339,12 +359,6 @@ class DynamicResolutionImageTiler:
         self._factor_max = factor_max
         self.norm_mean = torch.tensor(norm_mean).reshape(3, 1, 1)
         self.norm_std = torch.tensor(norm_std).reshape(3, 1, 1)
-        self._transform = T.Compose(
-            [
-                T.Lambda(lambda img: img.convert("RGB") if img.mode != "RGB" else img),
-                T.ToTensor(),
-            ]
-        )
         assert downsample_ratio < 1
         reduction_factor = 1 / downsample_ratio
         assert reduction_factor == 2.0
@@ -434,15 +448,25 @@ class DynamicResolutionImageTiler:
         patch_size: tuple[int, int]
 
     def apply_params(self, params: DynamicResolutionParams) -> list[torch.Tensor]:
-        resized_img = params.media.resize(
-            (
-                params.patch_size[0] * self._patch_size,
-                params.patch_size[1] * self._patch_size,
-            )
+        target_size = (
+            params.patch_size[1] * self._patch_size,
+            params.patch_size[0] * self._patch_size,
         )
-        processed_images = [resized_img]
-
-        return [self._transform(img) for img in processed_images]
+        image = np.asarray(
+            params.media.convert("RGB") if params.media.mode != "RGB" else params.media,
+            dtype=np.uint8,
+        )
+        resized_img = (
+            torch.nn.functional.interpolate(
+                torch.from_numpy(image).unsqueeze(0).permute(0, 3, 1, 2),
+                size=target_size,
+                mode="bicubic",
+                align_corners=False,
+                antialias=True,
+            )
+            / 255.0
+        )
+        return list(resized_img)
 
     def process_media(
         self,
@@ -796,6 +820,7 @@ class BaseNanoNemotronVLProcessor(ABC):
             image_repl = self.get_image_repl(feature_size, num_patches)
             parts[i] = parts[i].replace("<image>", image_repl.full)
         text = ["".join(parts)]
+
         return text, image_inputs
 
     def _make_batch_input(self, input_item: Any | list[Any] | None = None):
@@ -915,14 +940,14 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
             frames_indices_lst = [
                 metadata["frames_indices"] for metadata in video_metadata_lst
             ]
-
+            video_num_patches = torch.tensor(
+                [len(item) for item in pixel_values_lst_video]
+            )
             video_inputs = {
                 "pixel_values_flat_video": input_conditioner(
                     torch.cat(pixel_values_lst_video), self.norm_mean, self.norm_std
                 ),
-                "video_num_patches": torch.tensor(
-                    [len(item) for item in pixel_values_lst_video]
-                ),
+                "video_num_patches": video_num_patches,
                 "frames_indices": frames_indices_lst,
                 "frame_duration_ms": torch.tensor(frame_duration_ms_lst),
             }
@@ -978,6 +1003,7 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
                     video_repl.full, skip_special_tokens=False
                 )
                 text = [t.replace("<video>", video_repl_text, 1) for t in text]
+
         return text, video_inputs
 
     def _preprocess_audio(
@@ -1380,6 +1406,127 @@ class NanoNemotronVLMultiModalProcessor(
     NanoNemotronBaseVLMultiModalProcessor[NanoNemotronVLProcessingInfo]
 ):
     """MultiModalProcessor extended for video support"""
+
+    def _extract_audio_from_videos(
+        self,
+        mm_items: MultiModalDataItems,
+    ) -> tuple[MultiModalDataItems, list[AudioItem]]:
+        """Extract audio tracks from video bytes in *mm_items*.
+
+        Returns:
+            The augmented *mm_items* (with audio added) and the list of
+            extracted audio items.
+        """
+        videos = mm_items.get_items("video", VideoProcessorItems)
+        assert isinstance(videos.metadata, list)
+        metadata_list = videos.metadata
+
+        audio_items: list[AudioItem] = []
+        for metadata in metadata_list:
+            video_bytes = metadata.get("original_video_bytes")
+            if video_bytes is None or len(video_bytes) == 0:
+                raise ValueError(
+                    "Cannot extract audio from video: original_video_bytes is "
+                    "missing or empty. When using use_audio_in_video=True, "
+                    "video must be loaded with keep_video_bytes=True (e.g. via "
+                    "the chat API with a model that sets use_audio_in_video)."
+                )
+            audio_items.append(extract_audio_from_video_bytes(video_bytes))
+
+        # Create a new VideoProcessorItems with metadata that does not contain
+        # the large video bytes, to avoid modifying the input `mm_items`.
+        new_metadata_list = [
+            {k: v for k, v in meta.items() if k != "original_video_bytes"}
+            for meta in metadata_list
+        ]
+        new_videos = VideoProcessorItems(data=videos.data, metadata=new_metadata_list)
+
+        audio_parsed = self.data_parser.parse_mm_data({"audio": audio_items})
+
+        # Create a new MultiModalDataItems with the new video and audio items.
+        new_mm_items_dict = {**mm_items, **audio_parsed, "video": new_videos}
+        mm_items = MultiModalDataItems(new_mm_items_dict)
+
+        return mm_items, audio_items
+
+    def apply(
+        self,
+        processor_inputs: ProcessorInputs,
+        timing_ctx: TimingContext | None = None,
+    ) -> MultiModalInputs:
+        if (hf_processor_mm_kwargs := processor_inputs.hf_processor_mm_kwargs) is None:
+            hf_processor_mm_kwargs = {}
+
+        use_audio_in_video = bool(
+            hf_processor_mm_kwargs.get("use_audio_in_video", False)
+        )
+
+        hf_processor_mm_kwargs = {
+            k: v for k, v in hf_processor_mm_kwargs.items() if k != "use_audio_in_video"
+        }
+
+        processor_inputs.hf_processor_mm_kwargs = hf_processor_mm_kwargs
+
+        if not (
+            use_audio_in_video
+            and "video" in processor_inputs.mm_data_items
+            and "audio" not in processor_inputs.mm_data_items
+        ):
+            return super().apply(
+                processor_inputs,
+                timing_ctx,
+            )
+
+        mm_items, audio_items = self._extract_audio_from_videos(
+            processor_inputs.mm_data_items
+        )
+        processor_inputs.mm_data_items = mm_items
+
+        prompt = processor_inputs.prompt
+        tokenizer = self.info.get_tokenizer()
+        if not isinstance(prompt, str):
+            prompt = tokenizer.decode(prompt, skip_special_tokens=False)
+
+        for _ in audio_items:
+            prompt = prompt.replace("<video>", "<video>" + AUDIO_CONTEXT, 1)
+
+        processor_inputs.prompt = tokenizer.encode(prompt, add_special_tokens=False)
+
+        if processor_inputs.tokenization_kwargs is None:
+            processor_inputs.tokenization_kwargs = {}
+
+        # Bypass the cached path: the HF processor must receive the
+        # prompt (with injected <so_embedding>) and the audio data
+        # together so it can perform audio-token replacement natively.
+        (
+            prompt_ids,
+            mm_info,
+            is_update_applied,
+        ) = self._apply_hf_processor(
+            processor_inputs,
+            timing_ctx=timing_ctx,
+        )
+
+        prompt_ids, mm_placeholders = self._maybe_apply_prompt_updates(
+            mm_items=mm_items,
+            prompt_ids=prompt_ids,
+            mm_kwargs=mm_info.kwargs,
+            mm_prompt_updates=mm_info.prompt_updates,
+            is_update_applied=is_update_applied,
+        )
+
+        mm_placeholder_ranges = {
+            modality: [item.to_range() for item in placeholders]
+            for modality, placeholders in mm_placeholders.items()
+        }
+
+        return MultiModalInputs(
+            type="multimodal",
+            prompt_token_ids=prompt_ids,
+            mm_kwargs=mm_info.kwargs,
+            mm_hashes=mm_info.hashes,
+            mm_placeholders=mm_placeholder_ranges,
+        )
 
     def _get_mm_fields_config(
         self,
@@ -2224,104 +2371,6 @@ class NemotronH_Nano_VL_V2(
         if self.sound_encoder is not None:
             assert len(sound_weights) > 0
             self.sound_encoder.load_weights(sound_weights)
-
-    def print_architecture(self, detailed: bool = True, save_to_file: str = None):
-        """
-        Print model architecture with parameter names, shapes, and sizes.
-
-        Args:
-            detailed: If True, show detailed parameter breakdown
-            save_to_file: If provided, save output to this file path
-        """
-        import sys
-        from io import StringIO
-
-        # Capture output if saving to file
-        original_stdout = sys.stdout
-        if save_to_file:
-            sys.stdout = StringIO()
-
-        try:
-            print("=" * 100)
-            print("NemotronH_Nano_VL_V2 Model Architecture")
-            print("=" * 100)
-
-            total_params = 0
-            param_groups = {
-                "language_model": [],
-                "vision_model": [],
-                "mlp1": [],
-                "other": [],
-            }
-
-            for name, param in self.named_parameters():
-                param_size = param.numel()
-                total_params += param_size
-
-                # Group parameters by main component
-                if name.startswith("language_model"):
-                    param_groups["language_model"].append(
-                        (name, param.shape, param_size, param.dtype)
-                    )
-                elif name.startswith("vision_model"):
-                    param_groups["vision_model"].append(
-                        (name, param.shape, param_size, param.dtype)
-                    )
-                elif name.startswith("mlp1"):
-                    param_groups["mlp1"].append(
-                        (name, param.shape, param_size, param.dtype)
-                    )
-                else:
-                    param_groups["other"].append(
-                        (name, param.shape, param_size, param.dtype)
-                    )
-
-                if detailed:
-                    print(
-                        f"{name:<70} | Shape: {str(param.shape):<25} | "
-                        f"Size: {param_size:>12,} | Dtype: {param.dtype}"
-                    )
-
-            print("=" * 100)
-            print("Summary by Component:")
-            print("-" * 60)
-
-            for component, params in param_groups.items():
-                if params:  # Only show components that have parameters
-                    component_total = sum(size for _, _, size, _ in params)
-                    percentage = (
-                        (component_total / total_params) * 100
-                        if total_params > 0
-                        else 0
-                    )
-                    print(
-                        f"{component:<20} | Parameters: {len(params):>4} | "
-                        f"Total Size: {component_total:>15,} | "
-                        f"{percentage:>6.2f}%"
-                    )
-
-            print("-" * 60)
-            print(f"{'Total Parameters':<20} | {total_params:>15,}")
-
-            # Estimate memory usage (assuming bfloat16 = 2 bytes per parameter)
-            memory_mb = total_params * 2 / (1024**2)
-            memory_gb = memory_mb / 1024
-            print(f"{'Est. Memory (MB)':<20} | {memory_mb:>15.2f}")
-            print(f"{'Est. Memory (GB)':<20} | {memory_gb:>15.2f}")
-            print("=" * 100)
-
-            # Save to file if requested
-            if save_to_file:
-                output = sys.stdout.getvalue()
-                sys.stdout = original_stdout
-                with open(save_to_file, "w") as f:
-                    f.write(output)
-                print(f"Architecture saved to: {save_to_file}")
-                print(output)  # Also print to console
-
-        finally:
-            if save_to_file and sys.stdout != original_stdout:
-                sys.stdout = original_stdout
 
     def get_vit_model_from_radio_config(self, hf_config):
         hf_config_vision = hf_config.vision_config
