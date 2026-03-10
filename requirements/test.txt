@@ -289,12 +289,9 @@ grpcio==1.78.0
     # via
     #   -r requirements/test.in
     #   grpcio-reflection
-    #   grpcio-tools
     #   ray
     #   tensorboard
 grpcio-reflection==1.78.0
-    # via -r requirements/test.in
-grpcio-tools==1.78.0
     # via -r requirements/test.in
 h11==0.14.0
     # via
@@ -765,7 +762,6 @@ protobuf==6.33.2
     #   google-api-core
     #   googleapis-common-protos
     #   grpcio-reflection
-    #   grpcio-tools
     #   opentelemetry-proto
     #   proto-plus
     #   ray
@@ -1045,7 +1041,6 @@ sentry-sdk==2.52.0
     # via wandb
 setuptools==77.0.3
     # via
-    #   grpcio-tools
     #   lightning-utilities
     #   pytablewriter
     #   tensorboard
