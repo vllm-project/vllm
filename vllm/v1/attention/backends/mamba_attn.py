@@ -414,8 +414,11 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             ]
             state_indices_tensor_p = state_indices_tensor_p[:, 0]
 
-        if num_decodes > 0 and self.use_spec_decode:
-            assert num_accepted_tokens is not None
+        # Sometimes even with specdec enabled we get single-token prefill chunks that
+        # should be treated as decodes but don't have num_accepted_tokens set.
+        # These should be fine to process as non-spec decodes since there's only
+        # one token, so no risk of placing accepted tokens in the wrong slot.
+        if num_decodes > 0 and self.use_spec_decode and num_accepted_tokens is not None:
             query_start_loc_d = common_attn_metadata.query_start_loc[: num_decodes + 1]
             num_accepted_tokens = num_accepted_tokens[:num_decodes]
 
@@ -501,7 +504,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             state_indices_tensor_d = self.state_indices_tensor_d[:padded_bs]
             state_indices_tensor_d[metadata.num_decodes :] = PAD_SLOT_ID
 
-            if self.use_spec_decode:
+            if self.use_spec_decode and num_accepted_tokens is not None:
                 assert query_start_loc_d is not None
                 assert num_accepted_tokens is not None
                 query_start_loc_d = query_start_loc_d[: padded_bs + 1]
