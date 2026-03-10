@@ -291,18 +291,37 @@ def test_builtin_empty_only_partition_is_merged():
     """
 
     def model_fn(x: torch.Tensor) -> torch.Tensor:
-        out1 = torch.empty_like(x)
-        torch.ops.silly.attention(x, x, x, out1)
-        out2 = torch.empty_like(x)
-        torch.ops.silly.attention(out1, out1, out1, out2)
-        return out2
+        hidden = x + 1
+        out1 = torch.empty_like(hidden)
+        torch.ops.silly.attention(hidden, hidden, hidden, out1)
+        out2 = torch.empty_like(hidden)
+        torch.ops.silly.attention(out1, out1, hidden, out2)
+        return out2 + hidden
 
     gm = torch.fx.symbolic_trace(model_fn)
     split_gm, split_items = split_graph(gm, ["silly::attention"])
 
-    # Without the empty-only merge, this graph creates 4 partitions:
-    # [empty_like], [attention], [empty_like], [attention].
-    assert len(split_items) == 3, "Builtin empty-only partition should be merged"
+    # Without empty-only merge, this graph would split into:
+    # [add, empty_like], [attention], [empty_like], [attention], [add].
+    assert len(split_items) == 4, "Builtin empty-only partition should be merged"
+
+    splitting_with_empty = _subgraphs_with_empty_nodes(
+        split_items, is_splitting_graph=True
+    )
+    assert len(splitting_with_empty) == 0, (
+        "Splitting-op subgraphs should not contain empty allocation nodes: "
+        f"{[item.submod_name for item in splitting_with_empty]}"
+    )
+
+    non_splitting_with_empty = _subgraphs_with_empty_nodes(
+        split_items, is_splitting_graph=False
+    )
+    assert len(non_splitting_with_empty) == 1, (
+        "Exactly one non-splitting subgraph should contain merged empty nodes"
+    )
+    assert len(_get_empty_nodes(non_splitting_with_empty[0])) == 2, (
+        "Expected two builtin empty_like nodes in merged non-splitting subgraph"
+    )
 
     x = torch.randn(2, 3, device="cuda")
     output_original = gm(x)
