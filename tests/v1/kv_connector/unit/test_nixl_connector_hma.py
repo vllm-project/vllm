@@ -74,6 +74,10 @@ def test_logical_to_kernel_block_ids_with_hma():
     # Simulate HMA scenario: logical block size = 32, kernel block size = 16
     # So each logical block maps to 2 kernel blocks eg [0]->[0,1]
     worker._physical_blocks_per_logical_kv_block = 2
+    # FA + SW groups (neither is MambaSpec, so both get expanded)
+    worker.kv_cache_config = make_kv_cache_config(
+        block_size=16, hma_enabled=True
+    )
 
     # Test conversion: FA + SW group
     logical_block_ids = [[0, 1, 2], [3, 4]]
@@ -201,3 +205,113 @@ def test_nixl_metadata_hma_block_ids_structure():
     assert len(req_meta.remote.block_ids) == 2
     assert list(req_meta.remote.block_ids[0]) == [10, 11, 12, 13, 14, 15, 16, 17]
     assert list(req_meta.remote.block_ids[1]) == [18, 19, 20, 21]
+
+
+@pytest.mark.cpu_test
+def test_get_block_descs_ids_hybrid_ssm():
+    """Test _get_block_descs_ids uses per-group strides for hybrid FA+SSM
+    when ratio=1 (no kernel block size mismatch)."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import (
+        NixlConnectorWorker,
+    )
+
+    worker = object.__new__(NixlConnectorWorker)
+
+    num_blocks = 100
+    engine_id = "test-engine"
+    worker.num_regions = 2
+    worker.dst_num_blocks = {engine_id: num_blocks}
+    worker._is_mamba = True
+    worker._is_mamba_layer = [False, True]
+    worker._physical_blocks_per_logical_kv_block = 1
+    # num_descs = num_regions * num_blocks (no blocks_first doubling)
+    worker.num_descs = 2 * num_blocks
+
+    fa_blocks = [3, 5]
+    ssm_blocks = [1, 2]
+    result = worker._get_block_descs_ids(engine_id, (fa_blocks, ssm_blocks))
+
+    # FA group: stride=num_blocks=100, offset=0
+    #   region0: [3, 5],  region1: [103, 105]
+    # SSM group: stride=logical_blocks=100 (=num_blocks/ratio=100/1),
+    #   offset=num_descs=200
+    #   region0: [201, 202],  region1: [301, 302]
+    expected = [3, 5, 103, 105, 201, 202, 301, 302]
+    assert list(result) == expected, f"Expected {expected}, got {list(result)}"
+
+
+@pytest.mark.cpu_test
+def test_get_block_descs_ids_kernel_block_mismatch():
+    """Test _get_block_descs_ids uses different strides for FA (kernel blocks)
+    vs SSM (logical blocks) when ratio > 1."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import (
+        NixlConnectorWorker,
+    )
+
+    worker = object.__new__(NixlConnectorWorker)
+
+    ratio = 4
+    logical_blocks = 100
+    num_blocks = logical_blocks * ratio  # 400 kernel blocks
+    engine_id = "test-engine"
+    worker.num_regions = 2
+    worker.dst_num_blocks = {engine_id: num_blocks}
+    worker._is_mamba = True
+    worker._is_mamba_layer = [False, True]
+    worker._physical_blocks_per_logical_kv_block = ratio
+    worker.num_descs = 2 * num_blocks  # 800
+
+    fa_blocks = [3, 7]  # kernel-level block IDs
+    ssm_blocks = [1, 2]  # logical block IDs
+    result = worker._get_block_descs_ids(engine_id, (fa_blocks, ssm_blocks))
+
+    # FA group: stride=num_blocks=400, offset=0
+    #   region0: [3, 7],  region1: [403, 407]
+    # SSM group: stride=logical_blocks=400//4=100, offset=num_descs=800
+    #   region0: [801, 802],  region1: [901, 902]
+    expected = [3, 7, 403, 407, 801, 802, 901, 902]
+    assert list(result) == expected, f"Expected {expected}, got {list(result)}"
+
+
+@pytest.mark.cpu_test
+def test_nixl_metadata_hybrid_ssm_block_ids():
+    """Test NixlConnectorMetadata correctly stores block IDs for FA + SSM
+    groups with different block counts (kernel mismatch active)."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import (
+        NixlConnectorMetadata,
+    )
+
+    metadata = NixlConnectorMetadata()
+
+    # FA: 8 kernel blocks (2 logical * ratio=4), SSM: 2 logical blocks
+    fa_blocks = [0, 1, 2, 3, 4, 5, 6, 7]
+    ssm_blocks = [0, 1]
+
+    metadata.add_new_req_to_recv(
+        request_id="test-req-hybrid",
+        local_block_ids=(fa_blocks, ssm_blocks),
+        kv_transfer_params={
+            "remote_block_ids": ([10, 11, 12, 13, 14, 15, 16, 17], [20, 21]),
+            "remote_engine_id": "remote-engine",
+            "remote_request_id": "prefill-test-req-hybrid",
+            "remote_host": "localhost",
+            "remote_port": 1234,
+            "tp_size": 1,
+        },
+    )
+
+    assert "test-req-hybrid" in metadata.reqs_to_recv
+    req_meta = metadata.reqs_to_recv["test-req-hybrid"]
+
+    # Verify local block IDs: different lengths per group
+    assert len(req_meta.local_block_ids) == 2
+    assert list(req_meta.local_block_ids[0]) == fa_blocks
+    assert list(req_meta.local_block_ids[1]) == ssm_blocks
+    assert len(req_meta.local_block_ids[0]) != len(req_meta.local_block_ids[1])
+
+    # Verify remote block IDs: same asymmetry preserved
+    assert req_meta.remote is not None
+    assert len(req_meta.remote.block_ids) == 2
+    assert list(req_meta.remote.block_ids[0]) == [10, 11, 12, 13, 14, 15, 16, 17]
+    assert list(req_meta.remote.block_ids[1]) == [20, 21]
+    assert len(req_meta.remote.block_ids[0]) != len(req_meta.remote.block_ids[1])

@@ -62,7 +62,7 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     MambaSpec,
     SlidingWindowSpec,
-    UniformTypeKVCacheSpecs,
+    UniformTypeKVCacheSpecs, FullAttentionSpec,
 )
 from vllm.v1.worker.block_table import BlockTable
 from vllm.v1.worker.utils import select_common_block_size
@@ -993,7 +993,7 @@ class NixlConnectorWorker:
         mamba_ssm_size = (0, 0)
         self._is_mamba = any(self._is_mamba_layer)
         if self._is_mamba:
-            assert self._is_hma_enabled
+            assert self._is_hma_required
             mamba_spec = next(
                 spec
                 for spec in self._layer_specs.values()
