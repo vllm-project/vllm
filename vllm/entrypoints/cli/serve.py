@@ -3,7 +3,6 @@
 
 import argparse
 import signal
-import time
 
 import uvloop
 
@@ -225,12 +224,8 @@ def run_headless(args: argparse.Namespace):
     try:
         engine_manager.join_first()
     finally:
-        timeout = None
-        if shutdown_requested:
-            timeout = vllm_config.shutdown_timeout
-            logger.info("Waiting up to %d seconds for processes to exit", timeout)
-        engine_manager.shutdown(timeout=timeout)
         logger.info("Shutting down.")
+        engine_manager.close()
 
 
 def run_multi_api_server(args: argparse.Namespace):
@@ -240,19 +235,6 @@ def run_multi_api_server(args: argparse.Namespace):
 
     if num_api_servers > 1:
         setup_multiprocess_prometheus()
-
-    shutdown_requested = False
-
-    # Catch SIGTERM and SIGINT to allow graceful shutdown.
-    def signal_handler(signum, frame):
-        nonlocal shutdown_requested
-        logger.debug("Received %d signal.", signum)
-        if not shutdown_requested:
-            shutdown_requested = True
-            raise SystemExit
-
-    signal.signal(signal.SIGTERM, signal_handler)
-    signal.signal(signal.SIGINT, signal_handler)
 
     listen_address, sock = setup_server(args)
 
@@ -315,29 +297,11 @@ def run_multi_api_server(args: argparse.Namespace):
         api_server_manager = APIServerProcessManager(**api_server_manager_kwargs)
 
     # Wait for API servers
-    try:
-        wait_for_completion_or_failure(
-            api_server_manager=api_server_manager,
-            engine_manager=local_engine_manager,
-            coordinator=coordinator,
-        )
-    finally:
-        timeout = shutdown_by = None
-        if shutdown_requested:
-            timeout = vllm_config.shutdown_timeout
-            shutdown_by = time.monotonic() + timeout
-            logger.info("Waiting up to %d seconds for processes to exit", timeout)
-
-        def to_timeout(deadline: float | None) -> float | None:
-            return (
-                deadline if deadline is None else max(deadline - time.monotonic(), 0.0)
-            )
-
-        api_server_manager.shutdown(timeout=timeout)
-        if local_engine_manager:
-            local_engine_manager.shutdown(timeout=to_timeout(shutdown_by))
-        if coordinator:
-            coordinator.shutdown(timeout=to_timeout(shutdown_by))
+    wait_for_completion_or_failure(
+        api_server_manager=api_server_manager,
+        engine_manager=local_engine_manager,
+        coordinator=coordinator,
+    )
 
 
 def run_api_server_worker_proc(
