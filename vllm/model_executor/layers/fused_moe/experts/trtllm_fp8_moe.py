@@ -173,6 +173,8 @@ class TrtLlmFp8ExpertsModular(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsModular):
         if fi_utils._is_fi_autotuning:
             return
 
+        assert a1q_scale is not None
+
         # `trtllm_fp8_block_scale_routed_moe` has a bug and does not write to the
         # output tensor in-place so we need to manually copy the result to the
         # output tensor
