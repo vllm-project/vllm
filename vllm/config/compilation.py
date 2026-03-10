@@ -131,6 +131,8 @@ class PassConfig:
     """Enable flashinfer allreduce fusion."""
     enable_qk_norm_rope_fusion: bool = False
     """Enable fused Q/K RMSNorm + RoPE pass."""
+    fuse_cache_mla_rope: bool = Field(default=None)
+    """Enable fused MLA KV cache update with RoPE."""
 
     # ROCm/AITER specific fusions
     fuse_act_padding: bool = Field(default=None)
@@ -217,6 +219,7 @@ class PassConfig:
         "fuse_allreduce_rms",
         "fuse_act_padding",
         "fuse_rope_kvcache",
+        "fuse_cache_mla_rope",
         mode="wrap",
     )
     @classmethod
@@ -268,6 +271,12 @@ class PassConfig:
                 "The fusion will be disabled."
             )
             self.fuse_rope_kvcache = False
+        if self.fuse_cache_mla_rope and not current_platform.is_cuda():
+            logger.warning_once(
+                "MLA KV cache update with RoPE fusion enabled but the "
+                "current platform is not CUDA. The fusion will be disabled."
+            )
+            self.fuse_cache_mla_rope = False
 
 
 class DynamicShapesType(str, enum.Enum):
@@ -1007,7 +1016,7 @@ class CompilationConfig:
                 # https://github.com/vllm-project/vllm/issues/33267
                 if not self.use_inductor_graph_partition:
                     self.splitting_ops.append("vllm::unified_kv_cache_update")
-                    self.splitting_ops.append("vllm::unified_mla_kv_cache_update")
+                    # self.splitting_ops.append("vllm::unified_mla_kv_cache_update")
 
             elif len(self.splitting_ops) == 0:
                 if (

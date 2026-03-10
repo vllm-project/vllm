@@ -39,18 +39,16 @@ def fused_concat_and_cache_mla_rope_impl(
     kv_cache_dtype: str,
     kv_cache_scale: torch.Tensor,
     layer_name: str) -> None:
-        # _, _, kv_cache, _ = get_attention_context(layer_name)
         forward_context = get_forward_context()
         attn_layer = forward_context.no_compile_layers[layer_name]
         kv_cache = attn_layer.kv_cache[forward_context.virtual_engine]
+        print("kv_cache", kv_cache.shape if kv_cache is not None else None)
         layer_slot_mapping = forward_context.slot_mapping.get(layer_name)
-        print("layer_slot_mapping:", layer_slot_mapping.size if layer_slot_mapping is not None else "None")
+        print("layer_slot_mapping", layer_slot_mapping.shape if layer_slot_mapping is not None else None)
         if layer_slot_mapping is not None:
             ops.concat_and_cache_mla_rope_fused(
                 positions, q_pe, k_pe, kv_c, cos_sin_cache, is_neox, layer_slot_mapping,
                 kv_cache, kv_cache_dtype, kv_cache_scale)
-
-        # return torch.empty(0, device=kv_cache.device, dtype=kv_cache.dtype)
 
 def fused_concat_and_cache_mla_rope_fake(
     dummy: torch.Tensor,
@@ -64,7 +62,6 @@ def fused_concat_and_cache_mla_rope_fake(
     kv_cache_scale: torch.Tensor,
     layer_name: str) -> None:
         pass
-        # return torch.empty(0, device=q_pe.device, dtype=q_pe.dtype)
 
 direct_register_custom_op(
     op_name="fused_concat_and_cache_mla_rope",
@@ -83,7 +80,6 @@ class KVCacheMLARoPEFusionPattern:
     ) -> None:
         self.layer_name = layer.layer_name
         self.kv_cache_dtype = layer.kv_cache_dtype
-        # self.k_scale = layer._k_scale
         self.num_heads = layer.num_heads
         self.num_kv_heads = layer.num_kv_heads
         self.head_size = 64 #layer.head_size
@@ -97,9 +93,7 @@ class KVCacheMLARoPEFusionPattern:
         # self.v_size = self.num_kv_heads * self.head_size_v
         self.v_size = self.num_kv_heads * self.head_size
 
-        # print("create pattern with", layer.layer_name, self.kv_cache_dtype)
-
-        self.rope_matcher = MatcherDeepseekScalingRotaryEmbedding(
+        self.rope_matcher = MatcherRotaryEmbedding(
             is_neox=self.is_neox,
             head_size=self.head_size,
             num_heads=self.num_heads,
@@ -107,39 +101,21 @@ class KVCacheMLARoPEFusionPattern:
         )
 
     def get_inputs(self) -> list[torch.Tensor]:
-        # # # output: bf16[s72, 576]
-
-        # # # q: bf16[s72, 16, 64]
-        # # # k_pe: bf16[s72, 64]
-        # # # kv_c: bf16[s72, 512]
         # Sample inputs to help pattern tracing
         T = 5
-        P = 4096
         L = 163840
         q = empty_bf16(T, 16, 64)
-        k_pe = empty_bf16(T, 1, 64) # ok
-        kv_c_normed = empty_bf16(T, 512) # ok
-        cos_sin_cache = empty_bf16(L, 64) # ok
-        sin = empty_bf16(T, 32)
-        cos = empty_bf16(T, 32)
-        key_rotated = empty_bf16(T, 1, 64)
+        k_pe = empty_bf16(T, 1, 64)
+        kv_c_normed = empty_bf16(T, 512)
+        cos_sin_cache = empty_bf16(L, 64)
         mm = empty_bf16(T, 576)
-        # q = empty_bf16(T, self.kv_lora_rank)
-        # k_pe = empty_bf16(T, 1, 64) #self.qk_rope_head_dim)
-        # kv_c_normed = empty_bf16(T, 512) #self.kv_lora_rank)
-        positions = empty_i64(T) # ok
-        # cos_sin_cache = empty_bf16(L, self.head_size)
+        positions = empty_i64(T)
         k_scale = torch.empty(0, device=k_pe.device, dtype=torch.float32)
-        # print("input shapes:", q.shape, k_pe.shape, kv_c_normed.shape, k_scale.shape)
-        # print("input dtypes:", q.dtype, k_pe.dtype, kv_c_normed.dtype, k_scale.dtype)
         return [
             q,
             k_pe,
             kv_c_normed,
-            # mm,
-            # key_rotated,
-            # cos,
-            # sin,
+            mm,
             positions,
             cos_sin_cache,
             k_scale,
@@ -150,19 +126,16 @@ class KVCacheMLARoPEFusionPattern:
             q: torch.Tensor,
             k_pe: torch.Tensor,
             kv_c_normed: torch.Tensor,
-            # mm: torch.Tensor,
-            # key_rotated: torch.Tensor,
-            # cos: torch.Tensor,
-            # sin: torch.Tensor,
+            mm: torch.Tensor,
             positions: torch.Tensor,
             cos_sin_cache: torch.Tensor,
             k_scale: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-            query, k3 = self.rope_matcher(positions, q, k_pe, cos_sin_cache)
-            # k = key.squeeze(1)
-            # scatter = torch.ops.aten.slice_scatter.default(mm, k, 1, 512, 576)
-            # _, k2 = torch.ops.aten.split_with_sizes.default(scatter, [512, 64], -1)
-            # k3 = k2.unsqueeze(1)
+            query, key = self.rope_matcher(positions, q, k_pe, cos_sin_cache)
+            k = key.squeeze(1)
+            scatter = torch.ops.aten.slice_scatter.default(mm, k, 1, 512, 576)
+            _, k2 = torch.ops.aten.split_with_sizes.default(scatter, [512, 64], -1)
+            k3 = k2.unsqueeze(1)
             
             dummy = torch.ops.vllm.unified_mla_kv_cache_update(
                 kv_c_normed, k3, self.layer_name, self.kv_cache_dtype, k_scale)
@@ -172,10 +145,7 @@ class KVCacheMLARoPEFusionPattern:
             q: torch.Tensor,
             k_pe: torch.Tensor,
             kv_c_normed: torch.Tensor,
-            # mm: torch.Tensor,
-            # key_rotated: torch.Tensor,
-            # cos: torch.Tensor,
-            # sin: torch.Tensor,
+            mm: torch.Tensor,
             positions: torch.Tensor,
             cos_sin_cache: torch.Tensor,
             k_scale: torch.Tensor,
@@ -190,7 +160,7 @@ class KVCacheMLARoPEFusionPattern:
                 q_pe=q,
                 k_pe=k_pe2,
                 kv_c=kv_c_normed,
-                cos_sin_cache=cos_sin_cache,
+                cos_sin_cache=cos_sin_cache.to(q.dtype),
                 is_neox=self.is_neox,
                 kv_cache_dtype=self.kv_cache_dtype,
                 kv_cache_scale=k_scale,
@@ -220,9 +190,7 @@ class KVCacheMLARoPEFusionPass(VllmPatternMatcherPass):
         )
         attn_layers = get_layers_from_vllm_config(config, MLAAttention)
 
-        print("====RUN MLA KV CACHE UPDATE ROPE FUSION=====")
         for _, layer in attn_layers.items():
-            print(f"registering KVCacheMLARoPEFusionPattern for {layer.layer_name}")
             for is_neox in [False, True]:
                 KVCacheMLARoPEFusionPattern(layer, is_neox).register(
                         self.patterns)
@@ -233,7 +201,6 @@ class KVCacheMLARoPEFusionPass(VllmPatternMatcherPass):
     def __call__(self, graph: fx.Graph) -> None:
         self.matched_count = self.patterns.apply(graph)
         logger.debug("Replaced %s patterns", self.matched_count)
-        print("matched count:", self.matched_count)
 
     def uuid(self) -> str:
         return self.hash_source(

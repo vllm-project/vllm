@@ -152,6 +152,52 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbeddingBase):
             key = key_rot
         return query, key
 
+    # TODO make sure that we need this
+    @staticmethod
+    def forward_static(
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor | None,
+        head_size: int,
+        rotary_dim: int,
+        cos_sin_cache: torch.Tensor,
+        is_neox_style: bool,
+        offsets: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """A PyTorch-native implementation of forward()."""
+        assert key is not None
+        query_rot = query[..., : rotary_dim]
+        key_rot = key[..., : rotary_dim]
+        if rotary_dim < head_size:
+            query_pass = query[..., rotary_dim :]
+            key_pass = key[..., rotary_dim :]
+
+        cos_sin = cos_sin_cache[
+            torch.add(positions, offsets) if offsets is not None else positions
+        ]
+        cos, sin = cos_sin.chunk(2, dim=-1)
+        if is_neox_style:
+            # NOTE(woosuk): Here we assume that the positions tensor has the
+            # shape [batch_size, seq_len].
+            cos = cos.repeat(1, 1, 2).unsqueeze(-2)
+            sin = sin.repeat(1, 1, 2).unsqueeze(-2)
+        else:
+            cos = cos.repeat_interleave(2, dim=-1).unsqueeze(-2)
+            sin = sin.repeat_interleave(2, dim=-1).unsqueeze(-2)
+
+        rotate_fn = rotate_neox if is_neox_style else rotate_gptj
+        query_rot = query_rot * cos + rotate_fn(query_rot) * sin
+        key_rot = key_rot * cos + rotate_fn(key_rot) * sin
+        
+        if rotary_dim < head_size:
+            query = torch.cat((query_rot, query_pass), dim=-1)
+            key = torch.cat((key_rot, key_pass), dim=-1)
+        else:
+            query = query_rot
+            key = key_rot
+        return query, key
+
+
     def forward_hip(
         self,
         positions: torch.Tensor,
