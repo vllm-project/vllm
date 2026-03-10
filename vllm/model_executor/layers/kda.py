@@ -205,7 +205,7 @@ class KimiDeltaAttention(nn.Module, MambaBase):
         # unsqueeze to fit conv1d weights shape into the linear weights shape.
         # Can't do this in `weight_loader` since it already exists in
         # `ColumnParallelLinear` and `set_weight_attrs`
-        # doesn't allow to override it
+        # doesn't allow overriding it
         self.q_conv1d.weight.data = self.q_conv1d.weight.data.unsqueeze(1)
         self.k_conv1d.weight.data = self.k_conv1d.weight.data.unsqueeze(1)
         self.v_conv1d.weight.data = self.v_conv1d.weight.data.unsqueeze(1)
