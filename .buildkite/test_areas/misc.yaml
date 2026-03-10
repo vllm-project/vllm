@@ -187,9 +187,9 @@ steps:
     - export VLLM_ALLOW_INSECURE_SERIALIZATION=1
     - pytest -v -s v1/spec_decode/test_acceptance_length.py -m slow_test
 
-- label: MTP Acceptance Length (B300)
+- label: MTP Acceptance Length (B200)
   timeout_in_minutes: 60
-  device: b300
+  device: b200
   optional: true
   num_devices: 4
   working_dir: "/vllm-workspace/tests"
