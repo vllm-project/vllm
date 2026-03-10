@@ -7,6 +7,7 @@ import torch
 import torch.nn as nn
 
 from vllm.config import VllmConfig
+from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.kv_cache_interface import CrossAttentionSpec, KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
 from vllm.v1.worker.gpu.input_batch import InputBatch
@@ -97,12 +98,19 @@ class WhisperModelState(ModelState):
     def prepare_attn(
         self,
         input_batch: InputBatch,
+        cudagraph_mode: CUDAGraphMode,
         block_tables: tuple[torch.Tensor, ...],
         slot_mappings: torch.Tensor,
         attn_groups: list[list[AttentionGroup]],
         kv_cache_config: KVCacheConfig,
         for_capture: bool = False,
     ) -> dict[str, Any]:
+        if cudagraph_mode == CUDAGraphMode.FULL:
+            num_reqs = input_batch.num_reqs_after_padding
+            num_tokens = input_batch.num_tokens_after_padding
+        else:
+            num_reqs = input_batch.num_reqs
+            num_tokens = input_batch.num_tokens
         encoder_seq_lens = self._get_encoder_seq_lens(
             input_batch.req_ids, attn_groups, for_capture
         )
@@ -111,8 +119,8 @@ class WhisperModelState(ModelState):
         max_query_len = input_batch.num_scheduled_tokens.max().item()
         attn_metadata = build_attn_metadata(
             attn_groups=attn_groups,
-            num_reqs=input_batch.num_reqs,
-            num_tokens=input_batch.num_tokens,
+            num_reqs=num_reqs,
+            num_tokens=num_tokens,
             query_start_loc_gpu=input_batch.query_start_loc,
             query_start_loc_cpu=query_start_loc_cpu,
             max_query_len=max_query_len,
