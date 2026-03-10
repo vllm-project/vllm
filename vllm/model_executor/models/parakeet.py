@@ -114,33 +114,50 @@ class ParakeetExtractor(ParakeetFeatureExtractor):
             round(self.config.clip_min_duration_s * self.sampling_rate)
         )
 
-    def _normalize_audio_length(self, audio_len: int) -> int:
-        # Match mcore's compute_params() logic for clip/minduration handling.
-        target_len = max(audio_len, self._tail_min_samples)
-        tail_remainder = target_len % self._clip_target_samples
-        if 0 < tail_remainder < self._tail_min_samples:
-            padding = self._tail_min_samples - tail_remainder
-            target_len += padding
-        assert isinstance(target_len, int)
-        return target_len
+    def _clip_sizes(self, audio_len: int) -> list[int]:
+        audio_len = max(audio_len, self._tail_min_samples)
+        num_full_clips, remainder = divmod(audio_len, self._clip_target_samples)
+        clip_sizes = [self._clip_target_samples] * num_full_clips
+        if remainder > 0:
+            clip_sizes.append(max(remainder, self._tail_min_samples))
+        return clip_sizes
 
     def audio_token_count(self, audio_len: int) -> int:
-        audio_len = self._normalize_audio_length(audio_len)
-        num_frames = audio_len // self.hop_length
-        n_tokens = HFParakeetEncoder._get_subsampling_output_length(
-            self, torch.tensor([num_frames], dtype=torch.float)
-        )
-        return max(1, n_tokens.item())
+        total_tokens = 0
+        for clip_size in self._clip_sizes(audio_len):
+            num_frames = clip_size // self.hop_length
+            n_tokens = HFParakeetEncoder._get_subsampling_output_length(
+                self, torch.tensor([num_frames], dtype=torch.float)
+            )
+            total_tokens += int(n_tokens.item())
+        return max(1, total_tokens)
+
+    def split_audio_into_clips(self, audio: np.ndarray) -> list[np.ndarray]:
+        assert audio.ndim == 1
+        audio_len = int(audio.shape[0])
+        clip_sizes = self._clip_sizes(audio_len)
+        target_len = sum(clip_sizes)
+        if audio_len < target_len:
+            audio = np.pad(audio, (0, target_len - audio_len))
+
+        clips = list[np.ndarray]()
+        offset = 0
+        for clip_size in clip_sizes:
+            clips.append(audio[offset : offset + clip_size])
+            offset += clip_size
+        return clips
 
     def __call__(self, raw_speech: list[np.ndarray], *args, **kwargs):
-        padded = []
-        for p in raw_speech:
-            assert p.ndim == 1
-            audio_len = int(p.shape[0])
-            target_len = self._normalize_audio_length(audio_len)
-            p = np.pad(p, (0, target_len - audio_len))
-            padded.append(p)
-        return super().__call__(padded, *args, **kwargs)
+        audio_clips = list[np.ndarray]()
+        audio_num_clips = list[int]()
+        for audio in raw_speech:
+            clips = self.split_audio_into_clips(audio)
+            audio_clips.extend(clips)
+            audio_num_clips.append(len(clips))
+
+        outputs = super().__call__(audio_clips, *args, **kwargs)
+        outputs["audio_num_clips"] = audio_num_clips
+        return outputs
 
     def audio_length(self, audio_tokens: int) -> int:
         return int(audio_tokens * self.config.subsampling_factor * self.hop_length)
