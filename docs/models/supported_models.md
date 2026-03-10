@@ -514,7 +514,7 @@ These models primarily support the [`LLM.embed`](./pooling_models.md#llmembed) A
 | ------------ | ------ | ----------------- | -------------------- | ------------------------- |
 | `BertModel`<sup>C</sup> | BERT-based | `BAAI/bge-base-en-v1.5`, `Snowflake/snowflake-arctic-embed-xs`, etc. | | |
 | `BertSpladeSparseEmbeddingModel` | SPLADE | `naver/splade-v3` | | |
-| `ErnieModel` | BERT-like Chinese ERNIE | `nghuyong/ernie-3.0-xbase-zh` (see note) | | |
+| `ErnieModel` | BERT-like Chinese ERNIE | `nghuyong/ernie-3.0-xbase-zh` | | |
 | `Gemma2Model`<sup>C</sup> | Gemma 2-based | `BAAI/bge-multilingual-gemma2`, etc. | ✅︎ | ✅︎ |
 | `Gemma3TextModel`<sup>C</sup> | Gemma 3-based | `google/embeddinggemma-300m`, etc. | ✅︎ | ✅︎ |
 | `GritLM` | GritLM | `parasail-ai/GritLM-7B-vllm`. | ✅︎ | ✅︎ |
@@ -547,9 +547,6 @@ These models primarily support the [`LLM.embed`](./pooling_models.md#llmembed) A
 !!! note
     The second-generation GTE model (mGTE-TRM) is named `NewModel`. The name `NewModel` is too generic, you should set `--hf-overrides '{"architectures": ["GteNewModel"]}'` to specify the use of the `GteNewModel` architecture.
 
-!!! note
-    The public ERNIE base checkpoint `nghuyong/ernie-3.0-xbase-zh` exposes the embedding architecture by default. To use the sequence or token classification implementations, pass `--hf-overrides` (or `hf_overrides`) to select `ErnieForSequenceClassification` or `ErnieForTokenClassification`.
-
 If your model is not in the above list, we will try to automatically convert the model using
 [as_embedding_model][vllm.model_executor.models.adapters.as_embedding_model]. By default, the embeddings
 of the whole prompt are extracted from the normalized hidden state corresponding to the last token.
@@ -560,7 +557,7 @@ These models primarily support the [`LLM.classify`](./pooling_models.md#llmclass
 
 | Architecture | Models | Example HF Models | [LoRA](../features/lora.md) | [PP](../serving/parallelism_scaling.md) |
 | ------------ | ------ | ----------------- | -------------------- | ------------------------- |
-| `ErnieForSequenceClassification` | BERT-like Chinese ERNIE | `nghuyong/ernie-3.0-xbase-zh` (see note) | | |
+| `ErnieForSequenceClassification` | BERT-like Chinese ERNIE | `Forrest20231206/ernie-3.0-base-zh-cls` | | |
 | `GPT2ForSequenceClassification` | GPT2 | `nie3e/sentiment-polish-gpt2-small` | | |
 | `JambaForSequenceClassification` | Jamba | `ai21labs/Jamba-tiny-reward-dev`, etc. | ✅︎ | ✅︎ |
 | `*Model`<sup>C</sup>, `*ForCausalLM`<sup>C</sup>, etc. | Generative models | N/A | \* | \* |
@@ -579,7 +576,7 @@ These models primarily support the [`LLM.score`](./pooling_models.md#llmscore) A
 | Architecture | Models | Example HF Models | Score template (see note) | [LoRA](../features/lora.md) | [PP](../serving/parallelism_scaling.md) |
 | ------------ | ------ | ----------------- | ------------------------- | --------------------------- | --------------------------------------- |
 | `BertForSequenceClassification` | BERT-based | `cross-encoder/ms-marco-MiniLM-L-6-v2`, etc. | N/A | | |
-| `ErnieForSequenceClassification` | BERT-like Chinese ERNIE | `nghuyong/ernie-3.0-xbase-zh` (see note) | N/A | | |
+| `ErnieForSequenceClassification` | BERT-like Chinese ERNIE | `Forrest20231206/ernie-3.0-base-zh-cls` | N/A | | |
 | `GemmaForSequenceClassification` | Gemma-based | `BAAI/bge-reranker-v2-gemma`(see note), etc. | [bge-reranker-v2-gemma.jinja](../../examples/pooling/score/template/bge-reranker-v2-gemma.jinja) | ✅︎ | ✅︎ |
 | `GteNewForSequenceClassification` | mGTE-TRM (see note) | `Alibaba-NLP/gte-multilingual-reranker-base`, etc. | N/A | | |
 | `LlamaBidirectionalForSequenceClassification`<sup>C</sup> | Llama-based with bidirectional attention | `nvidia/llama-nemotron-rerank-1b-v2`, etc. | [nemotron-rerank.jinja](../../examples/pooling/score/template/nemotron-rerank.jinja) | ✅︎ | ✅︎ |
@@ -645,7 +642,7 @@ These models primarily support the [`LLM.encode`](./pooling_models.md#llmencode)
 | Architecture | Models | Example HF Models | [LoRA](../features/lora.md) | [PP](../serving/parallelism_scaling.md) |
 | ------------ | ------ | ----------------- | --------------------------- | --------------------------------------- |
 | `BertForTokenClassification` | bert-based | `boltuix/NeuroBERT-NER` (see note), etc. | | |
-| `ErnieForTokenClassification` | BERT-like Chinese ERNIE | `nghuyong/ernie-3.0-xbase-zh` (see note) | | |
+| `ErnieForTokenClassification` | BERT-like Chinese ERNIE | `gyr66/Ernie-3.0-base-chinese-finetuned-ner` | | |
 | `ModernBertForTokenClassification` | ModernBERT-based | `disham993/electrical-ner-ModernBERT-base` | | |
 
 !!! note

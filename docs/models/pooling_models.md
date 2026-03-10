@@ -374,35 +374,6 @@ curl -s http://localhost:8000/pooling -H "Content-Type: application/json" -d '{
 
 An example can be found here: [examples/pooling/score/colbert_rerank_online.py](../../examples/pooling/score/colbert_rerank_online.py)
 
-### ERNIE Models
-
-vLLM supports BERT-like Chinese ERNIE pooling models through the native
-`ErnieModel`, `ErnieForSequenceClassification`, and
-`ErnieForTokenClassification` implementations.
-
-For the public base checkpoint `nghuyong/ernie-3.0-xbase-zh`, use
-`--hf-overrides` to select the desired architecture:
-
-```shell
-# Embedding / token embedding
-vllm serve nghuyong/ernie-3.0-xbase-zh \
-    --runner pooling \
-    --hf-overrides '{"architectures": ["ErnieModel"]}'
-
-# Sequence classification / score
-vllm serve nghuyong/ernie-3.0-xbase-zh \
-    --runner pooling \
-    --hf-overrides '{"architectures": ["ErnieForSequenceClassification"]}'
-
-# Token classification
-vllm serve nghuyong/ernie-3.0-xbase-zh \
-    --runner pooling \
-    --hf-overrides '{"architectures": ["ErnieForTokenClassification"]}'
-```
-
-For fine-tuned checkpoints that already save the correct `architectures` field,
-no override is needed.
-
 ### ColQwen3 Multi-Modal Late Interaction Models
 
 ColQwen3 is based on [ColPali](https://arxiv.org/abs/2407.01449), which extends ColBERT's late interaction approach to **multi-modal** inputs. While ColBERT operates on text-only token embeddings, ColPali/ColQwen3 can embed both **text and images** (e.g. PDF pages, screenshots, diagrams) into per-token L2-normalized vectors and compute relevance via MaxSim scoring. ColQwen3 specifically uses Qwen3-VL as its vision-language backbone.

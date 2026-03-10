@@ -18,6 +18,7 @@ from vllm.platforms import current_platform
                 pytest.mark.slow_test,
             ],
         ),
+        pytest.param("Forrest20231206/ernie-3.0-base-zh-cls"),
     ],
 )
 @pytest.mark.parametrize("dtype", ["half"] if current_platform.is_rocm() else ["float"])
