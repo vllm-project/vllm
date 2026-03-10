@@ -8,8 +8,9 @@ steps:
   - csrc/
   - tests/kernels/core
   - tests/kernels/test_top_k_per_row.py
+  - tests/kernels/test_concat_mla_q.py
   commands:
-    - pytest -v -s kernels/core kernels/test_top_k_per_row.py
+    - pytest -v -s kernels/core kernels/test_top_k_per_row.py kernels/test_concat_mla_q.py
 
 - label: Kernels Attention Test %N
   timeout_in_minutes: 35
@@ -44,7 +45,8 @@ steps:
   - vllm/envs.py
   - vllm/config
   commands:
-    - pytest -v -s kernels/moe --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+    - pytest -v -s kernels/moe --ignore=kernels/moe/test_modular_oai_triton_moe.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+    - pytest -v -s kernels/moe/test_modular_oai_triton_moe.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
   parallelism: 2
 
 - label: Kernels Mamba Test
@@ -70,7 +72,7 @@ steps:
   - tests/kernels/moe/test_batched_deepgemm.py
   - tests/kernels/attention/test_deepgemm_attention.py
   commands:
-    - pytest -v -s kernels/quantization/test_block_fp8.py -k deep_gemm
+    - pytest -v -s kernels/quantization/test_block_fp8.py
     - pytest -v -s kernels/moe/test_deepgemm.py
     - pytest -v -s kernels/moe/test_batched_deepgemm.py
     - pytest -v -s kernels/attention/test_deepgemm_attention.py
@@ -95,7 +97,7 @@ steps:
   - vllm/platforms/cuda.py
   commands:
     - nvidia-smi
-    - python3 examples/offline_inference/basic/chat.py
+    - python3 examples/basic/offline_inference/chat.py
     # Attention
     # num_heads2 broken by https://github.com/flashinfer-ai/flashinfer/issues/1353
     - pytest -v -s tests/kernels/attention/test_attention_selector.py
@@ -155,5 +157,14 @@ steps:
   commands:
     - pytest -v -s kernels/moe/test_deepep_deepgemm_moe.py
     - pytest -v -s kernels/moe/test_deepep_moe.py
-    - pytest -v -s kernels/moe/test_pplx_cutlass_moe.py
-    # - pytest -v -s kernels/moe/test_pplx_moe.py - failing on main
+
+- label: Kernels Fp4 MoE Test (B200)
+  timeout_in_minutes: 60
+  device: b200
+  num_devices: 1
+  optional: true
+  commands:
+    - pytest -v -s kernels/moe/test_cutedsl_moe.py
+    - pytest -v -s kernels/moe/test_flashinfer_moe.py
+    - pytest -v -s kernels/moe/test_nvfp4_moe.py
+    - pytest -v -s kernels/moe/test_ocp_mx_moe.py

@@ -63,10 +63,8 @@ async def create_responses(request: ResponsesRequest, raw_request: Request):
         return base_server.create_error_response(
             message="The model does not support Responses API"
         )
-    try:
-        generator = await handler.create_responses(request, raw_request)
-    except Exception as e:
-        generator = handler.create_error_response(e)
+
+    generator = await handler.create_responses(request, raw_request)
 
     if isinstance(generator, ErrorResponse):
         return JSONResponse(
@@ -95,14 +93,11 @@ async def retrieve_responses(
             message="The model does not support Responses API"
         )
 
-    try:
-        response = await handler.retrieve_responses(
-            response_id,
-            starting_after=starting_after,
-            stream=stream,
-        )
-    except Exception as e:
-        response = handler.create_error_response(e)
+    response = await handler.retrieve_responses(
+        response_id,
+        starting_after=starting_after,
+        stream=stream,
+    )
 
     if isinstance(response, ErrorResponse):
         return JSONResponse(
@@ -125,10 +120,7 @@ async def cancel_responses(response_id: str, raw_request: Request):
             message="The model does not support Responses API"
         )
 
-    try:
-        response = await handler.cancel_responses(response_id)
-    except Exception as e:
-        response = handler.create_error_response(e)
+    response = await handler.cancel_responses(response_id)
 
     if isinstance(response, ErrorResponse):
         return JSONResponse(
