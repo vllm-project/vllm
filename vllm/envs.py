@@ -115,6 +115,8 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_SKINNY_GEMM: bool = True
     VLLM_ROCM_FP8_PADDING: bool = True
     VLLM_ROCM_MOE_PADDING: bool = True
+    VLLM_USE_ATOM_FUSED_DECODE: bool = True
+    VLLM_USE_ATOM_FUSED_PREFILL: bool = True
     VLLM_ROCM_CUSTOM_PAGED_ATTN: bool = True
     VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT: bool = False
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
@@ -978,6 +980,18 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # By default is enabled.
     "VLLM_ROCM_USE_AITER_TRITON_GEMM": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_TRITON_GEMM", "True").lower() in ("true", "1")
+    ),
+    # Enable AITER fused decode kernel for MLA (ROCm only, decode path only)
+    # Fuses: FP4/FP8 BMM + RoPE + concat + KV cache write in ONE kernel
+    # By default is enabled for AMD GPUs with FP4/FP8 support.
+    "VLLM_USE_ATOM_FUSED_DECODE": lambda: (
+        os.getenv("VLLM_USE_ATOM_FUSED_DECODE", "True").lower() in ("true", "1")
+    ),
+    # Enable AITER fused prefill kernel for MLA (ROCm only, prefill path)
+    # Fuses: RoPE + concat + KV cache write in ONE kernel
+    # By default is enabled for AMD GPUs.
+    "VLLM_USE_ATOM_FUSED_PREFILL": lambda: (
+        os.getenv("VLLM_USE_ATOM_FUSED_PREFILL", "True").lower() in ("true", "1")
     ),
     # use rocm skinny gemms
     "VLLM_ROCM_USE_SKINNY_GEMM": lambda: (

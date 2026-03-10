@@ -87,6 +87,21 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
         self.indexer_rope_emb = mla_modules.indexer_rotary_emb
         self.is_sparse = mla_modules.is_sparse
 
+        # Extract RoPE caches for AITER fused kernels
+        if self.rotary_emb is not None:
+            # RoPE stores combined cos_sin_cache, need to split it
+            # Format: [seq_len, rotary_dim] where first half is cos, second half is sin
+            cos_sin_cache = self.rotary_emb.cos_sin_cache
+            rotary_dim = self.rotary_emb.rotary_dim
+            half_dim = rotary_dim // 2
+            self.cos_cache = cos_sin_cache[:, :half_dim]
+            self.sin_cache = cos_sin_cache[:, half_dim:]
+            self.is_neox_style = self.rotary_emb.is_neox_style
+        else:
+            self.cos_cache = None
+            self.sin_cache = None
+            self.is_neox_style = False
+
         if self.indexer is not None:
             assert hasattr(self.indexer, "topk_tokens")
             self.topk_tokens = self.indexer.topk_tokens
@@ -106,6 +121,10 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
             kv_b_proj=self.kv_b_proj,
             use_sparse=self.is_sparse,
             indexer=self.indexer,
+            # Pass RoPE caches for AITER fused kernels
+            cos_cache=self.cos_cache,
+            sin_cache=self.sin_cache,
+            is_neox_style=self.is_neox_style,
         )
 
         self.prefix = prefix
@@ -154,10 +173,23 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
         # Add head dim of 1 to k_pe
         k_pe = k_pe.unsqueeze(1)
 
-        if self.rotary_emb is not None:
+        # Determine if we should skip RoPE (AITER fused kernel will apply it)
+        # IMPORTANT: Only skip RoPE when fused kernel is enabled
+        # The fused kernel applies RoPE internally for decode tokens
+        # WARNING: This assumes decode-only batches. Mixed batches (prefill+decode)
+        # will fall back to regular path in forward_impl which expects RoPE pre-applied.
+        skip_rope_for_fused_kernel = (
+            self.rotary_emb is not None
+            and hasattr(self.mla_attn, "use_atom_fused_decode")
+            and self.mla_attn.use_atom_fused_decode
+        )
+
+        if self.rotary_emb is not None and not skip_rope_for_fused_kernel:
+            # Normal path: Apply RoPE here (prefill, mixed batches, or fused kernel disabled)
             q[..., self.qk_nope_head_dim :], k_pe = self.rotary_emb(
                 positions, q[..., self.qk_nope_head_dim :], k_pe
             )
+        # else: AITER fused kernel will apply RoPE internally for decode tokens
 
         if self.indexer and self.is_sparse:
             _topk_indices = self.indexer(
@@ -172,6 +204,8 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
             kv_c_normed,
             k_pe,
             output_shape=(hidden_states.shape[0], self.num_heads * self.v_head_dim),
+            positions=positions,  # Pass positions for AITER fused kernel
+            rope_applied=(not skip_rope_for_fused_kernel),  # Indicate if RoPE was pre-applied
         )
 
         return self.o_proj(attn_out)[0]
