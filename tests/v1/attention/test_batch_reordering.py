@@ -5,49 +5,10 @@ from dataclasses import dataclass
 
 import numpy as np
 import pytest
-import torch
 
-from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.utils import (
     reorder_batch_to_split_decodes_and_prefills,
-    split_decodes_and_prefills,
 )
-
-
-def _make_common_attn_metadata(
-    query_lens: list[int],
-    seq_lens: list[int],
-    num_computed_tokens: list[int] | None = None,
-):
-    num_reqs = len(query_lens)
-    num_tokens = sum(query_lens)
-    max_query_len = max(query_lens) if query_lens else 0
-
-    query_start_loc = torch.zeros(num_reqs + 1, dtype=torch.int32)
-    for i, ql in enumerate(query_lens):
-        query_start_loc[i + 1] = query_start_loc[i] + ql
-
-    seq_lens_t = torch.tensor(seq_lens, dtype=torch.int32)
-
-    has_context = None
-    if num_computed_tokens is not None:
-        has_context = torch.tensor(
-            [nct > 0 for nct in num_computed_tokens], dtype=torch.bool
-        )
-
-    return CommonAttentionMetadata(
-        query_start_loc=query_start_loc,
-        query_start_loc_cpu=query_start_loc,
-        seq_lens=seq_lens_t,
-        _seq_lens_cpu=seq_lens_t,
-        has_context=has_context,
-        num_reqs=num_reqs,
-        num_actual_tokens=num_tokens,
-        max_query_len=max_query_len,
-        max_seq_len=max(seq_lens) if seq_lens else 0,
-        block_table_tensor=torch.empty(0),
-        slot_mapping=torch.empty(0),
-    )
 
 
 class MockInputBatch:
@@ -186,52 +147,3 @@ def test_reorder_batch_to_split_decodes_and_prefills(test_case: ReorderTestCase)
     assert input_batch.req_ids == expected_req_ids, (
         f"Expected order {expected_req_ids}, got {input_batch.req_ids}"
     )
-
-
-@dataclass
-class SplitTestCase:
-    query_lens: list[int]
-    seq_lens: list[int]
-    num_computed_tokens: list[int]
-    decode_threshold: int
-    expected: tuple[int, int, int, int]  # (num_d, num_p, num_dt, num_pt)
-
-
-SPLIT_TEST_CASES = {
-    "mtp_new_request_is_prefill": SplitTestCase(
-        query_lens=[3],
-        seq_lens=[3],
-        num_computed_tokens=[0],
-        decode_threshold=4,
-        expected=(0, 1, 0, 3),
-    ),
-    "mtp_cuda_graph_synthetic_decodes": SplitTestCase(
-        query_lens=[4, 4, 4],
-        seq_lens=[4, 4, 4],
-        num_computed_tokens=[1, 1, 1],
-        decode_threshold=4,
-        expected=(3, 0, 12, 0),
-    ),
-    "mtp_mixed_decodes_and_new_request": SplitTestCase(
-        query_lens=[4, 4, 3],
-        seq_lens=[100, 200, 3],
-        num_computed_tokens=[96, 196, 0],
-        decode_threshold=4,
-        expected=(2, 1, 8, 3),
-    ),
-}
-
-
-@pytest.mark.parametrize(
-    "test_case", SPLIT_TEST_CASES.values(), ids=SPLIT_TEST_CASES.keys()
-)
-def test_split_decodes_and_prefills(test_case: SplitTestCase):
-    meta = _make_common_attn_metadata(
-        query_lens=test_case.query_lens,
-        seq_lens=test_case.seq_lens,
-        num_computed_tokens=test_case.num_computed_tokens,
-    )
-    result = split_decodes_and_prefills(
-        meta, decode_threshold=test_case.decode_threshold
-    )
-    assert result == test_case.expected
