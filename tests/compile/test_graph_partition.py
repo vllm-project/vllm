@@ -7,7 +7,7 @@ import pytest
 import torch
 from torch.fx.experimental.proxy_tensor import make_fx
 
-from vllm.compilation.backends import split_graph
+from vllm.compilation.backends import _is_empty_allocation_node, split_graph
 from vllm.compilation.passes.fx_utils import find_op_nodes
 
 # This import automatically registers `torch.ops.silly.attention`
@@ -234,6 +234,43 @@ def test_builtin_empty_only_partition_is_merged():
     assert len(split_items) == 3, "Builtin empty-only partition should be merged"
 
     x = torch.randn(2, 3, device="cuda")
+    output_original = gm(x)
+    output_split = split_gm(x)
+    assert torch.allclose(output_original, output_split), "Output mismatch after split"
+
+
+def test_empty_only_partition_not_merged_into_splitting_subgraph():
+    """
+    Empty-only subgraphs should not be merged into splitting-op subgraphs.
+    This avoids changing splitting graph contents in ways that can affect
+    piecewise cudagraph behavior.
+    """
+
+    def model_fn(x: torch.Tensor) -> torch.Tensor:
+        base = x + 1
+        y = torch.sin(base)
+        out = torch.empty_like(base)
+        torch.ops.aten.cos.out(base, out=out)
+        return out + y
+
+    x = torch.randn(4, 3)
+    gm = make_fx(model_fn)(x)
+    split_gm, split_items = split_graph(gm, ["aten::sin", "aten::cos.out"])
+
+    splitting_items = [item for item in split_items if item.is_splitting_graph]
+    assert len(splitting_items) == 2
+
+    for split_item in splitting_items:
+        empty_nodes = [
+            node
+            for node in split_item.graph.graph.nodes
+            if _is_empty_allocation_node(node)
+        ]
+        assert len(empty_nodes) == 0, (
+            f"{split_item.submod_name} should not contain empty allocation nodes: "
+            f"{[node.name for node in empty_nodes]}"
+        )
+
     output_original = gm(x)
     output_split = split_gm(x)
     assert torch.allclose(output_original, output_split), "Output mismatch after split"

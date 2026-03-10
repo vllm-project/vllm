@@ -431,6 +431,7 @@ def _is_empty_allocation_node(node: fx.Node) -> bool:
 
 def _merge_empty_only_subgraphs(
     node_to_subgraph_id: dict[fx.Node, int],
+    split_op_graphs: list[int],
 ) -> None:
     """
     Merge a partition that only contains an empty allocation op into the
@@ -445,17 +446,43 @@ def _merge_empty_only_subgraphs(
             subgraph_id_order.append(subgraph_id)
         nodes_by_subgraph_id[subgraph_id].append(node)
 
+    splitting_subgraphs = set(split_op_graphs)
     prev_subgraph_id: int | None = None
+    prev_non_splitting_subgraph_id: int | None = None
+
     for subgraph_id in subgraph_id_order:
         nodes = nodes_by_subgraph_id[subgraph_id]
-        if (
-            len(nodes) == 1
-            and _is_empty_allocation_node(nodes[0])
-            and prev_subgraph_id is not None
-        ):
-            node_to_subgraph_id[nodes[0]] = prev_subgraph_id
+        is_empty_only_subgraph = len(nodes) == 1 and _is_empty_allocation_node(nodes[0])
+        merged = False
+
+        if is_empty_only_subgraph:
+            # Prefer merging into the most recent non-splitting subgraph.
+            # Fallback to legacy behavior (merge into previous subgraph)
+            # when no non-splitting predecessor exists.
+            target_subgraph_id = (
+                prev_non_splitting_subgraph_id
+                if prev_non_splitting_subgraph_id is not None
+                else prev_subgraph_id
+            )
+
+            if (
+                target_subgraph_id is not None
+                # Safety check: don't move allocation before any input producer.
+                and all(
+                    input_node.op == "placeholder"
+                    or node_to_subgraph_id[input_node] <= target_subgraph_id
+                    for input_node in nodes[0].all_input_nodes
+                )
+            ):
+                node_to_subgraph_id[nodes[0]] = target_subgraph_id
+                merged = True
+
+        if merged:
             continue
+
         prev_subgraph_id = subgraph_id
+        if subgraph_id not in splitting_subgraphs:
+            prev_non_splitting_subgraph_id = subgraph_id
 
 
 def split_graph(
@@ -496,7 +523,7 @@ def split_graph(
         else:
             node_to_subgraph_id[node] = subgraph_id
 
-    _merge_empty_only_subgraphs(node_to_subgraph_id)
+    _merge_empty_only_subgraphs(node_to_subgraph_id, split_op_graphs)
 
     # `keep_original_order` is important!
     # otherwise pytorch might reorder the nodes and
