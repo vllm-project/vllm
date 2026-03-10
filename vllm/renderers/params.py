@@ -40,6 +40,34 @@ def merge_kwargs(
     return defaults | {k: v for k, v in overrides.items() if v not in unset_values}
 
 
+def recursively_merge_kwargs(
+    defaults: dict[str, Any] | None,
+    overrides: dict[str, Any] | None,
+    /,
+    *,
+    unset_values: tuple[object, ...] = (None, "auto"),
+) -> dict[str, Any]:
+    if defaults is None:
+        defaults = {}
+    if overrides is None:
+        overrides = {}
+
+    merged = dict(defaults)
+
+    for k, v in overrides.items():
+        if v in unset_values:
+            continue
+
+        if k in merged and isinstance(merged[k], dict) and isinstance(v, dict):
+            merged[k] = recursively_merge_kwargs(
+                merged[k], v, unset_values=unset_values
+            )
+        else:
+            merged[k] = v
+
+    return merged
+
+
 @dataclass(frozen=True)
 class ChatParams:
     """Configuration to control how to parse chat messages."""
@@ -56,12 +84,20 @@ class ChatParams:
     media_io_kwargs: dict[str, dict[str, Any]] | None = None
     """Per-modality kwargs for media I/O (loading/decoding images, videos, etc.)."""
 
+    mm_processor_kwargs: dict[str, Any] | None = None
+    """The kwargs to pass to the multi-modal processor."""
+
     def with_defaults(
         self,
         default_chat_template_kwargs: dict[str, Any] | None = None,
         default_media_io_kwargs: dict[str, dict[str, Any]] | None = None,
+        default_mm_processor_kwargs: dict[str, Any] | None = None,
     ):
-        if not default_chat_template_kwargs and not default_media_io_kwargs:
+        if (
+            not default_chat_template_kwargs
+            and not default_media_io_kwargs
+            and not default_mm_processor_kwargs
+        ):
             return self
 
         return ChatParams(
@@ -74,6 +110,10 @@ class ChatParams:
             media_io_kwargs=merge_media_io_kwargs(
                 default_media_io_kwargs,
                 self.media_io_kwargs,
+            ),
+            mm_processor_kwargs=recursively_merge_kwargs(
+                default_mm_processor_kwargs,
+                self.mm_processor_kwargs,
             ),
         )
 
