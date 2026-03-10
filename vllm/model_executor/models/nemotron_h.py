@@ -498,7 +498,6 @@ class NemotronHAttention(nn.Module):
         self.max_position_embeddings = max_position_embeddings
         self.rotary_emb = get_rope(
             head_size=self.head_dim,
-            rotary_dim=self.head_dim,
             max_position=max_position_embeddings,
             is_neox_style=True,
             dtype=model_config.dtype if model_config else torch.get_default_dtype(),
