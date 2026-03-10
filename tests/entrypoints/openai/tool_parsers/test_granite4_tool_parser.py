@@ -332,7 +332,7 @@ tools = [
             "Number of ACME Transaction IDs to return\n    "
             "order (str, optional): Sort by most run "
             "transaction IDs. The value can be 'asc' for "
-            "accending or 'desc' for descending\n    "
+            "ascending or 'desc' for descending\n    "
             "transaction_id (str, optional): ACME Transaction "
             "ID to filter on\n    acme_region (str, optional): "
             "ACME Region to filter on\nReturns:\n    - A "
@@ -487,7 +487,7 @@ async def get_args_streaming(
 
 async def run_scenario(server: RemoteOpenAIServer, _tools, _messages, _stop):
     non_streaming = get_args(server.get_client(), _tools, _messages, _stop)
-    json.loads(non_streaming)  # verifiy that it is json loadable
+    json.loads(non_streaming)  # verify that it is json loadable
     streaming = await get_args_streaming(
         server.get_async_client(), _tools, _messages, _stop
     )
