@@ -8,6 +8,7 @@ import pytest
 import pytest_asyncio
 from openai.types.responses import (
     ResponseFunctionCallArgumentsDeltaEvent,
+    ResponseFunctionCallArgumentsDoneEvent,
     ResponseOutputItemDoneEvent,
     ResponseReasoningItem,
     ResponseReasoningTextDeltaEvent,
@@ -974,11 +975,16 @@ class TestStreamingToolCallEvents:
                 ]
             ),
         ]
+        prev_tool_call_arr_sequence = [
+            [{"name": "get_weather", "arguments": '{"lo'}],
+            [{"name": "get_weather", "arguments": '{"location": "Boston"}'}],
+        ]
         call_count = 0
 
         def mock_extract_tool_calls_streaming(**kwargs):
             nonlocal call_count
             result = delta_sequence[call_count]
+            mock_parser.prev_tool_call_arr = prev_tool_call_arr_sequence[call_count]
             call_count += 1
             return result
 
@@ -1022,6 +1028,12 @@ class TestStreamingToolCallEvents:
             e for e in events if isinstance(e, ResponseFunctionCallArgumentsDeltaEvent)
         ]
         assert len(fc_deltas) >= 1
+        fc_done = [
+            e for e in events if isinstance(e, ResponseFunctionCallArgumentsDoneEvent)
+        ]
+        assert len(fc_done) == 1
+        assert fc_done[0].name == "get_weather"
+        assert fc_done[0].arguments == '{"location": "Boston"}'
 
         # No raw XML text deltas
         text_deltas = [e for e in events if isinstance(e, ResponseTextDeltaEvent)]
@@ -1061,6 +1073,10 @@ class TestStreamingToolCallEvents:
                 ]
             ),
         ]
+        prev_tool_call_arr_sequence = [
+            [],
+            [{"name": "get_weather", "arguments": '{"location": "Boston"}'}],
+        ]
 
         reasoning_call_count = 0
         tool_call_count = 0
@@ -1086,6 +1102,9 @@ class TestStreamingToolCallEvents:
         def mock_extract_tool_calls_streaming(**kwargs):
             nonlocal tool_call_count
             result = tool_deltas[tool_call_count]
+            mock_tool_parser.prev_tool_call_arr = prev_tool_call_arr_sequence[
+                tool_call_count
+            ]
             tool_call_count += 1
             return result
 
@@ -1148,6 +1167,12 @@ class TestStreamingToolCallEvents:
             e for e in events if isinstance(e, ResponseFunctionCallArgumentsDeltaEvent)
         ]
         assert len(fc_deltas) >= 1
+        fc_done = [
+            e for e in events if isinstance(e, ResponseFunctionCallArgumentsDoneEvent)
+        ]
+        assert len(fc_done) == 1
+        assert fc_done[0].name == "get_weather"
+        assert fc_done[0].arguments == '{"location": "Boston"}'
 
         # No raw XML text deltas
         text_deltas = [e for e in events if isinstance(e, ResponseTextDeltaEvent)]
