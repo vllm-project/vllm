@@ -158,13 +158,10 @@ class MultiprocExecutor(Executor):
             global_start_rank = (
                 self.local_world_size * self.parallel_config.node_rank_within_dp
             )
-            # When using fork, keep track of socket file descriptors that are
-            # inherited by the worker, so that we can close them in subsequent
+            # Keep track of socket file descriptors that are inherited by the
+            # worker when using fork, so that we can close them in subsequent
             # workers
-            inherited_fds: list[int] | None = (
-                [] if context.get_start_method() == "fork" else None
-            )
-
+            inherited_fds: list[int] = []
             for local_rank in range(self.local_world_size):
                 global_rank = global_start_rank + local_rank
                 is_driver_worker = self._is_driver_worker(global_rank)
@@ -179,9 +176,13 @@ class MultiprocExecutor(Executor):
                     inherited_fds=inherited_fds,
                 )
                 unready_workers.append(unready_worker_handle)
-                if inherited_fds is not None:
-                    inherited_fds.append(unready_worker_handle.death_writer.fileno())
-                    inherited_fds.append(unready_worker_handle.ready_pipe.fileno())
+                if context.get_start_method() == "fork":
+                    inherited_fds.extend(
+                        [
+                            unready_worker_handle.death_writer.fileno(),
+                            unready_worker_handle.ready_pipe.fileno(),
+                        ]
+                    )
 
             # Workers must be created before wait_for_ready to avoid
             # deadlock, since worker.init_device() does a device sync.
@@ -453,13 +454,12 @@ class MultiprocExecutor(Executor):
                         w.worker_response_mq.shutdown()
                         w.worker_response_mq = None
 
-        if rpc_broadcast_mq := getattr(self, "rpc_broadcast_mq", None):
-            rpc_broadcast_mq.shutdown()
+        if self.rpc_broadcast_mq is not None:
+            self.rpc_broadcast_mq.shutdown()
             self.rpc_broadcast_mq = None
-        if response_mqs := getattr(self, "response_mqs", None):
-            for mq in response_mqs:
-                mq.shutdown()
-            self.response_mqs = []
+        for mq in self.response_mqs:
+            mq.shutdown()
+        self.response_mqs = []
 
     def check_health(self) -> None:
         self.collective_rpc("check_health", timeout=10)
@@ -638,16 +638,13 @@ class WorkerProc:
         input_shm_handle,  # Receive SchedulerOutput
         shared_worker_lock: LockType,
         is_driver_worker: bool,
-        inherited_fds: list[int] | None = None,
+        inherited_fds: list[int],
     ) -> UnreadyWorkerProcHandle:
         context = get_mp_context()
         # Ready pipe to communicate readiness from child to parent
         ready_reader, ready_writer = context.Pipe(duplex=False)
         # Death pipe to let child detect parent process exit
         death_reader, death_writer = context.Pipe(duplex=False)
-        if inherited_fds is not None:
-            inherited_fds = inherited_fds.copy()
-            inherited_fds.extend((ready_reader.fileno(), death_writer.fileno()))
         process_kwargs = {
             "vllm_config": vllm_config,
             "local_rank": local_rank,
@@ -659,7 +656,8 @@ class WorkerProc:
             "shared_worker_lock": shared_worker_lock,
             "is_driver_worker": is_driver_worker,
             # Have the worker close parent end of this worker's pipes too
-            "inherited_fds": inherited_fds if inherited_fds is not None else [],
+            "inherited_fds": inherited_fds
+            + [ready_reader.fileno(), death_writer.fileno()],
         }
         # Run EngineCore busy loop in background process.
         proc = context.Process(
@@ -703,8 +701,9 @@ class WorkerProc:
         unready_proc_handles: list[UnreadyWorkerProcHandle],
     ) -> list[WorkerProcHandle]:
         e = Exception(
-            "WorkerProc initialization failed due to an exception in a "
-            "background process. See stack trace for root cause."
+            "WorkerProc initialization failed due to "
+            "an exception in a background process. "
+            "See stack trace for root cause."
         )
 
         pipes = {handle.ready_pipe: handle for handle in unready_proc_handles}
@@ -807,7 +806,7 @@ class WorkerProc:
             try:
                 os.close(fd)
             except Exception as e:
-                logger.warning("Error closing inherited connection: %s: %s", type(e), e)
+                logger.warning("Exception closing inherited connection: %s", e)
 
         try:
             # Initialize tracer
