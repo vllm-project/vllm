@@ -86,7 +86,7 @@ def test_compile_ranges(use_fresh_inductor_cache):
         ),
         compilation_config=CompilationConfig(
             mode=CompilationMode.VLLM_COMPILE,
-            compile_ranges_split_points=[8, 32],
+            compile_ranges_endpoints=[8, 32],
             compile_sizes=[16, 64, 128],
             inductor_compile_config={
                 "post_grad_custom_post_pass": post_grad_range_checker,
@@ -110,7 +110,7 @@ def test_compile_ranges(use_fresh_inductor_cache):
 
 def test_compile_config_get_compile_ranges():
     compilation_config = CompilationConfig(
-        compile_ranges_split_points=[8, 32],
+        compile_ranges_endpoints=[8, 32],
     )
     VllmConfig(
         scheduler_config=SchedulerConfig(
@@ -149,7 +149,7 @@ def test_inductor_cache_compile_ranges(monkeypatch, use_fresh_inductor_cache):
             scheduler_config=scheduler_config,
             compilation_config=CompilationConfig(
                 mode=CompilationMode.VLLM_COMPILE,
-                compile_ranges_split_points=[8],
+                compile_ranges_endpoints=[8],
                 inductor_compile_config={
                     "post_grad_custom_post_pass": post_grad_range_checker,
                 },

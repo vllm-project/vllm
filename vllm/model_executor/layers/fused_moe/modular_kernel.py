@@ -1519,7 +1519,7 @@ class FusedMoEKernelModularImpl:
             assert not disable_inplace()
             output = hidden_states
         else:
-            output = torch.zeros_like(hidden_states)
+            output = torch.empty_like(hidden_states)
 
         local_num_experts = w1.size(0)
         if global_num_experts == -1:
