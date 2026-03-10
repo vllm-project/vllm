@@ -49,7 +49,6 @@ def test_fused_recurrent_packed_decode_matches_reference(
     state_ref = state0.clone()
     state_packed = state0.clone()
 
-    out_ref = torch.empty((B, 1, HV, V), device=device, dtype=dtype)
     out_packed = torch.empty((B, 1, HV, V), device=device, dtype=dtype)
 
     # Reference path: materialize contiguous Q/K/V + explicit gating.
@@ -65,14 +64,14 @@ def test_fused_recurrent_packed_decode_matches_reference(
     g = (-torch.exp(A_log.float()) * softplus_x).unsqueeze(1)
     beta = torch.sigmoid(b.float()).to(dtype).unsqueeze(1)
 
-    fused_recurrent_gated_delta_rule(
+    out_ref, state_ref = fused_recurrent_gated_delta_rule(
         q=q,
         k=k,
         v=v,
         g=g,
         beta=beta,
+        scale=K**-0.5,
         initial_state=state_ref,
-        out=out_ref,
         inplace_final_state=True,
         cu_seqlens=None,
         ssm_state_indices=ssm_state_indices,
