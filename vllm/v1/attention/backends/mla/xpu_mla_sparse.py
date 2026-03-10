@@ -8,6 +8,7 @@ import numpy as np
 import torch
 
 from vllm.config import VllmConfig
+from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import (
     get_mla_dims,
@@ -34,6 +35,11 @@ logger = init_logger(__name__)
 
 class XPUMLASparseBackend(AttentionBackend):
     accept_output_buffer: bool = True
+    supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
+    supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
+        "auto",
+        "bfloat16",
+    ]
 
     @staticmethod
     def get_name() -> str:
