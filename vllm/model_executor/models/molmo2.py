@@ -1583,13 +1583,15 @@ class Molmo2ProcessingInfo(BaseProcessingInfo):
         self,
         image_processor: BaseImageProcessor | BaseVideoProcessor,
     ) -> tuple[int, int]:
-        return get_patches_grid_size(
+        nrows, ncols = get_patches_grid_size(
             image_h=image_processor.size["height"],
             image_w=image_processor.size["width"],
             patch_size=image_processor.patch_size,
             pool_h=image_processor.pooling_size[0],
             pool_w=image_processor.pooling_size[1],
         )
+
+        return ncols, nrows
 
     def get_patches_grid_size(
         self,
@@ -1631,14 +1633,14 @@ class Molmo2ProcessingInfo(BaseProcessingInfo):
     ) -> int:
         image_processor = processor.image_processor
 
-        resize_nrows, resize_cols = self.get_base_grid_size(image_processor)
+        resize_ncols, resize_nrows = self.get_base_grid_size(image_processor)
         # start/end tokens + image patch token + col tokens
         if processor.use_single_crop_col_tokens is not None:
             use_col_tokens = processor.use_single_crop_col_tokens
         else:
             use_col_tokens = processor.image_use_col_tokens
-        extra = 2 + resize_nrows * (resize_cols + int(use_col_tokens))
-        overlap_nrows, overlap_ncols = self.get_patches_grid_size(
+        extra = 2 + resize_nrows * (resize_ncols + int(use_col_tokens))
+        overlap_ncols, overlap_nrows = self.get_patches_grid_size(
             image_height=image_height,
             image_width=image_width,
             image_processor=image_processor,
@@ -1657,9 +1659,9 @@ class Molmo2ProcessingInfo(BaseProcessingInfo):
     ) -> int:
         video_processor = processor.video_processor
 
-        resize_nrows, resize_cols = self.get_base_grid_size(video_processor)
+        resize_ncols, resize_nrows = self.get_base_grid_size(video_processor)
         # start/end tokens
-        extra = 2 + resize_nrows * (resize_cols + int(processor.video_use_col_tokens))
+        extra = 2 + resize_nrows * (resize_ncols + int(processor.video_use_col_tokens))
         return num_frames * extra
 
     def get_image_size_with_most_features(self) -> ImageSize:
@@ -2177,7 +2179,7 @@ class Molmo2MultiModalProcessor(BaseMultiModalProcessor[Molmo2ProcessingInfo]):
             image = images.get(item_idx)
             image = exif_transpose(image)
 
-            resize_nrows, resize_cols = self.info.get_base_grid_size(image_processor)
+            resize_ncols, resize_nrows = self.info.get_base_grid_size(image_processor)
             if use_single_crop_col_tokens is not None:
                 use_col_tokens = use_single_crop_col_tokens
             else:
@@ -2186,7 +2188,7 @@ class Molmo2MultiModalProcessor(BaseMultiModalProcessor[Molmo2ProcessingInfo]):
                 start_id = low_res_im_start_id
             else:
                 start_id = img_start_id
-            extra_row = [img_patch_id] * resize_cols + [img_col_id] * int(
+            extra_row = [img_patch_id] * resize_ncols + [img_col_id] * int(
                 use_col_tokens
             )
             extra_joint = [start_id] + extra_row * resize_nrows + [img_end_id]
@@ -2212,7 +2214,7 @@ class Molmo2MultiModalProcessor(BaseMultiModalProcessor[Molmo2ProcessingInfo]):
             do_sample_frames = hf_processor_mm_kwargs.get("do_sample_frames")
 
             timestamps = self.info._get_video_second_idx(metadata, do_sample_frames)
-            nrows, ncols = self.info.get_base_grid_size(video_processor)
+            ncols, nrows = self.info.get_base_grid_size(video_processor)
 
             if use_frame_special_tokens:
                 start_id = frame_start_id
