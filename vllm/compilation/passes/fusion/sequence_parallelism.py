@@ -62,7 +62,9 @@ def get_sequence_parallelism_threshold(
 
     if not current_platform.is_cuda():
         # Non-CUDA platforms: let platform provide default
-        return current_platform.get_sp_min_token_num_default(hidden_size, tp_size, element_size)
+        return current_platform.get_sp_min_token_num_default(
+            hidden_size, tp_size, element_size
+        )
 
     capability = current_platform.get_device_capability()
     if capability is None:
