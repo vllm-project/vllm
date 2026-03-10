@@ -13,6 +13,24 @@ if not current_platform.is_cuda():
     pytest.skip("These tests require CUDA", allow_module_level=True)
 
 FP8_DTYPE = current_platform.fp8_dtype()
+OUTPUT_SCALE_VALUE = 1.25
+FP8_CLOSE_RTOL = 1e-1
+FP8_CLOSE_ATOL = 1e-1
+
+
+def _make_positive_scale(
+    shape: tuple[int, int],
+    start: float,
+    end: float,
+) -> torch.Tensor:
+    numel = shape[0] * shape[1]
+    return torch.linspace(
+        start,
+        end,
+        steps=numel,
+        device="cuda",
+        dtype=torch.float32,
+    ).reshape(shape)
 
 
 def _make_scales(
@@ -23,8 +41,8 @@ def _make_scales(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     a_shape = (m, 1) if per_token_a else (1, 1)
     b_shape = (1, n) if per_out_ch_b else (1, 1)
-    a_scales = torch.rand(a_shape, device="cuda", dtype=torch.float32) + 0.5
-    b_scales = torch.rand(b_shape, device="cuda", dtype=torch.float32) + 0.5
+    a_scales = _make_positive_scale(a_shape, 0.75, 1.25)
+    b_scales = _make_positive_scale(b_shape, 0.9, 1.4)
     return a_scales, b_scales
 
 
@@ -57,7 +75,9 @@ def test_cutlass_scaled_mm_static_fp8_quant(
     a = to_fp8(torch.randn((m, k), device="cuda") / 4)
     b = to_fp8(torch.randn((n, k), device="cuda").t() / 4)
     a_scales, b_scales = _make_scales(m, n, per_token_a, per_out_ch_b)
-    output_scale = torch.tensor(1.25, device="cuda", dtype=torch.float32)
+    # Keep this non-unit so the output-scale folding path is exercised.
+    output_scale = torch.tensor(OUTPUT_SCALE_VALUE, device="cuda",
+                                dtype=torch.float32)
 
     fused = ops.cutlass_scaled_mm_static_fp8_quant(
         a, b, a_scales, b_scales, output_scale
@@ -77,8 +97,8 @@ def test_cutlass_scaled_mm_static_fp8_quant(
     torch.testing.assert_close(
         fused.to(torch.float32),
         reference.to(torch.float32),
-        rtol=1e-1,
-        atol=1e-1,
+        rtol=FP8_CLOSE_RTOL,
+        atol=FP8_CLOSE_ATOL,
     )
 
     out = torch.empty((m, n), device="cuda", dtype=FP8_DTYPE)

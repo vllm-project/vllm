@@ -47,21 +47,21 @@ class _BaseGemmQuantModel(torch.nn.Module):
         )
 
 
-class TestGemmStaticFP8QuantModel(_BaseGemmQuantModel):
+class GemmStaticFP8QuantModel(_BaseGemmQuantModel):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         mm_out = self._gemm(x)
         quant_out, _ = ops.scaled_fp8_quant(mm_out, scale=self.output_scale)
         return quant_out
 
 
-class TestGemmDynamicFP8QuantModel(_BaseGemmQuantModel):
+class GemmDynamicFP8QuantModel(_BaseGemmQuantModel):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         mm_out = self._gemm(x)
         quant_out, _ = ops.scaled_fp8_quant(mm_out)
         return quant_out
 
 
-class TestGemmPerTokenFP8QuantModel(_BaseGemmQuantModel):
+class GemmPerTokenFP8QuantModel(_BaseGemmQuantModel):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         mm_out = self._gemm(x)
         scale = torch.ones((mm_out.shape[0], 1), device=x.device, dtype=torch.float32)
@@ -82,9 +82,9 @@ class TestGemmPerTokenFP8QuantModel(_BaseGemmQuantModel):
 @pytest.mark.parametrize(
     "model_cls, should_fuse",
     [
-        (TestGemmStaticFP8QuantModel, True),
-        (TestGemmDynamicFP8QuantModel, False),
-        (TestGemmPerTokenFP8QuantModel, False),
+        (GemmStaticFP8QuantModel, True),
+        (GemmDynamicFP8QuantModel, False),
+        (GemmPerTokenFP8QuantModel, False),
     ],
 )
 def test_gemm_quant_fusion_pass(model_cls: type[torch.nn.Module], should_fuse: bool):
