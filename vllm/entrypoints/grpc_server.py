@@ -20,12 +20,17 @@ Example:
 
 import argparse
 import asyncio
+import importlib
 import signal
 import sys
 import time
+from collections.abc import AsyncGenerator
+from types import SimpleNamespace
+from typing import Any
 
 try:
     import grpc
+    from google.protobuf.symbol_database import Default as symbol_db_default
     from grpc_reflection.v1alpha import reflection
     from smg_grpc_proto import vllm_engine_pb2, vllm_engine_pb2_grpc
     from smg_grpc_servicer.vllm.servicer import VllmEngineServicer
@@ -38,6 +43,7 @@ except ImportError:
 import uvloop
 
 from vllm.engine.arg_utils import AsyncEngineArgs
+from vllm.entrypoints.grpc_kv_events import GrpcKvEventStreamer
 from vllm.entrypoints.utils import log_version_and_model
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
@@ -46,6 +52,105 @@ from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
+
+
+def _get_vllm_engine_service_descriptor(pb2_module: Any) -> Any | None:
+    return pb2_module.DESCRIPTOR.services_by_name.get("VllmEngine")
+
+
+def _supports_subscribe_kv_events(pb2_module: Any) -> bool:
+    service_descriptor = _get_vllm_engine_service_descriptor(pb2_module)
+    if service_descriptor is None:
+        return False
+    return "SubscribeKvEvents" in service_descriptor.methods_by_name
+
+
+def _resolve_kv_proto_bindings(default_pb2_module: Any) -> tuple[Any, Any, Any]:
+    """Resolve request/response protobuf classes for SubscribeKvEvents.
+
+    Handles both layouts:
+    - vLLM local proto: messages are in `vllm_engine_pb2`.
+    - SMG proto: service is in `vllm_engine_pb2`, messages are in `common_pb2`.
+    """
+    service_descriptor = _get_vllm_engine_service_descriptor(default_pb2_module)
+    if (
+        service_descriptor is not None
+        and "SubscribeKvEvents" in service_descriptor.methods_by_name
+    ):
+        subscribe_desc = service_descriptor.methods_by_name["SubscribeKvEvents"]
+        sym_db = symbol_db_default()
+        request_cls = sym_db.GetSymbol(subscribe_desc.input_type.full_name)
+        response_cls = sym_db.GetSymbol(subscribe_desc.output_type.full_name)
+
+        response_pb2 = importlib.import_module(response_cls.__module__)
+        pb2_bundle = SimpleNamespace(
+            KvEventBatch=response_pb2.KvEventBatch,
+            KvCacheEvent=response_pb2.KvCacheEvent,
+            KvBlocksStored=response_pb2.KvBlocksStored,
+            KvBlock=response_pb2.KvBlock,
+            KvBlocksRemoved=response_pb2.KvBlocksRemoved,
+            KvCacheCleared=response_pb2.KvCacheCleared,
+        )
+        return request_cls, response_cls, pb2_bundle
+
+    from vllm.grpc import vllm_engine_pb2 as local_pb2
+
+    return (
+        local_pb2.SubscribeKvEventsRequest,
+        local_pb2.KvEventBatch,
+        local_pb2,
+    )
+
+
+async def _stream_kv_events(
+    streamer: GrpcKvEventStreamer,
+    request: Any,
+    context: grpc.aio.ServicerContext,
+) -> AsyncGenerator[Any, None]:
+    async for batch in streamer.subscribe(request, context):
+        yield batch
+
+
+def _register_subscribe_kv_events(
+    server: grpc.aio.Server,
+    servicer: Any,
+    async_llm: AsyncLLM,
+) -> None:
+    request_cls, response_cls, kv_pb2_module = _resolve_kv_proto_bindings(
+        vllm_engine_pb2
+    )
+    kv_streamer = GrpcKvEventStreamer(
+        kv_events_config=async_llm.vllm_config.kv_events_config,
+        data_parallel_size=async_llm.vllm_config.parallel_config.data_parallel_size,
+        pb2_module=kv_pb2_module,
+    )
+
+    async def subscribe_handler(request, context):
+        async for batch in _stream_kv_events(kv_streamer, request, context):
+            yield batch
+
+    if _supports_subscribe_kv_events(vllm_engine_pb2):
+        # Override the method on the runtime instance before registration.
+        servicer.SubscribeKvEvents = subscribe_handler
+        logger.info("Registered SubscribeKvEvents using smg_grpc_proto service.")
+        return
+
+    # Fallback: register this single method directly if the imported service
+    # descriptor is older and does not include SubscribeKvEvents yet.
+    method_handler = grpc.unary_stream_rpc_method_handler(
+        subscribe_handler,
+        request_deserializer=request_cls.FromString,
+        response_serializer=response_cls.SerializeToString,
+    )
+    generic_handler = grpc.method_handlers_generic_handler(
+        "vllm.grpc.engine.VllmEngine",
+        {"SubscribeKvEvents": method_handler},
+    )
+    server.add_generic_rpc_handlers((generic_handler,))
+    logger.warning(
+        "Registered SubscribeKvEvents as a fallback generic handler because "
+        "the imported gRPC service descriptor does not include it."
+    )
 
 
 async def serve_grpc(args: argparse.Namespace):
@@ -91,6 +196,10 @@ async def serve_grpc(args: argparse.Namespace):
             ("grpc.keepalive_permit_without_calls", True),
         ],
     )
+
+    # Register SubscribeKvEvents before adding the main servicer so method
+    # overrides are picked up during handler construction.
+    _register_subscribe_kv_events(server, servicer, async_llm)
 
     # Add servicer to server
     vllm_engine_pb2_grpc.add_VllmEngineServicer_to_server(servicer, server)
