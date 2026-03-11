@@ -4,6 +4,7 @@ from collections.abc import Callable, Sequence
 from http import HTTPStatus
 from typing import Any
 
+import jinja2
 from openai_harmony import Message as OpenAIMessage
 
 from vllm.config import ModelConfig

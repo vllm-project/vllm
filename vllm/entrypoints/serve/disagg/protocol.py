@@ -6,12 +6,10 @@ from pydantic import BaseModel, Field
 
 from vllm.config import ModelConfig
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionLogProbs
-from vllm.entrypoints.openai.engine.protocol import (
-    SamplingParams,
-    StreamOptions,
-)
+from vllm.entrypoints.openai.engine.protocol import StreamOptions
 from vllm.logprobs import Logprob
 from vllm.renderers import TokenizeParams
+from vllm.sampling_params import SamplingParams
 from vllm.utils import random_uuid
 
 ####### Tokens IN <> Tokens OUT #######
