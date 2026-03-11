@@ -402,6 +402,7 @@ class LlamaNemotronVLChatModel(nn.Module, SupportsMultiModal, SupportsPP, Suppor
         multimodal_config = vllm_config.model_config.multimodal_config
 
         self.config = config
+        self.model_config = vllm_config.model_config
         self.multimodal_config = multimodal_config
         self._patch_quant_config(config, quant_config)
 
@@ -456,7 +457,10 @@ class LlamaNemotronVLChatModel(nn.Module, SupportsMultiModal, SupportsPP, Suppor
         *,
         prefix: str,
     ):
-        return AutoModel.from_config(config.vision_config, trust_remote_code=True)
+        return AutoModel.from_config(
+            config.vision_config,
+            trust_remote_code=self.model_config.trust_remote_code,
+        )
 
     def _init_mlp1(
         self,
@@ -624,7 +628,6 @@ class LlamaNemotronVLChatModel(nn.Module, SupportsMultiModal, SupportsPP, Suppor
         multimodal_embeddings: MultiModalEmbeddings | None = None,
         *,
         is_multimodal: torch.Tensor | None = None,
-        handle_oov_mm_token: bool = False,
     ) -> torch.Tensor:
         if multimodal_embeddings is not None and len(multimodal_embeddings) > 0:
             self._set_visual_token_mask(input_ids)
@@ -637,7 +640,6 @@ class LlamaNemotronVLChatModel(nn.Module, SupportsMultiModal, SupportsPP, Suppor
             input_ids,
             multimodal_embeddings=multimodal_embeddings,
             is_multimodal=is_multimodal,
-            handle_oov_mm_token=handle_oov_mm_token,
         )
 
     def forward(

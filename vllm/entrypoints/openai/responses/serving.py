@@ -1102,7 +1102,6 @@ class OpenAIServingResponses(OpenAIServing):
         event_deque: deque[StreamingResponsesResponse] = deque()
         new_event_signal = asyncio.Event()
         self.event_store[request.request_id] = (event_deque, new_event_signal)
-        response = None
         generator = self.responses_stream_generator(request, *args, **kwargs)
         try:
             async for event in generator:
@@ -1110,15 +1109,6 @@ class OpenAIServingResponses(OpenAIServing):
                 new_event_signal.set()  # Signal new event available
         finally:
             new_event_signal.set()
-
-        if response is not None and isinstance(response, ErrorResponse):
-            # If the request has failed, update the status to "failed".
-            response_id = request.request_id
-            async with self.response_store_lock:
-                stored_response = self.response_store.get(response_id)
-                assert stored_response is not None
-                if stored_response.status not in ("completed", "cancelled"):
-                    stored_response.status = "failed"
 
     async def _run_background_request(
         self,
@@ -1224,19 +1214,6 @@ class OpenAIServingResponses(OpenAIServing):
             message=f"Response with id '{response_id}' not found.",
             status_code=HTTPStatus.NOT_FOUND,
             param="response_id",
-        )
-
-    def _make_store_not_supported_error(self) -> ErrorResponse:
-        return self.create_error_response(
-            err_type="invalid_request_error",
-            message=(
-                "`store=True` (default) is not supported. Please set "
-                "`store=False` in Responses API or set "
-                "`VLLM_ENABLE_RESPONSES_API_STORE=1` in the env var when "
-                "starting the vLLM server."
-            ),
-            status_code=HTTPStatus.BAD_REQUEST,
-            param="store",
         )
 
     async def _process_simple_streaming_events(
@@ -1364,6 +1341,26 @@ class OpenAIServingResponses(OpenAIServing):
                         for pm in previous_delta_messages
                         if pm.reasoning is not None
                     )
+
+                    # delta message could have both reasoning and
+                    # content. Include current delta's reasoning in the
+                    # finalization since it may carry the tail end of
+                    # reasoning text (e.g. when reasoning end and
+                    # content start arrive in the same delta).
+                    if delta_message.reasoning is not None:
+                        yield _increment_sequence_number_and_return(
+                            ResponseReasoningTextDeltaEvent(
+                                type="response.reasoning_text.delta",
+                                sequence_number=-1,
+                                content_index=current_content_index,
+                                output_index=current_output_index,
+                                item_id=current_item_id,
+                                delta=delta_message.reasoning,
+                            )
+                        )
+                        reason_content += delta_message.reasoning
+                        delta_message = DeltaMessage(content=delta_message.content)
+
                     yield _increment_sequence_number_and_return(
                         ResponseReasoningTextDoneEvent(
                             type="response.reasoning_text.done",
