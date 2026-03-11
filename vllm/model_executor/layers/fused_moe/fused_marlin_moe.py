@@ -35,6 +35,10 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_moe_intermediate_size,
     marlin_quant_input,
 )
+from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
+    MARLIN_TILE_K,
+    MARLIN_TILE_N,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8Static128BlockSym,
@@ -88,12 +92,16 @@ def _fused_marlin_moe(
     M, K = hidden_states.size()
     N = marlin_moe_intermediate_size(w1, w2)
     w13_num_shards = 2 if activation.is_gated else 1
+    _w13_n = w13_num_shards * N
+    # Compute the same tile-aligned padded sizes used at weight-load time.
+    _w13_n_padded = _w13_n + ((-_w13_n) % MARLIN_TILE_N)  # for w13 GEMM size_n
+    _N_padded = N + ((-N) % MARLIN_TILE_K)  # for w2  GEMM size_k
     if workspace is None:
         workspace = marlin_make_workspace_new(hidden_states.device, 4)
 
     if intermediate_cache13 is None:
         intermediate_cache13 = torch.empty(
-            (M * num_topk * max(w13_num_shards * N, K),),
+            (M * num_topk * max(_w13_n_padded, K),),
             device=hidden_states.device,
             dtype=hidden_states.dtype,
         )
@@ -106,7 +114,7 @@ def _fused_marlin_moe(
         )
 
     intermediate_cache1 = _resize_cache(
-        intermediate_cache13, (M * num_topk, w13_num_shards * N)
+        intermediate_cache13, (M * num_topk, _w13_n_padded)
     )
 
     intermediate_cache3 = _resize_cache(intermediate_cache13, (M * num_topk, K))
@@ -143,17 +151,21 @@ def _fused_marlin_moe(
         mul_topk_weights=apply_router_weight_on_input,
         b_q_type=quant_type,
         size_m=M,
-        size_n=w13_num_shards * N,
+        size_n=_w13_n_padded,  # padded to Marlin tile_n boundary
         size_k=K,
         is_k_full=is_k_full,
         use_atomic_add=False,
         use_fp32_reduce=True,
         is_zp_float=False,
     )
+    # Trim w13 padding before activation (GEMM produced _w13_n_padded cols,
+    # activation expects true _w13_n cols).
+    if _w13_n_padded != _w13_n:
+        intermediate_cache1 = intermediate_cache1[:, :_w13_n].contiguous()
     activation_func(
         activation,
         intermediate_cache2,
-        intermediate_cache1.view(-1, w13_num_shards * N),
+        intermediate_cache1.view(-1, _w13_n),
     )
 
     if output is None:
@@ -174,6 +186,13 @@ def _fused_marlin_moe(
             intermediate_cache2, input_dtype
         )
 
+    # Pad activation output to _N_padded so w2 GEMM size_k is tile-aligned.
+    # Extra columns are zero; the matching zero-padding in w2's repacked weights
+    # ensures they contribute nothing to the output.
+    if _N_padded != N:
+        intermediate_cache2 = torch.nn.functional.pad(
+            intermediate_cache2, (0, _N_padded - N)
+        )
     output = ops.moe_wna16_marlin_gemm(
         intermediate_cache2,
         output,
@@ -196,7 +215,7 @@ def _fused_marlin_moe(
         b_q_type=quant_type,
         size_m=M * num_topk,
         size_n=K,
-        size_k=N,
+        size_k=_N_padded,  # padded to Marlin tile_k boundary
         is_k_full=is_k_full,
         use_atomic_add=False,
         use_fp32_reduce=True,
