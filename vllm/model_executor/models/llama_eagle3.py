@@ -150,7 +150,6 @@ class LlamaModel(nn.Module):
             self.use_aux_hidden_state = eagle_config["use_aux_hidden_state"]
         else:
             self.use_aux_hidden_state = True
-        # Only gpt-oss uses it (speculators sets during training).
         self.norm_before_fc = getattr(self.config, "norm_before_fc", False)
 
         current_vllm_config = get_current_vllm_config()
