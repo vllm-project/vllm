@@ -127,6 +127,7 @@ class DFlashModelProposer(SpecDecodeBaseProposer):
                 hidden_states=self.hidden_states[:num_input_tokens],
                 inputs_embeds=None,
             )
+            
     @override
     def _get_slot_mapping(
         self,
@@ -156,7 +157,6 @@ class DFlashModelProposer(SpecDecodeBaseProposer):
         num_query_tokens: int,
         slot_mapping: torch.Tensor,
     ) -> CommonAttentionMetadata:
-        
         """Build non-causal metadata for DFlash 
         from original CommonAttentionMetadata."""
         batch_size = common_attn_metadata.num_reqs
@@ -202,7 +202,7 @@ class DFlashModelProposer(SpecDecodeBaseProposer):
         (_, num_query_tokens_dp_padded, num_tokens_across_dp) = (
             self._determine_batch_execution_and_padding(              
                 total_query_tokens, use_cudagraphs=False
-          )
+            )
         )
         self._set_positions(num_kv_tokens, position_ids)
         self.input_ids[:total_query_tokens] = input_ids[:total_query_tokens]
@@ -373,10 +373,9 @@ class DFlashModelProposer(SpecDecodeBaseProposer):
             input_ids[: bucket.total_query_tokens]
         )
         if bucket.num_input_tokens > bucket.total_query_tokens:
-            bucket.input_ids[
-                bucket.total_query_tokens:bucket.num_input_tokens
-            ].fill_(0)
-
+            bucket.input_ids[bucket.total_query_tokens : bucket.num_input_tokens].fill_(
+                0
+            )
         bucket.positions.copy_(position_ids)
         bucket.hidden_states.copy_(target_hidden_states)
         bucket.slot_mapping.copy_(slot_mapping)
