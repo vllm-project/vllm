@@ -44,6 +44,7 @@ from vllm.entrypoints.sagemaker.api_router import sagemaker_standards_bootstrap
 from vllm.entrypoints.serve.elastic_ep.middleware import (
     ScalingMiddleware,
 )
+from vllm.entrypoints.serve.fault_tolerance.middleware import FaultToleranceMiddleware
 from vllm.entrypoints.serve.tokenize.serving import OpenAIServingTokenization
 from vllm.entrypoints.utils import (
     cli_env_setup,
@@ -185,7 +186,7 @@ def build_app(
 
     from vllm.entrypoints.serve import register_vllm_serve_api_routers
 
-    register_vllm_serve_api_routers(app)
+    register_vllm_serve_api_routers(app, args=args)
 
     from vllm.entrypoints.openai.models.api_router import (
         attach_router as register_models_api_router,
@@ -278,6 +279,11 @@ def build_app(
 
     # Add scaling middleware to check for scaling state
     app.add_middleware(ScalingMiddleware)
+
+    if args.enable_fault_tolerance:
+        # Add fault-tolerance middleware to short-circuit requests when the
+        # engine's ClientSentinel reports a faulted state.
+        app.add_middleware(FaultToleranceMiddleware)
 
     if "realtime" in supported_tasks:
         # Add WebSocket metrics middleware

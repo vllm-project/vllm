@@ -221,7 +221,12 @@ def run_headless(args: argparse.Namespace):
     )
 
     try:
-        engine_manager.join_first()
+        if vllm_config.fault_tolerance_config.enable_fault_tolerance:
+            engine_manager.monitor_engine_liveness(
+                engine_down_callback=engine_manager.notify_engine_down
+            )
+        else:
+            engine_manager.join_first()
     finally:
         timeout = None
         if shutdown_requested:
@@ -294,6 +299,7 @@ def run_multi_api_server(args: argparse.Namespace):
             stats_update_address=coordinator.get_stats_publish_address()
             if coordinator
             else None,
+            fault_tolerance_addresses=addresses.fault_tolerance_addresses,
         )
 
         # For dp ranks > 0 in external/hybrid DP LB modes, we must delay the

@@ -1,19 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
 import contextlib
 import os
 import threading
+import uuid
 import weakref
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from enum import Enum, auto
 from multiprocessing import Process, connection
 from multiprocessing.process import BaseProcess
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 from unittest.mock import patch
 
 import msgspec
+import regex as re
 import zmq
 
 from vllm import envs
@@ -21,10 +22,15 @@ from vllm.config import CacheConfig, ParallelConfig, VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.ray.ray_env import get_env_vars_to_copy
-from vllm.utils.network_utils import get_open_zmq_ipc_path, zmq_socket_ctx
+from vllm.utils.network_utils import (
+    get_open_zmq_ipc_path,
+    make_zmq_socket,
+    zmq_socket_ctx,
+)
 from vllm.utils.system_utils import get_mp_context
 from vllm.v1.engine.coordinator import DPCoordinator
 from vllm.v1.executor import Executor
+from vllm.v1.fault_tolerance.utils import FaultInfo, FaultToleranceZmqAddresses
 from vllm.v1.utils import get_engine_client_zmq_addr, shutdown
 
 if TYPE_CHECKING:
@@ -65,6 +71,8 @@ class EngineZmqAddresses:
     # Not used by engine, just relayed to front-end in handshake response.
     # Only required for external DP LB case.
     frontend_stats_publish_address: str | None = None
+    # ZMQ socket addresses for fault tolerance if applicable
+    fault_tolerance_addresses: FaultToleranceZmqAddresses | None = None
 
 
 @dataclass
@@ -104,7 +112,20 @@ class CoreEngineProcManager:
             "executor_class": executor_class,
             "log_stats": log_stats,
         }
-
+        if vllm_config.fault_tolerance_config.enable_fault_tolerance:
+            zmq_ctx = zmq.Context()
+            zmq_addr = get_engine_client_zmq_addr(
+                local_only=False,
+                host=vllm_config.parallel_config.data_parallel_master_ip,
+                port=vllm_config.fault_tolerance_config.internal_fault_report_port,
+            )
+            self.engine_down_socket = make_zmq_socket(
+                ctx=zmq_ctx,
+                path=zmq_addr,
+                socket_type=zmq.DEALER,
+                bind=False,
+                identity=str(uuid.uuid4()).encode("utf8"),
+            )
         if client_handshake_address:
             common_kwargs["client_handshake_address"] = client_handshake_address
 
@@ -130,6 +151,8 @@ class CoreEngineProcManager:
             )
 
         self._finalizer = weakref.finalize(self, shutdown, self.processes)
+        self.shutdown_monitor = False
+        self.vllm_config = vllm_config
 
         try:
             for proc, local_dp_rank in zip(self.processes, local_dp_ranks):
@@ -153,6 +176,39 @@ class CoreEngineProcManager:
         """Shutdown engine core processes with configurable timeout."""
         if self._finalizer.detach() is not None:
             shutdown(self.processes, timeout=timeout)
+
+    def notify_engine_down(self, engine_rank, died_proc):
+        """
+        Send fault notification to the engine_down_socket
+        and log the failure event.
+        """
+        fault_info = FaultInfo(
+            type="EngineDeadError",
+            message=f"Engine core proc {died_proc.name} died unexpectedly.",
+            engine_id=engine_rank,
+            additional_info=None,
+        )
+
+        self.engine_down_socket.send_multipart(
+            [b"", msgspec.msgpack.encode(fault_info)]
+        )
+        logger.error("Engine core proc %s died unexpectedly", died_proc.name)
+
+    def monitor_engine_liveness(self, engine_down_callback):
+        """
+        Monitor engine core process liveness.
+        """
+        sentinels = [proc.sentinel for proc in self.processes]
+        while sentinels and not self.shutdown_monitor:
+            died = connection.wait(sentinels)
+            for sentinel in died:
+                sentinel = cast(int, sentinel)
+                died_proc = next(
+                    proc for proc in self.processes if proc.sentinel == sentinel
+                )
+                engine_rank = re.match(r"EngineCore_DP(\d+)", died_proc.name).group(1)
+                engine_down_callback(engine_rank, died_proc)
+                sentinels.remove(sentinel)
 
     def join_first(self):
         """Wait for any process to exit."""
@@ -280,7 +336,7 @@ class CoreEngineActorManager:
             if dp_size > 1 and vllm_config.model_config.is_moe
             else EngineCoreActor
         )
-
+        self.vllm_config = vllm_config
         self.local_engine_actors: list[ray.ActorHandle] = []
         self.remote_engine_actors: list[ray.ActorHandle] = []
 
@@ -295,6 +351,21 @@ class CoreEngineActorManager:
         self.log_stats = log_stats
         local_engine_count = vllm_config.parallel_config.data_parallel_size_local
         world_size = vllm_config.parallel_config.world_size
+
+        if vllm_config.fault_tolerance_config.enable_fault_tolerance:
+            zmq_ctx = zmq.Context()
+            zmq_addr = get_engine_client_zmq_addr(
+                local_only=False,
+                host=vllm_config.parallel_config.data_parallel_master_ip,
+                port=vllm_config.fault_tolerance_config.internal_fault_report_port,
+            )
+            self.engine_down_socket = make_zmq_socket(
+                ctx=zmq_ctx,
+                path=zmq_addr,
+                socket_type=zmq.DEALER,
+                bind=False,
+                identity=str(uuid.uuid4()).encode("utf8"),
+            )
 
         if ray.is_initialized():
             logger.info("Ray is already initialized. Skipping Ray initialization.")
@@ -370,6 +441,7 @@ class CoreEngineActorManager:
                     local_dp_rank=local_index,
                 )
             )
+
             if local_client:
                 self.local_engine_actors.append(actor)
             else:
@@ -379,6 +451,7 @@ class CoreEngineActorManager:
 
         ray.get(refs)
         self.run_refs = []
+        self.shutdown_monitor = False
         for actor in self.local_engine_actors + self.remote_engine_actors:
             self.run_refs.append(actor.run.remote())
 
@@ -792,6 +865,44 @@ class CoreEngineActorManager:
     def get_run_refs(self):
         return self.run_refs
 
+    def notify_engine_down(self, engine_rank, actor_ref):
+        fault_info = FaultInfo(
+            type="EngineDeadError",
+            message="Engine_actor died unexpectedly.",
+            engine_id=str(engine_rank),
+            additional_info=None,
+        )
+
+        self.engine_down_socket.send_multipart(
+            [b"", msgspec.msgpack.encode(fault_info)]
+        )
+        logger.error("Engine actor %s died unexpectedly", engine_rank)
+
+    def monitor_engine_liveness(self, engine_down_callback):
+        import ray
+
+        processed_done_refs = set()
+        while not self.shutdown_monitor:
+            actor_run_refs = self.get_run_refs()
+            if not actor_run_refs:
+                logger.info(
+                    "There are no actors to monitor currently."
+                    " The monitoring function is about to terminate."
+                )
+                return
+            ref_to_index_mapping = {
+                ref: index for index, ref in enumerate(actor_run_refs)
+            }
+            actor_done_refs, _ = ray.wait(actor_run_refs, timeout=5)
+            if not actor_done_refs:
+                continue
+            for actor_ref in actor_done_refs:
+                if actor_ref in processed_done_refs:
+                    continue
+                error_engine_id = ref_to_index_mapping[actor_ref]
+                engine_down_callback(error_engine_id, actor_ref)
+                processed_done_refs.add(actor_ref)
+
     def shutdown(self, timeout: float | None = None) -> None:
         import ray
 
@@ -864,7 +975,6 @@ def launch_core_engines(
     local_engines_only = parallel_config.local_engines_only
 
     offline_mode = local_start_index is not None
-
     # Run the DP Coordinator process with rank 0 when in online DP mode.
     # The coordinator is needed for:
     # 1. Internal/hybrid LB: collecting and publishing queue stats for load balancing
@@ -889,6 +999,16 @@ def launch_core_engines(
         logger.info("Started DP Coordinator process (PID: %d)", coordinator.proc.pid)
     else:
         coordinator = None
+
+    if vllm_config.fault_tolerance_config.enable_fault_tolerance is True:
+        addresses.fault_tolerance_addresses = FaultToleranceZmqAddresses.build(
+            host,
+            local_engines_only,
+            dp_size,
+            addresses.inputs,
+            addresses.outputs,
+            vllm_config.fault_tolerance_config,
+        )
 
     if parallel_config.data_parallel_backend == "ray":
         logger.info("Starting ray-based data parallel backend")
