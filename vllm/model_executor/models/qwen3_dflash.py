@@ -208,6 +208,7 @@ class DFlashQwen3DecoderLayer(nn.Module):
         return hidden_states, residual
 
 
+# NOTE: torch.compile is not stable here
 class DFlashQwen3Model(nn.Module):
     def __init__(
         self,

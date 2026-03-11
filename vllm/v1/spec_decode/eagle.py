@@ -86,15 +86,17 @@ class SpecDecodeBaseProposer:
 
         # Unifying eagle, draft model, and parallel drafting support
         # DFlash always uses parallel drafting (all tokens in one pass)
-        self.parallel_drafting: bool = (
-            self.speculative_config.parallel_drafting or self.method == "dflash"
-        )
+        self.parallel_drafting: bool = self.speculative_config.parallel_drafting
         self.extra_slots_per_request = (
             1 if not self.parallel_drafting else self.num_speculative_tokens
         )
         self.net_num_new_slots_per_request = self.extra_slots_per_request - (
             1 if self.pass_hidden_states_to_model else 0
         )
+        if self.method == "dflash":
+            self.parallel_drafting = True
+            self.extra_slots_per_request = self.num_speculative_tokens
+            self.net_num_new_slots_per_request = self.extra_slots_per_request
         self.needs_extra_input_slots = self.net_num_new_slots_per_request > 0
 
         self.parallel_drafting_token_id: int = 0
@@ -187,7 +189,7 @@ class SpecDecodeBaseProposer:
         )
 
         if self.needs_extra_input_slots:
-            self._raise_if_padded_drafter_batch_disabled()
+            # self._raise_if_padded_drafter_batch_disabled()
             self._raise_if_multimodal()
             self._raise_if_mrope()
 
@@ -488,7 +490,7 @@ class SpecDecodeBaseProposer:
         # - positions: all positions (context + query) for RoPE
         if self.method == "dflash":
             num_context = self._dflash_num_context
-            num_all_positions = self._dflash_num_positions
+            num_all_positions = num_context + num_input_tokens
             model_kwargs["hidden_states"] = self.hidden_states[:num_context]
             model_kwargs["positions"] = self._get_positions(num_all_positions)
 
@@ -755,12 +757,7 @@ class SpecDecodeBaseProposer:
             self.hidden_states[:num_context] = target_hidden_states
 
             # 4. Compute slot mapping for ALL K/V tokens (context + query)
-            builder = (
-                self._get_attention_metadata_builder()
-                if self.attn_metadata_builder is None
-                else self.attn_metadata_builder
-            )
-            block_size = builder.kv_cache_spec.block_size
+            block_size = self.block_size
             all_positions = self.positions[:num_all_positions]
             block_numbers = all_positions // block_size
             # For context tokens, use the original block table
@@ -827,7 +824,6 @@ class SpecDecodeBaseProposer:
             )
 
             return num_query_total, token_indices_to_sample, new_cad
-
         else:
             assert self.is_rejected_token_mask is not None
             assert self.is_masked_token_mask is not None
@@ -1646,54 +1642,26 @@ class SpecDecodeBaseProposer:
         is_graph_capturing: bool = False,
         slot_mappings: dict[str, torch.Tensor] | None = None,
     ) -> None:
-        # DFlash: single forward pass with PIECEWISE CUDA graphs
-        if self.method == "dflash":
-            num_query = min(num_tokens, self._dflash_extra_tokens)
-            num_positions = num_tokens + num_query
-            num_tokens_dp_padded, num_tokens_across_dp = self._pad_batch_across_dp(
-                num_tokens_unpadded=num_query,
-                num_tokens_padded=num_query,
-            )
-            if use_cudagraphs:
-                cudagraph_runtime_mode, batch_desc = self.cudagraph_dispatcher.dispatch(
-                    num_tokens_dp_padded
-                )
-                num_input_tokens = batch_desc.num_tokens
-            else:
-                cudagraph_runtime_mode = CUDAGraphMode.NONE
-                num_input_tokens = num_tokens_dp_padded
-            if num_tokens_across_dp is not None:
-                num_tokens_across_dp[self.dp_rank] = num_input_tokens
-            slot_mapping_dict = slot_mappings or {}
-            with set_forward_context(
-                None,
-                self.vllm_config,
-                num_tokens=num_input_tokens,
-                num_tokens_across_dp=num_tokens_across_dp,
-                cudagraph_runtime_mode=cudagraph_runtime_mode,
-                slot_mapping=slot_mapping_dict,
-            ):
-                kwargs = dict(
-                    input_ids=self.input_ids[:num_input_tokens],
-                    positions=self._get_positions(num_positions),
-                    inputs_embeds=None,
-                )
-                if self.pass_hidden_states_to_model:
-                    kwargs["hidden_states"] = self.hidden_states[:num_tokens]
-                self.model(**kwargs)
-            return
-
         # FIXME: when using tree-based specdec, adjust number of forward-passes
         # according to the depth of the tree.
+        only_one_forward_pass = is_graph_capturing or self.parallel_drafting
         for fwd_idx in range(
-            self.num_speculative_tokens if not is_graph_capturing else 1
+            1 if only_one_forward_pass else self.num_speculative_tokens
         ):
+            if self.method == "dflash":
+                num_query_tokens = min(num_tokens, self._dflash_extra_tokens)
             if fwd_idx <= 1:
                 cudagraph_runtime_mode, num_input_tokens, num_tokens_across_dp = (
                     self._determine_batch_execution_and_padding(
-                        num_tokens, use_cudagraphs=use_cudagraphs
+                        num_query_tokens, use_cudagraphs=use_cudagraphs
                     )
                 )
+
+            # TODO(ben): figure out what the right value is here
+            if self.method == "dflash":
+                num_positions = num_tokens + num_query_tokens
+            else:
+                raise ValueError("Unsupported method: {}".format(self.method))
 
             # Make sure to use EAGLE's own buffer during cudagraph capture.
             if (
@@ -1722,11 +1690,11 @@ class SpecDecodeBaseProposer:
 
                 kwargs = dict(
                     input_ids=input_ids,
-                    positions=self._get_positions(num_input_tokens),
+                    positions=self._get_positions(num_positions),
                     inputs_embeds=inputs_embeds,
                 )
                 if self.pass_hidden_states_to_model:
-                    kwargs["hidden_states"] = self.hidden_states[:num_input_tokens]
+                    kwargs["hidden_states"] = self.hidden_states[:num_tokens]
                 self.model(**kwargs)
 
     def _get_eagle3_use_aux_hidden_state_from_config(self) -> bool:
