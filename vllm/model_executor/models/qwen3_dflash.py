@@ -484,7 +484,7 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
         # combine multiple auxiliary hidden states returned by eagle3
         if hidden_states.dim() == 1:
             return self.model.hidden_norm(
-                self.model.fc(hidden_states).view(-1,1)
+                self.model.fc(hidden_states).view(-1, 1)
             ).view(-1)
         return self.model.hidden_norm(self.model.fc(hidden_states))
 
