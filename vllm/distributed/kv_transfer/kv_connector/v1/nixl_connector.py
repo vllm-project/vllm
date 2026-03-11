@@ -1486,14 +1486,6 @@ class NixlConnectorWorker:
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data in nixl."""
-        print(f"{self.vllm_config.cache_config.mamba_page_size_padded=}\n\n")
-        # block size: 400, the one from the FA spec
-        print(f"block size: {self.block_size}\n\n")
-        print("NUM_BLOCKS: ", self.num_blocks, "\n\n", flush=True)
-        # vs = next(iter(kv_caches.values()))
-        # len(vs)=2, [torch.Size([18525, 3, 3328]), torch.Size([18525, 48, 64, 128])]
-        # print(f"{next(iter(kv_caches.keys()))}:{len(vs)=},"
-        #       f" {[v.shape for v in vs]}\n\n")
         self.kv_topo = TpKVTopology(
             tp_rank=self.tp_rank,
             engine_id=self.engine_id,
@@ -1585,8 +1577,6 @@ class NixlConnectorWorker:
             if tensor_size_bytes is None:
                 tensor_size_bytes = curr_tensor_size_bytes
 
-            print(f"{layer_name=}, {[v.shape for v in cache_list]}")
-
             # TODO (NickLucche) we could eventually unify how we handle FA/FI regions,
             # registering a single tensor for both K/V and splitting logically like FI.
             for cache in cache_list:
@@ -1607,7 +1597,6 @@ class NixlConnectorWorker:
                     "All kv cache tensors must have the same number of blocks"
                 )
 
-                print(f"{curr_tensor_size_bytes=}, {page_size=}\n\n")
                 if not self.use_mla:
                     # Different kv cache shape is not supported by HeteroTP.
                     # This must also hold true for Mamba-like models.
@@ -1630,11 +1619,7 @@ class NixlConnectorWorker:
 
         self.kv_caches_base_addr[self.engine_id][self.tp_rank] = seen_base_addresses
         self.num_regions = len(caches_data)
-        print(
-            f"{self.num_regions=}, {self.hma_group_size=},"
-            f" {self.kv_topo.is_kv_layout_blocks_first=}\n\n",
-            flush=True,
-        )
+
         # TODO (NickLucche) Adapt to different descs views (engine_id->tp_rank) to
         # support heterogeneous TP.
         # `seen_base_addresses*num_blocks=num_descs` we register below.
@@ -1907,7 +1892,6 @@ class NixlConnectorWorker:
         # Eg. PTP1 DTP2 => P0 KV:[block0-KV_0 | block0-KV_1..].
 
         # Register all remote blocks, but only the corresponding kv heads.
-        # TODO elaborate comment that we create two views
         def register_remote_blocks(
             blocks_data: list[tuple[int, int, int]], mamba: bool
         ):
@@ -1916,7 +1900,6 @@ class NixlConnectorWorker:
                 local_block_len = self.get_backend_aware_kv_block_len(
                     layer_idx=i, first_split=True, mamba_view=mamba
                 )
-                print(f"Add agent {i=}, {local_block_len=}\n", flush=True)
                 remote_kv_block_len = local_block_len // block_size_ratio
                 if block_size_ratio > 1:
                     # using remote kv_block_len as transfer unit
@@ -1976,6 +1959,7 @@ class NixlConnectorWorker:
 
         register_remote_blocks(blocks_data, mamba=False)
         if self._is_mamba:
+            # Create extra descs for the Mamba "view" of the same KV cache tensors.
             assert self.num_descs == len(blocks_data)
             logger.debug(
                 "Registering additional %s remote Mamba blocks", len(blocks_data)
