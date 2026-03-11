@@ -216,6 +216,8 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
         block_ids: tuple[list[int], ...],
     ) -> tuple[bool, dict[str, Any] | None]:
         # Offloading only manages group 0 (attention) blocks.
+        if not block_ids:
+            return self.request_finished(request, [])
         return self.request_finished(request, block_ids[0])
 
     def take_events(self) -> Iterable[KVCacheEvent]:
