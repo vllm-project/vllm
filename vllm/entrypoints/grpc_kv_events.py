@@ -390,10 +390,7 @@ class GrpcKvEventStreamer:
             if bracket_end != -1:
                 return host_port[1:bracket_end]
             return host_port.strip("[]")
-        # grpc peer strings for ipv6 are generally bracketed when a port is
-        # present, but keep a best-effort fallback.
-        if ":" in host_port and host_port.count(":") == 1:
-            return host_port.rsplit(":", maxsplit=1)[0]
+        # An unbracketed IPv6 address is assumed to not have a port.
         return host_port
 
     @staticmethod
