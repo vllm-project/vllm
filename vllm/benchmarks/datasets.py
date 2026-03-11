@@ -540,6 +540,9 @@ class RandomDataset(BenchmarkDataset):
         input_len: int = DEFAULT_INPUT_LEN,
         output_len: int = DEFAULT_OUTPUT_LEN,
         batchsize: int = 1,
+        max_loras: int | None = None,
+        lora_path: str | None = None,
+        lora_assignment: str = "random",
         **kwargs,
     ) -> list[SampleRequest]:
         # validate total input tokens (prefix + sampled) is at least 1.
@@ -584,11 +587,18 @@ class RandomDataset(BenchmarkDataset):
                 allowed_tokens=allowed_tokens,
             )
             token_mismatch_total += token_mismatch
+            lora_req = self.get_lora_request(
+                index=i,
+                max_loras=max_loras,
+                lora_path=lora_path,
+                lora_assignment=lora_assignment,
+            )
             requests.append(
                 SampleRequest(
                     prompt=prompt,
                     prompt_len=total_input_len,
                     expected_output_len=int(output_lens[i]),
+                    lora_request=lora_req,
                     request_id=request_id_prefix + str(i),
                 )
             )
