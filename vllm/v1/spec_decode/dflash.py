@@ -129,7 +129,10 @@ class DFlashModelProposer(SpecDecodeBaseProposer):
     ) -> dict[str, torch.Tensor]:
         """DFlash constructs complete slot_mappings externally,
         so just wrap the tensor in a per-layer dict."""
-        if isinstance(num_tokens_or_slot_mapping, torch.Tensor) and slot_mapping is None:
+        if (
+            isinstance(num_tokens_or_slot_mapping, torch.Tensor)
+            and slot_mapping is None
+        ):
             sm = num_tokens_or_slot_mapping
         else:
             sm = slot_mapping if slot_mapping is not None else num_tokens_or_slot_mapping
