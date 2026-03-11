@@ -19,6 +19,10 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
     FusedMoEMethodBase,
 )
+from vllm.model_executor.layers.fused_moe.modular_kernel import (
+    FusedMoEExpertsModular,
+    FusedMoEPrepareAndFinalizeModular,
+)
 from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
     UnquantizedMoeBackend,
     convert_to_unquantized_kernel_format,
@@ -44,7 +48,6 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         self.unquantized_backend, self.experts_cls = select_unquantized_moe_backend(
             moe_config=self.moe,
         )
-        assert self.unquantized_backend != UnquantizedMoeBackend.NONE
 
     @property
     def is_monolithic(self) -> bool:
@@ -65,6 +68,16 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             f"{self.__class__.__name__} uses the new modular kernel initialization "
             "logic for all but the CPU backend. CPU backend is monolithic. "
             "So this function should not be called."
+        )
+
+    def select_gemm_impl(
+        self,
+        prepare_finalize: FusedMoEPrepareAndFinalizeModular,
+        layer: torch.nn.Module,
+    ) -> FusedMoEExpertsModular:
+        raise ValueError(
+            f"{self.__class__.__name__} uses the new modular kernel initialization "
+            "logic. This function should not be called."
         )
 
     def create_weights(

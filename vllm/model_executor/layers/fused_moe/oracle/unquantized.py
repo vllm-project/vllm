@@ -30,7 +30,6 @@ logger = init_logger(__name__)
 
 
 class UnquantizedMoeBackend(Enum):
-    NONE = "NONE"
     FLASHINFER_TRTLLM = "FlashInfer TRTLLM"
     FLASHINFER_CUTLASS = "FlashInfer CUTLASS"
     AITER = "ROCm AITER"
@@ -42,6 +41,7 @@ class UnquantizedMoeBackend(Enum):
 
 def _get_priority_backends(
     moe_config: FusedMoEConfig,
+    activation_format: mk.FusedMoEActivationFormat,
 ) -> list[UnquantizedMoeBackend]:
     """
     Get available backends in priority order based on platform and config.
@@ -50,21 +50,27 @@ def _get_priority_backends(
     """
 
     _AVAILABLE_BACKENDS = []
-    if current_platform.is_rocm():
-        _AVAILABLE_BACKENDS = [
-            UnquantizedMoeBackend.AITER,
-            UnquantizedMoeBackend.TRITON,
-        ]
-    elif current_platform.is_cuda():
-        _AVAILABLE_BACKENDS = [
-            UnquantizedMoeBackend.FLASHINFER_TRTLLM,
-            UnquantizedMoeBackend.FLASHINFER_CUTLASS,
-            UnquantizedMoeBackend.TRITON,
-        ]
-    elif current_platform.is_xpu():
-        _AVAILABLE_BACKENDS = [UnquantizedMoeBackend.XPU]
-    elif current_platform.is_cpu():
-        _AVAILABLE_BACKENDS = [UnquantizedMoeBackend.CPU]
+    if activation_format == mk.FusedMoEActivationFormat.Standard:
+        if current_platform.is_rocm():
+            _AVAILABLE_BACKENDS = [
+                UnquantizedMoeBackend.AITER,
+                UnquantizedMoeBackend.TRITON,
+            ]
+        elif current_platform.is_cuda():
+            _AVAILABLE_BACKENDS = [
+                UnquantizedMoeBackend.FLASHINFER_TRTLLM,
+                UnquantizedMoeBackend.FLASHINFER_CUTLASS,
+                UnquantizedMoeBackend.TRITON,
+            ]
+        elif current_platform.is_xpu():
+            _AVAILABLE_BACKENDS = [UnquantizedMoeBackend.XPU]
+        elif current_platform.is_cpu():
+            _AVAILABLE_BACKENDS = [UnquantizedMoeBackend.CPU]
+    else:
+        if current_platform.is_cuda_alike():
+            _AVAILABLE_BACKENDS = [
+                UnquantizedMoeBackend.BATCHED_TRITON,
+            ]
     return _AVAILABLE_BACKENDS
 
 
@@ -113,14 +119,21 @@ def backend_to_kernel_cls(
         raise ValueError(f"Unknown unquantized MoE backend: {backend.value}")
 
 
-def map_unquantized_backend(runner_backend: MoEBackend) -> UnquantizedMoeBackend:
+def map_unquantized_backend(
+    runner_backend: MoEBackend, activation_format: mk.FusedMoEActivationFormat
+) -> UnquantizedMoeBackend:
     """Map user's MoEBackend to UnquantizedMoeBackend."""
-    mapping = {
-        "triton": UnquantizedMoeBackend.TRITON,
-        "flashinfer_trtllm": UnquantizedMoeBackend.FLASHINFER_TRTLLM,
-        "flashinfer_cutlass": UnquantizedMoeBackend.FLASHINFER_CUTLASS,
-        "aiter": UnquantizedMoeBackend.AITER,
-    }
+    if activation_format == mk.FusedMoEActivationFormat.Standard:
+        mapping = {
+            "triton": UnquantizedMoeBackend.TRITON,
+            "flashinfer_trtllm": UnquantizedMoeBackend.FLASHINFER_TRTLLM,
+            "flashinfer_cutlass": UnquantizedMoeBackend.FLASHINFER_CUTLASS,
+            "aiter": UnquantizedMoeBackend.AITER,
+        }
+    else:
+        mapping = {
+            "trition": UnquantizedMoeBackend.BATCHED_TRITON,
+        }
     if backend := mapping.get(runner_backend):
         return backend
     raise ValueError(
@@ -142,13 +155,18 @@ def select_unquantized_moe_backend(
         # TODO(yzong): migrate CPU backend to FusedMoEExpertsMonolithic
         return UnquantizedMoeBackend.CPU, None
 
-    AVAILABLE_BACKENDS = _get_priority_backends(moe_config)
+    if current_platform.is_tpu() or current_platform.is_out_of_tree():
+        raise RuntimeError(
+            "Unquantized MoE oracle does not support TPU or OOT platforms."
+        )
 
     activation_format = (
         mk.FusedMoEActivationFormat.BatchedExperts
         if moe_config.moe_parallel_config.use_batched_activation_format
         else mk.FusedMoEActivationFormat.Standard
     )
+
+    AVAILABLE_BACKENDS = _get_priority_backends(moe_config, activation_format)
 
     def _make_log_backend(backend: UnquantizedMoeBackend) -> str:
         available_strs = [b.value for b in AVAILABLE_BACKENDS]
@@ -184,20 +202,9 @@ def select_unquantized_moe_backend(
             return backend, k_cls
         raise ValueError(_make_log_unsupported(backend, reason))
 
-    def _maybe_swap_to_batched_variant(
-        backend: UnquantizedMoeBackend,
-    ) -> UnquantizedMoeBackend:
-        if (
-            activation_format == mk.FusedMoEActivationFormat.BatchedExperts
-            and backend == UnquantizedMoeBackend.TRITON
-        ):
-            return UnquantizedMoeBackend.BATCHED_TRITON
-        return backend
-
     runner_backend = moe_config.moe_backend
     if runner_backend != "auto":
-        requested_backend = map_unquantized_backend(runner_backend)
-        requested_backend = _maybe_swap_to_batched_variant(requested_backend)
+        requested_backend = map_unquantized_backend(runner_backend, activation_format)
         return _return_or_raise(requested_backend, moe_config, activation_format)
 
     # Handle explicit FlashInfer FP16 configuration.
@@ -245,8 +252,6 @@ def select_unquantized_moe_backend(
             )
 
     for backend in AVAILABLE_BACKENDS:
-        backend = _maybe_swap_to_batched_variant(backend)
-
         k_cls = backend_to_kernel_cls(backend)
         supported, reason = k_cls.is_supported_config(
             k_cls, moe_config, None, None, activation_format
@@ -257,16 +262,9 @@ def select_unquantized_moe_backend(
 
         logger.debug_once(_make_log_unsupported(backend, reason), scope="local")
 
-    if (
-        current_platform.is_cuda_alike()
-        or current_platform.is_xpu()
-        or current_platform.is_cpu()
-    ):
-        raise NotImplementedError(
-            "No unquantized MoE backend supports the deployment configuration."
-        )
-
-    return UnquantizedMoeBackend.NONE, None
+    raise NotImplementedError(
+        "No unquantized MoE backend supports the deployment configuration."
+    )
 
 
 def convert_to_unquantized_kernel_format(
@@ -338,7 +336,8 @@ def make_unquantized_moe_kernel(
         shared_experts=(
             shared_experts
             if (
-                moe_config.moe_parallel_config.use_all2all_kernels and not is_monolithic
+                moe_config.moe_parallel_config.use_deepep_ll_kernels
+                and not is_monolithic
             )
             else None
         ),
