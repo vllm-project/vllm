@@ -936,6 +936,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             assert block_tables is not None
             attn_metadata = self.model_state.prepare_attn(
                 input_batch,
+                batch_desc.cg_mode,
                 block_tables,
                 slot_mappings,
                 self.attn_groups,
