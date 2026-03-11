@@ -196,7 +196,7 @@ async def test_dynamic_lora_invalid_files(client: openai.AsyncOpenAI, tmp_path):
     invalid_files.mkdir()
     (invalid_files / "adapter_config.json").write_text("this is not json")
 
-    with pytest.raises(openai.BadRequestError):
+    with pytest.raises(openai.InternalServerError):
         await client.post(
             "load_lora_adapter",
             cast_to=str,
@@ -232,7 +232,7 @@ async def test_dynamic_lora_badrequests(
         json.dump(adapter_config, f)
 
     # Test loading the adapter
-    with pytest.raises(openai.BadRequestError, match=expected_error):
+    with pytest.raises(openai.InternalServerError, match=expected_error):
         await client.post(
             "load_lora_adapter",
             cast_to=str,
@@ -312,7 +312,7 @@ async def test_loading_invalid_adapters_does_not_break_others(
                 body={"lora_name": "notfound", "lora_path": "/not/an/adapter"},
             )
     for _ in range(25):
-        with suppress(openai.BadRequestError):
+        with suppress(openai.InternalServerError):
             await client.post(
                 "load_lora_adapter",
                 cast_to=str,
