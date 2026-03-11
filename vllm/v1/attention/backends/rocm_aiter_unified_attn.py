@@ -30,6 +30,12 @@ class RocmAiterUnifiedAttentionBackend(RocmAttentionBackend):
         return [MultipleOf(16)]
 
     @classmethod
+    def supports_block_size(cls, block_size: int | None) -> bool:
+        if block_size is None:
+            return True
+        return block_size % 16 == 0
+
+    @classmethod
     def supports_head_size(cls, head_size: int) -> bool:
         return head_size >= 32
 

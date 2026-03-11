@@ -573,6 +573,8 @@ class Transformer(nn.Module):
             )
 
     def forward(self, hidden_states: torch.Tensor, ilens: int = 0):
+        max_len = max(ilens)
+        hidden_states = hidden_states[:, :max_len, :]
         batch_size, seq_len, dim = hidden_states.size()
         chunk_num = (seq_len - 1) // self.k + 1
         pad_num = chunk_num * self.k - seq_len
@@ -975,7 +977,6 @@ class FunASRForConditionalGeneration(
         multimodal_embeddings: MultiModalEmbeddings | None = None,
         *,
         is_multimodal: torch.Tensor | None = None,
-        handle_oov_mm_token: bool = False,
     ) -> torch.Tensor:
         inputs_embeds = self.model.decoder.embed_input_ids(input_ids)
 

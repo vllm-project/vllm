@@ -1,4 +1,4 @@
-# Basic
+# Offline Inference
 
 The `LLM` class provides the primary Python interface for doing offline inference, which is interacting with a model without using a separate model inference server.
 
@@ -7,31 +7,31 @@ The `LLM` class provides the primary Python interface for doing offline inferenc
 The first script in this example shows the most basic usage of vLLM. If you are new to Python and vLLM, you should start here.
 
 ```bash
-python examples/offline_inference/basic/basic.py
+python examples/basic/offline_inference/basic.py
 ```
 
 The rest of the scripts include an [argument parser](https://docs.python.org/3/library/argparse.html), which you can use to pass any arguments that are compatible with [`LLM`](https://docs.vllm.ai/en/latest/api/offline_inference/llm.html). Try running the script with `--help` for a list of all available arguments.
 
 ```bash
-python examples/offline_inference/basic/classify.py
+python examples/basic/offline_inference/classify.py
 ```
 
 ```bash
-python examples/offline_inference/basic/embed.py
+python examples/basic/offline_inference/embed.py
 ```
 
 ```bash
-python examples/offline_inference/basic/score.py
+python examples/basic/offline_inference/score.py
 ```
 
 The chat and generate scripts also accept the [sampling parameters](https://docs.vllm.ai/en/latest/api/inference_params.html#sampling-parameters): `max_tokens`, `temperature`, `top_p` and `top_k`.
 
 ```bash
-python examples/offline_inference/basic/chat.py
+python examples/basic/offline_inference/chat.py
 ```
 
 ```bash
-python examples/offline_inference/basic/generate.py
+python examples/basic/offline_inference/generate.py
 ```
 
 ## Features
