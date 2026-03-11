@@ -238,7 +238,7 @@ class Granite4ToolParser(ToolParser):
                         function=function.model_dump(exclude_none=True),
                     )
                 )
-                self.streamed_args_for_tool.append(function.arguments)
+                self.streamed_args_for_tool.append(function.arguments or "")
 
             assert self.current_tool_id + 1 == len(self.prev_tool_call_arr)
             assert self.current_tool_id + 1 == len(self.streamed_args_for_tool)
