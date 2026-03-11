@@ -1,4 +1,4 @@
-model_name: "nvidia/NVIDIA-Nemotron-3-Super-BF16-Placeholder"
+model_name: "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16"
 accuracy_threshold: 0.93
 num_questions: 1319
 num_fewshot: 5
@@ -8,5 +8,4 @@ server_args: >-
   --max-model-len 4096
   --tensor-parallel-size 4
   --enable-expert-parallel
-  --attention-backend TRITON_ATTN
   --speculative-config '{"method":"mtp","num_speculative_tokens":5}'
