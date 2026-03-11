@@ -227,10 +227,13 @@ class GrpcKvEventStreamer:
             yield self._to_proto_batch(sequence_number, decoded_batch)
 
     def _offset_endpoints(self, endpoint: str) -> list[str]:
-        return [
-            ZmqEventPublisher.offset_endpoint_port(endpoint, dp_rank)
-            for dp_rank in range(self._data_parallel_size)
-        ]
+        endpoints: list[str] = []
+        for dp_rank in range(self._data_parallel_size):
+            maybe_endpoint = ZmqEventPublisher.offset_endpoint_port(endpoint, dp_rank)
+            if maybe_endpoint is None:
+                raise ValueError("KV event endpoint must not be None")
+            endpoints.append(maybe_endpoint)
+        return endpoints
 
     def _should_emit(
         self,
