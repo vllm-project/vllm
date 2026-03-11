@@ -12,7 +12,6 @@ pytest.importorskip("grpc")
 pytest.importorskip("torch")
 
 import grpc
-
 from vllm.grpc import vllm_engine_pb2 as local_pb2
 from vllm.grpc import vllm_engine_pb2_grpc as local_pb2_grpc
 
