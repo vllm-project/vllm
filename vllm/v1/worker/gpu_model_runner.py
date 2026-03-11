@@ -4563,7 +4563,7 @@ class GPUModelRunner(
                         speculative_config = self.speculative_config
                         assert speculative_config is not None
                         assert speculative_config.method is not None
-                        
+
                         aux_layers = self.model.get_eagle3_aux_hidden_state_layers(
                             method=speculative_config.method
                         )
