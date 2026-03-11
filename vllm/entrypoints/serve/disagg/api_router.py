@@ -61,9 +61,7 @@ router = APIRouter()
 async def generate(request: GenerateRequest, raw_request: Request):
     handler = generate_tokens(raw_request)
     if handler is None:
-        return tokenization(raw_request).create_error_response(
-            message="The model does not support generate tokens API"
-        )
+        raise NotImplementedError("The model does not support generate tokens API")
 
     generator = await handler.serve_tokens(request, raw_request)
 
