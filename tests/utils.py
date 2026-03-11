@@ -519,7 +519,17 @@ class RemoteLaunchRenderServer(RemoteVLLMServer):
         )
 
     def _pre_download_model(self, model: str, args) -> None:
-        pass  # Render server only needs the tokenizer, not model weights
+        """Download only the tokenizer files (no model weights needed)."""
+        is_local = os.path.isdir(model)
+        if not is_local:
+            engine_args = AsyncEngineArgs.from_cli_args(args)
+            model_config = engine_args.create_model_config()
+            get_tokenizer(
+                model_config.tokenizer,
+                tokenizer_mode=model_config.tokenizer_mode,
+                trust_remote_code=model_config.trust_remote_code,
+                revision=model_config.tokenizer_revision,
+            )
 
     def _wait_for_gpu_memory_release(self, timeout: float = 30.0):
         pass  # No GPU used
