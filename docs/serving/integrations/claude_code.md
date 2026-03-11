@@ -60,6 +60,23 @@ The environment variables:
 !!! tip
     You can add these environment variables to your shell profile (e.g., `.bashrc`, `.zshrc`), Claude Code configuration file (`~/.claude/settings.json`), or create a wrapper script for convenience.
 
+### Optimizing Performance
+
+Claude Code recently added an attribution header that changes between requests, which can invalidate vLLM's prefix caching and significantly slow down inference. To disable it, add the following to `~/.claude/settings.json`:
+
+```json
+{
+  "env": {
+    "CLAUDE_CODE_ATTRIBUTION_HEADER": "0"
+  }
+}
+```
+
+!!! warning
+This setting must be in `~/.claude/settings.json`. Using `export CLAUDE_CODE_ATTRIBUTION_HEADER=0` in your shell does not work.
+
+Credit to [Unsloth](https://unsloth.ai/docs/basics/claude-code#fixing-90-slower-inference-in-claude-code) for this tip!
+
 ## Testing the Setup
 
 Once Claude Code launches, try a simple prompt to verify the connection:
@@ -75,3 +92,5 @@ If the model responds correctly, your setup is working. You can now use Claude C
 **Tool calls not working**: Verify that your model supports tool calling and that you've enabled it with the correct `--tool-call-parser` flag. See [Tool Calling](../../features/tool_calling.md).
 
 **Model not found**: Ensure the `--served-model-name` matches the model names in your environment variables. You cannot use model names with `/` in them, such as `openai/gpt-oss-120b` directly from Huggingface, so beware of that limitation with Claude Code.
+
+**Slow inference / poor prefix caching**: Claude Code's attribution header can invalidate prefix caching. See [Optimizing Performance](#optimizing-performance) above.
