@@ -1940,7 +1940,7 @@ class TritonExperts(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_current_device() -> bool:
-        return current_platform.is_cuda_alike()
+        return current_platform.is_cuda_alike() or current_platform.is_xpu()
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:
@@ -1959,8 +1959,10 @@ class TritonExperts(mk.FusedMoEExpertsModular):
         else:
             is_rocm_on_gfx9 = False
 
-        device_supports_fp8 = is_rocm_on_gfx9 or (
-            p.is_cuda() and p.has_device_capability((8, 9))
+        device_supports_fp8 = (
+            is_rocm_on_gfx9
+            or (p.is_cuda() and p.has_device_capability((8, 9)))
+            or p.is_xpu()
         )
 
         if not device_supports_fp8:
