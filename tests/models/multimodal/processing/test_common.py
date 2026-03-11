@@ -33,32 +33,9 @@ from ...registry import (
 )
 
 
-def glm4_1v_patch_mm_data(mm_data: MultiModalDataDict) -> MultiModalDataDict:
+def add_video_metadata(mm_data: MultiModalDataDict) -> MultiModalDataDict:
     """
-    Patch the multimodal data for GLM4.1V model.
-    """
-    # Ensure video metadata is included
-    if "video" in mm_data:
-        # GLM4.1V doesn't support multiple videos
-        video = mm_data["video"]
-        num_frames = len(video)
-        mm_data["video"] = (
-            video,
-            {
-                "total_num_frames": num_frames,
-                "fps": num_frames,
-                "duration": 1,
-                "frames_indices": [i for i in range(num_frames)],
-                "video_backend": "opencv",
-                "do_sample_frames": True,
-            },
-        )
-    return mm_data
-
-
-def qwen3_vl_patch_mm_data(mm_data: MultiModalDataDict) -> MultiModalDataDict:
-    """
-    Patch the multimodal data for Qwen3-VL model.
+    Add metadata to video mm_data
     """
 
     def create_metadata(frames: np.ndarray):
@@ -119,16 +96,7 @@ _IGNORE_MM_KEYS = {
 }
 
 MM_DATA_PATCHES = {
-    # Ernie4.5-VL, GLM4.1V and Qwen3-VL requires video metadata
-    "ernie4_5_moe_vl": qwen3_vl_patch_mm_data,
-    "glm4v": glm4_1v_patch_mm_data,
-    "glm4v_moe": glm4_1v_patch_mm_data,
-    "glm_ocr": glm4_1v_patch_mm_data,
     "glmasr": glmasr_patch_mm_data,
-    "interns1_pro": qwen3_vl_patch_mm_data,
-    "molmo2": qwen3_vl_patch_mm_data,
-    "qwen3_vl": qwen3_vl_patch_mm_data,
-    "qwen3_vl_moe": qwen3_vl_patch_mm_data,
 }
 
 
@@ -173,6 +141,9 @@ def get_text_token_prompts(
     dummy_inputs = processor.dummy_inputs
     tokenizer: TokenizerLike = processor.info.get_tokenizer()
     model_config = processor.info.ctx.model_config
+
+    if processor.info.data_parser.video_needs_metadata:
+        mm_data = add_video_metadata(mm_data)
 
     model_type = model_config.hf_config.model_type
     if model_type in MM_DATA_PATCHES:
@@ -227,13 +198,17 @@ def get_text_token_prompts(
             mm_counts,
             mm_options={},
         )
-        assert isinstance(inputs.prompt, str)
-
-        text_prompt = inputs.prompt
-        token_prompt = tokenizer.encode(
-            text_prompt,
-            add_special_tokens=_ADD_SPECIAL_TOKENS_OVERRIDES.get(model_type, True),
-        )
+        # Some models (e.g., Kimi-Audio) return token IDs directly instead of str
+        if isinstance(inputs.prompt, list):
+            text_prompt = None
+            token_prompt = inputs.prompt
+        else:
+            assert isinstance(inputs.prompt, str)
+            text_prompt = inputs.prompt
+            token_prompt = tokenizer.encode(
+                text_prompt,
+                add_special_tokens=_ADD_SPECIAL_TOKENS_OVERRIDES.get(model_type, True),
+            )
 
     return text_prompt, token_prompt
 

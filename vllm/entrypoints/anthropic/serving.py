@@ -349,6 +349,8 @@ class AnthropicServingMessages(OpenAIServingChat):
             req.tool_choice = "auto"
         elif tool_choice_type == "any":
             req.tool_choice = "required"
+        elif tool_choice_type == "none":
+            req.tool_choice = "none"
         elif tool_choice_type == "tool":
             req.tool_choice = ChatCompletionNamedToolChoiceParam.model_validate(
                 {

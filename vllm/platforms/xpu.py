@@ -61,7 +61,8 @@ class XPUPlatform(Platform):
 
         dtype = attn_selector_config.dtype
         if attn_selector_config.use_sparse:
-            raise NotImplementedError("Sparse Attention is not supported on XPU.")
+            logger.info_once("Using XPU MLA Sparse backend.")
+            return AttentionBackendEnum.XPU_MLA_SPARSE.get_path()
         if attn_selector_config.use_mla:
             logger.info_once("Using Triton MLA backend on V1 engine.")
             return AttentionBackendEnum.TRITON_MLA.get_path()
@@ -162,7 +163,7 @@ class XPUPlatform(Platform):
         model_config = vllm_config.model_config
         parallel_config = vllm_config.parallel_config
         # in V1(or with chunked prefill) block_size is 64
-        if cache_config and cache_config.block_size is None:
+        if cache_config and not cache_config.user_specified_block_size:
             cache_config.block_size = 64
 
         # lazy import to avoid circular import
@@ -220,6 +221,18 @@ class XPUPlatform(Platform):
                 vllm_config.model_config.max_model_len,
                 vllm_config.scheduler_config.DEFAULT_MAX_NUM_BATCHED_TOKENS,
             )
+
+        # In some cases, the internal memory type cache can misdetect GPU
+        # memory as host memory, also leading to invalid memory access.
+        # This cache can be disabled by setting UCX_MEMTYPE_CACHE=n.
+        # ref. https://openucx.readthedocs.io/en/master/faq.html
+        os.environ["UCX_MEMTYPE_CACHE"] = "n"
+
+    @classmethod
+    def update_block_size_for_backend(cls, vllm_config: "VllmConfig") -> None:
+        # TODO: XPU still sets block_size in check_and_update_config.
+        # Move that logic here so block_size is chosen by the backend.
+        pass
 
     @classmethod
     def support_hybrid_kv_cache(cls) -> bool:
