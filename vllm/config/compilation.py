@@ -1086,8 +1086,8 @@ class CompilationConfig:
 
     def splitting_ops_contain_kv_cache_update(self) -> bool:
         kv_cache_update_ops = [
-            "vllm:unified_kv_cache_update",
-            "vllm:unified_mla_kv_cache_update",
+            "vllm::unified_kv_cache_update",
+            "vllm::unified_mla_kv_cache_update",
         ]
         return self.splitting_ops is not None and all(
             op in self.splitting_ops for op in kv_cache_update_ops
