@@ -264,7 +264,7 @@ class DefaultMoERunner(MoERunner):
             )
 
             # Record that the shared_experts_input will be used in the
-            # shared_experts_stream to to avoid gc issue from
+            # shared_experts_stream to avoid gc issue from
             # deallocation. For more details:
             # https://docs.pytorch.org/docs/stable/generated/torch.Tensor.record_stream.html # noqa: E501
             # NOTE: We don't need shared_output.record_stream(current_stream())

@@ -50,7 +50,7 @@ def swap_w13_to_w31(x: torch.Tensor) -> torch.Tensor:
 def rotate_weights_for_fi_trtllm_fp8_per_tensor_moe(
     gemm1_weights: torch.Tensor, gemm2_weights: torch.Tensor, is_gated_activation: bool
 ):
-    """Shuffle weights for for FI TRT-LLM Format"""
+    """Shuffle weights for FI TRT-LLM Format"""
     from flashinfer import reorder_rows_for_gated_act_gemm, shuffle_matrix_a
 
     epilogue_tile_m = 128
