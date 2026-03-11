@@ -75,6 +75,10 @@ class GemmStaticFP8QuantPattern:
         output_scale: torch.Tensor,
     ) -> torch.Tensor:
         # Step 1: scaled_mm → BF16/FP16
+        # Note: rocm_per_tensor_float_w8a8_scaled_mm_impl returns a single
+        # torch.Tensor (not a tuple). auto_functionalized wraps it as
+        # (token, output_tensor), so [1] is always the output tensor.
+        # This is consistent with other fusion passes (e.g. act_quant_fusion).
         mm_result = auto_functionalized(
             SCALED_MM_OP,
             A=a,
