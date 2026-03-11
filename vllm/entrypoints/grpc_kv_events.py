@@ -251,9 +251,7 @@ class GrpcKvEventStreamer:
 
     def _to_proto_batch(self, sequence_number: int, batch: KVEventBatch) -> Any:
         proto_events = [
-            self._to_proto_event(
-                self._make_event_id(sequence_number, event_idx), event
-            )
+            self._to_proto_event(self._make_event_id(sequence_number, event_idx), event)
             for event_idx, event in enumerate(batch.events)
         ]
         message = self._pb2.KvEventBatch(
@@ -285,9 +283,7 @@ class GrpcKvEventStreamer:
             start = block_idx * token_stride
             end = start + token_stride
             block_token_ids = (
-                event.token_ids[start:end]
-                if token_stride > 0
-                else event.token_ids
+                event.token_ids[start:end] if token_stride > 0 else event.token_ids
             )
             block = self._pb2.KvBlock(
                 block_hash=_hash_to_int64(block_hash),

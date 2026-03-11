@@ -58,6 +58,13 @@ def _get_vllm_engine_service_descriptor(pb2_module: Any) -> Any | None:
     return pb2_module.DESCRIPTOR.services_by_name.get("VllmEngine")
 
 
+def _get_vllm_engine_service_full_name(pb2_module: Any) -> str:
+    service_descriptor = _get_vllm_engine_service_descriptor(pb2_module)
+    if service_descriptor is None:
+        raise RuntimeError("VllmEngine service descriptor is missing")
+    return service_descriptor.full_name
+
+
 def _supports_subscribe_kv_events(pb2_module: Any) -> bool:
     service_descriptor = _get_vllm_engine_service_descriptor(pb2_module)
     if service_descriptor is None:
@@ -142,8 +149,9 @@ def _register_subscribe_kv_events(
         request_deserializer=request_cls.FromString,
         response_serializer=response_cls.SerializeToString,
     )
+    service_full_name = _get_vllm_engine_service_full_name(vllm_engine_pb2)
     generic_handler = grpc.method_handlers_generic_handler(
-        "vllm.grpc.engine.VllmEngine",
+        service_full_name,
         {"SubscribeKvEvents": method_handler},
     )
     server.add_generic_rpc_handlers((generic_handler,))

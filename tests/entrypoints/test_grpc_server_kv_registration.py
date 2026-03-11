@@ -4,6 +4,7 @@
 import importlib
 import sys
 from types import ModuleType, SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -17,14 +18,14 @@ from vllm.grpc import vllm_engine_pb2_grpc as local_pb2_grpc
 
 
 def _install_grpc_reflection_stub(monkeypatch: pytest.MonkeyPatch) -> None:
-    reflection_module = ModuleType("grpc_reflection.v1alpha.reflection")
+    reflection_module: Any = ModuleType("grpc_reflection.v1alpha.reflection")
     reflection_module.SERVICE_NAME = "grpc.reflection.v1alpha.ServerReflection"
     reflection_module.enable_server_reflection = lambda *_args, **_kwargs: None
 
-    v1alpha_module = ModuleType("grpc_reflection.v1alpha")
+    v1alpha_module: Any = ModuleType("grpc_reflection.v1alpha")
     v1alpha_module.reflection = reflection_module
 
-    root_module = ModuleType("grpc_reflection")
+    root_module: Any = ModuleType("grpc_reflection")
     root_module.v1alpha = v1alpha_module
 
     monkeypatch.setitem(sys.modules, "grpc_reflection", root_module)
@@ -37,17 +38,17 @@ def _install_grpc_reflection_stub(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _install_smg_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
-    smg_proto_module = ModuleType("smg_grpc_proto")
+    smg_proto_module: Any = ModuleType("smg_grpc_proto")
     smg_proto_module.vllm_engine_pb2 = local_pb2
     smg_proto_module.vllm_engine_pb2_grpc = local_pb2_grpc
 
-    servicer_module = ModuleType("smg_grpc_servicer.vllm.servicer")
+    servicer_module: Any = ModuleType("smg_grpc_servicer.vllm.servicer")
     servicer_module.VllmEngineServicer = local_pb2_grpc.VllmEngineServicer
 
-    vllm_module = ModuleType("smg_grpc_servicer.vllm")
+    vllm_module: Any = ModuleType("smg_grpc_servicer.vllm")
     vllm_module.servicer = servicer_module
 
-    root_module = ModuleType("smg_grpc_servicer")
+    root_module: Any = ModuleType("smg_grpc_servicer")
     root_module.vllm = vllm_module
 
     monkeypatch.setitem(sys.modules, "smg_grpc_proto", smg_proto_module)
@@ -69,30 +70,26 @@ def grpc_server_module(monkeypatch: pytest.MonkeyPatch):
 
 
 class _DummyRequest:
-
     @staticmethod
     def FromString(data):
         return data
 
 
 class _DummyResponse:
-
     @staticmethod
     def SerializeToString(_message):
         return b""
 
 
 class _FakeServer:
-
     def __init__(self) -> None:
-        self.generic_handlers = []
+        self.generic_handlers: list[Any] = []
 
     def add_generic_rpc_handlers(self, handlers):
         self.generic_handlers.extend(handlers)
 
 
 class _DummyStreamer:
-
     def __init__(self, **kwargs):
         self.kwargs = kwargs
 
@@ -102,7 +99,6 @@ class _DummyStreamer:
 
 
 class _ProtoAwareDummyStreamer:
-
     def __init__(self, **kwargs):
         self._pb2 = kwargs["pb2_module"]
 
