@@ -397,6 +397,15 @@ class SpecDecodeBaseProposer:
     ) -> torch.Tensor:
         batch_size = common_attn_metadata.batch_size()
 
+        if self.method == "dflash":
+            dflash_core = getattr(self, "_propose_dflash_core", None)
+            return dflash_core(
+                target_positions=target_positions,
+                target_hidden_states=target_hidden_states,
+                next_token_ids=next_token_ids,
+                common_attn_metadata=common_attn_metadata,
+                sampling_metadata=sampling_metadata,
+            )
         if self.method == "eagle3":
             assert isinstance(self.model, Eagle3LlamaForCausalLM)
             target_hidden_states = self.model.combine_hidden_states(
