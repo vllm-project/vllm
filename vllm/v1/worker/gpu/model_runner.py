@@ -204,6 +204,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             device=self.device,
         )
 
+        self.sampler: Sampler | None = None
+        self.rejection_sampler: RejectionSampler | None = None
+        self.prompt_logprobs_worker: PromptLogprobsWorker | None = None
+        self.structured_outputs_worker: StructuredOutputsWorker | None = None
         if self.is_last_pp_rank and not self.is_pooling_model:
             # Initialize sampling-related workers.
             # These components are only set up on the last PP rank and
@@ -227,11 +231,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 vocab_size=self.vocab_size,
                 device=self.device,
             )
-        else:
-            self.sampler = None
-            self.rejection_sampler = None
-            self.prompt_logprobs_worker = None
-            self.structured_outputs_worker = None
 
         # CUDA graphs.
         self.decode_query_len = self.num_speculative_steps + 1
@@ -298,7 +297,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.model_state = init_model_state(
             self.vllm_config, self.model, self.encoder_cache, self.device
         )
-        if self.is_pooling_model:
+        if self.is_pooling_model and self.is_last_pp_rank:
             self.pooling_runner = PoolingRunner(self.model)
 
     def get_model(self) -> nn.Module:
@@ -1093,6 +1092,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Broadcast to non-last PP ranks (handles spec decode multi-token).
             pp_broadcast(sampler_output.sampled_token_ids, num_sampled, num_rejected)
 
+        assert self.prompt_logprobs_worker is not None
         prompt_logprobs_dict = self.prompt_logprobs_worker.compute_prompt_logprobs(
             self.model.compute_logits,
             hidden_states,
@@ -1132,6 +1132,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             input_batch, sampler_output.sampled_token_ids, num_sampled, num_rejected
         )
         if self.speculator is not None:
+            assert self.sampler is not None
             draft_tokens = self.speculator.propose(
                 input_batch,
                 attn_metadata,
