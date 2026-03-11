@@ -219,22 +219,35 @@ def bench_fp8_fused_vs_unfused(
         iters,
     )
 
-    # -- Unfused: CUDA merge (input_dtype output) + scaled_fp8_quant --
-    output_merge_buf = torch.empty(
+    # -- Unfused CUDA: CUDA merge (input_dtype output) + scaled_fp8_quant --
+    output_merge_buf_cuda = torch.empty(
         (num_tokens, num_heads, head_size), dtype=input_dtype, device="cuda"
     )
-    # scaled_fp8_quant expects 2-D input [M, N]
-    merge_buf_2d = output_merge_buf.view(-1, head_size)
-    # Static scale for quant (same value as fused path)
+    merge_buf_cuda_2d = output_merge_buf_cuda.view(-1, head_size)
     quant_scale = output_scale.clone()
 
-    def unfused_fn():
+    def unfused_cuda_fn():
         merge_attn_states_cuda(
-            output_merge_buf, prefix_out, prefix_lse, suffix_out, suffix_lse
+            output_merge_buf_cuda, prefix_out, prefix_lse, suffix_out, suffix_lse
         )
-        ops.scaled_fp8_quant(merge_buf_2d, quant_scale)
+        ops.scaled_fp8_quant(merge_buf_cuda_2d, quant_scale)
 
-    t_unfused = bench_fn(unfused_fn, warmup, iters)
+    t_unfused_cuda = bench_fn(unfused_cuda_fn, warmup, iters)
+
+    # -- Unfused Triton: Triton merge (input_dtype output) + scaled_fp8_quant --
+    output_merge_buf_triton = torch.empty(
+        (num_tokens, num_heads, head_size), dtype=input_dtype, device="cuda"
+    )
+    merge_buf_triton_2d = output_merge_buf_triton.view(-1, head_size)
+    quant_scale_triton = output_scale.clone()
+
+    def unfused_triton_fn():
+        merge_attn_states_triton(
+            output_merge_buf_triton, prefix_out, prefix_lse, suffix_out, suffix_lse
+        )
+        ops.scaled_fp8_quant(merge_buf_triton_2d, quant_scale_triton)
+
+    t_unfused_triton = bench_fn(unfused_triton_fn, warmup, iters)
 
     return [
         BenchResult(
@@ -261,8 +274,17 @@ def bench_fp8_fused_vs_unfused(
             num_heads,
             head_size,
             input_dtype,
-            "fp8_unfused",
-            t_unfused,
+            "fp8_unfused_cuda",
+            t_unfused_cuda,
+        ),
+        BenchResult(
+            config_label,
+            num_tokens,
+            num_heads,
+            head_size,
+            input_dtype,
+            "fp8_unfused_triton",
+            t_unfused_triton,
         ),
     ]
 
@@ -273,7 +295,7 @@ def bench_fp8_fused_vs_unfused(
 
 
 def print_fp8_table(results: list[BenchResult]):
-    """Print a comparison table: fused CUDA / fused Triton / unfused."""
+    """Print a comparison table: fused vs unfused for both CUDA and Triton."""
     from collections import defaultdict
 
     groups: dict[tuple, dict[str, float]] = defaultdict(dict)
@@ -286,8 +308,8 @@ def print_fp8_table(results: list[BenchResult]):
     header = (
         f"{'Config':<18} {'Tokens':>6} {'Heads':>5} {'Hdim':>5} "
         f"{'InDtype':<10} "
-        f"{'FusedCUDA':>11} {'FusedTriton':>13} {'Unfused':>11} "
-        f"{'SpeedupCUDA':>12} {'SpeedupTriton':>14}"
+        f"{'FuCUDA':>9} {'UnfCUDA':>10} {'SpdCUDA':>8} "
+        f"{'FuTriton':>11} {'UnfTriton':>12} {'SpdTriton':>10}"
     )
     sep = "-" * len(header)
 
@@ -303,18 +325,20 @@ def print_fp8_table(results: list[BenchResult]):
         g = groups[key]
         t_fused_cuda = g.get("fp8_fused_cuda", float("nan"))
         t_fused_triton = g.get("fp8_fused_triton", float("nan"))
-        t_unfused = g.get("fp8_unfused", float("nan"))
-        speedup_cuda = t_unfused / t_fused_cuda if t_fused_cuda > 0 else float("nan")
-        speedup_triton = (
-            t_unfused / t_fused_triton if t_fused_triton > 0 else float("nan")
+        t_unfused_cuda = g.get("fp8_unfused_cuda", float("nan"))
+        t_unfused_triton = g.get("fp8_unfused_triton", float("nan"))
+        spd_cuda = t_unfused_cuda / t_fused_cuda if t_fused_cuda > 0 else float("nan")
+        spd_triton = (
+            t_unfused_triton / t_fused_triton if t_fused_triton > 0 else float("nan")
         )
         print(
             f"{config_label:<18} {num_tokens:>6} {num_heads:>5} "
             f"{head_size:>5} "
             f"{short_dtype(input_dtype):<10} "
-            f"{t_fused_cuda:>9.1f}us {t_fused_triton:>11.1f}us "
-            f"{t_unfused:>9.1f}us "
-            f"{speedup_cuda:>11.2f}x {speedup_triton:>13.2f}x"
+            f"{t_fused_cuda:>7.1f}us {t_unfused_cuda:>8.1f}us "
+            f"{spd_cuda:>7.2f}x "
+            f"{t_fused_triton:>9.1f}us {t_unfused_triton:>10.1f}us "
+            f"{spd_triton:>9.2f}x"
         )
     print(sep)
 
