@@ -74,8 +74,6 @@ class TestAllReduceRMSNormModel(torch.nn.Module):
         return y4
 
     def ops_in_model_before(self):
-        if self.use_aiter:
-            return [rocm_aiter_ops.get_rmsnorm_fused_add_op()]
         return [torch.ops.vllm.all_reduce.default]
 
     def ops_in_model_after(self):
@@ -203,6 +201,7 @@ class TestAllReduceFusedAddRMSNormStaticQuantFP4Model(torch.nn.Module):
             False,
             marks=pytest.mark.skipif(
                 current_platform.is_rocm(),
+                reason="Not supported on ROCm platform",
             ),
         ),
         pytest.param(
@@ -211,6 +210,7 @@ class TestAllReduceFusedAddRMSNormStaticQuantFP4Model(torch.nn.Module):
             False,
             marks=pytest.mark.skipif(
                 current_platform.is_rocm(),
+                reason="Not supported on ROCm platform",
             ),
         ),
         pytest.param(
@@ -219,6 +219,7 @@ class TestAllReduceFusedAddRMSNormStaticQuantFP4Model(torch.nn.Module):
             False,
             marks=pytest.mark.skipif(
                 current_platform.is_rocm(),
+                reason="Not supported on ROCm platform",
             ),
         ),
     ],
@@ -382,6 +383,17 @@ def all_reduce_fusion_pass_on_test_model(
         assert all_reduce_fusion_pass.matched_count == 4, (
             f"{all_reduce_fusion_pass.matched_count=}"
         )
-        backend.check_before_ops(model.ops_in_model_before(), fully_replaced=False)
+        if use_aiter:
+            # aiter all_reduce is not a torch op, check by callable identity
+            import aiter as aiter_ops
+
+            pre_nodes = [
+                n
+                for n in backend.graph_pre_pass.nodes
+                if n.op == "call_function" and n.target is aiter_ops.all_reduce
+            ]
+            assert len(pre_nodes) > 0
+        else:
+            backend.check_before_ops(model.ops_in_model_before(), fully_replaced=False)
         backend.check_after_ops(model.ops_in_model_after())
         del all_reduce_fusion_pass
