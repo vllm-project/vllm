@@ -14,8 +14,10 @@ import pytest
 import torch
 
 import vllm.model_executor.layers.activation
+from vllm.compilation.backends import VllmBackend
 from vllm.compilation.caching import (
     StandaloneCompiledArtifacts,
+    VllmSerializableFunction,
 )
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import (
@@ -154,6 +156,26 @@ def test_save_and_load(monkeypatch: pytest.MonkeyPatch):
                 "Expected was_aot_compile_fn_loaded_from_disk to be True"
             )
             assert torch.allclose(ret, expected)
+
+
+@pytest.mark.skipif(not is_torch_equal_or_newer("2.10.0"), reason="requires torch 2.10")
+def test_save_and_load_slice(monkeypatch: pytest.MonkeyPatch):
+    def foo(x: torch.Tensor):
+        return x[slice(0, x.shape[0])]
+
+    vllm_config = make_vllm_config()
+
+    example_input = torch.randn(10, 10)
+    torch._dynamo.mark_dynamic(example_input, 0)
+    gm = torch.fx.symbolic_trace(foo)
+    assert "getitem_1 = x[slice(0, getitem, None)]" in gm.code
+    with use_vllm_config(vllm_config):
+        payload = VllmSerializableFunction.serialize_compile_artifacts(
+            VllmSerializableFunction(gm, (example_input,), "", foo)
+        )
+        fn = VllmSerializableFunction.deserialize_compile_artifacts(payload)
+
+    assert gm.code == fn.graph_module.code
 
 
 @pytest.mark.skipif(not is_torch_equal_or_newer("2.10.0"), reason="requires torch 2.10")
@@ -700,3 +722,44 @@ class TestStandaloneCompiledArtifactsIntegration:
             ("mod3", "shape3"),
         ]:
             assert cache.get(submod, shape) == shared_data
+
+    def test_functorch_config(self):
+        vllm_config = make_vllm_config()
+        example_inputs = (torch.randn(10, 10),)
+
+        def add_1(x: torch.Tensor):
+            return x + 1
+
+        gm = torch._dynamo.functional_export.dynamo_graph_capture_for_export(add_1)(
+            *example_inputs
+        )
+
+        gm.graph._codegen = torch.fx.graph.CodeGen()
+        gm._dynamo_bytecode_flatten = None
+        gm._dynamo_bytecode_unflatten = None
+
+        with (
+            torch._functorch.config.patch(bundled_autograd_cache=False),
+            set_current_vllm_config(vllm_config),
+        ):
+            with torch._functorch.config.patch(bundled_autograd_cache=True):
+                fn = VllmSerializableFunction(gm, example_inputs, "", add_1)
+
+            payload = VllmSerializableFunction.serialize_compile_artifacts(fn)
+
+            config = None
+
+            def backend(*args, **kwargs) -> VllmSerializableFunction:
+                nonlocal config
+                # bundled_autograd_cache should be True even compiler backend
+                # runs with bundled_autograd_cache=False in ambient context.
+                config = torch._functorch.config.save_config_portable()
+                return fn
+
+            loaded_fn = VllmSerializableFunction.deserialize_compile_artifacts(payload)
+            with patch.object(VllmBackend, "__call__", backend):
+                loaded_fn(*example_inputs)
+
+        assert isinstance(config, dict)
+        assert "bundled_autograd_cache" in config
+        assert config["bundled_autograd_cache"] is True

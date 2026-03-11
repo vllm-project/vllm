@@ -20,7 +20,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import (
     NixlKVConnectorStats,
 )
-from vllm.platforms import current_platform
 
 MODEL_NAME = "meta-llama/Llama-3.2-1B-Instruct"
 
@@ -97,13 +96,6 @@ def _compare_directories(dir1: Path, dir2: Path) -> bool:
     return True
 
 
-@pytest.mark.skipif(
-    current_platform.is_rocm(),
-    reason=(
-        "hipErrorLaunchFailure when running this test, see issue:"
-        "https://github.com/ROCm/pytorch/issues/2822"
-    ),
-)
 def test_multi_example_connector_consistency():
     """
     Tests that MultiConnector with two ExampleConnectors saves

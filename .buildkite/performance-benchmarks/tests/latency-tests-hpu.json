@@ -51,5 +51,56 @@
             "max-model-len": 256,
             "async-scheduling": ""
         }
+    },
+    {
+        "test_name": "latency_deepseek_r1",
+        "environment_variables": {
+            "PT_HPU_LAZY_MODE": 1,
+            "PT_HPU_ENABLE_LAZY_COLLECTIVES": 1,
+            "VLLM_CONTIGUOUS_PA": 1,
+            "VLLM_DEFRAG": 1
+        },
+        "parameters": {
+            "model": "deepseek-ai/DeepSeek-R1",
+            "tensor_parallel_size": 8,
+            "load_format": "dummy",
+            "max-model-len": 2048,
+            "dtype": "bfloat16"
+        }
+    },
+    {
+        "test_name": "latency_llama4_maverick_17b128e_instruct_fp8",
+        "environment_variables": {
+            "PT_HPU_LAZY_MODE": 1,
+            "PT_HPU_ENABLE_LAZY_COLLECTIVES": 1,
+            "VLLM_CONTIGUOUS_PA": 1,
+            "VLLM_DEFRAG": 1
+        },
+        "parameters": {
+            "model": "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8",
+            "tensor_parallel_size": 8,
+            "max-model-len": 512,
+            "max-num-seqs": 128,
+            "async-scheduling": "",
+            "gpu-memory-utilization": 0.95,
+            "enable_expert_parallel": ""
+        }
+    },
+    {
+        "test_name": "latency_qwen3_8b",
+        "environment_variables": {
+            "PT_HPU_LAZY_MODE": 1,
+            "PT_HPU_ENABLE_LAZY_COLLECTIVES": 1,
+            "VLLM_CONTIGUOUS_PA": 1,
+            "VLLM_DEFRAG": 1
+        },
+        "parameters": {
+            "model": "Qwen/Qwen3-8B",
+            "tensor_parallel_size": 1,
+            "max-model-len": 2048,
+            "max-num-seqs": 128,
+            "dtype": "bfloat16",
+            "async-scheduling": ""
+        }
     }
 ]

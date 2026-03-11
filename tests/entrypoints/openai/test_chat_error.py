@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass, field
-from http import HTTPStatus
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -11,7 +10,7 @@ import pytest
 from vllm.config.multimodal import MultiModalConfig
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
-from vllm.entrypoints.openai.engine.protocol import ErrorResponse
+from vllm.entrypoints.openai.engine.protocol import GenerationError
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.outputs import CompletionOutput, RequestOutput
@@ -61,15 +60,21 @@ class MockModelConfig:
 
 
 @dataclass
+class MockParallelConfig:
+    _api_process_rank: int = 0
+
+
+@dataclass
 class MockVllmConfig:
     model_config: MockModelConfig
+    parallel_config: MockParallelConfig
 
 
 def _build_renderer(model_config: MockModelConfig):
     _, tokenizer_name, _, kwargs = tokenizer_args_from_config(model_config)
 
     return HfRenderer.from_config(
-        MockVllmConfig(model_config),
+        MockVllmConfig(model_config, parallel_config=MockParallelConfig()),
         tokenizer_kwargs={**kwargs, "tokenizer_name": tokenizer_name},
     )
 
@@ -145,12 +150,8 @@ async def test_chat_error_non_stream():
         stream=False,
     )
 
-    response = await serving_chat.create_chat_completion(request)
-
-    assert isinstance(response, ErrorResponse)
-    assert response.error.type == "InternalServerError"
-    assert response.error.message == "Internal server error"
-    assert response.error.code == HTTPStatus.INTERNAL_SERVER_ERROR
+    with pytest.raises(GenerationError):
+        await serving_chat.create_chat_completion(request)
 
 
 @pytest.mark.asyncio
@@ -370,3 +371,15 @@ def test_system_message_warns_on_video(video_content):
     call_args = str(mock_logger.warning_once.call_args)
     assert "System messages should only contain text" in call_args
     assert "video_url" in call_args
+
+
+def test_json_schema_response_format_missing_schema():
+    """When response_format type is 'json_schema' but the json_schema field
+    is not provided, request construction should raise a validation error
+    so the API returns 400 instead of 500."""
+    with pytest.raises(Exception, match="json_schema.*must be provided"):
+        ChatCompletionRequest(
+            model=MODEL_NAME,
+            messages=[{"role": "user", "content": "hello"}],
+            response_format={"type": "json_schema"},
+        )

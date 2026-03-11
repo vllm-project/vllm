@@ -33,32 +33,9 @@ from ...registry import (
 )
 
 
-def glm4_1v_patch_mm_data(mm_data: MultiModalDataDict) -> MultiModalDataDict:
+def add_video_metadata(mm_data: MultiModalDataDict) -> MultiModalDataDict:
     """
-    Patch the multimodal data for GLM4.1V model.
-    """
-    # Ensure video metadata is included
-    if "video" in mm_data:
-        # GLM4.1V doesn't support multiple videos
-        video = mm_data["video"]
-        num_frames = len(video)
-        mm_data["video"] = (
-            video,
-            {
-                "total_num_frames": num_frames,
-                "fps": num_frames,
-                "duration": 1,
-                "frames_indices": [i for i in range(num_frames)],
-                "video_backend": "opencv",
-                "do_sample_frames": True,
-            },
-        )
-    return mm_data
-
-
-def qwen3_vl_patch_mm_data(mm_data: MultiModalDataDict) -> MultiModalDataDict:
-    """
-    Patch the multimodal data for Qwen3-VL model.
+    Add metadata to video mm_data
     """
 
     def create_metadata(frames: np.ndarray):
@@ -119,16 +96,7 @@ _IGNORE_MM_KEYS = {
 }
 
 MM_DATA_PATCHES = {
-    # Ernie4.5-VL, GLM4.1V and Qwen3-VL requires video metadata
-    "ernie4_5_moe_vl": qwen3_vl_patch_mm_data,
-    "glm4v": glm4_1v_patch_mm_data,
-    "glm4v_moe": glm4_1v_patch_mm_data,
-    "glm_ocr": glm4_1v_patch_mm_data,
     "glmasr": glmasr_patch_mm_data,
-    "interns1_pro": qwen3_vl_patch_mm_data,
-    "molmo2": qwen3_vl_patch_mm_data,
-    "qwen3_vl": qwen3_vl_patch_mm_data,
-    "qwen3_vl_moe": qwen3_vl_patch_mm_data,
 }
 
 
@@ -173,6 +141,9 @@ def get_text_token_prompts(
     dummy_inputs = processor.dummy_inputs
     tokenizer: TokenizerLike = processor.info.get_tokenizer()
     model_config = processor.info.ctx.model_config
+
+    if processor.info.data_parser.video_needs_metadata:
+        mm_data = add_video_metadata(mm_data)
 
     model_type = model_config.hf_config.model_type
     if model_type in MM_DATA_PATCHES:
@@ -227,13 +198,17 @@ def get_text_token_prompts(
             mm_counts,
             mm_options={},
         )
-        assert isinstance(inputs.prompt, str)
-
-        text_prompt = inputs.prompt
-        token_prompt = tokenizer.encode(
-            text_prompt,
-            add_special_tokens=_ADD_SPECIAL_TOKENS_OVERRIDES.get(model_type, True),
-        )
+        # Some models (e.g., Kimi-Audio) return token IDs directly instead of str
+        if isinstance(inputs.prompt, list):
+            text_prompt = None
+            token_prompt = inputs.prompt
+        else:
+            assert isinstance(inputs.prompt, str)
+            text_prompt = inputs.prompt
+            token_prompt = tokenizer.encode(
+                text_prompt,
+                add_special_tokens=_ADD_SPECIAL_TOKENS_OVERRIDES.get(model_type, True),
+            )
 
     return text_prompt, token_prompt
 
@@ -333,10 +308,12 @@ def _test_processing_correctness(
 
     rng = np.random.RandomState(0)
 
+    # GLM-ASR requires a minimum audio length of 70ms
+    min_audio_len = 512 if model_config.hf_config.model_type != "glmasr" else 1120
     input_to_hit = {
         "image": Image.new("RGB", size=(128, 128)),
         "video": np.zeros((4, 128, 128, 3), dtype=np.uint8),
-        "audio": (np.zeros((512,)), 16000),
+        "audio": (np.zeros((min_audio_len,)), 16000),
         "vision_chunk": {"type": "image", "image": Image.new("RGB", size=(128, 128))},
     }
     input_factory = {
@@ -344,7 +321,13 @@ def _test_processing_correctness(
         "video": partial(
             random_video, rng, min_frames=2, max_frames=16, min_wh=128, max_wh=256
         ),
-        "audio": partial(random_audio, rng, min_len=512, max_len=1024, sr=16000),
+        "audio": partial(
+            random_audio,
+            rng,
+            min_len=min_audio_len,
+            max_len=min_audio_len + 512,
+            sr=16000,
+        ),
         "vision_chunk": partial(
             random_vision_chunk, rng, min_wh=128, max_wh=256, min_frames=1, max_frames=1
         ),
@@ -452,8 +435,6 @@ def test_processing_correctness(
     num_batches: int,
     simplify_rate: float,
 ):
-    if model_id == "allendou/Fun-ASR-Nano-2512-vllm":
-        pytest.skip("Cached audio `input_features` not matched. Fix later.")
     if model_id == "google/gemma-3n-E2B-it":
         pytest.skip("Fix later")
     if model_id == "OpenGVLab/InternVL2-2B":
