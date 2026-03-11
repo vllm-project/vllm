@@ -461,7 +461,8 @@ class MiniCPMModel(nn.Module, EagleModelMixin):
 
         aux_hidden_states = self._maybe_add_hidden_state([], 0, hidden_states, residual)
         for idx, layer in enumerate(
-            islice(self.layers, self.start_layer, self.end_layer)
+            islice(self.layers, self.start_layer, self.end_layer),
+            start=self.start_layer,
         ):
             hidden_states, residual = layer(
                 positions,
