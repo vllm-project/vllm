@@ -293,7 +293,7 @@ class GemmaModel(nn.Module):
         )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.embed_tokens(input_ids)
+        return self.embed_tokens(input_ids) * self.normalizer
 
     def forward(
         self,
@@ -307,7 +307,6 @@ class GemmaModel(nn.Module):
                 hidden_states = inputs_embeds
             else:
                 hidden_states = self.embed_input_ids(input_ids)
-            hidden_states *= self.normalizer
             residual = None
         else:
             hidden_states = intermediate_tensors["hidden_states"]
