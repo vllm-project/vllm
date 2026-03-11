@@ -11,7 +11,7 @@ import socket
 import tempfile
 import warnings
 from argparse import Namespace
-from collections.abc import AsyncIterator, Awaitable
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -551,7 +551,7 @@ async def build_and_serve(
     sock: socket.socket,
     args: Namespace,
     **uvicorn_kwargs,
-) -> Awaitable[None]:
+) -> asyncio.Task:
     """Build FastAPI app, initialize state, and start serving.
 
     Returns the shutdown task for the caller to await.
@@ -681,8 +681,6 @@ if __name__ == "__main__":
     )
     parser = make_arg_parser(parser)
     args = parser.parse_args()
-    if args is None:
-        raise ValueError("Failed to parse CLI arguments")
     validate_parsed_serve_args(args)
 
     uvloop.run(run_server(args))
