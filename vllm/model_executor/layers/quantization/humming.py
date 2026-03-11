@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import math
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 import regex as re
@@ -176,47 +177,12 @@ def compressed_tensors_get_config(config: dict[str, Any], key: str) -> dict[str,
     return target_group_config
 
 
-class HummingLayerQuantizationConfig(QuantizationConfig):
-    def __init__(self, weight_schema, input_schema=None, force_input_schema=None):
-        self.weight_schema: BaseWeightSchema = weight_schema
-        if input_schema is None:
-            input_schema = HummingInputSchema()
-        self.input_schema: BaseInputSchema = input_schema
-        self.force_input_schema: HummingInputSchema | None = force_input_schema
-
-    @classmethod
-    def from_config(cls, config):
-        weight_schema = BaseWeightSchema.from_config(config)
-        return cls(weight_schema)
-
-    @classmethod
-    def get_config_filenames(cls):
-        return []
-
-    @classmethod
-    def get_min_capability(cls):
-        return 75
-
-    @classmethod
-    def get_name(cls):
-        return "humming"
-
-    @classmethod
-    def get_supported_act_dtypes(cls) -> list[torch.dtype]:
-        return [torch.bfloat16, torch.half]
-
-    def get_quant_method(
-        self, layer: torch.nn.Module, prefix: str
-    ) -> QuantizeMethodBase | None:
-        raise NotImplementedError
-
-
 class HummingConfig(QuantizationConfig):
+    packed_modules_mapping = {}
+
     def __init__(self, full_config: dict[str, Any] | None = None):
         assert_humming_available()
         self.full_config: dict[str, Any] = full_config or {}
-        keys = ["ignored_layers", "ignore", "modules_to_not_convert"]
-        self.ignored_layers = self.get_from_keys_or(full_config or {}, keys, []) or []
 
     @classmethod
     def get_name(cls) -> QuantizationMethods:
@@ -245,10 +211,14 @@ class HummingConfig(QuantizationConfig):
         return "humming" if user_quant == "humming" else None
 
     def apply_vllm_mapper(self, hf_to_vllm_mapper: "WeightsMapper"):
-        self.ignored_layers = hf_to_vllm_mapper.apply_list(self.ignored_layers)
+        self.hf_to_vllm_mapper = hf_to_vllm_mapper
 
     def is_layer_skipped(self, config: dict[str, Any], prefix: str):
-        ignored_layers = self.ignored_layers
+        keys = ["ignored_layers", "ignore", "modules_to_not_convert"]
+        ignored_layers = self.get_from_keys_or(config, keys, []) or []
+        if hasattr(self, "hf_to_vllm_mapper"):
+            ignored_layers = self.hf_to_vllm_mapper.apply_list(ignored_layers)
+
         if any(module_name in prefix for module_name in ignored_layers):
             return True
         if "lm_head" in prefix:
@@ -276,7 +246,7 @@ class HummingConfig(QuantizationConfig):
         layer_dynmaic = config.get("dynamic", {})
         if not isinstance(layer_dynmaic, dict):
             layer_dynmaic = {}
-        for regex, override_config in layer_dynmaic:
+        for regex, override_config in layer_dynmaic.items():
             if regex[:1] != "+":
                 continue
             if re.match(regex[2:], prefix):
@@ -298,21 +268,28 @@ class HummingConfig(QuantizationConfig):
             config = group_config
 
         if config.get("quant_method", None) in BaseInputSchema.INPUT_SCHEMA_MAP:
-            return BaseInputSchema.from_config(config, error_if_unsupported=False)
+            return BaseInputSchema.from_config(config)
         return None
 
     def get_quant_config_for_layer(
         self, prefix: str, layer_type: str
-    ) -> HummingLayerQuantizationConfig | None:
-        assert HummingMethod is not None, ""
+    ) -> "HummingLayerQuantizationConfig | None":
+        weight_schema: BaseWeightSchema | None = None
+        force_weight_schema: HummingWeightSchema | None = None
 
         if self.full_config:
             weight_schema = self.get_layer_weight_schema(self.full_config, prefix)
-        else:
-            weight_config = envs.VLLM_HUMMING_ONLINE_QUANT_CONFIG or {}
-            if "quant_method" not in weight_config:
-                weight_config["quant_method"] = "humming"
-            weight_schema = self.get_layer_weight_schema(weight_config, prefix)
+
+        is_online_quant = False
+        online_quant_config = envs.VLLM_HUMMING_ONLINE_QUANT_CONFIG or {}
+        if not self.full_config or online_quant_config.get("force_requant", False):
+            online_quant_config["quant_method"] = "humming"
+            schema = self.get_layer_weight_schema(online_quant_config, prefix)
+            if not self.full_config:
+                weight_schema = schema
+                is_online_quant = True
+            else:
+                force_weight_schema = schema
 
         if weight_schema is not None:
             if weight_schema.quant_method == "mxfp4" and layer_type != "moe":
@@ -330,10 +307,15 @@ class HummingConfig(QuantizationConfig):
                 if input_schema is None:
                     input_schema = force_input_schema
 
+            if force_weight_schema is not None and force_input_schema is None:
+                force_input_schema = HummingInputSchema()
+
             return HummingLayerQuantizationConfig(
                 weight_schema=weight_schema,
                 input_schema=input_schema,
+                force_weight_schema=force_weight_schema,
                 force_input_schema=force_input_schema,
+                is_online_quant=is_online_quant,
             )
         return None
 
@@ -358,14 +340,44 @@ class HummingConfig(QuantizationConfig):
         return None
 
 
+class HummingLayerQuantizationConfig(HummingConfig):
+    def __init__(
+        self,
+        weight_schema: BaseWeightSchema,
+        input_schema: BaseInputSchema | None = None,
+        force_weight_schema: HummingWeightSchema | None = None,
+        force_input_schema: HummingInputSchema | None = None,
+        is_online_quant: bool = False,
+    ):
+        self.weight_schema = weight_schema
+        if input_schema is None:
+            input_schema = HummingInputSchema()
+        self.input_schema = input_schema
+        self.force_weight_schema = force_weight_schema
+        self.force_input_schema = force_input_schema
+        self.is_online_quant = is_online_quant
+
+    @classmethod
+    def from_config(cls, config):
+        weight_schema = BaseWeightSchema.from_config(config)
+        return cls(weight_schema)
+
+    def get_quant_method(
+        self, layer: torch.nn.Module, prefix: str
+    ) -> QuantizeMethodBase | None:
+        raise NotImplementedError
+
+
 class HummingLinearMethod(LinearMethodBase):
     def __init__(self, quant_config: HummingLayerQuantizationConfig):
         self.quant_config = quant_config
         self.weight_schema = quant_config.weight_schema
         self.input_schema = quant_config.input_schema
+        self.force_weight_schema = quant_config.force_weight_schema
         self.force_input_schema = quant_config.force_input_schema
+        self.is_online_quant = self.quant_config.is_online_quant
 
-    def prepare_weight_loader(self, layer, weight_loader):
+    def prepare_weight_loader(self, layer: torch.nn.Module, weight_loader: Callable):
         def new_weight_loader(
             param: torch.nn.Parameter,
             loaded_weight: torch.Tensor,
@@ -373,7 +385,8 @@ class HummingLinearMethod(LinearMethodBase):
         ):
             name = param.param_name
             float_dtypes = [torch.float16, torch.bfloat16, torch.float32]
-            if name == "weight" and loaded_weight.dtype in float_dtypes:
+            is_unquantized = name == "weight" and loaded_weight.dtype in float_dtypes
+            if is_unquantized and self.is_online_quant:
                 assert isinstance(self.weight_schema, HummingWeightSchema)
                 f16_dtype = DataType.from_torch_dtype(layer.param_dtype)
                 tensor_list = quantize_weight(
@@ -395,6 +408,30 @@ class HummingLinearMethod(LinearMethodBase):
                     param.weight_loader(param, tensor, shard_id)
 
                 return None
+            elif is_unquantized and not self.is_online_quant:
+                # fallback to unquantized linear
+                if layer.is_fallback:
+                    return None
+                layer.is_fallback = True
+                for name, _ in list(layer.named_parameters()):
+                    if name != "bias":
+                        delattr(layer, name)
+                delattr(layer, "locks")
+                self.__class__ = UnquantizedLinearMethod
+                tensor = torch.empty(
+                    (layer.output_size_per_partition, layer.input_size_per_partition),
+                    dtype=layer.param_dtype,
+                    device=param.device,
+                )
+                layer.weight = ModelWeightParameter(
+                    data=tensor,
+                    input_dim=1,
+                    output_dim=0,
+                    weight_loader=layer.extra_weight_attrs["weight_loader"],
+                )
+                if shard_id is not None:
+                    return layer.weight.weight_loader(param, loaded_weight, shard_id)
+                return layer.weight.weight_loader(param, loaded_weight)
 
             loaded_weight = self.weight_schema.process_loaded_weight(
                 tensor=loaded_weight,
@@ -424,7 +461,7 @@ class HummingLinearMethod(LinearMethodBase):
         layer.input_size_per_partition = input_size_per_partition
         layer.output_size_per_partition = sum(output_partition_sizes)
         layer.output_partition_sizes = output_partition_sizes
-        layer.extra_weight_attrs = extra_weight_attrs
+        layer.extra_weight_attrs = extra_weight_attrs.copy()
 
         weight_loader = extra_weight_attrs.get("weight_loader", default_weight_loader)
         new_weight_loader = self.prepare_weight_loader(layer, weight_loader)
@@ -465,7 +502,13 @@ class HummingLinearMethod(LinearMethodBase):
         if self.force_input_schema is not None:
             self.input_schema = self.force_input_schema
 
+        if not hasattr(layer, "weight"):
+            param = prepare_param(torch.tensor(0), "weight", extra_weight_attrs)
+            layer.weight = param
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        if layer.is_fallback:
+            return None
         if not isinstance(self.weight_schema, HummingWeightSchema):
             self.weight_schema, tensors = self.weight_schema.convert_humming(
                 tensors=layer.state_dict(),
@@ -487,6 +530,29 @@ class HummingLinearMethod(LinearMethodBase):
             for name, tensor in tensors.items():
                 param = torch.nn.Parameter(tensor, requires_grad=False)
                 setattr(layer, name, param)
+
+            del tensors
+
+        assert isinstance(self.weight_schema, HummingWeightSchema)
+        force_requant = self.force_weight_schema is not None
+        if force_requant and self.weight_schema != self.force_weight_schema:
+            tensors = self.weight_schema.requant_tensors(
+                tensors=layer.state_dict(),
+                target_weight_schema=self.force_weight_schema,
+                param_dtype=layer.param_dtype,
+            )
+
+            self.weight_schema = self.force_weight_schema
+
+            for name, _ in list(layer.named_parameters()):
+                if name != "bias":
+                    delattr(layer, name)
+
+            for name, tensor in tensors.items():
+                param = torch.nn.Parameter(tensor, requires_grad=False)
+                setattr(layer, name, param)
+
+            del tensors
 
         HummingMethod.prepare_layer_meta(
             layer=layer,
@@ -525,6 +591,7 @@ class HummingMoEMethod(FusedMoEMethodBase):
         self.moe = moe
         self.weight_schema = quant_config.weight_schema
         self.input_schema = quant_config.input_schema
+        self.force_weight_schema = quant_config.force_weight_schema
         self.force_input_schema = quant_config.force_input_schema
 
     def prepare_weight_loader(self, layer, weight_loader):
@@ -538,7 +605,8 @@ class HummingMoEMethod(FusedMoEMethodBase):
         ):
             name = param.param_name
             float_dtypes = [torch.float16, torch.bfloat16, torch.float32]
-            if name == "weight" and loaded_weight.dtype in float_dtypes:
+            is_unquantized = name == "weight" and loaded_weight.dtype in float_dtypes
+            if is_unquantized:
                 assert isinstance(self.weight_schema, HummingWeightSchema)
                 f16_dtype = DataType.from_torch_dtype(layer.param_dtype)
                 tensor_list = quantize_weight(
@@ -687,8 +755,9 @@ class HummingMoEMethod(FusedMoEMethodBase):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         for sublayer_name, configs in layer.sublayer_configs.items():
-            input_schema = weight_schema = None
-            if not isinstance(self.weight_schema, HummingWeightSchema):
+            input_schema = self.input_schema
+            weight_schema = self.weight_schema
+            if not isinstance(weight_schema, HummingWeightSchema):
                 tensors: dict[str, torch.Tensor] = dict(
                     (key.removeprefix(sublayer_name + "_"), value)
                     for key, value in layer.state_dict().items()
@@ -700,7 +769,7 @@ class HummingMoEMethod(FusedMoEMethodBase):
                 if sublayer_name == "w13":
                     shape_n_stacks = [configs["shape_n"] // 2] * 2
 
-                weight_schema, tensors = self.weight_schema.convert_humming(
+                weight_schema, tensors = weight_schema.convert_humming(
                     tensors=tensors,
                     shape_n_stacks=shape_n_stacks,
                     shape_k_stacks=shape_k_stacks,
@@ -708,7 +777,7 @@ class HummingMoEMethod(FusedMoEMethodBase):
                     num_experts=layer.num_experts,
                 )
 
-                input_schema, _ = self.input_schema.convert_humming(
+                input_schema, _ = input_schema.convert_humming(
                     tensors=tensors,
                     shape_n_stacks=shape_n_stacks,
                     shape_k_stacks=shape_k_stacks,
@@ -726,14 +795,45 @@ class HummingMoEMethod(FusedMoEMethodBase):
                     param = torch.nn.Parameter(tensor, requires_grad=False)
                     setattr(layer, name, param)
 
+            assert isinstance(weight_schema, HummingWeightSchema)
+            force_requant = self.force_weight_schema is not None
+            if force_requant and weight_schema != self.force_weight_schema:
+                tensors: dict[str, torch.Tensor] = dict(
+                    (key.removeprefix(sublayer_name + "_"), value)
+                    for key, value in layer.state_dict().items()
+                    if key.startswith(sublayer_name + "_")
+                )
+
+                tensors = weight_schema.requant_tensors(
+                    tensors=tensors,
+                    target_weight_schema=self.force_weight_schema,
+                    param_dtype=layer.param_dtype,
+                )
+
+                weight_schema = self.force_weight_schema
+
+                for name, _ in list(layer.named_parameters()):
+                    if not name.startswith(sublayer_name + "_"):
+                        continue
+                    if name == sublayer_name + "_bias":
+                        continue
+                    delattr(layer, name)
+
+                for name, tensor in tensors.items():
+                    name = f"{sublayer_name}_{name}"
+                    param = torch.nn.Parameter(tensor, requires_grad=False)
+                    setattr(layer, name, param)
+
+                del tensors
+
             HummingMethod.prepare_layer_meta(
                 layer=layer,
                 shape_n=configs["shape_n"],
                 shape_k=configs["shape_k"],
                 pad_n_to_multiple=256,
                 pad_k_to_multiple=128,
-                input_schema=input_schema or self.input_schema,
-                weight_schema=weight_schema or self.weight_schema,
+                input_schema=input_schema,
+                weight_schema=weight_schema,
                 has_bias=self.moe.has_bias,
                 num_experts=layer.num_experts,
                 top_k=self.moe.experts_per_token,
