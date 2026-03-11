@@ -13,19 +13,19 @@ namespace vllm {
 
 // Implements section 2.2 of https://www.arxiv.org/pdf/2501.01005
 // can be used to combine partial attention results (in the split-KV case)
-template <typename scalar_t, typename out_t, const uint NUM_THREADS,
-          bool FP8_OUTPUT>
+template <typename scalar_t, typename output_t, const uint NUM_THREADS,
+          bool USE_FP8_OUTPUT>
 __global__ void merge_attn_states_kernel(
-    out_t* output, float* output_lse, const scalar_t* prefix_output,
+    output_t* output, float* output_lse, const scalar_t* prefix_output,
     const float* prefix_lse, const scalar_t* suffix_output,
     const float* suffix_lse, const float* output_scale, const uint num_tokens,
     const uint num_heads, const uint head_size, const uint prefix_head_stride,
     const uint output_head_stride) {
   // Inputs always load 128-bit packs (pack_size elements of scalar_t).
-  // Outputs store pack_size elements of out_t, which is smaller for FP8.
+  // Outputs store pack_size elements of output_t, which is smaller for FP8.
   using input_pack_t = uint4;
   using output_pack_t =
-      std::conditional_t<FP8_OUTPUT,
+      std::conditional_t<USE_FP8_OUTPUT,
                          std::conditional_t<sizeof(scalar_t) == 4, uint, uint2>,
                          uint4>;
   const uint pack_size = 16 / sizeof(scalar_t);
@@ -50,12 +50,12 @@ __global__ void merge_attn_states_kernel(
                                head_idx * output_head_stride;
   const scalar_t* prefix_head_ptr = prefix_output + src_head_offset;
   const scalar_t* suffix_head_ptr = suffix_output + src_head_offset;
-  out_t* output_head_ptr = output + dst_head_offset;
+  output_t* output_head_ptr = output + dst_head_offset;
 
-  // Load scale once for FP8 path
-  float fp8_scale = 1.0f;
-  if constexpr (FP8_OUTPUT) {
-    fp8_scale = *output_scale;
+  // Pre-invert scale: multiplication is faster than division
+  float fp8_scale_inv = 1.0f;
+  if constexpr (USE_FP8_OUTPUT) {
+    fp8_scale_inv = 1.0f / *output_scale;
   }
 
   float p_lse = prefix_lse[head_idx * num_tokens + token_idx];
@@ -65,21 +65,29 @@ __global__ void merge_attn_states_kernel(
 
   const float max_lse = fmaxf(p_lse, s_lse);
 
+  /* In certain edge cases, MLA can produce p_lse = s_lse = -inf;
+     continuing the pipeline then yields NaN. Root cause: with chunked prefill
+     a batch may be split into two chunks; if a request in that batch has no
+     prefix hit, every LSE entry for that request's position is -inf, and at
+     this moment we merge cross-attention at first. For now we simply emit
+     prefix_output (expected to be all zeros) and prefix_lse (-inf) to fix
+     this problem.
+  */
   if (std::isinf(max_lse)) {
     if (pack_offset < head_size) {
       input_pack_t p_out_pack = reinterpret_cast<const input_pack_t*>(
           prefix_head_ptr)[pack_offset / pack_size];
 
-      if constexpr (FP8_OUTPUT) {
+      if constexpr (USE_FP8_OUTPUT) {
         // Convert prefix values to FP8 (since -inf means no data,
         // prefix_output is expected to be zeros)
-        out_t o_out_pack[pack_size];
+        output_t o_out_pack[pack_size];
 #pragma unroll
         for (uint i = 0; i < pack_size; ++i) {
           const float val =
               vllm::to_float(reinterpret_cast<const scalar_t*>(&p_out_pack)[i]);
           o_out_pack[i] =
-              vllm::scaled_fp8_conversion<false, out_t>(val, fp8_scale);
+              vllm::scaled_fp8_conversion<true, output_t>(val, fp8_scale_inv);
         }
         reinterpret_cast<output_pack_t*>(
             output_head_ptr)[pack_offset / pack_size] =
@@ -122,12 +130,12 @@ __global__ void merge_attn_states_kernel(
     }
 
     // Convert and store
-    if constexpr (FP8_OUTPUT) {
-      out_t o_out_pack[pack_size];
+    if constexpr (USE_FP8_OUTPUT) {
+      output_t o_out_pack[pack_size];
 #pragma unroll
       for (uint i = 0; i < pack_size; ++i) {
-        o_out_pack[i] =
-            vllm::scaled_fp8_conversion<false, out_t>(o_out_f[i], fp8_scale);
+        o_out_pack[i] = vllm::scaled_fp8_conversion<true, output_t>(
+            o_out_f[i], fp8_scale_inv);
       }
       reinterpret_cast<output_pack_t*>(
           output_head_ptr)[pack_offset / pack_size] =
@@ -168,11 +176,13 @@ __global__ void merge_attn_states_kernel(
     }                                                                   \
   }
 
-#define LAUNCH_MERGE_ATTN_STATES(scalar_t, out_t, NUM_THREADS, FP8_OUTPUT)     \
+#define LAUNCH_MERGE_ATTN_STATES(scalar_t, output_t, NUM_THREADS,              \
+                                 USE_FP8_OUTPUT)                               \
   {                                                                            \
-    vllm::merge_attn_states_kernel<scalar_t, out_t, NUM_THREADS, FP8_OUTPUT>   \
+    vllm::merge_attn_states_kernel<scalar_t, output_t, NUM_THREADS,            \
+                                   USE_FP8_OUTPUT>                             \
         <<<grid, block, 0, stream>>>(                                          \
-            reinterpret_cast<out_t*>(output.data_ptr()), output_lse_ptr,       \
+            reinterpret_cast<output_t*>(output.data_ptr()), output_lse_ptr,    \
             reinterpret_cast<scalar_t*>(prefix_output.data_ptr()),             \
             reinterpret_cast<float*>(prefix_lse.data_ptr()),                   \
             reinterpret_cast<scalar_t*>(suffix_output.data_ptr()),             \
