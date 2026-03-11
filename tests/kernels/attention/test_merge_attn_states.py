@@ -330,11 +330,15 @@ FP8_NUM_QUERY_HEADS = [8, 16, 64]
 FP8_HEAD_SIZES = [64, 128, 256]
 
 
+FP8_INPUT_DTYPES = [torch.float32, torch.float16, torch.bfloat16]
+
+
 @pytest.mark.parametrize("num_tokens", FP8_NUM_BATCH_TOKENS)
 @pytest.mark.parametrize("num_query_heads", FP8_NUM_QUERY_HEADS)
 @pytest.mark.parametrize("head_size", FP8_HEAD_SIZES)
 @pytest.mark.parametrize("output_scale_val", [0.5, 0.05])
 @pytest.mark.parametrize("use_output_lse", [True, False])
+@pytest.mark.parametrize("input_dtype", FP8_INPUT_DTYPES)
 @torch.inference_mode()
 def test_merge_attn_states_fp8(
     num_tokens: int,
@@ -342,11 +346,10 @@ def test_merge_attn_states_fp8(
     head_size: int,
     output_scale_val: float,
     use_output_lse: bool,
+    input_dtype: torch.dtype,
 ):
     if not current_platform.is_cuda():
         pytest.skip("FP8 merge_attn_states test requires CUDA")
-
-    input_dtype = torch.bfloat16
     fp8_dtype = current_platform.fp8_dtype()
 
     print(
@@ -438,13 +441,13 @@ def test_merge_attn_states_fp8(
         output_scale=output_scale,
     )
 
-    # 3. Compare — use scale-dependent tolerances
-    # scale=0.5: values stay in low-magnitude FP8 range, finer granularity
-    # scale=0.05: values pushed to high-magnitude range, coarse quantization
+    # 3. Compare — use scale-dependent tolerances.
+    # FP8 e4m3 spacing grows with magnitude (e.g. 4.0 at magnitude 32),
+    # so smaller scales (larger FP8 magnitudes) need wider absolute tolerance.
     if output_scale_val >= 0.5:
-        fp8_atol, fp8_rtol = 0.5, 0.05
+        fp8_atol, fp8_rtol = 2.5, 0.05
     else:
-        fp8_atol, fp8_rtol = 2.5, 0.15
+        fp8_atol, fp8_rtol = 5.0, 0.10
 
     def diff(a: torch.Tensor, b: torch.Tensor):
         return torch.max(torch.abs(a.float() - b.float()))

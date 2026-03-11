@@ -195,7 +195,7 @@ __global__ void merge_attn_states_kernel(
  * into the output tensor. NUM_TOKENS: n, NUM_HEADS: h, HEAD_SIZE: d
  *
  * @param output [n,h,d] The output tensor to store the merged attention states.
- * @param output_lse [h,d] Optional tensor to store the log-sum-exp values.
+ * @param output_lse [h,n] Optional tensor to store the log-sum-exp values.
  * @param prefix_output [n,h,d] The prefix attention states.
  * @param prefix_lse [h,n] The log-sum-exp values for the prefix attention
  * states.
