@@ -6,7 +6,7 @@ Expert parallelism load balancer (EPLB) metrics and states.
 # Glossary
 
 - **Logical Expert**: An expert that is part of the model's logical structure.
-  It holds a set of weights and is replicated across multiple physical
+  It holds a set of weights and might be replicated across multiple physical
   experts.
 - **Redundant Expert**: To achieve load balancing, for some popular logical
   experts, we create additional copies of the expert weights. During inference,
@@ -106,7 +106,10 @@ class EplbModelState:
     [[0, 1, 2, 3, 0, 1],
      [0, 2, 0, 1, 0, 3]]
     ```
+    The two first columns represent physical experts on the first device,
+    the next two on the second device, etc...
     """
+
     logical_to_physical_map: torch.Tensor
     """
     Mapping from logical experts to physical experts.
@@ -130,7 +133,13 @@ class EplbModelState:
       [1, -1, -1],
       [5, -1, -1]]]
     ```
+    In each row, the count of positions that are NOT equal to -1 is
+    the number of times the expert is replicated. In the example above,
+    in the first layer, logical expert 1 (second row) is replicated twice:
+    once as physical expert 1 on device 0 (first column), and once as
+    physical expert 5 on device 1 (second column).
     """
+
     logical_replica_count: torch.Tensor
     """
     Number of replicas for each logical expert.
@@ -150,13 +159,14 @@ class EplbModelState:
     expert_load_pass: torch.Tensor
     """
     Expert load during this forward pass. 
-    We use the token count each expert processes as the load.
+    We use the token count each physical expert processes as the load.
 
     Shape: (num_moe_layers, num_physical_experts)
     """
+
     expert_load_window: torch.Tensor
     """
-    A sliding window of expert load.
+    A sliding window of physical expert load.
 
     Shape: (window_size, num_moe_layers, num_physical_experts)
 
@@ -168,8 +178,14 @@ class EplbModelState:
     See:
     https://github.com/vllm-project/vllm/pull/22167#pullrequestreview-3086143856
     """
+
     model_name: str
+    """
+    Used for observability / logging.
+    """
+
     model: MixtureOfExperts
+
     expert_buffer: list[torch.Tensor]
     """
     The buffer to store the expert weights during transfer.
@@ -632,7 +648,6 @@ class EplbState:
                     self.move_to_workspace(
                         model_state=eplb_model_state,
                         ep_group=ep_group,
-                        is_profile=is_profile,
                     )
 
         if self.expert_rearrangement_step >= self.expert_rearrangement_step_interval:
@@ -862,7 +877,6 @@ class EplbState:
 
     def start_async_loop(
         self,
-        rank_mapping: dict[int, int] | None = None,
         is_profile: bool = False,
     ):
         if not self.is_async:
@@ -900,7 +914,6 @@ class EplbState:
         self,
         model_state: EplbModelState,
         ep_group: ProcessGroup,
-        is_profile: bool = False,
     ):
         # We call move_to_workspace only when ep_buffer_ready is 1.
         # It means we only need to wait for the lock for a short time.
@@ -1069,14 +1082,14 @@ class EplbState:
         return eplb_state
 
 
-@dataclass
-class EplbLayerState:
+@dataclass(frozen=True)
+class InitializedEplbLayerState:
     """Runtime EPLB data stored in the MoE layer."""
 
-    expert_load_view: torch.Tensor | None = None
-    logical_to_physical_map: torch.Tensor | None = None
-    logical_replica_count: torch.Tensor | None = None
-    should_record_tensor: torch.Tensor | None = None
+    expert_load_view: torch.Tensor
+    logical_to_physical_map: torch.Tensor
+    logical_replica_count: torch.Tensor
+    should_record_tensor: torch.Tensor
     """
     Shared scalar bool tensor controlling whether to accumulate expert load
     metrics during this forward pass.  All layers reference the **same**

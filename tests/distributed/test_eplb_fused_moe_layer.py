@@ -221,6 +221,11 @@ def _test_eplb_fml(env, world_size: int, test_config: TestConfig):
             is_profile=False,
         )
 
+        # Recompute derived per-expert state (quant scales, kernel cached
+        # values) that became stale after rearrangement.
+        for fml in fml_layers:
+            fml.post_weight_rearrangement()
+
         num_local_experts = test_config.num_local_experts
         num_global_experts = test_config.num_experts
         for lidx, fml in enumerate(fml_layers):
