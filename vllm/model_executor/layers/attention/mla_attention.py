@@ -456,7 +456,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 self._vllm_config.scheduler_config.max_num_batched_tokens,
                 self.num_heads * self.v_head_dim,
                 dtype=dtype,
-                device=self.kv_b_proj.weight.device,
+                device=next(self.kv_b_proj.parameters()).device,
             )
 
     @property
