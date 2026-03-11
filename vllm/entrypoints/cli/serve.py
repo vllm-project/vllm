@@ -3,7 +3,6 @@
 
 import argparse
 import signal
-import time
 
 import uvloop
 
@@ -50,6 +49,12 @@ class ServeSubcommand(CLISubcommand):
         # If model is specified in CLI (as positional arg), it takes precedence
         if hasattr(args, "model_tag") and args.model_tag is not None:
             args.model = args.model_tag
+
+        if getattr(args, "grpc", False):
+            from vllm.entrypoints.grpc_server import serve_grpc
+
+            uvloop.run(serve_grpc(args))
+            return
 
         if args.headless:
             if args.api_server_count is not None and args.api_server_count > 0:
@@ -127,6 +132,13 @@ class ServeSubcommand(CLISubcommand):
         )
 
         serve_parser = make_arg_parser(serve_parser)
+        serve_parser.add_argument(
+            "--grpc",
+            action="store_true",
+            default=False,
+            help="Launch a gRPC server instead of the HTTP OpenAI-compatible "
+            "server. Requires: pip install vllm[grpc].",
+        )
         serve_parser.epilog = VLLM_SUBCMD_PARSER_EPILOG.format(subcmd=self.name)
         return serve_parser
 
@@ -212,12 +224,8 @@ def run_headless(args: argparse.Namespace):
     try:
         engine_manager.join_first()
     finally:
-        timeout = None
-        if shutdown_requested:
-            timeout = vllm_config.shutdown_timeout
-            logger.info("Waiting up to %d seconds for processes to exit", timeout)
-        engine_manager.shutdown(timeout=timeout)
         logger.info("Shutting down.")
+        engine_manager.close()
 
 
 def run_multi_api_server(args: argparse.Namespace):
@@ -225,27 +233,8 @@ def run_multi_api_server(args: argparse.Namespace):
     num_api_servers: int = args.api_server_count
     assert num_api_servers > 0
 
-    if num_api_servers > 1 and getattr(args, "use_gpu_for_pooling_score", False):
-        # TODO(wentao): remove this once well tested
-        raise ValueError(
-            "--use-gpu-for-pooling-score cannot be used with api_server_count > 1 now"
-        )
-
     if num_api_servers > 1:
         setup_multiprocess_prometheus()
-
-    shutdown_requested = False
-
-    # Catch SIGTERM and SIGINT to allow graceful shutdown.
-    def signal_handler(signum, frame):
-        nonlocal shutdown_requested
-        logger.debug("Received %d signal.", signum)
-        if not shutdown_requested:
-            shutdown_requested = True
-            raise SystemExit
-
-    signal.signal(signal.SIGTERM, signal_handler)
-    signal.signal(signal.SIGINT, signal_handler)
 
     listen_address, sock = setup_server(args)
 
@@ -308,29 +297,11 @@ def run_multi_api_server(args: argparse.Namespace):
         api_server_manager = APIServerProcessManager(**api_server_manager_kwargs)
 
     # Wait for API servers
-    try:
-        wait_for_completion_or_failure(
-            api_server_manager=api_server_manager,
-            engine_manager=local_engine_manager,
-            coordinator=coordinator,
-        )
-    finally:
-        timeout = shutdown_by = None
-        if shutdown_requested:
-            timeout = vllm_config.shutdown_timeout
-            shutdown_by = time.monotonic() + timeout
-            logger.info("Waiting up to %d seconds for processes to exit", timeout)
-
-        def to_timeout(deadline: float | None) -> float | None:
-            return (
-                deadline if deadline is None else max(deadline - time.monotonic(), 0.0)
-            )
-
-        api_server_manager.shutdown(timeout=timeout)
-        if local_engine_manager:
-            local_engine_manager.shutdown(timeout=to_timeout(shutdown_by))
-        if coordinator:
-            coordinator.shutdown(timeout=to_timeout(shutdown_by))
+    wait_for_completion_or_failure(
+        api_server_manager=api_server_manager,
+        engine_manager=local_engine_manager,
+        coordinator=coordinator,
+    )
 
 
 def run_api_server_worker_proc(
