@@ -126,8 +126,8 @@ class DFlashModelProposer(SpecDecodeBaseProposer):
                 positions=self._get_positions(2 * num_input_tokens),
                 hidden_states=self.hidden_states[:num_input_tokens],
                 inputs_embeds=None,
-            )
-            
+            )            
+           
     @override
     def _get_slot_mapping(
         self,
