@@ -197,7 +197,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             logprobs_mode=self.model_config.logprobs_mode,
             num_speculative_tokens=self.num_speculative_steps + 1,
         )
-        self.prompt_logprobs_worker = PromptLogprobsWorker(self.max_num_reqs)
+        self.prompt_logprobs_worker = PromptLogprobsWorker(
+            self.max_num_reqs, logprobs_mode=self.model_config.logprobs_mode
+        )
 
         # CUDA graphs.
         self.decode_query_len = self.num_speculative_steps + 1

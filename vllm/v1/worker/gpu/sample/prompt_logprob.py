@@ -5,16 +5,17 @@ from collections.abc import Callable
 import numpy as np
 import torch
 
+from vllm.config.model import LogprobsMode
 from vllm.sampling_params import SamplingParams
 from vllm.triton_utils import tl, triton
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.worker.gpu.input_batch import InputBatch
-from vllm.v1.worker.gpu.sample.logprob import compute_topk_logprobs
 
 
 class PromptLogprobsWorker:
-    def __init__(self, max_num_reqs: int):
+    def __init__(self, max_num_reqs: int, logprobs_mode: LogprobsMode = "raw_logprobs"):
         self.max_num_reqs = max_num_reqs
+        self.logprobs_mode = logprobs_mode
 
         self.uses_prompt_logprobs = np.zeros(self.max_num_reqs, dtype=bool)
         # req_idx -> list of in-progress LogprobsTensors
@@ -77,6 +78,7 @@ class PromptLogprobsWorker:
             prompt_logprobs_token_ids,
             hidden_states[: input_batch.num_tokens],
             logits_fn,
+            self.logprobs_mode,
         )
 
         pos_after_step = computed_prefill + input_batch.num_scheduled_tokens
@@ -184,6 +186,7 @@ def compute_prompt_logprobs_with_chunking(
     prompt_token_ids: torch.Tensor,
     prompt_hidden_states: torch.Tensor,
     logits_fn: Callable[[torch.Tensor], torch.Tensor],
+    logprobs_mode: LogprobsMode = "raw_logprobs",
 ) -> tuple[torch.Tensor, torch.Tensor]:
     # Since materializing the full prompt logits can take too much memory,
     # we compute it in chunks.
@@ -195,13 +198,25 @@ def compute_prompt_logprobs_with_chunking(
         end_idx = start_idx + CHUNK_SIZE
         # NOTE(woosuk): logits_fn can be slow because it involves all-gather.
         prompt_logits = logits_fn(prompt_hidden_states[start_idx:end_idx])
-        prompt_logprobs = compute_topk_logprobs(
-            prompt_logits,
-            0,  # num_logprobs
-            prompt_token_ids[start_idx:end_idx],
-        )
-        logprobs.append(prompt_logprobs.logprobs)
-        ranks.append(prompt_logprobs.selected_token_ranks)
+
+        # NOTE: For prompt logprobs, there is no "processing" step
+        # (no penalties, temperature, etc.), so "processed" and "raw"
+        # variants are equivalent. We respect logprobs_mode to return
+        # either log_softmax values or raw logits as requested.
+        token_ids = prompt_token_ids[start_idx:end_idx]
+        if logprobs_mode in ("raw_logits", "processed_logits"):
+            values = prompt_logits.to(torch.float32)
+        else:
+            values = torch.nn.functional.log_softmax(
+                prompt_logits, dim=-1, dtype=torch.float32
+            )
+
+        token_ids_unsqueezed = token_ids.unsqueeze(-1)
+        token_logprobs = values.gather(-1, token_ids_unsqueezed)
+        token_ranks = (values >= token_logprobs).sum(-1)
+
+        logprobs.append(token_logprobs)
+        ranks.append(token_ranks)
 
     logprobs = torch.cat(logprobs, dim=0) if len(logprobs) > 1 else logprobs[0]
     ranks = torch.cat(ranks, dim=0) if len(ranks) > 1 else ranks[0]
