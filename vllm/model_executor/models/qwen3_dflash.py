@@ -8,10 +8,10 @@ import torch
 from torch import nn
 from transformers import Qwen3Config
 
-from vllm.model_executor.layers.attention import Attention
 from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     QKVParallelLinear,
@@ -483,7 +483,9 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
             return hidden_states
         # combine multiple auxiliary hidden states returned by eagle3
         if hidden_states.dim() == 1:
-            return self.model.hidden_norm(self.model.fc(hidden_states).view(-1,1)).view(-1)
+            return self.model.hidden_norm(
+                self.model.fc(hidden_states).view(-1,1)
+            ).view(-1)
         return self.model.hidden_norm(self.model.fc(hidden_states))
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
