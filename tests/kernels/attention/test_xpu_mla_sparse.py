@@ -72,15 +72,16 @@ def reference_mla_sparse_prefill(
 
     lonely_q_mask = orig_lse == float("-inf")  # [s_q, h_q]
     orig_lse[lonely_q_mask] = float("+inf")
-    return (out.to(torch.bfloat16), out, max_logits, orig_lse)
+    return (out.to(kv.dtype), out, max_logits, orig_lse)
 
 
 @pytest.mark.parametrize("device_str", ["xpu"])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.skipif(
     not torch.xpu.is_available(),
     reason="XPU is required",
 )
-def test_bf16_triton_sparse_mla(device_str):
+def test_bf16_triton_sparse_mla(device_str, dtype):
     device = torch.device(device_str)
     s_q = 1
     s_kv = 256
@@ -89,7 +90,6 @@ def test_bf16_triton_sparse_mla(device_str):
     d_qk = 576
     d_v = 512
     topk = 128
-    dtype = torch.bfloat16
 
     torch.random.manual_seed(1234)
 

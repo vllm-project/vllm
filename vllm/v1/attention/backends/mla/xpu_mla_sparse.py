@@ -57,6 +57,14 @@ class XPUMLASparseBackend(AttentionBackend):
     def get_impl_cls() -> type["XPUMLASparseImpl"]:
         return XPUMLASparseImpl
 
+    @classmethod
+    def is_mla(cls) -> bool:
+        return True
+
+    @classmethod
+    def is_sparse(cls) -> bool:
+        return True
+
     @staticmethod
     def get_kv_cache_shape(
         num_blocks: int,
@@ -66,10 +74,6 @@ class XPUMLASparseBackend(AttentionBackend):
         cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
         return (num_blocks, block_size, head_size)
-
-    @classmethod
-    def get_supported_dtypes(cls) -> list[torch.dtype]:
-        return [torch.bfloat16]
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
@@ -225,6 +229,9 @@ class XPUMLASparseImpl(SparseMLAAttentionImpl[XPUMLASparseMetadata]):
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         # NOTE(lucas): for the sparse FlashMLA kernels the kernels want to use
         # MQA 576/512 approach for both prefill and decode
+
+        if self.kv_cache_dtype.startswith("fp8"):
+            raise NotImplementedError("FP8 kv is not supported with XPU MLA Sparse yet")
 
         # Concatenate q if it's a tuple (ql_nope, q_pe)
         if isinstance(q, tuple):
