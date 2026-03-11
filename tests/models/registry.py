@@ -669,20 +669,14 @@ _TOKEN_CLASSIFICATION_EXAMPLE_MODELS = {
 }
 
 _SEQUENCE_CLASSIFICATION_EXAMPLE_MODELS = {
-    # [Decoder-only]
     "GPT2ForSequenceClassification": _HfExamplesInfo(
         "nie3e/sentiment-polish-gpt2-small"
     ),
-    # [Cross-encoder]
     "BertForSequenceClassification": _HfExamplesInfo(
         "cross-encoder/ms-marco-MiniLM-L-6-v2"
     ),
-    "BertForTokenClassification": _HfExamplesInfo("boltuix/NeuroBERT-NER"),
     "ErnieForSequenceClassification": _HfExamplesInfo(
         "Forrest20231206/ernie-3.0-base-zh-cls",
-    ),
-    "ErnieForTokenClassification": _HfExamplesInfo(
-        "gyr66/Ernie-3.0-base-chinese-finetuned-ner",
     ),
     "GteNewForSequenceClassification": _HfExamplesInfo(
         "Alibaba-NLP/gte-multilingual-reranker-base",
