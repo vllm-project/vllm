@@ -31,7 +31,10 @@ from transformers.models.llama4.image_processing_llama4_fast import (
     get_best_fit,
 )
 
-from vllm.compilation.decorators import support_torch_compile
+from vllm.compilation.decorators import (
+    should_torch_compile_mm_encoder,
+    support_torch_compile,
+)
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import get_tensor_model_parallel_world_size
@@ -49,7 +52,6 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.model_loader.utils import initialize_model
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.module_mapping import MultiModelKeys
-from vllm.model_executor.models.vision import should_torch_compile_mm_vit
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalDataDict,
@@ -454,7 +456,7 @@ class Llama4UnfoldConvolution(nn.Module):
 
 
 @support_torch_compile(
-    dynamic_arg_dims={"images_flattened": 0}, enable_if=should_torch_compile_mm_vit
+    dynamic_arg_dims={"images_flattened": 0}, enable_if=should_torch_compile_mm_encoder
 )
 class Llama4VisionModel(nn.Module):
     def __init__(
@@ -1151,6 +1153,28 @@ class Llama4ForConditionalGeneration(
         """
         return MultiModelKeys.from_string_field(
             language_model="language_model",
-            connector="multi_modal_projector.",
+            connector=[
+                "multi_modal_projector.",
+                "vision_model.vision_adapter.",
+            ],
             tower_model="vision_model.",
         )
+
+    def get_num_mm_encoder_tokens(self, num_image_tokens: int) -> int:
+        vision_config = self.config.vision_config
+        patches_per_chunk = Mllama4ProcessingInfo.get_patch_per_chunk(vision_config)
+        if num_image_tokens <= 0 or patches_per_chunk <= 0:
+            return 0
+        raw_patches = (vision_config.image_size // vision_config.patch_size) ** 2
+        num_chunks = num_image_tokens // patches_per_chunk
+        # Encoder processes raw_patches + 1 (CLS) per chunk
+        return num_chunks * (raw_patches + 1)
+
+    def get_num_mm_connector_tokens(self, num_vision_tokens: int) -> int:
+        vision_config = self.config.vision_config
+        raw_patches = (vision_config.image_size // vision_config.patch_size) ** 2
+        if num_vision_tokens <= 0:
+            return 0
+        num_chunks = num_vision_tokens // (raw_patches + 1)
+        patches_per_chunk = Mllama4ProcessingInfo.get_patch_per_chunk(vision_config)
+        return num_chunks * patches_per_chunk

@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
-from dataclasses import dataclass, field
 from typing import Generic, TypeVar
 
 import numpy as np
@@ -18,25 +17,12 @@ from vllm.config.multimodal import (
 from vllm.logger import init_logger
 
 from ..inputs import MultiModalDataDict
-from ..parse import MultiModalDataItems
 from .context import BaseProcessingInfo
+from .inputs import ProcessorInputs
 
 _I = TypeVar("_I", bound=BaseProcessingInfo)
 
 logger = init_logger(__name__)
-
-
-@dataclass
-class ProcessorInputs:
-    """
-    Represents the keyword arguments to
-    [`vllm.multimodal.processing.BaseMultiModalProcessor.apply`][].
-    """
-
-    prompt: str | list[int]
-    mm_items: MultiModalDataItems
-    hf_processor_mm_kwargs: Mapping[str, object] = field(default_factory=dict)
-    tokenization_kwargs: Mapping[str, object] = field(default_factory=dict)
 
 
 class BaseDummyInputsBuilder(ABC, Generic[_I]):
@@ -101,7 +87,7 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
 
         return ProcessorInputs(
             prompt=dummy_text,
-            mm_items=dummy_mm_items,
+            mm_data_items=dummy_mm_items,
             tokenization_kwargs=tokenization_kwargs,
         )
 

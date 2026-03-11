@@ -37,16 +37,17 @@ from vllm.multimodal.parse import (
     ImageProcessorItems,
     ImageSize,
     MultiModalDataItems,
-    MultiModalUUIDItems,
 )
 from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
     InputProcessingContext,
+    ProcessorInputs,
     PromptReplacement,
     PromptUpdate,
     PromptUpdateDetails,
+    TimingContext,
 )
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
@@ -543,6 +544,11 @@ class LlavaForConditionalGeneration(
         self.config = config
         self.multimodal_config = multimodal_config
 
+        self.configure_mm_token_handling(
+            vocab_size=config.text_config.vocab_size,
+            mm_token_ids=[config.image_token_index],
+        )
+
         # NOTE: These are special cases for Pixtral-12B in the HF-format
         # https://huggingface.co/mistral-community/pixtral-12b/blob/main/config.json  # noqa
         if (
@@ -770,11 +776,8 @@ class MantisProcessingInfo(LlavaProcessingInfo):
 class MantisMultiModalProcessor(LlavaMultiModalProcessor):
     def apply(
         self,
-        prompt: str | list[int],
-        mm_items: MultiModalDataItems,
-        mm_uuid_items: MultiModalUUIDItems | None = None,
-        hf_processor_mm_kwargs: Mapping[str, object] | None = None,
-        tokenization_kwargs: Mapping[str, object] | None = None,
+        inputs: ProcessorInputs,
+        timing_ctx: TimingContext,
     ) -> MultiModalInputs:
         hf_config = self.info.get_hf_config()
         image_token_id = hf_config.image_token_index
@@ -785,15 +788,9 @@ class MantisMultiModalProcessor(LlavaMultiModalProcessor):
             image_height=-1,
         )
 
-        result = super().apply(
-            prompt,
-            mm_items,
-            mm_uuid_items,
-            hf_processor_mm_kwargs=hf_processor_mm_kwargs,
-            tokenization_kwargs=tokenization_kwargs,
-        )
+        result = super().apply(inputs, timing_ctx)
 
-        mm_item_counts = mm_items.get_all_counts()
+        mm_item_counts = inputs.mm_data_items.get_all_counts()
         mm_kwargs = result["mm_kwargs"]
         mm_hashes = result["mm_hashes"]
 
@@ -825,8 +822,8 @@ class MantisMultiModalProcessor(LlavaMultiModalProcessor):
         )
 
         orig_repls = self._get_mm_prompt_updates(
-            mm_items,
-            hf_processor_mm_kwargs,
+            inputs.mm_data_items,
+            inputs.hf_processor_mm_kwargs,
             mm_kwargs,
         )
         mm_placeholders = self._find_mm_placeholders(prompt_ids, orig_repls)

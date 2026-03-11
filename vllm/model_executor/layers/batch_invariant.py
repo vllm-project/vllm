@@ -9,6 +9,7 @@ import torch
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.utils.platform_utils import num_compute_units
 from vllm.utils.torch_utils import is_torch_equal_or_newer
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
@@ -147,7 +148,7 @@ def matmul_persistent(
     assert bias is None or bias.dim() == 1, (
         "Currently assuming bias is 1D, let Horace know if you run into this"
     )
-    NUM_SMS = torch.cuda.get_device_properties("cuda").multi_processor_count
+    NUM_SMS = num_compute_units(a.device.index)
     M, K = a.shape
     K, N = b.shape
     dtype = a.dtype

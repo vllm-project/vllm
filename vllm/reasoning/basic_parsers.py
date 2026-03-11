@@ -2,7 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import abstractmethod
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
+from itertools import islice
 from typing import TYPE_CHECKING, Any
 
 from vllm.entrypoints.openai.engine.protocol import DeltaMessage
@@ -77,7 +78,7 @@ class BaseThinkingReasoningParser(ReasoningParser):
         return False
 
     def is_reasoning_end_streaming(
-        self, input_ids: Sequence[int], delta_ids: Sequence[int]
+        self, input_ids: Sequence[int], delta_ids: Iterable[int]
     ) -> bool:
         end_token_id = self.end_token_id
         return end_token_id in delta_ids
@@ -86,7 +87,7 @@ class BaseThinkingReasoningParser(ReasoningParser):
         """
         Extract the content after the end tokens
         """
-        if self.end_token_id not in input_ids[:-1]:
+        if self.end_token_id not in islice(input_ids, 0, max(0, len(input_ids) - 1)):
             return []
         else:
             return input_ids[input_ids.index(self.end_token_id) + 1 :]

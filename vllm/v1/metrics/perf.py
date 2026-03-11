@@ -13,6 +13,7 @@ from collections.abc import Iterable
 from dataclasses import asdict, dataclass
 from typing import Any, Protocol
 
+import prometheus_client
 import torch
 from pydantic import BaseModel, Field, ValidationError, model_validator
 from typing_extensions import Self
@@ -1231,6 +1232,87 @@ class PerfMetricsLogging:
             self.debug_logging.log(log_fn, log_prefix, delta_time)
 
         self.reset()
+
+
+#### Prometheus Integration ####
+
+
+class PerfMetricsProm:
+    """Record performance metrics in Prometheus.
+
+    Average TFLOPS (tera floating-point operations per second) can be
+    calculated using a PromQL query:
+
+      rate(vllm:estimated_flops_per_gpu_total[1m]) / 1e12
+
+    Average memory bandwidth in GB/s can be calculated using:
+
+      (rate(vllm:estimated_read_bytes_per_gpu_total[1m]) +
+       rate(vllm:estimated_write_bytes_per_gpu_total[1m])) / 1e9
+    """
+
+    _counter_cls = prometheus_client.Counter
+
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        labelnames: list[str],
+        per_engine_labelvalues: dict[int, list[object]],
+    ):
+        counter_flops = self._counter_cls(
+            name="vllm:estimated_flops_per_gpu_total",
+            documentation=(
+                "Estimated number of floating point operations per GPU "
+                "(for Model Flops Utilization calculations)."
+            ),
+            labelnames=labelnames,
+        )
+        self.counter_flops = make_per_engine(counter_flops, per_engine_labelvalues)
+
+        counter_read_bytes = self._counter_cls(
+            name="vllm:estimated_read_bytes_per_gpu_total",
+            documentation=(
+                "Estimated number of bytes read from memory per GPU "
+                "(for Model Flops Utilization calculations)."
+            ),
+            labelnames=labelnames,
+        )
+        self.counter_read_bytes = make_per_engine(
+            counter_read_bytes, per_engine_labelvalues
+        )
+
+        counter_write_bytes = self._counter_cls(
+            name="vllm:estimated_write_bytes_per_gpu_total",
+            documentation=(
+                "Estimated number of bytes written to memory per GPU "
+                "(for Model Flops Utilization calculations)."
+            ),
+            labelnames=labelnames,
+        )
+        self.counter_write_bytes = make_per_engine(
+            counter_write_bytes, per_engine_labelvalues
+        )
+
+    def observe(self, perf_stats: PerfStats, engine_idx: int = 0):
+        if not (
+            perf_stats.num_flops_per_gpu
+            or perf_stats.num_read_bytes_per_gpu
+            or perf_stats.num_write_bytes_per_gpu
+        ):
+            return
+        self.counter_flops[engine_idx].inc(perf_stats.num_flops_per_gpu)
+        self.counter_read_bytes[engine_idx].inc(perf_stats.num_read_bytes_per_gpu)
+        self.counter_write_bytes[engine_idx].inc(perf_stats.num_write_bytes_per_gpu)
+
+
+def make_per_engine(
+    counter: prometheus_client.Counter, per_engine_labelvalues: dict[int, list[object]]
+):
+    """Create a counter for each label value."""
+    return {
+        idx: counter.labels(*labelvalues)
+        for idx, labelvalues in per_engine_labelvalues.items()
+    }
 
 
 ## util functions

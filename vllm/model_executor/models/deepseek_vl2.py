@@ -30,15 +30,16 @@ from vllm.multimodal.parse import (
     ImageProcessorItems,
     ImageSize,
     MultiModalDataItems,
-    MultiModalUUIDItems,
 )
 from vllm.multimodal.processing import BaseDummyInputsBuilder
 from vllm.multimodal.processing.processor import (
     BaseMultiModalProcessor,
     BaseProcessingInfo,
     MultiModalProcessingInfo,
+    ProcessorInputs,
     PromptReplacement,
     PromptUpdate,
+    TimingContext,
 )
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers import cached_tokenizer_from_config
@@ -47,7 +48,6 @@ from vllm.transformers_utils.configs.deepseek_vl2 import (
     MlpProjectorConfig,
     VisionEncoderConfig,
 )
-from vllm.transformers_utils.processors.deepseek_vl2 import DeepseekVLV2Processor
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from vllm.utils.torch_utils import set_default_torch_dtype
 
@@ -159,7 +159,7 @@ class DeepseekVL2ProcessingInfo(BaseProcessingInfo):
         return self.ctx.get_hf_config(DeepseekVLV2Config)
 
     def get_hf_processor(self, **kwargs: object):
-        return self.ctx.get_hf_processor(DeepseekVLV2Processor, **kwargs)
+        return self.ctx.get_hf_processor(**kwargs)
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": None}
@@ -310,32 +310,17 @@ class DeepseekVL2MultiModalProcessor(
 
     def _cached_apply_hf_processor(
         self,
-        prompt: str | list[int],
-        mm_data_items: MultiModalDataItems,
-        mm_uuid_items: MultiModalUUIDItems | None,
-        hf_processor_mm_kwargs: Mapping[str, object],
-        tokenization_kwargs: Mapping[str, object],
+        inputs: ProcessorInputs,
+        timing_ctx: TimingContext,
     ) -> tuple[list[int], MultiModalProcessingInfo, bool]:
         # The processor logic is different for len(images) <= 2 vs > 2
         # Since the processing cache assumes that the processor output is
         # invariant of how many images are passed per prompt, we only
         # perform caching for the most common case
-        if mm_data_items.get_count("image", strict=False) > 2:
-            return self._apply_hf_processor(
-                prompt=prompt,
-                mm_data_items=mm_data_items,
-                mm_uuid_items=mm_uuid_items,
-                hf_processor_mm_kwargs=hf_processor_mm_kwargs,
-                tokenization_kwargs=tokenization_kwargs,
-            )
+        if inputs.mm_data_items.get_count("image", strict=False) > 2:
+            return self._apply_hf_processor(inputs, timing_ctx)
 
-        return super()._cached_apply_hf_processor(
-            prompt=prompt,
-            mm_data_items=mm_data_items,
-            mm_uuid_items=mm_uuid_items,
-            hf_processor_mm_kwargs=hf_processor_mm_kwargs,
-            tokenization_kwargs=tokenization_kwargs,
-        )
+        return super()._cached_apply_hf_processor(inputs, timing_ctx)
 
 
 @MULTIMODAL_REGISTRY.register_processor(

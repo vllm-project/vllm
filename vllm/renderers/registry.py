@@ -19,7 +19,9 @@ _VLLM_RENDERERS = {
     "deepseek_v32": ("deepseek_v32", "DeepseekV32Renderer"),
     "hf": ("hf", "HfRenderer"),
     "grok2": ("grok2", "Grok2Renderer"),
+    "kimi_audio": ("kimi_audio", "KimiAudioRenderer"),
     "mistral": ("mistral", "MistralRenderer"),
+    "qwen_vl": ("qwen_vl", "QwenVLRenderer"),
     "terratorch": ("terratorch", "TerratorchRenderer"),
 }
 
@@ -73,9 +75,17 @@ RENDERER_REGISTRY = RendererRegistry(
 
 def renderer_from_config(config: "VllmConfig", **kwargs):
     model_config = config.model_config
+
     tokenizer_mode, tokenizer_name, args, kwargs = tokenizer_args_from_config(
         model_config, **kwargs
     )
+
+    # Override tokenizer_mode for Kimi-Audio models
+    if model_config.architecture == "MoonshotKimiaForCausalLM":
+        tokenizer_mode = "kimi_audio"
+        # Update model_config so other components (e.g., multimodal registry)
+        # also use the correct tokenizer mode
+        model_config.tokenizer_mode = "kimi_audio"
 
     if (
         model_config.tokenizer_mode == "auto"

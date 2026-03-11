@@ -2304,22 +2304,22 @@ def test_block_lookup_cache_single_block_per_key():
     assert cache.get_one_block(key0) is block0
     assert cache.get_one_block(key1) is block1
     assert cache.get_one_block(key2) is None
-    # No block poped due to block_id mismatch
+    # No block popped due to block_id mismatch
     assert cache.pop(key0, 100) is None
     assert cache.get_one_block(key0) is block0
     assert cache.get_one_block(key1) is block1
     assert cache.get_one_block(key2) is None
-    # block poped with (key0, block ID 0)
+    # block popped with (key0, block ID 0)
     assert cache.pop(key0, 0) is block0
     assert cache.get_one_block(key0) is None
     assert cache.get_one_block(key1) is block1
     assert cache.get_one_block(key2) is None
-    # No block poped due to block_id mismatch
+    # No block popped due to block_id mismatch
     assert cache.pop(key0, 1) is None
     assert cache.get_one_block(key0) is None
     assert cache.get_one_block(key1) is block1
     assert cache.get_one_block(key2) is None
-    # block poped with (key1, block ID 1)
+    # block popped with (key1, block ID 1)
     assert cache.pop(key1, 1) is block1
     assert cache.get_one_block(key0) is None
     assert cache.get_one_block(key1) is None
