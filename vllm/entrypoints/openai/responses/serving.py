@@ -1102,7 +1102,6 @@ class OpenAIServingResponses(OpenAIServing):
         event_deque: deque[StreamingResponsesResponse] = deque()
         new_event_signal = asyncio.Event()
         self.event_store[request.request_id] = (event_deque, new_event_signal)
-        response = None
         generator = self.responses_stream_generator(request, *args, **kwargs)
         try:
             async for event in generator:
@@ -1110,15 +1109,6 @@ class OpenAIServingResponses(OpenAIServing):
                 new_event_signal.set()  # Signal new event available
         finally:
             new_event_signal.set()
-
-        if response is not None and isinstance(response, ErrorResponse):
-            # If the request has failed, update the status to "failed".
-            response_id = request.request_id
-            async with self.response_store_lock:
-                stored_response = self.response_store.get(response_id)
-                assert stored_response is not None
-                if stored_response.status not in ("completed", "cancelled"):
-                    stored_response.status = "failed"
 
     async def _run_background_request(
         self,
@@ -1224,19 +1214,6 @@ class OpenAIServingResponses(OpenAIServing):
             message=f"Response with id '{response_id}' not found.",
             status_code=HTTPStatus.NOT_FOUND,
             param="response_id",
-        )
-
-    def _make_store_not_supported_error(self) -> ErrorResponse:
-        return self.create_error_response(
-            err_type="invalid_request_error",
-            message=(
-                "`store=True` (default) is not supported. Please set "
-                "`store=False` in Responses API or set "
-                "`VLLM_ENABLE_RESPONSES_API_STORE=1` in the env var when "
-                "starting the vLLM server."
-            ),
-            status_code=HTTPStatus.BAD_REQUEST,
-            param="store",
         )
 
     async def _process_simple_streaming_events(
