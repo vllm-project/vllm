@@ -1,12 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import sys
-import traceback
 from collections.abc import Callable, Sequence
 from http import HTTPStatus
 from typing import Any
 
-import jinja2
 from openai_harmony import Message as OpenAIMessage
 
 from vllm.config import ModelConfig
@@ -18,7 +15,6 @@ from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.entrypoints.openai.engine.protocol import (
-    ErrorInfo,
     ErrorResponse,
     ModelCard,
     ModelList,
@@ -30,7 +26,7 @@ from vllm.entrypoints.openai.parser.harmony_utils import (
     parse_chat_inputs_to_harmony_messages,
     render_for_completion,
 )
-from vllm.entrypoints.utils import sanitize_message
+from vllm.entrypoints.utils import create_error_response
 from vllm.inputs.data import ProcessorInputs, PromptType, SingletonPrompt, TokensPrompt
 from vllm.logger import init_logger
 from vllm.parser import ParserManager
@@ -102,81 +98,76 @@ class OpenAIServingRender:
             logger.error("Error with model %s", error_check_ret)
             return error_check_ret
 
-        try:
-            tokenizer = self.renderer.tokenizer
+        tokenizer = self.renderer.tokenizer
 
-            tool_parser = self.tool_parser
+        tool_parser = self.tool_parser
 
-            if is_mistral_tokenizer(tokenizer):
-                # because of issues with pydantic we need to potentially
-                # re-serialize the tool_calls field of the request
-                # for more info: see comment in `maybe_serialize_tool_calls`
-                _mt.maybe_serialize_tool_calls(request)  # type: ignore[arg-type]
-                _mt.truncate_tool_call_ids(request)  # type: ignore[arg-type]
-                _mt.validate_request_params(request)
+        if is_mistral_tokenizer(tokenizer):
+            # because of issues with pydantic we need to potentially
+            # re-serialize the tool_calls field of the request
+            # for more info: see comment in `maybe_serialize_tool_calls`
+            _mt.maybe_serialize_tool_calls(request)  # type: ignore[arg-type]
+            _mt.truncate_tool_call_ids(request)  # type: ignore[arg-type]
+            _mt.validate_request_params(request)
 
-            # Check if tool parsing is unavailable (common condition)
-            tool_parsing_unavailable = (
-                tool_parser is None
-                and not is_mistral_tokenizer(tokenizer)
-                and not self.use_harmony
+        # Check if tool parsing is unavailable (common condition)
+        tool_parsing_unavailable = (
+            tool_parser is None
+            and not is_mistral_tokenizer(tokenizer)
+            and not self.use_harmony
+        )
+
+        # Validate tool_choice when tool parsing is required but unavailable
+        if tool_parsing_unavailable and request.tool_choice not in (
+            None,
+            "none",
+        ):
+            if request.tool_choice == "auto" and not self.enable_auto_tools:
+                # for hf tokenizers, "auto" tools requires
+                # --enable-auto-tool-choice and --tool-call-parser
+                return self.create_error_response(
+                    '"auto" tool choice requires '
+                    "--enable-auto-tool-choice and --tool-call-parser to be set"
+                )
+            elif request.tool_choice != "auto":
+                # "required" or named tool requires tool parser
+                return self.create_error_response(
+                    f'tool_choice="{request.tool_choice}" requires '
+                    "--tool-call-parser to be set"
+                )
+
+        if request.tools is None or (
+            request.tool_choice == "none" and self.exclude_tools_when_tool_choice_none
+        ):
+            tool_dicts = None
+        else:
+            tool_dicts = [tool.model_dump() for tool in request.tools]
+
+        if not self.use_harmony:
+            # Common case.
+            error_check_ret = self._validate_chat_template(
+                request_chat_template=request.chat_template,
+                chat_template_kwargs=request.chat_template_kwargs,
+                trust_request_chat_template=self.trust_request_chat_template,
             )
+            if error_check_ret is not None:
+                return error_check_ret
 
-            # Validate tool_choice when tool parsing is required but unavailable
-            if tool_parsing_unavailable and request.tool_choice not in (
-                None,
-                "none",
-            ):
-                if request.tool_choice == "auto" and not self.enable_auto_tools:
-                    # for hf tokenizers, "auto" tools requires
-                    # --enable-auto-tool-choice and --tool-call-parser
-                    return self.create_error_response(
-                        '"auto" tool choice requires '
-                        "--enable-auto-tool-choice and --tool-call-parser to be set"
-                    )
-                elif request.tool_choice != "auto":
-                    # "required" or named tool requires tool parser
-                    return self.create_error_response(
-                        f'tool_choice="{request.tool_choice}" requires '
-                        "--tool-call-parser to be set"
-                    )
-
-            if request.tools is None or (
-                request.tool_choice == "none"
-                and self.exclude_tools_when_tool_choice_none
-            ):
-                tool_dicts = None
-            else:
-                tool_dicts = [tool.model_dump() for tool in request.tools]
-
-            if not self.use_harmony:
-                # Common case.
-                error_check_ret = self._validate_chat_template(
-                    request_chat_template=request.chat_template,
-                    chat_template_kwargs=request.chat_template_kwargs,
-                    trust_request_chat_template=self.trust_request_chat_template,
-                )
-                if error_check_ret is not None:
-                    return error_check_ret
-
-                conversation, engine_prompts = await self._preprocess_chat(
-                    request,
-                    request.messages,
-                    default_template=self.chat_template,
-                    default_template_content_format=self.chat_template_content_format,
-                    default_template_kwargs=self.default_chat_template_kwargs,
-                    tool_dicts=tool_dicts,
-                    tool_parser=tool_parser,
-                )
-            else:
-                # For GPT-OSS.
-                should_include_tools = tool_dicts is not None
-                conversation, engine_prompts = self._make_request_with_harmony(
-                    request, should_include_tools
-                )
-        except (ValueError, TypeError, RuntimeError, jinja2.TemplateError) as e:
-            logger.exception("Error in preprocessing prompt inputs")
-            return self.create_error_response(e)
+            conversation, engine_prompts = await self._preprocess_chat(
+                request,
+                request.messages,
+                default_template=self.chat_template,
+                default_template_content_format=self.chat_template_content_format,
+                default_template_kwargs=self.default_chat_template_kwargs,
+                tool_dicts=tool_dicts,
+                tool_parser=tool_parser,
+            )
+        else:
+            # For GPT-OSS.
+            should_include_tools = tool_dicts is not None
+            conversation, engine_prompts = self._make_request_with_harmony(
+                request, should_include_tools
+            )
 
         return conversation, engine_prompts
 
@@ -204,15 +195,11 @@ class OpenAIServingRender:
                 "prompt_logprobs is not compatible with prompt embeds."
             )
 
-        try:
-            engine_prompts = await self._preprocess_completion(
-                request,
-                prompt_input=request.prompt,
-                prompt_embeds=request.prompt_embeds,
-            )
-        except (ValueError, TypeError, RuntimeError, jinja2.TemplateError) as e:
-            logger.exception("Error in preprocessing prompt inputs")
-            return self.create_error_response(e)
+        engine_prompts = await self._preprocess_completion(
+            request,
+            prompt_input=request.prompt,
+            prompt_embeds=request.prompt_embeds,
+        )
 
         return engine_prompts
 
@@ -284,54 +271,7 @@ class OpenAIServingRender:
         status_code: HTTPStatus = HTTPStatus.BAD_REQUEST,
         param: str | None = None,
     ) -> ErrorResponse:
-        """Copied from OpenAIServing.create_error_response."""
-        exc: Exception | None = None
-
-        if isinstance(message, Exception):
-            exc = message
-
-            from vllm.exceptions import VLLMValidationError
-
-            if isinstance(exc, VLLMValidationError):
-                err_type = "BadRequestError"
-                status_code = HTTPStatus.BAD_REQUEST
-                param = exc.parameter
-            elif isinstance(exc, (ValueError, TypeError, RuntimeError, OverflowError)):
-                # Common validation errors from user input
-                err_type = "BadRequestError"
-                status_code = HTTPStatus.BAD_REQUEST
-                param = None
-            elif isinstance(exc, NotImplementedError):
-                err_type = "NotImplementedError"
-                status_code = HTTPStatus.NOT_IMPLEMENTED
-                param = None
-            elif exc.__class__.__name__ == "TemplateError":
-                # jinja2.TemplateError (avoid importing jinja2)
-                err_type = "BadRequestError"
-                status_code = HTTPStatus.BAD_REQUEST
-                param = None
-            else:
-                err_type = "InternalServerError"
-                status_code = HTTPStatus.INTERNAL_SERVER_ERROR
-                param = None
-
-            message = str(exc)
-
-        if self.log_error_stack:
-            exc_type, _, _ = sys.exc_info()
-            if exc_type is not None:
-                traceback.print_exc()
-            else:
-                traceback.print_stack()
-
-        return ErrorResponse(
-            error=ErrorInfo(
-                message=sanitize_message(message),
-                type=err_type,
-                code=status_code.value,
-                param=param,
-            )
-        )
+        return create_error_response(message, err_type, status_code, param)
 
     def _is_model_supported(self, model_name: str) -> bool:
         """Simplified from OpenAIServing._is_model_supported (no LoRA support)."""
