@@ -6161,7 +6161,7 @@ class GPUModelRunner(
         ):
             assert isinstance(
                 self.drafter, 
-                EagleProposer | ExtractHiddenStatesProposer | DFlashModelProposer
+                EagleProposer | ExtractHiddenStatesProposer | DFlashModelProposer,
             )
             self.drafter.initialize_cudagraph_keys(cudagraph_mode)
 
