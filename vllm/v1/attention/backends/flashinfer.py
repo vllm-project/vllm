@@ -14,11 +14,19 @@ from flashinfer import (
     BatchPrefillWithRaggedKVCacheWrapper,
     MultiLevelCascadeAttentionWrapper,
 )
+
+try:
+    from flashinfer import (
+        rope_append_paged_kv_cache as flashinfer_rope_append_paged_kv_cache,
+    )
+except ImportError:
+    flashinfer_rope_append_paged_kv_cache = None
 from flashinfer.decode import fast_decode_plan, trtllm_batch_decode_with_kv_cache
 from flashinfer.prefill import trtllm_batch_context_with_kv_cache
 from flashinfer.utils import FP4Tensor
 from typing_extensions import override
 
+import vllm._custom_ops as ops
 from vllm import envs
 from vllm.config import (
     CUDAGraphMode,
@@ -50,6 +58,7 @@ from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
     AttentionImpl,
+    AttentionLayer,
     AttentionMetadataBuilder,
     AttentionType,
     CommonAttentionMetadata,
@@ -490,6 +499,9 @@ class FlashInferMetadata:
     """
 
     cascade_wrapper: MultiLevelCascadeAttentionWrapper | None
+    query_start_loc: torch.Tensor | None = None
+    paged_kv_indptr: torch.Tensor | None = None
+    paged_kv_indices: torch.Tensor | None = None
 
 
 class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
@@ -914,6 +926,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             prefill=None,
             decode=None,
             cascade_wrapper=None,
+            query_start_loc=qo_indptr,
         )
 
         # Guard access to seq_lens_cpu, which may not always be needed
@@ -956,7 +969,13 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             num_blocks_np -= num_common_kv_blocks
 
         # Compute paged_kv_indices if necessary
-        needs_paged_kv_indices = use_cascade or not is_only_trtllm_decode
+        needs_rope_kvcache_indices = (
+            self.compilation_config.pass_config.fuse_rope_kvcache
+            and flashinfer_rope_append_paged_kv_cache is not None
+        )
+        needs_paged_kv_indices = (
+            use_cascade or not is_only_trtllm_decode or needs_rope_kvcache_indices
+        )
         if needs_paged_kv_indices:
             assert num_blocks_np is not None
             assert seq_lens_np is not None
@@ -969,6 +988,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             )
         else:
             paged_kv_indices = None
+
+        attn_metadata.paged_kv_indptr = self.paged_kv_indptr.gpu[: num_reqs + 1]
+        attn_metadata.paged_kv_indices = paged_kv_indices
 
         # Early-out for cascade attention
         if use_cascade:
@@ -1190,6 +1212,7 @@ class FlashInferImpl(AttentionImpl):
         self.head_size = head_size
         self.scale = float(scale)
         self.num_kv_heads = num_kv_heads
+        self.attn_type = attn_type
         if alibi_slopes is not None:
             alibi_slopes = torch.tensor(alibi_slopes, dtype=torch.float32)
         self.alibi_slopes = alibi_slopes
@@ -1252,10 +1275,165 @@ class FlashInferImpl(AttentionImpl):
             and quant_key in (kFp8StaticTensorSym, kNvfp4Dynamic)
         )
 
+    def fused_rope_kvcache_supported(self):
+        return (
+            flashinfer_rope_append_paged_kv_cache is not None
+            and self.attn_type == AttentionType.DECODER
+        )
+
     # FlashInfer requires attention sinks to be float32
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         if self.sinks is not None and self.sinks.dtype != torch.float32:
             self.sinks = self.sinks.to(torch.float32)
+
+    def _fallback_do_rope_and_kv_cache_update(
+        self,
+        layer: AttentionLayer,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        positions: torch.Tensor,
+        cos_sin_cache: torch.Tensor,
+        is_neox: bool,
+        kv_cache: torch.Tensor,
+        layer_slot_mapping: torch.Tensor,
+        num_actual_tokens: int,
+    ) -> None:
+        ops.rotary_embedding(
+            positions[:num_actual_tokens],
+            query[:num_actual_tokens],
+            key[:num_actual_tokens],
+            self.head_size,
+            cos_sin_cache,
+            is_neox,
+        )
+        self.do_kv_cache_update(
+            layer,
+            key[:num_actual_tokens],
+            value[:num_actual_tokens],
+            kv_cache,
+            layer_slot_mapping[:num_actual_tokens],
+        )
+
+    @staticmethod
+    def _get_batch_indices(query_start_loc: torch.Tensor) -> torch.Tensor:
+        query_lens = query_start_loc[1:] - query_start_loc[:-1]
+        return torch.repeat_interleave(
+            torch.arange(
+                query_lens.shape[0],
+                device=query_start_loc.device,
+                dtype=torch.int32,
+            ),
+            query_lens.to(torch.int64),
+        )
+
+    def do_rope_and_kv_cache_update(
+        self,
+        layer: AttentionLayer,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        positions: torch.Tensor,
+        cos_sin_cache: torch.Tensor,
+        is_neox: bool,
+        kv_cache: torch.Tensor,
+        layer_slot_mapping: torch.Tensor,
+        attn_metadata: FlashInferMetadata | None = None,
+    ) -> None:
+        num_actual_tokens = (
+            attn_metadata.num_actual_tokens
+            if attn_metadata is not None
+            else layer_slot_mapping.shape[0]
+        )
+
+        can_use_fast_path = (
+            flashinfer_rope_append_paged_kv_cache is not None
+            and self.attn_type == AttentionType.DECODER
+            and self.kv_sharing_target_layer_name is None
+            and attn_metadata is not None
+            and attn_metadata.num_prefill_tokens == 0
+            and attn_metadata.query_start_loc is not None
+            and attn_metadata.paged_kv_indptr is not None
+            and attn_metadata.paged_kv_indices is not None
+        )
+        if self.kv_cache_dtype.startswith("fp8"):
+            can_use_fast_path = can_use_fast_path and (
+                layer._k_scale_float == layer._v_scale_float
+            )
+
+        if not can_use_fast_path:
+            self._fallback_do_rope_and_kv_cache_update(
+                layer,
+                query,
+                key,
+                value,
+                positions,
+                cos_sin_cache,
+                is_neox,
+                kv_cache,
+                layer_slot_mapping,
+                num_actual_tokens,
+            )
+            return
+
+        assert attn_metadata is not None
+        assert attn_metadata.query_start_loc is not None
+        assert attn_metadata.paged_kv_indptr is not None
+        assert attn_metadata.paged_kv_indices is not None
+
+        query = query[:num_actual_tokens]
+        key = key[:num_actual_tokens]
+        value = value[:num_actual_tokens]
+        positions = positions[:num_actual_tokens]
+
+        rotary_dim = cos_sin_cache.shape[-1]
+        q_rope = query[..., :rotary_dim]
+        q_nope = query[..., rotary_dim:]
+        k_rope = key[..., :rotary_dim]
+        k_nope = key[..., rotary_dim:]
+
+        if self.kv_cache_dtype.startswith("fp8"):
+            torch_dtype = FlashInferBackend.get_fp8_dtype_for_flashinfer(
+                self.kv_cache_dtype
+            )
+            kv_cache = kv_cache.view(torch_dtype)
+
+        kv_cache_permute = kv_cache.permute(
+            *FlashInferBackend.get_kv_cache_stride_order()
+        )
+        key_cache, value_cache = kv_cache_permute.unbind(1)
+        page_size = (
+            key_cache.shape[1] if get_kv_cache_layout() == "NHD" else key_cache.shape[2]
+        )
+        kv_scale = (
+            layer._k_scale_float if self.kv_cache_dtype.startswith("fp8") else 1.0
+        )
+        batch_indices = self._get_batch_indices(attn_metadata.query_start_loc).to(
+            positions.device
+        )
+
+        # Pure decode only: downstream attention reads K/V from cache, so we
+        # only need the roped query written back in-place here.
+        flashinfer_rope_append_paged_kv_cache(
+            q_rope,
+            k_rope,
+            q_nope if q_nope.shape[-1] > 0 else None,
+            k_nope if k_nope.shape[-1] > 0 else None,
+            value,
+            cos_sin_cache,
+            positions,
+            (key_cache, value_cache),
+            attn_metadata.paged_kv_indices,
+            attn_metadata.paged_kv_indptr,
+            batch_indices,
+            positions,
+            is_neox=is_neox,
+            kv_scale=kv_scale,
+            page_size=page_size,
+            kv_layout=get_kv_cache_layout(),
+            q_rope_out=q_rope,
+            q_nope_out=q_nope if q_nope.shape[-1] > 0 else None,
+        )
 
     def forward(
         self,

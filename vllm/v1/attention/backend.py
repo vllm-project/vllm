@@ -773,6 +773,7 @@ class AttentionImpl(AttentionImplBase[T], Generic[T]):
         is_neox: bool,
         kv_cache: torch.Tensor,
         layer_slot_mapping: torch.Tensor,
+        attn_metadata: T | None = None,
     ):
         """
         If `fused_rope_kvcache_supported` returns True, this method will be called

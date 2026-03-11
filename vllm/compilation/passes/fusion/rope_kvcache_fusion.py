@@ -46,7 +46,9 @@ def fused_rope_and_unified_kv_cache_update_impl(
     that is passed to unified_attention to signal a side effect and
     the data dependency between them to ensure torch.compile preserves ordering.
     """
-    _, attn_layer, kv_cache, layer_slot_mapping = get_attention_context(layer_name)
+    attn_metadata, attn_layer, kv_cache, layer_slot_mapping = get_attention_context(
+        layer_name
+    )
     if layer_slot_mapping is not None:
         attn_layer.impl.do_rope_and_kv_cache_update(
             attn_layer,
@@ -58,6 +60,7 @@ def fused_rope_and_unified_kv_cache_update_impl(
             is_neox,
             kv_cache,
             layer_slot_mapping,
+            attn_metadata,
         )
 
     return torch.empty(0, device=kv_cache.device, dtype=kv_cache.dtype)
