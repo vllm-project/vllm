@@ -322,7 +322,6 @@ class Qwen3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle3):
         ]
         return target_layer_ids
 
-
     def get_eagle3_aux_hidden_state_layers(self, method) -> tuple[int, ...]:
         num_layers = len(self.model.layers)
         if method == "dflash":
