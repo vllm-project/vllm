@@ -349,6 +349,9 @@ def reset_compile_wrapper(model: torch.nn.Module) -> None:
     compilation_counter.num_cache_entries_updated = 0
     compilation_counter.num_compiled_artifacts_saved = 0
     compilation_counter.stock_torch_compile_count = 0
+    compilation_counter.num_aot_compiles = 0
+    compilation_counter.num_aot_artifacts_saved = 0
+    compilation_counter.num_aot_artifacts_loaded = 0
 
     # Clear the AOT compiled function so the model is forced to
     # recompile on the next call. Without this, decorators.py
