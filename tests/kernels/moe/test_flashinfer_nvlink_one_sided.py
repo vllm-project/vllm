@@ -1,15 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
-Tests for FlashInfer MoE A2A (trtllm_moe_alltoall) kernel backend.
+Tests for FlashInfer MoeAlltoAll/One-sided NVLink (trtllm_moe_alltoall) kernel backend.
 
 Validates the _supports_parallel_config incompatibility matrix to ensure
-each Expert backend correctly accepts or rejects the flashinfer_moe_a2a
+each Expert backend correctly accepts or rejects the flashinfer_nvlink_one_sided
 parallel configuration.  No GPU required.
 
 See also:
   - mk_objects.py for combinatorial registration of the new P/F and Experts
-  - PR #36022 (FlashInfer MoE A2A kernel backend)
 """
 
 import importlib
@@ -50,9 +49,9 @@ def _import_expert_cls(module_path: str, class_name: str, skip_reason: str | Non
         raise
 
 
-# (module_path, class_name, supports_flashinfer_moe_a2a, skip_reason)
+# (module_path, class_name, supports_flashinfer_nvlink_one_sided, skip_reason)
 _EXPERT_COMPAT_CASES = [
-    # Backends that reject flashinfer_moe_a2a (Standard format, no all2allv)
+    # Backends that reject flashinfer_nvlink_one_sided (Standard format, no all2allv)
     (
         "vllm.model_executor.layers.fused_moe.fused_moe",
         "TritonExperts",
@@ -77,7 +76,7 @@ _EXPERT_COMPAT_CASES = [
         False,
         "requires cutlass_fp8",
     ),
-    # Backends that accept flashinfer_moe_a2a
+    # Backends that accept flashinfer_nvlink_one_sided
     (
         "vllm.model_executor.layers.fused_moe.fused_batched_moe",
         "BatchedTritonExperts",
@@ -104,18 +103,18 @@ _EXPERT_COMPAT_CASES = [
     _EXPERT_COMPAT_CASES,
     ids=[c[1] for c in _EXPERT_COMPAT_CASES],
 )
-def test_supports_parallel_config_flashinfer_moe_a2a(
+def test_supports_parallel_config_flashinfer_nvlink_one_sided(
     module_path: str,
     class_name: str,
     expected_support: bool,
     skip_reason: str | None,
 ):
-    """Verify _supports_parallel_config for the flashinfer_moe_a2a backend."""
+    """Verify _supports_parallel_config for the flashinfer_nvlink_one_sided backend."""
     cls = _import_expert_cls(module_path, class_name, skip_reason)
-    config = _make_parallel_config("flashinfer_moe_a2a")
+    config = _make_parallel_config("flashinfer_nvlink_one_sided")
     result = cls._supports_parallel_config(config)
     assert result == expected_support, (
-        f"{class_name}._supports_parallel_config('flashinfer_moe_a2a') "
+        f"{class_name}._supports_parallel_config('flashinfer_nvlink_one_sided') "
         f"returned {result}, expected {expected_support}"
     )
 
@@ -131,7 +130,7 @@ def test_supports_parallel_config_parity_with_all2allv(
     expected_support: bool,
     skip_reason: str | None,
 ):
-    """Verify flashinfer_moe_a2a and flashinfer_all2allv share the same
+    """Verify flashinfer_nvlink_one_sided and flashinfer_all2allv share the same
     incompatibility matrix (both reject and accept the same Expert backends).
     """
     cls = _import_expert_cls(module_path, class_name, skip_reason)
@@ -140,6 +139,6 @@ def test_supports_parallel_config_parity_with_all2allv(
     assert result == expected_support, (
         f"{class_name}._supports_parallel_config('flashinfer_all2allv') "
         f"returned {result}, expected {expected_support}. "
-        f"flashinfer_moe_a2a and flashinfer_all2allv should share the same "
+        f"flashinfer_nvlink_one_sided and flashinfer_all2allv should share the same "
         f"incompatibility matrix."
     )

@@ -957,14 +957,18 @@ class FusedMoEParallelConfig:
         return self.use_all2all_kernels and self.all2all_backend == "deepep_low_latency"
 
     @property
-    def use_fi_all2allv_kernels(self):
-        return (
-            self.use_all2all_kernels and self.all2all_backend == "flashinfer_all2allv"
+    def use_fi_nvl_two_sided_kernels(self):
+        return self.use_all2all_kernels and (
+            self.all2all_backend == "flashinfer_all2allv"
+            or self.all2all_backend == "flashinfer_nvlink_two_sided"
         )
 
     @property
-    def use_fi_moe_a2a_kernels(self):
-        return self.use_all2all_kernels and self.all2all_backend == "flashinfer_moe_a2a"
+    def use_fi_nvl_one_sided_kernels(self):
+        return (
+            self.use_all2all_kernels
+            and self.all2all_backend == "flashinfer_nvlink_one_sided"
+        )
 
     @property
     def use_batched_activation_format(self):
@@ -1240,12 +1244,12 @@ class FusedMoEConfig:
         return self.moe_parallel_config.use_mori_kernels
 
     @property
-    def use_fi_all2allv_kernels(self):
-        return self.moe_parallel_config.use_fi_all2allv_kernels
+    def use_fi_nvl_two_sided_kernels(self):
+        return self.moe_parallel_config.use_fi_nvl_two_sided_kernels
 
     @property
-    def use_fi_moe_a2a_kernels(self):
-        return self.moe_parallel_config.use_fi_moe_a2a_kernels
+    def use_fi_nvl_one_sided_kernels(self):
+        return self.moe_parallel_config.use_fi_nvl_one_sided_kernels
 
     @property
     def use_naive_all2all_kernels(self):

@@ -10,21 +10,21 @@ from vllm.distributed import get_dp_group, get_ep_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.utils.flashinfer import (
-    has_flashinfer_all2all,
-    has_flashinfer_moe_a2a,
+    has_flashinfer_nvlink_one_sided,
+    has_flashinfer_nvlink_two_sided,
 )
 from vllm.utils.import_utils import has_deep_ep, has_mori
 
 from .base_device_communicator import All2AllManagerBase, Cache
 
-if has_flashinfer_all2all():
+if has_flashinfer_nvlink_two_sided():
     from flashinfer.comm import Mapping  # type: ignore[import-not-found]
     from flashinfer.comm.mnnvl import MnnvlConfig  # type: ignore[import-not-found]
     from flashinfer.comm.trtllm_alltoall import (
         MnnvlMoe,  # type: ignore[import-not-found]
     )
 
-if has_flashinfer_moe_a2a():
+if has_flashinfer_nvlink_one_sided():
     from flashinfer.comm import Mapping  # type: ignore[import-not-found]
     from flashinfer.comm.mnnvl import MnnvlConfig  # type: ignore[import-not-found]
     from flashinfer.comm.trtllm_moe_alltoall import (
@@ -426,9 +426,9 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
         return 0
 
 
-class FlashInferAllToAllManager(All2AllManagerBase):
+class FlashInferNVLinkTwoSidedManager(All2AllManagerBase):
     """
-    All2All communication based on flashinfer kernels.
+    All2All communication based on flashinfer all2allv/two-sided NVLink kernels.
     """
 
     # This type lint could be removed after all of the work in
@@ -437,7 +437,7 @@ class FlashInferAllToAllManager(All2AllManagerBase):
     world_size: int
 
     def __init__(self, cpu_group, tcp_store_group=None):
-        assert has_flashinfer_all2all(), (
+        assert has_flashinfer_nvlink_two_sided(), (
             "flashinfer all2all module not found. Please install/check flashinfer"
         )  # noqa
         super().__init__(cpu_group, tcp_store_group)
@@ -494,7 +494,7 @@ class FlashInferAllToAllManager(All2AllManagerBase):
 
     def ensure_alltoall_workspace_initialized(self):
         """Ensure workspace is initialized"""
-        if not has_flashinfer_all2all():
+        if not has_flashinfer_nvlink_two_sided():
             return False
 
         if self.world_size <= 1:
@@ -530,24 +530,24 @@ class FlashInferAllToAllManager(All2AllManagerBase):
                 self.initialized = False
 
 
-class FlashInferMoeA2AManager(All2AllManagerBase):
+class FlashInferNVLinkOneSidedManager(All2AllManagerBase):
     """
-    All2All communication based on FlashInfer's MoeAlltoAll kernel.
+    All2All communication based on FlashInfer's MoeAlltoAll/One-sided NVLink kernel.
     This is a newer kernel from trtllm that should perform better than the kernel
-    used by flashinfer_all2allv.
+    used by flashinfer_nvlink_two_sided.
     """
 
     rank: int
     world_size: int
 
     def __init__(self, cpu_group):
-        assert has_flashinfer_moe_a2a(), (
+        assert has_flashinfer_nvlink_one_sided(), (
             "flashinfer trtllm_moe_alltoall module not found. "
             "Please install/check flashinfer"
         )
         super().__init__(cpu_group)
         logger.debug(
-            "Initialize FlashInfer MoeA2A rank=%d, world size=%d",
+            "Initialize FlashInfer One-sided NVLink rank=%d, world size=%d",
             self.rank,
             self.world_size,
         )
@@ -569,7 +569,7 @@ class FlashInferMoeA2AManager(All2AllManagerBase):
         self.cleanup()
         gpus_per_node = torch.cuda.device_count()
         logger.debug(
-            "Making MoeA2A mapping: rank=%d, world size=%d",
+            "Making One-sided NVLink mapping: rank=%d, world size=%d",
             self.rank,
             self.world_size,
         )
@@ -619,7 +619,7 @@ class FlashInferMoeA2AManager(All2AllManagerBase):
         self.initialized = True
 
         logger.info(
-            "FlashInfer MoeA2A initialized for rank %s, size %s",
+            "FlashInfer One-sided NVLink initialized for rank %s, size %s",
             self.rank,
             self.world_size,
         )
@@ -634,7 +634,9 @@ class FlashInferMoeA2AManager(All2AllManagerBase):
             try:
                 del self.moe_alltoall
             except Exception as e:
-                logger.warning("Failed to cleanup FlashInfer MoeA2A workspace: %s", e)
+                logger.warning(
+                    "Failed to cleanup FlashInfer One-sided NVLink workspace: %s", e
+                )
             finally:
                 self.moe_alltoall = None
                 self.mapping = None

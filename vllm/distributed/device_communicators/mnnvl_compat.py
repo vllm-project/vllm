@@ -5,9 +5,9 @@ from typing import Any
 import torch.distributed as dist
 from flashinfer.comm.mnnvl import CommBackend as CommBackend
 
-from vllm.utils.flashinfer import has_flashinfer_all2all
+from vllm.utils.flashinfer import has_flashinfer_nvlink_two_sided
 
-assert has_flashinfer_all2all(), "Flashinfer alltoallv module cannot be found"
+assert has_flashinfer_nvlink_two_sided(), "Flashinfer alltoallv module cannot be found"
 
 
 class CustomCommunicator(CommBackend):

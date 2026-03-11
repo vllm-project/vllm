@@ -150,7 +150,7 @@ def has_flashinfer_comm() -> bool:
 
 
 @functools.cache
-def has_flashinfer_all2all() -> bool:
+def has_flashinfer_nvlink_two_sided() -> bool:
     """Return `True` if FlashInfer mnnvl all2all is available."""
     if not has_flashinfer_comm():
         return False
@@ -171,7 +171,7 @@ def has_flashinfer_all2all() -> bool:
 
 
 @functools.cache
-def has_flashinfer_moe_a2a() -> bool:
+def has_flashinfer_nvlink_one_sided() -> bool:
     """Return `True` if FlashInfer trtllm_moe_alltoall module is available."""
     if not has_flashinfer_comm():
         return False
@@ -774,8 +774,8 @@ __all__ = [
     "autotune",
     "has_flashinfer_moe",
     "has_flashinfer_comm",
-    "has_flashinfer_all2all",
-    "has_flashinfer_moe_a2a",
+    "has_flashinfer_nvlink_two_sided",
+    "has_flashinfer_nvlink_one_sided",
     "has_flashinfer_cutlass_fused_moe",
     "has_flashinfer_cutedsl_grouped_gemm_nt_masked",
     "has_flashinfer_fp8_blockscale_gemm",

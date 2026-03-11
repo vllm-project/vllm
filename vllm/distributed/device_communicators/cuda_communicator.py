@@ -143,16 +143,26 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 from .all2all import MoriAll2AllManager
 
                 self.all2all_manager = MoriAll2AllManager(self.cpu_group)
-            elif self.all2all_backend == "flashinfer_all2allv":
-                from .all2all import FlashInferAllToAllManager
+            elif (
+                self.all2all_backend == "flashinfer_all2allv"
+                or self.all2all_backend == "flashinfer_nvlink_two_sided"
+            ):
+                if self.all2all_backend == "flashinfer_all2allv":
+                    logger.warning_once(
+                        "'flashinfer_all2allv' is deprecated and has been renamed to"
+                        "'flashinfer_nvlink_two_sided'. It will be removed in a future"
+                        "release."
+                    )
 
-                self.all2all_manager = FlashInferAllToAllManager(
+                from .all2all import FlashInferNVLinkTwoSidedManager
+
+                self.all2all_manager = FlashInferNVLinkTwoSidedManager(
                     self.cpu_group, tcp_store_group
                 )
-            elif self.all2all_backend == "flashinfer_moe_a2a":
-                from .all2all import FlashInferMoeA2AManager
+            elif self.all2all_backend == "flashinfer_nvlink_one_sided":
+                from .all2all import FlashInferNVLinkOneSidedManager
 
-                self.all2all_manager = FlashInferMoeA2AManager(self.cpu_group)
+                self.all2all_manager = FlashInferNVLinkOneSidedManager(self.cpu_group)
             else:
                 raise ValueError(f"Unknown all2all backend: {self.all2all_backend}")
 

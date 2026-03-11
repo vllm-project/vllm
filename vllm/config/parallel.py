@@ -43,8 +43,9 @@ All2AllBackend = Literal[
     "deepep_low_latency",
     "mori",
     "allgather_reducescatter",
+    "flashinfer_nvlink_two_sided",
     "flashinfer_all2allv",
-    "flashinfer_moe_a2a",
+    "flashinfer_nvlink_one_sided",
 ]
 
 
@@ -156,8 +157,8 @@ class ParallelConfig:
     - "deepep_high_throughput": Use deepep high-throughput kernels\n
     - "deepep_low_latency": Use deepep low-latency kernels\n
     - "mori": Use mori kernels\n
-    - "flashinfer_all2allv": Use flashinfer alltoallv kernels for mnnvl\n
-    - "flashinfer_moe_a2a": Use flashinfer moe alltoall kernels"""
+    - "flashinfer_nvlink_two_sided": Use flashinfer alltoallv kernels for mnnvl\n
+    - "flashinfer_nvlink_one_sided": Use flashinfer moe alltoall kernels"""
 
     max_parallel_loading_workers: int | None = None
     """Maximum number of parallel loading workers when loading model

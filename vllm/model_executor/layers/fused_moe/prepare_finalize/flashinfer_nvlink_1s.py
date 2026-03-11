@@ -14,7 +14,7 @@ def get_local_sizes():
     return get_forward_context().dp_metadata.get_chunk_sizes_across_dp_rank()
 
 
-class FlashInferMoeA2APrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
+class FlashInferNVLinkOneSidedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
     """FlashInfer implementation using the Moe AlltoAll kernel."""
 
     def __init__(

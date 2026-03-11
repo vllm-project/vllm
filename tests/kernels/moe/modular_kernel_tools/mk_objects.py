@@ -35,7 +35,7 @@ from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import is_deep_gemm_supported
 from vllm.utils.flashinfer import (
     has_flashinfer_cutlass_fused_moe,
-    has_flashinfer_moe_a2a,
+    has_flashinfer_nvlink_one_sided,
 )
 from vllm.utils.import_utils import (
     has_aiter,
@@ -243,15 +243,15 @@ if has_mori():
     )
 
 if has_flashinfer_cutlass_fused_moe() and current_platform.has_device_capability(100):
-    from vllm.model_executor.layers.fused_moe.flashinfer_a2a_prepare_finalize import (  # noqa: E501
-        FlashInferA2APrepareAndFinalize,
-    )
     from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
         FlashInferExperts,
     )
+    from vllm.model_executor.layers.fused_moe.flashinfer_nvlink_2s_prepare_finalize import (  # noqa: E501
+        FlashInferNVLinkTwoSidedPrepareAndFinalize,
+    )
 
     register_prepare_and_finalize(
-        FlashInferA2APrepareAndFinalize,
+        FlashInferNVLinkTwoSidedPrepareAndFinalize,
         standard_format,
         nvfp4_types + fp8_types,
         blocked_quantization_support=True,
@@ -274,20 +274,20 @@ else:
     FlashInferExperts = None
 
 if (
-    has_flashinfer_moe_a2a()
+    has_flashinfer_nvlink_one_sided()
     and has_flashinfer_cutlass_fused_moe()
     and current_platform.has_device_capability(100)
 ):
-    from vllm.model_executor.layers.fused_moe.prepare_finalize.flashinfer_moe_a2a import (  # noqa: E501
-        FlashInferMoeA2APrepareAndFinalize,
+    from vllm.model_executor.layers.fused_moe.prepare_finalize.flashinfer_nvlink_1s import (  # noqa: E501
+        FlashInferNVLinkOneSidedPrepareAndFinalize,
     )
 
     register_prepare_and_finalize(
-        FlashInferMoeA2APrepareAndFinalize,
+        FlashInferNVLinkOneSidedPrepareAndFinalize,
         standard_format,
         nvfp4_types,
         blocked_quantization_support=False,
-        backend="flashinfer_moe_a2a",
+        backend="flashinfer_nvlink_one_sided",
         supports_apply_weight_on_input=False,
     )
 

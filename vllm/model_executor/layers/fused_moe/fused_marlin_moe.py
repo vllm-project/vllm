@@ -601,8 +601,8 @@ class MarlinExpertsBase(mk.FusedMoEExpertsModular):
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
         return not (
-            moe_parallel_config.use_fi_all2allv_kernels
-            or moe_parallel_config.use_fi_moe_a2a_kernels
+            moe_parallel_config.use_fi_nvl_two_sided_kernels
+            or moe_parallel_config.use_fi_nvl_one_sided_kernels
         )
 
     @property

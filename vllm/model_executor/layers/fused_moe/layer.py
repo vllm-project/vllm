@@ -637,7 +637,7 @@ class FusedMoE(CustomOp):
         self.use_overlapped = (
             not (
                 (self.enable_eplb and backend != "allgather_reducescatter")
-                or self.moe_parallel_config.use_fi_all2allv_kernels
+                or self.moe_parallel_config.use_fi_nvl_two_sided_kernels
             )
             and self._shared_experts is not None
         )
