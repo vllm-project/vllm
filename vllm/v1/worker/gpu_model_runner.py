@@ -5983,7 +5983,7 @@ class GPUModelRunner(
         ):
             assert isinstance(
                 self.drafter, 
-                EagleProposer | DraftModelProposer | DFlashModelProposer
+                EagleProposer | DraftModelProposer | DFlashModelProposer,
             )
             self.drafter.initialize_attn_backend(kv_cache_config, kernel_block_sizes)
 
