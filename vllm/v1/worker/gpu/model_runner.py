@@ -90,7 +90,7 @@ from vllm.v1.worker.gpu.spec_decode import init_speculator
 from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
     set_eagle3_aux_hidden_state_layers,
 )
-from vllm.v1.worker.gpu.spec_decode.rejection_sample import rejection_sample
+from vllm.v1.worker.gpu.spec_decode.rejection_sampler import RejectionSampler
 from vllm.v1.worker.gpu.spec_decode.utils import DraftTokensHandler
 from vllm.v1.worker.gpu.states import RequestState
 from vllm.v1.worker.gpu.structured_outputs import StructuredOutputsWorker
@@ -162,6 +162,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.speculator = None
         self.num_speculative_steps = 0
         self.use_aux_hidden_state_outputs = False
+        use_strict_rejection_sampling = False
         if self.speculative_config is not None:
             self.num_speculative_steps = self.speculative_config.num_speculative_tokens
             if self.is_last_pp_rank:
@@ -172,6 +173,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.use_aux_hidden_state_outputs = True
                 if self.pp_size > 1:
                     raise ValueError("EAGLE3 with pipeline parallel is not supported.")
+            use_strict_rejection_sampling = (
+                self.speculative_config.rejection_sample_method == "strict"
+            )
 
         # Draft tokens propagation - for spec-dec + struct outputs.
         self.draft_tokens_handler = DraftTokensHandler(self.device)
@@ -183,6 +187,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_speculative_steps=self.num_speculative_steps,
             vocab_size=self.vocab_size,
             device=self.device,
+            model_dtype=self.dtype,
+            cache_draft_logits=not use_strict_rejection_sampling,
         )
         self.input_buffers = InputBuffers(
             max_num_reqs=self.max_num_reqs,
@@ -196,6 +202,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             req_states=self.req_states,
             logprobs_mode=self.model_config.logprobs_mode,
             num_speculative_tokens=self.num_speculative_steps + 1,
+        )
+        self.rejection_sampler = RejectionSampler(
+            self.sampler,
+            num_speculative_steps=self.num_speculative_steps,
+            use_strict_rejection_sampling=use_strict_rejection_sampling,
         )
         self.prompt_logprobs_worker = PromptLogprobsWorker(self.max_num_reqs)
 
@@ -412,6 +423,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 next_prefill_tokens=self.req_states.next_prefill_tokens,
                 temperature=self.sampler.sampling_states.temperature.gpu,
                 seeds=self.sampler.sampling_states.seeds.gpu,
+                draft_logits_out=self.req_states.draft_logits,
                 num_tokens_across_dp=num_tokens_across_dp,
                 dummy_run=True,
                 skip_attn_for_dummy_run=skip_attn,
@@ -425,24 +437,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def _dummy_sampler_run(self, hidden_states: torch.Tensor) -> None:
         num_reqs = hidden_states.shape[0]
         logits = self.model.compute_logits(hidden_states)
-        idx_mapping = torch.arange(num_reqs, dtype=torch.int32, device=self.device)
-        idx_mapping_np = np.arange(num_reqs, dtype=np.int32)
-        pos = torch.zeros(num_reqs, dtype=torch.int64, device=self.device)
-        dummy_input_ids = torch.zeros(num_reqs, dtype=torch.int32, device=self.device)
-        expanded_local_pos = torch.zeros(
-            num_reqs, dtype=torch.int32, device=self.device
+        dummy_input_batch = InputBatch.make_dummy(
+            num_reqs, num_reqs, self.input_buffers
         )
+
         # NOTE(woosuk): During the initial memory profiling, the sampler may skip
         # top_k, top_p, and logprobs, using less GPU memory than what is possible
         # during actual execution.
         self.sampler(
             logits,
-            idx_mapping,
-            idx_mapping_np,
-            idx_mapping_np,
-            pos,
-            dummy_input_ids,
-            expanded_local_pos,
+            dummy_input_batch,
         )
 
     @torch.inference_mode()
@@ -768,8 +772,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         grammar_output: GrammarOutput | None,
     ) -> tuple[SamplerOutput, torch.Tensor, torch.Tensor]:
         sample_hidden_states = hidden_states[input_batch.logits_indices]
-        sample_pos = input_batch.positions[input_batch.logits_indices]
-        input_ids = input_batch.input_ids[input_batch.logits_indices]
         logits = self.model.compute_logits(sample_hidden_states)
         if grammar_output is not None:
             # Apply grammar bitmask to the logits in-place.
@@ -780,34 +782,27 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 grammar_output.grammar_bitmask,
             )
 
-        # Sample tokens and compute logprobs (if needed).
-        sampler_output = self.sampler(
-            logits,
-            input_batch.expanded_idx_mapping,
-            input_batch.idx_mapping_np,
-            input_batch.cu_num_logits_np,
-            sample_pos,
-            input_ids,
-            input_batch.expanded_local_pos,
-        )
-
         if input_batch.num_draft_tokens == 0:
             # No draft tokens (common case).
-            num_sampled = input_batch.seq_lens.new_ones(input_batch.num_reqs)
+            sampler_output = self.sampler(
+                logits,
+                input_batch,
+            )
         else:
             # Rejection sampling for spec decoding.
-            sampled_tokens, num_sampled = rejection_sample(
-                sampler_output.sampled_token_ids,
-                input_ids,
-                input_batch.cu_num_logits,
-                self.num_speculative_steps,
+            sampler_output = self.rejection_sampler(
+                logits,
+                input_batch,
+                # Draft logits are needed for probabilistic rejection sampling.
+                self.req_states.draft_logits[input_batch.idx_mapping]
+                if self.req_states.draft_logits is not None
+                else None,
             )
-            sampler_output.sampled_token_ids = sampled_tokens
 
         # Get the number of sampled and rejected tokens.
         # For chunked prefills, num_sampled and num_rejected are both 0.
         num_sampled, num_rejected = get_num_sampled_and_rejected(
-            num_sampled,
+            sampler_output.num_sampled,
             input_batch.seq_lens,
             input_batch.cu_num_logits,
             input_batch.idx_mapping,
@@ -1105,6 +1100,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.req_states.next_prefill_tokens,
                 self.sampler.sampling_states.temperature.gpu,
                 self.sampler.sampling_states.seeds.gpu,
+                self.req_states.draft_logits,
                 num_tokens_across_dp=num_tokens_across_dp,
             )
             self.req_states.draft_tokens[input_batch.idx_mapping] = draft_tokens
