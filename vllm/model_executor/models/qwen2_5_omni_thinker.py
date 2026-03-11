@@ -608,7 +608,7 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
                         use_audio_in_video = bool(use_audio_in_video_tensor.item())
                         break
             # for mutilmodality cache
-            if any([item is None for item in mm_kwargs["video"]]):
+            if any(item is None for item in mm_kwargs["video"]):
                 video_token_id = self.info.get_hf_config().video_token_id
                 audio_token_id = self.info.get_hf_config().audio_token_id
                 video_audio_item_num = sum(
