@@ -23,7 +23,6 @@ from vllm.ray.ray_env import get_env_vars_to_copy
 from vllm.utils.network_utils import get_open_zmq_ipc_path, zmq_socket_ctx
 from vllm.utils.system_utils import get_mp_context
 from vllm.v1.engine.coordinator import DPCoordinator
-from vllm.v1.engine.core import EngineCoreProc
 from vllm.v1.executor import Executor
 from vllm.v1.utils import get_engine_client_zmq_addr, shutdown
 
@@ -109,6 +108,9 @@ class CoreEngineProcManager:
             common_kwargs["client_handshake_address"] = client_handshake_address
 
         is_dp = vllm_config.parallel_config.data_parallel_size > 1
+
+        from vllm.v1.engine.core import EngineCoreProc
+
         self.processes: list[BaseProcess] = []
         local_dp_ranks = []
         for index in range(local_engine_count):
@@ -128,23 +130,18 @@ class CoreEngineProcManager:
 
         self._finalizer = weakref.finalize(self, shutdown, self.processes)
 
-        data_parallel = vllm_config.parallel_config.data_parallel_size > 1
         try:
             for proc, local_dp_rank in zip(self.processes, local_dp_ranks):
                 # Adjust device control in DP for non-CUDA platforms
                 # as well as external and ray launchers
                 # For CUDA platforms, we use torch.cuda.set_device()
-                with (
-                    set_device_control_env_var(vllm_config, local_dp_rank)
-                    if (
-                        data_parallel
-                        and (
-                            not current_platform.is_cuda_alike()
-                            or vllm_config.parallel_config.use_ray
-                        )
-                    )
-                    else contextlib.nullcontext()
+                if is_dp and (
+                    not current_platform.is_cuda_alike()
+                    or vllm_config.parallel_config.use_ray
                 ):
+                    with set_device_control_env_var(vllm_config, local_dp_rank):
+                        proc.start()
+                else:
                     proc.start()
         finally:
             # Kill other procs if not all are running.
