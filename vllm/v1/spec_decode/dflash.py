@@ -101,8 +101,13 @@ class DFlashModelProposer(SpecDecodeBaseProposer):
         is_graph_capturing: bool = False,
         slot_mappings: dict[str, torch.Tensor] | None = None,
     ) -> None:
-        _, num_input_tokens, num_tokens_across_dp = self._determine_batch_execution_and_padding(
-            num_tokens, use_cudagraphs=False
+       (
+            _,
+            num_query_tokens_dp_padded,
+            num_tokens_across_dp,
+        ) = self._determine_batch_execution_and_padding(
+            total_query_tokens,
+            use_cudagraphs=False,
         )
         if num_tokens_across_dp is not None:
             num_tokens_across_dp[self.dp_rank] = num_input_tokens
@@ -306,21 +311,23 @@ class DFlashModelProposer(SpecDecodeBaseProposer):
             )
 
         # capture
-        with torch.cuda.graph(graph, self._dflash_graph_pool):
-            with set_forward_context(
-                per_layer_attn_metadata,
-                self.vllm_config,
-                num_tokens=num_input_tokens,
-                num_tokens_across_dp=num_tokens_across_dp,
-                cudagraph_runtime_mode=CUDAGraphMode.NONE,
-                slot_mapping=self._get_slot_mapping(slot_mapping_static),
-            ):
-                output_hidden_states = self.model(
-                    input_ids=input_ids_static,
-                    positions=positions_static,
-                    hidden_states=hidden_states_static,
-                    inputs_embeds=None,
-                )
+        with torch.cuda.graph(
+            graph,
+            self._dflash_graph_pool,
+        ), set_forward_context(
+            per_layer_attn_metadata,
+            self.vllm_config,
+            num_tokens=num_input_tokens,
+            num_tokens_across_dp=num_tokens_across_dp,
+            cudagraph_runtime_mode=CUDAGraphMode.NONE,
+            slot_mapping=self._get_slot_mapping(slot_mapping_static),
+        ):
+            output_hidden_states = self.model(
+                input_ids=input_ids_static,
+                positions=positions_static,
+                hidden_states=hidden_states_static,
+                inputs_embeds=None,
+            )
 
         bucket = _DFlashGraphBucket(
             num_context_tokens=num_context_tokens,
