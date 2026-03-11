@@ -384,6 +384,7 @@ def prepare_inputs_to_capture(
 
     attn_metadata = model_state.prepare_attn(
         input_batch,
+        CUDAGraphMode.NONE,
         input_block_tables,
         slot_mappings,
         attn_groups,

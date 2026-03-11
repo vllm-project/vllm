@@ -533,6 +533,7 @@ class SamplingParams(
             if eos_ids:
                 self._all_stop_token_ids.update(eos_ids)
                 if not self.ignore_eos:
+                    assert self.stop_token_ids is not None
                     eos_ids.update(self.stop_token_ids)
                     self.stop_token_ids = list(eos_ids)
 

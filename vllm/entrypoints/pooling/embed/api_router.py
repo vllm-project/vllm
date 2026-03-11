@@ -4,14 +4,12 @@
 from http import HTTPStatus
 
 from fastapi import APIRouter, Depends, Request
-from fastapi.responses import JSONResponse
 
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.openai.utils import validate_json_request
 from vllm.entrypoints.pooling.embed.protocol import EmbeddingRequest
 from vllm.entrypoints.pooling.embed.serving import ServingEmbedding
 from vllm.entrypoints.utils import (
-    create_error_response,
     load_aware_call,
     with_cancellation,
 )
@@ -39,11 +37,6 @@ async def create_embedding(
 ):
     handler = embedding(raw_request)
     if handler is None:
-        error_response = create_error_response(
-            message="The model does not support Embeddings API"
-        )
-        return JSONResponse(
-            content=error_response.model_dump(),
-            status_code=error_response.error.code,
-        )
+        raise NotImplementedError("The model does not support Embeddings API")
+
     return await handler(request, raw_request)
