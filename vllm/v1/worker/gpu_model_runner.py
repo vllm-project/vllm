@@ -4377,7 +4377,10 @@ class GPUModelRunner(
             )
 
         elif spec_config.use_eagle() or spec_config.uses_draft_model():
-            assert isinstance(self.drafter, EagleProposer | DraftModelProposer | DFlashModelProposer)
+            assert isinstance(
+                self.drafter, 
+                EagleProposer | DraftModelProposer | DFlashModelProposer
+            )
 
             if spec_config.disable_padded_drafter_batch:
                 # When padded-batch is disabled, the sampled_token_ids should be
@@ -5978,7 +5981,10 @@ class GPUModelRunner(
             self.speculative_config.use_eagle()
             or self.speculative_config.uses_draft_model()
         ):
-            assert isinstance(self.drafter, EagleProposer | DraftModelProposer | DFlashModelProposer)
+            assert isinstance(
+                self.drafter, 
+                EagleProposer | DraftModelProposer | DFlashModelProposer
+            )
             self.drafter.initialize_attn_backend(kv_cache_config, kernel_block_sizes)
 
     def _check_and_update_cudagraph_mode(
@@ -6153,7 +6159,10 @@ class GPUModelRunner(
             self.speculative_config.use_eagle()
             or self.speculative_config.uses_extract_hidden_states()
         ):
-            assert isinstance(self.drafter, EagleProposer | ExtractHiddenStatesProposer | DFlashModelProposer)
+            assert isinstance(
+                self.drafter, 
+                EagleProposer | ExtractHiddenStatesProposer | DFlashModelProposer
+            )
             self.drafter.initialize_cudagraph_keys(cudagraph_mode)
 
     def calculate_reorder_batch_threshold(self) -> None:
