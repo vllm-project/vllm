@@ -18,7 +18,7 @@ class EAGLEConfig(PretrainedConfig):
         method: str | None = "eagle",
         **kwargs,
     ):
-        model_config: PretrainedConfig | DeepseekV2Config | Noneea
+        model_config: PretrainedConfig | DeepseekV2Config | None
         if isinstance(model, dict):
             model_config = AutoConfig.for_model(**model)
         else:
@@ -52,7 +52,7 @@ class EAGLEConfig(PretrainedConfig):
                 for arch in self.model.architectures
             ]
 
-        elif method == "":
+        elif method == "eagle3":
             assert self.model is not None, (
                 "model should not be None when method is eagle3"
             )
