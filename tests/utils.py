@@ -1600,6 +1600,41 @@ def override_cutlass_fp8_supported(value: bool):
         yield
 
 
+def disable_aiter_plain_rmsnorm(monkeypatch) -> None:
+    """Patch dispatch_rocm_rmsnorm_func so the plain (non-fused) rms_norm path
+    always uses the native float32 kernel for the duration of a test.
+
+    The fused path (rms_norm2d_with_add, selected when with_fused_add=True) is
+    left on AITER -- only the plain path is redirected to native.
+
+    AITER's plain rms_norm accumulates variance in bfloat16 (~1 ULP/call),
+    which drifts the KV cache over many decode steps. This drift is irrelevant
+    for a trained model (rank-1/rank-2 gap ~1-3 nats >> 1 ULP), but breaks
+    logprob comparison tests with randomly-initialised models like
+    TitanML/tiny-mixtral whose rank-1/rank-2 gap is only O(1/sqrt(V)) ~0.006
+    nats -- smaller than the accumulated per-step error.
+    """
+    import torch
+
+    import vllm.model_executor.layers.layernorm as _ln_mod
+    from vllm.model_executor.layers.layernorm import rms_norm as _native
+
+    _orig = _ln_mod.dispatch_rocm_rmsnorm_func
+
+    def _native_plain(
+        with_fused_add: bool, dtype: torch.dtype, use_aiter: bool = False
+    ):
+        if (
+            use_aiter
+            and not with_fused_add
+            and dtype in (torch.float16, torch.bfloat16)
+        ):
+            return _native
+        return _orig(with_fused_add, dtype, use_aiter)
+
+    monkeypatch.setattr(_ln_mod, "dispatch_rocm_rmsnorm_func", _native_plain)
+
+
 def prep_prompts(batch_size: int, ln_range: tuple[int, int] = (800, 1100)):
     """
     Generate prompts which a bunch of assignments,

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
+import copy
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
@@ -90,10 +91,17 @@ class BaseRenderer(ABC, Generic[_T]):
 
             mm_processor_cache = mm_registry.processor_cache_from_config(config)
 
+            # Deep-copy the tokenizer so the multimodal processor gets its
+            # own Rust tokenizer backend.  Without this, concurrent access
+            # from AsyncMicrobatchTokenizer and call_hf_processor causes
+            # "RuntimeError: Already borrowed" from the Rust RefCell.
+            # See: https://github.com/huggingface/tokenizers/issues/537
+            mm_tokenizer = copy.deepcopy(tokenizer)
+
             with set_default_torch_num_threads():
                 self.mm_processor = mm_registry.create_processor(
                     config.model_config,
-                    tokenizer=tokenizer,
+                    tokenizer=mm_tokenizer,
                     cache=mm_processor_cache,
                 )
 
