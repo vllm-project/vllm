@@ -354,7 +354,16 @@ class CudaPlatformBase(Platform):
 
     @classmethod
     def get_supported_vit_attn_backends(cls) -> list["AttentionBackendEnum"]:
-        if cls.has_device_capability(80):
+        if _is_blackwell_class(cls.get_device_capability()):
+            # SM12x (GB10): Flash Attention ViT kernels lack SM121 PTX,
+            # prefer FlashInfer which is compiled with SM121 support.
+            return [
+                AttentionBackendEnum.FLASHINFER,
+                AttentionBackendEnum.TRITON_ATTN,
+                AttentionBackendEnum.TORCH_SDPA,
+                AttentionBackendEnum.FLASH_ATTN,
+            ]
+        elif cls.has_device_capability(80):
             return [
                 AttentionBackendEnum.FLASH_ATTN,
                 AttentionBackendEnum.TRITON_ATTN,
@@ -368,7 +377,6 @@ class CudaPlatformBase(Platform):
                 AttentionBackendEnum.TRITON_ATTN,
                 AttentionBackendEnum.FLASHINFER,
             ]
-
     @classmethod
     def get_vit_attn_backend(
         cls,
