@@ -13,6 +13,7 @@ from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.mm.encoder_runner import EncoderRunner
 from vllm.v1.worker.gpu.mm.mrope_utils import MRopeState
+from vllm.v1.worker.gpu.mm.xdrope_utils import XDRopeState
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.states import RequestState
 from vllm.v1.worker.utils import AttentionGroup
@@ -59,6 +60,15 @@ class DefaultModelState(ModelState):
                 max_model_len=self.max_model_len,
                 device=self.device,
             )
+        self.uses_xdrope_dim = self.model_config.uses_xdrope_dim
+        if self.uses_xdrope_dim > 0:
+            self.xdrope_state = XDRopeState(
+                uses_xdrope_dim=self.uses_xdrope_dim,
+                max_num_reqs=self.max_num_reqs,
+                max_num_tokens=self.max_num_tokens,
+                max_model_len=self.max_model_len,
+                device=self.device,
+            )
 
     def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
         if self.uses_mrope:
@@ -70,10 +80,19 @@ class DefaultModelState(ModelState):
                 new_req_data.prefill_token_ids,
                 mm_features=new_req_data.mm_features,
             )
+        elif self.uses_xdrope_dim > 0:
+            self.xdrope_state.init_prefill_xdrope_positions(
+                req_index,
+                self.model,
+                new_req_data.prefill_token_ids,
+                mm_features=new_req_data.mm_features,
+            )
 
     def apply_staged_writes(self) -> None:
         if self.uses_mrope:
             self.mrope_state.apply_staged_writes()
+        elif self.uses_xdrope_dim > 0:
+            self.xdrope_state.apply_staged_writes()
 
     def get_mm_embeddings(
         self,
@@ -106,21 +125,31 @@ class DefaultModelState(ModelState):
     def prepare_inputs(
         self, input_batch: InputBatch, req_states: RequestState
     ) -> dict[str, torch.Tensor | None]:
-        if not self.uses_mrope:
-            # Common case (1D positions).
-            return {}
-
-        # Prepare M-RoPE positions.
-        self.mrope_state.prepare_mrope_positions(
-            input_batch.idx_mapping,
-            input_batch.query_start_loc,
-            req_states.prefill_len.gpu,
-            req_states.num_computed_tokens.gpu,
-        )
-        mrope_positions = self.mrope_state.mrope_positions[
-            :, : input_batch.num_tokens_after_padding
-        ]
-        return {"positions": mrope_positions}
+        if self.uses_mrope:
+            # Prepare M-RoPE positions.
+            self.mrope_state.prepare_mrope_positions(
+                input_batch.idx_mapping,
+                input_batch.query_start_loc,
+                req_states.prefill_len.gpu,
+                req_states.num_computed_tokens.gpu,
+            )
+            mrope_positions = self.mrope_state.mrope_positions[
+                :, : input_batch.num_tokens_after_padding
+            ]
+            return {"positions": mrope_positions}
+        elif self.uses_xdrope_dim > 0:
+            # Prepare XD-RoPE positions.
+            self.xdrope_state.prepare_xdrope_positions(
+                input_batch.idx_mapping,
+                input_batch.query_start_loc,
+                req_states.prefill_len.gpu,
+                req_states.num_computed_tokens.gpu,
+            )
+            xdrope_positions = self.xdrope_state.xdrope_positions[
+                :, : input_batch.num_tokens_after_padding
+            ]
+            return {"positions": xdrope_positions}
+        return {}  # Common case (1D positions).
 
     def prepare_dummy_inputs(
         self, num_reqs: int, num_tokens: int
@@ -132,6 +161,9 @@ class DefaultModelState(ModelState):
         if self.uses_mrope:
             mrope_positions = self.mrope_state.mrope_positions[:, :num_tokens]
             model_inputs["positions"] = mrope_positions
+        elif self.uses_xdrope_dim > 0:
+            xdrope_positions = self.xdrope_state.xdrope_positions[:, :num_tokens]
+            model_inputs["positions"] = xdrope_positions
         return model_inputs
 
     def prepare_attn(
