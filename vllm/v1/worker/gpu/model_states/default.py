@@ -160,9 +160,7 @@ class DefaultModelState(ModelState):
         ]
         return {"positions": xdrope_positions}
 
-    def prepare_dummy_inputs(
-        self, num_reqs: int, num_tokens: int
-    ) -> dict[str, torch.Tensor | None]:
+    def prepare_dummy_inputs(self, num_reqs: int, num_tokens: int) -> dict[str, Any]:
         model_inputs = {}
         if self.supports_mm_inputs:
             inputs_embeds = self.encoder_runner.inputs_embeds[:num_tokens]
@@ -183,6 +181,7 @@ class DefaultModelState(ModelState):
         slot_mappings: torch.Tensor,
         attn_groups: list[list[AttentionGroup]],
         kv_cache_config: KVCacheConfig,
+        for_capture: bool = False,
     ) -> dict[str, Any]:
         if cudagraph_mode == CUDAGraphMode.FULL:
             # Use padded sizes - padding is handled by model_runner.prepare_attn.

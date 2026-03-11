@@ -391,5 +391,6 @@ def prepare_inputs_to_capture(
         slot_mappings,
         attn_groups,
         kv_cache_config,
+        for_capture=True,
     )
     return attn_metadata, slot_mappings_by_layer
