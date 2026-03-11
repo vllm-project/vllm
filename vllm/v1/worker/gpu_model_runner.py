@@ -160,6 +160,7 @@ from vllm.v1.sample.logits_processor.interface import LogitsProcessor
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import RejectionSampler
 from vllm.v1.sample.sampler import Sampler
+from vllm.v1.spec_decode.dflash import DFlashModelProposer
 from vllm.v1.spec_decode.draft_model import DraftModelProposer
 from vllm.v1.spec_decode.eagle import EagleProposer
 from vllm.v1.spec_decode.extract_hidden_states import ExtractHiddenStatesProposer
@@ -506,6 +507,7 @@ class GPUModelRunner(
                 | NgramProposerGPU
                 | SuffixDecodingProposer
                 | EagleProposer
+                | DFlashModelProposer
                 | DraftModelProposer
                 | MedusaProposer
                 | ExtractHiddenStatesProposer
@@ -539,6 +541,18 @@ class GPUModelRunner(
                 )
             elif self.speculative_config.method == "suffix":
                 self.drafter = SuffixDecodingProposer(self.vllm_config)
+            elif self.speculative_config.method == "dflash":
+                self.drafter = DFlashModelProposer(
+                    vllm_config=self.vllm_config,
+                    device=self.device,
+                    runner=self,
+                )
+                hf_config = self.speculative_config.draft_model_config.hf_config
+                drafter_config = getattr(hf_config, "eagle_config", {}) or {}
+                drafter_config.update(getattr(hf_config, "dflash_config", {}) or {})
+                use_aux = drafter_config.get("use_aux_hidden_state", True)
+                if use_aux:
+                    self.use_aux_hidden_state_outputs = True
             elif self.speculative_config.use_eagle():
                 self.drafter = EagleProposer(self.vllm_config, self.device, self)
                 if self.speculative_config.method == "eagle3":
@@ -2082,7 +2096,7 @@ class GPUModelRunner(
                 cm.slot_mapping = slot_mappings[kv_cache_gid]
 
             if self.speculative_config and spec_decode_common_attn_metadata is None:
-                if isinstance(self.drafter, EagleProposer):
+                if isinstance(self.drafter, EagleProposer | DFlashModelProposer):
                     if self.drafter.kv_cache_gid == kv_cache_gid:
                         spec_decode_common_attn_metadata = cm
                 else:
@@ -4363,7 +4377,7 @@ class GPUModelRunner(
             )
 
         elif spec_config.use_eagle() or spec_config.uses_draft_model():
-            assert isinstance(self.drafter, EagleProposer | DraftModelProposer)
+            assert isinstance(self.drafter, EagleProposer | DraftModelProposer | DFlashModelProposer)
 
             if spec_config.disable_padded_drafter_batch:
                 # When padded-batch is disabled, the sampled_token_ids should be
@@ -4657,12 +4671,17 @@ class GPUModelRunner(
             return None
 
         hf_config = self.speculative_config.draft_model_config.hf_config
-        if not hasattr(hf_config, "eagle_aux_hidden_state_layer_ids"):
-            return None
 
-        layer_ids = hf_config.eagle_aux_hidden_state_layer_ids
-        if layer_ids and isinstance(layer_ids, (list, tuple)):
-            return tuple(layer_ids)
+        if hasattr(hf_config, "eagle_aux_hidden_state_layer_ids"):
+            layer_ids = hf_config.eagle_aux_hidden_state_layer_ids
+            if layer_ids and isinstance(layer_ids, (list, tuple)):
+                return tuple(layer_ids)
+
+        dflash_cfg = getattr(hf_config, "dflash_config", None)
+        if dflash_cfg and isinstance(dflash_cfg, dict):
+            target_layer_ids = dflash_cfg.get("target_layer_ids")
+            if target_layer_ids and isinstance(target_layer_ids, (list, tuple)):
+                return tuple(target_layer_ids)
 
         return None
 
@@ -5959,7 +5978,7 @@ class GPUModelRunner(
             self.speculative_config.use_eagle()
             or self.speculative_config.uses_draft_model()
         ):
-            assert isinstance(self.drafter, EagleProposer | DraftModelProposer)
+            assert isinstance(self.drafter, EagleProposer | DraftModelProposer | DFlashModelProposer)
             self.drafter.initialize_attn_backend(kv_cache_config, kernel_block_sizes)
 
     def _check_and_update_cudagraph_mode(
@@ -6134,7 +6153,7 @@ class GPUModelRunner(
             self.speculative_config.use_eagle()
             or self.speculative_config.uses_extract_hidden_states()
         ):
-            assert isinstance(self.drafter, EagleProposer | ExtractHiddenStatesProposer)
+            assert isinstance(self.drafter, EagleProposer | ExtractHiddenStatesProposer | DFlashModelProposer)
             self.drafter.initialize_cudagraph_keys(cudagraph_mode)
 
     def calculate_reorder_batch_threshold(self) -> None:
