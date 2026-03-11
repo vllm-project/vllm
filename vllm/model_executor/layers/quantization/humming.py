@@ -41,6 +41,7 @@ from vllm.model_executor.parameter import (
     ModelWeightParameter,
     PackedvLLMParameter,
     PerTensorScaleParameter,
+    RowvLLMParameter,
 )
 from vllm.model_executor.utils import set_weight_attrs
 
@@ -49,6 +50,7 @@ if TYPE_CHECKING:
 
 
 try:
+    from humming.dtypes import DataType
     from humming.layer import HummingMethod
     from humming.schema import (
         BaseInputSchema,
@@ -56,6 +58,7 @@ try:
         HummingInputSchema,
         HummingWeightSchema,
     )
+    from humming.utils.weight import quantize_weight
 except ImportError:
     HummingMethod = None
 
@@ -85,10 +88,14 @@ def prepare_param(tensor, name, extra_attrs):
         param_cls = PackedvLLMParameter
     elif scale_type in param_cls_name_map:
         param_cls = param_cls_name_map[scale_type]
-    elif "output_dim" not in extra_attrs or "input_dim" not in extra_attrs:
-        param_cls = torch.nn.Parameter
-    else:
+    elif "output_dim" in extra_attrs and "input_dim" in extra_attrs:
         param_cls = ModelWeightParameter
+    elif "input_dim" in extra_attrs:
+        param_cls = RowvLLMParameter
+    elif "output_dim" in extra_attrs:
+        param_cls = ChannelQuantScaleParameter
+    else:
+        param_cls = torch.nn.Parameter
 
     if param_cls == torch.nn.Parameter:
         param = param_cls(tensor, requires_grad=False)
@@ -137,7 +144,7 @@ def may_pad_loaded_weight(param, loaded_weight):
         return loaded_weight
     value = 1 if loaded_weight.dtype == torch.float8_e8m0fnu else 0
     padding = []
-    for x in pad_shape[::-1][:loaded_weight.ndim]:
+    for x in pad_shape[::-1][: loaded_weight.ndim]:
         padding += [0, x]
     loaded_weight = torch.nn.functional.pad(
         input=loaded_weight,
@@ -170,11 +177,12 @@ def compressed_tensors_get_config(config: dict[str, Any], key: str) -> dict[str,
 
 
 class HummingLayerQuantizationConfig(QuantizationConfig):
-    def __init__(self, weight_schema, input_schema = None,):
+    def __init__(self, weight_schema, input_schema=None, force_input_schema=None):
         self.weight_schema: BaseWeightSchema = weight_schema
         if input_schema is None:
             input_schema = HummingInputSchema()
         self.input_schema: BaseInputSchema = input_schema
+        self.force_input_schema: HummingInputSchema | None = force_input_schema
 
     @classmethod
     def from_config(cls, config):
@@ -208,7 +216,7 @@ class HummingConfig(QuantizationConfig):
         assert_humming_available()
         self.full_config: dict[str, Any] = full_config or {}
         keys = ["ignored_layers", "ignore", "modules_to_not_convert"]
-        self.ignored_layers = self.get_from_keys_or(full_config, keys, []) or []
+        self.ignored_layers = self.get_from_keys_or(full_config or {}, keys, []) or []
 
     @classmethod
     def get_name(cls) -> QuantizationMethods:
@@ -281,14 +289,16 @@ class HummingConfig(QuantizationConfig):
         return None
 
     def get_layer_input_schema(self, config: dict[str, Any], prefix: str):
+        if self.is_layer_skipped(config, prefix):
+            return None
         if config["quant_method"] in ["compressed-tensors", "modelopt"]:
             group_config = compressed_tensors_get_config(config, "input_activations")
             if group_config is None:
                 return None
             config = group_config
 
-        if "quant_method" in config:
-            return BaseInputSchema.from_config(config)
+        if config.get("quant_method", None) in BaseInputSchema.INPUT_SCHEMA_MAP:
+            return BaseInputSchema.from_config(config, error_if_unsupported=False)
         return None
 
     def get_quant_config_for_layer(
@@ -296,20 +306,35 @@ class HummingConfig(QuantizationConfig):
     ) -> HummingLayerQuantizationConfig | None:
         assert HummingMethod is not None, ""
 
-        weight_schema = self.get_layer_weight_schema(self.full_config, prefix)
-
-        if not self.full_config:
+        if self.full_config:
+            weight_schema = self.get_layer_weight_schema(self.full_config, prefix)
+        else:
             weight_config = envs.VLLM_HUMMING_ONLINE_QUANT_CONFIG or {}
+            if "quant_method" not in weight_config:
+                weight_config["quant_method"] = "humming"
             weight_schema = self.get_layer_weight_schema(weight_config, prefix)
 
         if weight_schema is not None:
             if weight_schema.quant_method == "mxfp4" and layer_type != "moe":
                 return None
             input_schema = None
+            force_input_schema = None
+
             if self.full_config:
                 input_schema = self.get_layer_input_schema(self.full_config, prefix)
 
-            return HummingLayerQuantizationConfig(weight_schema, input_schema)
+            if envs.VLLM_HUMMING_INPUT_QUANT_CONFIG:
+                quant_config = envs.VLLM_HUMMING_INPUT_QUANT_CONFIG.copy()
+                quant_config["quant_method"] = "humming"
+                force_input_schema = self.get_layer_input_schema(quant_config, prefix)
+                if input_schema is None:
+                    input_schema = force_input_schema
+
+            return HummingLayerQuantizationConfig(
+                weight_schema=weight_schema,
+                input_schema=input_schema,
+                force_input_schema=force_input_schema,
+            )
         return None
 
     def get_quant_method(
@@ -336,16 +361,41 @@ class HummingConfig(QuantizationConfig):
 class HummingLinearMethod(LinearMethodBase):
     def __init__(self, quant_config: HummingLayerQuantizationConfig):
         self.quant_config = quant_config
-        self.weight_schema: BaseWeightSchema = quant_config.weight_schema
-        self.input_schema: BaseInputSchema = quant_config.input_schema
+        self.weight_schema = quant_config.weight_schema
+        self.input_schema = quant_config.input_schema
+        self.force_input_schema = quant_config.force_input_schema
 
-    def prepare_weight_loader(self, weight_loader):
+    def prepare_weight_loader(self, layer, weight_loader):
         def new_weight_loader(
             param: torch.nn.Parameter,
             loaded_weight: torch.Tensor,
             shard_id: str | int | None = None,
         ):
             name = param.param_name
+            float_dtypes = [torch.float16, torch.bfloat16, torch.float32]
+            if name == "weight" and loaded_weight.dtype in float_dtypes:
+                assert isinstance(self.weight_schema, HummingWeightSchema)
+                f16_dtype = DataType.from_torch_dtype(layer.param_dtype)
+                tensor_list = quantize_weight(
+                    weight=loaded_weight,
+                    dtype=self.weight_schema.b_dtype,
+                    scale_dtype=self.weight_schema.bs_dtype or f16_dtype,
+                    group_size=self.weight_schema.weight_scale_group_size,
+                    has_zero_point=self.weight_schema.has_zero_point,
+                    has_global_scale=self.weight_schema.has_global_scale,
+                    is_fp_zero_point=self.weight_schema.is_fp_zero_point,
+                    pack=True,
+                )
+
+                key_list = ["weight", "weight_scale", "zero_point", "global_scale"]
+                for key, tensor in zip(key_list, tensor_list):
+                    if tensor is None or tensor.nelement() == 0:
+                        continue
+                    param = getattr(layer, key)
+                    param.weight_loader(param, tensor, shard_id)
+
+                return None
+
             loaded_weight = self.weight_schema.process_loaded_weight(
                 tensor=loaded_weight,
                 name=name,
@@ -376,6 +426,10 @@ class HummingLinearMethod(LinearMethodBase):
         layer.output_partition_sizes = output_partition_sizes
         layer.extra_weight_attrs = extra_weight_attrs
 
+        weight_loader = extra_weight_attrs.get("weight_loader", default_weight_loader)
+        new_weight_loader = self.prepare_weight_loader(layer, weight_loader)
+        extra_weight_attrs["weight_loader"] = new_weight_loader
+
         for key in ["weight_block_size", "block_structure"]:
             block_size = getattr(self.weight_schema, key, None)
             if block_size is not None:
@@ -402,13 +456,14 @@ class HummingLinearMethod(LinearMethodBase):
             tensor = torch.empty(attrs["shape"], dtype=attrs["dtype"])
             extra_attrs = attrs.get("extra_attrs", {}).copy()
             extra_attrs.update(extra_weight_attrs)
-            weight_loader = extra_attrs.get("weight_loader", default_weight_loader)
-            extra_attrs["weight_loader"] = self.prepare_weight_loader(weight_loader)
             param = prepare_param(tensor, name, extra_attrs)
             setattr(layer, name, param)
 
         locks = torch.zeros(1024, dtype=torch.int32)
         layer.register_buffer("locks", locks)
+
+        if self.force_input_schema is not None:
+            self.input_schema = self.force_input_schema
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if not isinstance(self.weight_schema, HummingWeightSchema):
@@ -468,19 +523,55 @@ class HummingMoEMethod(FusedMoEMethodBase):
         super().__init__(moe)
         self.quant_config = quant_config
         self.moe = moe
-        self.weight_schema: BaseWeightSchema = quant_config.weight_schema
-        self.input_schema: BaseInputSchema = quant_config.input_schema
+        self.weight_schema = quant_config.weight_schema
+        self.input_schema = quant_config.input_schema
+        self.force_input_schema = quant_config.force_input_schema
 
-    def prepare_weight_loader(self, weight_loader):
+    def prepare_weight_loader(self, layer, weight_loader):
         def new_weight_loader(
             param: torch.nn.Parameter,
             loaded_weight: torch.Tensor,
             weight_name: str,
-            shard_id: int | None = None,
+            shard_id: str,
             expert_id: int | None = None,
             return_success: bool = False,
         ):
             name = param.param_name
+            float_dtypes = [torch.float16, torch.bfloat16, torch.float32]
+            if name == "weight" and loaded_weight.dtype in float_dtypes:
+                assert isinstance(self.weight_schema, HummingWeightSchema)
+                f16_dtype = DataType.from_torch_dtype(layer.param_dtype)
+                tensor_list = quantize_weight(
+                    weight=loaded_weight,
+                    dtype=self.weight_schema.b_dtype,
+                    scale_dtype=self.weight_schema.bs_dtype or f16_dtype,
+                    group_size=self.weight_schema.weight_scale_group_size,
+                    has_zero_point=self.weight_schema.has_zero_point,
+                    has_global_scale=self.weight_schema.has_global_scale,
+                    is_fp_zero_point=self.weight_schema.is_fp_zero_point,
+                    pack=True,
+                )
+
+                key_list = ["weight", "weight_scale", "zero_point", "global_scale"]
+                success = True
+                for key, tensor in zip(key_list, tensor_list):
+                    if tensor is None or tensor.nelement() == 0:
+                        continue
+                    sublayer_name = "w2" if shard_id == "w2" else "w13"
+
+                    param = getattr(layer, sublayer_name + "_" + key)
+                    part_subccess = param.weight_loader(
+                        param=param,
+                        loaded_weight=tensor.cpu(),
+                        weight_name=weight_name,
+                        shard_id=shard_id,
+                        expert_id=expert_id,
+                        return_success=return_success,
+                    )
+                    success = success and part_subccess
+
+                return success if return_success else None
+
             loaded_weight = self.weight_schema.process_loaded_weight(
                 tensor=loaded_weight,
                 name=name,
@@ -508,6 +599,9 @@ class HummingMoEMethod(FusedMoEMethodBase):
     ):
         layer.num_experts = num_experts
         layer.param_dtype = params_dtype
+        weight_loader = extra_weight_attrs.get("weight_loader", default_weight_loader)
+        weight_loader = self.prepare_weight_loader(layer, weight_loader)
+        extra_weight_attrs["weight_loader"] = weight_loader
 
         layer.sublayer_configs = {
             "w13": {
@@ -544,11 +638,11 @@ class HummingMoEMethod(FusedMoEMethodBase):
                 param = torch.nn.Parameter(tensor, requires_grad=False)
                 extra_attrs = attrs.get("extra_attrs", {}).copy()
                 extra_attrs.update(extra_weight_attrs)
-                weight_loader = extra_attrs.get("weight_loader", default_weight_loader)
-                weight_loader = self.prepare_weight_loader(weight_loader)
-                extra_attrs["weight_loader"] = weight_loader
                 param = prepare_moe_param(tensor, name, extra_attrs)
                 setattr(layer, f"{sublayer_name}_{name}", param)
+
+        if self.force_input_schema is not None:
+            self.input_schema = self.force_input_schema
 
         locks = torch.zeros(1024, dtype=torch.int32)
         layer.register_buffer("locks", locks)
