@@ -371,7 +371,7 @@ async def test_subscribe_kv_events_round_trip_with_fallback_handler(
 
 
 @pytest.mark.asyncio
-async def test_subscribe_kv_events_returns_failed_precondition_when_disabled(
+async def test_subscribe_kv_events_returns_unimplemented_when_disabled(
     monkeypatch,
     grpc_server_module,
 ):
@@ -411,7 +411,7 @@ async def test_subscribe_kv_events_returns_failed_precondition_when_disabled(
         with pytest.raises(grpc.aio.AioRpcError) as exc_info:
             await call.read()
 
-        assert exc_info.value.code() == grpc.StatusCode.FAILED_PRECONDITION
+        assert exc_info.value.code() == grpc.StatusCode.UNIMPLEMENTED
         assert "KV cache events are not enabled" in exc_info.value.details()
     finally:
         await channel.close()

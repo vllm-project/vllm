@@ -5,7 +5,9 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 from collections.abc import AsyncGenerator
+from contextlib import suppress
 from typing import Any
 
 import grpc
@@ -96,13 +98,29 @@ class GrpcKvEventStreamer:
     ) -> AsyncGenerator[Any, None]:
         if not self.enabled:
             await context.abort(
-                grpc.StatusCode.FAILED_PRECONDITION,
+                grpc.StatusCode.UNIMPLEMENTED,
                 "KV cache events are not enabled. Set --kv-events-config with "
                 "enable_kv_cache_events=true and publisher=zmq.",
             )
             return
 
         assert self._config is not None
+        if not self._is_subscriber_allowed(context):
+            await context.abort(
+                grpc.StatusCode.PERMISSION_DENIED,
+                "SubscribeKvEvents is restricted to local subscribers by "
+                "default. Set kv_events_config.allow_remote_subscribe=true "
+                "only on trusted networks.",
+            )
+            return
+
+        send_initial_metadata = getattr(context, "send_initial_metadata", None)
+        if callable(send_initial_metadata):
+            # Flush response headers immediately so clients can await
+            # stream setup without waiting for the first event.
+            with suppress(Exception):
+                await send_initial_metadata(())
+
         start_sequence = max(0, int(getattr(request, "start_sequence_number", 0)))
 
         ctx = zmq.asyncio.Context.instance()
@@ -235,6 +253,12 @@ class GrpcKvEventStreamer:
             endpoints.append(maybe_endpoint)
         return endpoints
 
+    def _is_subscriber_allowed(self, context: grpc.aio.ServicerContext) -> bool:
+        assert self._config is not None
+        if self._config.allow_remote_subscribe:
+            return True
+        return self._is_local_peer(self._peer(context))
+
     def _should_emit(
         self,
         decoded_batch: KVEventBatch,
@@ -328,13 +352,64 @@ class GrpcKvEventStreamer:
         return (seq_hi << 32) | idx_lo
 
     @staticmethod
-    def _is_cancelled(context: grpc.aio.ServicerContext) -> bool:
-        for method_name in ("done", "cancelled"):
-            method = getattr(context, method_name, None)
-            if callable(method):
-                try:
-                    if bool(method()):
-                        return True
-                except Exception:
-                    continue
+    def _peer(context: grpc.aio.ServicerContext) -> str:
+        peer_method = getattr(context, "peer", None)
+        if callable(peer_method):
+            try:
+                peer_value = peer_method()
+            except Exception:
+                return ""
+            return str(peer_value) if peer_value is not None else ""
+        return ""
+
+    @classmethod
+    def _is_local_peer(cls, peer: str) -> bool:
+        if not peer:
+            return False
+        if peer.startswith("unix:"):
+            return True
+        if peer.startswith("ipv4:"):
+            host_port = peer[len("ipv4:") :]
+            if ":" in host_port:
+                host = host_port.rsplit(":", maxsplit=1)[0]
+            else:
+                host = host_port
+            return cls._is_loopback_host(host)
+        if peer.startswith("ipv6:"):
+            host_port = peer[len("ipv6:") :]
+            host = cls._extract_ipv6_host(host_port)
+            return cls._is_loopback_host(host)
         return False
+
+    @staticmethod
+    def _extract_ipv6_host(host_port: str) -> str:
+        if not host_port:
+            return ""
+        if host_port.startswith("["):
+            bracket_end = host_port.find("]")
+            if bracket_end != -1:
+                return host_port[1:bracket_end]
+            return host_port.strip("[]")
+        # grpc peer strings for ipv6 are generally bracketed when a port is
+        # present, but keep a best-effort fallback.
+        if ":" in host_port and host_port.count(":") == 1:
+            return host_port.rsplit(":", maxsplit=1)[0]
+        return host_port
+
+    @staticmethod
+    def _is_loopback_host(host: str) -> bool:
+        normalized = host.strip().strip("[]")
+        if not normalized:
+            return False
+        if normalized.lower() == "localhost":
+            return True
+        # Strip optional IPv6 zone index (e.g., ::1%lo0).
+        ip_text = normalized.split("%", maxsplit=1)[0]
+        try:
+            return ipaddress.ip_address(ip_text).is_loopback
+        except ValueError:
+            return False
+
+    @staticmethod
+    def _is_cancelled(context: grpc.aio.ServicerContext) -> bool:
+        return context.cancelled()

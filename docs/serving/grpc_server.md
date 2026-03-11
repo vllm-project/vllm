@@ -32,7 +32,14 @@ python -m vllm.entrypoints.grpc_server \
 Notes:
 
 - The RPC request accepts `start_sequence_number` for replay/catch-up.
-- If KV events are disabled, the RPC returns `FAILED_PRECONDITION`.
+- If KV events are disabled, the RPC returns `UNIMPLEMENTED`.
 - For replay support, set `replay_endpoint` in `--kv-events-config`.
+- For security, `SubscribeKvEvents` only allows local peers (`127.0.0.1`,
+  `::1`, or `unix:`) by default. This protects sensitive `token_ids`.
+- To allow remote subscribers, explicitly set
+  `allow_remote_subscribe: true` in `--kv-events-config` and use trusted
+  network controls.
+- The local-peer check is transport-level. If you deploy behind a proxy or
+  sidecar, enforce authentication and authorization at that boundary.
 
 For a KV events example, see [examples/online_serving/disaggregated_serving/kv_events.sh](../../examples/online_serving/disaggregated_serving/kv_events.sh).

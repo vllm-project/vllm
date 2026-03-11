@@ -49,6 +49,12 @@ class KVEventsConfig:
     this topic to receive events.
     """
 
+    allow_remote_subscribe: bool = False
+    """If False (default), SubscribeKvEvents only allows local loopback or unix
+    peers. Set to True to allow remote gRPC subscribers. KV events include
+    token IDs and may expose sensitive prompt/response content.
+    """
+
     def __post_init__(self):
         if self.publisher is None:
             self.publisher = "zmq" if self.enable_kv_cache_events else "null"
