@@ -24,11 +24,11 @@ try:
     from amdsmi import (
         AmdSmiException,
         amdsmi_get_gpu_asic_info,
+        amdsmi_get_gpu_device_uuid,
         amdsmi_get_processor_handles,
         amdsmi_init,
         amdsmi_shut_down,
         amdsmi_topo_get_link_type,
-        amdsmi_get_gpu_device_uuid,
     )
 except ImportError as e:
     logger.warning("Failed to import from amdsmi with %r", e)
@@ -120,6 +120,16 @@ def _get_gcn_arch_via_amdsmi() -> str:
         )
     # Ultimate fallback: use torch.cuda (will initialize CUDA)
     return torch.cuda.get_device_properties("cuda").gcnArchName
+
+
+@with_amdsmi_context
+def _get_gcn_arch_name(cls, device_id: int = 0) -> str:
+    if torch.cuda.is_available():
+        return torch.cuda.get_device_properties(device_id).gcnArchName
+
+    device = amdsmi_get_processor_handles()[device_id]
+    asic_info = amdsmi_get_gpu_asic_info(device)
+    return asic_info["target_graphics_version"]
 
 
 @cache
@@ -458,7 +468,7 @@ class RocmPlatform(Platform):
         else:
             device = amdsmi_get_processor_handles()[device_id]
             asic_info = amdsmi_get_gpu_asic_info(device)
-            target_id = asic_info['target_graphics_version']
+            target_id = asic_info["target_graphics_version"]
             major_minor = target_id[3:]
             if len(major_minor) == 4:
                 major = int(major_minor[0:2])
@@ -508,9 +518,8 @@ class RocmPlatform(Platform):
     @classmethod
     @with_amdsmi_context
     def get_device_uuid(cls, device_id: int = 0) -> str:
-            device = amdsmi_get_processor_handles()[device_id]
-            return amdsmi_get_gpu_device_uuid(device)
-        
+        device = amdsmi_get_processor_handles()[device_id]
+        return amdsmi_get_gpu_device_uuid(device)
 
     @classmethod
     def get_device_total_memory(cls, device_id: int = 0) -> int:
@@ -640,16 +649,6 @@ class RocmPlatform(Platform):
         return (
             "vllm.distributed.device_communicators.cuda_communicator.CudaCommunicator"  # noqa
         )
-
-    @classmethod
-    @with_amdsmi_context
-    def _get_gcn_arch_name(cls, device_id: int = 0) -> str:
-        if torch.cuda.is_available():
-            return torch.cuda.get_device_properties(device_id).gcnArchName
-
-        device = amdsmi_get_processor_handles()[device_id]
-        asic_info = amdsmi_get_gpu_asic_info(device)
-        return asic_info['target_graphics_version']
 
     @classmethod
     def supports_mx(cls) -> bool:
