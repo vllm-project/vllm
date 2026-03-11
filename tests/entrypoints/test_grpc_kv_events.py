@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+
 import pytest
 
 pytest.importorskip("grpc")
 
 import grpc
+from vllm.grpc import vllm_engine_pb2
 
 from vllm.config.kv_events import KVEventsConfig
 from vllm.distributed.kv_events import (
@@ -15,7 +17,6 @@ from vllm.distributed.kv_events import (
     KVEventBatch,
 )
 from vllm.entrypoints.grpc_kv_events import GrpcKvEventStreamer, _hash_to_int64
-from vllm.grpc import vllm_engine_pb2
 
 
 class _FakeContext:
