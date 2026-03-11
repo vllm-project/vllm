@@ -24,6 +24,8 @@ from .types import (
 
 logger = init_logger(__name__)
 
+_BGE_M3_EMBED_DIM = 1024
+
 
 class BgeM3SparseEmbeddingsProcessor(
     IOProcessor[SparseEmbeddingCompletionRequestMixin, SparseEmbeddingResponse]
@@ -105,8 +107,8 @@ class BgeM3SparseEmbeddingsProcessor(
             mo = model_output[idx]
             sparse_embedding: dict[int, float] = {}
             num_prompt_tokens += len(mo.prompt_token_ids)
-            dense_embedding = mo.outputs.data[:1024].tolist()
-            sparse_weights = mo.outputs.data[1024:].tolist()
+            dense_embedding = mo.outputs.data[:_BGE_M3_EMBED_DIM].tolist()
+            sparse_weights = mo.outputs.data[_BGE_M3_EMBED_DIM:].tolist()
             if len(mo.prompt_token_ids) != len(sparse_weights):
                 # this is the case that add_special_tokens is True,
                 # which means first token and last token are special tokens
