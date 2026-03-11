@@ -38,7 +38,7 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.worker.gpu_input_batch import InputBatch
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
-from vllm.v1.worker.utils import AttentionGroup, select_common_block_size
+from vllm.v1.worker.utils import select_common_block_size
 
 BLOCK_SIZE = 16
 NUM_BLOCKS = 10
@@ -203,37 +203,25 @@ def _make_kv_cache_spec() -> FullAttentionSpec:
 def test_select_common_block_size_prefers_manager_block_size():
     backend_a = _make_mock_backend_for_kernel_block_size([MultipleOf(32)])
     backend_b = _make_mock_backend_for_kernel_block_size([64, MultipleOf(16)])
-    attn_groups = [
-        AttentionGroup(backend_a, [], [], _make_kv_cache_spec(), 0),
-        AttentionGroup(backend_b, [], [], _make_kv_cache_spec(), 0),
-    ]
 
-    selected_size = select_common_block_size(128, attn_groups)
+    selected_size = select_common_block_size(128, [backend_a, backend_b])
     assert selected_size == 128
 
 
 def test_select_common_block_size_uses_largest_shared_int():
     backend_a = _make_mock_backend_for_kernel_block_size([128, 64])
     backend_b = _make_mock_backend_for_kernel_block_size([64, 32])
-    attn_groups = [
-        AttentionGroup(backend_a, [], [], _make_kv_cache_spec(), 0),
-        AttentionGroup(backend_b, [], [], _make_kv_cache_spec(), 0),
-    ]
 
-    selected_size = select_common_block_size(256, attn_groups)
+    selected_size = select_common_block_size(256, [backend_a, backend_b])
     assert selected_size == 64
 
 
 def test_select_common_block_size_no_valid_option():
     backend_a = _make_mock_backend_for_kernel_block_size([64])
     backend_b = _make_mock_backend_for_kernel_block_size([MultipleOf(16)])
-    attn_groups = [
-        AttentionGroup(backend_a, [], [], _make_kv_cache_spec(), 0),
-        AttentionGroup(backend_b, [], [], _make_kv_cache_spec(), 0),
-    ]
 
     with pytest.raises(ValueError):
-        select_common_block_size(48, attn_groups)
+        select_common_block_size(48, [backend_a, backend_b])
 
 
 def test_update_states_new_request(model_runner, dist_init):
