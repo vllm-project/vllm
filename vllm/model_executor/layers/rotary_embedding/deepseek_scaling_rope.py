@@ -164,7 +164,7 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbeddingBase):
             query,
             key,
             offsets,
-            self.cos_sin_cache,
+            self._match_cos_sin_cache_dtype(query),
             self.rotary_dim,
             self.is_neox_style,
         )
