@@ -48,7 +48,9 @@ MTPModelTypes = Literal[
 ]
 NgramGPUTypes = Literal["ngram_gpu"]
 DFlashModelTypes = Literal["dflash"]
-EagleModelTypes = Literal["eagle", "eagle3", "extract_hidden_states", MTPModelTypes, DFlashModelTypes]
+EagleModelTypes = Literal[
+    "eagle", "eagle3", "extract_hidden_states", MTPModelTypes, DFlashModelTypes
+]
 SpeculativeMethod = Literal[
     "ngram",
     "medusa",
@@ -194,7 +196,11 @@ class SpeculativeConfig:
         factors: list[Any] = []
         # Eagle3 and extract_hidden_states affect the computation graph because
         # they return intermediate hidden states in addition to the final hidden state.
-        uses_aux_hidden_states = self.method in ("eagle3", "extract_hidden_states", "dflash")
+        uses_aux_hidden_states = self.method in (
+            "eagle3",
+            "extract_hidden_states",
+            "dflash",
+        )
         factors.append(uses_aux_hidden_states)
 
         # The specific layers used also affect the computation graph
