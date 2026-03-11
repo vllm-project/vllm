@@ -786,10 +786,12 @@ class SpecDecodeBaseProposer:
         ctx_slot_mapping = cad.slot_mapping[:num_context_tokens]
         full_slot_mapping = torch.cat([ctx_slot_mapping, query_slot_mapping], dim=0)
 
+        query_offsets_loc_buffer = self._dflash_query_start_loc_buffer
+        assert query_offsets_loc_buffer is not None
         if (
             getattr(self, "_dflash_query_start_loc_buffer", None) is None
-            or self._dflash_query_start_loc_buffer.shape[0] < batch_size + 1
-            or self._dflash_query_start_loc_buffer.device != device
+            or query_offsets_loc_buffer.shape[0] < batch_size + 1
+            or query_offsets_loc_buffer.device != device
         ):
             self._dflash_query_start_loc_buffer = torch.empty(
                 batch_size + 1,
@@ -801,9 +803,11 @@ class SpecDecodeBaseProposer:
         qsl.copy_(torch.arange(batch_size + 1, device=device, dtype=torch.int32))
         qsl.mul_(num_query_tokens)
 
+        dflash_query_start_loc_cpu_buffer = self._dflash_query_start_loc_cpu_buffer
+        assert dflash_query_start_loc_cpu_buffer is not None
         if (
             getattr(self, "_dflash_query_start_loc_cpu_buffer", None) is None
-            or self._dflash_query_start_loc_cpu_buffer.shape[0] < batch_size + 1
+            or dflash_query_start_loc_cpu_buffer.shape[0] < batch_size + 1
         ):
             self._dflash_query_start_loc_cpu_buffer = torch.empty(
                 batch_size + 1,
