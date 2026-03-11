@@ -20,15 +20,16 @@ rms_norm_native = ir.ops.rms_norm.impls["native"].impl_fn
 
 
 @pytest.mark.skipif(
-    not current_platform.is_cuda_alike(),
-    reason="Currently only kernels on CUDA and ROCm",
+    not current_platform.is_cuda_alike() and not current_platform.is_xpu(),
+    reason="Currently only kernels on CUDA, ROCm and XPU",
 )
 def test_rms_norm_registration():
     expected = {
         "native": True,
-        "vllm_c": True,
+        "vllm_c": current_platform.is_cuda_alike(),
         "aiter": current_platform.is_rocm(),
         "oink": False,
+        "xpu_kernels": current_platform.is_xpu(),
     }
 
     actual = {
@@ -43,13 +44,13 @@ def test_rms_norm_registration():
 @pytest.mark.parametrize("hidden_size", [16, 4096, 8192])
 @pytest.mark.parametrize("epsilon", [1e-6, 1e-5])
 @pytest.mark.skipif(
-    not current_platform.is_cuda_alike(),
-    reason="Currently only kernels on CUDA and ROCm",
+    not current_platform.is_cuda_alike() and not current_platform.is_xpu(),
+    reason="Currently only kernels on CUDA, ROCm and XPU",
 )
 class TestRMSNorm:
     @classmethod
     def setup_class(cls, **kwargs):
-        torch.set_default_device("cuda")
+        torch.set_default_device(current_platform.device_name)
 
     def test_native_semantics(self, dtype, n_tokens, hidden_size, epsilon):
         x, weight = rms_norm_inputs(4, 8, dtype)
@@ -70,7 +71,7 @@ class TestRMSNorm:
         out4 = rms_norm_native(x, None, epsilon=epsilon)
         torch.testing.assert_close(out3, out4)
 
-    @pytest.mark.parametrize("provider", ["vllm_c", "aiter"])
+    @pytest.mark.parametrize("provider", ["vllm_c", "aiter", "xpu_kernels"])
     def test_impls(self, dtype, n_tokens, hidden_size, epsilon, provider):
         impl = ir.ops.rms_norm.impls[provider]
         if not impl.supported:
@@ -115,7 +116,7 @@ class TestRMSNorm:
             atol=2e-4,
         )
 
-    @pytest.mark.parametrize("provider", ["vllm_c", "aiter", "native"])
+    @pytest.mark.parametrize("provider", ["vllm_c", "aiter", "xpu_kernels", "native"])
     def test_torch_opcheck(self, dtype, n_tokens, hidden_size, epsilon, provider):
         if not ir.ops.rms_norm.impls[provider].supported:
             pytest.skip(f"{provider} impl not supported on this platform")
