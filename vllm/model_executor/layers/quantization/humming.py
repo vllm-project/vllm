@@ -65,8 +65,10 @@ except ImportError:
 
 
 def assert_humming_available():
-    err_msg = "humming is not available, please run 'pip install humming' to install."
-    assert HummingMethod is not None, err_msg
+    assert HummingMethod is not None, (
+        "humming is not available, please run "
+        "'pip install git+https://github.com/inclusionAI/humming' to install it."
+    )
 
 
 def prepare_padded_shape(shape, x):
