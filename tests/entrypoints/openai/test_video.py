@@ -446,6 +446,7 @@ async def test_online_audio_in_video(
         {
             "role": "user",
             "content": [
+                {"type": "text", "text": "What's in this video?"},
                 {
                     "type": "video_url",
                     "video_url": {"url": f"data:video/mp4;base64,{video_base64}"},
