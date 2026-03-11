@@ -36,8 +36,15 @@ _fi_ar_quant_workspace = None
 def _cleanup_fi_ar_workspaces():
     """Release workspaces before Python shutdown to avoid __del__ crash."""
     global _fi_ar_workspace, _fi_ar_quant_workspace
-    _fi_ar_workspace = None
+    if (
+        _fi_ar_quant_workspace is not None
+        and _fi_ar_quant_workspace is not _fi_ar_workspace
+    ):
+        _fi_ar_quant_workspace.destroy()
     _fi_ar_quant_workspace = None
+    if _fi_ar_workspace is not None:
+        _fi_ar_workspace.destroy()
+        _fi_ar_workspace = None
 
 
 atexit.register(_cleanup_fi_ar_workspaces)
