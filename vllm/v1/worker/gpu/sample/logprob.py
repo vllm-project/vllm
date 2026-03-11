@@ -102,7 +102,27 @@ def compute_topk_logprobs(
     batch_size, vocab_size = logits.shape
     logprob_token_ids = sampled_token_ids.unsqueeze(-1)
     if num_logprobs > 0:
-        topk_indices = torch.topk(logits, num_logprobs, dim=-1).indices
+        # Request one extra to handle the case where the sampled token
+        # is already in the top-k (which would cause a duplicate).
+        k = min(num_logprobs + 1, vocab_size)
+        topk_indices = torch.topk(logits, k, dim=-1).indices
+        # Build a mask that is False only at the *first* occurrence of
+        # the sampled token in each row, so we can remove it.
+        is_sampled = topk_indices == sampled_token_ids.unsqueeze(-1)
+        # Zero out all but the first True per row so we only remove one.
+        first_match = is_sampled.cumsum(dim=-1) == 1
+        remove_mask = is_sampled & first_match
+        # Keep entries that are not removed.  For rows where the sampled
+        # token was NOT in the top-k, all k entries survive and we later
+        # slice to num_logprobs.  For rows where it WAS present, removing
+        # one entry leaves exactly k-1 = num_logprobs entries.
+        #
+        # Collect kept entries in order using a stable sort on the mask:
+        # kept entries get key 0, removed entries get key 1, so kept
+        # entries stay in their original relative order at the front.
+        sort_keys = remove_mask.to(torch.int32)
+        _, perm = sort_keys.sort(dim=-1, stable=True)
+        topk_indices = topk_indices.gather(1, perm)[:, :num_logprobs]
         logprob_token_ids = torch.cat((logprob_token_ids, topk_indices), dim=1)
 
     # NOTE(woosuk): Here, to save GPU memory, we do not materialize the full
