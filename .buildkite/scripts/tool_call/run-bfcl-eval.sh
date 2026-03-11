@@ -27,6 +27,7 @@
 #   BFCL_TP_SIZE        - Tensor parallel size (default: 1)
 #   BFCL_MAX_MODEL_LEN  - Max model length (default: 4096)
 #   BFCL_PORT           - Server port (default: 8000)
+#   BFCL_REASONING_PARSER - Reasoning parser name (default: disabled)
 #   BFCL_EXTRA_ARGS     - Additional vLLM server args
 
 set -euo pipefail
@@ -41,6 +42,7 @@ NUM_THREADS="${BFCL_NUM_THREADS:-8}"
 TP_SIZE="${BFCL_TP_SIZE:-1}"
 MAX_MODEL_LEN="${BFCL_MAX_MODEL_LEN:-4096}"
 PORT="${BFCL_PORT:-8000}"
+REASONING_PARSER="${BFCL_REASONING_PARSER:-}"
 EXTRA_ARGS="${BFCL_EXTRA_ARGS:-}"
 
 # Set up output directory
@@ -98,6 +100,11 @@ SERVE_ARGS=(
     --enforce-eager
     --no-enable-prefix-caching
 )
+
+# Append reasoning parser if specified
+if [ -n "$REASONING_PARSER" ]; then
+    SERVE_ARGS+=(--reasoning-parser "$REASONING_PARSER")
+fi
 
 # Append any extra args
 if [ -n "$EXTRA_ARGS" ]; then
@@ -165,7 +172,7 @@ bfcl_model_config.MODEL_CONFIG_MAPPING[model] = ModelConfig(
     model_name=model,
     display_name=f"{model} (FC) (vLLM)",
     url=f"https://huggingface.co/{model}",
-    org="openai",
+    org="",
     license="apache-2.0",
     model_handler=handler,
     input_price=None,
