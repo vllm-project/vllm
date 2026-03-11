@@ -1116,7 +1116,7 @@ def get_safetensors_params_metadata(
     revision: str | None = None,
 ) -> dict[str, Any]:
     """
-    Get the safetensors metadata for remote model repository.
+    Get the safetensors parameters metadata for remote/local model repository.
     """
     full_metadata = {}
     if (model_path := Path(model)).exists():
