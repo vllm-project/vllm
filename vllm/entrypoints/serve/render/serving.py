@@ -221,6 +221,9 @@ class OpenAIServingRender:
         # if the model supports it. TODO: Support browsing.
         assert not self.supports_browsing
         assert not self.supports_code_interpreter
+        assert request.reasoning_effort != "none", (
+            "Harmony does not support reasoning_effort='none'"
+        )
         sys_msg = get_system_message(
             reasoning_effort=request.reasoning_effort,
             browser_description=None,
