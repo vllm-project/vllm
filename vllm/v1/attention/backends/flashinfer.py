@@ -1111,7 +1111,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         if num_decodes > 0:
             if decode_use_trtllm:
                 assert num_decode_tokens % num_decodes == 0, (
-                    "TRTLLM decode requires uniform query lengths per request."
+                    "TRTLLM decode requires uniform query lengths per request. "
+                    f"Got {num_decode_tokens=} and {num_decodes=}."
                 )
                 attn_metadata.decode = TRTLLMDecode(
                     block_tables=block_table_tensor[:num_decodes],
