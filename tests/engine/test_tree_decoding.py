@@ -68,19 +68,31 @@ def test_tree_decoding():
         outputs = llm.generate(prompt, sampling_params)
         
         if outputs and len(outputs) > 0:
-            # print(len(outputs))
-            # print(len(outputs[0].outputs))
-            for output in outputs[0].outputs:
-                generated_text = output.text
-                print(f"\n--- 序列 ID: {output.seq_id} | 父节点 ID: {output.parent_seq_id} | 深度: {output.tree_depth} ---")
-                print(f"生成结果: {generated_text}")
-                print(f"生成长度: {len(generated_text)} 字符")
+            seq_map = {output.seq_id: output for output in outputs[0].outputs}
+            leaf_outputs = [output for output in outputs[0].outputs if output.is_leaf]
             
+            for leaf_out in leaf_outputs:
+                # Traverse up to collect texts
+                path_texts = []
+                current = leaf_out
+                while current is not None:
+                    path_texts.append(current.text)
+                    if current.parent_seq_id is not None and current.parent_seq_id in seq_map:
+                        current = seq_map[current.parent_seq_id]
+                    else:
+                        current = None
+                
+                # The path gives leaf to root, so we reverse it
+                full_text = "".join(reversed(path_texts))
+                print(f"\n--- 序列 ID: {leaf_out.seq_id} | 父节点 ID: {leaf_out.parent_seq_id} | 深度: {leaf_out.tree_depth} (叶子节点) ---")
+                print(f"完整生成结果: {full_text}")
+                print(f"完整生成长度: {len(full_text)} 字符")
+                
             # 检查是否成功生成
-            if generated_text:
-                print("✓ 生成成功!")
+            if leaf_outputs:
+                print("✓ 成功生成叶子节点!")
             else:
-                print("✗ 生成失败: 空结果")
+                print("✗ 生成失败: 没有找到叶子节点")
                 all_success = False
         else:
             print("✗ 生成失败: 无输出")

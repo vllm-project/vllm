@@ -51,6 +51,7 @@ class CompletionOutput:
     parent_req_id: Optional[str] = None
     parent_seq_id: Optional[int] = None
     seq_id: Optional[int] = None
+    is_leaf: bool = True
 
     def finished(self) -> bool:
         return self.finish_reason is not None
@@ -66,7 +67,8 @@ class CompletionOutput:
                 f"tree_depth={self.tree_depth}, "
                 f"parent_req_id={self.parent_req_id}, "
                 f"parent_seq_id={self.parent_seq_id}, "
-                f"seq_id={self.seq_id})")
+                f"seq_id={self.seq_id}, "
+                f"is_leaf={self.is_leaf})")
 
 
 @dataclass
@@ -295,6 +297,7 @@ class RequestOutput:
                 output.parent_req_id = getattr(seq, 'parent_req_id', None)
                 output.parent_seq_id = getattr(seq, 'parent_seq_id', None)
                 output.seq_id = seq.seq_id
+                output.is_leaf = getattr(seq, 'is_leaf', True)
 
             else:
                 output = CompletionOutput(
@@ -308,7 +311,8 @@ class RequestOutput:
                     getattr(seq, 'tree_depth', 0),
                     getattr(seq, 'parent_req_id', None),
                     getattr(seq, 'parent_seq_id', None),
-                    seq.seq_id)
+                    seq.seq_id,
+                    getattr(seq, 'is_leaf', True))
 
             outputs.append(output)
 

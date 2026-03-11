@@ -510,6 +510,7 @@ class Sequence:
         self.tree_depth = 0
         self.parent_req_id = None
         self.parent_seq_id = None
+        self.is_leaf = True
 
     @property
     def n_blocks(self) -> int:
@@ -1545,6 +1546,7 @@ class ParallelSampleSequenceGroup(SequenceGroupBase):
         original_seqs_length = len(self.assembled_seq_group.seqs)
         parent_seq_group = self.to_be_finished[parent_req_id]
         parent_seq = parent_seq_group.seqs[0]
+        parent_seq.is_leaf = False
         old_tokens = parent_seq.get_token_ids()
         parent_seq.status = SequenceStatus.FINISHED_STOPPED
         self.finish_seq(parent_seq_group)
