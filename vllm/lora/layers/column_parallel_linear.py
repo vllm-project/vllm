@@ -283,10 +283,9 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
         packed_modules_list: list,
         model_config: PretrainedConfig | None = None,
     ) -> bool:
-        return (
-            type(source_layer) is MergedColumnParallelLinear
-            and len(packed_modules_list) == len(source_layer.output_sizes)
-        )
+        return type(source_layer) is MergedColumnParallelLinear and len(
+            packed_modules_list
+        ) == len(source_layer.output_sizes)
 
 
 class QKVParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
