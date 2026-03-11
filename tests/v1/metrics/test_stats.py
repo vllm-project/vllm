@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import pytest
+
 from vllm.v1.engine import FinishReason
 from vllm.v1.metrics.stats import IterationStats, PromptTokenStats, RequestStateStats
 
@@ -115,9 +117,10 @@ def test_prompt_token_stats_all_computed():
 
     # Case 1: No caching (All tokens computed locally)
     stats.update_from_output(
+        request_id="test-req-1",
+        prompt_len=1000,
         num_cached_tokens=0,
         num_external_computed_tokens=0,
-        prompt_len=1000,
     )
 
     assert stats.computed == 1000
@@ -132,14 +135,16 @@ def test_prompt_token_stats_partial_local_cache():
 
     # Case 2: Partial local cache
     stats.update_from_output(
+        request_id="test-req-2",
+        prompt_len=1000,
         num_cached_tokens=300,
         num_external_computed_tokens=0,
-        prompt_len=1000,
     )
 
     assert stats.computed == 700
     assert stats.local_cache_hit == 300
     assert stats.external_kv_transfer == 0
+    assert stats.total == 1000
 
 
 def test_prompt_token_stats_partial_external_transfer():
@@ -148,14 +153,16 @@ def test_prompt_token_stats_partial_external_transfer():
 
     # Case 3: Partial external transfer
     stats.update_from_output(
+        request_id="test-req-3",
+        prompt_len=1000,
         num_cached_tokens=500,
         num_external_computed_tokens=500,
-        prompt_len=1000,
     )
 
     assert stats.computed == 500
     assert stats.local_cache_hit == 0
     assert stats.external_kv_transfer == 500
+    assert stats.total == 1000
 
 
 def test_prompt_token_stats_mixed_sources():
@@ -164,14 +171,16 @@ def test_prompt_token_stats_mixed_sources():
 
     # Case 4: Mixed sources
     stats.update_from_output(
+        request_id="test-req-4",
+        prompt_len=1000,
         num_cached_tokens=600,
         num_external_computed_tokens=200,
-        prompt_len=1000,
     )
 
     assert stats.computed == 400
     assert stats.local_cache_hit == 400
     assert stats.external_kv_transfer == 200
+    assert stats.total == 1000
 
 
 def test_prompt_token_stats_full_local_cache_recompute():
@@ -184,14 +193,16 @@ def test_prompt_token_stats_full_local_cache_recompute():
 
     # Case 5: Full local cache (999 cached after reduction, 1 recomputed)
     stats.update_from_output(
+        request_id="test-req-5",
+        prompt_len=1000,
         num_cached_tokens=999,
         num_external_computed_tokens=0,
-        prompt_len=1000,
     )
 
     assert stats.computed == 1
     assert stats.local_cache_hit == 1000
     assert stats.recomputed_tokens == 1
+    assert stats.total == 1000
 
 
 def test_prompt_token_stats_full_external_transfer_recompute():
@@ -200,12 +211,77 @@ def test_prompt_token_stats_full_external_transfer_recompute():
 
     # Case 6: Full external transfer (999 cached after reduction, 1 recomputed)
     stats.update_from_output(
+        request_id="test-req-6",
+        prompt_len=1000,
         num_cached_tokens=999,
         num_external_computed_tokens=1000,
-        prompt_len=1000,
     )
 
     assert stats.computed == 1
     assert stats.local_cache_hit == 0
     assert stats.external_kv_transfer == 1000
     assert stats.recomputed_tokens == 1
+    assert stats.total == 1000
+
+
+@pytest.mark.parametrize(
+    "test_id,prompt_len,num_cached,num_external,description",
+    [
+        (
+            "negative-cached",
+            100,
+            -10,
+            0,
+            "negative num_cached_tokens",
+        ),
+        (
+            "negative-external",
+            100,
+            10,
+            -5,
+            "negative num_external_computed_tokens",
+        ),
+        (
+            "cached-exceeds-prompt",
+            100,
+            150,
+            0,
+            "num_cached_tokens > prompt_len",
+        ),
+        (
+            "external-exceeds-cached",
+            100,
+            10,
+            50,
+            "num_external > num_cached + recomputed (P/D disaggregation)",
+        ),
+        (
+            "multiple-violations",
+            100,
+            -5,
+            -10,
+            "multiple violations (both negative)",
+        ),
+    ],
+)
+def test_prompt_token_stats_invariant_violation(
+    test_id, prompt_len, num_cached, num_external, description, caplog_vllm
+):
+    """Test that invariant violations are caught and handled safely."""
+    stats = PromptTokenStats()
+
+    stats.update_from_output(
+        request_id=f"test-req-{test_id}",
+        prompt_len=prompt_len,
+        num_cached_tokens=num_cached,
+        num_external_computed_tokens=num_external,
+    )
+
+    # Should log a warning
+    assert "METRICS ACCOUNTING BUG DETECTED" in caplog_vllm.text
+
+    # Should not crash, should discard cache metrics
+    assert stats.computed == prompt_len
+    assert stats.local_cache_hit == 0
+    assert stats.external_kv_transfer == 0
+    assert stats.total == prompt_len
