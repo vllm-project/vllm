@@ -43,20 +43,19 @@ class SimpleCPUOffloadWorker:
         self.device: torch.device | None = None
         self.num_cpu_blocks: int = 0
 
-        # Cached launch params for the Triton kernel
-        self._store_launch_params: LaunchParams | None = None
-        self._load_launch_params: LaunchParams | None = None
-
         # CUDA streams for the async transfers
         self.load_stream: torch.cuda.Stream | None = None
         self.store_stream: torch.cuda.Stream | None = None
+
+        # Cached launch params for the Triton kernel
+        self._store_launch_params: LaunchParams | None = None
+        self._load_launch_params: LaunchParams | None = None
 
         # Ordered (event_idx, event) — stream ordering lets us break early
         self._load_events: list[tuple[int, torch.cuda.Event]] = []
         self._store_events: list[tuple[int, torch.cuda.Event]] = []
 
-        # Deferred stores: queued in wait_for_save(), flushed in start_load_kv()
-        self._pending_store_events: list[tuple[int, list[int], list[int]]] = []
+        # Metadata for the current step
         self._connector_metadata: SimpleCPUOffloadMetadata | None = None
 
         # Pending event index sets, populated in bind_connector_metadata
@@ -164,97 +163,77 @@ class SimpleCPUOffloadWorker:
         self._connector_metadata = None
 
     def start_load_kv(self) -> None:
-        """Flush deferred stores, then start async loads from CPU to GPU."""
-        if not self._is_initialized:
-            logger.warning("KV caches not registered, skipping load")
-            return
-
-        self._submit_pending_stores()
-
-        if self._connector_metadata is None:
-            return
-
-        metadata = self._connector_metadata
-        if not metadata.load_gpu_blocks:
-            return
-
-        assert self.load_stream is not None
-        assert self.cpu_kv_caches is not None
-        assert self.gpu_kv_caches is not None
-
-        with torch.cuda.stream(self.load_stream):
-            self._copy_blocks(
-                src_caches=self.cpu_kv_caches,
-                dst_caches=self.gpu_kv_caches,
-                src_block_ids=metadata.load_cpu_blocks,
-                dst_block_ids=metadata.load_gpu_blocks,
-                is_store=False,
-            )
-            event = torch.cuda.Event()
-            event.record(self.load_stream)
-
-        self._load_events.append((metadata.load_event, event))
-        logger.debug(
-            "Started loading %d blocks from CPU (event_idx=%d)",
-            len(metadata.load_gpu_blocks),
-            metadata.load_event,
-        )
+        # NOTE: we defer launching the load kernel to `wait_for_save()` after the
+        # main model computation kernels/CUDA graphs have been launched to hide
+        # the CPU-side KV block copy kernel launching overhead.
+        pass
 
     def wait_for_save(self) -> None:
-        """Queue store events; actual submission deferred to start_load_kv()."""
-        if self._connector_metadata is None:
-            return
+        """Submit async load (CPU->GPU) and store (GPU->CPU) transfers.
 
-        if not self._is_initialized:
+        Both are deferred here (after forward-pass kernels are enqueued) to
+        hide the CPU-side Triton kernel launch overhead behind GPU compute.
+        """
+        if not self._is_initialized or self._connector_metadata is None:
             return
 
         metadata = self._connector_metadata
-        if not metadata.store_gpu_blocks:
-            return
-
-        self._pending_store_events.append(
-            (metadata.store_event, metadata.store_gpu_blocks, metadata.store_cpu_blocks)
+        self._submit_copy(  # submit the load kernel
+            src_blocks=metadata.load_cpu_blocks,
+            dst_blocks=metadata.load_gpu_blocks,
+            event_idx=metadata.load_event,
+            is_store=False,
         )
-        logger.debug(
-            "Queued storing %d blocks to CPU (event_idx=%d)",
-            len(metadata.store_gpu_blocks),
-            metadata.store_event,
+        self._submit_copy(  # submit the store kernel
+            src_blocks=metadata.store_gpu_blocks,
+            dst_blocks=metadata.store_cpu_blocks,
+            event_idx=metadata.store_event,
+            is_store=True,
         )
 
-    def _submit_pending_stores(self) -> None:
-        if not self._pending_store_events:
-            return
-        if not self._is_initialized:
+    def _submit_copy(
+        self,
+        src_blocks: list[int],
+        dst_blocks: list[int],
+        event_idx: int,
+        is_store: bool,
+    ) -> None:
+        """Launch an async block copy on *stream* and record a tracking event."""
+        if not src_blocks:
             return
 
-        assert self.store_stream is not None
         assert self.gpu_kv_caches is not None
         assert self.cpu_kv_caches is not None
 
-        all_src: list[int] = []
-        all_dst: list[int] = []
-        for _, src, dst in self._pending_store_events:
-            all_src.extend(src)
-            all_dst.extend(dst)
+        if is_store:
+            src_caches, dst_caches = self.gpu_kv_caches, self.cpu_kv_caches
+            stream = self.store_stream
+            events = self._store_events
+        else:
+            src_caches, dst_caches = self.cpu_kv_caches, self.gpu_kv_caches
+            stream = self.load_stream
+            events = self._load_events
 
-        with torch.cuda.stream(self.store_stream):
-            if all_src:
-                self._copy_blocks(
-                    src_caches=self.gpu_kv_caches,
-                    dst_caches=self.cpu_kv_caches,
-                    src_block_ids=all_src,
-                    dst_block_ids=all_dst,
-                    is_store=True,
-                )
-            # One event covers all batched jobs; they share the same completion point.
+        assert stream is not None
+
+        with torch.cuda.stream(stream):
+            self._copy_blocks(
+                src_caches,
+                dst_caches,
+                src_blocks,
+                dst_blocks,
+                is_store,
+            )
             event = torch.cuda.Event()
-            event.record(self.store_stream)
+            event.record(stream)
 
-        for event_idx, _, _ in self._pending_store_events:
-            self._store_events.append((event_idx, event))
-            logger.debug("Submitted deferred store to CPU (event_idx=%d)", event_idx)
-
-        self._pending_store_events.clear()
+        events.append((event_idx, event))
+        logger.debug(
+            "Submitted %s of %d blocks (event_idx=%d)",
+            "store" if is_store else "load",
+            len(src_blocks),
+            event_idx,
+        )
 
     def get_finished(
         self,
@@ -341,8 +320,6 @@ class SimpleCPUOffloadWorker:
 
     def handle_preemptions(self) -> None:
         """Sync all in-flight transfers before preempted blocks are reused."""
-        self._submit_pending_stores()
-
         for _, event in self._load_events:
             event.synchronize()
         self._load_events.clear()
