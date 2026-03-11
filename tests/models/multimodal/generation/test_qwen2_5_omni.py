@@ -1,0 +1,74 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+import base64
+import json
+
+import pytest
+import pytest_asyncio
+
+from ....conftest import VideoTestAssets
+from ....utils import RemoteOpenAIServer
+
+MODEL_NAME = "/mnt/data0/LLM/Qwen2.5-Omni-3B"
+
+
+@pytest.fixture
+def server():
+    args = [
+        "--dtype",
+        "bfloat16",
+        "--max-model-len",
+        "4096",
+        "--enforce-eager",
+        "--limit-mm-per-prompt",
+        json.dumps({"audio": 1, "video": 1}),
+    ]
+
+    with RemoteOpenAIServer(
+        MODEL_NAME, args, env_dict={"VLLM_AUDIO_FETCH_TIMEOUT": "30"}
+    ) as remote_server:
+        yield remote_server
+
+
+@pytest_asyncio.fixture
+async def client(server):
+    async with server.get_async_client() as async_client:
+        yield async_client
+
+
+@pytest.mark.core_model
+@pytest.mark.asyncio
+async def test_online_audio_in_video(client, video_assets: VideoTestAssets):
+    """Exercises online serving with/without chunked prefill enabled."""
+
+    video_path = video_assets[0].video_path
+    with open(video_path, "rb") as f:
+        video_base64 = base64.b64encode(f.read()).decode("utf-8")
+
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "video_url",
+                    "video_url": {"url": f"data:video/mp4;base64,{video_base64}"},
+                },
+            ],
+        }
+    ]
+
+    chat_completion = await client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=messages,
+        max_tokens=16,
+        extra_body={
+            "mm_processor_kwargs": {
+                "use_audio_in_video": True,
+            }
+        },
+    )
+
+    assert len(chat_completion.choices) == 1
+    choice = chat_completion.choices[0]
+    assert choice.finish_reason == "length"
