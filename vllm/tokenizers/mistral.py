@@ -44,7 +44,7 @@ def maybe_serialize_tool_calls(request: "MistralChatCompletionRequest"):
     # SEE: https://github.com/vllm-project/vllm/pull/9951
     # Credits go to: @gcalmettes
     # NOTE: There is currently a bug in pydantic where attributes
-    # declared as iterables are replaced in in the instances by
+    # declared as iterables are replaced in the instances by
     # pydantic-core ValidatorIterator instance. In particular, this
     # affects tool_calls defined in ChatCompletionAssistantMessageParam
     # model:
