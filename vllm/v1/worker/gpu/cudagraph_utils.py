@@ -384,9 +384,11 @@ def prepare_inputs_to_capture(
 
     attn_metadata = model_state.prepare_attn(
         input_batch,
+        CUDAGraphMode.NONE,
         input_block_tables,
         slot_mappings,
         attn_groups,
         kv_cache_config,
+        for_capture=True,
     )
     return attn_metadata, slot_mappings_by_layer
