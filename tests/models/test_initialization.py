@@ -103,6 +103,12 @@ def can_initialize(
             "pickle error when loading `transformers.models.auto.CONFIG_MAPPING`"
         )
 
+    if model_arch == "MoonshotKimiaForCausalLM":
+        pytest.skip(
+            "Kimi-Audio requires SpeechToTextConfig "
+            "which is not configured in test environment"
+        )
+
     if model_arch in ["DeepseekV32ForCausalLM", "GlmMoeDsaForCausalLM"]:
         from vllm.platforms import current_platform
 
