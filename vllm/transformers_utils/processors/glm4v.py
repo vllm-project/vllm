@@ -28,8 +28,11 @@ class GLM4VProcessor(ProcessorMixin):
         self,
         tokenizer: PreTrainedTokenizer,
         image_size: int,
+        image_processor: GLM4VImageProcessorFast | None = None,
     ) -> None:
         self.tokenizer = tokenizer
-        self.image_processor = GLM4VImageProcessorFast(
-            size={"width": image_size, "height": image_size}
-        )
+        if image_processor is None:
+            image_processor = GLM4VImageProcessorFast(
+                size={"width": image_size, "height": image_size}
+            )
+        self.image_processor = image_processor

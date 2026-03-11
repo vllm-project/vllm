@@ -35,12 +35,6 @@ class TrtLlmFp8Experts(mk.FusedMoEExpertsMonolithic):
     ):
         super().__init__(moe_config, quant_config)
 
-        if moe_config.moe_parallel_config.use_ep and quant_config.is_per_tensor:
-            raise NotImplementedError(
-                "EP parallelism is not supported with TRTLLM"
-                "per-tensor FP8 quantization."
-            )
-
         self.routing_method_type = moe_config.routing_method
         self.topk = moe_config.experts_per_token
         self.intermediate_size_per_partition = (
@@ -181,9 +175,6 @@ class TrtLlmFp8Experts(mk.FusedMoEExpertsMonolithic):
 
         assert not apply_router_weight_on_input
         assert activation == MoEActivation.SILU
-
-        if e_score_correction_bias is not None:
-            e_score_correction_bias = e_score_correction_bias.to(hidden_states.dtype)
 
         if self.routing_method_type == RoutingMethodType.DeepSeekV3:
             router_logits = router_logits.to(torch.float32)
