@@ -5261,7 +5261,10 @@ class GPUModelRunner(
             ):
                 assert isinstance(
                     self.drafter, 
-                    EagleProposer | DraftModelProposer | ExtractHiddenStatesProposer | DFlashModelProposer,
+                    EagleProposer 
+                    | DraftModelProposer 
+                    | ExtractHiddenStatesProposer 
+                    | DFlashModelProposer,
                 )
                 assert self.speculative_config is not None
                 # Eagle currently only supports PIECEWISE cudagraphs.
