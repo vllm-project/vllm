@@ -1741,6 +1741,12 @@ class NanoNemotronVLDummyInputsBuilder(
             target_num_frames = self.info.get_num_frames_with_most_features(
                 seq_len, mm_counts
             )
+            mm_config = self.info.ctx.get_mm_config()
+            if num_frames := mm_config.media_io_kwargs.get("video", {}).get(
+                "num_frames"
+            ):
+                assert num_frames > 0
+                target_num_frames = num_frames
             num_videos = mm_counts.get("video", 0)
             video_overrides = mm_options.get("video")
             dummy_video = {
