@@ -42,13 +42,10 @@ def fused_concat_and_cache_mla_rope_impl(
         forward_context = get_forward_context()
         attn_layer = forward_context.no_compile_layers[layer_name]
         kv_cache = attn_layer.kv_cache[forward_context.virtual_engine]
-        print("kv_cache", kv_cache.shape if kv_cache is not None else None)
         layer_slot_mapping = forward_context.slot_mapping.get(layer_name)
-        print("layer_slot_mapping", layer_slot_mapping.shape if layer_slot_mapping is not None else None)
-        if layer_slot_mapping is not None:
-            ops.concat_and_cache_mla_rope_fused(
-                positions, q_pe, k_pe, kv_c, cos_sin_cache, is_neox, layer_slot_mapping,
-                kv_cache, kv_cache_dtype, kv_cache_scale)
+        ops.concat_and_cache_mla_rope_fused(
+            positions, q_pe, k_pe, kv_c, cos_sin_cache, is_neox, layer_slot_mapping,
+            kv_cache, kv_cache_dtype, kv_cache_scale, layer_slot_mapping is not None)
 
 def fused_concat_and_cache_mla_rope_fake(
     dummy: torch.Tensor,
@@ -67,7 +64,7 @@ direct_register_custom_op(
     op_name="fused_concat_and_cache_mla_rope",
     op_func=fused_concat_and_cache_mla_rope_impl,
     fake_impl=fused_concat_and_cache_mla_rope_fake,
-    mutates_args=["dummy", "q_pe", "k_pe", "kv_c"],
+    mutates_args=["dummy", "q_pe", "k_pe"],
 )
 
 class KVCacheMLARoPEFusionPattern:
@@ -139,7 +136,7 @@ class KVCacheMLARoPEFusionPattern:
             
             dummy = torch.ops.vllm.unified_mla_kv_cache_update(
                 kv_c_normed, k3, self.layer_name, self.kv_cache_dtype, k_scale)
-            return dummy, query, k3, kv_c_normed
+            return dummy, query, k3
 
         def replacement(
             q: torch.Tensor,
@@ -150,15 +147,13 @@ class KVCacheMLARoPEFusionPattern:
             cos_sin_cache: torch.Tensor,
             k_scale: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-            print("replacement called")
-            k_pe2 = k_pe.squeeze(1)
             dummy = torch.empty(0, device=kv_c_normed.device, dtype=kv_c_normed.dtype)
-            results = auto_functionalized(
-                self.FUSED_OP,
+            k_pe_squeezed = k_pe.squeeze(1)
+            self.FUSED_OP(
                 dummy=dummy,
                 positions=positions,
                 q_pe=q,
-                k_pe=k_pe2,
+                k_pe=k_pe_squeezed,
                 kv_c=kv_c_normed,
                 cos_sin_cache=cos_sin_cache.to(q.dtype),
                 is_neox=self.is_neox,
@@ -166,7 +161,25 @@ class KVCacheMLARoPEFusionPattern:
                 kv_cache_scale=k_scale,
                 layer_name=self.layer_name,
             )
-            return results[1], results[2], results[3].unsqueeze(1), results[4]
+            return dummy, q, k_pe_squeezed.unsqueeze(1)
+
+            # TODO this is a fallback - delete when done
+            torch.ops.vllm.flashinfer_rotary_embedding(
+                positions=positions,
+                query=q,
+                key=k_pe,
+                head_size=q.shape[2],
+                cos_sin_cache=cos_sin_cache,
+                is_neox=self.is_neox
+            )
+            k = k_pe.squeeze(1)
+            scatter = torch.ops.aten.slice_scatter.default(mm, k, 1, 512, 576)
+            _, k2 = torch.ops.aten.split_with_sizes.default(scatter, [512, 64], -1)
+            k3 = k2.unsqueeze(1)
+            dummy = torch.ops.vllm.unified_mla_kv_cache_update(
+                kv_c_normed, k3, self.layer_name, self.kv_cache_dtype, k_scale)
+            return dummy, q, k3
+
 
         # NOTE: use view_to_reshape to unify view/reshape to simplify
         # pattern and increase matching opportunities
