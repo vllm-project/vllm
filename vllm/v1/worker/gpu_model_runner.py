@@ -423,6 +423,9 @@ class GPUModelRunner(
         )
         # This will be overridden in load_model()
         self.is_multimodal_pruning_enabled = False
+        # Set to True after init_routed_experts_capturer() completes.
+        # Prevents routed experts code from running during profiling/dummy run.
+        self.routed_experts_initialized = False
         self.max_model_len = model_config.max_model_len
 
         # Always set to false after the first forward pass
@@ -2117,8 +2120,10 @@ class GPUModelRunner(
         block_table_gid_0 = _get_block_table(0)
         slot_mapping_gid_0 = slot_mappings[0]
 
-        if self.model_config.enable_return_routed_experts:
-            self.slot_mapping = slot_mapping_gid_0[:num_tokens].cpu().numpy()
+        if self.routed_experts_initialized:
+            attn_gid = self.routed_experts_attn_gid
+            slot_mapping_attn = slot_mappings[attn_gid]
+            self.slot_mapping = slot_mapping_attn[:num_tokens].cpu().numpy()
 
         if self.use_async_spec_decode:
             seq_lens_cpu = None
@@ -2128,6 +2133,7 @@ class GPUModelRunner(
             num_computed_tokens_cpu = self.input_batch.num_computed_tokens_cpu_tensor[
                 :num_reqs_padded
             ]
+
         cm_base = CommonAttentionMetadata(
             query_start_loc=self.query_start_loc.gpu[: num_reqs_padded + 1],
             query_start_loc_cpu=self.query_start_loc.cpu[: num_reqs_padded + 1],
@@ -3714,7 +3720,7 @@ class GPUModelRunner(
                 "after execute_model() returns None."
             )
 
-        if self.vllm_config.model_config.enable_return_routed_experts:
+        if self.routed_experts_initialized:
             capturer = RoutedExpertsCapturer.get_instance()
             if capturer is not None:
                 capturer.clear_buffer()  # noqa
@@ -4224,7 +4230,7 @@ class GPUModelRunner(
         self.kv_connector_output = None
 
         with record_function_or_nullcontext("gpu_model_runner: ModelRunnerOutput"):
-            if self.model_config.enable_return_routed_experts:
+            if self.routed_experts_initialized:
                 capturer = RoutedExpertsCapturer.get_instance()
                 if capturer is not None:
                     capturer.save_captured_experts(indices=self.slot_mapping)  # noqa
@@ -5737,16 +5743,14 @@ class GPUModelRunner(
         kv_cache_spec = self.get_kv_cache_spec()
         kv_cache_groups = get_kv_cache_groups(self.vllm_config, kv_cache_spec)
         min_blocks = self.compilation_config.max_cudagraph_capture_size or 1
-        if kv_cache_groups:
-            page_size = kv_cache_groups[0].kv_cache_spec.page_size_bytes
-            group_size = max(len(g.layer_names) for g in kv_cache_groups)
-            available_memory = min_blocks * page_size * group_size
-        else:
-            available_memory = 1  # Attention-free model
 
+        # Temporarily change num_gpu_blocks_override to allocate a minimal KV cache
+        saved_override = self.cache_config.num_gpu_blocks_override
+        self.cache_config.num_gpu_blocks_override = min_blocks
         minimal_config = get_kv_cache_config_from_groups(
-            self.vllm_config, kv_cache_groups, available_memory=available_memory
+            self.vllm_config, kv_cache_groups, available_memory=0
         )
+        self.cache_config.num_gpu_blocks_override = saved_override
 
         self.initialize_kv_cache(minimal_config)
         self.cache_config.num_gpu_blocks = minimal_config.num_blocks
@@ -6720,8 +6724,12 @@ class GPUModelRunner(
                 kv_transfer_group.register_kv_caches(kv_caches)
             kv_transfer_group.set_host_xfer_buffer_ops(copy_kv_blocks)
 
-        if self.model_config.enable_return_routed_experts:
-            self.init_routed_experts_capturer()
+    def _get_attention_kv_cache_gid(self) -> int:
+        """Find the KV cache group index for attention layers."""
+        for gid, group in enumerate(self.kv_cache_config.kv_cache_groups):
+            if isinstance(group.kv_cache_spec, AttentionSpec):
+                return gid
+        return 0
 
     def init_routed_experts_capturer(self):
         logger.info(
@@ -6729,17 +6737,29 @@ class GPUModelRunner(
             self.model_config.enable_return_routed_experts,
         )
         routed_experts_capturer = RoutedExpertsCapturer.create()
-        block_size = self.cache_config.block_size
+        self.routed_experts_attn_gid = self._get_attention_kv_cache_gid()
+        min_block_size = min(
+            [
+                group.kv_cache_spec.block_size
+                for group in self.kv_cache_config.kv_cache_groups
+            ]
+        )
+        num_groups = len(self.kv_cache_config.kv_cache_groups)
         self.max_num_kv_tokens = (
-            self.kv_cache_config.num_blocks // len(self.kv_cache_config.kv_cache_groups)
-            + 1
-        ) * block_size
+            self.kv_cache_config.num_blocks // num_groups
+        ) * min_block_size
+        dcp_size = self.vllm_config.parallel_config.decode_context_parallel_size
+        pcp_size = self.vllm_config.parallel_config.prefill_context_parallel_size
+        if pcp_size * dcp_size > 1:
+            self.max_num_kv_tokens *= pcp_size * dcp_size
+
         routed_experts_capturer.init_buffer(
             max_num_batched_tokens=self.scheduler_config.max_num_batched_tokens,
             max_num_kv_tokens=self.max_num_kv_tokens,
             vllm_config=self.vllm_config,
         )
         self._bind_routed_experts_capturer(routed_experts_capturer)
+        self.routed_experts_initialized = True
 
     def _bind_routed_experts_capturer(self, capturer: RoutedExpertsCapturer) -> None:
         from vllm.model_executor.layers.fused_moe.layer import FusedMoE

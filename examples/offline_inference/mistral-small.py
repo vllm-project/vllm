@@ -62,9 +62,9 @@ def run_simple_demo(args: argparse.Namespace):
 
     llm = LLM(
         model=model_name,
-        tokenizer_mode="mistral" if args.format == "mistral" else "auto",
-        config_format="mistral" if args.format == "mistral" else "auto",
-        load_format="mistral" if args.format == "mistral" else "auto",
+        tokenizer_mode="mistral" if args.format == "mistral" else "hf",
+        config_format="mistral" if args.format == "mistral" else "hf",
+        load_format="mistral" if args.format == "mistral" else "hf",
         limit_mm_per_prompt={"image": 1},
         max_model_len=4096,
         max_num_seqs=2,
@@ -102,9 +102,9 @@ def run_advanced_demo(args: argparse.Namespace):
     sampling_params = SamplingParams(max_tokens=8192, temperature=0.7)
     llm = LLM(
         model=model_name,
-        tokenizer_mode="mistral" if args.format == "mistral" else "auto",
-        config_format="mistral" if args.format == "mistral" else "auto",
-        load_format="mistral" if args.format == "mistral" else "auto",
+        tokenizer_mode="mistral" if args.format == "mistral" else "hf",
+        config_format="mistral" if args.format == "mistral" else "hf",
+        load_format="mistral" if args.format == "mistral" else "hf",
         limit_mm_per_prompt={"image": max_img_per_msg},
         max_model_len=max_img_per_msg * max_tokens_per_img,
         tensor_parallel_size=2,
