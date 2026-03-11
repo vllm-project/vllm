@@ -80,8 +80,6 @@ from vllm.multimodal.parse import (
 )
 from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
-    ProcessorInputs,
-    TimingContext,
 )
 from vllm.multimodal.processing.processor import (
     BaseMultiModalProcessor,
@@ -609,6 +607,17 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
                     if use_audio_in_video_tensor.numel() > 0:
                         use_audio_in_video = bool(use_audio_in_video_tensor.item())
                         break
+            # for mutilmodality cache
+            if any([item is None for item in mm_kwargs["video"]]):
+                video_token_id = self.info.get_hf_config().video_token_id
+                audio_token_id = self.info.get_hf_config().audio_token_id
+                video_audio_item_num = sum(
+                    id in (video_token_id, audio_token_id) for id in prompt_ids
+                )
+                audio_updates_num = len(mm_prompt_updates.get("audio", []))
+                video_updates_num = len(mm_prompt_updates.get("video", []))
+                if video_audio_item_num != video_updates_num + audio_updates_num:
+                    use_audio_in_video = True
 
         if is_update_applied:
             mm_placeholders = self._find_mm_placeholders(
@@ -814,16 +823,6 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
                 replacement=video_replacement_fn,
             ),
         ]
-
-    def _cached_apply_hf_processor(
-        self,
-        inputs: ProcessorInputs,
-        timing_ctx: TimingContext,
-    ):
-        mm_processor_kwargs = inputs.hf_processor_mm_kwargs
-        if mm_processor_kwargs.get("use_audio_in_video", False):
-            return self._apply_hf_processor(inputs, timing_ctx)
-        return super()._cached_apply_hf_processor(inputs, timing_ctx)
 
     def _apply_hf_processor_main(
         self,
