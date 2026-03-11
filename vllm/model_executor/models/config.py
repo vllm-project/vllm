@@ -236,8 +236,8 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
             logger.warning(
                 "Automatically increased max_num_batched_tokens from %d"
                 " to %d to accommodate Mamba align mode block_size",
-                cache_config.block_size,
                 old_max_tokens,
+                cache_config.block_size,
             )
 
         # By default, mamba block size will be set to max_model_len.
