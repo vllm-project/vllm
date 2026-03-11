@@ -160,9 +160,6 @@ class BlockTable:
     def commit_block_table(self, num_reqs: int) -> None:
         self.block_table.copy_to_gpu(num_reqs)
 
-    def commit_slot_mapping(self, num_tokens: int) -> None:
-        self.slot_mapping.copy_to_gpu(num_tokens)
-
     def clear(self) -> None:
         self.block_table.gpu.fill_(0)
         self.block_table.cpu.fill_(0)
@@ -298,10 +295,6 @@ class MultiGroupBlockTable:
     def commit_block_table(self, num_reqs: int) -> None:
         for block_table in self.block_tables:
             block_table.commit_block_table(num_reqs)
-
-    def commit_slot_mapping(self, num_tokens: int) -> None:
-        for block_table in self.block_tables:
-            block_table.commit_slot_mapping(num_tokens)
 
     def clear(self) -> None:
         for block_table in self.block_tables:
