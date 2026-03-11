@@ -18,6 +18,12 @@ def find_nccl_library() -> str:
     """Return NCCL/RCCL shared library name to load.
 
     Uses `VLLM_NCCL_SO_PATH` if set; otherwise chooses by torch backend.
+
+    .. deprecated::
+        This function is used by the legacy ctypes-based NCCL bindings.
+        The new nccl4py bindings automatically discover the NCCL library
+        via the nvidia-nccl-cuXX package. Set VLLM_DISABLE_NCCL4PY=1 to
+        use the legacy bindings which require this function.
     """
     so_file = envs.VLLM_NCCL_SO_PATH
     if so_file:
