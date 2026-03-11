@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+import atexit
+
 import torch
 import torch.distributed as dist
 from torch.distributed import ProcessGroup
@@ -29,6 +31,16 @@ _fi_ar_workspace = None
 # Extra workspace for quant fusion patterns (only supported by trtllm backend)
 # Only created if primary workspace is not already trtllm
 _fi_ar_quant_workspace = None
+
+
+def _cleanup_fi_ar_workspaces():
+    """Release workspaces before Python shutdown to avoid __del__ crash."""
+    global _fi_ar_workspace, _fi_ar_quant_workspace
+    _fi_ar_workspace = None
+    _fi_ar_quant_workspace = None
+
+
+atexit.register(_cleanup_fi_ar_workspaces)
 
 
 def get_fi_ar_workspace():
