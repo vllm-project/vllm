@@ -59,6 +59,8 @@ class KimiAudioProcessor(ProcessorMixin):
             text_inputs = self.tokenizer(
                 text, return_tensors=return_tensors, padding=True
             )
+        else:
+            text_inputs = {}
 
         if audio is not None:
             # Ensure audio is a list
