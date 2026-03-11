@@ -205,8 +205,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
 
         if self.is_last_pp_rank and not self.is_pooling_model:
-            # Sampling-related workers.
-            # Only initialized on the last PP rank and generative models.
+            # Initialize sampling-related workers.
+            # These components are only set up on the last PP rank and
+            # for generative (non-pooling) models.
             self.sampler = Sampler(
                 max_num_reqs=self.max_num_reqs,
                 vocab_size=self.vocab_size,
