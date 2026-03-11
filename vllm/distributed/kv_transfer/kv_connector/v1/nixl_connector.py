@@ -1610,7 +1610,7 @@ class NixlConnectorWorker:
                     (base_addr, curr_tensor_size_bytes, self.device_id, "")
                 )
 
-        logger.info(
+        logger.debug(
             "Different block lengths collected: %s", set(self.block_len_per_layer)
         )
         # Doesnt really matter unless its MLA anyway..
