@@ -24,6 +24,9 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 EngineId = str
+# block ids as returned by the hybrid KV cache manager. list[list[int]] are allow
+# mutability and are for connector internal use only.
+BlockIds = tuple[list[int], ...] | list[list[int]]
 
 
 def get_kv_connector_cache_layout():
@@ -348,20 +351,12 @@ class TpKVTopology:
                     include_num_layers_dimension=self._cross_layers_blocks
                 )
             except (AttributeError, NotImplementedError):
+                assert self.tensor_shape is not None
                 kv_cache_stride_order = tuple(range(len(self.tensor_shape)))
 
             # In case of cross layers permute kv_cache_shape according to
             # stride_order to retrieve physical position of block_size
             kv_cache_shape = tuple(kv_cache_shape[i] for i in kv_cache_stride_order)
-
-        # In the default non-cross layers layout the block_size position
-        # is logical while in the cross layers case it is the physical
-        # position. This matches the shape of the actual kv cache tensors
-        # passed at register_kv_caches()/register_cross_layers_kv_cache()
-        block_size_position = kv_cache_shape.index(_MOCK_BLOCK_SIZE)
-
-        assert block_size_position is not None
-        self._block_size_position = -(len(kv_cache_shape) - block_size_position)
 
     @property
     def is_kv_layout_blocks_first(self) -> bool:
@@ -385,10 +380,6 @@ class TpKVTopology:
     @property
     def cross_layers_blocks(self) -> bool:
         return self._cross_layers_blocks
-
-    @property
-    def block_size_position(self) -> int:
-        return self._block_size_position
 
     def tp_ratio(
         self,
@@ -480,24 +471,46 @@ class TpKVTopology:
         return self.get_target_remote_ranks(remote_tp_size)
 
 
-def get_current_attn_backend(vllm_config: VllmConfig):
-    layer_type = cast(type[Any], AttentionLayerBase)
-    layers = get_layers_from_vllm_config(vllm_config, layer_type, None)
-    if layers:
-        backend = next(iter(layers.values())).get_attn_backend()
-    else:
-        # Fallback for tests, when static_forward_context is empty.
-        logger.debug(
-            "No layers found in the vLLM config. "
-            "Falling back to default attention backend."
-        )
-        from vllm.v1.attention.selector import get_attn_backend
+def get_current_attn_backends(
+    vllm_config: VllmConfig, layer_names: list[str] | None = None
+) -> list[type[AttentionBackend]]:
+    """Get all distinct attention backends for the given layers.
 
-        backend = get_attn_backend(
+    Args:
+        vllm_config: The current vLLM configuration.
+        layer_names: Optional list of layer names to scope the lookup.
+            When None, all attention layers are considered.
+
+    Returns:
+        Deduplicated list of attention backend classes.
+    """
+    layer_type = cast(type[Any], AttentionLayerBase)
+    layers = get_layers_from_vllm_config(vllm_config, layer_type, layer_names)
+    if layers:
+        seen: dict[str, type[AttentionBackend]] = {}
+        for layer in layers.values():
+            backend = layer.get_attn_backend()
+            seen[backend.full_cls_name()] = backend
+        return list(seen.values())
+
+    # Fallback for tests, when static_forward_context is empty.
+    logger.debug(
+        "No layers found in the vLLM config. Falling back to default attention backend."
+    )
+    from vllm.v1.attention.selector import get_attn_backend
+
+    return [
+        get_attn_backend(
             head_size=vllm_config.model_config.get_head_size(),
             dtype=vllm_config.model_config.dtype,
             kv_cache_dtype=vllm_config.cache_config.cache_dtype,
-            block_size=vllm_config.cache_config.block_size,
             use_mla=vllm_config.model_config.use_mla,
         )
-    return backend
+    ]
+
+
+def get_current_attn_backend(
+    vllm_config: VllmConfig, layer_names: list[str] | None = None
+) -> type[AttentionBackend]:
+    """Get the first attention backend for the given layers."""
+    return get_current_attn_backends(vllm_config, layer_names)[0]
