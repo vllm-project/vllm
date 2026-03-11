@@ -369,94 +369,50 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             block_table.clamp_(min=0)
 
             max_decode_len = int(decode_lens_cpu.max().item())
-            decode_lens_are_uniform = torch.all(decode_lens_cpu == decode_lens_cpu[0])
-            if max_decode_len == 1:
-                next_n = 1 + self.num_speculative_tokens
-                if next_n > 1:
-                    offsets = torch.arange(
-                        next_n, device=self.device, dtype=torch.int32
-                    )
-                else:
-                    offsets = None
-                batch_size = num_decodes
-            else:
+            if max_decode_len > 1:
                 # Flatten multi-token decode requests into single-token
                 # batch entries, expanding seq_lens and block tables so
                 # the kernel always sees next_n=1.
 
-                if not decode_lens_are_uniform:
-                    # Generic logic for non-uniform decode lengths
-                    # Assume 4 requests with seq_lens [10, 7, 12, 0] (the final req is
-                    # padding) and decode_lens [3, 1, 4, 0] in the example comments.
-                    # The context lengths are therefore
-                    # [10-3, 7-1, 12-4, 0-0] = [7, 6, 8, 0].
+                # Assume 4 requests with seq_lens [10, 7, 12, 0] (the final req is
+                # padding) and decode_lens [3, 1, 4, 0] in the below example comments.
+                # The context lengths are therefore
+                # [10-3, 7-1, 12-4, 0-0] = [7, 6, 8, 0].
 
-                    # 3 + 1 + 4 + 0 = 8
-                    actual_expanded = int(decode_lens_cpu.sum().item())
+                # 3 + 1 + 4 + 0 = 8
+                actual_expanded = int(decode_lens_cpu.sum().item())
 
-                    # [7, 6, 8, 0] -> [7, 7, 7, 6, 8, 8, 8, 8]
-                    expanded_base = torch.repeat_interleave(
-                        seq_lens - decode_lens, decode_lens
-                    )
+                # [7, 6, 8, 0] -> [7, 7, 7, 6, 8, 8, 8, 8]
+                expanded_base = torch.repeat_interleave(
+                    seq_lens - decode_lens, decode_lens, output_size=actual_expanded
+                )
 
-                    # [0, 3, 4, 8] -> [0, 0, 0, 3, 4, 4, 4, 4]
-                    expanded_starts = torch.repeat_interleave(
-                        common_attn_metadata.query_start_loc[:num_decodes], decode_lens
-                    )
+                # [0, 3, 4, 8] -> [0, 0, 0, 3, 4, 4, 4, 4]
+                expanded_starts = torch.repeat_interleave(
+                    common_attn_metadata.query_start_loc[:num_decodes],
+                    decode_lens,
+                    output_size=actual_expanded,
+                )
 
-                    # [0, 1, 2, 0, 0, 1, 2, 3]
-                    positions_within = (
-                        self.arange_buffer[:actual_expanded] - expanded_starts
-                    )
+                # [0, 1, 2, 0, 0, 1, 2, 3]
+                positions_within = (
+                    self.arange_buffer[:actual_expanded] - expanded_starts
+                )
 
-                    # [8, 9, 10, 7, 9, 10, 11, 12, ...] where ... is unused buffer space
-                    self.expanded_seq_lens_buffer[:actual_expanded] = (
-                        expanded_base + positions_within + 1
-                    )
-
-                    # Give each of the flattened entries the same block table row as the
-                    # original request.
-                    self.expanded_block_table_buffer[:actual_expanded] = (
-                        torch.repeat_interleave(block_table, decode_lens, dim=0)
-                    )
-                else:
-                    # Optimized logic for uniform decode lengths, which is common in
-                    # speculative decoding. In this case we can avoid repeat_interleave
-                    # and just use broadcasting to expand without involving the CPU.
-                    actual_expanded = num_decodes * max_decode_len
-
-                    context_lens = seq_lens[:num_decodes] - max_decode_len
-
-                    # We have consistent offsets since requests have uniform lengths:
-                    # each request's tokens has offsets [1, 2, ..., max_decode_len]
-                    offsets = self.arange_buffer[1 : max_decode_len + 1]
-
-                    # Broadcast and flatten: [num_decodes, max_decode_len]
-                    #                     -> [actual_expanded]
-                    seq_lens_expanded = context_lens.unsqueeze(1) + offsets.unsqueeze(0)
-                    seq_lens_flat = seq_lens_expanded.view(-1)
-
-                    self.expanded_seq_lens_buffer[:actual_expanded] = seq_lens_flat
-
-                    # Repeat the block tables for each expanded decode token.
-                    #    [num_decodes, max_blocks]
-                    # -> [num_decodes, max_decode_len, max_blocks] (expand to repeat)
-                    # -> [actual_expanded, max_blocks]             (reshape to flatten)
-                    expanded_blocks = (
-                        block_table[:num_decodes]
-                        .unsqueeze(1)
-                        .expand(-1, max_decode_len, -1)
-                        .reshape(actual_expanded, -1)
-                    )
-
-                    self.expanded_block_table_buffer[:actual_expanded] = expanded_blocks
-
-                # Common logic to both cases: zero out the padding slots in the
-                # expanded buffers, and slice out the relevant (padded) buffer region.
-                if actual_expanded < num_decode_tokens:
-                    self.expanded_seq_lens_buffer[actual_expanded:num_decode_tokens] = 0
+                # [8, 9, 10, 7, 9, 10, 11, 12, ...] where ... is unused buffer space
+                self.expanded_seq_lens_buffer[:actual_expanded] = (
+                    expanded_base + positions_within + 1
+                )
+                self.expanded_seq_lens_buffer[actual_expanded:] = 0
                 seq_lens = self.expanded_seq_lens_buffer[:num_decode_tokens]
 
+                # Give each of the flattened entries the same block table row as the
+                # original request.
+                self.expanded_block_table_buffer[:actual_expanded] = (
+                    torch.repeat_interleave(
+                        block_table, decode_lens, dim=0, output_size=actual_expanded
+                    )
+                )
                 if actual_expanded < num_decode_tokens:
                     self.expanded_block_table_buffer[
                         actual_expanded:num_decode_tokens, 0
@@ -468,6 +424,15 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 decode_lens = self.decode_lens_buffer[:num_decode_tokens]
                 offsets = None
                 batch_size = num_decode_tokens
+            else:
+                next_n = 1 + self.num_speculative_tokens
+                if next_n > 1:
+                    offsets = torch.arange(
+                        next_n, device=self.device, dtype=torch.int32
+                    )
+                else:
+                    offsets = None
+                batch_size = num_decodes
 
             # DeepGEMM is required for the paged MQA logits on CUDA devices
             if current_platform.is_cuda() and is_deep_gemm_supported():
