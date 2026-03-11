@@ -178,6 +178,11 @@ def get_max_tokens(
     default_sampling_params: dict,
     override_max_tokens: int | None = None,
 ) -> int:
+    if max_model_len < input_length:
+        raise ValueError(
+            f"Input length ({input_length}) exceeds model's maximum "
+            f"context length ({max_model_len})."
+        )
     model_max_tokens = max_model_len - input_length
     platform_max_tokens = current_platform.get_max_output_tokens(input_length)
     fallback_max_tokens = (
