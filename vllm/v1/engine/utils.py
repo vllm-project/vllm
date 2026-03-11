@@ -14,6 +14,7 @@ from unittest.mock import patch
 
 import msgspec
 import zmq
+import asyncio
 
 from vllm import envs
 from vllm.config import CacheConfig, ParallelConfig, VllmConfig
@@ -108,48 +109,66 @@ class CoreEngineProcManager:
         if client_handshake_address:
             common_kwargs["client_handshake_address"] = client_handshake_address
 
+        data_parallel = vllm_config.parallel_config.data_parallel_size > 1
+        need_env_control = (
+            data_parallel
+            and (
+                (not current_platform.is_cuda_alike())
+                or vllm_config.parallel_config.use_ray
+                )
+        )
+        evar = current_platform.device_control_env_var
+        world_size = vllm_config.parallel_config.world_size
+        local_world_size = vllm_config.parallel_config.local_world_size
+
         self.processes: list[BaseProcess] = []
         local_dp_ranks = []
         for index in range(local_engine_count):
             local_index = local_start_index + index
             global_index = start_index + index
+            value = get_device_indices(evar, local_index, world_size, local_world_size)
+            target_kwargs = common_kwargs | {
+                'dp_rank': global_index,
+                'local_dp_rank': local_index,
+            }
 
             # Start EngineCore in background process.
             local_dp_ranks.append(local_index)
             self.processes.append(
                 context.Process(
-                    target=target_fn,
+                    target=_enginecore_bootstrap,
                     name=f"EngineCore_DP{global_index}",
-                    kwargs=common_kwargs
-                    | {
-                        "dp_rank": global_index,
-                        "local_dp_rank": local_index,
+                    kwargs={
+                         "need_env_control": need_env_control,
+                         "evar": evar,
+                         "value": value,
+                         "target_fn": target_fn,
+                         "target_kwargs": target_kwargs,
                     },
                 )
             )
 
         self._finalizer = weakref.finalize(self, shutdown, self.processes)
 
-        data_parallel = vllm_config.parallel_config.data_parallel_size > 1
         try:
-            for proc, local_dp_rank in zip(self.processes, local_dp_ranks):
-                # Adjust device control in DP for non-CUDA platforms
-                # as well as external and ray launchers
-                # For CUDA platforms, we use torch.cuda.set_device()
-                with (
-                    set_device_control_env_var(vllm_config, local_dp_rank)
-                    if (
-                        data_parallel
-                        and (
-                            not current_platform.is_cuda_alike()
-                            or vllm_config.parallel_config.use_ray
-                        )
-                    )
-                    else contextlib.nullcontext()
-                ):
-                    proc.start()
+            # Check if we're already in an event loop
+            try:
+                loop = asyncio.get_running_loop()
+                # Already in event loop - cannot use asyncio.run()
+                # Create a new thread to run the async startup
+                import concurrent.futures
+                import threading
+                def run_in_thread():
+                    asyncio.run(self.start_async())
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                    future = executor.submit(run_in_thread)
+                    future.result()  # Wait for completion
+            except RuntimeError:
+                # No running loop - safe to use asyncio.run()
+                asyncio.run(self.start_async())
+            logger.info("All %d engines started successfully.", local_engine_count)
         finally:
-            # Kill other procs if not all are running.
+            # Kill other procs if startup failed
             if self.finished_procs():
                 self.close()
 
@@ -188,6 +207,19 @@ def set_device_control_env_var(
     value = get_device_indices(evar, local_dp_rank, world_size, local_world_size)
     with patch.dict(os.environ, values=((evar, value),)):
         yield
+
+
+def _enginecore_bootstrap(
+    *,
+    need_env_control: bool,
+    evar: str,
+    value: str,
+    target_fn: Callable[..., Any],
+    target_kwargs: dict[str, Any],
+    ) -> None:
+    if need_env_control:
+        os.environ[evar] = value
+    target_fn(**target_kwargs)
 
 
 def get_device_indices(
