@@ -3,7 +3,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import argparse
 import regex as re
-
 import requests
 from datasets import load_dataset
 
@@ -59,7 +58,6 @@ def main():
     args = parse_args()
     if args.hf_endpoint:
         import os
-
         os.environ["HF_ENDPOINT"] = args.hf_endpoint
 
     print("Loading GSM8K test set...")
@@ -110,8 +108,8 @@ def main():
         if (idx + 1) % 100 == 0 and num_evaluated > 0:
             current_accuracy = correct / num_evaluated * 100
             print(
-                f"Processed {idx + 1}/{total}, Evaluated: {num_evaluated},"
-	        f" Current accuracy: {current_accuracy:.2f}%"
+                f"Processed {idx + 1}/{total}, Evaluated: {num_evaluated}, "
+                f"Current accuracy: {current_accuracy:.2f}%"
             )
 
     accuracy = correct / num_evaluated * 100 if num_evaluated > 0 else 0
@@ -120,4 +118,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main() 
+    main()
