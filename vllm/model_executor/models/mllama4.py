@@ -63,12 +63,10 @@ from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
-    InputProcessingContext,
     PromptReplacement,
     PromptUpdate,
     PromptUpdateDetails,
 )
-from vllm.renderers import TokenizeParams
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
@@ -548,9 +546,6 @@ class Llama4VisionModel(nn.Module):
 
 
 class Mllama4ProcessingInfo(BaseProcessingInfo):
-    def __init__(self, ctx: InputProcessingContext) -> None:
-        super().__init__(ctx)
-
     def get_hf_config(self) -> Llama4Config:
         return self.ctx.get_hf_config(Llama4Config)
 
@@ -558,9 +553,6 @@ class Mllama4ProcessingInfo(BaseProcessingInfo):
         return self.ctx.get_hf_processor(
             Llama4Processor, use_fast=kwargs.pop("use_fast", True), **kwargs
         )
-
-    def get_default_tok_params(self) -> TokenizeParams:
-        return super().get_default_tok_params().with_kwargs(add_special_tokens=False)
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         # Although vLLM can support more images from an infra capability
@@ -599,10 +591,6 @@ class Mllama4MultiModalProcessor(BaseMultiModalProcessor[Mllama4ProcessingInfo])
         mm_kwargs: Mapping[str, object],
         tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        tokenizer = self.info.get_tokenizer()
-
-        if mm_data is None:
-            return tokenizer(prompt, add_special_tokens=False)  # exclude bos
         processed_outputs = super()._call_hf_processor(
             prompt=prompt,
             mm_data=mm_data,

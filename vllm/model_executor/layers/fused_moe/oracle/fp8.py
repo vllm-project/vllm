@@ -94,6 +94,11 @@ def _get_priority_backends(
         else:
             _move_to_front(_AVAILABLE_BACKENDS, Fp8MoeBackend.TRITON)
 
+    if current_platform.is_xpu():
+        # XPU platform supports TritonExperts and XPUExpertsFp8,
+        # move XPU backend to the front.
+        _move_to_front(_AVAILABLE_BACKENDS, Fp8MoeBackend.XPU)
+
     return _AVAILABLE_BACKENDS
 
 
@@ -562,7 +567,7 @@ def make_fp8_moe_kernel(
         experts,
         shared_experts=(
             shared_experts
-            if moe_config.moe_parallel_config.use_all2all_kernels
+            if moe_config.moe_parallel_config.use_deepep_ll_kernels
             else None
         ),
         moe_parallel_config=moe_config.moe_parallel_config,
