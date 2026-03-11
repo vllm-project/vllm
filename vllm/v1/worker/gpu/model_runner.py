@@ -532,13 +532,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
         return cuda_graph_size
 
-    def warmup_for_prefill(self) -> None:
-        # For FlashInfer, we would like to execute a dummy prefill run
-        # to trigger JIT compilation.
-        if all("FLASHINFER" in b.get_name() for b in self.attn_backends.values()):
-            self._dummy_run(self.max_num_tokens, skip_attn=False)
-            torch.accelerator.synchronize()
-
     def finish_requests(self, scheduler_output: SchedulerOutput) -> None:
         finished_req_ids = scheduler_output.finished_req_ids
         preempted_req_ids = scheduler_output.preempted_req_ids
@@ -936,6 +929,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             assert block_tables is not None
             attn_metadata = self.model_state.prepare_attn(
                 input_batch,
+                batch_desc.cg_mode,
                 block_tables,
                 slot_mappings,
                 self.attn_groups,

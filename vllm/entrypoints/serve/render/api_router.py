@@ -11,7 +11,6 @@ from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.openai.utils import validate_json_request
 from vllm.entrypoints.serve.disagg.protocol import GenerateRequest
 from vllm.entrypoints.serve.render.serving import OpenAIServingRender
-from vllm.entrypoints.utils import create_error_response
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -37,13 +36,8 @@ def render(request: Request) -> OpenAIServingRender | None:
 async def render_chat_completion(request: ChatCompletionRequest, raw_request: Request):
     handler = render(raw_request)
     if handler is None:
-        error = create_error_response(
-            message="The model does not support Chat Completions Render API",
-            err_type="NotFoundError",
-            status_code=HTTPStatus.NOT_FOUND,
-        )
-        return JSONResponse(
-            status_code=HTTPStatus.NOT_FOUND, content=error.model_dump()
+        raise NotImplementedError(
+            "The model does not support Chat Completions Render API"
         )
 
     result = await handler.render_chat_completion(request)
@@ -67,14 +61,7 @@ async def render_chat_completion(request: ChatCompletionRequest, raw_request: Re
 async def render_completion(request: CompletionRequest, raw_request: Request):
     handler = render(raw_request)
     if handler is None:
-        error = create_error_response(
-            message="The model does not support Completions Render API",
-            err_type="NotFoundError",
-            status_code=HTTPStatus.NOT_FOUND,
-        )
-        return JSONResponse(
-            status_code=HTTPStatus.NOT_FOUND, content=error.model_dump()
-        )
+        raise NotImplementedError("The model does not support Completions Render API")
 
     result = await handler.render_completion(request)
 
