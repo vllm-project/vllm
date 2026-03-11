@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import pytest
+
 from vllm.entrypoints.utils import get_max_tokens, sanitize_message
 
 
@@ -80,3 +82,15 @@ class TestGetMaxTokens:
             default_sampling_params={"max_tokens": 2048},
         )
         assert result == 512
+
+    def test_input_length_exceeds_max_model_len(self):
+        with pytest.raises(
+            ValueError,
+            match="Input length .* exceeds model's maximum context length .*",
+        ):
+            get_max_tokens(
+                max_model_len=100,
+                max_tokens=50,
+                input_length=150,
+                default_sampling_params={"max_tokens": 2048},
+            )

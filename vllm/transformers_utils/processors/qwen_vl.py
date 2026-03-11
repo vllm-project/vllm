@@ -1,5 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+# Adapted from
+# https://huggingface.co/Qwen/Qwen-VL/blob/main/modeling_qwen.py
+# Copyright (c) Alibaba Cloud.
 from transformers.image_processing_utils_fast import BaseImageProcessorFast
 from transformers.image_utils import PILImageResampling
 from transformers.processing_utils import ProcessorMixin
@@ -29,11 +33,14 @@ class QwenVLProcessor(ProcessorMixin):
         self,
         tokenizer: QwenVLTokenizer,
         image_size: int,
+        image_processor: QwenVLImageProcessorFast | None = None,
     ) -> None:
         self.tokenizer = tokenizer
-        self.image_processor = QwenVLImageProcessorFast(
-            size={"width": image_size, "height": image_size}
-        )
+        if image_processor is None:
+            image_processor = QwenVLImageProcessorFast(
+                size={"width": image_size, "height": image_size}
+            )
+        self.image_processor = image_processor
 
     @property
     def image_start_tag(self) -> str:
