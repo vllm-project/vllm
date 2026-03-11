@@ -413,7 +413,6 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     self.expanded_seq_lens_buffer[:actual_expanded] = (
                         expanded_base + positions_within + 1
                     )
-                    self.expanded_seq_lens_buffer[actual_expanded:] = 0
 
                     # Give each of the flattened entries the same block table row as the
                     # original request.
