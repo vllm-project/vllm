@@ -75,7 +75,7 @@ For an optimized workflow when iterating on C++/CUDA kernels, see the [Increment
 vLLM uses `pre-commit` to lint and format the codebase. See <https://pre-commit.com/#usage> if `pre-commit` is new to you. Setting up `pre-commit` is as easy as:
 
 ```bash
-uv pip install -r requirements/lint.txt
+uv pip install pre-commit==4.5.1
 pre-commit install
 ```
 

@@ -25,6 +25,6 @@ jobs:
     - run: echo "::add-matcher::.github/workflows/matchers/mypy.json"
     - name: Install & run pre-commit
       run: |
-        pip install -r requirements/lint.txt
+        pip install pre-commit==4.5.1
         pre-commit install
         pre-commit run --all-files --hook-stage manual
