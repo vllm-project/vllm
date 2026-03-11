@@ -77,6 +77,7 @@ from vllm.outputs import (
 )
 from vllm.platforms import current_platform
 from vllm.pooling_params import PoolingParams
+from vllm.reasoning import ReasoningParserManager
 from vllm.renderers import ChatParams, merge_kwargs
 from vllm.renderers.inputs.preprocess import (
     conversation_to_seq,
@@ -403,6 +404,17 @@ class LLM:
             renderer=self.renderer,
             chat_template_config=self.chat_template_config,
         )
+        self.reasoning_parser = None
+        if (
+            self.llm_engine.vllm_config.structured_outputs_config
+            and self.llm_engine.vllm_config.structured_outputs_config.reasoning_parser
+        ):
+            parser_name = (
+                self.llm_engine.vllm_config.structured_outputs_config.reasoning_parser
+            )
+            manager = ReasoningParserManager(self.get_tokenizer())
+            self.reasoning_parser = manager.get_parser(parser_name)
+
         # Cache for __repr__ to avoid repeated collective_rpc calls
         self._cached_repr: str | None = None
 
@@ -1979,6 +1991,15 @@ class LLM:
             for output in step_outputs:
                 assert isinstance(output, output_type)
                 if output.finished:
+                    if self.reasoning_parser and isinstance(output, RequestOutput):
+                        for completion in output.outputs:
+                            reasoning, content = self.reasoning_parser.extract_reasoning(
+                                completion.text, None
+                            )
+                            if reasoning is not None:
+                                completion.reasoning_text = reasoning
+                                completion.text = content if content is not None else ""
+
                     outputs.append(output)  # type: ignore[arg-type]
                     if use_tqdm:
                         if isinstance(output, RequestOutput):

@@ -46,6 +46,7 @@ class CompletionOutput:
     finish_reason: str | None = None
     stop_reason: int | str | None = None
     lora_request: LoRARequest | None = None
+    reasoning_text: str | None = None
 
     def finished(self) -> bool:
         return self.finish_reason is not None
@@ -59,7 +60,8 @@ class CompletionOutput:
             f"cumulative_logprob={self.cumulative_logprob}, "
             f"logprobs={self.logprobs}, "
             f"finish_reason={self.finish_reason}, "
-            f"stop_reason={self.stop_reason})"
+            f"stop_reason={self.stop_reason}, "
+            f"reasoning_text={self.reasoning_text})"
         )
 
 
