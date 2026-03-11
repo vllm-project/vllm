@@ -2464,7 +2464,27 @@ class NemotronH_Nano_VL_V2(
             else:
                 frames_indices = torch.cat([f.flatten() for f in frames_indices], dim=0)
 
-            frame_duration_ms = frame_duration_ms.flatten()
+            if torch.is_tensor(frame_duration_ms):
+                frame_duration_ms = frame_duration_ms.flatten()
+            else:
+                frame_duration_ms = torch.cat(
+                    [f.flatten() for f in frame_duration_ms], dim=0
+                )
+
+            if not torch.is_tensor(pixel_values_flat_video):
+                if not all(
+                    t.shape[-2] == pixel_values_flat_video[0].shape[-2]
+                    and t.shape[-1] == pixel_values_flat_video[0].shape[-1]
+                    for t in pixel_values_flat_video
+                ):
+                    raise NotImplementedError(
+                        "Batched video inference with different spatial"
+                        " dimensions is not yet supported. To process a batch of videos"
+                        " with different spatial dimensions, process one video at a"
+                        " time."
+                    )
+                pixel_values_flat_video = torch.cat(pixel_values_flat_video, dim=0)
+
             expected_h = pixel_values_flat_video.shape[-2]
             expected_w = pixel_values_flat_video.shape[-1]
             num_frames = video_num_patches[0].item()
