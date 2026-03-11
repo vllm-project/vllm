@@ -131,6 +131,9 @@ class DefaultModelState(ModelState):
     def prepare_inputs(
         self, input_batch: InputBatch, req_states: RequestState
     ) -> dict[str, torch.Tensor | None]:
+        if not self.uses_mrope and not self.uses_xdrope_dim > 0:
+            return {}  # Common case (1D positions).
+
         if self.uses_mrope:
             # Prepare M-RoPE positions.
             self.mrope_state.prepare_mrope_positions(
@@ -143,19 +146,18 @@ class DefaultModelState(ModelState):
                 :, : input_batch.num_tokens_after_padding
             ]
             return {"positions": mrope_positions}
-        elif self.uses_xdrope_dim > 0:
-            # Prepare XD-RoPE positions.
-            self.xdrope_state.prepare_xdrope_positions(
-                input_batch.idx_mapping,
-                input_batch.query_start_loc,
-                req_states.prefill_len.gpu,
-                req_states.num_computed_tokens.gpu,
-            )
-            xdrope_positions = self.xdrope_state.xdrope_positions[
-                :, : input_batch.num_tokens_after_padding
-            ]
-            return {"positions": xdrope_positions}
-        return {}  # Common case (1D positions).
+
+        # Prepare XD-RoPE positions.
+        self.xdrope_state.prepare_xdrope_positions(
+            input_batch.idx_mapping,
+            input_batch.query_start_loc,
+            req_states.prefill_len.gpu,
+            req_states.num_computed_tokens.gpu,
+        )
+        xdrope_positions = self.xdrope_state.xdrope_positions[
+            :, : input_batch.num_tokens_after_padding
+        ]
+        return {"positions": xdrope_positions}
 
     def prepare_dummy_inputs(
         self, num_reqs: int, num_tokens: int
