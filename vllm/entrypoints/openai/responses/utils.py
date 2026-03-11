@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import logging
 from typing import Any
 
 from openai.types.chat import (
@@ -25,8 +24,9 @@ from vllm import envs
 from vllm.entrypoints.constants import MCP_PREFIX
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionMessageParam
 from vllm.entrypoints.openai.responses.protocol import ResponseInputOutputItem
+from vllm.logger import init_logger
 
-logger = logging.getLogger(__name__)
+logger = init_logger(__name__)
 
 
 def should_continue_final_message(
