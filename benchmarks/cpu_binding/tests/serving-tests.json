@@ -1,0 +1,22 @@
+[
+    {
+        "test_name": "serving_llama405B_tp8_random_2048_2048",
+        "qps_list": ["inf"],
+        "max_concurrency_list": [12, 16, 24, 32, 64, 128, 200],
+        "server_parameters": {
+            "model": "meta-llama/Meta-Llama-3.1-405B-Instruct",
+            "tensor_parallel_size": 8,
+            "swap_space": 16,
+            "disable_log_stats": "",
+            "load_format": "dummy"
+        },
+        "client_parameters": {
+            "model": "meta-llama/Meta-Llama-3.1-405B-Instruct",
+            "backend": "vllm",
+            "dataset_name": "random",
+            "random-input-len": 2048,
+            "random-output-len": 2048,
+            "num_prompts": 200
+        }
+    }
+]

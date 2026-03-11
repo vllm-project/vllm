@@ -1,0 +1,101 @@
+# docker-compose.yml 
+# 2 profiles:
+#   - benchmark: runs run-performance-benchmarks.sh
+#   - deploy: runs `vllm serve` (OpenAI-compatible server)
+#
+# Uses x-common anchors and keeps the same service name: vllm-server
+#
+# IMPORTANT: In the embedded shell, use $$ to escape $ so Compose does NOT interpolate it.
+
+x-common: &common
+  image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:latest
+  container_name: vllm-ci-test-gpu
+  shm_size: 128g
+
+  # Equivalent to: --gpus all
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            count: all
+            capabilities: [gpu]
+
+  # Equivalent to: --runtime nvidia (for older Docker setups)
+  runtime: nvidia
+
+  # Equivalent to: --ipc=host
+  ipc: host
+
+  volumes:
+    - "${MODEL_CACHE:-~/.cache/huggingface}:/root/.cache/huggingface"
+    - "./tests/serving-tests.json:/vllm-workspace/.buildkite/performance-benchmarks/tests/serving-tests.json:ro"
+    - "./results:/vllm-workspace/benchmarks/results"
+
+x-common-env: &common_env
+  no_proxy: ${no_proxy}
+  http_proxy: ${http_proxy}
+  https_proxy: ${https_proxy}
+  HF_TOKEN: ${HF_TOKEN}
+  PROMPTS_PER_CONCURRENCY: ${PROMPTS_PER_CONCURRENCY:-1}
+
+services:
+  vllm-server:
+    # Same service name; profiles choose behavior via MODE.
+    profiles: ["benchmark", "deploy"]
+    <<: *common
+
+    environment:
+      <<: *common_env
+
+      # Switch behavior (default keeps original benchmark behavior)
+      MODE: "${MODE:-benchmark}"
+      HF_HUB_DISABLE_XET: "1"
+      HF_HUB_DOWNLOAD_TIMEOUT: "300"
+      HF_HUB_ETAG_TIMEOUT: "120"
+      # Deploy-mode parameters (ignored by benchmark mode unless your script reads them)
+      MODEL: "${MODEL:-meta-llama/Meta-Llama-3.1-405B-Instruct}"
+      HOST: "${HOST:-0.0.0.0}"
+      PORT: "${PORT:-8000}"
+      EXTRA_ARGS: "${EXTRA_ARGS:---swap-space 16 --tensor-parallel-size 8 --disable-log-stats --gpu-memory-utilization 0.80 --max-model-len 2048}"
+
+    entrypoint:
+      - bash
+      - -lc
+      - |
+        set -euo pipefail
+        echo "MODE=$${MODE:-benchmark}"
+
+        if [ "$${MODE:-benchmark}" = "deploy" ]; then
+          # Deploy profile: OpenAI-compatible server via vLLM CLI
+          HOST_EFFECTIVE="$${HOST:-0.0.0.0}"
+          PORT_EFFECTIVE="$${PORT:-8000}"
+          MODEL_EFFECTIVE="$${MODEL:-meta-llama/Meta-Llama-3.1-405B-Instruct}"
+
+          # Handle set-but-empty (e.g. PORT=)
+          if [ -z "$${HOST_EFFECTIVE}" ]; then HOST_EFFECTIVE="0.0.0.0"; fi
+          if [ -z "$${PORT_EFFECTIVE}" ]; then PORT_EFFECTIVE="8000"; fi
+          if [ -z "$${MODEL_EFFECTIVE}" ]; then MODEL_EFFECTIVE="meta-llama/Meta-Llama-3.1-405B-Instruct"; fi
+
+          echo "[vllm-server] Starting deploy via: vllm serve $${MODEL_EFFECTIVE} --host $${HOST_EFFECTIVE} --port $${PORT_EFFECTIVE} $${EXTRA_ARGS:-}"
+          # shellcheck disable=SC2086
+          exec vllm serve "$${MODEL_EFFECTIVE}" --host "$${HOST_EFFECTIVE}" --port "$${PORT_EFFECTIVE}" $${EXTRA_ARGS:-}
+        fi
+
+        # Benchmark profile (original behavior):
+        # Run via bash to avoid needing +x on bind-mounted scripts.
+        echo "[vllm-server] Running benchmark script..."
+        exec bash /vllm-workspace/.buildkite/performance-benchmarks/scripts/run-performance-benchmarks.sh
+
+    # Keep the original healthcheck. It worked for your benchmark flow because the script
+    # brings up the OpenAI server on localhost:8000 during the run.
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8000/v1/models >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 120
+      start_period: 3600s
+
+    # Only useful for deploy profile; harmless for benchmark profile
+    ports:
+      - "${PORT:-8000}:${PORT:-8000}"

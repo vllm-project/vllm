@@ -1,0 +1,102 @@
+# docker-compose.cpu.yml
+#
+# CPU compose file with explicit MODE switch (do NOT rely on MODE/profiles inside the container)
+# - MODE=deploy     -> vllm serve ...
+# - MODE=benchmark  -> run-performance-benchmarks.sh (script manages server lifecycle)
+#
+# CPU_EXTRA_ARGS default is tuned for vLLM CPU deploy. Tensor parallel size is auto-set to
+# the number of NUMA nodes detected inside the container (fallback=1) unless you explicitly
+# pass --tensor-parallel-size in CPU_EXTRA_ARGS.
+
+services:
+  vllm-cpu-server:
+    image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:b8b302cde434df8c9289a2b465406b47ebab1c2d-cpu
+    container_name: vllm-cpu-server
+
+    profiles:
+      - deploy
+      - benchmark
+
+    shm_size: 128g
+
+    volumes:
+      - /mnt/hf_cache:/mnt/hf_cache
+      - "./tests/serving-tests-cpu.json:/workspace/.buildkite/nightly-benchmarks/tests/serving-tests-cpu.json:ro"
+      - "./results-cpu:/workspace/benchmarks/results"
+
+    environment:
+      no_proxy: ${no_proxy}
+      http_proxy: ${http_proxy}
+      https_proxy: ${https_proxy}
+      HF_TOKEN: ${HF_TOKEN}
+
+      MODE: "${MODE:-benchmark}"
+
+      HF_HOME: /mnt/hf_cache
+      ON_CPU: "1"
+      VLLM_CPU_KVCACHE_SPACE: "${VLLM_CPU_KVCACHE_SPACE:-40}"
+
+      CPU_MODEL: "${CPU_MODEL:-meta-llama/Llama-3.1-8B-Instruct}"
+      CPU_HOST: "${CPU_HOST:-0.0.0.0}"
+      CPU_PORT: "${CPU_PORT:-8001}"
+
+      # Default args (no --tensor-parallel-size here; it's computed from NUMA nodes at runtime)
+      CPU_EXTRA_ARGS: "${CPU_EXTRA_ARGS:---dtype bfloat16 --distributed-executor-backend mp --block-size 128 --trust-remote-code --enable-chunked-prefill --disable-log-stats --enforce-eager --max-num-batched-tokens 2048 --max-num-seqs 256}"
+
+    entrypoint:
+      - bash
+      - -lc
+      - |
+        set -euo pipefail
+
+        echo "MODE=$${MODE:-benchmark}"
+        echo "CPU_MODEL=$${CPU_MODEL:-meta-llama/Llama-3.1-8B-Instruct}"
+        echo "CPU_HOST=$${CPU_HOST:-0.0.0.0}"
+        echo "CPU_PORT=$${CPU_PORT:-8001}"
+        echo "CPU_EXTRA_ARGS=$${CPU_EXTRA_ARGS:-}"
+
+        if [ "$${MODE:-benchmark}" = "deploy" ]; then
+          CPU_HOST_EFFECTIVE="$${CPU_HOST:-0.0.0.0}"
+          CPU_PORT_EFFECTIVE="$${CPU_PORT:-8001}"
+          CPU_MODEL_EFFECTIVE="$${CPU_MODEL:-meta-llama/Llama-3.1-8B-Instruct}"
+          CPU_EXTRA_EFFECTIVE="$${CPU_EXTRA_ARGS:-}"
+
+          # Handle set-but-empty (e.g., CPU_PORT=)
+          if [ -z "$${CPU_HOST_EFFECTIVE}" ]; then CPU_HOST_EFFECTIVE="0.0.0.0"; fi
+          if [ -z "$${CPU_PORT_EFFECTIVE}" ]; then CPU_PORT_EFFECTIVE="8001"; fi
+          if [ -z "$${CPU_MODEL_EFFECTIVE}" ]; then CPU_MODEL_EFFECTIVE="meta-llama/Llama-3.1-8B-Instruct"; fi
+
+          # Detect NUMA node count for --tensor-parallel-size (fallback=1)
+          TP_SIZE="1"
+          if command -v lscpu >/dev/null 2>&1; then
+            NODES="$$(lscpu -p=NODE 2>/dev/null | grep -v '^#' | sort -u | wc -l | tr -d ' ')"
+            if [ -n "$$NODES" ] && [ "$$NODES" -ge 1 ] 2>/dev/null; then
+              TP_SIZE="$$NODES"
+            fi
+          elif command -v numactl >/dev/null 2>&1; then
+            NODES="$(numactl -H 2>/dev/null | awk '/available:/'{print $2} | tr -d ' ')"
+            if [ -n "$$NODES" ] && [ "$$NODES" -ge 1 ] 2>/dev/null; then
+              TP_SIZE="$$NODES"
+            fi
+          fi
+
+          # If user already provided --tensor-parallel-size, respect it.
+          if echo " $CPU_EXTRA_EFFECTIVE " | grep -q -- " --tensor-parallel-size "; then
+            TP_ARG=""
+          else
+            TP_ARG="--tensor-parallel-size $$TP_SIZE"
+          fi
+
+          echo "[vllm-cpu-server] DEPLOY: starting vLLM CPU server"
+          echo "Detected NUMA nodes => tensor-parallel-size=$$TP_SIZE"
+          echo "vllm serve $${CPU_MODEL_EFFECTIVE} --host $${CPU_HOST_EFFECTIVE} --port $${CPU_PORT_EFFECTIVE} $$TP_ARG $${CPU_EXTRA_EFFECTIVE}"
+
+          # shellcheck disable=SC2086
+          exec vllm serve "$${CPU_MODEL_EFFECTIVE}"             --host "$${CPU_HOST_EFFECTIVE}"             --port "$${CPU_PORT_EFFECTIVE}"             $$TP_ARG             $$CPU_EXTRA_EFFECTIVE
+        fi
+
+        echo "[vllm-cpu-server] BENCHMARK: running benchmark script (server is managed by the script)"
+        exec bash /workspace/.buildkite/nightly-benchmarks/scripts/run-performance-benchmarks.sh
+
+    ports:
+      - "${CPU_PORT:-8001}:${CPU_PORT:-8001}"
