@@ -146,7 +146,7 @@ class SpecDecodeBaseProposer:
             # 1D-RoPE.
             # See page 5 of https://arxiv.org/abs/2409.12191
             self.mrope_positions = torch.zeros(
-                (3,  2 * (self.max_num_tokens + 1)), dtype=torch.int64, device=device
+                (3, 2 * (self.max_num_tokens + 1)), dtype=torch.int64, device=device
             )
         elif self.uses_xdrope_dim > 0 and self.draft_uses_xdrope_dim > 0:
             self.xdrope_positions = torch.zeros(
@@ -758,9 +758,9 @@ class SpecDecodeBaseProposer:
 
         token_indices_to_sample = (
             torch.arange(
-            num_query_tokens_total,
-            device=device,
-            dtype=torch.int32,
+                num_query_tokens_total,
+                device=device,
+                dtype=torch.int32,
             )
             .view(batch_size, num_query_tokens)[:, 1:]
             .reshape(-1)
