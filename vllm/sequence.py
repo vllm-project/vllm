@@ -509,6 +509,7 @@ class Sequence:
         # Tree decoding related fields
         self.tree_depth = 0
         self.parent_req_id = None
+        self.parent_seq_id = None
 
     @property
     def n_blocks(self) -> int:
@@ -1574,6 +1575,7 @@ class ParallelSampleSequenceGroup(SequenceGroupBase):
             self.to_be_finished[request_id_i] = seq_group
             seq_group.seqs[0].tree_depth = parent_seq.tree_depth + 1
             seq_group.seqs[0].parent_req_id = parent_req_id
+            seq_group.seqs[0].parent_seq_id = parent_seq.seq_id
             self.assembled_seq_group.seqs.append(seq_group.seqs[0])
 
     def get_unfinished_seqs(self) -> list[Sequence]:

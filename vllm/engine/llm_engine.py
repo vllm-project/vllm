@@ -1467,6 +1467,8 @@ class LLMEngine:
     
     def _process_tree_decoding(self, outputs, seq_group_metadata_list):
         """处理tree decoding逻辑"""
+        if len(self.seq_id_to_seq_group) == 0:
+            return
         original_parallel_seq_group = next(iter(self.seq_id_to_seq_group.values()))
         # unfinished_seqs = original_parallel_seq_group.get_unfinished_seqs()
         assert hasattr(outputs[0], 'logprobs')

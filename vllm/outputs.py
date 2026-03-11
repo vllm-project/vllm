@@ -47,6 +47,10 @@ class CompletionOutput:
     finish_reason: Optional[str] = None
     stop_reason: Union[int, str, None] = None
     lora_request: Optional[LoRARequest] = None
+    tree_depth: int = 0
+    parent_req_id: Optional[str] = None
+    parent_seq_id: Optional[int] = None
+    seq_id: Optional[int] = None
 
     def finished(self) -> bool:
         return self.finish_reason is not None
@@ -58,7 +62,11 @@ class CompletionOutput:
                 f"cumulative_logprob={self.cumulative_logprob}, "
                 f"logprobs={self.logprobs}, "
                 f"finish_reason={self.finish_reason}, "
-                f"stop_reason={self.stop_reason})")
+                f"stop_reason={self.stop_reason}, "
+                f"tree_depth={self.tree_depth}, "
+                f"parent_req_id={self.parent_req_id}, "
+                f"parent_seq_id={self.parent_seq_id}, "
+                f"seq_id={self.seq_id})")
 
 
 @dataclass
@@ -283,6 +291,10 @@ class RequestOutput:
                 output.finish_reason = SequenceStatus.get_finished_reason(
                     seq.status)
                 output.stop_reason = seq.stop_reason
+                output.tree_depth = getattr(seq, 'tree_depth', 0)
+                output.parent_req_id = getattr(seq, 'parent_req_id', None)
+                output.parent_seq_id = getattr(seq, 'parent_seq_id', None)
+                output.seq_id = seq.seq_id
 
             else:
                 output = CompletionOutput(
@@ -291,7 +303,12 @@ class RequestOutput:
                     seq.get_cumulative_logprob() if include_logprobs else None,
                     output_logprobs,
                     SequenceStatus.get_finished_reason(seq.status),
-                    seq.stop_reason)
+                    seq.stop_reason,
+                    None, # lora_request
+                    getattr(seq, 'tree_depth', 0),
+                    getattr(seq, 'parent_req_id', None),
+                    getattr(seq, 'parent_seq_id', None),
+                    seq.seq_id)
 
             outputs.append(output)
 
