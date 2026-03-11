@@ -708,7 +708,7 @@ class SpecDecodeBaseProposer:
         target_token_ids: torch.Tensor,
         next_token_ids: torch.Tensor,
         target_positions: torch.Tensor,
-        target_hidden_states: torch.Tensor,
+        target_hidden_states: torch.Tensor | None,
         token_indices_to_sample: torch.Tensor | None,
         cad: CommonAttentionMetadata,
         num_rejected_tokens_gpu: torch.Tensor | None,
