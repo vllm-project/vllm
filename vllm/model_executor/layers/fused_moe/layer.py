@@ -1014,7 +1014,9 @@ class FusedMoE(CustomOp):
             assert shard_id in ("w1", "w3", "w13")
             expert_data.copy_(loaded_weight)
 
-    def _map_global_expert_id_to_local_expert_id(self, expert_id: int | None) -> int:
+    def _map_global_expert_id_to_local_expert_id(
+        self, expert_id: int | None,
+    ) -> int | None:
         if self._expert_map is None:
             return expert_id
         return self._expert_map[expert_id].item()
