@@ -752,9 +752,26 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             mixed_qkv_non_spec
         )
 
+        if spec_sequence_masks is not None:
+            if attn_metadata.num_prefills == 0 and attn_metadata.num_decodes == 0:
+                a_spec = a
+                b_spec = b
+            else:
+                assert spec_token_indx is not None
+                a_spec = a.index_select(0, spec_token_indx)
+                b_spec = b.index_select(0, spec_token_indx)
+            a_non_spec = None
+            b_non_spec = None
+        else:
+            a_spec = None
+            b_spec = None
+            a_non_spec = a
+            b_non_spec = b
+
         if attn_metadata.num_prefills > 0:
             g, beta = fused_gdn_gating(self.A_log, a, b, self.dt_bias)
             if spec_sequence_masks is not None:
+                assert non_spec_token_indx is not None
                 g_non_spec = g.index_select(1, non_spec_token_indx)
                 beta_non_spec = beta.index_select(1, non_spec_token_indx)
             else:
@@ -768,11 +785,13 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
 
         # 2.1: Process the multi-query part
         if spec_sequence_masks is not None:
+            assert a_spec is not None
+            assert b_spec is not None
             core_attn_out_spec, last_recurrent_state = (
                 fused_sigmoid_gating_delta_rule_update(
                     A_log=self.A_log,
-                    a=a,
-                    b=b,
+                    a=a_spec,
+                    b=b_spec,
                     dt_bias=self.dt_bias,
                     q=query_spec,
                     k=key_spec,
@@ -813,11 +832,13 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                 ssm_state.dtype
             )
         elif attn_metadata.num_decodes > 0:
+            assert a_non_spec is not None
+            assert b_non_spec is not None
             core_attn_out_non_spec, last_recurrent_state = (
                 fused_sigmoid_gating_delta_rule_update(
                     A_log=self.A_log,
-                    a=a,
-                    b=b,
+                    a=a_non_spec,
+                    b=b_non_spec,
                     dt_bias=self.dt_bias,
                     q=query_non_spec,
                     k=key_non_spec,
