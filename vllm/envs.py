@@ -53,6 +53,7 @@ if TYPE_CHECKING:
     VLLM_CPU_SGL_KERNEL: bool = False
     VLLM_ZENTORCH_WEIGHT_PREPACK: bool = True
     VLLM_CPU_WOQ_INT8_MODE: bool = False
+    VLLM_CPU_INT4_W4A8: bool = False
     VLLM_XLA_CACHE_PATH: str = os.path.join(VLLM_CACHE_ROOT, "xla_cache")
     VLLM_XLA_CHECK_RECOMPILATION: bool = False
     VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE: Literal["auto", "nccl", "shm"] = "auto"
