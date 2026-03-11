@@ -303,8 +303,7 @@ def test_additional_cases():
 def test_compute_logical_maps_with_negative_indices():
     """
     Test that compute_logical_maps correctly handles physical slots containing
-    -1 (unused slots). Without the >= 0 guard, -1 would be treated as a valid
-    index via Python's negative indexing and corrupt the last expert's counts.
+    -1 (unused slots).
     """
     # 2 layers, 6 physical slots, 4 logical experts.
     # Slots 2 and 5 are unused (-1).
@@ -314,34 +313,23 @@ def test_compute_logical_maps_with_negative_indices():
             [3, -1, 2, 1, 0, -1],
         ]
     )
+    num_layers = 2
     num_logical_experts = 4
 
     log2phy, logcnt = compute_logical_maps(phy2log, num_logical_experts)
 
-    # Shapes
-    assert logcnt.shape == (2, 4)
-    assert log2phy.shape[0] == 2
-    assert log2phy.shape[1] == 4
+    assert logcnt.shape == (num_layers, num_logical_experts)
+    assert log2phy.shape == (num_layers, num_logical_experts, 1)
 
-    # Each logical expert appears exactly once per layer
-    expected_logcnt = torch.ones(2, 4, dtype=phy2log.dtype)
+    expected_logcnt = torch.ones(num_layers, num_logical_experts, dtype=phy2log.dtype)
     assert torch.all(logcnt == expected_logcnt), (
-        f"Expected all replica counts == 1, got {logcnt}"
+        f"Expected that all replica counts == 1, got {logcnt}"
     )
 
-    # -1 slots must not inflate any expert's count
-    assert torch.all(logcnt >= 0), "No expert should have a negative count"
-    assert torch.all(logcnt <= 1), (
-        "No expert should have more than 1 replica (no duplicates in input)"
-    )
-
-    # Unused slots (-1) should not appear in log2phy
     assert torch.all(log2phy >= 0), (
-        "log2phy should only contain valid physical indices, not -1 sentinel"
+        "log2phy should only contain valid physical indices, not -1"
     )
 
-    # Verify the actual physical slot assignments are correct (layer 0)
-    # Expert 0 -> slot 0, Expert 1 -> slot 1, Expert 2 -> slot 3, Expert 3 -> slot 4
     assert log2phy[0, 0, 0] == 0
     assert log2phy[0, 1, 0] == 1
     assert log2phy[0, 2, 0] == 3
