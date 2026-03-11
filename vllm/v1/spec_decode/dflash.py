@@ -3,11 +3,11 @@
 
 from dataclasses import dataclass, replace
 from typing import Any
-from typing_extensions import override
 
 import torch
+from typing_extensions import override
 
-from vllm.config import VllmConfig, CUDAGraphMode
+from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.v1.attention.backend import CommonAttentionMetadata
@@ -93,7 +93,8 @@ class DFlashModelProposer(SpecDecodeBaseProposer):
         # One bucket per KV shape
         self._dflash_graph_pool = torch.cuda.graph_pool_handle()
         self._dflash_graph_buckets: dict[tuple[int, int, int], _DFlashGraphBucket] = {}
-# key: (batch_size, num_context_tokens, total_query_tokens)
+
+    # key: (batch_size, num_context_tokens, total_query_tokens)
 
     @override
     @torch.inference_mode()
@@ -104,12 +105,10 @@ class DFlashModelProposer(SpecDecodeBaseProposer):
         is_graph_capturing: bool = False,
         slot_mappings: dict[str, torch.Tensor] | None = None,
     ) -> None:
-        (   _, 
-            num_input_tokens, 
-            num_tokens_across_dp
-        ) = self._determine_batch_execution_and_padding(
-            num_tokens, 
-            use_cudagraphs=False
+        (_, num_input_tokens, num_tokens_across_dp) = (
+            self._determine_batch_execution_and_padding(
+                num_tokens, use_cudagraphs=False
+            )
         )
         if num_tokens_across_dp is not None:
             num_tokens_across_dp[self.dp_rank] = num_input_tokens
@@ -143,9 +142,7 @@ class DFlashModelProposer(SpecDecodeBaseProposer):
             sm = num_tokens_or_slot_mapping
         else:
             sm = (
-                slot_mapping 
-                if slot_mapping is not None 
-                else num_tokens_or_slot_mapping
+                slot_mapping if slot_mapping is not None else num_tokens_or_slot_mapping
             )
         return {name: sm for name in self._draft_attn_layer_names}
 
@@ -159,6 +156,7 @@ class DFlashModelProposer(SpecDecodeBaseProposer):
         num_query_tokens: int,
         slot_mapping: torch.Tensor,
     ) -> CommonAttentionMetadata:
+        
         """Build non-causal metadata for DFlash 
         from original CommonAttentionMetadata."""
         batch_size = common_attn_metadata.num_reqs
@@ -201,12 +199,10 @@ class DFlashModelProposer(SpecDecodeBaseProposer):
         slot_mapping: torch.Tensor,
     ) -> torch.Tensor:
         """Run DFlash draft model forward in eager mode."""
-        (_, 
-         num_query_tokens_dp_padded, 
-         num_tokens_across_dp
-        ) = self._determine_batch_execution_and_padding(
-            total_query_tokens, 
-            use_cudagraphs=False
+        (_, num_query_tokens_dp_padded, num_tokens_across_dp) = (
+            self._determine_batch_execution_and_padding(              
+                total_query_tokens, use_cudagraphs=False
+          )
         )
         self._set_positions(num_kv_tokens, position_ids)
         self.input_ids[:total_query_tokens] = input_ids[:total_query_tokens]
@@ -323,16 +319,19 @@ class DFlashModelProposer(SpecDecodeBaseProposer):
             )
 
         # capture
-        with torch.cuda.graph(
-            graph,
-            self._dflash_graph_pool,
-        ), set_forward_context(
-            per_layer_attn_metadata,
-            self.vllm_config,
-            num_tokens=num_input_tokens,
-            num_tokens_across_dp=num_tokens_across_dp,
-            cudagraph_runtime_mode=CUDAGraphMode.NONE,
-            slot_mapping=self._get_slot_mapping(slot_mapping_static),
+        with (
+            torch.cuda.graph(
+                graph,
+                self._dflash_graph_pool,
+            ),
+            set_forward_context(
+                per_layer_attn_metadata,
+                self.vllm_config,
+                num_tokens=num_input_tokens,
+                num_tokens_across_dp=num_tokens_across_dp,
+                cudagraph_runtime_mode=CUDAGraphMode.NONE,
+                slot_mapping=self._get_slot_mapping(slot_mapping_static),
+            ),
         ):
             output_hidden_states = self.model(
                 input_ids=input_ids_static,
@@ -370,11 +369,13 @@ class DFlashModelProposer(SpecDecodeBaseProposer):
         seq_lens: torch.Tensor,
     ) -> torch.Tensor:
         """Replay the captured DFlash graph."""
-        bucket.input_ids[:bucket.total_query_tokens].copy_(
-            input_ids[:bucket.total_query_tokens]
+        bucket.input_ids[: bucket.total_query_tokens].copy_(
+            input_ids[: bucket.total_query_tokens]
         )
         if bucket.num_input_tokens > bucket.total_query_tokens:
-            bucket.input_ids[bucket.total_query_tokens:bucket.num_input_tokens].fill_(0)
+            bucket.input_ids[
+                bucket.total_query_tokens:bucket.num_input_tokens
+            ].fill_(0)
 
         bucket.positions.copy_(position_ids)
         bucket.hidden_states.copy_(target_hidden_states)
@@ -428,7 +429,7 @@ class DFlashModelProposer(SpecDecodeBaseProposer):
             device=device, dtype=torch.long
         )
         ctx_lens = query_start_loc[1:] - query_start_loc[:-1]  # [batch_size]
-        ctx_end_indices = query_start_loc[1:]                  # [batch_size]
+        ctx_end_indices = query_start_loc[1:]  # [batch_size]
 
         # Position of each request's last context token
         last_positions = base_target_positions[ctx_end_indices - 1]  # [batch_size]
