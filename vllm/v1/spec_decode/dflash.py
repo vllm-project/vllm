@@ -126,7 +126,8 @@ class DFlashModelProposer(SpecDecodeBaseProposer):
                 positions=self._get_positions(2 * num_input_tokens),
                 hidden_states=self.hidden_states[:num_input_tokens],
                 inputs_embeds=None,
-            )            
+            )
+            
            
     @override
     def _get_slot_mapping(
@@ -157,8 +158,6 @@ class DFlashModelProposer(SpecDecodeBaseProposer):
         num_query_tokens: int,
         slot_mapping: torch.Tensor,
     ) -> CommonAttentionMetadata:
-        """Build non-causal metadata for DFlash 
-        from original CommonAttentionMetadata."""
         batch_size = common_attn_metadata.num_reqs
 
         # For batch_size=1, query_start_loc is always [0, num_query_tokens]
@@ -199,8 +198,8 @@ class DFlashModelProposer(SpecDecodeBaseProposer):
         slot_mapping: torch.Tensor,
     ) -> torch.Tensor:
         """Run DFlash draft model forward in eager mode."""
-        (_, num_query_tokens_dp_padded, num_tokens_across_dp) = (
-            self._determine_batch_execution_and_padding(              
+        (_, num_query_tokens_dp_padded, num_tokens_across_dp) = (            
+            self._determine_batch_execution_and_padding(      
                 total_query_tokens, use_cudagraphs=False
             )
         )
