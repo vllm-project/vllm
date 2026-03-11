@@ -653,6 +653,10 @@ class OpenVLAForActionPrediction(nn.Module, SupportsMultiModal, SupportsPP):
             raise RuntimeError("Vision components not initialized")
 
         pixel_values = image_input.pixel_values
+        # Processor outputs float32; vision backbone expects model dtype (bfloat16).
+        device = next(self.vision_backbone.parameters()).device
+        dtype = next(self.vision_backbone.parameters()).dtype
+        pixel_values = pixel_values.to(device=device, dtype=dtype)
         vision_features = self.vision_backbone(pixel_values)
         return self.projector(vision_features)
 

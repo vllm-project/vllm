@@ -439,14 +439,22 @@ def calculate_metrics(
             actual_output_lens.append(output_len)
             total_input += input_requests[i].prompt_len
             tpot = 0
+            ttft = outputs[i].ttft
+            itl_list = list(outputs[i].itl)
+            # Fallback: some models (e.g. VLA/OpenVLA) may not stream token chunks,
+            # so ttft=0 and itl=[] despite generating tokens. Infer from latency.
+            if output_len > 0 and ttft == 0.0 and not itl_list:
+                inferred_ttft = outputs[i].latency / output_len
+                ttft = inferred_ttft
+                itl_list = [inferred_ttft] * (output_len - 1)
             if output_len > 1:
-                latency_minus_ttft = outputs[i].latency - outputs[i].ttft
+                latency_minus_ttft = outputs[i].latency - ttft
                 tpot = latency_minus_ttft / (output_len - 1)
                 tpots.append(tpot)
             # Note: if output_len <= 1, we regard tpot as 0 for goodput
             all_tpots.append(tpot)
-            itls += outputs[i].itl
-            ttfts.append(outputs[i].ttft)
+            itls += itl_list
+            ttfts.append(ttft)
             e2els.append(outputs[i].latency)
             input_audio_duration += outputs[i].input_audio_duration
             completed += 1

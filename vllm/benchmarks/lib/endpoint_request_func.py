@@ -34,7 +34,9 @@ class StreamedResponseHandler:
 
         messages = []
 
-        # Split by double newlines (SSE message separator)
+        # Split by double newlines (SSE message separator).
+        # Support both \n\n and \r\n\r\n (HTTP-style).
+        self.buffer = self.buffer.replace("\r\n", "\n")
         while "\n\n" in self.buffer:
             message, self.buffer = self.buffer.split("\n\n", 1)
             message = message.strip()
@@ -264,7 +266,28 @@ def _get_chat_content(
     request_func_input: RequestFuncInput,
     mm_position: Literal["first", "last"] = "last",
 ) -> list[dict[str, Any]]:
-    text_contents = [{"type": "text", "text": request_func_input.prompt}]
+    prompt = request_func_input.prompt
+
+    # When enable_multimodal_chat=True, CustomMMDataset passes preformatted
+    # messages: [{"role": "user", "content": [{"type": "text", "text": "..."},
+    # {"type": "image_url", ...}]}]. Use content directly to avoid wrapping
+    # a list as "text" (which causes 400 Bad Request).
+    if isinstance(prompt, list) and len(prompt) > 0:
+        first = prompt[0]
+        if (
+            isinstance(first, dict)
+            and first.get("role") == "user"
+            and "content" in first
+        ):
+            content = first["content"]
+            if mm_position == "first" and isinstance(content, list):
+                # Reorder: images first, then text
+                text_items = [c for c in content if c.get("type") == "text"]
+                mm_items = [c for c in content if c.get("type") != "text"]
+                return mm_items + text_items
+            return content if isinstance(content, list) else [content]
+
+    text_contents = [{"type": "text", "text": prompt}]
 
     mm_contents = []
     if request_func_input.multi_modal_content:
@@ -310,6 +333,10 @@ async def async_request_openai_chat_completions(
     }
     _update_payload_common(payload, request_func_input)
 
+    use_streaming = payload.get("stream", True)
+    if "stream_options" in payload and not use_streaming:
+        payload.pop("stream_options", None)
+
     headers = _get_headers("application/json")
     _update_headers_common(headers, request_func_input)
 
@@ -318,52 +345,120 @@ async def async_request_openai_chat_completions(
 
     generated_text = ""
     ttft = 0.0
+    content_chunk_count = 0  # fallback when usage.completion_tokens is 0
     st = time.perf_counter()
     output.start_time = st
     most_recent_timestamp = st
     try:
         async with session.post(url=api_url, json=payload, headers=headers) as response:
             if response.status == 200:
-                handler = StreamedResponseHandler()
-                async for chunk_bytes in response.content.iter_any():
-                    chunk_bytes = chunk_bytes.strip()
-                    if not chunk_bytes:
-                        continue
-
-                    messages = handler.add_chunk(chunk_bytes)
-                    for message in messages:
-                        # NOTE: SSE comments (often used as pings) start with
-                        # a colon. These are not JSON data payload and should
-                        # be skipped.
-                        if message.startswith(":"):
+                if not use_streaming:
+                    # Non-streaming: single JSON response (used for VLA models)
+                    body = await response.json()
+                    output.generated_text = (
+                        (body.get("choices") or [{}])[0]
+                        .get("message", {})
+                        .get("content", "")
+                        or ""
+                    )
+                    if usage := body.get("usage"):
+                        output.output_tokens = usage.get("completion_tokens") or 0
+                    output.success = True
+                    output.latency = time.perf_counter() - st
+                else:
+                    handler = StreamedResponseHandler()
+                    async for chunk_bytes in response.content.iter_any():
+                        chunk_bytes = chunk_bytes.strip()
+                        if not chunk_bytes:
                             continue
 
-                        chunk = message.removeprefix("data: ")
+                        messages = handler.add_chunk(chunk_bytes)
+                        for message in messages:
+                            # NOTE: SSE comments (often used as pings) start with
+                            # a colon. These are not JSON data payload and should
+                            # be skipped.
+                            if message.startswith(":"):
+                                continue
 
-                        if chunk != "[DONE]":
-                            timestamp = time.perf_counter()
-                            data = json.loads(chunk)
+                            chunk = message.removeprefix("data: ")
 
-                            if choices := data.get("choices"):
-                                content = choices[0]["delta"].get("content")
-                                # First token
-                                if ttft == 0.0:
-                                    ttft = timestamp - st
-                                    output.ttft = ttft
+                            if chunk != "[DONE]":
+                                timestamp = time.perf_counter()
+                                data = json.loads(chunk)
 
-                                # Decoding phase
-                                else:
-                                    output.itl.append(timestamp - most_recent_timestamp)
+                                if choices := data.get("choices"):
+                                    choice = choices[0]
+                                    # Streaming: delta.content
+                                    delta = choice.get("delta") or {}
+                                    content = delta.get("content")
+                                    # Non-streaming in SSE: message.content (e.g. OpenVLA)
+                                    if content is None and (msg := choice.get("message")):
+                                        content = msg.get("content") or ""
+                                        if content and output.output_tokens == 0:
+                                            if usage := data.get("usage"):
+                                                output.output_tokens = (
+                                                    usage.get("completion_tokens")
+                                                    or 0
+                                                )
+                                            if output.output_tokens and ttft == 0.0:
+                                                output.ttft = timestamp - st
+                                                output.itl = [
+                                                    (timestamp - st)
+                                                    / output.output_tokens
+                                                ] * (output.output_tokens - 1)
+                                    # First token (streaming)
+                                    elif content is not None:
+                                        if ttft == 0.0:
+                                            ttft = timestamp - st
+                                            output.ttft = ttft
+                                        else:
+                                            output.itl.append(
+                                                timestamp - most_recent_timestamp
+                                            )
+                                            content_chunk_count += 1
 
-                                generated_text += content or ""
-                            elif usage := data.get("usage"):
-                                output.output_tokens = usage.get("completion_tokens")
+                                    generated_text += content or ""
+                                elif usage := data.get("usage"):
+                                    ct = usage.get("completion_tokens")
+                                    # Fallback: some models (e.g. VLA/OpenVLA) may return
+                                    # completion_tokens=0 despite streaming content
+                                    output.output_tokens = (
+                                        ct
+                                        if (ct is not None and ct != 0)
+                                        else content_chunk_count
+                                    )
 
-                            most_recent_timestamp = timestamp
+                                most_recent_timestamp = timestamp
 
-                output.generated_text = generated_text
-                output.success = True
-                output.latency = most_recent_timestamp - st
+                    # Fallback: server may return non-streaming JSON in one chunk
+                    # (e.g. OpenVLA) when stream=True. Buffer won't match SSE format.
+                    if (
+                        not generated_text
+                        and handler.buffer.strip()
+                        and not handler.buffer.strip().startswith("data:")
+                    ):
+                        try:
+                            body = json.loads(handler.buffer.strip())
+                            msg = (body.get("choices") or [{}])[0].get("message") or {}
+                            generated_text = msg.get("content") or ""
+                            if usage := body.get("usage"):
+                                output.output_tokens = (
+                                    usage.get("completion_tokens") or 0
+                                )
+                            lat = time.perf_counter() - st
+                            if output.output_tokens and output.output_tokens > 0:
+                                inferred = lat / output.output_tokens
+                                output.ttft = inferred
+                                output.itl = [
+                                    inferred
+                                ] * (output.output_tokens - 1)
+                            most_recent_timestamp = time.perf_counter()
+                        except (json.JSONDecodeError, KeyError):
+                            pass
+
+                    output.generated_text = generated_text
+                    output.success = True
+                    output.latency = most_recent_timestamp - st
             else:
                 output.error = response.reason or ""
                 output.success = False
@@ -453,7 +548,8 @@ async def async_request_openai_audio(
                                 data = json.loads(chunk)
 
                                 if choices := data.get("choices"):
-                                    content = choices[0]["delta"].get("content")
+                                    delta = choices[0].get("delta") or {}
+                                    content = delta.get("content")
                                     # First token
                                     if ttft == 0.0:
                                         ttft = timestamp - st
