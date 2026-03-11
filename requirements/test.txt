@@ -66,7 +66,7 @@ backoff==2.2.1
     # via
     #   -r requirements/test.in
     #   schemathesis
-bitsandbytes==0.46.1
+bitsandbytes==0.49.2
     # via
     #   -r requirements/test.in
     #   lightning
@@ -287,10 +287,11 @@ greenlet==3.2.3
     # via sqlalchemy
 grpcio==1.78.0
     # via
-    #   grpcio-tools
+    #   -r requirements/test.in
+    #   grpcio-reflection
     #   ray
     #   tensorboard
-grpcio-tools==1.78.0
+grpcio-reflection==1.78.0
     # via -r requirements/test.in
 h11==0.14.0
     # via
@@ -413,6 +414,8 @@ jsonschema-specifications==2024.10.1
     # via jsonschema
 junit-xml==1.9
     # via schemathesis
+kaldi-native-fbank==1.22.3
+    # via -r requirements/test.in
 kaleido==0.2.1
     # via genai-perf
 kiwisolver==1.4.7
@@ -487,7 +490,7 @@ msgpack==1.1.0
     # via
     #   librosa
     #   ray
-mteb==2.1.2
+mteb==2.8.3
     # via -r requirements/test.in
 multidict==6.1.0
     # via
@@ -653,6 +656,7 @@ orjson==3.11.5
 packaging==24.2
     # via
     #   accelerate
+    #   bitsandbytes
     #   black
     #   datamodel-code-generator
     #   datasets
@@ -757,7 +761,7 @@ protobuf==6.33.2
     # via
     #   google-api-core
     #   googleapis-common-protos
-    #   grpcio-tools
+    #   grpcio-reflection
     #   opentelemetry-proto
     #   proto-plus
     #   ray
@@ -1037,7 +1041,6 @@ sentry-sdk==2.52.0
     # via wandb
 setuptools==77.0.3
     # via
-    #   grpcio-tools
     #   lightning-utilities
     #   pytablewriter
     #   tensorboard

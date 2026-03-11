@@ -86,6 +86,26 @@ class AttentionBackend(ABC):
     ) -> tuple[int, ...]:
         raise NotImplementedError
 
+    @classmethod
+    def get_kv_cache_block_dim(
+        cls,
+        block_size: int,
+        num_kv_heads: int,
+        head_size: int,
+        cache_dtype_str: str = "auto",
+    ) -> int:
+        """Discover which tensor dim is the block index, since different
+        backends lay out dims differently."""
+        _S = 1234567
+        shape = cls.get_kv_cache_shape(
+            _S,
+            block_size,
+            num_kv_heads,
+            head_size,
+            cache_dtype_str=cache_dtype_str,
+        )
+        return shape.index(_S)
+
     @staticmethod
     def get_kv_cache_stride_order(
         include_num_layers_dimension: bool = False,
@@ -162,7 +182,7 @@ class AttentionBackend(ABC):
         return False
 
     @classmethod
-    def get_preferred_block_size(cls, default_block_size: int = 16) -> int:
+    def get_preferred_block_size(cls, default_block_size: int) -> int:
         supported_sizes = cls.get_supported_kernel_block_sizes()
         if not supported_sizes:
             return default_block_size
@@ -193,6 +213,10 @@ class AttentionBackend(ABC):
         return False
 
     @classmethod
+    def supports_per_head_quant_scales(cls) -> bool:
+        return False
+
+    @classmethod
     def supports_attn_type(cls, attn_type: str) -> bool:
         """Check if backend supports a given attention type.
 
@@ -211,7 +235,7 @@ class AttentionBackend(ABC):
         head_size: int,
         dtype: torch.dtype,
         kv_cache_dtype: "CacheDType | None",
-        block_size: int,
+        block_size: int | None,
         use_mla: bool,
         has_sink: bool,
         use_sparse: bool,
@@ -225,11 +249,12 @@ class AttentionBackend(ABC):
         head_size: int,
         dtype: torch.dtype,
         kv_cache_dtype: "CacheDType | None",
-        block_size: int,
+        block_size: int | None,
         use_mla: bool,
         has_sink: bool,
         use_sparse: bool,
         use_mm_prefix: bool,
+        use_per_head_quant_scales: bool,
         device_capability: "DeviceCapability",
         attn_type: str,
     ) -> list[str]:
@@ -252,12 +277,14 @@ class AttentionBackend(ABC):
             else:
                 invalid_reasons.append("non-MLA not supported")
         if has_sink and not cls.supports_sink():
-            invalid_reasons.append("sink setting not supported")
+            invalid_reasons.append("attention sinks not supported")
         if use_sparse != cls.is_sparse():
             if use_sparse:
                 invalid_reasons.append("sparse not supported")
             else:
                 invalid_reasons.append("non-sparse not supported")
+        if use_per_head_quant_scales and not cls.supports_per_head_quant_scales():
+            invalid_reasons.append("per-head quant scales not supported")
         if not cls.supports_compute_capability(device_capability):
             invalid_reasons.append("compute capability not supported")
         if not cls.supports_attn_type(attn_type):
@@ -640,7 +667,6 @@ class AttentionImplBase(ABC, Generic[T]):
     # TODO add support to more backends:
     # https://github.com/vllm-project/vllm/issues/25584
     supports_quant_query_input: bool = False
-    supports_per_head_quant_scales: bool = False
 
     dcp_world_size: int
     dcp_rank: int
@@ -728,6 +754,33 @@ class AttentionImpl(AttentionImplBase[T], Generic[T]):
         """
         return False
 
+    def fused_rope_kvcache_supported(self):
+        """
+        Does this attention implementation support RoPE+KVCache fusion.
+        This is used by the RopeKVCacheFusionPass to only fuse the RoPE ops
+        with the KV cache update for implementations that support it.
+        """
+        return False
+
+    def do_rope_and_kv_cache_update(
+        self,
+        layer: AttentionLayer,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        positions: torch.Tensor,
+        cos_sin_cache: torch.Tensor,
+        is_neox: bool,
+        kv_cache: torch.Tensor,
+        layer_slot_mapping: torch.Tensor,
+    ):
+        """
+        If `fused_rope_kvcache_supported` returns True, this method will be called
+        by torch.ops.vllm.fused_rope_and_unified_kv_cache_update
+        to perform the inplace RoPE and KV cache update.
+        """
+        raise NotImplementedError
+
 
 class MLAAttentionImpl(AttentionImplBase[T], Generic[T]):
     """MLA attention implementation with forward_mqa and forward_mha methods."""
@@ -783,6 +836,28 @@ class MLAAttentionImpl(AttentionImplBase[T], Generic[T]):
         """MQA-style decode forward pass."""
         raise NotImplementedError
 
+    def do_kv_cache_update(
+        self,
+        kv_c_normed: torch.Tensor,
+        k_pe: torch.Tensor,
+        kv_cache: torch.Tensor,
+        slot_mapping: torch.Tensor,
+        kv_cache_dtype: str,
+        k_scale: torch.Tensor,
+    ) -> None:
+        if kv_cache.numel() == 0:
+            return
+        from vllm import _custom_ops as ops
+
+        ops.concat_and_cache_mla(
+            kv_c_normed,
+            k_pe.squeeze(1),
+            kv_cache,
+            slot_mapping.flatten(),
+            kv_cache_dtype=kv_cache_dtype,
+            scale=k_scale,
+        )
+
 
 class SparseMLAAttentionImpl(AttentionImplBase[T], Generic[T]):
     """Sparse MLA attention implementation with only forward_mqa method.
@@ -827,6 +902,28 @@ class SparseMLAAttentionImpl(AttentionImplBase[T], Generic[T]):
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """MQA-style decode forward pass."""
         raise NotImplementedError
+
+    def do_kv_cache_update(
+        self,
+        kv_c_normed: torch.Tensor,
+        k_pe: torch.Tensor,
+        kv_cache: torch.Tensor,
+        slot_mapping: torch.Tensor,
+        kv_cache_dtype: str,
+        k_scale: torch.Tensor,
+    ) -> None:
+        if kv_cache.numel() == 0:
+            return
+        from vllm import _custom_ops as ops
+
+        ops.concat_and_cache_mla(
+            kv_c_normed,
+            k_pe.squeeze(1),
+            kv_cache,
+            slot_mapping.flatten(),
+            kv_cache_dtype=kv_cache_dtype,
+            scale=k_scale,
+        )
 
 
 def is_quantized_kv_cache(kv_cache_dtype: str) -> bool:

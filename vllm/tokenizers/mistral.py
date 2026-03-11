@@ -44,7 +44,7 @@ def maybe_serialize_tool_calls(request: "MistralChatCompletionRequest"):
     # SEE: https://github.com/vllm-project/vllm/pull/9951
     # Credits go to: @gcalmettes
     # NOTE: There is currently a bug in pydantic where attributes
-    # declared as iterables are replaced in in the instances by
+    # declared as iterables are replaced in the instances by
     # pydantic-core ValidatorIterator instance. In particular, this
     # affects tool_calls defined in ChatCompletionAssistantMessageParam
     # model:
@@ -169,7 +169,7 @@ def _prepare_apply_chat_template_tools_and_messages(
                     tool.pop(tool_key)
                     logger.warning_once(
                         f"'{tool_key}' is not supported by mistral-common for tools. "
-                        "It has been poped from the tool definition."
+                        "It has been popped from the tool definition."
                     )
                 if tool["type"] == "function":
                     function_keys = list(tool["function"].keys())
@@ -178,7 +178,7 @@ def _prepare_apply_chat_template_tools_and_messages(
                             tool["function"].pop(function_key)
                             logger.warning_once(
                                 f"'{function_key}' is not supported by mistral-common "
-                                "for function tools. It has been poped from the "
+                                "for function tools. It has been popped from the "
                                 "function definition."
                             )
                 else:
@@ -210,6 +210,8 @@ def _tekken_token_to_id(tokenizer: "Tekkenizer", t: str | bytes) -> int:
 
 
 class MistralTokenizer(TokenizerLike):
+    IS_MISTRAL_TOKENIZER = True  # used by vllm.utils.mistral
+
     @classmethod
     def from_pretrained(
         cls,

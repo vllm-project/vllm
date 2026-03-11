@@ -67,19 +67,35 @@ class KVConnectorModelRunnerMixin:
     @staticmethod
     def maybe_get_kv_connector_output(
         scheduler_output: "SchedulerOutput",
+        defer_finalize: bool = False,
     ) -> AbstractContextManager[KVConnectorOutput | None]:
         return (
-            KVConnectorModelRunnerMixin._get_kv_connector_output(scheduler_output)
+            KVConnectorModelRunnerMixin._get_kv_connector_output(
+                scheduler_output, defer_finalize=defer_finalize
+            )
             if has_kv_transfer_group()
             else nullcontext()
         )
+
+    @staticmethod
+    def finalize_kv_connector() -> None:
+        """Finalize the KV connector: wait_for_save and clear metadata.
+
+        Call after draft model forward when defer_finalize=True was used.
+        """
+        if has_kv_transfer_group():
+            kv_connector = get_kv_transfer_group()
+            kv_connector.wait_for_save()
+            kv_connector.clear_connector_metadata()
 
     # This context manager must be used within an active forward context.
     # It encapsulates the entire KV connector lifecycle within execute_model
     @staticmethod
     @contextmanager
     def _get_kv_connector_output(
-        scheduler_output: "SchedulerOutput", wait_for_save: bool = True
+        scheduler_output: "SchedulerOutput",
+        wait_for_save: bool = True,
+        defer_finalize: bool = False,
     ) -> Generator[KVConnectorOutput, None, None]:
         output = KVConnectorOutput()
 
@@ -97,7 +113,7 @@ class KVConnectorModelRunnerMixin:
         try:
             yield output
         finally:
-            if wait_for_save:
+            if wait_for_save and not defer_finalize:
                 kv_connector.wait_for_save()
 
             output.finished_sending, output.finished_recving = (
@@ -108,7 +124,8 @@ class KVConnectorModelRunnerMixin:
             output.kv_connector_stats = kv_connector.get_kv_connector_stats()
             output.kv_cache_events = kv_connector.get_kv_connector_kv_cache_events()
 
-            kv_connector.clear_connector_metadata()
+            if not defer_finalize:
+                kv_connector.clear_connector_metadata()
 
     @staticmethod
     def use_uniform_kv_cache(

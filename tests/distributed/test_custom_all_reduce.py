@@ -33,6 +33,7 @@ def graph_allreduce(
 ):
     with monkeypatch.context() as m:
         m.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+        m.delenv("HIP_VISIBLE_DEVICES", raising=False)
         device = torch.device(f"cuda:{rank}")
         torch.cuda.set_device(device)
         init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
@@ -47,7 +48,7 @@ def graph_allreduce(
         data = torch.zeros(1)
         data = data.to(device=device)
         torch.distributed.all_reduce(data, group=group)
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         del data
 
         # we use the first group to communicate once
@@ -67,7 +68,7 @@ def graph_allreduce(
                     inp2 = torch.randint(
                         1, 16, (sz,), dtype=dtype, device=torch.cuda.current_device()
                     )
-                    torch.cuda.synchronize()
+                    torch.accelerator.synchronize()
                     graph = torch.cuda.CUDAGraph()
                     with torch.cuda.graph(graph, stream=graph_capture_context.stream):
                         for i in range(num_communication):
@@ -92,6 +93,7 @@ def eager_allreduce(
 ):
     with monkeypatch.context() as m:
         m.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+        m.delenv("HIP_VISIBLE_DEVICES", raising=False)
         device = torch.device(f"cuda:{rank}")
         torch.cuda.set_device(device)
         init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)

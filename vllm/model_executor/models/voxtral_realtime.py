@@ -8,12 +8,13 @@ from typing import Literal
 
 import numpy as np
 import torch
+from mistral_common.audio import Audio
 from mistral_common.protocol.instruct.chunk import RawAudio
 from mistral_common.protocol.transcription.request import (
     StreamingMode,
     TranscriptionRequest,
 )
-from mistral_common.tokens.tokenizers.audio import Audio, AudioConfig
+from mistral_common.tokens.tokenizers.audio import AudioConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
@@ -41,6 +42,7 @@ from vllm.multimodal.processing.processor import (
 )
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers import cached_tokenizer_from_config
+from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 from .utils import (
     _flatten_embeddings,
@@ -297,7 +299,6 @@ class VoxtralRealtimeGeneration(VoxtralForConditionalGeneration, SupportsRealtim
         *,
         is_multimodal: torch.Tensor | None = None,
         # Multi-modal token ID may exceed vocab size
-        handle_oov_mm_token: bool = True,
     ) -> torch.Tensor:
         """Pass post-conv embeddings directly as input.
 
@@ -337,9 +338,21 @@ class VoxtralRealtimeGeneration(VoxtralForConditionalGeneration, SupportsRealtim
         assert input_ids is not None
 
         pool_size = self.config.audio_config.block_pool_size
-        inputs_embeds = inputs_embeds.view(
-            inputs_embeds.shape[0] * pool_size, inputs_embeds.shape[1] // pool_size
-        )
+        if is_torch_equal_or_newer("2.11"):
+            inputs_embeds = inputs_embeds.view(
+                inputs_embeds.shape[0] * pool_size, inputs_embeds.shape[1] // pool_size
+            )
+        else:
+            # TODO Use reshape + clone to break the view chain and avoid output
+            # aliasing input bug in torch.compile's AOT autograd cache.
+            # Without clone(), if any downstream operation returns a view that's
+            # connected to this view of inputs_embeds, the AOT autograd cache
+            # fails to pickle the ViewMetaSequence containing SymInt shapes.
+            # This will be fixed in pytorch 2.11 and beyond.
+            # issue: https://github.com/pytorch/pytorch/issues/174299
+            inputs_embeds = inputs_embeds.reshape(
+                inputs_embeds.shape[0] * pool_size, inputs_embeds.shape[1] // pool_size
+            ).clone()
 
         whisper_positions = _expand_tensor(positions, pool_size)
         audio_hidden_states = self.whisper_encoder.whisper_encoder(

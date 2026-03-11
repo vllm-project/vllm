@@ -720,7 +720,7 @@ class OffloadPromMetrics(KVConnectorPromMetrics):
         per_engine_labelvalues: dict[int, list[object]],
     ):
         super().__init__(vllm_config, metric_types, labelnames, per_engine_labelvalues)
-        # (engine_idx, transfer_tupe) -> (metric with bounded labels)
+        # (engine_idx, transfer_type) -> (metric with bounded labels)
         self.histogram_transfer_size: dict[tuple[int, str], PromMetricT] = {}
         self.counter_kv_bytes: dict[tuple[int, str], PromMetricT] = {}
         self.counter_kv_transfer_time: dict[tuple[int, str], PromMetricT] = {}

@@ -17,9 +17,6 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionResponse,
 )
 from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
-from vllm.entrypoints.openai.engine.protocol import (
-    ErrorResponse,
-)
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.inputs import PromptType
@@ -542,11 +539,9 @@ async def test_header_dp_rank_argument():
         # Test 2: Out-of-range DP rank (1)
         mock_raw_request.headers = {"X-data-parallel-rank": "1"}
 
-        # should return ErrorResponse for out-of-range rank
-        response2 = await serving_chat.create_chat_completion(req, mock_raw_request)
-        assert isinstance(response2, ErrorResponse), (
-            "Expected an ErrorResponse for out-of-range DP rank"
-        )
+        # should raise ValueError for out-of-range rank
+        with pytest.raises(ValueError):
+            await serving_chat.create_chat_completion(req, mock_raw_request)
 
 
 @pytest.mark.asyncio

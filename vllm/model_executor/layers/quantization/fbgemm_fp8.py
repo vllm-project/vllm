@@ -8,6 +8,9 @@ from torch.nn import Module
 from torch.nn.parameter import Parameter
 
 from vllm.logger import init_logger
+from vllm.model_executor.kernels.linear import (
+    init_fp8_linear_kernel,
+)
 from vllm.model_executor.layers.linear import (
     LinearBase,
     LinearMethodBase,
@@ -17,9 +20,6 @@ from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
-)
-from vllm.model_executor.layers.quantization.kernels.scaled_mm import (
-    init_fp8_linear_kernel,
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     apply_fp8_marlin_linear,

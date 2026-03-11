@@ -80,7 +80,18 @@ def enable_hf_transfer():
             pass
 
 
-enable_hf_transfer()
+def enable_xet_high_performance():
+    """automatically activates xet high performance mode"""
+    if "HF_XET_HIGH_PERFORMANCE" not in os.environ:
+        huggingface_hub.constants.HF_XET_HIGH_PERFORMANCE = True
+
+
+if hasattr(huggingface_hub.constants, "HF_XET_HIGH_PERFORMANCE"):
+    # Transformers v5
+    enable_xet_high_performance()
+else:
+    # Transformers v4
+    enable_hf_transfer()
 
 
 class DisabledTqdm(tqdm):
@@ -276,7 +287,17 @@ def get_quant_config(
         )
 
     if hf_quant_config is not None:
-        return quant_cls.from_config(hf_quant_config)
+        # For modelopt_mixed, config.json's quantization_config may or may
+        # not contain the per-layer quantized_layers map.  Newer checkpoints
+        # embed it directly; older ones keep it only in hf_quant_config.json.
+        # If it is missing, fall through to the file-based loading path.
+        if (
+            model_config.quantization == "modelopt_mixed"
+            and "quantized_layers" not in hf_quant_config
+        ):
+            pass  # fall through to file-based loading below
+        else:
+            return quant_cls.from_config(hf_quant_config)
 
     # if hf_quant_config is None, we will try to get config from
     # hf_overrides
@@ -354,8 +375,8 @@ def get_quant_config(
 
         if model_config.quantization == "bitsandbytes":
             config["adapter_name_or_path"] = model_config.model
-        elif model_config.quantization == "modelopt":
-            if config["producer"]["name"] == "modelopt":
+        elif model_config.quantization in ("modelopt", "modelopt_mixed"):
+            if config.get("producer", {}).get("name") == "modelopt":
                 return quant_cls.from_config(config)
             else:
                 raise ValueError(
@@ -752,7 +773,9 @@ def multi_thread_safetensors_weights_iterator(
         return result
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = [executor.submit(_load_file, st_file) for st_file in hf_weights_files]
+        # Note to use generator here so we do not store all the loaded files in memory
+        # at the same time, which can cause OOM for large models.
+        futures = (executor.submit(_load_file, st_file) for st_file in hf_weights_files)
         futures_iter = tqdm(
             concurrent.futures.as_completed(futures),
             total=len(hf_weights_files),
@@ -763,7 +786,9 @@ def multi_thread_safetensors_weights_iterator(
 
         for future in futures_iter:
             state_dict = future.result()
-            yield from state_dict.items()
+            del future
+            for key in list(state_dict):
+                yield key, state_dict.pop(key)
 
 
 def runai_safetensors_weights_iterator(
