@@ -101,8 +101,7 @@ class DFlashModelProposer(SpecDecodeBaseProposer):
         is_graph_capturing: bool = False,
         slot_mappings: dict[str, torch.Tensor] | None = None,
     ) -> None:
-       (
-            _,
+       (   _,
             num_query_tokens_dp_padded,
             num_tokens_across_dp,
         ) = self._determine_batch_execution_and_padding(
@@ -140,7 +139,11 @@ class DFlashModelProposer(SpecDecodeBaseProposer):
         ):
             sm = num_tokens_or_slot_mapping
         else:
-            sm = slot_mapping if slot_mapping is not None else num_tokens_or_slot_mapping
+            sm = (
+                slot_mapping 
+                if slot_mapping is not None 
+                else num_tokens_or_slot_mapping
+            )
         return {name: sm for name in self._draft_attn_layer_names}
 
     # ---------------- DFlash-specific internal utilities ----------------
@@ -153,7 +156,8 @@ class DFlashModelProposer(SpecDecodeBaseProposer):
         num_query_tokens: int,
         slot_mapping: torch.Tensor,
     ) -> CommonAttentionMetadata:
-        """Build non-causal metadata for DFlash from original CommonAttentionMetadata."""
+        """Build non-causal metadata for DFlash 
+        from original CommonAttentionMetadata."""
         batch_size = common_attn_metadata.num_reqs
 
         # For batch_size=1, query_start_loc is always [0, num_query_tokens]
@@ -194,8 +198,13 @@ class DFlashModelProposer(SpecDecodeBaseProposer):
         slot_mapping: torch.Tensor,
     ) -> torch.Tensor:
         """Run DFlash draft model forward in eager mode."""
-        _, num_query_tokens_dp_padded, num_tokens_across_dp = self._determine_batch_execution_and_padding(
-        total_query_tokens, use_cudagraphs=False)
+        (_, 
+         num_query_tokens_dp_padded, 
+         num_tokens_across_dp
+        ) = self._determine_batch_execution_and_padding(
+            total_query_tokens, 
+            use_cudagraphs=False
+        )
         self._set_positions(num_kv_tokens, position_ids)
         self.input_ids[:total_query_tokens] = input_ids[:total_query_tokens]
         if num_query_tokens_dp_padded > total_query_tokens:
@@ -394,7 +403,6 @@ class DFlashModelProposer(SpecDecodeBaseProposer):
         target_hidden_states = self.model.combine_hidden_states(target_hidden_states)
         assert target_hidden_states.shape[-1] == self.hidden_size
 
-        # If target uses M-RoPE but draft does not, use eagle-style handling: take dim-0 positions.
         if (
             self.uses_xdrope_dim > 0
             and self.draft_uses_xdrope_dim == 0
@@ -487,7 +495,6 @@ class DFlashModelProposer(SpecDecodeBaseProposer):
             for layer_name in attn_group.layer_names:
                 per_layer_attn_metadata[layer_name] = attn_metadata
 
-        # Query input_ids: first query per request is sampled token, rest are mask tokens
         self.input_ids[:total_query_tokens] = self.mask_token_id
         first_query_indices = torch.arange(
             0, total_query_tokens, num_query_tokens, device=device, dtype=torch.long
