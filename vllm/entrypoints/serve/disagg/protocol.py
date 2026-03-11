@@ -7,7 +7,6 @@ from pydantic import BaseModel, Field
 from vllm.config import ModelConfig
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionLogProbs
 from vllm.entrypoints.openai.engine.protocol import (
-    MultiModalFeatures,
     SamplingParams,
     StreamOptions,
 )
@@ -17,6 +16,44 @@ from vllm.utils import random_uuid
 
 
 ####### Tokens IN <> Tokens OUT #######
+
+
+class PlaceholderRangeInfo(BaseModel):
+    """Serializable placeholder location for a single multi-modal item."""
+
+    offset: int
+    """Start index of the placeholder tokens in the prompt."""
+
+    length: int
+    """Number of placeholder tokens."""
+
+    # TODO: add ``is_embed: list[bool] | None`` once the /generate side
+    # consumes features — some models (e.g. Qwen-VL) use sparse
+    # placeholder masks that cannot be recomputed from offset+length alone.
+
+
+class MultiModalFeatures(BaseModel):
+    """Lightweight multimodal metadata produced by the render step.
+
+    Carries hashes (for cache lookup / identification) and placeholder
+    positions so the downstream ``/generate`` service knows *where* in
+    the token sequence each multimodal item lives.
+
+    .. note:: Phase 1 — metadata only.
+       Phase 2 should add ``mm_kwargs`` (processed tensor data) using a
+       binary transport so the ``/generate`` side can skip re-processing.
+       The ``/generate`` endpoint must also be updated to inject these
+       features into ``ProcessorInputs`` before passing to
+       ``InputProcessor.process_inputs``.
+    """
+
+    mm_hashes: dict[str, list[str]]
+    """Per-modality item hashes, e.g. ``{"image": ["abc", "def"]}``."""
+
+    mm_placeholders: dict[str, list[PlaceholderRangeInfo]]
+    """Per-modality placeholder ranges in the token sequence."""
+
+
 class GenerateRequest(BaseModel):
     request_id: str = Field(
         default_factory=lambda: f"{random_uuid()}",

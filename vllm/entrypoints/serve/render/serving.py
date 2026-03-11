@@ -23,6 +23,8 @@ from vllm.entrypoints.openai.engine.protocol import (
     ModelCard,
     ModelList,
     ModelPermission,
+)
+from vllm.entrypoints.serve.disagg.protocol import (
     MultiModalFeatures,
     PlaceholderRangeInfo,
 )
