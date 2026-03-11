@@ -1941,7 +1941,7 @@ class Molmo2MultiModalProcessor(BaseMultiModalProcessor[Molmo2ProcessingInfo]):
         tokenizer = processor.tokenizer
         bos_token_id = tokenizer.bos_token_id or tokenizer.eos_token_id
 
-        if len(prompt_tokens) > 0 and prompt_tokens[0] != bos_token_id:
+        if len(prompt_tokens) == 0 or prompt_tokens[0] != bos_token_id:
             # Prepend the bos token to the prompt tokens
             prompt_tokens = [bos_token_id] + prompt_tokens
 
@@ -1959,10 +1959,22 @@ class Molmo2MultiModalProcessor(BaseMultiModalProcessor[Molmo2ProcessingInfo]):
         hf_config = self.info.get_hf_config()
         hf_processor = self.info.get_hf_processor(**mm_kwargs)
 
+        def patched_call(text=None, images=None, videos=None, **kwargs) -> BatchFeature:
+            res = hf_processor(text=text, images=images, videos=videos, **kwargs)
+
+            # Molmo2Processor.insert_bos results in float outputs
+            # if the input text is empty
+            if not text:
+                res["input_ids"] = res["input_ids"].long()
+
+            return res
+
         tokenizer = hf_processor.tokenizer
         image_processor = hf_processor.image_processor
 
         if videos := mm_data.pop("videos", []):
+            bos_token_id = tokenizer.bos_token_id or tokenizer.eos_token_id
+
             pixel_values_videos_lst = []
             video_token_pooling_lst = []
             video_num_crops_lst = []
@@ -1997,14 +2009,16 @@ class Molmo2MultiModalProcessor(BaseMultiModalProcessor[Molmo2ProcessingInfo]):
                 video_mm_data["videos"] = [[video_array]]
                 video_mm_data["video_metadata"] = [[metadata]]
 
-                video_outputs = super()._call_hf_processor(
-                    prompt=VIDEO_PROMPT,
-                    mm_data=video_mm_data,
-                    mm_kwargs=video_mm_kwargs,
-                    tok_kwargs=tok_kwargs,
+                video_outputs = self.info.ctx.call_hf_processor(
+                    patched_call,
+                    dict(text=VIDEO_PROMPT, **video_mm_data),
+                    dict(**video_mm_kwargs, **tok_kwargs),
                 )
 
                 input_ids = video_outputs.pop("input_ids")
+                if input_ids[0, 0] == bos_token_id:
+                    input_ids = input_ids[:, 1:]
+
                 video_string = tokenizer.batch_decode(input_ids)[0]
                 prompt = prompt.replace(VIDEO_PROMPT, video_string, 1)
 
@@ -2045,11 +2059,10 @@ class Molmo2MultiModalProcessor(BaseMultiModalProcessor[Molmo2ProcessingInfo]):
         else:
             all_video_outputs = dict()
 
-        processed_outputs = super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
+        processed_outputs = self.info.ctx.call_hf_processor(
+            patched_call,
+            dict(text=prompt, **mm_data),
+            dict(**mm_kwargs, **tok_kwargs),
         )
 
         if (images := mm_data.get("images")) is not None:
