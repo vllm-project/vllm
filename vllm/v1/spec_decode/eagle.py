@@ -423,10 +423,10 @@ class SpecDecodeBaseProposer:
 
         if self.method in ("eagle3", "dflash"):
             assert isinstance(
-                self.model, 
+                self.model,
                 (
-                    Eagle3LlamaForCausalLM, 
-                    Eagle3DeepseekV2ForCausalLM, 
+                    Eagle3LlamaForCausalLM,
+                    Eagle3DeepseekV2ForCausalLM,
                     DFlashQwen3ForCausalLM,
                 ),
             )
