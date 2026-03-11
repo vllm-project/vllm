@@ -10,23 +10,22 @@ import pytest_asyncio
 from ....conftest import VideoTestAssets
 from ....utils import RemoteOpenAIServer
 
-MODEL_NAME = "/mnt/data0/LLM/Qwen2.5-Omni-3B"
+MODEL_NAME = "Qwen/Qwen2.5-Omni-3B"
 
 
 @pytest.fixture
 def server():
     args = [
-        "--dtype",
-        "bfloat16",
         "--max-model-len",
-        "4096",
+        "8192",
         "--enforce-eager",
         "--limit-mm-per-prompt",
         json.dumps({"audio": 1, "video": 1}),
     ]
 
     with RemoteOpenAIServer(
-        MODEL_NAME, args, env_dict={"VLLM_AUDIO_FETCH_TIMEOUT": "30"}
+        MODEL_NAME,
+        args,
     ) as remote_server:
         yield remote_server
 
@@ -58,17 +57,19 @@ async def test_online_audio_in_video(client, video_assets: VideoTestAssets):
         }
     ]
 
-    chat_completion = await client.chat.completions.create(
-        model=MODEL_NAME,
-        messages=messages,
-        max_tokens=16,
-        extra_body={
-            "mm_processor_kwargs": {
-                "use_audio_in_video": True,
-            }
-        },
-    )
+    # multi-turn to test mm processor cache as well
+    for _ in range(2):
+        chat_completion = await client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=messages,
+            max_tokens=16,
+            extra_body={
+                "mm_processor_kwargs": {
+                    "use_audio_in_video": True,
+                }
+            },
+        )
 
-    assert len(chat_completion.choices) == 1
-    choice = chat_completion.choices[0]
-    assert choice.finish_reason == "length"
+        assert len(chat_completion.choices) == 1
+        choice = chat_completion.choices[0]
+        assert choice.finish_reason == "length"
