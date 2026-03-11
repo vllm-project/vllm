@@ -10,6 +10,7 @@ import torch.fx as fx
 from torch._higher_order_ops.auto_functionalize import auto_functionalized
 from torch._inductor.pattern_matcher import PatternMatcherPass
 
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig
 from vllm.config.utils import Range
 from vllm.distributed import get_tp_group, tensor_model_parallel_all_reduce
@@ -21,7 +22,6 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
 )
-from vllm._aiter_ops import rocm_aiter_ops
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import (
     direct_register_custom_op,
@@ -1006,9 +1006,7 @@ class RocmAiterAllReduceFusedAddRMSNormPattern:
             residual: torch.Tensor, input: torch.Tensor, weight: torch.Tensor
         ) -> tuple[torch.Tensor, torch.Tensor]:
             allreduce_output = tensor_model_parallel_all_reduce(input)
-            rms, residual = self.rmsnorm_matcher(
-                allreduce_output, weight, residual
-            )
+            rms, residual = self.rmsnorm_matcher(allreduce_output, weight, residual)
             return rms, residual
 
         def replacement(
@@ -1061,15 +1059,12 @@ class RocmAiterAllReduceFusionPass(VllmPatternMatcherPass):
             return
 
         if not rocm_aiter_ops.is_enabled():
-            logger.warning(
-                "AITER is not enabled; skipping ROCm allreduce fusion pass."
-            )
+            logger.warning("AITER is not enabled; skipping ROCm allreduce fusion pass.")
             return
 
         if not rocm_aiter_ops.is_rmsnorm_enabled():
             logger.warning(
-                "AITER RMSNorm is not enabled; "
-                "skipping ROCm allreduce fusion pass."
+                "AITER RMSNorm is not enabled; skipping ROCm allreduce fusion pass."
             )
             return
 
@@ -1084,9 +1079,7 @@ class RocmAiterAllReduceFusionPass(VllmPatternMatcherPass):
     def register_patterns(self) -> None:
         use_aiter_rmsnorm = rocm_aiter_ops.is_rmsnorm_enabled()
         for epsilon in [1e-5, 1e-6]:
-            for match_aiter in (
-                [True, False] if use_aiter_rmsnorm else [False]
-            ):
+            for match_aiter in [True, False] if use_aiter_rmsnorm else [False]:
                 RocmAiterAllReduceRMSNormPattern(
                     epsilon,
                     self.model_dtype,
@@ -1106,9 +1099,7 @@ class RocmAiterAllReduceFusionPass(VllmPatternMatcherPass):
 
     def is_applicable_for_range(self, compile_range: Range) -> bool:
         if self.disabled:
-            logger.warning_once(
-                "ROCm AITER AllReduce fusion pass is disabled."
-            )
+            logger.warning_once("ROCm AITER AllReduce fusion pass is disabled.")
             return False
         return True
 

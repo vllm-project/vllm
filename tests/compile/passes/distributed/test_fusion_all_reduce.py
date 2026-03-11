@@ -348,14 +348,9 @@ class TestRocmAiterAllReduceRMSNormModel(torch.nn.Module):
         super().__init__()
         self.hidden_size = hidden_size
         self.eps = eps
-        self.norm = torch.nn.ModuleList(
-            [RMSNorm(hidden_size, eps) for _ in range(4)]
-        )
+        self.norm = torch.nn.ModuleList([RMSNorm(hidden_size, eps) for _ in range(4)])
         self.w = torch.nn.ParameterList(
-            [
-                torch.nn.Parameter(torch.rand(hidden_size, hidden_size))
-                for _ in range(3)
-            ]
+            [torch.nn.Parameter(torch.rand(hidden_size, hidden_size)) for _ in range(3)]
         )
 
     def forward(self, x):
@@ -483,31 +478,23 @@ def _rocm_aiter_worker_fn(
         func_pass = FixFunctionalizationPass(vllm_config)
         cleanup_pass = PostCleanupPass(vllm_config)
 
-        backend = TestBackend(
-            noop_pass, allreduce_fusion_pass, func_pass, cleanup_pass
-        )
+        backend = TestBackend(noop_pass, allreduce_fusion_pass, func_pass, cleanup_pass)
 
         token_num = batch_size * seq_len
         model = test_model_cls(hidden_size, token_num)
 
-        hidden_states = torch.randn(
-            (token_num, hidden_size), requires_grad=False
-        )
+        hidden_states = torch.randn((token_num, hidden_size), requires_grad=False)
 
         compiled_model = torch.compile(model, backend=backend)
         compiled_model(hidden_states)
 
         results_unfused = model(hidden_states)
         results_fused = compiled_model(hidden_states)
-        torch.testing.assert_close(
-            results_unfused, results_fused, atol=1e-2, rtol=1e-2
-        )
+        torch.testing.assert_close(results_unfused, results_fused, atol=1e-2, rtol=1e-2)
 
         assert allreduce_fusion_pass.matched_count == 4, (
             f"{allreduce_fusion_pass.matched_count=}"
         )
-        backend.check_before_ops(
-            model.ops_in_model_before(), fully_replaced=False
-        )
+        backend.check_before_ops(model.ops_in_model_before(), fully_replaced=False)
         backend.check_after_ops(model.ops_in_model_after())
         del allreduce_fusion_pass
