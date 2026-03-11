@@ -132,7 +132,7 @@ def map_unquantized_backend(
         }
     else:
         mapping = {
-            "trition": UnquantizedMoeBackend.BATCHED_TRITON,
+            "triton": UnquantizedMoeBackend.BATCHED_TRITON,
         }
     if backend := mapping.get(runner_backend):
         return backend
