@@ -340,10 +340,9 @@ class Lfm2VLProcessingInfo(BaseProcessingInfo):
             f"downsample_factor, got width_patches={thumbnail_width_patches}, "
             f"downsample_factor={downsample_factor}"
         )
-        num_thumbnail_tokens = (
-            math.ceil(thumbnail_height_patches / downsample_factor)
-            * math.ceil(thumbnail_width_patches / downsample_factor)
-        )
+        num_thumbnail_tokens = math.ceil(
+            thumbnail_height_patches / downsample_factor
+        ) * math.ceil(thumbnail_width_patches / downsample_factor)
         num_patches_tile = tile_size // encoder_patch_size
         dwn_num_patches_tile = math.ceil(num_patches_tile / downsample_factor)
         num_tiles_tokens = dwn_num_patches_tile * dwn_num_patches_tile
