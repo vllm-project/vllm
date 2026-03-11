@@ -1463,17 +1463,7 @@ class OpenAIServingChat(OpenAIServing):
             tool_call_class = (
                 MistralToolCall if is_mistral_tokenizer(tokenizer) else ToolCall
             )
-            if self.use_harmony:
-                # Harmony models already have parsed content and tool_calls
-                # through parse_chat_output. Respect its output directly.
-                message = ChatMessage(
-                    role=role,
-                    reasoning=reasoning,
-                    content=content,
-                    tool_calls=tool_calls if tool_calls else [],
-                )
-
-            elif (not self.enable_auto_tools or not self.tool_parser) and (
+            if (not self.enable_auto_tools or not self.tool_parser) and (
                 not isinstance(request.tool_choice, ChatCompletionNamedToolChoiceParam)
                 and request.tool_choice != "required"
             ):
@@ -1903,8 +1893,10 @@ class OpenAIServingChat(OpenAIServing):
         # if the model supports it. TODO: Support browsing.
         assert not self.supports_browsing
         assert not self.supports_code_interpreter
+        if (reasoning_effort := request.reasoning_effort) == "none":
+            raise ValueError(f"Harmony does not support {reasoning_effort=}")
         sys_msg = get_system_message(
-            reasoning_effort=request.reasoning_effort,
+            reasoning_effort=reasoning_effort,
             browser_description=None,
             python_description=None,
             with_custom_tools=should_include_tools,

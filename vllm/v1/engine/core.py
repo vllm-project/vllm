@@ -9,7 +9,6 @@ from collections import defaultdict, deque
 from collections.abc import Callable, Generator
 from concurrent.futures import Future
 from contextlib import ExitStack, contextmanager
-from enum import IntEnum
 from functools import partial
 from inspect import isclass, signature
 from logging import DEBUG
@@ -62,7 +61,6 @@ from vllm.v1.engine import (
 from vllm.v1.engine.utils import (
     EngineHandshakeMetadata,
     EngineZmqAddresses,
-    SignalCallback,
     get_device_indices,
 )
 from vllm.v1.executor import Executor
@@ -119,14 +117,7 @@ class EngineCore:
             self._eep_scale_up_before_kv_init()
 
         # Setup KV Caches and update CacheConfig after profiling.
-        num_gpu_blocks, num_cpu_blocks, kv_cache_config = self._initialize_kv_caches(
-            vllm_config
-        )
-
-        vllm_config.cache_config.num_gpu_blocks = num_gpu_blocks
-        vllm_config.cache_config.num_cpu_blocks = num_cpu_blocks
-        self.collective_rpc("initialize_cache", args=(num_gpu_blocks, num_cpu_blocks))
-
+        kv_cache_config = self._initialize_kv_caches(vllm_config)
         self.structured_output_manager = StructuredOutputManager(vllm_config)
 
         # Setup scheduler.
@@ -231,9 +222,7 @@ class EngineCore:
         enable_envs_cache()
 
     @instrument(span_name="Prepare model")
-    def _initialize_kv_caches(
-        self, vllm_config: VllmConfig
-    ) -> tuple[int, int, KVCacheConfig]:
+    def _initialize_kv_caches(self, vllm_config: VllmConfig) -> KVCacheConfig:
         start = time.time()
 
         # Get all kv cache needed by the model
@@ -274,8 +263,14 @@ class EngineCore:
             self.collective_rpc("update_max_model_len", args=(max_model_len_after,))
 
         scheduler_kv_cache_config = generate_scheduler_kv_cache_config(kv_cache_configs)
-        num_gpu_blocks = scheduler_kv_cache_config.num_blocks
-        num_cpu_blocks = 0
+        vllm_config.cache_config.num_gpu_blocks = scheduler_kv_cache_config.num_blocks
+        kv_cache_groups = scheduler_kv_cache_config.kv_cache_groups
+        if kv_cache_groups:
+            vllm_config.cache_config.block_size = min(
+                g.kv_cache_spec.block_size for g in kv_cache_groups
+            )
+
+        vllm_config.validate_block_size()
 
         # Initialize kv cache and warmup the execution
         self.model_executor.initialize_from_config(kv_cache_configs)
@@ -286,7 +281,7 @@ class EngineCore:
             elapsed,
             scope="local",
         )
-        return num_gpu_blocks, num_cpu_blocks, scheduler_kv_cache_config
+        return scheduler_kv_cache_config
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         return self.model_executor.supported_tasks
@@ -448,9 +443,10 @@ class EngineCore:
         deferred_scheduler_output = None
         if self.scheduler.has_requests():
             scheduler_output = self.scheduler.schedule()
-            exec_future = self.model_executor.execute_model(
-                scheduler_output, non_block=True
-            )
+            with self.log_error_detail(scheduler_output):
+                exec_future = self.model_executor.execute_model(
+                    scheduler_output, non_block=True
+                )
             if self.is_ec_consumer:
                 model_executed = scheduler_output.total_num_scheduled_tokens > 0
 
@@ -769,12 +765,6 @@ class EngineCore:
         raise NotImplementedError
 
 
-class EngineShutdownState(IntEnum):
-    RUNNING = 0
-    REQUESTED = 1
-    SHUTTING_DOWN = 2
-
-
 class EngineCoreProc(EngineCore):
     """ZMQ-wrapper for running EngineCore in background process."""
 
@@ -802,7 +792,6 @@ class EngineCoreProc(EngineCore):
         self.engine_index = engine_index
         identity = self.engine_index.to_bytes(length=2, byteorder="little")
         self.engines_running = False
-        self.shutdown_state = EngineShutdownState.RUNNING
 
         with self._perform_handshakes(
             handshake_address,
@@ -1033,11 +1022,25 @@ class EngineCoreProc(EngineCore):
     def run_engine_core(*args, dp_rank: int = 0, local_dp_rank: int = 0, **kwargs):
         """Launch EngineCore busy loop in background process."""
 
+        # Signal handler used for graceful termination.
+        # SystemExit exception is only raised once to allow this and worker
+        # processes to terminate without error
+        shutdown_requested = False
+
         # Ensure we can serialize transformer config after spawning
         maybe_register_config_serialize_by_value()
 
+        def signal_handler(signum, frame):
+            nonlocal shutdown_requested
+            if not shutdown_requested:
+                shutdown_requested = True
+                raise SystemExit()
+
+        # Either SIGTERM or SIGINT will terminate the engine_core
+        signal.signal(signal.SIGTERM, signal_handler)
+        signal.signal(signal.SIGINT, signal_handler)
+
         engine_core: EngineCoreProc | None = None
-        signal_callback: SignalCallback | None = None
         try:
             vllm_config: VllmConfig = kwargs["vllm_config"]
             parallel_config: ParallelConfig = vllm_config.parallel_config
@@ -1085,22 +1088,6 @@ class EngineCoreProc(EngineCore):
                 engine_core = EngineCoreProc(*args, engine_index=dp_rank, **kwargs)
 
             assert engine_core is not None
-
-            def wakeup_engine():
-                # Wakes up idle engine via input_queue when shutdown is requested
-                # Not safe in a signal handler - we may interrupt the main thread
-                # while it is holding the non-reentrant input_queue.mutex
-                engine_core.input_queue.put_nowait((EngineCoreRequestType.WAKEUP, None))
-
-            signal_callback = SignalCallback(wakeup_engine)
-
-            def signal_handler(signum, frame):
-                engine_core.shutdown_state = EngineShutdownState.REQUESTED
-                signal_callback.trigger()
-
-            signal.signal(signal.SIGTERM, signal_handler)
-            signal.signal(signal.SIGINT, signal_handler)
-
             engine_core.run_busy_loop()
 
         except SystemExit:
@@ -1114,10 +1101,6 @@ class EngineCoreProc(EngineCore):
                 engine_core._send_engine_dead()
             raise e
         finally:
-            signal.signal(signal.SIGTERM, signal.SIG_DFL)
-            signal.signal(signal.SIGINT, signal.SIG_DFL)
-            if signal_callback is not None:
-                signal_callback.stop()
             if engine_core is not None:
                 engine_core.shutdown()
 
@@ -1132,25 +1115,21 @@ class EngineCoreProc(EngineCore):
             or bool(self.batch_queue)
         )
 
-    def is_running(self) -> bool:
-        """Returns true if shutdown has not been requested."""
-        return self.shutdown_state == EngineShutdownState.RUNNING
-
     def run_busy_loop(self):
         """Core busy loop of the EngineCore."""
-        while self._handle_shutdown():
+
+        # Loop until process is sent a SIGINT or SIGTERM
+        while True:
             # 1) Poll the input queue until there is work to do.
             self._process_input_queue()
             # 2) Step the engine core and return the outputs.
             self._process_engine_step()
 
-        raise SystemExit
-
     def _process_input_queue(self):
         """Exits when an engine step needs to be performed."""
 
         waited = False
-        while not self.has_work() and self.is_running():
+        while not self.has_work():
             # Notify callbacks waiting for engine to become idle.
             self._notify_idle_state_callbacks()
             if self.input_queue.empty():
@@ -1202,60 +1181,18 @@ class EngineCoreProc(EngineCore):
             callback = self._idle_state_callbacks.pop()
             callback(self)
 
-    def _handle_shutdown(self) -> bool:
-        # Check if shutdown was requested and handle it
-        if self.shutdown_state == EngineShutdownState.RUNNING:
-            return True
-
-        if self.shutdown_state == EngineShutdownState.REQUESTED:
-            shutdown_timeout = self.vllm_config.shutdown_timeout
-
-            logger.info("Shutdown initiated (timeout=%d)", shutdown_timeout)
-
-            if shutdown_timeout == 0:
-                num_requests = self.scheduler.get_num_unfinished_requests()
-                if num_requests > 0:
-                    logger.info("Aborting %d requests", num_requests)
-                aborted_reqs = self.scheduler.finish_requests(
-                    None, RequestStatus.FINISHED_ABORTED
-                )
-                self._send_abort_outputs(aborted_reqs)
-            else:
-                num_requests = self.scheduler.get_num_unfinished_requests()
-                if num_requests > 0:
-                    logger.info(
-                        "Draining %d in-flight requests (timeout=%ds)",
-                        num_requests,
-                        shutdown_timeout,
-                    )
-
-            self.shutdown_state = EngineShutdownState.SHUTTING_DOWN
-
-        # Exit when no work remaining
-        if not self.has_work():
-            logger.info("Shutdown complete")
-            return False
-
-        return True
-
     def _handle_client_request(
         self, request_type: EngineCoreRequestType, request: Any
     ) -> None:
         """Dispatch request from client."""
 
-        if request_type == EngineCoreRequestType.WAKEUP:
-            return
-        elif request_type == EngineCoreRequestType.ADD:
+        if request_type == EngineCoreRequestType.ADD:
             req, request_wave = request
-            if self._reject_add_in_shutdown(req):
-                return
             self.add_request(req, request_wave)
         elif request_type == EngineCoreRequestType.ABORT:
             self.abort_requests(request)
         elif request_type == EngineCoreRequestType.UTILITY:
             client_idx, call_id, method_name, args = request
-            if self._reject_utility_in_shutdown(client_idx, call_id, method_name):
-                return
             output = UtilityOutput(call_id)
             # Lazily look-up utility method so that failure will be handled/returned.
             get_result = lambda: (method := getattr(self, method_name)) and method(
@@ -1271,27 +1208,6 @@ class EngineCoreProc(EngineCore):
             logger.error(
                 "Unrecognized input request type encountered: %s", request_type
             )
-
-    def _reject_add_in_shutdown(self, request: Request) -> bool:
-        if self.shutdown_state == EngineShutdownState.RUNNING:
-            return False
-
-        logger.info("Rejecting request %s (server shutting down)", request.request_id)
-        self._send_abort_outputs_to_client([request.request_id], request.client_index)
-        return True
-
-    def _reject_utility_in_shutdown(
-        self, client_idx: int, call_id: int, method_name: str
-    ) -> bool:
-        if self.shutdown_state == EngineShutdownState.RUNNING:
-            return False
-
-        logger.warning("Rejecting utility call %s (server shutting down)", method_name)
-        output = UtilityOutput(call_id, failure_message="Server shutting down")
-        self.output_queue.put_nowait(
-            (client_idx, EngineCoreOutputs(utility_output=output))
-        )
-        return True
 
     @staticmethod
     def _invoke_utility_method(
@@ -1506,7 +1422,22 @@ class EngineCoreProc(EngineCore):
         logger.exception(
             "Unexpected error pre-processing request %s", request.request_id
         )
-        self._send_error_outputs_to_client([request.request_id], request.client_index)
+        self.output_queue.put_nowait(
+            (
+                request.client_index,
+                EngineCoreOutputs(
+                    engine_index=self.engine_index,
+                    finished_requests={request.request_id},
+                    outputs=[
+                        EngineCoreOutput(
+                            request_id=request.request_id,
+                            new_token_ids=[],
+                            finish_reason=FinishReason.ERROR,
+                        )
+                    ],
+                ),
+            )
+        )
 
     def pause_scheduler(
         self, mode: PauseMode = "abort", clear_cache: bool = True
@@ -1549,26 +1480,6 @@ class EngineCoreProc(EngineCore):
         self._idle_state_callbacks.append(partial(engine_idle_callback, future=future))
         return future
 
-    def _send_finish_outputs_to_client(
-        self, req_ids: list[str], client_index: int, finish_reason: FinishReason
-    ) -> None:
-        outputs = [
-            EngineCoreOutput(req_id, [], finish_reason=finish_reason)
-            for req_id in req_ids
-        ]
-        eco = EngineCoreOutputs(finished_requests=req_ids, outputs=outputs)
-        self.output_queue.put_nowait((client_index, eco))
-
-    def _send_abort_outputs_to_client(
-        self, req_ids: list[str], client_index: int
-    ) -> None:
-        self._send_finish_outputs_to_client(req_ids, client_index, FinishReason.ABORT)
-
-    def _send_error_outputs_to_client(
-        self, req_ids: list[str], client_index: int
-    ) -> None:
-        self._send_finish_outputs_to_client(req_ids, client_index, FinishReason.ERROR)
-
     def _send_abort_outputs(self, aborted_reqs: list[tuple[str, int]]) -> None:
         # TODO(nick) this will be moved inside the scheduler
         if aborted_reqs:
@@ -1577,7 +1488,12 @@ class EngineCoreProc(EngineCore):
             for req_id, client_index in aborted_reqs:
                 by_client[client_index].add(req_id)
             for client_index, req_ids in by_client.items():
-                self._send_abort_outputs_to_client(list(req_ids), client_index)
+                outputs = [
+                    EngineCoreOutput(req_id, [], finish_reason=FinishReason.ABORT)
+                    for req_id in req_ids
+                ]
+                eco = EngineCoreOutputs(finished_requests=req_ids, outputs=outputs)
+                self.output_queue.put_nowait((client_index, eco))
 
 
 class DPEngineCoreProc(EngineCoreProc):
@@ -1695,7 +1611,7 @@ class DPEngineCoreProc(EngineCoreProc):
         """Core busy loop of the EngineCore for data parallel case."""
 
         # Loop until process is sent a SIGINT or SIGTERM
-        while self._handle_shutdown():
+        while True:
             # 1) Poll the input queue until there is work to do.
             self._process_input_queue()
 
@@ -1742,8 +1658,6 @@ class DPEngineCoreProc(EngineCoreProc):
                 # Increment wave count and reset step counter.
                 self.current_wave += 1
                 self.step_counter = 0
-
-        raise SystemExit
 
     def _has_global_unfinished_reqs(self, local_unfinished: bool) -> bool:
         # Optimization - only perform finish-sync all-reduce every 32 steps.
