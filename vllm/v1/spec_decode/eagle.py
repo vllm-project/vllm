@@ -398,6 +398,11 @@ class SpecDecodeBaseProposer:
         batch_size = common_attn_metadata.batch_size()
 
         if self.method == "dflash":
+            if dflash_core is None:
+                raise RuntimeError(
+                    "_propose_dflash_core is not initialized ."
+                )
+
             dflash_core = getattr(self, "_propose_dflash_core", None)
             return dflash_core(
                 target_positions=target_positions,
