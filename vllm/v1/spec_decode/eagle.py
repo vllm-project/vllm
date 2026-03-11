@@ -168,7 +168,7 @@ class SpecDecodeBaseProposer:
             self.dflash_mask_token_id: int = 151669
             self._dflash_kv_len: int = 0
             self._dflash_num_query_tokens: int = 0
-    
+
             # Cached query_start_loc buffers for (batch_size, num_query_tokens) layout
             self._dflash_query_start_loc_buffer: torch.Tensor | None = None
             self._dflash_query_start_loc_cpu_buffer: torch.Tensor | None = None
@@ -464,14 +464,14 @@ class SpecDecodeBaseProposer:
         else:
             input_ids = self.input_ids[:num_input_tokens]
             inputs_embeds = None
-            
+
         if self.method == "dflash":
             positions_len = self._dflash_kv_len
             hidden_states_len = self._dflash_ctx_len
         else:
             positions_len = num_input_tokens
             hidden_states_len = num_input_tokens
-            
+
         model_kwargs = {
             "input_ids": input_ids,
             "positions": self._get_positions(positions_len),
@@ -702,7 +702,7 @@ class SpecDecodeBaseProposer:
         # [batch_size, num_speculative_tokens]
         draft_token_ids = torch.stack(draft_token_ids_list, dim=1)
         return draft_token_ids
-        
+
     def set_dflash_first_pass(
         self,
         target_token_ids: torch.Tensor,
@@ -715,36 +715,29 @@ class SpecDecodeBaseProposer:
     ) -> tuple[int, torch.Tensor, CommonAttentionMetadata]:
         if self.dflash_mask_token_id is None:
             raise ValueError("DFlash requires mask_token_id.")
-    
+
         if target_positions.dim() != 1:
             target_positions = target_positions[0]
-    
+
         batch_size = cad.batch_size()
         device = target_hidden_states.device
         num_query_tokens = 1 + self.num_speculative_tokens
         num_query_tokens_total = batch_size * num_query_tokens
-    
+
         num_context_tokens = target_hidden_states.shape[0]
         num_kv_tokens = num_context_tokens + num_query_tokens_total
-    
+
         self._dflash_ctx_len = num_context_tokens
         self._dflash_kv_len = num_kv_tokens
         self._dflash_num_query_tokens = num_query_tokens
         self._dflash_num_query_tokens_total = num_query_tokens_total
-    
+
         self.input_ids[:num_query_tokens_total].fill_(self.dflash_mask_token_id)
         self.input_ids[:num_query_tokens_total:num_query_tokens] = next_token_ids
         last_positions = cad.seq_lens.to(torch.long) - 1
-    
+
         query_offsets = self._dflash_query_offsets
-        if query_offsets is None:
-            self._dflash_query_offsets = torch.arange(
-                num_query_tokens,
-                device=device,
-                dtype=target_positions.dtype,
-            ).view(1, -1)
-            query_offsets = self._dflash_query_offsets
-        elif (
+        if query_offsets is None or (
             query_offsets.device != device
             or query_offsets.shape[1] != num_query_tokens
             or query_offsets.dtype != target_positions.dtype
@@ -755,16 +748,16 @@ class SpecDecodeBaseProposer:
                 dtype=target_positions.dtype,
             ).view(1, -1)
             query_offsets = self._dflash_query_offsets
-    
+
         assert query_offsets is not None
         query_positions = last_positions.view(-1, 1) + 1 + query_offsets
         query_positions_flat = query_positions.reshape(-1)
-    
+
         self.positions[:num_context_tokens] = target_positions[:num_context_tokens]
         self.positions[num_context_tokens:num_kv_tokens] = query_positions_flat
-    
+
         self.hidden_states[:num_context_tokens] = target_hidden_states
-    
+
         token_indices_to_sample = (
             torch.arange(
                 num_query_tokens_total,
@@ -774,33 +767,26 @@ class SpecDecodeBaseProposer:
             .view(batch_size, num_query_tokens)[:, 1:]
             .reshape(-1)
         )
-    
+
         block_size = self.block_size
-    
+
         block_table_tensor = getattr(cad, "block_table_tensor", None)
         if block_table_tensor is None:
             raise RuntimeError(
                 "DFlash requires block_table_tensor in CommonAttentionMetadata."
             )
-    
+
         block_numbers_bt = (query_positions // block_size).to(torch.long)
         block_ids = block_table_tensor.gather(dim=1, index=block_numbers_bt)
         query_slot_mapping = (
             block_ids * block_size + (query_positions % block_size)
         ).reshape(-1)
-    
+
         ctx_slot_mapping = cad.slot_mapping[:num_context_tokens]
         full_slot_mapping = torch.cat([ctx_slot_mapping, query_slot_mapping], dim=0)
-    
+
         query_start_loc_buffer = self._dflash_query_start_loc_buffer
-        if query_start_loc_buffer is None:
-            self._dflash_query_start_loc_buffer = torch.empty(
-                batch_size + 1,
-                device=device,
-                dtype=torch.int32,
-            )
-            query_start_loc_buffer = self._dflash_query_start_loc_buffer
-        elif (
+        if query_start_loc_buffer is None or (
             query_start_loc_buffer.shape[0] < batch_size + 1
             or query_start_loc_buffer.device != device
         ):
@@ -810,21 +796,14 @@ class SpecDecodeBaseProposer:
                 dtype=torch.int32,
             )
             query_start_loc_buffer = self._dflash_query_start_loc_buffer
-    
+
         assert query_start_loc_buffer is not None
         qsl = query_start_loc_buffer[: batch_size + 1]
         qsl.copy_(torch.arange(batch_size + 1, device=device, dtype=torch.int32))
         qsl.mul_(num_query_tokens)
-    
+
         query_start_loc_cpu_buffer = self._dflash_query_start_loc_cpu_buffer
-        if query_start_loc_cpu_buffer is None:
-            self._dflash_query_start_loc_cpu_buffer = torch.empty(
-                batch_size + 1,
-                dtype=torch.int32,
-                pin_memory=is_pin_memory_available(),
-            )
-            query_start_loc_cpu_buffer = self._dflash_query_start_loc_cpu_buffer
-        elif (
+        if query_start_loc_cpu_buffer is None or (
             query_start_loc_cpu_buffer.shape[0] < batch_size + 1
         ):
             self._dflash_query_start_loc_cpu_buffer = torch.empty(
@@ -833,13 +812,13 @@ class SpecDecodeBaseProposer:
                 pin_memory=is_pin_memory_available(),
             )
             query_start_loc_cpu_buffer = self._dflash_query_start_loc_cpu_buffer
-    
+
         assert query_start_loc_cpu_buffer is not None
         qsl_cpu = query_start_loc_cpu_buffer[: batch_size + 1]
         qsl_cpu.copy_(
             torch.arange(batch_size + 1, dtype=torch.int32).mul_(num_query_tokens)
         )
-    
+
         new_cad = replace(
             cad,
             slot_mapping=full_slot_mapping,
@@ -853,10 +832,10 @@ class SpecDecodeBaseProposer:
             seq_lens=(cad.seq_lens + num_query_tokens),
             causal=False,
         )
-    
+
         new_cad._seq_lens_cpu = None
         new_cad._num_computed_tokens_cpu = None
-    
+
         return num_query_tokens_total, token_indices_to_sample, new_cad
 
     def set_inputs_first_pass(
