@@ -180,7 +180,7 @@ class EagleSpeculator:
                 )
                 if attn_metadata is not None:
                     self.block_tables.compute_slot_mappings(
-                        idx_mapping, query_start_loc, pos, num_tokens_padded
+                        idx_mapping, query_start_loc, pos
                     )
 
     def capture_model(self) -> None:
@@ -323,7 +323,7 @@ class EagleSpeculator:
         if not (dummy_run and skip_attn_for_dummy_run):
             query_start_loc = self.input_buffers.query_start_loc[: num_reqs + 1]
             slot_mappings = self.block_tables.compute_slot_mappings(
-                idx_mapping, query_start_loc, pos, batch_desc.num_tokens
+                idx_mapping, query_start_loc, pos
             )
 
         if batch_desc.cg_mode == CUDAGraphMode.FULL:

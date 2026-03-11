@@ -135,7 +135,6 @@ class BlockTables:
         idx_mapping: torch.Tensor,
         query_start_loc: torch.Tensor,
         positions: torch.Tensor,
-        num_tokens_padded: int,
     ) -> torch.Tensor:
         num_reqs = idx_mapping.shape[0]
         num_groups = self.num_kv_cache_groups
@@ -155,7 +154,7 @@ class BlockTables:
             PAD_ID=PAD_SLOT_ID,
             TRITON_BLOCK_SIZE=1024,  # type: ignore
         )
-        return self.slot_mappings[:, :num_tokens_padded]
+        return self.slot_mappings[:, : positions.shape[0]]
 
     def get_dummy_slot_mappings(self, num_tokens: int) -> torch.Tensor:
         # Fill the entire slot_mappings tensor, not just the first `num_tokens` entries.

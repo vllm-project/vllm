@@ -755,7 +755,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             input_batch.idx_mapping,
             input_batch.query_start_loc,
             input_batch.positions,
-            num_tokens_padded=input_batch.num_tokens_after_padding,
         )
         return block_tables, slot_mappings
 
