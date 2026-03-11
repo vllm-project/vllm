@@ -165,6 +165,7 @@ def can_initialize(
             hf_overrides=hf_overrides_fn,
             max_num_seqs=model_info.max_num_seqs,
             attention_config=attention_config,
+            enable_prefix_caching=model_info.enable_prefix_caching,
         )
 
 

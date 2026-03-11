@@ -72,6 +72,12 @@ class _HfExamplesInfo:
     If False, we will use CUDA graph and eager execution in hybrid.
     """
 
+    enable_prefix_caching: bool = True
+    """
+    Whether to enable prefix caching for the model. If True, we will test the model with
+    prefix caching enabled. If False, we will test the model without prefix caching.
+    """
+
     is_available_online: bool = True
     """
     Set this to `False` if the name of this architecture no longer exists on
@@ -1194,6 +1200,7 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         "LGAI-EXAONE/K-EXAONE-236B-A23B",
         speculative_model="LGAI-EXAONE/K-EXAONE-236B-A23B",
         min_transformers_version="5.1.0",
+        enable_prefix_caching=False,
     ),
     "ExtractHiddenStatesModel": _HfExamplesInfo(
         "Qwen/Qwen3-8B",
