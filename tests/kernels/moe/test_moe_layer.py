@@ -956,11 +956,11 @@ def _test_body_eplb(
         routed_output_transform=routed_output_transform,
     )
 
+    # Necessary?
     if moe_layer._expert_map is not None:
         moe_layer._expert_map = moe_layer._expert_map.to(device)
 
     # All ranks must generate the same permutation
-    set_random_seed(42)
     initial_indices = torch.arange(num_experts, dtype=torch.long)
     shuffled_indices = initial_indices[torch.randperm(num_experts)]
 
@@ -1029,6 +1029,8 @@ def _test_loop(
     use_routed_input_transform: bool,
     **kwargs,
 ) -> None:
+    set_random_seed(7)
+
     """Generic test loop that sets up environment and delegates to test_body_fn.
 
     This function is called directly by test_moe_layer and test_moe_layer_eplb
@@ -1041,8 +1043,6 @@ def _test_loop(
     assert vllm_config.parallel_config.enable_expert_parallel == use_ep
 
     in_dtype = torch.bfloat16
-
-    set_random_seed(7)
 
     device = torch.cuda.current_device()
     init_workspace_manager(device)
@@ -1145,6 +1145,7 @@ def _test_loop(
             routed_output_transform=routed_output_transform,
         )
 
+        # Necessary?
         if moe_layer._expert_map is not None:
             moe_layer._expert_map = moe_layer._expert_map.to(device)
 
@@ -1294,9 +1295,6 @@ def test_moe_layer_no_parallel(
     del baseline_layer
     torch.accelerator.empty_cache()
 
-    # Initialize workspace manager and prepare for test (inlined from _test_loop)
-    set_random_seed(7)
-
     # Initialize distributed environment for single GPU
     _set_vllm_config(vllm_config, world_size, rank=0, local_rank=0)
 
@@ -1401,8 +1399,6 @@ def test_moe_layer(
 
     For non-parallel cases (world_size == 1), use test_moe_layer_no_parallel instead.
     """
-    set_random_seed(7)
-
     num_gpus = cuda_device_count_stateless()
     world_size = tp_size * dp_size
     ep_size = 1 if not use_ep else world_size  # or dp_size?
@@ -1520,8 +1516,6 @@ def test_moe_layer_eplb(
     use_routed_input_transform: bool,
     monkeypatch,
 ):
-    set_random_seed(7)
-
     num_gpus = cuda_device_count_stateless()
     world_size = tp_size * dp_size
 
