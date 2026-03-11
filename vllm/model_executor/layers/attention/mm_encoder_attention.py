@@ -124,7 +124,7 @@ class MMEncoderAttention(CustomOp):
         attn_backend: AttentionBackendEnum,
         cu_seqlens: np.ndarray,
         device: torch.device,
-    ) -> np.ndarray | None:
+    ) -> torch.Tensor | None:
         if (oot_class := get_oot_class_by_name(cls.__name__)) is not None:
             return oot_class.maybe_compute_seq_lens(attn_backend, cu_seqlens, device)  # type: ignore[attr-defined]
 
@@ -148,7 +148,7 @@ class MMEncoderAttention(CustomOp):
         hidden_size: int,
         tp_size: int,
         device: torch.device,
-    ) -> np.ndarray:
+    ) -> torch.Tensor:
         if (oot_class := get_oot_class_by_name(cls.__name__)) is not None:
             return oot_class.maybe_recompute_cu_seqlens(  # type: ignore[attr-defined]
                 attn_backend, cu_seqlens, hidden_size, tp_size, device
