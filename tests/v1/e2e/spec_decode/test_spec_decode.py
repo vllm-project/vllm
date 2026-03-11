@@ -1091,7 +1091,7 @@ def test_dflash_correctness():
         speculative_config={
             "method": "dflash",
             "model": draft_model,
-            "num_speculative_tokens": 15,
+            "num_speculative_tokens": 16,
             "max_model_len": 32768,
             "disable_padded_drafter_batch": True,
         },
@@ -1110,7 +1110,6 @@ def test_dflash_correctness():
         "humaneval": 6.50,
     }
 
-    # TODO(ben): Tests currently failing, AR seemingly drops late in the test
     prev_metrics = None
     tokenizer = spec_llm.get_tokenizer()
     for dataset_name, expected_len in expected_acceptance_lengths.items():
@@ -1126,10 +1125,8 @@ def test_dflash_correctness():
             )
             prompts.append(prompt_text)
 
-            # Temp=0, MaxTokens=2048 from the paper
-            spec_llm.generate(
-                [prompt_text], SamplingParams(temperature=0, max_tokens=2048)
-            )
+        # Temp=0, MaxTokens=2048 from the paper
+        spec_llm.generate(prompts, SamplingParams(temperature=0, max_tokens=2048))
 
         current_metrics = spec_llm.get_metrics()
         acceptance_len = compute_acceptance_len(current_metrics, prev_metrics)
