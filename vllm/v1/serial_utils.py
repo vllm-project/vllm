@@ -546,8 +546,12 @@ class PydanticMsgspecMixin:
     @staticmethod
     def _serialize_msgspec(value: Any) -> Any:
         """Serialize a msgspec.Struct to a JSON-compatible dict, stripping
-        private (``_``-prefixed) and explicitly excluded fields."""
-        raw = msgspec.structs.asdict(value)
+        private (``_``-prefixed) and explicitly excluded fields.
+
+        Uses ``msgspec.to_builtins`` which respects ``omit_defaults=True``,
+        so only fields that differ from their declared defaults are included.
+        """
+        raw = msgspec.to_builtins(value)
         if not isinstance(raw, dict):
             return raw
 
@@ -559,4 +563,4 @@ class PydanticMsgspecMixin:
             if key.startswith("_") or key in exclude:
                 del raw[key]
 
-        return msgspec.to_builtins(raw)
+        return raw

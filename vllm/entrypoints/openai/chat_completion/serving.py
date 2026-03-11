@@ -6,7 +6,6 @@ import json
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
-from http import HTTPStatus
 from typing import Any, Final
 
 import partial_json_parser
@@ -66,7 +65,6 @@ from vllm.entrypoints.openai.parser.harmony_utils import (
     render_for_completion,
 )
 from vllm.entrypoints.openai.utils import maybe_filter_parallel_tool_calls
-from vllm.entrypoints.serve.disagg.protocol import GenerateRequest
 from vllm.entrypoints.utils import get_max_tokens, should_include_usage
 from vllm.inputs.data import ProcessorInputs, TokensPrompt
 from vllm.logger import init_logger
@@ -174,32 +172,6 @@ class OpenAIServingChat(OpenAIServing):
         self.supports_code_interpreter = False
         self.python_tool = None
 
-    def _build_params(
-        self,
-        request: "ChatCompletionRequest",
-        engine_prompt: Any,
-    ) -> "SamplingParams | BeamSearchParams":
-        max_tokens = get_max_tokens(
-            self.model_config.max_model_len,
-            request.max_completion_tokens
-            if request.max_completion_tokens is not None
-            else request.max_tokens,
-            self._extract_prompt_len(engine_prompt),
-            self.default_sampling_params,
-            self.override_max_tokens,
-        )
-
-        if request.use_beam_search:
-            return request.to_beam_search_params(
-                max_tokens,
-                self.default_sampling_params,
-            )
-
-        return request.to_sampling_params(
-            max_tokens,
-            self.default_sampling_params,
-        )
-
     def warmup(self) -> None:
         self.renderer.warmup(
             ChatParams(
@@ -304,73 +276,6 @@ class OpenAIServingChat(OpenAIServing):
 
         return conversation, engine_prompts
 
-    async def render_chat_completion(
-        self,
-        request: ChatCompletionRequest,
-        raw_request: Request | None = None,
-    ) -> GenerateRequest | ErrorResponse:
-        """Render a chat completion request into a token-in GenerateRequest.
-
-        This is a pure preprocessing step: it does not generate text.
-        The returned ``GenerateRequest`` is directly consumable by
-        ``/inference/v1/generate`` (``ServingTokens``).
-
-        Beam search is not supported; requests with
-        ``use_beam_search=True`` will receive an ``ErrorResponse``.
-        """
-        if request.use_beam_search:
-            return self.create_error_response(
-                "Beam search is not supported by the token-in render endpoint"
-            )
-
-        result = await self.render_chat_request(request)
-        if isinstance(result, ErrorResponse):
-            return result
-
-        _, engine_prompts = result
-
-        if len(engine_prompts) != 1:
-            return self.create_error_response(
-                f"Expected exactly 1 engine prompt, got {len(engine_prompts)}"
-            )
-
-        engine_prompt = engine_prompts[0]
-
-        # Extract token IDs only; do not return internal multimodal artifacts.
-        prompt_components = self._extract_prompt_components(engine_prompt)
-        token_ids = prompt_components.token_ids
-        if not token_ids:
-            return self.create_error_response("No token_ids rendered")
-        token_ids = list(token_ids)
-
-        params = self._build_params(request, engine_prompt)
-        # The beam-search guard above should prevent BeamSearchParams, but
-        # check defensively so callers always get SamplingParams.
-        if not isinstance(params, SamplingParams):
-            return self.create_error_response(
-                "Internal logic error: Beam search parameters were found, "
-                "but should have been filtered out earlier.",
-                err_type="InternalServerError",
-                status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
-            )
-
-        request_id = (
-            f"chatcmpl-{self._base_request_id(raw_request, request.request_id)}"
-        )
-
-        return GenerateRequest(
-            request_id=request_id,
-            token_ids=token_ids,
-            sampling_params=params,
-            model=request.model,
-            # Preserve stream intent on the returned token-in request.
-            # The /render HTTP response itself is always non-streamed JSON.
-            stream=bool(request.stream),
-            stream_options=(request.stream_options if request.stream else None),
-            cache_salt=request.cache_salt,
-            priority=request.priority,
-        )
-
     async def create_chat_completion(
         self,
         request: ChatCompletionRequest,
@@ -419,6 +324,7 @@ class OpenAIServingChat(OpenAIServing):
         data_parallel_rank = self._get_data_parallel_rank(raw_request)
 
         # Schedule the request and get the result generator.
+        max_model_len = self.model_config.max_model_len
         generators: list[AsyncGenerator[RequestOutput, None]] = []
         for i, engine_prompt in enumerate(engine_prompts):
             prompt_token_ids = self._extract_prompt_components(engine_prompt).token_ids
@@ -429,7 +335,26 @@ class OpenAIServingChat(OpenAIServing):
                 request_id if len(engine_prompts) == 1 else f"{request_id}_{i}"
             )
 
-            sampling_params = self._build_params(request, engine_prompt)
+            max_tokens = get_max_tokens(
+                max_model_len,
+                request.max_completion_tokens
+                if request.max_completion_tokens is not None
+                else request.max_tokens,
+                self._extract_prompt_len(engine_prompt),
+                self.default_sampling_params,
+                self.override_max_tokens,
+            )
+
+            sampling_params: SamplingParams | BeamSearchParams
+            if request.use_beam_search:
+                sampling_params = request.to_beam_search_params(
+                    max_tokens, self.default_sampling_params
+                )
+            else:
+                sampling_params = request.to_sampling_params(
+                    max_tokens,
+                    self.default_sampling_params,
+                )
 
             self._log_inputs(
                 sub_request_id,
@@ -1538,7 +1463,17 @@ class OpenAIServingChat(OpenAIServing):
             tool_call_class = (
                 MistralToolCall if is_mistral_tokenizer(tokenizer) else ToolCall
             )
-            if (not self.enable_auto_tools or not self.tool_parser) and (
+            if self.use_harmony:
+                # Harmony models already have parsed content and tool_calls
+                # through parse_chat_output. Respect its output directly.
+                message = ChatMessage(
+                    role=role,
+                    reasoning=reasoning,
+                    content=content,
+                    tool_calls=tool_calls if tool_calls else [],
+                )
+
+            elif (not self.enable_auto_tools or not self.tool_parser) and (
                 not isinstance(request.tool_choice, ChatCompletionNamedToolChoiceParam)
                 and request.tool_choice != "required"
             ):

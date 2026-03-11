@@ -7,7 +7,7 @@ import json as json_mod
 from dataclasses import field
 from enum import Enum, IntEnum
 from functools import cached_property
-from typing import Any, ClassVar
+from typing import Any
 
 import msgspec
 from pydantic.dataclasses import dataclass
@@ -165,15 +165,6 @@ class SamplingParams(
     API (https://platform.openai.com/docs/api-reference/completions/create).
     In addition, we support beam search, which is not supported by OpenAI.
     """
-
-    # Non-underscore fields that are internal and should be excluded from
-    # Pydantic serialization (e.g. API responses).  Underscore-prefixed fields
-    # are always excluded automatically by PydanticMsgspecMixin.
-    __pydantic_msgspec_exclude__: ClassVar[set[str]] = {
-        "output_text_buffer_length",
-        "skip_clone",
-        "skip_reading_prefix_cache",
-    }
 
     n: int = 1
     """Number of outputs to return for the given prompt request.
