@@ -35,7 +35,7 @@ from vllm.model_executor.layers.fla.ops import (
     chunk_gated_delta_rule as fla_chunk_gated_delta_rule,
 )
 from vllm.model_executor.layers.fla.ops import (
-    fused_recurrent_gated_delta_rule_packed_decode_fwd,
+    fused_recurrent_gated_delta_rule_packed_decode,
     fused_sigmoid_gating_delta_rule_update,
 )
 from vllm.model_executor.layers.fla.ops.chunk import l2norm_fwd
@@ -480,7 +480,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             envs.VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE
         )
         self._forward_core_impl = (
-            self._forward_core_packed
+            self._forward_core_decode_non_spec
             if self.enable_packed_recurrent_decode
             else self._forward_core_baseline
         )
@@ -868,7 +868,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         else:
             core_attn_out[:num_actual_tokens] = core_attn_out_non_spec.squeeze(0)
 
-    def _forward_core_packed(
+    def _forward_core_decode_non_spec(
         self,
         mixed_qkv: torch.Tensor,
         b: torch.Tensor,
@@ -917,28 +917,20 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             conv_state_indices=non_spec_state_indices_tensor[:num_actual_tokens],
             validate_data=False,
         )
-        try:
-            out_buf = core_attn_out[:num_actual_tokens].unsqueeze(1)
-            fused_recurrent_gated_delta_rule_packed_decode_fwd(
-                mixed_qkv=mixed_qkv_non_spec,
-                a=a,
-                b=b,
-                A_log=self.A_log,
-                dt_bias=self.dt_bias,
-                scale=self.head_k_dim**-0.5,
-                initial_state=ssm_state,
-                out=out_buf,
-                ssm_state_indices=non_spec_state_indices_tensor[:num_actual_tokens],
-                use_qk_l2norm_in_kernel=True,
-            )
-            return
-        except ValueError as exc:
-            logger.warning_once(
-                "Packed recurrent decode fast path unavailable; falling back "
-                "to default path: %s",
-                exc,
-            )
-            return self._forward_core_baseline(mixed_qkv, b, a, core_attn_out)
+        out_buf = core_attn_out[:num_actual_tokens].unsqueeze(1)
+        fused_recurrent_gated_delta_rule_packed_decode(
+            mixed_qkv=mixed_qkv_non_spec,
+            a=a,
+            b=b,
+            A_log=self.A_log,
+            dt_bias=self.dt_bias,
+            scale=self.head_k_dim**-0.5,
+            initial_state=ssm_state,
+            out=out_buf,
+            ssm_state_indices=non_spec_state_indices_tensor[:num_actual_tokens],
+            use_qk_l2norm_in_kernel=True,
+        )
+        return
 
 
 class Qwen3NextAttention(nn.Module):

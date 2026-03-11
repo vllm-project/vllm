@@ -253,7 +253,7 @@ def fused_recurrent_gated_delta_rule_fwd(
 
 
 @triton.jit
-def fused_recurrent_gated_delta_rule_packed_decode_fwd_kernel(
+def fused_recurrent_gated_delta_rule_packed_decode_kernel(
     mixed_qkv,
     a,
     b,
@@ -335,7 +335,7 @@ def fused_recurrent_gated_delta_rule_packed_decode_fwd_kernel(
     tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
 
 
-def fused_recurrent_gated_delta_rule_packed_decode_fwd(
+def fused_recurrent_gated_delta_rule_packed_decode(
     mixed_qkv: torch.Tensor,
     a: torch.Tensor,
     b: torch.Tensor,
@@ -446,7 +446,7 @@ def fused_recurrent_gated_delta_rule_packed_decode_fwd(
 
     NV = triton.cdiv(V, BV)
     grid = (NV, B * HV)
-    fused_recurrent_gated_delta_rule_packed_decode_fwd_kernel[grid](
+    fused_recurrent_gated_delta_rule_packed_decode_kernel[grid](
         mixed_qkv=mixed_qkv,
         a=a,
         b=b,

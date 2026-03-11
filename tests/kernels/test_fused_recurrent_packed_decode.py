@@ -6,12 +6,12 @@ import torch
 
 from vllm.model_executor.layers.fla.ops import (
     fused_recurrent_gated_delta_rule,
-    fused_recurrent_gated_delta_rule_packed_decode_fwd,
+    fused_recurrent_gated_delta_rule_packed_decode,
 )
 
 
 @pytest.mark.skipif(torch.cuda.device_count() < 1, reason="Need CUDA device")
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
 @pytest.mark.parametrize("strided_mixed_qkv", [False, True])
 def test_fused_recurrent_packed_decode_matches_reference(
     dtype: torch.dtype, strided_mixed_qkv: bool
@@ -79,7 +79,7 @@ def test_fused_recurrent_packed_decode_matches_reference(
     )
 
     # Packed path: fused gating + recurrent directly from packed mixed_qkv.
-    fused_recurrent_gated_delta_rule_packed_decode_fwd(
+    fused_recurrent_gated_delta_rule_packed_decode(
         mixed_qkv=mixed_qkv,
         a=a,
         b=b,
@@ -92,5 +92,7 @@ def test_fused_recurrent_packed_decode_matches_reference(
         use_qk_l2norm_in_kernel=True,
     )
 
-    torch.testing.assert_close(out_packed, out_ref, rtol=1e-2, atol=2e-2)
-    torch.testing.assert_close(state_packed, state_ref, rtol=1e-2, atol=2e-2)
+    atol = 2e-2 if dtype != torch.float32 else 1e-4
+    rtol = 1e-2 if dtype != torch.float32 else 1e-4
+    torch.testing.assert_close(out_packed, out_ref, rtol=rtol, atol=atol)
+    torch.testing.assert_close(state_packed, state_ref, rtol=rtol, atol=atol)
