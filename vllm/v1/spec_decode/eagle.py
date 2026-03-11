@@ -715,7 +715,8 @@ class SpecDecodeBaseProposer:
     ) -> tuple[int, torch.Tensor, CommonAttentionMetadata]:
         if self.dflash_mask_token_id is None:
             raise ValueError("DFlash requires mask_token_id.")
-
+        if target_hidden_states is None:
+            raise ValueError("target_hidden_states must not be None here")
         if target_positions.dim() != 1:
             target_positions = target_positions[0]
 
