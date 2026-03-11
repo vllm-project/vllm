@@ -23,6 +23,7 @@ from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models import supports_multimodal
 from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
+from vllm.model_executor.models.qwen3_dflash import DFlashQwen3ForCausalLM
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
 from vllm.triton_utils import triton
@@ -136,9 +137,14 @@ class EagleProposer:
             )
         else:
             # RoPE need (max_num_tokens,)
-            self.positions = torch.zeros(
-                self.max_num_tokens, dtype=torch.int64, device=device
-            )
+            if self.method == "dflash":
+                self.positions = torch.zeros(
+                    self.max_num_tokens, dtype=torch.int64, device=device
+                )
+            else:
+                self.positions = torch.zeros(
+                    2 * self.max_num_tokens, dtype=torch.int64, device=device
+                )
         self.hidden_states = torch.zeros(
             (self.max_num_tokens, self.hidden_size), dtype=self.dtype, device=device
         )
@@ -1226,7 +1232,7 @@ class EagleProposer:
         They might indicate this by setting "use_aux_hidden_state" to False
         inside the "eagle_config" dict of their hf_config.
         """
-        if self.method != "eagle3":
+        if self.method != "eagle3" and self.method != "dflash":
             return False
         # Assume that eagle3 heads use aux hidden states by default
         use_aux_hidden_state = True
