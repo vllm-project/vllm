@@ -765,11 +765,15 @@ class SpecDecodeBaseProposer:
     
         self.hidden_states[:num_context_tokens] = target_hidden_states
     
-        token_indices_to_sample = torch.arange(
-            num_query_tokens_total,
-            device=device,
-            dtype=torch.int32,
-        ).view(batch_size, num_query_tokens)[:, 1:].reshape(-1)
+        token_indices_to_sample = (
+            torch.arange(
+                num_query_tokens_total,
+                device=device,
+                dtype=torch.int32,
+            )
+            .view(batch_size, num_query_tokens)[:, 1:]
+            .reshape(-1)
+        )
     
         block_size = self.block_size
     
@@ -808,7 +812,7 @@ class SpecDecodeBaseProposer:
             query_start_loc_buffer = self._dflash_query_start_loc_buffer
     
         assert query_start_loc_buffer is not None
-        qsl = query_start_loc_buffer[:batch_size + 1]
+        qsl = query_start_loc_buffer[: batch_size + 1]
         qsl.copy_(torch.arange(batch_size + 1, device=device, dtype=torch.int32))
         qsl.mul_(num_query_tokens)
     
@@ -820,7 +824,9 @@ class SpecDecodeBaseProposer:
                 pin_memory=is_pin_memory_available(),
             )
             query_start_loc_cpu_buffer = self._dflash_query_start_loc_cpu_buffer
-        elif query_start_loc_cpu_buffer.shape[0] < batch_size + 1:
+        elif (
+            query_start_loc_cpu_buffer.shape[0] < batch_size + 1
+        ):
             self._dflash_query_start_loc_cpu_buffer = torch.empty(
                 batch_size + 1,
                 dtype=torch.int32,
@@ -829,7 +835,7 @@ class SpecDecodeBaseProposer:
             query_start_loc_cpu_buffer = self._dflash_query_start_loc_cpu_buffer
     
         assert query_start_loc_cpu_buffer is not None
-        qsl_cpu = query_start_loc_cpu_buffer[:batch_size + 1]
+        qsl_cpu = query_start_loc_cpu_buffer[: batch_size + 1]
         qsl_cpu.copy_(
             torch.arange(batch_size + 1, dtype=torch.int32).mul_(num_query_tokens)
         )
@@ -841,7 +847,9 @@ class SpecDecodeBaseProposer:
             max_query_len=num_query_tokens,
             query_start_loc=qsl,
             query_start_loc_cpu=qsl_cpu,
-            max_seq_len=min(int(cad.max_seq_len + num_query_tokens), self.max_model_len),
+            max_seq_len=min(
+                int(cad.max_seq_len + num_query_tokens), self.max_model_len
+            ),
             seq_lens=(cad.seq_lens + num_query_tokens),
             causal=False,
         )
