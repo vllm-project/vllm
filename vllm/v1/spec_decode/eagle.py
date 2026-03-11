@@ -401,9 +401,7 @@ class SpecDecodeBaseProposer:
         if self.method == "dflash":
             dflash_core = getattr(self, "_propose_dflash_core", None)
             if dflash_core is None:
-                raise RuntimeError(
-                    "_propose_dflash_core is not initialized ."
-                )
+                raise RuntimeError("_propose_dflash_core is not initialized .")
 
             return dflash_core(
                 target_positions=target_positions,
