@@ -196,7 +196,7 @@ class SpeculativeConfig:
         uses_aux_hidden_states = self.method in (
             "eagle3", 
             "extract_hidden_states", 
-            "dflash"
+            "dflash",
         )
         factors.append(uses_aux_hidden_states)
 
