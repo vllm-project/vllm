@@ -532,6 +532,22 @@ class ModelConfig:
         self._architecture = arch
         logger.info("Resolved architecture: %s", arch)
 
+        # Set default tokenizer modes based on model architecture
+        if self.tokenizer_mode == "auto":
+            if arch == "Grok1ForCausalLM":
+                self.tokenizer_mode = "grok2"
+            elif arch == "MoonshotKimiaForCausalLM":
+                self.tokenizer_mode = "kimi_audio"
+            elif arch == "QwenVLForConditionalGeneration":
+                self.tokenizer_mode = "qwen_vl"
+
+            if self.tokenizer_mode != "auto":
+                logger.info(
+                    "Defaulting to tokenizer_mode=%r for %s",
+                    self.tokenizer_mode,
+                    arch,
+                )
+
         # Init pooler config if needed
         if self.runner_type == "pooling":
             if self.pooler_config is None:
