@@ -659,6 +659,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         dtype = mixed_qkv.dtype
         num_k_heads = self.num_k_heads // self.tp_size
         num_v_heads = self.num_v_heads // self.tp_size
+        _, state_dtype = self.get_state_dtype()
 
         # Run warmup for each possible BT value of chunk_fwd_kernel_o:
         #   T=16 → BT=16, T=32 → BT=32, T=64 → BT=64.
@@ -682,7 +683,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                 self.head_v_dim,
                 self.head_k_dim,
                 device=device,
-                dtype=torch.float32,
+                dtype=state_dtype,
             )
             cu_seqlens = torch.tensor([0, T], device=device, dtype=torch.long)
 
