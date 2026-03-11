@@ -199,13 +199,17 @@ def get_text_token_prompts(
             mm_counts,
             mm_options={},
         )
-        assert isinstance(inputs.prompt, str)
-
-        text_prompt = inputs.prompt
-        token_prompt = tokenizer.encode(
-            text_prompt,
-            add_special_tokens=_ADD_SPECIAL_TOKENS_OVERRIDES.get(model_type, True),
-        )
+        # Some models (e.g., Kimi-Audio) return token IDs directly instead of str
+        if isinstance(inputs.prompt, list):
+            text_prompt = None
+            token_prompt = inputs.prompt
+        else:
+            assert isinstance(inputs.prompt, str)
+            text_prompt = inputs.prompt
+            token_prompt = tokenizer.encode(
+                text_prompt,
+                add_special_tokens=_ADD_SPECIAL_TOKENS_OVERRIDES.get(model_type, True),
+            )
 
     return text_prompt, token_prompt
 

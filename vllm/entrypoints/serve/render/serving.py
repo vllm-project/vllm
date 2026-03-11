@@ -1,12 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import sys
-import traceback
 from collections.abc import Callable, Sequence
 from http import HTTPStatus
 from typing import Any
 
-import jinja2
 from openai_harmony import Message as OpenAIMessage
 
 from vllm.config import ModelConfig
@@ -18,7 +15,6 @@ from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.entrypoints.openai.engine.protocol import (
-    ErrorInfo,
     ErrorResponse,
     ModelCard,
     ModelList,
@@ -30,8 +26,8 @@ from vllm.entrypoints.openai.parser.harmony_utils import (
     parse_chat_inputs_to_harmony_messages,
     render_for_completion,
 )
-from vllm.entrypoints.utils import sanitize_message
-from vllm.inputs import EngineInput, PromptType, SingletonPrompt, TokensPrompt
+from vllm.entrypoints.utils import create_error_response
+from vllm.inputs import EngineInput, PromptType, SingletonPrompt, tokens_input
 from vllm.logger import init_logger
 from vllm.parser import ParserManager
 from vllm.renderers import BaseRenderer, merge_kwargs
@@ -109,7 +105,6 @@ class OpenAIServingRender:
         if is_mistral_tokenizer(tokenizer):
             # because of issues with pydantic we need to potentially
             # re-serialize the tool_calls field of the request
-            # for more info: see comment in `maybe_serialize_tool_calls`
             _mt.maybe_serialize_tool_calls(request)  # type: ignore[arg-type]
             _mt.truncate_tool_call_ids(request)  # type: ignore[arg-type]
             _mt.validate_request_params(request)
@@ -199,15 +194,11 @@ class OpenAIServingRender:
                 "prompt_logprobs is not compatible with prompt embeds."
             )
 
-        try:
-            engine_inputs = await self._preprocess_completion(
-                request,
-                prompt_input=request.prompt,
-                prompt_embeds=request.prompt_embeds,
-            )
-        except (ValueError, TypeError, RuntimeError, jinja2.TemplateError) as e:
-            logger.exception("Error in preprocessing prompt inputs")
-            return self.create_error_response(e)
+        engine_inputs = await self._preprocess_completion(
+            request,
+            prompt_input=request.prompt,
+            prompt_embeds=request.prompt_embeds,
+        )
 
         return engine_inputs
 
@@ -249,13 +240,9 @@ class OpenAIServingRender:
 
         # Render prompt token ids.
         prompt_token_ids = render_for_completion(messages)
-        engine_prompt = TokensPrompt(prompt_token_ids=prompt_token_ids)
+        engine_input = tokens_input(prompt_token_ids, cache_salt=request.cache_salt)
 
-        # Add cache_salt if provided in the request
-        if request.cache_salt is not None:
-            engine_prompt["cache_salt"] = request.cache_salt
-
-        return messages, [engine_prompt]
+        return messages, [engine_input]
 
     async def show_available_models(self) -> ModelList:
         """Returns the models served by this render server."""
@@ -279,54 +266,7 @@ class OpenAIServingRender:
         status_code: HTTPStatus = HTTPStatus.BAD_REQUEST,
         param: str | None = None,
     ) -> ErrorResponse:
-        """Copied from OpenAIServing.create_error_response."""
-        exc: Exception | None = None
-
-        if isinstance(message, Exception):
-            exc = message
-
-            from vllm.exceptions import VLLMValidationError
-
-            if isinstance(exc, VLLMValidationError):
-                err_type = "BadRequestError"
-                status_code = HTTPStatus.BAD_REQUEST
-                param = exc.parameter
-            elif isinstance(exc, (ValueError, TypeError, RuntimeError, OverflowError)):
-                # Common validation errors from user input
-                err_type = "BadRequestError"
-                status_code = HTTPStatus.BAD_REQUEST
-                param = None
-            elif isinstance(exc, NotImplementedError):
-                err_type = "NotImplementedError"
-                status_code = HTTPStatus.NOT_IMPLEMENTED
-                param = None
-            elif exc.__class__.__name__ == "TemplateError":
-                # jinja2.TemplateError (avoid importing jinja2)
-                err_type = "BadRequestError"
-                status_code = HTTPStatus.BAD_REQUEST
-                param = None
-            else:
-                err_type = "InternalServerError"
-                status_code = HTTPStatus.INTERNAL_SERVER_ERROR
-                param = None
-
-            message = str(exc)
-
-        if self.log_error_stack:
-            exc_type, _, _ = sys.exc_info()
-            if exc_type is not None:
-                traceback.print_exc()
-            else:
-                traceback.print_stack()
-
-        return ErrorResponse(
-            error=ErrorInfo(
-                message=sanitize_message(message),
-                type=err_type,
-                code=status_code.value,
-                param=param,
-            )
-        )
+        return create_error_response(message, err_type, status_code, param)
 
     def _is_model_supported(self, model_name: str) -> bool:
         """Simplified from OpenAIServing._is_model_supported (no LoRA support)."""
