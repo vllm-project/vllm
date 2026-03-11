@@ -1015,7 +1015,7 @@ class FusedMoE(CustomOp):
             expert_data.copy_(loaded_weight)
 
     def _map_global_expert_id_to_local_expert_id(
-        self, expert_id: int | None,
+        self, expert_id: int | None
     ) -> int | None:
         if self._expert_map is None:
             return expert_id
