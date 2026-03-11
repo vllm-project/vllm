@@ -61,15 +61,16 @@ class DefaultModelState(ModelState):
                 max_model_len=self.max_model_len,
                 device=self.device,
             )
-        self.uses_xdrope_dim = self.model_config.uses_xdrope_dim
-        if self.uses_xdrope_dim > 0:
+        if self.model_config.uses_xdrope_dim > 0:
             self.xdrope_state = XDRopeState(
-                uses_xdrope_dim=self.uses_xdrope_dim,
+                uses_xdrope_dim=self.model_config.uses_xdrope_dim,
                 max_num_reqs=self.max_num_reqs,
                 max_num_tokens=self.max_num_tokens,
                 max_model_len=self.max_model_len,
                 device=self.device,
             )
+        else:
+            self.xdrope_state = None
 
     def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
         if self.uses_mrope:
@@ -81,7 +82,7 @@ class DefaultModelState(ModelState):
                 new_req_data.prefill_token_ids,
                 mm_features=new_req_data.mm_features,
             )
-        elif self.uses_xdrope_dim > 0:
+        elif self.xdrope_state is not None:
             # Pre-compute XD-RoPE positions for prefill.
             assert new_req_data.prefill_token_ids is not None
             self.xdrope_state.init_prefill_xdrope_positions(
@@ -94,7 +95,7 @@ class DefaultModelState(ModelState):
     def apply_staged_writes(self) -> None:
         if self.uses_mrope:
             self.mrope_state.apply_staged_writes()
-        elif self.uses_xdrope_dim > 0:
+        elif self.xdrope_state is not None:
             self.xdrope_state.apply_staged_writes()
 
     def get_mm_embeddings(
@@ -131,7 +132,7 @@ class DefaultModelState(ModelState):
     def prepare_inputs(
         self, input_batch: InputBatch, req_states: RequestState
     ) -> dict[str, torch.Tensor | None]:
-        if not self.uses_mrope and not self.uses_xdrope_dim > 0:
+        if not self.uses_mrope and self.xdrope_state is None:
             return {}  # Common case (1D positions).
 
         if self.uses_mrope:
@@ -169,7 +170,7 @@ class DefaultModelState(ModelState):
         if self.uses_mrope:
             mrope_positions = self.mrope_state.mrope_positions[:, :num_tokens]
             model_inputs["positions"] = mrope_positions
-        elif self.uses_xdrope_dim > 0:
+        elif self.xdrope_state is not None:
             xdrope_positions = self.xdrope_state.xdrope_positions[:, :num_tokens]
             model_inputs["positions"] = xdrope_positions
         return model_inputs

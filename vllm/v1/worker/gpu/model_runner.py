@@ -961,6 +961,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Update for non-first PP ranks.
             model_inputs["input_ids"] = None
             model_inputs["inputs_embeds"] = None
+            assert intermediate_tensors is not None
 
         # Run model.
         if batch_desc.cg_mode == CUDAGraphMode.FULL:
