@@ -165,7 +165,7 @@ class SpecDecodeBaseProposer:
             (self.max_num_tokens, self.hidden_size), dtype=self.dtype, device=device
         )
         if self.method == "dflash":
-            # --- DFlash scratch state (kept across propose() call) ---
+            # --- DFlash scratch state (kept across () call) ---
             self._dflash_ctx_len: int = 0
             self.dflash_mask_token_id: int = 151669
             self._dflash_kv_len: int = 0
@@ -423,7 +423,12 @@ class SpecDecodeBaseProposer:
 
         if self.method in ("eagle3", "dflash"):
             assert isinstance(
-                self.model, (Eagle3LlamaForCausalLM, Eagle3DeepseekV2ForCausalLM, DFlashQwen3ForCausalLM)
+                self.model, 
+                (
+                    Eagle3LlamaForCausalLM, 
+                    Eagle3DeepseekV2ForCausalLM, 
+                    DFlashQwen3ForCausalLM,
+                ),
             )
             target_hidden_states = self.model.combine_hidden_states(
                 target_hidden_states
