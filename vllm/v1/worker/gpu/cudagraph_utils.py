@@ -320,6 +320,8 @@ class ModelCudaGraphManager(CudaGraphManager):
                     model_inputs = {
                         "input_ids": input_buffers.input_ids[:num_tokens],
                         "positions": input_buffers.positions[:num_tokens],
+                        # NOTE(santinor): PP currently uses eager mode only.
+                        "intermediate_tensors": None,
                         **model_state.prepare_dummy_inputs(num_reqs, num_tokens),
                     }
                     model_output = model(**model_inputs)
