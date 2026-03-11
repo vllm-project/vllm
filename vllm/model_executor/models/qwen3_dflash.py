@@ -326,7 +326,7 @@ class Qwen3Model(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         input_embeds: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         if input_embeds is None:
             input_embeds = self.embed_input_ids(input_ids)
         assert hidden_states.shape[-1] == input_embeds.shape[-1]
@@ -430,7 +430,7 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         inputs_embeds: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         return self.model(input_ids, positions, hidden_states, inputs_embeds)
 
     def compute_logits(
