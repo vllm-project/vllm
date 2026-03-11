@@ -456,16 +456,20 @@ class RocmPlatform(Platform):
         if torch.cuda.is_available():
             major, minor = torch.cuda.get_device_capability(device_id)
         else:
-            device0 = amdsmi_get_processor_handles()[0]
-            asic_info = amdsmi_get_gpu_asic_info(device0)
+            device = amdsmi_get_processor_handles()[device_id]
+            asic_info = amdsmi_get_gpu_asic_info(device)
             target_id = asic_info['target_graphics_version']
             major_minor = target_id[3:]
             if len(major_minor) == 4:
                 major = int(major_minor[0:2])
                 minor = int(major_minor[2:])
             elif len(major_minor) == 3:
-                major = int(major_minor[0])
-                minor = int(major_minor[1])
+                if major_minor[2].isdigit():
+                    major = int(major_minor[0])
+                    minor = int(major_minor[1:])
+                else:
+                    major = int(major_minor[0])
+                    minor = int(major_minor[1])
 
         return DeviceCapability(major=major, minor=minor)
 
