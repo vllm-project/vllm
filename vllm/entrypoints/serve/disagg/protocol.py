@@ -14,7 +14,6 @@ from vllm.logprobs import Logprob
 from vllm.renderers import TokenizeParams
 from vllm.utils import random_uuid
 
-
 ####### Tokens IN <> Tokens OUT #######
 
 

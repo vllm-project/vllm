@@ -20,17 +20,17 @@ from vllm.entrypoints.openai.engine.protocol import (
     ModelList,
     ModelPermission,
 )
-from vllm.entrypoints.serve.disagg.protocol import (
-    MultiModalFeatures,
-    PlaceholderRangeInfo,
-)
 from vllm.entrypoints.openai.parser.harmony_utils import (
     get_developer_message,
     get_system_message,
     parse_chat_inputs_to_harmony_messages,
     render_for_completion,
 )
-from vllm.entrypoints.serve.disagg.protocol import GenerateRequest
+from vllm.entrypoints.serve.disagg.protocol import (
+    GenerateRequest,
+    MultiModalFeatures,
+    PlaceholderRangeInfo,
+)
 from vllm.entrypoints.serve.tokenize.protocol import (
     DetokenizeRequest,
     DetokenizeResponse,
@@ -38,8 +38,10 @@ from vllm.entrypoints.serve.tokenize.protocol import (
     TokenizeRequest,
     TokenizeResponse,
 )
-from vllm.entrypoints.utils import get_max_tokens, sanitize_message
-from vllm.entrypoints.utils import create_error_response
+from vllm.entrypoints.utils import (
+    create_error_response,
+    get_max_tokens,
+)
 from vllm.inputs.data import ProcessorInputs, PromptType, SingletonPrompt, TokensPrompt
 from vllm.logger import init_logger
 from vllm.multimodal.inputs import MultiModalHashes, MultiModalPlaceholderDict
