@@ -669,14 +669,14 @@ _TOKEN_CLASSIFICATION_EXAMPLE_MODELS = {
 }
 
 _SEQUENCE_CLASSIFICATION_EXAMPLE_MODELS = {
-    "GPT2ForSequenceClassification": _HfExamplesInfo(
-        "nie3e/sentiment-polish-gpt2-small"
-    ),
     "BertForSequenceClassification": _HfExamplesInfo(
         "cross-encoder/ms-marco-MiniLM-L-6-v2"
     ),
     "ErnieForSequenceClassification": _HfExamplesInfo(
         "Forrest20231206/ernie-3.0-base-zh-cls",
+    ),
+    "GPT2ForSequenceClassification": _HfExamplesInfo(
+        "nie3e/sentiment-polish-gpt2-small"
     ),
     "GteNewForSequenceClassification": _HfExamplesInfo(
         "Alibaba-NLP/gte-multilingual-reranker-base",
