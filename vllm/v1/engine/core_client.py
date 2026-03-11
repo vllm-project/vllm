@@ -1376,7 +1376,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
                 # are empty.
                 idx = (self.eng_start_index + i) % num_engines
                 waiting, running = current_counts[idx]
-                score = waiting * 4 + running
+                score = waiting + running
                 if score < min_score:
                     min_score = score
                     eng_index = idx
