@@ -395,7 +395,10 @@ class HelionKernelWrapper:
         autotune_effort: str = "quick",
     ) -> Config:
         """Run autotuning for a single input configuration."""
-        extra_kwargs = {"autotune_effort": autotune_effort}
+        extra_kwargs = {
+            "autotune_effort": autotune_effort,
+            "autotune_ignore_errors": True,
+        }
         autotune_kernel = create_helion_decorated_kernel(
             self.raw_kernel_func, self.helion_settings, extra_kwargs
         )
