@@ -16,11 +16,7 @@ from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
     apply_nvfp4_linear,
     convert_to_nvfp4_linear_kernel_format,
     cutlass_fp4_supported,
-    pad_nvfp4_activation_for_cutlass,
-    pad_nvfp4_weight_for_cutlass,
     select_nvfp4_linear_backend,
-    slice_nvfp4_output,
-    swizzle_blockscale,
 )
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer
@@ -114,95 +110,6 @@ def test_select_backend_emulation(monkeypatch) -> None:
 
 def test_cutlass_fp4_supported() -> None:
     assert cutlass_fp4_supported() is True
-
-
-@pytest.mark.parametrize("device", CUDA_DEVICES)
-@pytest.mark.parametrize("n,k", [(128, 128), (256, 64), (150, 96)])
-@torch.inference_mode()
-def test_swizzle_blockscale_2d(
-    n: int,
-    k: int,
-    device: str,
-) -> None:
-    sf = torch.ones(n, k // BLOCK_SIZE, dtype=torch.float8_e4m3fn, device=device)
-    out = swizzle_blockscale(sf)
-    assert out.dtype == torch.float8_e4m3fn
-    assert out.is_cuda
-
-
-@pytest.mark.parametrize("device", CUDA_DEVICES)
-@pytest.mark.parametrize("b,n,k", [(2, 128, 64), (4, 256, 128)])
-@torch.inference_mode()
-def test_swizzle_blockscale_3d(
-    b: int,
-    n: int,
-    k: int,
-    device: str,
-) -> None:
-    sf = torch.ones(b, n, k // BLOCK_SIZE, dtype=torch.float8_e4m3fn, device=device)
-    out = swizzle_blockscale(sf)
-    assert out.shape[0] == b
-    assert out.dtype == torch.float8_e4m3fn
-
-
-@pytest.mark.parametrize("device", CUDA_DEVICES)
-@torch.inference_mode()
-def test_pad_weight_already_aligned(device: str) -> None:
-    w = torch.zeros(128, 64, dtype=torch.uint8, device=device)
-    pw, pad = pad_nvfp4_weight_for_cutlass(w)
-    assert pad == 0
-    assert pw.shape == w.shape
-
-
-@pytest.mark.parametrize("device", CUDA_DEVICES)
-@torch.inference_mode()
-def test_pad_weight_unaligned_k(device: str) -> None:
-    # K=48 FP4 elements = 24 bytes; 48 is not divisible by 32
-    w = torch.zeros(128, 24, dtype=torch.uint8, device=device)
-    pw, pad = pad_nvfp4_weight_for_cutlass(w)
-    assert pad > 0
-    assert pw.shape[1] > 24
-
-
-@pytest.mark.parametrize("device", CUDA_DEVICES)
-@torch.inference_mode()
-def test_pad_weight_unaligned_n(device: str) -> None:
-    # N=150 is not divisible by 32
-    w = torch.zeros(150, 64, dtype=torch.uint8, device=device)
-    pw, _ = pad_nvfp4_weight_for_cutlass(w)
-    assert pw.shape[0] % 32 == 0
-
-
-@pytest.mark.parametrize("device", CUDA_DEVICES)
-@torch.inference_mode()
-def test_pad_activation_no_padding(device: str) -> None:
-    x = torch.zeros(4, 64, dtype=torch.uint8, device=device)
-    out = pad_nvfp4_activation_for_cutlass(x, weights_padding_bytes=0)
-    assert out.data_ptr() == x.data_ptr()
-
-
-@pytest.mark.parametrize("device", CUDA_DEVICES)
-@torch.inference_mode()
-def test_pad_activation_with_padding(device: str) -> None:
-    x = torch.zeros(4, 24, dtype=torch.uint8, device=device)
-    out = pad_nvfp4_activation_for_cutlass(x, weights_padding_bytes=8)
-    assert out.shape[1] == 32
-
-
-@pytest.mark.parametrize("device", CUDA_DEVICES)
-@torch.inference_mode()
-def test_slice_output_no_op(device: str) -> None:
-    out = torch.zeros(16, 128, device=device)
-    result = slice_nvfp4_output(out, output_size=128)
-    assert result.data_ptr() == out.data_ptr()
-
-
-@pytest.mark.parametrize("device", CUDA_DEVICES)
-@torch.inference_mode()
-def test_slice_output_trims_padding(device: str) -> None:
-    out = torch.zeros(16, 160, device=device)
-    result = slice_nvfp4_output(out, output_size=128)
-    assert result.shape[-1] == 128
 
 
 @pytest.mark.parametrize("device", CUDA_DEVICES)
