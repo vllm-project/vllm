@@ -229,6 +229,7 @@ async def test_function_calling_with_streaming_expected_arguments(
     )
 
     tool_call_item = None
+    completed_event = None
     async for event in stream_response:
         if (
             event.type == "response.output_item.added"
@@ -237,10 +238,17 @@ async def test_function_calling_with_streaming_expected_arguments(
             tool_call_item = event.item
         elif event.type == "response.function_call_arguments.delta" and tool_call_item:
             tool_call_item.arguments += event.delta
-
+        elif (
+            event.type == "response.output_item.done"
+            and event.item.type == "function_call"
+        ):
+            completed_event = event
     assert tool_call_item is not None
     assert tool_call_item.type == "function_call"
     assert tool_call_item.name == "get_weather"
+    assert completed_event is not None
+    assert tool_call_item.arguments == completed_event.item.arguments
+    assert tool_call_item.name == completed_event.item.name
     args = json.loads(tool_call_item.arguments)
     assert "location" in args
     assert args["location"] is not None
