@@ -153,8 +153,7 @@ vllm serve "$MODEL" \
     }' \
     --kv-transfer-config '{
         "kv_connector": "NixlConnector",
-        "kv_role": "kv_producer",
-        "kv_buffer_device": "'"$DEVICE_PLATFORM"'"
+        "kv_role": "kv_producer"
     }' \
     >"${P_LOG}" 2>&1 &
 
@@ -176,8 +175,7 @@ vllm serve "$MODEL" \
     --allowed-local-media-path "${GIT_ROOT}"/tests/v1/ec_connector/integration \
     --kv-transfer-config '{
         "kv_connector": "NixlConnector",
-        "kv_role": "kv_consumer",
-        "kv_buffer_device": "'"$DEVICE_PLATFORM"'"
+        "kv_role": "kv_consumer"
     }' \
     >"${D_LOG}" 2>&1 &
 
