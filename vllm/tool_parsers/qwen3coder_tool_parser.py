@@ -249,7 +249,10 @@ class Qwen3CoderToolParser(ToolParser):
         self, function_call_str: str, tools: list[ChatCompletionToolsParam] | None
     ) -> ToolCall | None:
         # Extract function name
-        end_index = function_call_str.index(">")
+        end_index = function_call_str.find(">")
+        # If there's no ">" character, this is not a valid xml function call
+        if end_index == -1:
+            return None
         function_name = function_call_str[:end_index]
         param_config = self._get_arguments_config(function_name, tools)
         parameters = function_call_str[end_index + 1 :]
@@ -316,7 +319,6 @@ class Qwen3CoderToolParser(ToolParser):
                 self._parse_xml_function_call(function_call_str, request.tools)
                 for function_call_str in function_calls
             ]
-
             # Populate prev_tool_call_arr for serving layer to set finish_reason
             self.prev_tool_call_arr.clear()  # Clear previous calls
             for tool_call in tool_calls:
@@ -335,7 +337,7 @@ class Qwen3CoderToolParser(ToolParser):
             content = model_output[:content_index]  # .rstrip()
 
             return ExtractedToolCallInformation(
-                tools_called=(len(tool_calls) > 0),
+                tools_called=(len(self.prev_tool_call_arr) > 0),
                 tool_calls=tool_calls,
                 content=content if content else None,
             )
