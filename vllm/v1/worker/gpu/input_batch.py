@@ -53,6 +53,7 @@ class InputBatch:
     # sum(num_scheduled_tokens)
     num_tokens: int
     num_tokens_after_padding: int
+    num_tokens_for_attn: int
     num_draft_tokens: int
 
     # [num_reqs + 1]
@@ -132,6 +133,7 @@ class InputBatch:
             num_scheduled_tokens=num_scheduled_tokens,
             num_tokens=num_tokens,
             num_tokens_after_padding=num_tokens,
+            num_tokens_for_attn=num_tokens,
             num_draft_tokens=0,
             query_start_loc=query_start_loc,
             query_start_loc_np=query_start_loc_np,

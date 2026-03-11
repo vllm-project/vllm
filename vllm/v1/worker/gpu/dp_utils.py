@@ -47,7 +47,7 @@ def sync_cudagraph_and_dp_padding(
 
     if torch.all(num_tokens_across_dp == 0).item():
         synced_desc = BatchExecutionDescriptor(
-            cg_mode=CUDAGraphMode.NONE, num_tokens=0, num_reqs=0
+            cg_mode=CUDAGraphMode.NONE, num_tokens=0, num_tokens_for_attn=0, num_reqs=0
         )
         return synced_desc, None
 
@@ -58,6 +58,7 @@ def sync_cudagraph_and_dp_padding(
         return BatchExecutionDescriptor(
             cg_mode=CUDAGraphMode.NONE,
             num_tokens=num_tokens,
+            num_tokens_for_attn=None,
             num_reqs=num_reqs,
         ), num_tokens_across_dp
 

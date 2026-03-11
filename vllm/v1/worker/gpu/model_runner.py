@@ -599,8 +599,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self, scheduler_output: SchedulerOutput, batch_desc: BatchExecutionDescriptor
     ) -> InputBatch:
         num_tokens = scheduler_output.total_num_scheduled_tokens
-        num_tokens_after_padding = batch_desc.num_tokens
         assert num_tokens > 0
+        num_tokens_after_padding = batch_desc.num_tokens
+        if batch_desc.num_tokens_for_attn is not None:
+            num_tokens_for_attn = batch_desc.num_tokens_for_attn
+        else:
+            num_tokens_for_attn = num_tokens
         num_tokens_per_req = scheduler_output.num_scheduled_tokens
         num_reqs = len(num_tokens_per_req)
 
@@ -721,6 +725,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_scheduled_tokens=num_scheduled_tokens,
             num_tokens=num_tokens,
             num_tokens_after_padding=num_tokens_after_padding,
+            num_tokens_for_attn=num_tokens_for_attn,
             num_draft_tokens=total_num_draft_tokens,
             query_start_loc=query_start_loc,
             query_start_loc_np=query_start_loc_np,
