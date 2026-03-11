@@ -526,35 +526,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.impl("cutlass_scaled_mm_supports_block_fp8",
            &cutlass_scaled_mm_supports_block_fp8);
 
-  // Check if cutlass sparse scaled_mm is supported for CUDA devices of the
-  // given capability
-  ops.def(
-      "cutlass_sparse_scaled_mm_supported(int cuda_device_capability) -> bool");
-  ops.impl("cutlass_sparse_scaled_mm_supported",
-           &cutlass_sparse_scaled_mm_supported);
-
-  // CUTLASS sparse GEMM, supporting symmetric per-tensor or per-row/column
-  // quantization, as well as bias
-  ops.def(
-      "cutlass_scaled_sparse_mm(Tensor! out, Tensor a,"
-      "                         Tensor bt_nzs,"
-      "                         Tensor bt_meta, Tensor a_scales,"
-      "                         Tensor b_scales, Tensor? bias) -> ()");
-  ops.impl("cutlass_scaled_sparse_mm", torch::kCUDA, &cutlass_scaled_sparse_mm);
-
-  // CUTLASS sparse matrix compressor
-  ops.def("cutlass_sparse_compress(Tensor a) -> Tensor[]");
-  ops.impl("cutlass_sparse_compress", &cutlass_sparse_compress);
-
-  // SM100 CUTLASS MLA decode
-  ops.def(
-      "sm100_cutlass_mla_decode(Tensor! out, Tensor! lse, Tensor q_nope,"
-      "                         Tensor q_pe, Tensor kv_c_and_k_pe_cache,"
-      "                         Tensor seq_lens, Tensor page_table,"
-      "                         Tensor workspace, float scale,"
-      "                         int num_kv_splits) -> ()");
-  // conditionally compiled so impl in source file
-
   // SM100 CUTLASS MLA workspace
   ops.def(
       "sm100_cutlass_mla_get_workspace_size(int max_seq_len, int num_batches,"

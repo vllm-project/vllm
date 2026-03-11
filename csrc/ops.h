@@ -286,16 +286,6 @@ void cutlass_scaled_mm_azp(torch::Tensor& out, torch::Tensor const& a,
                            std::optional<torch::Tensor> const& azp,
                            std::optional<torch::Tensor> const& bias);
 
-bool cutlass_sparse_scaled_mm_supported(int64_t cuda_device_capability);
-
-void cutlass_scaled_sparse_mm(torch::Tensor& out, torch::Tensor const& a,
-                              torch::Tensor const& b, torch::Tensor const& e,
-                              torch::Tensor const& a_scales,
-                              torch::Tensor const& b_scales,
-                              std::optional<torch::Tensor> const& bias);
-
-std::vector<torch::Tensor> cutlass_sparse_compress(torch::Tensor const& a);
-
 std::tuple<torch::Tensor, torch::Tensor> scaled_fp4_quant_func(
     torch::Tensor const& input, torch::Tensor const& input_scale,
     bool is_sf_swizzled_layout);
