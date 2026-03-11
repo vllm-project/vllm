@@ -783,6 +783,53 @@ def test_abort_loading_requests(request_runner):
     assert req_id not in runner.scheduler.requests
 
 
+class TestOffloadingConnectorHMA:
+    """Tests for OffloadingConnector HMA (hybrid memory allocator) support."""
+
+    def test_supports_hma(self):
+        """OffloadingConnector must declare HMA support."""
+        from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+            SupportsHMA,
+            supports_hma,
+        )
+
+        assert issubclass(OffloadingConnector, SupportsHMA)
+        assert supports_hma(OffloadingConnector)
+
+    def test_request_finished_all_groups_delegates_to_group_0(self):
+        """request_finished_all_groups should delegate to request_finished
+        with block_ids from group 0."""
+        connector = MagicMock(spec=OffloadingConnector)
+        connector.request_finished.return_value = (True, None)
+
+        group0_ids = [1, 2, 3]
+        group1_ids = [4, 5]
+        block_ids = (group0_ids, group1_ids)
+
+        result = OffloadingConnector.request_finished_all_groups(
+            connector, MagicMock(), block_ids
+        )
+
+        connector.request_finished.assert_called_once()
+        args = connector.request_finished.call_args
+        assert args[0][1] == group0_ids
+        assert result == (True, None)
+
+    def test_request_finished_all_groups_empty_block_ids(self):
+        """request_finished_all_groups should handle empty block_ids."""
+        connector = MagicMock(spec=OffloadingConnector)
+        connector.request_finished.return_value = (False, None)
+
+        result = OffloadingConnector.request_finished_all_groups(
+            connector, MagicMock(), ()
+        )
+
+        connector.request_finished.assert_called_once()
+        args = connector.request_finished.call_args
+        assert args[0][1] == []
+        assert result == (False, None)
+
+
 class TestOffloadingConnectorStats:
     """Tests for OffloadingConnector stats reconstruction and operations."""
 
