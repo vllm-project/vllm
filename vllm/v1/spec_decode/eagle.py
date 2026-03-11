@@ -787,7 +787,6 @@ class SpecDecodeBaseProposer:
         full_slot_mapping = torch.cat([ctx_slot_mapping, query_slot_mapping], dim=0)
 
         query_offsets_loc_buffer = self._dflash_query_start_loc_buffer
-        assert query_offsets_loc_buffer is not None
         if (
             getattr(self, "_dflash_query_start_loc_buffer", None) is None
             or query_offsets_loc_buffer.shape[0] < batch_size + 1
@@ -798,13 +797,13 @@ class SpecDecodeBaseProposer:
                 device=device,
                 dtype=torch.int32,
             )
-
-        qsl = self._dflash_query_start_loc_buffer[: batch_size + 1]
+            
+        assert query_offsets_loc_buffer is not None
+        qsl = query_offsets_loc_buffer[: batch_size + 1]
         qsl.copy_(torch.arange(batch_size + 1, device=device, dtype=torch.int32))
         qsl.mul_(num_query_tokens)
 
         dflash_query_start_loc_cpu_buffer = self._dflash_query_start_loc_cpu_buffer
-        assert dflash_query_start_loc_cpu_buffer is not None
         if (
             getattr(self, "_dflash_query_start_loc_cpu_buffer", None) is None
             or dflash_query_start_loc_cpu_buffer.shape[0] < batch_size + 1
@@ -815,7 +814,8 @@ class SpecDecodeBaseProposer:
                 pin_memory=is_pin_memory_available(),
             )
 
-        qsl_cpu = self._dflash_query_start_loc_cpu_buffer[: batch_size + 1]
+        assert dflash_query_start_loc_cpu_buffer is not None
+        qsl_cpu = dflash_query_start_loc_cpu_buffer[: batch_size + 1]
         qsl_cpu.copy_(
             torch.arange(batch_size + 1, dtype=torch.int32).mul_(num_query_tokens)
         )
