@@ -66,7 +66,7 @@ class ObjectStorageModel:
         dir_name = os.path.join(
             get_cache_dir(),
             "model_streamer",
-            hashlib.sha256(str(url).encode()).hexdigest()[:8],
+            hashlib.sha256(str(url).encode()).hexdigest()[:16],
         )
         self._runai_obj = RunaiObjectStorageModel(model_path=url, dst=dir_name)
         self.dir = self._runai_obj.dir
