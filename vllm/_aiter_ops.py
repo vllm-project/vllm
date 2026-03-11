@@ -1096,6 +1096,8 @@ class rocm_aiter_ops:
     # TODO: Consolidate under _LINEAR_ENABLED
     _TRITON_UNQUANT_GEMM = envs.VLLM_ROCM_USE_AITER_TRITON_GEMM
 
+    _AR_MAX_SIZE = 8192 * 1024 * 8
+
     @classmethod
     def refresh_env_variables(cls):
         """
@@ -1183,6 +1185,16 @@ class rocm_aiter_ops:
             "per_128x128": QuantType.per_128x128,
         }
         return mapping.get(name)
+
+    @classmethod
+    def custom_allreduce_max_size(cls, world_size: int) -> int | None:
+        """Returns max allreduce size in bytes for aiter. None if unsupported."""
+        if not cls.is_enabled():
+            return None
+        AITER_SUPPORTED_WORLD_SIZES = [2, 4, 6, 8]
+        if world_size not in AITER_SUPPORTED_WORLD_SIZES:
+            return None
+        return cls._AR_MAX_SIZE
 
     @classmethod
     @if_aiter_supported

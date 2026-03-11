@@ -963,6 +963,20 @@ class RocmAiterAllReduceFusionPass(VllmPatternMatcherPass):
             )
             return
 
+        hidden_dim = config.model_config.get_hidden_size()
+        max_size = rocm_aiter_ops.custom_allreduce_max_size(self.tp_size)
+
+        if max_size is None:
+            # AITER doesn't support current world size
+            logger.warning(
+                "AITER allreduce fusion is not supported for world size %s"
+                " or max size is not provided",
+                self.tp_size,
+            )
+            return
+        element_size = torch.tensor([], dtype=self.model_dtype).element_size()
+        self.max_token_num = max_size // (hidden_dim * element_size)
+
         self.patterns: PatternMatcherPass = PatternMatcherPass(
             pass_name="rocm_aiter_allreduce_rmsnorm_fusion_pass"
         )
@@ -988,6 +1002,12 @@ class RocmAiterAllReduceFusionPass(VllmPatternMatcherPass):
             torch._inductor.pattern_matcher._seen_patterns.clear()
 
         self.disabled = False
+
+    def is_applicable_for_range(self, compile_range: Range) -> bool:
+        if self.disabled:
+            logger.warning_once("AllReduce fusion pass is disabled.")
+            return False
+        return bool(compile_range.end <= self.max_token_num)
 
     @VllmInductorPass.time_and_log
     def __call__(self, graph: fx.Graph):
