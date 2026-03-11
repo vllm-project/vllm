@@ -19,6 +19,12 @@ model_config = {
     ),
 }
 
+dense_embedding_sum = [
+    -0.7214539647102356,  # "What is the capital of France?"
+    -0.6926871538162231,  # "What is the capital of Germany?"
+    -0.7129564881324768,  # "What is the capital of Spain?"
+]
+
 
 def _float_close(expected: object, result: object):
     assert isinstance(expected, float) and isinstance(result, float), (
@@ -31,6 +37,12 @@ def _get_attr_or_val(obj: object | dict, key: str):
     if isinstance(obj, dict) and key in obj:
         return obj[key]
     return getattr(obj, key, None)
+
+
+def _check_dense_embedding(data, index=0):
+    assert _float_close(sum(data), dense_embedding_sum[index]), (
+        "dense-embedding result not match"
+    )
 
 
 def _check_sparse_embedding(data, check_tokens=False):
@@ -109,13 +121,18 @@ async def test_bge_m3_sparse_plugin_online(
     assert len(_get_attr_or_val(parsed_response, "data")) > 0
 
     data_entry = _get_attr_or_val(parsed_response, "data")[0]
-    assert _get_attr_or_val(data_entry, "object") == "sparse-embedding"
+    assert _get_attr_or_val(data_entry, "object") == "sparse&dense"
     assert _get_attr_or_val(data_entry, "sparse_embedding")
 
     # Verify sparse embedding format
     sparse_embedding = _get_attr_or_val(data_entry, "sparse_embedding")
     assert isinstance(sparse_embedding, list)
     _check_sparse_embedding(sparse_embedding, return_tokens)
+
+    # Verify dense embedding format
+    dense_embedding = _get_attr_or_val(data_entry, "dense_embedding")
+    assert isinstance(dense_embedding, list)
+    _check_dense_embedding(dense_embedding)
 
     # Verify usage information
     usage = _get_attr_or_val(parsed_response, "usage")
@@ -164,6 +181,9 @@ def test_bge_m3_sparse_plugin_offline(vllm_runner, return_tokens: bool):
         sparse_embedding = output.sparse_embedding
         assert isinstance(sparse_embedding, list)
         _check_sparse_embedding(sparse_embedding, return_tokens)
+        dense_embedding = output.dense_embedding
+        assert isinstance(dense_embedding, list)
+        _check_dense_embedding(dense_embedding)
 
     # Verify usage
     assert response.usage.prompt_tokens > 0
@@ -206,6 +226,9 @@ def test_bge_m3_sparse_plugin_offline_multiple_inputs(vllm_runner):
         # Each output should have sparse embeddings
         sparse_embedding = output.sparse_embedding
         assert isinstance(sparse_embedding, list)
+        dense_embedding = output.dense_embedding
+        assert isinstance(dense_embedding, list)
+        _check_dense_embedding(dense_embedding, i)
 
     # Verify usage
     assert response.usage.prompt_tokens > 0
