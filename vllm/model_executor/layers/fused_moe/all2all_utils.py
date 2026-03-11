@@ -21,8 +21,8 @@ from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEPrepareAndFinalize,
 )
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
-    MoEPrepareAndFinalizeNaiveEP,
-    MoEPrepareAndFinalizeNoEP,
+    make_moe_prepare_and_finalize_naive_dp_ep,
+    make_moe_prepare_and_finalize_no_dp_ep,
 )
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_deep_ep, has_mori
@@ -77,6 +77,7 @@ def maybe_make_prepare_finalize(
     quant_config: FusedMoEQuantConfig | None,
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     allow_new_interface: bool = False,
+    use_monolithic: bool = False,
 ) -> FusedMoEPrepareAndFinalize | None:
     # NOTE(rob): we are migrating each quant_method to hold the MK
     # in all cases. The allow_new_interface=False flag allow us to fall
@@ -102,14 +103,15 @@ def maybe_make_prepare_finalize(
                 "Detected DP deployment with no --enable-expert-parallel. "
                 "Falling back to AllGather+ReduceScatter dispatch/combine."
             )
-            return MoEPrepareAndFinalizeNaiveEP(
+            return make_moe_prepare_and_finalize_naive_dp_ep(
                 is_sequence_parallel=moe.moe_parallel_config.is_sequence_parallel,
                 num_dispatchers=(
                     get_ep_group().device_communicator.all2all_manager.world_size
                 ),
+                use_monolithic=use_monolithic,
             )
         else:
-            return MoEPrepareAndFinalizeNoEP()
+            return make_moe_prepare_and_finalize_no_dp_ep(use_monolithic)
 
     all2all_manager = get_ep_group().device_communicator.all2all_manager
     assert all2all_manager is not None
@@ -201,8 +203,9 @@ def maybe_make_prepare_finalize(
         )
 
     elif moe.use_naive_all2all_kernels and allow_new_interface:
-        prepare_finalize = MoEPrepareAndFinalizeNaiveEP(
-            is_sequence_parallel=(moe.moe_parallel_config.is_sequence_parallel),
+        prepare_finalize = make_moe_prepare_and_finalize_naive_dp_ep(
+            use_monolithic=use_monolithic,
+            is_sequence_parallel=moe.moe_parallel_config.is_sequence_parallel,
             num_dispatchers=all2all_manager.world_size,
         )
 
