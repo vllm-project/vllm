@@ -5,6 +5,8 @@ import argparse
 import regex as re
 import requests
 from datasets import load_dataset
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Evaluate GSM8K accuracy using vLLM chat completions."
@@ -24,7 +26,7 @@ def parse_args():
         default=None,
         help="Number of prompts to evaluate (default: all test set)",
     )
- parser.add_argument(
+    parser.add_argument(
         "--max-tokens",
         type=int,
         default=512,
@@ -41,6 +43,7 @@ def parse_args():
     )
     return parser.parse_args()
 
+
 def extract_answer(response_text):
     match = re.search(r"####\s*(-?\d+(?:\.\d+)?)", response_text)
     if match:
@@ -49,6 +52,7 @@ def extract_answer(response_text):
     if numbers:
         return numbers[-1]
     return None
+
 
 def main():
     args = parse_args()
@@ -64,7 +68,8 @@ def main():
     total = len(problems)
     correct = 0
     num_evaluated = 0
- print(f"Evaluating {total} examples...\n")
+
+    print(f"Evaluating {total} examples...\n")
 
     for idx, problem in enumerate(problems):
         question = problem["question"]
@@ -85,7 +90,9 @@ def main():
             response = requests.post(args.api_url, json=payload, timeout=60)
             response.raise_for_status()
             model_output = response.json()["choices"][0]["message"]["content"]
-            pred_answer = extract_answer(model_output)if pred_answer == gold_answer:
+            pred_answer = extract_answer(model_output)
+
+            if pred_answer == gold_answer:
                 correct += 1
             else:
                 print(f"Example {idx}:")
