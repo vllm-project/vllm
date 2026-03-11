@@ -8,6 +8,7 @@ from typing import Any
 import pytest
 import torch
 from datasets import load_dataset
+from tqdm import tqdm
 
 from tests.evals.gsm8k.gsm8k_eval import _build_gsm8k_prompts, evaluate_gsm8k_offline
 from tests.utils import (
@@ -1076,16 +1077,14 @@ def load_and_process_dataset(data_name: str):
     return dataset
 
 
-def test_dflash_correctness():
-    """
-    E2E test for DFlash (block diffusion) speculative decoding.
-    Runs acceptance rate validation on GSM8k, MT-Bench, and HumanEval comparing against
-    results from the paper. Checks GSM8k score to ensure output correctness.
-    """
+@pytest.fixture
+def dflash_config():
     target_model = "Qwen/Qwen3-8B"
     draft_model = "z-lab/Qwen3-8B-DFlash-b16"
 
-    spec_llm = LLM(
+    # Note, DFlash should enable both disable_padded_drafter_batch
+    # and parallel_drafting automatically on startup
+    return dict(
         model=target_model,
         trust_remote_code=True,
         speculative_config={
@@ -1103,46 +1102,92 @@ def test_dflash_correctness():
         attention_config={"backend": "FLASH_ATTN"},
     )
 
+
+def test_dflash_acceptance_rates(dflash_config):
+    """
+    E2E test for DFlash (block diffusion) speculative decoding.
+    Runs acceptance rate validation on GSM8k, MT-Bench, and HumanEval
+    comparing against baseline results from the paper (Table 1).
+    See https://github.com/z-lab/dflash/blob/main/benchmark_sglang.py for methodology.
+    """
+    spec_llm = LLM(**dflash_config)
+
+    max_prompts_per_dataset = 200  # mt-bench has 80, humaneval has 164, truncate gsm8k
+
     # All scores from Table 1 in https://arxiv.org/pdf/2602.06036
     expected_acceptance_lengths = {
         "mt-bench": 4.24,
-        "gsm8k": 6.54,
         "humaneval": 6.50,
+        "gsm8k": 6.54 * 0.95,  # runs with a subset of prompts so extra wide tol here
     }
 
-    prev_metrics = None
     tokenizer = spec_llm.get_tokenizer()
     for dataset_name, expected_len in expected_acceptance_lengths.items():
         dataset = load_and_process_dataset(dataset_name)
-        prompts = []
-        for item in dataset:
-            user_content = item["turns"][0]
+        prev_metrics = None
+        acceptance_lengths = []
+        for i in tqdm(
+            range(min(max_prompts_per_dataset, len(dataset))),
+            desc=f"Processing {dataset_name}",
+        ):
+            user_content = dataset[i]["turns"][0]
             prompt_text = tokenizer.apply_chat_template(
                 [{"role": "user", "content": user_content}],
                 tokenize=False,
                 add_generation_prompt=True,
                 enable_thinking=False,
             )
-            prompts.append(prompt_text)
 
-        # Temp=0, MaxTokens=2048 from the paper
-        spec_llm.generate(prompts, SamplingParams(temperature=0, max_tokens=2048))
+            # Temp=0, MaxTokens=2048 from the paper
+            spec_llm.generate(
+                [prompt_text],
+                SamplingParams(temperature=0, max_tokens=2048),
+                use_tqdm=False,
+            )
+            current_metrics = spec_llm.get_metrics()
+            acceptance_len = compute_acceptance_len(current_metrics, prev_metrics)
+            prev_metrics = current_metrics
+            acceptance_lengths.append(acceptance_len)
 
-        current_metrics = spec_llm.get_metrics()
-        acceptance_len = compute_acceptance_len(current_metrics, prev_metrics)
-        prev_metrics = current_metrics
+        mean_acceptance_length = sum(acceptance_lengths) / len(acceptance_lengths)
         print(
-            f"DFlash acceptance_len for {dataset_name}: {acceptance_len:.2f}"
+            f"DFlash acceptance_len for {dataset_name}: {mean_acceptance_length:.2f}"
             f" (expected {expected_len})"
         )
 
-        assert acceptance_len >= expected_len * 0.9, (
+        assert mean_acceptance_length >= expected_len * 0.9, (
             f"DFlash acceptance_len for {dataset_name} is below expected threshold:"
-            f"{acceptance_len:.2f} < {expected_len * 0.9:.2f}"
+            f"{mean_acceptance_length:.2f} < {mean_acceptance_length * 0.9:.2f}"
         )
+
+    del spec_llm
+    torch.accelerator.empty_cache()
+    cleanup_dist_env_and_memory()
+
+
+def test_dflash_correctness(dflash_config):
+    """
+    E2E test for DFlash (block diffusion) speculative decoding.
+    Ensures output correctness on GSM8k, with cudagraphs and batching on.
+    """
+    spec_llm = LLM(**dflash_config)
 
     # Evaluate GSM8k accuracy (Qwen3-8B ref: ~87-92% on GSM8k)
     evaluate_llm_for_gsm8k(spec_llm, expected_accuracy_threshold=0.8)
+
+    current_metrics = spec_llm.get_metrics()
+    acceptance_len = compute_acceptance_len(current_metrics)
+
+    # AR is thoroughly validated in test_dflash_acceptance_rates, in a manner consistent
+    # with the DFlash paper. However, that test measures AL per-request and thus runs
+    # with a batch size of 1. To ensure that AL does not collapse with large batch sizes
+    # we enforce a baseline on the AL over the full lm-eval-style GSM8k test.
+    expected_len = 3.5  # Measured is 3.9 to 4.0
+    print(f"DFlash GSM8k correctness test got AL {acceptance_len}")
+    assert acceptance_len >= expected_len, (
+        "DFlash correctness check failed with"
+        f" {acceptance_len=}, expected at least {expected_len}"
+    )
 
     del spec_llm
     torch.accelerator.empty_cache()
