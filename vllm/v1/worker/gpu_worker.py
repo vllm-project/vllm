@@ -203,21 +203,17 @@ class Worker(WorkerBase):
             self.model_runner.init_fp8_kv_scales()
 
     def _maybe_get_memory_pool_context(self, tag: str) -> AbstractContextManager:
-        if self.vllm_config.model_config.enable_sleep_mode:
-            from vllm.device_allocator.cumem import CuMemAllocator
-
-            allocator = CuMemAllocator.get_instance()
-            if tag == "weights":
-                assert allocator.get_current_usage() == 0, (
-                    "Sleep mode can only be used for one instance per process."
-                )
-            return allocator.use_memory_pool(tag=tag)
-        else:
+        if not self.vllm_config.model_config.enable_sleep_mode:
             return nullcontext()
 
-    def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int) -> None:
-        self.cache_config.num_gpu_blocks = num_gpu_blocks
-        self.cache_config.num_cpu_blocks = num_cpu_blocks
+        from vllm.device_allocator.cumem import CuMemAllocator
+
+        allocator = CuMemAllocator.get_instance()
+        if tag == "weights":
+            assert allocator.get_current_usage() == 0, (
+                "Sleep mode can only be used for one instance per process."
+            )
+        return allocator.use_memory_pool(tag=tag)
 
     @instrument(span_name="Init device")
     def init_device(self):
@@ -555,6 +551,14 @@ class Worker(WorkerBase):
                 self.model_runner.initialize_kv_cache(kv_cache_config)
         else:
             self.model_runner.initialize_kv_cache(kv_cache_config)
+
+        # Build KV-zero metadata outside the CuMem pool so the bookkeeping
+        # GPU tensors (seg_addrs, block-id buffers) use the standard PyTorch
+        # allocator and are not discarded during sleep/wake cycles.
+        if kv_cache_config.needs_kv_cache_zeroing and hasattr(
+            self.model_runner, "_init_kv_zero_meta"
+        ):
+            self.model_runner._init_kv_zero_meta()
 
     @instrument(span_name="Warmup (GPU)")
     def compile_or_warm_up_model(self) -> float:
