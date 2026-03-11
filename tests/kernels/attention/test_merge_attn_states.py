@@ -355,8 +355,16 @@ FP8_HEAD_SIZES = [64, 128, 256]
 @pytest.mark.parametrize("num_tokens", FP8_NUM_BATCH_TOKENS)
 @pytest.mark.parametrize("num_query_heads", FP8_NUM_QUERY_HEADS)
 @pytest.mark.parametrize("head_size", FP8_HEAD_SIZES)
+@pytest.mark.parametrize("output_scale_val", [0.5, 0.05])
+@pytest.mark.parametrize("use_output_lse", [True, False])
 @torch.inference_mode()
-def test_merge_attn_states_fp8(num_tokens: int, num_query_heads: int, head_size: int):
+def test_merge_attn_states_fp8(
+    num_tokens: int,
+    num_query_heads: int,
+    head_size: int,
+    output_scale_val: float,
+    use_output_lse: bool,
+):
     if not current_platform.is_cuda():
         pytest.skip("FP8 merge_attn_states test requires CUDA")
 
@@ -366,7 +374,8 @@ def test_merge_attn_states_fp8(num_tokens: int, num_query_heads: int, head_size:
     print(
         f"\n[FP8] NUM_TOKENS:{num_tokens}, NUM_HEADS:{num_query_heads}, "
         f"HEAD_SIZE:{head_size}, input_dtype:{input_dtype}, "
-        f"fp8_dtype:{fp8_dtype}"
+        f"fp8_dtype:{fp8_dtype}, output_scale:{output_scale_val}, "
+        f"use_output_lse:{use_output_lse}"
     )
 
     # Create inputs in BF16
@@ -393,10 +402,25 @@ def test_merge_attn_states_fp8(num_tokens: int, num_query_heads: int, head_size:
     suffix_lse[mask_suffix] = float("inf")
 
     # Output scale for static FP8 quantization
-    output_scale = torch.tensor([0.05], dtype=torch.float32, device="cuda")
+    output_scale = torch.tensor([output_scale_val], dtype=torch.float32, device="cuda")
+
+    # Optional output_lse
+    output_lse_ref = None
+    output_lse_cuda = None
+    output_lse_triton = None
+    if use_output_lse:
+        output_lse_ref = torch.zeros(
+            num_query_heads, num_tokens, dtype=torch.float32, device="cuda"
+        )
+        output_lse_cuda = torch.zeros(
+            num_query_heads, num_tokens, dtype=torch.float32, device="cuda"
+        )
+        output_lse_triton = torch.zeros(
+            num_query_heads, num_tokens, dtype=torch.float32, device="cuda"
+        )
 
     # 0. Compute reference using torch with output_scale
-    ref_fp8, _ = merge_attn_states_torch(
+    ref_fp8, output_lse_ref = merge_attn_states_torch(
         torch.zeros(
             (num_tokens, num_query_heads, head_size), dtype=fp8_dtype, device="cuda"
         ),
@@ -404,6 +428,7 @@ def test_merge_attn_states_fp8(num_tokens: int, num_query_heads: int, head_size:
         prefix_lse.clone(),
         suffix_output,
         suffix_lse.clone(),
+        output_lse=output_lse_ref,
         output_scale=output_scale,
     )
 
@@ -417,6 +442,7 @@ def test_merge_attn_states_fp8(num_tokens: int, num_query_heads: int, head_size:
         prefix_lse,
         suffix_output,
         suffix_lse,
+        output_lse=output_lse_cuda,
         output_scale=output_scale,
     )
 
@@ -430,10 +456,18 @@ def test_merge_attn_states_fp8(num_tokens: int, num_query_heads: int, head_size:
         prefix_lse,
         suffix_output,
         suffix_lse,
+        output_lse=output_lse_triton,
         output_scale=output_scale,
     )
 
-    # 3. Compare — FP8 has limited precision so use wider tolerances
+    # 3. Compare — use scale-dependent tolerances
+    # scale=0.5: values stay in low-magnitude FP8 range, finer granularity
+    # scale=0.05: values pushed to high-magnitude range, coarse quantization
+    if output_scale_val >= 0.5:
+        fp8_atol, fp8_rtol = 0.5, 0.05
+    else:
+        fp8_atol, fp8_rtol = 2.5, 0.15
+
     def diff(a: torch.Tensor, b: torch.Tensor):
         return torch.max(torch.abs(a.float() - b.float()))
 
@@ -441,17 +475,27 @@ def test_merge_attn_states_fp8(num_tokens: int, num_query_heads: int, head_size:
     print(f"  (Triton vs Ref) max diff: {diff(output_triton, ref_fp8)}")
     print(f"  (CUDA vs Triton) max diff: {diff(output_cuda, output_triton)}")
 
-    # FP8 E4M3 has coarse quantization levels (e.g. ..., 16, 18, 20, ...),
-    # so rounding boundary differences between GPU kernels and PyTorch
-    # reference can produce up to 1 quantization step difference (~2.0
-    # at larger magnitudes). Use tolerances that accommodate this.
     torch.testing.assert_close(
-        output_cuda.float(), ref_fp8.float(), atol=2.5, rtol=0.15
+        output_cuda.float(), ref_fp8.float(), atol=fp8_atol, rtol=fp8_rtol
     )
     torch.testing.assert_close(
-        output_triton.float(), ref_fp8.float(), atol=2.5, rtol=0.15
+        output_triton.float(), ref_fp8.float(), atol=fp8_atol, rtol=fp8_rtol
     )
     torch.testing.assert_close(
-        output_cuda.float(), output_triton.float(), atol=2.5, rtol=0.15
+        output_cuda.float(), output_triton.float(), atol=fp8_atol, rtol=fp8_rtol
     )
+
+    # 4. Compare output_lse if provided (float32, unaffected by FP8)
+    if use_output_lse:
+        cuda_lse_diff = diff(output_lse_cuda, output_lse_ref)
+        triton_lse_diff = diff(output_lse_triton, output_lse_ref)
+        print(f"  (CUDA LSE vs Ref)   max diff: {cuda_lse_diff}")
+        print(f"  (Triton LSE vs Ref) max diff: {triton_lse_diff}")
+        torch.testing.assert_close(
+            output_lse_cuda, output_lse_ref, atol=1e-3, rtol=1e-2
+        )
+        torch.testing.assert_close(
+            output_lse_triton, output_lse_ref, atol=1e-3, rtol=1e-2
+        )
+
     print("[FP8] All tests passed!")
