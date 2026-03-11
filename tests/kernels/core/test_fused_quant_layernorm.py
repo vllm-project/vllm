@@ -8,7 +8,7 @@ import pytest
 import torch
 
 import vllm._custom_ops as ops
-from tests.kernels.utils import opcheck
+from tests.kernels.utils import DEFAULT_OPCHECK_TEST_UTILS, opcheck
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
@@ -261,11 +261,62 @@ def test_rms_norm(
         assert torch.allclose(ref_residual, ops_residual)
 
     output = torch.empty_like(x, dtype=quant_dtype)
-    scales = torch.empty(
-        (x.numel() // x.shape[-1], 1), device=x.device, dtype=torch.float32
-    )
 
-    opcheck(
-        torch.ops._C.rms_norm_dynamic_per_token_quant,
-        (output, x, layer.weight, scales, 1e-5, scale_ub, residual),
-    )
+    if group_size is not None:
+        if tma_alignment == 0:
+            scales = torch.empty(
+                (
+                    x.shape[-1] // group_size[1],
+                    x.numel() // x.shape[-1],
+                ),
+                device=x.device,
+                dtype=torch.float32,
+            ).transpose(0, 1)
+        else:
+            m = x.shape[-2] if x.dim() > 1 else x.shape[0]
+            sf_k = x.shape[-1] // group_size[1]
+            tma_aligned_m = (m + tma_alignment - 1) // tma_alignment * tma_alignment
+            shape = (m, sf_k) if x.dim() == 2 else x.shape[:-2] + (m, sf_k)
+            stride = (
+                (tma_aligned_m, 1)
+                if x.dim() == 2
+                else (tma_aligned_m * sf_k, tma_aligned_m, 1)
+            )
+            scales = torch.empty_strided(
+                shape, stride, device=x.device, dtype=torch.float32
+            )
+
+        # Use DEFAULT_OPCHECK_TEST_UTILS (excludes test_aot_dispatch_dynamic)
+        # and also exclude test_schema because opcheck falsely reports the
+        # immutable weight tensor as mutated due to CUDA memory-allocator
+        # reuse when it internally clones the arguments.
+        # See https://github.com/vllm-project/vllm/issues/36688
+        opcheck_test_utils = tuple(
+            t for t in DEFAULT_OPCHECK_TEST_UTILS if t != "test_schema"
+        )
+        opcheck(
+            torch.ops._C.rms_norm_per_block_quant,
+            (
+                output,
+                x,
+                layer.weight,
+                scales,
+                EPS,
+                scale_ub,
+                residual,
+                group_size[1],
+                True,  # is_scale_transposed
+            ),
+            test_utils=opcheck_test_utils,
+        )
+    else:
+        scales = torch.empty(
+            (x.numel() // x.shape[-1], 1),
+            device=x.device,
+            dtype=torch.float32,
+        )
+
+        opcheck(
+            torch.ops._C.rms_norm_dynamic_per_token_quant,
+            (output, x, layer.weight, scales, EPS, scale_ub, residual),
+        )
