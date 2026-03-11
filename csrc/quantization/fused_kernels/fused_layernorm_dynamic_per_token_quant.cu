@@ -8,7 +8,8 @@
 
 namespace vllm {
 
-template <typename scalar_t, typename scalar_out_t, bool has_residual = false>
+template <typename scalar_t, typename scalar_out_t, bool has_residual = false,
+          bool is_gemma = false>
 __device__ void rms_norm_dynamic_per_token_quant_vec(
     scalar_out_t* __restrict__ out,       // [..., hidden_size]
     float* __restrict__ scales,           // [num_tokens]
@@ -24,27 +25,28 @@ __device__ void rms_norm_dynamic_per_token_quant_vec(
       &rms, input, hidden_size, var_epsilon, residual);
 
   // Compute scale
-  vllm::vectorized::compute_dynamic_per_token_scales<scalar_t, scalar_out_t,
-                                                     has_residual>(
+  vllm::vectorized::compute_dynamic_per_token_scales<
+      scalar_t, scalar_out_t, has_residual, false, 0, is_gemma>(
       &token_scale, scales, input, weight, rms, scale_ub, hidden_size,
       residual);
 
   // RMS Norm + Quant
   if constexpr (std::is_same_v<scalar_out_t, int8_t>) {
     token_scale = 1.0f / token_scale;
-    vllm::vectorized::norm_and_quant<scalar_t, scalar_out_t, true,
-                                     has_residual>(
+    vllm::vectorized::norm_and_quant<scalar_t, scalar_out_t, true, has_residual,
+                                     false, 0, is_gemma>(
         out, input, weight, rms, &token_scale, hidden_size, residual);
   } else {
     // FP8 - Do not invert token_scale for exact match with FBGemm
     vllm::vectorized::norm_and_quant<scalar_t, scalar_out_t, false,
-                                     has_residual>(
+                                     has_residual, false, 0, is_gemma>(
         out, input, weight, rms, &token_scale, hidden_size, residual);
   }
 }
 
 // RMS norm + quant kernel
-template <typename scalar_t, typename scalar_out_t, bool has_residual = false>
+template <typename scalar_t, typename scalar_out_t, bool has_residual = false,
+          bool is_gemma = false>
 __global__ void rms_norm_dynamic_per_token_quant_kernel(
     scalar_out_t* __restrict__ out,       // [..., hidden_size]
     float* __restrict__ scales,           // [num_tokens]
@@ -58,7 +60,7 @@ __global__ void rms_norm_dynamic_per_token_quant_kernel(
 
   if (can_vectorize) {
     return rms_norm_dynamic_per_token_quant_vec<scalar_t, scalar_out_t,
-                                                has_residual>(
+                                                has_residual, is_gemma>(
         out, scales, input, weight, scale_ub, var_epsilon, hidden_size,
         residual);
   }
@@ -70,25 +72,29 @@ __global__ void rms_norm_dynamic_per_token_quant_kernel(
   vllm::compute_rms<scalar_t, has_residual>(&rms, input, hidden_size,
                                             var_epsilon, residual);
   // Compute Scale
-  vllm::compute_dynamic_per_token_scales<scalar_t, scalar_out_t, has_residual>(
+  vllm::compute_dynamic_per_token_scales<scalar_t, scalar_out_t, has_residual,
+                                         false, is_gemma>(
       &token_scale, scales, input, weight, rms, scale_ub, hidden_size,
       residual);
 
   // RMS Norm + Quant
   if constexpr (std::is_same_v<scalar_out_t, int8_t>) {
     token_scale = 1.0f / token_scale;
-    vllm::norm_and_quant<scalar_t, scalar_out_t, true, has_residual>(
-        out, input, weight, rms, &token_scale, hidden_size, residual);
+    vllm::norm_and_quant<scalar_t, scalar_out_t, true, has_residual, false,
+                         is_gemma>(out, input, weight, rms, &token_scale,
+                                   hidden_size, residual);
   } else {
     // FP8 - Do not invert s_token_scale for exact match with FBGemm
-    vllm::norm_and_quant<scalar_t, scalar_out_t, false, has_residual>(
-        out, input, weight, rms, &token_scale, hidden_size, residual);
+    vllm::norm_and_quant<scalar_t, scalar_out_t, false, has_residual, false,
+                         is_gemma>(out, input, weight, rms, &token_scale,
+                                   hidden_size, residual);
   }
 }
 
 // RMS norm + quant kernel
 template <typename scalar_t, typename scalar_out_t, bool has_residual = false,
-          bool is_scale_transposed = false, int32_t group_size = 0>
+          bool is_scale_transposed = false, int32_t group_size = 0,
+          bool is_gemma = false>
 __global__ void rms_norm_per_block_quant_kernel(
     scalar_out_t* __restrict__ out,  // [..., hidden_size]
     float* __restrict__ scales,      // [num_tokens, hidden_size / group_size]
@@ -107,9 +113,9 @@ __global__ void rms_norm_per_block_quant_kernel(
   // Compute Scale
   // Always able to vectorize due to constraints on hidden_size and group_size
   vllm::vectorized::compute_dynamic_per_token_scales<
-      scalar_t, scalar_out_t, has_residual, is_scale_transposed, group_size>(
-      nullptr, scales, input, weight, rms, scale_ub, hidden_size, residual,
-      outer_scale_stride);
+      scalar_t, scalar_out_t, has_residual, is_scale_transposed, group_size,
+      is_gemma>(nullptr, scales, input, weight, rms, scale_ub, hidden_size,
+                residual, outer_scale_stride);
 
   // RMS Norm + Quant
   // Always able to vectorize due to constraints on hidden_size
@@ -119,7 +125,7 @@ __global__ void rms_norm_per_block_quant_kernel(
   // overhead.
   vllm::vectorized::norm_and_quant<
       scalar_t, scalar_out_t, std::is_same_v<scalar_out_t, int8_t>,
-      has_residual, is_scale_transposed, group_size>(
+      has_residual, is_scale_transposed, group_size, is_gemma>(
       out, input, weight, rms, scales, hidden_size, residual,
       outer_scale_stride);
 }
@@ -127,7 +133,7 @@ __global__ void rms_norm_per_block_quant_kernel(
 }  // namespace vllm
 
 // Residual add + RMS norm + dynamic per token
-template <typename scalar_in_t>
+template <typename scalar_in_t, bool is_gemma = false>
 void rms_norm_dynamic_per_token_quant_dispatch(
     torch::Tensor& out,           // [..., hidden_size]
     torch::Tensor const& input,   // [..., hidden_size]
@@ -148,7 +154,7 @@ void rms_norm_dynamic_per_token_quant_dispatch(
     VLLM_DISPATCH_QUANT_TYPES(
         out.scalar_type(), "rms_norm_dynamic_per_token_quant_kernel", [&] {
           vllm::rms_norm_dynamic_per_token_quant_kernel<scalar_in_t, scalar_t,
-                                                        has_residual>
+                                                        has_residual, is_gemma>
               <<<grid, block, 0, stream>>>(
                   out.data_ptr<scalar_t>(), scales.data_ptr<float>(),
                   input.data_ptr<scalar_in_t>(), weight.data_ptr<scalar_in_t>(),
@@ -159,12 +165,11 @@ void rms_norm_dynamic_per_token_quant_dispatch(
   });
 }
 
-void rms_norm_dynamic_per_token_quant(
-    torch::Tensor& out,           // [..., hidden_size]
-    torch::Tensor const& input,   // [..., hidden_size]
-    torch::Tensor const& weight,  // [hidden_size]
-    torch::Tensor& scales,        // [num_tokens]
-    double const var_epsilon,     // Variance epsilon used in norm calculation
+// Shared implementation for rms_norm_dynamic_per_token_quant
+template <bool is_gemma>
+static void rms_norm_dynamic_per_token_quant_impl(
+    torch::Tensor& out, torch::Tensor const& input, torch::Tensor const& weight,
+    torch::Tensor& scales, double const var_epsilon,
     std::optional<at::Tensor> scale_ub, std::optional<at::Tensor> residual) {
   static c10::ScalarType kFp8Type = is_fp8_ocp()
                                         ? c10::ScalarType::Float8_e4m3fn
@@ -183,12 +188,24 @@ void rms_norm_dynamic_per_token_quant(
 
   VLLM_DISPATCH_FLOATING_TYPES(
       input.scalar_type(), "rms_norm_dynamic_per_token_quant_dispatch", [&] {
-        rms_norm_dynamic_per_token_quant_dispatch<scalar_t>(
+        rms_norm_dynamic_per_token_quant_dispatch<scalar_t, is_gemma>(
             out, input, weight, scales, var_epsilon, scale_ub, residual);
       });
 }
 
+void rms_norm_dynamic_per_token_quant(
+    torch::Tensor& out,           // [..., hidden_size]
+    torch::Tensor const& input,   // [..., hidden_size]
+    torch::Tensor const& weight,  // [hidden_size]
+    torch::Tensor& scales,        // [num_tokens]
+    double const var_epsilon,     // Variance epsilon used in norm calculation
+    std::optional<at::Tensor> scale_ub, std::optional<at::Tensor> residual) {
+  rms_norm_dynamic_per_token_quant_impl</*is_gemma=*/false>(
+      out, input, weight, scales, var_epsilon, scale_ub, residual);
+}
+
 // Residual add + RMS norm + dynamic per token
+template <bool is_gemma = false>
 void rms_norm_per_block_quant_dispatch(
     torch::Tensor& out,           // [..., hidden_size]
     torch::Tensor const& input,   // [..., hidden_size]
@@ -216,19 +233,18 @@ void rms_norm_per_block_quant_dispatch(
             VLLM_DISPATCH_BOOL(is_scale_transposed, transpose_scale, [&] {
               VLLM_DISPATCH_QUANT_TYPES(
                   out.scalar_type(), "rms_norm_per_block_quant_kernel", [&] {
-                    vllm::rms_norm_per_block_quant_kernel<scalar_in_t, scalar_t,
-                                                          has_residual,
-                                                          transpose_scale, gs>
-                        <<<grid, block, 0, stream>>>(
-                            out.data_ptr<scalar_t>(), scales.data_ptr<float>(),
-                            input.data_ptr<scalar_in_t>(),
-                            weight.data_ptr<scalar_in_t>(),
-                            scale_ub.has_value() ? scale_ub->data_ptr<float>()
-                                                 : nullptr,
-                            var_epsilon, hidden_size,
-                            has_residual ? residual->data_ptr<scalar_in_t>()
-                                         : nullptr,
-                            scales.stride(1));
+                    vllm::rms_norm_per_block_quant_kernel<
+                        scalar_in_t, scalar_t, has_residual, transpose_scale,
+                        gs, is_gemma><<<grid, block, 0, stream>>>(
+                        out.data_ptr<scalar_t>(), scales.data_ptr<float>(),
+                        input.data_ptr<scalar_in_t>(),
+                        weight.data_ptr<scalar_in_t>(),
+                        scale_ub.has_value() ? scale_ub->data_ptr<float>()
+                                             : nullptr,
+                        var_epsilon, hidden_size,
+                        has_residual ? residual->data_ptr<scalar_in_t>()
+                                     : nullptr,
+                        scales.stride(1));
                   });
             });
           });
@@ -236,12 +252,14 @@ void rms_norm_per_block_quant_dispatch(
       });
 }
 
-void rms_norm_per_block_quant(torch::Tensor& out, torch::Tensor const& input,
-                              torch::Tensor const& weight,
-                              torch::Tensor& scales, double const var_epsilon,
-                              std::optional<torch::Tensor> scale_ub,
-                              std::optional<torch::Tensor> residual,
-                              int64_t group_size, bool is_scale_transposed) {
+// Shared implementation for rms_norm_per_block_quant
+template <bool is_gemma>
+static void rms_norm_per_block_quant_impl(
+    torch::Tensor& out, torch::Tensor const& input, torch::Tensor const& weight,
+    torch::Tensor& scales, double const var_epsilon,
+    std::optional<torch::Tensor> scale_ub,
+    std::optional<torch::Tensor> residual, int64_t group_size,
+    bool is_scale_transposed) {
   static c10::ScalarType kFp8Type = is_fp8_ocp()
                                         ? c10::ScalarType::Float8_e4m3fn
                                         : c10::ScalarType::Float8_e4m3fnuz;
@@ -265,7 +283,38 @@ void rms_norm_per_block_quant(torch::Tensor& out, torch::Tensor const& input,
                 "Outer scale stride must be 1 when scales are not transposed");
   }
 
-  rms_norm_per_block_quant_dispatch(out, input, weight, scales, group_size,
-                                    var_epsilon, scale_ub, residual,
-                                    is_scale_transposed);
+  rms_norm_per_block_quant_dispatch<is_gemma>(out, input, weight, scales,
+                                              group_size, var_epsilon, scale_ub,
+                                              residual, is_scale_transposed);
+}
+
+void rms_norm_per_block_quant(torch::Tensor& out, torch::Tensor const& input,
+                              torch::Tensor const& weight,
+                              torch::Tensor& scales, double const var_epsilon,
+                              std::optional<torch::Tensor> scale_ub,
+                              std::optional<torch::Tensor> residual,
+                              int64_t group_size, bool is_scale_transposed) {
+  rms_norm_per_block_quant_impl</*is_gemma=*/false>(
+      out, input, weight, scales, var_epsilon, scale_ub, residual, group_size,
+      is_scale_transposed);
+}
+
+// Gemma variants: use weight as (1 + weight) instead of weight
+void gemma_rms_norm_dynamic_per_token_quant(
+    torch::Tensor& out, torch::Tensor const& input, torch::Tensor const& weight,
+    torch::Tensor& scales, double const var_epsilon,
+    std::optional<at::Tensor> scale_ub, std::optional<at::Tensor> residual) {
+  rms_norm_dynamic_per_token_quant_impl</*is_gemma=*/true>(
+      out, input, weight, scales, var_epsilon, scale_ub, residual);
+}
+
+void gemma_rms_norm_per_block_quant(
+    torch::Tensor& out, torch::Tensor const& input, torch::Tensor const& weight,
+    torch::Tensor& scales, double const var_epsilon,
+    std::optional<torch::Tensor> scale_ub,
+    std::optional<torch::Tensor> residual, int64_t group_size,
+    bool is_scale_transposed) {
+  rms_norm_per_block_quant_impl</*is_gemma=*/true>(
+      out, input, weight, scales, var_epsilon, scale_ub, residual, group_size,
+      is_scale_transposed);
 }

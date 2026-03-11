@@ -10,7 +10,7 @@
 namespace vllm {
 
 // TODO(woosuk): Further optimize this kernel.
-template <typename scalar_t, int VEC_SIZE, int NUM_DIMS>
+template <typename scalar_t, int VEC_SIZE, int NUM_DIMS, bool is_gemma = false>
 __global__ void rms_norm_kernel(
     scalar_t* __restrict__ out,           // [..., hidden_size]
     const scalar_t* __restrict__ input,   // [..., hidden_size]
@@ -77,7 +77,11 @@ __global__ void rms_norm_kernel(
 #pragma unroll
     for (int j = 0; j < VEC_SIZE; j++) {
       float x = static_cast<float>(src1.val[j]);
-      dst.val[j] = ((scalar_t)(x * s_variance)) * src2.val[j];
+      float w = static_cast<float>(src2.val[j]);
+      if constexpr (is_gemma) {
+        w = 1.0f + w;
+      }
+      dst.val[j] = ((scalar_t)(x * s_variance)) * static_cast<scalar_t>(w);
     }
     v_out[i] = dst;
   }
@@ -87,7 +91,7 @@ __global__ void rms_norm_kernel(
    Additional optimizations we can make in this case are
    packed and vectorized operations, which help with the
    memory latency bottleneck. */
-template <typename scalar_t, int width>
+template <typename scalar_t, int width, bool is_gemma = false>
 __global__ std::enable_if_t<(width > 0) && _typeConvert<scalar_t>::exists>
 fused_add_rms_norm_kernel(
     scalar_t* __restrict__ input,  // [..., hidden_size]
@@ -136,7 +140,19 @@ fused_add_rms_norm_kernel(
     int64_t strided_id = blockIdx.x * vec_input_stride + idx;
     _f16Vec<scalar_t, width> temp = residual_v[id];
     temp *= s_variance;
-    temp *= weight_v[idx];
+    if constexpr (is_gemma) {
+      // For Gemma: multiply by (1 + weight)
+      using Converter = _typeConvert<scalar_t>;
+      _f16Vec<scalar_t, width> one_plus_w = weight_v[idx];
+#pragma unroll
+      for (int i = 0; i < width; ++i) {
+        one_plus_w.data[i] =
+            Converter::convert(1.0f + Converter::convert(one_plus_w.data[i]));
+      }
+      temp *= one_plus_w;
+    } else {
+      temp *= weight_v[idx];
+    }
     input_v[strided_id] = temp;
   }
 }
@@ -144,7 +160,7 @@ fused_add_rms_norm_kernel(
 /* Generic fused_add_rms_norm_kernel
    The width field is not used here but necessary for other specializations.
  */
-template <typename scalar_t, int width>
+template <typename scalar_t, int width, bool is_gemma = false>
 __global__ std::enable_if_t<(width == 0) || !_typeConvert<scalar_t>::exists>
 fused_add_rms_norm_kernel(
     scalar_t* __restrict__ input,  // [..., hidden_size]
@@ -174,17 +190,22 @@ fused_add_rms_norm_kernel(
 
   for (int idx = threadIdx.x; idx < hidden_size; idx += blockDim.x) {
     float x = (float)residual[blockIdx.x * hidden_size + idx];
+    float w = (float)weight[idx];
+    if constexpr (is_gemma) {
+      w = 1.0f + w;
+    }
     input[blockIdx.x * input_stride + idx] =
-        ((scalar_t)(x * s_variance)) * weight[idx];
+        ((scalar_t)(x * s_variance)) * ((scalar_t)w);
   }
 }
 
 }  // namespace vllm
 
-void rms_norm(torch::Tensor& out,     // [..., hidden_size]
-              torch::Tensor& input,   // [..., hidden_size]
-              torch::Tensor& weight,  // [hidden_size]
-              double epsilon) {
+template <bool is_gemma = false>
+static void rms_norm_impl(torch::Tensor& out,     // [..., hidden_size]
+                          torch::Tensor& input,   // [..., hidden_size]
+                          torch::Tensor& weight,  // [hidden_size]
+                          double epsilon) {
   TORCH_CHECK(out.is_contiguous());
   if (input.stride(-1) != 1) {
     input = input.contiguous();
@@ -215,7 +236,7 @@ void rms_norm(torch::Tensor& out,     // [..., hidden_size]
           std::min(hidden_size / calculated_vec_size, max_block_size);
       dim3 block(block_size);
       VLLM_DISPATCH_VEC_SIZE(calculated_vec_size, [&] {
-        vllm::rms_norm_kernel<scalar_t, vec_size, tensor_rank>
+        vllm::rms_norm_kernel<scalar_t, vec_size, tensor_rank, is_gemma>
             <<<grid, block, 0, stream>>>(
                 out.data_ptr<scalar_t>(), input.data_ptr<scalar_t>(),
                 input_stride_d2, input_stride_d3, input_stride_d4,
@@ -226,20 +247,36 @@ void rms_norm(torch::Tensor& out,     // [..., hidden_size]
   });
 }
 
-#define LAUNCH_FUSED_ADD_RMS_NORM(width)                                    \
+void rms_norm(torch::Tensor& out,     // [..., hidden_size]
+              torch::Tensor& input,   // [..., hidden_size]
+              torch::Tensor& weight,  // [hidden_size]
+              double epsilon) {
+  rms_norm_impl<false>(out, input, weight, epsilon);
+}
+
+void gemma_rms_norm(torch::Tensor& out,     // [..., hidden_size]
+                    torch::Tensor& input,   // [..., hidden_size]
+                    torch::Tensor& weight,  // [hidden_size]
+                    double epsilon) {
+  rms_norm_impl<true>(out, input, weight, epsilon);
+}
+
+#define LAUNCH_FUSED_ADD_RMS_NORM(width, _is_gemma)                         \
   VLLM_DISPATCH_FLOATING_TYPES(                                             \
       input.scalar_type(), "fused_add_rms_norm_kernel", [&] {               \
-        vllm::fused_add_rms_norm_kernel<scalar_t, width>                    \
+        vllm::fused_add_rms_norm_kernel<scalar_t, width, _is_gemma>         \
             <<<grid, block, 0, stream>>>(                                   \
                 input.data_ptr<scalar_t>(), input_stride,                   \
                 residual.data_ptr<scalar_t>(), weight.data_ptr<scalar_t>(), \
                 epsilon, num_tokens, hidden_size);                          \
       });
 
-void fused_add_rms_norm(torch::Tensor& input,     // [..., hidden_size]
-                        torch::Tensor& residual,  // [..., hidden_size]
-                        torch::Tensor& weight,    // [hidden_size]
-                        double epsilon) {
+template <bool is_gemma = false>
+static void fused_add_rms_norm_impl(
+    torch::Tensor& input,     // [..., hidden_size]
+    torch::Tensor& residual,  // [..., hidden_size]
+    torch::Tensor& weight,    // [hidden_size]
+    double epsilon) {
   TORCH_CHECK(weight.scalar_type() == input.scalar_type());
   TORCH_CHECK(input.scalar_type() == residual.scalar_type());
   TORCH_CHECK(residual.is_contiguous());
@@ -279,8 +316,22 @@ void fused_add_rms_norm(torch::Tensor& input,     // [..., hidden_size]
   bool batch_invariant_launch = vllm::vllm_is_batch_invariant();
   if (ptrs_are_aligned && offsets_are_multiple_of_vector_width &&
       !batch_invariant_launch) {
-    LAUNCH_FUSED_ADD_RMS_NORM(8);
+    LAUNCH_FUSED_ADD_RMS_NORM(8, is_gemma);
   } else {
-    LAUNCH_FUSED_ADD_RMS_NORM(0);
+    LAUNCH_FUSED_ADD_RMS_NORM(0, is_gemma);
   }
+}
+
+void fused_add_rms_norm(torch::Tensor& input,     // [..., hidden_size]
+                        torch::Tensor& residual,  // [..., hidden_size]
+                        torch::Tensor& weight,    // [hidden_size]
+                        double epsilon) {
+  fused_add_rms_norm_impl<false>(input, residual, weight, epsilon);
+}
+
+void gemma_fused_add_rms_norm(torch::Tensor& input,     // [..., hidden_size]
+                              torch::Tensor& residual,  // [..., hidden_size]
+                              torch::Tensor& weight,    // [hidden_size]
+                              double epsilon) {
+  fused_add_rms_norm_impl<true>(input, residual, weight, epsilon);
 }

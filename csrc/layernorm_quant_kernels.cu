@@ -18,7 +18,8 @@
 namespace vllm {
 
 // TODO(woosuk): Further optimize this kernel.
-template <typename scalar_t, typename fp8_type, int VEC_SIZE>
+template <typename scalar_t, typename fp8_type, int VEC_SIZE,
+          bool is_gemma = false>
 __global__ void rms_norm_static_fp8_quant_kernel(
     fp8_type* __restrict__ out,          // [..., hidden_size]
     const scalar_t* __restrict__ input,  // [..., hidden_size]
@@ -65,7 +66,11 @@ __global__ void rms_norm_static_fp8_quant_kernel(
 #pragma unroll
     for (int j = 0; j < VEC_SIZE; j++) {
       float x = static_cast<float>(src1.val[j]);
-      float const out_norm = ((scalar_t)(x * s_variance)) * src2.val[j];
+      float w = static_cast<float>(src2.val[j]);
+      if constexpr (is_gemma) {
+        w = 1.0f + w;
+      }
+      float const out_norm = ((scalar_t)(x * s_variance)) * w;
       out[blockIdx.x * hidden_size + idx * VEC_SIZE + j] =
           scaled_fp8_conversion<true, fp8_type>(out_norm, scale_inv);
     }
@@ -76,7 +81,8 @@ __global__ void rms_norm_static_fp8_quant_kernel(
    Additional optimizations we can make in this case are
    packed and vectorized operations, which help with the
    memory latency bottleneck. */
-template <typename scalar_t, int width, typename fp8_type>
+template <typename scalar_t, int width, typename fp8_type,
+          bool is_gemma = false>
 __global__ std::enable_if_t<(width > 0) && _typeConvert<scalar_t>::exists>
 fused_add_rms_norm_static_fp8_quant_kernel(
     fp8_type* __restrict__ out,    // [..., hidden_size]
@@ -129,11 +135,14 @@ fused_add_rms_norm_static_fp8_quant_kernel(
     int id = blockIdx.x * vec_hidden_size + idx;
     _f16Vec<scalar_t, width> temp = residual_v[id];
     temp *= s_variance;
-    temp *= weight_v[idx];
 #pragma unroll
     for (int i = 0; i < width; ++i) {
-      out[id * width + i] =
-          scaled_fp8_conversion<true, fp8_type>(float(temp.data[i]), scale_inv);
+      float w = static_cast<float>(weight_v[idx].data[i]);
+      if constexpr (is_gemma) {
+        w = 1.0f + w;
+      }
+      out[id * width + i] = scaled_fp8_conversion<true, fp8_type>(
+          float(temp.data[i]) * w, scale_inv);
     }
   }
 }
@@ -141,7 +150,8 @@ fused_add_rms_norm_static_fp8_quant_kernel(
 /* Generic fused_add_rms_norm_kernel
    The width field is not used here but necessary for other specializations.
  */
-template <typename scalar_t, int width, typename fp8_type>
+template <typename scalar_t, int width, typename fp8_type,
+          bool is_gemma = false>
 __global__ std::enable_if_t<(width == 0) || !_typeConvert<scalar_t>::exists>
 fused_add_rms_norm_static_fp8_quant_kernel(
     fp8_type* __restrict__ out,    // [..., hidden_size]
@@ -176,7 +186,11 @@ fused_add_rms_norm_static_fp8_quant_kernel(
 
   for (int idx = threadIdx.x; idx < hidden_size; idx += blockDim.x) {
     float x = (float)residual[blockIdx.x * hidden_size + idx];
-    float const out_norm = ((scalar_t)(x * s_variance)) * weight[idx];
+    float w = static_cast<float>(weight[idx]);
+    if constexpr (is_gemma) {
+      w = 1.0f + w;
+    }
+    float const out_norm = ((scalar_t)(x * s_variance)) * w;
     out[blockIdx.x * hidden_size + idx] =
         scaled_fp8_conversion<true, fp8_type>(out_norm, scale_inv);
   }
@@ -184,11 +198,13 @@ fused_add_rms_norm_static_fp8_quant_kernel(
 
 }  // namespace vllm
 
-void rms_norm_static_fp8_quant(torch::Tensor& out,     // [..., hidden_size]
-                               torch::Tensor& input,   // [..., hidden_size]
-                               torch::Tensor& weight,  // [hidden_size]
-                               torch::Tensor& scale,   // [1]
-                               double epsilon) {
+template <bool is_gemma = false>
+static void rms_norm_static_fp8_quant_impl(
+    torch::Tensor& out,     // [..., hidden_size]
+    torch::Tensor& input,   // [..., hidden_size]
+    torch::Tensor& weight,  // [hidden_size]
+    torch::Tensor& scale,   // [1]
+    double epsilon) {
   TORCH_CHECK(out.is_contiguous());
   int hidden_size = input.size(-1);
   int input_stride = input.stride(-2);
@@ -210,7 +226,7 @@ void rms_norm_static_fp8_quant(torch::Tensor& out,     // [..., hidden_size]
               dim3 block(block_size);
               VLLM_DISPATCH_VEC_SIZE(calculated_vec_size, [&] {
                 vllm::rms_norm_static_fp8_quant_kernel<scalar_t, fp8_t,
-                                                       vec_size>
+                                                       vec_size, is_gemma>
                     <<<grid, block, 0, stream>>>(
                         out.data_ptr<fp8_t>(), input.data_ptr<scalar_t>(),
                         input_stride, weight.data_ptr<scalar_t>(),
@@ -221,21 +237,22 @@ void rms_norm_static_fp8_quant(torch::Tensor& out,     // [..., hidden_size]
       });
 }
 
-#define LAUNCH_FUSED_ADD_RMS_NORM(width)                                     \
-  VLLM_DISPATCH_FLOATING_TYPES(                                              \
-      input.scalar_type(), "fused_add_rms_norm_kernel_scalar_type", [&] {    \
-        VLLM_DISPATCH_FP8_TYPES(                                             \
-            out.scalar_type(), "fused_add_rms_norm_kernel_fp8_type", [&] {   \
-              vllm::fused_add_rms_norm_static_fp8_quant_kernel<scalar_t,     \
-                                                               width, fp8_t> \
-                  <<<grid, block, 0, stream>>>(                              \
-                      out.data_ptr<fp8_t>(), input.data_ptr<scalar_t>(),     \
-                      input_stride, residual.data_ptr<scalar_t>(),           \
-                      weight.data_ptr<scalar_t>(), scale.data_ptr<float>(),  \
-                      epsilon, num_tokens, hidden_size);                     \
-            });                                                              \
+#define LAUNCH_FUSED_ADD_RMS_NORM(width, _is_gemma)                         \
+  VLLM_DISPATCH_FLOATING_TYPES(                                             \
+      input.scalar_type(), "fused_add_rms_norm_kernel_scalar_type", [&] {   \
+        VLLM_DISPATCH_FP8_TYPES(                                            \
+            out.scalar_type(), "fused_add_rms_norm_kernel_fp8_type", [&] {  \
+              vllm::fused_add_rms_norm_static_fp8_quant_kernel<             \
+                  scalar_t, width, fp8_t, _is_gemma>                        \
+                  <<<grid, block, 0, stream>>>(                             \
+                      out.data_ptr<fp8_t>(), input.data_ptr<scalar_t>(),    \
+                      input_stride, residual.data_ptr<scalar_t>(),          \
+                      weight.data_ptr<scalar_t>(), scale.data_ptr<float>(), \
+                      epsilon, num_tokens, hidden_size);                    \
+            });                                                             \
       });
-void fused_add_rms_norm_static_fp8_quant(
+template <bool is_gemma = false>
+static void fused_add_rms_norm_static_fp8_quant_impl(
     torch::Tensor& out,       // [..., hidden_size],
     torch::Tensor& input,     // [..., hidden_size]
     torch::Tensor& residual,  // [..., hidden_size]
@@ -274,8 +291,38 @@ void fused_add_rms_norm_static_fp8_quant(
   bool batch_invariant_launch = vllm::vllm_is_batch_invariant();
   if (ptrs_are_aligned && hidden_size % 8 == 0 && input_stride % 8 == 0 &&
       !batch_invariant_launch) {
-    LAUNCH_FUSED_ADD_RMS_NORM(8);
+    LAUNCH_FUSED_ADD_RMS_NORM(8, is_gemma);
   } else {
-    LAUNCH_FUSED_ADD_RMS_NORM(0);
+    LAUNCH_FUSED_ADD_RMS_NORM(0, is_gemma);
   }
+}
+
+// Non-Gemma public API (delegates to impl)
+void rms_norm_static_fp8_quant(torch::Tensor& out, torch::Tensor& input,
+                               torch::Tensor& weight, torch::Tensor& scale,
+                               double epsilon) {
+  rms_norm_static_fp8_quant_impl<false>(out, input, weight, scale, epsilon);
+}
+
+void fused_add_rms_norm_static_fp8_quant(torch::Tensor& out,
+                                         torch::Tensor& input,
+                                         torch::Tensor& residual,
+                                         torch::Tensor& weight,
+                                         torch::Tensor& scale, double epsilon) {
+  fused_add_rms_norm_static_fp8_quant_impl<false>(out, input, residual, weight,
+                                                  scale, epsilon);
+}
+
+// Gemma public API (delegates to impl with is_gemma=true)
+void gemma_rms_norm_static_fp8_quant(torch::Tensor& out, torch::Tensor& input,
+                                     torch::Tensor& weight,
+                                     torch::Tensor& scale, double epsilon) {
+  rms_norm_static_fp8_quant_impl<true>(out, input, weight, scale, epsilon);
+}
+
+void gemma_fused_add_rms_norm_static_fp8_quant(
+    torch::Tensor& out, torch::Tensor& input, torch::Tensor& residual,
+    torch::Tensor& weight, torch::Tensor& scale, double epsilon) {
+  fused_add_rms_norm_static_fp8_quant_impl<true>(out, input, residual, weight,
+                                                 scale, epsilon);
 }

@@ -13,6 +13,16 @@
 
 namespace vllm {
 
+// Helper to apply RMS norm weight, supporting Gemma's (1 + w) variant
+template <bool is_gemma, typename scalar_t>
+__device__ __forceinline__ scalar_t effective_weight(scalar_t w) {
+  if constexpr (is_gemma) {
+    return static_cast<scalar_t>(1.0f + static_cast<float>(w));
+  } else {
+    return w;
+  }
+}
+
 // has_residual must be true, if residual is not a nullptr
 template <typename scalar_t, bool has_residual = false>
 __device__ void compute_rms(float* rms, scalar_t const* __restrict__ input,
@@ -68,7 +78,7 @@ __device__ float warpReduceMaxSpecialized(volatile float* val, int64_t tid,
 }
 
 template <typename scalar_t, typename scalar_out_t, bool has_residual = false,
-          bool is_scale_transposed = false>
+          bool is_scale_transposed = false, bool is_gemma = false>
 __device__ void compute_dynamic_per_token_scales(
     float* __restrict__ token_scale, float* __restrict__ all_token_scales,
     scalar_t const* __restrict__ input, scalar_t const* __restrict__ weight,
@@ -93,7 +103,8 @@ __device__ void compute_dynamic_per_token_scales(
       if constexpr (has_residual) {
         x += static_cast<float>(residual[token_offset + i]);
       }
-      x = static_cast<float>(static_cast<scalar_t>(x * rms) * weight[i]);
+      x = static_cast<float>(static_cast<scalar_t>(x * rms) *
+                             effective_weight<is_gemma>(weight[i]));
       block_absmax_val_maybe = fmaxf(block_absmax_val_maybe, fabsf(x));
     }
     s_max_vals[threadIdx.x] = block_absmax_val_maybe;
@@ -152,7 +163,8 @@ __device__ void compute_dynamic_per_token_scales(
         x += static_cast<float>(residual[token_offset + i]);
       }
 
-      x = static_cast<float>(static_cast<scalar_t>(x * rms) * weight[i]);
+      x = static_cast<float>(static_cast<scalar_t>(x * rms) *
+                             effective_weight<is_gemma>(weight[i]));
       block_absmax_val_maybe = fmaxf(block_absmax_val_maybe, fabsf(x));
     }
     using BlockReduce = cub::BlockReduce<float, 1024>;
@@ -181,7 +193,8 @@ __device__ void compute_dynamic_per_token_scales(
 }
 
 template <typename scalar_t, typename scalar_out_t, bool is_scale_inverted,
-          bool has_residual = false, bool is_scale_transposed = false>
+          bool has_residual = false, bool is_scale_transposed = false,
+          bool is_gemma = false>
 __device__ void norm_and_quant(
     scalar_out_t* __restrict__ output, scalar_t const* __restrict__ input,
     scalar_t const* __restrict__ weight, float const rms, float* const scale,
@@ -196,7 +209,8 @@ __device__ void norm_and_quant(
       residual[token_offset + i] = static_cast<scalar_t>(x);
     }
     // Norm
-    x = static_cast<float>(static_cast<scalar_t>(x * rms) * weight[i]);
+    x = static_cast<float>(static_cast<scalar_t>(x * rms) *
+                           effective_weight<is_gemma>(weight[i]));
     // Quant
     // If groupwise is_scale_inverted is true, so we invert the scale here.
     int64_t scale_idx = 0;
@@ -283,7 +297,8 @@ __device__ void compute_rms(float* rms, scalar_t const* __restrict__ input,
 // Vectorized version of vllm::compute_dynamic_per_token_scales
 // hidden_size must be a multiple of 4
 template <typename scalar_t, typename scalar_out_t, bool has_residual = false,
-          bool is_scale_transposed = false, int32_t group_size = 0>
+          bool is_scale_transposed = false, int32_t group_size = 0,
+          bool is_gemma = false>
 __device__ void compute_dynamic_per_token_scales(
     float* __restrict__ token_scale, float* __restrict__ all_token_scales,
     scalar_t const* __restrict__ input, scalar_t const* __restrict__ weight,
@@ -341,9 +356,9 @@ __device__ void compute_dynamic_per_token_scales(
 
 #pragma unroll
       for (int j = 0; j < VEC_SIZE; ++j) {
-        block_absmax_val_maybe =
-            fmaxf(block_absmax_val_maybe,
-                  fabs(static_cast<scalar_t>(x.val[j] * rms) * w.val[j]));
+        block_absmax_val_maybe = fmaxf(
+            block_absmax_val_maybe, fabs(static_cast<scalar_t>(x.val[j] * rms) *
+                                         effective_weight<is_gemma>(w.val[j])));
       }
     }
 
@@ -427,9 +442,9 @@ __device__ void compute_dynamic_per_token_scales(
 
 #pragma unroll
       for (int j = 0; j < VEC_SIZE; ++j) {
-        block_absmax_val_maybe =
-            fmaxf(block_absmax_val_maybe,
-                  fabs(static_cast<scalar_t>(x.val[j] * rms) * w.val[j]));
+        block_absmax_val_maybe = fmaxf(
+            block_absmax_val_maybe, fabs(static_cast<scalar_t>(x.val[j] * rms) *
+                                         effective_weight<is_gemma>(w.val[j])));
       }
     }
 
@@ -461,7 +476,7 @@ __device__ void compute_dynamic_per_token_scales(
 // hidden_size must be a multiple of 4
 template <typename scalar_t, typename scalar_out_t, bool is_scale_inverted,
           bool has_residual = false, bool is_scale_transposed = false,
-          int32_t group_size = 0>
+          int32_t group_size = 0, bool is_gemma = false>
 __device__ void norm_and_quant(scalar_out_t* __restrict__ output,
                                scalar_t const* __restrict__ input,
                                scalar_t const* __restrict__ weight,
@@ -535,7 +550,9 @@ __device__ void norm_and_quant(scalar_out_t* __restrict__ output,
 #pragma unroll
     for (int j = 0; j < VEC_SIZE; ++j) {
       out.val[j] = ScaledQuant<scalar_out_t, is_scale_inverted>::quant_fn(
-          static_cast<scalar_t>(x.val[j] * rms) * w.val[j], scale_val);
+          static_cast<scalar_t>(x.val[j] * rms) *
+              effective_weight<is_gemma>(w.val[j]),
+          scale_val);
     }
     vec_output[i] = out;
   }
