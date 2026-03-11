@@ -76,8 +76,10 @@ ENV UV_LINK_MODE="copy"
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,src=requirements/common.txt,target=/workspace/vllm/requirements/common.txt \
     --mount=type=bind,src=requirements/xpu.txt,target=/workspace/vllm/requirements/xpu.txt \
+    --mount=type=bind,src=requirements/xpu-test.txt,target=/workspace/vllm/requirements/xpu-test.txt \
     uv pip install --upgrade pip && \
-    uv pip install -r requirements/xpu.txt
+    uv pip install -r requirements/xpu.txt && \
+    uv pip install --no-build-isolation -r /workspace/vllm/requirements/xpu-test.txt
 
 
 
@@ -168,22 +170,3 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip uninstall oneccl oneccl-devel
 
 ENTRYPOINT ["vllm", "serve"]
-
-FROM vllm-openai AS vllm-test
-
-RUN --mount=type=cache,target=/root/.cache/uv \
-    --mount=type=bind,src=requirements/xpu-test.txt,target=/workspace/vllm/requirements/xpu-test.txt \
-    source /opt/intel/oneapi/setvars.sh --force && \
-    source /opt/intel/oneapi/ccl/2021.15/env/vars.sh --force && \
-    export CMAKE_PREFIX_PATH="$(python -c 'import site; print(site.getsitepackages()[0])'):${CMAKE_PREFIX_PATH}" && \
-    uv pip install --no-build-isolation -r /workspace/vllm/requirements/xpu-test.txt
-
-# Ensure oneAPI/oneCCL runtime env is available for XPU tests
-ENV CCL_ROOT="/opt/intel/oneapi/ccl/latest"
-ENV LD_LIBRARY_PATH="${CCL_ROOT}/lib:${LD_LIBRARY_PATH}"
-
-ENV VLLM_TEST_DEVICE=xpu
-ENV PYTEST_ADDOPTS="--color=yes"
-
-ENTRYPOINT []
-CMD ["pytest", "tests/"]

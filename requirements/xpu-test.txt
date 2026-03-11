@@ -1,5 +1,5 @@
 # XPU Test Dependencies
-# NOTE: Assumes base image already has common.txt + xpu.txt installed,
+# NOTE: Base image already has common.txt + xpu.txt installed,
 #       and vllm-openai stage has pytest, pytest-asyncio, lm-eval[api].
 #       This file only adds incremental test-specific packages.
 
@@ -12,70 +12,32 @@ pytest-rerunfailures==14.0
 pytest-shard==0.1.2
 
 grpcio-tools>=1.76.0
-protobuf==6.33.5
 nanobind
 
 arctic-inference==0.1.1
 
-# Audio processing dependencies
-audioread==3.0.1
-    # via librosa
-cffi==1.17.1
-    # via soundfile
-decorator==5.2.1
-    # via librosa
-lazy-loader==0.4
-    # via librosa
-platformdirs==4.3.6
-    # via pooch
-pooch==1.8.2
-    # via librosa
-soundfile==0.13.1
-    # via librosa
-soxr==0.5.0.post1
-    # via librosa
+# Required for audio processing tests
 librosa==0.10.2.post1
+audioread==3.0.1
+soxr==0.5.0.post1
+pooch==1.8.2
+soundfile==0.13.1
 
-# Retrieval and search
-bm25s==0.2.13
-    # via mteb
-pystemmer==3.0.0
-    # via mteb
-
-# Multi-modal processing
+# Required for Mistral's streaming tool parser
 blobfile==3.0.0
-    # video processing, required by entrypoints/openai/test_video.py
 rapidfuzz==3.12.1
 
-# OpenAI compatibility and testing
+# Required for Mistral's streaming tool parser and some evaluation scripts
 gpt-oss==0.0.8
-    # OpenAI compatibility tests
 schemathesis==3.39.15
-    # OpenAI schema test
-
-# Evaluation and benchmarking (lm-eval already in vllm-openai)
 jiwer==4.0.0
-
-# Required for multiprocessed tests that use spawn method, Datasets and Evaluate Test
-multiprocess==0.70.16
-
-# Add ray extras (cgraph, default) for test_engine_logger_apis.py
-ray[cgraph,default]>=2.48.0
-
-# MTEB Benchmark Test
+bm25s==0.2.13
+pystemmer==3.0.0
 mteb[bm25s]>=2, <3
-
-# Utilities
 num2words==0.5.14
-    # via lm-eval
 pqdm==0.2.0
-    # via lm-eval
 
-# Required for the multi-modal models test
+# Required for some evaluation scripts
 timm==1.0.17
-# Required for plugins test
 albumentations==1.4.6
-# Pin HF Hub version
-huggingface-hub==0.36.2
-# Add audio extra (common.txt only has [image])
 mistral-common[image,audio]==1.9.1
