@@ -22,6 +22,7 @@ from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
+from vllm.v1.worker.gpu.lora_utils import resolve_effective_num_active_loras
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.utils import AttentionGroup
 
@@ -99,7 +100,8 @@ class CudaGraphManager:
         self.pool = current_platform.get_global_graph_pool() if cudagraph_mode else None
 
         self._graphs_captured = False
-        self._candidates: list[list[BatchExecutionDescriptor]] = []
+
+        self._candidates: dict[tuple[int, int], list[BatchExecutionDescriptor]] = {}
         self._capture_descs: dict[CUDAGraphMode, list[BatchExecutionDescriptor]] = {}
         self._init_candidates()
 
@@ -115,7 +117,9 @@ class CudaGraphManager:
         mixed_mode = self.cudagraph_mode.mixed_mode()
         separate_decode_routine = self.cudagraph_mode.separate_routine()
 
-        descs_by_token_count = defaultdict(list)
+        descs_by_token_lora: dict[tuple[int, int], list[BatchExecutionDescriptor]] = (
+            defaultdict(list)
+        )
         descs_by_mode = defaultdict(list)
 
         for num_tokens, num_active_loras in product(
@@ -136,7 +140,7 @@ class CudaGraphManager:
                     num_active_loras=num_active_loras,
                 )
                 descs_by_mode[decode_mode].append(desc)
-                descs_by_token_count[num_tokens].append(desc)
+                descs_by_token_lora[(num_tokens, num_active_loras)].append(desc)
 
             if mixed_mode:
                 # for PIECEWISE graphs there is no limit on requests when replaying
@@ -154,19 +158,22 @@ class CudaGraphManager:
                     num_active_loras=num_active_loras,
                 )
                 descs_by_mode[mixed_mode].append(desc)
-                descs_by_token_count[num_tokens].append(desc)
+                descs_by_token_lora[(num_tokens, num_active_loras)].append(desc)
 
-        if not descs_by_token_count:
+        if not descs_by_token_lora:
             return
 
-        sorted_padded = sorted(descs_by_token_count.keys())
-        self._candidates = [[] for _ in range(sorted_padded[-1] + 1)]
-
+        all_token_counts = sorted({k[0] for k in descs_by_token_lora})
         current_range_start = 0
-        for cg_size in sorted_padded:
-            for i in range(current_range_start, cg_size + 1):
-                self._candidates[i] = descs_by_token_count[cg_size]
-            current_range_start = cg_size + 1
+        for token_cg_size in all_token_counts:
+            for i in range(current_range_start, token_cg_size + 1):
+                for num_active_loras in self.lora_capture_cases:
+                    staging_key = (token_cg_size, num_active_loras)
+                    if staging_key in descs_by_token_lora:
+                        self._candidates[(i, num_active_loras)] = descs_by_token_lora[
+                            staging_key
+                        ]
+            current_range_start = token_cg_size + 1
 
         for mode, descs in descs_by_mode.items():
             descs.sort(key=lambda d: d.num_tokens, reverse=True)
@@ -239,13 +246,13 @@ class CudaGraphManager:
         num_active_loras: int = 0,
     ) -> BatchExecutionDescriptor:
         """Find matching cudagraph descriptor from priority-ordered candidates."""
-        from vllm.v1.worker.gpu.lora_utils import resolve_effective_num_active_loras
 
         effective_loras = resolve_effective_num_active_loras(
             num_active_loras, self.lora_capture_cases
         )
-        if self._graphs_captured and 0 < num_tokens < len(self._candidates):
-            for desc in self._candidates[num_tokens]:
+        key = (num_tokens, effective_loras)
+        if self._graphs_captured and num_tokens > 0 and key in self._candidates:
+            for desc in self._candidates[key]:
                 if _is_compatible(
                     desc,
                     num_reqs,
