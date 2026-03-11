@@ -47,16 +47,13 @@ SystemEnv = namedtuple(
         "nvidia_gpu_models",
         "cudnn_version",
         "xpu_available",
-        "xpu_compiler_version",
+        "xpu_runtime_version",
         "intel_graphics_compiler_version",
         "intel_gpu_models",
         "oneapi_compiler_version",
         "level_zero_loader_version",
         "level_zero_driver_version",
         "oneccl_version",
-        "intel_igc_opencl_version",
-        "intel_ocloc_version",
-        "intel_opencl_icd_version",
         "libigdgmm_version",
         "vllm_xpu_kernels_version",
         "sycl_version",
@@ -297,7 +294,7 @@ def get_xpu_available():
     return False
 
 
-def get_xpu_compiler_version():
+def get_xpu_runtime_version():
     if TORCH_AVAILABLE and hasattr(torch.version, "xpu"):
         return torch.version.xpu
     return "N/A"
@@ -333,16 +330,8 @@ def get_pkg_version(run_lambda, pkg):
                 pkg_candidates = ["level-zero", "libze1"]
             if pkg == "level_zero_driver":
                 pkg_candidates = ["libze-intel-gpu1", "intel-level-zero-gpu"]
-            if pkg == "intel_opencl":
-                pkg_candidates = ["intel-opencl-icd", "intel-opencl"]
             if pkg == "oneccl":
                 pkg_candidates = ["intel-oneapi-ccl", "oneccl"]
-            if pkg == "intel_igc_opencl":
-                pkg_candidates = ["intel-igc-opencl"]
-            if pkg == "intel_ocloc":
-                pkg_candidates = ["intel-ocloc"]
-            if pkg == "intel_opencl":
-                pkg_candidates = ["intel-opencl-icd", "intel-opencl"]
             if pkg == "libigdgmm":
                 pkg_candidates = ["libigdgmm12", "libigdgmm"]
             if pkg == "vllm_xpu_kernels":
@@ -381,6 +370,7 @@ def get_pkg_version(run_lambda, pkg):
 
 
 def get_intel_graphics_compiler_version(run_lambda):
+    """Return Intel Graphics Compiler (IGC) version."""
     return get_pkg_version(run_lambda, "igc")
 
 
@@ -395,20 +385,8 @@ def get_level_zero_driver_version(run_lambda):
 
 
 def get_oneapi_ccl_version(run_lambda):
-    """Return Intel oneAPI Collective Runtime (oneCCL) version."""
+    """Return oneAPI Collective Communications Library (oneCCL) version."""
     return get_pkg_version(run_lambda, "oneccl")
-
-
-def get_intel_igc_opencl_version(run_lambda):
-    return get_pkg_version(run_lambda, "intel_igc_opencl")
-
-
-def get_intel_ocloc_version(run_lambda):
-    return get_pkg_version(run_lambda, "intel_ocloc")
-
-
-def get_intel_opencl_icd_version(run_lambda):
-    return get_pkg_version(run_lambda, "intel_opencl")
 
 
 def get_libigdgmm_version(run_lambda):
@@ -812,16 +790,13 @@ def get_env_info():
         nvidia_driver_version=get_nvidia_driver_version(run_lambda),
         cudnn_version=get_cudnn_version(run_lambda),
         xpu_available=str(get_xpu_available()),
-        xpu_compiler_version=get_xpu_compiler_version(),
+        xpu_runtime_version=get_xpu_runtime_version(),
         intel_graphics_compiler_version=get_intel_graphics_compiler_version(run_lambda),
         intel_gpu_models=get_intel_gpu_models(),
         oneapi_compiler_version=get_oneapi_compiler_version(run_lambda),
         level_zero_loader_version=get_level_zero_loader_version(run_lambda),
         level_zero_driver_version=get_level_zero_driver_version(run_lambda),
         oneccl_version=get_oneapi_ccl_version(run_lambda),
-        intel_igc_opencl_version=get_intel_igc_opencl_version(run_lambda),
-        intel_ocloc_version=get_intel_ocloc_version(run_lambda),
-        intel_opencl_icd_version=get_intel_opencl_icd_version(run_lambda),
         libigdgmm_version=get_libigdgmm_version(run_lambda),
         vllm_xpu_kernels_version=get_vllm_xpu_kernels_version(run_lambda),
         sycl_version=get_sycl_version(run_lambda),
@@ -864,7 +839,7 @@ PyTorch version              : {torch_version}
 Is debug build               : {is_debug_build}
 CUDA used to build PyTorch   : {cuda_compiled_version}
 ROCM used to build PyTorch   : {hip_compiled_version}
-XPU used to build PyTorch    : {xpu_compiler_version}
+XPU used to build PyTorch    : {xpu_runtime_version}
 
 ==============================
       Python Environment
@@ -889,7 +864,7 @@ Is XNNPACK available         : {is_xnnpack_available}
       Intel XPU / GPU Info
 ==============================
 Is XPU available             : {xpu_available}
-XPU compiler version         : {xpu_compiler_version}
+XPU runtime version          : {xpu_runtime_version}
 Intel GPU models             : {intel_gpu_models}
 
 --Compile time--
@@ -899,9 +874,6 @@ oneCCL version               : {oneccl_version}
 
 --Runtime--
 Intel Graphics Compiler (IGC): {intel_graphics_compiler_version}
-Intel IGC OpenCL             : {intel_igc_opencl_version}
-Intel ocloc                  : {intel_ocloc_version}
-Intel OpenCL ICD             : {intel_opencl_icd_version}
 Intel GMM (libigdgmm)        : {libigdgmm_version}
 Level Zero loader version    : {level_zero_loader_version}
 Level Zero driver version    : {level_zero_driver_version}
@@ -1008,10 +980,6 @@ def pretty_str(envinfo):
         "level_zero_loader_version",
         "level_zero_driver_version",
         "oneccl_version",
-        "intel_graphics_compiler_version",
-        "intel_igc_opencl_version",
-        "intel_ocloc_version",
-        "intel_opencl_icd_version",
         "libigdgmm_version",
         "vllm_xpu_kernels_version",
     ]
@@ -1026,11 +994,8 @@ def pretty_str(envinfo):
     if not xpu_available and all_dynamic_xpu_fields_missing:
         for field in all_xpu_fields:
             mutable_dict[field] = "No XPU"
-        if (
-            envinfo.xpu_compiler_version is None
-            or envinfo.xpu_compiler_version == "N/A"
-        ):
-            mutable_dict["xpu_compiler_version"] = "N/A"
+        if envinfo.xpu_runtime_version is None or envinfo.xpu_runtime_version == "N/A":
+            mutable_dict["xpu_runtime_version"] = "N/A"
 
     # If intel_gpu_models is multiline, start on the next line
     mutable_dict["intel_gpu_models"] = maybe_start_on_next_line(
