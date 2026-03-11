@@ -1,300 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import json
+import random
+from typing import Any
 
 import openai
 import pytest
-from lark import UnexpectedCharacters, UnexpectedToken
-from lark.lexer import Token
+from transformers import AutoTokenizer
 
-from vllm.tool_parsers.granite4_tool_parser import HermesLexer, HermesToolCallParser
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.entrypoints.openai.engine.protocol import (
+    DeltaMessage,
+)
+from vllm.tool_parsers.granite4_tool_parser import Granite4ToolParser
 
 from ....utils import RemoteOpenAIServer
-
-
-def lex_input(input_text, tc_part_only=True):
-    tokens = []
-
-    push_back = ""
-
-    def generator():
-        nonlocal push_back
-        yield ""
-        for c in input_text:
-            push_back = yield push_back + c
-            push_back = push_back or ""
-        while push_back:
-            push_back = yield push_back
-
-    gen = generator()
-    next(gen)
-
-    lexer = HermesLexer(None)
-
-    def lex_tc_only(stream):
-        yield from lexer.consume_tool_call(stream)
-
-    lex_func = lex_tc_only if tc_part_only else lexer.lex
-
-    for tok in lex_func(gen):
-        tokens.append(tok)
-    return tokens
-
-
-def test_lexer_invalid_input():
-    with pytest.raises(UnexpectedCharacters):
-        lex_input("fewfewf")
-
-    with pytest.raises(UnexpectedCharacters):
-        lex_input("'fewfewf'")
-
-    with pytest.raises(UnexpectedCharacters):
-        lex_input("<tool_call_>")
-
-    with pytest.raises(UnexpectedCharacters):
-        lex_input('111. "aaa"')
-
-    with pytest.raises(UnexpectedCharacters):
-        lex_input('111.111.111 "aaa"')
-
-    with pytest.raises(UnexpectedCharacters):
-        lex_input('222.111e "aaa"')
-
-    with pytest.raises(UnexpectedCharacters):
-        lex_input("<tool_call> aaa")
-
-
-def collect_skipping(tokens):
-    return [t for t in tokens if t.type != "SKIP"]
-
-
-def test_lexer_valid_input():
-    result = collect_skipping(lex_input('"Hello"'))
-    assert result == [Token("STRING", '"Hello"')]
-
-    result = collect_skipping(lex_input('111 "Hello"'))
-    assert result == [Token("FLOAT", "111"), Token("STRING", '"Hello"')]
-
-    result = collect_skipping(lex_input('111.22 "Hello"'))
-    assert result == [Token("FLOAT", "111.22"), Token("STRING", '"Hello"')]
-
-    result = collect_skipping(lex_input('111e22 "Hello"'))
-    assert result == [Token("FLOAT", "111e22"), Token("STRING", '"Hello"')]
-
-    result = collect_skipping(lex_input('111.22e3 "Hello"'))
-    assert result == [Token("FLOAT", "111.22e3"), Token("STRING", '"Hello"')]
-
-    result = collect_skipping(lex_input("{}"))
-    assert result == [Token("_LBRACE", ""), Token("_RBRACE", "")]
-
-    result = collect_skipping(lex_input("{}"))
-    assert result == [Token("_LBRACE", ""), Token("_RBRACE", "")]
-
-    result = collect_skipping(lex_input('{"a": 1}'))
-    assert result == [
-        Token("_LBRACE", ""),
-        Token("STRING", '"a"'),
-        Token("_COLON", ""),
-        Token("FLOAT", "1"),
-        Token("_RBRACE", ""),
-    ]
-
-    result = collect_skipping(lex_input("[{}, 1]"))
-    assert result == [
-        Token("_LBRACK", ""),
-        Token("_LBRACE", ""),
-        Token("_RBRACE", ""),
-        Token("_COMMA", ""),
-        Token("FLOAT", "1"),
-        Token("_RBRACK", ""),
-    ]
-
-
-def test_lexer_tool_calls_with_text():
-    # Test that the lexer switches correctly from free text mode to
-    # tool calling mode and back
-    result = collect_skipping(lex_input('"Hello"', tc_part_only=False))
-    assert result == [Token("TEXT", c) for c in '"Hello"']
-
-    result = collect_skipping(lex_input('111 "Hello"', tc_part_only=False))
-    assert result == [Token("TEXT", c) for c in '111 "Hello"']
-
-    result = collect_skipping(lex_input('<tool_call> "Hello"', tc_part_only=False))
-    assert result == [Token("TC_START", ""), Token("STRING", '"Hello"')]
-
-    result = collect_skipping(lex_input('<tool_call> 111 "Hello"', tc_part_only=False))
-    assert result == [
-        Token("TC_START", ""),
-        Token("FLOAT", "111"),
-        Token("STRING", '"Hello"'),
-    ]
-
-    result = collect_skipping(
-        lex_input('<tool_call> 111 </tool_call> "Hello"', tc_part_only=False)
-    )
-    assert result == [
-        Token("TC_START", ""),
-        Token("FLOAT", "111"),
-        Token("TC_END", ""),
-    ] + [Token("TEXT", c) for c in ' "Hello"']
-
-    result = collect_skipping(
-        lex_input(
-            '<tool_call> 111 </tool_call> "Hello" <tool_call> "Hello"',
-            tc_part_only=False,
-        )
-    )
-    assert result == [
-        Token("TC_START", ""),
-        Token("FLOAT", "111"),
-        Token("TC_END", ""),
-    ] + [Token("TEXT", c) for c in ' "Hello" '] + [
-        Token("TC_START", ""),
-        Token("STRING", '"Hello"'),
-    ]
-
-
-def test_parser_invalid_input():
-    def build_parser():
-        return HermesToolCallParser(
-            lambda x: None,
-            lambda x: None,
-            lambda x: None,
-        )
-
-    with pytest.raises(UnexpectedCharacters):
-        build_parser().feed(chunk="<tool_call> aaa")
-
-    with pytest.raises(UnexpectedToken):
-        build_parser().feed(chunk="<tool_call> </tool_call>")
-
-    with pytest.raises(UnexpectedToken):
-        build_parser().feed(chunk='<tool_call> {"name": "foo"} </tool_call>')
-
-    with pytest.raises(UnexpectedToken):
-        build_parser().feed(
-            chunk='<tool_call> {"name": "foo", "args": {"a": 1}} </tool_call>'
-        )
-
-
-# Test that we get the text right away
-def test_text_pipeline_depth():
-    parsed_text = []
-
-    parser = HermesToolCallParser(
-        lambda x: None,
-        lambda x: None,
-        lambda x: parsed_text.append(x),
-    )
-
-    parser.feed(chunk="Hello ")
-    assert "".join(parsed_text) == "Hello "
-
-    parser.feed(chunk="my ")
-    assert "".join(parsed_text) == "Hello my "
-
-    parser.feed(chunk="name ")
-    assert "".join(parsed_text) == "Hello my name "
-
-    parser.feed(chunk="is ")
-    assert "".join(parsed_text) == "Hello my name is "
-
-
-def test_valid_input():
-    tool_names = []
-    tool_calls = []
-
-    parser = HermesToolCallParser(
-        lambda x: tool_names.append(x),
-        lambda x: tool_calls.append(x),
-        lambda x: None,
-    )
-
-    parser.feed(chunk="<tool_call> ")
-    assert len(tool_names) == 0
-    assert len(tool_calls) == 0
-
-    parser.feed(chunk='{"name": "foo", ')
-    assert tool_names == ["foo"]
-    assert len(tool_calls) == 0
-
-    parser.feed(chunk=' "arguments"')
-    assert len(tool_names) == 1
-    assert len(tool_calls) == 0
-
-    parser.feed(chunk=': {"a": 1}}')
-    assert len(tool_names) == 1
-    assert len(tool_calls) == 0
-
-    parser.feed(chunk=" </tool_call>")
-    assert tool_names == ["foo"]
-    assert tool_calls == [{"name": "foo", "arguments": {"a": 1}}]
-    parser.finish()
-
-
-def create_complex_input():
-    coord_arg = {
-        "coordinates": [[23.54, 43.1], [-12.2, 54.3], [4, 5]],
-        "coordinate_type": "latlong",
-    }
-    coord_arg_str = json.dumps(coord_arg)
-    return [
-        {"name": "find_bbox", "arguments": coord_arg},
-        {
-            "name": "get_stock_price",
-            "arguments": {
-                "symbol": "AAPL",
-                "start_date": "2021-01-01",
-                "end_date": "2021-12-31",
-            },
-        },
-        {"name": "find_bbox", "arguments": coord_arg_str},  # test granite behavior
-    ]
-
-
-def test_tool_call_parser_complex():
-    tool_names = []
-    tool_calls = []
-    streamed_text_chunks = []
-
-    parser = HermesToolCallParser(
-        lambda x: tool_names.append(x),
-        lambda x: tool_calls.append(x),
-        lambda x: streamed_text_chunks.append(x),
-    )
-    print(parser.parser.options.lexer)
-    input_dicts = create_complex_input()
-    print(input_dicts)
-
-    formatted_tcs = [
-        "<tool_call> " + json.dumps(call) + " </tool_call>" for call in input_dicts
-    ]
-
-    text_messages = [
-        "Here goes the bbox call: \n",
-        " Now the stock price call: \n ",
-        " Now another bbox call: \n ",
-        " See? I'm a helpful assistant.",
-    ]
-
-    test_input = (
-        text_messages[0]
-        + formatted_tcs[0]
-        + text_messages[1]
-        + formatted_tcs[1]
-        + text_messages[2]
-        + formatted_tcs[2]
-        + text_messages[3]
-    )
-    print(test_input)
-    parser.feed(test_input)
-
-    streamed_text = "".join(streamed_text_chunks)
-    assert tool_names == ["find_bbox", "get_stock_price", "find_bbox"]
-    assert tool_calls == input_dicts
-    assert streamed_text == "".join(text_messages)
-    parser.finish()
-
 
 MODEL = "ibm-granite/granite-4.0-h-tiny"
 
@@ -316,6 +36,137 @@ def server():
     ]
     with RemoteOpenAIServer(model, args_for_model, max_wait_seconds=480) as server:
         yield server
+
+
+def create_complex_input(create_string_args: bool):
+    coord_arg: dict | str = {
+        "coordinates": [[23.54, 43.1], [-12.2, 54.3], [4, 5]],
+        "coordinate_type": "latlong",
+    }
+    if create_string_args:
+        # test granite behavior
+        coord_arg = json.dumps(coord_arg)
+    return [
+        {"name": "find_bbox", "arguments": coord_arg},
+        {
+            "name": "get_stock_price",
+            "arguments": {
+                "symbol": "AAPL",
+                "start_date": "2021-01-01",
+                "end_date": "2021-12-31",
+            },
+        },
+        {"name": "find_bbox", "arguments": coord_arg},
+    ]
+
+
+def random_chunks(s: str, min_len: int, max_len: int):
+    chunks = []
+    i = 0
+    n = len(s)
+
+    while i < n:
+        size = random.randint(min_len, max_len)
+        chunks.append(s[i : i + size])
+        i += size
+
+    return chunks
+
+
+@pytest.fixture(scope="module")
+def tokenizer():
+    return AutoTokenizer.from_pretrained(MODEL)
+
+
+# create a variety of input chunk sizes
+@pytest.mark.parametrize(
+    "min_chunk, max_chunk",
+    [
+        (1, 1),
+        (1, 2),
+        (5, 7),
+        (6, 20),
+    ],
+)
+def test_tool_call_parser_complex(min_chunk: int, max_chunk: int, tokenizer):
+    input_dicts = create_complex_input(True)
+
+    formatted_tcs = [
+        "<tool_call> " + json.dumps(call) + " </tool_call>" for call in input_dicts
+    ]
+
+    text_messages = [
+        "Here goes the bbox call: \n",
+        " Now the stock price call: \n ",
+        " Now another bbox call: \n ",
+        " See? I'm a helpful assistant.",
+    ]
+
+    test_input = (
+        text_messages[0]
+        + formatted_tcs[0]
+        + text_messages[1]
+        + formatted_tcs[1]
+        + text_messages[2]
+        + formatted_tcs[2]
+        + text_messages[3]
+    )
+
+    any_chat_request = ChatCompletionRequest(
+        seed=42,
+        model=MODEL,
+        messages=[],
+    )
+
+    parser = Granite4ToolParser(tokenizer=tokenizer)
+
+    delta_messages = list[DeltaMessage]()
+    for text in random_chunks(test_input, min_chunk, max_chunk):
+        delta = parser.extract_tool_calls_streaming(
+            previous_text="",
+            current_text="",
+            delta_text=text,
+            previous_token_ids=[],
+            current_token_ids=[],
+            delta_token_ids=[],
+            request=any_chat_request,
+        )
+        if delta is not None:
+            delta_messages.append(delta)
+
+    content = ""
+    tool_calls = list[dict[str, Any]]()
+
+    current_name = "__start__"
+    current_args = ""
+
+    for msg in delta_messages:
+        if msg.content:
+            content += msg.content
+        for tool_call in msg.tool_calls:
+            if delta_func := tool_call.function:
+                if delta_func.name is not None:
+                    if current_name == "__start__":
+                        current_name = delta_func.name
+
+                    if delta_func.name != current_name:
+                        tool_calls.append(
+                            {
+                                "name": current_name,
+                                "arguments": json.loads(current_args),
+                            }
+                        )
+                        current_name = delta_func.name
+                        current_args = ""
+
+                if delta_func.arguments:
+                    current_args += delta_func.arguments
+
+    if current_name != "__start__":
+        tool_calls.append({"name": current_name, "arguments": json.loads(current_args)})
+
+    assert content == "".join(text_messages)
+    assert tool_calls == create_complex_input(False)
 
 
 tools = [

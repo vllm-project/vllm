@@ -1,17 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import functools
-import io
 import json
-import operator
-from ast import literal_eval
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, Protocol, TypeVar
 
 import regex as re
-from lark import Lark, Transformer, UnexpectedCharacters
-from lark.lexer import Lexer, Token
 
 from vllm.entrypoints.chat_utils import make_tool_call_id
 from vllm.entrypoints.openai.chat_completion.protocol import (
@@ -33,292 +27,19 @@ from vllm.tool_parsers.abstract_tool_parser import (
 
 logger = init_logger(__name__)
 
-hermes_grammar = r"""
-
-    output: (text+|tagged_tool_call)+
-    tagged_tool_call: TC_START tool_call TC_END
-    tool_call: _LBRACE tool_name _COMMA tool_arguments _RBRACE
-             | _LBRACE tool_arguments _COMMA tool_name _RBRACE
-    tool_name: NAME _COLON string
-    tool_arguments: ARGUMENTS _COLON value
-    text: TEXT -> text
-
-    ?value: dict
-          | list
-          | string
-          | FLOAT             -> number
-          | TRUE              -> true
-          | FALSE             -> false
-          | NULL              -> null
-
-    list : _LBRACK [value (_COMMA value)*] _RBRACK
-    dict : _LBRACE [pair (_COMMA pair)*] _RBRACE
-    pair : string _COLON value
-    string: STRING -> string
-
-    %declare TC_START TC_END NAME ARGUMENTS STRING FLOAT TRUE FALSE NULL
-    %declare _LBRACE _RBRACE _LBRACK _RBRACK _COMMA _COLON TEXT SKIP
-    %ignore SKIP
-"""
-
-
-class HermesLexer(Lexer):
-    def tc_start(self):
-        return r"<tool_call>"
-
-    def tc_end(self):
-        return r"</tool_call>"
-
-    PATTERNS = [
-        ("STRING", r'"(?:[^"\\]|\\.)*"'),
-        ("FLOAT", r"-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?(?=[ \t\n\r\}\],]+)"),
-        ("TRUE", r"true"),
-        ("FALSE", r"false"),
-        ("NULL", r"null"),
-        ("_LBRACE", r"\{"),
-        ("_RBRACE", r"\}"),
-        ("_LBRACK", r"\["),
-        ("_RBRACK", r"\]"),
-        ("_COMMA", r","),
-        ("_COLON", r":"),
-        ("WS", r"[ \t\n\r]+"),
-    ]
-
-    def __init__(self, lexer_conf):
-        delimiters = [("TC_START", self.tc_start()), ("TC_END", self.tc_end())]
-        pattern = "|".join(
-            f"(?P<{name}>{pattern})" for name, pattern in delimiters + self.PATTERNS
-        )
-        self.regex = re.compile(pattern)
-        self.start_regex = re.compile(f"(?P<TC_START>{self.tc_start()})")
-        self.buffer = ""
-        self.done = False
-
-    def wait_for_content(self, stream):
-        try:
-            while True:
-                self.buffer = stream.send(self.buffer)
-                if not self.buffer:
-                    yield Token("SKIP", "")
-                else:
-                    return False
-        except StopIteration:
-            return True
-
-    def consume_buffer(self, length: int | None = None) -> str:
-        length = len(self.buffer) if length is None else length
-        text = self.buffer[:length]
-        self.buffer = self.buffer[length:]
-        return text
-
-    def consume_text(self, stream):
-        while True:
-            self.done = yield from self.wait_for_content(stream)
-            if self.done:
-                return
-            match = self.start_regex.search(self.buffer, partial=True)
-            if match is not None and match.end() > match.start():
-                text = self.consume_buffer(match.start())
-                if text:
-                    yield Token("TEXT", text)
-                if match.partial:
-                    if not text:  # No need to send another token
-                        yield Token("SKIP", "")
-                else:
-                    return
-            else:
-                yield Token("TEXT", self.consume_buffer())
-
-    def consume_tool_call(self, stream):
-        self.dict_dept = 0
-        while True:
-            self.done = yield from self.wait_for_content(stream)
-            if self.done:
-                return
-            while self.buffer:
-                if (match := self.regex.match(self.buffer, partial=True)) is not None:
-                    token_type = match.lastgroup
-                    if match.partial:
-                        yield Token("SKIP", "")  # Possible partial match
-                        break
-                    if token_type == "WS":  # skip whitespace
-                        self.consume_buffer(match.end())
-                        continue
-                    value = match.group() if token_type in ["STRING", "FLOAT"] else ""
-                    if token_type == "_LBRACE":
-                        self.dict_dept += 1
-                    elif token_type == "_RBRACE":
-                        self.dict_dept -= 1
-                    elif token_type == "STRING":
-                        if value == '"name"' and self.dict_dept == 1:
-                            token_type = "NAME"
-                            value = ""
-                        elif value == '"arguments"' and self.dict_dept == 1:
-                            token_type = "ARGUMENTS"
-                            value = ""
-                    self.consume_buffer(match.end())
-                    yield Token(token_type, value)
-                    if token_type == "TC_END":
-                        return
-                else:
-                    raise UnexpectedCharacters(self.buffer, 0, 0, 0)
-
-    def lex(self, stream):
-        self.buffer = ""
-        self.done = False
-        while not self.done:
-            yield from self.consume_text(stream)
-            yield from self.consume_tool_call(stream)
-
-
-class HermesTransformer(Transformer):
-    def __init__(self):
-        super().__init__()
-        self.parsed_tool_names = list[str]()
-        self.parsed_tool_calls = list[dict[str, dict[str, Any]]]()
-
-    def tool_name(self, items):
-        self.parsed_tool_names.append(items[1])
-        return items[1]
-
-    def tool_arguments(self, items):
-        return items[1]
-
-    def tagged_tool_call(self, items):
-        return items[1]
-
-    def tool_call(self, items):
-        tc = {"name": items[0], "arguments": items[1]}
-        self.parsed_tool_calls.append(tc)
-        self.validate()
-        return tc
-
-    def text(self, items):
-        chunk = str(items[0])
-        return chunk
-
-    dict = dict
-    list = list
-    pair = tuple
-    null = lambda self, _: None
-    true = lambda self, _: True
-    false = lambda self, _: False
-
-    def number(self, items):
-        try:
-            return int(items[0])
-        except ValueError:
-            return float(items[0])
-
-    def string(self, items):
-        return literal_eval(str(items[0]))
-
-    def validate(self, comp=operator.le):
-        seen_tools = len(self.parsed_tool_calls)
-        seen_tool_names = len(self.parsed_tool_names)
-        assert comp(seen_tools, seen_tool_names)
-        assert 0 <= (seen_tool_names - seen_tools) <= 1
-        for name, tc in zip(self.parsed_tool_names, self.parsed_tool_calls):
-            assert name == tc["name"]
-
-    def finish(self):
-        self.validate(operator.eq)
-
-
-# Avoid compiling the grammar every time. It's about an order of magnitude faster
-# Loading from a warm cache takes 0.3 ms on my machine
-@functools.cache
-def _make_parser_proto(lexer_class=HermesLexer):
-    new_hermes_parser = Lark(
-        hermes_grammar,
-        start="output",
-        lexer=lexer_class,
-        parser="lalr",
-        transformer=HermesTransformer(),
-    )
-    binary_buffer = io.BytesIO()
-    new_hermes_parser.save(binary_buffer)
-    binary_buffer.seek(0)
-    return binary_buffer
-
-
-def make_parser(lexer_class=HermesLexer):
-    serialized = _make_parser_proto(lexer_class)
-    serialized.seek(0)
-    return Lark.load(serialized)
-
-
-class HermesToolCallParser:
-    def __init__(
-        self,
-        tool_name_callback,
-        tool_call_callback,
-        text_callback,
-        lexer_class=HermesLexer,
-    ):
-        self.parser = make_parser(lexer_class)
-
-        self.tool_name_callback = tool_name_callback
-        self.tool_call_callback = tool_call_callback
-        self.text_callback = text_callback
-        self.tool_names_found = 0
-        self.tool_found = 0
-        self.text_ptr = 0
-        self.finished = False
-
-        self.food = ""
-
-        def generator():
-            yield ""
-            while not self.finished:
-                food = self.food
-                self.food = ""
-                push_back = yield food
-                self.food = push_back + self.food
-
-        gen = generator()
-        next(gen)
-
-        self.interactive = self.parser.parse_interactive(gen)
-        self.transformer = self.parser.parser.options.transformer
-        self.token_stream = self.interactive.lexer_thread.lex(
-            self.interactive.parser_state
-        )
-        lexer = lexer_class(None)
-        self.start_token = lexer.tc_start()
-        self.end_token = lexer.tc_end()
-
-    def _invoke_callbacks(self):
-        if len(self.transformer.parsed_tool_names) > self.tool_names_found:
-            self.tool_name_callback(self.transformer.parsed_tool_names[-1])
-            self.tool_names_found += 1
-        if len(self.transformer.parsed_tool_calls) > self.tool_found:
-            self.tool_call_callback(self.transformer.parsed_tool_calls[-1])
-            self.tool_found += 1
-
-    def feed(self, chunk: str):
-        self.food += chunk
-        while True:
-            token = next(self.token_stream)
-            if token.type == "TEXT":
-                self.text_callback(str(token))
-            if token.type == "SKIP":  # waiting for more input
-                break
-            self.interactive.result = self.interactive.feed_token(token)
-            self._invoke_callbacks()
-
-    def finish(self) -> list[tuple[str, Any]]:
-        self.finished = True
-        result = self.interactive.feed_eof()
-        self._invoke_callbacks()
-        return result
-
 
 def dump_args(args: None | dict[str, Any] | str) -> str | None:
     if args is None or isinstance(args, str):
         return args
     else:
         return json.dumps(args, ensure_ascii=False)
+
+
+class _FunctionCallCtor(Protocol):
+    def __init__(self, *, name: str, arguments: str | None): ...
+
+
+FuncT = TypeVar("FuncT", bound=_FunctionCallCtor)
 
 
 class Granite4ToolParser(ToolParser):
@@ -328,18 +49,14 @@ class Granite4ToolParser(ToolParser):
         self.prev_tool_call_arr: list[dict] = []
         self.current_tool_id: int = -1
         self.streamed_args_for_tool = list[str]()
-        self.streamed_tool_names = list[str]()
-        self.streamed_text_chunks = list[str]()
 
-        self.tool_names = list[str]()
-        self.tool_calls = list[dict[str, dict[str, Any]]]()
-        self.parsed_text_chunks = list[str]()
+        self.look_ahead = ""
+        self.in_tc = False
 
-        self.parser = HermesToolCallParser(
-            lambda x: self.tool_names.append(x),
-            lambda x: self.tool_calls.append(x),
-            lambda x: self.parsed_text_chunks.append(x),
-        )
+        self.tc_start = "<tool_call>"
+        self.tc_end = "</tool_call>"
+        self.start_regex = re.compile(self.tc_start)
+        self.end_regex = re.compile(self.tc_end)
 
     def adjust_request(self, request: ChatCompletionRequest) -> ChatCompletionRequest:
         request = super().adjust_request(request)
@@ -350,6 +67,24 @@ class Granite4ToolParser(ToolParser):
             request.skip_special_tokens = False
         return request
 
+    def _collect_results(
+        self, text_segments: list[str], tc_segments: list[str], cls: type[FuncT]
+    ) -> tuple[str, list[FuncT]]:
+        tool_calls_json: list[dict[str, Any]] = [
+            json.loads(tc_text) for tc_text in tc_segments
+        ]
+        tool_calls = []
+        for tc in tool_calls_json:
+            assert isinstance(tc, dict)
+            self.prev_tool_call_arr.append(tc)
+            tool_calls.append(
+                cls(
+                    name=tc["name"],
+                    arguments=dump_args(tc["arguments"]),
+                )
+            )
+        return "".join(text_segments), tool_calls
+
     def extract_tool_calls(
         self,
         model_output: str,
@@ -359,77 +94,109 @@ class Granite4ToolParser(ToolParser):
             tools_called=False, tool_calls=[], content=model_output
         )
         try:
-            self.parser.feed(model_output)
-            self.parser.finish()
+            delimiters = [("TC_START", self.tc_start), ("TC_END", self.tc_end)]
+            pattern = "|".join(f"(?P<{name}>{pattern})" for name, pattern in delimiters)
+            regex = re.compile(pattern)
+
+            text_segments = list[str]()
+            tc_segments = list[str]()
+            last_cut_loc = 0
+
+            for match in regex.finditer(model_output):
+                match_type = match.lastgroup
+                if match_type == "TC_START":
+                    assert not self.in_tc, "Two tool call start tokens found in a row"
+                    if preceding_text := model_output[last_cut_loc : match.start()]:
+                        text_segments.append(preceding_text)
+                    self.in_tc = True
+                elif match_type == "TC_END":
+                    assert self.in_tc, (
+                        "Tool call end token found without corresponding start token"
+                    )
+                    tool_text = model_output[last_cut_loc : match.start()]
+                    assert tool_text, (
+                        "Expected the model to generate text between tool call tokens"
+                    )
+                    tc_segments.append(tool_text)
+                    self.in_tc = False
+                else:
+                    raise ValueError("Unexpected match")
+                last_cut_loc = match.end()
+            assert not self.in_tc, "The model generated an incomplete tool call"
+            if final_text := model_output[last_cut_loc:]:
+                text_segments.append(final_text)
+
+            content, tool_call_funcs = self._collect_results(
+                text_segments, tc_segments, FunctionCall
+            )
             tool_calls = [
                 ToolCall(
                     type="function",
-                    function=FunctionCall(
-                        name=tc["name"],
-                        # function call args are JSON but as a string
-                        arguments=dump_args(tc["arguments"]),
-                    ),
+                    function=func,
                 )
-                for tc in self.tool_calls
+                for func in tool_call_funcs
             ]
             msg.tools_called = bool(tool_calls)
             msg.tool_calls = tool_calls
-            msg.content = "".join(self.parsed_text_chunks) or None
+            msg.content = content or None
         except Exception:
             logger.exception("Error in extracting tool call from response.")
         return msg
 
-    def collect_unstreamed_text(self) -> str:
-        n_streamed_chunks = len(self.streamed_text_chunks)
-        n_parsed_chunks = len(self.parsed_text_chunks)
-        unstreamed = []
+    def _tool_extraction_step(
+        self,
+        delta_text: str,
+    ) -> tuple[bool, str, str]:
+        start_token_pos = start_token_end = end_token_pos = end_token_end = -1
 
-        if n_streamed_chunks < n_parsed_chunks:
-            n_unstreamed = n_parsed_chunks - n_streamed_chunks
-            unstreamed = self.parsed_text_chunks[-n_unstreamed:]
-            self.streamed_text_chunks.extend(unstreamed)
-        ret = "".join(unstreamed)
-        return ret
+        if start_match := self.start_regex.search(delta_text, partial=True):
+            if not start_match.partial:
+                start_token_pos, start_token_end = start_match.span()
+            elif start_match.end() > start_match.start():
+                start_token_pos = -2
 
-    def collect_tool_calls(self) -> list[DeltaToolCall]:
-        tool_calls = list[DeltaToolCall]()
+        if end_match := self.end_regex.search(delta_text):
+            end_token_pos, end_token_end = end_match.span()
 
-        n_parsed_names = len(self.tool_names)
-        n_streamed_names = len(self.streamed_tool_names)
-        n_streamed_args = len(self.streamed_args_for_tool)
+        # Done means that we've exhausted the current buffer
+        # and need more output from the model
+        done = True
+        content = tc_text = ""
 
-        if n_streamed_names == n_streamed_args:
-            if n_parsed_names > n_streamed_names:
-                self.current_tool_id += 1
+        if start_token_pos < 0:
+            # just streaming text so far
+            if start_token_pos == -2:
+                # There is a partial match
+                content = delta_text[: start_match.start()]
+                self.look_ahead = delta_text[start_match.start() :]
             else:
-                return tool_calls
+                content = delta_text
+
+        elif not self.in_tc:
+            # we're entering a new tool call
+            self.in_tc = True
+
+            content = delta_text[:start_token_pos]
+            if end_token_pos > 0:
+                self.start_in_tc = False
+                tc_text = delta_text[start_token_end:end_token_pos]
+                self.look_ahead = delta_text[end_token_end:]
+                done = False  # There could be more content already buffered
+            else:
+                self.look_ahead = delta_text[start_token_pos:]
+
+        elif end_token_pos < 0:
+            # we're in between the start and the end token
+            assert self.in_tc
+            self.look_ahead = delta_text
         else:
-            assert n_streamed_names == n_streamed_args + 1
-
-        for i in range(self.current_tool_id, n_parsed_names):
-            self.current_tool_id = i
-            function = DeltaFunctionCall()
-
-            if i == len(self.streamed_tool_names):
-                function.name = self.tool_names[i]
-                self.streamed_tool_names.append(function.name)
-
-            if i < len(self.tool_calls):
-                tc = self.tool_calls[i]
-                self.prev_tool_call_arr.append(tc)
-                function.arguments = dump_args(tc.get("arguments"))
-                self.streamed_args_for_tool.append(function.arguments or "")
-
-            delta = DeltaToolCall(
-                index=self.current_tool_id,
-                function=function.model_dump(exclude_none=True),
-            )
-            if function.name:
-                delta.type = "function"
-                delta.id = make_tool_call_id()
-            if function.name or function.arguments:
-                tool_calls.append(delta)
-        return tool_calls
+            # We have found the end
+            assert self.in_tc
+            tc_text = delta_text[start_token_end:end_token_pos]
+            self.in_tc = False
+            self.look_ahead = delta_text[end_token_end:]
+            done = False  # There could be more content already buffered
+        return done, content, tc_text
 
     def extract_tool_calls_streaming(
         self,
@@ -442,17 +209,44 @@ class Granite4ToolParser(ToolParser):
         request: ChatCompletionRequest,
     ) -> DeltaMessage | None:
         try:
-            msg = DeltaMessage()
+            done = False
+            text_segments = list[str]()
+            tc_segments = list[str]()
 
-            self.parser.feed(delta_text)
-            msg.tool_calls = self.collect_tool_calls()
-            msg.content = self.collect_unstreamed_text()
+            while not done:
+                delta_text = self.look_ahead + delta_text
+                self.look_ahead = ""
+                done, content, tc_text = self._tool_extraction_step(delta_text)
+                if content:
+                    text_segments.append(content)
+                if tc_text:
+                    tc_segments.append(tc_text)
+                delta_text = ""
 
+            content, tool_call_funcs = self._collect_results(
+                text_segments, tc_segments, DeltaFunctionCall
+            )
+
+            delta_tool_calls = list[DeltaToolCall]()
+            for function in tool_call_funcs:
+                self.current_tool_id += 1
+                delta_tool_calls.append(
+                    DeltaToolCall(
+                        id=make_tool_call_id(),
+                        type="function",
+                        index=self.current_tool_id,
+                        function=function.model_dump(exclude_none=True),
+                    )
+                )
+                self.streamed_args_for_tool.append(function.arguments)
+
+            assert self.current_tool_id + 1 == len(self.prev_tool_call_arr)
+            assert self.current_tool_id + 1 == len(self.streamed_args_for_tool)
+
+            msg = DeltaMessage(content=content or None, tool_calls=delta_tool_calls)
             if msg.content or msg.tool_calls:
                 return msg
-            else:
-                return None  # nothing to stream
 
         except Exception:
             logger.exception("Error trying to handle streaming tool call.")
-            return None  # do not stream a delta. skip this token ID.
+        return None
