@@ -115,6 +115,21 @@ class OpenAIServingModels:
         self.io_processor = self.engine_client.io_processor
         self.input_processor = self.engine_client.input_processor
 
+    async def init_static_loras(self):
+        """Loads all static LoRA modules.
+        Raises if any fail to load"""
+        if self.static_lora_modules is None:
+            return
+        for lora in self.static_lora_modules:
+            load_request = LoadLoRAAdapterRequest(
+                lora_path=lora.path, lora_name=lora.name
+            )
+            load_result = await self.load_lora_adapter(
+                request=load_request, base_model_name=lora.base_model_name
+            )
+            if isinstance(load_result, ErrorResponse):
+                raise ValueError(load_result.error.message)
+
     def is_base_model(self, model_name: str) -> bool:
         return self.registry.is_base_model(model_name)
 
@@ -140,21 +155,6 @@ class OpenAIServingModels:
         ]
         model_list.data.extend(lora_cards)
         return model_list
-
-    async def init_static_loras(self):
-        """Loads all static LoRA modules.
-        Raises if any fail to load"""
-        if self.static_lora_modules is None:
-            return
-        for lora in self.static_lora_modules:
-            load_request = LoadLoRAAdapterRequest(
-                lora_path=lora.path, lora_name=lora.name
-            )
-            load_result = await self.load_lora_adapter(
-                request=load_request, base_model_name=lora.base_model_name
-            )
-            if isinstance(load_result, ErrorResponse):
-                raise ValueError(load_result.error.message)
 
     async def load_lora_adapter(
         self, request: LoadLoRAAdapterRequest, base_model_name: str | None = None
