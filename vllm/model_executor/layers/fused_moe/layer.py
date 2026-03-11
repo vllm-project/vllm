@@ -985,7 +985,10 @@ class FusedMoE(CustomOp):
         expert_data.copy_(loaded_weight)
 
     def _load_single_value(
-        self, param: torch.nn.Parameter, loaded_weight: torch.Tensor, expert_id: int
+        self,
+        param: torch.nn.Parameter,
+        loaded_weight: torch.Tensor,
+        expert_id: int | None,
     ):
         param_data = param.data
 
@@ -1011,7 +1014,7 @@ class FusedMoE(CustomOp):
             assert shard_id in ("w1", "w3", "w13")
             expert_data.copy_(loaded_weight)
 
-    def _map_global_expert_id_to_local_expert_id(self, expert_id: int) -> int:
+    def _map_global_expert_id_to_local_expert_id(self, expert_id: int | None) -> int:
         if self._expert_map is None:
             return expert_id
         return self._expert_map[expert_id].item()

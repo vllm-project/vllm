@@ -138,6 +138,7 @@ class ModelOptQuantConfigBase(QuantizationConfig):
     ):
         super().__init__()
         self.exclude_modules: list[str] = exclude_modules
+        self.original_config: dict[str, Any] = {}
 
     def is_layer_excluded(self, prefix: str) -> bool:
         """

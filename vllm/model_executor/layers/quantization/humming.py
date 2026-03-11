@@ -65,7 +65,7 @@ except ImportError:
 
 
 def assert_humming_available():
-    err_msg = "humming is not avaiable, please run 'pip install humming' to install."
+    err_msg = "humming is not available, please run 'pip install humming' to install."
     assert HummingMethod is not None, err_msg
 
 
@@ -85,6 +85,7 @@ def prepare_param(tensor, name, extra_attrs):
         "input_scale": PerTensorScaleParameter,
     }
 
+    param_cls: type[torch.nn.Parameter]
     if "packed_dim" in extra_attrs:
         param_cls = PackedvLLMParameter
     elif scale_type in param_cls_name_map:
@@ -99,7 +100,7 @@ def prepare_param(tensor, name, extra_attrs):
         param_cls = torch.nn.Parameter
 
     if param_cls == torch.nn.Parameter:
-        param = param_cls(tensor, requires_grad=False)
+        param = torch.nn.Parameter(tensor, requires_grad=False)
         set_weight_attrs(param, extra_attrs)
     else:
         kwargs_keys = [
@@ -155,7 +156,7 @@ def may_pad_loaded_weight(param, loaded_weight):
     return loaded_weight
 
 
-def compressed_tensors_get_config(config: dict[str, Any], key: str) -> dict[str, Any]:
+def compressed_tensors_get_config(config: dict[str, Any], key: str):
     assert key in ["weights", "input_activations"]
     target_group_config = None
     for group_config in config["config_groups"].values():
@@ -243,10 +244,10 @@ class HummingConfig(QuantizationConfig):
             config = group_config
 
         layer_config = config
-        layer_dynmaic = config.get("dynamic", {})
-        if not isinstance(layer_dynmaic, dict):
-            layer_dynmaic = {}
-        for regex, override_config in layer_dynmaic.items():
+        layer_dynamic = config.get("dynamic", {})
+        if not isinstance(layer_dynamic, dict):
+            layer_dynamic = {}
+        for regex, override_config in layer_dynamic.items():
             if regex[:1] != "+":
                 continue
             if re.match(regex[2:], prefix):
@@ -417,7 +418,7 @@ class HummingLinearMethod(LinearMethodBase):
                     if name != "bias":
                         delattr(layer, name)
                 delattr(layer, "locks")
-                self.__class__ = UnquantizedLinearMethod
+                self.__class__ = UnquantizedLinearMethod  # type: ignore
                 tensor = torch.empty(
                     (layer.output_size_per_partition, layer.input_size_per_partition),
                     dtype=layer.param_dtype,
@@ -798,7 +799,7 @@ class HummingMoEMethod(FusedMoEMethodBase):
             assert isinstance(weight_schema, HummingWeightSchema)
             force_requant = self.force_weight_schema is not None
             if force_requant and weight_schema != self.force_weight_schema:
-                tensors: dict[str, torch.Tensor] = dict(
+                tensors = dict(
                     (key.removeprefix(sublayer_name + "_"), value)
                     for key, value in layer.state_dict().items()
                     if key.startswith(sublayer_name + "_")
