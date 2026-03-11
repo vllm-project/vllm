@@ -61,6 +61,7 @@ class DefaultModelState(ModelState):
                 max_model_len=self.max_model_len,
                 device=self.device,
             )
+        self.xdrope_state: XDRopeState | None = None
         if self.model_config.uses_xdrope_dim > 0:
             self.xdrope_state = XDRopeState(
                 uses_xdrope_dim=self.model_config.uses_xdrope_dim,
@@ -69,8 +70,6 @@ class DefaultModelState(ModelState):
                 max_model_len=self.max_model_len,
                 device=self.device,
             )
-        else:
-            self.xdrope_state = None
 
     def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
         if self.uses_mrope:
@@ -149,6 +148,7 @@ class DefaultModelState(ModelState):
             return {"positions": mrope_positions}
 
         # Prepare XD-RoPE positions.
+        assert self.xdrope_state is not None
         self.xdrope_state.prepare_xdrope_positions(
             input_batch.idx_mapping,
             input_batch.query_start_loc,
