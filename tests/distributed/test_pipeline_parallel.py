@@ -247,6 +247,7 @@ def _compare_tp(
     hf_config = get_config(model_id, trust_remote_code)
     require_embed_inputs = model_info.require_embed_inputs
     max_num_seqs = model_info.max_num_seqs
+    enable_prefix_caching = model_info.enable_prefix_caching
 
     dtype = "float16"
     if hf_config.model_type in _FLOAT16_NOT_SUPPORTED_MODELS:
@@ -300,6 +301,8 @@ def _compare_tp(
         common_args.extend(["--load-format", load_format])
     if hf_overrides:
         common_args.extend(["--hf-overrides", json.dumps(hf_overrides)])
+    if not enable_prefix_caching:
+        common_args.append("--no-enable-prefix-caching")
     if require_embed_inputs:
         common_args.extend(
             [
