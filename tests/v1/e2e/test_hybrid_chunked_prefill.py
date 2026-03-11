@@ -36,7 +36,7 @@ MESSAGES = [
 
 # TODO(ben): Add Nemotron-H with MTP
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA not available")
-@pytest.mark.parametrize("model_name", ["Qwen/Qwen3.5-35B-A3B-FP8"])
+@pytest.mark.parametrize("model_name", ["Qwen/Qwen3.5-4B"])
 @pytest.mark.parametrize("enable_prefix_caching", [False, True])
 def test_mtp_speculative_mixed_batch_short_prefill(
     vllm_runner, model_name, enable_prefix_caching
@@ -58,7 +58,7 @@ def test_mtp_speculative_mixed_batch_short_prefill(
         max_num_batched_tokens=chunk_size,
         max_model_len=512,
         enforce_eager=True,
-        tensor_parallel_size=2,
+        tensor_parallel_size=1,
         trust_remote_code=True,
         enable_chunked_prefill=True,
         enable_prefix_caching=enable_prefix_caching,
