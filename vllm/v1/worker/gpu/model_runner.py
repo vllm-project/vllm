@@ -565,7 +565,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.req_states.remove_request(req_id)
             if self.encoder_cache is not None:
                 self.encoder_cache.remove_request(req_id)
-            self.prompt_logprobs_worker.remove_request(req_id)
+            if self.prompt_logprobs_worker is not None:
+                self.prompt_logprobs_worker.remove_request(req_id)
             self.lora_state.remove_request(req_id)
 
     def free_states(self, scheduler_output: SchedulerOutput) -> None:
