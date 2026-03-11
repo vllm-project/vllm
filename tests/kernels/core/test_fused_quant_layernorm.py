@@ -278,21 +278,22 @@ def test_rms_norm(
         assert torch.allclose(ref_residual, ops_residual)
 
     output = torch.empty(x.shape, dtype=quant_dtype, device=x.device)
-    scales = torch.empty(
-        (x.numel() // x.shape[-1], 1), device=x.device, dtype=torch.float32
-    )
-
     if group_size is None:
+        scales = torch.empty(
+            (x.numel() // x.shape[-1], 1), device=x.device, dtype=torch.float32
+        )
         opcheck(
             torch.ops._C.rms_norm_dynamic_per_token_quant,
             (output, x, layer.weight, scales, 1e-5, scale_ub, residual),
         )
     else:
-        # TODO(luka/eliza) opcheck is broken?
-        #  Somehow the cloned args are getting mutated in-place,
-        #  which causes the opcheck to fail.
-        # https://github.com/vllm-project/vllm/issues/36688
-        return
+        assert hidden_size % group_size[1] == 0
+        num_groups = hidden_size // group_size[1]
+        scales = torch.empty(
+            (num_groups, num_tokens),
+            device=x.device,
+            dtype=torch.float32,
+        ).transpose(0, 1)
         opcheck(
             torch.ops._C.rms_norm_per_block_quant,
             (
