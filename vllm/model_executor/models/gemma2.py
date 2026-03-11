@@ -29,7 +29,7 @@ from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import GeluAndMul
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.layernorm import GemmaRMSNorm
+from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
     QKVParallelLinear,
@@ -217,14 +217,21 @@ class Gemma2DecoderLayer(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.mlp",
         )
-        self.input_layernorm = GemmaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.post_attention_layernorm = GemmaRMSNorm(
+        # GGUF stores RMSNorm weights with +1 baked in (llama.cpp convention).
+        # GemmaRMSNorm adds 1 in its forward pass, so use plain RMSNorm for GGUF.
+        norm_cls = (
+            RMSNorm
+            if (quant_config is not None and quant_config.get_name() == "gguf")
+            else GemmaRMSNorm
+        )
+        self.input_layernorm = norm_cls(config.hidden_size, eps=config.rms_norm_eps)
+        self.post_attention_layernorm = norm_cls(
             config.hidden_size, eps=config.rms_norm_eps
         )
-        self.pre_feedforward_layernorm = GemmaRMSNorm(
+        self.pre_feedforward_layernorm = norm_cls(
             config.hidden_size, eps=config.rms_norm_eps
         )
-        self.post_feedforward_layernorm = GemmaRMSNorm(
+        self.post_feedforward_layernorm = norm_cls(
             config.hidden_size, eps=config.rms_norm_eps
         )
 
@@ -274,7 +281,12 @@ class Gemma2Model(nn.Module):
             ),
             prefix=f"{prefix}.layers",
         )
-        self.norm = GemmaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        norm_cls = (
+            RMSNorm
+            if (quant_config is not None and quant_config.get_name() == "gguf")
+            else GemmaRMSNorm
+        )
+        self.norm = norm_cls(config.hidden_size, eps=config.rms_norm_eps)
 
         # Normalize the embedding by sqrt(hidden_size)
         # The normalizer's data type should be downcasted to the model's
@@ -428,24 +440,8 @@ class Gemma2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        # Apply GGUF RMSNorm weight correction before loading.
-        # llama.cpp adds 1 to RMSNorm weights during GGUF conversion,
-        # so we need to subtract 1 to restore original values.
-        # See: https://github.com/ggml-org/llama.cpp/blob/be7c3034108473beda214fd1d7c98fd6a7a3bdf5/convert_hf_to_gguf.py#L3397-L3400
-        def _process_weights(
-            weights: Iterable[tuple[str, torch.Tensor]],
-        ) -> Iterable[tuple[str, torch.Tensor]]:
-            for name, loaded_weight in weights:
-                if (
-                    self.quant_config
-                    and self.quant_config.get_name() == "gguf"
-                    and name.endswith("norm.weight")
-                ):
-                    loaded_weight = loaded_weight - 1
-                yield name, loaded_weight
-
         loader = AutoWeightsLoader(
             self,
             skip_prefixes=(["lm_head."] if self.config.tie_word_embeddings else None),
         )
-        return loader.load_weights(_process_weights(weights))
+        return loader.load_weights(weights)
