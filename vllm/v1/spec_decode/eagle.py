@@ -165,7 +165,7 @@ class SpecDecodeBaseProposer:
         if self.method == "dflash":
             # --- DFlash scratch state (kept across propose() call) ---
             self._dflash_ctx_len: int = 0
-            self.mask_dflash_token_id: int = 151669
+            self.dflash_mask_token_id: int = 151669
             self._dflash_kv_len: int = 0
             self._dflash_num_query_tokens: int = 0
     
@@ -371,7 +371,7 @@ class SpecDecodeBaseProposer:
     ) -> dict[str, torch.Tensor]:
         return {
             name: slot_mapping
-            for name in self.attn_layer_names + self.indexer_layer_names
+            for name in self._draft_attn_layer_names
         }
 
     def initialize_cudagraph_keys(self, cudagraph_mode: CUDAGraphMode) -> None:
@@ -423,7 +423,7 @@ class SpecDecodeBaseProposer:
             target_hidden_states = self.model.combine_hidden_states(
                 target_hidden_states
             )
-            assert target_hidden_states.shape[-1] == self.hidden_sizee
+            assert target_hidden_states.shape[-1] == self.hidden_size
 
         num_tokens, token_indices_to_sample, common_attn_metadata = (
             self.set_inputs_first_pass(
@@ -493,9 +493,7 @@ class SpecDecodeBaseProposer:
             num_tokens=num_input_tokens,
             num_tokens_across_dp=num_tokens_across_dp,
             cudagraph_runtime_mode=cudagraph_runtime_mode,
-            slot_mapping=self._get_slot_mapping(
-                num_input_tokens, common_attn_metadata.slot_mapping
-            ),
+            slot_mapping=forward_slot_mapping,
         ):
             ret_hidden_states = self.model(**model_kwargs)
             if not self.model_returns_tuple():
@@ -758,12 +756,7 @@ class SpecDecodeBaseProposer:
             dtype=torch.int32,
         ).view(batch_size, num_query_tokens)[:, 1:].reshape(-1)
 
-        builder = (
-        self._get_attention_metadata_builder()
-        if self.attn_metadata_builder is None
-        else self.attn_metadata_builder
-        )
-        block_size = builder.kv_cache_spec.block_size
+        block_size = self.block_size
 
         block_table_tensor = getattr(cad, "block_table_tensor", None)
         if block_table_tensor is None:
