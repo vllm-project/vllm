@@ -75,15 +75,10 @@ class EagleSpeculator:
             device=device,
         )
 
-        # currently we don't  support PIECEWISE for Eagle.
-        cudagraph_mode = vllm_config.compilation_config.cudagraph_mode
-        if cudagraph_mode.decode_mode() == CUDAGraphMode.FULL:
-            cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY
-        else:
-            cudagraph_mode = CUDAGraphMode.NONE
-
+        # Initialized without mode; set_cudagraph_mode() is called later
+        # after init_attn_backend resolves backend support.
         self.cudagraph_manager = EagleCudaGraphManager(
-            vllm_config, device, cudagraph_mode, self.draft_tokens
+            vllm_config, device, self.draft_tokens
         )
 
     def load_model(self, target_model: nn.Module) -> None:
