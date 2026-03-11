@@ -189,8 +189,8 @@ class SpeculativeConfig:
         # Eagle3 and extract_hidden_states affect the computation graph because
         # they return intermediate hidden states in addition to the final hidden state.
         uses_aux_hidden_states = self.method in (
-            "eagle3", 
-            "extract_hidden_states", 
+            "eagle3",
+            "extract_hidden_states",
             "dflash",
         )
         factors.append(uses_aux_hidden_states)
