@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import base64
 import json
 
 import openai
@@ -10,9 +11,11 @@ import pytest_asyncio
 from vllm.multimodal.utils import encode_video_url, fetch_video
 from vllm.platforms import current_platform
 
+from ...conftest import VideoTestAssets
 from ...utils import RemoteOpenAIServer
 
 MODEL_NAME = "llava-hf/llava-onevision-qwen2-0.5b-ov-hf"
+QWEN2_5_OMNI_MODEL_NAME = "Qwen/Qwen2.5-Omni-3B"
 MAXIMUM_VIDEOS = 3
 
 TEST_VIDEO_URLS = [
@@ -402,3 +405,68 @@ async def test_multi_video_input(
         )
         message = chat_completion.choices[0].message
         assert message.content is not None and len(message.content) >= 0
+
+
+@pytest.fixture
+def qwen2_5_omni_server():
+    args = [
+        "--max-model-len",
+        "8192",
+        "--enforce-eager",
+        "--limit-mm-per-prompt",
+        json.dumps({"audio": 1, "video": 1}),
+    ]
+
+    with RemoteOpenAIServer(
+        QWEN2_5_OMNI_MODEL_NAME,
+        args,
+    ) as remote_server:
+        yield remote_server
+
+
+@pytest_asyncio.fixture
+async def qwen2_5_omni_client(qwen2_5_omni_server):
+    async with qwen2_5_omni_server.get_async_client() as async_client:
+        yield async_client
+
+
+@pytest.mark.core_model
+@pytest.mark.asyncio
+async def test_online_audio_in_video(
+    qwen2_5_omni_client: openai.AsyncOpenAI, video_assets: VideoTestAssets
+):
+    """Test video input with `audio_in_video=True`"""
+
+    # we don't use video_urls above because they missed audio stream.
+    video_path = video_assets[0].video_path
+    with open(video_path, "rb") as f:
+        video_base64 = base64.b64encode(f.read()).decode("utf-8")
+
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "video_url",
+                    "video_url": {"url": f"data:video/mp4;base64,{video_base64}"},
+                },
+            ],
+        }
+    ]
+
+    # multi-turn to test mm processor cache as well
+    for _ in range(2):
+        chat_completion = await qwen2_5_omni_client.chat.completions.create(
+            model=QWEN2_5_OMNI_MODEL_NAME,
+            messages=messages,
+            max_tokens=16,
+            extra_body={
+                "mm_processor_kwargs": {
+                    "use_audio_in_video": True,
+                }
+            },
+        )
+
+        assert len(chat_completion.choices) == 1
+        choice = chat_completion.choices[0]
+        assert choice.finish_reason == "length"
