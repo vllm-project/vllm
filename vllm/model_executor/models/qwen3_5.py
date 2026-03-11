@@ -528,8 +528,9 @@ class Qwen3_5ForCausalLMBase(
             "v_proj",
         ],
         "gate_up_proj": ["gate_proj", "up_proj"],
-        # GDN fused projections.
-        "in_proj_qkvz": ["in_proj_qkv", "in_proj_z"],
+        # GDN fused projections — 4 packed modules to match 4 output_sizes
+        # in create_qkvz_proj for correct per-slice TP sharding with LoRA.
+        "in_proj_qkvz": ["in_proj_q", "in_proj_k", "in_proj_v", "in_proj_z"],
         "in_proj_ba": ["in_proj_b", "in_proj_a"],
     }
 
@@ -632,7 +633,7 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
     supports_multimodal_pruning = False
 
     packed_modules_mapping = Qwen3VLForConditionalGeneration.packed_modules_mapping | {
-        "in_proj_qkvz": ["in_proj_qkv", "in_proj_z"],
+        "in_proj_qkvz": ["in_proj_q", "in_proj_k", "in_proj_v", "in_proj_z"],
         "in_proj_ba": ["in_proj_b", "in_proj_a"],
     }
 

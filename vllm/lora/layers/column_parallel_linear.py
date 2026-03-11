@@ -285,7 +285,7 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
     ) -> bool:
         return (
             type(source_layer) is MergedColumnParallelLinear
-            and len(packed_modules_list) == 2
+            and len(packed_modules_list) == len(source_layer.output_sizes)
         )
 
 
