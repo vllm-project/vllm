@@ -327,9 +327,6 @@ def rocm_fp8_paged_mqa_logits(
     aiter_paged_mqa_logits_module = None
     if rocm_aiter_ops.is_enabled():
         aiter_paged_mqa_logits_module = paged_mqa_logits_module()
-    # FIXME(ganyi): Temporarily disable the aiter path until nightly docker
-    # update aiter to the fix PR.
-    aiter_paged_mqa_logits_module = None
 
     if aiter_paged_mqa_logits_module is not None:
         deepgemm_fp8_paged_mqa_logits_stage1 = (
