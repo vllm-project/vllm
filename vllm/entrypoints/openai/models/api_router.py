@@ -5,7 +5,10 @@
 from fastapi import APIRouter, FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+from vllm.entrypoints.openai.models.serving import (
+    OpenAIModelRegistry,
+    OpenAIServingModels,
+)
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -13,7 +16,7 @@ logger = init_logger(__name__)
 router = APIRouter()
 
 
-def models(request: Request) -> OpenAIServingModels:
+def models(request: Request) -> OpenAIModelRegistry | OpenAIServingModels:
     return request.app.state.openai_serving_models
 
 
