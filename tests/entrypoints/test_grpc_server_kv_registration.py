@@ -118,15 +118,39 @@ def _make_async_llm():
     )
 
 
-def _make_async_llm_with_kv_events_disabled():
+def _make_async_llm_with_kv_events_config(kv_events_config: Any):
     return SimpleNamespace(
         vllm_config=SimpleNamespace(
-            kv_events_config=SimpleNamespace(
-                enable_kv_cache_events=False,
-                publisher="null",
-            ),
+            kv_events_config=kv_events_config,
             parallel_config=SimpleNamespace(data_parallel_size=1),
         )
+    )
+
+
+def _make_async_llm_with_kv_events_disabled():
+    return _make_async_llm_with_kv_events_config(
+        SimpleNamespace(
+            enable_kv_cache_events=False,
+            publisher="null",
+        )
+    )
+
+
+def _make_async_llm_with_kv_events_enabled_local_only():
+    return _make_async_llm_with_kv_events_config(
+        SimpleNamespace(
+            enable_kv_cache_events=True,
+            publisher="zmq",
+            allow_remote_subscribe=False,
+        )
+    )
+
+
+def _subscribe_kv_events_rpc(channel: grpc.aio.Channel):
+    return channel.unary_stream(
+        "/vllm.grpc.engine.VllmEngine/SubscribeKvEvents",
+        request_serializer=local_pb2.SubscribeKvEventsRequest.SerializeToString,
+        response_deserializer=local_pb2.KvEventBatch.FromString,
     )
 
 
@@ -278,11 +302,7 @@ async def test_subscribe_kv_events_round_trip_with_servicer_override(
 
     channel = grpc.aio.insecure_channel(f"127.0.0.1:{port}")
     try:
-        rpc = channel.unary_stream(
-            "/vllm.grpc.engine.VllmEngine/SubscribeKvEvents",
-            request_serializer=local_pb2.SubscribeKvEventsRequest.SerializeToString,
-            response_deserializer=local_pb2.KvEventBatch.FromString,
-        )
+        rpc = _subscribe_kv_events_rpc(channel)
         call = rpc(local_pb2.SubscribeKvEventsRequest(start_sequence_number=42))
         responses = [msg async for msg in call]
         assert len(responses) == 1
@@ -356,11 +376,7 @@ async def test_subscribe_kv_events_round_trip_with_fallback_handler(
 
     channel = grpc.aio.insecure_channel(f"127.0.0.1:{port}")
     try:
-        rpc = channel.unary_stream(
-            "/vllm.grpc.engine.VllmEngine/SubscribeKvEvents",
-            request_serializer=local_pb2.SubscribeKvEventsRequest.SerializeToString,
-            response_deserializer=local_pb2.KvEventBatch.FromString,
-        )
+        rpc = _subscribe_kv_events_rpc(channel)
         call = rpc(local_pb2.SubscribeKvEventsRequest(start_sequence_number=7))
         responses = [msg async for msg in call]
         assert len(responses) == 1
@@ -402,17 +418,62 @@ async def test_subscribe_kv_events_returns_unimplemented_when_disabled(
 
     channel = grpc.aio.insecure_channel(f"127.0.0.1:{port}")
     try:
-        rpc = channel.unary_stream(
-            "/vllm.grpc.engine.VllmEngine/SubscribeKvEvents",
-            request_serializer=local_pb2.SubscribeKvEventsRequest.SerializeToString,
-            response_deserializer=local_pb2.KvEventBatch.FromString,
-        )
+        rpc = _subscribe_kv_events_rpc(channel)
         call = rpc(local_pb2.SubscribeKvEventsRequest(start_sequence_number=0))
         with pytest.raises(grpc.aio.AioRpcError) as exc_info:
             await call.read()
 
         assert exc_info.value.code() == grpc.StatusCode.UNIMPLEMENTED
         assert "KV cache events are not enabled" in exc_info.value.details()
+    finally:
+        await channel.close()
+        await server.stop(None)
+
+
+@pytest.mark.asyncio
+async def test_subscribe_kv_events_returns_permission_denied_for_remote_peer(
+    monkeypatch,
+    grpc_server_module,
+):
+    server = grpc.aio.server()
+    servicer = local_pb2_grpc.VllmEngineServicer()
+    async_llm = _make_async_llm_with_kv_events_enabled_local_only()
+
+    monkeypatch.setattr(
+        grpc_server_module,
+        "_resolve_kv_proto_bindings",
+        lambda _pb2_module: (
+            local_pb2.SubscribeKvEventsRequest,
+            local_pb2.KvEventBatch,
+            local_pb2,
+        ),
+    )
+    monkeypatch.setattr(
+        grpc_server_module,
+        "_supports_subscribe_kv_events",
+        lambda _pb2_module: True,
+    )
+    monkeypatch.setattr(
+        grpc_server_module.GrpcKvEventStreamer,
+        "_peer",
+        staticmethod(lambda _context: "ipv4:10.1.2.3:50051"),
+    )
+
+    grpc_server_module._register_subscribe_kv_events(server, servicer, async_llm)
+    local_pb2_grpc.add_VllmEngineServicer_to_server(servicer, server)
+
+    port = server.add_insecure_port("127.0.0.1:0")
+    await server.start()
+
+    channel = grpc.aio.insecure_channel(f"127.0.0.1:{port}")
+    try:
+        rpc = _subscribe_kv_events_rpc(channel)
+        call = rpc(local_pb2.SubscribeKvEventsRequest(start_sequence_number=0))
+        with pytest.raises(grpc.aio.AioRpcError) as exc_info:
+            await call.read()
+
+        assert exc_info.value.code() == grpc.StatusCode.PERMISSION_DENIED
+        assert "allow_remote_subscribe=true" in exc_info.value.details()
     finally:
         await channel.close()
         await server.stop(None)

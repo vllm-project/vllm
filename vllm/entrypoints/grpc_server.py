@@ -24,7 +24,6 @@ import importlib
 import signal
 import sys
 import time
-from collections.abc import AsyncGenerator
 from types import SimpleNamespace
 from typing import Any
 
@@ -109,15 +108,6 @@ def _resolve_kv_proto_bindings(default_pb2_module: Any) -> tuple[Any, Any, Any]:
     )
 
 
-async def _stream_kv_events(
-    streamer: GrpcKvEventStreamer,
-    request: Any,
-    context: grpc.aio.ServicerContext,
-) -> AsyncGenerator[Any, None]:
-    async for batch in streamer.subscribe(request, context):
-        yield batch
-
-
 def _register_subscribe_kv_events(
     server: grpc.aio.Server,
     servicer: Any,
@@ -133,7 +123,7 @@ def _register_subscribe_kv_events(
     )
 
     async def subscribe_handler(request, context):
-        async for batch in _stream_kv_events(kv_streamer, request, context):
+        async for batch in kv_streamer.subscribe(request, context):
             yield batch
 
     if _supports_subscribe_kv_events(vllm_engine_pb2):

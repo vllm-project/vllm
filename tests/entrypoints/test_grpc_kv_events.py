@@ -58,6 +58,36 @@ class _FakeStreamContext(_FakeAbortContext):
         self.initial_metadata_sent = True
 
 
+def _make_streamer(
+    kv_events_config: KVEventsConfig | None = None,
+) -> GrpcKvEventStreamer:
+    return GrpcKvEventStreamer(
+        kv_events_config=kv_events_config,
+        data_parallel_size=1,
+        pb2_module=vllm_engine_pb2,
+    )
+
+
+def _make_enabled_kv_events_config(
+    topic: str = "",
+    allow_remote_subscribe: bool = False,
+) -> KVEventsConfig:
+    return KVEventsConfig(
+        enable_kv_cache_events=True,
+        publisher="zmq",
+        topic=topic,
+        allow_remote_subscribe=allow_remote_subscribe,
+    )
+
+
+def _make_request(
+    start_sequence_number: int = 0,
+) -> vllm_engine_pb2.SubscribeKvEventsRequest:
+    return vllm_engine_pb2.SubscribeKvEventsRequest(
+        start_sequence_number=start_sequence_number
+    )
+
+
 def test_hash_to_int64_normalizes_unsigned_values():
     assert _hash_to_int64(7) == 7
     assert _hash_to_int64((1 << 63) + 5) == -9223372036854775803
@@ -65,11 +95,7 @@ def test_hash_to_int64_normalizes_unsigned_values():
 
 
 def test_to_proto_batch_maps_all_event_variants():
-    streamer = GrpcKvEventStreamer(
-        kv_events_config=None,
-        data_parallel_size=1,
-        pb2_module=vllm_engine_pb2,
-    )
+    streamer = _make_streamer()
 
     stored = BlockStored(
         block_hashes=[1, 2],
@@ -118,11 +144,7 @@ def test_to_proto_batch_maps_all_event_variants():
 
 
 def test_unknown_medium_does_not_set_cache_level():
-    streamer = GrpcKvEventStreamer(
-        kv_events_config=None,
-        data_parallel_size=1,
-        pb2_module=vllm_engine_pb2,
-    )
+    streamer = _make_streamer()
 
     removed = BlockRemoved(block_hashes=[1], medium="DISK")
     proto_event = streamer._to_proto_event(event_id=0, event=removed)
@@ -131,11 +153,7 @@ def test_unknown_medium_does_not_set_cache_level():
 
 
 def test_block_stored_token_ids_are_split_per_block():
-    streamer = GrpcKvEventStreamer(
-        kv_events_config=None,
-        data_parallel_size=1,
-        pb2_module=vllm_engine_pb2,
-    )
+    streamer = _make_streamer()
 
     stored = BlockStored(
         block_hashes=[101, 202],
@@ -152,12 +170,10 @@ def test_block_stored_token_ids_are_split_per_block():
     assert proto_event.stored.blocks[1].token_ids == [3, 4]
 
 
-def test_is_cancelled_uses_cancelled_method_false():
-    assert not GrpcKvEventStreamer._is_cancelled(_FakeContext(cancelled=False))
-
-
-def test_is_cancelled_uses_cancelled_method_true():
-    assert GrpcKvEventStreamer._is_cancelled(_FakeContext(cancelled=True))
+@pytest.mark.parametrize("cancelled", [False, True])
+def test_is_cancelled_uses_cancelled_method(cancelled: bool):
+    context = _FakeContext(cancelled=cancelled)
+    assert GrpcKvEventStreamer._is_cancelled(context) is cancelled
 
 
 @pytest.mark.parametrize(
@@ -176,43 +192,36 @@ def test_is_local_peer(peer: str, is_local: bool):
     assert GrpcKvEventStreamer._is_local_peer(peer) is is_local
 
 
+def test_extract_ipv6_host_only_strips_bracketed_port():
+    assert GrpcKvEventStreamer._extract_ipv6_host("[::1]:50051") == "::1"
+    assert GrpcKvEventStreamer._extract_ipv6_host("::1") == "::1"
+    assert GrpcKvEventStreamer._extract_ipv6_host("2001:db8::1") == "2001:db8::1"
+    # Unbracketed inputs are treated as full IPv6 host text.
+    assert GrpcKvEventStreamer._extract_ipv6_host("::1:50051") == "::1:50051"
+
+
 def test_is_subscriber_allowed_respects_allow_remote_subscribe():
-    streamer_default = GrpcKvEventStreamer(
-        kv_events_config=KVEventsConfig(
-            enable_kv_cache_events=True,
-            publisher="zmq",
-        ),
-        data_parallel_size=1,
-        pb2_module=vllm_engine_pb2,
-    )
+    streamer_default = _make_streamer(kv_events_config=_make_enabled_kv_events_config())
     remote_context = _FakePeerContext(cancelled=False, peer="ipv4:10.1.2.3:50051")
     assert not streamer_default._is_subscriber_allowed(remote_context)
 
-    streamer_remote_allowed = GrpcKvEventStreamer(
-        kv_events_config=KVEventsConfig(
-            enable_kv_cache_events=True,
-            publisher="zmq",
+    streamer_remote_allowed = _make_streamer(
+        kv_events_config=_make_enabled_kv_events_config(
             allow_remote_subscribe=True,
-        ),
-        data_parallel_size=1,
-        pb2_module=vllm_engine_pb2,
+        )
     )
     assert streamer_remote_allowed._is_subscriber_allowed(remote_context)
 
 
 @pytest.mark.asyncio
 async def test_subscribe_denies_remote_peer_by_default():
-    streamer = GrpcKvEventStreamer(
-        kv_events_config=KVEventsConfig(
-            enable_kv_cache_events=True,
-            publisher="zmq",
+    streamer = _make_streamer(
+        kv_events_config=_make_enabled_kv_events_config(
             topic="kv-events",
-        ),
-        data_parallel_size=1,
-        pb2_module=vllm_engine_pb2,
+        )
     )
     context = _FakeAbortContext(cancelled=False, peer="ipv4:10.1.2.3:50051")
-    request = vllm_engine_pb2.SubscribeKvEventsRequest(start_sequence_number=0)
+    request = _make_request()
 
     responses = [batch async for batch in streamer.subscribe(request, context)]
 
@@ -225,13 +234,9 @@ async def test_subscribe_denies_remote_peer_by_default():
 
 @pytest.mark.asyncio
 async def test_subscribe_returns_unimplemented_when_disabled():
-    streamer = GrpcKvEventStreamer(
-        kv_events_config=None,
-        data_parallel_size=1,
-        pb2_module=vllm_engine_pb2,
-    )
+    streamer = _make_streamer()
     context = _FakeAbortContext(cancelled=False, peer="")
-    request = vllm_engine_pb2.SubscribeKvEventsRequest(start_sequence_number=0)
+    request = _make_request()
 
     responses = [batch async for batch in streamer.subscribe(request, context)]
 
@@ -244,17 +249,13 @@ async def test_subscribe_returns_unimplemented_when_disabled():
 
 @pytest.mark.asyncio
 async def test_subscribe_sends_initial_metadata_before_stream():
-    streamer = GrpcKvEventStreamer(
-        kv_events_config=KVEventsConfig(
-            enable_kv_cache_events=True,
-            publisher="zmq",
+    streamer = _make_streamer(
+        kv_events_config=_make_enabled_kv_events_config(
             topic="kv-events",
-        ),
-        data_parallel_size=1,
-        pb2_module=vllm_engine_pb2,
+        )
     )
     context = _FakeStreamContext(cancelled=True, peer="ipv4:127.0.0.1:50051")
-    request = vllm_engine_pb2.SubscribeKvEventsRequest(start_sequence_number=0)
+    request = _make_request()
 
     responses = [batch async for batch in streamer.subscribe(request, context)]
 

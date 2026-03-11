@@ -171,20 +171,15 @@ class GrpcKvEventStreamer:
                 if sequence_number < start_sequence:
                     continue
 
-                try:
-                    decoded_batch = self._decoder.decode(payload)
-                except Exception as exc:
-                    logger.warning(
-                        "Failed to decode KV event batch seq=%d: %s",
-                        sequence_number,
-                        exc,
-                    )
+                message = self._decode_and_maybe_convert(
+                    payload,
+                    sequence_number,
+                    last_seq_by_dp,
+                    source="KV event",
+                )
+                if message is None:
                     continue
-                if not self._should_emit(
-                    decoded_batch, sequence_number, last_seq_by_dp
-                ):
-                    continue
-                yield self._to_proto_batch(sequence_number, decoded_batch)
+                yield message
 
         except asyncio.CancelledError:
             return
@@ -231,27 +226,27 @@ class GrpcKvEventStreamer:
             if sequence_number < start_sequence:
                 continue
 
-            try:
-                decoded_batch = self._decoder.decode(payload)
-            except Exception as exc:
-                logger.warning(
-                    "Failed to decode KV replay batch seq=%d: %s",
-                    sequence_number,
-                    exc,
-                )
+            message = self._decode_and_maybe_convert(
+                payload,
+                sequence_number,
+                last_seq_by_dp,
+                source="KV replay",
+            )
+            if message is None:
                 continue
-            if not self._should_emit(decoded_batch, sequence_number, last_seq_by_dp):
-                continue
-            yield self._to_proto_batch(sequence_number, decoded_batch)
+            yield message
+
+    def _offset_endpoint(self, endpoint: str, dp_rank: int) -> str:
+        maybe_endpoint = ZmqEventPublisher.offset_endpoint_port(endpoint, dp_rank)
+        if maybe_endpoint is None:
+            raise ValueError("KV event endpoint must not be None")
+        return maybe_endpoint
 
     def _offset_endpoints(self, endpoint: str) -> list[str]:
-        endpoints: list[str] = []
-        for dp_rank in range(self._data_parallel_size):
-            maybe_endpoint = ZmqEventPublisher.offset_endpoint_port(endpoint, dp_rank)
-            if maybe_endpoint is None:
-                raise ValueError("KV event endpoint must not be None")
-            endpoints.append(maybe_endpoint)
-        return endpoints
+        return [
+            self._offset_endpoint(endpoint, dp_rank)
+            for dp_rank in range(self._data_parallel_size)
+        ]
 
     def _is_subscriber_allowed(self, context: grpc.aio.ServicerContext) -> bool:
         assert self._config is not None
@@ -275,6 +270,27 @@ class GrpcKvEventStreamer:
             return False
         last_seq_by_dp[dp_rank] = sequence_number
         return True
+
+    def _decode_and_maybe_convert(
+        self,
+        payload: bytes,
+        sequence_number: int,
+        last_seq_by_dp: dict[int, int],
+        source: str,
+    ) -> Any | None:
+        try:
+            decoded_batch = self._decoder.decode(payload)
+        except Exception as exc:
+            logger.warning(
+                "Failed to decode %s batch seq=%d: %s",
+                source,
+                sequence_number,
+                exc,
+            )
+            return None
+        if not self._should_emit(decoded_batch, sequence_number, last_seq_by_dp):
+            return None
+        return self._to_proto_batch(sequence_number, decoded_batch)
 
     def _to_proto_batch(self, sequence_number: int, batch: KVEventBatch) -> Any:
         proto_events = [
@@ -366,20 +382,20 @@ class GrpcKvEventStreamer:
     def _is_local_peer(cls, peer: str) -> bool:
         if not peer:
             return False
-        if peer.startswith("unix:"):
+        family, _, address = peer.partition(":")
+        if family == "unix":
             return True
-        if peer.startswith("ipv4:"):
-            host_port = peer[len("ipv4:") :]
-            if ":" in host_port:
-                host = host_port.rsplit(":", maxsplit=1)[0]
-            else:
-                host = host_port
-            return cls._is_loopback_host(host)
-        if peer.startswith("ipv6:"):
-            host_port = peer[len("ipv6:") :]
-            host = cls._extract_ipv6_host(host_port)
-            return cls._is_loopback_host(host)
+        if family == "ipv4":
+            return cls._is_loopback_host(cls._extract_ipv4_host(address))
+        if family == "ipv6":
+            return cls._is_loopback_host(cls._extract_ipv6_host(address))
         return False
+
+    @staticmethod
+    def _extract_ipv4_host(host_port: str) -> str:
+        if ":" in host_port:
+            return host_port.rsplit(":", maxsplit=1)[0]
+        return host_port
 
     @staticmethod
     def _extract_ipv6_host(host_port: str) -> str:
