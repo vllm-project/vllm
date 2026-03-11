@@ -479,11 +479,6 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         self.enable_packed_recurrent_decode = (
             envs.VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE
         )
-        self._forward_core_impl = (
-            self._forward_core_decode_non_spec
-            if self.enable_packed_recurrent_decode
-            else self._forward_core_baseline
-        )
 
         compilation_config = get_current_vllm_config().compilation_config
         if prefix in compilation_config.static_forward_context:
@@ -662,7 +657,34 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         a: torch.Tensor,
         core_attn_out: torch.Tensor,
     ):
-        return self._forward_core_impl(mixed_qkv, b, a, core_attn_out)
+        if not self.enable_packed_recurrent_decode:
+            return self._forward_core_baseline(mixed_qkv, b, a, core_attn_out)
+
+        forward_context = get_forward_context()
+        attn_metadata: AttentionMetadata = forward_context.attn_metadata
+
+        if attn_metadata is None:
+            return
+
+        assert isinstance(attn_metadata, dict)
+        attn_metadata = attn_metadata[self.prefix]
+        assert isinstance(attn_metadata, GDNAttentionMetadata)
+
+        if (
+            attn_metadata.spec_sequence_masks is not None
+            or attn_metadata.num_prefills > 0
+            or attn_metadata.num_decodes == 0
+        ):
+            return self._forward_core_baseline(mixed_qkv, b, a, core_attn_out)
+
+        return self._forward_core_decode_non_spec(
+            mixed_qkv=mixed_qkv,
+            b=b,
+            a=a,
+            core_attn_out=core_attn_out,
+            attn_metadata=attn_metadata,
+            virtual_engine=forward_context.virtual_engine,
+        )
 
     def _forward_core_baseline(
         self,
@@ -874,29 +896,14 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         b: torch.Tensor,
         a: torch.Tensor,
         core_attn_out: torch.Tensor,
+        attn_metadata: GDNAttentionMetadata,
+        virtual_engine: int,
     ):
         """
         Core attention computation with a packed non-spec decode fast path.
         """
-        forward_context = get_forward_context()
-        attn_metadata: AttentionMetadata = forward_context.attn_metadata
-
-        if attn_metadata is None:
-            return
-
-        assert isinstance(attn_metadata, dict)
-        attn_metadata = attn_metadata[self.prefix]
-        assert isinstance(attn_metadata, GDNAttentionMetadata)
-        spec_sequence_masks = attn_metadata.spec_sequence_masks
-        if (
-            spec_sequence_masks is not None
-            or attn_metadata.num_prefills > 0
-            or attn_metadata.num_decodes == 0
-        ):
-            return self._forward_core_baseline(mixed_qkv, b, a, core_attn_out)
-
         non_spec_state_indices_tensor = attn_metadata.non_spec_state_indices_tensor  # noqa: E501
-        self_kv_cache = self.kv_cache[forward_context.virtual_engine]
+        self_kv_cache = self.kv_cache[virtual_engine]
         conv_state = self_kv_cache[0].transpose(-1, -2)
         ssm_state = self_kv_cache[1]
         num_actual_tokens = attn_metadata.num_actual_tokens
