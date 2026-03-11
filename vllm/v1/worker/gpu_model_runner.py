@@ -541,7 +541,7 @@ class GPUModelRunner(
                 self.drafter = SuffixDecodingProposer(self.vllm_config)
             elif self.speculative_config.use_eagle():
                 self.drafter = EagleProposer(self.vllm_config, self.device, self)
-                if self.speculative_config.method == "eagle3":
+                if self.speculative_config.method in ("eagle3","dflash"):
                     self.use_aux_hidden_state_outputs = (
                         self.drafter.eagle3_use_aux_hidden_state
                     )
@@ -4560,7 +4560,7 @@ class GPUModelRunner(
                             aux_layers,
                         )
                     else:
-                        aux_layers = self.model.get_eagle3_aux_hidden_state_layers()
+                        aux_layers = self.model.get_eagle3_aux_hidden_state_layers(method = self.speculative_config.method)
 
                     self.model.set_aux_hidden_state_layers(aux_layers)
                 time_after_load = time.perf_counter()
