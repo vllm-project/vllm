@@ -43,10 +43,6 @@ body:
       Any other things you would like to mention.
   validations:
     required: false
-- type: markdown
-  attributes:
-    value: >
-      Thanks for contributing 🎉!
 - type: checkboxes
   id: askllm
   attributes:

@@ -1,12 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import os
 import time
 
 from vllm import LLM, SamplingParams
-
-# enable torch profiler, can also be set on cmd line
-os.environ["VLLM_TORCH_PROFILER_DIR"] = "./vllm_profile"
 
 # Sample prompts.
 prompts = [
@@ -18,10 +15,17 @@ prompts = [
 # Create a sampling params object.
 sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 
-if __name__ == "__main__":
 
+def main():
     # Create an LLM.
-    llm = LLM(model="facebook/opt-125m", tensor_parallel_size=1)
+    llm = LLM(
+        model="facebook/opt-125m",
+        tensor_parallel_size=1,
+        profiler_config={
+            "profiler": "torch",
+            "torch_profiler_dir": "./vllm_profile",
+        },
+    )
 
     llm.start_profile()
 
@@ -32,11 +36,17 @@ if __name__ == "__main__":
     llm.stop_profile()
 
     # Print the outputs.
+    print("-" * 50)
     for output in outputs:
         prompt = output.prompt
         generated_text = output.outputs[0].text
-        print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+        print(f"Prompt: {prompt!r}\nGenerated text: {generated_text!r}")
+        print("-" * 50)
 
     # Add a buffer to wait for profiler in the background process
     # (in case MP is on) to finish writing profiling output.
     time.sleep(10)
+
+
+if __name__ == "__main__":
+    main()

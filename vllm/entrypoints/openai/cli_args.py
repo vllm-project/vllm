@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 This file contains the command line arguments for the vLLM's
 OpenAI-compatible server. It is kept in a separate file for documentation
@@ -9,25 +10,35 @@ import argparse
 import json
 import ssl
 from collections.abc import Sequence
-from typing import Optional, Union, get_args
+from dataclasses import field
+from typing import Any, Literal
 
-from vllm.engine.arg_utils import AsyncEngineArgs, nullable_str
-from vllm.entrypoints.chat_utils import (ChatTemplateContentFormatOption,
-                                         validate_chat_template)
-from vllm.entrypoints.openai.serving_models import (LoRAModulePath,
-                                                    PromptAdapterPath)
-from vllm.entrypoints.openai.tool_parsers import ToolParserManager
-from vllm.utils import FlexibleArgumentParser
+import vllm.envs as envs
+from vllm.config import config
+from vllm.engine.arg_utils import AsyncEngineArgs, optional_type
+from vllm.entrypoints.chat_utils import (
+    ChatTemplateContentFormatOption,
+    validate_chat_template,
+)
+from vllm.entrypoints.constants import (
+    H11_MAX_HEADER_COUNT_DEFAULT,
+    H11_MAX_INCOMPLETE_EVENT_SIZE_DEFAULT,
+)
+from vllm.entrypoints.openai.models.protocol import LoRAModulePath
+from vllm.logger import init_logger
+from vllm.tool_parsers import ToolParserManager
+from vllm.utils.argparse_utils import FlexibleArgumentParser
+
+logger = init_logger(__name__)
 
 
 class LoRAParserAction(argparse.Action):
-
     def __call__(
         self,
         parser: argparse.ArgumentParser,
         namespace: argparse.Namespace,
-        values: Optional[Union[str, Sequence[str]]],
-        option_string: Optional[str] = None,
+        values: str | Sequence[str] | None,
+        option_string: str | None = None,
     ):
         if values is None:
             values = []
@@ -36,10 +47,10 @@ class LoRAParserAction(argparse.Action):
 
         lora_list: list[LoRAModulePath] = []
         for item in values:
-            if item in [None, '']:  # Skip if item is None or empty string
+            if item in [None, ""]:  # Skip if item is None or empty string
                 continue
-            if '=' in item and ',' not in item:  # Old format: name=path
-                name, path = item.split('=')
+            if "=" in item and "," not in item:  # Old format: name=path
+                name, path = item.split("=")
                 lora_list.append(LoRAModulePath(name, path))
             else:  # Assume JSON format
                 try:
@@ -47,8 +58,7 @@ class LoRAParserAction(argparse.Action):
                     lora = LoRAModulePath(**lora_dict)
                     lora_list.append(lora)
                 except json.JSONDecodeError:
-                    parser.error(
-                        f"Invalid JSON format for --lora-modules: {item}")
+                    parser.error(f"Invalid JSON format for --lora-modules: {item}")
                 except TypeError as e:
                     parser.error(
                         f"Invalid fields for --lora-modules: {item} - {str(e)}"
@@ -56,217 +66,290 @@ class LoRAParserAction(argparse.Action):
         setattr(namespace, self.dest, lora_list)
 
 
-class PromptAdapterParserAction(argparse.Action):
+@config
+class BaseFrontendArgs:
+    """Base arguments for the OpenAI-compatible frontend server.
 
-    def __call__(
-        self,
-        parser: argparse.ArgumentParser,
-        namespace: argparse.Namespace,
-        values: Optional[Union[str, Sequence[str]]],
-        option_string: Optional[str] = None,
-    ):
-        if values is None:
-            values = []
-        if isinstance(values, str):
-            raise TypeError("Expected values to be a list")
+    This base class does not include host, port, and server-specific arguments
+    like SSL, CORS, and HTTP server settings. Those arguments are added by
+    the subclasses.
+    """
 
-        adapter_list: list[PromptAdapterPath] = []
-        for item in values:
-            name, path = item.split('=')
-            adapter_list.append(PromptAdapterPath(name, path))
-        setattr(namespace, self.dest, adapter_list)
+    lora_modules: list[LoRAModulePath] | None = None
+    """LoRA modules configurations in either 'name=path' format or JSON format
+    or JSON list format. Example (old format): `'name=path'` Example (new
+    format): `{\"name\": \"name\", \"path\": \"lora_path\",
+    \"base_model_name\": \"id\"}`"""
+    chat_template: str | None = None
+    """The file path to the chat template, or the template in single-line form
+    for the specified model."""
+    chat_template_content_format: ChatTemplateContentFormatOption = "auto"
+    """The format to render message content within a chat template.
+
+    * "string" will render the content as a string. Example: `"Hello World"`
+    * "openai" will render the content as a list of dictionaries, similar to
+      OpenAI schema. Example: `[{"type": "text", "text": "Hello world!"}]`"""
+    trust_request_chat_template: bool = False
+    """Whether to trust the chat template provided in the request. If False,
+    the server will always use the chat template specified by `--chat-template`
+    or the ones from tokenizer."""
+    default_chat_template_kwargs: dict[str, Any] | None = None
+    """Default keyword arguments to pass to the chat template renderer.
+    These will be merged with request-level chat_template_kwargs,
+    with request values taking precedence. Useful for setting default
+    behavior for reasoning models. Example: '{"enable_thinking": false}'
+    to disable thinking mode by default for Qwen3/DeepSeek models."""
+    response_role: str = "assistant"
+    """The role name to return if `request.add_generation_prompt=true`."""
+    return_tokens_as_token_ids: bool = False
+    """When `--max-logprobs` is specified, represents single tokens as
+    strings of the form 'token_id:{token_id}' so that tokens that are not
+    JSON-encodable can be identified."""
+    disable_frontend_multiprocessing: bool = False
+    """If specified, will run the OpenAI frontend server in the same process as
+    the model serving engine."""
+    enable_auto_tool_choice: bool = False
+    """Enable auto tool choice for supported models. Use `--tool-call-parser`
+    to specify which parser to use."""
+    exclude_tools_when_tool_choice_none: bool = False
+    """If specified, exclude tool definitions in prompts when
+    tool_choice='none'."""
+    tool_call_parser: str | None = None
+    """Select the tool call parser depending on the model that you're using.
+    This is used to parse the model-generated tool call into OpenAI API format.
+    Required for `--enable-auto-tool-choice`. You can choose any option from
+    the built-in parsers or register a plugin via `--tool-parser-plugin`."""
+    tool_parser_plugin: str = ""
+    """Special the tool parser plugin write to parse the model-generated tool
+    into OpenAI API format, the name register in this plugin can be used in
+    `--tool-call-parser`."""
+    tool_server: str | None = None
+    """Comma-separated list of host:port pairs (IPv4, IPv6, or hostname).
+    Examples: 127.0.0.1:8000, [::1]:8000, localhost:1234. Or `demo` for
+    built-in demo tools (browser and Python code interpreter). WARNING:
+    The `demo` Python tool executes model-generated code in Docker without
+    network isolation by default. See the security guide for more
+    information."""
+    log_config_file: str | None = envs.VLLM_LOGGING_CONFIG_PATH
+    """Path to logging config JSON file for both vllm and uvicorn"""
+    max_log_len: int | None = None
+    """Max number of prompt characters or prompt ID numbers being printed in
+    log. The default of None means unlimited."""
+    enable_prompt_tokens_details: bool = False
+    """If set to True, enable prompt_tokens_details in usage."""
+    enable_server_load_tracking: bool = False
+    """If set to True, enable tracking server_load_metrics in the app state."""
+    enable_force_include_usage: bool = False
+    """If set to True, including usage on every request."""
+    enable_tokenizer_info_endpoint: bool = False
+    """Enable the `/tokenizer_info` endpoint. May expose chat
+    templates and other tokenizer configuration."""
+    enable_log_outputs: bool = False
+    """If set to True, log model outputs (generations).
+    Requires `--enable-log-requests`. As with `--enable-log-requests`,
+    information is only logged at INFO level at maximum."""
+    enable_log_deltas: bool = True
+    """If set to False, output deltas will not be logged. Relevant only if 
+    --enable-log-outputs is set.
+    """
+    log_error_stack: bool = envs.VLLM_SERVER_DEV_MODE
+    """If set to True, log the stack trace of error responses"""
+    tokens_only: bool = False
+    """
+    If set to True, only enable the Tokens In<>Out endpoint. 
+    This is intended for use in a Disaggregated Everything setup.
+    """
+
+    @classmethod
+    def _customize_cli_kwargs(
+        cls,
+        frontend_kwargs: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Customize argparse kwargs before arguments are registered.
+
+        Subclasses should override this and call
+        ``super()._customize_cli_kwargs(frontend_kwargs)`` first.
+        """
+        # Special case: default_chat_template_kwargs needs json.loads type
+        frontend_kwargs["default_chat_template_kwargs"]["type"] = json.loads
+
+        # Special case: LoRA modules need custom parser action and
+        # optional_type(str)
+        frontend_kwargs["lora_modules"]["type"] = optional_type(str)
+        frontend_kwargs["lora_modules"]["action"] = LoRAParserAction
+
+        # Special case: Tool call parser shows built-in options.
+        valid_tool_parsers = list(ToolParserManager.list_registered())
+        parsers_str = ",".join(valid_tool_parsers)
+        frontend_kwargs["tool_call_parser"]["metavar"] = (
+            f"{{{parsers_str}}} or name registered in --tool-parser-plugin"
+        )
+        return frontend_kwargs
+
+    @classmethod
+    def add_cli_args(cls, parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
+        """Register CLI arguments for this frontend class.
+
+        Subclasses should override ``_customize_cli_kwargs`` instead of
+        this method so that base-class postprocessing is always applied.
+        """
+        from vllm.engine.arg_utils import get_kwargs
+
+        frontend_kwargs = get_kwargs(cls)
+        frontend_kwargs = cls._customize_cli_kwargs(frontend_kwargs)
+
+        group_name = cls.__name__.replace("Args", "")
+        frontend_group = parser.add_argument_group(
+            title=group_name,
+            description=cls.__doc__,
+        )
+        for key, value in frontend_kwargs.items():
+            extra_flags = value.pop("flags", [])
+            frontend_group.add_argument(
+                *extra_flags, f"--{key.replace('_', '-')}", **value
+            )
+
+        return parser
+
+
+@config
+class FrontendArgs(BaseFrontendArgs):
+    """Arguments for the OpenAI-compatible frontend server."""
+
+    host: str | None = None
+    """Host name."""
+    port: int = 8000
+    """Port number."""
+    uds: str | None = None
+    """Unix domain socket path. If set, host and port arguments are ignored."""
+    uvicorn_log_level: Literal[
+        "critical", "error", "warning", "info", "debug", "trace"
+    ] = "info"
+    """Log level for uvicorn."""
+    disable_uvicorn_access_log: bool = False
+    """Disable uvicorn access log."""
+    disable_access_log_for_endpoints: str | None = None
+    """Comma-separated list of endpoint paths to exclude from uvicorn access
+    logs. This is useful to reduce log noise from high-frequency endpoints
+    like health checks. Example: "/health,/metrics,/ping".
+    When set, access logs for requests to these paths will be suppressed
+    while keeping logs for other endpoints."""
+    allow_credentials: bool = False
+    """Allow credentials."""
+    allowed_origins: list[str] = field(default_factory=lambda: ["*"])
+    """Allowed origins."""
+    allowed_methods: list[str] = field(default_factory=lambda: ["*"])
+    """Allowed methods."""
+    allowed_headers: list[str] = field(default_factory=lambda: ["*"])
+    """Allowed headers."""
+    api_key: list[str] | None = None
+    """If provided, the server will require one of these keys to be presented in
+    the header."""
+    ssl_keyfile: str | None = None
+    """The file path to the SSL key file."""
+    ssl_certfile: str | None = None
+    """The file path to the SSL cert file."""
+    ssl_ca_certs: str | None = None
+    """The CA certificates file."""
+    enable_ssl_refresh: bool = False
+    """Refresh SSL Context when SSL certificate files change"""
+    ssl_cert_reqs: int = int(ssl.CERT_NONE)
+    """Whether client certificate is required (see stdlib ssl module's)."""
+    ssl_ciphers: str | None = None
+    """SSL cipher suites for HTTPS (TLS 1.2 and below only).
+    Example: 'ECDHE-RSA-AES256-GCM-SHA384:ECDHE-RSA-CHACHA20-POLY1305'"""
+    root_path: str | None = None
+    """FastAPI root_path when app is behind a path based routing proxy."""
+    middleware: list[str] = field(default_factory=lambda: [])
+    """Additional ASGI middleware to apply to the app. We accept multiple
+    --middleware arguments. The value should be an import path. If a function
+    is provided, vLLM will add it to the server using
+    `@app.middleware('http')`. If a class is provided, vLLM will
+    add it to the server using `app.add_middleware()`."""
+    enable_request_id_headers: bool = False
+    """If specified, API server will add X-Request-Id header to responses."""
+    disable_fastapi_docs: bool = False
+    """Disable FastAPI's OpenAPI schema, Swagger UI, and ReDoc endpoint."""
+    h11_max_incomplete_event_size: int = H11_MAX_INCOMPLETE_EVENT_SIZE_DEFAULT
+    """Maximum size (bytes) of an incomplete HTTP event (header or body) for
+    h11 parser. Helps mitigate header abuse. Default: 4194304 (4 MB)."""
+    h11_max_header_count: int = H11_MAX_HEADER_COUNT_DEFAULT
+    """Maximum number of HTTP headers allowed in a request for h11 parser.
+    Helps mitigate header abuse. Default: 256."""
+    enable_offline_docs: bool = False
+    """
+    Enable offline FastAPI documentation for air-gapped environments.
+    Uses vendored static assets bundled with vLLM.
+    """
+
+    @classmethod
+    def _customize_cli_kwargs(
+        cls,
+        frontend_kwargs: dict[str, Any],
+    ) -> dict[str, Any]:
+        frontend_kwargs = super()._customize_cli_kwargs(frontend_kwargs)
+
+        # Special case: allowed_origins, allowed_methods, allowed_headers all
+        # need json.loads type
+        # Should also remove nargs
+        frontend_kwargs["allowed_origins"]["type"] = json.loads
+        frontend_kwargs["allowed_methods"]["type"] = json.loads
+        frontend_kwargs["allowed_headers"]["type"] = json.loads
+        del frontend_kwargs["allowed_origins"]["nargs"]
+        del frontend_kwargs["allowed_methods"]["nargs"]
+        del frontend_kwargs["allowed_headers"]["nargs"]
+
+        # Special case: Middleware needs to append action
+        frontend_kwargs["middleware"]["action"] = "append"
+        frontend_kwargs["middleware"]["type"] = str
+        if "nargs" in frontend_kwargs["middleware"]:
+            del frontend_kwargs["middleware"]["nargs"]
+        frontend_kwargs["middleware"]["default"] = []
+
+        # Special case: disable_access_log_for_endpoints is a single
+        # comma-separated string, not a list
+        if "nargs" in frontend_kwargs["disable_access_log_for_endpoints"]:
+            del frontend_kwargs["disable_access_log_for_endpoints"]["nargs"]
+
+        return frontend_kwargs
 
 
 def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
-    parser.add_argument("--host",
-                        type=nullable_str,
-                        default=None,
-                        help="Host name.")
-    parser.add_argument("--port", type=int, default=8000, help="Port number.")
+    """Create the CLI argument parser used by the OpenAI API server.
+
+    We rely on the helper methods of `FrontendArgs` and `AsyncEngineArgs` to
+    register all arguments instead of manually enumerating them here. This
+    avoids code duplication and keeps the argument definitions in one place.
+    """
     parser.add_argument(
-        "--uvicorn-log-level",
+        "model_tag",
         type=str,
-        default="info",
-        choices=['debug', 'info', 'warning', 'error', 'critical', 'trace'],
-        help="Log level for uvicorn.")
-    parser.add_argument("--disable-uvicorn-access-log",
-                        action="store_true",
-                        help="Disable uvicorn access log.")
-    parser.add_argument("--allow-credentials",
-                        action="store_true",
-                        help="Allow credentials.")
-    parser.add_argument("--allowed-origins",
-                        type=json.loads,
-                        default=["*"],
-                        help="Allowed origins.")
-    parser.add_argument("--allowed-methods",
-                        type=json.loads,
-                        default=["*"],
-                        help="Allowed methods.")
-    parser.add_argument("--allowed-headers",
-                        type=json.loads,
-                        default=["*"],
-                        help="Allowed headers.")
-    parser.add_argument("--api-key",
-                        type=nullable_str,
-                        default=None,
-                        help="If provided, the server will require this key "
-                        "to be presented in the header.")
+        nargs="?",
+        help="The model tag to serve (optional if specified in config)",
+    )
     parser.add_argument(
-        "--lora-modules",
-        type=nullable_str,
-        default=None,
-        nargs='+',
-        action=LoRAParserAction,
-        help="LoRA module configurations in either 'name=path' format"
-        "or JSON format. "
-        "Example (old format): ``'name=path'`` "
-        "Example (new format): "
-        "``{\"name\": \"name\", \"path\": \"lora_path\", "
-        "\"base_model_name\": \"id\"}``")
-    parser.add_argument(
-        "--prompt-adapters",
-        type=nullable_str,
-        default=None,
-        nargs='+',
-        action=PromptAdapterParserAction,
-        help="Prompt adapter configurations in the format name=path. "
-        "Multiple adapters can be specified.")
-    parser.add_argument("--chat-template",
-                        type=nullable_str,
-                        default=None,
-                        help="The file path to the chat template, "
-                        "or the template in single-line form "
-                        "for the specified model.")
-    parser.add_argument(
-        '--chat-template-content-format',
-        type=str,
-        default="auto",
-        choices=get_args(ChatTemplateContentFormatOption),
-        help='The format to render message content within a chat template.'
-        '\n\n'
-        '* "string" will render the content as a string. '
-        'Example: ``"Hello World"``\n'
-        '* "openai" will render the content as a list of dictionaries, '
-        'similar to OpenAI schema. '
-        'Example: ``[{"type": "text", "text": "Hello world!"}]``')
-    parser.add_argument("--response-role",
-                        type=nullable_str,
-                        default="assistant",
-                        help="The role name to return if "
-                        "``request.add_generation_prompt=true``.")
-    parser.add_argument("--ssl-keyfile",
-                        type=nullable_str,
-                        default=None,
-                        help="The file path to the SSL key file.")
-    parser.add_argument("--ssl-certfile",
-                        type=nullable_str,
-                        default=None,
-                        help="The file path to the SSL cert file.")
-    parser.add_argument("--ssl-ca-certs",
-                        type=nullable_str,
-                        default=None,
-                        help="The CA certificates file.")
-    parser.add_argument(
-        "--enable-ssl-refresh",
+        "--headless",
         action="store_true",
         default=False,
-        help="Refresh SSL Context when SSL certificate files change")
+        help="Run in headless mode. See multi-node data parallel "
+        "documentation for more details.",
+    )
     parser.add_argument(
-        "--ssl-cert-reqs",
+        "--api-server-count",
+        "-asc",
         type=int,
-        default=int(ssl.CERT_NONE),
-        help="Whether client certificate is required (see stdlib ssl module's)."
+        default=None,
+        help="How many API server processes to run. "
+        "Defaults to data_parallel_size if not specified.",
     )
     parser.add_argument(
-        "--root-path",
-        type=nullable_str,
-        default=None,
-        help="FastAPI root_path when app is behind a path based routing proxy."
+        "--config",
+        help="Read CLI options from a config file. "
+        "Must be a YAML with the following options: "
+        "https://docs.vllm.ai/en/latest/configuration/serve_args.html",
     )
-    parser.add_argument(
-        "--middleware",
-        type=nullable_str,
-        action="append",
-        default=[],
-        help="Additional ASGI middleware to apply to the app. "
-        "We accept multiple --middleware arguments. "
-        "The value should be an import path. "
-        "If a function is provided, vLLM will add it to the server "
-        "using ``@app.middleware('http')``. "
-        "If a class is provided, vLLM will add it to the server "
-        "using ``app.add_middleware()``. ")
-    parser.add_argument(
-        "--return-tokens-as-token-ids",
-        action="store_true",
-        help="When ``--max-logprobs`` is specified, represents single tokens "
-        " as strings of the form 'token_id:{token_id}' so that tokens "
-        "that are not JSON-encodable can be identified.")
-    parser.add_argument(
-        "--disable-frontend-multiprocessing",
-        action="store_true",
-        help="If specified, will run the OpenAI frontend server in the same "
-        "process as the model serving engine.")
-    parser.add_argument(
-        "--enable-request-id-headers",
-        action="store_true",
-        help="If specified, API server will add X-Request-Id header to "
-        "responses. Caution: this hurts performance at high QPS.")
-    parser.add_argument(
-        "--enable-auto-tool-choice",
-        action="store_true",
-        default=False,
-        help="Enable auto tool choice for supported models. Use "
-        "``--tool-call-parser`` to specify which parser to use.")
-
-    valid_tool_parsers = ToolParserManager.tool_parsers.keys()
-    parser.add_argument(
-        "--tool-call-parser",
-        type=str,
-        metavar="{" + ",".join(valid_tool_parsers) + "} or name registered in "
-        "--tool-parser-plugin",
-        default=None,
-        help=
-        "Select the tool call parser depending on the model that you're using."
-        " This is used to parse the model-generated tool call into OpenAI API "
-        "format. Required for ``--enable-auto-tool-choice``.")
-
-    parser.add_argument(
-        "--tool-parser-plugin",
-        type=str,
-        default="",
-        help=
-        "Special the tool parser plugin write to parse the model-generated tool"
-        " into OpenAI API format, the name register in this plugin can be used "
-        "in ``--tool-call-parser``.")
-
+    parser = FrontendArgs.add_cli_args(parser)
     parser = AsyncEngineArgs.add_cli_args(parser)
-
-    parser.add_argument('--max-log-len',
-                        type=int,
-                        default=None,
-                        help='Max number of prompt characters or prompt '
-                        'ID numbers being printed in log.'
-                        ' The default of None means unlimited.')
-
-    parser.add_argument(
-        "--disable-fastapi-docs",
-        action='store_true',
-        default=False,
-        help="Disable FastAPI's OpenAPI schema, Swagger UI, and ReDoc endpoint."
-    )
-    parser.add_argument(
-        "--enable-prompt-tokens-details",
-        action='store_true',
-        default=False,
-        help="If set to True, enable prompt_tokens_details in usage.")
-    parser.add_argument(
-        "--enable-server-load-tracking",
-        action='store_true',
-        default=False,
-        help=
-        "If set to True, enable tracking server_load_metrics in the app state."
-    )
 
     return parser
 
@@ -281,16 +364,13 @@ def validate_parsed_serve_args(args: argparse.Namespace):
 
     # Enable auto tool needs a tool call parser to be valid
     if args.enable_auto_tool_choice and not args.tool_call_parser:
-        raise TypeError("Error: --enable-auto-tool-choice requires "
-                        "--tool-call-parser")
-
-    # Enable reasoning needs a reasoning parser to be valid
-    if args.enable_reasoning and not args.reasoning_parser:
-        raise TypeError("Error: --enable-reasoning requires "
-                        "--reasoning-parser")
+        raise TypeError("Error: --enable-auto-tool-choice requires --tool-call-parser")
+    if args.enable_log_outputs and not args.enable_log_requests:
+        raise TypeError("Error: --enable-log-outputs requires --enable-log-requests")
 
 
 def create_parser_for_docs() -> FlexibleArgumentParser:
     parser_for_docs = FlexibleArgumentParser(
-        prog="-m vllm.entrypoints.openai.api_server")
+        prog="-m vllm.entrypoints.openai.api_server"
+    )
     return make_arg_parser(parser_for_docs)

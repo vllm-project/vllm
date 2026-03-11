@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 Validates the loading of a model saved with the sharded_state format.
 This script demonstrates how to load a model that was previously saved
@@ -8,14 +9,12 @@ Example usage:
 
 python save_sharded_state.py \
     --model /path/to/load \
-    --quantization deepspeedfp \
     --tensor-parallel-size 8 \
-    --output /path/to/save/sharded/modele
+    --output /path/to/save/sharded/model
 
 python load_sharded_state.py \
     --model /path/to/saved/sharded/model \
     --load-format sharded_state \
-    --quantization deepspeedfp \
     --tensor-parallel-size 8 \
     --prompt "Hello, my name is" \
     --max-tokens 50
@@ -24,7 +23,7 @@ python load_sharded_state.py \
 import dataclasses
 
 from vllm import LLM, EngineArgs, SamplingParams
-from vllm.utils import FlexibleArgumentParser
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 
 def parse_args():
@@ -36,22 +35,21 @@ def parse_args():
     parser.set_defaults(load_format="sharded_state")
 
     # Add validation arguments
-    parser.add_argument("--prompt",
-                        type=str,
-                        default="Hello, world!",
-                        help="Prompt for validation")
-    parser.add_argument("--max-tokens",
-                        type=int,
-                        default=100,
-                        help="Maximum number of tokens to generate")
-    parser.add_argument("--temperature",
-                        type=float,
-                        default=0.7,
-                        help="Sampling temperature")
-    parser.add_argument("--top-p",
-                        type=float,
-                        default=1.0,
-                        help="Top-p sampling parameter")
+    parser.add_argument(
+        "--prompt", type=str, default="Hello, world!", help="Prompt for validation"
+    )
+    parser.add_argument(
+        "--max-tokens",
+        type=int,
+        default=100,
+        help="Maximum number of tokens to generate",
+    )
+    parser.add_argument(
+        "--temperature", type=float, default=0.7, help="Sampling temperature"
+    )
+    parser.add_argument(
+        "--top-p", type=float, default=1.0, help="Top-p sampling parameter"
+    )
 
     return parser.parse_args()
 
@@ -60,8 +58,9 @@ def main():
     args = parse_args()
     engine_args = EngineArgs.from_cli_args(args)
 
-    print(f"Loading model from {engine_args.model} "
-          f"using format {engine_args.load_format}")
+    print(
+        f"Loading model from {engine_args.model} using format {engine_args.load_format}"
+    )
     print(f"Tensor parallel size: {engine_args.tensor_parallel_size}")
 
     # Load the model using engine args

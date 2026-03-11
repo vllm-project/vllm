@@ -1,0 +1,54 @@
+{%- set ns = namespace(developer_content='', has_tools=false) -%}
+
+{%- if tools is defined and tools | length > 0 -%}
+    {%- set ns.has_tools = true -%}
+{%- endif -%}
+
+{%- for message in messages -%}
+    {%- if message.role == 'developer' or message.role == 'system' -%}
+<start_of_turn>user
+{{ message.content }}
+{%- if ns.has_tools %}
+
+Available functions:
+{%- for tool in tools %}
+{%- if tool.type == 'function' %}
+
+Function: {{ tool.function.name }}
+Description: {{ tool.function.description | default('No description provided') }}
+Parameters: {{ tool.function.parameters | tojson }}
+{%- endif %}
+{%- endfor %}
+{%- endif %}
+<end_of_turn>
+    {%- elif message.role == 'user' -%}
+<start_of_turn>user
+{{ message.content }}<end_of_turn>
+    {%- elif message.role == 'assistant' -%}
+        {%- if message.tool_calls is defined and message.tool_calls | length > 0 -%}
+<start_of_turn>model
+{%- for tool_call in message.tool_calls %}
+<start_function_call>call:{{ tool_call.function.name }}{
+{%- set args = tool_call.function.arguments -%}
+{%- if args is string -%}
+{%- set args = args | fromjson -%}
+{%- endif -%}
+{%- for key, value in args.items() -%}
+{{ key }}:<escape>{{ value }}<escape>{% if not loop.last %},{% endif %}
+{%- endfor -%}
+}<end_function_call>
+{%- endfor %}
+<end_of_turn>
+        {%- else -%}
+<start_of_turn>model
+{{ message.content }}<end_of_turn>
+        {%- endif -%}
+    {%- elif message.role == 'tool' -%}
+<start_of_turn>user
+Function result for {{ message.name | default('function') }}: {{ message.content }}<end_of_turn>
+    {%- endif -%}
+{%- endfor -%}
+
+{%- if add_generation_prompt -%}
+<start_of_turn>model
+{%- endif -%}

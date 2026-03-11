@@ -13,8 +13,7 @@ Prometheus metric logging is enabled by default in the OpenAI-compatible server.
 
 ```bash
 vllm serve mistralai/Mistral-7B-v0.1 \
-    --max-model-len 2048 \
-    --disable-log-requests
+    --max-model-len 2048
 ```
 
 Launch Prometheus and Grafana servers with `docker compose`:
@@ -28,7 +27,7 @@ Submit some sample requests to the server:
 ```bash
 wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json
 
-python3 ../../../benchmarks/benchmark_serving.py \
+vllm bench serve \
     --model mistralai/Mistral-7B-v0.1 \
     --tokenizer mistralai/Mistral-7B-v0.1 \
     --endpoint /v1/completions \
@@ -47,7 +46,7 @@ Navigate to [`http://localhost:3000`](http://localhost:3000). Log in with the de
 
 Navigate to [`http://localhost:3000/connections/datasources/new`](http://localhost:3000/connections/datasources/new) and select Prometheus.
 
-On Prometheus configuration page, we need to add the `Prometheus Server URL` in `Connection`. For this setup, Grafana and Prometheus are running in separate containers, but Docker creates DNS name for each containers. You can just use `http://prometheus:9090`.
+On Prometheus configuration page, we need to add the `Prometheus Server URL` in `Connection`. For this setup, Grafana and Prometheus are running in separate containers, but Docker creates DNS name for each container. You can just use `http://prometheus:9090`.
 
 Click `Save & Test`. You should get a green check saying "Successfully queried the Prometheus API.".
 

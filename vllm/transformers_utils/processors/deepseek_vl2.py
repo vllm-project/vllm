@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-# yapf: disable
 # ruff: noqa: E501
 # coding=utf-8
 # adapted from https://github.com/deepseek-ai/DeepSeek-VL2/blob/ff23960c5cf9e6874b44be38af930cfb0ccbb620/deepseek_vl2/models/processing_deepseek_vl_v2.py
@@ -24,21 +24,22 @@
 # CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 import math
-from typing import List, Tuple
+from typing import Any
 
 import torch
 import torchvision.transforms as T
 from PIL import Image, ImageOps
-from transformers import AutoProcessor, BatchFeature, LlamaTokenizerFast
+from transformers import BatchFeature, LlamaTokenizerFast
 from transformers.processing_utils import ProcessorMixin
 
 
 class ImageTransform:
-
-    def __init__(self,
-                 mean: Tuple[float, float, float] = (0.5, 0.5, 0.5),
-                 std: Tuple[float, float, float] = (0.5, 0.5, 0.5),
-                 normalize: bool = True):
+    def __init__(
+        self,
+        mean: tuple[float, float, float] = (0.5, 0.5, 0.5),
+        std: tuple[float, float, float] = (0.5, 0.5, 0.5),
+        normalize: bool = True,
+    ):
         self.mean = mean
         self.std = std
         self.normalize = normalize
@@ -62,11 +63,11 @@ class DeepseekVLV2Processor(ProcessorMixin):
     def __init__(
         self,
         tokenizer: LlamaTokenizerFast,
-        candidate_resolutions: Tuple[Tuple[int, int]],
+        candidate_resolutions: tuple[tuple[int, int]],
         patch_size: int,
         downsample_ratio: int,
-        image_mean: Tuple[float, float, float] = (0.5, 0.5, 0.5),
-        image_std: Tuple[float, float, float] = (0.5, 0.5, 0.5),
+        image_mean: tuple[float, float, float] = (0.5, 0.5, 0.5),
+        image_std: tuple[float, float, float] = (0.5, 0.5, 0.5),
         normalize: bool = True,
         image_token: str = "<image>",
         pad_token: str = "<｜▁pad▁｜>",
@@ -76,7 +77,6 @@ class DeepseekVLV2Processor(ProcessorMixin):
         ignore_id: int = -100,
         **kwargs,
     ):
-
         self.candidate_resolutions = candidate_resolutions
         self.image_size = candidate_resolutions[0][0]
         self.patch_size = patch_size
@@ -85,13 +85,15 @@ class DeepseekVLV2Processor(ProcessorMixin):
         self.normalize = normalize
         self.downsample_ratio = downsample_ratio
 
-        self.image_transform = ImageTransform(mean=image_mean, std=image_std, normalize=normalize)
+        self.image_transform = ImageTransform(
+            mean=image_mean, std=image_std, normalize=normalize
+        )
         self.tokenizer = tokenizer
-        self.tokenizer.padding_side = 'left'  # must set this，padding side with make a difference in batch inference
+        self.tokenizer.padding_side = "left"  # must set this，padding side with make a difference in batch inference
 
         # add the pad_token as special token to use 'tokenizer.pad_token' and 'tokenizer.pad_token_id'
         if tokenizer.pad_token is None:
-            self.tokenizer.add_special_tokens({'pad_token': pad_token})
+            self.tokenizer.add_special_tokens({"pad_token": pad_token})
 
         # add image token
         image_token_id = self.tokenizer.vocab.get(image_token)
@@ -103,7 +105,7 @@ class DeepseekVLV2Processor(ProcessorMixin):
 
         # add five special tokens for grounding-related tasks
         # <|ref|>, <|/ref|>, <|det|>, <|/det|>, <|grounding|>
-        special_tokens = ['<|ref|>', '<|/ref|>', '<|det|>', '<|/det|>', '<|grounding|>']
+        special_tokens = ["<|ref|>", "<|/ref|>", "<|det|>", "<|/det|>", "<|grounding|>"]
         special_tokens_dict = {"additional_special_tokens": special_tokens}
         self.tokenizer.add_special_tokens(special_tokens_dict)
 
@@ -133,15 +135,19 @@ class DeepseekVLV2Processor(ProcessorMixin):
 
         for width, height in self.candidate_resolutions:
             scale = min(width / original_width, height / original_height)
-            downscaled_width, downscaled_height = int(
-                original_width * scale), int(original_height * scale)
-            effective_resolution = min(downscaled_width * downscaled_height,
-                                       original_width * original_height)
+            downscaled_width, downscaled_height = (
+                int(original_width * scale),
+                int(original_height * scale),
+            )
+            effective_resolution = min(
+                downscaled_width * downscaled_height, original_width * original_height
+            )
             wasted_resolution = (width * height) - effective_resolution
 
             if effective_resolution > max_effective_resolution or (
-                    effective_resolution == max_effective_resolution
-                    and wasted_resolution < min_wasted_resolution):
+                effective_resolution == max_effective_resolution
+                and wasted_resolution < min_wasted_resolution
+            ):
                 max_effective_resolution = effective_resolution
                 min_wasted_resolution = wasted_resolution
                 best_fit = (width, height)
@@ -170,25 +176,23 @@ class DeepseekVLV2Processor(ProcessorMixin):
 
         return t
 
-    def decode(self, t: List[int], **kwargs) -> str:
+    def decode(self, t: list[int], **kwargs) -> str:
         return self.tokenizer.decode(t, **kwargs)
 
     def process_one(
         self,
         prompt: str,
-        images: List[Image.Image],
+        images: list[Image.Image],
         inference_mode: bool = True,
-        **kwargs,
+        **kwargs: Any,
     ):
         """
 
         Args:
             prompt (str): the formatted prompt;
-            conversations (List[Dict]): conversations with a list of messages;
-            images (List[ImageType]): the list of images;
+            images (list[ImageType]): the list of images;
             inference_mode (bool): if True, then remove the last eos token;
-            system_prompt (str): the system prompt;
-            **kwargs:
+            **kwargs: Additional keyword arguments.
 
         Returns:
             outputs (BaseProcessorOutput): the output of the processor,
@@ -196,15 +200,23 @@ class DeepseekVLV2Processor(ProcessorMixin):
                 - target_ids (torch.LongTensor): [N + image tokens]
                 - pixel_values (torch.FloatTensor): [n_patches, 3, H, W]
                 - image_id (int): the id of the image token
-                - num_image_tokens (List[int]): the number of image tokens
+                - num_image_tokens (list[int]): the number of image tokens
         """
 
-        assert (prompt is not None and images is not None
-                ), "prompt and images must be used at the same time."
+        assert prompt is not None and images is not None, (
+            "prompt and images must be used at the same time."
+        )
 
         sft_format = prompt
-        tokenized_str, images_list, images_seq_mask, images_spatial_crop, num_image_tokens = self.tokenize_with_images(
-            sft_format, images, bos=True, eos=True, cropping=len(images) <= 2)
+        (
+            tokenized_str,
+            images_list,
+            images_seq_mask,
+            images_spatial_crop,
+            num_image_tokens,
+        ) = self.tokenize_with_images(
+            sft_format, images, bos=True, eos=True, cropping=len(images) <= 2
+        )
         masked_tokenized_str = []
         for token_index in tokenized_str:
             if token_index != self.image_token_id:
@@ -212,17 +224,21 @@ class DeepseekVLV2Processor(ProcessorMixin):
             else:
                 masked_tokenized_str.append(self.ignore_id)
 
-        assert len(tokenized_str) == len(images_seq_mask) == len(masked_tokenized_str), \
-            (f"tokenized_str's length {len(tokenized_str)}, input_ids' length {len(masked_tokenized_str)}, "
-             f"imags_seq_mask's length {len(images_seq_mask)}, are not equal")
+        assert (
+            len(tokenized_str) == len(images_seq_mask) == len(masked_tokenized_str)
+        ), (
+            f"tokenized_str's length {len(tokenized_str)}, input_ids' length {len(masked_tokenized_str)}, "
+            f"imags_seq_mask's length {len(images_seq_mask)}, are not equal"
+        )
 
         input_ids = torch.LongTensor(tokenized_str)
         target_ids = torch.LongTensor(masked_tokenized_str)
         images_seq_mask = torch.tensor(images_seq_mask, dtype=torch.bool)
 
         # set input_ids < 0 | input_ids == self.image_token_id as ignore_id
-        target_ids[(input_ids < 0) |
-                   (input_ids == self.image_token_id)] = self.ignore_id
+        target_ids[(input_ids < 0) | (input_ids == self.image_token_id)] = (
+            self.ignore_id
+        )
         input_ids[input_ids < 0] = self.pad_id
 
         if inference_mode:
@@ -256,16 +272,16 @@ class DeepseekVLV2Processor(ProcessorMixin):
     def __call__(
         self,
         *,
-        prompt: str,
-        images: List[Image.Image],
+        text: str,
+        images: list[Image.Image],
         inference_mode: bool = True,
-        **kwargs,
+        **kwargs: Any,
     ):
         """
 
         Args:
-            prompt (str): the formatted prompt;
-            images (List[ImageType]): the list of images;
+            text (str): the formatted prompt;
+            images (list[ImageType]): the list of images;
             inference_mode (bool): if True, then remove the last eos token;
             **kwargs:
 
@@ -274,11 +290,11 @@ class DeepseekVLV2Processor(ProcessorMixin):
                 - input_ids (torch.LongTensor): [N + image tokens]
                 - images (torch.FloatTensor): [n_images, 3, H, W]
                 - image_id (int): the id of the image token
-                - num_image_tokens (List[int]): the number of image tokens
+                - num_image_tokens (list[int]): the number of image tokens
         """
 
         prepare = self.process_one(
-            prompt=prompt,
+            prompt=text,
             images=images,
             inference_mode=inference_mode,
         )
@@ -288,7 +304,7 @@ class DeepseekVLV2Processor(ProcessorMixin):
     def tokenize_with_images(
         self,
         conversation: str,
-        images: List[Image.Image],
+        images: list[Image.Image],
         bos: bool = True,
         eos: bool = True,
         cropping: bool = True,
@@ -312,30 +328,50 @@ class DeepseekVLV2Processor(ProcessorMixin):
                 best_width, best_height = self.image_size, self.image_size
 
             """process the global view"""
-            global_view = ImageOps.pad(image, (self.image_size, self.image_size),
-                                       color=tuple(int(x * 255) for x in self.image_transform.mean))
+            global_view = ImageOps.pad(
+                image,
+                (self.image_size, self.image_size),
+                color=tuple(int(x * 255) for x in self.image_transform.mean),
+            )
             images_list.append(self.image_transform(global_view))
 
             """process the local views"""
-            local_view = ImageOps.pad(image, (best_width, best_height),
-                                      color=tuple(int(x * 255) for x in self.image_transform.mean))
+            local_view = ImageOps.pad(
+                image,
+                (best_width, best_height),
+                color=tuple(int(x * 255) for x in self.image_transform.mean),
+            )
             for i in range(0, best_height, self.image_size):
                 for j in range(0, best_width, self.image_size):
                     images_list.append(
-                        self.image_transform(local_view.crop((j, i, j + self.image_size, i + self.image_size))))
+                        self.image_transform(
+                            local_view.crop(
+                                (j, i, j + self.image_size, i + self.image_size)
+                            )
+                        )
+                    )
 
             """record height / width crop num"""
-            num_width_tiles, num_height_tiles = best_width // self.image_size, best_height // self.image_size
+            num_width_tiles, num_height_tiles = (
+                best_width // self.image_size,
+                best_height // self.image_size,
+            )
             images_spatial_crop.append([num_width_tiles, num_height_tiles])
 
             """add image tokens"""
-            h = w = math.ceil((self.image_size // self.patch_size) / self.downsample_ratio)
+            h = w = math.ceil(
+                (self.image_size // self.patch_size) / self.downsample_ratio
+            )
             # global views tokens h * (w + 1), 1 is for line separator
             tokenized_image = [self.image_token_id] * h * (w + 1)
             # add a separator between global and local views
             tokenized_image += [self.image_token_id]
             # local views tokens, (num_height_tiles * h) * (num_width_tiles * w + 1)
-            tokenized_image += [self.image_token_id] * (num_height_tiles * h) * (num_width_tiles * w + 1)
+            tokenized_image += (
+                [self.image_token_id]
+                * (num_height_tiles * h)
+                * (num_width_tiles * w + 1)
+            )
 
             tokenized_str += tokenized_image
             images_seq_mask += [True] * len(tokenized_image)
@@ -354,10 +390,14 @@ class DeepseekVLV2Processor(ProcessorMixin):
             tokenized_str = tokenized_str + [self.eos_id]
             images_seq_mask = images_seq_mask + [False]
 
-        assert len(tokenized_str) == len(
-            images_seq_mask), f"tokenize_with_images func: tokenized_str's length {len(tokenized_str)} is not equal to imags_seq_mask's length {len(images_seq_mask)}"
+        assert len(tokenized_str) == len(images_seq_mask), (
+            f"tokenize_with_images func: tokenized_str's length {len(tokenized_str)} is not equal to imags_seq_mask's length {len(images_seq_mask)}"
+        )
 
-        return tokenized_str, images_list, images_seq_mask, images_spatial_crop, num_image_tokens
-
-
-AutoProcessor.register("DeepseekVLV2Processor", DeepseekVLV2Processor)
+        return (
+            tokenized_str,
+            images_list,
+            images_seq_mask,
+            images_spatial_crop,
+            num_image_tokens,
+        )

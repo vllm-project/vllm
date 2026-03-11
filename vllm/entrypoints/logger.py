@@ -1,44 +1,100 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Optional, Union
+import logging
+from collections.abc import Sequence
+
+import torch
 
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.pooling_params import PoolingParams
-from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 
 logger = init_logger(__name__)
 
 
 class RequestLogger:
-
-    def __init__(self, *, max_log_len: Optional[int]) -> None:
-        super().__init__()
-
+    def __init__(self, *, max_log_len: int | None) -> None:
         self.max_log_len = max_log_len
+
+        if not logger.isEnabledFor(logging.INFO):
+            logger.warning_once(
+                "`--enable-log-requests` is set but "
+                "the minimum log level is higher than INFO. "
+                "No request information will be logged."
+            )
+        elif not logger.isEnabledFor(logging.DEBUG):
+            logger.info_once(
+                "`--enable-log-requests` is set but "
+                "the minimum log level is higher than DEBUG. "
+                "Only limited information will be logged to minimize overhead. "
+                "To view more details, set `VLLM_LOGGING_LEVEL=DEBUG`."
+            )
 
     def log_inputs(
         self,
         request_id: str,
-        prompt: Optional[str],
-        prompt_token_ids: Optional[list[int]],
-        params: Optional[Union[SamplingParams, PoolingParams,
-                               BeamSearchParams]],
-        lora_request: Optional[LoRARequest],
-        prompt_adapter_request: Optional[PromptAdapterRequest],
+        prompt: str | None,
+        prompt_token_ids: list[int] | None,
+        prompt_embeds: torch.Tensor | None,
+        params: SamplingParams | PoolingParams | BeamSearchParams | None,
+        lora_request: LoRARequest | None,
+    ) -> None:
+        if logger.isEnabledFor(logging.DEBUG):
+            max_log_len = self.max_log_len
+            if max_log_len is not None:
+                if prompt is not None:
+                    prompt = prompt[:max_log_len]
+
+                if prompt_token_ids is not None:
+                    prompt_token_ids = prompt_token_ids[:max_log_len]
+
+            logger.debug(
+                "Request %s details: prompt: %r, "
+                "prompt_token_ids: %s, "
+                "prompt_embeds shape: %s.",
+                request_id,
+                prompt,
+                prompt_token_ids,
+                prompt_embeds.shape if prompt_embeds is not None else None,
+            )
+
+        logger.info(
+            "Received request %s: params: %s, lora_request: %s.",
+            request_id,
+            params,
+            lora_request,
+        )
+
+    def log_outputs(
+        self,
+        request_id: str,
+        outputs: str,
+        output_token_ids: Sequence[int] | None,
+        finish_reason: str | None = None,
+        is_streaming: bool = False,
+        delta: bool = False,
     ) -> None:
         max_log_len = self.max_log_len
         if max_log_len is not None:
-            if prompt is not None:
-                prompt = prompt[:max_log_len]
+            if outputs is not None:
+                outputs = outputs[:max_log_len]
 
-            if prompt_token_ids is not None:
-                prompt_token_ids = prompt_token_ids[:max_log_len]
+            if output_token_ids is not None:
+                # Convert to list and apply truncation
+                output_token_ids = list(output_token_ids)[:max_log_len]
+
+        stream_info = ""
+        if is_streaming:
+            stream_info = " (streaming delta)" if delta else " (streaming complete)"
 
         logger.info(
-            "Received request %s: prompt: %r, "
-            "params: %s, prompt_token_ids: %s, "
-            "lora_request: %s, prompt_adapter_request: %s.", request_id,
-            prompt, params, prompt_token_ids, lora_request,
-            prompt_adapter_request)
+            "Generated response %s%s: output: %r, "
+            "output_token_ids: %s, finish_reason: %s",
+            request_id,
+            stream_info,
+            outputs,
+            output_token_ids,
+            finish_reason,
+        )

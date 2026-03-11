@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # adapted from https://github.com/huggingface/transformers/blob/v4.43.2/src/transformers/models/idefics2/modeling_idefics2.py
 # Copyright 2024 The vLLM team.
@@ -17,21 +18,29 @@
 # limitations under the License.
 """PyTorch Idefics2 model."""
 
-from typing import Iterable, Optional, Set, Tuple
+from collections.abc import Iterable
 
 import torch
 from torch import nn
+from torch.nn import functional as F
 from transformers.models.idefics2.configuration_idefics2 import (
-    Idefics2Config, Idefics2VisionConfig)
+    Idefics2Config,
+    Idefics2VisionConfig,
+)
 
-from vllm.attention.layer import MultiHeadAttention
-from vllm.distributed import divide, get_tensor_model_parallel_world_size
+from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
-from vllm.model_executor.layers.linear import (ColumnParallelLinear,
-                                               QKVParallelLinear,
-                                               RowParallelLinear)
+from vllm.model_executor.layers.attention import MMEncoderAttention
+from vllm.model_executor.layers.conv import Conv2dLayer
+from vllm.model_executor.layers.linear import (
+    ColumnParallelLinear,
+    QKVParallelLinear,
+    RowParallelLinear,
+)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+
+from .vision import is_vit_use_data_parallel, run_dp_sharded_vision_model
 
 
 class Idefics2VisionEmbeddings(nn.Module):
@@ -53,7 +62,7 @@ class Idefics2VisionEmbeddings(nn.Module):
         self.embed_dim = config.hidden_size
         self.image_size = config.image_size
         self.patch_size = config.patch_size
-        self.patch_embedding = nn.Conv2d(
+        self.patch_embedding = Conv2dLayer(
             in_channels=config.num_channels,
             out_channels=self.embed_dim,
             kernel_size=self.patch_size,
@@ -63,13 +72,14 @@ class Idefics2VisionEmbeddings(nn.Module):
         self.num_patches_per_side = self.image_size // self.patch_size
         self.num_patches = self.num_patches_per_side**2
         self.num_positions = self.num_patches
-        self.position_embedding = nn.Embedding(self.num_positions,
-                                               self.embed_dim)
+        self.position_embedding = nn.Embedding(self.num_positions, self.embed_dim)
 
-    def forward(self,
-                pixel_values: torch.FloatTensor,
-                patch_attention_mask: torch.BoolTensor,
-                tgt_sizes: Optional[torch.IntTensor] = None) -> torch.Tensor:
+    def forward(
+        self,
+        pixel_values: torch.FloatTensor,
+        patch_attention_mask: torch.BoolTensor,
+        tgt_sizes: torch.IntTensor | None = None,
+    ) -> torch.Tensor:
         batch_size, _, max_im_h, max_im_w = pixel_values.shape
         target_dtype = self.patch_embedding.weight.dtype
         patch_embeds = self.patch_embedding(pixel_values.to(target_dtype))
@@ -78,14 +88,14 @@ class Idefics2VisionEmbeddings(nn.Module):
             max_im_h // self.patch_size,
             max_im_w // self.patch_size,
         )
-        boundaries = torch.arange(1 / self.num_patches_per_side, 1.0,
-                                  1 / self.num_patches_per_side)
-        position_ids = torch.full(size=(batch_size,
-                                        max_nb_patches_h * max_nb_patches_w),
-                                  fill_value=0)
+        boundaries = torch.arange(
+            1 / self.num_patches_per_side, 1.0, 1 / self.num_patches_per_side
+        )
+        position_ids = torch.full(
+            size=(batch_size, max_nb_patches_h * max_nb_patches_w), fill_value=0
+        )
 
         for batch_idx, p_attn_mask in enumerate(patch_attention_mask):
-
             if tgt_sizes is not None:
                 nb_patches_h = tgt_sizes[batch_idx][0]
                 nb_patches_w = tgt_sizes[batch_idx][1]
@@ -94,17 +104,18 @@ class Idefics2VisionEmbeddings(nn.Module):
                 nb_patches_w = p_attn_mask[0].sum()
             fractional_coords_h = torch.arange(0, 1 - 1e-6, 1 / nb_patches_h)
             fractional_coords_w = torch.arange(0, 1 - 1e-6, 1 / nb_patches_w)
-            bucket_coords_h = torch.bucketize(fractional_coords_h,
-                                              boundaries,
-                                              right=True)
-            bucket_coords_w = torch.bucketize(fractional_coords_w,
-                                              boundaries,
-                                              right=True)
-            pos_ids = (bucket_coords_h[:, None] * self.num_patches_per_side +
-                       bucket_coords_w).flatten()
+            bucket_coords_h = torch.bucketize(
+                fractional_coords_h, boundaries, right=True
+            )
+            bucket_coords_w = torch.bucketize(
+                fractional_coords_w, boundaries, right=True
+            )
+            pos_ids = (
+                bucket_coords_h[:, None] * self.num_patches_per_side + bucket_coords_w
+            ).flatten()
             position_ids[batch_idx][p_attn_mask.view(-1).cpu()] = pos_ids
         position_ids = position_ids.to(self.position_embedding.weight.device)
-        embeddings = embeddings + self.position_embedding(position_ids)
+        embeddings += self.position_embedding(position_ids)
         return embeddings
 
 
@@ -114,10 +125,11 @@ class Idefics2VisionAttention(nn.Module):
     def __init__(
         self,
         config: Idefics2VisionConfig,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
+        use_data_parallel = is_vit_use_data_parallel()
         self.config = config
         self.embed_dim = config.hidden_size
         self.num_heads = config.num_attention_heads
@@ -125,15 +137,22 @@ class Idefics2VisionAttention(nn.Module):
         if self.head_dim * self.num_heads != self.embed_dim:
             raise ValueError(
                 f"embed_dim must be divisible by num_heads (got `embed_dim`: {self.embed_dim} and `num_heads`:"  # noqa: E501
-                f" {self.num_heads}).")
+                f" {self.num_heads})."
+            )
         self.scale = self.head_dim**-0.5
         self.dropout = config.attention_dropout
+
+        tp_size = 1 if use_data_parallel else get_tensor_model_parallel_world_size()
+        assert self.num_heads % tp_size == 0
+        self.num_heads_per_partition = self.num_heads // tp_size
+
         self.qkv_proj = QKVParallelLinear(
             self.embed_dim,
             self.head_dim,
             self.num_heads,
             quant_config=quant_config,
             prefix=f"{prefix}.qkv_proj",
+            disable_tp=use_data_parallel,
         )
         self.out_proj = RowParallelLinear(
             self.embed_dim,
@@ -141,42 +160,77 @@ class Idefics2VisionAttention(nn.Module):
             bias=True,
             quant_config=quant_config,
             prefix=f"{prefix}.out_proj",
+            disable_tp=use_data_parallel,
         )
-        self.tp_size = get_tensor_model_parallel_world_size()
-        self.num_heads_per_partition = divide(self.num_heads, self.tp_size)
-        self.attn = MultiHeadAttention(self.num_heads_per_partition,
-                                       self.head_dim, self.scale)
+        # Use unified MMEncoderAttention with Flash Attention support
+        self.attn = MMEncoderAttention(
+            self.num_heads_per_partition,
+            self.head_dim,
+            self.scale,
+            prefix=f"{prefix}.attn",
+        )
 
     def forward(
         self,
         hidden_states: torch.Tensor,
+        attention_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(
             hidden_states
         )  # batch_size, q_len, 3 * num_heads_per_partition * head_dim
         query_states, key_states, value_states = qkv.chunk(3, dim=-1)
-        out = self.attn(query_states, key_states, value_states)
+
+        # If attention_mask is provided, prefer Torch SDPA so the mask is
+        # correctly applied (aligns with HuggingFace NaViT SigLIP behavior).
+        if attention_mask is None:
+            # Use unified MMEncoderAttention implementation
+            out = self.attn(query_states, key_states, value_states)
+        else:
+            bsz, q_len = query_states.size()[:2]
+            kv_len = key_states.size(1)
+
+            query = query_states.view(
+                bsz, q_len, self.num_heads_per_partition, self.head_dim
+            ).transpose(1, 2)
+            key = key_states.view(
+                bsz, kv_len, self.num_heads_per_partition, self.head_dim
+            ).transpose(1, 2)
+            value = value_states.view(
+                bsz, kv_len, self.num_heads_per_partition, self.head_dim
+            ).transpose(1, 2)
+
+            out = F.scaled_dot_product_attention(
+                query,
+                key,
+                value,
+                attn_mask=attention_mask,
+                dropout_p=0.0,
+                scale=self.scale,
+            )
+            out = out.transpose(1, 2).reshape(bsz, q_len, -1)
         attn_output, _ = self.out_proj(out)
         return attn_output
 
 
 class Idefics2VisionMLP(nn.Module):
-
     def __init__(
         self,
         config: Idefics2VisionConfig,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
         self.config = config
         self.activation_fn = get_act_fn(config.hidden_act)
+
+        use_data_parallel = is_vit_use_data_parallel()
         self.fc1 = ColumnParallelLinear(
             config.hidden_size,
             config.intermediate_size,
             bias=True,
             quant_config=quant_config,
             prefix=f"{prefix}.fc1",
+            disable_tp=use_data_parallel,
         )
         self.fc2 = RowParallelLinear(
             config.intermediate_size,
@@ -184,6 +238,7 @@ class Idefics2VisionMLP(nn.Module):
             bias=True,
             quant_config=quant_config,
             prefix=f"{prefix}.fc2",
+            disable_tp=use_data_parallel,
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -194,29 +249,31 @@ class Idefics2VisionMLP(nn.Module):
 
 
 class Idefics2EncoderLayer(nn.Module):
-
     def __init__(
         self,
         config: Idefics2Config,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
         self.embed_dim = config.hidden_size
-        self.self_attn = Idefics2VisionAttention(config,
-                                                 quant_config=quant_config,
-                                                 prefix=f"{prefix}.self_attn")
-        self.layer_norm1 = nn.LayerNorm(self.embed_dim,
-                                        eps=config.layer_norm_eps)
-        self.mlp = Idefics2VisionMLP(config,
-                                     quant_config=quant_config,
-                                     prefix=f"{prefix}.mlp")
-        self.layer_norm2 = nn.LayerNorm(self.embed_dim,
-                                        eps=config.layer_norm_eps)
+        self.self_attn = Idefics2VisionAttention(
+            config,
+            quant_config=quant_config,
+            prefix=f"{prefix}.self_attn",
+        )
+        self.layer_norm1 = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_eps)
+        self.mlp = Idefics2VisionMLP(
+            config,
+            quant_config=quant_config,
+            prefix=f"{prefix}.mlp",
+        )
+        self.layer_norm2 = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_eps)
 
     def forward(
         self,
         hidden_states: torch.Tensor,
+        attention_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """
         Args:
@@ -226,12 +283,12 @@ class Idefics2EncoderLayer(nn.Module):
         """
         residual = hidden_states
         hidden_states = self.layer_norm1(hidden_states)
-        hidden_states = self.self_attn(hidden_states)
-        hidden_states = residual + hidden_states
+        hidden_states = self.self_attn(hidden_states, attention_mask=attention_mask)
+        hidden_states += residual
         residual = hidden_states
         hidden_states = self.layer_norm2(hidden_states)
         hidden_states = self.mlp(hidden_states)
-        hidden_states = residual + hidden_states
+        hidden_states += residual
         return hidden_states
 
 
@@ -248,9 +305,9 @@ class Idefics2Encoder(nn.Module):
     def __init__(
         self,
         config: Idefics2Config,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         *,
-        num_hidden_layers_override: Optional[int] = None,
+        num_hidden_layers_override: int | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -262,16 +319,21 @@ class Idefics2Encoder(nn.Module):
         else:
             num_hidden_layers = num_hidden_layers_override
 
-        self.layers = nn.ModuleList([
-            Idefics2EncoderLayer(config,
-                                 quant_config=quant_config,
-                                 prefix=f"{prefix}.layers.{layer_idx}")
-            for layer_idx in range(num_hidden_layers)
-        ])
+        self.layers = nn.ModuleList(
+            [
+                Idefics2EncoderLayer(
+                    config,
+                    quant_config=quant_config,
+                    prefix=f"{prefix}.layers.{layer_idx}",
+                )
+                for layer_idx in range(num_hidden_layers)
+            ]
+        )
 
     def forward(
         self,
         inputs_embeds: torch.Tensor,
+        attention_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         r"""
         Args:
@@ -284,32 +346,35 @@ class Idefics2Encoder(nn.Module):
         """
         hidden_states = inputs_embeds
         for encoder_layer in self.layers:
-            layer_outputs = encoder_layer(hidden_states)
+            layer_outputs = encoder_layer(hidden_states, attention_mask=attention_mask)
             hidden_states = layer_outputs
         return hidden_states
 
 
 class Idefics2VisionTransformer(nn.Module):
-
     def __init__(
         self,
         config: Idefics2VisionConfig,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         *,
-        num_hidden_layers_override: Optional[int] = None,
+        num_hidden_layers_override: int | None = None,
         require_post_norm: bool = True,
+        apply_encoder_attention_mask: bool = False,
         prefix: str = "",
     ) -> None:
         super().__init__()
 
         embed_dim = config.hidden_size
         self.config = config
+        self.use_data_parallel = is_vit_use_data_parallel()
+        self.apply_encoder_attention_mask = apply_encoder_attention_mask
         self.embeddings = Idefics2VisionEmbeddings(config)
         self.encoder = Idefics2Encoder(
             config,
             quant_config=quant_config,
             num_hidden_layers_override=num_hidden_layers_override,
-            prefix=f"{prefix}.encoder")
+            prefix=f"{prefix}.encoder",
+        )
 
         num_hidden_layers = config.num_hidden_layers
         if len(self.encoder.layers) > config.num_hidden_layers:
@@ -319,10 +384,14 @@ class Idefics2VisionTransformer(nn.Module):
             )
 
         self.require_post_norm = require_post_norm
-        self.post_layernorm = nn.LayerNorm(
-            embed_dim,
-            eps=config.layer_norm_eps,
-        ) if require_post_norm else nn.Identity()
+        self.post_layernorm = (
+            nn.LayerNorm(
+                embed_dim,
+                eps=config.layer_norm_eps,
+            )
+            if require_post_norm
+            else nn.Identity()
+        )
 
     def get_input_embeddings(self):
         return self.embeddings
@@ -330,20 +399,60 @@ class Idefics2VisionTransformer(nn.Module):
     def forward(
         self,
         pixel_values,
-        patch_attention_mask: Optional[torch.BoolTensor] = None,
-        tgt_sizes: Optional[torch.IntTensor] = None,
+        patch_attention_mask: torch.BoolTensor | None = None,
+        tgt_sizes: torch.IntTensor | None = None,
     ) -> torch.Tensor:
+        batch_size = pixel_values.size(0)
+
+        if patch_attention_mask is None:
+            # No mask provided - create default all-ones mask for embeddings
+            # and skip attention masking (no padding to mask)
+            patch_attention_mask = torch.ones(
+                size=(
+                    batch_size,
+                    pixel_values.size(2) // self.config.patch_size,
+                    pixel_values.size(3) // self.config.patch_size,
+                ),
+                dtype=torch.bool,
+                device=pixel_values.device,
+            )
+            flat_patch_mask = None
+        else:
+            flat_patch_mask = patch_attention_mask.view(batch_size, -1)
+
         hidden_states = self.embeddings(
             pixel_values=pixel_values,
             patch_attention_mask=patch_attention_mask,
             tgt_sizes=tgt_sizes,
         )
-        encoder_outputs = self.encoder(hidden_states)
+
+        # Align with HuggingFace NaViT SigLIP in MiniCPMV/O:
+        # - if apply_encoder_attention_mask is False, skip (not all models
+        #   sharing this encoder apply masking in attention, e.g. Aria, Phi4)
+        # - if patch_attention_mask was None, skip attention masking
+        # - if any padding exists, create an additive 4D mask and pass it
+        #   to attention; else skip mask for performance.
+        if (
+            not self.apply_encoder_attention_mask
+            or flat_patch_mask is None
+            or not torch.any(~flat_patch_mask)
+        ):
+            attention_mask = None
+        else:
+            # Additive mask: masked positions receive a large negative value.
+            # Shape: (B, 1, 1, L) broadcastable to (B, H, Q, K).
+            min_val = torch.finfo(hidden_states.dtype).min
+            attention_mask = (~flat_patch_mask).to(dtype=hidden_states.dtype) * min_val
+            attention_mask = attention_mask[:, None, None, :]
+
+        if self.use_data_parallel:
+            encoder_outputs = run_dp_sharded_vision_model(hidden_states, self.encoder)
+        else:
+            encoder_outputs = self.encoder(hidden_states, attention_mask=attention_mask)
         last_hidden_state = self.post_layernorm(encoder_outputs)
         return last_hidden_state
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
@@ -351,7 +460,7 @@ class Idefics2VisionTransformer(nn.Module):
             ("qkv_proj", "v_proj", "v"),
         ]
         params_dict = dict(self.named_parameters())
-        loaded_params: Set[str] = set()
+        loaded_params: set[str] = set()
         layer_count = len(self.encoder.layers)
 
         for name, loaded_weight in weights:
@@ -360,8 +469,7 @@ class Idefics2VisionTransformer(nn.Module):
                 continue
 
             # post_layernorm is optional
-            if (name.startswith("post_layernorm.")
-                    and not self.require_post_norm):
+            if name.startswith("post_layernorm.") and not self.require_post_norm:
                 continue
 
             # omit layers when num_hidden_layers_override is set
@@ -371,7 +479,7 @@ class Idefics2VisionTransformer(nn.Module):
                     continue
 
             for param_name, weight_name, shard_id in stacked_params_mapping:
-                if weight_name not in name:
+                if weight_name not in name or self.use_data_parallel:
                     continue
                 name = name.replace(weight_name, param_name)
                 param = params_dict[name]
@@ -380,8 +488,7 @@ class Idefics2VisionTransformer(nn.Module):
                 break
             else:
                 param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params
