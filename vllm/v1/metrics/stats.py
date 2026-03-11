@@ -274,6 +274,21 @@ class PromptTokenStats:
         prompt_len: int,
     ) -> None:
         """Update stats from a prefill output."""
+        # Clamp to valid ranges.  Several scheduler paths can leave these
+        # values inconsistent with prompt_len:
+        #  - num_cached_tokens may be -1 (uninitialised) for requests that
+        #    failed during async KV loading before scheduling completed.
+        #  - In multi-turn sessions the scheduler's prompt includes kept
+        #    output tokens from previous turns while the output-processor's
+        #    prompt_len does not (see TODO in apply_streaming_update), so
+        #    num_cached_tokens can exceed prompt_len after preemption.
+        #  - num_external_computed_tokens can go negative after block
+        #    invalidation (_update_requests_with_invalid_blocks).
+        num_cached_tokens = max(0, min(num_cached_tokens, prompt_len))
+        num_external_computed_tokens = max(
+            0, min(num_external_computed_tokens, num_cached_tokens)
+        )
+
         # When all tokens are cached, the scheduler reduces num_cached_tokens
         # by 1 to force the model to recompute the last token, since the model
         # needs at least one input token to run a forward pass.
