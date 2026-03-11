@@ -28,13 +28,12 @@ def test_resolve_kv_connector_requirements(cuda_major, expected_package):
         KV_CONNECTOR_REQUIREMENTS,
         cuda_major,
     )
+    expected_output = KV_CONNECTOR_REQUIREMENTS.replace(
+        "nixl >= 0.7.1, < 0.10.0",
+        f"{expected_package} >= 0.7.1, < 0.10.0",
+    )
 
-    assert "# Existing comment\n" in resolved
-    assert "lmcache >= 0.3.9\n" in resolved
-    assert "mooncake-transfer-engine >= 0.3.8\n" in resolved
-    assert (
-        f"{expected_package} >= 0.7.1, < 0.10.0 # Required for disaggregated prefill\n"
-    ) in resolved
+    assert resolved == expected_output
 
 
 def test_resolve_kv_connector_requirements_requires_nixl():
