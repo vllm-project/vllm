@@ -351,6 +351,7 @@ class TpKVTopology:
                     include_num_layers_dimension=self._cross_layers_blocks
                 )
             except (AttributeError, NotImplementedError):
+                assert self.tensor_shape is not None
                 kv_cache_stride_order = tuple(range(len(self.tensor_shape)))
 
             # In case of cross layers permute kv_cache_shape according to

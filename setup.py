@@ -18,8 +18,6 @@ import torch
 from packaging.version import Version, parse
 from setuptools import Extension, setup
 from setuptools.command.build_ext import build_ext
-from setuptools.command.build_py import build_py
-from setuptools.command.develop import develop
 from setuptools_scm import get_version
 from torch.utils.cpp_extension import CUDA_HOME, ROCM_HOME
 
@@ -79,93 +77,6 @@ def is_ninja_available() -> bool:
 
 def is_freethreaded():
     return bool(sysconfig.get_config_var("Py_GIL_DISABLED"))
-
-
-def compile_grpc_protos():
-    """Compile gRPC protobuf definitions during build.
-
-    This generates *_pb2.py, *_pb2_grpc.py, and *_pb2.pyi files from
-    the .proto definitions in vllm/grpc/.
-    """
-    try:
-        from grpc_tools import protoc
-    except ImportError:
-        logger.warning(
-            "grpcio-tools not installed, skipping gRPC proto compilation. "
-            "gRPC server functionality will not be available."
-        )
-        return False
-
-    grpc_dir = ROOT_DIR / "vllm" / "grpc"
-    proto_names = ["vllm_engine", "vllm_render"]
-
-    # Include well-known protobuf types (e.g. google/protobuf/struct.proto)
-    try:
-        import grpc_tools as _grpc_tools
-
-        well_known_path = str(Path(_grpc_tools.__file__).parent / "_proto")
-    except Exception:
-        well_known_path = None
-
-    proto_path_args = [f"--proto_path={ROOT_DIR}"]
-    if well_known_path:
-        proto_path_args.append(f"--proto_path={well_known_path}")
-
-    spdx_header = (
-        "# SPDX-License-Identifier: Apache-2.0\n"
-        "# SPDX-FileCopyrightText: Copyright contributors to the vLLM project\n"
-        "# mypy: ignore-errors\n"
-    )
-
-    for proto_name in proto_names:
-        proto_file = grpc_dir / f"{proto_name}.proto"
-        if not proto_file.exists():
-            logger.warning("Proto file not found at %s, skipping", proto_file)
-            continue
-
-        logger.info("Compiling gRPC protobuf: %s", proto_file)
-
-        result = protoc.main(
-            [
-                "grpc_tools.protoc",
-                *proto_path_args,
-                f"--python_out={ROOT_DIR}",
-                f"--grpc_python_out={ROOT_DIR}",
-                f"--pyi_out={ROOT_DIR}",
-                str(proto_file),
-            ]
-        )
-
-        if result != 0:
-            logger.error("protoc failed with exit code %s", result)
-            return False
-
-        # Add SPDX headers and mypy ignore to generated files
-        for suffix in ["_pb2.py", "_pb2_grpc.py", "_pb2.pyi"]:
-            generated_file = grpc_dir / f"{proto_name}{suffix}"
-            if generated_file.exists():
-                content = generated_file.read_text()
-                if not content.startswith("# SPDX-License-Identifier"):
-                    generated_file.write_text(spdx_header + content)
-
-    logger.info("gRPC protobuf compilation successful")
-    return True
-
-
-class BuildPyAndGenerateGrpc(build_py):
-    """Build Python modules and generate gRPC stubs from proto files."""
-
-    def run(self):
-        compile_grpc_protos()
-        super().run()
-
-
-class DevelopAndGenerateGrpc(develop):
-    """Develop mode that also generates gRPC stubs from proto files."""
-
-    def run(self):
-        compile_grpc_protos()
-        super().run()
 
 
 class CMakeExtension(Extension):
@@ -1040,17 +951,12 @@ if _no_device():
     ext_modules = []
 
 if not ext_modules:
-    cmdclass = {
-        "build_py": BuildPyAndGenerateGrpc,
-        "develop": DevelopAndGenerateGrpc,
-    }
+    cmdclass = {}
 else:
     cmdclass = {
         "build_ext": precompiled_build_ext
         if envs.VLLM_USE_PRECOMPILED
         else cmake_build_ext,
-        "build_py": BuildPyAndGenerateGrpc,
-        "develop": DevelopAndGenerateGrpc,
     }
 
 setup(
@@ -1076,6 +982,8 @@ setup(
         "petit-kernel": ["petit-kernel"],
         # Optional deps for Helion kernel development
         "helion": ["helion"],
+        # Optional deps for gRPC server (vllm serve --grpc)
+        "grpc": ["smg-grpc-servicer >= 0.4.2"],
         # Optional deps for OpenTelemetry tracing
         "otel": [
             "opentelemetry-sdk>=1.26.0",

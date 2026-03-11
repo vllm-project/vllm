@@ -14,6 +14,11 @@ from starlette.datastructures import State
 from vllm.config import VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.cli.types import CLISubcommand
+from vllm.entrypoints.grpc import (  # type: ignore[attr-defined]
+    vllm_render_pb2,
+    vllm_render_pb2_grpc,
+)
+from vllm.entrypoints.grpc.render_servicer import RenderGrpcServicer
 from vllm.entrypoints.openai.api_server import (
     build_and_serve_renderer,
     init_render_app_state,
@@ -24,11 +29,6 @@ from vllm.entrypoints.openai.cli_args import (
     validate_parsed_serve_args,
 )
 from vllm.entrypoints.utils import VLLM_SUBCMD_PARSER_EPILOG
-from vllm.grpc import (  # type: ignore[attr-defined]
-    vllm_render_pb2,
-    vllm_render_pb2_grpc,
-)
-from vllm.grpc.render_servicer import RenderGrpcServicer
 from vllm.logger import init_logger
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 

@@ -237,9 +237,9 @@ ep_kernels_workspace/
 !vllm/benchmarks/lib/
 
 # Generated gRPC protobuf files (compiled at build time from .proto files)
-vllm/grpc/*_pb2.py
-vllm/grpc/*_pb2_grpc.py
-vllm/grpc/*_pb2.pyi
+vllm/entrypoints/grpc/*_pb2.py
+vllm/entrypoints/grpc/*_pb2_grpc.py
+vllm/entrypoints/grpc/*_pb2.pyi
 
 # Ignore generated cpu headers 
 csrc/cpu/cpu_attn_dispatch_generated.h

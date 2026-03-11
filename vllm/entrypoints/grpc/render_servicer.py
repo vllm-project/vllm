@@ -9,15 +9,16 @@ Implements the VllmRender service with management and rendering RPCs.
 import time
 
 import grpc
+from smg_grpc_proto import vllm_engine_pb2  # type: ignore[import-untyped]
 from starlette.datastructures import State
 
 from vllm.engine.protocol import EngineClient
+from vllm.entrypoints.grpc import vllm_render_pb2  # type: ignore[attr-defined]
+from vllm.entrypoints.grpc.field_transforms import FIELD_TRANSFORMS
+from vllm.entrypoints.grpc.proto_utils import from_proto, to_proto
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
-from vllm.grpc import vllm_engine_pb2, vllm_render_pb2  # type: ignore[attr-defined]
-from vllm.grpc.field_transforms import FIELD_TRANSFORMS
-from vllm.grpc.proto_utils import from_proto, to_proto
 
 
 class RenderGrpcServicer:

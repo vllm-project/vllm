@@ -3,7 +3,7 @@ syntax = "proto3";
 package vllm.grpc.render;
 
 import "google/protobuf/struct.proto";
-import "vllm/grpc/vllm_engine.proto";
+import "vllm_engine.proto";
 
 // Service definition for GPU-less render serving.
 // Only management and rendering RPCs — no inference.
