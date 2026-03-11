@@ -737,11 +737,13 @@ class SpecDecodeBaseProposer:
         self.input_ids[:num_query_tokens_total:num_query_tokens] = next_token_ids
         last_positions = cad.seq_lens.to(torch.long) - 1
 
+        query_offsets = self._dflash_query_offsets
+        assert query_offsets is not None
         if (
             getattr(self, "_dflash_query_offsets", None) is None
-            or self._dflash_query_offsets.device != device
-            or self._dflash_query_offsets.shape[1] != num_query_tokens
-            or self._dflash_query_offsets.dtype != target_positions.dtype
+            or query_offsets.device != device
+            or query_offsets.shape[1] != num_query_tokens
+            or query_offsets.dtype != target_positions.dtype
         ):
             self._dflash_query_offsets = torch.arange(
                 num_query_tokens,
