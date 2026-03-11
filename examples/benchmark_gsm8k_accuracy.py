@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import argparse
+
 import regex as re
 import requests
 from datasets import load_dataset
@@ -58,6 +59,7 @@ def main():
     args = parse_args()
     if args.hf_endpoint:
         import os
+
         os.environ["HF_ENDPOINT"] = args.hf_endpoint
 
     print("Loading GSM8K test set...")
