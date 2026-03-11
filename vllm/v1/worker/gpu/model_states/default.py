@@ -82,9 +82,11 @@ class DefaultModelState(ModelState):
                 mm_features=new_req_data.mm_features,
             )
         elif self.uses_xdrope_dim > 0:
+            # Pre-compute XD-RoPE positions for prefill.
+            assert new_req_data.prefill_token_ids is not None
             self.xdrope_state.init_prefill_xdrope_positions(
                 req_index,
-                self.model,
+                self.model,  # type: ignore
                 new_req_data.prefill_token_ids,
                 mm_features=new_req_data.mm_features,
             )
