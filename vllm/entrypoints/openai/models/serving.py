@@ -7,7 +7,6 @@ from http import HTTPStatus
 
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.openai.engine.protocol import (
-    ErrorInfo,
     ErrorResponse,
     ModelCard,
     ModelList,
@@ -18,7 +17,8 @@ from vllm.entrypoints.serve.lora.protocol import (
     LoadLoRAAdapterRequest,
     UnloadLoRAAdapterRequest,
 )
-from vllm.entrypoints.utils import sanitize_message
+from vllm.entrypoints.utils import create_error_response
+from vllm.exceptions import LoRAAdapterNotFoundError
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.lora.resolver import LoRAResolver, LoRAResolverRegistry
@@ -152,15 +152,15 @@ class OpenAIServingModels:
             try:
                 await self.engine_client.add_lora(lora_request)
             except Exception as e:
-                error_type = "BadRequestError"
-                status_code = HTTPStatus.BAD_REQUEST
-                if "No adapter found" in str(e):
-                    error_type = "NotFoundError"
-                    status_code = HTTPStatus.NOT_FOUND
-
-                return create_error_response(
-                    message=str(e), err_type=error_type, status_code=status_code
-                )
+                if str(
+                    LoRAAdapterNotFoundError(
+                        lora_request.lora_name, lora_request.lora_path
+                    )
+                ) in str(e):
+                    raise LoRAAdapterNotFoundError(
+                        lora_request.lora_name, lora_request.lora_path
+                    ) from e
+                raise
 
             self.lora_requests[lora_name] = lora_request
             logger.info(
@@ -292,17 +292,3 @@ class OpenAIServingModels:
                     err_type="NotFoundError",
                     status_code=HTTPStatus.NOT_FOUND,
                 )
-
-
-def create_error_response(
-    message: str,
-    err_type: str = "BadRequestError",
-    status_code: HTTPStatus = HTTPStatus.BAD_REQUEST,
-) -> ErrorResponse:
-    return ErrorResponse(
-        error=ErrorInfo(
-            message=sanitize_message(message),
-            type=err_type,
-            code=status_code.value,
-        )
-    )
