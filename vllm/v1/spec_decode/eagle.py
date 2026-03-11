@@ -146,7 +146,7 @@ class SpecDecodeBaseProposer:
             # 1D-RoPE.
             # See page 5 of https://arxiv.org/abs/2409.12191
             self.mrope_positions = torch.zeros(
-                (3, 2*(self.max_num_tokens + 1)), dtype=torch.int64, device=device
+                (3,  2 * (self.max_num_tokens + 1)), dtype=torch.int64, device=device
             )
         elif self.uses_xdrope_dim > 0 and self.draft_uses_xdrope_dim > 0:
             self.xdrope_positions = torch.zeros(
@@ -157,7 +157,7 @@ class SpecDecodeBaseProposer:
         else:
             # RoPE need (max_num_tokens,)
             self.positions = torch.zeros(
-                2*self.max_num_tokens, dtype=torch.int64, device=device
+                2 * self.max_num_tokens, dtype=torch.int64, device=device
             )
         self.hidden_states = torch.zeros(
             (self.max_num_tokens, self.hidden_size), dtype=self.dtype, device=device
@@ -366,13 +366,10 @@ class SpecDecodeBaseProposer:
         return {name: view for name in self._draft_attn_layer_names}
 
     def _get_dflash_slot_mapping(
-    self,
-    slot_mapping: torch.Tensor,
+        self,
+        slot_mapping: torch.Tensor,
     ) -> dict[str, torch.Tensor]:
-        return {
-            name: slot_mapping
-            for name in self._draft_attn_layer_names
-        }
+        return {name: slot_mapping for name in self._draft_attn_layer_names}
 
     def initialize_cudagraph_keys(self, cudagraph_mode: CUDAGraphMode) -> None:
         """Initialize cudagraph dispatcher keys for eagle.
@@ -419,7 +416,9 @@ class SpecDecodeBaseProposer:
         batch_size = common_attn_metadata.batch_size()
 
         if self.method in ("eagle3", "dflash"):
-            assert isinstance(self.model, (Eagle3LlamaForCausalLM, DFlashQwen3ForCausalLM))
+            assert isinstance(
+                self.model, (Eagle3LlamaForCausalLM, DFlashQwen3ForCausalLM)
+            )
             target_hidden_states = self.model.combine_hidden_states(
                 target_hidden_states
             )
@@ -482,10 +481,13 @@ class SpecDecodeBaseProposer:
             model_kwargs["hidden_states"] = self.hidden_states[:hidden_states_len]
 
         if self.method == "dflash":
-            forward_slot_mapping = self._get_dflash_slot_mapping(common_attn_metadata.slot_mapping)
+            forward_slot_mapping = self._get_dflash_slot_mapping(
+                common_attn_metadata.slot_mapping
+            )
         else:
             forward_slot_mapping = self._get_slot_mapping(
-                num_input_tokens, common_attn_metadata.slot_mapping)
+                num_input_tokens, common_attn_metadata.slot_mapping
+            )
 
         with set_forward_context(
             per_layer_attn_metadata,
@@ -505,7 +507,11 @@ class SpecDecodeBaseProposer:
         sample_hidden_states = last_hidden_states[token_indices_to_sample]
 
         # Early exit if there is only one draft token to be generated.
-        if self.num_speculative_tokens == 1 or self.parallel_drafting or self.method == "dflash":
+        if (
+            self.num_speculative_tokens == 1
+            or self.parallel_drafting
+            or self.method == "dflash"
+        ):
             draft_token_ids = self._greedy_sample(sample_hidden_states)
             return draft_token_ids.view(-1, self.num_speculative_tokens)
 
@@ -728,7 +734,7 @@ class SpecDecodeBaseProposer:
 
         self.input_ids[:num_query_tokens_total].fill_(self.dflash_mask_token_id)
         self.input_ids[:num_query_tokens_total:num_query_tokens] = next_token_ids
-        last_positions = cad.seq_lens.to(torch.long) - 1  
+        last_positions = cad.seq_lens.to(torch.long) - 1
 
         if (
             getattr(self, "_dflash_query_offsets", None) is None
@@ -743,26 +749,32 @@ class SpecDecodeBaseProposer:
             ).view(1, -1)
 
         query_positions = last_positions.view(-1, 1) + 1 + self._dflash_query_offsets
-        query_positions_flat = query_positions.reshape(-1)  
+        query_positions_flat = query_positions.reshape(-1)
 
         self.positions[:num_context_tokens] = target_positions[:num_context_tokens]
         self.positions[num_context_tokens:num_kv_tokens] = query_positions_flat
 
         self.hidden_states[:num_context_tokens] = target_hidden_states
 
-        token_indices_to_sample = torch.arange(
+        token_indices_to_sample = (
+            torch.arange(
             num_query_tokens_total,
             device=device,
             dtype=torch.int32,
-        ).view(batch_size, num_query_tokens)[:, 1:].reshape(-1)
+            )
+            .view(batch_size, num_query_tokens)[:, 1:]
+            .reshape(-1)
+        )
 
         block_size = self.block_size
 
         block_table_tensor = getattr(cad, "block_table_tensor", None)
         if block_table_tensor is None:
-            raise RuntimeError("DFlash requires block_table_tensor in CommonAttentionMetadata.")
+            raise RuntimeError(
+                "DFlash requires block_table_tensor in CommonAttentionMetadata."
+            )
 
-        block_numbers_bt = (query_positions // block_size).to(torch.long)   # [B, T]
+        block_numbers_bt = (query_positions // block_size).to(torch.long)  # [B, T]
         block_ids = block_table_tensor.gather(dim=1, index=block_numbers_bt)  # [B, T]
         query_slot_mapping = (
             block_ids * block_size + (query_positions % block_size)
@@ -782,7 +794,7 @@ class SpecDecodeBaseProposer:
                 dtype=torch.int32,
             )
 
-        qsl = self._dflash_query_start_loc_buffer[:batch_size + 1]
+        qsl = self._dflash_query_start_loc_buffer[: batch_size + 1]
         qsl.copy_(torch.arange(batch_size + 1, device=device, dtype=torch.int32))
         qsl.mul_(num_query_tokens)
 
@@ -796,8 +808,10 @@ class SpecDecodeBaseProposer:
                 pin_memory=is_pin_memory_available(),
             )
 
-        qsl_cpu = self._dflash_query_start_loc_cpu_buffer[:batch_size + 1]
-        qsl_cpu.copy_(torch.arange(batch_size + 1, dtype=torch.int32).mul_(num_query_tokens))
+        qsl_cpu = self._dflash_query_start_loc_cpu_buffer[: batch_size + 1]
+        qsl_cpu.copy_(
+            torch.arange(batch_size + 1, dtype=torch.int32).mul_(num_query_tokens)
+        )
 
         new_cad = replace(
             cad,
@@ -806,7 +820,9 @@ class SpecDecodeBaseProposer:
             max_query_len=num_query_tokens,
             query_start_loc=qsl,
             query_start_loc_cpu=qsl_cpu,
-            max_seq_len=min(int(cad.max_seq_len + num_query_tokens), self.max_model_len),
+            max_seq_len=min(
+                int(cad.max_seq_len + num_query_tokens), self.max_model_len
+            ),
             seq_lens=(cad.seq_lens + num_query_tokens),
             causal=False,
         )
@@ -1673,7 +1689,7 @@ class SpecDecodeBaseProposer:
             else:
                 slot_mapping_dict = slot_mappings or {}
 
-            is_dflash = (self.method == "dflash")
+            is_dflash = self.method == "dflash"
 
             with set_forward_context(
                 None,
@@ -1729,7 +1745,9 @@ class SpecDecodeBaseProposer:
             return False
         use_aux_hidden_state = True
         eagle_config = getattr(self.draft_model_config.hf_config, "eagle_config", None)
-        dflash_config = getattr(self.draft_model_config.hf_config, "dflash_config", None)
+        dflash_config = getattr(
+            self.draft_model_config.hf_config, "dflash_config", None
+        )
         if eagle_config is not None:
             use_aux_hidden_state = eagle_config.get("use_aux_hidden_state", True)
         if dflash_config is not None:
