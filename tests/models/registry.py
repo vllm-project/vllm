@@ -1137,6 +1137,18 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         speculative_model="yuhuili/EAGLE-LLaMA3-Instruct-8B",
         tokenizer="meta-llama/Meta-Llama-3-8B-Instruct",
     ),
+    "Eagle3DeepseekV2ForCausalLM": _HfExamplesInfo(
+        "moonshotai/Kimi-K2.5",
+        trust_remote_code=True,
+        speculative_model="AQ-MedAI/Kimi-K25-eagle3",
+        tokenizer="moonshotai/Kimi-K2.5",
+    ),
+    "Eagle3DeepseekV3ForCausalLM": _HfExamplesInfo(
+        "moonshotai/Kimi-K2.5",
+        trust_remote_code=True,
+        speculative_model="AQ-MedAI/Kimi-K25-eagle3",
+        tokenizer="moonshotai/Kimi-K2.5",
+    ),
     "Eagle3LlamaForCausalLM": _HfExamplesInfo(
         "meta-llama/Llama-3.1-8B-Instruct",
         trust_remote_code=True,
