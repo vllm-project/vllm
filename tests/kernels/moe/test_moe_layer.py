@@ -751,7 +751,7 @@ def make_fake_moe_layer(
     activation: str = "silu",
     indices_type: torch.dtype | None = None,
     expert_map: torch.Tensor | None = None,
-    enable_eplb: bool = False,  # TODO: add eplb support
+    enable_eplb: bool = False,
     expert_load_view: torch.Tensor | None = None,
     logical_to_physical_map: torch.Tensor | None = None,
     logical_replica_count: torch.Tensor | None = None,
@@ -853,7 +853,7 @@ def make_fake_moe_layer(
             output += shared_output
 
         # Apply TP/DP reduction if not already reduced
-        # if False and reduce_results and (tp_size > 1 or dp_size > 1):
+        # if (tp_size > 1 or dp_size > 1):
         #    output = tensor_model_parallel_all_reduce(output)
 
         return output
@@ -868,12 +868,11 @@ def _test_body_regular(
     vllm_config: VllmConfig,
     num_tokens: int,
     num_tokens_across_dp: torch.Tensor,
-    baseline_output: torch.Tensor,
     device: torch.device,
     **kwargs,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Regular MoE test body: compare layer output to baseline."""
-    baseline_output = baseline_output.to(device)
+    baseline_output = kwargs["baseline_output"]
 
     with set_forward_context(
         None,
@@ -957,7 +956,6 @@ def _test_body_eplb(
         routed_output_transform=routed_output_transform,
     )
 
-    # Is this necessary?
     if moe_layer._expert_map is not None:
         moe_layer._expert_map = moe_layer._expert_map.to(device)
 
@@ -1018,22 +1016,17 @@ def _test_loop(
     ep_size: int,
     dp_size: int,
     tp_size: int,
-    hidden_states: torch.Tensor,
-    router_logits: torch.Tensor,
-    w1: torch.Tensor,
-    w2: torch.Tensor,
-    num_experts: int,
     m: int,
     n: int,
     k: int,
+    num_experts: int,
     top_k: int,
     quantization: str | None,
-    shared_experts_config: SharedExpertsConfig | None,
     reduce_results: bool,
     test_body_fn: Callable,
-    gate: torch.nn.Module | None,
-    routed_input_transform: torch.nn.Module | None,
-    routed_output_transform: torch.nn.Module | None,
+    use_shared_experts: bool,
+    use_gate: bool,
+    use_routed_input_transform: bool,
     **kwargs,
 ) -> None:
     """Generic test loop that sets up environment and delegates to test_body_fn.
@@ -1047,42 +1040,81 @@ def _test_loop(
 
     assert vllm_config.parallel_config.enable_expert_parallel == use_ep
 
+    in_dtype = torch.bfloat16
+
     set_random_seed(7)
 
-    in_dtype = hidden_states.dtype
     device = torch.cuda.current_device()
     init_workspace_manager(device)
+
+    # Create test data and transforms
+    test_data = setup_moe_test_data(
+        m=m,
+        k=k,
+        n=n,
+        num_experts=num_experts,
+        in_dtype=in_dtype,
+        use_shared_experts=use_shared_experts,
+        use_gate=use_gate,
+        use_routed_input_transform=use_routed_input_transform,
+        device="cuda",
+    )
+
+    # Extract data from test_data
+    hidden_states = test_data.hidden_states
+    router_logits = test_data.router_logits
+    w1 = test_data.w1
+    w2 = test_data.w2
+    shared_experts_config = test_data.shared_experts_config
+    gate = test_data.gate
+    routed_input_transform = test_data.routed_input_transform
+    routed_output_transform = test_data.routed_output_transform
+
+    # Create baseline layer with tp_size=1 config (before chunking weights)
+    baseline_parallel_config = ParallelConfig()
+    baseline_vllm_config = VllmConfig(
+        parallel_config=baseline_parallel_config,
+        compilation_config=vllm_config.compilation_config,
+    )
 
     dp_rank = vllm_config.parallel_config.data_parallel_rank
     tp_rank = pgi.rank % tp_size
 
-    # Chunk weights for EP/TP
-    if ep_size > 1:
-        w1 = chunk_by_rank(w1, dp_rank, dp_size, dim=0, device=device)
-        w2 = chunk_by_rank(w2, dp_rank, dp_size, dim=0, device=device)
+    with set_current_vllm_config(baseline_vllm_config):
+        baseline_layer = make_fake_moe_layer(
+            w1=w1,
+            w2=w2,
+            top_k=top_k,
+            global_num_experts=num_experts,
+            in_dtype=in_dtype,
+            quant_dtype=None,
+            renormalize=False,
+            shared_experts_config=shared_experts_config,
+            gate=gate,
+            routed_input_transform=routed_input_transform,
+            routed_output_transform=routed_output_transform,
+            # use_ep=use_ep,
+            # tp_size=tp_size,
+            # ep_size=ep_size,
+            # dp_size=dp_size,
+            reduce_results=reduce_results,
+        )
 
-    if tp_size > 1:
-        w1 = tp_chunk_gate_up(w1, tp_rank, tp_size, dim=1, device=device)
-        w2 = chunk_by_rank(w2, tp_rank, tp_size, dim=2, device=device)
+        baseline_output = baseline_layer(hidden_states, router_logits)
 
-    # TODO: are these to(device) calls needed?
-
-    if ep_size <= 1 and tp_size <= 1:
-        w1 = w1.to(device)
-        w2 = w2.to(device)
-
-    hidden_states = hidden_states.to(device)
-    router_logits = router_logits.to(device)
-
-    # Move gate and routed_input_transform to device if provided
-    if gate is not None:
-        gate = gate.to(device)
-    if routed_input_transform is not None:
-        routed_input_transform = routed_input_transform.to(device)
-    if routed_output_transform is not None:
-        routed_output_transform = routed_output_transform.to(device)
+        del baseline_layer
+        torch.accelerator.empty_cache()
 
     with set_current_vllm_config(vllm_config):
+        # Chunk weights for EP/TP (after baseline is created)
+        if ep_size > 1:
+            w1 = chunk_by_rank(w1, dp_rank, dp_size, dim=0, device=device)
+            w2 = chunk_by_rank(w2, dp_rank, dp_size, dim=0, device=device)
+
+        if tp_size > 1:
+            w1 = tp_chunk_gate_up(w1, tp_rank, tp_size, dim=1, device=device)
+            w2 = chunk_by_rank(w2, tp_rank, tp_size, dim=2, device=device)
+
         # Setup shared experts if needed
         shared_experts = create_shared_experts_from_config(
             shared_experts_config, in_dtype, tp_size, tp_rank, device
@@ -1113,7 +1145,6 @@ def _test_loop(
             routed_output_transform=routed_output_transform,
         )
 
-        # Is this necessary?
         if moe_layer._expert_map is not None:
             moe_layer._expert_map = moe_layer._expert_map.to(device)
 
@@ -1154,6 +1185,7 @@ def _test_loop(
             gate=gate,
             routed_input_transform=routed_input_transform,
             routed_output_transform=routed_output_transform,
+            baseline_output=baseline_output,
             **kwargs,
         )
 
@@ -1163,7 +1195,7 @@ def _test_loop(
         atol, rtol = 3.5e-2, 3.5e-2
     elif quantization in ("fp8", "modelopt_fp8"):
         atol, rtol = 6e-2, 6e-2
-    elif quantization == "modelopt_fp4":
+    elif quantization == "modelopt_nvfp4":
         atol = rtol = 1e-1 + k * 5e-4
     else:
         atol, rtol = 6e-2, 6e-2
@@ -1416,63 +1448,6 @@ def test_moe_layer(
         parallel_config=parallel_config, compilation_config=compilation_config
     )
 
-    in_dtype = torch.bfloat16
-
-    # Create all tensors on CPU first (for safe pickling to subprocess workers)
-    test_data = setup_moe_test_data(
-        m=m,
-        k=k,
-        n=n,
-        num_experts=num_experts,
-        in_dtype=in_dtype,
-        use_shared_experts=use_shared_experts,
-        use_gate=use_gate,
-        use_routed_input_transform=use_routed_input_transform,
-    )
-
-    # For now, run baseline unquantized.
-    # quant_dtype = torch.float8_e4m3fn if quantization is not None else None
-
-    # Create baseline with tp_size=1 (single GPU, full weights)
-    # to avoid TP-aware behavior when using full, unchunked weights
-    baseline_parallel_config = ParallelConfig()
-    baseline_vllm_config = VllmConfig(
-        parallel_config=baseline_parallel_config, compilation_config=compilation_config
-    )
-
-    with set_current_vllm_config(baseline_vllm_config):
-        baseline_layer = make_fake_moe_layer(
-            w1=test_data.w1,
-            w2=test_data.w2,
-            top_k=top_k,
-            global_num_experts=num_experts,
-            in_dtype=in_dtype,
-            quant_dtype=None,  # quant_dtype,
-            renormalize=False,
-            shared_experts_config=test_data.shared_experts_config,
-            gate=test_data.gate,
-            routed_input_transform=test_data.routed_input_transform,
-            routed_output_transform=test_data.routed_output_transform,
-            use_ep=use_ep,
-            tp_size=tp_size,
-            ep_size=ep_size,
-            dp_size=dp_size,
-            reduce_results=reduce_results,
-        )
-
-    baseline_output = baseline_layer(
-        test_data.hidden_states,
-        test_data.router_logits,
-    )
-
-    # Move baseline output back to CPU and detach for passing to workers
-    # (detach to avoid autograd across process boundaries)
-    baseline_output = baseline_output.detach().cpu()
-
-    # Free the baseline layer and all CUDA tensors before spawn
-    del baseline_layer
-    torch.accelerator.empty_cache()
-
     try:
         parallel_launch_with_config(
             world_size,
@@ -1482,23 +1457,17 @@ def test_moe_layer(
             ep_size,
             dp_size,
             tp_size,
-            test_data.hidden_states,
-            test_data.router_logits,
-            test_data.w1,
-            test_data.w2,
-            num_experts,
             m,
             n,
             k,
+            num_experts,
             top_k,
             quantization,
-            test_data.shared_experts_config,
             reduce_results,
             _test_body_regular,
-            gate=test_data.gate,
-            routed_input_transform=test_data.routed_input_transform,
-            routed_output_transform=test_data.routed_output_transform,
-            baseline_output=baseline_output,
+            use_shared_experts,
+            use_gate,
+            use_routed_input_transform,
         )
     finally:
         # Cleanup GPU memory after spawned processes complete
@@ -1592,20 +1561,6 @@ def test_moe_layer_eplb(
         parallel_config=parallel_config, compilation_config=compilation_config
     )
 
-    in_dtype = torch.bfloat16
-
-    # Setup test data and transforms
-    test_data = setup_moe_test_data(
-        m=m,
-        k=k,
-        n=n,
-        num_experts=num_experts,
-        in_dtype=in_dtype,
-        use_shared_experts=use_shared_experts,
-        use_gate=use_gate,
-        use_routed_input_transform=use_routed_input_transform,
-    )
-
     try:
         parallel_launch_with_config(
             world_size,
@@ -1615,22 +1570,17 @@ def test_moe_layer_eplb(
             world_size,  # ep_size = world_size for EPLB
             dp_size,
             tp_size,
-            test_data.hidden_states,
-            test_data.router_logits,
-            test_data.w1,
-            test_data.w2,
-            num_experts,
             m,
             n,
             k,
+            num_experts,
             top_k,
             quantization,
-            test_data.shared_experts_config,
             reduce_results,
             _test_body_eplb,
-            gate=test_data.gate,
-            routed_input_transform=test_data.routed_input_transform,
-            routed_output_transform=test_data.routed_output_transform,
+            use_shared_experts,
+            use_gate,
+            use_routed_input_transform,
         )
     finally:
         # Cleanup GPU memory after spawned processes complete
