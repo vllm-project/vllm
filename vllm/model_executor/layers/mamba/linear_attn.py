@@ -435,7 +435,7 @@ class MiniMaxText01LinearAttention(nn.Module, MambaBase):
                 )
         hidden = self.norm._forward(hidden)
         gate, _ = self.output_gate(hidden_states[:num_actual_tokens])
-        hidden = F.sigmoid(gate) * hidden
+        hidden = torch.sigmoid(gate) * hidden
         hidden = hidden.to(hidden_states.dtype)
 
         output[:num_actual_tokens], _ = self.out_proj(hidden)

@@ -121,7 +121,11 @@ class MiniMaxM2MoE(nn.Module):
 
     @staticmethod
     def ebias_weight_loader(param: nn.Parameter, loaded_weight: torch.Tensor) -> None:
-        assert param.size() == loaded_weight.size()
+        if param.size() != loaded_weight.size():
+            raise ValueError(
+                f"Shape mismatch for e_score_correction_bias: expected {param.size()}, "
+                f"got {loaded_weight.size()}"
+            )
         param.data.copy_(loaded_weight.to(torch.float32))
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
