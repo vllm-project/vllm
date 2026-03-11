@@ -924,6 +924,7 @@ class Scheduler(SchedulerInterface):
         self.encoder_cache_manager.free(request)
         request.status = RequestStatus.PREEMPTED
         request.num_computed_tokens = 0
+        request.num_cached_tokens = -1
         if request.spec_token_ids:
             request.spec_token_ids = []
         request.num_preemptions += 1
