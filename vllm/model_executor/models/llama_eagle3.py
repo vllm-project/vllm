@@ -176,8 +176,6 @@ class LlamaModel(nn.Module):
                 fc_input_size = self.config.target_hidden_size * 3
             else:
                 fc_input_size = self.config.hidden_size * 3
-            # Optional RMSNorm on combined aux hidden states before fc (gpt-oss only;
-            # omitted for other models and old checkpoints).
             if self.norm_before_fc:
                 self.input_norm = RMSNorm(
                     fc_input_size,
