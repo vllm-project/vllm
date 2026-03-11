@@ -999,8 +999,8 @@ class HunYuanVLForConditionalGeneration(
         self,
         input_ids: torch.Tensor | None,
         positions: torch.Tensor,
-        intermediate_tensors: IntermediateTensors | None = None,
-        inputs_embeds: torch.Tensor | None = None,
+        intermediate_tensors: IntermediateTensors | None,
+        inputs_embeds: torch.Tensor | None,
         **kwargs: object,
     ) -> torch.Tensor | IntermediateTensors:
         if intermediate_tensors is not None:
