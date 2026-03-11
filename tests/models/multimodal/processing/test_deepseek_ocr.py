@@ -14,54 +14,53 @@ Run with:
 """
 
 import pytest
-import torch
+from PIL import Image
+from transformers import AutoTokenizer
 
 from vllm.model_executor.models.deepseek_ocr import DeepseekOCRImagePixelInputs
+from vllm.transformers_utils.processors.deepseek_ocr import DeepseekOCRProcessor
+
+MODEL_ID = "deepseek-ai/DeepSeek-OCR"
+
+
+@pytest.fixture(scope="module")
+def processor():
+    """Load the DeepseekOCRProcessor with tokenizer from HuggingFace."""
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
+    return DeepseekOCRProcessor(tokenizer=tokenizer)
 
 
 class TestDeepseekOCREmptyImagesCrop:
     """Verify TensorSchema validation handles empty images_crop correctly."""
 
-    def test_empty_images_crop_gundam_preset(self):
-        """Empty images_crop (0, 3, 640, 640) should not crash when
-        base_size=1024 and image_size=640 (Gundam preset).
+    def test_empty_images_crop_small_image(self, processor):
+        """A small image (<=640px) produces empty images_crop and should
+        not crash the TensorSchema validation.
 
-        Previously, the code used `numel() > 0` to decide whether to read
+        Previously, the code used ``numel() > 0`` to decide whether to read
         image_size from the tensor shape. When numel()==0, it fell back to
         base_size=1024, mismatching the actual tensor dim of 640.
         """
-        base_size = 1024
-        image_size = 640
+        # Small image: both dims <= IMAGE_SIZE (640) → no crops
+        small_image = Image.new("RGB", (100, 100), color="red")
 
-        pixel_values = torch.randn(1, 3, base_size, base_size)
-        images_crop = torch.zeros(0, 3, image_size, image_size)
-        images_spatial_crop = torch.tensor([[1, 1]])
-
-        # This should NOT raise ValueError
-        result = DeepseekOCRImagePixelInputs(
-            type="pixel_values",
-            data=pixel_values,
-            images_crop=images_crop,
-            images_spatial_crop=images_spatial_crop,
-            resolve_bindings={
-                "base_size": base_size,
-                "image_size": images_crop.shape[-1],  # 640, not base_size
-            },
+        result = processor(
+            prompt="<image>\nDescribe this image.",
+            images=[small_image],
         )
 
-        assert result.data.shape == (1, 3, 1024, 1024)
-        assert result.images_crop.shape == (0, 3, 640, 640)
+        pixel_values = result["pixel_values"]
+        images_crop = result["images_crop"]
+        images_spatial_crop = result["images_spatial_crop"]
 
-    def test_populated_images_crop_gundam_preset(self):
-        """Populated images_crop should continue to work normally."""
-        base_size = 1024
-        image_size = 640
+        # Processor must produce an empty crop tensor for a small image
+        assert images_crop.shape[0] == 0
 
-        pixel_values = torch.randn(1, 3, base_size, base_size)
-        images_crop = torch.randn(2, 3, image_size, image_size)
-        images_spatial_crop = torch.tensor([[2, 1]])
+        base_size = pixel_values.shape[-1]
+        image_size = images_crop.shape[-1] if images_crop is not None else base_size
 
-        result = DeepseekOCRImagePixelInputs(
+        # This should NOT raise ValueError
+        schema = DeepseekOCRImagePixelInputs(
             type="pixel_values",
             data=pixel_values,
             images_crop=images_crop,
@@ -72,38 +71,55 @@ class TestDeepseekOCREmptyImagesCrop:
             },
         )
 
-        assert result.data.shape == (1, 3, 1024, 1024)
-        assert result.images_crop.shape == (2, 3, 640, 640)
+        assert schema.data.shape == (1, 3, 1024, 1024)
+        assert schema.images_crop.shape == (0, 3, 640, 640)
 
-    def test_empty_images_crop_base_preset(self):
-        """Base preset (image_size == base_size == 1024) should also work
-        with empty crops."""
-        size = 1024
+    def test_populated_images_crop_large_image(self, processor):
+        """A large image (>640px) produces populated images_crop."""
+        # Large image: exceeds IMAGE_SIZE (640) → dynamic crop tiles
+        large_image = Image.new("RGB", (1200, 800), color="blue")
 
-        pixel_values = torch.randn(1, 3, size, size)
-        images_crop = torch.zeros(0, 3, size, size)
-        images_spatial_crop = torch.tensor([[1, 1]])
+        result = processor(
+            prompt="<image>\nDescribe this image.",
+            images=[large_image],
+        )
 
-        result = DeepseekOCRImagePixelInputs(
+        pixel_values = result["pixel_values"]
+        images_crop = result["images_crop"]
+        images_spatial_crop = result["images_spatial_crop"]
+
+        assert images_crop.shape[0] > 0
+
+        base_size = pixel_values.shape[-1]
+        image_size = images_crop.shape[-1]
+
+        schema = DeepseekOCRImagePixelInputs(
             type="pixel_values",
             data=pixel_values,
             images_crop=images_crop,
             images_spatial_crop=images_spatial_crop,
             resolve_bindings={
-                "base_size": size,
-                "image_size": size,
+                "base_size": base_size,
+                "image_size": image_size,
             },
         )
 
-        assert result.data.shape == (1, 3, 1024, 1024)
-        assert result.images_crop.shape == (0, 3, 1024, 1024)
+        assert schema.data.shape == (1, 3, 1024, 1024)
+        assert schema.images_crop.shape[-1] == 640
 
-    def test_mismatched_image_size_raises(self):
+    def test_mismatched_image_size_raises(self, processor):
         """Deliberately wrong image_size binding should still be caught
         by TensorSchema validation."""
-        pixel_values = torch.randn(1, 3, 1024, 1024)
-        images_crop = torch.zeros(0, 3, 640, 640)
-        images_spatial_crop = torch.tensor([[1, 1]])
+        small_image = Image.new("RGB", (100, 100), color="green")
+
+        result = processor(
+            prompt="<image>\nDescribe this image.",
+            images=[small_image],
+        )
+
+        pixel_values = result["pixel_values"]
+        images_crop = result["images_crop"]
+        images_spatial_crop = result["images_spatial_crop"]
 
         with pytest.raises(ValueError, match="images_crop"):
             DeepseekOCRImagePixelInputs(
