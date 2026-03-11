@@ -41,7 +41,6 @@ class StructuredOutputsParams:
     grammar: str | None = None
     json_object: bool | None = None
     # These are other options that can be set.
-    disable_fallback: bool = False
     disable_any_whitespace: bool = False
     disable_additional_properties: bool = False
     whitespace_pattern: str | None = None
@@ -534,6 +533,7 @@ class SamplingParams(
             if eos_ids:
                 self._all_stop_token_ids.update(eos_ids)
                 if not self.ignore_eos:
+                    assert self.stop_token_ids is not None
                     eos_ids.update(self.stop_token_ids)
                     self.stop_token_ids = list(eos_ids)
 

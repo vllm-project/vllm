@@ -1917,7 +1917,7 @@ class TritonExperts(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:
-        return False
+        return True
 
     @staticmethod
     def _supports_quant_scheme(
@@ -1956,6 +1956,9 @@ class TritonExperts(mk.FusedMoEExpertsModular):
             MoEActivation.GELU,
             MoEActivation.SWIGLUOAI,
             MoEActivation.SWIGLUSTEP,
+            MoEActivation.SILU_NO_MUL,
+            MoEActivation.GELU_NO_MUL,
+            MoEActivation.RELU2_NO_MUL,
         ]
 
     @staticmethod
