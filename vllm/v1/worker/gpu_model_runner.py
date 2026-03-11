@@ -1233,9 +1233,10 @@ class GPUModelRunner(
                     # defaults hold. No data is lost because rejections accumulate on
                     # GPU and are applied when available.
                     if prev_req_id_to_index is not None and cumulative_num_rejected:
-                        prev_req_index = prev_req_id_to_index[req_id]
-                        num_rejected = cumulative_num_rejected[prev_req_index]
-                        num_accepted = req_state.prev_num_draft_len - num_rejected
+                        prev_req_index = prev_req_id_to_index.get(req_id)
+                        if prev_req_index is not None:
+                            num_rejected = cumulative_num_rejected[prev_req_index]
+                            num_accepted = req_state.prev_num_draft_len - num_rejected
 
                     num_computed_tokens -= num_rejected
 
