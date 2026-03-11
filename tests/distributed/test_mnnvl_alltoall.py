@@ -646,9 +646,10 @@ def flashinfer_data_communication_worker(rank: int, world_size: int):
             assert dispatched_hidden.shape == (expected_total_tokens, hidden_size), (
                 f"[Rank {rank}] Unexpected hidden shape: {dispatched_hidden.shape}"
             )
-            assert dispatched_router.shape == (expected_total_tokens, num_global_experts), (
-                f"[Rank {rank}] Unexpected router shape: {dispatched_router.shape}"
-            )
+            assert dispatched_router.shape == (
+                expected_total_tokens,
+                num_global_experts,
+            ), f"[Rank {rank}] Unexpected router shape: {dispatched_router.shape}"
 
             # Validate VALUES: verify data from all ranks is present
             # Each rank's data should have its unique value (rank + 1)
@@ -665,12 +666,14 @@ def flashinfer_data_communication_worker(rank: int, world_size: int):
                 actual_router_mean = rank_router.mean().item()
 
                 assert abs(actual_hidden_mean - expected_hidden_val) < 0.1, (
-                    f"[Rank {rank}] Hidden states: expected rank {r} data to have value "
-                    f"{expected_hidden_val}, but got {actual_hidden_mean}"
+                    f"[Rank {rank}] Hidden states: expected rank {r} data "
+                    f"to have value {expected_hidden_val}, "
+                    f"but got {actual_hidden_mean}"
                 )
                 assert abs(actual_router_mean - expected_router_val) < 10, (
-                    f"[Rank {rank}] Router logits: expected rank {r} data to have value "
-                    f"{expected_router_val}, but got {actual_router_mean}"
+                    f"[Rank {rank}] Router logits: expected rank {r} data "
+                    f"to have value {expected_router_val}, "
+                    f"but got {actual_router_mean}"
                 )
 
             print(f"[Rank {rank}]   ✓ dispatch_router_logits: all rank data verified")
@@ -686,8 +689,14 @@ def flashinfer_data_communication_worker(rank: int, world_size: int):
 
             # Validate shapes
             assert dispatched_hidden2.shape == (expected_total_tokens, hidden_size)
-            assert dispatched_weights.shape == (expected_total_tokens, num_experts_per_token)
-            assert dispatched_ids.shape == (expected_total_tokens, num_experts_per_token)
+            assert dispatched_weights.shape == (
+                expected_total_tokens,
+                num_experts_per_token,
+            )
+            assert dispatched_ids.shape == (
+                expected_total_tokens,
+                num_experts_per_token,
+            )
 
             # Validate VALUES: verify data from all ranks
             for r in range(world_size):
@@ -739,7 +748,8 @@ def flashinfer_data_communication_worker(rank: int, world_size: int):
                 actual_mean = combined[i, :].mean().item()
 
                 assert abs(actual_mean - expected_value) < 1.0, (
-                    f"[Rank {rank}] Token {i}: expected {expected_value}, got {actual_mean}"
+                    f"[Rank {rank}] Token {i}: expected {expected_value}, "
+                    f"got {actual_mean}"
                 )
 
             print(f"[Rank {rank}]   ✓ combine: values correctly reduced")
@@ -747,7 +757,10 @@ def flashinfer_data_communication_worker(rank: int, world_size: int):
             torch.distributed.barrier()
 
             print(f"[Rank {rank}] ✓ All2All data communication validation passed")
-            print(f"[Rank {rank}]   - Verified data from all {world_size} ranks is present")
+            print(
+                f"[Rank {rank}]   - Verified data from all {world_size} "
+                f"ranks is present"
+            )
             print(f"[Rank {rank}]   - Verified dispatch gathers data correctly")
             print(f"[Rank {rank}]   - Verified combine reduces data correctly")
 
