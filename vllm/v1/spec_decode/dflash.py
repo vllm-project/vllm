@@ -101,11 +101,12 @@ class DFlashModelProposer(SpecDecodeBaseProposer):
         is_graph_capturing: bool = False,
         slot_mappings: dict[str, torch.Tensor] | None = None,
     ) -> None:
-       (   _,
-            num_query_tokens_dp_padded,
-            num_tokens_across_dp,
+       (
+            _, 
+            num_input_tokens, 
+            num_tokens_across_dp
         ) = self._determine_batch_execution_and_padding(
-            total_query_tokens,
+            num_tokens,
             use_cudagraphs=False,
         )
         if num_tokens_across_dp is not None:
