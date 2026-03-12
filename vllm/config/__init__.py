@@ -11,6 +11,7 @@ from vllm.config.compilation import (
 )
 from vllm.config.device import DeviceConfig
 from vllm.config.ec_transfer import ECTransferConfig
+from vllm.config.kernel import KernelConfig
 from vllm.config.kv_events import KVEventsConfig
 from vllm.config.kv_transfer import KVTransferConfig
 from vllm.config.load import LoadConfig
@@ -23,6 +24,12 @@ from vllm.config.model import (
 )
 from vllm.config.multimodal import MultiModalConfig
 from vllm.config.observability import ObservabilityConfig
+from vllm.config.offload import (
+    OffloadBackend,
+    OffloadConfig,
+    PrefetchOffloadConfig,
+    UVAOffloadConfig,
+)
 from vllm.config.parallel import EPLBConfig, ParallelConfig
 from vllm.config.pooler import PoolerConfig
 from vllm.config.profiler import ProfilerConfig
@@ -65,6 +72,8 @@ __all__ = [
     "DeviceConfig",
     # From vllm.config.ec_transfer
     "ECTransferConfig",
+    # From vllm.config.kernel
+    "KernelConfig",
     # From vllm.config.kv_events
     "KVEventsConfig",
     # From vllm.config.kv_transfer
@@ -82,6 +91,11 @@ __all__ = [
     "MultiModalConfig",
     # From vllm.config.observability
     "ObservabilityConfig",
+    # From vllm.config.offload
+    "OffloadBackend",
+    "OffloadConfig",
+    "PrefetchOffloadConfig",
+    "UVAOffloadConfig",
     # From vllm.config.parallel
     "EPLBConfig",
     "ParallelConfig",

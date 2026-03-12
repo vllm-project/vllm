@@ -30,12 +30,15 @@ from vllm.lora.utils import (
     replace_submodule,
 )
 from vllm.model_executor.layers.fused_moe import FusedMoE
-from vllm.model_executor.models import SupportsLoRA, supports_multimodal
-from vllm.model_executor.models.interfaces import is_pooling_model
+from vllm.model_executor.models import (
+    SupportsLoRA,
+    is_pooling_model,
+    supports_multimodal,
+)
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.utils import PPMissingLayer
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.budget import MultiModalBudget
+from vllm.multimodal.encoder_budget import MultiModalBudget
 from vllm.utils.cache import LRUCache
 from vllm.utils.platform_utils import is_pin_memory_available
 
@@ -452,16 +455,23 @@ class LoRAModelManager:
             if module_name not in self.packed_modules:
                 assert embedding_modules is not None
                 if parts[-1] in embedding_modules:
-                    input_dim = (
-                        module.base_layer.org_vocab_size
-                        if hasattr(module.base_layer, "org_vocab_size")
-                        else module.base_layer.weight.shape[1]
-                    )
-                    output_dim = (
-                        module.base_layer.embedding_dim
-                        if hasattr(module.base_layer, "embedding_dim")
-                        else module.base_layer.weight.shape[0]
-                    )
+                    # Special-case lm_head: wrapped by LogitsProcessorWithLoRA.
+                    # LoRA input dim is hidden_size, output dim is vocab size.
+                    # LogitsProcessorWithLoRA handles extra vocab size directly.
+                    if parts[-1] == "lm_head":
+                        input_dim = module.lora_a_stacked[0].shape[-1]
+                        output_dim = module.lora_b_stacked[0].shape[-2]
+                    else:
+                        input_dim = (
+                            module.base_layer.org_vocab_size
+                            if hasattr(module.base_layer, "org_vocab_size")
+                            else module.base_layer.weight.shape[1]
+                        )
+                        output_dim = (
+                            module.base_layer.embedding_dim
+                            if hasattr(module.base_layer, "embedding_dim")
+                            else module.base_layer.weight.shape[0]
+                        )
                     lora = LoRALayerWeights.create_dummy_lora_weights(
                         module_name,
                         input_dim,
@@ -589,8 +599,8 @@ class LoRAModelManager:
                 replacement_loras[i] = None
             # HACK Temporary solution for the pool model.
             if self.is_pooling_model and not lora_model.check_lora_name(module_name):
-                replaced_module_name = module_name.replace("model.", "")
-                if lora_model.check_lora_name(module_name):
+                replaced_module_name = module_name.removeprefix("model.")
+                if lora_model.check_lora_name(replaced_module_name):
                     module_name = replaced_module_name
             if module_name.endswith(".experts"):
                 if self._is_non_gated_moe and len(replacement_loras) > 0:
@@ -735,7 +745,7 @@ class LoRAModelManager:
         if self.is_pooling_model and not lora_model.check_lora_name(module_name):
             # If it's a pool model, and the layer name is not found,
             # remove the prefix 'model.' and search again.
-            module_name = module_name.replace("model.", "")
+            module_name = module_name.removeprefix("model.")
             if lora_model.check_lora_name(module_name):
                 org_module_name = module_name
                 logger.info_once(

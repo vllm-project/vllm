@@ -15,7 +15,6 @@ from .common import (
     BenchmarkConfig,
     BenchmarkResult,
     MockLayer,
-    MockModelConfig,
     ResultsFormatter,
     get_attention_scale,
     is_mla_backend,
@@ -36,7 +35,6 @@ __all__ = [
     "ResultsFormatter",
     # Mock objects
     "MockLayer",
-    "MockModelConfig",
     # Utilities
     "setup_mla_dims",
     "get_attention_scale",

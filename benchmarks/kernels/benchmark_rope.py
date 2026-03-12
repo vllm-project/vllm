@@ -5,6 +5,7 @@ import itertools
 
 import torch
 
+from vllm.benchmarks.lib.utils import default_vllm_config
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.triton_utils import triton
 from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -29,6 +30,7 @@ def get_benchmark(head_size, rotary_dim, is_neox_style, device):
             args={},
         )
     )
+    @default_vllm_config()
     def benchmark(batch_size, seq_len, num_heads, provider):
         dtype = torch.bfloat16
         max_position = 8192
