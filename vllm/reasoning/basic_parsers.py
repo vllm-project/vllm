@@ -72,7 +72,8 @@ class BaseThinkingReasoningParser(ReasoningParser):
                 return True
         return False
 
-    def is_reasoning_end_streaming(self, input_ids: Sequence[int], delta_ids: Iterable[int]) -> bool:
+    def is_reasoning_end_streaming(
+        self, input_ids: Sequence[int], delta_ids: Iterable[int]) -> bool:
         return self.end_token_id in delta_ids
 
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
@@ -95,7 +96,8 @@ class BaseThinkingReasoningParser(ReasoningParser):
         Extract reasoning content from a delta message.
         Handles streaming output where previous + delta = current.
         """
-        if len(delta_token_ids) == 1 and (delta_token_ids[0] in [self.start_token_id, self.end_token_id]):
+        if len(delta_token_ids) == 1 and (
+            delta_token_ids[0] in [self.start_token_id, self.end_token_id]):
             return None
 
         if self.start_token_id in previous_token_ids:
@@ -116,25 +118,30 @@ class BaseThinkingReasoningParser(ReasoningParser):
                 end_index = delta_text.find(self.end_token)
                 reasoning = delta_text[start_index + len(self.start_token) : end_index]
                 content = delta_text[end_index + len(self.end_token) :]
-                return DeltaMessage(reasoning=reasoning, content=content if content else None)
+                return DeltaMessage(
+                    reasoning=reasoning, content=content if content else None)
             else:
                 return DeltaMessage(reasoning=delta_text)
         else:
             return DeltaMessage(content=delta_text)
 
-    def extract_reasoning(self, model_output: str, request: ChatCompletionRequest | ResponsesRequest
+    def extract_reasoning(
+        self, model_output: str, request: ChatCompletionRequest | ResponsesRequest
                          ) -> tuple[str | None, str]:
         """
-        Extract reasoning and content from model output, supporting both standard tags and escaped <\think> tags.
+        Extract reasoning and content from model output,
+        supporting both standard tags and escaped <\think> tags.
         """
         if not model_output or not self.start_token or not self.end_token:
             return None, model_output.strip()
 
         # Constructing robust regex pattern to handle escaped variations (e.g., <\think>)
-        start_pattern = re.escape(self.start_token).replace(r'\<', r'\<\\?')
-        end_pattern = re.escape(self.end_token).replace(r'\<', r'\<\\?').replace(r'\/', r'\\?\/')
-        full_pattern = fr"({start_pattern})(.*?)({end_pattern})"
-
+        start_pattern = re.escape(self.start_token).replace(r"\<", r"\<\\?")
+        end_pattern = (
+            re.escape(self.end_token)
+            .replace(r"\<", r"\<\\?")
+            .replace(r"\/", r"\\?\/")
+        )
         # Using finditer for safer substring extraction without relying on str.index()
         matches = list(re.finditer(full_pattern, model_output, re.DOTALL))
         
