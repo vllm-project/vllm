@@ -48,7 +48,6 @@ from vllm.multimodal.processing import (
     PromptReplacement,
     PromptUpdate,
 )
-from vllm.platforms import current_platform
 from vllm.renderers import TokenizeParams
 from vllm.transformers_utils.processors.cohere_asr import (
     INF_VAL,
@@ -1283,9 +1282,7 @@ class ConformerLayer(torch.nn.Module):
                 pos_emb=pos_emb,
             )
         elif self.self_attention_model == "abs_pos":
-            x = self.self_attn(
-                query=x, key=x, value=x, mask=att_mask
-            )
+            x = self.self_attn(query=x, key=x, value=x, mask=att_mask)
         else:
             x = None
 
@@ -1839,7 +1836,7 @@ class CohereASRProcessingInfo(BaseProcessingInfo):
                 mel_norm=preproc.get("mel_norm", "slaney"),
                 stft_exact_pad=preproc.get("stft_exact_pad", False),
                 stft_conv=preproc.get("stft_conv", False),
-                device="cpu"
+                device="cpu",
             )
 
             tokenizer = self.ctx.tokenizer
@@ -2139,7 +2136,9 @@ class CohereASRForConditionalGeneration(
         # CohereASR does not have encoder text tokens.
         return self.model.decoder.get_input_embeddings(input_ids)
 
-    def _parse_and_validate_audio_input(self, **kwargs: object) -> tuple[torch.Tensor, torch.Tensor]:
+    def _parse_and_validate_audio_input(
+        self, **kwargs: object
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         input_features = kwargs.pop("input_features", None)
         length = kwargs.pop("length", None)
 
