@@ -2778,6 +2778,49 @@ def free_shared_buffer(ptr: int) -> None:
     torch.ops._C_custom_ar.free_shared_buffer(ptr)
 
 
+# hierarchical allreduce (multi-node custom AR with UCCL-EP)
+def init_hierarchical_ar(
+    intra_ar_ptr: int,
+    broadcast_ptrs: list[int],
+    hier_signal_ptrs: list[int],
+    local_rank: int,
+    local_world_size: int,
+    node_id: int,
+    num_nodes: int,
+    gateway_local_rank: int,
+    max_size: int,
+    num_proxy_threads: int,
+) -> int:
+    return torch.ops._C_custom_ar.init_hierarchical_ar(
+        intra_ar_ptr,
+        broadcast_ptrs,
+        hier_signal_ptrs,
+        local_rank,
+        local_world_size,
+        node_id,
+        num_nodes,
+        gateway_local_rank,
+        max_size,
+        num_proxy_threads,
+    )
+
+
+def hierarchical_all_reduce(
+    har: int,
+    inp: torch.Tensor,
+    out: torch.Tensor,
+) -> None:
+    torch.ops._C_custom_ar.hierarchical_all_reduce(har, inp, out)
+
+
+def dispose_hierarchical_ar(har: int) -> None:
+    torch.ops._C_custom_ar.dispose_hierarchical_ar(har)
+
+
+def hier_signal_size() -> int:
+    return torch.ops._C_custom_ar.hier_signal_size()
+
+
 # quick all reduce
 def init_custom_qr(rank: int, world_size: int, qr_max_size: int | None = None) -> int:
     return torch.ops._C_custom_ar.init_custom_qr(rank, world_size, qr_max_size)

@@ -83,6 +83,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
         self.qr_comm: QuickAllReduce | None = None
         self.symm_mem_comm: SymmMemCommunicator | None = None
         self.fi_ar_comm: FlashInferAllReduce | None = None
+        self.hier_comm = None  # HierarchicalAllreduce (multi-node)
 
         if use_torch_symm_mem and current_platform.is_cuda():
             self.symm_mem_comm = SymmMemCommunicator(
@@ -113,6 +114,48 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 # If it's a rocm, 'use_custom_allreduce==True' means it must
                 # currently be an MI300 series.
                 self.qr_comm = QuickAllReduce(group=self.cpu_group, device=self.device)
+
+        # Initialize hierarchical allreduce for multi-node TP
+        if (
+            use_custom_allreduce
+            and self.world_size > 1
+            and envs.VLLM_USE_HIERARCHICAL_AR
+            and "tp" in unique_name
+            and current_platform.is_cuda()
+        ):
+            from vllm.distributed.device_communicators.hierarchical_allreduce import (
+                HierarchicalAllreduce,
+            )
+            try:
+                # Derive topology from global info
+                import os
+                local_rank = int(os.environ.get("LOCAL_RANK", 0))
+                global_rank = torch.distributed.get_rank()
+                global_ws = global_world_size or torch.distributed.get_world_size()
+                local_ws = int(os.environ.get(
+                    "LOCAL_WORLD_SIZE", self.world_size))
+                num_nodes = max(1, global_ws // local_ws)
+                node_id = global_rank // local_ws
+
+                if num_nodes > 1:
+                    self.hier_comm = HierarchicalAllreduce(
+                        local_group=self.cpu_group,
+                        global_group=self.cpu_group,
+                        gateway_group=None,
+                        device=self.device,
+                        local_rank=local_rank,
+                        global_rank=global_rank,
+                        node_id=node_id,
+                        num_nodes=num_nodes,
+                        local_world_size=local_ws,
+                        num_proxy_threads=envs.VLLM_UCCL_EP_PROXY_THREADS,
+                    )
+                    if self.hier_comm.disabled:
+                        self.hier_comm = None
+            except Exception as e:
+                logger.warning(
+                    "Failed to initialize hierarchical allreduce: %s", e)
+                self.hier_comm = None
 
         if self.use_all2all:
             if self.all2all_backend == "naive":
@@ -167,8 +210,18 @@ class CudaCommunicator(DeviceCommunicatorBase):
             out = torch.ops.vllm.all_reduce_symmetric_with_copy(input_)
             if out is not None:
                 return out
-        # always try quick reduce first, then flashinfer, then custom allreduce,
+        # always try hierarchical AR first (highest priority for multi-node),
+        # then quick reduce, then flashinfer, then custom allreduce,
         # and then pynccl. (quick reduce just for ROCM MI3*)
+        hier_comm = self.hier_comm
+        if (
+            hier_comm is not None
+            and not hier_comm.disabled
+            and hier_comm.should_custom_ar(input_)
+        ):
+            out = hier_comm.custom_all_reduce(input_)
+            if out is not None:
+                return out
         qr_comm = self.qr_comm
         if (
             qr_comm is not None
@@ -322,6 +375,9 @@ class CudaCommunicator(DeviceCommunicatorBase):
             self.pynccl_comm = None
         if self.ca_comm is not None:
             self.ca_comm = None
+        if self.hier_comm is not None:
+            self.hier_comm.close()
+            self.hier_comm = None
         if self.fi_ar_comm is not None:
             self.fi_ar_comm.destroy()
             self.fi_ar_comm = None
