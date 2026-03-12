@@ -42,7 +42,7 @@ steps:
 #####################################################################################################################################
 
 - label: Pytorch Nightly Dependency Override Check # 2min
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90a]
   agent_pool: mi250_1
   source_file_dependencies:
   - requirements/nightly_torch_test.txt
@@ -51,7 +51,7 @@ steps:
 
 - label: Async Engine, Inputs, Utils, Worker Test # 10min
   timeout_in_minutes: 15
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90a]
   agent_pool: mi250_1
   source_file_dependencies:
   - vllm/
@@ -65,7 +65,7 @@ steps:
 
 - label: Async Engine, Inputs, Utils, Worker, Config Test (CPU) # 20min
   timeout_in_minutes: 30
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90a]
   agent_pool: mi250_1
   source_file_dependencies:
   - vllm/
@@ -94,7 +94,7 @@ steps:
 
 - label: Python-only Installation Test # 10min
   timeout_in_minutes: 20
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90a]
   agent_pool: mi250_1
   source_file_dependencies:
   - tests/standalone_tests/python_only_compile.sh
@@ -104,7 +104,7 @@ steps:
 
 - label: Basic Correctness Test # 20min
   timeout_in_minutes: 30
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90a]
   agent_pool: mi250_1
   fast_check: true
   torch_nightly: true
@@ -121,7 +121,7 @@ steps:
 
 - label: Entrypoints Unit Tests # 5min
   timeout_in_minutes: 10
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90a]
   agent_pool: mi250_1
   working_dir: "/vllm-workspace/tests"
   fast_check: true
@@ -134,7 +134,7 @@ steps:
 
 - label: Entrypoints Integration Test (LLM) # 30min
   timeout_in_minutes: 40
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90a]
   agent_pool: mi250_1
   fast_check: true
   torch_nightly: true
@@ -151,7 +151,7 @@ steps:
 
 - label: Entrypoints Integration Test (API Server 1) # 100min
   timeout_in_minutes: 130
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90a]
   agent_pool: mi250_1
   working_dir: "/vllm-workspace/tests"
   fast_check: true
@@ -167,7 +167,7 @@ steps:
 
 - label: Entrypoints Integration Test (API Server 2)
   timeout_in_minutes: 50
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90a]
   agent_pool: mi250_1
   optional: true
   working_dir: "/vllm-workspace/tests"
@@ -186,7 +186,7 @@ steps:
 
 - label: Entrypoints Integration Test (Pooling)
   timeout_in_minutes: 50
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90a]
   agent_pool: mi250_1
   optional: true
   fast_check: true
@@ -201,7 +201,7 @@ steps:
 
 - label: Entrypoints Integration Test (Responses API)
   timeout_in_minutes: 50
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90a]
   agent_pool: mi250_1
   optional: true
   working_dir: "/vllm-workspace/tests"
@@ -216,7 +216,7 @@ steps:
 
 - label: Distributed Tests (4 GPUs) # 35min
   timeout_in_minutes: 50
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90a]
   agent_pool: mi250_4
   optional: true
   num_gpus: 4
@@ -266,7 +266,7 @@ steps:
 
 - label: Distributed Tests (8 GPUs) # 4min
   timeout_in_minutes: 10
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90a]
   agent_pool: mi250_8
   optional: true
   num_gpus: 8
@@ -284,7 +284,7 @@ steps:
 
 - label: EPLB Algorithm Test # 5min
   timeout_in_minutes: 15
-  mirror_hardwares: [amdexperimental, amdproduction, amdtentative]
+  mirror_hardwares: [amdexperimental, amdproduction, amdtentative, amdgfx90a]
   agent_pool: mi250_1
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
@@ -295,7 +295,7 @@ steps:
 
 - label: EPLB Execution Test # 10min
   timeout_in_minutes: 20
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90a]
   agent_pool: mi250_4
   num_gpus: 4
   working_dir: "/vllm-workspace/tests"
@@ -308,7 +308,7 @@ steps:
 
 - label: Metrics, Tracing Test # 12min
   timeout_in_minutes: 20
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90a]
   agent_pool: mi250_2
   num_gpus: 2
   source_file_dependencies:
@@ -324,7 +324,7 @@ steps:
 
 - label: Regression Test # 7min
   timeout_in_minutes: 20
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90a]
   agent_pool: mi250_1
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
@@ -336,7 +336,7 @@ steps:
 
 - label: Engine Test # 9min
   timeout_in_minutes: 15
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90a]
   agent_pool: mi250_1
   source_file_dependencies:
   - vllm/
@@ -350,7 +350,7 @@ steps:
 
 - label: V1 Test e2e + engine # 65min
   timeout_in_minutes: 90
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90a]
   agent_pool: mi250_1
   optional: true
   source_file_dependencies:
@@ -362,7 +362,7 @@ steps:
 
 - label: V1 Test e2e (2 GPUs) # 65min
   timeout_in_minutes: 90
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90a]
   agent_pool: mi250_2
   optional: true
   source_file_dependencies:
@@ -373,7 +373,7 @@ steps:
 
 - label: V1 Test e2e (4 GPUs) # 65min
   timeout_in_minutes: 90
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90a]
   agent_pool: mi250_4
   optional: true
   source_file_dependencies:
@@ -384,7 +384,7 @@ steps:
 
 - label: V1 Test entrypoints # 35min
   timeout_in_minutes: 50
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90a]
   agent_pool: mi250_1
   source_file_dependencies:
     - vllm/
@@ -394,7 +394,7 @@ steps:
 
 - label: V1 Test others # 42min
   timeout_in_minutes: 60
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90a]
   agent_pool: mi250_1
   optional: true
   source_file_dependencies:
@@ -419,7 +419,7 @@ steps:
 
 - label: V1 Test attention (H100) # 10min
   timeout_in_minutes: 30
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90a]
   agent_pool: mi250_1
   optional: true
   source_file_dependencies:
@@ -432,7 +432,7 @@ steps:
 
 - label: Batch Invariance Tests (H100) # 10min
   timeout_in_minutes: 25
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90a]
   agent_pool: mi250_1
   source_file_dependencies:
     - vllm/v1/attention
@@ -446,7 +446,7 @@ steps:
 
 - label: V1 Test others (CPU) # 5 mins
   timeout_in_minutes: 15
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90a]
   agent_pool: mi250_1
   no_gpu: true
   source_file_dependencies:
@@ -462,7 +462,7 @@ steps:
 
 - label: Examples Test # 30min
   timeout_in_minutes: 45
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90a]
   agent_pool: mi250_1
   working_dir: "/vllm-workspace/examples"
   source_file_dependencies:
@@ -490,7 +490,7 @@ steps:
 
 - label: Platform Tests (CUDA) # 4min
   timeout_in_minutes: 15
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90a]
   agent_pool: mi250_1
   source_file_dependencies:
   - vllm/
@@ -501,7 +501,7 @@ steps:
 
 - label: Samplers Test # 56min
   timeout_in_minutes: 75
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90a]
   agent_pool: mi250_1
   optional: true
   source_file_dependencies:
@@ -514,7 +514,7 @@ steps:
 
 - label: LoRA Test %N # 20min
   timeout_in_minutes: 30
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90a]
   agent_pool: mi250_1
   optional: true
   parallelism: 4
@@ -535,7 +535,7 @@ steps:
 
 - label: PyTorch Compilation Unit Tests # 15min
   timeout_in_minutes: 30
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90a]
   agent_pool: mi250_1
   torch_nightly: true
   source_file_dependencies:
@@ -546,7 +546,7 @@ steps:
 
 - label: PyTorch Compilation Passes Unit Tests
   timeout_in_minutes: 20
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90a]
   agent_pool: mi250_1
   source_file_dependencies:
     - vllm/
@@ -556,7 +556,7 @@ steps:
 
 - label: PyTorch Fullgraph Smoke Test # 15min
   timeout_in_minutes: 30
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90a]
   agent_pool: mi250_1
   torch_nightly: true
   source_file_dependencies:
@@ -567,7 +567,7 @@ steps:
 
 - label: PyTorch Fullgraph Test # 27min
   timeout_in_minutes: 40
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90a]
   agent_pool: mi250_1
   torch_nightly: true
   source_file_dependencies:
@@ -578,7 +578,7 @@ steps:
 
 - label: Cudagraph test # 15min
   timeout_in_minutes: 20
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90a]
   agent_pool: mi250_1
   source_file_dependencies:
   - tests/v1/cudagraph
@@ -591,7 +591,7 @@ steps:
 
 - label: Kernels Core Operation Test # 48min
   timeout_in_minutes: 75
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90a]
   agent_pool: mi250_1
   source_file_dependencies:
   - csrc/
@@ -602,7 +602,7 @@ steps:
 
 - label: Kernels Attention Test %N # 23min
   timeout_in_minutes: 35
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90a]
   agent_pool: mi250_1
   parallelism: 2
   source_file_dependencies:
@@ -615,7 +615,7 @@ steps:
 
 - label: Kernels Quantization Test %N # 64min
   timeout_in_minutes: 90
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90a]
   agent_pool: mi250_1
   optional: true
   parallelism: 2
@@ -628,7 +628,7 @@ steps:
 
 - label: Kernels MoE Test %N # 40min
   timeout_in_minutes: 60
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90a]
   agent_pool: mi250_1
   parallelism: 2
   source_file_dependencies:
@@ -644,7 +644,7 @@ steps:
 
 - label: Kernels Mamba Test # 31min
   timeout_in_minutes: 45
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90a]
   agent_pool: mi250_1
   source_file_dependencies:
   - csrc/mamba/
@@ -655,7 +655,7 @@ steps:
 
 - label: Kernels Helion Test # 20min
   timeout_in_minutes: 30
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90a]
   agent_pool: mi250_1
   source_file_dependencies:
   - vllm/utils/import_utils.py
@@ -667,7 +667,7 @@ steps:
 - label: Model Executor Test # 23min
   timeout_in_minutes: 35
   torch_nightly: true
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90a]
   agent_pool: mi250_1
   source_file_dependencies:
   - vllm/engine/arg_utils.py
@@ -683,7 +683,7 @@ steps:
 
 - label: Benchmarks # 11min
   timeout_in_minutes: 20
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90a]
   agent_pool: mi250_1
   working_dir: "/vllm-workspace/.buildkite"
   source_file_dependencies:
@@ -693,7 +693,7 @@ steps:
 
 - label: Benchmarks CLI Test # 7min
   timeout_in_minutes: 20
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90a]
   agent_pool: mi250_1
   source_file_dependencies:
   - vllm/
@@ -703,7 +703,7 @@ steps:
 
 - label: Quantization Test # 70min
   timeout_in_minutes: 90
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90a]
   agent_pool: mi250_1
   source_file_dependencies:
   - csrc/
@@ -716,7 +716,7 @@ steps:
 
 - label: LM Eval Small Models # 53min
   timeout_in_minutes: 75
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90a]
   agent_pool: mi250_1
   optional: true
   source_file_dependencies:
@@ -728,7 +728,7 @@ steps:
 
 - label: OpenAI API correctness # 10min
   timeout_in_minutes: 15
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90a]
   agent_pool: mi250_1
   source_file_dependencies:
   - csrc/
@@ -741,7 +741,7 @@ steps:
 
 - label: Basic Models Tests (Initialization) # 15min
   timeout_in_minutes: 45
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90a]
   agent_pool: mi250_1
   torch_nightly: true
   source_file_dependencies:
@@ -752,7 +752,7 @@ steps:
 
 - label: Basic Models Tests (Extra Initialization) %N # 15min
   timeout_in_minutes: 45
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90a]
   agent_pool: mi250_1
   torch_nightly: true
   parallelism: 2
@@ -768,7 +768,7 @@ steps:
 
 - label: Basic Models Tests (Other) # 15min
   timeout_in_minutes: 45
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90a]
   agent_pool: mi250_1
   optional: true
   torch_nightly: true
@@ -782,7 +782,7 @@ steps:
 
 - label: Basic Models Test (Other CPU) # 5min
   timeout_in_minutes: 10
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90a]
   agent_pool: mi250_1
   torch_nightly: true
   no_gpu: true
@@ -795,7 +795,7 @@ steps:
 
 - label: Language Models Tests (Standard) # 18min
   timeout_in_minutes: 25
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90a]
   agent_pool: mi250_1
   torch_nightly: true
   source_file_dependencies:
@@ -807,7 +807,7 @@ steps:
 
 - label: Language Models Tests (Extra Standard) %N # 27min
   timeout_in_minutes: 45
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90a]
   agent_pool: mi250_1
   optional: true
   torch_nightly: true
@@ -826,7 +826,7 @@ steps:
 
 - label: Language Models Tests (Hybrid) %N # 50min
   timeout_in_minutes: 75
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90a]
   agent_pool: mi250_1
   optional: true
   torch_nightly: true
@@ -844,7 +844,7 @@ steps:
 
 - label: Language Models Test (Extended Generation) # 80min
   timeout_in_minutes: 110
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90a]
   agent_pool: mi250_1
   optional: true
   source_file_dependencies:
@@ -857,7 +857,7 @@ steps:
 
 - label: Language Models Test (PPL) # 80min
   timeout_in_minutes: 110
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90a]
   agent_pool: mi250_1
   optional: true
   source_file_dependencies:
@@ -868,7 +868,7 @@ steps:
 
 - label: Language Models Test (Extended Pooling)  # 36min
   timeout_in_minutes: 50
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90a]
   agent_pool: mi250_1
   optional: true
   source_file_dependencies:
@@ -879,7 +879,7 @@ steps:
 
 - label: Language Models Test (MTEB) # 80min
   timeout_in_minutes: 110
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90a]
   agent_pool: mi250_1
   optional: true
   source_file_dependencies:
@@ -890,7 +890,7 @@ steps:
 
 - label: Multi-Modal Processor Test (CPU) # 15min
   timeout_in_minutes: 60
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90a]
   agent_pool: mi250_1
   no_gpu: true
   source_file_dependencies:
@@ -903,7 +903,7 @@ steps:
 
 - label: Multi-Modal Processor Test # 44min
   timeout_in_minutes: 60
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90a]
   agent_pool: mi250_1
   source_file_dependencies:
   - vllm/
@@ -915,7 +915,7 @@ steps:
 
 - label: Multi-Modal Models Test (Standard) # 60min
   timeout_in_minutes: 100
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90a]
   agent_pool: mi250_1
   torch_nightly: true
   source_file_dependencies:
@@ -932,7 +932,7 @@ steps:
 
 - label: Multi-Modal Accuracy Eval (Small Models) # 5min
   timeout_in_minutes: 10
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90a]
   agent_pool: mi250_1
   working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
   source_file_dependencies:
@@ -946,7 +946,7 @@ steps:
 
 - label: Multi-Modal Models Test (Extended) 1 # 60min
   timeout_in_minutes: 120
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90a]
   agent_pool: mi250_1
   optional: true
   source_file_dependencies:
@@ -960,7 +960,7 @@ steps:
 
 - label: Multi-Modal Models Test (Extended) 2 #60min
   timeout_in_minutes: 120
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90a]
   agent_pool: mi250_1
   optional: true
   source_file_dependencies:
@@ -974,7 +974,7 @@ steps:
 
 - label: Multi-Modal Models Test (Extended) 3 # 75min
   timeout_in_minutes: 150
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90a]
   agent_pool: mi250_1
   optional: true
   source_file_dependencies:
@@ -988,7 +988,7 @@ steps:
 
 - label: Quantized Models Test # 45 min
   timeout_in_minutes: 60
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90a]
   agent_pool: mi250_1
   source_file_dependencies:
   - vllm/model_executor/layers/quantization
@@ -997,7 +997,7 @@ steps:
     - pytest -v -s models/quantization
 
 - label: Transformers Nightly Models Test # 60 min
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90a]
   agent_pool: mi250_1
   working_dir: "/vllm-workspace/"
   optional: true
@@ -1011,7 +1011,7 @@ steps:
 
 - label: Distributed Comm Ops Test # 7min
   timeout_in_minutes: 20
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90a]
   agent_pool: mi250_2
   num_gpus: 2
   working_dir: "/vllm-workspace/tests"
@@ -1026,7 +1026,7 @@ steps:
 
 - label: 2 Node Tests (4 GPUs in total) # 16min
   timeout_in_minutes: 30
-  mirror_hardwares: [amdexperimental, amdproduction, amdmultinode]
+  mirror_hardwares: [amdexperimental, amdproduction, amdmultinode, amdgfx90a]
   agent_pool: mi250_4
   optional: true
   num_gpus: 2
@@ -1053,7 +1053,7 @@ steps:
 
 - label: Distributed Tests (2 GPUs) # 68min
   timeout_in_minutes: 90
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90a]
   agent_pool: mi250_2
   optional: true
   num_gpus: 2
@@ -1091,7 +1091,7 @@ steps:
 
 - label: Distributed Model Tests (2 GPUs) # 37min
   timeout_in_minutes: 50
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90a]
   agent_pool: mi250_2
   optional: true
   num_gpus: 2
@@ -1112,7 +1112,7 @@ steps:
 
 - label: Plugin Tests (2 GPUs) # 40min
   timeout_in_minutes: 60
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90a]
   agent_pool: mi250_2
   num_gpus: 2
   working_dir: "/vllm-workspace/tests"
@@ -1149,7 +1149,7 @@ steps:
 
 - label: Pipeline + Context Parallelism Test # 45min
   timeout_in_minutes: 60
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90a]
   agent_pool: mi250_4
   num_gpus: 4
   working_dir: "/vllm-workspace/tests"
@@ -1165,7 +1165,7 @@ steps:
 
 - label: LoRA TP Test (Distributed) # 17 min
   timeout_in_minutes: 30
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90a]
   agent_pool: mi250_4
   num_gpus: 4
   source_file_dependencies:
@@ -1180,7 +1180,7 @@ steps:
 
 - label: Weight Loading Multiple GPU Test  # 33min
   timeout_in_minutes: 45
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90a]
   agent_pool: mi250_2
   num_gpus: 2
   optional: true
@@ -1192,7 +1192,7 @@ steps:
     - bash weight_loading/run_model_weight_loading_test.sh -c weight_loading/models-amd.txt
 
 - label: Weight Loading Multiple GPU Test - Large Models # optional
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90a]
   agent_pool: mi250_2
   num_gpus: 2
   optional: true
@@ -1205,7 +1205,7 @@ steps:
 
 - label: NixlConnector PD accuracy tests (Distributed) # 30min
   timeout_in_minutes: 30
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90a]
   agent_pool: mi250_4
   num_gpus: 4
   working_dir: "/vllm-workspace/tests"
@@ -1218,7 +1218,7 @@ steps:
 
 - label: DP EP NixlConnector PD accuracy tests (Distributed) # 15min
   timeout_in_minutes: 15
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90a]
   agent_pool: mi250_4
   num_gpus: 4
   working_dir: "/vllm-workspace/tests"
@@ -1231,7 +1231,7 @@ steps:
 
 - label: Distributed Tests (A100) # 68min
   timeout_in_minutes: 90
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90a]
   agent_pool: mi250_4
   optional: true
   num_gpus: 4
@@ -1246,7 +1246,7 @@ steps:
 
 - label: LM Eval Large Models # 80min
   timeout_in_minutes: 110
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90a]
   agent_pool: mi250_4
   optional: true
   num_gpus: 4
@@ -1260,7 +1260,7 @@ steps:
 
 - label: LM Eval Large Models (H100) # 80min
   timeout_in_minutes: 110
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90a]
   agent_pool: mi250_4
   optional: true
   num_gpus: 4
@@ -1274,7 +1274,7 @@ steps:
 
 - label: Distributed Tests (H200) # 68min
   timeout_in_minutes: 90
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90a]
   agent_pool: mi250_2
   optional: true
   num_gpus: 2
@@ -1287,7 +1287,7 @@ steps:
 
 - label: LM Eval Small Models (1 Card) # 15min
   timeout_in_minutes: 20
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90a]
   agent_pool: mi250_1
   source_file_dependencies:
   - csrc/
@@ -1297,7 +1297,7 @@ steps:
 
 - label: LM Eval Large Models (4 Card) # 80min
   timeout_in_minutes: 110
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90a]
   agent_pool: mi250_4
   optional: true
   num_gpus: 4
@@ -1311,7 +1311,7 @@ steps:
 
 - label: ROCm LM Eval Large Models (8 Card) # 80min
   timeout_in_minutes: 110
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90a]
   agent_pool: mi250_8
   num_gpus: 8
   working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
@@ -1323,7 +1323,7 @@ steps:
   timeout_in_minutes: 60
   working_dir: "/vllm-workspace/"
   agent_pool: mi250_1
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90a]
   optional: true
   source_file_dependencies:
   - tests/evals/gpt_oss
@@ -1336,7 +1336,7 @@ steps:
 
 - label: DeepSeek V2-Lite Accuracy # 70min
   timeout_in_minutes: 60
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90a]
   agent_pool: mi250_4
   optional: true
   num_gpus: 4
@@ -1346,7 +1346,7 @@ steps:
 
 - label: Qwen3-Next-80B-A3B-Instruct MTP Async EPLB Accuracy # 70min
   timeout_in_minutes: 60
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90a]
   agent_pool: mi250_4
   optional: true
   num_gpus: 4
