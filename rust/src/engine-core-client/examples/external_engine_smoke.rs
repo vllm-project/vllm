@@ -6,8 +6,8 @@ use futures::StreamExt;
 use tokio::time::timeout;
 use tracing_subscriber::EnvFilter;
 use vllm_engine_core_client::{
-    EngineCoreClient, EngineCoreClientConfig, EngineCoreRequest, FinishReason, RequestOutputKind,
-    RequestOutputStream, SamplingParams, StopReason,
+    EngineCoreClient, EngineCoreClientConfig, RequestOutputStream,
+    protocol::{EngineCoreRequest, FinishReason, RequestOutputKind, SamplingParams, StopReason},
 };
 
 const PROMPT_TOKEN_IDS: &[u32] = &[20841, 448, 6896, 25, 23811];
@@ -111,7 +111,7 @@ async fn main() -> Result<()> {
     let ready_timeout = Duration::from_secs(args.ready_timeout_secs);
     let output_timeout = Duration::from_secs(args.output_timeout_secs);
     let request_id = unique_request_id();
-    let mut client = EngineCoreClient::connect(EngineCoreClientConfig {
+    let client = EngineCoreClient::connect(EngineCoreClientConfig {
         handshake_address: args.handshake_address.clone(),
         local_host: args.host.clone(),
         ready_timeout,
@@ -133,7 +133,7 @@ async fn main() -> Result<()> {
     println!("ready_message={ready_message:?}");
 
     let stream = client
-        .add_request(request)
+        .call(request)
         .await
         .context("failed to add request")?;
 

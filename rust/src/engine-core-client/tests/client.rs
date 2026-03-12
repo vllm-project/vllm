@@ -10,10 +10,13 @@ use futures::StreamExt;
 use thiserror_ext::AsReport as _;
 use tokio::time::timeout;
 use tracing_subscriber::EnvFilter;
+use vllm_engine_core_client::protocol::UtilityOutput;
 use vllm_engine_core_client::protocol::handshake::HandshakeInitMessage;
-use vllm_engine_core_client::{
-    EngineCoreClient, EngineCoreClientConfig, EngineCoreOutput, EngineCoreOutputs,
-    EngineCoreRequest, Error, FinishReason, ReadyMessage, RequestOutputKind, SamplingParams,
+use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig, Error};
+
+use vllm_engine_core_client::protocol::{
+    EngineCoreOutput, EngineCoreOutputs, EngineCoreRequest, FinishReason, RequestOutputKind,
+    SamplingParams, handshake::ReadyMessage,
 };
 use zeromq::prelude::{Socket, SocketRecv, SocketSend};
 use zeromq::util::PeerIdentity;
@@ -204,7 +207,7 @@ async fn client_streams_outputs_per_request_and_ignores_other_messages() {
             send_outputs(
                 &mut push,
                 EngineCoreOutputs {
-                    utility_output: Some(vllm_engine_core_client::UtilityOutput {
+                    utility_output: Some(UtilityOutput {
                         call_id: 1,
                         failure_message: None,
                         result: None,
@@ -225,7 +228,7 @@ async fn client_streams_outputs_per_request_and_ignores_other_messages() {
                 &mut push,
                 EngineCoreOutputs {
                     outputs: vec![request_output("req-1", vec![999], None)],
-                    utility_output: Some(vllm_engine_core_client::UtilityOutput {
+                    utility_output: Some(UtilityOutput {
                         call_id: 2,
                         failure_message: None,
                         result: None,
@@ -273,7 +276,7 @@ async fn client_streams_outputs_per_request_and_ignores_other_messages() {
         }
     });
 
-    let mut client = EngineCoreClient::connect(EngineCoreClientConfig {
+    let client = EngineCoreClient::connect(EngineCoreClientConfig {
         handshake_address,
         local_host: "127.0.0.1".to_string(),
         ready_timeout: Duration::from_secs(2),
@@ -290,14 +293,8 @@ async fn client_streams_outputs_per_request_and_ignores_other_messages() {
         Some("READY")
     );
 
-    let mut stream_1 = client
-        .add_request(sample_request_with_id("req-1"))
-        .await
-        .unwrap();
-    let mut stream_2 = client
-        .add_request(sample_request_with_id("req-2"))
-        .await
-        .unwrap();
+    let mut stream_1 = client.call(sample_request_with_id("req-1")).await.unwrap();
+    let mut stream_2 = client.call(sample_request_with_id("req-2")).await.unwrap();
 
     let first_2 = timeout(Duration::from_secs(1), stream_2.next())
         .await
@@ -316,7 +313,7 @@ async fn client_streams_outputs_per_request_and_ignores_other_messages() {
     assert_eq!(first_1.new_token_ids, vec![11]);
 
     client
-        .abort_requests(&["req-1".to_string(), "unknown".to_string()])
+        .abort(&["req-1".to_string(), "unknown".to_string()])
         .await
         .unwrap();
 
@@ -379,7 +376,7 @@ async fn duplicate_request_ids_are_rejected_without_sending_a_second_add() {
         }
     });
 
-    let mut client = EngineCoreClient::connect(EngineCoreClientConfig {
+    let client = EngineCoreClient::connect(EngineCoreClientConfig {
         handshake_address,
         local_host: "127.0.0.1".to_string(),
         ready_timeout: Duration::from_secs(2),
@@ -388,8 +385,8 @@ async fn duplicate_request_ids_are_rejected_without_sending_a_second_add() {
     .await
     .unwrap();
 
-    let mut stream = client.add_request(sample_request()).await.unwrap();
-    let error = match client.add_request(sample_request()).await {
+    let mut stream = client.call(sample_request()).await.unwrap();
+    let error = match client.call(sample_request()).await {
         Ok(_) => panic!("expected duplicate request error"),
         Err(error) => error,
     };
@@ -440,7 +437,7 @@ async fn dropping_a_live_stream_triggers_abort() {
         }
     });
 
-    let mut client = EngineCoreClient::connect(EngineCoreClientConfig {
+    let client = EngineCoreClient::connect(EngineCoreClientConfig {
         handshake_address,
         local_host: "127.0.0.1".to_string(),
         ready_timeout: Duration::from_secs(2),
@@ -449,7 +446,7 @@ async fn dropping_a_live_stream_triggers_abort() {
     .await
     .unwrap();
 
-    let mut stream = client.add_request(sample_request()).await.unwrap();
+    let mut stream = client.call(sample_request()).await.unwrap();
     let first = timeout(Duration::from_secs(1), stream.next())
         .await
         .unwrap()
@@ -481,7 +478,7 @@ async fn dispatcher_failure_propagates_to_streams_and_future_calls() {
         }
     });
 
-    let mut client = EngineCoreClient::connect(EngineCoreClientConfig {
+    let client = EngineCoreClient::connect(EngineCoreClientConfig {
         handshake_address,
         local_host: "127.0.0.1".to_string(),
         ready_timeout: Duration::from_secs(2),
@@ -490,14 +487,8 @@ async fn dispatcher_failure_propagates_to_streams_and_future_calls() {
     .await
     .unwrap();
 
-    let mut stream_1 = client
-        .add_request(sample_request_with_id("req-1"))
-        .await
-        .unwrap();
-    let mut stream_2 = client
-        .add_request(sample_request_with_id("req-2"))
-        .await
-        .unwrap();
+    let mut stream_1 = client.call(sample_request_with_id("req-1")).await.unwrap();
+    let mut stream_2 = client.call(sample_request_with_id("req-2")).await.unwrap();
 
     let error_1 = timeout(Duration::from_secs(1), stream_1.next())
         .await
@@ -512,13 +503,10 @@ async fn dispatcher_failure_propagates_to_streams_and_future_calls() {
     assert!(is_shared_dispatcher_closed(&error_1));
     assert!(is_shared_dispatcher_closed(&error_2));
 
-    let abort_error = client
-        .abort_requests(&["req-1".to_string()])
-        .await
-        .unwrap_err();
+    let abort_error = client.abort(&["req-1".to_string()]).await.unwrap_err();
     assert!(matches!(abort_error, Error::DispatcherClosed { .. }));
 
-    let add_error = match client.add_request(sample_request_with_id("req-3")).await {
+    let add_error = match client.call(sample_request_with_id("req-3")).await {
         Ok(_) => panic!("expected dispatcher closed error"),
         Err(error) => error,
     };

@@ -228,50 +228,48 @@ pub async fn send_message(
     Ok(())
 }
 
-pub fn spawn_output_loop(
+pub async fn run_output_loop(
     mut output_socket: PullSocket,
     tx: mpsc::Sender<Result<EngineCoreOutputs>>,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        loop {
-            let message = match output_socket.recv().await {
-                Ok(message) => message,
-                Err(error) => {
-                    error!(error = ?error, "failed to receive output message");
-                    let _ = tx.send(Err(Error::Transport(error))).await;
-                    return;
-                }
-            };
-
-            let frame_count = message.len();
-            debug!(frame_count, "received output message");
-            if frame_count != 1 {
-                error!(
-                    frame_count,
-                    "unsupported auxiliary frames in output message"
-                );
-                let _ = tx
-                    .send(Err(Error::UnsupportedAuxFrames { frame_count }))
-                    .await;
+) {
+    loop {
+        let message = match output_socket.recv().await {
+            Ok(message) => message,
+            Err(error) => {
+                error!(error = ?error, "failed to receive output message");
+                let _ = tx.send(Err(Error::Transport(error))).await;
                 return;
             }
+        };
 
-            let frame = message.into_vec().into_iter().next().unwrap();
-            let frame_len = frame.len();
-            let decoded = match decode_msgpack(frame.as_ref()) {
-                Ok(decoded) => {
-                    debug!(frame_len, outputs = ?decoded, "decoded output message");
-                    Ok(decoded)
-                }
-                Err(error) => {
-                    warn!(frame_len, error = ?error, "failed to decode output message");
-                    Err(error)
-                }
-            };
-            if tx.send(decoded).await.is_err() {
-                warn!("output loop rx dropped, shutting down output loop");
-                return;
-            }
+        let frame_count = message.len();
+        debug!(frame_count, "received output message");
+        if frame_count != 1 {
+            error!(
+                frame_count,
+                "unsupported auxiliary frames in output message"
+            );
+            let _ = tx
+                .send(Err(Error::UnsupportedAuxFrames { frame_count }))
+                .await;
+            return;
         }
-    })
+
+        let frame = message.into_vec().into_iter().next().unwrap();
+        let frame_len = frame.len();
+        let decoded = match decode_msgpack(frame.as_ref()) {
+            Ok(decoded) => {
+                debug!(frame_len, outputs = ?decoded, "decoded output message");
+                Ok(decoded)
+            }
+            Err(error) => {
+                warn!(frame_len, error = ?error, "failed to decode output message");
+                Err(error)
+            }
+        };
+        if tx.send(decoded).await.is_err() {
+            warn!("output loop rx dropped, shutting down output loop");
+            return;
+        }
+    }
 }
