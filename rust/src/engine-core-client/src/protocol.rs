@@ -4,84 +4,59 @@ use std::io::Cursor;
 use bytes::Bytes;
 use rmpv::Value;
 use serde::{Deserialize, Serialize};
+use serde_default::DefaultFromSerde;
 use serde_repr::{Deserialize_repr, Serialize_repr};
 use serde_tuple::{Deserialize_tuple, Serialize_tuple};
 
 use crate::client::{Error, Result};
 
 /// Dynamic msgpack value used for schema positions that are preserved but not
-/// yet strongly typed in the first-stage Rust client.
+/// yet strongly typed in the early-stage Rust client.
 pub type OpaqueValue = Value;
 
-fn is_default<T>(value: &T) -> bool
-where
-    T: Default + PartialEq,
-{
-    value == &T::default()
-}
+mod defaults {
+    use super::*;
 
-fn default_sampling_n() -> u32 {
-    1
-}
+    pub fn sampling_n() -> u32 {
+        1
+    }
 
-fn is_default_sampling_n(value: &u32) -> bool {
-    *value == default_sampling_n()
-}
+    pub fn temperature() -> f32 {
+        1.0
+    }
 
-fn default_temperature() -> f32 {
-    1.0
-}
+    pub fn top_p() -> f32 {
+        1.0
+    }
 
-fn is_default_temperature(value: &f32) -> bool {
-    *value == default_temperature()
-}
+    pub fn max_tokens() -> Option<u32> {
+        Some(16)
+    }
 
-fn default_top_p() -> f32 {
-    1.0
-}
-
-fn is_default_top_p(value: &f32) -> bool {
-    *value == default_top_p()
-}
-
-fn default_max_tokens() -> Option<u32> {
-    Some(16)
-}
-
-fn is_default_max_tokens(value: &Option<u32>) -> bool {
-    *value == default_max_tokens()
-}
-
-fn default_output_kind() -> RequestOutputKind {
-    RequestOutputKind::Cumulative
-}
-
-fn is_default_output_kind(value: &RequestOutputKind) -> bool {
-    *value == default_output_kind()
+    pub fn request_output_kind() -> RequestOutputKind {
+        RequestOutputKind::Cumulative
+    }
 }
 
 /// Request types are encoded as single-byte protocol constants so they can be
 /// sent over the ZMQ socket without an extra encoding step.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
 pub enum EngineCoreRequestType {
-    Add,
-    Abort,
-    StartDpWave,
-    Utility,
+    Add = 0,
+    Abort = 1,
+    StartDpWave = 2,
+    Utility = 3,
 }
 
 impl EngineCoreRequestType {
-    pub const fn as_byte(self) -> u8 {
-        match self {
-            Self::Add => 0x00,
-            Self::Abort => 0x01,
-            Self::StartDpWave => 0x02,
-            Self::Utility => 0x03,
-        }
-    }
-
     pub fn as_frame(self) -> Bytes {
-        Bytes::from(vec![self.as_byte()])
+        Bytes::from_static(match self {
+            Self::Add => b"\x00",
+            Self::Abort => b"\x01",
+            Self::StartDpWave => b"\x02",
+            Self::Utility => b"\x03",
+        })
     }
 }
 
@@ -134,70 +109,58 @@ pub enum StopReason {
 ///
 /// This is the first-stage strongly typed subset of Python `SamplingParams`.
 /// Complex or less stable fields remain dynamic values.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, DefaultFromSerde)]
 pub struct SamplingParams {
     /// Number of outputs to return for the given prompt request.
-    #[serde(
-        default = "default_sampling_n",
-        skip_serializing_if = "is_default_sampling_n"
-    )]
+    #[serde(default = "defaults::sampling_n")]
     pub n: u32,
     /// Controls randomness. Lower values are more deterministic; zero means
     /// greedy sampling.
-    #[serde(
-        default = "default_temperature",
-        skip_serializing_if = "is_default_temperature"
-    )]
+    #[serde(default = "defaults::temperature")]
     pub temperature: f32,
     /// Cumulative probability threshold for nucleus sampling.
-    #[serde(default = "default_top_p", skip_serializing_if = "is_default_top_p")]
+    #[serde(default = "defaults::top_p")]
     pub top_p: f32,
     /// Maximum number of top tokens to consider. `0` means all tokens.
-    #[serde(default, skip_serializing_if = "is_default")]
+    #[serde(default)]
     pub top_k: i32,
     /// Maximum number of tokens to generate per output sequence.
-    #[serde(
-        default = "default_max_tokens",
-        skip_serializing_if = "is_default_max_tokens"
-    )]
+    #[serde(default = "defaults::max_tokens")]
     pub max_tokens: Option<u32>,
     /// Minimum number of tokens to generate before EOS or stop-token handling.
-    #[serde(default, skip_serializing_if = "is_default")]
+    #[serde(default)]
     pub min_tokens: u32,
     /// Stop strings. Returned output does not include them.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub stop: Vec<String>,
     /// Token IDs that stop generation.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub stop_token_ids: Vec<u32>,
     /// Continue generation after EOS if set.
-    #[serde(default, skip_serializing_if = "is_default")]
+    #[serde(default)]
     pub ignore_eos: bool,
     /// Whether updates are cumulative, delta-based, or final-only.
-    #[serde(
-        default = "default_output_kind",
-        skip_serializing_if = "is_default_output_kind"
-    )]
+    #[serde(default = "defaults::request_output_kind")]
     pub output_kind: RequestOutputKind,
     /// Structured output configuration carried through as an opaque msgpack value.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub structured_outputs: Option<OpaqueValue>,
     /// Logit bias configuration carried through as an opaque msgpack value.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub logit_bias: Option<OpaqueValue>,
     /// Optional allow-list of token IDs.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub allowed_token_ids: Option<Vec<u32>>,
     /// Arbitrary engine/plugin-specific args.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub extra_args: Option<OpaqueValue>,
     /// Repetition detection config carried through as an opaque msgpack value.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub repetition_detection: Option<OpaqueValue>,
 }
 
 /// Engine-core add-request payload sent from frontend to engine.
-#[derive(Debug, Clone, PartialEq, Serialize_tuple, Deserialize_tuple)]
+#[derive(Debug, Clone, PartialEq, Serialize_tuple, Deserialize_tuple, DefaultFromSerde)]
 pub struct EngineCoreRequest {
     pub request_id: String,
     pub prompt_token_ids: Option<Vec<u32>>,
@@ -207,22 +170,33 @@ pub struct EngineCoreRequest {
     /// Pooling parameters are preserved in the schema but not yet strongly typed.
     pub pooling_params: Option<OpaqueValue>,
     pub arrival_time: f64,
+    #[serde(default)]
     pub lora_request: Option<OpaqueValue>,
+    #[serde(default)]
     pub cache_salt: Option<String>,
+    #[serde(default)]
     pub data_parallel_rank: Option<u32>,
     /// Unsupported in the first-stage Rust client because Python uses a custom
     /// tensor/aux-frame encoding path for this field.
+    #[serde(default)]
     pub prompt_embeds: Option<OpaqueValue>,
     /// Index of the client, used to ensure outputs are sent back to the same
     /// client when scaling out the frontend.
+    #[serde(default)]
     pub client_index: u32,
     /// In DP mode, indicates which wave this request is expected to belong to.
+    #[serde(default)]
     pub current_wave: u32,
+    #[serde(default)]
     pub priority: i32,
+    #[serde(default)]
     pub trace_headers: Option<BTreeMap<String, String>>,
+    #[serde(default)]
     pub resumable: bool,
     /// Original user-provided request ID, used for output reporting and aborts.
+    #[serde(default)]
     pub external_req_id: Option<String>,
+    #[serde(default)]
     pub reasoning_ended: Option<bool>,
 }
 
@@ -240,24 +214,36 @@ impl EngineCoreRequest {
 }
 
 /// Engine-core output for a single request.
-#[derive(Debug, Clone, PartialEq, Serialize_tuple, Deserialize_tuple)]
+#[derive(Debug, Clone, PartialEq, Serialize_tuple, Deserialize_tuple, DefaultFromSerde)]
 pub struct EngineCoreOutput {
     pub request_id: String,
     pub new_token_ids: Vec<u32>,
+    #[serde(default)]
     pub new_logprobs: Option<OpaqueValue>,
+    #[serde(default)]
     pub new_prompt_logprobs_tensors: Option<OpaqueValue>,
+    #[serde(default)]
     pub pooling_output: Option<OpaqueValue>,
+    #[serde(default)]
     pub finish_reason: Option<FinishReason>,
+    #[serde(default)]
     pub stop_reason: Option<StopReason>,
+    #[serde(default)]
     pub events: Option<OpaqueValue>,
+    #[serde(default)]
     pub kv_transfer_params: Option<OpaqueValue>,
+    #[serde(default)]
     pub trace_headers: Option<OpaqueValue>,
     /// Number of tokens with prefix-cache hits, local plus external.
+    #[serde(default)]
     pub num_cached_tokens: u32,
     /// Number of tokens computed remotely, preserving the original connector count.
+    #[serde(default)]
     pub num_external_computed_tokens: u32,
+    #[serde(default)]
     pub routed_experts: Option<OpaqueValue>,
     /// Number of NaNs seen in logits. Values above zero indicate corruption.
+    #[serde(default)]
     pub num_nans_in_logits: u32,
 }
 
@@ -269,28 +255,38 @@ impl EngineCoreOutput {
 }
 
 /// Result of a utility call.
-#[derive(Debug, Clone, PartialEq, Serialize_tuple, Deserialize_tuple)]
+#[derive(Debug, Clone, PartialEq, Serialize_tuple, Deserialize_tuple, DefaultFromSerde)]
 pub struct UtilityOutput {
     pub call_id: i64,
     /// Non-`None` implies the call failed and `result` should be ignored.
+    #[serde(default)]
     pub failure_message: Option<String>,
+    #[serde(default)]
     pub result: Option<OpaqueValue>,
 }
 
 /// Batch of engine-core outputs returned to a frontend client.
-#[derive(Debug, Clone, PartialEq, Serialize_tuple, Deserialize_tuple, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize_tuple, Deserialize_tuple, DefaultFromSerde)]
 pub struct EngineCoreOutputs {
+    #[serde(default)]
     pub engine_index: u32,
     /// Outputs grouped for this client in the current engine tick.
+    #[serde(default)]
     pub outputs: Vec<EngineCoreOutput>,
+    #[serde(default)]
     pub scheduler_stats: Option<OpaqueValue>,
+    #[serde(default)]
     pub timestamp: f64,
+    #[serde(default)]
     pub utility_output: Option<UtilityOutput>,
+    #[serde(default)]
     pub finished_requests: Option<BTreeSet<String>>,
     /// In DP mode, signals that the current wave finished and engines are paused.
+    #[serde(default)]
     pub wave_complete: Option<u32>,
     /// In DP mode, signals that a request arrived for an old wave and the next
     /// wave needs to start in other engines.
+    #[serde(default)]
     pub start_wave: Option<u32>,
 }
 
