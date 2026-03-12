@@ -808,19 +808,15 @@ class GPUModelRunner(
             pin_memory=self.pin_memory,
         )
 
-        # Rejected draft counts: accumulated on GPU, D2H copied only when
-        # the CPU has consumed the previous copy (gated by
-        # _cumulative_copy_consumed). GPU tensor zeroed after each copy.
+        # Pre-allocated tensor for copying valid sampled token counts to CPU,
+        # with dedicated stream for overlapping and event for coordination.
         self.valid_sampled_token_count_event: torch.Event | None = None
         self.valid_sampled_token_count_copy_stream: torch.cuda.Stream | None = None
         # We also copy the drafted tokens to the CPU asynchronously,
         # in case we need them for structured outputs.
         self.draft_token_ids_event: torch.Event | None = None
         self.draft_token_ids_copy_stream: torch.cuda.Stream | None = None
-        self.cumulative_num_rejected = self._make_buffer(
-            self.max_num_reqs, dtype=torch.int32
-        )
-        self._cumulative_copy_consumed = True
+        self.valid_sampled_token_count_cpu: torch.Tensor | None = None
         self.draft_token_ids_cpu: torch.Tensor | None = None
         self.num_accepted_tokens_event: torch.Event | None = None
         if self.num_spec_tokens:
@@ -836,6 +832,12 @@ class GPUModelRunner(
             if self.use_async_scheduling:
                 self.valid_sampled_token_count_event = torch.Event()
                 self.valid_sampled_token_count_copy_stream = torch.cuda.Stream()
+                self.valid_sampled_token_count_cpu = torch.empty(
+                    self.max_num_reqs,
+                    dtype=torch.int32,
+                    device="cpu",
+                    pin_memory=self.pin_memory,
+                )
 
         # Model weight offloader
         # Make sure this is called before any get_offloader call
@@ -1193,8 +1195,10 @@ class GPUModelRunner(
                 self.input_batch.req_id_to_index,
             )
 
-        # Non-blocking in async mode; [] if copy hasn't landed yet.
-        cumulative_num_rejected = self._get_cumulative_num_rejected(
+        # Get valid_sampled_tokens_count from cpu to correct
+        # num_computed_tokens. Non-blocking for async spec decode
+        # to avoid adding a sync point.
+        valid_sampled_token_count = self._get_valid_sampled_token_count(
             blocking=not self.use_async_spec_decode
         )
         prev_req_id_to_index = self.input_batch.prev_req_id_to_index
@@ -1224,19 +1228,22 @@ class GPUModelRunner(
                 if req_index is None:
                     req_state.prev_num_draft_len = 0
                 else:
-                    # Optimistic defaults: assume all drafts accepted.
                     num_accepted = req_state.prev_num_draft_len
                     num_rejected = 0
 
-                    # If rejection data is available (it always is for non-async),
-                    # correct the optimistic defaults. If not (async copy in flight),
-                    # defaults hold. No data is lost because rejections accumulate on
-                    # GPU and are applied when available.
-                    if prev_req_id_to_index is not None and cumulative_num_rejected:
-                        prev_req_index = prev_req_id_to_index.get(req_id)
-                        if prev_req_index is not None:
-                            num_rejected = cumulative_num_rejected[prev_req_index]
-                            num_accepted = req_state.prev_num_draft_len - num_rejected
+                    if not self.use_async_spec_decode:
+                        # Non-async: correct with actual acceptance count.
+                        assert prev_req_id_to_index is not None
+                        prev_req_index = prev_req_id_to_index[req_id]
+                        num_accepted = valid_sampled_token_count[prev_req_index] - 1
+                        num_rejected = req_state.prev_num_draft_len - num_accepted
+                    elif prev_req_id_to_index is not None and valid_sampled_token_count:
+                        # Async: correct num_computed_tokens to prevent
+                        # CPU drift, but keep num_accepted optimistic
+                        # for placeholder logic below.
+                        prev_req_index = prev_req_id_to_index[req_id]
+                        actual = valid_sampled_token_count[prev_req_index] - 1
+                        num_rejected = req_state.prev_num_draft_len - actual
 
                     num_computed_tokens -= num_rejected
 
@@ -1920,18 +1927,6 @@ class GPUModelRunner(
             and prev_req_id_to_index
         ):
             self.prev_positions.copy_to_gpu(num_reqs)
-
-            # Remap cumulative_num_rejected to current batch positions. wait_stream is
-            # for safety but effectively free — copy stream finishes during draft fwd.
-            torch.cuda.current_stream().wait_stream(
-                self.valid_sampled_token_count_copy_stream
-            )
-            prev_pos = self.prev_positions.gpu[:num_reqs]
-            rejected = self.cumulative_num_rejected.gpu
-            rejected[:num_reqs] = torch.where(
-                prev_pos >= 0, rejected[prev_pos.clamp(min=0)], 0
-            )
-
             cpu_values = self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs].to(
                 device=self.device, non_blocking=True
             )
@@ -1939,7 +1934,7 @@ class GPUModelRunner(
             update_num_computed_tokens_for_batch_change(
                 self.num_computed_tokens,
                 self.num_accepted_tokens.gpu[:num_reqs],
-                prev_pos,
+                self.prev_positions.gpu[:num_reqs],
                 self.valid_sampled_token_count_gpu,
                 self.prev_num_draft_tokens.gpu,
                 cpu_values,
@@ -4160,7 +4155,7 @@ class GPUModelRunner(
                             self.discard_request_mask.gpu,
                         )
                     )
-                    self._accumulate_and_copy_num_rejected(
+                    self._copy_valid_sampled_token_count(
                         next_token_ids, valid_sampled_tokens_count
                     )
                     self._draft_token_ids = torch.zeros(
@@ -4186,7 +4181,7 @@ class GPUModelRunner(
                             self.discard_request_mask.gpu,
                         )
                     )
-                    self._accumulate_and_copy_num_rejected(
+                    self._copy_valid_sampled_token_count(
                         next_token_ids, valid_sampled_tokens_count
                     )
                     # Since we couldn't run the drafter,
@@ -4371,51 +4366,46 @@ class GPUModelRunner(
         self.draft_token_ids_event.synchronize()
         return self.draft_token_ids_cpu[: len(req_ids)].tolist(), req_ids
 
-    def _accumulate_and_copy_num_rejected(
+    def _copy_valid_sampled_token_count(
         self, next_token_ids: torch.Tensor, valid_sampled_tokens_count: torch.Tensor
     ) -> None:
         if self.valid_sampled_token_count_event is None:
             return
 
         default_stream = torch.cuda.current_stream()
-        # Accumulate rejections on GPU; only D2H copy when previous was consumed.
+        # Initialize a new stream to overlap the copy operation with
+        # prepare_input of draft model.
         with torch.cuda.stream(self.valid_sampled_token_count_copy_stream):
             self.valid_sampled_token_count_copy_stream.wait_stream(default_stream)  # type: ignore
-            batch_size = valid_sampled_tokens_count.shape[0]
-            rejected = (
-                self.prev_num_draft_tokens.gpu[:batch_size]
-                - (valid_sampled_tokens_count[:batch_size] - 1)
-            ).clamp(min=0)
-            self.cumulative_num_rejected.gpu[:batch_size] += rejected
-            if self._cumulative_copy_consumed:
-                self.cumulative_num_rejected.cpu[:batch_size].copy_(
-                    self.cumulative_num_rejected.gpu[:batch_size],
-                    non_blocking=True,
-                )
-                self.cumulative_num_rejected.gpu[:batch_size].zero_()
-                self.valid_sampled_token_count_event.record()
-                self._cumulative_copy_consumed = False
+            counts = valid_sampled_tokens_count
+            counts_cpu = self.valid_sampled_token_count_cpu
+            assert counts_cpu is not None
+            counts_cpu[: counts.shape[0]].copy_(counts, non_blocking=True)
+            self.valid_sampled_token_count_event.record()
 
         if self.use_async_spec_decode:
             self.valid_sampled_token_count_gpu = valid_sampled_tokens_count
         self.input_batch.prev_sampled_token_ids = next_token_ids.unsqueeze(1)
 
-    def _get_cumulative_num_rejected(self, blocking: bool = True) -> list[int]:
+    def _get_valid_sampled_token_count(self, blocking: bool = True) -> list[int]:
         prev_sampled_token_ids = self.input_batch.prev_sampled_token_ids
         sampled_count_event = self.valid_sampled_token_count_event
         if sampled_count_event is None or prev_sampled_token_ids is None:
             return []
-        # Mark consumed so the next accumulate step can issue a fresh copy.
-        # Returns [] if the copy hasn't landed; no corrections are lost.
+        # With async spec decode, the drafter may start its next round
+        # before the target's D2H copy of these counts has completed.
+        # This is only used to prevent unbounded drift in CPU-side num_computed_tokens.
+        # It's acceptable for the CPU value to be slightly stale because the GPU side is
+        # the source of truth, corrected by update_num_computed_tokens_for_batch_change.
+        # Without async, we must block because the CPU value is used directly.
         if blocking:
             sampled_count_event.synchronize()
         elif not sampled_count_event.query():
             return []
 
-        self._cumulative_copy_consumed = True
-        return self.cumulative_num_rejected.cpu[
-            : prev_sampled_token_ids.shape[0]
-        ].tolist()
+        counts_cpu = self.valid_sampled_token_count_cpu
+        assert counts_cpu is not None
+        return counts_cpu[: prev_sampled_token_ids.shape[0]].tolist()
 
     def propose_draft_token_ids(
         self,
@@ -4465,7 +4455,7 @@ class GPUModelRunner(
                 self.num_tokens_no_spec_gpu,
                 self.discard_request_mask.gpu,
             )
-            self._accumulate_and_copy_num_rejected(
+            self._copy_valid_sampled_token_count(
                 next_token_ids, valid_sampled_tokens_count
             )
 
@@ -4559,7 +4549,7 @@ class GPUModelRunner(
                     self.discard_request_mask.gpu,
                 )
             )
-            self._accumulate_and_copy_num_rejected(
+            self._copy_valid_sampled_token_count(
                 next_token_ids, valid_sampled_tokens_count
             )
 
@@ -4598,7 +4588,7 @@ class GPUModelRunner(
                         self.discard_request_mask.gpu,
                     )
                 )
-                self._accumulate_and_copy_num_rejected(
+                self._copy_valid_sampled_token_count(
                     next_token_ids, valid_sampled_tokens_count
                 )
 
