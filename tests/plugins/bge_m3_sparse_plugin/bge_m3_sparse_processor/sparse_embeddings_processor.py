@@ -24,8 +24,6 @@ from .types import (
 
 logger = init_logger(__name__)
 
-_BGE_M3_EMBED_DIM = 1024
-
 
 class BgeM3SparseEmbeddingsProcessor(
     IOProcessor[SparseEmbeddingCompletionRequestMixin, SparseEmbeddingResponse]
@@ -42,7 +40,7 @@ class BgeM3SparseEmbeddingsProcessor(
                 if getattr(pooler_config, param, None) is None:
                     continue
                 self.default_pooling_params[param] = getattr(pooler_config, param)
-        self.embed_dimensions = vllm_config.get("hidden_size", _BGE_M3_EMBED_DIM)
+        self.embed_dimensions = vllm_config.model_config.get_hidden_size()
 
     def merge_pooling_params(
         self,
