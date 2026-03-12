@@ -851,30 +851,13 @@ def launch_core_engines(
 
     offline_mode = local_start_index is not None
 
-    # client_local_only = True for cases where this front-end
-    # sends requests only to colocated engines.
-    client_local_only = (
-        offline_mode or local_engines_only or (local_engine_count == dp_size)
-    )
-
     # Create a single tensor IPC queue for sharing multimodal tensors between
-    # API servers and rank 0 engine core. Only rank 0 consumes multimodal
-    # tensors during TP>1 and PP>1, so one queue is sufficient.
-    torch_mp.set_start_method("spawn", force=True)
-    tensor_queues: list[torch_mp.Queue] = [torch_mp.Queue()]
-
-    # Set up input and output addresses.
-    addresses = EngineZmqAddresses(
-        inputs=[
-            get_engine_client_zmq_addr(client_local_only, host)
-            for _ in range(num_api_servers)
-        ],
-        outputs=[
-            get_engine_client_zmq_addr(client_local_only, host)
-            for _ in range(num_api_servers)
-        ],
-        tensor_queues=tensor_queues,
-    )
+    # API servers and engine core.
+    if (
+        vllm_config.model_config.multimodal_config is not None
+        and vllm_config.model_config.multimodal_config.mm_tensor_ipc == "torch_shm"
+    ):
+        addresses.tensor_queues = [torch_mp.Queue()]
 
     # Run the DP Coordinator process with rank 0 when in online DP mode.
     # The coordinator is needed for:
@@ -973,7 +956,7 @@ def launch_core_engines(
                 local_engine_count=local_engine_count,
                 start_index=dp_rank,
                 local_start_index=local_start_index or 0,
-                tensor_queues=tensor_queues,
+                tensor_queues=addresses.tensor_queues,
             )
         else:
             local_engine_manager = None

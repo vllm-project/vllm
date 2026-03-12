@@ -665,22 +665,7 @@ class VllmConfig:
         if self.model_config is not None:
             self.model_config.verify_with_parallel_config(self.parallel_config)
             self.model_config.verify_dual_chunk_attention_config(self.load_config)
-
             self.parallel_config.is_moe_model = self.model_config.is_moe
-
-            # torch_shm uses a single IPC queue to rank 0; DP>1 is
-            # incompatible because API servers can't know which
-            # CoreEngine the scheduler will assign work to.
-            multimodal_config = self.model_config.multimodal_config
-            if (
-                multimodal_config is not None
-                and multimodal_config.mm_tensor_ipc == "torch_shm"
-                and self.parallel_config.data_parallel_size > 1
-            ):
-                raise ValueError(
-                    "mm_tensor_ipc='torch_shm' is not supported "
-                    "with data_parallel_size > 1."
-                )
 
         self.cache_config.verify_with_parallel_config(self.parallel_config)
 
@@ -779,6 +764,16 @@ class VllmConfig:
                 self.parallel_config.disable_nccl_for_dp_synchronization = True
             else:
                 self.parallel_config.disable_nccl_for_dp_synchronization = False
+
+        if (
+            self.model_config.multimodal_config is not None
+            and self.model_config.multimodal_config.mm_tensor_ipc == "torch_shm"
+            and os.environ.get("VLLM_WORKER_MULTIPROC_METHOD") != "spawn"
+        ):
+            raise ValueError(
+                "torch_shm is known to fail without "
+                "VLLM_WORKER_MULTIPROC_METHOD set to spawn"
+            )
 
         from vllm.platforms import current_platform
 
