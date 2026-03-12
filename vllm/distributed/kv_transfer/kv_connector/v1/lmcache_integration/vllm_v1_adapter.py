@@ -718,52 +718,24 @@ class LMCacheConnectorV1Impl:
         """Shutdown the LMCache connector and release all resources."""
         logger.info("Shutting down LMCacheConnectorV1Impl")
 
-        # Stop auxiliary services first (they may hold references to engine)
-        if api_server := getattr(self, "api_server", None):
-            try:
-                if hasattr(api_server, "stop"):
-                    api_server.stop()
-                elif hasattr(api_server, "shutdown"):
-                    api_server.shutdown()
-            except Exception:
-                logger.exception("Error stopping API server")
-
-        if plugin_launcher := getattr(self, "plugin_launcher", None):
-            try:
-                if hasattr(plugin_launcher, "stop"):
-                    plugin_launcher.stop()
-                elif hasattr(plugin_launcher, "shutdown"):
-                    plugin_launcher.shutdown()
-            except Exception:
-                logger.exception("Error stopping plugin launcher")
-
-        if offload_server := getattr(self, "offload_server", None):
-            try:
-                if hasattr(offload_server, "close"):
-                    offload_server.close()
-                elif hasattr(offload_server, "shutdown"):
-                    offload_server.shutdown()
-            except Exception:
-                logger.exception("Error closing offload server")
-
-        # Close lookup server/client
-        if lookup_server := getattr(self, "lookup_server", None):
-            try:
-                if hasattr(lookup_server, "close"):
-                    lookup_server.close()
-                elif hasattr(lookup_server, "shutdown"):
-                    lookup_server.shutdown()
-            except Exception:
-                logger.exception("Error closing lookup server")
-
-        if lookup_client := getattr(self, "lookup_client", None):
-            try:
-                if hasattr(lookup_client, "close"):
-                    lookup_client.close()
-                elif hasattr(lookup_client, "shutdown"):
-                    lookup_client.shutdown()
-            except Exception:
-                logger.exception("Error closing lookup client")
+        # Stop auxiliary services first (they may hold references to engine),
+        # then close network resources.
+        components_to_shutdown = [
+            ("api_server", ["stop", "shutdown"], "Error stopping API server"),
+            ("plugin_launcher", ["stop", "shutdown"], "Error stopping plugin launcher"),
+            ("offload_server", ["close", "shutdown"], "Error closing offload server"),
+            ("lookup_server", ["close", "shutdown"], "Error closing lookup server"),
+            ("lookup_client", ["close", "shutdown"], "Error closing lookup client"),
+        ]
+        for attr_name, methods, error_msg in components_to_shutdown:
+            if component := getattr(self, attr_name, None):
+                try:
+                    for method_name in methods:
+                        if hasattr(component, method_name):
+                            getattr(component, method_name)()
+                            break
+                except Exception:
+                    logger.exception(error_msg)
 
         # Destroy singleton builders (frees GPU buffers)
         try:
