@@ -20,7 +20,7 @@ gh pr list --repo vllm-project/vllm --state open --search "<short area keywords>
 
 ### No low-value busywork PRs
 
-Do not open one-off PRs for tiny edits (single typo, isolated lint fix, one mutable default, etc.). Mechanical cleanups are acceptable only when bundled with substantive work.
+Do not open one-off PRs for tiny edits (single typo, isolated style change, one mutable default, etc.). Mechanical cleanups are acceptable only when bundled with substantive work.
 
 ### Accountability
 
