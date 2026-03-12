@@ -418,6 +418,9 @@ class Mistral3ForConditionalGeneration(
 
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
+            # Some PEFT LoRAs are trained against the text submodule directly
+            # and produce names like `base_model.model.model.layers.*`.
+            "model.": "language_model.model.",
             # mapping for new names in checkpoint saved after transformers v4.52
             "model.language_model.": "language_model.model.",
             "model.vision_tower.": "vision_tower.",
