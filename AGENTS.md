@@ -78,3 +78,16 @@ pre-commit run ruff-check --all-files
 # Run mypy as it is in CI:
 pre-commit run mypy-3.10 --all-files --hook-stage manual
 ```
+
+### Commit messages
+
+Add attribution using commit trailers such as `Co-authored-by:` (other projects use `Assisted-by:` or `Generated-by:`). For example:
+
+```text
+Your commit message here
+
+Co-authored-by: GitHub Copilot
+Co-authored-by: Claude
+Co-authored-by: gemini-code-assist
+Signed-off-by: Your Name <your.email@example.com>
+```
