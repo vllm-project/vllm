@@ -514,6 +514,53 @@ class EplbState:
         self.model_states[model_config.compute_hash()] = model_state
         self.num_valid_physical_experts = model.num_physical_experts
 
+    def _log_stats(self, ep_rank: int) -> None:
+        # Sync the expert load pass for each model (main and drafter).
+        # expert_load_pass: (num_moe_layers, num_physical_experts)
+        logger.debug(
+            "EPLB step() entering _sync_load_pass all-reduce: ep_rank=%d, step=%d",
+            ep_rank,
+            self.expert_rearrangement_step,
+        )
+        expert_load_pass_list = self._sync_load_pass()
+        ep_group = get_ep_group().device_group
+        for expert_load_pass, eplb_model_state in zip(
+            expert_load_pass_list, self.model_states.values()
+        ):
+            # num_tokens_per_rank: (num_moe_layers, num_ranks)
+            num_tokens_per_rank = (
+                expert_load_pass.reshape(expert_load_pass.shape[0], ep_group.size(), -1)
+                .sum(dim=-1)
+                .float()
+            )
+
+            # Compute balancedness ratio:
+            # for each layer:
+            #   (mean load across ranks) / (max load across ranks)
+            avg_tokens_tensor = num_tokens_per_rank.mean(dim=0).sum(dim=0)
+            max_tokens_tensor = num_tokens_per_rank.max(dim=0).values.sum(dim=0)
+
+            # Just to make type checker happy
+            tokens_tensors: list[float] = torch.stack(
+                [avg_tokens_tensor, max_tokens_tensor]
+            ).tolist()
+            avg_tokens, max_tokens = tokens_tensors
+            balancedness = avg_tokens / max_tokens if max_tokens > 0 else 0.0
+
+            if ep_group.rank() == 0:
+                logger.info(
+                    "EPLB step: %d for model %s: avg_tokens=%.2f, "
+                    "max_tokens=%d, balancedness=%.4f, "
+                    "steps until the next rearrangement: %d",
+                    self.expert_rearrangement_step,
+                    eplb_model_state.model_name,
+                    avg_tokens,
+                    max_tokens,
+                    balancedness,
+                    self.expert_rearrangement_step_interval
+                    - self.expert_rearrangement_step,
+                )
+
     def step(
         self,
         is_dummy: bool = False,
@@ -540,6 +587,7 @@ class EplbState:
             - `balancedness`: The ratio of average load to maximum load.
         """
         ep_group = get_ep_group().device_group
+
         if is_profile:
             self.rearrange(is_profile=True)
             return
@@ -549,54 +597,13 @@ class EplbState:
             for eplb_model_state in self.model_states.values():
                 eplb_model_state.expert_load_pass.zero_()
 
-        if (
-            log_stats
-            and self.expert_rearrangement_step
+        is_rearrange_step = (
+            self.expert_rearrangement_step
             % self.parallel_config.eplb_config.log_balancedness_interval
             == 0
-        ):
-            # Sync the expert load pass for each model (main and drafter).
-            # expert_load_pass: (num_moe_layers, num_physical_experts)
-            expert_load_pass_list = self._sync_load_pass()
-            ep_group = get_ep_group().device_group
-            for expert_load_pass, eplb_model_state in zip(
-                expert_load_pass_list, self.model_states.values()
-            ):
-                # num_tokens_per_rank: (num_moe_layers, num_ranks)
-                num_tokens_per_rank = (
-                    expert_load_pass.reshape(
-                        expert_load_pass.shape[0], ep_group.size(), -1
-                    )
-                    .sum(dim=-1)
-                    .float()
-                )
-
-                # Compute balancedness ratio:
-                # for each layer:
-                #   (mean load across ranks) / (max load across ranks)
-                avg_tokens_tensor = num_tokens_per_rank.mean(dim=0).sum(dim=0)
-                max_tokens_tensor = num_tokens_per_rank.max(dim=0).values.sum(dim=0)
-
-                # Just to make type checker happy
-                tokens_tensors: list[float] = torch.stack(
-                    [avg_tokens_tensor, max_tokens_tensor]
-                ).tolist()
-                avg_tokens, max_tokens = tokens_tensors
-                balancedness = avg_tokens / max_tokens if max_tokens > 0 else 0.0
-
-                if ep_group.rank() == 0:
-                    logger.info(
-                        "EPLB step: %d for model %s: avg_tokens=%.2f, "
-                        "max_tokens=%d, balancedness=%.4f, "
-                        "steps until the next rearrangement: %d",
-                        self.expert_rearrangement_step,
-                        eplb_model_state.model_name,
-                        avg_tokens,
-                        max_tokens,
-                        balancedness,
-                        self.expert_rearrangement_step_interval
-                        - self.expert_rearrangement_step,
-                    )
+        )
+        if log_stats and is_rearrange_step:
+            self._log_stats(ep_group.rank())
 
         # Update the expert load sliding window
         if not is_dummy:
@@ -627,7 +634,6 @@ class EplbState:
                     self.move_to_workspace(
                         model_state=eplb_model_state,
                         ep_group=ep_group,
-                        is_profile=is_profile,
                     )
 
         if self.expert_rearrangement_step >= self.expert_rearrangement_step_interval:
@@ -761,40 +767,40 @@ class EplbState:
                     rank_mapping,
                 )
 
-                if not is_profile:
-                    if (
-                        eplb_model_state.physical_to_logical_map.shape[1]
-                        != new_physical_to_logical_map.shape[1]
-                    ):
-                        eplb_model_state.physical_to_logical_map = (
-                            new_physical_to_logical_map.to(
-                                eplb_model_state.physical_to_logical_map.device
-                            )
+                if is_profile:
+                    break
+
+                if (
+                    eplb_model_state.physical_to_logical_map.shape[1]
+                    != new_physical_to_logical_map.shape[1]
+                ):
+                    eplb_model_state.physical_to_logical_map = (
+                        new_physical_to_logical_map.to(
+                            eplb_model_state.physical_to_logical_map.device
                         )
-                    else:
-                        eplb_model_state.physical_to_logical_map.copy_(
-                            new_physical_to_logical_map
-                        )
-                    max_physical_slots = new_logical_to_physical_map.shape[-1]
-                    assert (
-                        max_physical_slots
-                        <= eplb_model_state.logical_to_physical_map.shape[-1]
                     )
-                    new_logical_to_physical_map = torch.nn.functional.pad(
-                        new_logical_to_physical_map,
-                        (
-                            0,
-                            eplb_model_state.logical_to_physical_map.shape[-1]
-                            - max_physical_slots,
-                        ),
-                        value=-1,
+                else:
+                    eplb_model_state.physical_to_logical_map.copy_(
+                        new_physical_to_logical_map
                     )
-                    eplb_model_state.logical_to_physical_map.copy_(
-                        new_logical_to_physical_map
-                    )
-                    eplb_model_state.logical_replica_count.copy_(
-                        new_logical_replica_count
-                    )
+                max_physical_slots = new_logical_to_physical_map.shape[-1]
+                assert (
+                    max_physical_slots
+                    <= eplb_model_state.logical_to_physical_map.shape[-1]
+                )
+                new_logical_to_physical_map = torch.nn.functional.pad(
+                    new_logical_to_physical_map,
+                    (
+                        0,
+                        eplb_model_state.logical_to_physical_map.shape[-1]
+                        - max_physical_slots,
+                    ),
+                    value=-1,
+                )
+                eplb_model_state.logical_to_physical_map.copy_(
+                    new_logical_to_physical_map
+                )
+                eplb_model_state.logical_replica_count.copy_(new_logical_replica_count)
                 if is_main_rank:
                     assert start_event is not None
                     assert end_event is not None
@@ -833,7 +839,6 @@ class EplbState:
 
     def start_async_loop(
         self,
-        rank_mapping: dict[int, int] | None = None,
         is_profile: bool = False,
     ):
         if not self.is_async:
@@ -907,7 +912,6 @@ class EplbState:
         self,
         model_state: EplbModelState,
         ep_group: ProcessGroup,
-        is_profile: bool = False,
     ):
         # We call move_to_workspace only when ep_buffer_ready is 1.
         # It means we only need to wait for the lock for a short time.
@@ -960,13 +964,8 @@ class EplbState:
             # After the main thread consumes, advance layer_to_transfer
             model_state.layer_to_transfer += 1
             model_state.ep_buffer_ready = 0
-            logger.debug(
-                "model %s successfully move_to_workspace layer %d",
-                model_state.model_name,
-                transferred_layer,
-            )
             if model_state.layer_to_transfer >= model_state.model.num_moe_layers:
-                self.post_eplb(model_state, is_profile)
+                self.post_eplb(model_state)
                 model_state.rebalanced = False
                 model_state.layer_to_transfer = 0
                 model_state.pending_global_ready_check = False
@@ -987,7 +986,7 @@ class EplbState:
                     str(e),
                 )
 
-    def post_eplb(self, model_state: EplbModelState, is_profile: bool = False) -> None:
+    def post_eplb(self, model_state: EplbModelState) -> None:
         assert model_state.new_physical_to_logical_map is not None
         assert model_state.new_logical_to_physical_map is not None
         assert model_state.new_logical_replica_count is not None
@@ -1000,8 +999,9 @@ class EplbState:
         """
         All-reduce a list of tensors.
         """
+        ep_group = get_ep_group().device_group
         if len(tensor_list) == 1:
-            all_reduce(tensor_list[0], group=get_ep_group().device_group)
+            all_reduce(tensor_list[0], group=ep_group)
             return tensor_list
         assert all(t.dim() == 2 for t in tensor_list), "All tensors must be 2D."
         assert all(t.shape[1] == tensor_list[0].shape[1] for t in tensor_list), (

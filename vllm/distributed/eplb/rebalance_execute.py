@@ -367,12 +367,26 @@ def move_to_buffer(
                 for req in reqs:
                     req.wait()
     elif p2p_ops:
+        logger.debug(
+            "move_to_buffer: ep_rank=%d, entering batch_isend_irecv "
+            "(sync, no cuda_stream)",
+            ep_rank,
+        )
         if is_stateless:
             ep_group.device_communicator.batch_isend_irecv(p2p_ops)
         else:
             reqs = batch_isend_irecv(p2p_ops)
             for req in reqs:
                 req.wait()
+        logger.debug(
+            "move_to_buffer: ep_rank=%d, batch_isend_irecv completed",
+            ep_rank,
+        )
+    else:
+        logger.debug(
+            "move_to_buffer: ep_rank=%d, no p2p_ops to execute",
+            ep_rank,
+        )
     # wait for the communication to finish
     return (
         is_unchanged,
@@ -620,12 +634,20 @@ def rearrange_expert_weights_inplace(
             )
         return
 
-    # NOTE(bowen): We need this synchronize to run, but I don't know why.
-    # If you figure out the reason, please let me know -- thank you!
+    # The P2P operations below (batch_isend_irecv) run on NCCL's internal
+    # CUDA stream, which has no implicit ordering with the default compute
+    # stream.  Without this barrier, NCCL could start reading expert weight
+    # tensors for isend while forward-pass kernels on the default stream are
+    # still accessing them, and move_from_buffer could overwrite weights
+    # that are still being read.  synchronize() ensures all prior
+    # compute-stream work (i.e. the forward pass) has completed before we
+    # touch the weights.  A more targeted fix would be to record a CUDA
+    # event on the compute stream and have NCCL's stream wait on it, but
+    # this is simpler.
     torch.accelerator.synchronize()
 
-    old_global_expert_indices_cpu = old_global_expert_indices.cpu().numpy()
-    new_global_expert_indices_cpu = new_global_expert_indices.cpu().numpy()
+    old_global_expert_indices_cpu: np.ndarray = old_global_expert_indices.cpu().numpy()
+    new_global_expert_indices_cpu: np.ndarray = new_global_expert_indices.cpu().numpy()
 
     for layer_idx in range(num_moe_layers):
         is_unchanged, is_received_locally, recv_metadata = move_to_buffer(
