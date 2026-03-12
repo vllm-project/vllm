@@ -46,7 +46,7 @@ If coordination evidence is missing, or work is duplicate/trivial busywork, **do
 
 ## 2. Development Workflow
 
-### Engironment setup
+### Environment setup
 
 ```bash
 # Always use `uv` for Python environment management:
