@@ -347,6 +347,7 @@ def rocm_fp8_paged_mqa_logits(
             context_lens,
             block_tables,
             max_model_len,
+            ChunkQ=heads,
         )
         return out_qk.sum(dim=0)
     else:
