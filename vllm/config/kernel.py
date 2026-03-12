@@ -2,10 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
 from collections.abc import Callable
-from dataclasses import fields
+from dataclasses import asdict, fields
 from typing import TYPE_CHECKING, Any, Literal
 
-from datasets.utils.py_utils import asdict
 from pydantic import Field, field_validator
 
 from vllm.config.utils import config, get_hash_factors, hash_factors
@@ -73,7 +72,7 @@ class IrOpPriorityConfig:
         """
         for field in fields(cls):
             if field.name not in kwargs:
-                kwargs[field.name] = default
+                kwargs[field.name] = list(default)
 
         return cls(**kwargs)
 
@@ -127,8 +126,8 @@ class KernelConfig:
         Any new fields that affect compilation should be added to the hash.
         Any future fields that don't affect compilation should be excluded.
         """
-
-        return hash_factors(get_hash_factors(self, set("enable_flashinfer_autotune")))
+        ignored_factors = {"enable_flashinfer_autotune"}
+        return hash_factors(get_hash_factors(self, ignored_factors))
 
     @field_validator("enable_flashinfer_autotune", mode="wrap")
     @classmethod

@@ -64,7 +64,7 @@ and no variance_size override.
 
 
 @ir.ops.rms_norm.register_impl(
-    "oink", supports_args=oink_rms_supported, supported=has_oink_op("rms_norm")
+    "oink", supports_args=oink_rms_supported, supported=has_oink_op("rmsnorm")
 )
 def rms_norm(
     x: torch.Tensor,

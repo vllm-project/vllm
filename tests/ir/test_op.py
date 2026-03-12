@@ -47,6 +47,12 @@ def test_registration_overloads():
     assert custom_div.name == "_custom_div"
     assert "_custom_div" not in IrOp.registry
 
+    with pytest.raises(AssertionError):
+
+        @vllm.ir.register_op
+        def _custom_mul(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+            return x * y - 100
+
 
 def test_no_kw_only_args():
     # kw-only args not supported

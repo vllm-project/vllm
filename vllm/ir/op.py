@@ -57,7 +57,7 @@ def register_op(
 
     def decorator(_f: Callable):
         op_name: str = _f.__name__ if name is None else name
-        assert name not in IrOp.registry
+        assert op_name not in IrOp.registry
         op = IrOp(op_name, _f)
         IrOp.registry[op_name] = op
         return op
@@ -212,9 +212,11 @@ class IrOp:
             return self.impls["native"]
 
         for impl in self._priority_impls:
-            assert impl.supported, (
-                "All implementations in priority list must be supported."
-            )
+            if not impl.supported:
+                raise ValueError(
+                    f"Implementation {impl.provider} for op {self.name} not supported. "
+                    f"All implementations in priority list must be supported."
+                )
             if impl.supports_args(*args, **kwargs):
                 return impl
 
