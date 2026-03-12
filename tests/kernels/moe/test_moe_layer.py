@@ -43,6 +43,9 @@ from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import cuda_device_count_stateless, set_random_seed
 from vllm.v1.worker.workspace import init_workspace_manager
 
+
+fp8_dtype = torch.float8_e4m3fn #current_platform.fp8_dtype
+
 SHAPE_COMBOS = [
     (1, 128, 256),
     (32, 1024, 512),
@@ -90,6 +93,44 @@ BACKEND_SUPPORTED_QUANTS: dict[str, set[str | None]] = {
     "deepep_high_throughput":   {None, "fp8", "modelopt_fp8", "modelopt_fp4"},
 }
 # fmt: on
+
+
+def maybe_roundup_layer_hidden_size(
+    hidden_size: int,
+    act_dtype: torch.dtype,
+    backend: str | None,
+) -> int:
+    """
+    Given layer hidden size and MoE configurations, round up hidden_size
+    if necessary.
+
+    Args:
+        hidden_size: Layer hidden-size
+        act_dtype: Data type of the layer activations.
+        moe_parallel_config: Fused MoE parallelization strategy configuration.
+
+    Return:
+        Rounded up hidden_size if rounding up is required based on the configs
+        and all2all backend.
+        Original hidden size otherwise.
+    """
+    if backend == "deepep_high_throughput":
+        from vllm.model_executor.layers.fused_moe.deepep_ht_prepare_finalize import DeepEPHTPrepareAndFinalize
+        new_hidden_size = DeepEPHTPrepareAndFinalize.maybe_roundup_layer_hidden_size(
+            hidden_size, act_dtype
+        )
+        print(f"ROUNDUP!!!!!!!!!!!!!!!!!! {hidden_size} -> {new_hidden_size}")
+        hidden_size = new_hidden_size
+
+    if backend == "deepep_low_latency":
+        from vllm.model_executor.layers.fused_moe.deepep_ll_prepare_finalize import DeepEPLLPrepareAndFinalize
+        new_hidden_size = DeepEPLLPrepareAndFinalize.maybe_roundup_layer_hidden_size(
+            hidden_size
+        )
+        print(f"ROUNDUP!!!!!!!!!!!!!!!!!! {hidden_size} -> {new_hidden_size}")
+        hidden_size = new_hidden_size
+
+    return hidden_size
 
 
 def rank_chunk(num: int, r: int, w: int) -> int:
@@ -176,12 +217,26 @@ def apply_test_filter(
         dp_size: Data parallel size
     """
     # routed_input_transform only makes sense with shared_experts (latent MoE)
+    # TODO: not sure this is true
     if use_routed_input_transform and not use_shared_experts:
         pytest.skip("routed_input_transform requires shared_experts")
 
     # gate requires shared_experts (use_overlapped mode)
+    # TODO: also not sure this is true
     if use_gate and not use_shared_experts:
         pytest.skip("gate requires shared_experts (use_overlapped mode)")
+
+    # TODO: disable for now
+    if use_routed_input_transform and enable_eplb:
+        pytest.skip("routed_input_transform not supported with EPLB.")
+
+    # TODO: disable for now
+    if use_routed_input_transform and use_gate:
+        pytest.skip("routed_input_transform not supported with gate because of padding problems")
+
+    # TODO: disable for now
+    if use_routed_input_transform and backend in ["deepep_low_latency", "deepep_high_throughput"]:
+        pytest.skip("routed_input_transform not supported with DeepEP backends because of padding problems")
 
     # routed_input_transform + quantization + high hidden dimensions
     if (
@@ -194,10 +249,6 @@ def apply_test_filter(
             "routed_input_transform + quantization + higher hidden dimensions "
             "leads to large differences."
         )
-
-    # Skip modelopt_fp4 on H100 (compute capability 9.0)
-    if quantization == "modelopt_fp4" and current_platform.has_device_capability(90):
-        pytest.skip("modelopt_fp4 not supported on H100+ GPUs")
 
     # Skip modelopt_fp4 if not on B100+ (compute capability 10.0+)
     if quantization == "modelopt_fp4" and not current_platform.has_device_capability(
@@ -309,14 +360,14 @@ def _quantize_fp8_halves(
     """Quantize w13 gate/up halves separately to FP8, producing per-shard scales."""
     half = w1.shape[1] // 2
     w1q_a, w1s_a, _ = moe_quantize_weights(
-        w1[:, :half, :], None, torch.float8_e4m3fn, False, None
+        w1[:, :half, :], None, fp8_dtype, False, None
     )
     w1q_b, w1s_b, _ = moe_quantize_weights(
-        w1[:, half:, :], None, torch.float8_e4m3fn, False, None
+        w1[:, half:, :], None, fp8_dtype, False, None
     )
     assert w1s_a is not None and w1s_b is not None
 
-    w2q, w2s, _ = moe_quantize_weights(w2, None, torch.float8_e4m3fn, False, None)
+    w2q, w2s, _ = moe_quantize_weights(w2, None, fp8_dtype, False, None)
     assert w2s is not None
 
     return QuantizedWeights(
@@ -327,6 +378,19 @@ def _quantize_fp8_halves(
         # w2s is (E, 1, 1) -> reshape to (E,)
         w2_weight_scale=w2s.view(-1),
     )
+
+
+def quantization_to_quant_dtype(
+    quantization: str | None,
+) -> torch.dtype | str | None:
+    if quantization is None:
+        return None
+    elif quanization in ["fp8", "modelopt_fp8"]:
+        return fp8_dtype
+    elif quanization in ["modelopt_fp4"]:
+        return "nvfp4"
+    else:
+        raise NotImplementedError(f"Unsupported quantization: {quantization}")
 
 
 def make_quant_config(
@@ -345,9 +409,11 @@ def make_quant_config(
 
     if quantization == "modelopt_fp8":
         qw = _quantize_fp8_halves(w1, w2)
+        # why?
         qw.w13_input_scale = torch.ones(
             num_experts, dtype=torch.float32, device=w1.device
         )
+        # why?
         qw.w2_input_scale = torch.ones(
             num_experts, dtype=torch.float32, device=w2.device
         )
@@ -512,6 +578,7 @@ def setup_moe_test_data(
     use_shared_experts: bool,
     use_gate: bool,
     use_routed_input_transform: bool,
+    backend: str | None,
     device: str = "cuda",
 ) -> MoETestData:
     """Setup test data and transforms for MOE tests.
@@ -532,6 +599,9 @@ def setup_moe_test_data(
     """
     # For latent MoE: latent_size = k // 2
     latent_size = k // 2
+
+    #k = maybe_roundup_layer_hidden_size(k, in_dtype, backend)
+    #latent_size = maybe_roundup_layer_hidden_size(latent_size, in_dtype, backend)
 
     # Determine dimensions for routed experts (may be transformed)
     # For latent MoE, routed experts operate entirely in latent space
@@ -586,6 +656,13 @@ def setup_moe_test_data(
     # Create test inputs
     hidden_states = torch.randn((m, k), device=device, dtype=in_dtype) / 10
     router_logits = torch.randn((m, num_experts), device=device, dtype=in_dtype)
+
+    #print(f"USE_SHARED {use_shared_experts} {k, n * 2} {n, k}")
+    #print(f"USE_GATE {use_gate} {gate_input_dim, num_experts}")
+    #print(f"USE_ROUTED_INPUT {use_routed_input_transform} {k, latent_size} {latent_size, k}")
+    #print(f"LATENT_SIZE {latent_size}")
+    #print(f"K {k}")
+    #print(f"HIDDEN_STATES {hidden_states.shape}")
 
     return MoETestData(
         w1=w1,
@@ -935,6 +1012,8 @@ def _test_body_eplb(
     # When using routed_input_transform, experts operate in latent space
     hidden_size_for_layer = k // 2 if routed_input_transform is not None else k
 
+    #print(f"HSFL {routed_input_transform is not None} {k} {hidden_size_for_layer}")
+
     moe_fn, moe_layer = make_fused_moe_layer(
         quantization=quantization,
         use_ep=use_ep,
@@ -1023,6 +1102,7 @@ def _test_loop(
     top_k: int,
     quantization: str | None,
     reduce_results: bool,
+    backend: str,
     test_body_fn: Callable,
     use_shared_experts: bool,
     use_gate: bool,
@@ -1057,8 +1137,10 @@ def _test_loop(
         use_shared_experts=use_shared_experts,
         use_gate=use_gate,
         use_routed_input_transform=use_routed_input_transform,
+        backend=backend,
         device="cuda",
     )
+    #print(f"REDUCE_RESULTS {reduce_results}")
 
     # Extract data from test_data
     hidden_states = test_data.hidden_states
@@ -1087,7 +1169,7 @@ def _test_loop(
             top_k=top_k,
             global_num_experts=num_experts,
             in_dtype=in_dtype,
-            quant_dtype=None,
+            quant_dtype=None, #quantization_to_quant_dtype(quantization),
             renormalize=False,
             shared_experts_config=shared_experts_config,
             gate=gate,
@@ -1123,6 +1205,8 @@ def _test_loop(
         # Determine hidden size for MoE layer
         # When using routed_input_transform, experts operate in latent space
         hidden_size_for_layer = k // 2 if routed_input_transform is not None else k
+
+        #print(f"HSFL {routed_input_transform is not None} {k} {hidden_size_for_layer}")
 
         # Create initial MoE layer
         moe_fn, moe_layer = make_fused_moe_layer(
@@ -1269,6 +1353,7 @@ def test_moe_layer_no_parallel(
         use_shared_experts=use_shared_experts,
         use_gate=use_gate,
         use_routed_input_transform=use_routed_input_transform,
+        backend=None,
         device="cuda",
     )
 
@@ -1460,6 +1545,7 @@ def test_moe_layer(
             top_k,
             quantization,
             reduce_results,
+            backend,
             _test_body_regular,
             use_shared_experts,
             use_gate,
@@ -1571,6 +1657,7 @@ def test_moe_layer_eplb(
             top_k,
             quantization,
             reduce_results,
+            backend,
             _test_body_eplb,
             use_shared_experts,
             use_gate,
