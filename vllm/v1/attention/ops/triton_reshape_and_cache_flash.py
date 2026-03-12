@@ -150,43 +150,43 @@ def reshape_and_cache_kernel_flash(
 # ---------------------------------------------------------------------------
 @triton.jit
 def _reshape_cache_int8_per_token_head(
-    key_ptr,            # [num_tokens, num_kv_heads, head_size]
-    value_ptr,          # [num_tokens, num_kv_heads, head_size_v]
-    key_cache_ptr,      # [num_blocks, block_size, num_kv_heads, head_size]  int8
-    value_cache_ptr,    # [num_blocks, block_size, num_kv_heads, head_size_v] int8
+    key_ptr,  # [num_tokens, num_kv_heads, head_size]
+    value_ptr,  # [num_tokens, num_kv_heads, head_size_v]
+    key_cache_ptr,  # [num_blocks, block_size, num_kv_heads, head_size]  int8
+    value_cache_ptr,  # [num_blocks, block_size, num_kv_heads, head_size_v] int8
     k_scale_cache_ptr,  # [num_blocks, block_size, num_kv_heads] float32
     v_scale_cache_ptr,  # [num_blocks, block_size, num_kv_heads] float32
-    slot_mapping_ptr,   # [num_tokens]
-    stride_key_tok:  tl.int64,
+    slot_mapping_ptr,  # [num_tokens]
+    stride_key_tok: tl.int64,
     stride_key_head: tl.int64,
-    stride_val_tok:  tl.int64,
+    stride_val_tok: tl.int64,
     stride_val_head: tl.int64,
-    stride_kc_blk:   tl.int64,   # key_cache stride over blocks
-    stride_kc_slot:  tl.int64,   # key_cache stride over slots
-    stride_kc_head:  tl.int64,   # key_cache stride over heads
-    stride_vc_blk:   tl.int64,
-    stride_vc_slot:  tl.int64,
-    stride_vc_head:  tl.int64,
-    stride_ks_blk:   tl.int64,   # k_scale_cache stride over blocks
-    stride_ks_slot:  tl.int64,   # k_scale_cache stride over slots
-    stride_ks_head:  tl.int64,   # k_scale_cache stride over heads
-    stride_vs_blk:   tl.int64,
-    stride_vs_slot:  tl.int64,
-    stride_vs_head:  tl.int64,
-    block_size:       tl.constexpr,
-    head_size:        tl.constexpr,
-    head_size_v:      tl.constexpr,
+    stride_kc_blk: tl.int64,  # key_cache stride over blocks
+    stride_kc_slot: tl.int64,  # key_cache stride over slots
+    stride_kc_head: tl.int64,  # key_cache stride over heads
+    stride_vc_blk: tl.int64,
+    stride_vc_slot: tl.int64,
+    stride_vc_head: tl.int64,
+    stride_ks_blk: tl.int64,  # k_scale_cache stride over blocks
+    stride_ks_slot: tl.int64,  # k_scale_cache stride over slots
+    stride_ks_head: tl.int64,  # k_scale_cache stride over heads
+    stride_vs_blk: tl.int64,
+    stride_vs_slot: tl.int64,
+    stride_vs_head: tl.int64,
+    block_size: tl.constexpr,
+    head_size: tl.constexpr,
+    head_size_v: tl.constexpr,
     head_size_padded: tl.constexpr,  # >= max(head_size, head_size_v), power-of-2
 ):
-    tok  = tl.program_id(0)
+    tok = tl.program_id(0)
     head = tl.program_id(1)
 
     slot = tl.load(slot_mapping_ptr + tok).to(tl.int64)
     if slot < 0:
         return
 
-    blk          = slot // block_size
-    slot_in_blk  = slot % block_size
+    blk = slot // block_size
+    slot_in_blk = slot % block_size
 
     offs = tl.arange(0, head_size_padded)
 
@@ -194,11 +194,12 @@ def _reshape_cache_int8_per_token_head(
     k_mask = offs < head_size
     k = tl.load(
         key_ptr + tok * stride_key_tok + head * stride_key_head + offs,
-        mask=k_mask, other=0.0,
+        mask=k_mask,
+        other=0.0,
     ).to(tl.float32)
     k_absmax = tl.max(tl.abs(tl.where(k_mask, k, 0.0)), axis=0)
-    k_scale  = tl.maximum(k_absmax / 127.0, 1e-6)
-    k_q      = tl.clamp(k / k_scale, -128.0, 127.0)
+    k_scale = tl.maximum(k_absmax / 127.0, 1e-6)
+    k_q = tl.clamp(k / k_scale, -128.0, 127.0)
 
     tl.store(
         key_cache_ptr
@@ -221,11 +222,12 @@ def _reshape_cache_int8_per_token_head(
     v_mask = offs < head_size_v
     v = tl.load(
         value_ptr + tok * stride_val_tok + head * stride_val_head + offs,
-        mask=v_mask, other=0.0,
+        mask=v_mask,
+        other=0.0,
     ).to(tl.float32)
     v_absmax = tl.max(tl.abs(tl.where(v_mask, v, 0.0)), axis=0)
-    v_scale  = tl.maximum(v_absmax / 127.0, 1e-6)
-    v_q      = tl.clamp(v / v_scale, -128.0, 127.0)
+    v_scale = tl.maximum(v_absmax / 127.0, 1e-6)
+    v_q = tl.clamp(v / v_scale, -128.0, 127.0)
 
     tl.store(
         value_cache_ptr
@@ -246,13 +248,13 @@ def _reshape_cache_int8_per_token_head(
 
 
 def triton_reshape_and_cache_flash_int8_per_token(
-    key: torch.Tensor,          # [num_tokens, num_kv_heads, head_size]
-    value: torch.Tensor,        # [num_tokens, num_kv_heads, head_size_v]
-    key_cache: torch.Tensor,    # [num_blocks, block_size, num_kv_heads, head_size]  int8
+    key: torch.Tensor,  # [num_tokens, num_kv_heads, head_size]
+    value: torch.Tensor,  # [num_tokens, num_kv_heads, head_size_v]
+    key_cache: torch.Tensor,  # [num_blocks, block_size, num_kv_heads, head_size]  int8
     value_cache: torch.Tensor,  # [num_blocks, block_size, num_kv_heads, head_size_v] int8
     k_scale_cache: torch.Tensor,  # [num_blocks, block_size, num_kv_heads] float32
     v_scale_cache: torch.Tensor,  # [num_blocks, block_size, num_kv_heads] float32
-    slot_mapping: torch.Tensor,   # [num_tokens]
+    slot_mapping: torch.Tensor,  # [num_tokens]
 ):
     """Quantize key/value per (token, head) and write to paged INT8 cache.
 
@@ -261,9 +263,9 @@ def triton_reshape_and_cache_flash_int8_per_token(
     float32 scale in k_scale_cache/v_scale_cache (indexed by the same
     block_table used for the KV cache).
     """
-    num_tokens  = key.shape[0]
+    num_tokens = key.shape[0]
     num_kv_heads = key.shape[1]
-    head_size   = key.shape[2]
+    head_size = key.shape[2]
     head_size_v = value.shape[2]
     head_size_padded = triton.next_power_of_2(max(head_size, head_size_v))
 
@@ -370,9 +372,7 @@ def triton_reshape_and_cache_flash(
     # Per-head INT8 scale: k_scale is a 1-D tensor [num_heads] rather than a scalar.
     # FP8 always uses per-tensor scale.
     INT8_PER_HEAD_SCALE = (
-        kv_cache_dtype.startswith("int8")
-        and k_scale.ndim == 1
-        and k_scale.numel() > 1
+        kv_cache_dtype.startswith("int8") and k_scale.ndim == 1 and k_scale.numel() > 1
     )
     if QUANTIZED_KV_CACHE:
         assert kv_cache_torch_dtype in [

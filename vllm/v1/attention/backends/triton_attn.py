@@ -511,7 +511,10 @@ class TritonAttentionImpl(AttentionImpl):
         # For FP8 / INT8 per-tensor, expand to (num_seqs, num_kv_heads) as usual.
         int8_k_scale_cache = None
         int8_v_scale_cache = None
-        if self.kv_cache_dtype.startswith("int8") and self._int8_k_scale_cache is not None:
+        if (
+            self.kv_cache_dtype.startswith("int8")
+            and self._int8_k_scale_cache is not None
+        ):
             # Per-token path: scale caches hold the dequant scales; k_descale unused.
             int8_k_scale_cache = self._int8_k_scale_cache
             int8_v_scale_cache = self._int8_v_scale_cache
