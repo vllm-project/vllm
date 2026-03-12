@@ -221,6 +221,18 @@ def test_kv_cache_block():
     assert block.block_hash is None
 
 
+def test_kv_cache_block_uses_slots():
+    block = KVCacheBlock(block_id=0)
+
+    # Slots eliminate per-instance __dict__, saving ~264 bytes per block.
+    # At 100K+ blocks this avoids tens of MB of overhead and GC pressure.
+    assert not hasattr(block, "__dict__")
+
+    # Verify that slots actually prevent dynamic attribute assignment.
+    with pytest.raises(AttributeError):
+        block.unexpected_field = True
+
+
 def test_free_kv_cache_block_queue_initialization():
     # Test with a single block
     block = KVCacheBlock(block_id=0)
@@ -327,7 +339,7 @@ def test_free_kv_cache_block_queue_append_n():
 
     # Create an empty FreeKVCacheBlockQueue
     invalid_queue = FreeKVCacheBlockQueue([])
-    # set prev_free_block to None and this will cause assertation in append_n
+    # set prev_free_block to None and this will cause assertion in append_n
     invalid_queue.fake_free_list_tail.prev_free_block = None
     with pytest.raises(AssertionError):
         # Append 1 block

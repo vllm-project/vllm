@@ -79,7 +79,8 @@ else()
     find_isa(${CPUINFO} "asimd" ASIMD_FOUND) # Check for ARM NEON support
     find_isa(${CPUINFO} "bf16" ARM_BF16_FOUND) # Check for ARM BF16 support
     find_isa(${CPUINFO} "S390" S390_FOUND)
-    find_isa(${CPUINFO} "v" RVV_FOUND) # Check for RISC-V RVV support
+    find_isa(${CPUINFO} "zvfhmin" RVV_FP16_FOUND) # Check for RISC-V Vector FP16 support
+    find_isa(${CPUINFO} "zvfbfmin" RVV_BF16_FOUND) # Check for RISC-V Vector BF16 support
 
     # Support cross-compilation by allowing override via environment variables
     if (ENABLE_ARM_BF16)
@@ -142,11 +143,19 @@ elseif (S390_FOUND)
         "-march=native"
         "-mtune=native")
 elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "riscv64")
-    if(RVV_FOUND)
-	    message(FAIL_ERROR "Can't support rvv now.")
+    message(STATUS "RISC-V detected")
+    if(RVV_BF16_FOUND)
+        message(STATUS "BF16 extension detected")
+        set(MARCH_FLAGS -march=rv64gcv_zvfh_zfbfmin_zvfbfmin_zvl128b -mrvv-vector-bits=zvl -mabi=lp64d)
+        add_compile_definitions(RISCV_BF16_SUPPORT)
+    elseif (RVV_FP16_FOUND)
+        message(WARNING "BF16 functionality is not available")
+        set(MARCH_FLAGS -march=rv64gcv_zvfh_zvl128b -mrvv-vector-bits=zvl -mabi=lp64d)
     else()
+        message(STATUS "compile riscv with scalar")
         list(APPEND CXX_COMPILE_FLAGS "-march=rv64gc")
     endif()
+    list(APPEND CXX_COMPILE_FLAGS ${MARCH_FLAGS})
 else()
     message(FATAL_ERROR "vLLM CPU backend requires X86, Power9+ ISA, S390X ISA, ARMv8 or RISC-V support.")
 endif()
@@ -242,13 +251,24 @@ if (ENABLE_X86_ISA OR (ASIMD_FOUND AND NOT APPLE_SILICON_FOUND) OR POWER9_FOUND 
         )
     else()
         message(STATUS "Downloading oneDNN from GitHub")
-        FetchContent_Declare(
-            oneDNN
-            GIT_REPOSITORY https://github.com/oneapi-src/oneDNN.git
-            GIT_TAG v3.10
-            GIT_PROGRESS TRUE
-            GIT_SHALLOW TRUE
-        )
+        if(ASIMD_FOUND AND NOT APPLE_SILICON_FOUND)
+            message(STATUS "aarch64 detected: using pinned oneDNN commit 9c5be1cc59e368aebf0909e6cf20f981ea61462a")
+            FetchContent_Declare(
+                oneDNN
+                GIT_REPOSITORY https://github.com/oneapi-src/oneDNN.git
+                GIT_TAG        9c5be1cc59e368aebf0909e6cf20f981ea61462a
+                GIT_PROGRESS   TRUE
+                GIT_SHALLOW    FALSE
+            )
+        else()
+            FetchContent_Declare(
+                oneDNN
+                GIT_REPOSITORY https://github.com/oneapi-src/oneDNN.git
+                GIT_TAG        v3.10
+                GIT_PROGRESS   TRUE
+                GIT_SHALLOW    TRUE
+            )
+        endif()
     endif()
 
     set(ONEDNN_LIBRARY_TYPE "STATIC")

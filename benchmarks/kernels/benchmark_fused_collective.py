@@ -385,32 +385,32 @@ def benchmark_operation(
     # Warmup before graph capture
     for _ in range(warmup):
         operation_func(*args, **kwargs)
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     # Create CUDA graph
     graph = torch.cuda.CUDAGraph()
     num_op_per_cudagraph = 10
 
     # Use vLLM's graph_capture to make tensor_model_parallel_all_reduce graph-safe
-    device = torch.device(f"cuda:{torch.cuda.current_device()}")
+    device = torch.device(f"cuda:{torch.accelerator.current_device_index()}")
     with graph_capture(device=device), torch.cuda.graph(graph):
         for _ in range(num_op_per_cudagraph):
             operation_func(*args, **kwargs)
 
     # Graph warmup
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     for _ in range(warmup):
         graph.replay()
 
     # Benchmark with CUDA graph
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     start_time = time.perf_counter()
 
     for _ in range(trials // num_op_per_cudagraph):
         # operation_func(*args, **kwargs)
         graph.replay()
 
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     end_time = time.perf_counter()
 
     avg_time_ms = ((end_time - start_time) / trials) * 1000
@@ -984,7 +984,7 @@ def main():
     world_size = int(os.environ["WORLD_SIZE"])
 
     device = torch.device(f"cuda:{rank}")
-    torch.cuda.set_device(device)
+    torch.accelerator.set_device_index(device)
     torch.set_default_device(device)
 
     init_distributed_environment()

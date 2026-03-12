@@ -318,8 +318,8 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, seed, monkeypatch)
                 out = deep_gemm_moe_fp8_fn(
                     a, w1, w2, w1_s, w2_s, topk_weights, topk_ids
                 )
-            torch.cuda.synchronize()
+            torch.accelerator.synchronize()
             graph.replay()
-            torch.cuda.synchronize()
+            torch.accelerator.synchronize()
 
     torch.testing.assert_close(out, ref_out, atol=0.035, rtol=0.035)
