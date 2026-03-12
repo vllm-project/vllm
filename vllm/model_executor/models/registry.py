@@ -255,6 +255,7 @@ _EMBEDDING_MODELS = {
     ),
     "Phi3VForCausalLM": ("phi3v", "Phi3VForCausalLM"),
     "Qwen2VLForConditionalGeneration": ("qwen2_vl", "Qwen2VLForConditionalGeneration"),  # noqa: E501
+    "ColQwen3_5": ("colqwen3_5", "ColQwen3_5Model"),
     "SiglipModel": ("siglip", "SiglipEmbeddingModel"),
     "LlamaNemotronVLModel": (
         "nemotron_vl",
