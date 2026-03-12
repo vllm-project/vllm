@@ -3,7 +3,7 @@
 import ast
 from dataclasses import replace
 from importlib.util import find_spec
-from typing import cast
+from typing import Any, cast
 
 import numpy as np
 import torch
@@ -104,16 +104,13 @@ class SpecDecodeBaseProposer:
             self.speculative_config.use_local_argmax_reduction
         )
 
-        max_batch_size = vllm_config.scheduler_config.max_num_seqs
+        self.max_batch_size = vllm_config.scheduler_config.max_num_seqs
         self.max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
         self.token_arange_np = np.arange(self.max_num_tokens)
 
-        # DFlash needs extra buffer space for context + query positions
-        self._dflash_extra_tokens = (
-            max_batch_size * (1 + self.num_speculative_tokens)
-            if self.method == "dflash"
-            else 0
-        )
+        # Can be specialized by methods like DFlash to reduce the limit
+        self.max_query_tokens = self.max_num_tokens
+        self.max_positions = self.max_num_tokens
 
         # Multi-modal data support
         self.mm_registry = MULTIMODAL_REGISTRY
@@ -156,18 +153,18 @@ class SpecDecodeBaseProposer:
             # 1D-RoPE.
             # See page 5 of https://arxiv.org/abs/2409.12191
             self.mrope_positions = torch.zeros(
-                (3, self.max_num_tokens + 1), dtype=torch.int64, device=device
+                (3, self.max_positions + 1), dtype=torch.int64, device=device
             )
         elif self.uses_xdrope_dim > 0 and self.draft_uses_xdrope_dim > 0:
             self.xdrope_positions = torch.zeros(
-                (self.uses_xdrope_dim, self.max_num_tokens + 1),
+                (self.uses_xdrope_dim, self.max_positions + 1),
                 dtype=torch.int64,
                 device=device,
             )
         else:
             # RoPE need (max_num_tokens,)
             self.positions = torch.zeros(
-                self.max_num_tokens + self._dflash_extra_tokens,
+                self.max_positions,
                 dtype=torch.int64,
                 device=device,
             )
@@ -180,7 +177,7 @@ class SpecDecodeBaseProposer:
 
         # We need +1 here because the arange is used to set query_start_loc,
         # which has one more element than batch_size.
-        max_num_slots_for_arange = max(max_batch_size + 1, self.max_num_tokens)
+        max_num_slots_for_arange = max(self.max_batch_size + 1, self.max_num_tokens)
         self.arange = torch.arange(
             max_num_slots_for_arange, device=device, dtype=torch.int32
         )
@@ -212,7 +209,7 @@ class SpecDecodeBaseProposer:
         )
 
         self.backup_next_token_ids = CpuGpuBuffer(
-            max_batch_size,
+            self.max_batch_size,
             dtype=torch.int32,
             pin_memory=is_pin_memory_available(),
             device=device,
@@ -220,7 +217,7 @@ class SpecDecodeBaseProposer:
         )
 
         self._slot_mapping_buffer = torch.zeros(
-            self.max_num_tokens + self._dflash_extra_tokens,
+            self.max_positions,
             dtype=torch.int64,
             device=device,
         )
@@ -289,7 +286,7 @@ class SpecDecodeBaseProposer:
         # Precompute draft position offsets in flattened tree.
         self.tree_draft_pos_offsets = torch.arange(
             1, len(self.tree_choices) + 1, device=device, dtype=torch.int32
-        ).repeat(max_batch_size, 1)
+        ).repeat(self.max_batch_size, 1)
 
     def _raise_if_padded_drafter_batch_disabled(self):
         if self.speculative_config.disable_padded_drafter_batch:
@@ -457,45 +454,9 @@ class SpecDecodeBaseProposer:
             self._determine_batch_execution_and_padding(num_tokens)
         )
 
-        if self.supports_mm_inputs:
-            mm_embeds, is_mm_embed = mm_embed_inputs or (None, None)
-
-            self.inputs_embeds[:num_tokens] = self.model.embed_input_ids(
-                self.input_ids[:num_tokens],
-                multimodal_embeddings=mm_embeds,
-                is_multimodal=is_mm_embed,
-            )
-
-            input_ids = None
-            inputs_embeds = self.inputs_embeds[:num_input_tokens]
-        else:
-            input_ids = self.input_ids[:num_input_tokens]
-            inputs_embeds = None
-
-        model_kwargs = {
-            "input_ids": input_ids,
-            "positions": self._get_positions(num_input_tokens),
-            "inputs_embeds": inputs_embeds,
-        }
-        if self.pass_hidden_states_to_model:
-            model_kwargs["hidden_states"] = self.hidden_states[:num_input_tokens]
-
-        # DFlash: override model kwargs for cross-attention architecture.
-        # The DFlash model expects:
-        # - hidden_states: context (combined target hidden states) only
-        # - input_ids: query tokens (bonus + mask) only
-        # - positions: all positions (context + query) for RoPE
-        if self.method == "dflash":
-            num_context = self._dflash_num_context
-            num_all_positions = num_context + num_input_tokens
-            model_kwargs["hidden_states"] = self.hidden_states[:num_context]
-            model_kwargs["positions"] = self._get_positions(num_all_positions)
-
-        # DFlash slot_mapping needs to cover all K/V tokens (context + query)
-        if self.method == "dflash":
-            slot_mapping_size = self._dflash_num_positions
-        else:
-            slot_mapping_size = num_input_tokens
+        model_kwargs, slot_mapping_size = self.build_model_inputs_first_pass(
+            num_tokens, num_input_tokens, mm_embed_inputs
+        )
 
         with set_forward_context(
             per_layer_attn_metadata,
@@ -717,110 +678,6 @@ class SpecDecodeBaseProposer:
             self.hidden_states[:num_tokens] = target_hidden_states
 
             return num_tokens, token_indices_to_sample, cad
-        elif self.method == "dflash":
-            # DFlash cross-attention: context K/V from target hidden states,
-            # Q from query embeddings (bonus + mask tokens).
-            batch_size = cad.batch_size()
-            num_context = target_token_ids.shape[0]
-            num_query_per_req = 1 + self.num_speculative_tokens
-            num_query_total = batch_size * num_query_per_req
-            num_all_positions = num_context + num_query_total
-
-            # Store for propose() to use
-            self._dflash_num_context = num_context
-            self._dflash_num_positions = num_all_positions
-
-            # 1. Set up query input_ids: [next_token, mask, mask, ...] x batch
-            for i in range(batch_size):
-                start = i * num_query_per_req
-                self.input_ids[start] = next_token_ids[i]
-                self.input_ids[start + 1 : start + num_query_per_req] = (
-                    self.parallel_drafting_token_id
-                )
-
-            # 2. Set up positions: [context_positions, query_positions]
-            # Context positions are the target positions
-            self.positions[:num_context] = target_positions
-            # Query positions extend from each request's last position
-            query_start_loc = cad.query_start_loc
-            for i in range(batch_size):
-                ctx_end = query_start_loc[i + 1].item()
-                last_pos = target_positions[ctx_end - 1].item()
-                q_start = num_context + i * num_query_per_req
-                for j in range(num_query_per_req):
-                    self.positions[q_start + j] = last_pos + 1 + j
-
-            # 3. Context hidden states (combined target HS)
-            self.hidden_states[:num_context] = target_hidden_states
-
-            # 4. Compute slot mapping for ALL K/V tokens (context + query)
-            block_size = self.block_size
-            all_positions = self.positions[:num_all_positions]
-            block_numbers = all_positions // block_size
-            # For context tokens, use the original block table
-            # For query tokens, also use block table (same requests)
-            # Build expanded block table index for gathering
-            slot_mapping = torch.empty(
-                num_all_positions, dtype=torch.int64, device=self.device
-            )
-            for i in range(batch_size):
-                # Context tokens for request i
-                ctx_start = query_start_loc[i].item()
-                ctx_end = query_start_loc[i + 1].item()
-                ctx_block_nums = block_numbers[ctx_start:ctx_end]
-                ctx_block_ids = cad.block_table_tensor[i].gather(
-                    0, ctx_block_nums.long()
-                )
-                slot_mapping[ctx_start:ctx_end] = (
-                    ctx_block_ids * block_size
-                    + all_positions[ctx_start:ctx_end] % block_size
-                )
-                # Query tokens for request i
-                q_start = num_context + i * num_query_per_req
-                q_end = q_start + num_query_per_req
-                q_block_nums = block_numbers[q_start:q_end]
-                q_block_ids = cad.block_table_tensor[i].gather(0, q_block_nums.long())
-                slot_mapping[q_start:q_end] = (
-                    q_block_ids * block_size + all_positions[q_start:q_end] % block_size
-                )
-
-            # 5. Token indices to sample: mask positions in query output
-            # Query output has num_query_per_req tokens per request.
-            # Skip index 0 (bonus token), take indices 1..num_spec_tokens.
-            token_indices_to_sample = torch.empty(
-                batch_size * self.num_speculative_tokens,
-                dtype=torch.int32,
-                device=self.device,
-            )
-            for i in range(batch_size):
-                base = i * num_query_per_req
-                for j in range(self.num_speculative_tokens):
-                    token_indices_to_sample[i * self.num_speculative_tokens + j] = (
-                        base + 1 + j
-                    )
-
-            # 6. Build attention metadata for the query tokens.
-            # DFlash uses non-causal attention.
-            new_query_start_loc = self.arange[: batch_size + 1] * num_query_per_req
-            new_cad = CommonAttentionMetadata(
-                query_start_loc=new_query_start_loc,
-                seq_lens=cad.seq_lens + num_query_per_req,
-                query_start_loc_cpu=(
-                    torch.from_numpy(self.token_arange_np[: batch_size + 1]).clone()
-                    * num_query_per_req
-                ),
-                _seq_lens_cpu=None,
-                _num_computed_tokens_cpu=None,
-                num_reqs=cad.num_reqs,
-                num_actual_tokens=num_query_total,
-                max_query_len=num_query_per_req,
-                max_seq_len=cad.max_seq_len + num_query_per_req,
-                block_table_tensor=cad.block_table_tensor,
-                slot_mapping=slot_mapping,
-                causal=False,
-            )
-
-            return num_query_total, token_indices_to_sample, new_cad
         else:
             assert self.is_rejected_token_mask is not None
             assert self.is_masked_token_mask is not None
@@ -922,6 +779,37 @@ class SpecDecodeBaseProposer:
             )
 
             return total_num_output_tokens, token_indices_to_sample, new_cad
+
+    def build_model_inputs_first_pass(
+        self,
+        num_tokens: int,
+        num_input_tokens: int,
+        mm_embed_inputs: tuple[list[torch.Tensor], torch.Tensor] | None,
+    ) -> tuple[dict[str, Any], int]:
+        if self.supports_mm_inputs:
+            mm_embeds, is_mm_embed = mm_embed_inputs or (None, None)
+
+            self.inputs_embeds[:num_tokens] = self.model.embed_input_ids(
+                self.input_ids[:num_tokens],
+                multimodal_embeddings=mm_embeds,
+                is_multimodal=is_mm_embed,
+            )
+
+            input_ids = None
+            inputs_embeds = self.inputs_embeds[:num_input_tokens]
+        else:
+            input_ids = self.input_ids[:num_input_tokens]
+            inputs_embeds = None
+
+        model_kwargs = {
+            "input_ids": input_ids,
+            "positions": self._get_positions(num_input_tokens),
+            "inputs_embeds": inputs_embeds,
+        }
+        if self.pass_hidden_states_to_model:
+            model_kwargs["hidden_states"] = self.hidden_states[:num_input_tokens]
+
+        return model_kwargs, num_input_tokens
 
     def model_returns_tuple(self) -> bool:
         return self.method not in ("mtp", "draft_model", "dflash")
@@ -1645,20 +1533,12 @@ class SpecDecodeBaseProposer:
         for fwd_idx in range(
             1 if only_one_forward_pass else self.num_speculative_tokens
         ):
-            if self.method == "dflash":
-                num_query_tokens = min(num_tokens, self._dflash_extra_tokens)
             if fwd_idx <= 1:
                 cudagraph_runtime_mode, num_input_tokens, num_tokens_across_dp = (
                     self._determine_batch_execution_and_padding(
-                        num_query_tokens, use_cudagraphs=use_cudagraphs
+                        num_tokens, use_cudagraphs=use_cudagraphs
                     )
                 )
-
-            # TODO(ben): figure out what the right value is here
-            if self.method == "dflash":
-                num_positions = num_tokens + num_query_tokens
-            else:
-                raise ValueError("Unsupported method: {}".format(self.method))
 
             # Make sure to use EAGLE's own buffer during cudagraph capture.
             if (
@@ -1687,11 +1567,11 @@ class SpecDecodeBaseProposer:
 
                 kwargs = dict(
                     input_ids=input_ids,
-                    positions=self._get_positions(num_positions),
+                    positions=self._get_positions(num_input_tokens),
                     inputs_embeds=inputs_embeds,
                 )
                 if self.pass_hidden_states_to_model:
-                    kwargs["hidden_states"] = self.hidden_states[:num_tokens]
+                    kwargs["hidden_states"] = self.hidden_states[:num_input_tokens]
                 self.model(**kwargs)
 
     def _get_eagle3_use_aux_hidden_state_from_config(self) -> bool:

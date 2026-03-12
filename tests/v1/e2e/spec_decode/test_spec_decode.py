@@ -1152,7 +1152,7 @@ def test_dflash_acceptance_rates(dflash_config):
         expected_len = expected_len * 0.9
         print(
             f"DFlash acceptance_len for {dataset_name}: {mean_acceptance_length:.2f}"
-            f" (expected at least {expected_len})"
+            f" (expected at least {expected_len:.2f})"
         )
 
         assert mean_acceptance_length >= expected_len, (
