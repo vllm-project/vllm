@@ -61,7 +61,8 @@ class XPUPlatform(Platform):
 
         dtype = attn_selector_config.dtype
         if attn_selector_config.use_sparse:
-            raise NotImplementedError("Sparse Attention is not supported on XPU.")
+            logger.info_once("Using XPU MLA Sparse backend.")
+            return AttentionBackendEnum.XPU_MLA_SPARSE.get_path()
         if attn_selector_config.use_mla:
             logger.info_once("Using Triton MLA backend on V1 engine.")
             return AttentionBackendEnum.TRITON_MLA.get_path()

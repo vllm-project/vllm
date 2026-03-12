@@ -87,6 +87,7 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     funaudiochat="FunAudioChatConfig",
     hunyuan_vl="HunYuanVLConfig",
     isaac="IsaacConfig",
+    kimi_k2="DeepseekV3Config",  # Kimi K2 uses same architecture as DeepSeek V3
     kimi_linear="KimiLinearConfig",
     kimi_vl="KimiVLConfig",
     kimi_k25="KimiK25Config",
@@ -161,7 +162,16 @@ class HFConfigParser(ConfigParserBase):
             )
         # Allow hf_overrides to override model_type before checking _CONFIG_REGISTRY
         if (hf_overrides := kwargs.pop("hf_overrides", None)) is not None:
-            model_type = hf_overrides.get("model_type", model_type)
+            if isinstance(hf_overrides, dict) and "model_type" in hf_overrides:
+                model_type = hf_overrides["model_type"]
+            elif callable(hf_overrides):
+                # If hf_overrides doesn't modify model_type, it will be passed straight
+                # through and remain unchanged by this elif block
+                dummy_model_type = f"dummy_{model_type}"
+                dummy_kwargs = dict(architectures=[""], model_type=dummy_model_type)
+                dummy_config = PretrainedConfig(**dummy_kwargs)
+                dummy_model_type = hf_overrides(dummy_config).model_type
+                model_type = dummy_model_type.removeprefix("dummy_")
 
         if model_type in _CONFIG_REGISTRY:
             config_class = _CONFIG_REGISTRY[model_type]
@@ -634,7 +644,7 @@ def get_config(
         trust_remote_code=trust_remote_code,
         revision=revision,
         code_revision=code_revision,
-        hf_overrides=hf_overrides_kw,
+        hf_overrides=hf_overrides_kw or hf_overrides_fn,
         **kwargs,
     )
 
@@ -1107,7 +1117,7 @@ def get_safetensors_params_metadata(
     revision: str | None = None,
 ) -> dict[str, Any]:
     """
-    Get the safetensors metadata for remote model repository.
+    Get the safetensors parameters metadata for remote/local model repository.
     """
     full_metadata = {}
     if (model_path := Path(model)).exists():
