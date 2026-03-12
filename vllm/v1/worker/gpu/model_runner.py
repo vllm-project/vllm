@@ -256,8 +256,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         tasks: list[SupportedTask] = []
         if self.model_config.runner_type == "generate":
             tasks.extend(self.model_state.get_supported_generation_tasks())
-        if self.pooling_runner is not None:
-            tasks.extend(self.pooling_runner.get_supported_pooling_tasks())
+        if self.is_pooling_model:
+            # Do not rely on pooling_runner here, since this information is needed
+            # on the first PP rank, while pooling_runner is only initialized
+            # on the last PP rank.
+            tasks.extend(PoolingRunner.get_supported_tasks(self.model))
         return tuple(tasks)
 
     def load_model(self, *args, **kwargs) -> None:
