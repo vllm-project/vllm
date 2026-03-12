@@ -19,6 +19,7 @@ from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.platforms import current_platform
 from vllm.platforms.cpu import CpuPlatform
 from vllm.platforms.cuda import CudaPlatform
+from vllm.platforms.interface import DeviceCapability
 from vllm.platforms.rocm import RocmPlatform
 from vllm.utils.torch_utils import set_default_torch_dtype, set_random_seed
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -82,6 +83,20 @@ def test_mha_attn_platform(default_vllm_config, device: str):
         ):
             attn = MMEncoderAttention(16, 72, scale=1)
             assert attn.attn_backend == AttentionBackendEnum.TRITON_ATTN
+
+        # Test Turing (pre-Ampere, sm_75): FlashAttention requires sm>=80,
+        # and Triton no longer supports MMA on Turing, so we expect that
+        # TORCH_SDPA is used for MMEncoderAttention.
+        with (
+            patch("vllm.model_executor.models.vision.current_platform", CudaPlatform()),
+            patch.object(
+                CudaPlatform,
+                "get_device_capability",
+                return_value=DeviceCapability(major=7, minor=5),
+            ),
+        ):
+            attn = MMEncoderAttention(16, 64, scale=1)
+            assert attn.attn_backend == AttentionBackendEnum.TORCH_SDPA
 
 
 def ref_attention(

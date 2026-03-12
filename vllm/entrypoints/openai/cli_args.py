@@ -125,8 +125,11 @@ class BaseFrontendArgs:
     `--tool-call-parser`."""
     tool_server: str | None = None
     """Comma-separated list of host:port pairs (IPv4, IPv6, or hostname).
-    Examples: 127.0.0.1:8000, [::1]:8000, localhost:1234. Or `demo` for demo
-    purpose."""
+    Examples: 127.0.0.1:8000, [::1]:8000, localhost:1234. Or `demo` for
+    built-in demo tools (browser and Python code interpreter). WARNING:
+    The `demo` Python tool executes model-generated code in Docker without
+    network isolation by default. See the security guide for more
+    information."""
     log_config_file: str | None = envs.VLLM_LOGGING_CONFIG_PATH
     """Path to logging config JSON file for both vllm and uvicorn"""
     max_log_len: int | None = None
@@ -278,10 +281,6 @@ class FrontendArgs(BaseFrontendArgs):
     Enable offline FastAPI documentation for air-gapped environments.
     Uses vendored static assets bundled with vLLM.
     """
-    use_gpu_for_pooling_score: bool = False
-    """If set, run pooling score MaxSim on GPU in the API server process.
-    Can significantly improve late-interaction scoring performance.
-    https://github.com/vllm-project/vllm/pull/35330"""
 
     @classmethod
     def _customize_cli_kwargs(
