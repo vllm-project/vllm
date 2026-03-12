@@ -104,13 +104,13 @@ fn decode_handshake_message(
 
     let frames = message.into_vec();
     let actual_identity = frames[0].to_vec();
-    if let Some(expected_identity) = expected_identity {
-        if actual_identity != expected_identity {
-            return Err(Error::UnexpectedHandshakeIdentity {
-                expected: expected_identity.to_vec(),
-                actual: actual_identity,
-            });
-        }
+    if let Some(expected_identity) = expected_identity
+        && actual_identity != expected_identity
+    {
+        return Err(Error::UnexpectedHandshakeIdentity {
+            expected: expected_identity.to_vec(),
+            actual: actual_identity,
+        });
     }
 
     let handshake_message: ReadyMessage = decode_msgpack(&frames[1])?;
