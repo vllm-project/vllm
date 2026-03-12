@@ -236,6 +236,10 @@ llm = LLM(
     trust_remote_code=True,
     max_model_len=2048,
     limit_mm_per_prompt={"image": 1},
+    io_processor_plugin=(
+        "vllm.plugins.io_processors.moondream3."
+        "Moondream3DetectPointIOProcessor"
+    ),
 )
 
 image = ImageAsset("stop_sign").pil_image
@@ -286,27 +290,13 @@ caption_out = llm.generate(
 )[0].outputs[0].text
 
 detect_out = llm.generate(
-    {
-        "prompt": make_detect_prompt("sign"),
-        "multi_modal_data": {"image": image},
-    },
-    SamplingParams(
-        max_tokens=500,
-        temperature=0,
-        extra_args={"moondream3_task": "detect"},
-    ),
+    {"data": {"task": "detect", "object": "sign", "image": image}},
+    SamplingParams(max_tokens=500, temperature=0),
 )[0].outputs[0].text
 
 point_out = llm.generate(
-    {
-        "prompt": make_point_prompt("sign"),
-        "multi_modal_data": {"image": image},
-    },
-    SamplingParams(
-        max_tokens=500,
-        temperature=0,
-        extra_args={"moondream3_task": "point"},
-    ),
+    {"data": {"task": "point", "object": "sign", "image": image}},
+    SamplingParams(max_tokens=500, temperature=0),
 )[0].outputs[0].text
 
 print("query:", query_out)
@@ -316,8 +306,8 @@ print("point:", json.loads(point_out))
 ```
 
 !!! note
-    For `detect` and `point`, set `extra_args={"moondream3_task": "detect"}` or
-    `extra_args={"moondream3_task": "point"}` in `SamplingParams`.
+    `detect` and `point` use the Moondream3 generation IOProcessor plugin.
+    Query and caption still use the standard multimodal prompt path.
 
 ### Video Inputs
 

@@ -782,8 +782,10 @@ Some models are supported only via the [Transformers modeling backend](#transfor
     For `InternVLChatModel`, only InternVL2.5 with Qwen2.5 text backbone (`OpenGVLab/InternVL2.5-1B` etc.), InternVL3 and InternVL3.5 have video inputs support currently.
 
 !!! note
-    `Moondream3ForCausalLM` uses task-specific prompt templates for `query`,
-    `caption`, `detect`, and `point`.
+    `Moondream3ForCausalLM` uses task-specific prompt templates for `query`
+    and `caption`. `detect` and `point` are exposed through the Moondream3
+    generation IOProcessor plugin, which builds the model's internal prompt
+    format for those skills.
     See [Moondream3 prompt recipes](../features/multimodal_inputs.md#moondream3-prompt-recipes).
 
 !!! note

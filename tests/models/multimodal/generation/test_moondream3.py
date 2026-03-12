@@ -30,6 +30,9 @@ from ....utils import large_gpu_mark
 
 MOONDREAM3_MODEL_ID = "moondream/moondream3-preview"
 MOONDREAM3_TOKENIZER = "moondream/starmie-v1"
+MOONDREAM3_IO_PROCESSOR = (
+    "vllm.plugins.io_processors.moondream3.Moondream3DetectPointIOProcessor"
+)
 
 # Golden reference values from verified HF run (model revision 1dae073c).
 # Used as fallback when live HF computation is unavailable.
@@ -194,6 +197,14 @@ def make_point_prompt(obj: str) -> str:
     )
 
 
+def make_detect_request(obj: str, image):
+    return {"data": {"task": "detect", "object": obj, "image": image}}
+
+
+def make_point_request(obj: str, image):
+    return {"data": {"task": "point", "object": obj, "image": image}}
+
+
 def make_caption_prompt() -> str:
     """Create a caption prompt for Moondream3.
 
@@ -264,6 +275,7 @@ def llm(hf_detect_point_reference):
             max_model_len=2048,
             enforce_eager=True,
             limit_mm_per_prompt={"image": 1},
+            io_processor_plugin=MOONDREAM3_IO_PROCESSOR,
         )
     except Exception as exc:
         pytest.skip(f"Failed to load {MOONDREAM3_MODEL_ID}: {exc}")
@@ -360,15 +372,10 @@ def test_detect_skill(llm, image_assets: ImageTestAssets):
     from vllm import SamplingParams
 
     image = image_assets[0].pil_image  # stop_sign
-    prompt = make_detect_prompt("sign")
 
     outputs = llm.generate(
-        {"prompt": prompt, "multi_modal_data": {"image": image}},
-        SamplingParams(
-            max_tokens=500,
-            temperature=0,
-            extra_args={"moondream3_task": "detect"},
-        ),
+        make_detect_request("sign", image),
+        SamplingParams(max_tokens=500, temperature=0),
     )
 
     output_text = outputs[0].outputs[0].text
@@ -402,15 +409,10 @@ def test_point_skill(llm, image_assets: ImageTestAssets):
     from vllm import SamplingParams
 
     image = image_assets[0].pil_image  # stop_sign
-    prompt = make_point_prompt("sign")
 
     outputs = llm.generate(
-        {"prompt": prompt, "multi_modal_data": {"image": image}},
-        SamplingParams(
-            max_tokens=500,
-            temperature=0,
-            extra_args={"moondream3_task": "point"},
-        ),
+        make_point_request("sign", image),
+        SamplingParams(max_tokens=500, temperature=0),
     )
 
     output_text = outputs[0].outputs[0].text
@@ -453,15 +455,10 @@ def test_detect_hf_parity(
     source = "live HF" if hf_ref["live"] else "golden (rev 1dae073c)"
 
     image = image_assets[0].pil_image  # stop_sign
-    prompt = make_detect_prompt("sign")
 
     outputs = llm.generate(
-        {"prompt": prompt, "multi_modal_data": {"image": image}},
-        SamplingParams(
-            max_tokens=500,
-            temperature=0,
-            extra_args={"moondream3_task": "detect"},
-        ),
+        make_detect_request("sign", image),
+        SamplingParams(max_tokens=500, temperature=0),
     )
 
     result = json.loads(outputs[0].outputs[0].text)
@@ -502,15 +499,10 @@ def test_point_hf_parity(
     hf_first_point = hf_point["points"][0]
 
     image = image_assets[0].pil_image  # stop_sign
-    prompt = make_point_prompt("sign")
 
     outputs = llm.generate(
-        {"prompt": prompt, "multi_modal_data": {"image": image}},
-        SamplingParams(
-            max_tokens=500,
-            temperature=0,
-            extra_args={"moondream3_task": "point"},
-        ),
+        make_point_request("sign", image),
+        SamplingParams(max_tokens=500, temperature=0),
     )
 
     result = json.loads(outputs[0].outputs[0].text)
@@ -538,21 +530,14 @@ def test_mixed_batch(llm, image_assets: ImageTestAssets):
             "prompt": make_query_prompt("What is shown in this image?"),
             "multi_modal_data": {"image": image},
         },
-        {
-            "prompt": make_detect_prompt("sign"),
-            "multi_modal_data": {"image": image},
-        },
+        make_detect_request("sign", image),
     ]
 
     outputs = llm.generate(
         prompts,
         [
             SamplingParams(max_tokens=200, temperature=0),
-            SamplingParams(
-                max_tokens=200,
-                temperature=0,
-                extra_args={"moondream3_task": "detect"},
-            ),
+            SamplingParams(max_tokens=200, temperature=0),
         ],
     )
 

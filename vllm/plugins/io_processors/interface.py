@@ -7,7 +7,7 @@ from typing import Generic, TypeVar
 
 from vllm.config import VllmConfig
 from vllm.inputs.data import PromptType
-from vllm.outputs import PoolingRequestOutput
+from vllm.outputs import PoolingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.renderers import BaseRenderer
 from vllm.sampling_params import SamplingParams
@@ -59,6 +59,13 @@ class IOProcessor(ABC, Generic[IOProcessorInput, IOProcessorOutput]):
             return validate_or_generate_params(params)  # type: ignore
 
         return params or SamplingParams()
+
+    def merge_sampling_params_for_prompt(
+        self,
+        prompt: IOProcessorInput,
+        params: SamplingParams | None = None,
+    ) -> SamplingParams:
+        return self.merge_sampling_params(params)
 
     def merge_pooling_params(
         self,
@@ -122,3 +129,23 @@ class IOProcessor(ABC, Generic[IOProcessorInput, IOProcessorOutput]):
         )
         collected_output = [output[1] for output in sorted_output]
         return self.post_process(collected_output, request_id=request_id, **kwargs)
+
+    def post_process_generate(
+        self,
+        model_output: RequestOutput,
+        request_id: str | None = None,
+        **kwargs,
+    ) -> RequestOutput:
+        return model_output
+
+    async def post_process_generate_async(
+        self,
+        model_output: RequestOutput,
+        request_id: str | None = None,
+        **kwargs,
+    ) -> RequestOutput:
+        return self.post_process_generate(
+            model_output,
+            request_id=request_id,
+            **kwargs,
+        )

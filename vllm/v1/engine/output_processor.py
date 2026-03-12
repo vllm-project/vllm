@@ -40,7 +40,6 @@ from vllm.v1.metrics.stats import (
 
 # shared empty CPU tensor used as a placeholder pooling output
 EMPTY_CPU_TENSOR = torch.empty(0, device="cpu")
-OUTPUT_TEXT_UTF8_KEY = "output_text_utf8"
 
 
 class RequestOutputCollector:
@@ -703,30 +702,8 @@ class OutputProcessor:
         ):
             return
 
-        text_override = self._decode_output_text_utf8(model_extra_output)
-        if text_override is None:
-            return
-
         for comp_output in request_output.outputs:
-            comp_output.text = text_override
-
-    def _decode_output_text_utf8(
-        self,
-        model_extra_output: dict[str, torch.Tensor],
-    ) -> str | None:
-        payload = model_extra_output.get(OUTPUT_TEXT_UTF8_KEY)
-        if payload is None:
-            return None
-        if not isinstance(payload, torch.Tensor):
-            return None
-        if payload.dim() != 1:
-            return None
-
-        try:
-            byte_values = payload.to("cpu", dtype=torch.uint8).tolist()
-            return bytes(byte_values).decode("utf-8")
-        except (TypeError, ValueError, UnicodeDecodeError):
-            return None
+            comp_output.model_extra_output = model_extra_output
 
     def _finish_request(self, req_state: RequestState) -> None:
         req_id = req_state.request_id

@@ -423,7 +423,7 @@ class LLM:
 
     def generate(
         self,
-        prompts: PromptType | Sequence[PromptType],
+        prompts: PromptType | DataPrompt | Sequence[PromptType | DataPrompt],
         sampling_params: SamplingParams | Sequence[SamplingParams] | None = None,
         *,
         use_tqdm: bool | Callable[..., tqdm] = True,
@@ -473,15 +473,49 @@ class LLM:
         if sampling_params is None:
             sampling_params = self.get_default_sampling_params()
 
-        return self._run_completion(
-            prompts=prompts,
-            params=sampling_params,
+        seq_prompts = prompt_to_seq(prompts)
+        has_io_processor_prompts = any(
+            self._is_io_processor_prompt(prompt) for prompt in seq_prompts
+        )
+
+        if not has_io_processor_prompts:
+            return self._run_completion(
+                prompts=prompts,
+                params=sampling_params,
+                output_type=RequestOutput,
+                use_tqdm=use_tqdm,
+                lora_request=lora_request,
+                tokenization_kwargs=tokenization_kwargs,
+                priority=priority,
+            )
+
+        if self.io_processor is None:
+            raise ValueError(
+                "No IOProcessor plugin installed, but `LLM.generate()` received "
+                "a prompt with a `data` field."
+            )
+
+        io_prompts, io_params, use_io_processor = (
+            self._prepare_generate_io_processor_inputs(
+                prompts,
+                sampling_params,
+            )
+        )
+        outputs = self._run_completion(
+            prompts=io_prompts,
+            params=io_params,
             output_type=RequestOutput,
             use_tqdm=use_tqdm,
             lora_request=lora_request,
             tokenization_kwargs=tokenization_kwargs,
             priority=priority,
         )
+        return [
+            self.io_processor.post_process_generate(output)
+            if use_io_processor[i]
+            else output
+            for i, output in enumerate(outputs)
+        ]
 
     def enqueue(
         self,
@@ -1729,6 +1763,57 @@ class LLM:
             return priority
 
         return [0] * num_requests
+
+    @staticmethod
+    def _is_io_processor_prompt(prompt: object) -> bool:
+        return isinstance(prompt, dict) and "data" in prompt
+
+    def _prepare_generate_io_processor_inputs(
+        self,
+        prompts: PromptType | DataPrompt | Sequence[PromptType | DataPrompt],
+        params: SamplingParams | Sequence[SamplingParams],
+    ) -> tuple[Sequence[PromptType], Sequence[SamplingParams], Sequence[bool]]:
+        assert self.io_processor is not None
+
+        seq_prompts = prompt_to_seq(prompts)
+        seq_params = self._params_to_seq(params, len(seq_prompts))
+
+        processed_prompts: list[PromptType] = []
+        processed_params: list[SamplingParams] = []
+        use_io_processor: list[bool] = []
+
+        for raw_prompt, param in zip(seq_prompts, seq_params):
+            if not self._is_io_processor_prompt(raw_prompt):
+                processed_prompts.append(raw_prompt)
+                processed_params.append(param)
+                use_io_processor.append(False)
+                continue
+
+            assert isinstance(raw_prompt, dict)
+            prompt_data = raw_prompt.get("data")
+            if prompt_data is None:
+                raise ValueError(
+                    "The `data` field of an IOProcessor prompt cannot be None."
+                )
+
+            validated_prompt = self.io_processor.parse_data(prompt_data)
+            engine_prompt = self.io_processor.pre_process(prompt=validated_prompt)
+            engine_prompts = prompt_to_seq(engine_prompt)
+            if len(engine_prompts) != 1:
+                raise ValueError(
+                    "Generation IOProcessor plugins must map each logical "
+                    "request to exactly one engine prompt."
+                )
+            processed_prompts.append(engine_prompts[0])
+            processed_params.append(
+                self.io_processor.merge_sampling_params_for_prompt(
+                    validated_prompt,
+                    param.clone(),
+                )
+            )
+            use_io_processor.append(True)
+
+        return processed_prompts, processed_params, use_io_processor
 
     def _add_completion_requests(
         self,

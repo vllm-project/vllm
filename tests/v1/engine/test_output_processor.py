@@ -142,7 +142,7 @@ def test_incremental_detokenization(
     assert not output_processor.has_unfinished_requests()
 
 
-def test_model_text_override(dummy_test_vectors):
+def test_model_extra_output_is_attached_to_completion(dummy_test_vectors):
     output_processor = OutputProcessor(dummy_test_vectors.tokenizer, log_stats=False)
 
     request = EngineCoreRequest(
@@ -166,17 +166,17 @@ def test_model_text_override(dummy_test_vectors):
     output_processor.add_request(request, dummy_test_vectors.prompt_strings[0])
 
     first_token = dummy_test_vectors.generation_tokens[0][0]
-    override_text = '{"points": [{"x": 0.5, "y": 0.5}]}'
+    expected_text = dummy_test_vectors.tokenizer.decode(
+        [first_token],
+        skip_special_tokens=False,
+    )
     outputs = [
         EngineCoreOutput(
             request_id=request.request_id,
             new_token_ids=[first_token],
             finish_reason=FinishReason.LENGTH,
             model_extra_output={
-                "output_text_utf8": torch.tensor(
-                    list(override_text.encode("utf-8")),
-                    dtype=torch.uint8,
-                )
+                "custom_payload": torch.tensor([1.0, 2.0], dtype=torch.float32)
             },
         )
     ]
@@ -186,25 +186,12 @@ def test_model_text_override(dummy_test_vectors):
     assert len(processed_outputs.request_outputs) == 1
     request_output = processed_outputs.request_outputs[0]
     assert isinstance(request_output, RequestOutput)
-    assert request_output.outputs[0].text == override_text
-
-
-def test_model_text_override_invalid_payload_is_ignored(dummy_test_vectors):
-    output_processor = OutputProcessor(dummy_test_vectors.tokenizer, log_stats=False)
-
-    # Wrong shape: payload must be 1D byte tensor.
-    invalid_payload = torch.tensor([[1, 2]], dtype=torch.uint8)
-    assert (
-        output_processor._decode_output_text_utf8({"output_text_utf8": invalid_payload})
-        is None
-    )
-
-    # Invalid UTF-8 bytes should also be ignored.
-    invalid_utf8 = torch.tensor([0xFF], dtype=torch.uint8)
-    assert (
-        output_processor._decode_output_text_utf8({"output_text_utf8": invalid_utf8})
-        is None
-    )
+    assert request_output.outputs[0].text == expected_text
+    assert request_output.outputs[0].model_extra_output is not None
+    assert request_output.outputs[0].model_extra_output["custom_payload"].tolist() == [
+        1.0,
+        2.0,
+    ]
 
 
 def _validate_logprobs(

@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Inference-only Moondream3 model implementation."""
 
-import json
 import math
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
@@ -46,6 +45,12 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.models.moondream3_io import (
+    MOONDREAM3_MAX_OBJECTS_DEFAULT,
+    MOONDREAM3_TASK_DETECT,
+    MOONDREAM3_TASK_POINT,
+    encode_moondream3_detect_point_output,
+)
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalDataDict,
@@ -484,7 +489,7 @@ class Moondream3RegionModule(nn.Module):
 # ============================================================================
 
 # Maximum number of objects per detect/point request.
-_DEFAULT_MAX_OBJECTS = 150
+_DEFAULT_MAX_OBJECTS = MOONDREAM3_MAX_OBJECTS_DEFAULT
 
 
 @dataclass
@@ -536,7 +541,10 @@ class DetectPointStateManager:
         mode: Literal["detect", "point"],
         max_objects: int = _DEFAULT_MAX_OBJECTS,
     ) -> None:
-        self._states[req_id] = DetectPointState(mode=mode, max_objects=max_objects)
+        self._states[req_id] = DetectPointState(
+            mode=mode,
+            max_objects=max_objects,
+        )
 
     def get_state(self, req_id: str) -> DetectPointState | None:
         return self._states.get(req_id)
@@ -546,15 +554,6 @@ class DetectPointStateManager:
 
     def remove_request(self, req_id: str) -> None:
         self._states.pop(req_id, None)
-
-    def get_json_result(self, req_id: str) -> str | None:
-        """Serialize the accumulated objects for a finished request."""
-        state = self._states.get(req_id)
-        if state is None:
-            return None
-        if state.mode == "detect":
-            return json.dumps({"objects": state.objects})
-        return json.dumps({"points": state.objects})
 
     def update_after_sample(self, req_id: str, sampled_token_id: int) -> None:
         """Transition state after a token is sampled."""
@@ -617,10 +616,10 @@ class Moondream3PerRequestStateAdapter(NoOpPerRequestStateAdapter):
             return
         extra = getattr(sampling_params, "extra_args", None) or {}
         dp_task = extra.get("moondream3_task")
-        if dp_task == "detect":
-            mode: Literal["detect", "point"] = "detect"
-        elif dp_task == "point":
-            mode = "point"
+        if dp_task == MOONDREAM3_TASK_DETECT:
+            mode: Literal["detect", "point"] = MOONDREAM3_TASK_DETECT
+        elif dp_task == MOONDREAM3_TASK_POINT:
+            mode = MOONDREAM3_TASK_POINT
         else:
             return
 
@@ -713,14 +712,10 @@ class Moondream3PerRequestStateAdapter(NoOpPerRequestStateAdapter):
             state = dp_mgr.get_state(req_id)
             if state is None:
                 continue
-            json_str = dp_mgr.get_json_result(req_id)
-            if json_str is not None:
-                per_request_extra[req_id] = {
-                    "output_text_utf8": torch.tensor(
-                        list(json_str.encode("utf-8")),
-                        dtype=torch.uint8,
-                    )
-                }
+            per_request_extra[req_id] = encode_moondream3_detect_point_output(
+                state.mode,
+                state.objects,
+            )
         return per_request_extra or None
 
     def _sync_dp_pending_embeds(
@@ -1420,9 +1415,10 @@ class Moondream3ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
     coordinates from hidden states and feed Fourier-encoded coordinate
     embeddings back as the next input.
 
-    Detect/point mode is activated by setting
-    ``SamplingParams(extra_args={"moondream3_task": "detect"})``
-    (or ``"point"``).
+    Detect/point decoding is exposed via a generation IOProcessor plugin.
+    The model still uses a per-request state machine internally to decode
+    coordinates from hidden states, but the final detect/point response is
+    intended to be decoded on the frontend from model extra output metadata.
     """
 
     supports_multimodal = True

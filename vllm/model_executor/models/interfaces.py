@@ -64,17 +64,17 @@ The output embeddings must be one of the following formats:
 """
 
 
-PerRequestStateExtraOutput: TypeAlias = dict[str, dict[str, torch.Tensor]]
+PerRequestModelExtraOutput: TypeAlias = dict[str, dict[str, torch.Tensor]]
+PerRequestStateExtraOutput: TypeAlias = PerRequestModelExtraOutput
 
 
 class PerRequestStateAdapter(Protocol):
     """Typed callbacks for per-request mutable decode state.
 
     The split callbacks preserve execution ordering across forward, logits
-    computation, and post-sampling state transitions. Moondream3 model
-    uses it - for its detect/point state machine that tracks per-request
-    decode state (coordinates, bounding boxes) and overrides output with
-    JSON results.
+    computation, and post-sampling state transitions. Implementations may also
+    return arbitrary per-request tensor metadata that is forwarded to the
+    frontend with the final request output.
     """
 
     def on_new_request(
@@ -104,7 +104,7 @@ class PerRequestStateAdapter(Protocol):
         self,
         *,
         req_ids: list[str],
-    ) -> PerRequestStateExtraOutput | None: ...
+    ) -> PerRequestModelExtraOutput | None: ...
 
 
 class NoOpPerRequestStateAdapter:
@@ -140,7 +140,7 @@ class NoOpPerRequestStateAdapter:
         self,
         *,
         req_ids: list[str],
-    ) -> PerRequestStateExtraOutput | None:
+    ) -> PerRequestModelExtraOutput | None:
         return None
 
 
