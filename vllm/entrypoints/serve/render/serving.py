@@ -96,9 +96,9 @@ class OpenAIServingRender:
         if error_check_ret is not None:
             logger.error("Error with model %s", error_check_ret)
             return error_check_ret
-        return await self._preprocess_chat_request(request)
+        return await self.render_chat(request)
 
-    async def _preprocess_chat_request(
+    async def render_chat(
         self,
         request: ChatCompletionRequest,
     ) -> tuple[list[ConversationMessage], list[ProcessorInputs]] | ErrorResponse:
@@ -192,9 +192,9 @@ class OpenAIServingRender:
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             return error_check_ret
-        return await self._preprocess_completion_request(request)
+        return await self.render_completion(request)
 
-    async def _preprocess_completion_request(
+    async def render_completion(
         self,
         request: CompletionRequest,
     ) -> list[ProcessorInputs] | ErrorResponse:
@@ -228,6 +228,7 @@ class OpenAIServingRender:
         request: ChatCompletionRequest,
         should_include_tools: bool = True,
     ):
+        """Build Harmony (GPT-OSS) messages and engine prompt from a chat request."""
         messages: list[OpenAIMessage] = []
 
         # because of issues with pydantic we need to potentially

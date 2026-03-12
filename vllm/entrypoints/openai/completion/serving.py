@@ -103,7 +103,7 @@ class OpenAIServingCompletion(OpenAIServing):
         if self.engine_client.errored:
             raise self.engine_client.dead_error
 
-        return await self.openai_serving_render._preprocess_completion_request(request)
+        return await self.openai_serving_render.render_completion(request)
 
     async def create_completion(
         self,

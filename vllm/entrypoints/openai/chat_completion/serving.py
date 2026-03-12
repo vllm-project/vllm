@@ -205,7 +205,7 @@ class OpenAIServingChat(OpenAIServing):
         if self.engine_client.errored:
             raise self.engine_client.dead_error
 
-        return await self.openai_serving_render._preprocess_chat_request(request)
+        return await self.openai_serving_render.render_chat(request)
 
     async def create_chat_completion(
         self,
@@ -1805,14 +1805,4 @@ class OpenAIServingChat(OpenAIServing):
                     ),
                 )
             ]
-        )
-
-    def _make_request_with_harmony(
-        self,
-        request: ChatCompletionRequest,
-        should_include_tools: bool = True,
-    ):
-        """Delegates to OpenAIServingRender._make_request_with_harmony."""
-        return self.openai_serving_render._make_request_with_harmony(
-            request, should_include_tools
         )
