@@ -21,7 +21,7 @@
 
 #include <cooperative_groups.h>
 #include <cooperative_groups/reduce.h>
-#include <cub/cub.cuh>
+#include "../cub_helpers.h"
 
 namespace vllm {
 namespace moe {

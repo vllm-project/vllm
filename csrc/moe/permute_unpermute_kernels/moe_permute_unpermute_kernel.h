@@ -5,9 +5,7 @@
 #include <c10/core/ScalarType.h>
 #include <torch/all.h>
 #include "dispatch.h"
-#include <cub/cub.cuh>
-#include <cub/device/device_radix_sort.cuh>
-#include <cub/util_type.cuh>
+#include "../../cub_helpers.h"
 #include "cutlass/numeric_size.h"
 #include "cutlass/array.h"
 
