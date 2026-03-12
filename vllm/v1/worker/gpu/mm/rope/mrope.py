@@ -1,13 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from typing import cast
+
 import torch
+import torch.nn as nn
 
 from vllm.model_executor.models.interfaces import SupportsMRoPE
 from vllm.triton_utils import tl, triton
 from vllm.v1.worker.gpu.buffer_utils import StagedWriteTensor, UvaBackedTensor
+from vllm.v1.worker.gpu.mm.rope.interface import RopeState
 
 
-class MRopeState:
+class MRopeState(RopeState):
     def __init__(
         self,
         max_num_reqs: int,
@@ -43,13 +47,14 @@ class MRopeState:
             (3, max_num_tokens + 1), dtype=torch.int64, device=device
         )
 
-    def init_prefill_mrope_positions(
+    def init_prefill_positions(
         self,
         req_idx: int,
-        mrope_model: SupportsMRoPE,
+        model: nn.Module,
         prefill_token_ids: list[int],
         mm_features: list,
     ) -> None:
+        mrope_model = cast(SupportsMRoPE, model)
         prefill_mrope_positions, prefill_mrope_delta = (
             mrope_model.get_mrope_input_positions(prefill_token_ids, mm_features)
         )
@@ -62,7 +67,10 @@ class MRopeState:
         self.prefill_mrope_positions.apply_write()
         self.prefill_mrope_delta.copy_to_uva()
 
-    def prepare_mrope_positions(
+    def get_positions(self, num_tokens: int) -> torch.Tensor:
+        return self.mrope_positions[:, :num_tokens]
+
+    def prepare_positions(
         self,
         idx_mapping: torch.Tensor,
         query_start_loc: torch.Tensor,

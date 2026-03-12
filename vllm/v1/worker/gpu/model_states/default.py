@@ -13,8 +13,9 @@ from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.mm.encoder_runner import EncoderRunner
-from vllm.v1.worker.gpu.mm.mrope_utils import MRopeState
-from vllm.v1.worker.gpu.mm.xdrope_utils import XDRopeState
+from vllm.v1.worker.gpu.mm.rope.interface import RopeState
+from vllm.v1.worker.gpu.mm.rope.mrope import MRopeState
+from vllm.v1.worker.gpu.mm.rope.xdrope import XDRopeState
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.states import RequestState
 from vllm.v1.worker.utils import AttentionGroup
@@ -53,17 +54,16 @@ class DefaultModelState(ModelState):
                 device=self.device,
             )
 
-        self.uses_mrope = self.model_config.uses_mrope
-        if self.uses_mrope:
-            self.mrope_state = MRopeState(
+        self.rope_state: RopeState | None = None
+        if self.model_config.uses_mrope:
+            self.rope_state = MRopeState(
                 max_num_reqs=self.max_num_reqs,
                 max_num_tokens=self.max_num_tokens,
                 max_model_len=self.max_model_len,
                 device=self.device,
             )
-        self.xdrope_state: XDRopeState | None = None
-        if self.model_config.uses_xdrope_dim > 0:
-            self.xdrope_state = XDRopeState(
+        elif self.model_config.uses_xdrope_dim > 0:
+            self.rope_state = XDRopeState(
                 uses_xdrope_dim=self.model_config.uses_xdrope_dim,
                 max_num_reqs=self.max_num_reqs,
                 max_num_tokens=self.max_num_tokens,
@@ -72,30 +72,18 @@ class DefaultModelState(ModelState):
             )
 
     def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
-        if self.uses_mrope:
-            # Pre-compute M-RoPE positions for prefill.
+        if self.rope_state is not None:
             assert new_req_data.prefill_token_ids is not None
-            self.mrope_state.init_prefill_mrope_positions(
+            self.rope_state.init_prefill_positions(
                 req_index,
-                self.model,  # type: ignore
-                new_req_data.prefill_token_ids,
-                mm_features=new_req_data.mm_features,
-            )
-        elif self.xdrope_state is not None:
-            # Pre-compute XD-RoPE positions for prefill.
-            assert new_req_data.prefill_token_ids is not None
-            self.xdrope_state.init_prefill_xdrope_positions(
-                req_index,
-                self.model,  # type: ignore
+                self.model,
                 new_req_data.prefill_token_ids,
                 mm_features=new_req_data.mm_features,
             )
 
     def apply_staged_writes(self) -> None:
-        if self.uses_mrope:
-            self.mrope_state.apply_staged_writes()
-        elif self.xdrope_state is not None:
-            self.xdrope_state.apply_staged_writes()
+        if self.rope_state is not None:
+            self.rope_state.apply_staged_writes()
 
     def get_mm_embeddings(
         self,
@@ -131,46 +119,28 @@ class DefaultModelState(ModelState):
     def prepare_inputs(
         self, input_batch: InputBatch, req_states: RequestState
     ) -> dict[str, torch.Tensor | None]:
-        if not self.uses_mrope and self.xdrope_state is None:
+        if self.rope_state is None:
             return {}  # Common case (1D positions).
 
-        if self.uses_mrope:
-            # Prepare M-RoPE positions.
-            self.mrope_state.prepare_mrope_positions(
-                input_batch.idx_mapping,
-                input_batch.query_start_loc,
-                req_states.prefill_len.gpu,
-                req_states.num_computed_tokens.gpu,
-            )
-            mrope_positions = self.mrope_state.mrope_positions[
-                :, : input_batch.num_tokens_after_padding
-            ]
-            return {"positions": mrope_positions}
-
-        # Prepare XD-RoPE positions.
-        assert self.xdrope_state is not None
-        self.xdrope_state.prepare_xdrope_positions(
+        self.rope_state.prepare_positions(
             input_batch.idx_mapping,
             input_batch.query_start_loc,
             req_states.prefill_len.gpu,
             req_states.num_computed_tokens.gpu,
         )
-        xdrope_positions = self.xdrope_state.xdrope_positions[
-            :, : input_batch.num_tokens_after_padding
-        ]
-        return {"positions": xdrope_positions}
+        return {
+            "positions": self.rope_state.get_positions(
+                input_batch.num_tokens_after_padding
+            )
+        }
 
     def prepare_dummy_inputs(self, num_reqs: int, num_tokens: int) -> dict[str, Any]:
         model_inputs = {}
         if self.supports_mm_inputs:
             inputs_embeds = self.encoder_runner.inputs_embeds[:num_tokens]
             model_inputs["inputs_embeds"] = inputs_embeds
-        if self.uses_mrope:
-            mrope_positions = self.mrope_state.mrope_positions[:, :num_tokens]
-            model_inputs["positions"] = mrope_positions
-        elif self.xdrope_state is not None:
-            xdrope_positions = self.xdrope_state.xdrope_positions[:, :num_tokens]
-            model_inputs["positions"] = xdrope_positions
+        if self.rope_state is not None:
+            model_inputs["positions"] = self.rope_state.get_positions(num_tokens)
         return model_inputs
 
     def prepare_attn(
