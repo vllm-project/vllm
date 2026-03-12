@@ -1225,9 +1225,6 @@ class VllmConfig:
         # Handle the KV connector configs
         self._post_init_kv_transfer_config()
 
-        # TODO enable this normally when done and tested
-        self.compilation_config.custom_ops.append("+rotary_embedding")
-
         # Log the custom passes that are enabled
         self.compilation_config.pass_config.log_enabled_passes()
 

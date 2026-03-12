@@ -11,11 +11,12 @@ from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention, MLAAttention
+from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
 from vllm.utils.torch_utils import direct_register_custom_op
 
 from ..inductor_pass import enable_fake_mode
 from ..vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
-from .matcher_utils import MatcherRotaryEmbedding
+from .matcher_utils import MatcherDeepseekScalingRotaryEmbedding, MatcherRotaryEmbedding
 from .rms_quant_fusion import empty_bf16, empty_i64
 
 logger = init_logger(__name__)
@@ -82,6 +83,7 @@ class KVCacheMLARoPEFusionPattern:
         self,
         layer: Attention,
         is_neox: bool,
+        use_flashinfer: bool = False,
     ) -> None:
         self.layer_name = layer.layer_name
         self.kv_cache_dtype = layer.kv_cache_dtype
@@ -90,12 +92,14 @@ class KVCacheMLARoPEFusionPattern:
         self.kv_lora_rank = layer.kv_lora_rank
         self.qk_rope_head_dim = layer.qk_rope_head_dim
         self.is_neox = is_neox
+        self.use_flashinfer = use_flashinfer
 
         self.rope_matcher = MatcherRotaryEmbedding(
             is_neox=self.is_neox,
             head_size=self.qk_rope_head_dim,
             num_heads=self.num_heads,
             num_kv_heads=self.num_kv_heads,
+            use_flashinfer=self.use_flashinfer,
         )
 
     def get_inputs(self) -> list[torch.Tensor]:
@@ -181,6 +185,99 @@ class KVCacheMLARoPEFusionPattern:
         )
 
 
+class KVCacheMLARoPEDeepseekScalingFusionPattern:
+    FUSED_OP = torch.ops.vllm.fused_concat_and_cache_mla_rope.default
+
+    def __init__(
+        self,
+        layer: Attention,
+        is_neox: bool,
+    ) -> None:
+        self.layer_name = layer.layer_name
+        self.kv_cache_dtype = layer.kv_cache_dtype
+        self.num_heads = layer.num_heads
+        self.num_kv_heads = layer.num_kv_heads
+        self.kv_lora_rank = layer.kv_lora_rank
+        self.qk_rope_head_dim = layer.qk_rope_head_dim
+        self.is_neox = is_neox
+
+        self.rope_matcher = MatcherDeepseekScalingRotaryEmbedding(
+            is_neox=self.is_neox,
+            head_size=self.qk_rope_head_dim,
+            num_heads=self.num_heads,
+            num_kv_heads=self.num_kv_heads,
+        )
+
+    def get_inputs(self) -> list[torch.Tensor]:
+        # Sample inputs to help pattern tracing
+        T = 5
+        L = 163840
+        q = empty_bf16(T, self.num_heads, self.qk_rope_head_dim)
+        k_pe = empty_bf16(T, 1, self.qk_rope_head_dim)
+        kv_c_normed = empty_bf16(T, self.kv_lora_rank)
+        cos_sin_cache = empty_bf16(L, self.qk_rope_head_dim)
+        positions = empty_i64(T)
+        k_scale = torch.empty(0, device=k_pe.device, dtype=torch.float32)
+        return [
+            q,
+            k_pe,
+            kv_c_normed,
+            positions,
+            cos_sin_cache,
+            k_scale,
+        ]
+
+    def register(self, pm_pass: PatternMatcherPass) -> None:
+        def pattern(
+            q: torch.Tensor,
+            k_pe: torch.Tensor,
+            kv_c_normed: torch.Tensor,
+            positions: torch.Tensor,
+            cos_sin_cache: torch.Tensor,
+            k_scale: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            query, key = self.rope_matcher(positions, q, k_pe, cos_sin_cache)
+            dummy = torch.ops.vllm.unified_mla_kv_cache_update(
+                kv_c_normed, key, self.layer_name, self.kv_cache_dtype, k_scale
+            )
+            return dummy, query, key
+
+        def replacement(
+            q: torch.Tensor,
+            k_pe: torch.Tensor,
+            kv_c_normed: torch.Tensor,
+            positions: torch.Tensor,
+            cos_sin_cache: torch.Tensor,
+            k_scale: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            dummy = torch.empty(0, device=kv_c_normed.device, dtype=kv_c_normed.dtype)
+            k_pe_squeezed = k_pe.squeeze(1)
+            self.FUSED_OP(
+                dummy=dummy,
+                positions=positions,
+                q_pe=q,
+                k_pe=k_pe_squeezed,
+                kv_c=kv_c_normed,
+                cos_sin_cache=cos_sin_cache.to(q.dtype),
+                is_neox=self.is_neox,
+                kv_cache_dtype=self.kv_cache_dtype,
+                kv_cache_scale=k_scale,
+                layer_name=self.layer_name,
+            )
+            return dummy, q, k_pe_squeezed.unsqueeze(1)
+
+        # NOTE: use view_to_reshape to unify view/reshape to simplify
+        # pattern and increase matching opportunities
+        def fwd_and_view_to_reshape(*args, **kwargs) -> fx.GraphModule:
+            gm = pm.fwd_only(*args, **kwargs)
+            view_to_reshape(gm)
+            return gm
+
+        pm.register_replacement(
+            pattern, replacement, self.get_inputs(), fwd_and_view_to_reshape, pm_pass
+        )
+
+
 class KVCacheMLARoPEFusionPass(VllmPatternMatcherPass):
     @enable_fake_mode
     def __init__(self, config: VllmConfig) -> None:
@@ -193,7 +290,23 @@ class KVCacheMLARoPEFusionPass(VllmPatternMatcherPass):
 
         for _, layer in attn_layers.items():
             for is_neox in [False, True]:
-                KVCacheMLARoPEFusionPattern(layer, is_neox).register(self.patterns)
+                if RotaryEmbedding.enabled():
+                    for use_flashinfer in [False, True]:
+                        KVCacheMLARoPEFusionPattern(
+                            layer,
+                            is_neox,
+                            use_flashinfer,
+                        ).register(self.patterns)
+                else:
+                    KVCacheMLARoPEFusionPattern(
+                        layer,
+                        is_neox,
+                    ).register(self.patterns)
+
+                KVCacheMLARoPEDeepseekScalingFusionPattern(
+                    layer,
+                    is_neox,
+                ).register(self.patterns)
 
         self.dump_patterns(config, self.patterns)
 

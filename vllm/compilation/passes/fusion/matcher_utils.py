@@ -24,7 +24,9 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kNvfp4Dynamic,
 )
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
-from vllm.model_executor.layers.rotary_embedding.deepseek_scaling_rope import DeepseekScalingRotaryEmbedding
+from vllm.model_executor.layers.rotary_embedding.deepseek_scaling_rope import (
+    DeepseekScalingRotaryEmbedding,
+)
 from vllm.platforms import current_platform
 
 RMS_OP = torch.ops._C.rms_norm.default
@@ -106,14 +108,12 @@ class MatcherRotaryEmbedding(MatcherCustomOp):
         self.q_size = self.num_heads * self.head_size
         self.kv_size = self.num_kv_heads * self.head_size
         self.rotary_dim = head_size
-        # if use_flashinfer:
-        #     self.rotary_op = FLASHINFER_ROTARY_OP
-        # elif match_rocm_aiter:
-        #     self.rotary_op = rocm_aiter_ops.get_triton_rotary_embedding_op()
-        # else:
-        #     self.rotary_op = ROTARY_OP
-
-        self.rotary_op = FLASHINFER_ROTARY_OP 
+        if use_flashinfer:
+            self.rotary_op = FLASHINFER_ROTARY_OP
+        elif match_rocm_aiter:
+            self.rotary_op = rocm_aiter_ops.get_triton_rotary_embedding_op()
+        else:
+            self.rotary_op = ROTARY_OP
 
     def inputs(self) -> list[torch.Tensor]:
         positions = self.empty_int64(5)
@@ -171,13 +171,10 @@ class MatcherDeepseekScalingRotaryEmbedding(MatcherCustomOp):
         num_heads: int,
         num_kv_heads: int,
         use_flashinfer: bool = False,
-        match_rocm_aiter: bool | None = None,
         enabled: bool | None = None,
     ) -> None:
         if enabled is None:
-            enabled = RotaryEmbedding.enabled()
-        if match_rocm_aiter is None:
-            match_rocm_aiter = rocm_aiter_ops.is_triton_rotary_embed_enabled()
+            enabled = DeepseekScalingRotaryEmbedding.enabled()
 
         super().__init__(enabled)
         self.is_neox = is_neox
@@ -187,19 +184,9 @@ class MatcherDeepseekScalingRotaryEmbedding(MatcherCustomOp):
         self.q_size = self.num_heads * self.head_size
         self.kv_size = self.num_kv_heads * self.head_size
         self.rotary_dim = head_size
-        if use_flashinfer:
-            self.rotary_op = FLASHINFER_ROTARY_OP
-        elif match_rocm_aiter:
-            self.rotary_op = rocm_aiter_ops.get_triton_rotary_embedding_op()
-        else:
-            self.rotary_op = ROTARY_OP
-
-        print("enabled:", enabled)
-        print("rotary_op:", self.rotary_op)
 
     def inputs(self) -> list[torch.Tensor]:
         positions = self.empty_int64(5)
-        # query = self.empty(5, self.q_size)
         key = self.empty(5, self.kv_size)
         cos_sin_cache = self.empty(4096, self.rotary_dim)
         return [positions, key, cos_sin_cache]
@@ -211,7 +198,7 @@ class MatcherDeepseekScalingRotaryEmbedding(MatcherCustomOp):
         key: torch.Tensor | None,
         cos_sin_cache: torch.Tensor,
     ) -> tuple[torch.Tensor | None]:
-        result: tuple[torch.Tensor, torch.Tensor | None] = (
+        result: tuple[torch.Tensor | None] = (
             DeepseekScalingRotaryEmbedding.forward_static(
                 positions,
                 query,
@@ -222,18 +209,7 @@ class MatcherDeepseekScalingRotaryEmbedding(MatcherCustomOp):
                 self.is_neox,
             )
         )
-        # result = auto_functionalized(
-        #     self.rotary_op,
-        #     positions=positions,
-        #     query=query,
-        #     key=key,
-        #     head_size=self.head_size,
-        #     cos_sin_cache=cos_sin_cache,
-        #     is_neox=self.is_neox,
-        # )
-        # query_out = result[1]
-        # key_out = result[2] if len(result) > 2 else None
-        return result[0], result[1]
+        return result
 
     def forward_native(
         self,
