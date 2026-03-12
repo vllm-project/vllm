@@ -625,6 +625,46 @@ curl -s http://localhost:8000/rerank -H "Content-Type: application/json" -d '{
 }'
 ```
 
+### ColQwen3.5 Multi-Modal Late Interaction Models
+
+ColQwen3.5 is based on [ColPali](https://arxiv.org/abs/2407.01449), extending ColBERT's late interaction approach to **multi-modal** inputs. It uses the Qwen3.5 hybrid backbone (linear + full attention) and produces per-token L2-normalized vectors for MaxSim scoring.
+
+| Architecture | Backbone | Example HF Models |
+|---|---|---|
+| `ColQwen3_5` | Qwen3.5 | `athrael-soju/colqwen3.5-4.5B` |
+
+Start the server:
+
+```shell
+vllm serve athrael-soju/colqwen3.5-4.5B --max-model-len 4096
+```
+
+Then you can use the rerank endpoint:
+
+```shell
+curl -s http://localhost:8000/rerank -H "Content-Type: application/json" -d '{
+    "model": "athrael-soju/colqwen3.5-4.5B",
+    "query": "What is machine learning?",
+    "documents": [
+        "Machine learning is a subset of artificial intelligence.",
+        "Python is a programming language.",
+        "Deep learning uses neural networks."
+    ]
+}'
+```
+
+Or the score endpoint:
+
+```shell
+curl -s http://localhost:8000/score -H "Content-Type: application/json" -d '{
+    "model": "athrael-soju/colqwen3.5-4.5B",
+    "text_1": "What is the capital of France?",
+    "text_2": ["The capital of France is Paris.", "Python is a programming language."]
+}'
+```
+
+An example can be found here: [examples/pooling/score/colqwen3_5_rerank_online.py](../../examples/pooling/score/colqwen3_5_rerank_online.py)
+
 ### BAAI/bge-m3
 
 The `BAAI/bge-m3` model comes with extra weights for sparse and colbert embeddings but unfortunately in its `config.json`
