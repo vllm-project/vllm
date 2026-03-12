@@ -136,12 +136,12 @@ class ColQwen3_5Model(
     supports_late_interaction: ClassVar[Literal[True]] = True
 
     # Override hf_to_vllm_mapper to handle ColQwen3.5 weight naming.
-    # ColPali naming: "model.visual.", "model.language_model."
+    # ColPali saves weights as "language_model.*" but vLLM's
+    # Qwen3_5ForCausalLM has them under "language_model.model.*".
+    # Visual weights ("visual.*") already match the vLLM module path.
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
-            "model.visual.": "visual.",
-            "lm_head.": "language_model.lm_head.",
-            "model.language_model.": "language_model.model.",
+            "language_model.": "language_model.model.",
         }
     )
 
