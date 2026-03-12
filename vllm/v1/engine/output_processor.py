@@ -54,14 +54,14 @@ class RequestOutputCollector:
     def __init__(self, output_kind: RequestOutputKind, request_id: str):
         self.aggregate = output_kind == RequestOutputKind.DELTA
         self.request_id = request_id
-        self.output: RequestOutput | PoolingRequestOutput | Exception | None = None
+        self.output: RequestOutput | PoolingRequestOutput | BaseException | None = None
         self.ready = asyncio.Event()
 
         self._input_stream_task: asyncio.Task | None = None
 
-    def put(self, output: RequestOutput | PoolingRequestOutput | Exception) -> None:
+    def put(self, output: RequestOutput | PoolingRequestOutput | BaseException) -> None:
         """Non-blocking put operation."""
-        if self.output is None or isinstance(output, Exception):
+        if self.output is None or isinstance(output, BaseException):
             self.output = output
             self.ready.set()
         elif isinstance(self.output, RequestOutput) and isinstance(
@@ -81,7 +81,7 @@ class RequestOutputCollector:
             await self.ready.wait()
         self.output = None
         self.ready.clear()
-        if isinstance(output, Exception):
+        if isinstance(output, BaseException):
             raise output
         return output
 
@@ -91,7 +91,7 @@ class RequestOutputCollector:
         if output is not None:
             self.output = None
             self.ready.clear()
-        if isinstance(output, Exception):
+        if isinstance(output, BaseException):
             raise output
         return output
 
@@ -436,7 +436,7 @@ class OutputProcessor:
     def has_unfinished_requests(self) -> bool:
         return len(self.request_states) > 0
 
-    def propagate_error(self, e: Exception):
+    def propagate_error(self, e: BaseException):
         """Propagate error to all generate() tasks."""
 
         for _, state in self.request_states.items():

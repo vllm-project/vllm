@@ -704,7 +704,27 @@ class AsyncLLM(EngineClient):
                             iteration_stats=iteration_stats,
                             mm_cache_stats=renderer.stat_mm_cache(),
                         )
-            except Exception as e:
+            except asyncio.CancelledError as e:
+                # CancelledError is a BaseException, not caught by
+                # except Exception.  Without this handler the task dies
+                # silently and the engine appears dead with no
+                # explanation ("EngineCore encountered an issue" but no
+                # root cause in logs).
+                # Common cause: embedding AsyncLLM inside asyncio.run()
+                # which calls _cancel_all_tasks() on loop cleanup.
+                # Propagate to all pending request collectors so that
+                # waiting consumers receive the error instead of
+                # blocking forever on a dead handler.
+                logger.exception(
+                    "AsyncLLM output_handler cancelled. "
+                    "The event loop is likely being shut down "
+                    "(e.g., asyncio.run() cleanup)."
+                )
+                output_processor.propagate_error(e)
+                raise
+            except (KeyboardInterrupt, SystemExit):
+                raise
+            except BaseException as e:
                 logger.exception("AsyncLLM output_handler failed.")
                 output_processor.propagate_error(e)
 

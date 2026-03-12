@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import asyncio
 import math
 import time
 
@@ -1336,3 +1337,126 @@ def test_abort_requests(runner: str, abort_by: str, dummy_test_vectors):
             output_processor.abort_requests([request.request_id], internal=True)
         else:
             output_processor.abort_requests([request.external_req_id], internal=False)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "exc",
+    [
+        RuntimeError("regular exception"),
+        BaseException("non-exception base"),
+        asyncio.CancelledError("task cancelled"),
+    ],
+    ids=["Exception", "BaseException", "CancelledError"],
+)
+async def test_request_output_collector_base_exception(exc: BaseException):
+    """Verify RequestOutputCollector accepts BaseException via put() and
+    re-raises it from get().
+
+    ``output_handler`` in ``async_llm.py`` catches ``BaseException`` (after
+    re-raising ``CancelledError``, ``KeyboardInterrupt``, and ``SystemExit``)
+    and propagates it through ``RequestOutputCollector.put()``.  The collector
+    must store the error and re-raise it on the next ``get()`` call regardless
+    of whether it is an ``Exception`` or a non-Exception ``BaseException``
+    subclass.
+    """
+    collector = RequestOutputCollector(
+        RequestOutputKind.DELTA, request_id="base-exc-test"
+    )
+
+    collector.put(exc)
+    assert collector.ready.is_set()
+
+    with pytest.raises(type(exc)):
+        await collector.get()
+
+    assert collector.output is None
+    assert not collector.ready.is_set()
+
+
+@pytest.mark.asyncio
+async def test_request_output_collector_base_exception_overwrites_output():
+    """Verify that putting a BaseException overwrites a pending RequestOutput.
+
+    When a normal output is already buffered and an error arrives, the error
+    must take priority so the consumer sees the failure instead of stale data.
+    """
+    collector = RequestOutputCollector(
+        RequestOutputKind.DELTA, request_id="overwrite-test"
+    )
+
+    normal_output = RequestOutput(
+        request_id="overwrite-test",
+        prompt=None,
+        prompt_token_ids=[1],
+        prompt_logprobs=None,
+        outputs=[
+            CompletionOutput(
+                index=0,
+                text="hello",
+                token_ids=[1],
+                cumulative_logprob=None,
+                logprobs=None,
+                finish_reason=None,
+            )
+        ],
+        finished=False,
+    )
+    collector.put(normal_output)
+
+    err = BaseException("fatal error")
+    collector.put(err)
+
+    with pytest.raises(BaseException, match="fatal error"):
+        await collector.get()
+
+
+def test_propagate_error_base_exception():
+    """Verify OutputProcessor.propagate_error() propagates a BaseException
+    to every in-flight request queue.
+
+    The ``output_handler`` in ``async_llm.py`` catches ``BaseException`` and
+    calls ``propagate_error(e)``.  The method must accept ``BaseException``
+    (not just ``Exception``) and put it into every request's
+    ``RequestOutputCollector`` so that each ``generate()`` consumer receives
+    the error.
+
+    Uses ``tokenizer=None`` and synthetic prompt tokens to avoid downloading
+    a gated model - ``propagate_error`` never touches the tokenizer.
+    """
+    output_processor = OutputProcessor(None, log_stats=False)
+
+    prompt_tokens = [1, 2, 3, 4, 5]
+    request_ids = [f"prop-err-{i}" for i in range(3)]
+    requests = [
+        EngineCoreRequest(
+            request_id=req_id,
+            external_req_id=f"ext-{req_id}",
+            prompt_token_ids=prompt_tokens,
+            mm_features=None,
+            arrival_time=0,
+            lora_request=None,
+            cache_salt=None,
+            data_parallel_rank=None,
+            sampling_params=SamplingParams(),
+            pooling_params=None,
+        )
+        for req_id in request_ids
+    ]
+
+    queues: list[RequestOutputCollector] = []
+    for request in requests:
+        queue = RequestOutputCollector(
+            output_kind=RequestOutputKind.DELTA,
+            request_id=request.request_id,
+        )
+        output_processor.add_request(request, None, queue=queue)
+        queues.append(queue)
+
+    err = BaseException("propagated base exception")
+    output_processor.propagate_error(err)
+
+    for queue in queues:
+        assert queue.ready.is_set(), "Queue should be signalled after propagate_error"
+        with pytest.raises(BaseException, match="propagated base exception"):
+            queue.get_nowait()
