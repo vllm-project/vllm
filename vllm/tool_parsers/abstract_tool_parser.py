@@ -67,7 +67,9 @@ class ToolParser:
             if isinstance(request, ChatCompletionRequest):
                 # tool_choice: "Forced Function" or "required" will override
                 # structured output json settings to make tool calling work correctly
-                request.structured_outputs = StructuredOutputsParams(
+                request.structured_outputs = StructuredOutputsParams(  # type: ignore[call-arg]
+                    # TODO: Look to change field from json to json_schema
+                    # to avoid conflicts
                     json=json_schema_from_tool
                 )
                 request.response_format = None
