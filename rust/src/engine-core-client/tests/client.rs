@@ -62,23 +62,6 @@ fn sample_request() -> EngineCoreRequest {
     }
 }
 
-fn fixture_python() -> Option<PathBuf> {
-    if let Some(explicit) = std::env::var_os("VLLM_ENGINE_CORE_TEST_PYTHON") {
-        return Some(explicit.into());
-    }
-
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let sibling_venv = manifest_dir
-        .join("../../../vllm/.venv/bin/python")
-        .canonicalize()
-        .ok();
-    if sibling_venv.as_ref().is_some_and(|path| path.exists()) {
-        return sibling_venv;
-    }
-
-    Some(PathBuf::from("python3"))
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn client_roundtrip_add_abort_and_finish() {
     let tempdir = tempdir().unwrap();
@@ -226,12 +209,8 @@ async fn connect_times_out_without_ready_message() {
 
 #[test]
 fn python_msgpack_fixtures_match_rust_encoding() {
-    let python = match fixture_python() {
-        Some(path) => path,
-        None => return,
-    };
     let script = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/python_compat.py");
-    let output = Command::new(python).arg(script).output();
+    let output = Command::new(&script).output();
 
     let output = match output {
         Ok(output) if output.status.success() => output,

@@ -1,3 +1,11 @@
+#!/usr/bin/env -S uv run
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#   "msgspec>=0.19,<1",
+# ]
+# ///
+
 from enum import Enum, IntEnum
 
 import msgspec
