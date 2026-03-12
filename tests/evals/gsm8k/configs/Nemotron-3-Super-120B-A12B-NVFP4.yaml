@@ -6,6 +6,6 @@ startup_max_wait_seconds: 1200
 server_args: >-
   --enforce-eager
   --max-model-len 4096
-  --tensor-parallel-size 4
+  --tensor-parallel-size 2
   --enable-expert-parallel
   --speculative-config '{"method":"mtp","num_speculative_tokens":5}'
