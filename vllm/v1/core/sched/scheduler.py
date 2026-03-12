@@ -1358,6 +1358,15 @@ class Scheduler(SchedulerInterface):
             pooler_output = pooler_outputs[req_index] if pooler_outputs else None
             kv_transfer_params = None
             status_before_stop = request.status
+            prompt_logprobs_tensors = prompt_logprobs_dict.get(req_id)
+            has_prompt_logprobs = req_id in prompt_logprobs_dict
+            score_only_request = bool(
+                request.score_only
+                or (
+                    request.sampling_params is not None
+                    and request.sampling_params.score_only
+                )
+            )
 
             # Check for stop and update request status.
             if new_token_ids:
@@ -1369,11 +1378,11 @@ class Scheduler(SchedulerInterface):
                 request.status = RequestStatus.FINISHED_STOPPED
                 stopped = True
 
-            if request.score_only:
+            if score_only_request:
                 assert not new_token_ids, (
                     "score_only requests must not generate new tokens"
                 )
-                if request.num_computed_tokens >= (
+                if has_prompt_logprobs or request.num_computed_tokens >= (
                     request.num_tokens + request.num_output_placeholders
                 ):
                     request.status = RequestStatus.FINISHED_LENGTH_CAPPED
@@ -1417,8 +1426,6 @@ class Scheduler(SchedulerInterface):
             if num_nans_in_logits is not None and req_id in num_nans_in_logits:
                 request.num_nans_in_logits = num_nans_in_logits[req_id]
 
-            # Get prompt logprobs for this request.
-            prompt_logprobs_tensors = prompt_logprobs_dict.get(req_id)
             if (
                 new_token_ids
                 or pooler_output is not None

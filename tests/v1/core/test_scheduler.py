@@ -519,6 +519,10 @@ def test_score_only_request_finishes_without_generated_tokens():
     scheduler_output = scheduler.schedule()
     req_id = request.request_id
 
+    # Async score-only paths can return prompt logprobs before the scheduler's
+    # computed-token bookkeeping has fully caught up, so prompt-logprob
+    # completion itself must be sufficient to finish the request.
+    request.num_computed_tokens = request.num_tokens - 1
     prompt_logprobs = LogprobsTensors.empty_cpu(
         len(request.prompt_token_ids) - 1, request.sampling_params.prompt_logprobs + 1
     )
