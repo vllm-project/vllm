@@ -66,6 +66,173 @@ TransferId = str  # KV transfer coordination ID (shared by P/D)
 logger = init_logger(__name__)
 
 
+@dataclass(frozen=True)
+class TransferRegion:
+    base_addr: int
+    block_len: int
+    kv_block_len: int
+
+
+def _get_tp_ratio(local_tp_size: int, remote_tp_size: int) -> int:
+    if local_tp_size >= remote_tp_size:
+        assert local_tp_size % remote_tp_size == 0, (
+            f"Local tensor parallel size {local_tp_size} is not divisible "
+            f"by remote tensor parallel size {remote_tp_size}."
+        )
+        return local_tp_size // remote_tp_size
+
+    assert remote_tp_size % local_tp_size == 0, (
+        f"Remote tensor parallel size {remote_tp_size} is not divisible "
+        f"by local tensor parallel size {local_tp_size}."
+    )
+    return -(remote_tp_size // local_tp_size)
+
+
+def _expand_transfer_regions(
+    base_addrs: list[int],
+    block_lens: list[int],
+    is_kv_layout_blocks_first: bool,
+) -> list[TransferRegion]:
+    regions: list[TransferRegion] = []
+    for base_addr, block_len in zip(base_addrs, block_lens):
+        kv_block_len = block_len // 2 if is_kv_layout_blocks_first else block_len
+        regions.append(
+            TransferRegion(
+                base_addr=base_addr,
+                block_len=block_len,
+                kv_block_len=kv_block_len,
+            )
+        )
+        if is_kv_layout_blocks_first:
+            regions.append(
+                TransferRegion(
+                    base_addr=base_addr + kv_block_len,
+                    block_len=block_len,
+                    kv_block_len=kv_block_len,
+                )
+            )
+    return regions
+
+
+def _compute_sender_transfer_plan(
+    local_tp_rank: int,
+    local_tp_size: int,
+    remote_tp_rank: int,
+    remote_tp_size: int,
+    local_kv_block_len: int,
+    remote_kv_block_len: int,
+    producer_cache_replicated: bool,
+) -> tuple[bool, int, int, int]:
+    tp_ratio = _get_tp_ratio(local_tp_size, remote_tp_size)
+
+    if tp_ratio == 1:
+        return True, 0, 0, local_kv_block_len
+
+    if tp_ratio > 0:
+        if producer_cache_replicated:
+            return local_tp_rank % tp_ratio == 0, 0, 0, local_kv_block_len
+        return (
+            True,
+            0,
+            (local_tp_rank % tp_ratio) * local_kv_block_len,
+            local_kv_block_len,
+        )
+
+    if producer_cache_replicated:
+        return True, 0, 0, local_kv_block_len
+
+    ratio_abs = -tp_ratio
+    return (
+        True,
+        (remote_tp_rank % ratio_abs) * remote_kv_block_len,
+        0,
+        remote_kv_block_len,
+    )
+
+
+def _can_coalesce_block_transfers(
+    local_region_block_len: int,
+    remote_region_block_len: int,
+    src_region_offset: int,
+    dst_region_offset: int,
+    transfer_len: int,
+) -> bool:
+    return (
+        src_region_offset == 0
+        and dst_region_offset == 0
+        and transfer_len == local_region_block_len
+        and transfer_len == remote_region_block_len
+    )
+
+
+def _validate_asymmetric_region_lengths(
+    local_regions: list[TransferRegion],
+    remote_regions: list[TransferRegion],
+    local_tp_size: int,
+    remote_tp_size: int,
+    producer_cache_replicated: bool,
+) -> None:
+    if producer_cache_replicated:
+        return
+
+    tp_ratio = _get_tp_ratio(local_tp_size, remote_tp_size)
+    for idx, (local_region, remote_region) in enumerate(
+        zip(local_regions, remote_regions)
+    ):
+        if tp_ratio == 1:
+            assert local_region.kv_block_len == remote_region.kv_block_len, (
+                "Mooncake KV region length mismatch for homogeneous TP at "
+                f"region {idx}: local={local_region.kv_block_len}, "
+                f"remote={remote_region.kv_block_len}."
+            )
+        elif tp_ratio > 0:
+            assert remote_region.kv_block_len == local_region.kv_block_len * tp_ratio, (
+                "Mooncake destination KV region length does not match the "
+                "producer TP ratio at region "
+                f"{idx}: local={local_region.kv_block_len}, "
+                f"remote={remote_region.kv_block_len}, tp_ratio={tp_ratio}."
+            )
+        else:
+            ratio_abs = -tp_ratio
+            assert local_region.kv_block_len == remote_region.kv_block_len * ratio_abs, (
+                "Mooncake source KV region length does not match the consumer "
+                "TP ratio at region "
+                f"{idx}: local={local_region.kv_block_len}, "
+                f"remote={remote_region.kv_block_len}, tp_ratio={tp_ratio}."
+            )
+
+
+def _get_debug_head_range(
+    num_heads: int,
+    local_tp_size: int,
+    remote_tp_rank: int,
+    remote_tp_size: int,
+    producer_cache_replicated: bool,
+) -> tuple[int, int]:
+    if producer_cache_replicated:
+        return 0, num_heads
+
+    tp_ratio = _get_tp_ratio(local_tp_size, remote_tp_size)
+    if tp_ratio >= 0:
+        return 0, num_heads
+
+    ratio_abs = -tp_ratio
+    assert num_heads % ratio_abs == 0, (
+        f"Number of KV heads {num_heads} is not divisible by "
+        f"heterogeneous TP ratio {ratio_abs}."
+    )
+    head_chunk = num_heads // ratio_abs
+    head_start = (remote_tp_rank % ratio_abs) * head_chunk
+    return head_start, head_start + head_chunk
+
+
+def _get_tensor_dense_flag(tensor: torch.Tensor) -> bool | None:
+    is_dense = getattr(tensor, "is_non_overlapping_and_dense", None)
+    if callable(is_dense):
+        return bool(is_dense())
+    return None
+
+
 class MooncakeXferMetadata(
     msgspec.Struct,
     omit_defaults=True,  # type: ignore[call-arg]
@@ -76,6 +243,7 @@ class MooncakeXferMetadata(
     remote_tp_rank: int
     req_blocks: dict[ReqId, tuple[TransferId, list[int]]]
     kv_caches_base_addr: list[int]
+    block_lens: list[int]
 
 
 class MooncakeXferResponseStatus(IntEnum):
@@ -172,6 +340,22 @@ class MooncakeConnector(KVConnectorBase_V1):
         elif role == KVConnectorRole.WORKER:
             self.connector_scheduler = None
             self.connector_worker = MooncakeConnectorWorker(vllm_config, self.engine_id)
+
+    @classmethod
+    def get_required_kvcache_layout(cls, vllm_config: VllmConfig):
+        if vllm_config.model_config is None:
+            logger.warning_once(
+                "Unable to detect current VLLM config. "
+                "Fallback to default kv cache layout."
+            )
+            return None
+        if vllm_config.model_config.use_mla:
+            return None
+        logger.info_once(
+            "MooncakeConnector setting KV cache layout to HND for "
+            "heterogeneous TP-safe KV transfer."
+        )
+        return "HND"
 
     ############################################################
     # Scheduler Side Methods
@@ -487,6 +671,9 @@ class MooncakeConnectorWorker:
         self.tp_rank = get_tensor_model_parallel_rank()
         self.tp_size = get_tensor_model_parallel_world_size()
         self.num_blocks = 0
+        self.block_len = 0
+        self.block_len_per_layer: list[int] = []
+        self.seen_base_addresses: list[int] = []
 
         assert (parallel_config := vllm_config.parallel_config)
         dp_rank = parallel_config.data_parallel_index
@@ -685,9 +872,13 @@ class MooncakeConnectorWorker:
     ):
         pending_reqs: dict[ReqId, SendBlockMeta] = {}
         remote_tp_ranks = self.kv_topo.get_target_remote_ranks(meta.remote_tp_size)
-        if self.tp_rank not in remote_tp_ranks:
+        if meta.remote_tp_rank not in remote_tp_ranks:
             # This D worker does not pair with the P worker.
-            msg = f"This P tp_rank {self.tp_rank} not in remote D target ranks {remote_tp_ranks}"  # noqa: E501
+            msg = (
+                "This D tp_rank "
+                f"{meta.remote_tp_rank} is not paired with P tp_rank "
+                f"{self.tp_rank}; expected one of {remote_tp_ranks}."
+            )
             logger.error(msg)
             response = MooncakeXferResponse(
                 status=MooncakeXferResponseStatus.ERROR,
@@ -821,11 +1012,12 @@ class MooncakeConnectorWorker:
     def resolve_need_send(self, send_meta: SendBlockMeta, remote_tp_ranks: list[int]):
         # Prepare for heterogeneous TP (one P pairs to multiple D)
         send_meta.need_send = len(remote_tp_ranks)
-        if send_meta.need_send != 1:
-            logger.error("Mooncake: Heterogeneous TP is not supported yet.")
-            raise NotImplementedError(
-                "Mooncake: Heterogeneous TP is not supported yet."
-            )
+        logger.debug(
+            "Mooncake request %s will be served by %d consumer TP workers: %s",
+            send_meta.transfer_id,
+            send_meta.need_send,
+            remote_tp_ranks,
+        )
 
     async def _build_transfer_params(
         self,
@@ -836,10 +1028,24 @@ class MooncakeConnectorWorker:
         dst_ptrs = []
         lengths = []
         err_reqs: list[ReqId] = []
-        local_base_addr = self.kv_caches_base_addr
-        remote_base_addr = agent_meta.kv_caches_base_addr
-        block_len = self.block_len
         remote_session = f"{agent_meta.remote_hostname}:{agent_meta.remote_port}"
+        local_regions = self._get_transfer_regions(
+            self.kv_caches_base_addr, self.block_len_per_layer
+        )
+        remote_regions = self._get_transfer_regions(
+            agent_meta.kv_caches_base_addr, agent_meta.block_lens
+        )
+        assert len(local_regions) == len(remote_regions), (
+            "Mooncake asymmetric TP requires matching KV region counts between "
+            "producer and consumer."
+        )
+        _validate_asymmetric_region_lengths(
+            local_regions=local_regions,
+            remote_regions=remote_regions,
+            local_tp_size=self.tp_size,
+            remote_tp_size=agent_meta.remote_tp_size,
+            producer_cache_replicated=self._producer_cache_is_replicated(),
+        )
 
         for d_req_id, send_meta in ready_reqs:
             _, remote_block_ids = agent_meta.req_blocks[d_req_id]
@@ -862,24 +1068,99 @@ class MooncakeConnectorWorker:
             if num_local_blocks > num_remote_blocks:
                 local_block_ids = local_block_ids[-num_remote_blocks:]
 
+            self._log_debug_cache_sample(
+                req_id=send_meta.p_req_id or d_req_id,
+                block_id=local_block_ids[0],
+                phase="producer_pre_send",
+                remote_tp_rank=agent_meta.remote_tp_rank,
+                remote_tp_size=agent_meta.remote_tp_size,
+            )
+
             # Group by indices
             group_local_block_ids, group_remote_block_ids = group_concurrent_contiguous(
                 local_block_ids, remote_block_ids
             )
 
-            for local_layer_addr, remote_layer_addr in zip(
-                local_base_addr, remote_base_addr
-            ):
+            for local_region, remote_region in zip(local_regions, remote_regions):
+                should_transfer, src_region_offset, dst_region_offset, transfer_len = (
+                    self._get_sender_transfer_plan(
+                        local_kv_block_len=local_region.kv_block_len,
+                        remote_kv_block_len=remote_region.kv_block_len,
+                        remote_tp_rank=agent_meta.remote_tp_rank,
+                        remote_tp_size=agent_meta.remote_tp_size,
+                    )
+                )
+                if not should_transfer:
+                    continue
+
+                assert src_region_offset + transfer_len <= local_region.kv_block_len, (
+                    "Computed source transfer region exceeds local KV block size."
+                )
+                assert dst_region_offset + transfer_len <= remote_region.kv_block_len, (
+                    "Computed destination transfer region exceeds remote KV block size."
+                )
+
                 for group_local_block_id, group_remote_block_id in zip(
                     group_local_block_ids, group_remote_block_ids
                 ):
-                    src_ptrs.append(
-                        local_layer_addr + group_local_block_id[0] * block_len
+                    can_coalesce = _can_coalesce_block_transfers(
+                        local_region_block_len=local_region.block_len,
+                        remote_region_block_len=remote_region.block_len,
+                        src_region_offset=src_region_offset,
+                        dst_region_offset=dst_region_offset,
+                        transfer_len=transfer_len,
                     )
-                    dst_ptrs.append(
-                        remote_layer_addr + group_remote_block_id[0] * block_len
+                    if can_coalesce:
+                        src_ptrs.append(
+                            local_region.base_addr
+                            + group_local_block_id[0] * local_region.block_len
+                            + src_region_offset
+                        )
+                        dst_ptrs.append(
+                            remote_region.base_addr
+                            + group_remote_block_id[0] * remote_region.block_len
+                            + dst_region_offset
+                        )
+                        lengths.append(transfer_len * len(group_local_block_id))
+                    else:
+                        for local_block_id, remote_block_id in zip(
+                            group_local_block_id, group_remote_block_id
+                        ):
+                            src_ptrs.append(
+                                local_region.base_addr
+                                + local_block_id * local_region.block_len
+                                + src_region_offset
+                            )
+                            dst_ptrs.append(
+                                remote_region.base_addr
+                                + remote_block_id * remote_region.block_len
+                                + dst_region_offset
+                            )
+                            lengths.append(transfer_len)
+
+                if local_region is local_regions[0]:
+                    logger.debug(
+                        "Mooncake transfer plan for request %s: local_tp=%d "
+                        "remote_tp=%d remote_tp_rank=%d local_block_len=%d "
+                        "remote_block_len=%d src_offset=%d dst_offset=%d "
+                        "transfer_len=%d coalesce=%s",
+                        d_req_id,
+                        self.tp_size,
+                        agent_meta.remote_tp_size,
+                        agent_meta.remote_tp_rank,
+                        local_region.block_len,
+                        remote_region.block_len,
+                        src_region_offset,
+                        dst_region_offset,
+                        transfer_len,
+                        _can_coalesce_block_transfers(
+                            local_region_block_len=local_region.block_len,
+                            remote_region_block_len=remote_region.block_len,
+                            src_region_offset=src_region_offset,
+                            dst_region_offset=dst_region_offset,
+                            transfer_len=transfer_len,
+                        ),
                     )
-                    lengths.append(block_len * len(group_local_block_id))
 
             logger.debug(
                 "Sending kv_caches for request %s (%d blocks) to %s",
@@ -917,16 +1198,20 @@ class MooncakeConnectorWorker:
         kv_data_ptrs = []
         kv_data_lens = []
         seen_base_addresses = []
+        self.block_len_per_layer = []
 
         split_k_and_v = self.kv_topo.split_k_and_v
         tensor_size_bytes = None
         for layer_name, cache_or_caches in kv_caches.items():
-            logger.debug(
-                "registering layer %s with shape %s", layer_name, cache_or_caches.shape
-            )
             cache_list = cache_or_caches if split_k_and_v else [cache_or_caches]
+            logger.debug(
+                "registering layer %s with %d cache tensor(s)",
+                layer_name,
+                len(cache_list),
+            )
 
             for cache in cache_list:
+                self._log_debug_cache_registration(layer_name, cache)
                 base_addr = cache.data_ptr()
                 if base_addr in seen_base_addresses:
                     continue
@@ -937,16 +1222,22 @@ class MooncakeConnectorWorker:
                 if tensor_size_bytes is None:
                     tensor_size_bytes = curr_tensor_size_bytes
                     self.num_blocks = cache.shape[0]
-
-                assert tensor_size_bytes == curr_tensor_size_bytes, (
-                    "All kv cache tensors must have the same size"
+                assert cache.shape[0] == self.num_blocks, (
+                    "All kv cache tensors must have the same number of blocks"
                 )
+                self.block_len_per_layer.append(curr_tensor_size_bytes // self.num_blocks)
+
+                if not self.use_mla:
+                    assert tensor_size_bytes == curr_tensor_size_bytes, (
+                        "All kv cache tensors must have the same size"
+                    )
                 kernel_block_size = cache.shape[-2 if self.use_mla else -3]
                 assert self.block_size == kernel_block_size
                 kv_data_ptrs.append(base_addr)
-                kv_data_lens.append(tensor_size_bytes)
+                kv_data_lens.append(curr_tensor_size_bytes)
 
         self.kv_caches_base_addr = seen_base_addresses
+        self.seen_base_addresses = seen_base_addresses
 
         ret_value = self.engine.batch_register_memory(kv_data_ptrs, kv_data_lens)
         if ret_value != 0:
@@ -958,7 +1249,10 @@ class MooncakeConnectorWorker:
         self.block_len = tensor_size_bytes // self.num_blocks
         self.device_kv_caches = kv_caches
         logger.debug(
-            "registered num_blocks=%d block_len=%d", self.num_blocks, self.block_len
+            "registered num_blocks=%d block_len=%d block_lens=%s",
+            self.num_blocks,
+            self.block_len,
+            self.block_len_per_layer,
         )
 
         # No need to launch server for D node.
@@ -1052,6 +1346,7 @@ class MooncakeConnectorWorker:
                 for req_id, pull_meta in pull_metas.items()
             },
             kv_caches_base_addr=self.kv_caches_base_addr,
+            block_lens=self.block_len_per_layer,
         )
 
         encoded_data = self._encoder.encode(metadata)
@@ -1103,6 +1398,12 @@ class MooncakeConnectorWorker:
             # No race because we are in async loop.
             pull_meta.pull_tasks_count -= 1
             if pull_meta.pull_tasks_count == 0:
+                if pull_meta.local_block_ids:
+                    self._log_debug_cache_sample(
+                        req_id=pull_meta.d_req_id,
+                        block_id=pull_meta.local_block_ids[0],
+                        phase="consumer_post_recv",
+                    )
                 self.finished_recving_reqs.add(pull_meta.d_req_id)
 
         if ok_reqs:
@@ -1152,11 +1453,11 @@ class MooncakeConnectorWorker:
             remote_engine_id
         )
         count = len(remote_tp_ranks)
-        if count != 1:
-            logger.error("Mooncake: Heterogeneous TP is not supported yet.")
-            raise NotImplementedError(
-                "Mooncake: Heterogeneous TP is not supported yet."
-            )
+        logger.debug(
+            "Receiving Mooncake KV for engine %s from producer TP ranks %s",
+            remote_engine_id,
+            remote_tp_ranks,
+        )
         for pull_meta in pull_metas.values():
             pull_meta.pull_tasks_count = count
         for remote_tp_rank in remote_tp_ranks:
@@ -1238,6 +1539,122 @@ class MooncakeConnectorWorker:
             asyncio.run_coroutine_threadsafe(
                 self.record_send_reqs(metadata), self.sender_loop
             )
+
+    def _producer_cache_is_replicated(self) -> bool:
+        return self.kv_topo.replicates_kv_cache(self.engine_id)
+
+    def _get_transfer_regions(
+        self, base_addrs: list[int], block_lens: list[int]
+    ) -> list[TransferRegion]:
+        return _expand_transfer_regions(
+            base_addrs=base_addrs,
+            block_lens=block_lens,
+            is_kv_layout_blocks_first=self.kv_topo.is_kv_layout_blocks_first,
+        )
+
+    def _get_sender_transfer_plan(
+        self,
+        local_kv_block_len: int,
+        remote_kv_block_len: int,
+        remote_tp_rank: int,
+        remote_tp_size: int,
+    ) -> tuple[bool, int, int, int]:
+        return _compute_sender_transfer_plan(
+            local_tp_rank=self.tp_rank,
+            local_tp_size=self.tp_size,
+            remote_tp_rank=remote_tp_rank,
+            remote_tp_size=remote_tp_size,
+            local_kv_block_len=local_kv_block_len,
+            remote_kv_block_len=remote_kv_block_len,
+            producer_cache_replicated=self._producer_cache_is_replicated(),
+        )
+
+    def _log_debug_cache_registration(
+        self, layer_name: str, cache: torch.Tensor
+    ) -> None:
+        if not logger.isEnabledFor(10):
+            return
+        logger.debug(
+            "Mooncake register view layer=%s shape=%s stride=%s "
+            "storage_offset=%d contiguous=%s dense=%s data_ptr=%d",
+            layer_name,
+            tuple(cache.shape),
+            tuple(cache.stride()),
+            cache.storage_offset(),
+            cache.is_contiguous(),
+            _get_tensor_dense_flag(cache),
+            cache.data_ptr(),
+        )
+
+    def _log_debug_cache_sample(
+        self,
+        *,
+        req_id: str,
+        block_id: int,
+        phase: str,
+        remote_tp_rank: int | None = None,
+        remote_tp_size: int | None = None,
+    ) -> None:
+        if not logger.isEnabledFor(10):
+            return
+        if self.use_mla or not self.kv_topo.split_k_and_v:
+            return
+        if not self.device_kv_caches:
+            return
+
+        first_layer = next(iter(self.device_kv_caches.items()), None)
+        if first_layer is None:
+            return
+        layer_name, cache_or_caches = first_layer
+        cache_list = list(cache_or_caches)
+        if len(cache_list) < 2 or cache_list[0].ndim < 4:
+            return
+        if block_id < 0 or block_id >= cache_list[0].shape[0]:
+            return
+
+        num_heads = cache_list[0].shape[-2]
+        head_start, head_end = 0, num_heads
+        if remote_tp_rank is not None and remote_tp_size is not None:
+            head_start, head_end = _get_debug_head_range(
+                num_heads=num_heads,
+                local_tp_size=self.tp_size,
+                remote_tp_rank=remote_tp_rank,
+                remote_tp_size=remote_tp_size,
+                producer_cache_replicated=self._producer_cache_is_replicated(),
+            )
+
+        k_sample = cache_list[0][block_id, :, head_start:head_end, :]
+        v_sample = cache_list[1][block_id, :, head_start:head_end, :]
+
+        def summarize(sample: torch.Tensor) -> tuple[float, float, list[float]]:
+            flat = sample.flatten().float()
+            return (
+                float(flat.sum().item()),
+                float(flat.abs().sum().item()),
+                flat[:4].cpu().tolist(),
+            )
+
+        k_sum, k_abs_sum, k_first = summarize(k_sample)
+        v_sum, v_abs_sum, v_first = summarize(v_sample)
+        logger.debug(
+            "Mooncake debug sample phase=%s req=%s tp_rank=%d layer=%s "
+            "block=%d remote_tp_rank=%s head_range=[%d,%d) k_sum=%.6f "
+            "k_abs_sum=%.6f k_first=%s v_sum=%.6f v_abs_sum=%.6f v_first=%s",
+            phase,
+            req_id,
+            self.tp_rank,
+            layer_name,
+            block_id,
+            remote_tp_rank,
+            head_start,
+            head_end,
+            k_sum,
+            k_abs_sum,
+            k_first,
+            v_sum,
+            v_abs_sum,
+            v_first,
+        )
 
 
 def group_concurrent_contiguous(
