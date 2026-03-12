@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""CuTe DSL GDN transpose decode kernel (ported from sglang)."""
+"""CuTe DSL GDN decode kernel (ported from sglang)."""
 
 import operator
 import warnings
@@ -393,7 +393,7 @@ def fused_recurrent_sigmoid_update_128x32_col(
     )
 
 
-def cutedsl_transpose_fused_sigmoid_gated_delta_rule_update(
+def cutedsl_fused_sigmoid_gated_delta_rule_update(
     A_log: torch.Tensor,
     a: torch.Tensor,
     dt_bias: torch.Tensor,
@@ -407,7 +407,7 @@ def cutedsl_transpose_fused_sigmoid_gated_delta_rule_update(
     gv: torch.Tensor | None = None,
     b: torch.Tensor | None = None,
     scale: float | None = None,
-    initial_state_source: torch.Tensor | None = None,
+    initial_state: torch.Tensor | None = None,
     initial_state_indices: torch.Tensor | None = None,
     use_qk_l2norm_in_kernel: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
@@ -418,15 +418,14 @@ def cutedsl_transpose_fused_sigmoid_gated_delta_rule_update(
     K_input = k.shape[-1]
     V_input = v.shape[-1]
 
-    if initial_state_source is None or initial_state_indices is None:
-        raise ValueError("initial_state_source and initial_state_indices are required")
+    if initial_state is None or initial_state_indices is None:
+        raise ValueError("initial_state and initial_state_indices are required")
 
     # Kernel expects K-contiguous view (stride[-2] == 1), i.e. [N, HV, K, V]
     # for best performance.
-    if initial_state_source.stride()[-2] != 1:
+    if initial_state.stride()[-2] != 1:
         warnings.warn(
-            "Expected initial_state_source with K-contiguous "
-            "layout (stride[-2] == 1), e.g. ssm_state.transpose(-2, -1).",
+            "Expected initial_state with K-contiguous layout (stride[-2] == 1).",
             RuntimeWarning,
             stacklevel=2,
         )
@@ -477,7 +476,7 @@ def cutedsl_transpose_fused_sigmoid_gated_delta_rule_update(
     q_ = _to_cute_tensor(q_launch)
     k_ = _to_cute_tensor(k_launch)
     v_ = _to_cute_tensor(v_launch)
-    h_ = _to_cute_tensor(initial_state_source)
+    h_ = _to_cute_tensor(initial_state)
     b_ = _to_cute_tensor(b_launch)
     ind_ = _to_cute_tensor(initial_state_indices)
     if cu_seqlens_launch is not None:
@@ -494,43 +493,40 @@ def cutedsl_transpose_fused_sigmoid_gated_delta_rule_update(
     BK = K
     BV = V // 4
 
-    dtype = torch2cute_dtype_map[initial_state_source.dtype]
+    dtype = torch2cute_dtype_map[initial_state.dtype]
 
     compile_key = (dtype, B, T, H, HV, BV, use_qk_l2norm_in_kernel)
 
     if stream is None:
         stream = cuda.CUstream(torch.cuda.current_stream().cuda_stream)
 
-    if (
-        compile_key
-        not in cutedsl_transpose_fused_sigmoid_gated_delta_rule_update.compile_cache
-    ):
-        cutedsl_transpose_fused_sigmoid_gated_delta_rule_update.compile_cache[
-            compile_key
-        ] = cute.compile(
-            fused_recurrent_sigmoid_update_128x32_col,
-            A_log_,
-            a_,
-            dt_bias_,
-            softplus_beta,
-            softplus_threshold,
-            q_,
-            k_,
-            v_,
-            h_,
-            o_,
-            b_,
-            ind_,
-            cu_seqlens_,
-            BK,
-            BV,
-            DIM=K,
-            scale=scale,
-            USE_QK_L2NORM_IN_KERNEL=use_qk_l2norm_in_kernel,
-            stream=stream,
+    if compile_key not in cutedsl_fused_sigmoid_gated_delta_rule_update.compile_cache:
+        cutedsl_fused_sigmoid_gated_delta_rule_update.compile_cache[compile_key] = (
+            cute.compile(
+                fused_recurrent_sigmoid_update_128x32_col,
+                A_log_,
+                a_,
+                dt_bias_,
+                softplus_beta,
+                softplus_threshold,
+                q_,
+                k_,
+                v_,
+                h_,
+                o_,
+                b_,
+                ind_,
+                cu_seqlens_,
+                BK,
+                BV,
+                DIM=K,
+                scale=scale,
+                USE_QK_L2NORM_IN_KERNEL=use_qk_l2norm_in_kernel,
+                stream=stream,
+            )
         )
 
-    cutedsl_transpose_fused_sigmoid_gated_delta_rule_update.compile_cache[compile_key](
+    cutedsl_fused_sigmoid_gated_delta_rule_update.compile_cache[compile_key](
         A_log_,
         a_,
         dt_bias_,
@@ -549,4 +545,4 @@ def cutedsl_transpose_fused_sigmoid_gated_delta_rule_update(
     return o.squeeze(0)
 
 
-cutedsl_transpose_fused_sigmoid_gated_delta_rule_update.compile_cache = {}
+cutedsl_fused_sigmoid_gated_delta_rule_update.compile_cache = {}

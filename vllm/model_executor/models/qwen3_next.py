@@ -39,8 +39,8 @@ from vllm.model_executor.layers.fla.ops import (
     fused_sigmoid_gating_delta_rule_update,
 )
 from vllm.model_executor.layers.fla.ops.chunk import l2norm_fwd
-from vllm.model_executor.layers.fla.ops.cutedsl_gdn_transpose import (
-    cutedsl_transpose_fused_sigmoid_gated_delta_rule_update,
+from vllm.model_executor.layers.fla.ops.cutedsl_gdn import (
+    cutedsl_fused_sigmoid_gated_delta_rule_update,
 )
 from vllm.model_executor.layers.fused_moe import SharedFusedMoE
 from vllm.model_executor.layers.layernorm import (
@@ -217,10 +217,10 @@ class ChunkGatedDeltaRule(CustomOp):
 
 @CustomOp.register("decode_gated_delta_rule")
 class DecodeGatedDeltaRule(CustomOp):
-    def __init__(self, use_cutedsl_transpose: bool) -> None:
+    def __init__(self, use_cutedsl: bool) -> None:
         super().__init__()
         self._forward_method = (
-            self.forward_cutedsl if use_cutedsl_transpose else self.forward_native
+            self.forward_cutedsl if use_cutedsl else self.forward_native
         )
 
     def forward_cutedsl(
@@ -237,7 +237,7 @@ class DecodeGatedDeltaRule(CustomOp):
         cu_seqlens: torch.LongTensor | None = None,
         use_qk_l2norm_in_kernel: bool = True,
     ):
-        output = cutedsl_transpose_fused_sigmoid_gated_delta_rule_update(
+        output = cutedsl_fused_sigmoid_gated_delta_rule_update(
             A_log=A_log,
             dt_bias=dt_bias,
             q=q,
@@ -245,7 +245,7 @@ class DecodeGatedDeltaRule(CustomOp):
             v=v,
             a=a,
             b=b,
-            initial_state_source=initial_state.transpose(-2, -1),
+            initial_state=initial_state.transpose(-2, -1),
             initial_state_indices=ssm_state_indices,
             cu_seqlens=cu_seqlens,
             use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
@@ -551,8 +551,16 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         self.enable_packed_recurrent_decode = (
             envs.VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE
         )
-        self._use_cutedsl_transpose_decode = False
-        gdn_decode_backend = envs.VLLM_GDN_DECODE_BACKEND.lower()
+        self._use_cutedsl_decode = False
+        gdn_decode_backend = (
+            str(
+                get_current_vllm_config().additional_config.get(
+                    "gdn_decode_backend", "triton"
+                )
+            )
+            .strip()
+            .lower()
+        )
         if gdn_decode_backend == "cutedsl":
             is_supported_sm = current_platform.is_cuda() and (
                 current_platform.is_device_capability_family(90)
@@ -560,7 +568,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             )
             if not is_supported_sm:
                 logger.warning_once(
-                    "Ignoring VLLM_GDN_DECODE_BACKEND=cutedsl: "
+                    "Ignoring gdn decode backend 'cutedsl': "
                     "cutedsl decode is only enabled on sm90/sm100."
                 )
             elif self.head_k_dim != self.head_v_dim or self.head_k_dim not in (
@@ -572,12 +580,13 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                     f"got K={self.head_k_dim}, V={self.head_v_dim}."
                 )
             else:
-                self._use_cutedsl_transpose_decode = True
+                self._use_cutedsl_decode = True
                 logger.info_once(
-                    "Using cutedsl GDN decode kernel (VLLM_GDN_DECODE_BACKEND=cutedsl)."
+                    "Using cutedsl GDN decode kernel (backend=%s).",
+                    gdn_decode_backend,
                 )
         self.decode_gated_delta_rule = DecodeGatedDeltaRule(
-            use_cutedsl_transpose=self._use_cutedsl_transpose_decode
+            use_cutedsl=self._use_cutedsl_decode
         )
 
         compilation_config = get_current_vllm_config().compilation_config
