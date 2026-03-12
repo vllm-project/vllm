@@ -306,7 +306,7 @@ class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
             # across graph captures and replays.
             cg_tsm = attn_metadata.decode.cg_tile_scheduler_metadata
             cg_ns = attn_metadata.decode.cg_num_splits
-            if cg_tsm is not None:
+            if cg_tsm is not None and cg_ns is not None:
                 cg_tsm[: tsm.shape[0], :].copy_(tsm)
                 cg_ns[: ns.shape[0]].copy_(ns)
                 tsm = cg_tsm[: tsm.shape[0], :]
