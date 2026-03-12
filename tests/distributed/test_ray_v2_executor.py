@@ -7,21 +7,23 @@ Validates executor initialization, placement group support, RPC calls,
 and distributed execution with various TP/PP configurations.
 """
 
+import gc
 import os
 import threading
+import time
+from unittest.mock import patch
 
 import pytest
 import ray
-import torch
 from ray.util.placement_group import PlacementGroup
 from ray.util.state import list_actors
 
+from vllm import LLM
 from vllm.config import VllmConfig
 from vllm.engine.arg_utils import EngineArgs
 from vllm.v1.executor.ray_executor_v2 import RayExecutorV2
 
 MODEL = "facebook/opt-125m"
-NUM_GPUS = torch.cuda.device_count() if torch.cuda.is_available() else 0
 
 
 @pytest.fixture(autouse=True)
@@ -32,10 +34,15 @@ def enable_ray_v2_backend():
             "VLLM_USE_RAY_V2_EXECUTOR_BACKEND"
         ),
         "RAY_RUNTIME_ENV_HOOK": os.environ.get("RAY_RUNTIME_ENV_HOOK"),
+        "VLLM_ENABLE_V1_MULTIPROCESSING": os.environ.get(
+            "VLLM_ENABLE_V1_MULTIPROCESSING"
+        ),
     }
     os.environ["VLLM_USE_RAY_V2_EXECUTOR_BACKEND"] = "1"
+    # TODO (jeffreywang): Is this necessary?
+    os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
     # TODO (jeffreywang): Figure out vLLM CI
-    # -- this is only necessary for Anyscale ray cluster
+    # This is only necessary for Anyscale ray cluster.
     os.environ.pop("RAY_RUNTIME_ENV_HOOK", None)
     try:
         yield
@@ -47,17 +54,27 @@ def enable_ray_v2_backend():
 
 
 def _cleanup_ray_resources():
-    dangling_actors = [
-        actor
-        for actor in list_actors(filters=[("state", "=", "ALIVE")])
-        if actor.class_name == "RayWorkerProc"
-    ]
+    if not ray.is_initialized():
+        return
+
+    # Ray actor shutdown is async -- wait until all actors are dead
+    for _ in range(10):
+        dangling_actors = [
+            actor
+            for actor in list_actors(filters=[("state", "=", "ALIVE")])
+            if actor.class_name == "RayWorkerProc"
+        ]
+        if not dangling_actors:
+            break
+        time.sleep(1)
     assert not dangling_actors
 
     for pg_id, pg_info in ray.util.placement_group_table().items():
         if pg_info["state"] == "CREATED":
             pg = PlacementGroup(ray.PlacementGroupID(bytes.fromhex(pg_id)))
             ray.util.remove_placement_group(pg)
+
+    ray.shutdown()
 
 
 def create_vllm_config(
@@ -134,10 +151,6 @@ def assert_executor(executor, tp_size, pp_size):
 @pytest.mark.parametrize("tp_size, pp_size", [(1, 1), (2, 1), (4, 1), (2, 2)])
 def test_ray_v2_executor(tp_size, pp_size):
     """Validate RayExecutorV2 with various TP/PP configs."""
-    world_size = tp_size * pp_size
-    if world_size > NUM_GPUS:
-        pytest.skip(f"Need at least {world_size} GPUs")
-
     vllm_config = create_vllm_config(
         tensor_parallel_size=tp_size,
         pipeline_parallel_size=pp_size,
@@ -156,10 +169,6 @@ def test_ray_v2_executor(tp_size, pp_size):
 )
 def test_ray_v2_executor_pg(tp_size, pp_size, create_placement_group):
     """Validate RayExecutorV2 with various TP/PP configs using external PG."""
-    world_size = tp_size * pp_size
-    if world_size > NUM_GPUS:
-        pytest.skip(f"Need at least {world_size} GPUs")
-
     vllm_config = create_vllm_config(
         tensor_parallel_size=tp_size,
         pipeline_parallel_size=pp_size,
@@ -172,7 +181,6 @@ def test_ray_v2_executor_pg(tp_size, pp_size, create_placement_group):
         executor.shutdown()
 
 
-@pytest.mark.skipif(NUM_GPUS < 2, reason="Need at least 2 GPUs")
 @pytest.mark.parametrize(
     "executor",
     [create_vllm_config(tensor_parallel_size=2)],
@@ -194,7 +202,6 @@ def test_ray_v2_executor_failure_callback(executor):
     assert callback_invoked
 
 
-@pytest.mark.skipif(NUM_GPUS < 2, reason="Need at least 2 GPUs")
 @pytest.mark.parametrize(
     "executor",
     [create_vllm_config(tensor_parallel_size=2)],
@@ -207,7 +214,6 @@ def test_ray_v2_executor_collective_rpc(executor):
     assert executor.rpc_broadcast_mq is not None
 
 
-@pytest.mark.skipif(NUM_GPUS < 2, reason="Need at least 2 GPUs")
 @pytest.mark.parametrize(
     "executor",
     [create_vllm_config(tensor_parallel_size=2)],
@@ -224,7 +230,6 @@ def test_ray_v2_executor_driver_node_rank_0(executor):
     assert rank0_handle.node_id == driver_node
 
 
-@pytest.mark.skipif(NUM_GPUS < 2, reason="Need at least 2 GPUs")
 @pytest.mark.parametrize(
     "executor",
     [create_vllm_config(tensor_parallel_size=2)],
@@ -250,7 +255,6 @@ def test_ray_v2_executor_worker_death(executor):
     assert executor.shutting_down
 
 
-@pytest.mark.skipif(NUM_GPUS < 2, reason="Need at least 2 GPUs")
 def test_ray_v2_executor_shutdown():
     """Validate graceful shutdown: ray.kill() terminates all worker actors."""
     executor = RayExecutorV2(vllm_config=create_vllm_config(tensor_parallel_size=2))
@@ -268,7 +272,6 @@ def test_ray_v2_executor_shutdown():
     assert len(executor.response_mqs) == 0
 
 
-@pytest.mark.skipif(NUM_GPUS < 2, reason="Need at least 2 GPUs")
 @pytest.mark.parametrize(
     "executor",
     [create_vllm_config(tensor_parallel_size=2)],
@@ -280,3 +283,70 @@ def test_ray_v2_run_refs_stored_for_monitoring(executor):
         assert handle.run_ref is not None
         ready, _ = ray.wait([handle.run_ref], timeout=0)
         assert len(ready) == 0, "run_ref should be pending"
+
+
+@pytest.mark.parametrize("tp_size, pp_size", [(2, 1), (2, 2)])
+def test_ray_v2_single_node_generation(tp_size, pp_size):
+    """End-to-end LLM generation with RayExecutorV2."""
+
+    llm = LLM(
+        model=MODEL,
+        tensor_parallel_size=tp_size,
+        pipeline_parallel_size=pp_size,
+        distributed_executor_backend="ray",
+        enforce_eager=True,
+        max_model_len=256,
+        gpu_memory_utilization=0.3,
+    )
+    try:
+        prompts = [
+            "Hello, my name is",
+            "The capital of France is",
+            "The future of AI is",
+        ]
+        outputs = llm.generate(prompts)
+
+        assert len(outputs) == len(prompts)
+        for output in outputs:
+            assert len(output.outputs) > 0
+            assert len(output.outputs[0].text) > 0
+    finally:
+        llm.llm_engine.model_executor.shutdown()
+        del llm
+        gc.collect()
+
+
+@pytest.mark.parametrize("tp_size, pp_size", [(2, 1), (2, 2)])
+def test_ray_v2_single_node_generation_with_pg(tp_size, pp_size):
+    """E2E LLM generation with a user-provided placement group."""
+    ensure_ray_initialized()
+    bundles = [{"GPU": 1, "CPU": 1} for _ in range(tp_size * pp_size)]
+    pg = ray.util.placement_group(bundles, strategy="PACK")
+    ray.get(pg.ready())
+
+    try:
+        with patch.object(ray.util, "get_current_placement_group", return_value=pg):
+            llm = LLM(
+                model=MODEL,
+                tensor_parallel_size=tp_size,
+                pipeline_parallel_size=pp_size,
+                distributed_executor_backend="ray",
+                enforce_eager=True,
+                max_model_len=256,
+                gpu_memory_utilization=0.3,
+            )
+        prompts = [
+            "Hello, my name is",
+            "The capital of France is",
+            "The future of AI is",
+        ]
+        outputs = llm.generate(prompts)
+
+        assert len(outputs) == len(prompts)
+        for output in outputs:
+            assert len(output.outputs) > 0
+            assert len(output.outputs[0].text) > 0
+    finally:
+        llm.llm_engine.model_executor.shutdown()
+        del llm
+        gc.collect()

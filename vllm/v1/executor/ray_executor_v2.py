@@ -75,7 +75,9 @@ class RayWorkerProc(WorkerProc):
         distributed_init_method: str,
         input_shm_handle: Handle,
         is_driver_worker: bool,
+        same_node_as_executor: bool = False,
     ):
+        self._same_node_as_executor = same_node_as_executor
         super().__init__(
             vllm_config=vllm_config,
             local_rank=local_rank,
@@ -86,6 +88,24 @@ class RayWorkerProc(WorkerProc):
             is_driver_worker=is_driver_worker,
         )
         self.local_rank = local_rank
+
+    def _init_message_queues(
+        self, input_shm_handle: Handle, vllm_config: VllmConfig
+    ) -> None:
+        """
+        Workers on the same node as the executor use shared memory for
+        both the broadcast (input) MQ and the response MQ. Workers on
+        different nodes use TCP (n_local_reader=0).
+        """
+        self.rpc_broadcast_mq = MessageQueue.create_from_handle(
+            input_shm_handle, self.worker.rank
+        )
+
+        n_local = 1 if self._same_node_as_executor else 0
+        self.worker_response_mq = MessageQueue(
+            n_reader=1, n_local_reader=n_local, connect_ip=get_ip()
+        )
+        self.peer_response_handles = []
 
     def wait_for_init(self) -> dict:
         """Respond to the driver's wait_until_ready() barrier."""
@@ -133,7 +153,7 @@ class RayExecutorV2(MultiprocExecutor):
         # Step 1: Initialize Ray cluster and retrieve placement group
         if ray is None:
             raise ImportError("Ray is required for RayExecutorV2")
-        initialize_ray_cluster(self.parallel_config)
+        initialize_ray_cluster(self.parallel_config, require_gpu_on_driver=False)
         placement_group = self.parallel_config.placement_group
 
         # Disable Ray usage stats collection
@@ -195,22 +215,34 @@ class RayExecutorV2(MultiprocExecutor):
         node_ids = list(dict.fromkeys(a["node_id"] for a in bundle_assignments))
         is_single_node = len(node_ids) == 1
 
-        # Step 3: Create broadcast MessageQueue
-        distributed_init_method = get_distributed_init_method(
-            get_loopback_ip() if is_single_node else get_ip(), get_open_port()
-        )
+        # Step 3: Resolve the IP for torch.distributed TCPStore.
+        # The TCPStore server runs on rank 0's node, so all workers
+        # must be able to reach this address.
+        rank0_node_id = bundle_assignments[0]["node_id"]
+        if is_single_node:
+            dist_ip = get_loopback_ip()
+        elif rank0_node_id == driver_node:
+            dist_ip = get_ip()
+        else:
+            node_id_to_ip = {
+                n["NodeID"]: n["NodeManagerAddress"] for n in ray.nodes() if n["Alive"]
+            }
+            dist_ip = node_id_to_ip[rank0_node_id]
+        distributed_init_method = get_distributed_init_method(dist_ip, get_open_port())
 
+        # Step 4: Create broadcast MessageQueue.
+        # Workers on the driver node use shared memory; the rest use TCP.
         max_chunk_bytes = envs.VLLM_MQ_MAX_CHUNK_BYTES_MB * 1024 * 1024
-        mq_connect_ip = get_ip()
+        n_local = sum(1 for a in bundle_assignments if a["node_id"] == driver_node)
         self.rpc_broadcast_mq = MessageQueue(
             self.world_size,
-            self.local_world_size,
+            n_local,
             max_chunk_bytes=max_chunk_bytes,
-            connect_ip=mq_connect_ip,
+            connect_ip=get_ip(),
         )
         scheduler_output_handle = self.rpc_broadcast_mq.export_handle()
 
-        # Step 4: Spawn RayWorkerProc actors into PG bundles
+        # Step 5: Spawn RayWorkerProc actors into PG bundles
         self.ray_worker_handles: list[RayWorkerHandle] = []
         self._ray_actors: list[Any] = []
 
@@ -247,6 +279,7 @@ class RayExecutorV2(MultiprocExecutor):
                     distributed_init_method=distributed_init_method,
                     input_shm_handle=scheduler_output_handle,
                     is_driver_worker=is_driver_worker,
+                    same_node_as_executor=(assignment["node_id"] == driver_node),
                 )
             )
 
@@ -260,7 +293,7 @@ class RayExecutorV2(MultiprocExecutor):
             self.ray_worker_handles.append(handle)
             self._ray_actors.append(actor)
 
-        # Step 5: Collect response MQ handles
+        # Step 6: Collect response MQ handles
         init_refs = [h.actor.wait_for_init.remote() for h in self.ray_worker_handles]
         init_results = ray.get(init_refs)
 
@@ -272,12 +305,12 @@ class RayExecutorV2(MultiprocExecutor):
                 MessageQueue.create_from_handle(result["handle"], 0)
             )
 
-        # Step 6: Start run() before wait_until_ready() to avoid
+        # Step 7: Start run() before wait_until_ready() to avoid
         # deadlock — workers send subscriptions inside run().
         for handle in self.ray_worker_handles:
             handle.run_ref = handle.actor.run.remote()
 
-        # Step 7: wait_until_ready() barrier
+        # Step 8: wait_until_ready() barrier
         self.rpc_broadcast_mq.wait_until_ready()
         for response_mq in self.response_mqs:
             response_mq.wait_until_ready()
@@ -295,39 +328,60 @@ class RayExecutorV2(MultiprocExecutor):
             return
 
         self_ref = weakref.ref(self)
-
         ref_to_rank = {
             h.run_ref: h.rank for h in self.ray_worker_handles if h.run_ref is not None
         }
 
-        def monitor_workers():
-            done, _ = ray.wait(run_refs, num_returns=1)
+        def _should_stop() -> bool:
             executor = self_ref()
-            if not executor or executor.shutting_down:
+            return not executor or executor.shutting_down
+
+        def monitor_workers():
+            # TODO (jeffreywang): Is there a better way?
+            # Poll with timeout; a blocking ray.wait() would segfault
+            # if Ray is torn down while this thread is waiting.
+            while not _should_stop() and ray.is_initialized():
+                try:
+                    done, _ = ray.wait(run_refs, num_returns=1, timeout=5.0)
+                except Exception:
+                    return
+                if not done or _should_stop():
+                    continue
+
+                dead_ranks = [ref_to_rank[r] for r in done if r in ref_to_rank]
+                executor = self_ref()
+                if not executor:
+                    return
+                executor.is_failed = True
+                logger.error(
+                    "RayWorkerProc rank=%s died unexpectedly, shutting down executor.",
+                    dead_ranks,
+                )
+                executor.shutdown()
+                if executor.failure_callback is not None:
+                    callback = executor.failure_callback
+                    executor.failure_callback = None
+                    callback()
                 return
 
-            dead_ranks = [ref_to_rank[ref] for ref in done if ref in ref_to_rank]
-            executor.is_failed = True
-            logger.error(
-                "RayWorkerProc rank=%s died unexpectedly, shutting down executor.",
-                dead_ranks,
-            )
-            executor.shutdown()
-
-            if executor.failure_callback is not None:
-                callback = executor.failure_callback
-                executor.failure_callback = None
-                callback()
-
-        threading.Thread(
+        t = threading.Thread(
             target=monitor_workers, daemon=True, name="RayWorkerMonitor"
-        ).start()
+        )
+        t.start()
+        self._monitor_thread = t
 
     def shutdown(self) -> None:
         """Properly shut down the executor and its workers"""
         if getattr(self, "shutting_down", False):
             return
         self.shutting_down = True
+
+        # Wait for the monitor thread to exit before tearing down Ray
+        # resources — it may be inside ray.wait() which would segfault
+        # if Ray is shut down underneath it.
+        monitor = getattr(self, "_monitor_thread", None)
+        if monitor is not None and monitor.is_alive():
+            monitor.join(timeout=10)
 
         for handle in getattr(self, "ray_worker_handles", []):
             try:
