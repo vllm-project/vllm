@@ -31,7 +31,9 @@ from vllm.parser import ParserManager
 from vllm.renderers import BaseRenderer, merge_kwargs
 from vllm.renderers.inputs.preprocess import parse_model_prompt, prompt_to_seq
 from vllm.tokenizers import TokenizerLike
+from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.tool_parsers import ToolParser
+from vllm.tool_parsers.mistral_tool_parser import MistralToolParser
 from vllm.utils.mistral import is_mistral_tokenizer
 from vllm.utils.mistral import mt as _mt
 
@@ -146,7 +148,11 @@ class OpenAIServingRender:
                 )
 
         if request.tools is None or (
-            request.tool_choice == "none" and self.exclude_tools_when_tool_choice_none
+            request.tool_choice == "none"
+            and (
+                self.exclude_tools_when_tool_choice_none
+                or is_mistral_tokenizer(tokenizer)
+            )
         ):
             tool_dicts = None
         else:
@@ -394,9 +400,18 @@ class OpenAIServingRender:
         # tool parsing is done only if a tool_parser has been set and if
         # tool_choice is not "none" (if tool_choice is "none" but a tool_parser
         # is set, we want to prevent parsing a tool_call hallucinated by the LLM
+        #
+        # Exception: MistralToolParser always calls adjust_request() (even for
+        # tool_choice="none") so the grammar prevents raw special tokens
+        # from leaking into the response.
         if tool_parser is not None:
             tool_choice = getattr(request, "tool_choice", "none")
-            if tool_choice != "none":
+            tokenizer = renderer.get_tokenizer()
+            is_mistral_grammar = issubclass(
+                tool_parser,  # type: ignore[arg-type]
+                MistralToolParser,
+            ) and isinstance(tokenizer, MistralTokenizer)
+            if tool_choice != "none" or is_mistral_grammar:
                 if not isinstance(request, ChatCompletionRequest):
                     msg = (
                         "Tool usage is only supported "
@@ -404,7 +419,6 @@ class OpenAIServingRender:
                         f"{type(request).__name__}"
                     )
                     raise NotImplementedError(msg)
-                tokenizer = renderer.get_tokenizer()
                 request = tool_parser(tokenizer).adjust_request(request=request)  # type: ignore[arg-type]
 
         return conversation, [engine_prompt]

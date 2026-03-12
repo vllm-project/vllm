@@ -105,7 +105,12 @@ from vllm.renderers.inputs.preprocess import (
 )
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import TokenizerLike
+from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.tool_parsers import ToolParser
+from vllm.tool_parsers.mistral_tool_parser import (
+    MistralToolParser,
+    is_mistral_lark_grammar_active,
+)
 from vllm.tracing import (
     contains_trace_headers,
     extract_trace_headers,
@@ -910,9 +915,18 @@ class OpenAIServing:
         # tool parsing is done only if a tool_parser has been set and if
         # tool_choice is not "none" (if tool_choice is "none" but a tool_parser
         # is set, we want to prevent parsing a tool_call hallucinated by the LLM
+        #
+        # Exception: MistralToolParser always calls adjust_request() (even for
+        # tool_choice="none") so the grammar prevents raw special tokens
+        # from leaking into the response.
         if tool_parser is not None:
             tool_choice = getattr(request, "tool_choice", "none")
-            if tool_choice != "none":
+            tokenizer = renderer.get_tokenizer()
+            is_mistral_grammar = issubclass(
+                tool_parser,  # type: ignore[arg-type]
+                MistralToolParser,
+            ) and isinstance(tokenizer, MistralTokenizer)
+            if tool_choice != "none" or is_mistral_grammar:
                 if not isinstance(request, ChatCompletionRequest | ResponsesRequest):
                     msg = (
                         "Tool usage is only supported for Chat Completions API "
@@ -921,7 +935,6 @@ class OpenAIServing:
                     raise NotImplementedError(msg)
 
                 # TODO: Update adjust_request to accept ResponsesRequest
-                tokenizer = renderer.get_tokenizer()
                 request = tool_parser(tokenizer).adjust_request(request=request)  # type: ignore[arg-type]
 
         return conversation, [engine_prompt]
@@ -1109,7 +1122,52 @@ class OpenAIServing:
         content: str | None = None,
     ) -> tuple[list[FunctionCall] | None, str | None]:
         function_calls = list[FunctionCall]()
-        if request.tool_choice and isinstance(request.tool_choice, ToolChoiceFunction):
+
+        use_mistral_grammar = is_mistral_lark_grammar_active(
+            request,
+            tokenizer,
+            tool_parser_cls,  # type: ignore[arg-type]
+        )
+        if use_mistral_grammar or (
+            tool_parser_cls
+            and enable_auto_tools
+            and (request.tool_choice == "auto" or request.tool_choice is None)
+        ):
+            if tokenizer is None:
+                raise ValueError(
+                    "Tokenizer not available when `skip_tokenizer_init=True`"
+                )
+
+            # Automatic Tool Call Parsing
+            try:
+                assert tool_parser_cls is not None
+                tool_parser = tool_parser_cls(tokenizer)
+            except RuntimeError as e:
+                logger.exception("Error in tool parser creation.")
+                raise e
+            tool_call_info = tool_parser.extract_tool_calls(
+                content if content is not None else "",
+                request=request,  # type: ignore
+            )
+            if tool_call_info is not None and tool_call_info.tools_called:
+                # extract_tool_calls() returns a list of tool calls.
+                function_calls.extend(
+                    FunctionCall(
+                        id=tool_call.id,
+                        name=tool_call.function.name,
+                        arguments=tool_call.function.arguments,
+                    )
+                    for tool_call in tool_call_info.tool_calls
+                )
+                content = tool_call_info.content
+                if content and content.strip() == "":
+                    content = None
+            else:
+                # No tool calls.
+                return None, content
+        elif request.tool_choice and isinstance(
+            request.tool_choice, ToolChoiceFunction
+        ):
             assert content is not None
             # Forced Function Call
             function_calls.append(
@@ -1140,42 +1198,6 @@ class OpenAIServing:
                     )
                 )
             content = None  # Clear content since tool is called.
-        elif (
-            tool_parser_cls
-            and enable_auto_tools
-            and (request.tool_choice == "auto" or request.tool_choice is None)
-        ):
-            if tokenizer is None:
-                raise ValueError(
-                    "Tokenizer not available when `skip_tokenizer_init=True`"
-                )
-
-            # Automatic Tool Call Parsing
-            try:
-                tool_parser = tool_parser_cls(tokenizer)
-            except RuntimeError as e:
-                logger.exception("Error in tool parser creation.")
-                raise e
-            tool_call_info = tool_parser.extract_tool_calls(
-                content if content is not None else "",
-                request=request,  # type: ignore
-            )
-            if tool_call_info is not None and tool_call_info.tools_called:
-                # extract_tool_calls() returns a list of tool calls.
-                function_calls.extend(
-                    FunctionCall(
-                        id=tool_call.id,
-                        name=tool_call.function.name,
-                        arguments=tool_call.function.arguments,
-                    )
-                    for tool_call in tool_call_info.tool_calls
-                )
-                content = tool_call_info.content
-                if content and content.strip() == "":
-                    content = None
-            else:
-                # No tool calls.
-                return None, content
 
         return function_calls, content
 

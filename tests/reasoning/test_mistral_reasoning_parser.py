@@ -346,3 +346,57 @@ def test_mistral_reasoning(
     else:
         content = parser.extract_content_ids(output_tokens)
         assert content == []
+
+
+def test_is_reasoning_end_with_prefilled_system_prompt(
+    mistral_tokenizer: MistralTokenizer,
+):
+    parser: ReasoningParser = ReasoningParserManager.get_reasoning_parser(parser_name)(
+        mistral_tokenizer
+    )
+
+    # Simulate a prompt that ends with a closed think block followed by
+    # regular content (as in system prompts with pre-filled thinking).
+    prompt_text_before = "System prompt text. "
+    think_content = "I am thinking about the task."
+    prompt_text_after = " Continue with the task."
+
+    prompt_tokens = (
+        mistral_tokenizer.tokenizer.encode(prompt_text_before, bos=False, eos=False)
+        + [mistral_tokenizer.instruct.BEGIN_THINK]
+        + mistral_tokenizer.tokenizer.encode(think_content, bos=False, eos=False)
+        + [mistral_tokenizer.instruct.END_THINK]
+        + mistral_tokenizer.tokenizer.encode(prompt_text_after, bos=False, eos=False)
+    )
+
+    assert parser.is_reasoning_end(prompt_tokens) is True
+
+    reasoning, content = run_reasoning_extraction_mistral(
+        parser,
+        model_output=(
+            [mistral_tokenizer.instruct.BEGIN_THINK]
+            + mistral_tokenizer.tokenizer.encode(
+                "Let me reason about this.", bos=False, eos=False
+            )
+            + [mistral_tokenizer.instruct.END_THINK]
+            + mistral_tokenizer.tokenizer.encode(
+                "Here is the answer.", bos=False, eos=False
+            )
+        ),
+        streaming=True,
+    )
+    assert reasoning == "Let me reason about this."
+    assert content == "Here is the answer."
+
+
+def test_is_reasoning_end_prompt_only_content(
+    mistral_tokenizer: MistralTokenizer,
+):
+    parser: ReasoningParser = ReasoningParserManager.get_reasoning_parser(parser_name)(
+        mistral_tokenizer
+    )
+
+    prompt_tokens = mistral_tokenizer.tokenizer.encode(
+        "Just a regular prompt.", bos=False, eos=False
+    )
+    assert parser.is_reasoning_end(prompt_tokens) is False
