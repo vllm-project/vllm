@@ -5,12 +5,6 @@
 
 ## 1. Contribution Policy (Mandatory)
 
-### Coordination before coding
-
-- If work maps to an existing issue, coordinate on that issue before opening a PR.
-- Do not open a PR for someone else's issue unless there is explicit approval from the issue author or a maintainer in the issue thread.
-- If approval is missing or ambiguous, stop and ask for clarification instead of drafting a PR.
-
 ### Duplicate-work checks
 
 Before proposing a PR, run these checks:

@@ -144,7 +144,6 @@ All AI-assisted contributions must meet the same quality, testing, and review st
 - Do not submit "pure agent" PRs. The human submitter is responsible for reviewing all changed lines, validating behavior end-to-end, and running relevant tests.
 - Attribution preserves legal clarity and community trust. Contributors must disclose AI assistance in pull requests and mark commits with appropriate trailers (e.g. `Co-authored-by:`).
 - Avoid one-off "busywork" PRs (single typo, isolated style cleanup, one mutable default fix, etc.). Bundle mechanical cleanups into a clear, systematic scope.
-- Coordinate on issues before opening PRs, review similar PRs, and wait for approval.
 
 !!! warning
     These topics are outlined for agents in [AGENTS.md](../../AGENTS.md) with instructions for how to autonomously implement them.
