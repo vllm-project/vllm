@@ -836,6 +836,15 @@ steps:
     # Run a subset of model initialization tests
     - pytest -v -s models/test_initialization.py::test_can_initialize_small_subset
 
+- label: SmolLM3 AITER Health Check
+  timeout_in_minutes: 45
+  mirror_hardwares: [amdexperimental, amdproduction]
+  agent_pool: mi325_1
+  source_file_dependencies:
+  - vllm/
+  commands:
+    - pytest -v -s models/release/SmolLM3.py
+
 - label: Basic Models Tests (Extra Initialization) %N
   timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental, amdproduction]
