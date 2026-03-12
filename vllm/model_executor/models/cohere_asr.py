@@ -365,7 +365,7 @@ class CohereASRDecoderLayer(nn.Module):
             attn_type=AttentionType.DECODER,
             cache_config=cache_config,
             quant_config=quant_config,
-            prefix=f"{prefix}.self_attn",
+            prefix=f"{prefix}.first_sub_layer",
         )
 
         # cross attn to attend to encoder
@@ -375,7 +375,7 @@ class CohereASRDecoderLayer(nn.Module):
             num_heads=self.num_heads,
             cache_config=cache_config,
             quant_config=quant_config,
-            prefix=f"{prefix}.encoder_attn",
+            prefix=f"{prefix}.second_sub_layer",
         )
 
         self.layer_norm_3 = nn.LayerNorm(self.hidden_dim)
@@ -384,7 +384,7 @@ class CohereASRDecoderLayer(nn.Module):
             ffn_dim=self.ffn_dim,
             act_fn=self.act_fn,
             quant_config=quant_config,
-            prefix=f"{prefix}.mlp",
+            prefix=f"{prefix}.third_sub_layer",
         )
 
     def forward(

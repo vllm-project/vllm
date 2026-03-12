@@ -264,6 +264,7 @@ class InputPreprocessor:
         skip = False
         if self.renderer.mm_processor is not None:
             from vllm.multimodal.processing import EncDecMultiModalProcessor
+
             if isinstance(self.renderer.mm_processor, EncDecMultiModalProcessor):
                 skip = self.renderer.mm_processor.skip_decoder_start_token
 

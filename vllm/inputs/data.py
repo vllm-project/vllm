@@ -5,8 +5,6 @@ from typing import TYPE_CHECKING, Any, Literal, TypeAlias
 import torch
 from typing_extensions import NotRequired, TypedDict, assert_never
 
-
-
 if TYPE_CHECKING:
     from vllm.multimodal.inputs import (
         MultiModalDataDict,
