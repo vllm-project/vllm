@@ -108,7 +108,12 @@ def resolve_chat_template(
 ) -> str | None:
     # 1st priority: The given chat template
     if chat_template is not None:
-        return chat_template
+        # Resolve template names (e.g. "tool_use") to actual Jinja content
+        # so that downstream kwargs detection can parse template variables.
+        try:
+            return tokenizer.get_chat_template(chat_template, tools=tools)
+        except Exception:
+            return chat_template
 
     # 2nd priority: AutoProcessor chat template, unless tool calling is enabled
     if tools is None:
