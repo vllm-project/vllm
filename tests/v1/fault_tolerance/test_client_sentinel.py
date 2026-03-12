@@ -1,264 +1,294 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
-import queue
-import socket
-import threading
-import time
-import traceback
+import asyncio
 import uuid
-from queue import Queue
+from unittest.mock import AsyncMock, Mock, patch
 
-import msgspec
+import msgspec.msgpack
 import pytest
-import zmq
+import zmq.asyncio
 
-from vllm.config import FaultToleranceConfig, ParallelConfig, VllmConfig
+from vllm.config import FaultToleranceConfig, VllmConfig
 from vllm.v1.engine import EngineStatusType
-from vllm.v1.fault_tolerance import ClientSentinel
+from vllm.v1.fault_tolerance.client_sentinel import ClientSentinel
 from vllm.v1.fault_tolerance.utils import (
     FaultInfo,
     FaultToleranceRequest,
     FaultToleranceResult,
-    FaultToleranceZmqAddresses,
 )
 
-
-def _find_free_port() -> int:
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
+pytestmark = pytest.mark.skip_global_cleanup
 
 
 @pytest.fixture
-def ft_addr():
-    ports = [_find_free_port() for _ in range(4)]
-    return FaultToleranceZmqAddresses(
-        fault_state_pub_socket_addr=f"tcp://127.0.0.1:{ports[0]}",
-        client_sentinel_request_addr=f"tcp://127.0.0.1:{ports[1]}",
-        engine_core_sentinel_cmd_addr=f"tcp://127.0.0.1:{ports[2]}",
-        engine_fault_socket_addr=f"tcp://127.0.0.1:{ports[3]}",
-        engine_core_sentinel_identities={0: b"engine_sentinel_identity"},
+def mock_vllm_config():
+    """Create mock VllmConfig object"""
+    config = Mock(spec=VllmConfig)
+    config.parallel_config = Mock(
+        data_parallel_index=0,
+        data_parallel_size=2,
+        data_parallel_size_local=2,
+    )
+    config.fault_tolerance_config = FaultToleranceConfig(gloo_comm_timeout=10)
+    return config
+
+
+@pytest.fixture
+def mock_ft_addresses():
+    """Create mock FaultToleranceZmqAddresses object"""
+    addresses = Mock()
+    addresses.all_client_input_addresses = ["tcp://127.0.0.1:5555"]
+    addresses.all_client_output_addresses = ["tcp://127.0.0.1:5556"]
+    addresses.engine_fault_socket_addr = "tcp://127.0.0.1:5557"
+    addresses.fault_state_pub_socket_addr = "tcp://127.0.0.1:5558"
+    addresses.ft_config = Mock(fault_state_pub_topic="fault_state")
+    return addresses
+
+
+@pytest.fixture
+def mock_call_utility_async():
+    """Create mock call_utility_async function"""
+    return AsyncMock(
+        return_value={"request_id": "request_id", "success": True, "reason": None}
     )
 
 
-# Helper to collect exceptions from threads and fail the test if any were raised.
-def fail_on_thread_exceptions(thread_excs: Queue) -> None:
-    if not thread_excs.empty():
-        pytest.fail("Thread raised exception:\n" + "\n".join(thread_excs.queue))
+@pytest.fixture
+def client_sentinel(mock_vllm_config, mock_ft_addresses, mock_call_utility_async):
+    """Fixed ClientSentinel fixture (mock Poller)"""
+    # 1. Mock Poller class and return mock Poller object
+    mock_poller = Mock()
+    mock_poller.register = Mock()
+    mock_poller.poll = AsyncMock(return_value=[])  # Return empty events by default
+    mock_poller_class = Mock(return_value=mock_poller)
+
+    # 2. Mock make_zmq_socket to return mock Socket
+    mock_socket = AsyncMock()
+    # Add necessary attributes to mock socket (avoid errors in other places)
+    mock_socket.fd = Mock(return_value=1)  # Mock file descriptor
+    mock_socket.getsockopt = Mock(return_value=0)
+
+    # 3. Batch mock related dependencies
+    with (
+        patch(
+            "vllm.v1.fault_tolerance.client_sentinel.make_zmq_socket",
+            return_value=mock_socket,
+        ),
+        patch("zmq.asyncio.Poller", mock_poller_class),
+        patch(
+            "vllm.v1.fault_tolerance.client_sentinel.asyncio.create_task"
+        ) as mock_create_task,
+    ):
+        # 4. Disable real async tasks (avoid run/_monitor_and_pause_on_fault execution)
+        mock_create_task.return_value = Mock()
+
+        # 5. Create ClientSentinel instance
+        sentinel = ClientSentinel(
+            vllm_config=mock_vllm_config,
+            fault_tolerance_addresses=mock_ft_addresses,
+            call_utility_async=mock_call_utility_async,
+            core_engines=[b"engine_0", b"engine_1"],
+        )
+
+        return sentinel
 
 
-def send_error_message(
-    fault_receiver_addr: str, engine_id: str, fault_type: str, thread_excs: queue.Queue
+# -------------------------- Test Cases --------------------------
+@pytest.mark.asyncio
+async def test_client_sentinel_initialization(client_sentinel: ClientSentinel):
+    """Test ClientSentinel initialization logic"""
+    # Verify engine status dictionary initialization is correct
+    assert client_sentinel.engine_status_dict == {
+        0: {"status": EngineStatusType.HEALTHY},
+        1: {"status": EngineStatusType.HEALTHY},
+    }
+
+    # Verify key attribute initialization
+    assert client_sentinel.start_rank == 0
+
+    assert not client_sentinel.is_faulted.is_set()
+
+    # Verify ZMQ sockets are created
+    assert len(client_sentinel.input_sockets) == 1
+    assert len(client_sentinel.output_sockets) == 1
+    assert client_sentinel.fault_receiver_socket is not None
+    assert client_sentinel.fault_state_pub_socket is not None
+
+
+@pytest.mark.asyncio
+async def test_retry_success(client_sentinel: ClientSentinel, mock_call_utility_async):
+    """Test retry method (success scenario)"""
+    # Mock engine to return successful result
+    mock_call_utility_async.return_value = {
+        "request_id": "request_id",
+        "success": True,
+        "reason": "success",
+    }
+
+    # Execute retry
+    result = await client_sentinel.retry(timeout=5)
+
+    # Verify result
+    assert result is True
+    assert not client_sentinel.is_faulted.is_set()
+
+    # Verify call parameters
+    mock_call_utility_async.assert_awaited()
+    call_args = mock_call_utility_async.call_args[0]
+    assert call_args[0] == "handle_fault"
+    assert isinstance(call_args[1], FaultToleranceRequest)
+    assert call_args[1].instruction == "retry"
+    assert call_args[1].params["timeout"] == 5
+
+
+@pytest.mark.asyncio
+async def test_retry_failure(client_sentinel: ClientSentinel, mock_call_utility_async):
+    """Test retry method (failure scenario)"""
+    # Mock one engine to return failure
+    mock_call_utility_async.side_effect = [
+        {"success": True},
+        {"success": False, "reason": "engine dead"},
+    ]
+
+    # Mark one engine as DEAD first
+    client_sentinel.engine_status_dict[1] = {"status": EngineStatusType.DEAD}
+
+    # Execute retry
+    result = await client_sentinel.retry()
+
+    # Verify result
+    assert result is False
+
+
+@pytest.mark.asyncio
+async def test_pause_operation(
+    client_sentinel: ClientSentinel, mock_call_utility_async
 ):
-    # send error message to client sentinel, simulating an engine reporting an error
-    try:
-        ctx = zmq.Context()
-        socket = ctx.socket(zmq.DEALER)
-        socket.setsockopt(zmq.IDENTITY, b"test_sender")
-        socket.connect(fault_receiver_addr)
+    """Test pause method"""
+    # Mock all engines to pause successfully
+    mock_call_utility_async.return_value = {
+        "request_id": "request_id",
+        "success": True,
+        "reason": None,
+    }
 
-        test_fault = FaultInfo(
-            engine_id=str(engine_id), type=fault_type, message="test error"
+    # Execute pause
+    result = await client_sentinel.pause(timeout=3, soft_pause=True)
+
+    # Verify result
+    assert result is True
+    assert client_sentinel.engine_status_dict[0]["status"] == EngineStatusType.PAUSED
+    assert client_sentinel.engine_status_dict[1]["status"] == EngineStatusType.PAUSED
+
+    # Verify call parameters
+    call_args = mock_call_utility_async.call_args[0][1]
+    assert call_args.instruction == "pause"
+    assert call_args.params["timeout"] == 3
+    assert call_args.params["soft_pause"] is True
+
+
+@pytest.mark.asyncio
+async def test_monitor_and_pause_on_fault(client_sentinel: ClientSentinel):
+    """Test fault monitoring and automatic pause logic (fix parameter conflict)"""
+
+    fault_info = FaultInfo(engine_id="0", type="dead", message="dead")
+    client_sentinel.fault_receiver_socket.recv_multipart = AsyncMock(
+        return_value=[b"", b"", msgspec.msgpack.encode(fault_info)]
+    )
+
+    async def mock_poll(self, timeout):
+        if not hasattr(mock_poll, "called"):
+            mock_poll.called = True  # type: ignore[attr-defined]
+            return [(client_sentinel.fault_receiver_socket, zmq.POLLIN)]
+        else:
+            client_sentinel.sentinel_dead = True
+            return []
+
+    with (
+        patch.object(asyncio, "sleep", return_value=None),
+        patch("zmq.asyncio.Poller.poll", mock_poll),
+    ):  # Replace Poller.poll
+        await client_sentinel._monitor_and_pause_on_fault()
+
+    assert client_sentinel.engine_status_dict[0]["status"] == EngineStatusType.DEAD
+    assert client_sentinel.is_faulted.is_set()
+    client_sentinel.fault_state_pub_socket.send_multipart.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_handle_command_from_socket(client_sentinel: ClientSentinel):
+    """Test handling external commands from ZMQ socket (fix ft_args type error)"""
+    # 1. Construct valid FaultToleranceRequest parameter dictionary
+    test_request_id = str(uuid.uuid4())
+    ft_request_dict = {
+        "request_id": test_request_id,
+        "instruction": "retry",
+        "params": {"timeout": 2},
+    }
+
+    # 2. Construct correctly formatted encoded data (core fix)
+    encode_data = [
+        0,  # client_index (int)
+        123,  # call_id (int)
+        b"",  # empty byte placeholder
+        [ft_request_dict],  # ft_args → dictionary wrapped in list (key!)
+    ]
+
+    # 3. Mock data received by socket (DEALER mode: first frame is empty)
+    mock_data = [
+        b"",  # empty frame for DEALER mode
+        msgspec.msgpack.encode(encode_data),  # encode complete data
+    ]
+
+    # 4. Mock recv_multipart method of input socket
+    client_sentinel.input_sockets[0].recv_multipart = AsyncMock(return_value=mock_data)
+
+    # 5. Mock poller.poll as AsyncMock (avoid await list error)
+    async def mock_poll(self, timeout):
+        if not hasattr(mock_poll, "called"):
+            mock_poll.called = True  # type: ignore[attr-defined]
+            return [(client_sentinel.input_sockets[0], zmq.POLLIN)]
+        else:
+            client_sentinel.sentinel_dead = True
+            return []
+
+    # 6. Mock _send_utility_result for assertion
+    client_sentinel._send_utility_result = AsyncMock()
+
+    # 7. Execute run method
+    with patch("zmq.asyncio.Poller.poll", mock_poll):
+        await client_sentinel.run()
+
+    # 8. Verify command handling result
+    client_sentinel._send_utility_result.assert_awaited_with(
+        0,  # client_index
+        123,  # call_id
+        FaultToleranceResult(
+            success=True,
+            request_id=test_request_id,
+            reason=None,  # add required fields
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_shutdown(client_sentinel: ClientSentinel):
+    """Test shutdown method"""
+    # Mock close_sockets function
+    with patch("vllm.v1.fault_tolerance.client_sentinel.close_sockets") as mock_close:
+        client_sentinel.shutdown()
+        from unittest.mock import call
+
+        mock_close.assert_has_calls(
+            [
+                call(
+                    [
+                        client_sentinel.fault_receiver_socket,
+                        client_sentinel.fault_state_pub_socket,
+                    ]
+                ),
+                call(client_sentinel.input_sockets + client_sentinel.output_sockets),
+            ],
+            any_order=True,
         )
-        socket.send_multipart([b"", msgspec.msgpack.encode(test_fault)])
-        socket.close()
-        ctx.term()
-    except Exception:
-        thread_excs.put(traceback.format_exc())
-
-
-def create_client_sentinel(num_engines: int = 2, ft_addr=None):
-    if ft_addr is None:
-        ports = [_find_free_port() for _ in range(4)]
-        ft_addr = FaultToleranceZmqAddresses(
-            fault_state_pub_socket_addr=f"tcp://127.0.0.1:{ports[0]}",
-            client_sentinel_request_addr=f"tcp://127.0.0.1:{ports[1]}",
-            engine_core_sentinel_cmd_addr=f"tcp://127.0.0.1:{ports[2]}",
-            engine_fault_socket_addr=f"tcp://127.0.0.1:{ports[3]}",
-            engine_core_sentinel_identities={
-                i: f"engine_sentinel_identity_{i}".encode() for i in range(num_engines)
-            },
-        )
-
-    parallel = ParallelConfig(
-        data_parallel_size=num_engines,
-        data_parallel_size_local=num_engines,
-        data_parallel_master_ip="127.0.0.1",
-    )
-    vconfig = VllmConfig(
-        parallel_config=parallel,
-        fault_tolerance_config=FaultToleranceConfig(enable_fault_tolerance=True),
-    )
-
-    return ClientSentinel(vllm_config=vconfig, fault_tolerance_addresses=ft_addr)
-
-
-def test_client_sentinel_initialization(ft_addr):
-    sentinel = create_client_sentinel(ft_addr=ft_addr)
-
-    assert (
-        sentinel.engine_core_sentinel_identities[0]
-        == ft_addr.engine_core_sentinel_identities[0]
-    )
-    assert not sentinel.sentinel_dead
-    assert sentinel.engine_status_dict[0]["status"] == EngineStatusType.HEALTHY
-    assert sentinel.fault_receiver_socket.type == zmq.ROUTER
-    assert sentinel.downstream_cmd_socket.type == zmq.ROUTER
-    assert sentinel.fault_state_pub_socket.type == zmq.PUB
-
-    sentinel.shutdown()
-
-
-def test_client_sentinel_receives_faults_and_publishes_status(ft_addr):
-    sentinel = create_client_sentinel(ft_addr=ft_addr)
-    thread_excs: Queue = Queue()
-
-    def decode_published_message(sub_socket):
-        # decode error messages published by client sentinel
-        if not sub_socket.poll(timeout=2000):
-            raise TimeoutError("Timeout waiting for published message")
-        frames = sub_socket.recv_multipart()
-        return frames[0].decode("utf-8"), msgspec.msgpack.decode(frames[-1])
-
-    def check_published_message():
-        # listen and verify error messages published from client sentinel
-        try:
-            ctx = zmq.Context()
-            sub_socket = ctx.socket(zmq.SUB)
-            sub_socket.connect(ft_addr.fault_state_pub_socket_addr)
-            sub_socket.setsockopt_string(
-                zmq.SUBSCRIBE, sentinel.ft_config.fault_state_pub_topic
-            )
-            # Consume the first published status update (after the first fault)
-            # without validating it here; this test only asserts on the final state
-            decode_published_message(sub_socket)
-            prefix, status_dict = decode_published_message(sub_socket)
-            sub_socket.close()
-            ctx.term()
-            assert prefix == sentinel.ft_config.fault_state_pub_topic
-            assert status_dict[1]["status"] == EngineStatusType.DEAD
-            assert status_dict[0]["status"] == EngineStatusType.UNHEALTHY
-        except Exception:
-            thread_excs.put(traceback.format_exc())
-
-    t1 = threading.Thread(target=check_published_message, daemon=True)
-    t1.start()
-    time.sleep(0.1)
-
-    threading.Thread(
-        target=send_error_message,
-        args=(ft_addr.engine_fault_socket_addr, "1", "dead", thread_excs),
-        daemon=True,
-    ).start()
-    time.sleep(0.1)
-    threading.Thread(
-        target=send_error_message,
-        args=(ft_addr.engine_fault_socket_addr, "0", "RuntimeError", thread_excs),
-        daemon=True,
-    ).start()
-
-    t1.join()
-    fail_on_thread_exceptions(thread_excs)
-
-    # Verify engine_status_dict updated
-    assert sentinel.engine_status_dict[1]["status"] == EngineStatusType.DEAD
-    assert sentinel.engine_status_dict[0]["status"] == EngineStatusType.UNHEALTHY
-
-    sentinel.shutdown()
-
-
-def test_shutdown_sentinel(ft_addr):
-    sentinel = create_client_sentinel(ft_addr=ft_addr)
-
-    original_fault_sock = sentinel.fault_receiver_socket
-    original_cmd_sock = sentinel.downstream_cmd_socket
-    original_pub_sock = sentinel.fault_state_pub_socket
-    original_ctx = sentinel.ctx
-
-    sentinel.shutdown()
-
-    assert sentinel.sentinel_dead
-
-    with pytest.raises(zmq.ZMQError):
-        original_fault_sock.recv()
-    with pytest.raises(zmq.ZMQError):
-        original_cmd_sock.recv()
-    with pytest.raises(zmq.ZMQError):
-        original_pub_sock.send(b"test")
-
-    assert original_ctx.closed
-
-
-@pytest.mark.parametrize("instruction", ["pause", "retry"])
-def test_handle_fault_roundtrip(instruction, ft_addr):
-    """Test the full FaultToleranceRequest -> engine -> FaultToleranceResult flow
-    by talking to the sentinel's ROUTER endpoints using msgpack-encoded
-    FaultToleranceRequest/Result messages.
-    """
-    sentinel = create_client_sentinel(num_engines=1, ft_addr=ft_addr)
-    thread_excs: Queue = Queue()
-
-    # Start a DEALER that will act as the downstream engine sentinel.
-    engine_ctx = zmq.Context()
-    engine_socket = engine_ctx.socket(zmq.DEALER)
-    engine_socket.setsockopt(zmq.IDENTITY, ft_addr.engine_core_sentinel_identities[0])
-    engine_socket.connect(ft_addr.engine_core_sentinel_cmd_addr)
-
-    # Create a client DEALER that will send the FaultToleranceRequest to ClientSentinel
-    client_ctx = zmq.Context()
-    client_socket = client_ctx.socket(zmq.DEALER)
-    client_socket.setsockopt(zmq.IDENTITY, b"test_client")
-    client_socket.connect(ft_addr.client_sentinel_request_addr)
-
-    # Prepare the fault tolerance request
-    req_id = str(uuid.uuid4())
-    params = {"timeout": 3}
-    if instruction == "pause":
-        params["soft_pause"] = True
-    else:
-        params["new_stateless_dp_group_port"] = 12568
-
-    ft_req = FaultToleranceRequest(
-        request_id=req_id, instruction=instruction, params=params
-    )
-
-    def engine_loop():
-        try:
-            if not engine_socket.poll(timeout=2000):
-                raise TimeoutError(
-                    "Timeout waiting for FaultToleranceRequest from client sentinel"
-                )
-            parts = engine_socket.recv_multipart()
-            received = msgspec.msgpack.decode(parts[-1], type=FaultToleranceRequest)
-            assert received.instruction in ("pause", "retry")
-            # reply with success
-            res = FaultToleranceResult(
-                request_id=received.request_id, success=True, reason=None
-            )
-            engine_socket.send_multipart([b"", msgspec.msgpack.encode(res)])
-        except Exception:
-            thread_excs.put(traceback.format_exc())
-
-    threading.Thread(target=engine_loop, daemon=True).start()
-    client_socket.send_multipart([b"", msgspec.msgpack.encode(ft_req)])
-
-    # Wait for reply from ClientSentinel on client_socket
-    if not client_socket.poll(timeout=2000):
-        pytest.fail("Timeout waiting for FaultToleranceResult from client sentinel.")
-    parts = client_socket.recv_multipart()
-    ft_res = msgspec.msgpack.decode(parts[-1], type=FaultToleranceResult)
-    assert ft_res.request_id == req_id
-    assert ft_res.success is True
-    if instruction == "pause":
-        assert sentinel.engine_status_dict[0]["status"] == EngineStatusType.PAUSED
-    elif instruction == "retry":
-        assert sentinel.engine_status_dict[0]["status"] == EngineStatusType.HEALTHY
-
-    fail_on_thread_exceptions(thread_excs)
-    client_socket.close()
-    client_ctx.term()
-    engine_socket.close()
-    engine_ctx.term()
-
-    sentinel.shutdown()
+        assert client_sentinel.sentinel_dead is True
