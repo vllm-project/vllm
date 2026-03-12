@@ -540,8 +540,12 @@ class HarmonyContext(ConversationContext):
         self.first_tok_of_message = True  # For streaming support
 
     def _update_num_reasoning_tokens(self):
-        # Count all analysis and commentary channels as reasoning tokens
-        if self.parser.current_channel in {"analysis", "commentary"}:
+        channel = self.parser.current_channel
+        if channel == "analysis":
+            self.num_reasoning_tokens += 1
+        elif channel == "commentary" and self.parser.current_recipient is not None:
+            # Tool interactions (python/browser/container) are hidden.
+            # Preambles (recipient=None) are visible user text.
             self.num_reasoning_tokens += 1
 
     def append_output(self, output: RequestOutput) -> None:

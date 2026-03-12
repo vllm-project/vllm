@@ -11,7 +11,6 @@ from copy import copy
 from http import HTTPStatus
 from typing import Final
 
-import jinja2
 from fastapi import Request
 from openai.types.responses import (
     ResponseContentPartAddedEvent,
@@ -58,15 +57,11 @@ from vllm.entrypoints.openai.engine.serving import (
 )
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.openai.parser.harmony_utils import (
-    construct_harmony_previous_input_messages,
     get_developer_message,
     get_stop_tokens_for_assistant_actions,
     get_system_message,
     get_user_message,
     has_custom_tools,
-    parse_output_message,
-    parse_remaining_state,
-    parse_response_input,
     render_for_completion,
 )
 from vllm.entrypoints.openai.responses.context import (
@@ -76,6 +71,12 @@ from vllm.entrypoints.openai.responses.context import (
     SimpleContext,
     StreamingHarmonyContext,
 )
+from vllm.entrypoints.openai.responses.harmony import (
+    construct_harmony_previous_input_messages,
+    harmony_to_response_output,
+    parser_state_to_response_output,
+    response_input_to_harmony,
+)
 from vllm.entrypoints.openai.responses.protocol import (
     InputTokensDetails,
     OutputTokensDetails,
@@ -83,13 +84,15 @@ from vllm.entrypoints.openai.responses.protocol import (
     ResponseCreatedEvent,
     ResponseInProgressEvent,
     ResponseInputOutputMessage,
+    ResponseReasoningPartAddedEvent,
+    ResponseReasoningPartDoneEvent,
     ResponsesRequest,
     ResponsesResponse,
     ResponseUsage,
     StreamingResponsesResponse,
 )
 from vllm.entrypoints.openai.responses.streaming_events import (
-    HarmonyStreamingState,
+    StreamingState,
     emit_content_delta_events,
     emit_previous_item_done_events,
     emit_tool_action_events,
@@ -170,14 +173,12 @@ class OpenAIServingResponses(OpenAIServing):
         enable_prompt_tokens_details: bool = False,
         enable_force_include_usage: bool = False,
         enable_log_outputs: bool = False,
-        log_error_stack: bool = False,
     ) -> None:
         super().__init__(
             engine_client=engine_client,
             models=models,
             request_logger=request_logger,
             return_tokens_as_token_ids=return_tokens_as_token_ids,
-            log_error_stack=log_error_stack,
         )
 
         self.chat_template = chat_template
@@ -361,28 +362,15 @@ class OpenAIServingResponses(OpenAIServing):
         else:
             prev_response = None
 
-        try:
-            lora_request = self._maybe_get_adapters(request)
-            model_name = self.models.model_name(lora_request)
+        lora_request = self._maybe_get_adapters(request)
+        model_name = self.models.model_name(lora_request)
 
-            if self.use_harmony:
-                messages, engine_prompts = self._make_request_with_harmony(
-                    request, prev_response
-                )
-            else:
-                messages, engine_prompts = await self._make_request(
-                    request, prev_response
-                )
-
-        except (
-            ValueError,
-            TypeError,
-            RuntimeError,
-            jinja2.TemplateError,
-            NotImplementedError,
-        ) as e:
-            logger.exception("Error in preprocessing prompt inputs")
-            return self.create_error_response(e)
+        if self.use_harmony:
+            messages, engine_prompts = self._make_request_with_harmony(
+                request, prev_response
+            )
+        else:
+            messages, engine_prompts = await self._make_request(request, prev_response)
 
         request_metadata = RequestResponseMetadata(request_id=request.request_id)
         if raw_request:
@@ -420,86 +408,83 @@ class OpenAIServingResponses(OpenAIServing):
         else:
             assert len(builtin_tool_list) == 0
             available_tools = []
-        try:
-            tokenizer = self.renderer.get_tokenizer()
+        tokenizer = self.renderer.get_tokenizer()
 
-            for engine_prompt in engine_prompts:
-                maybe_error = self._validate_generator_input(engine_prompt)
-                if maybe_error is not None:
-                    return maybe_error
+        for engine_prompt in engine_prompts:
+            maybe_error = self._validate_generator_input(engine_prompt)
+            if maybe_error is not None:
+                return maybe_error
 
-                default_max_tokens = get_max_tokens(
-                    max_model_len,
-                    request.max_output_tokens,
-                    self._extract_prompt_len(engine_prompt),
-                    self.default_sampling_params,
-                    self.override_max_tokens,
-                )
+            default_max_tokens = get_max_tokens(
+                max_model_len,
+                request.max_output_tokens,
+                self._extract_prompt_len(engine_prompt),
+                self.default_sampling_params,
+                self.override_max_tokens,
+            )
 
-                sampling_params = request.to_sampling_params(
-                    default_max_tokens, self.default_sampling_params
-                )
+            sampling_params = request.to_sampling_params(
+                default_max_tokens, self.default_sampling_params
+            )
 
-                trace_headers = (
-                    None
-                    if raw_request is None
-                    else await self._get_trace_headers(raw_request.headers)
-                )
+            trace_headers = (
+                None
+                if raw_request is None
+                else await self._get_trace_headers(raw_request.headers)
+            )
 
-                context: ConversationContext
-                if self.use_harmony:
-                    if request.stream:
-                        context = StreamingHarmonyContext(messages, available_tools)
-                    else:
-                        context = HarmonyContext(messages, available_tools)
+            context: ConversationContext
+            if self.use_harmony:
+                if request.stream:
+                    context = StreamingHarmonyContext(messages, available_tools)
                 else:
-                    if envs.VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT:
-                        # This is a feature in development for parsing
-                        # tokens during generation instead of at the end
-                        context = ParsableContext(
-                            response_messages=messages,
-                            tokenizer=tokenizer,
-                            reasoning_parser_cls=self.parser.reasoning_parser_cls
-                            if self.parser
-                            else None,
-                            request=request,
-                            tool_parser_cls=self.parser.tool_parser_cls
-                            if self.parser
-                            else None,
-                            available_tools=available_tools,
-                            chat_template=self.chat_template,
-                            chat_template_content_format=self.chat_template_content_format,
-                        )
-                    else:
-                        context = SimpleContext()
+                    context = HarmonyContext(messages, available_tools)
+            else:
+                if envs.VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT:
+                    # This is a feature in development for parsing
+                    # tokens during generation instead of at the end
+                    context = ParsableContext(
+                        response_messages=messages,
+                        tokenizer=tokenizer,
+                        reasoning_parser_cls=self.parser.reasoning_parser_cls
+                        if self.parser
+                        else None,
+                        request=request,
+                        tool_parser_cls=self.parser.tool_parser_cls
+                        if self.parser
+                        else None,
+                        available_tools=available_tools,
+                        chat_template=self.chat_template,
+                        chat_template_content_format=self.chat_template_content_format,
+                    )
+                else:
+                    context = SimpleContext()
 
-                if self.parser and self.parser.reasoning_parser_cls is not None:
-                    reasoning_parser = self.parser.reasoning_parser_cls(tokenizer)
-                    if (
-                        isinstance(
-                            struct_out := sampling_params.structured_outputs,
-                            StructuredOutputsParams,
-                        )
-                        and struct_out.all_non_structural_tag_constraints_none()
-                    ):
-                        sampling_params.structured_outputs = replace(
-                            struct_out,
-                            structural_tag=reasoning_parser.prepare_structured_tag(
-                                struct_out.structural_tag, self.tool_server
-                            ),
-                        )
-                generator = self._generate_with_builtin_tools(
-                    request_id=request.request_id,
-                    engine_prompt=engine_prompt,
-                    sampling_params=sampling_params,
-                    context=context,
-                    lora_request=lora_request,
-                    priority=request.priority,
-                    trace_headers=trace_headers,
-                )
-                generators.append(generator)
-        except ValueError as e:
-            return self.create_error_response(e)
+            if self.parser and self.parser.reasoning_parser_cls is not None:
+                reasoning_parser = self.parser.reasoning_parser_cls(tokenizer)
+                if (
+                    isinstance(
+                        struct_out := sampling_params.structured_outputs,
+                        StructuredOutputsParams,
+                    )
+                    and struct_out.all_non_structural_tag_constraints_none()
+                ):
+                    sampling_params.structured_outputs = replace(
+                        struct_out,
+                        structural_tag=reasoning_parser.prepare_structured_tag(
+                            struct_out.structural_tag, self.tool_server
+                        ),
+                    )
+            generator = self._generate_with_builtin_tools(
+                request_id=request.request_id,
+                engine_prompt=engine_prompt,
+                sampling_params=sampling_params,
+                context=context,
+                lora_request=lora_request,
+                priority=request.priority,
+                trace_headers=trace_headers,
+            )
+            generators.append(generator)
 
         assert len(generators) == 1
         (result_generator,) = generators
@@ -574,20 +559,15 @@ class OpenAIServingResponses(OpenAIServing):
                 request_metadata,
             )
 
-        try:
-            return await self.responses_full_generator(
-                request,
-                sampling_params,
-                result_generator,
-                context,
-                model_name,
-                tokenizer,
-                request_metadata,
-            )
-        except GenerationError as e:
-            return self._convert_generation_error_to_response(e)
-        except Exception as e:
-            return self.create_error_response(e)
+        return await self.responses_full_generator(
+            request,
+            sampling_params,
+            result_generator,
+            context,
+            model_name,
+            tokenizer,
+            request_metadata,
+        )
 
     async def _make_request(
         self,
@@ -671,8 +651,6 @@ class OpenAIServingResponses(OpenAIServing):
                     pass
             except asyncio.CancelledError:
                 return self.create_error_response("Client disconnected")
-            except ValueError as e:
-                return self.create_error_response(e)
 
         # NOTE: Implementation of status is still WIP, but for now
         # we guarantee that if the status is not "completed", it is accurate.
@@ -954,9 +932,9 @@ class OpenAIServingResponses(OpenAIServing):
         output_items: list[ResponseOutputItem] = []
         num_init_messages = context.num_init_messages
         for msg in context.messages[num_init_messages:]:
-            output_items.extend(parse_output_message(msg))
+            output_items.extend(harmony_to_response_output(msg))
         # Handle the generation stopped in the middle (if any).
-        last_items = parse_remaining_state(context.parser)
+        last_items = parser_state_to_response_output(context.parser)
         if last_items:
             output_items.extend(last_items)
         return output_items
@@ -1103,13 +1081,13 @@ class OpenAIServingResponses(OpenAIServing):
             else:
                 prev_outputs = []
             for response_msg in request.input:
-                new_msg = parse_response_input(response_msg, prev_outputs)
+                new_msg = response_input_to_harmony(response_msg, prev_outputs)
                 if new_msg.author.role != "system":
                     messages.append(new_msg)
 
                 # User passes in a tool call request and its output. We need
-                # to add the tool call request to prev_outputs so that the
-                # parse_response_input can find the tool call request when
+                # to add the tool call request to prev_outputs so that
+                # response_input_to_harmony can find the tool call request when
                 # parsing the tool call output.
                 if isinstance(response_msg, ResponseFunctionToolCall):
                     prev_outputs.append(response_msg)
@@ -1124,28 +1102,13 @@ class OpenAIServingResponses(OpenAIServing):
         event_deque: deque[StreamingResponsesResponse] = deque()
         new_event_signal = asyncio.Event()
         self.event_store[request.request_id] = (event_deque, new_event_signal)
-        response = None
+        generator = self.responses_stream_generator(request, *args, **kwargs)
         try:
-            generator = self.responses_stream_generator(request, *args, **kwargs)
             async for event in generator:
                 event_deque.append(event)
                 new_event_signal.set()  # Signal new event available
-        except GenerationError as e:
-            response = self._convert_generation_error_to_response(e)
-        except Exception as e:
-            logger.exception("Background request failed for %s", request.request_id)
-            response = self.create_error_response(e)
         finally:
             new_event_signal.set()
-
-        if response is not None and isinstance(response, ErrorResponse):
-            # If the request has failed, update the status to "failed".
-            response_id = request.request_id
-            async with self.response_store_lock:
-                stored_response = self.response_store.get(response_id)
-                assert stored_response is not None
-                if stored_response.status not in ("completed", "cancelled"):
-                    stored_response.status = "failed"
 
     async def _run_background_request(
         self,
@@ -1153,13 +1116,7 @@ class OpenAIServingResponses(OpenAIServing):
         *args,
         **kwargs,
     ):
-        try:
-            response = await self.responses_full_generator(request, *args, **kwargs)
-        except GenerationError as e:
-            response = self._convert_generation_error_to_response(e)
-        except Exception as e:
-            logger.exception("Background request failed for %s", request.request_id)
-            response = self.create_error_response(e)
+        response = await self.responses_full_generator(request, *args, **kwargs)
 
         if isinstance(response, ErrorResponse):
             # If the request has failed, update the status to "failed".
@@ -1259,19 +1216,6 @@ class OpenAIServingResponses(OpenAIServing):
             param="response_id",
         )
 
-    def _make_store_not_supported_error(self) -> ErrorResponse:
-        return self.create_error_response(
-            err_type="invalid_request_error",
-            message=(
-                "`store=True` (default) is not supported. Please set "
-                "`store=False` in Responses API or set "
-                "`VLLM_ENABLE_RESPONSES_API_STORE=1` in the env var when "
-                "starting the vLLM server."
-            ),
-            status_code=HTTPStatus.BAD_REQUEST,
-            param="store",
-        )
-
     async def _process_simple_streaming_events(
         self,
         request: ResponsesRequest,
@@ -1337,6 +1281,19 @@ class OpenAIServingResponses(OpenAIServing):
                                 ),
                             )
                         )
+                        yield _increment_sequence_number_and_return(
+                            ResponseReasoningPartAddedEvent(
+                                type="response.reasoning_part.added",
+                                sequence_number=-1,
+                                output_index=current_output_index,
+                                item_id=current_item_id,
+                                content_index=current_content_index,
+                                part=ResponseReasoningTextContent(
+                                    text="",
+                                    type="reasoning_text",
+                                ),
+                            )
+                        )
                     else:
                         yield _increment_sequence_number_and_return(
                             ResponseOutputItemAddedEvent(
@@ -1352,22 +1309,21 @@ class OpenAIServingResponses(OpenAIServing):
                                 ),
                             )
                         )
-                    yield _increment_sequence_number_and_return(
-                        ResponseContentPartAddedEvent(
-                            type="response.content_part.added",
-                            sequence_number=-1,
-                            output_index=current_output_index,
-                            item_id=current_item_id,
-                            content_index=current_content_index,
-                            part=ResponseOutputText(
-                                type="output_text",
-                                text="",
-                                annotations=[],
-                                logprobs=[],
-                            ),
+                        yield _increment_sequence_number_and_return(
+                            ResponseContentPartAddedEvent(
+                                type="response.content_part.added",
+                                sequence_number=-1,
+                                output_index=current_output_index,
+                                item_id=current_item_id,
+                                content_index=current_content_index,
+                                part=ResponseOutputText(
+                                    type="output_text",
+                                    text="",
+                                    annotations=[],
+                                    logprobs=[],
+                                ),
+                            )
                         )
-                    )
-                    current_content_index += 1
                     first_delta_sent = True
                 # todo(kebe7jun) tool call support
 
@@ -1385,6 +1341,26 @@ class OpenAIServingResponses(OpenAIServing):
                         for pm in previous_delta_messages
                         if pm.reasoning is not None
                     )
+
+                    # delta message could have both reasoning and
+                    # content. Include current delta's reasoning in the
+                    # finalization since it may carry the tail end of
+                    # reasoning text (e.g. when reasoning end and
+                    # content start arrive in the same delta).
+                    if delta_message.reasoning is not None:
+                        yield _increment_sequence_number_and_return(
+                            ResponseReasoningTextDeltaEvent(
+                                type="response.reasoning_text.delta",
+                                sequence_number=-1,
+                                content_index=current_content_index,
+                                output_index=current_output_index,
+                                item_id=current_item_id,
+                                delta=delta_message.reasoning,
+                            )
+                        )
+                        reason_content += delta_message.reasoning
+                        delta_message = DeltaMessage(content=delta_message.content)
+
                     yield _increment_sequence_number_and_return(
                         ResponseReasoningTextDoneEvent(
                             type="response.reasoning_text.done",
@@ -1393,6 +1369,19 @@ class OpenAIServingResponses(OpenAIServing):
                             output_index=current_output_index,
                             content_index=current_content_index,
                             text=reason_content,
+                        )
+                    )
+                    yield _increment_sequence_number_and_return(
+                        ResponseReasoningPartDoneEvent(
+                            type="response.reasoning_part.done",
+                            sequence_number=-1,
+                            item_id=current_item_id,
+                            output_index=current_output_index,
+                            content_index=current_content_index,
+                            part=ResponseReasoningTextContent(
+                                text=reason_content,
+                                type="reasoning_text",
+                            ),
                         )
                     )
                     current_content_index = 0
@@ -1416,6 +1405,8 @@ class OpenAIServingResponses(OpenAIServing):
                             item=reasoning_item,
                         )
                     )
+                    current_output_index += 1
+                    current_item_id = str(uuid.uuid4())
                     yield _increment_sequence_number_and_return(
                         ResponseOutputItemAddedEvent(
                             type="response.output_item.added",
@@ -1430,8 +1421,6 @@ class OpenAIServingResponses(OpenAIServing):
                             ),
                         )
                     )
-                    current_output_index += 1
-                    current_item_id = str(uuid.uuid4())
                     yield _increment_sequence_number_and_return(
                         ResponseContentPartAddedEvent(
                             type="response.content_part.added",
@@ -1447,7 +1436,6 @@ class OpenAIServingResponses(OpenAIServing):
                             ),
                         )
                     )
-                    current_content_index += 1
                     # reset previous delta messages
                     previous_delta_messages = []
 
@@ -1483,7 +1471,6 @@ class OpenAIServingResponses(OpenAIServing):
                             ),
                         )
                     )
-                current_content_index += 1
 
                 previous_delta_messages.append(delta_message)
         if previous_delta_messages:
@@ -1503,7 +1490,19 @@ class OpenAIServingResponses(OpenAIServing):
                         text=reason_content,
                     )
                 )
-                current_content_index += 1
+                yield _increment_sequence_number_and_return(
+                    ResponseReasoningPartDoneEvent(
+                        type="response.reasoning_part.done",
+                        sequence_number=-1,
+                        item_id=current_item_id,
+                        output_index=current_output_index,
+                        content_index=current_content_index,
+                        part=ResponseReasoningTextContent(
+                            text=reason_content,
+                            type="reasoning_text",
+                        ),
+                    )
+                )
                 reasoning_item = ResponseReasoningItem(
                     type="reasoning",
                     content=[
@@ -1541,7 +1540,6 @@ class OpenAIServingResponses(OpenAIServing):
                         item_id=current_item_id,
                     )
                 )
-                current_content_index += 1
                 part = ResponseOutputText(
                     text=final_content,
                     type="output_text",
@@ -1557,7 +1555,6 @@ class OpenAIServingResponses(OpenAIServing):
                         part=part,
                     )
                 )
-                current_content_index += 1
                 item = ResponseOutputMessage(
                     type="message",
                     role="assistant",
@@ -1591,7 +1588,7 @@ class OpenAIServingResponses(OpenAIServing):
             [StreamingResponsesResponse], StreamingResponsesResponse
         ],
     ) -> AsyncGenerator[StreamingResponsesResponse, None]:
-        state = HarmonyStreamingState()
+        state = StreamingState()
 
         async for ctx in result_generator:
             assert isinstance(ctx, StreamingHarmonyContext)
@@ -1647,9 +1644,9 @@ class OpenAIServingResponses(OpenAIServing):
                 # TODO: in streaming, we noticed this bug:
                 # https://github.com/vllm-project/vllm/issues/25697
                 await self._initialize_tool_sessions(request, context, exit_stack)
-                processer = self._process_harmony_streaming_events
+                processor = self._process_harmony_streaming_events
             else:
-                processer = self._process_simple_streaming_events
+                processor = self._process_simple_streaming_events
             # TODO Hanchen make sampling params to include the structural tag
 
             initial_response = ResponsesResponse.from_request(
@@ -1677,7 +1674,7 @@ class OpenAIServingResponses(OpenAIServing):
             )
 
             try:
-                async for event_data in processer(
+                async for event_data in processor(
                     request,
                     sampling_params,
                     result_generator,

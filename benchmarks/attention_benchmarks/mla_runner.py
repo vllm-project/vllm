@@ -145,7 +145,6 @@ def create_minimal_vllm_config(
     cache_config = CacheConfig(
         block_size=block_size,
         gpu_memory_utilization=0.9,
-        swap_space=0,
         cache_dtype="auto",
         enable_prefix_caching=False,
     )
@@ -701,7 +700,7 @@ def _run_single_benchmark(
     # Warmup
     for _ in range(config.warmup_iters):
         forward_fn()
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     # Benchmark
     times = []
@@ -714,7 +713,7 @@ def _run_single_benchmark(
             forward_fn()
         end.record()
 
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         elapsed_ms = start.elapsed_time(end)
         times.append(elapsed_ms / 1000.0 / config.num_layers)
 
