@@ -716,7 +716,7 @@ def test_mixtral_moe(
     monkeypatch.setenv("MASTER_ADDR", "localhost")
     monkeypatch.setenv("MASTER_PORT", "12345")
     init_distributed_environment()
-    init_workspace_manager(torch.cuda.current_device())
+    init_workspace_manager(torch.accelerator.current_device_index())
 
     # Instantiate our and huggingface's MoE blocks
     vllm_config.compilation_config.static_forward_context = dict()
