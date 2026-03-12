@@ -9,7 +9,6 @@
 #
 # Build targets:
 #   vllm-openai (default): used for serving deployment
-#   vllm-openai-amd: AMD Zen optimized serving image with zentorch (pypi)
 #   vllm-openai-amd-source: AMD Zen optimized serving image with zentorch (source build)
 #   vllm-test: used for CI tests
 #   vllm-dev: used for development
@@ -88,8 +87,6 @@ RUN echo 'ulimit -c 0' >> ~/.bashrc
 
 ######################### BUILD IMAGE #########################
 FROM base AS vllm-build
-
-ENV VLLM_ZENTORCH_INSTALL=0
 
 ARG max_jobs=32
 ENV MAX_JOBS=${max_jobs}
@@ -257,19 +254,6 @@ LABEL ai.vllm.build.python-version="${PYTHON_VERSION:-3.12}"
 
 ENTRYPOINT ["vllm", "serve"]
 
-######################### AMD RELEASE IMAGE #########################
-FROM vllm-openai AS vllm-openai-amd
-
-ARG TARGETARCH
-RUN if [ "$TARGETARCH" != "amd64" ]; then \
-        echo "ERROR: vllm-openai-amd only supports --platform=linux/amd64"; \
-        exit 1; \
-    fi
-
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install zentorch
-
-ENTRYPOINT ["vllm", "serve"]
 
 ######################### AMD SOURCE BUILD IMAGE #########################
 FROM vllm-openai AS vllm-openai-amd-source

@@ -44,7 +44,9 @@ class ZenCpuPlatform(CpuPlatform):
         """
         from torch.torch_version import TorchVersion
 
-        if TorchVersion(torch.__version__) < (2, 10):
+        if TorchVersion(torch.__version__) < (2, 10) or TorchVersion(
+            torch.__version__
+        ) >= (2, 11):
             return
 
         cls._patch_fxgraphcache_pickle()
@@ -52,30 +54,18 @@ class ZenCpuPlatform(CpuPlatform):
     @classmethod
     def _patch_fxgraphcache_pickle(cls):
         """Backport mainline ValueError fix to FxGraphCachePickler.dumps()."""
-        import pickle
-
-        from torch._inductor.codecache import FxGraphCachePickler
+        from torch._inductor.codecache import BypassFxGraphCache, FxGraphCachePickler
 
         original_dumps = FxGraphCachePickler.dumps
         if hasattr(original_dumps, "_zen_patched"):
             return
 
-        def patched_dumps_method(self, obj):
-            import logging as _logging
-
-            from torch._inductor.codecache import BypassFxGraphCache
-
-            _logger = _logging.getLogger("torch._inductor.codecache")
+        def patched_dumps(self, obj):
             try:
-                self.dump(obj)
-                return self._stream.getvalue()
-            except (TypeError, AttributeError, pickle.PicklingError, ValueError) as e:
-                _logger.warning("Failed to pickle cache key", exc_info=True)
+                return original_dumps(self, obj)
+            except ValueError as e:
                 raise BypassFxGraphCache("Failed to pickle cache key") from e
-            finally:
-                self._stream.seek(0)
-                self._stream.truncate(0)
 
-        patched_dumps_method._zen_patched = True  # type: ignore[attr-defined]
-        FxGraphCachePickler.dumps = patched_dumps_method
+        patched_dumps._zen_patched = True  # type: ignore[attr-defined]
+        FxGraphCachePickler.dumps = patched_dumps
         logger.info("[zen_cpu] Patched FxGraphCachePickler.dumps (ValueError fix)")

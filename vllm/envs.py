@@ -52,7 +52,6 @@ if TYPE_CHECKING:
     VLLM_CPU_NUM_OF_RESERVED_CPU: int | None = None
     VLLM_CPU_SGL_KERNEL: bool = False
     VLLM_ZENTORCH_WEIGHT_PREPACK: bool = True
-    VLLM_ZENTORCH_INSTALL: bool = True
     VLLM_XLA_CACHE_PATH: str = os.path.join(VLLM_CACHE_ROOT, "xla_cache")
     VLLM_XLA_CHECK_RECOMPILATION: bool = False
     VLLM_FUSED_MOE_CHUNK_SIZE: int = 16 * 1024
@@ -716,10 +715,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ZENTORCH_WEIGHT_PREPACK": lambda: bool(
         int(os.getenv("VLLM_ZENTORCH_WEIGHT_PREPACK", "1"))
     ),
-    # (Zen CPU backend) whether to include zentorch as a pip requirement
-    # during setup.py install. Disabled in Docker where zentorch is
-    # built from source or installed separately.
-    "VLLM_ZENTORCH_INSTALL": lambda: bool(int(os.getenv("VLLM_ZENTORCH_INSTALL", "1"))),
     # If the env var is set, Ray Compiled Graph uses the specified
     # channel type to communicate between workers belonging to
     # different pipeline-parallel stages.
@@ -1780,7 +1775,6 @@ def compile_factors() -> dict[str, object]:
         "VLLM_CPU_KVCACHE_SPACE",
         "VLLM_CPU_MOE_PREPACK",
         "VLLM_ZENTORCH_WEIGHT_PREPACK",
-        "VLLM_ZENTORCH_INSTALL",
         "VLLM_TEST_FORCE_LOAD_FORMAT",
         "VLLM_ENABLE_CUDA_COMPATIBILITY",
         "VLLM_CUDA_COMPATIBILITY_PATH",

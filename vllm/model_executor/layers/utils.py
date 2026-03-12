@@ -244,9 +244,9 @@ def dispatch_cpu_unquantized_gemm(
             )
             is_prepacked = True
 
-        layer.cpu_linear = (
-            lambda x, weight, bias: torch.ops.zentorch.zentorch_linear_unary(
-                x, zen_weight, bias, is_weight_prepacked=is_prepacked
+        layer.cpu_linear = lambda x, weight, bias, _p=is_prepacked: (
+            torch.ops.zentorch.zentorch_linear_unary(
+                x, zen_weight, bias, is_weight_prepacked=_p
             )
         )
         if remove_weight:
