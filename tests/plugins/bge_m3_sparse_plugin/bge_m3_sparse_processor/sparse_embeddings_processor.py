@@ -41,7 +41,7 @@ class BgeM3SparseEmbeddingsProcessor(
                 if getattr(pooler_config, param, None) is None:
                     continue
                 self.default_pooling_params[param] = getattr(pooler_config, param)
-        self.embed_dimensions = vllm_config.model_config.embedding_size()
+        self.embed_dimensions = vllm_config.model_config.embedding_size
         self.embed_request_queue: list[EmbedRequestMixin] = []
         logger.info(self)
 
