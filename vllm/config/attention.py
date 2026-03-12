@@ -30,14 +30,14 @@ class AttentionConfig:
     use_cudnn_prefill: bool = False
     """Whether to use cudnn prefill."""
 
-    use_trtllm_ragged_deepseek_prefill: bool = True
+    use_trtllm_ragged_deepseek_prefill: bool = False
     """Whether to use TRTLLM ragged deepseek prefill."""
 
     use_trtllm_attention: bool | None = None
     """If set to True/False, use or don't use the TRTLLM attention backend
     in flashinfer. If None, auto-detect the attention backend in flashinfer."""
 
-    disable_flashinfer_prefill: bool = False
+    disable_flashinfer_prefill: bool = True
     """Whether to disable flashinfer prefill."""
 
     disable_flashinfer_q_quantization: bool = False
