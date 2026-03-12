@@ -23,9 +23,11 @@ from vllm.entrypoints.openai.engine.protocol import (
 )
 from vllm.entrypoints.openai.models.serving import (
     BaseModelPath,
+    OpenAIModelRegistry,
     OpenAIServingModels,
 )
 from vllm.entrypoints.openai.parser.harmony_utils import get_encoding
+from vllm.entrypoints.serve.render.serving import OpenAIServingRender
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs import TokensPrompt
 from vllm.outputs import CompletionOutput, RequestOutput
@@ -560,9 +562,9 @@ def _build_renderer(model_config: MockModelConfig):
     )
 
 
-def _build_serving_render(engine, model_registry):
-    from vllm.entrypoints.serve.render.serving import OpenAIServingRender
-
+def _build_serving_render(
+    engine, model_registry: OpenAIModelRegistry
+) -> OpenAIServingRender:
     return OpenAIServingRender(
         model_config=engine.model_config,
         renderer=engine.renderer,
