@@ -513,15 +513,6 @@ class MsgpackDecoder:
             return slice(*obj)
         return [self._decode_nested_slices(x) for x in obj]
 
-    def cleanup_request_tensors(self, request_id: str) -> int:
-        """Remove all orphaned tensors associated with a request.
-
-        Pass-through to the TensorIpcReceiver. Returns 0 if no receiver.
-        """
-        if self.tensor_ipc_receiver is None:
-            return 0
-        return self.tensor_ipc_receiver.cleanup_request_tensors(request_id)
-
     def ext_hook(self, code: int, data: memoryview) -> Any:
         if code == CUSTOM_TYPE_RAW_VIEW:
             return data
