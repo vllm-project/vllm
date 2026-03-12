@@ -1038,6 +1038,115 @@ def test_no_spec_tokens_scheduled_for_prefill_chunks():
     assert len(output.scheduled_spec_decode_tokens[req.request_id]) == num_spec_tokens
 
 
+def test_mixed_batch_disables_spec_decode():
+    """Test that mixed decode/spec_decode batches disable spec decode.
+
+    When concurrent requests approach max_model_len at different times,
+    the scheduler clips num_new_tokens to 1 for requests near the boundary
+    (disabling their spec decode) but keeps spec decode for others. This
+    produces a mixed batch that backends like GDN cannot handle.
+
+    The fix detects this mixed batch and disables spec decode for all
+    requests in that step.
+    """
+    num_spec_tokens = 3
+    max_model_len = 20
+    scheduler = create_scheduler(
+        num_speculative_tokens=num_spec_tokens,
+        max_model_len=max_model_len,
+    )
+    # Override max_model_len on scheduler since model_config.max_model_len
+    # may differ from scheduler_config.max_model_len for test models.
+    scheduler.max_model_len = max_model_len
+    # Use 1-token prompts (same pattern as test_schedule_spec_decoding_stats)
+    requests = create_requests(num_requests=2, num_tokens=1)
+    req_a, req_b = requests[0], requests[1]
+    req_ids = [r.request_id for r in requests]
+    req_to_index = {r.request_id: i for i, r in enumerate(requests)}
+    for req in requests:
+        scheduler.add_request(req)
+
+    # Step 1: Prefill both (1 token each)
+    output = scheduler.schedule()
+    assert len(output.scheduled_new_reqs) == 2
+
+    model_runner_output = ModelRunnerOutput(
+        req_ids=req_ids,
+        req_id_to_index=req_to_index,
+        sampled_token_ids=[[0], [0]],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+    scheduler.update_from_output(output, model_runner_output)
+
+    # Both: num_computed_tokens=1, num_tokens=2
+    assert req_a.num_computed_tokens == 1
+    assert req_b.num_computed_tokens == 1
+
+    # Give both draft tokens and do one normal decode step with spec
+    draft = DraftTokenIds(req_ids, [[1, 2, 3], [1, 2, 3]])
+    scheduler.update_draft_token_ids(draft)
+
+    output = scheduler.schedule()
+    # Both get 1 + 3 = 4 tokens
+    for req in requests:
+        assert output.num_scheduled_tokens[req.request_id] == 4
+        assert req.request_id in output.scheduled_spec_decode_tokens
+
+    model_runner_output = ModelRunnerOutput(
+        req_ids=req_ids,
+        req_id_to_index=req_to_index,
+        sampled_token_ids=[[1, 2, 3, 4], [1, 2, 3, 4]],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+    scheduler.update_from_output(output, model_runner_output)
+
+    # Both: num_computed_tokens=5, num_tokens=6
+    assert req_a.num_computed_tokens == 5
+    assert req_b.num_computed_tokens == 5
+
+    # Advance request A close to max_model_len boundary.
+    # max_model_len=20, so we need num_computed_tokens=18
+    # => max_model_len - 1 - 18 = 1 token allowed (no room for spec)
+    # Add tokens to A and set computed_tokens to simulate being near boundary.
+    for tok in range(100, 113):  # add 13 tokens so num_tokens = 6+13 = 19
+        req_a._all_token_ids.append(tok)
+    req_a.num_computed_tokens = 18
+    assert req_a.num_tokens == 19
+
+    # Give both requests draft tokens
+    draft = DraftTokenIds(req_ids, [[1, 2, 3], [1, 2, 3]])
+    scheduler.update_draft_token_ids(draft)
+
+    # req_a: num_tokens_with_spec=22, wants 22-18=4, clipped to min(4, 20-1-18)=1
+    #   → no spec decode for A
+    # req_b: num_tokens_with_spec=9, wants 9-5=4, clipped to min(4, 20-1-5)=4
+    #   → has spec decode for B
+    # This is a mixed batch → fix should disable all spec decode
+
+    output = scheduler.schedule()
+
+    # KEY ASSERTIONS: The fix should detect the mixed batch and disable
+    # spec decode for ALL requests in this step.
+    assert output.scheduled_spec_decode_tokens == {}, (
+        f"Expected no spec decode tokens in mixed batch, "
+        f"got {output.scheduled_spec_decode_tokens}"
+    )
+    # Request A: only 1 token (clipped by max_model_len)
+    assert output.num_scheduled_tokens[req_a.request_id] == 1, (
+        f"Expected 1 token for boundary request, "
+        f"got {output.num_scheduled_tokens[req_a.request_id]}"
+    )
+    # Request B: only 1 token (spec decode disabled by mixed batch fix)
+    assert output.num_scheduled_tokens[req_b.request_id] == 1, (
+        f"Expected 1 token for non-boundary request (spec stripped), "
+        f"got {output.num_scheduled_tokens[req_b.request_id]}"
+    )
+
+
 def _assert_right_scheduler_output(
     output: SchedulerOutput,
     num_requests: int,
