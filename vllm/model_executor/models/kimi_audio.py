@@ -17,6 +17,7 @@ from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.inputs.data import PromptType, TokensPrompt
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.model_loader import DefaultModelLoader
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import (
     SupportsMultiModal,
     SupportsPP,
@@ -76,7 +77,6 @@ class KimiAudioWhisperEncoder(WhisperEncoder):
     # packed_modules_mapping for Q/K/V fusion during weight loading
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
-        "kv_proj": ["k_proj", "v_proj"],
     }
 
     def __init__(
@@ -100,6 +100,39 @@ class KimiAudioWhisperEncoder(WhisperEncoder):
 
         # Restore original config
         vllm_config.model_config.hf_config = original_config
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        stacked_params_mapping = [
+            # (param_name, shard_name, shard_id)
+            ("qkv_proj", "q_proj", "q"),
+            ("qkv_proj", "k_proj", "k"),
+            ("qkv_proj", "v_proj", "v"),
+        ]
+        params_dict = dict(self.named_parameters())
+        loaded_params: set[str] = set()
+        for name, loaded_weight in weights:
+            for param_name, weight_name, shard_id in stacked_params_mapping:
+                if weight_name not in name:
+                    continue
+                name = name.replace(weight_name, param_name)
+                # Skip loading extra bias for GPTQ models.
+                if name.endswith(".bias") and name not in params_dict:
+                    continue
+
+                param = params_dict[name]
+                weight_loader = param.weight_loader
+                weight_loader(param, loaded_weight, shard_id)
+                break
+            else:
+                # Skip loading extra bias for GPTQ models.
+                if name.endswith(".bias") and name not in params_dict:
+                    continue
+
+                param = params_dict[name]
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                weight_loader(param, loaded_weight)
+            loaded_params.add(name)
+        return loaded_params
 
 
 # -----------------------------------------------------------------------------
@@ -358,6 +391,8 @@ class KimiAudioForConditionalGeneration(
 
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
+            # audio tower
+            "model.encoder.": "audio_tower.",
             # Audio projector (VQ-Adaptor)
             "model.vq_adaptor.layers.0.": "multi_modal_projector.vq_adaptor_layers_0.",
             "model.vq_adaptor.layers.3.": "multi_modal_projector.vq_adaptor_layers_3.",
@@ -368,7 +403,11 @@ class KimiAudioForConditionalGeneration(
             "model.embed_tokens.": "language_model.model.embed_tokens.",
             "model.norm.": "language_model.model.norm.",
             "lm_head.": "language_model.lm_head.",
-        }
+        },
+        orig_to_new_substr={
+            ".fc1.": ".mlp.fc1.",
+            ".fc2.": ".mlp.fc2.",
+        },
     )
 
     # Audio placeholder token sequence
@@ -388,8 +427,8 @@ class KimiAudioForConditionalGeneration(
         self.secondary_weights = [
             DefaultModelLoader.Source(
                 model_or_path=vllm_config.model_config.model,
+                subfolder="whisper-large-v3",
                 revision=None,
-                prefix="audio_tower.",
             )
         ]
 
@@ -569,10 +608,12 @@ class KimiAudioForConditionalGeneration(
         """Load weights, skipping MIMO layers (TTS-only) for ASR."""
         # Filter out MIMO/TTS weights since we only do ASR (speech-to-text)
         skipped_patterns = [
+            # Audio tower
+            "model.",
+            # MIMO/TTS
             "mimo_layers.",
             "mimo_output.",
             "mimo_norm.",
-            "audio_decoder.",
         ]
 
         # Load main model weights (LLM + projector) with mapper
