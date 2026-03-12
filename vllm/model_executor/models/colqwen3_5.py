@@ -252,11 +252,10 @@ class ColQwen3_5Model(
             for name, weight in proj_weights:
                 if self.embed_dim is None and "weight" in name:
                     self.embed_dim = weight.shape[0]
-                    has_bias = any("bias" in n for n, _ in proj_weights)
                     self.custom_text_proj = nn.Linear(
                         self._proj_hidden_size,
                         self.embed_dim,
-                        bias=has_bias,
+                        bias=False,
                         dtype=model_dtype,
                     )
                     self.custom_text_proj.to(model_device)
