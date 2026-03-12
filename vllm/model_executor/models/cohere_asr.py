@@ -283,7 +283,6 @@ class CohereASRMLP(nn.Module):
         ffn_dim: int,
         act_fn: str,
         quant_config: QuantizationConfig | None = None,
-        ffn_dropout: float = 0.0,
         prefix: str = "",
     ):
         super().__init__()
@@ -306,7 +305,6 @@ class CohereASRMLP(nn.Module):
         hidden_states, _ = self.dense_in(hidden_states)
         hidden_states = self.activation_fn(hidden_states)
         hidden_states, _ = self.dense_out(hidden_states)
-        # hidden_states = self.layer_dropout(hidden_states)
         return hidden_states
 
 
@@ -358,7 +356,6 @@ class CohereASRDecoderLayer(nn.Module):
         self.ffn_dim = config.get("inner_size")
         self.act_fn = config.get("hidden_act")
         self.num_heads = config.get("num_attention_heads")
-        self.ffn_dropout = config.get("ffn_dropout")  # NEW
 
         # self_attn
         self.layer_norm_1 = nn.LayerNorm(self.hidden_dim)
@@ -387,7 +384,6 @@ class CohereASRDecoderLayer(nn.Module):
             ffn_dim=self.ffn_dim,
             act_fn=self.act_fn,
             quant_config=quant_config,
-            ffn_dropout=self.ffn_dropout,  # NEW
             prefix=f"{prefix}.mlp",
         )
 
@@ -699,21 +695,15 @@ class PositionalEncoding(torch.nn.Module):
     """Fixed sinusoidal positional encoding.
     Args:
         d_model (int): embedding dim
-        dropout_rate (float): dropout rate
         max_len (int): maximum input length
         xscale (bool): whether to scale the input by sqrt(d_model)
-        dropout_rate_emb (float): dropout rate for the positional embeddings
     """
 
-    def __init__(
-        self, d_model, dropout_rate, max_len=5000, xscale=None, dropout_rate_emb=0.0
-    ):
-        """Construct an PositionalEncoding object."""
+    def __init__(self, d_model, max_len=5000, xscale=None):
         super().__init__()
         self.d_model = d_model
         self.xscale = xscale
         self.max_len = max_len
-        
 
     def create_pe(self, positions, dtype):
         pos_length = positions.size(0)
@@ -745,10 +735,8 @@ class PositionalEncoding(torch.nn.Module):
         if self.xscale:
             x = x * self.xscale
         pos_emb = self.pe[:, :input_len]
-        if self.dropout_emb:
-            pos_emb = self.dropout_emb(pos_emb)
         x = x + pos_emb
-        return self.dropout(x), pos_emb
+        return x, pos_emb
 
 
 class RelPositionalEncoding(PositionalEncoding):
@@ -756,10 +744,8 @@ class RelPositionalEncoding(PositionalEncoding):
     See : Appendix B in https://arxiv.org/abs/1901.02860
     Args:
         d_model (int): embedding dim
-        dropout_rate (float): dropout rate
         max_len (int): maximum input length
         xscale (bool): whether to scale the input by sqrt(d_model)
-        dropout_rate_emb (float): dropout rate for the positional embeddings
     """
 
     def extend_pe(self, length, device, dtype):
@@ -767,9 +753,6 @@ class RelPositionalEncoding(PositionalEncoding):
         needed_size = 2 * length - 1
         if hasattr(self, "pe") and self.pe.size(1) >= needed_size:
             return
-        # positions would be from negative numbers to positive
-        # positive positions would be used for left positions
-        # and negative for right positions
         positions = torch.arange(
             length - 1, -length, -1, dtype=torch.float32, device=device
         ).unsqueeze(1)
@@ -788,21 +771,13 @@ class RelPositionalEncoding(PositionalEncoding):
         if self.xscale:
             x = x * self.xscale
 
-        # center_pos would be the index of position 0
-        # negative positions would be used for right and
-        # positive for left tokens
-        # for input of length L, 2*L-1 positions are needed,
-        # positions from (L-1) to -(L-1)
         input_len = x.size(1) + cache_len
         center_pos = self.pe.size(1) // 2 + 1
         start_pos = center_pos - input_len
         end_pos = center_pos + input_len - 1
         pos_emb = self.pe[:, start_pos:end_pos]
 
-        if self.dropout_emb:
-            pos_emb = self.dropout_emb(pos_emb)
-
-        return self.dropout(x), pos_emb
+        return x, pos_emb
 
 
 class Swish(nn.SiLU):
@@ -820,7 +795,7 @@ class ConformerFeedForward(nn.Module):
         training of huge models.
     """
 
-    def __init__(self, d_model, d_ff, dropout, activation=None, use_bias=True):
+    def __init__(self, d_model, d_ff, activation=None, use_bias=True):
         super().__init__()
         if activation is None:
             activation = Swish()
@@ -829,13 +804,11 @@ class ConformerFeedForward(nn.Module):
         self.use_bias = use_bias
         self.linear1 = nn.Linear(d_model, d_ff, bias=self.use_bias)
         self.activation = activation
-        self.dropout = nn.Dropout(p=dropout)
         self.linear2 = nn.Linear(d_ff, d_model, bias=self.use_bias)
 
     def forward(self, x):
         x = self.linear1(x)
         x = self.activation(x)
-        x = self.dropout(x)
         x = self.linear2(x)
         return x
 
@@ -1033,32 +1006,22 @@ class CohereASRMultiHeadAttention(nn.Module):
     Args:
         n_head (int): number of heads
         n_feat (int): size of the features
-        dropout_rate (float): dropout rate
         use_bias (bool): whether to remove bias in linear and conv layers
-        use_pytorch_sdpa (bool): use torch sdpa instead of manual attention
-        use_pytorch_sdpa_backends list[str]: list of backend
-            names to use in sdpa. None or empty list means
-            all backends. e.g. ["MATH"]
     """
 
     def __init__(
         self,
         n_head,
         n_feat,
-        dropout_rate,
         max_cache_len=0,
         use_bias=True,
-        use_pytorch_sdpa=False,
-        use_pytorch_sdpa_backends=None,
     ):
         """Construct an MultiHeadedAttention object."""
         super().__init__()
 
         self.cache_drop_size = None
         self.use_bias = use_bias
-        self.dropout_rate = dropout_rate
         assert n_feat % n_head == 0
-        # We assume d_v always equals d_k
         self.d_k = n_feat // n_head
         self.s_d_k = math.sqrt(self.d_k)
         self.h = n_head
@@ -1066,7 +1029,6 @@ class CohereASRMultiHeadAttention(nn.Module):
         self.linear_k = nn.Linear(n_feat, n_feat, bias=use_bias)
         self.linear_v = nn.Linear(n_feat, n_feat, bias=use_bias)
         self.linear_out = nn.Linear(n_feat, n_feat, bias=use_bias)
-        self.dropout = nn.Dropout(p=dropout_rate)
 
         self._max_cache_len = max_cache_len
 
@@ -1112,8 +1074,7 @@ class CohereASRMultiHeadAttention(nn.Module):
         else:
             attn = torch.softmax(scores, dim=-1)  # (batch, head, time1, time2)
 
-        p_attn = self.dropout(attn)
-        x = torch.matmul(p_attn, value)  # (batch, head, time1, d_k)
+        x = torch.matmul(attn, value)  # (batch, head, time1, d_k)
         x = x.transpose(1, 2).reshape(
             n_batch, -1, self.h * self.d_k
         )  # (batch, time1, d_model)
@@ -1167,7 +1128,6 @@ class RelPositionMultiHeadAttention(CohereASRMultiHeadAttention):
     Args:
         n_head (int): number of heads
         n_feat (int): size of the features
-        dropout_rate (float): dropout rate
         use_bias (bool): whether to apply bias in linear
             and conv layers of MultiHeadAttention
     """
@@ -1176,23 +1136,17 @@ class RelPositionMultiHeadAttention(CohereASRMultiHeadAttention):
         self,
         n_head,
         n_feat,
-        dropout_rate,
         pos_bias_u,
         pos_bias_v,
         max_cache_len=0,
         use_bias=True,
-        use_pytorch_sdpa=False,
-        use_pytorch_sdpa_backends=None,
     ):
         """Construct an RelPositionMultiHeadedAttention object."""
         super().__init__(
             n_head=n_head,
             n_feat=n_feat,
-            dropout_rate=dropout_rate,
             max_cache_len=max_cache_len,
             use_bias=use_bias,
-            use_pytorch_sdpa=use_pytorch_sdpa,
-            use_pytorch_sdpa_backends=use_pytorch_sdpa_backends,
         )
         # linear transformation for positional encoding
         self.linear_pos = nn.Linear(n_feat, n_feat, bias=False)
@@ -1248,7 +1202,6 @@ class RelPositionMultiHeadAttention(CohereASRMultiHeadAttention):
         q = q.transpose(1, 2)  # (batch, time1, head, d_k)
 
         n_batch_pos = pos_emb.size(0)
-        value.size(0)
         p = self.linear_pos(pos_emb).view(n_batch_pos, -1, self.h, self.d_k)
         p = p.transpose(1, 2)  # (batch, head, time1, d_k)
 
@@ -1290,32 +1243,10 @@ class ConformerLayer(torch.nn.Module):
             PositionwiseFeedForward
         self_attention_model (str): type of the attention
             layer and positional encoding
-            'rel_pos': relative positional embedding and
-                Transformer-XL
-            'rel_pos_local_attn': relative positional
-                embedding and Transformer-XL with local
-                attention using overlapping chunks.
-                Attention context is determined by
-                att_context_size parameter.
-            'abs_pos': absolute positional embedding and
-                Transformer. Default is rel_pos.
-        global_tokens (int): number of tokens to be used
-            for global attention. Only relevant if
-            self_attention_model is 'rel_pos_local_attn'.
-            Defaults to 0.
-        global_tokens_spacing (int): how far apart the
-            global tokens are. Defaults to 1.
-        global_attn_separate (bool): whether the q, k, v
-            layers used for global tokens should be
-            separate. Defaults to False.
         n_heads (int): number of heads for multi-head
             attention
         conv_kernel_size (int): kernel size for depthwise
             convolution in convolution module
-        dropout (float): dropout probabilities for linear
-            layers
-        dropout_att (float): dropout probabilities for
-            attention distributions
         use_bias (bool): Apply bias to all Linear and
             Conv1d layers from each ConformerLayer to
             improve activation flow and stabilize training
@@ -1327,30 +1258,19 @@ class ConformerLayer(torch.nn.Module):
         d_model,
         d_ff,
         self_attention_model="rel_pos",
-        global_tokens=0,
-        global_tokens_spacing=1,
-        global_attn_separate=False,
         n_heads=4,
         conv_kernel_size=31,
         conv_norm_type="batch_norm",
         conv_context_size=None,
-        dropout=0.1,
-        dropout_att=0.1,
         pos_bias_u=None,
         pos_bias_v=None,
         att_context_size=None,
         use_bias=True,
-        use_pytorch_sdpa=False,
-        use_pytorch_sdpa_backends=None,
     ):
         super().__init__()
         if att_context_size is None:
             att_context_size = [-1, -1]
 
-        self.use_pytorch_sdpa = use_pytorch_sdpa
-        if use_pytorch_sdpa_backends is None:
-            use_pytorch_sdpa_backends = []
-        self.use_pytorch_sdpa_backends = use_pytorch_sdpa_backends
         self.self_attention_model = self_attention_model
         self.n_heads = n_heads
         self.fc_factor = 0.5
@@ -1358,7 +1278,7 @@ class ConformerLayer(torch.nn.Module):
         # first feed forward module
         self.norm_feed_forward1 = nn.LayerNorm(d_model)
         self.feed_forward1 = ConformerFeedForward(
-            d_model=d_model, d_ff=d_ff, dropout=dropout, use_bias=use_bias
+            d_model=d_model, d_ff=d_ff, use_bias=use_bias
         )
 
         # convolution module
@@ -1380,22 +1300,18 @@ class ConformerLayer(torch.nn.Module):
         self.self_attn = RelPositionMultiHeadAttention(
             n_head=n_heads,
             n_feat=d_model,
-            dropout_rate=dropout_att,
             pos_bias_u=pos_bias_u,
             pos_bias_v=pos_bias_v,
             max_cache_len=MHA_max_cache_len,
             use_bias=use_bias,
-            use_pytorch_sdpa=self.use_pytorch_sdpa,
-            use_pytorch_sdpa_backends=self.use_pytorch_sdpa_backends,
         )
 
         # second feed forward module
         self.norm_feed_forward2 = nn.LayerNorm(d_model)
         self.feed_forward2 = ConformerFeedForward(
-            d_model=d_model, d_ff=d_ff, dropout=dropout, use_bias=use_bias
+            d_model=d_model, d_ff=d_ff, use_bias=use_bias
         )
 
-        self.dropout = nn.Dropout(dropout)
         self.norm_out = nn.LayerNorm(d_model)
 
     def forward(
@@ -1427,7 +1343,7 @@ class ConformerLayer(torch.nn.Module):
         residual = x
         x = self.norm_feed_forward1(x)
         x = self.feed_forward1(x)
-        residual = residual + self.dropout(x) * self.fc_factor
+        residual = residual + x * self.fc_factor
 
         x = self.norm_self_att(residual)
         if self.self_attention_model == "rel_pos":
@@ -1458,17 +1374,17 @@ class ConformerLayer(torch.nn.Module):
         if x is not None and cache_last_channel is not None:
             (x, cache_last_channel) = x
 
-        residual = residual + self.dropout(x)
+        residual = residual + x
 
         x = self.norm_conv(residual)
         x = self.conv(x, pad_mask=pad_mask, cache=cache_last_time)
         if cache_last_time is not None:
             (x, cache_last_time) = x
-        residual = residual + self.dropout(x)
+        residual = residual + x
 
         x = self.norm_feed_forward2(residual)
         x = self.feed_forward2(x)
-        residual = residual + self.dropout(x) * self.fc_factor
+        residual = residual + x * self.fc_factor
 
         x = self.norm_out(residual)
 
@@ -1503,9 +1419,6 @@ class ConformerEncoder(nn.Module):
             "subsampling_conv_chunking_factor", 1
         )
         subsampling_conv_channels = self.hf_config.encoder["subsampling_conv_channels"]
-        self.hf_config.encoder["reduction"]
-        self.hf_config.encoder["reduction_position"]
-        self.hf_config.encoder["reduction_factor"]
         ff_expansion_factor = self.hf_config.encoder["ff_expansion_factor"]
         self_attention_model = self.hf_config.encoder["self_attention_model"]
         n_heads = self.hf_config.encoder["n_heads"]
@@ -1519,16 +1432,6 @@ class ConformerEncoder(nn.Module):
         conv_norm_type = self.hf_config.encoder["conv_norm_type"]
         conv_context_size = self.hf_config.encoder["conv_context_size"]
         use_bias = self.hf_config.encoder.get("use_bias", True)
-        dropout = self.hf_config.encoder["dropout"]
-        dropout_pre_encoder = self.hf_config.encoder["dropout_pre_encoder"]
-        dropout_emb = self.hf_config.encoder["dropout_emb"]
-        dropout_att = self.hf_config.encoder["dropout_att"]
-        global_tokens: int = 0
-        global_tokens_spacing: int = 1
-        global_attn_separate: bool = False
-        use_pytorch_sdpa: bool = False
-        use_pytorch_sdpa_backends = None
-        sync_max_audio_length: bool = True
 
         d_ff = d_model * ff_expansion_factor
         self.d_model = d_model
@@ -1539,14 +1442,6 @@ class ConformerEncoder(nn.Module):
         self.subsampling_conv_chunking_factor = subsampling_conv_chunking_factor
 
         self.self_attention_model = self_attention_model
-        self.global_tokens = global_tokens
-        self.global_attn_separate = global_attn_separate
-        self.global_tokens_spacing = global_tokens_spacing
-        self.use_pytorch_sdpa = use_pytorch_sdpa
-        if use_pytorch_sdpa_backends is None:
-            use_pytorch_sdpa_backends = []
-        self.use_pytorch_sdpa_backends = use_pytorch_sdpa_backends
-        self.sync_max_audio_length = sync_max_audio_length
 
         # Setting up the att_context_size
         (
@@ -1583,10 +1478,6 @@ class ConformerEncoder(nn.Module):
             is_causal=causal_downsampling,
         )
 
-        # Reduction
-        self.reduction_subsampling = None
-        self.reduction_position = None
-
         self._feat_out = d_model
 
         # Biases for relative positional encoding
@@ -1611,10 +1502,8 @@ class ConformerEncoder(nn.Module):
         assert self_attention_model == "rel_pos"
         self.pos_enc = RelPositionalEncoding(
             d_model=d_model,
-            dropout_rate=dropout_pre_encoder,
             max_len=pos_emb_max_len,
             xscale=self.xscale,
-            dropout_rate_emb=dropout_emb,
         )
 
         self.layers = nn.ModuleList()
@@ -1623,21 +1512,14 @@ class ConformerEncoder(nn.Module):
                 d_model=d_model,
                 d_ff=d_ff,
                 self_attention_model=self_attention_model,
-                global_tokens=global_tokens,
-                global_tokens_spacing=global_tokens_spacing,
-                global_attn_separate=global_attn_separate,
                 n_heads=n_heads,
                 conv_kernel_size=conv_kernel_size,
                 conv_norm_type=conv_norm_type,
                 conv_context_size=self.conv_context_size,
-                dropout=dropout,
-                dropout_att=dropout_att,
                 pos_bias_u=pos_bias_u,
                 pos_bias_v=pos_bias_v,
                 att_context_size=self.att_context_size,
                 use_bias=use_bias,
-                use_pytorch_sdpa=self.use_pytorch_sdpa,
-                use_pytorch_sdpa_backends=self.use_pytorch_sdpa_backends,
             )
             self.layers.append(layer)
 
@@ -1649,9 +1531,6 @@ class ConformerEncoder(nn.Module):
             self._feat_out = d_model
         self.set_max_audio_length(self.pos_emb_max_len)
         self.use_pad_mask = True
-
-        self.export_cache_support = False
-        self.interctc_capture_at_layers = None
 
     def get_num_encoder_cross_attn_tokens(self, num_encoder_input_tokens: int) -> int:
         num_encoder_cross_attn_tokens = math.ceil(
@@ -1741,42 +1620,15 @@ class ConformerEncoder(nn.Module):
         )
 
         for lth, layer in enumerate(self.layers):
-            cache_last_channel_cur = None
-            cache_last_time_cur = None
             audio_signal = layer(
                 x=audio_signal,
                 att_mask=att_mask,
                 pos_emb=pos_emb,
                 pad_mask=pad_mask,
-                cache_last_channel=cache_last_channel_cur,
-                cache_last_time=cache_last_time_cur,
             )
-
-            if self.reduction_position == lth:
-                audio_signal, length = self.reduction_subsampling(
-                    x=audio_signal, lengths=length
-                )
-                max_audio_length = audio_signal.size(1)
-                # Don't update the audio_signal here because
-                # then it will again scale the audio_signal
-                # and cause an increase in the WER
-                _, pos_emb = self.pos_enc(x=audio_signal, cache_len=cache_len)
-                pad_mask, att_mask = self._create_masks(
-                    att_context_size=cur_att_context_size,
-                    padding_length=length,
-                    max_audio_length=max_audio_length,
-                    offset=offset,
-                    device=audio_signal.device,
-                )
 
         if self.out_proj is not None:
             audio_signal = self.out_proj(audio_signal)
-
-        # Reduction
-        if self.reduction_position == -1:
-            audio_signal, length = self.reduction_subsampling(
-                x=audio_signal, lengths=length
-            )
 
         audio_signal = torch.transpose(audio_signal, 1, 2)
         length = length.to(dtype=torch.int64)
@@ -2038,12 +1890,11 @@ class CohereASRModel(nn.Module):
 
                 # Convert buffer dtype to match loaded weight for pos_bias tensors
                 if "pos_bias" in name and param.dtype != loaded_weight.dtype:
-                    # For buffers, we need to ensure dtype matches the loaded weight
-                    print(
-                        f"Converting buffer {name} dtype "
-                        f"from {param.dtype} to "
-                        f"{loaded_weight.dtype} for "
-                        f"loading."
+                    logger.info(
+                        "Converting buffer %s dtype from %s to %s for loading.",
+                        name,
+                        param.dtype,
+                        loaded_weight.dtype,
                     )
                     param.data = param.data.to(loaded_weight.dtype)
 
@@ -2092,8 +1943,6 @@ class CohereASRProcessingInfo(BaseProcessingInfo):
                 frame_splicing=preproc.get("frame_splicing", 1),
                 exact_pad=preproc.get("exact_pad", False),
                 mag_power=preproc.get("mag_power", 2.0),
-                nb_augmentation_prob=preproc.get("nb_augmentation_prob", 0.0),
-                nb_max_freq=preproc.get("nb_max_freq", 4000),
                 mel_norm=preproc.get("mel_norm", "slaney"),
                 stft_exact_pad=preproc.get("stft_exact_pad", False),
                 stft_conv=preproc.get("stft_conv", False),
@@ -2276,7 +2125,7 @@ class CohereASRForConditionalGeneration(
         # NOTE: this function is used only by online inference and not offline inference
         # CohereASR doesnt have encoder prompt
         language_tag = f"<|{language}|><|{language}|>"
-        pnc = True  # TODO: ekagra make this configurable later
+        pnc = True  # TODO(ekagra): make this configurable later
         pnc_tag = "<|pnc|>" if pnc else "<|nopnc|>"
         default_prompt = (
             f"<|startofcontext|><|startoftranscript|>"
