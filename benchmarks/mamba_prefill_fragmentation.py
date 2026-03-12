@@ -77,9 +77,7 @@ def main(args):
         zero_before = getattr(scheduler, "mamba_zero_collapse_count", 0)
         round_before = getattr(scheduler, "_scheduler_iteration", 0)
 
-        ttft, latency, output_tokens = _run_once(
-            llm, prompt_token_ids, args.max_tokens
-        )
+        ttft, latency, output_tokens = _run_once(llm, prompt_token_ids, args.max_tokens)
 
         frag_after = getattr(scheduler, "mamba_fragmentation_count", 0)
         zero_after = getattr(scheduler, "mamba_zero_collapse_count", 0)
