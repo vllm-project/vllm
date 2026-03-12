@@ -10,16 +10,13 @@ from typing import Any, ClassVar, Literal
 import numpy as np
 import torch
 import torch.nn as nn
-from safetensors import safe_open
 from transformers import BatchFeature
 from transformers import WhisperConfig as HFWhisperConfig
 
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.inputs.data import PromptType, TokensPrompt
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.model_loader.weight_utils import (
-    default_weight_loader,
-)
+from vllm.model_executor.model_loader import DefaultModelLoader
 from vllm.model_executor.models.interfaces import (
     SupportsMultiModal,
     SupportsPP,
@@ -388,6 +385,14 @@ class KimiAudioForConditionalGeneration(
         self.multimodal_config = vllm_config.model_config.multimodal_config
         self.model_path = vllm_config.model_config.model
 
+        self.secondary_weights = [
+            DefaultModelLoader.Source(
+                model_or_path=vllm_config.model_config.model,
+                revision=None,
+                prefix="audio_tower.",
+            )
+        ]
+
         self.audio_tower = KimiAudioWhisperEncoder(
             vllm_config=vllm_config,
             prefix=maybe_prefix(prefix, "audio_tower"),
@@ -570,93 +575,10 @@ class KimiAudioForConditionalGeneration(
             "audio_decoder.",
         ]
 
-        # Filter weights
-        filtered_weights = [
-            (name, param)
-            for name, param in weights
-            if not any(pattern in name for pattern in skipped_patterns)
-        ]
-
-        # Separate main weights (non-Whisper) from Whisper weights
-        main_weights = [
-            (name, param)
-            for name, param in filtered_weights
-            if not name.startswith("audio_tower.")
-        ]
-
         # Load main model weights (LLM + projector) with mapper
-        loader = AutoWeightsLoader(self)
-        loaded = loader.load_weights(main_weights, mapper=self.hf_to_vllm_mapper)
-
-        # Load Whisper encoder weights from subfolder
-        whisper_path = os.path.join(
-            self.model_path, f"{KIMIA_WHISPER_SUBFOLDER}/model.safetensors"
-        )
-        if os.path.exists(whisper_path):
-            whisper_loaded = self._load_whisper_weights_from_file(whisper_path)
-            loaded.update(whisper_loaded)
-
+        loader = AutoWeightsLoader(self, skip_prefixes=skipped_patterns)
+        loaded = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
         return loaded
-
-    def _load_whisper_weights_from_file(self, whisper_path: str) -> set[str]:
-        """Load Whisper encoder weights from safetensors file with transformations."""
-        if not os.path.exists(whisper_path):
-            return set()
-
-        # Step 1: Load raw weights from safetensors file
-        whisper_weights = []
-        with safe_open(whisper_path, framework="pt") as f:
-            for key in f.keys():  # noqa: SIM118
-                if key.startswith("model.encoder.") and "embed_positions" not in key:
-                    new_key = key.replace("model.encoder.", "")
-                    whisper_weights.append((new_key, f.get_tensor(key)))
-
-        # Step 2: Apply fc → mlp mapping using WeightsMapper
-        fc_mapper = WeightsMapper(
-            orig_to_new_substr={".fc1.": ".mlp.fc1.", ".fc2.": ".mlp.fc2."}
-        )
-        whisper_mapped = list(fc_mapper.apply(whisper_weights))
-
-        # Step 3: Apply Q/K/V fusion manually
-        stacked_params_mapping = [
-            (".self_attn.qkv_proj", ".self_attn.q_proj", "q"),
-            (".self_attn.qkv_proj", ".self_attn.k_proj", "k"),
-            (".self_attn.qkv_proj", ".self_attn.v_proj", "v"),
-        ]
-
-        params_dict = dict(self.audio_tower.named_parameters())
-        whisper_loaded: set[str] = set()
-
-        for name, loaded_weight in whisper_mapped:
-            fused = False
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                if weight_name not in name:
-                    continue
-                fused_name = name.replace(weight_name, param_name)
-                if fused_name not in params_dict:
-                    continue
-
-                param = params_dict[fused_name]
-                param.weight_loader(param, loaded_weight, shard_id)
-                whisper_loaded.add(f"audio_tower.{fused_name}")
-                fused = True
-                break
-
-            if not fused:
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-                if name not in params_dict:
-                    continue
-
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(param, loaded_weight)
-                whisper_loaded.add(f"audio_tower.{name}")
-
-        # Add embed_positions which is initialized randomly
-        whisper_loaded.add("audio_tower.embed_positions.weight")
-
-        return whisper_loaded
 
     @classmethod
     def get_speech_to_text_config(
