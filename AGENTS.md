@@ -46,11 +46,11 @@ If work is duplicate/trivial busywork, **do not proceed**. Return a short explan
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
 # Always use `uv` for Python environment management:
-uv venv
+uv venv --python 3.12
 source .venv/bin/activate
 
 # Always make sure `pre-commit` and its hooks are installed:
-uv pip install pre-commit
+uv pip install -r requirements/lint.txt
 pre-commit install
 ```
 
@@ -71,11 +71,10 @@ All versions for test dependencies should be read from `requirements/test.txt`
 
 ```bash
 # Install bare minimum test dependencies:
-uv pip install pytest==<requirements/test.txt version>
-uv pip install tblib==<requirements/test.txt version>
+uv pip install pytest pytest-asyncio tblib
 
-# Install additional required dependencies from `requirements/test.txt` as needed:
-uv pip install <requirements/test.txt dependency>==<requirements/test.txt version>
+# Install additional test dependencies as needed, or install them all as follows:
+uv pip install -r requirements/test.txt
 
 # Run specific test from specific test file
 pytest tests/path/to/test.py -v -s -k test_name
