@@ -179,7 +179,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
         | ChatCompletionNamedToolChoiceParam
         | None
     ) = "none"
-    reasoning_effort: Literal["low", "medium", "high"] | None = None
+    reasoning_effort: Literal["none", "low", "medium", "high"] | None = None
     include_reasoning: bool = True
     parallel_tool_calls: bool | None = True
 
@@ -266,6 +266,13 @@ class ChatCompletionRequest(OpenAIBaseModel):
         description=(
             "Additional keyword args to pass to the template renderer. "
             "Will be accessible by the chat template."
+        ),
+    )
+    media_io_kwargs: dict[str, dict[str, Any]] | None = Field(
+        default=None,
+        description=(
+            "Additional kwargs to pass to the media IO connectors, "
+            "keyed by modality. Merged with engine-level media_io_kwargs."
         ),
     )
     mm_processor_kwargs: dict[str, Any] | None = Field(
@@ -366,6 +373,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
                     reasoning_effort=self.reasoning_effort,
                 ),
             ),
+            media_io_kwargs=self.media_io_kwargs,
         )
 
     def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
@@ -769,4 +777,11 @@ class ChatCompletionRequest(OpenAIBaseModel):
                                     part_type,
                                 )
 
+        return data
+
+    @model_validator(mode="before")
+    @classmethod
+    def set_include_reasoning_for_none_effort(cls, data: Any) -> Any:
+        if data.get("reasoning_effort") == "none":
+            data["include_reasoning"] = False
         return data

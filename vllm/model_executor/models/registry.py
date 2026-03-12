@@ -30,6 +30,7 @@ from vllm.config import (
 )
 from vllm.logger import init_logger
 from vllm.logging_utils import logtime
+from vllm.tasks import ScoreType
 from vllm.transformers_utils.dynamic_module import try_get_class_from_dynamic_module
 from vllm.utils.hashing import safe_hash
 
@@ -48,8 +49,6 @@ from .interfaces import (
     is_attention_free,
     is_hybrid,
     requires_raw_input_tokens,
-    supports_cross_encoding,
-    supports_late_interaction,
     supports_mamba_prefix_caching,
     supports_multimodal,
     supports_multimodal_encoder_tp_data,
@@ -61,6 +60,7 @@ from .interfaces_base import (
     get_attn_type,
     get_default_seq_pooling_type,
     get_default_tok_pooling_type,
+    get_score_type,
     is_pooling_model,
     is_text_generation_model,
 )
@@ -132,6 +132,8 @@ _TEXT_GENERATION_MODELS = {
     "HunYuanMoEV1ForCausalLM": ("hunyuan_v1", "HunYuanMoEV1ForCausalLM"),
     "HunYuanDenseV1ForCausalLM": ("hunyuan_v1", "HunYuanDenseV1ForCausalLM"),
     "HCXVisionForCausalLM": ("hyperclovax_vision", "HCXVisionForCausalLM"),
+    "HCXVisionV2ForCausalLM": ("hyperclovax_vision_v2", "HCXVisionV2ForCausalLM"),
+    "HyperCLOVAXForCausalLM": ("llama", "LlamaForCausalLM"),
     "InternLMForCausalLM": ("llama", "LlamaForCausalLM"),
     "InternLM2ForCausalLM": ("internlm2", "InternLM2ForCausalLM"),
     "InternLM2VEForCausalLM": ("internlm2_ve", "InternLM2VEForCausalLM"),
@@ -191,6 +193,8 @@ _TEXT_GENERATION_MODELS = {
     "Qwen3ForCausalLM": ("qwen3", "Qwen3ForCausalLM"),
     "Qwen3MoeForCausalLM": ("qwen3_moe", "Qwen3MoeForCausalLM"),
     "RWForCausalLM": ("falcon", "FalconForCausalLM"),
+    "SarvamMoEForCausalLM": ("sarvam", "SarvamMoEForCausalLM"),
+    "SarvamMLAForCausalLM": ("sarvam", "SarvamMLAForCausalLM"),
     "SeedOssForCausalLM": ("seed_oss", "SeedOssForCausalLM"),
     "Step1ForCausalLM": ("step1", "Step1ForCausalLM"),
     "Step3TextForCausalLM": ("step3_text", "Step3TextForCausalLM"),
@@ -210,19 +214,14 @@ _EMBEDDING_MODELS = {
     # [Text-only]
     "BertModel": ("bert", "BertEmbeddingModel"),
     "BertSpladeSparseEmbeddingModel": ("bert", "BertSpladeSparseEmbeddingModel"),
-    "HF_ColBERT": ("colbert", "ColBERTModel"),
-    "ColBERTModernBertModel": ("colbert", "ColBERTModernBertModel"),
-    "ColBERTJinaRobertaModel": ("colbert", "ColBERTJinaRobertaModel"),
+    "BgeM3EmbeddingModel": ("roberta", "BgeM3EmbeddingModel"),
     "DeciLMForCausalLM": ("nemotron_nas", "DeciLMForCausalLM"),
     "Gemma2Model": ("gemma2", "Gemma2ForCausalLM"),
     "Gemma3TextModel": ("gemma3", "Gemma3Model"),
     "GlmForCausalLM": ("glm", "GlmForCausalLM"),
-    "GPT2ForSequenceClassification": ("gpt2", "GPT2ForSequenceClassification"),
     "GritLM": ("gritlm", "GritLM"),
     "GteModel": ("bert_with_rope", "SnowflakeGteNewModel"),
     "GteNewModel": ("bert_with_rope", "GteNewModel"),
-    "InternLM2ForRewardModel": ("internlm2", "InternLM2ForRewardModel"),
-    "JambaForSequenceClassification": ("jamba", "JambaForSequenceClassification"),  # noqa: E501
     "LlamaBidirectionalModel": ("llama", "LlamaBidirectionalModel"),
     "LlamaModel": ("llama", "LlamaForCausalLM"),
     **{
@@ -237,8 +236,6 @@ _EMBEDDING_MODELS = {
     "Phi3ForCausalLM": ("phi3", "Phi3ForCausalLM"),
     "Qwen2Model": ("qwen2", "Qwen2ForCausalLM"),
     "Qwen2ForCausalLM": ("qwen2", "Qwen2ForCausalLM"),
-    "Qwen2ForRewardModel": ("qwen2_rm", "Qwen2ForRewardModel"),
-    "Qwen2ForProcessRewardModel": ("qwen2_rm", "Qwen2ForProcessRewardModel"),
     "RobertaForMaskedLM": ("roberta", "RobertaEmbeddingModel"),
     "RobertaModel": ("roberta", "RobertaEmbeddingModel"),
     "TeleChatForCausalLM": ("telechat2", "TeleChat2ForCausalLM"),
@@ -248,19 +245,14 @@ _EMBEDDING_MODELS = {
         "VoyageQwen3BidirectionalEmbedModel",
     ),
     "XLMRobertaModel": ("roberta", "RobertaEmbeddingModel"),
-    "BgeM3EmbeddingModel": ("roberta", "BgeM3EmbeddingModel"),
     # [Multimodal]
     "CLIPModel": ("clip", "CLIPEmbeddingModel"),
-    "ColModernVBertForRetrieval": ("colmodernvbert", "ColModernVBertForRetrieval"),
     "LlavaNextForConditionalGeneration": (
         "llava_next",
         "LlavaNextForConditionalGeneration",
     ),
     "Phi3VForCausalLM": ("phi3v", "Phi3VForCausalLM"),
     "Qwen2VLForConditionalGeneration": ("qwen2_vl", "Qwen2VLForConditionalGeneration"),  # noqa: E501
-    "ColQwen3": ("colqwen3", "ColQwen3Model"),
-    "OpsColQwen3Model": ("colqwen3", "ColQwen3Model"),
-    "Qwen3VLNemotronEmbedModel": ("colqwen3", "ColQwen3Model"),
     "SiglipModel": ("siglip", "SiglipEmbeddingModel"),
     "LlamaNemotronVLModel": (
         "nemotron_vl",
@@ -273,34 +265,58 @@ _EMBEDDING_MODELS = {
     "Terratorch": ("terratorch", "Terratorch"),
 }
 
-_CROSS_ENCODER_MODELS = {
-    "BertForSequenceClassification": ("bert", "BertForSequenceClassification"),
+_LATE_INTERACTION_MODELS = {
+    # [Text-only]
+    "HF_ColBERT": ("colbert", "ColBERTModel"),
+    "ColBERTModernBertModel": ("colbert", "ColBERTModernBertModel"),
+    "ColBERTJinaRobertaModel": ("colbert", "ColBERTJinaRobertaModel"),
+    # [Multimodal]
+    "ColModernVBertForRetrieval": ("colmodernvbert", "ColModernVBertForRetrieval"),
+    "ColQwen3": ("colqwen3", "ColQwen3Model"),
+    "OpsColQwen3Model": ("colqwen3", "ColQwen3Model"),
+    "Qwen3VLNemotronEmbedModel": ("colqwen3", "ColQwen3Model"),
+}
+
+_REWARD_MODELS = {
+    "InternLM2ForRewardModel": ("internlm2", "InternLM2ForRewardModel"),
+    "Qwen2ForRewardModel": ("qwen2_rm", "Qwen2ForRewardModel"),
+    "Qwen2ForProcessRewardModel": ("qwen2_rm", "Qwen2ForProcessRewardModel"),
+}
+
+_TOKEN_CLASSIFICATION_MODELS = {
     "BertForTokenClassification": ("bert", "BertForTokenClassification"),
+    "ModernBertForTokenClassification": (
+        "modernbert",
+        "ModernBertForTokenClassification",
+    ),
+}
+
+_SEQUENCE_CLASSIFICATION_MODELS = {
+    "BertForSequenceClassification": ("bert", "BertForSequenceClassification"),
+    "GPT2ForSequenceClassification": ("gpt2", "GPT2ForSequenceClassification"),
     "GteNewForSequenceClassification": (
         "bert_with_rope",
         "GteNewForSequenceClassification",
     ),
-    "JinaVLForRanking": ("jina_vl", "JinaVLForSequenceClassification"),
+    "JambaForSequenceClassification": ("jamba", "JambaForSequenceClassification"),  # noqa: E501
     "LlamaBidirectionalForSequenceClassification": (
         "llama",
         "LlamaBidirectionalForSequenceClassification",
-    ),
-    "LlamaNemotronVLForSequenceClassification": (
-        "nemotron_vl",
-        "LlamaNemotronVLForSequenceClassification",
     ),
     "ModernBertForSequenceClassification": (
         "modernbert",
         "ModernBertForSequenceClassification",
     ),
-    "ModernBertForTokenClassification": (
-        "modernbert",
-        "ModernBertForTokenClassification",
-    ),
     "RobertaForSequenceClassification": ("roberta", "RobertaForSequenceClassification"),
     "XLMRobertaForSequenceClassification": (
         "roberta",
         "RobertaForSequenceClassification",
+    ),
+    # [Multimodal]
+    "JinaVLForRanking": ("jina_vl", "JinaVLForSequenceClassification"),
+    "LlamaNemotronVLForSequenceClassification": (
+        "nemotron_vl",
+        "LlamaNemotronVLForSequenceClassification",
     ),
 }
 
@@ -405,6 +421,7 @@ _MULTIMODAL_MODELS = {
     "RForConditionalGeneration": ("rvl", "RForConditionalGeneration"),
     "KimiVLForConditionalGeneration": ("kimi_vl", "KimiVLForConditionalGeneration"),  # noqa: E501
     "KimiK25ForConditionalGeneration": ("kimi_k25", "KimiK25ForConditionalGeneration"),  # noqa: E501
+    "MoonshotKimiaForCausalLM": ("kimi_audio", "KimiAudioForConditionalGeneration"),  # noqa: E501
     "LightOnOCRForConditionalGeneration": (
         "lightonocr",
         "LightOnOCRForConditionalGeneration",
@@ -534,6 +551,8 @@ _SPECULATIVE_DECODING_MODELS = {
         "mistral_large_3_eagle",
         "EagleMistralLarge3ForCausalLM",
     ),
+    "Eagle3DeepseekV2ForCausalLM": ("deepseek_eagle3", "Eagle3DeepseekV2ForCausalLM"),
+    "Eagle3DeepseekV3ForCausalLM": ("deepseek_eagle3", "Eagle3DeepseekV2ForCausalLM"),
     "EagleDeepSeekMTPModel": ("deepseek_eagle", "EagleDeepseekV3ForCausalLM"),
     "DeepSeekMTPModel": ("deepseek_mtp", "DeepSeekMTP"),
     "ErnieMTPModel": ("ernie_mtp", "ErnieMTP"),
@@ -602,7 +621,10 @@ _TRANSFORMERS_BACKEND_MODELS = {
 _VLLM_MODELS = {
     **_TEXT_GENERATION_MODELS,
     **_EMBEDDING_MODELS,
-    **_CROSS_ENCODER_MODELS,
+    **_LATE_INTERACTION_MODELS,
+    **_REWARD_MODELS,
+    **_TOKEN_CLASSIFICATION_MODELS,
+    **_SEQUENCE_CLASSIFICATION_MODELS,
     **_MULTIMODAL_MODELS,
     **_SPECULATIVE_DECODING_MODELS,
     **_TRANSFORMERS_SUPPORTED_MODELS,
@@ -639,8 +661,7 @@ class _ModelInfo:
     attn_type: AttnTypeStr
     default_seq_pooling_type: SequencePoolingType
     default_tok_pooling_type: TokenPoolingType
-    supports_cross_encoding: bool
-    supports_late_interaction: bool
+    score_type: ScoreType
     supports_multimodal: bool
     supports_multimodal_raw_input_only: bool
     requires_raw_input_tokens: bool
@@ -663,8 +684,7 @@ class _ModelInfo:
             default_seq_pooling_type=get_default_seq_pooling_type(model),
             default_tok_pooling_type=get_default_tok_pooling_type(model),
             attn_type=get_attn_type(model),
-            supports_cross_encoding=supports_cross_encoding(model),
-            supports_late_interaction=supports_late_interaction(model),
+            score_type=get_score_type(model),
             supports_multimodal=supports_multimodal(model),
             supports_multimodal_raw_input_only=supports_multimodal_raw_input_only(
                 model
@@ -1161,14 +1181,6 @@ class _ModelRegistry:
     ) -> bool:
         model_cls, _ = self.inspect_model_cls(architectures, model_config)
         return model_cls.is_pooling_model
-
-    def is_cross_encoder_model(
-        self,
-        architectures: str | list[str],
-        model_config: ModelConfig,
-    ) -> bool:
-        model_cls, _ = self.inspect_model_cls(architectures, model_config)
-        return model_cls.supports_cross_encoding
 
     def is_multimodal_model(
         self,

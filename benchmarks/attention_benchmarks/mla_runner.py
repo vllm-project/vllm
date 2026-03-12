@@ -145,7 +145,6 @@ def create_minimal_vllm_config(
     cache_config = CacheConfig(
         block_size=block_size,
         gpu_memory_utilization=0.9,
-        swap_space=0,
         cache_dtype="auto",
         enable_prefix_caching=False,
     )
@@ -758,7 +757,7 @@ def _run_mla_benchmark_batched(
 
     backend_cfg = _get_backend_config(backend)
     device = torch.device(configs_with_params[0][0].device)
-    torch.cuda.set_device(device)
+    torch.accelerator.set_device_index(device)
 
     # Determine block size
     config_block_size = configs_with_params[0][0].block_size
