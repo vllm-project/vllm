@@ -82,7 +82,6 @@ class PoolingParams(
             "score": ["use_activation"],
             "token_embed": ["dimensions", "use_activation"],
             "token_classify": ["use_activation"],
-            "embed&token_classify": ["dimensions", "use_activation"],
         }
 
     def clone(self) -> "PoolingParams":
@@ -95,6 +94,10 @@ class PoolingParams(
         if self.task == "plugin":
             if self.skip_reading_prefix_cache is None:
                 self.skip_reading_prefix_cache = True
+            return
+
+        # skipping verify, let plugins configure and validate pooling params
+        if self.task not in self.valid_parameters:
             return
 
         # NOTE: Task validation needs to done against the model instance,
@@ -123,7 +126,7 @@ class PoolingParams(
             # If prefix caching is enabled,
             # the output of all pooling may less than n_prompt_tokens,
             # we need to skip reading cache at this request.
-            if self.task in ["token_embed", "token_classify", "embed&token_classify"]:
+            if self.task in ["token_embed", "token_classify"]:
                 self.skip_reading_prefix_cache = True
             else:
                 self.skip_reading_prefix_cache = False
@@ -157,7 +160,7 @@ class PoolingParams(
                     setattr(self, k, getattr(pooler_config, k))
 
     def _set_default_parameters(self, model_config: ModelConfig):
-        if self.task in ["embed", "token_embed", "embed&token_classify"]:
+        if self.task in ["embed", "token_embed"]:
             if self.use_activation is None:
                 self.use_activation = True
 
@@ -181,7 +184,7 @@ class PoolingParams(
                 elif self.dimensions < 1:
                     raise ValueError("Dimensions must be greater than 0")
 
-        elif self.task in ["classify", "score", "token_classify"]:
+        elif self.task in ["classify", "score"]:
             if self.use_activation is None:
                 self.use_activation = True
         else:
