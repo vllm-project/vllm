@@ -1,16 +1,66 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for ColBERT late interaction scoring."""
+"""Tests for ColBERT late interaction scoring.
+
+Tests are parametrized across multiple ColBERT backbones to ensure the
+generic ColBERT support works with different encoder architectures.
+"""
 
 import pytest
 import torch
 
 from vllm.entrypoints.pooling.score.utils import compute_maxsim_score
 
-# ColBERT model - using answerai-colbert-small-v1 as it's a smaller model
-# suitable for testing (based on BERT-base)
-COLBERT_MODEL = "answerdotai/answerai-colbert-small-v1"
-COLBERT_DIM = 96  # This model uses 96-dimensional output
+# -----------------------------------------------------------------------
+# Model definitions: (model_name, colbert_dim, extra vllm_runner kwargs)
+# -----------------------------------------------------------------------
+COLBERT_MODELS = {
+    "bert": {
+        "model": "answerdotai/answerai-colbert-small-v1",
+        "colbert_dim": 96,
+        "max_model_len": 512,
+        "extra_kwargs": {},
+        "hf_comparison": {
+            "weights_file": "model.safetensors",
+            "weights_key": "linear.weight",
+            "trust_remote_code": False,
+            "model_cls": "BertModel",
+        },
+    },
+    "modernbert": {
+        "model": "lightonai/GTE-ModernColBERT-v1",
+        "colbert_dim": 128,
+        "max_model_len": 299,
+        "extra_kwargs": {
+            "hf_overrides": {
+                "architectures": ["ColBERTModernBertModel"],
+            },
+        },
+        "hf_comparison": {
+            "weights_file": "1_Dense/model.safetensors",
+            "weights_key": "linear.weight",
+            "trust_remote_code": False,
+            "model_cls": "AutoModel",
+        },
+    },
+    "jina": {
+        "model": "jinaai/jina-colbert-v2",
+        "colbert_dim": 128,
+        "max_model_len": 8192,
+        "extra_kwargs": {
+            "hf_overrides": {
+                "architectures": ["ColBERTJinaRobertaModel"],
+            },
+        },
+        "hf_comparison": {
+            "weights_file": "model.safetensors",
+            "weights_key": "linear.weight",
+            "trust_remote_code": True,
+            "model_cls": "AutoModel",
+        },
+    },
+}
+
 
 TEXTS_1 = [
     "What is the capital of France?",
@@ -25,80 +75,175 @@ TEXTS_2 = [
 DTYPE = "half"
 
 
+def _load_hf_model(model_name: str, hf_spec: dict, device: torch.device):
+    """Load HF model on the given device with a compatible attention impl."""
+    from transformers import AutoModel, BertModel
+
+    cls = BertModel if hf_spec["model_cls"] == "BertModel" else AutoModel
+    trust = hf_spec.get("trust_remote_code", False)
+
+    # Flash / Triton kernels require GPU tensors; fall back to eager on CPU.
+    extra = {}
+    if device.type == "cpu":
+        extra["attn_implementation"] = "eager"
+
+    model = cls.from_pretrained(
+        model_name,
+        trust_remote_code=trust,
+        **extra,
+    ).to(device)
+    model.eval()
+    return model
+
+
+def _load_projection_weight(model_name: str, hf_spec: dict, device: torch.device):
+    """Download and return the ColBERT linear projection weight."""
+    from huggingface_hub import hf_hub_download
+    from safetensors.torch import load_file
+
+    path = hf_hub_download(model_name, filename=hf_spec["weights_file"])
+    weights = load_file(path)
+    return weights[hf_spec["weights_key"]].to(device)
+
+
+def _compute_hf_colbert_embeddings(model, tokenizer, linear_weight, texts, device):
+    """Run HF model + projection and return L2-normalised token embeddings."""
+    import torch.nn.functional as F
+
+    embeddings = []
+    for text in texts:
+        inputs = tokenizer(text, return_tensors="pt").to(device)
+        with torch.no_grad():
+            hidden = model(**inputs).last_hidden_state.float()
+            projected = F.linear(hidden, linear_weight.float())
+            normalised = F.normalize(projected, p=2, dim=-1)
+            embeddings.append(normalised.squeeze(0).cpu())
+    return embeddings
+
+
+def _assert_embeddings_close(vllm_outputs, hf_embeddings):
+    """Assert that vLLM and HuggingFace embeddings match."""
+    for i, (hf_emb, vllm_out) in enumerate(zip(hf_embeddings, vllm_outputs)):
+        vllm_emb = torch.as_tensor(vllm_out).float()
+
+        assert hf_emb.shape == vllm_emb.shape, (
+            f"Shape mismatch for text {i}: HF {hf_emb.shape} vs vLLM {vllm_emb.shape}"
+        )
+
+        torch.testing.assert_close(
+            vllm_emb,
+            hf_emb,
+            rtol=1e-2,
+            atol=1e-2,
+            msg=f"Embedding mismatch for text {i}",
+        )
+
+
+@pytest.fixture(params=list(COLBERT_MODELS.keys()), scope="module")
+def colbert_spec(request):
+    """Return the model spec dict for the current parametrization."""
+    return COLBERT_MODELS[request.param]
+
+
 @pytest.fixture(scope="module")
-def colbert_model_name():
-    return COLBERT_MODEL
+def colbert_model_name(colbert_spec):
+    return colbert_spec["model"]
 
 
-def test_colbert_token_embed(vllm_runner, colbert_model_name):
+@pytest.fixture(scope="module")
+def colbert_dim(colbert_spec):
+    return colbert_spec["colbert_dim"]
+
+
+@pytest.fixture(scope="module")
+def colbert_max_model_len(colbert_spec):
+    return colbert_spec["max_model_len"]
+
+
+@pytest.fixture(scope="module")
+def colbert_extra_kwargs(colbert_spec):
+    return colbert_spec["extra_kwargs"]
+
+
+def test_colbert_token_embed(
+    vllm_runner,
+    colbert_model_name,
+    colbert_dim,
+    colbert_max_model_len,
+    colbert_extra_kwargs,
+):
     """Test that ColBERT model produces token embeddings."""
     with vllm_runner(
         colbert_model_name,
         runner="pooling",
         dtype=DTYPE,
-        max_model_len=512,
+        max_model_len=colbert_max_model_len,
         enforce_eager=True,
+        **colbert_extra_kwargs,
     ) as vllm_model:
-        # Get token embeddings for a single text
         outputs = vllm_model.token_embed([TEXTS_1[0]])
 
         assert len(outputs) == 1
-        # Token embeddings should be 2D: [num_tokens, colbert_dim]
-        emb = torch.tensor(outputs[0])
+        emb = torch.as_tensor(outputs[0])
         assert emb.dim() == 2
-        assert emb.shape[1] == COLBERT_DIM
-        # Should have at least a few tokens
+        assert emb.shape[1] == colbert_dim
         assert emb.shape[0] > 1
 
 
-def test_colbert_late_interaction_1_to_1(vllm_runner, colbert_model_name):
+def test_colbert_late_interaction_1_to_1(
+    vllm_runner,
+    colbert_model_name,
+    colbert_max_model_len,
+    colbert_extra_kwargs,
+):
     """Test ColBERT late interaction scoring with 1:1 query-document pair."""
     with vllm_runner(
         colbert_model_name,
         runner="pooling",
         dtype=DTYPE,
-        max_model_len=512,
+        max_model_len=colbert_max_model_len,
         enforce_eager=True,
+        **colbert_extra_kwargs,
     ) as vllm_model:
-        # Get token embeddings
         q_outputs = vllm_model.token_embed([TEXTS_1[0]])
         d_outputs = vllm_model.token_embed([TEXTS_2[0]])
 
-        q_emb = torch.tensor(q_outputs[0])
-        d_emb = torch.tensor(d_outputs[0])
+        q_emb = torch.as_tensor(q_outputs[0])
+        d_emb = torch.as_tensor(d_outputs[0])
 
-        # Compute MaxSim manually
         manual_score = compute_maxsim_score(q_emb, d_emb).item()
 
-        # Use the score API (which should internally use _late_interaction_score)
         vllm_scores = vllm_model.score(TEXTS_1[0], TEXTS_2[0])
 
         assert len(vllm_scores) == 1
         assert vllm_scores[0] == pytest.approx(manual_score, rel=0.01)
 
 
-def test_colbert_late_interaction_1_to_N(vllm_runner, colbert_model_name):
+def test_colbert_late_interaction_1_to_N(
+    vllm_runner,
+    colbert_model_name,
+    colbert_max_model_len,
+    colbert_extra_kwargs,
+):
     """Test ColBERT late interaction scoring with 1:N query-documents."""
     with vllm_runner(
         colbert_model_name,
         runner="pooling",
         dtype=DTYPE,
-        max_model_len=512,
+        max_model_len=colbert_max_model_len,
         enforce_eager=True,
+        **colbert_extra_kwargs,
     ) as vllm_model:
-        # Get token embeddings
         q_outputs = vllm_model.token_embed([TEXTS_1[0]])
         d_outputs = vllm_model.token_embed(TEXTS_2)
 
-        q_emb = torch.tensor(q_outputs[0])
+        q_emb = torch.as_tensor(q_outputs[0])
 
-        # Compute MaxSim manually for each document
         manual_scores = []
         for d_out in d_outputs:
-            d_emb = torch.tensor(d_out)
+            d_emb = torch.as_tensor(d_out)
             manual_scores.append(compute_maxsim_score(q_emb, d_emb).item())
 
-        # Use the score API
         vllm_scores = vllm_model.score(TEXTS_1[0], TEXTS_2)
 
         assert len(vllm_scores) == 2
@@ -106,27 +251,30 @@ def test_colbert_late_interaction_1_to_N(vllm_runner, colbert_model_name):
             assert vllm_scores[i] == pytest.approx(manual_scores[i], rel=0.01)
 
 
-def test_colbert_late_interaction_N_to_N(vllm_runner, colbert_model_name):
+def test_colbert_late_interaction_N_to_N(
+    vllm_runner,
+    colbert_model_name,
+    colbert_max_model_len,
+    colbert_extra_kwargs,
+):
     """Test ColBERT late interaction scoring with N:N query-documents."""
     with vllm_runner(
         colbert_model_name,
         runner="pooling",
         dtype=DTYPE,
-        max_model_len=512,
+        max_model_len=colbert_max_model_len,
         enforce_eager=True,
+        **colbert_extra_kwargs,
     ) as vllm_model:
-        # Get token embeddings
         q_outputs = vllm_model.token_embed(TEXTS_1)
         d_outputs = vllm_model.token_embed(TEXTS_2)
 
-        # Compute MaxSim manually for each pair
         manual_scores = []
         for q_out, d_out in zip(q_outputs, d_outputs):
-            q_emb = torch.tensor(q_out)
-            d_emb = torch.tensor(d_out)
+            q_emb = torch.as_tensor(q_out)
+            d_emb = torch.as_tensor(d_out)
             manual_scores.append(compute_maxsim_score(q_emb, d_emb).item())
 
-        # Use the score API
         vllm_scores = vllm_model.score(TEXTS_1, TEXTS_2)
 
         assert len(vllm_scores) == 2
@@ -134,8 +282,13 @@ def test_colbert_late_interaction_N_to_N(vllm_runner, colbert_model_name):
             assert vllm_scores[i] == pytest.approx(manual_scores[i], rel=0.01)
 
 
-def test_colbert_relevance_ordering(vllm_runner, colbert_model_name):
-    """Test that ColBERT scores relevant documents higher than irrelevant ones."""
+def test_colbert_relevance_ordering(
+    vllm_runner,
+    colbert_model_name,
+    colbert_max_model_len,
+    colbert_extra_kwargs,
+):
+    """Test that ColBERT scores relevant documents higher than irrelevant."""
     query = "What is machine learning?"
     documents = [
         "Machine learning is a subset of artificial intelligence.",
@@ -147,101 +300,75 @@ def test_colbert_relevance_ordering(vllm_runner, colbert_model_name):
         colbert_model_name,
         runner="pooling",
         dtype=DTYPE,
-        max_model_len=512,
+        max_model_len=colbert_max_model_len,
         enforce_eager=True,
+        **colbert_extra_kwargs,
     ) as vllm_model:
         scores = vllm_model.score(query, documents)
 
         assert len(scores) == 3
-        # ML-related documents should score higher than unrelated Python doc
-        # Document 0 (ML definition) should be most relevant
-        # Document 2 (Deep learning) should also be relevant
-        # Document 1 (Python) should be least relevant
         assert scores[0] > scores[1], "ML doc should score higher than Python doc"
         assert scores[2] > scores[1], "DL doc should score higher than Python doc"
 
 
-def test_colbert_embed_not_supported(vllm_runner, colbert_model_name):
+def test_colbert_embed_not_supported(
+    vllm_runner,
+    colbert_model_name,
+    colbert_max_model_len,
+    colbert_extra_kwargs,
+):
     """Test that ColBERT model does not support 'embed' task."""
     with (
         vllm_runner(
             colbert_model_name,
             runner="pooling",
             dtype=DTYPE,
-            max_model_len=512,
+            max_model_len=colbert_max_model_len,
             enforce_eager=True,
+            **colbert_extra_kwargs,
         ) as vllm_model,
         pytest.raises(ValueError, match="Embedding API is not supported"),
     ):
         vllm_model.embed([TEXTS_1[0]])
 
 
-def test_colbert_hf_comparison(vllm_runner, colbert_model_name):
-    """Test that vLLM ColBERT produces same embeddings as HuggingFace."""
-    import torch.nn.functional as F
-    from huggingface_hub import hf_hub_download
-    from safetensors.torch import load_file
-    from transformers import AutoTokenizer, BertModel
+@pytest.mark.parametrize("backend", list(COLBERT_MODELS.keys()))
+def test_colbert_hf_comparison(vllm_runner, backend):
+    """Test that vLLM ColBERT embeddings match HuggingFace for each backend."""
+    from transformers import AutoTokenizer
 
+    spec = COLBERT_MODELS[backend]
+    hf_spec = spec["hf_comparison"]
+    model_name = spec["model"]
+    assert isinstance(model_name, str)
+    assert isinstance(hf_spec, dict)
     test_texts = [TEXTS_1[0], TEXTS_2[0]]
 
-    # Get vLLM embeddings first (to avoid GPU memory contention)
-    # Use fp32 to match HuggingFace default precision for fair comparison
     with vllm_runner(
-        colbert_model_name,
+        model_name,
         runner="pooling",
         dtype="float32",
-        max_model_len=512,
+        max_model_len=spec["max_model_len"],
         enforce_eager=True,
+        **spec["extra_kwargs"],
     ) as vllm_model:
         vllm_outputs = vllm_model.token_embed(test_texts)
 
-    # Get HuggingFace reference embeddings on CPU
-    # Load the base BERT model and manually apply the ColBERT linear projection
-    hf_tokenizer = AutoTokenizer.from_pretrained(colbert_model_name)
-    hf_bert = BertModel.from_pretrained(colbert_model_name)
-    hf_bert.eval()
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # Load the ColBERT linear weights from safetensors
-    weights_path = hf_hub_download(colbert_model_name, filename="model.safetensors")
-    weights = load_file(weights_path)
-    linear_weight = weights["linear.weight"]  # [96, 384]
+    hf_tokenizer = AutoTokenizer.from_pretrained(
+        model_name,
+        trust_remote_code=hf_spec.get("trust_remote_code", False),
+    )
+    hf_model = _load_hf_model(model_name, hf_spec, device)
+    linear_weight = _load_projection_weight(model_name, hf_spec, device)
 
-    hf_embeddings = []
-    for text in test_texts:
-        inputs = hf_tokenizer(text, return_tensors="pt")
-        with torch.no_grad():
-            outputs = hf_bert(**inputs)
-            # Get last hidden state: [1, seq_len, 384]
-            hidden_states = outputs.last_hidden_state
-            # Apply ColBERT linear projection: [1, seq_len, 96]
-            token_emb = F.linear(hidden_states, linear_weight)
-            # L2 normalize
-            token_emb = F.normalize(token_emb, p=2, dim=-1)
-            hf_embeddings.append(token_emb.squeeze(0).float())
+    hf_embeddings = _compute_hf_colbert_embeddings(
+        hf_model,
+        hf_tokenizer,
+        linear_weight,
+        test_texts,
+        device,
+    )
 
-    # Compare embeddings
-    for i, (hf_emb, vllm_out) in enumerate(zip(hf_embeddings, vllm_outputs)):
-        vllm_emb = torch.tensor(vllm_out).float()
-
-        # Print first few components for debugging
-        print(f"\n=== Text {i}: '{test_texts[i][:30]}...' ===")
-        print(f"HF shape: {hf_emb.shape}, vLLM shape: {vllm_emb.shape}")
-        print(f"HF first token, first 10 dims:   {hf_emb[0, :10].tolist()}")
-        print(f"vLLM first token, first 10 dims: {vllm_emb[0, :10].tolist()}")
-        print(f"HF last token, first 10 dims:    {hf_emb[-1, :10].tolist()}")
-        print(f"vLLM last token, first 10 dims:  {vllm_emb[-1, :10].tolist()}")
-
-        # Should have same shape
-        assert hf_emb.shape == vllm_emb.shape, (
-            f"Shape mismatch for text {i}: HF {hf_emb.shape} vs vLLM {vllm_emb.shape}"
-        )
-
-        # Should have same values (with tolerance for fp16)
-        torch.testing.assert_close(
-            vllm_emb,
-            hf_emb,
-            rtol=1e-2,
-            atol=1e-2,
-            msg=f"Embedding mismatch for text {i}",
-        )
+    _assert_embeddings_close(vllm_outputs, hf_embeddings)

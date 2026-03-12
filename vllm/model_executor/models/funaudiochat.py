@@ -13,7 +13,6 @@ positions via `inputs_embeds`, while `position_ids` (RoPE) remains standard 1D.
 
 from __future__ import annotations
 
-import os
 from collections.abc import Iterable, Mapping, Sequence
 from functools import cached_property
 from typing import Any
@@ -610,7 +609,7 @@ class FunAudioChatDummyInputsBuilder(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
         feature_extractor = self.info.get_feature_extractor()
         sampling_rate = int(feature_extractor.sampling_rate)
@@ -629,7 +628,7 @@ class FunAudioChatDummyInputsBuilder(
         )
         num_audios = int(mm_counts.get("audio", 0))
 
-        audio_overrides = mm_options.get("audio") if mm_options else None
+        audio_overrides = mm_options.get("audio")
         return {
             "audio": self._get_dummy_audios(
                 length=audio_len,
@@ -656,7 +655,7 @@ class FunAudioChatMultiModalProcessor(
         if not audios:
             return BatchFeature({"input_ids": input_ids})
 
-        feature_extractor = self.info.get_feature_extractor()
+        feature_extractor = self.info.get_feature_extractor(**mm_kwargs)
         sr = int(feature_extractor.sampling_rate)
         min_samples = int(getattr(feature_extractor, "n_fft", 400) or 400)
 
@@ -924,53 +923,6 @@ class FunAudioChatForConditionalGeneration(nn.Module, SupportsMultiModal, Suppor
                     f"sequence of Tensors (got {type(speech_attention_mask)})"
                 )
 
-        debug = os.getenv("VLLM_FUN_AUDIOCHAT_DEBUG", "") == "1"
-        if debug:
-            print(
-                f"[FunAudioChat] embed_multimodal speech_ids={tuple(speech_ids.shape)} "
-                f"speech_attention_mask={tuple(speech_attention_mask.shape)}",
-                flush=True,
-            )
-            attn_impl = getattr(
-                self.continuous_audio_tower.config, "_attn_implementation", None
-            )
-            print(
-                f"[FunAudioChat] audio_attn_impl={attn_impl}",
-                flush=True,
-            )
-            if hasattr(self.continuous_audio_tower, "conv1"):
-                conv1_w = self.continuous_audio_tower.conv1.weight
-                print(
-                    f"[FunAudioChat] conv1_w_norm={float(conv1_w.norm().item()):.6g}",
-                    flush=True,
-                )
-            try:
-                attn0 = self.continuous_audio_tower.layers[0].self_attn
-                q_norm = float(attn0.q_proj.weight.norm().item())
-                k_norm = float(attn0.k_proj.weight.norm().item())
-                v_norm = float(attn0.v_proj.weight.norm().item())
-                o_norm = float(attn0.out_proj.weight.norm().item())
-                print(
-                    f"[FunAudioChat] attn0_q_norm={q_norm:.6g} "
-                    f"k_norm={k_norm:.6g} "
-                    f"v_norm={v_norm:.6g} "
-                    f"o_norm={o_norm:.6g}",
-                    flush=True,
-                )
-            except Exception:
-                pass
-            if isinstance(input_features, torch.Tensor):
-                print(
-                    f"[FunAudioChat] input_features={tuple(input_features.shape)}",
-                    flush=True,
-                )
-            if isinstance(feature_attention_mask, torch.Tensor):
-                print(
-                    "[FunAudioChat] feature_attention_mask="
-                    f"{tuple(feature_attention_mask.shape)}",
-                    flush=True,
-                )
-
         group_size = int(self.audio_tower.group_size)
         speech_maxlen = int(speech_ids.shape[-1])
 
@@ -1019,38 +971,6 @@ class FunAudioChatForConditionalGeneration(nn.Module, SupportsMultiModal, Suppor
         embeds = tuple(
             audio_features[i, : int(length)] for i, length in enumerate(lengths)
         )
-        if debug:
-            embed_lens = [int(t.shape[0]) for t in embeds]
-            print(f"[FunAudioChat] embed_multimodal out_lens={embed_lens}", flush=True)
-            if embeds:
-                t0 = embeds[0]
-                print(
-                    f"[FunAudioChat] embed0 dtype={t0.dtype} device={t0.device} "
-                    f"nan={bool(torch.isnan(t0).any())} "
-                    f"norm={float(t0.norm().item()):.6g}",
-                    flush=True,
-                )
-            dump_path = os.getenv("VLLM_FUN_AUDIOCHAT_DUMP_PATH", "")
-            if (
-                dump_path
-                and speech_ids.shape[0] == 1
-                and len(embeds) == 1
-                and embed_lens[0] > 10
-            ):
-                if not os.path.exists(dump_path):
-                    np.save(dump_path, embeds[0].detach().float().cpu().numpy())
-                    print(f"[FunAudioChat] dumped embeds to {dump_path}", flush=True)
-                cont_path = dump_path.replace(".npy", "_cont.npy")
-                if continuous_audio_features is not None and not os.path.exists(
-                    cont_path
-                ):
-                    np.save(
-                        cont_path,
-                        continuous_audio_features.detach().float().cpu().numpy(),
-                    )
-                    print(
-                        f"[FunAudioChat] dumped continuous to {cont_path}", flush=True
-                    )
         return embeds
 
     def forward(

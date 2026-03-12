@@ -19,7 +19,7 @@ from vllm.multimodal.inputs import PlaceholderRange
 def test_placeholder_range_get_num_embeds(is_embed, expected):
     length = len(is_embed) if is_embed is not None else 5
     pr = PlaceholderRange(offset=0, length=length, is_embed=is_embed)
-    assert pr.get_num_embeds == expected
+    assert pr.get_num_embeds() == expected
 
 
 @pytest.mark.parametrize(

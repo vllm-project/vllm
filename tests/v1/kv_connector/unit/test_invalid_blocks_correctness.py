@@ -337,9 +337,9 @@ def test_async_recompute_blocks_not_cached_when_invalid(
     scheduler_output = recompute_scheduler.schedule()
 
     # request should be waiting for remote KVs
-    assert len(recompute_scheduler.waiting) == 1
+    assert len(recompute_scheduler.skipped_waiting) == 1
     assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
-    assert request.num_computed_tokens == 0
+    assert request.num_computed_tokens == num_external_computed_tokens
 
     # get the allocated block IDs
     (req_block_ids,) = recompute_scheduler.kv_cache_manager.get_block_ids(

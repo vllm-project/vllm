@@ -5,6 +5,8 @@ import os
 
 from transformers import PretrainedConfig
 
+from vllm.transformers_utils.utils import without_trust_remote_code
+
 
 class MedusaConfig(PretrainedConfig):
     model_type = "medusa"
@@ -42,7 +44,7 @@ class MedusaConfig(PretrainedConfig):
         **kwargs,
     ) -> "MedusaConfig":
         config_dict, kwargs = cls.get_config_dict(
-            pretrained_model_name_or_path, **kwargs
+            pretrained_model_name_or_path, **without_trust_remote_code(kwargs)
         )
         for k in list(config_dict.keys()):
             if "num" in k:

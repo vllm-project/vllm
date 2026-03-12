@@ -168,7 +168,7 @@ def bench_impl(
     # warmup
     for kwargs in kwargs_list:
         impl_type.get_impl()(**kwargs)
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     # Merge into a single kwargs and qualify arguments as ArgPool
     kwargs = {k: ArgPool([]) for k in kwargs_list[0]}
@@ -202,7 +202,7 @@ def test_correctness(T: int, N: int):
     # reference output
     ref_out_q, ref_out_s = output_from_impl(ImplType.REFERENCE)
 
-    # test ouptut
+    # test output
     out_q, out_s = output_from_impl(
         ImplType.SILU_MUL_PER_TOKEN_GROUP_QUANT_FP8_COLMAJOR
     )

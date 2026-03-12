@@ -3,7 +3,7 @@
 """
 This test file includes some cases where it is inappropriate to
 only get the `eos_token_id` from the tokenizer as defined by
-`vllm.LLMEngine._get_eos_token_id`.
+`BaseRenderer.get_eos_token_id`.
 """
 
 from vllm.tokenizers import get_tokenizer

@@ -83,7 +83,6 @@ We test the throughput by using `vllm bench serve` with request rate = inf to co
         "server_parameters": {
             "model": "meta-llama/Meta-Llama-3-8B",
             "tensor_parallel_size": 1,
-            "swap_space": 16,
             "disable_log_stats": "",
             "load_format": "dummy"
         },

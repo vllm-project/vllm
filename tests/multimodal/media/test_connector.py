@@ -7,8 +7,10 @@ import mimetypes
 import os
 from tempfile import NamedTemporaryFile, TemporaryDirectory
 
+import aiohttp
 import numpy as np
 import pytest
+import requests
 import torch
 from PIL import Image, ImageChops
 
@@ -318,3 +320,58 @@ async def test_allowed_media_domains(video_url: str, num_frames: int):
 
     with pytest.raises(ValueError):
         _, _ = await connector.fetch_video_async(disallowed_url)
+
+
+@pytest.mark.asyncio
+async def test_ssrf_bypass_backslash_in_url(local_asset_server):
+    """Verify that backslash-@ URL parsing confusion cannot bypass the
+    allowed_media_domains check (GHSA-v359-jj2v-j536).
+
+    urllib3.parse_url() and aiohttp/yarl disagree on how to parse a
+    backslash before ``@``.  urllib3 treats ``\\`` as part of the path
+    (encoding it as ``%5C``), while yarl treats it as a userinfo
+    separator, changing the effective host.  The fix normalises the URL
+    through urllib3 *before* handing it to aiohttp so both layers agree.
+    """
+    port = local_asset_server.port
+    asset = TEST_IMAGE_ASSETS[0]
+
+    # Craft the bypass payload: urllib3 sees host=127.0.0.1, but an
+    # un-patched aiohttp would see host=example.com.
+    bypass_url = f"http://127.0.0.1:{port}\\@example.com/{asset}"
+
+    connector = MediaConnector(
+        allowed_media_domains=["127.0.0.1"],
+    )
+
+    # After the fix the request is made to 127.0.0.1 (the local asset
+    # server) using the normalised URL.  The normalised path will be
+    # /%5C@example.com/<asset> which won't match any file the server
+    # knows about, so we expect an HTTP error — but crucially NOT a
+    # successful fetch from example.com.
+    with pytest.raises(requests.exceptions.HTTPError):
+        connector.fetch_image(bypass_url)
+
+    with pytest.raises(aiohttp.ClientResponseError):
+        await connector.fetch_image_async(bypass_url)
+
+
+@pytest.mark.asyncio
+async def test_ssrf_bypass_backslash_disallowed_domain():
+    """The reverse direction: even when the *attacker-controlled* host
+    appears in the urllib3-parsed hostname position the allowlist must
+    still block it.
+    """
+    # urllib3.parse_url sees host=example.com which is NOT in the
+    # allowlist, so this must be rejected before any request is made.
+    bypass_url = "https://example.com\\@safe.example.org/image.png"
+
+    connector = MediaConnector(
+        allowed_media_domains=["safe.example.org"],
+    )
+
+    with pytest.raises(ValueError, match="allowed domains"):
+        connector.fetch_image(bypass_url)
+
+    with pytest.raises(ValueError, match="allowed domains"):
+        await connector.fetch_image_async(bypass_url)

@@ -136,6 +136,9 @@ def create_cross_attention_backend(
             if (
                 not underlying_attn_backend.forward_includes_kv_cache_update
                 and attn_metadata is not None
+                and layer.kv_sharing_target_layer_name is None
+                and key is not None
+                and value is not None
             ):
                 self.do_kv_cache_update(
                     layer, key, value, kv_cache, attn_metadata.slot_mapping
@@ -185,10 +188,8 @@ class CrossAttention(Attention):
 
         if cache_config is not None:
             kv_cache_dtype = cache_config.cache_dtype
-            block_size = cache_config.block_size
         else:
             kv_cache_dtype = "auto"
-            block_size = 16
 
         if attn_type is not None:
             assert attn_type == AttentionType.ENCODER_DECODER, (
@@ -199,7 +200,6 @@ class CrossAttention(Attention):
             head_size,
             dtype,
             kv_cache_dtype,
-            block_size,
             attn_type=AttentionType.ENCODER_DECODER,
         )
         attn_backend = create_cross_attention_backend(underlying_attn_backend)

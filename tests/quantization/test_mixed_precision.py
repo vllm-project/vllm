@@ -8,6 +8,7 @@ Run `pytest tests/quantization/test_mixed_precision.py`.
 
 import importlib
 import importlib.metadata
+import importlib.util
 from dataclasses import dataclass
 
 import lm_eval

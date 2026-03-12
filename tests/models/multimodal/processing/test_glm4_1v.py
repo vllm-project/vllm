@@ -52,7 +52,7 @@ def test_processor_override(
     metadata["fps"] = fps
     mm_data = {"video": [(video, metadata)]}
 
-    processed_inputs = processor.apply(
+    processed_inputs = processor(
         prompt,
         mm_items=processor.info.parse_mm_data(mm_data),
         hf_processor_mm_kwargs=hf_processor_mm_kwargs,
@@ -104,12 +104,12 @@ def test_video_loader_consistency(
     static_mm_data = {"video": [(static_video, static_metadata)]}
     dynamic_mm_data = {"video": [(dynamic_video, dynamic_metadata)]}
 
-    static_outputs = processor.apply(
+    static_outputs = processor(
         prompt,
         mm_items=processor.info.parse_mm_data(static_mm_data),
         hf_processor_mm_kwargs=hf_processor_mm_kwargs,
     )
-    dynamic_outputs = processor.apply(
+    dynamic_outputs = processor(
         prompt,
         mm_items=processor.info.parse_mm_data(dynamic_mm_data),
         hf_processor_mm_kwargs=hf_processor_mm_kwargs,

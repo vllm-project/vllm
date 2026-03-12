@@ -57,10 +57,10 @@ class RowParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
             input_parallel = input_
         else:
             # TODO: simplify code below
-            splitted_input = split_tensor_along_last_dim(
+            split_input = split_tensor_along_last_dim(
                 input_, num_partitions=self.tp_size
             )
-            input_parallel = splitted_input[self.tp_rank].contiguous()
+            input_parallel = split_input[self.tp_rank].contiguous()
 
         # Matrix multiply.
         bias_ = (

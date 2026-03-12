@@ -8,23 +8,15 @@ operations, including naming conventions, directory resolution, and file I/O.
 
 Config File Structure
 ---------------------
-Each kernel has a single JSON config file: {kernel_name}.json
+Each kernel has a directory: {kernel_name}/
+Inside, each GPU platform has its own JSON file: {kernel_name}/{platform}.json
 
-The file uses a simplified 2-layer hierarchical structure:
-{
-    "h100": {                             # GPU platform
-        "default": { ... },               # Fallback configuration
-        "batch_32_hidden_4096": { ... },
-        "batch_64_hidden_8192": { ... }
-    },
-    "a100": {
-        "default": { ... },
-        "batch_16_hidden_2048": { ... }
-    }
-}
+For example:
+    silu_mul_fp8/
+        nvidia_h100.json    # { "default": {...}, "batch_32_hidden_4096": {...} }
+        nvidia_h200.json    # { "batch_16_hidden_2048": {...} }
 
-Example file: silu_mul_fp8.json
-
+Each platform file maps config keys to Helion config objects.
 Config keys should be structured strings that encode the relevant
 parameters (e.g., "batch_32_hidden_4096", "seq_512_heads_16", "fp8_batch_64", etc.).
 
@@ -71,10 +63,18 @@ class ConfigSet:
         platform_dict = self._configs.get(platform)
         if platform_dict is None:
             avail_platforms = self.get_platforms()
+            # TODO(@gmagogsfm): add a CLI/env override flag so users can
+            # directly specify a platform name instead of relying on
+            # auto-detection, and suggest it in this error message.
             raise KeyError(
                 f"Config not found for kernel '{self._kernel_name}': "
                 f"platform '{platform}' not found. "
-                f"Available platforms: {avail_platforms or '(none)'}"
+                f"Available platforms: {avail_platforms or '(none)'}. "
+                f"If your GPU is a variant of a supported platform, "
+                f"consider adding a mapping in _GPU_NAME_ALIASES in "
+                f"vllm/kernels/helion/utils.py, or run "
+                f"scripts/autotune_helion_kernels.py to generate configs "
+                f"for your platform."
             )
 
         config = platform_dict.get(config_key)
@@ -104,9 +104,6 @@ class ConfigSet:
             result[platform] = {}
 
             for config_key, config in config_keys_dict.items():
-                # Convert helion.Config to dict using to_json() + json.loads()
-                import json
-
                 result[platform][config_key] = json.loads(config.to_json())
 
         return result
@@ -134,6 +131,27 @@ class ConfigSet:
 
         return config_set
 
+    def set_config(
+        self, platform: str, config_key: str, config: "helion.Config"
+    ) -> None:
+        platform = platform.lower()
+        if platform not in self._configs:
+            self._configs[platform] = {}
+        self._configs[platform][config_key] = config
+        logger.debug(
+            "Set config for kernel '%s': platform='%s', key='%s'",
+            self._kernel_name,
+            platform,
+            config_key,
+        )
+
+    def has_config(self, platform: str, config_key: str) -> bool:
+        platform = platform.lower()
+        platform_dict = self._configs.get(platform)
+        if platform_dict is None:
+            return False
+        return config_key in platform_dict
+
 
 class ConfigManager:
     """File-level configuration management for Helion kernels (global singleton)."""
@@ -145,7 +163,6 @@ class ConfigManager:
         resolved_base_dir = cls._resolve_base_dir(base_dir)
 
         if cls._instance is not None:
-            # Instance already exists - check for base_dir mismatch
             if cls._instance_base_dir != resolved_base_dir:
                 raise ValueError(
                     f"ConfigManager singleton already exists with base_dir "
@@ -154,14 +171,12 @@ class ConfigManager:
                 )
             return cls._instance
 
-        # Create new instance
         instance = super().__new__(cls)
         cls._instance = instance
         cls._instance_base_dir = resolved_base_dir
         return instance
 
     def __init__(self, base_dir: str | Path | None = None):
-        # Only initialize if not already initialized
         if hasattr(self, "_base_dir"):
             return
 
@@ -189,43 +204,104 @@ class ConfigManager:
         cls._instance = None
         cls._instance_base_dir = None
 
-    def get_config_file_path(self, kernel_name: str) -> Path:
-        return self._base_dir / f"{kernel_name}.json"
+    def get_kernel_dir(self, kernel_name: str) -> Path:
+        return self._base_dir / kernel_name
+
+    def get_config_file_path(
+        self, kernel_name: str, platform: str | None = None
+    ) -> Path:
+        if platform is not None:
+            return self.get_kernel_dir(kernel_name) / f"{platform}.json"
+        return self.get_kernel_dir(kernel_name)
 
     def ensure_base_dir_exists(self) -> Path:
         self._base_dir.mkdir(parents=True, exist_ok=True)
         return self._base_dir
 
-    def load_config_set(self, kernel_name: str) -> ConfigSet:
-        config_path = self.get_config_file_path(kernel_name)
-        if not config_path.exists():
-            return ConfigSet.from_dict(kernel_name, {})
+    def ensure_base_dir_writable(self) -> None:
+        self.ensure_base_dir_exists()
+        test_file = self._base_dir / ".write_test"
+        try:
+            test_file.write_text("test")
+            test_file.unlink()
+        except OSError as e:
+            raise OSError(
+                f"Config directory '{self._base_dir}' is not writable: {e}"
+            ) from e
 
+    def _load_platform_file(self, kernel_name: str, platform: str) -> dict[str, Any]:
+        config_path = self.get_config_file_path(kernel_name, platform)
+        if not config_path.exists():
+            return {}
         try:
             with open(config_path) as f:
-                data = json.load(f)
-            return ConfigSet.from_dict(kernel_name, data)
+                return json.load(f)
         except (json.JSONDecodeError, OSError) as e:
             logger.error("Failed to load config file %s: %s", config_path, e)
+            return {}
+
+    def load_config_set(self, kernel_name: str) -> ConfigSet:
+        kernel_dir = self.get_kernel_dir(kernel_name)
+        if not kernel_dir.is_dir():
             return ConfigSet.from_dict(kernel_name, {})
+
+        data: dict[str, Any] = {}
+        for platform_file in sorted(kernel_dir.glob("*.json")):
+            platform = platform_file.stem
+            try:
+                with open(platform_file) as f:
+                    platform_data = json.load(f)
+                data[platform] = platform_data
+            except (json.JSONDecodeError, OSError) as e:
+                logger.error("Failed to load config file %s: %s", platform_file, e)
+
+        return ConfigSet.from_dict(kernel_name, data)
 
     def get_platform_configs(
         self, kernel_name: str, platform: str
     ) -> dict[str, helion.Config]:
-        config_set = self.load_config_set(kernel_name)
+        platform_data = self._load_platform_file(kernel_name, platform)
+        if not platform_data:
+            return {}
+        config_set = ConfigSet.from_dict(kernel_name, {platform: platform_data})
         config_keys = config_set.get_config_keys(platform)
-
         return {
             config_key: config_set.get_config(platform, config_key)
             for config_key in config_keys
         }
 
     def save_config_set(self, config_set: ConfigSet) -> Path:
-        config_path = self.get_config_file_path(config_set.kernel_name)
-        config_path.parent.mkdir(parents=True, exist_ok=True)
+        kernel_dir = self.get_kernel_dir(config_set.kernel_name)
+        kernel_dir.mkdir(parents=True, exist_ok=True)
 
-        with open(config_path, "w") as f:
-            json.dump(config_set.to_dict(), f, indent=2)
+        full_data = config_set.to_dict()
+        for platform, platform_data in full_data.items():
+            platform_path = kernel_dir / f"{platform}.json"
+            with open(platform_path, "w") as f:
+                json.dump(platform_data, f, indent=2)
+            logger.info("Saved config to: %s", platform_path)
 
-        logger.info("Saved config to: %s", config_path)
-        return config_path
+        return kernel_dir
+
+    def save_configs(
+        self,
+        kernel_name: str,
+        platform: str,
+        configs: dict[str, "helion.Config"],
+    ) -> Path:
+        """Save configs for a kernel/platform, merging with existing."""
+        platform_data = self._load_platform_file(kernel_name, platform)
+        for config_key, config in configs.items():
+            platform_data[config_key] = json.loads(config.to_json())
+
+        platform_path = self.get_config_file_path(kernel_name, platform)
+        platform_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(platform_path, "w") as f:
+            json.dump(platform_data, f, indent=2)
+
+        logger.info("Saved config to: %s", platform_path)
+        return platform_path
+
+    def config_exists(self, kernel_name: str, platform: str, config_key: str) -> bool:
+        platform_data = self._load_platform_file(kernel_name, platform)
+        return config_key in platform_data

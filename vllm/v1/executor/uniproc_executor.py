@@ -12,9 +12,9 @@ import torch.distributed as dist
 
 import vllm.envs as envs
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_distributed_init_method, get_ip, get_open_port
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
-from vllm.v1.engine import ReconfigureDistributedRequest, ReconfigureRankType
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.outputs import AsyncModelRunnerOutput, DraftTokenIds, ModelRunnerOutput
 from vllm.v1.serial_utils import run_method
@@ -43,9 +43,12 @@ class UniProcExecutor(Executor):
                 max_workers=1, thread_name_prefix="WorkerAsyncOutput"
             )
 
+        is_eep_new_worker = envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH
         self.driver_worker.init_worker(all_kwargs=[kwargs])
-        self.driver_worker.init_device()
-        self.driver_worker.load_model()
+        if not is_eep_new_worker:
+            self.driver_worker.init_device()
+            self.driver_worker.load_model()
+            current_platform.update_block_size_for_backend(self.vllm_config)
 
     def _distributed_args(self) -> tuple[str, int, int]:
         """Return (distributed_init_method, rank, local_rank)."""
@@ -97,12 +100,17 @@ class UniProcExecutor(Executor):
     def execute_model(  # type: ignore[override]
         self, scheduler_output: SchedulerOutput, non_block: bool = False
     ) -> ModelRunnerOutput | None | Future[ModelRunnerOutput | None]:
-        return self.collective_rpc(
+        output = self.collective_rpc(
             "execute_model",
             args=(scheduler_output,),
             non_block=non_block,
             single_value=True,
         )
+        # In non-blocking mode, surface any exception as early as possible.
+        if non_block and output.done():
+            # Raise the exception in-line if the task failed.
+            output.result()
+        return output
 
     def sample_tokens(  # type: ignore[override]
         self, grammar_output: GrammarOutput | None, non_block: bool = False
@@ -121,16 +129,6 @@ class UniProcExecutor(Executor):
         # UniProcExecutor will always be healthy as long as
         # it's running.
         return
-
-    def reinitialize_distributed(
-        self, reconfig_request: ReconfigureDistributedRequest
-    ) -> None:
-        self.driver_worker.reinitialize_distributed(reconfig_request)
-        if (
-            reconfig_request.new_data_parallel_rank
-            == ReconfigureRankType.SHUTDOWN_CURRENT_RANK
-        ):
-            self.shutdown()
 
     def shutdown(self) -> None:
         if worker := self.driver_worker:

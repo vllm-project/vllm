@@ -54,7 +54,7 @@ class PoolerConfig:
     Reduce the dimensions of embeddings if model
     support matryoshka representation. Defaults to None.
     """
-    enable_chunked_processing: bool | None = None
+    enable_chunked_processing: bool = False
     """
     Whether to enable chunked processing for long inputs that exceed the model's
     maximum position embeddings. When enabled, long inputs will be split into

@@ -11,6 +11,8 @@ from vllm.transformers_utils.configs.speculators.algos import (
 
 __all__ = ["SpeculatorsConfig"]
 
+from vllm.transformers_utils.utils import without_trust_remote_code
+
 
 class SpeculatorsConfig(PretrainedConfig):
     model_type = "speculators"
@@ -22,7 +24,9 @@ class SpeculatorsConfig(PretrainedConfig):
         **kwargs,
     ) -> "SpeculatorsConfig":
         """Load speculators Eagle config and convert to vLLM format."""
-        config_dict, _ = cls.get_config_dict(pretrained_model_name_or_path, **kwargs)
+        config_dict, _ = cls.get_config_dict(
+            pretrained_model_name_or_path, **without_trust_remote_code(kwargs)
+        )
 
         vllm_config = cls.extract_transformers_pre_trained_config(config_dict)
         return cls(**vllm_config)

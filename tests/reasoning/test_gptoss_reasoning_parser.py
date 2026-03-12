@@ -17,7 +17,9 @@ def gpt_oss_tokenizer():
 
 USER_MESSAGE_START = "<|start|>user<|message|>"
 REASONING_SECTION_START = "<|end|><|start|>assistant<|channel|>analysis<|message|>"
-ASSISTANT_CONTENT_START_PREFIX = "<|end|><|start|>assistant<|channel|>final"
+END = "<|end|>"
+ASSISTANT_START = "<|start|>assistant"
+ASSISTANT_CONTENT_START_PREFIX = END + ASSISTANT_START + "<|channel|>final"
 ASSISTANT_CONTENT_START_SUFFIX = "<|message|>"
 ASSISTANT_CONTENT_START = (
     ASSISTANT_CONTENT_START_PREFIX + ASSISTANT_CONTENT_START_SUFFIX
@@ -97,6 +99,20 @@ COMPLEX_CONTENT_2 = {
     "is_reasoning_end": True,
 }
 
+MULTI_TURN_CONTENT = {
+    "output": USER_MESSAGE_START
+    + "1st turn user message"
+    + REASONING_SECTION_START
+    + "1st turn reasoning"
+    + ASSISTANT_CONTENT_START
+    + "1st turn response"
+    + END
+    + USER_MESSAGE_START
+    + "2nd turn user message"
+    + END
+    + ASSISTANT_START,
+    "is_reasoning_end": False,
+}
 TEST_CASES = [
     BASIC_CONTENT,
     BASIC_REASONING_ONLY,
@@ -106,6 +122,7 @@ TEST_CASES = [
     COMPLEX_CONTENT_1,
     COMPLEX_CONTENT_1_WITH_CONTENT,
     COMPLEX_CONTENT_2,
+    MULTI_TURN_CONTENT,
 ]
 
 

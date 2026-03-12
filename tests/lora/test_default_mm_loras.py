@@ -153,5 +153,5 @@ def test_default_mm_lora_does_not_expand_string_reqs(vllm_runner):
         # Then check to make sure the submitted lora request
         # and text prompt were zipped together correctly
         engine_args, engine_kwargs = mock_add_request.call_args
+        assert engine_args[1]["prompt"] == AUDIO_PROMPT
         assert engine_kwargs["lora_request"] is None
-        assert engine_kwargs["prompt_text"] == AUDIO_PROMPT

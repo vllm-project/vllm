@@ -96,7 +96,9 @@ class WorkerProfiler(ABC):
             logger.info_once("Starting profiler after delay...", scope="local")
             self._call_start()
 
-        if self._running:
+        # Call profiler step for schedule-based profiling
+        # Only count iterations where data is actually recorded (not warmup)
+        if self._running and self._profiler_step():
             self._profiling_for_iters += 1
 
         if (
@@ -112,6 +114,16 @@ class WorkerProfiler(ABC):
             )
             self._call_stop()
             return
+
+    def _profiler_step(self) -> bool:
+        """Called each step when profiler is running.
+        Override in subclasses to handle schedule-based profiling.
+
+        Returns:
+            True if the step was an active profiling step (data recorded),
+            False if the step was a warmup step (data discarded).
+        """
+        return True
 
     def stop(self) -> None:
         """Attempt to stop the profiler, accounting for overlapped calls."""
@@ -187,13 +199,45 @@ class TorchProfilerWrapper(WorkerProfiler):
             )
 
         self.dump_cpu_time_total = "CPU" in activities and len(activities) == 1
+
+        # Create profiler schedule if warmup or wait iterations are configured
+        profiler_schedule = None
+        if profiler_config.warmup_iterations > 0 or profiler_config.wait_iterations > 0:
+            profiler_schedule = torch.profiler.schedule(
+                skip_first=0,
+                wait=profiler_config.wait_iterations,
+                warmup=profiler_config.warmup_iterations,
+                active=profiler_config.active_iterations,
+                repeat=1,
+            )
+            if local_rank in (None, 0):
+                logger.info_once(
+                    "Profiler schedule configured: wait=%d, warmup=%d, active=%d",
+                    profiler_config.wait_iterations,
+                    profiler_config.warmup_iterations,
+                    profiler_config.active_iterations,
+                    scope="local",
+                )
+
         self.profiler = torch.profiler.profile(
             activities=[TorchProfilerActivityMap[activity] for activity in activities],
+            schedule=profiler_schedule,
             record_shapes=profiler_config.torch_profiler_record_shapes,
             profile_memory=profiler_config.torch_profiler_with_memory,
             with_stack=profiler_config.torch_profiler_with_stack,
             with_flops=profiler_config.torch_profiler_with_flops,
             on_trace_ready=trace_handler,
+        )
+
+        # Track if we're using a schedule (need to call step())
+        self._uses_schedule = profiler_schedule is not None
+        self._warmup_iterations = profiler_config.warmup_iterations
+        # Subtract 1 because profiler.start() already consumes step 0
+        # (WAIT or WARMUP), so only wait + warmup - 1 non-active steps
+        # remain to be advanced through via profiler.step() calls.
+        self._warmup_steps_remaining = max(
+            profiler_config.wait_iterations + profiler_config.warmup_iterations - 1,
+            0,
         )
 
     @override
@@ -227,6 +271,22 @@ class TorchProfilerWrapper(WorkerProfiler):
                     sort_by="self_cpu_time_total", row_limit=50
                 )
             )
+
+    @override
+    def _profiler_step(self) -> bool:
+        """Call profiler.step() when using schedule-based profiling.
+
+        Returns:
+            True if the step was an active profiling step (data recorded),
+            False if the step was a warmup step (data discarded).
+        """
+        if self._uses_schedule:
+            self.profiler.step()
+            # Track warmup steps - only count active steps toward max_iterations
+            if self._warmup_steps_remaining > 0:
+                self._warmup_steps_remaining -= 1
+                return False
+        return True
 
     @override
     def annotate_context_manager(self, name: str):

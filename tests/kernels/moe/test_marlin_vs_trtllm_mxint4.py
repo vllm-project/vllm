@@ -221,16 +221,16 @@ def test_marlin_vs_trtllm_mxint4_moe_kimik2(monkeypatch, m, n, k, e, topk, group
     )
 
     marlin_output = fused_marlin_moe(
-        a,
-        w1_marlin,
-        w2_marlin,
-        None,
-        None,
-        w1_scales_marlin,
-        w2_scales_marlin,
-        None,  # gating_output not needed when topk_weights/ids provided
-        topk_weights,
-        topk_ids,
+        hidden_states=a,
+        w1=w1_marlin,
+        w2=w2_marlin,
+        bias1=None,
+        bias2=None,
+        w1_scale=w1_scales_marlin,
+        w2_scale=w2_scales_marlin,
+        topk_weights=topk_weights,
+        topk_ids=topk_ids,
+        quant_type_id=scalar_types.uint4b8.id,
         global_num_experts=e,
         expert_map=None,
         global_scale1=None,
@@ -244,7 +244,6 @@ def test_marlin_vs_trtllm_mxint4_moe_kimik2(monkeypatch, m, n, k, e, topk, group
         w1_zeros=None,
         w2_zeros=None,
         input_dtype=dtype,
-        quant_type_id=scalar_types.uint4b8.id,
         is_k_full=True,
     )
 

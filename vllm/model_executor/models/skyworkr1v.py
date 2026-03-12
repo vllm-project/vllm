@@ -487,11 +487,8 @@ class SkyworkR1VProcessingInfo(BaseProcessingInfo):
         *,
         image_width: int,
         image_height: int,
-        processor: SkyworkR1VProcessor | None,
+        processor: SkyworkR1VProcessor,
     ) -> int:
-        if processor is None:
-            processor = self.get_hf_processor()
-
         return processor.get_num_image_tokens(
             image_width=image_width,
             image_height=image_height,
@@ -532,12 +529,12 @@ class SkyworkR1VDummyInputsBuilder(BaseDummyInputsBuilder[SkyworkR1VProcessingIn
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
         target_width, target_height = self.info.get_image_size_with_most_features()
         num_images = mm_counts.get("image", 0)
 
-        image_overrides = mm_options.get("image") if mm_options else None
+        image_overrides = mm_options.get("image")
 
         return {
             "image": self._get_dummy_images(
@@ -880,7 +877,6 @@ class SkyworkR1VChatModel(nn.Module, SupportsMultiModal, SupportsPP):
         multimodal_embeddings: MultiModalEmbeddings | None = None,
         *,
         is_multimodal: torch.Tensor | None = None,
-        handle_oov_mm_token: bool = False,
     ) -> torch.Tensor:
         if multimodal_embeddings is not None and len(multimodal_embeddings) > 0:
             self._set_visual_token_mask(input_ids)
@@ -893,7 +889,6 @@ class SkyworkR1VChatModel(nn.Module, SupportsMultiModal, SupportsPP):
             input_ids,
             multimodal_embeddings=multimodal_embeddings,
             is_multimodal=is_multimodal,
-            handle_oov_mm_token=handle_oov_mm_token,
         )
 
     def forward(

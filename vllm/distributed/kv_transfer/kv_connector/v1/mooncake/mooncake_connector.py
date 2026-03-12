@@ -481,7 +481,7 @@ class MooncakeConnectorWorker:
         )
 
         self._remote_agents: dict[EngineId, dict[int, dict[int, str]]] = {}
-        self._pending_bootstrap_querys: dict[str, asyncio.Event] = {}
+        self._pending_bootstrap_queries: dict[str, asyncio.Event] = {}
         self.side_channel_port: int = 0  # we will bind it in register_kv_caches()
         self.engine_id: EngineId = engine_id
         self.tp_rank = get_tensor_model_parallel_rank()
@@ -1077,7 +1077,7 @@ class MooncakeConnectorWorker:
                     response = self._xfer_resp_decoder.decode(ret_msg)
                     if response.status == MooncakeXferResponseStatus.ERROR:
                         logger.error(
-                            "Error happens during tranfering kvcache for %s: %s",
+                            "Error happens during transferring kvcache for %s: %s",
                             req_ids,
                             response.err_msg,
                         )
@@ -1140,8 +1140,8 @@ class MooncakeConnectorWorker:
             )
 
         # Always notify others regardless of connection success or failure.
-        self._pending_bootstrap_querys[remote_bootstrap_addr].set()
-        del self._pending_bootstrap_querys[remote_bootstrap_addr]
+        self._pending_bootstrap_queries[remote_bootstrap_addr].set()
+        del self._pending_bootstrap_queries[remote_bootstrap_addr]
 
     def receive_kv(
         self,
@@ -1171,11 +1171,11 @@ class MooncakeConnectorWorker:
         pull_metas: dict[ReqId, PullReqMeta],
     ):
         remote_bootstrap_addr = next(iter(pull_metas.values())).remote_bootstrap_addr
-        if remote_bootstrap_addr not in self._pending_bootstrap_querys:
-            self._pending_bootstrap_querys[remote_bootstrap_addr] = asyncio.Event()
+        if remote_bootstrap_addr not in self._pending_bootstrap_queries:
+            self._pending_bootstrap_queries[remote_bootstrap_addr] = asyncio.Event()
             await self._connect_to_prefiller_bootstrap(remote_bootstrap_addr)
         else:
-            await self._pending_bootstrap_querys[remote_bootstrap_addr].wait()
+            await self._pending_bootstrap_queries[remote_bootstrap_addr].wait()
 
         if remote_engine_id not in self._remote_agents:
             logger.error(

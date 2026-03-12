@@ -13,6 +13,7 @@ from torch.utils.benchmark import Measurement as TMeasurement
 from tqdm import tqdm
 
 import vllm._custom_ops as ops
+from vllm.benchmarks.lib.utils import default_vllm_config
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
@@ -291,6 +292,7 @@ def print_timers(timers: Iterable[TMeasurement]):
     compare.print()
 
 
+@default_vllm_config()
 def main():
     torch.set_default_device("cuda")
     bench_params = get_bench_params()

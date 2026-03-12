@@ -10,16 +10,10 @@ from abc import ABC
 
 import pytest
 
-from vllm.model_executor.layers.quantization.kernels.scaled_mm import (
-    Int8ScaledMMLinearLayerConfig,
-)
-from vllm.model_executor.layers.quantization.kernels.scaled_mm.aiter import (
+from vllm.model_executor.kernels.linear import (
     AiterInt8ScaledMMLinearKernel,
-)
-from vllm.model_executor.layers.quantization.kernels.scaled_mm.cpu import (
     CPUInt8ScaledMMLinearKernel,
-)
-from vllm.model_executor.layers.quantization.kernels.scaled_mm.ScaledMMLinearKernel import (  # noqa: E501
+    Int8ScaledMMLinearLayerConfig,
     ScaledMMLinearKernel,
 )
 

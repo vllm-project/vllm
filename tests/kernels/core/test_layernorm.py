@@ -127,7 +127,7 @@ def test_fused_rms_norm_quant(
             out_quant, x_unfused.contiguous(), quant_scale_t
         )
 
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         torch.testing.assert_close(residual_fused, residual, atol=1e-2, rtol=1e-2)
         opcheck(
             torch.ops._C.fused_add_rms_norm_static_fp8_quant,

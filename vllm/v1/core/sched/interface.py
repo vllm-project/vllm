@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import enum
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
 from typing import TYPE_CHECKING
@@ -16,6 +17,20 @@ if TYPE_CHECKING:
     from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
     from vllm.v1.request import Request, RequestStatus
     from vllm.v1.structured_output import StructuredOutputManager
+
+
+class PauseState(enum.IntEnum):
+    """Scheduler pause state.
+
+    - UNPAUSED: Normal operation
+    - PAUSE_NEW: No new requests are scheduled, requests already in
+                 running state are scheduled.
+    - PAUSE_ALL: No requests are scheduled
+    """
+
+    UNPAUSED = 0
+    PAUSED_NEW = 1
+    PAUSED_ALL = 2
 
 
 class SchedulerInterface(ABC):
@@ -120,11 +135,11 @@ class SchedulerInterface(ABC):
     @abstractmethod
     def finish_requests(
         self,
-        request_ids: str | Iterable[str],
+        request_ids: str | Iterable[str] | None,
         finished_status: "RequestStatus",
-    ) -> None:
+    ) -> list[tuple[str, int]]:
         """Finish the requests in the scheduler's internal queue. If the request
-        is not in the queue, this method will do nothing.
+        is not in the queue, this method will do nothing for that request.
 
         This method is called in two cases:
         1. When the request is aborted by the client.
@@ -132,8 +147,12 @@ class SchedulerInterface(ABC):
            de-tokenizing its generated tokens.
 
         Args:
-            request_ids: A single or a list of request IDs.
+            request_ids: A single or a list of request IDs, or None to finish all.
             finished_status: The finished status of the given requests.
+
+        Returns:
+            Tuple of (req_id, client_index) for requests that were aborted. Will not
+            include any that were already finished.
         """
         raise NotImplementedError
 
@@ -166,6 +185,16 @@ class SchedulerInterface(ABC):
         """Returns True if there are unfinished requests, or finished requests
         not yet returned in SchedulerOutputs."""
         return self.has_unfinished_requests() or self.has_finished_requests()
+
+    @property
+    @abstractmethod
+    def pause_state(self) -> PauseState:
+        """Current pause state of the scheduler."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def set_pause_state(self, pause_state: PauseState) -> None:
+        raise NotImplementedError
 
     @abstractmethod
     def reset_prefix_cache(

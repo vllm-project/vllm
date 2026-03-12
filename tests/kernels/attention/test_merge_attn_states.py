@@ -165,7 +165,7 @@ def test_merge_attn_states(
             suffix_lse_torch,
             output_lse_torch,
         )
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     for _ in range(repeat_times):
         start.record()
@@ -178,7 +178,7 @@ def test_merge_attn_states(
             output_lse_torch,
         )
         end.record()
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         total_time_torch_kernel += start.elapsed_time(end)
 
     avg_time_torch_kernel = total_time_torch_kernel / repeat_times
@@ -200,7 +200,7 @@ def test_merge_attn_states(
             suffix_lse,
             output_lse_ref_triton,
         )
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     for _ in range(repeat_times):
         start.record()
@@ -213,7 +213,7 @@ def test_merge_attn_states(
             output_lse_ref_triton,
         )
         end.record()
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         total_time_triton_kernel += start.elapsed_time(end)
 
     avg_time_triton_kernel = total_time_triton_kernel / repeat_times
@@ -232,7 +232,7 @@ def test_merge_attn_states(
             suffix_lse,
             output_lse_cuda,
         )
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     for _ in range(repeat_times):
         start.record()
@@ -245,7 +245,7 @@ def test_merge_attn_states(
             output_lse_cuda,
         )
         end.record()
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         total_time_cuda_kernel += start.elapsed_time(end)
 
     avg_time_cuda_kernel = total_time_cuda_kernel / repeat_times

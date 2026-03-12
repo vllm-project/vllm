@@ -8,7 +8,7 @@ from typing import Literal
 import torch
 import torchvision.transforms as T
 from PIL import Image, ImageOps
-from transformers import AutoProcessor, BatchFeature, LlamaTokenizerFast
+from transformers import BatchFeature, LlamaTokenizerFast
 from transformers.processing_utils import ProcessorMixin
 
 # TODO(Isotr0py): change modes for variants
@@ -453,6 +453,3 @@ class DeepseekOCRProcessor(ProcessorMixin):
             num_image_tokens,
             image_shapes,
         )
-
-
-AutoProcessor.register("DeepseekOCRProcessor", DeepseekOCRProcessor)

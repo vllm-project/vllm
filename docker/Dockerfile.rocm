@@ -305,6 +305,14 @@ RUN --mount=type=bind,from=export_vllm,src=/,target=/install \
 RUN --mount=type=bind,from=build_rixl,src=/app/install,target=/rixl_install \
     uv pip install --system /rixl_install/*.whl
 
+# RIXL/MoRIIO runtime dependencies (RDMA userspace libraries)
+RUN apt-get update -q -y && apt-get install -q -y \
+    librdmacm1 \
+    libibverbs1 \
+    ibverbs-providers \
+    ibverbs-utils \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /vllm-workspace
 ARG COMMON_WORKDIR
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm /vllm-workspace
@@ -329,6 +337,11 @@ RUN bash /tmp/install_torchcodec.sh \
 
 # Copy in the v1 package (for python-only install test group)
 COPY --from=export_vllm /vllm_v1 /usr/local/lib/python${PYTHON_VERSION}/dist-packages/vllm/v1
+
+# Set MIOPEN ENVS to resolve performance regressions in MIOpen 3D convolution kernel
+# See: https://github.com/pytorch/pytorch/issues/169857
+ENV MIOPEN_DEBUG_CONV_DIRECT=0
+ENV MIOPEN_DEBUG_CONV_GEMM=0
 
 # Source code is used in the `python_only_compile.sh` test
 # We hide it inside `src/` so that this source code

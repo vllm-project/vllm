@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, overload
 
 import torch
 import torch.nn as nn
@@ -14,12 +14,24 @@ if TYPE_CHECKING:
 
 
 class BaseLayerWithLoRA(nn.Module):
+    @overload
+    def slice_lora_a(
+        self, lora_a: list[torch.Tensor | None]
+    ) -> list[torch.Tensor | None]: ...
+    @overload
+    def slice_lora_a(self, lora_a: torch.Tensor) -> torch.Tensor: ...
     def slice_lora_a(
         self, lora_a: torch.Tensor | list[torch.Tensor | None]
     ) -> torch.Tensor | list[torch.Tensor | None]:
         """Slice lora a if splitting for tensor parallelism."""
         ...
 
+    @overload
+    def slice_lora_b(
+        self, lora_b: list[torch.Tensor | None]
+    ) -> list[torch.Tensor | None]: ...
+    @overload
+    def slice_lora_b(self, lora_b: torch.Tensor) -> torch.Tensor: ...
     def slice_lora_b(
         self, lora_b: torch.Tensor | list[torch.Tensor | None]
     ) -> torch.Tensor | list[torch.Tensor | None]:

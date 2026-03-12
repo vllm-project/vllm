@@ -106,7 +106,7 @@ def test_extract_tool_calls_no_tools(seed_oss_tool_parser):
 @pytest.mark.parametrize(
     ids=[
         "tool_call_0_thinking_budget",
-        "tool_call_512_thinkg_budget",
+        "tool_call_512_thinking_budget",
         "tool_call_unlimited_thinking_budget",
     ],
     argnames=["model_output", "expected_tool_calls", "expected_content"],
@@ -308,7 +308,7 @@ def stream_delta_message_generator(
 @pytest.mark.parametrize(
     ids=[
         "tool_call_0_thinking_budget",
-        "tool_call_512_thinkg_budget",
+        "tool_call_512_thinking_budget",
         "tool_call_unlimited_thinking_budget",
     ],
     argnames=["model_output", "expected_tool_calls", "expected_content"],

@@ -7,7 +7,9 @@ import pytest
 
 from vllm.config import ModelConfig
 from vllm.entrypoints.chat_utils import ChatTemplateResolutionError
-from vllm.entrypoints.pooling.score.utils import get_score_prompt
+from vllm.entrypoints.pooling.score.utils import (
+    get_score_prompt,
+)
 from vllm.inputs import TokensPrompt
 from vllm.tokenizers import get_tokenizer
 

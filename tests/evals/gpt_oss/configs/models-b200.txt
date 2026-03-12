@@ -1,0 +1,5 @@
+# B200 model configurations for GPQA evaluation
+# Tests different environment variable combinations
+gpt-oss-20b-flashinfer-mxfp4-bf16.yaml
+gpt-oss-20b-flashinfer-mxfp4-mxfp8-cutlass.yaml
+gpt-oss-20b-sm100-fi-mxfp4-mxfp8-trtllm.yaml

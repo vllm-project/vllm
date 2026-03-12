@@ -42,21 +42,21 @@ echo "lanching vllm..."
 echo "logging to $VLLM_LOG"
 echo
 
-vllm serve $MODEL \
+vllm serve "$MODEL" \
  --seed 42 \
- --max-num-seqs $MAX_NUM_SEQS \
- --max-num-batched-tokens $MAX_NUM_BATCHED_TOKENS \
- --tensor-parallel-size $TENSOR_PARALLEL_SIZE \
+ --max-num-seqs "$MAX_NUM_SEQS" \
+ --max-num-batched-tokens "$MAX_NUM_BATCHED_TOKENS" \
+ --tensor-parallel-size "$TENSOR_PARALLEL_SIZE" \
  --no-enable-prefix-caching \
- --download_dir $DOWNLOAD_DIR \
- --max-model-len $MAX_MODEL_LEN > "$VLLM_LOG" 2>&1 &
+ --download_dir "$DOWNLOAD_DIR" \
+ --max-model-len "$MAX_MODEL_LEN" > "$VLLM_LOG" 2>&1 &
 
 
 echo "wait for 20 minutes.."
 echo
 # sleep 1200
 # wait for 10 minutes...
-for i in {1..120}; do
+for _ in {1..120}; do
     # TODO: detect other type of errors.
     if grep -Fq "raise RuntimeError" "$VLLM_LOG"; then
         echo "Detected RuntimeError, exiting."
@@ -78,11 +78,11 @@ echo "logging to $BM_LOG"
 echo
 vllm bench serve \
     --backend vllm \
-    --model $MODEL  \
+    --model "$MODEL"  \
     --dataset-name sonnet \
     --dataset-path benchmarks/sonnet_4x.txt \
-    --sonnet-input-len $INPUT_LEN \
-    --sonnet-output-len $OUTPUT_LEN \
+    --sonnet-input-len "$INPUT_LEN" \
+    --sonnet-output-len "$OUTPUT_LEN" \
     --ignore-eos > "$BM_LOG"
 
 echo "completed..."

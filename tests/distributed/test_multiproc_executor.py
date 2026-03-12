@@ -9,11 +9,11 @@ focusing on executor initialization, RPC calls, and distributed execution.
 
 import multiprocessing
 import os
+import socket
 
 from tests.utils import multi_gpu_test
 from vllm.config import VllmConfig
 from vllm.engine.arg_utils import EngineArgs
-from vllm.utils import get_open_port
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.executor.multiproc_executor import MultiprocExecutor
 
@@ -333,7 +333,9 @@ def test_multiproc_executor_multi_node():
     - Node 1 (rank 1): Uses GPUs 2,3 (CUDA_VISIBLE_DEVICES=2,3) with TP=2
     Total world_size = 4, nnodes = 2
     """
-    port = get_open_port()
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("", 0))
+        port = s.getsockname()[1]
     # symm_mem does not work for simulating multi instance in single node
     os.environ["VLLM_ALLREDUCE_USE_SYMM_MEM"] = "0"
 

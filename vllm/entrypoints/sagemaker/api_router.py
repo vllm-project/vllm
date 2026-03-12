@@ -10,17 +10,18 @@ import pydantic
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 
-from vllm.entrypoints.openai.basic.api_router import base
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.openai.engine.serving import OpenAIServing
 from vllm.entrypoints.openai.utils import validate_json_request
+from vllm.entrypoints.pooling.base.serving import PoolingServing
+from vllm.entrypoints.serve.instrumentator.basic import base
 from vllm.entrypoints.serve.instrumentator.health import health
 from vllm.tasks import POOLING_TASKS, SupportedTask
 
 # TODO: RequestType = TypeForm[BaseModel] when recognized by type checkers
 # (requires typing_extensions >= 4.13)
 RequestType = Any
-GetHandlerFn = Callable[[Request], OpenAIServing | None]
+GetHandlerFn = Callable[[Request], OpenAIServing | PoolingServing | None]
 EndpointFn = Callable[[RequestType, Request], Awaitable[Any]]
 
 

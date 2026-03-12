@@ -23,8 +23,6 @@ class StructuredOutputsConfig:
     regex, etc) by default. With "auto", we will make opinionated choices
     based on request contents and what the backend libraries currently support,
     so the behavior is subject to change in each release."""
-    disable_fallback: bool = False
-    """If `True`, vLLM will not fallback to a different backend on error."""
     disable_any_whitespace: bool = False
     """If `True`, json output will always be compact without any whitespace.
     If `False`, the model may generate whitespace between JSON fields,

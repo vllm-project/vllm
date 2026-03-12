@@ -17,6 +17,7 @@ EXPECTED_VALUES = {
     "deepseek-ai/deepseek-vl2-small": 0.59,
     "deepseek-ai/deepseek-vl2-tiny": 0.19,
     "deepseek-ai/DeepSeek-V2-Lite-Chat": 0.65,
+    "google/gemma-3-4b-it": 0.74,
 }
 
 SIMPLE_PROMPT = (

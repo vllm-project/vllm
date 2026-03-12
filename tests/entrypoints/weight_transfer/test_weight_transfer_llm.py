@@ -90,6 +90,10 @@ class MockWeightTransferEngine(WeightTransferEngine[MockInitInfo, MockUpdateInfo
     def shutdown(self) -> None:
         MockWeightTransferEngine.shutdown_called = True
 
+    def trainer_send_weights(self, *args, **kwargs):
+        """Mock method to simulate trainer sending weights."""
+        pass
+
 
 def mock_create_engine(config, parallel_config):
     """Mock factory function that returns our mock engine."""
@@ -124,6 +128,8 @@ def test_init_weight_transfer_engine_calls_engine():
     if torch.cuda.device_count() < 1:
         pytest.skip("Need at least 1 GPU for this test")
 
+    # Run in-process so mock.patch works (spawn won't inherit the mock)
+    os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
     # Enable insecure serialization to allow pickling functions for collective_rpc
     os.environ["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
 
@@ -171,6 +177,8 @@ def test_update_weights_calls_engine():
     if torch.cuda.device_count() < 1:
         pytest.skip("Need at least 1 GPU for this test")
 
+    # Run in-process so mock.patch works (spawn won't inherit the mock)
+    os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
     # Enable insecure serialization to allow pickling functions for collective_rpc
     os.environ["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
 
@@ -228,6 +236,8 @@ def test_full_weight_transfer_flow():
     if torch.cuda.device_count() < 1:
         pytest.skip("Need at least 1 GPU for this test")
 
+    # Run in-process so mock.patch works (spawn won't inherit the mock)
+    os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
     # Enable insecure serialization to allow pickling functions for collective_rpc
     os.environ["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
 

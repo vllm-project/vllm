@@ -65,16 +65,12 @@ async def create_transcriptions(
 ):
     handler = transcription(raw_request)
     if handler is None:
-        base_server = raw_request.app.state.openai_serving_tokenization
-        return base_server.create_error_response(
-            message="The model does not support Transcriptions API"
-        )
+        raise NotImplementedError("The model does not support Transcriptions API")
 
     audio_data = await request.file.read()
-    try:
-        generator = await handler.create_transcription(audio_data, request, raw_request)
-    except Exception as e:
-        return handler.create_error_response(e)
+
+    generator = await handler.create_transcription(audio_data, request, raw_request)
+
     if isinstance(generator, ErrorResponse):
         return JSONResponse(
             content=generator.model_dump(), status_code=generator.error.code
@@ -102,16 +98,11 @@ async def create_translations(
 ):
     handler = translation(raw_request)
     if handler is None:
-        base_server = raw_request.app.state.openai_serving_tokenization
-        return base_server.create_error_response(
-            message="The model does not support Translations API"
-        )
+        raise NotImplementedError("The model does not support Translations API")
 
     audio_data = await request.file.read()
-    try:
-        generator = await handler.create_translation(audio_data, request, raw_request)
-    except Exception as e:
-        return handler.create_error_response(e)
+
+    generator = await handler.create_translation(audio_data, request, raw_request)
 
     if isinstance(generator, ErrorResponse):
         return JSONResponse(
@@ -140,7 +131,6 @@ def init_transcription_state(
             engine_client,
             state.openai_serving_models,
             request_logger=request_logger,
-            log_error_stack=args.log_error_stack,
             enable_force_include_usage=args.enable_force_include_usage,
         )
         if "transcription" in supported_tasks
@@ -151,7 +141,6 @@ def init_transcription_state(
             engine_client,
             state.openai_serving_models,
             request_logger=request_logger,
-            log_error_stack=args.log_error_stack,
             enable_force_include_usage=args.enable_force_include_usage,
         )
         if "transcription" in supported_tasks

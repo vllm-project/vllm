@@ -108,7 +108,7 @@ def get_vit_attn_backend(
         multimodal_config: MultiModalConfig | None = (
             model_config.multimodal_config if model_config is not None else None
         )
-    except AssertionError:
+    except (AssertionError, AttributeError):
         multimodal_config = None
 
     attn_backend_override = (
@@ -134,18 +134,13 @@ def is_vit_use_data_parallel():
         multimodal_config: MultiModalConfig | None = (
             model_config.multimodal_config if model_config is not None else None
         )
-    except AssertionError:
+    except (AssertionError, AttributeError):
         multimodal_config = None
 
     mm_encoder_tp_mode = (
         multimodal_config.mm_encoder_tp_mode if multimodal_config is not None else None
     )
     return mm_encoder_tp_mode == "data"
-
-
-def should_torch_compile_mm_vit(vllm_config: VllmConfig) -> bool:
-    """Callable to be passed to `@support_torch_compile`'s `enable_if` argument."""
-    return vllm_config.compilation_config.compile_mm_encoder
 
 
 VisionFeatureSelectStrategyStr = Literal["class", "default", "full"]

@@ -217,7 +217,7 @@ class Sampler(nn.Module):
 
         Args:
           logprobs: (num tokens) x (vocab) tensor
-          num_logprobs: minimum number of logprobs to
+          num_logprobs: maximum number of logprobs to
                         retain per token
           token_ids: prompt tokens (if prompt logprobs)
                      or sampled tokens (if sampled

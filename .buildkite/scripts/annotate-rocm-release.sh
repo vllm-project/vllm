@@ -25,7 +25,7 @@ S3_REGION="${AWS_DEFAULT_REGION:-us-west-2}"
 S3_URL="http://${S3_BUCKET}.s3-website-${S3_REGION}.amazonaws.com"
 
 # Format ROCm version for path (e.g., "7.1" -> "rocm710")
-ROCM_VERSION_PATH="rocm$(echo ${ROCM_VERSION} | tr -d '.')"
+ROCM_VERSION_PATH="rocm$(echo "${ROCM_VERSION}" | tr -d '.')"
 ROCM_PATH="rocm/${BUILDKITE_COMMIT}/${ROCM_VERSION_PATH}"
 buildkite-agent annotate --style 'success' --context 'rocm-release-workflow' << EOF
 ## ROCm Wheel and Docker Image Releases
@@ -68,7 +68,7 @@ aws s3 cp s3://${S3_BUCKET}/rocm/${BUILDKITE_COMMIT}/${ROCM_VERSION_PATH}/triton
 aws s3 cp s3://${S3_BUCKET}/rocm/${BUILDKITE_COMMIT}/${ROCM_VERSION_PATH}/torchvision-*.whl .
 aws s3 cp s3://${S3_BUCKET}/rocm/${BUILDKITE_COMMIT}/${ROCM_VERSION_PATH}/torchaudio-*.whl .
 aws s3 cp s3://${S3_BUCKET}/rocm/${BUILDKITE_COMMIT}/${ROCM_VERSION_PATH}/amdsmi-*.whl .
-aws s3 cp s3://${S3_BUCKET}/rocm/${BUILDKITE_COMMIT}/${ROCM_VERSION_PATH}/aiter-*.whl .
+aws s3 cp s3://${S3_BUCKET}/rocm/${BUILDKITE_COMMIT}/${ROCM_VERSION_PATH}/amd_aiter-*.whl .
 aws s3 cp s3://${S3_BUCKET}/rocm/${BUILDKITE_COMMIT}/${ROCM_VERSION_PATH}/flash-attn-*.whl .
 \`\`\`
 
@@ -80,7 +80,7 @@ aws s3 cp s3://${S3_BUCKET}/rocm/${BUILDKITE_COMMIT}/${ROCM_VERSION_PATH}/flash-
 - **torchvision**: TorchVision for ROCm PyTorch
 - **torchaudio**: Torchaudio for ROCm PyTorch
 - **amdsmi**: AMD SMI Python bindings
-- **aiter**: Aiter for ROCm
+- **amd_aiter**: Aiter for ROCm
 - **flash-attn**: Flash Attention for ROCm
 
 ### :warning: Notes

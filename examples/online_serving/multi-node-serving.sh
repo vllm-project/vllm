@@ -57,8 +57,7 @@ case "$subcommand" in
 
     # Retry until the worker node connects to the head node or the timeout expires.
     for (( i=0; i < $ray_init_timeout; i+=5 )); do
-      ray start --address=$ray_address:$ray_port --block "${start_params[@]}"
-      if [ $? -eq 0 ]; then
+      if ray start --address="$ray_address":"$ray_port" --block "${start_params[@]}"; then
         echo "Worker: Ray runtime started with head address $ray_address:$ray_port"
         exit 0
       fi
@@ -95,12 +94,12 @@ case "$subcommand" in
     fi
 
     # Start the Ray head node.
-    ray start --head --port=$ray_port "${start_params[@]}"
+    ray start --head --port="$ray_port" "${start_params[@]}"
 
     # Poll Ray until every worker node is active.
     for (( i=0; i < $ray_init_timeout; i+=5 )); do
-        active_nodes=`python3 -c 'import ray; ray.init(); print(sum(node["Alive"] for node in ray.nodes()))'`
-        if [ $active_nodes -eq $ray_cluster_size ]; then
+        active_nodes=$(python3 -c 'import ray; ray.init(); print(sum(node["Alive"] for node in ray.nodes()))')
+        if [ "$active_nodes" -eq "$ray_cluster_size" ]; then
           echo "All ray workers are active and the ray cluster is initialized successfully."
           exit 0
         fi

@@ -3,17 +3,21 @@
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, TypeVar
 
-from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
 from vllm.logger import init_logger
+from vllm.multimodal.media.connector import merge_media_io_kwargs
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.import_utils import LazyLoader
 
 if TYPE_CHECKING:
     import torch
+
+    from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 else:
     torch = LazyLoader("torch", globals(), "torch")
+
+    ChatTemplateContentFormatOption = object
 
 logger = init_logger(__name__)
 
@@ -36,6 +40,34 @@ def merge_kwargs(
     return defaults | {k: v for k, v in overrides.items() if v not in unset_values}
 
 
+def recursively_merge_kwargs(
+    defaults: dict[str, Any] | None,
+    overrides: dict[str, Any] | None,
+    /,
+    *,
+    unset_values: tuple[object, ...] = (None, "auto"),
+) -> dict[str, Any]:
+    if defaults is None:
+        defaults = {}
+    if overrides is None:
+        overrides = {}
+
+    merged = dict(defaults)
+
+    for k, v in overrides.items():
+        if v in unset_values:
+            continue
+
+        if k in merged and isinstance(merged[k], dict) and isinstance(v, dict):
+            merged[k] = recursively_merge_kwargs(
+                merged[k], v, unset_values=unset_values
+            )
+        else:
+            merged[k] = v
+
+    return merged
+
+
 @dataclass(frozen=True)
 class ChatParams:
     """Configuration to control how to parse chat messages."""
@@ -43,14 +75,29 @@ class ChatParams:
     chat_template: str | None = None
     """The chat template to apply."""
 
-    chat_template_content_format: ChatTemplateContentFormatOption = "auto"
+    chat_template_content_format: "ChatTemplateContentFormatOption" = "auto"
     """The format of the chat template."""
 
     chat_template_kwargs: dict[str, Any] = field(default_factory=dict)
     """The kwargs to pass to the chat template."""
 
-    def with_defaults(self, default_chat_template_kwargs: dict[str, Any] | None):
-        if not default_chat_template_kwargs:
+    media_io_kwargs: dict[str, dict[str, Any]] | None = None
+    """Per-modality kwargs for media I/O (loading/decoding images, videos, etc.)."""
+
+    mm_processor_kwargs: dict[str, Any] | None = None
+    """The kwargs to pass to the multi-modal processor."""
+
+    def with_defaults(
+        self,
+        default_chat_template_kwargs: dict[str, Any] | None = None,
+        default_media_io_kwargs: dict[str, dict[str, Any]] | None = None,
+        default_mm_processor_kwargs: dict[str, Any] | None = None,
+    ):
+        if (
+            not default_chat_template_kwargs
+            and not default_media_io_kwargs
+            and not default_mm_processor_kwargs
+        ):
             return self
 
         return ChatParams(
@@ -59,6 +106,14 @@ class ChatParams:
             chat_template_kwargs=merge_kwargs(
                 default_chat_template_kwargs,
                 self.chat_template_kwargs,
+            ),
+            media_io_kwargs=merge_media_io_kwargs(
+                default_media_io_kwargs,
+                self.media_io_kwargs,
+            ),
+            mm_processor_kwargs=recursively_merge_kwargs(
+                default_mm_processor_kwargs,
+                self.mm_processor_kwargs,
             ),
         )
 
@@ -163,10 +218,7 @@ class TokenizeParams:
                 value=truncate_prompt_tokens,
             )
 
-    def with_kwargs(self, tokenization_kwargs: dict[str, Any] | None):
-        if tokenization_kwargs is None:
-            tokenization_kwargs = {}
-
+    def with_kwargs(self, **tokenization_kwargs: Any):
         max_length = tokenization_kwargs.pop("max_length", self.max_input_tokens)
         pad_prompt_tokens = tokenization_kwargs.pop(
             "pad_prompt_tokens", self.pad_prompt_tokens
@@ -253,13 +305,14 @@ class TokenizeParams:
                 # To save resources, fail the request outright without even
                 # attempting tokenization
                 raise VLLMValidationError(
-                    f"You passed {len(text)} input characters "
-                    f"and requested {self.max_output_tokens} output tokens. "
-                    f"However, the model's context length is only "
-                    f"{self.max_total_tokens} tokens, resulting in a maximum "
-                    f"input length of {max_input_tokens} tokens "
-                    f"(at most {max_input_chars} characters). "
-                    f"Please reduce the length of the input prompt.",
+                    f"This model's maximum context length is "
+                    f"{self.max_total_tokens} tokens. However, you requested "
+                    f"{self.max_output_tokens} output tokens and your prompt "
+                    f"contains {len(text)} characters (more than "
+                    f"{max_input_chars} characters, which is the upper bound "
+                    f"for {max_input_tokens} input tokens). "
+                    f"Please reduce the length of the input prompt or the "
+                    f"number of requested output tokens.",
                     parameter="input_text",
                     value=len(text),
                 )
@@ -334,15 +387,22 @@ class TokenizeParams:
             return tokens
 
         if len(tokens) > max_input_tokens:
+            token_count = len(tokens)
+            # The tokenizer may have truncated the prompt to
+            # max_input_tokens + 1 (see get_encode_kwargs), so the
+            # actual prompt length could be larger.
+            qualifier = "at least " if token_count == max_input_tokens + 1 else ""
+            total = token_count + self.max_output_tokens
             raise VLLMValidationError(
-                f"You passed {len(tokens)} input tokens "
-                f"and requested {self.max_output_tokens} output tokens. "
-                f"However, the model's context length is only "
-                f"{self.max_total_tokens} tokens, resulting in a maximum "
-                f"input length of {max_input_tokens} tokens. "
-                f"Please reduce the length of the input prompt.",
+                f"This model's maximum context length is "
+                f"{self.max_total_tokens} tokens. However, you requested "
+                f"{self.max_output_tokens} output tokens and your prompt "
+                f"contains {qualifier}{token_count} input tokens, "
+                f"for a total of {qualifier}{total} tokens. "
+                f"Please reduce the length of the input prompt or the "
+                f"number of requested output tokens.",
                 parameter="input_tokens",
-                value=len(tokens),
+                value=token_count,
             )
 
         return tokens

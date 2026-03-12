@@ -9,10 +9,11 @@ ENV_FILE=$1
 
 # For testing on local vm, use `set -a` to export all variables
 source /etc/environment
-source $ENV_FILE
+# shellcheck source=/dev/null
+source "$ENV_FILE"
 
 remove_docker_container() { 
-    docker rm -f $CONTAINER_NAME || true;
+    docker rm -f "$CONTAINER_NAME" || true;
 }
 
 trap remove_docker_container EXIT
@@ -41,13 +42,13 @@ echo
 echo "starting docker...$CONTAINER_NAME"
 echo    
 docker run \
- -v $DOWNLOAD_DIR:$DOWNLOAD_DIR \
- --env-file $ENV_FILE \
+ -v "$DOWNLOAD_DIR":"$DOWNLOAD_DIR" \
+ --env-file "$ENV_FILE" \
  -e HF_TOKEN="$HF_TOKEN" \
- -e TARGET_COMMIT=$BUILDKITE_COMMIT \
- -e MODEL=$MODEL \
+ -e TARGET_COMMIT="$BUILDKITE_COMMIT" \
+ -e MODEL="$MODEL" \
  -e WORKSPACE=/workspace \
- --name $CONTAINER_NAME \
+ --name "$CONTAINER_NAME" \
  -d \
  --privileged \
  --network host \

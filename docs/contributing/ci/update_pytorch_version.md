@@ -66,12 +66,12 @@ This complicates the process as we cannot use the out-of-the-box
 - Important indexes at the moment include:
 
 | Platform | `--extra-index-url` |
-|----------|-----------------|
-| CUDA 12.8| [https://download.pytorch.org/whl/cu128](https://download.pytorch.org/whl/cu128)|
-| CPU      | [https://download.pytorch.org/whl/cpu](https://download.pytorch.org/whl/cpu)|
+| -------- | ------------------- |
+| CUDA 12.8 | [https://download.pytorch.org/whl/cu128](https://download.pytorch.org/whl/cu128) |
+| CPU | [https://download.pytorch.org/whl/cpu](https://download.pytorch.org/whl/cpu) |
 | ROCm 6.2 | [https://download.pytorch.org/whl/rocm6.2.4](https://download.pytorch.org/whl/rocm6.2.4) |
 | ROCm 6.3 | [https://download.pytorch.org/whl/rocm6.3](https://download.pytorch.org/whl/rocm6.3) |
-| XPU      | [https://download.pytorch.org/whl/xpu](https://download.pytorch.org/whl/xpu) |
+| XPU | [https://download.pytorch.org/whl/xpu](https://download.pytorch.org/whl/xpu) |
 
 - Update the below files to match the CUDA version from step 1. This makes sure that the release vLLM wheel is tested on CI.
     - `.buildkite/release-pipeline.yaml`

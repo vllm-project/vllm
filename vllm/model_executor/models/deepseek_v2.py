@@ -32,6 +32,7 @@ import torch
 from torch import nn
 from transformers import DeepseekV2Config, DeepseekV3Config
 
+import vllm._custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ParallelConfig, VllmConfig, get_current_vllm_config
@@ -46,7 +47,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
-from vllm.model_executor.layers.fused_moe import SharedFusedMoE
+from vllm.model_executor.layers.fused_moe import GateLinear, SharedFusedMoE
 from vllm.model_executor.layers.layernorm import LayerNorm, RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -74,13 +75,20 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.models.utils import sequence_parallel_chunk
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
+from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerBackend,
 )
 from vllm.v1.kv_cache_interface import KVCacheSpec, MLAAttentionSpec
 
-from .interfaces import MixtureOfExperts, SupportsEagle, SupportsLoRA, SupportsPP
+from .interfaces import (
+    MixtureOfExperts,
+    SupportsEagle,
+    SupportsEagle3,
+    SupportsLoRA,
+    SupportsPP,
+)
 from .utils import (
     PPMissingLayer,
     is_pp_missing_parameter,
@@ -248,11 +256,9 @@ class DeepseekV2MoE(nn.Module):
                 "Only silu is supported for now."
             )
 
-        self.gate = ReplicatedLinear(
+        self.gate = GateLinear(
             config.hidden_size,
             config.n_routed_experts,
-            bias=False,
-            quant_config=None,
             prefix=f"{prefix}.gate",
         )
         if getattr(config, "topk_method", None) == "noaux_tc":
@@ -322,6 +328,13 @@ class DeepseekV2MoE(nn.Module):
             n_shared_experts=config.n_shared_experts
             if self.is_fusion_moe_shared_experts_enabled
             else None,
+        )
+
+        # NOTE(rob): this is a hack until we finish off the PR for
+        # merging TRTLLM kernels into the MK framework. Then we can
+        # query the MonolithicMK for the expected router logits.
+        self.gate.set_out_dtype(
+            torch.float32 if self.experts.quant_method.is_monolithic else torch.bfloat16
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -711,6 +724,91 @@ class Indexer(nn.Module):
         return self.indexer_op(hidden_states, q_fp8, k, weights)
 
 
+def _min_latency_fused_qkv_a_proj_impl(
+    input_: torch.Tensor,
+    weight: torch.Tensor,
+) -> torch.Tensor:
+    """
+    Dynamically run min-latency gemm if num_tokens <= 16.
+    This must be wrapped in a custom op because our torch.compile integration
+    does not support runtime dispatching on num_tokens.
+    """
+    num_tokens = input_.shape[0]
+    if 0 < num_tokens <= 16:
+        output = torch.empty(
+            num_tokens,
+            weight.shape[0],
+            dtype=torch.bfloat16,
+            device=input_.device,
+        )
+        ops.dsv3_fused_a_gemm(output, input_, weight.T)
+        return output
+    else:
+        return torch.nn.functional.linear(input_, weight)
+
+
+def _min_latency_fused_qkv_a_proj_fake(
+    input_: torch.Tensor,
+    weight: torch.Tensor,
+) -> torch.Tensor:
+    return input_.new_empty(input_.shape[0], weight.shape[0])
+
+
+direct_register_custom_op(
+    op_name="min_latency_fused_qkv_a_proj",
+    op_func=_min_latency_fused_qkv_a_proj_impl,
+    mutates_args=[],
+    fake_impl=_min_latency_fused_qkv_a_proj_fake,
+)
+
+
+class DeepSeekV2FusedQkvAProjLinear(MergedColumnParallelLinear):
+    def __init__(
+        self,
+        input_size: int,
+        output_size: list[int],
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
+    ):
+        super().__init__(
+            input_size,
+            output_size,
+            bias=False,
+            quant_config=quant_config,
+            disable_tp=True,
+            prefix=prefix,
+        )
+
+        # Check if the DeepSeek V3 fused A GEMM kernel can be used.
+        # This kernel supports PDL and is optimized for low batch size.
+        self._use_min_latency_gemm = (
+            hasattr(self, "weight")
+            and self.weight.dtype == torch.bfloat16
+            and self.weight.shape[0] == 2112
+            and self.weight.shape[1] == 7168
+            and current_platform.is_cuda()
+            and (
+                current_platform.is_device_capability(90)
+                or current_platform.is_device_capability_family(100)
+            )
+        )
+
+    def forward(
+        self,
+        input_,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.nn.Parameter | None]:
+        if self._use_min_latency_gemm:
+            output = torch.ops.vllm.min_latency_fused_qkv_a_proj(input_, self.weight)
+            if not self.return_bias:
+                return output
+            output_bias = self.bias if self.skip_bias_add else None
+            return output, output_bias
+        else:
+            # Fallback to the standard forward method when
+            # the fused A GEMM kernel cannot be used.
+            return super().forward(input_)
+
+
 class DeepseekV2MLAAttention(nn.Module):
     """
     Main reference: DeepseekV2 paper, and FlashInfer Implementation
@@ -736,6 +834,7 @@ class DeepseekV2MLAAttention(nn.Module):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         topk_indices_buffer: torch.Tensor | None = None,
+        input_size: int | None = None,
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -755,18 +854,20 @@ class DeepseekV2MLAAttention(nn.Module):
         self.scaling = self.qk_head_dim**-0.5
         self.max_position_embeddings = max_position_embeddings
 
+        # Use input_size for projection input dimensions if provided,
+        # otherwise default to hidden_size (used in Eagle3 Deepseek with MLA)
+        proj_input_size = input_size if input_size is not None else self.hidden_size
+
         if self.q_lora_rank is not None:
-            self.fused_qkv_a_proj = MergedColumnParallelLinear(
-                self.hidden_size,
+            self.fused_qkv_a_proj = DeepSeekV2FusedQkvAProjLinear(
+                proj_input_size,
                 [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
-                bias=False,
                 quant_config=quant_config,
                 prefix=f"{prefix}.fused_qkv_a_proj",
-                disable_tp=True,
             )
         else:
             self.kv_a_proj_with_mqa = ReplicatedLinear(
-                self.hidden_size,
+                proj_input_size,
                 self.kv_lora_rank + self.qk_rope_head_dim,
                 bias=False,
                 quant_config=quant_config,
@@ -784,7 +885,7 @@ class DeepseekV2MLAAttention(nn.Module):
             )
         else:
             self.q_proj = ColumnParallelLinear(
-                self.hidden_size,
+                proj_input_size,
                 self.num_heads * self.qk_head_dim,
                 bias=False,
                 quant_config=quant_config,
@@ -836,7 +937,7 @@ class DeepseekV2MLAAttention(nn.Module):
                 qk_rope_head_dim,
                 max_position=max_position_embeddings,
                 rope_parameters=config.rope_parameters,
-                is_neox_style=True,
+                is_neox_style=not getattr(config, "indexer_rope_interleave", False),
             )
             self.indexer = Indexer(
                 vllm_config,
@@ -1080,6 +1181,8 @@ class DeepseekV2Model(nn.Module):
             ["hidden_states", "residual"], config.hidden_size
         )
 
+        self.aux_hidden_state_layers = tuple[int, ...]()
+
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
@@ -1115,7 +1218,13 @@ class DeepseekV2Model(nn.Module):
         else:
             llama_4_scaling = None
 
-        for layer in islice(self.layers, self.start_layer, self.end_layer):
+        aux_hidden_states = []
+        for idx, layer in enumerate(
+            islice(self.layers, self.start_layer, self.end_layer),
+            start=self.start_layer,
+        ):
+            if idx in self.aux_hidden_state_layers:
+                aux_hidden_states.append(hidden_states + residual)
             hidden_states, residual = layer(
                 positions, hidden_states, residual, llama_4_scaling
             )
@@ -1126,6 +1235,8 @@ class DeepseekV2Model(nn.Module):
             )
 
         hidden_states, _ = self.norm(hidden_states, residual)
+        if len(aux_hidden_states) > 0:
+            return hidden_states, aux_hidden_states
         return hidden_states
 
 
@@ -1171,7 +1282,12 @@ class DeepseekV2MixtureOfExperts(MixtureOfExperts):
 
 
 class DeepseekV2ForCausalLM(
-    nn.Module, SupportsPP, DeepseekV2MixtureOfExperts, SupportsLoRA, SupportsEagle
+    nn.Module,
+    SupportsPP,
+    DeepseekV2MixtureOfExperts,
+    SupportsLoRA,
+    SupportsEagle,
+    SupportsEagle3,
 ):
     packed_modules_mapping = {
         "gate_up_proj": ["gate_proj", "up_proj"],
@@ -1249,6 +1365,13 @@ class DeepseekV2ForCausalLM(
                 self.moe_layers.append(layer.mlp.experts)
 
         self.extract_moe_parameters(example_moe)
+
+    def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
+        self.model.aux_hidden_state_layers = layers
+
+    def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:
+        num_layers = len(self.model.layers)
+        return (2, num_layers // 2, num_layers - 3)
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
@@ -1496,6 +1619,10 @@ class DeepseekForCausalLM(DeepseekV2ForCausalLM):
 
 
 class DeepseekV3ForCausalLM(DeepseekV2ForCausalLM):
+    pass
+
+
+class GlmMoeDsaForCausalLM(DeepseekV2ForCausalLM):
     pass
 
 

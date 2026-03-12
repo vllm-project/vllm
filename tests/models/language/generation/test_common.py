@@ -3,6 +3,8 @@
 
 import pytest
 import torch
+from packaging.version import Version
+from transformers import __version__ as TRANSFORMERS_VERSION
 
 from vllm.platforms import current_platform
 
@@ -126,6 +128,10 @@ def test_models(
 
     if use_rocm_aiter and (model in AITER_MODEL_LIST):
         monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
+        if model == "TitanML/tiny-mixtral":
+            # Untrained model: near-uniform logits make argmax sensitive to
+            # AITER's bfloat16 rounding error in plain rms_norm.
+            monkeypatch.setenv("VLLM_ROCM_USE_AITER_RMSNORM", "0")
     elif use_rocm_aiter and model not in AITER_MODEL_LIST:
         # Skip model that are not using AITER tests.
         # When more AITER kernels are added, this list will not be
@@ -146,6 +152,16 @@ def test_models(
             )
             if prompt_embeds is not None:
                 embed = hf_model.model.get_input_embeddings()(token_ids)
+
+                if "gemma" in model.lower() and (
+                    Version(TRANSFORMERS_VERSION) < Version("5.3.0.dev0")
+                ):
+                    # For Gemma 1/2 models with Transformers 5.4.0+, the prompt
+                    # embeddings are normalised in `get_prompt_embeddings`,
+                    # like Gemma 3. For older versions, we need to manually normalise.
+                    embed_scale = hf_model.config.hidden_size**0.5
+                    normalizer = torch.tensor(embed_scale, dtype=embed.dtype)
+                    embed *= normalizer
 
                 # MiniCPM models apply scale_emb to embeddings internally.
                 # vLLM expects pre-scaled embeddings when using inputs_embeds.
@@ -195,4 +211,4 @@ def test_models(
         # unit tests. On ROCm, when using AITER
         # the memory might not be deallocated completely
         # before running the next test case
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()

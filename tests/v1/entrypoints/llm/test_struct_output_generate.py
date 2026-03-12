@@ -857,7 +857,7 @@ def test_structured_output_batched_with_non_structured_outputs_requests(
     # Free memory as soon as possible as failed assertions
     # will short circuit and not free up memory
     del llm
-    torch.cuda.empty_cache()
+    torch.accelerator.empty_cache()
     cleanup_dist_env_and_memory()
 
     for index, output in enumerate(outputs):
@@ -911,7 +911,7 @@ def test_structured_output_with_structural_tag(backend: str):
         ),
     )
 
-    prompt = "Hello and repete hello 10 times, do not say anything else. Only say hello hello hello, now start"
+    prompt = "Hello and repeat hello 10 times, do not say anything else. Only say hello hello hello, now start"
     outputs = llm.generate(prompt, sampling_params=sampling_params, use_tqdm=True)
     assert outputs is not None
     for output in outputs:

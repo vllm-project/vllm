@@ -6,7 +6,7 @@ from tests.models.utils import GenerateModelInfo
 
 from .ppl_utils import wikitext_ppl_test
 
-MODELS = [GenerateModelInfo("openai-community/gpt2-large")]
+MODELS = [GenerateModelInfo("openai-community/gpt2-large", hf_ppl=19.457056045532227)]
 
 
 @pytest.mark.parametrize("model_info", MODELS)

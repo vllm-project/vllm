@@ -40,6 +40,21 @@ class PoolingBasicRequestMixin(OpenAIBaseModel):
             "if the served model does not use priority scheduling."
         ),
     )
+    mm_processor_kwargs: dict[str, Any] | None = Field(
+        default=None,
+        description="Additional kwargs to pass to the HF processor.",
+    )
+    cache_salt: str | None = Field(
+        default=None,
+        description=(
+            "If specified, the prefix cache will be salted with the provided "
+            "string to prevent an attacker to guess prompts in multi-user "
+            "environments. The salt should be random, protected from "
+            "access by 3rd parties, and long enough to be "
+            "unpredictable (e.g., 43 characters base64-encoded, corresponding "
+            "to 256 bit)."
+        ),
+    )
     # --8<-- [end:pooling-common-extra-params]
 
 
@@ -109,6 +124,13 @@ class ChatRequestMixin(OpenAIBaseModel):
             "Will be accessible by the chat template."
         ),
     )
+    media_io_kwargs: dict[str, dict[str, Any]] | None = Field(
+        default=None,
+        description=(
+            "Additional kwargs to pass to the media IO connectors, "
+            "keyed by modality. Merged with engine-level media_io_kwargs."
+        ),
+    )
     # --8<-- [end:chat-extra-params]
 
     @model_validator(mode="before")
@@ -136,6 +158,7 @@ class ChatRequestMixin(OpenAIBaseModel):
                     continue_final_message=self.continue_final_message,
                 ),
             ),
+            media_io_kwargs=self.media_io_kwargs,
         )
 
 
@@ -174,10 +197,6 @@ class EmbedRequestMixin(EncodingRequestMixin):
         default=None,
         description="Whether to use activation for the pooler outputs. "
         "`None` uses the pooler's default, which is `True` in most cases.",
-    )
-    normalize: bool | None = Field(
-        default=None,
-        description="Deprecated; please pass `use_activation` instead",
     )
     # --8<-- [end:embed-extra-params]
 

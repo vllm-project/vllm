@@ -444,7 +444,7 @@ def ref_multi_query_kv_attention(
 
 
 @pytest.mark.parametrize("attention_cls", [Attention, MMEncoderAttention])
-def test_num_heads_not_divisble_by_num_kv_heads(attention_cls: type) -> None:
+def test_num_heads_not_divisible_by_num_kv_heads(attention_cls: type) -> None:
     head_size = 64
     scale = float(1.0 / (head_size**0.5))
     num_heads = 16

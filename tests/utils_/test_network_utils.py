@@ -7,6 +7,7 @@ import zmq
 
 from vllm.utils.network_utils import (
     get_open_port,
+    get_open_ports_list,
     get_tcp_uri,
     join_host_port,
     make_zmq_path,
@@ -26,6 +27,25 @@ def test_get_open_port(monkeypatch: pytest.MonkeyPatch):
                 s2.bind(("localhost", get_open_port()))
                 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s3:
                     s3.bind(("localhost", get_open_port()))
+
+
+def test_get_open_ports_list_with_vllm_port(monkeypatch: pytest.MonkeyPatch):
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_PORT", "5678")
+        ports = get_open_ports_list(5)
+        assert len(ports) == 5
+        assert len(set(ports)) == 5, "ports must be unique"
+
+        # verify every port is actually bindable
+        sockets = []
+        try:
+            for p in ports:
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s.bind(("localhost", p))
+                sockets.append(s)
+        finally:
+            for s in sockets:
+                s.close()
 
 
 @pytest.mark.parametrize(

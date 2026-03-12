@@ -75,7 +75,7 @@ This guide will help you quickly get started with vLLM to perform:
 
 ## Offline Batched Inference
 
-With vLLM installed, you can start generating texts for list of input prompts (i.e. offline batch inferencing). See the example script: [examples/offline_inference/basic/basic.py](../../examples/offline_inference/basic/basic.py)
+With vLLM installed, you can start generating texts for list of input prompts (i.e. offline batch inferencing). See the example script: [examples/basic/offline_inference/basic.py](../../examples/basic/offline_inference/basic.py)
 
 The first line of this example imports the classes [LLM][vllm.LLM] and [SamplingParams][vllm.SamplingParams]:
 
@@ -228,7 +228,7 @@ Since this server is compatible with OpenAI API, you can use it as a drop-in rep
     print("Completion result:", completion)
     ```
 
-A more detailed client example can be found here: [examples/offline_inference/basic/basic.py](../../examples/offline_inference/basic/basic.py)
+A more detailed client example can be found here: [examples/basic/offline_inference/basic.py](../../examples/basic/offline_inference/basic.py)
 
 ### OpenAI Chat Completions API with vLLM
 

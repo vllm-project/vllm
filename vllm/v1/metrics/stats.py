@@ -151,6 +151,12 @@ class MultiModalCacheStats(BaseCacheStats):
       that were queried.
     """
 
+    def record(self, num_queries: int, num_hits: int) -> None:
+        """Aggregate request information into the stats."""
+        self.requests += 1
+        self.queries += num_queries
+        self.hits += num_hits
+
 
 @dataclass
 class KVCacheEvictionEvent:

@@ -43,7 +43,7 @@ __global__ void __launch_bounds__(512, VLLM_BLOCKS_PER_SM(512))
                     uint32_t* input_offset_by_experts,
                     uint32_t* output_scale_offset_by_experts, int n_experts,
                     bool low_latency) {
-  using PackedVec = PackedVec<Type>;
+  using PackedVec = PackedVec<Type, CVT_FP4_PACK16>;
   static constexpr int CVT_FP4_NUM_THREADS_PER_SF =
       (CVT_FP4_SF_VEC_SIZE / CVT_FP4_ELTS_PER_THREAD);
   static_assert(sizeof(PackedVec) == sizeof(Type) * CVT_FP4_ELTS_PER_THREAD,
@@ -155,7 +155,7 @@ __global__ void __launch_bounds__(1024, VLLM_BLOCKS_PER_SM(1024))
                     float const* SFScale, uint32_t* out, uint32_t* SFout,
                     uint32_t* input_offset_by_experts,
                     uint32_t* output_scale_offset_by_experts, int n_experts) {
-  using PackedVec = PackedVec<Type>;
+  using PackedVec = PackedVec<Type, CVT_FP4_PACK16>;
   static constexpr int CVT_FP4_NUM_THREADS_PER_SF =
       (CVT_FP4_SF_VEC_SIZE / CVT_FP4_ELTS_PER_THREAD);
   static_assert(sizeof(PackedVec) == sizeof(Type) * CVT_FP4_ELTS_PER_THREAD,

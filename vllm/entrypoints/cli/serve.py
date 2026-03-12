@@ -50,6 +50,12 @@ class ServeSubcommand(CLISubcommand):
         if hasattr(args, "model_tag") and args.model_tag is not None:
             args.model = args.model_tag
 
+        if getattr(args, "grpc", False):
+            from vllm.entrypoints.grpc_server import serve_grpc
+
+            uvloop.run(serve_grpc(args))
+            return
+
         if args.headless:
             if args.api_server_count is not None and args.api_server_count > 0:
                 raise ValueError(
@@ -108,6 +114,7 @@ class ServeSubcommand(CLISubcommand):
             run_multi_api_server(args)
         else:
             # Single API server (this process).
+            args.api_server_count = None
             uvloop.run(run_server(args))
 
     def validate(self, args: argparse.Namespace) -> None:
@@ -125,6 +132,13 @@ class ServeSubcommand(CLISubcommand):
         )
 
         serve_parser = make_arg_parser(serve_parser)
+        serve_parser.add_argument(
+            "--grpc",
+            action="store_true",
+            default=False,
+            help="Launch a gRPC server instead of the HTTP OpenAI-compatible "
+            "server. Requires: pip install vllm[grpc].",
+        )
         serve_parser.epilog = VLLM_SUBCMD_PARSER_EPILOG.format(subcmd=self.name)
         return serve_parser
 
@@ -245,8 +259,12 @@ def run_multi_api_server(args: argparse.Namespace):
 
     api_server_manager: APIServerProcessManager | None = None
 
+    from vllm.v1.engine.utils import get_engine_zmq_addresses
+
+    addresses = get_engine_zmq_addresses(vllm_config, num_api_servers)
+
     with launch_core_engines(
-        vllm_config, executor_class, log_stats, num_api_servers
+        vllm_config, executor_class, log_stats, addresses, num_api_servers
     ) as (local_engine_manager, coordinator, addresses):
         # Construct common args for the APIServerProcessManager up-front.
         api_server_manager_kwargs = dict(

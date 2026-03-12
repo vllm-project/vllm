@@ -14,7 +14,7 @@ from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.forward_context import ForwardContext, get_forward_context
-from vllm.model_executor.custom_op import CustomOp
+from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -107,8 +107,8 @@ def is_mamba(config: Plamo2Config, i: int) -> bool:
 # vllm.model_executor.layers.mamba.mamba_mixer2.MambaMixer2
 # transformers.models.mamba.modeling_mamba.MambaMixer
 # --8<-- [start:plamo2_mamba_mixer]
-@CustomOp.register("plamo2_mamba_mixer")
-class Plamo2MambaMixer(MambaBase, CustomOp):
+@PluggableLayer.register("plamo2_mamba_mixer")
+class Plamo2MambaMixer(MambaBase, PluggableLayer):
     # --8<-- [end:plamo2_mamba_mixer]
 
     def __init__(self, vllm_config: VllmConfig, *, prefix: str = "", **kwargs) -> None:
@@ -233,14 +233,6 @@ class Plamo2MambaMixer(MambaBase, CustomOp):
         dt = self.dt_proj(time_step)
         return B, C, dt
 
-    def forward_native(
-        self,
-        hidden_states: torch.Tensor,
-        output: torch.Tensor,
-        **kwargs,
-    ):
-        pass
-
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -253,7 +245,7 @@ class Plamo2MambaMixer(MambaBase, CustomOp):
             self.prefix,
         )
 
-    def forward_cuda(
+    def forward_impl(
         self,
         hidden_states: torch.Tensor,
         output: torch.Tensor,
@@ -274,7 +266,8 @@ class Plamo2MambaMixer(MambaBase, CustomOp):
             # conv_state = (..., dim, width-1) yet contiguous along 'dim'
             conv_state = self_kv_cache[0].transpose(-1, -2)
             ssm_state = self_kv_cache[1]
-            state_indices_tensor = attn_metadata.state_indices_tensor
+            state_indices_tensor_p = attn_metadata.state_indices_tensor_p
+            state_indices_tensor_d = attn_metadata.state_indices_tensor_d
             has_initial_states_p = attn_metadata.has_initial_states_p
             prep_initial_states = attn_metadata.prep_initial_states
             chunk_size = attn_metadata.chunk_size
@@ -317,13 +310,6 @@ class Plamo2MambaMixer(MambaBase, CustomOp):
         gate_d, gate_p = torch.split(
             gate[:num_actual_tokens], [num_decodes, num_prefill_tokens], dim=0
         )
-        # Split along batch dimension
-        state_indices_tensor_d, state_indices_tensor_p = torch.split(
-            state_indices_tensor,
-            [num_decodes, num_prefills],
-            dim=0,
-        )
-
         # Preallocate output tensor to avoid memcpy cost for merging prefill
         # and decode outputs
         preallocated_ssm_out = torch.empty(
@@ -344,7 +330,7 @@ class Plamo2MambaMixer(MambaBase, CustomOp):
         if has_prefill:
             # 2. Convolution sequence transformation
             # - "cache_indices" updates the conv_state cache in positions
-            #   pointed to by "state_indices_tensor"
+            #   pointed to by "state_indices_tensor_p"
             x = hidden_states_p.transpose(0, 1)  # this is the form that causal-conv see
             hidden_states_p = causal_conv1d_fn(
                 x,
@@ -494,7 +480,7 @@ def plamo2_mamba_mixer(
 ) -> None:
     forward_context: ForwardContext = get_forward_context()
     self = forward_context.no_compile_layers[layer_name]
-    self.forward_cuda(hidden_states=hidden_states, output=output)
+    self.forward_impl(hidden_states=hidden_states, output=output)
 
 
 def plamo2_mamba_mixer_fake(
@@ -756,7 +742,6 @@ class Plamo2Model(torch.nn.Module):
         config = vllm_config.model_config.hf_config
 
         self.config = config
-        self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
 
         self.embed_tokens = VocabParallelEmbedding(

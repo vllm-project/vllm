@@ -726,12 +726,12 @@ class GlmAsrDummyInputsBuilder(BaseDummyInputsBuilder[GlmAsrProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
         feature_extractor = self.info.get_feature_extractor()
         sampling_rate = feature_extractor.sampling_rate
         num_audios = mm_counts.get("audio", 0)
-        audio_overrides = mm_options.get("audio") if mm_options else None
+        audio_overrides = mm_options.get("audio")
 
         max_audio_len = getattr(
             self.info.get_hf_processor(), "max_audio_len", DEFAULT_MAX_AUDIO_LEN_S
@@ -740,7 +740,9 @@ class GlmAsrDummyInputsBuilder(BaseDummyInputsBuilder[GlmAsrProcessingInfo]):
 
         return {
             "audio": self._get_dummy_audios(
-                length=audio_len, num_audios=num_audios, overrides=audio_overrides
+                length=audio_len,
+                num_audios=num_audios,
+                overrides=audio_overrides,
             )
         }
 
@@ -807,9 +809,9 @@ class GlmAsrMultiModalProcessor(BaseMultiModalProcessor["GlmAsrProcessingInfo"])
 
         # Postprocess: rename mask and add chunk counts
         # Handle different key names from different transformers versions
-        if "input_feature_mask" in outputs:
-            outputs["feature_attention_mask"] = outputs.pop("input_feature_mask")
-        elif "feature_attention_mask" not in outputs and "input_features" in outputs:
+        if "input_features_mask" in outputs:
+            outputs["feature_attention_mask"] = outputs.pop("input_features_mask")
+        elif "input_features_mask" not in outputs and "input_features" in outputs:
             # If no mask is provided, create one from input_features
             input_features = outputs["input_features"]
             if isinstance(input_features, torch.Tensor):
