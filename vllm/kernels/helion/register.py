@@ -98,13 +98,11 @@ def validate_helion_settings(
             f"@{op_name}.register_config_picker instead."
         )
 
-    # Warn if static_shapes is explicitly set to True since most vLLM ops need
-    # dynamic shapes for variable batch sizes and sequence lengths
     if settings_dict.get("static_shapes") is True:
         logger.warning(
-            "Kernel '%s' has static_shapes=True in helion_settings. "
-            "Most vLLM ops require dynamic shapes for variable batch sizes "
-            "and sequence lengths. Consider removing this setting.",
+            "Kernel '%s' has static_shapes=True in helion_settings, "
+            "which will be overridden to False. vLLM requires dynamic "
+            "shapes for variable batch sizes and sequence lengths.",
             op_name,
         )
 
@@ -118,10 +116,8 @@ def create_helion_decorated_kernel(
     if helion_settings:
         kernel_kwargs.update(helion_settings.to_dict())
 
-    # Set static_shapes=False by default if user didn't explicitly set it
-    # This is needed for dynamic batch sizes and sequence lengths in vLLM
-    if kernel_kwargs.get("static_shapes") is not True:
-        kernel_kwargs["static_shapes"] = False
+    # vLLM requires dynamic shapes for variable batch sizes and sequence lengths
+    kernel_kwargs["static_shapes"] = False
 
     if extra_kwargs:
         kernel_kwargs.update(extra_kwargs)
