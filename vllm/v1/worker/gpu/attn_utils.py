@@ -106,6 +106,7 @@ def _reshape_kv_cache(
     kv_cache_config: KVCacheConfig,
     kv_cache_raw_tensors: dict[str, torch.Tensor],
     attn_backends: dict[str, AttentionBackend],
+    cache_dtype: str,
 ) -> dict[str, torch.Tensor]:
     kv_caches: dict[str, torch.Tensor] = {}
     for kv_cache_group_spec in kv_cache_config.kv_cache_groups:
@@ -122,6 +123,7 @@ def _reshape_kv_cache(
                 kv_cache_spec.block_size,
                 kv_cache_spec.num_kv_heads,
                 kv_cache_spec.head_size,
+                cache_dtype,
             )
 
             # FIXME(woosuk): Add kv_cache_stride_order to all attention backends.
@@ -150,9 +152,12 @@ def init_kv_cache(
     kv_cache_config: KVCacheConfig,
     attn_backends: dict[str, AttentionBackend],
     device: torch.device,
+    cache_dtype: str,
 ) -> dict[str, torch.Tensor]:
     kv_cache_raw_tensors = _allocate_kv_cache(kv_cache_config, device)
-    kv_caches = _reshape_kv_cache(kv_cache_config, kv_cache_raw_tensors, attn_backends)
+    kv_caches = _reshape_kv_cache(
+        kv_cache_config, kv_cache_raw_tensors, attn_backends, cache_dtype
+    )
     bind_kv_cache(kv_caches, forward_context, runner_kv_caches)
     return kv_caches
 
