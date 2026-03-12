@@ -704,6 +704,8 @@ if __name__ == "__main__":
     # NOTE(simon):
     # This section should be in sync with vllm/entrypoints/cli/main.py for CLI
     # entrypoints.
+    from vllm.entrypoints.cli.serve import run_headless
+
     cli_env_setup()
     parser = FlexibleArgumentParser(
         description="vLLM OpenAI-Compatible RESTful API server."
@@ -712,4 +714,8 @@ if __name__ == "__main__":
     args = parser.parse_args()
     validate_parsed_serve_args(args)
 
-    uvloop.run(run_server(args))
+    if args.headless or args.api_server_count < 1:
+        run_headless(args)
+
+    else:
+        uvloop.run(run_server(args))
