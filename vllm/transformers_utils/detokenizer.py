@@ -122,6 +122,33 @@ class Detokenizer:
                  prompt_ids=all_input_ids[:-1],
                  skip_special_tokens=prms.skip_special_tokens,
              )
+            
+            # For child sequences spawned by tree-decoding: the branch token
+            # (new_branch_token_id) sits as the last prompt token.  Decode it
+            # now and store the result in a dynamic attribute so outputs.py can
+            # prepend it to output_text when building tree_text.
+            new_branch_token_id = getattr(seq, 'new_branch_token_id', None)
+            if new_branch_token_id is not None:
+                # seq.tokens already contains up to 7 prompt tokens with the
+                # branch token last (seq.tokens[-1]).  Decode that token by
+                # calling detokenize_incrementally treating it as the "new"
+                # token appended after the preceding prompt context.
+                branch_prev_tokens = seq.tokens[:-1]
+                branch_read_offset = seq.read_offset - 1
+                branch_prefix_offset = min(seq.prefix_offset,
+                                           branch_read_offset)
+                (_, branch_text, _, _) = detokenize_incrementally(
+                    tokenizer=tokenizer,
+                    all_input_ids=all_input_ids[:-1],  # prompt only
+                    prev_tokens=branch_prev_tokens,
+                    prefix_offset=branch_prefix_offset,
+                    read_offset=branch_read_offset,
+                    skip_special_tokens=prms.skip_special_tokens,
+                    spaces_between_special_tokens=prms.
+                    spaces_between_special_tokens,
+                )
+                # Store decoded text for tree_text construction in outputs.py.
+                seq._new_branch_token_text = branch_text  # type: ignore[attr-defined]
 
         (new_tokens, new_decoded_token_text, prefix_offset,
          read_offset) = detokenize_incrementally(
@@ -164,5 +191,9 @@ class Detokenizer:
         seq.prefix_offset = prefix_offset
         seq.read_offset = read_offset
         seq.output_text += new_decoded_token_text
+        # Track number of chars the most-recent token contributed to output_text.
+        # This allows outputs.py to trim a parent's tree_text when the last token
+        # became a branch trigger (old_branch_token_id).
+        seq._last_decoded_token_len = len(new_decoded_token_text)  # type: ignore[attr-defined]
 
         return len(new_decoded_token_text)

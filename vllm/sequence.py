@@ -508,9 +508,20 @@ class Sequence:
 
         # Tree decoding related fields
         self.tree_depth = 0
-        self.parent_req_id = None
-        self.parent_seq_id = None
+        self.parent_req_id: Optional[str] = None
+        self.parent_seq_id: Optional[int] = None
         self.is_leaf = True
+        # Token ID whose text should be prepended to this sequence's output
+        # (set on child sequences created by add_tree_branches).
+        self.new_branch_token_id: Optional[int] = None
+        # Text decoded for new_branch_token_id; populated by the detokenizer.
+        self._new_branch_token_text: Optional[str] = None
+        # Token ID that was the last output token before branching
+        # (set on the parent sequence by add_tree_branches).
+        self.old_branch_token_id: Optional[int] = None
+        # Number of chars the last detokenized token contributed to output_text.
+        # Used to trim the old_branch_token text from tree_text.
+        self._last_decoded_token_len: int = 0
 
     @property
     def n_blocks(self) -> int:
@@ -1549,6 +1560,7 @@ class ParallelSampleSequenceGroup(SequenceGroupBase):
         parent_seq.is_leaf = False
         old_tokens = parent_seq.get_token_ids()
         parent_seq.status = SequenceStatus.FINISHED_STOPPED
+        parent_seq.old_branch_token_id = old_tokens[-1]
         self.finish_seq(parent_seq_group)
         for i, token_id in enumerate(new_token_ids):
             new_tokens = old_tokens[:-1] + [token_id]
@@ -1575,10 +1587,12 @@ class ParallelSampleSequenceGroup(SequenceGroupBase):
             assert seq_group is not None
             engine.seq_id_to_seq_group[request_id_i] = self
             self.to_be_finished[request_id_i] = seq_group
-            seq_group.seqs[0].tree_depth = parent_seq.tree_depth + 1
-            seq_group.seqs[0].parent_req_id = parent_req_id
-            seq_group.seqs[0].parent_seq_id = parent_seq.seq_id
-            self.assembled_seq_group.seqs.append(seq_group.seqs[0])
+            child_seq = seq_group.seqs[0]
+            child_seq.tree_depth = parent_seq.tree_depth + 1
+            child_seq.parent_req_id = parent_req_id
+            child_seq.parent_seq_id = parent_seq.seq_id
+            child_seq.new_branch_token_id = token_id
+            self.assembled_seq_group.seqs.append(child_seq)
 
     def get_unfinished_seqs(self) -> list[Sequence]:
         unfinished_seqs = []
