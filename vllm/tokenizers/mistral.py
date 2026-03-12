@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast, overload
 
@@ -44,7 +45,7 @@ def maybe_serialize_tool_calls(request: "MistralChatCompletionRequest"):
     # SEE: https://github.com/vllm-project/vllm/pull/9951
     # Credits go to: @gcalmettes
     # NOTE: There is currently a bug in pydantic where attributes
-    # declared as iterables are replaced in in the instances by
+    # declared as iterables are replaced in the instances by
     # pydantic-core ValidatorIterator instance. In particular, this
     # affects tool_calls defined in ChatCompletionAssistantMessageParam
     # model:
@@ -434,7 +435,9 @@ class MistralTokenizer(TokenizerLike):
             return_dict=False,
         )
 
-    def decode(self, ids: list[int] | int, skip_special_tokens: bool = False) -> str:
+    def decode(
+        self, ids: Sequence[int] | int, skip_special_tokens: bool = False
+    ) -> str:
         # TODO(juliendenize): once https://github.com/huggingface/transformers/pull/41962
         # is in, directly call self.transformers_tokenizer.decode(...).
         if isinstance(ids, int):
@@ -512,7 +515,7 @@ class MistralTokenizer(TokenizerLike):
 
     def convert_ids_to_tokens(
         self,
-        ids: list[int],
+        ids: Sequence[int],
         skip_special_tokens: bool = False,
     ) -> list[str]:
         if not skip_special_tokens:
