@@ -2033,6 +2033,18 @@ class NixlConnectorWorker:
         to track which workers are done.
         """
         assert self.kv_topo is not None
+
+        pending_send = len(self._reqs_to_send)
+        pending_process = len(self._reqs_to_process)
+        if pending_send > 0 or pending_process > 0:
+            logger.warning(
+                "[DIAG-P] get_finished called: tp_rank=%d, "
+                "pending_reqs_to_send=%d, pending_reqs_to_process=%d, "
+                "pending_recv_transfers=%d",
+                self.tp_rank, pending_send, pending_process,
+                len(self._recving_transfers),
+            )
+
         done_sending = self._get_new_notifs()
         done_recving = self._pop_done_transfers(self._recving_transfers)
 
@@ -2057,6 +2069,26 @@ class NixlConnectorWorker:
             assert meta.remote is not None
             if self.use_host_buffer:
                 self.sync_recved_kv_to_device(req_id, meta)
+
+            remote_engine_id = meta.remote.engine_id
+            remote_req_id = meta.remote.request_id
+            if remote_engine_id in self._remote_agents:
+                notif_id = f"{remote_req_id}:{self.world_size}".encode()
+                agents = self._remote_agents[remote_engine_id]
+                sent_ranks = []
+                for rank, agent in agents.items():
+                    try:
+                        self.nixl_wrapper.send_notif(agent, notif_msg=notif_id)
+                        sent_ranks.append(rank)
+                    except Exception as e:
+                        logger.warning(
+                            "[DIAG-D] post-xfer send_notif FAILED rank %d: %s",
+                            rank, e)
+                logger.warning(
+                    "[DIAG-D] Post-xfer notif: tp_rank=%d, req=%s, "
+                    "remote_engine=%s, sent_to=%s",
+                    self.tp_rank, req_id[:16],
+                    remote_engine_id[:12], sent_ranks)
 
             # post processing for heteroblocksize
             block_size_ratio = self.kv_topo.block_size_ratio_from_engine_id(
@@ -2105,18 +2137,35 @@ class NixlConnectorWorker:
         """
         assert self.kv_topo is not None
         notified_req_ids: set[str] = set()
-        for notifs in self.nixl_wrapper.get_new_notifs().values():
+        raw_notifs = self.nixl_wrapper.get_new_notifs()
+        total_notif_count = sum(len(v) for v in raw_notifs.values())
+        if total_notif_count > 0 or len(self._reqs_to_send) > 0:
+            logger.warning(
+                "[DIAG-P] _get_new_notifs: tp_rank=%d, "
+                "raw_notif_agents=%d, total_notifs=%d, "
+                "reqs_to_send=%d, reqs_to_process=%d",
+                self.tp_rank, len(raw_notifs), total_notif_count,
+                len(self._reqs_to_send), len(self._reqs_to_process),
+            )
+        for notifs in raw_notifs.values():
             for notif in notifs:
                 req_id, tp_size = notif.decode("utf-8").rsplit(":", 1)
                 if (
                     req_id not in self._reqs_to_send
                     and req_id not in self._reqs_to_process
                 ):
+                    send_keys = list(self._reqs_to_send.keys())[:5]
+                    proc_keys = list(self._reqs_to_process)[:5]
                     logger.error(
-                        "Potentially invalid KV blocks for "
-                        "unrecognized request %s were retrieved by "
-                        "a decode worker. They may have expired.",
-                        req_id,
+                        "[DIAG-P] UNRECOGNIZED notif: tp_rank=%d, "
+                        "notif_req_id='%s' (len=%d), "
+                        "reqs_to_send_keys=%s, "
+                        "reqs_to_process_keys=%s, "
+                        "raw_notif_bytes=%s",
+                        self.tp_rank, req_id, len(req_id),
+                        [k for k in send_keys],
+                        [k for k in proc_keys],
+                        notif.hex(),
                     )
                     continue
 
@@ -2185,6 +2234,18 @@ class NixlConnectorWorker:
                 # Only report request as completed when all transfers are done.
                 done_req_ids.add(req_id)
                 del transfers[req_id]
+                meta = self._recving_metadata.get(req_id)
+                remote_req_id = meta.remote.request_id if (
+                    meta and meta.remote) else "N/A"
+                remote_engine = meta.remote.engine_id[:12] if (
+                    meta and meta.remote) else "N/A"
+                logger.warning(
+                    "[DIAG-D] Transfer DONE: tp_rank=%d, "
+                    "local_req=%s, remote_req=%s, "
+                    "remote_engine=%s, notif_msg_would_be='%s:%d'",
+                    self.tp_rank, req_id[:16], remote_req_id[:16],
+                    remote_engine, remote_req_id[:16], self.world_size,
+                )
             else:
                 transfers[req_id] = in_progress
         return done_req_ids
@@ -2262,6 +2323,14 @@ class NixlConnectorWorker:
         for req_id, expiration_time in metadata.reqs_to_send.items():
             if req_id in self._reqs_to_process:
                 self._reqs_to_send[req_id] = expiration_time
+                logger.warning(
+                    "[DIAG-P] Added to reqs_to_send: tp_rank=%d, "
+                    "req_id='%s' (len=%d), expires_in=%.1fs, "
+                    "total_pending=%d",
+                    self.tp_rank, req_id, len(req_id),
+                    expiration_time - time.perf_counter(),
+                    len(self._reqs_to_send),
+                )
 
     def _read_blocks_for_req(self, req_id: str, meta: ReqMeta):
         assert meta.remote is not None and self.kv_topo is not None
@@ -2314,13 +2383,27 @@ class NixlConnectorWorker:
             )
 
             if self.use_mla and tp_ratio < 0:
-                # ..but we still need to notify the other remote ranks that we
-                # have the blocks we need so they can update the request state.
                 notif_id = f"{req_id}:{self.world_size}".encode()
                 remote_agents = self._remote_agents[meta.remote.engine_id]
+                sent_to = []
                 for rank_to_notify, agent in remote_agents.items():
                     if rank_to_notify != remote_rank:
-                        self.nixl_wrapper.send_notif(agent, notif_msg=notif_id)
+                        try:
+                            self.nixl_wrapper.send_notif(agent, notif_msg=notif_id)
+                            sent_to.append(rank_to_notify)
+                        except Exception as e:
+                            logger.warning(
+                                "[DIAG-D] send_notif FAILED to rank %d: %s",
+                                rank_to_notify, e)
+                logger.warning(
+                    "[DIAG-D] MLA send_notif: tp_rank=%d, "
+                    "local_req='%s' (len=%d), "
+                    "remote_req='%s' (len=%d), "
+                    "notif='%s', sent_to_ranks=%s",
+                    self.tp_rank,
+                    req_id, len(req_id),
+                    meta.remote.request_id, len(meta.remote.request_id),
+                    notif_id.decode(), sent_to)
 
     def _read_blocks(
         self,
@@ -2382,6 +2465,15 @@ class NixlConnectorWorker:
         if len(local_block_ids) == 0:
             # A full prefix cache hit is indicated with an empty list.
             agent_name = self._remote_agents[dst_engine_id][remote_rank]
+            logger.warning(
+                "[DIAG-D] Full cache hit, sending explicit notif: "
+                "tp_rank=%d, local_req=%s, remote_req=%s, "
+                "remote_engine=%s, agent=%s, notif='%s'",
+                self.tp_rank, request_id[:16],
+                remote_request_id[:16], dst_engine_id[:12],
+                agent_name[:20] if agent_name else "None",
+                notif_id.decode()[:30],
+            )
             try:
                 self.nixl_wrapper.send_notif(agent_name, notif_msg=notif_id)
             except Exception as e:
@@ -2443,6 +2535,17 @@ class NixlConnectorWorker:
 
             # Begin async xfer.
             self.nixl_wrapper.transfer(handle)
+            logger.warning(
+                "[DIAG-D] RDMA READ posted: tp_rank=%d, "
+                "local_req='%s' (len=%d), "
+                "remote_req='%s' (len=%d), "
+                "notif_msg='%s', descs=%d",
+                self.tp_rank,
+                request_id, len(request_id),
+                remote_request_id, len(remote_request_id),
+                notif_id.decode(),
+                len(local_block_descs_ids),
+            )
 
             # Use handle to check completion in future step().
             self._recving_transfers[request_id].append(handle)
