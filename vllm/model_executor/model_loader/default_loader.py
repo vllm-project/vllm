@@ -101,9 +101,6 @@ class DefaultModelLoader(BaseModelLoader):
         load_format = self.load_config.load_format
         use_safetensors = False
         index_file = SAFE_WEIGHTS_INDEX_NAME
-        index_file_with_subfolder = (
-            f"{subfolder}/{index_file}" if subfolder else index_file
-        )
 
         # First check for 'auto' format that mistral files format are present.
         # This is to load mistral models with official format by default.
@@ -175,9 +172,10 @@ class DefaultModelLoader(BaseModelLoader):
             if not is_local:
                 download_safetensors_index_file_from_hf(
                     model_name_or_path,
-                    index_file_with_subfolder,
-                    self.load_config.download_dir,
-                    revision,
+                    index_file,
+                    cache_dir=self.load_config.download_dir,
+                    subfolder=subfolder,
+                    revision=revision,
                 )
             hf_weights_files = filter_duplicate_safetensors_files(
                 hf_weights_files, hf_folder, index_file

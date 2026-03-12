@@ -472,6 +472,7 @@ def download_weights_from_hf(
     cache_dir: str | None,
     allow_patterns: list[str],
     revision: str | None = None,
+    subfolder: str | None = None,
     ignore_patterns: str | list[str] | None = None,
 ) -> str:
     """Download model weights from Hugging Face Hub.
@@ -484,6 +485,8 @@ def download_weights_from_hf(
             weight files. Files matched by any of the patterns will be
             downloaded.
         revision (Optional[str]): The revision of the model.
+        subfolder (Optional[str]): The subfolder within the model repository
+            to download weights from.
         ignore_patterns (Optional[Union[str, list[str]]]): The patterns to
             filter out the weight files. Files matched by any of the patterns
             will be ignored.
@@ -510,6 +513,7 @@ def download_weights_from_hf(
                     filename=SAFE_WEIGHTS_INDEX_NAME,
                     cache_dir=cache_dir,
                     revision=revision,
+                    subfolder=subfolder,
                 )
                 with open(index_path) as f:
                     weight_map = json.load(f)["weight_map"]
@@ -570,6 +574,7 @@ def download_safetensors_index_file_from_hf(
     model_name_or_path: str,
     index_file: str,
     cache_dir: str | None,
+    subfolder: str | None = None,
     revision: str | None = None,
 ) -> None:
     """Download hf safetensors index file from Hugging Face Hub.
@@ -579,6 +584,8 @@ def download_safetensors_index_file_from_hf(
         index_file (str): The safetensors index file name
         cache_dir (Optional[str]): The cache directory to store the model
             weights. If None, will use HF defaults.
+        subfolder (Optional[str]): The subfolder within the model repository
+            to download weights from.
         revision (Optional[str]): The revision of the model.
     """
     # Use file lock to prevent multiple processes from
@@ -591,6 +598,7 @@ def download_safetensors_index_file_from_hf(
                 filename=index_file,
                 cache_dir=cache_dir,
                 revision=revision,
+                subfolder=subfolder,
                 local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
             )
         # If file not found on remote or locally, we should not fail since
