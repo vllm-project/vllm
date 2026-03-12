@@ -76,7 +76,7 @@ def test_tree_decoding():
                 path_texts = []
                 current = leaf_out
                 while current is not None:
-                    path_texts.append(current.text)
+                    path_texts.append(current.tree_text)
                     if current.parent_seq_id is not None and current.parent_seq_id in seq_map:
                         current = seq_map[current.parent_seq_id]
                     else:
