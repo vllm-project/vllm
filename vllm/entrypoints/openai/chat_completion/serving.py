@@ -1507,7 +1507,7 @@ class OpenAIServingChat(OpenAIServing):
 
             elif request.tool_choice and request.tool_choice == "required":
                 tool_call_class_items = []
-                assert tool_calls is not None and len(tool_calls) > 0
+                tool_calls = tool_calls or []
                 for idx, tool_call in enumerate(tool_calls):
                     # Use native ID if available,
                     # otherwise generate ID with correct id_type
@@ -1893,8 +1893,10 @@ class OpenAIServingChat(OpenAIServing):
         # if the model supports it. TODO: Support browsing.
         assert not self.supports_browsing
         assert not self.supports_code_interpreter
+        if (reasoning_effort := request.reasoning_effort) == "none":
+            raise ValueError(f"Harmony does not support {reasoning_effort=}")
         sys_msg = get_system_message(
-            reasoning_effort=request.reasoning_effort,
+            reasoning_effort=reasoning_effort,
             browser_description=None,
             python_description=None,
             with_custom_tools=should_include_tools,

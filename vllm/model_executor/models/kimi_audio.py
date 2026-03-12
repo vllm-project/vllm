@@ -3,7 +3,6 @@
 
 """Inference-only Kimi-Audio model compatible with HuggingFace weights."""
 
-import os
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any, ClassVar, Literal
 
@@ -14,6 +13,7 @@ from transformers import BatchFeature
 from transformers import WhisperConfig as HFWhisperConfig
 
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
+from vllm.config.multimodal import BaseDummyOptions
 from vllm.inputs.data import PromptType, TokensPrompt
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.model_loader import DefaultModelLoader
@@ -45,7 +45,10 @@ from vllm.multimodal.processing import (
     BaseProcessingInfo,
     PromptReplacement,
 )
-from vllm.multimodal.processing.processor import BaseMultiModalProcessor
+from vllm.multimodal.processing.processor import (
+    BaseMultiModalProcessor,
+    ProcessorInputs,
+)
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers import cached_get_tokenizer
 from vllm.tokenizers.kimi_audio import KimiAudioTokenizer
@@ -85,10 +88,10 @@ class KimiAudioWhisperEncoder(WhisperEncoder):
         # Load Whisper config from subfolder (authoritative source)
         # Kimi-Audio stores Whisper config in whisper-large-v3/config.json
         model_path = vllm_config.model_config.model
-        whisper_config_path = os.path.join(model_path, KIMIA_WHISPER_SUBFOLDER)
 
         # Load WhisperConfig from the subfolder
-        whisper_config = HFWhisperConfig.from_pretrained(whisper_config_path)
+        whisper_dir = f"{model_path}/{KIMIA_WHISPER_SUBFOLDER}"
+        whisper_config = HFWhisperConfig.from_pretrained(whisper_dir)
 
         # Temporarily replace hf_config for WhisperEncoder.__init__()
         original_config = vllm_config.model_config.hf_config
@@ -144,28 +147,18 @@ class KimiAudioWhisperEncoder(WhisperEncoder):
 class KimiAudioProcessingInfo(BaseProcessingInfo):
     """Processing info for vLLM registry."""
 
-    def get_hf_config(self):
-        return self.ctx.model_config.hf_config
-
     def get_hf_processor(self, **kwargs: object) -> KimiAudioProcessor:
-        """Get KimiAudioProcessor with feature extractor and tokenizer."""
-        # Use vLLM's cached loader for feature extractor
         feature_extractor = cached_feature_extractor_from_config(
             self.ctx.model_config,
             subfolder=KIMIA_WHISPER_SUBFOLDER,
         )
 
-        # Use vLLM's standard tokenizer loading (respects tokenizer_mode)
-        tokenizer = self.get_tokenizer()
-
-        # Construct processor directly
         return KimiAudioProcessor(
             feature_extractor=feature_extractor,
-            tokenizer=tokenizer,
+            tokenizer=self.get_tokenizer(),
         )
 
     def get_feature_extractor(self, **kwargs: object):
-        """Get feature extractor using vLLM's cached loader."""
         return cached_feature_extractor_from_config(
             self.ctx.model_config, subfolder=KIMIA_WHISPER_SUBFOLDER
         )
@@ -174,26 +167,16 @@ class KimiAudioProcessingInfo(BaseProcessingInfo):
         return {"audio": 1}
 
     def get_data_parser(self) -> "KimiAudioMultiModalDataParser":
-        """Get data parser for audio inputs."""
+        feature_extractor = self.get_feature_extractor()
         return KimiAudioMultiModalDataParser(
+            target_sr=feature_extractor.sampling_rate,
             expected_hidden_size=self._get_expected_hidden_size(),
         )
 
 
 class KimiAudioDummyInputsBuilder(BaseDummyInputsBuilder[KimiAudioProcessingInfo]):
-    """Dummy inputs builder for vLLM registry."""
-
-    def get_dummy_text(self, mm_counts: Mapping[str, int]) -> list[int]:
-        """Return dummy text as token IDs directly."""
-        num_audios = mm_counts.get("audio", 0)
-        if num_audios == 0:
-            return [198]  # "Transcribe" tokenized
-        # Return as token IDs directly to avoid tokenizer issues
-        return [
-            KimiAudioProcessor.KIMIA_MEDIA_BEGIN,
-            KimiAudioProcessor.KIMIA_TEXT_BLANK,
-            KimiAudioProcessor.KIMIA_MEDIA_END,
-        ] * num_audios
+    def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
+        return ""
 
     def get_dummy_mm_data(
         self,
@@ -216,6 +199,29 @@ class KimiAudioDummyInputsBuilder(BaseDummyInputsBuilder[KimiAudioProcessingInfo
             ),
         }
 
+    def get_dummy_processor_inputs(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+        mm_options: Mapping[str, BaseDummyOptions],
+    ) -> ProcessorInputs:
+        dummy_mm_data = self.get_dummy_mm_data(seq_len, mm_counts, mm_options)
+        dummy_mm_items = self.info.parse_mm_data(dummy_mm_data)
+
+        num_audios = mm_counts.get("audio", 0)
+        dummy_tokens = (
+            [198]
+            if num_audios == 0
+            else [
+                KimiAudioProcessor.KIMIA_MEDIA_BEGIN,
+                KimiAudioProcessor.KIMIA_TEXT_BLANK,
+                KimiAudioProcessor.KIMIA_MEDIA_END,
+            ]
+            * num_audios
+        )
+
+        return ProcessorInputs(prompt=dummy_tokens, mm_data_items=dummy_mm_items)
+
 
 # Field config for Kimi-Audio multimodal data
 _KIMIAUDIO_FIELD_CONFIG = {
@@ -226,10 +232,6 @@ _KIMIAUDIO_FIELD_CONFIG = {
 
 class KimiAudioMultiModalDataParser(MultiModalDataParser):
     """Custom data parser for Kimi-Audio multimodal data."""
-
-    def __init__(self, **kwargs):
-        # Whisper expects 16kHz audio
-        super().__init__(target_sr=16000, **kwargs)
 
     def _parse_audio_data(
         self,
