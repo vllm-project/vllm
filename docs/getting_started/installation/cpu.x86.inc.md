@@ -1,9 +1,10 @@
-# --8<-- [start:installation]
+<!-- markdownlint-disable MD041 -->
+--8<-- [start:installation]
 
 vLLM supports basic model inferencing and serving on x86 CPU platform, with data types FP32, FP16 and BF16.
 
-# --8<-- [end:installation]
-# --8<-- [start:requirements]
+--8<-- [end:installation]
+--8<-- [start:requirements]
 
 - OS: Linux
 - CPU flags: `avx512f` (Recommended), `avx512_bf16` (Optional), `avx512_vnni` (Optional)
@@ -11,11 +12,11 @@ vLLM supports basic model inferencing and serving on x86 CPU platform, with data
 !!! tip
     Use `lscpu` to check the CPU flags.
 
-# --8<-- [end:requirements]
-# --8<-- [start:set-up-using-python]
+--8<-- [end:requirements]
+--8<-- [start:set-up-using-python]
 
-# --8<-- [end:set-up-using-python]
-# --8<-- [start:pre-built-wheels]
+--8<-- [end:set-up-using-python]
+--8<-- [start:pre-built-wheels]
 
 Pre-built vLLM wheels for x86 with AVX512 are available since version 0.13.0. To install release wheels:
 
@@ -25,6 +26,7 @@ export VLLM_VERSION=$(curl -s https://api.github.com/repos/vllm-project/vllm/rel
 # use uv
 uv pip install https://github.com/vllm-project/vllm/releases/download/v${VLLM_VERSION}/vllm-${VLLM_VERSION}+cpu-cp38-abi3-manylinux_2_35_x86_64.whl --torch-backend cpu
 ```
+
 ??? console "pip"
     ```bash
     # use pip
@@ -46,7 +48,7 @@ uv pip install https://github.com/vllm-project/vllm/releases/download/v${VLLM_VE
     export LD_PRELOAD="$TC_PATH:$IOMP_PATH:$LD_PRELOAD"
     ```
 
-**Install the latest code**
+#### Install the latest code
 
 To install the wheel built from the latest main branch:
 
@@ -54,7 +56,7 @@ To install the wheel built from the latest main branch:
 uv pip install vllm --extra-index-url https://wheels.vllm.ai/nightly/cpu --index-strategy first-index --torch-backend cpu
 ```
 
-**Install specific revisions**
+#### Install specific revisions
 
 If you want to access the wheels for previous commits (e.g. to bisect the behavior change, performance regression), you can specify the commit hash in the URL:
 
@@ -63,8 +65,8 @@ export VLLM_COMMIT=730bd35378bf2a5b56b6d3a45be28b3092d26519 # use full commit ha
 uv pip install vllm --extra-index-url https://wheels.vllm.ai/${VLLM_COMMIT}/cpu --index-strategy first-index --torch-backend cpu
 ```
 
-# --8<-- [end:pre-built-wheels]
-# --8<-- [start:build-wheel-from-source]
+--8<-- [end:pre-built-wheels]
+--8<-- [start:build-wheel-from-source]
 
 Install recommended compiler. We recommend to use `gcc/g++ >= 12.3.0` as the default compiler to avoid potential problems. For example, on Ubuntu 22.4, you can run:
 
@@ -158,16 +160,23 @@ uv pip install dist/*.whl
     ]
     ```
 
-# --8<-- [end:build-wheel-from-source]
-# --8<-- [start:pre-built-images]
+--8<-- [end:build-wheel-from-source]
+--8<-- [start:pre-built-images]
 
-You can pull the latest available CPU image here via:
+You can pull the latest available CPU image from Docker Hub:
 
 ```bash
-docker pull public.ecr.aws/q9t5s3a7/vllm-cpu-release-repo:latest
+docker pull vllm/vllm-openai-cpu:latest-x86_64
 ```
 
-If you want a more specific build you can find all published CPU based images here: [https://gallery.ecr.aws/q9t5s3a7/vllm-cpu-release-repo](https://gallery.ecr.aws/q9t5s3a7/vllm-cpu-release-repo)
+To pull an image for a specific vLLM version:
+
+```bash
+export VLLM_VERSION=$(curl -s https://api.github.com/repos/vllm-project/vllm/releases/latest | jq -r .tag_name | sed 's/^v//')
+docker pull vllm/vllm-openai-cpu:v${VLLM_VERSION}-x86_64
+```
+
+All available image tags are here: [https://hub.docker.com/r/vllm/vllm-openai-cpu/tags](https://hub.docker.com/r/vllm/vllm-openai-cpu/tags)
 
 You can run these images via:
 
@@ -176,16 +185,16 @@ docker run \
     -v ~/.cache/huggingface:/root/.cache/huggingface \
     -p 8000:8000 \
     --env "HF_TOKEN=<secret>" \
-    public.ecr.aws/q9t5s3a7/vllm-cpu-release-repo:<tag> <args...>
+vllm/vllm-openai-cpu:latest-x86_64 <args...>
 ```
 
 !!! warning
     If deploying the pre-built images on machines without `avx512f`, `avx512_bf16`, or `avx512_vnni` support, an `Illegal instruction` error may be raised. See the build-image-from-source section below for build arguments to match your target CPU capabilities.
 
-# --8<-- [end:pre-built-images]
-# --8<-- [start:build-image-from-source]
+--8<-- [end:pre-built-images]
+--8<-- [start:build-image-from-source]
 
-## Building for your target CPU
+#### Building for your target CPU
 
 ```bash
 docker build -f docker/Dockerfile.cpu \
@@ -205,15 +214,15 @@ docker build -f docker/Dockerfile.cpu \
     - `VLLM_CPU_{ISA}=true` - Force-enable the instruction set (build with ISA regardless of build system capabilities)
     - `VLLM_CPU_{ISA}=false` - Rely on auto-detection (default)
 
-### Examples
+##### Examples
 
-**Auto-detection build (default)**
+###### Auto-detection build (default)
 
 ```bash
 docker build -f docker/Dockerfile.cpu --tag vllm-cpu-env --target vllm-openai .
 ```
 
-**Cross-compile for AVX512**
+###### Cross-compile for AVX512
 
 ```bash
 docker build -f docker/Dockerfile.cpu \
@@ -224,7 +233,7 @@ docker build -f docker/Dockerfile.cpu \
         --target vllm-openai .
 ```
 
-**Cross-compile for AVX2**
+###### Cross-compile for AVX2
 
 ```bash
 docker build -f docker/Dockerfile.cpu \
@@ -233,7 +242,7 @@ docker build -f docker/Dockerfile.cpu \
         --target vllm-openai .
 ```
 
-## Launching the OpenAI server
+#### Launching the OpenAI server
 
 ```bash
 docker run --rm \
@@ -248,6 +257,6 @@ docker run --rm \
             other vLLM OpenAI server arguments
 ```
 
-# --8<-- [end:build-image-from-source]
-# --8<-- [start:extra-information]
-# --8<-- [end:extra-information]
+--8<-- [end:build-image-from-source]
+--8<-- [start:extra-information]
+--8<-- [end:extra-information]

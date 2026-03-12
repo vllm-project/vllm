@@ -143,6 +143,10 @@ class AnthropicServingMessages(OpenAIServingChat):
             system_prompt = ""
             for block in anthropic_request.system:
                 if block.type == "text" and block.text:
+                    # Strip Claude Code's attribution header which contains
+                    # a per-request hash that defeats prefix caching.
+                    if block.text.startswith("x-anthropic-billing-header"):
+                        continue
                     system_prompt += block.text
             openai_messages.append({"role": "system", "content": system_prompt})
 
@@ -349,6 +353,8 @@ class AnthropicServingMessages(OpenAIServingChat):
             req.tool_choice = "auto"
         elif tool_choice_type == "any":
             req.tool_choice = "required"
+        elif tool_choice_type == "none":
+            req.tool_choice = "none"
         elif tool_choice_type == "tool":
             req.tool_choice = ChatCompletionNamedToolChoiceParam.model_validate(
                 {

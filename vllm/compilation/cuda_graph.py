@@ -2,10 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import dataclasses
+import weakref
 from collections import Counter
 from collections.abc import Callable
 from contextlib import ExitStack
-from typing import Any
+from typing import Any, ClassVar
 from unittest.mock import patch
 
 import torch
@@ -162,6 +163,14 @@ class CUDAGraphWrapper:
     guaranteed when VLLM_LOGGING_LEVEL == "DEBUG".
     """
 
+    _all_instances: ClassVar[weakref.WeakSet["CUDAGraphWrapper"]] = weakref.WeakSet()
+
+    @classmethod
+    def clear_all_graphs(cls) -> None:
+        """Clear captured graphs from all CUDAGraphWrapper instances."""
+        for instance in list(cls._all_instances):
+            instance.clear_graphs()
+
     def __init__(
         self,
         runnable: Callable[..., Any],
@@ -192,6 +201,8 @@ class CUDAGraphWrapper:
         # cudagraphs for.
         self.concrete_cudagraph_entries: dict[BatchDescriptor, CUDAGraphEntry] = {}
 
+        CUDAGraphWrapper._all_instances.add(self)
+
     def __getattr__(self, key: str) -> Any:
         # allow accessing the attributes of the runnable.
         if hasattr(self.runnable, key):
@@ -204,6 +215,13 @@ class CUDAGraphWrapper:
     def unwrap(self) -> Callable[..., Any]:
         # in case we need to access the original runnable.
         return self.runnable
+
+    @property
+    def cudagraph_wrapper(self) -> "CUDAGraphWrapper":
+        return self
+
+    def clear_graphs(self) -> None:
+        self.concrete_cudagraph_entries.clear()
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any | None:
         forward_context = get_forward_context()
@@ -260,7 +278,9 @@ class CUDAGraphWrapper:
                     # therefore, we only run gc for the first graph,
                     # and disable gc for the rest of the graphs.
                     stack.enter_context(patch("gc.collect", lambda: None))
-                    stack.enter_context(patch("torch.cuda.empty_cache", lambda: None))
+                    stack.enter_context(
+                        patch("torch.accelerator.empty_cache", lambda: None)
+                    )
 
                 if self.graph_pool is not None:
                     set_graph_pool_id(self.graph_pool)

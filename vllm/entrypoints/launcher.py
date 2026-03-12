@@ -4,11 +4,10 @@
 import asyncio
 import signal
 import socket
-from http import HTTPStatus
 from typing import Any
 
 import uvicorn
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI
 
 from vllm import envs
 from vllm.engine.protocol import EngineClient
@@ -19,7 +18,6 @@ from vllm.entrypoints.constants import (
 from vllm.entrypoints.ssl import SSLCertRefresher
 from vllm.logger import init_logger
 from vllm.utils.network_utils import find_process_using_port
-from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
 
 logger = init_logger(__name__)
 
@@ -75,7 +73,7 @@ async def serve_http(
     config.h11_max_header_count = h11_max_header_count
     config.load()
     server = uvicorn.Server(config)
-    _add_shutdown_handlers(app, server)
+    app.state.server = server
 
     loop = asyncio.get_running_loop()
 
@@ -148,40 +146,3 @@ def terminate_if_errored(server: uvicorn.Server, engine: EngineClient):
     engine_errored = engine.errored and not engine.is_running
     if not envs.VLLM_KEEP_ALIVE_ON_ENGINE_DEATH and engine_errored:
         server.should_exit = True
-
-
-def _add_shutdown_handlers(app: FastAPI, server: uvicorn.Server) -> None:
-    """
-    VLLM V1 AsyncLLM catches exceptions and returns
-    only two types: EngineGenerateError and EngineDeadError.
-
-    EngineGenerateError is raised by the per request generate()
-    method. This error could be request specific (and therefore
-    recoverable - e.g. if there is an error in input processing).
-
-    EngineDeadError is raised by the background output_handler
-    method. This error is global and therefore not recoverable.
-
-    We register these @app.exception_handlers to return nice
-    responses to the end user if they occur and shut down if needed.
-    See https://fastapi.tiangolo.com/tutorial/handling-errors/
-    for more details on how exception handlers work.
-
-    If an exception is encountered in a StreamingResponse
-    generator, the exception is not raised, since we already sent
-    a 200 status. Rather, we send an error message as the next chunk.
-    Since the exception is not raised, this means that the server
-    will not automatically shut down. Instead, we use the watchdog
-    background task for check for errored state.
-    """
-
-    @app.exception_handler(RuntimeError)
-    @app.exception_handler(EngineDeadError)
-    @app.exception_handler(EngineGenerateError)
-    async def runtime_exception_handler(request: Request, __):
-        terminate_if_errored(
-            server=server,
-            engine=request.app.state.engine_client,
-        )
-
-        return Response(status_code=HTTPStatus.INTERNAL_SERVER_ERROR)
