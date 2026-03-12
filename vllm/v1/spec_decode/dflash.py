@@ -101,10 +101,10 @@ class DFlashProposer(SpecDecodeBaseProposer):
         all_positions = self.positions[:num_all_positions]
         block_numbers = all_positions // block_size
 
-        # TODO(ben): This may cause a sync, use output_size if possible
         req_lens = cad.query_start_loc[1:] - cad.query_start_loc[:-1]
-        ctx_req_idx = torch.repeat_interleave(self.arange[:batch_size], req_lens)
-        assert ctx_req_idx.shape[0] == num_context
+        ctx_req_idx = torch.repeat_interleave(
+            self.arange[:batch_size], req_lens, output_size=num_context
+        )
         q_req_idx = torch.repeat_interleave(self.arange[:batch_size], num_query_per_req)
         req_idx = torch.cat([ctx_req_idx, q_req_idx])
 
