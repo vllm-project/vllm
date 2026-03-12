@@ -44,6 +44,18 @@ pynvml = import_pynvml()
 torch.backends.cuda.enable_cudnn_sdp(False)
 
 
+def _is_blackwell_class(device_capability: DeviceCapability) -> bool:
+    """Check if device is Blackwell-class (SM10x, SM11x, SM12x).
+
+    Blackwell architecture includes:
+    - SM100/SM101: B100, B200 (major=10)
+    - SM120/SM121: GB10 DGX Spark (major=12)
+
+    Note: SM11x may be used by future Blackwell variants.
+    """
+    return device_capability.major in (10, 11, 12)
+
+
 @cache
 def _get_backend_priorities(
     use_mla: bool,
@@ -51,8 +63,10 @@ def _get_backend_priorities(
     num_heads: int | None = None,
 ) -> list[AttentionBackendEnum]:
     """Get backend priorities with lazy import to avoid circular dependency."""
+    is_blackwell = _is_blackwell_class(device_capability)
+
     if use_mla:
-        if device_capability.major == 10:
+        if is_blackwell:
             # Prefer FlashInfer at low head counts (FlashMLA uses padding)
             if num_heads is not None and num_heads <= 16:
                 sparse_backends = [
@@ -81,7 +95,7 @@ def _get_backend_priorities(
                 AttentionBackendEnum.FLASHMLA_SPARSE,
             ]
     else:
-        if device_capability.major == 10:
+        if is_blackwell:
             return [
                 AttentionBackendEnum.FLASHINFER,
                 AttentionBackendEnum.FLASH_ATTN,
@@ -163,6 +177,21 @@ class CudaPlatformBase(Platform):
     @classmethod
     def log_warnings(cls):
         pass
+
+    @classmethod
+    def is_blackwell_class(cls, device_id: int = 0) -> bool:
+        """Check if device is Blackwell-class (SM10x, SM11x, SM12x).
+
+        Blackwell architecture includes:
+        - SM100/SM101: B100, B200 (major=10)
+        - SM120/SM121: GB10 DGX Spark (major=12)
+
+        Note: SM11x may be used by future Blackwell variants.
+        """
+        capability = cls.get_device_capability(device_id)
+        if capability is None:
+            return False
+        return capability.major in (10, 11, 12)
 
     @classmethod
     def check_and_update_config(cls, vllm_config: "VllmConfig") -> None:
@@ -325,7 +354,16 @@ class CudaPlatformBase(Platform):
 
     @classmethod
     def get_supported_vit_attn_backends(cls) -> list["AttentionBackendEnum"]:
-        if cls.has_device_capability(80):
+        if _is_blackwell_class(cls.get_device_capability()):
+            # SM12x (GB10): Flash Attention ViT kernels lack SM121 PTX,
+            # prefer FlashInfer which is compiled with SM121 support.
+            return [
+                AttentionBackendEnum.FLASHINFER,
+                AttentionBackendEnum.TRITON_ATTN,
+                AttentionBackendEnum.TORCH_SDPA,
+                AttentionBackendEnum.FLASH_ATTN,
+            ]
+        elif cls.has_device_capability(80):
             return [
                 AttentionBackendEnum.FLASH_ATTN,
                 AttentionBackendEnum.TRITON_ATTN,
@@ -339,7 +377,6 @@ class CudaPlatformBase(Platform):
                 AttentionBackendEnum.TRITON_ATTN,
                 AttentionBackendEnum.FLASHINFER,
             ]
-
     @classmethod
     def get_vit_attn_backend(
         cls,

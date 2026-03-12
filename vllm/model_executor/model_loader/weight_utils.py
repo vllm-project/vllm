@@ -861,7 +861,7 @@ def fastsafetensors_weights_iterator(
     # Use nogds=True for TP > 1 to avoid cuFileDriverOpen() which
     # initializes the GDS DMA subsystem for all visible GPUs, creating
     # unwanted CUDA contexts on every device.
-    nogds = pg.size() > 1
+    nogds = True  # GB10 does not support GDS
 
     for f_list in tqdm(
         weight_files_sub_lists,
