@@ -5,7 +5,7 @@ import torch
 from vllm.config import VllmConfig, replace
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.triton_utils import tl, triton
+from vllm.triton_utils import HAS_TRITON, tl, triton
 from vllm.v1.attention.backends.utils import (
     CommonAttentionMetadata,
 )
@@ -288,6 +288,56 @@ def eagle_step_slot_mapping_metadata_kernel(
     tl.store(seq_lens_ptr + req_idx, new_seq_len)
 
 
+def eagle_step_update_slot_mapping_and_metadata_pytorch(
+    positions_1d: torch.Tensor,
+    block_table_tensor: torch.Tensor,
+    seq_lens: torch.Tensor,
+    block_size: int,
+    max_model_len: int,
+    out_clamped_positions: torch.Tensor,
+    out_slot_mapping: torch.Tensor,
+    input_batch_size: int | None = None,
+) -> None:
+    """PyTorch implementation of eagle_step_slot_mapping_metadata_kernel."""
+    batch_size = positions_1d.shape[0]
+    if input_batch_size is None:
+        input_batch_size = batch_size
+
+    # Handle padding slots (req_idx >= batch_size)
+    if input_batch_size > batch_size:
+        out_slot_mapping[batch_size:input_batch_size] = PADDING_SLOT_ID
+
+    # Process actual requests
+    new_position = positions_1d + 1
+    exceeds_max = new_position >= max_model_len
+    clamped_position = torch.where(
+        exceeds_max, torch.zeros_like(new_position), new_position
+    )
+
+    # Block table lookup
+    block_number = clamped_position // block_size
+    n_blocks_per_req = block_table_tensor.shape[1]
+    block_number = torch.clamp(block_number, max=n_blocks_per_req - 1)
+
+    # Gather block_id from block_table
+    block_id = block_table_tensor[
+        torch.arange(batch_size, device=block_table_tensor.device), block_number.long()
+    ]
+    slot_id = block_id * block_size + (clamped_position % block_size)
+    slot_id = torch.where(exceeds_max, PADDING_SLOT_ID, slot_id)
+
+    # Update seq_lens
+    new_seq_len = torch.where(exceeds_max, torch.ones_like(seq_lens), seq_lens + 1)
+    new_seq_len = torch.clamp(new_seq_len, max=max_model_len)
+
+    # Store outputs
+    out_clamped_positions[:batch_size] = clamped_position.to(
+        out_clamped_positions.dtype
+    )
+    out_slot_mapping[:batch_size] = slot_id.to(out_slot_mapping.dtype)
+    seq_lens[:] = new_seq_len.to(seq_lens.dtype)
+
+
 def eagle_step_update_slot_mapping_and_metadata(
     positions_1d: torch.Tensor,
     block_table_tensor: torch.Tensor,
@@ -319,21 +369,33 @@ def eagle_step_update_slot_mapping_and_metadata(
     batch_size = positions_1d.shape[0]
     if input_batch_size is None:
         input_batch_size = batch_size
-    n_blocks_per_req = block_table_tensor.shape[1]
 
-    eagle_step_slot_mapping_metadata_kernel[(input_batch_size,)](
-        positions_1d,
-        block_table_tensor,
-        block_table_tensor.stride(0),
-        seq_lens,
-        out_clamped_positions,
-        out_slot_mapping,
-        block_size=block_size,
-        max_model_len=max_model_len,
-        n_blocks_per_req=n_blocks_per_req,
-        PAD_ID=PADDING_SLOT_ID,
-        batch_size=batch_size,
-    )
+    if HAS_TRITON:
+        n_blocks_per_req = block_table_tensor.shape[1]
+        eagle_step_slot_mapping_metadata_kernel[(input_batch_size,)](
+            positions_1d,
+            block_table_tensor,
+            block_table_tensor.stride(0),
+            seq_lens,
+            out_clamped_positions,
+            out_slot_mapping,
+            block_size=block_size,
+            max_model_len=max_model_len,
+            n_blocks_per_req=n_blocks_per_req,
+            PAD_ID=PADDING_SLOT_ID,
+            batch_size=batch_size,
+        )
+    else:
+        eagle_step_update_slot_mapping_and_metadata_pytorch(
+            positions_1d,
+            block_table_tensor,
+            seq_lens,
+            block_size,
+            max_model_len,
+            out_clamped_positions,
+            out_slot_mapping,
+            input_batch_size,
+        )
 
 
 @triton.jit
