@@ -62,6 +62,8 @@ attrs==24.2.0
     #   referencing
 audioread==3.0.1
     # via librosa
+av==16.1.0
+    # via -r requirements/test.in
 backoff==2.2.1
     # via
     #   -r requirements/test.in
