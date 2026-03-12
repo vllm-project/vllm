@@ -1451,6 +1451,21 @@ class OpenAIServingChat(OpenAIServing):
                 content = output.text
 
             auto_tools_called = False
+
+            # Early check: if tool_choice="required" but the model hit
+            # the max token limit, give a clear error instead of a
+            # cryptic JSON parse failure.
+            if (request.tool_choice == "required"
+                    and output.finish_reason == "length"):
+                raise ValueError(
+                    "Model reached the max token limit "
+                    "(finish_reason='length') before generating "
+                    "complete tool calls, but tool_choice='required' "
+                    "demands valid tool calls. Please increase "
+                    "`max_tokens` to allow the model to finish "
+                    "generating the tool call."
+                )
+
             # if auto tools are not enabled, and a named tool choice using
             #   outlines is not being used
             tool_calls, content = self._parse_tool_calls_from_content(

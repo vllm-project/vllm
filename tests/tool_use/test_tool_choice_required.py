@@ -361,3 +361,23 @@ def test_streaming_output_valid_with_trailing_extra_data():
         previous_text = current_text
 
     assert len(messages) > 0
+
+
+def test_parse_tool_calls_incomplete_json_gives_clear_error():
+    """When tool_choice='required' and content is incomplete JSON
+    (e.g. model hit max_tokens), the error message should be
+    actionable rather than a cryptic JSON parse error."""
+    from vllm.entrypoints.openai.engine.serving import OpenAIServing
+
+    incomplete_json = '[{"name": "get_current_weather", "parameters": {"city":'
+    request = MagicMock()
+    request.tool_choice = "required"
+
+    with pytest.raises(ValueError, match="max token limit"):
+        OpenAIServing._parse_tool_calls_from_content(
+            request=request,
+            tokenizer=None,
+            content=incomplete_json,
+            enable_auto_tools=False,
+            tool_parser_cls=None,
+        )

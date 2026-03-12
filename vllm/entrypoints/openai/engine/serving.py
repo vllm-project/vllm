@@ -13,7 +13,7 @@ from fastapi import Request
 from openai.types.responses import (
     ToolChoiceFunction,
 )
-from pydantic import ConfigDict, TypeAdapter
+from pydantic import ConfigDict, TypeAdapter, ValidationError
 from starlette.datastructures import Headers
 
 import vllm.envs as envs
@@ -1126,7 +1126,19 @@ class OpenAIServing:
             content = None  # Clear content since tool is called.
         elif request.tool_choice == "required":
             assert content is not None
-            tool_calls = TypeAdapter(list[FunctionDefinition]).validate_json(content)
+            try:
+                tool_calls = TypeAdapter(
+                    list[FunctionDefinition]).validate_json(content)
+            except ValidationError as e:
+                raise ValueError(
+                    "When tool_choice='required', the model must produce "
+                    "valid JSON tool calls, but the generated content "
+                    "could not be parsed. This can happen when the model "
+                    "hits the max token limit (finish_reason='length') "
+                    "before completing the tool call. Consider increasing "
+                    "`max_tokens` to allow the model to finish generating "
+                    "the tool call."
+                ) from e
             function_calls.extend(
                 [
                     FunctionCall(
