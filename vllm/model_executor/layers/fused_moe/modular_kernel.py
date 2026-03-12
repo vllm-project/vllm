@@ -1216,6 +1216,7 @@ class FusedMoEKernelModularImpl:
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         global_num_experts: int,
+        local_num_experts: int,
         expert_map: torch.Tensor | None,
         apply_router_weight_on_input: bool,
     ) -> tuple[
@@ -1246,6 +1247,7 @@ class FusedMoEKernelModularImpl:
                 topk_weights,
                 topk_ids,
                 global_num_experts,
+                local_num_experts,
                 expert_map,
                 apply_router_weight_on_input,
                 self.fused_experts.quant_config,
@@ -1259,6 +1261,7 @@ class FusedMoEKernelModularImpl:
                 topk_weights,
                 topk_ids,
                 global_num_experts,
+                local_num_experts,
                 expert_map,
                 apply_router_weight_on_input,
                 self.fused_experts.quant_config,
@@ -1268,7 +1271,7 @@ class FusedMoEKernelModularImpl:
             # TODO(lucas): refactor this in the alternative schedules followup
             # currently unpack if we have hook + receiver pair or just
             # receiver (see finalize_async docstring)
-            hook, receiver = (
+            hook, receiver, w2_gemm_overlap_args = (
                 prepare_ret if isinstance(prepare_ret, tuple) else (None, prepare_ret)
             )
 
@@ -1296,7 +1299,14 @@ class FusedMoEKernelModularImpl:
             topk_weights if _expert_topk_weights is None else _expert_topk_weights
         )
 
-        return a1q, a1q_scale, expert_tokens_meta, topk_ids, topk_weights
+        return (
+            a1q,
+            a1q_scale,
+            expert_tokens_meta,
+            topk_ids,
+            topk_weights,
+            w2_gemm_overlap_args,
+        )
 
     def _fused_experts(
         self,
@@ -1313,6 +1323,7 @@ class FusedMoEKernelModularImpl:
         expert_map: torch.Tensor | None,
         apply_router_weight_on_input: bool,
         expert_tokens_meta: ExpertTokensMetadata | None,
+        w2_gemm_overlap_args,
     ) -> torch.Tensor:
         _, M_full, N, K, top_k = self.fused_experts.moe_problem_size(
             a1q, w1, w2, topk_ids
@@ -1388,6 +1399,7 @@ class FusedMoEKernelModularImpl:
                 workspace2=workspace2,
                 expert_tokens_meta=c_expert_tokens_meta,
                 apply_router_weight_on_input=apply_router_weight_on_input,
+                w2_gemm_overlap_args=w2_gemm_overlap_args,
             )
 
         return fused_out
@@ -1524,12 +1536,19 @@ class FusedMoEKernelModularImpl:
         local_num_experts = w1.size(0)
         if global_num_experts == -1:
             global_num_experts = local_num_experts
-
-        a1q, a1q_scale, expert_tokens_meta, topk_ids, topk_weights = self._prepare(
+        (
+            a1q,
+            a1q_scale,
+            expert_tokens_meta,
+            topk_ids,
+            topk_weights,
+            w2_gemm_overlap_args,
+        ) = self._prepare(
             hidden_states,
             topk_weights,
             topk_ids,
             global_num_experts,
+            local_num_experts,
             expert_map,
             apply_router_weight_on_input,
         )
@@ -1548,6 +1567,7 @@ class FusedMoEKernelModularImpl:
             expert_map=expert_map,
             apply_router_weight_on_input=apply_router_weight_on_input,
             expert_tokens_meta=expert_tokens_meta,
+            w2_gemm_overlap_args=w2_gemm_overlap_args,
         )
 
         return self._finalize(

@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+
 import pytest
 
 from vllm.platforms import current_platform
@@ -11,6 +12,7 @@ if not current_platform.has_device_capability(100):
         reason="Nvfp4 Requires compute capability of 10 or above.",
         allow_module_level=True,
     )
+
 
 import torch
 from flashinfer import fp4_quantize
@@ -27,6 +29,15 @@ from vllm.utils.flashinfer import (
     scaled_fp4_grouped_quantize,
 )
 
+<<<<<<< HEAD
+if torch.cuda.get_device_capability() < (10, 0):
+    pytest.skip(
+        reason="Nvfp4 Requires compute capability of 10 or above.",
+        allow_module_level=True,
+    )
+
+=======
+>>>>>>> main
 kE2M1ToFloat = torch.tensor(
     [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0], dtype=torch.float32
 )
