@@ -221,10 +221,10 @@ class CacheConfig:
             )
         elif cache_dtype.startswith("int8"):
             int8_warn_info = (
-                "int8 kv cache requires calibrated scaling factors. "
-                "Make sure --calculate_kv_scales argument is set and "
-                "K_SCALE_CONSTANT/V_SCALE_CONSTANT environment variables are set, "
-                "normally set to 127 for int8."
+                "For INT8 KV cache, vLLM supports per-tensor, per-head, and per-token "
+                "quantization scales. If no pre-calibrated scales are found in the "
+                "checkpoint, scales will be computed dynamically. For best accuracy, "
+                "provide a checkpoint with pre-calibrated scales."
             )
             logger.info(
                 warn_info,
