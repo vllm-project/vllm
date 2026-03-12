@@ -258,6 +258,7 @@ async fn client_streams_outputs_per_request_and_ignores_other_messages() {
             send_outputs(
                 &mut push,
                 EngineCoreOutputs {
+                    outputs: vec![request_output("req-2", vec![], Some(FinishReason::Length))],
                     finished_requests: Some(BTreeSet::from(["req-2".to_string()])),
                     ..Default::default()
                 },
@@ -317,6 +318,13 @@ async fn client_streams_outputs_per_request_and_ignores_other_messages() {
         .await
         .unwrap();
 
+    let final_2 = timeout(Duration::from_secs(1), stream_2.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(final_2.request_id, "req-2");
+    assert_eq!(final_2.finish_reason, Some(FinishReason::Length));
     assert!(
         timeout(Duration::from_secs(1), stream_2.next())
             .await
@@ -368,6 +376,7 @@ async fn duplicate_request_ids_are_rejected_without_sending_a_second_add() {
             send_outputs(
                 &mut push,
                 EngineCoreOutputs {
+                    outputs: vec![request_output("req-1", vec![], Some(FinishReason::Length))],
                     finished_requests: Some(BTreeSet::from(["req-1".to_string()])),
                     ..Default::default()
                 },
@@ -395,12 +404,80 @@ async fn duplicate_request_ids_are_rejected_without_sending_a_second_add() {
         Error::DuplicateRequestId { request_id } if request_id == "req-1"
     ));
 
+    let final_output = timeout(Duration::from_secs(1), stream.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(final_output.finish_reason, Some(FinishReason::Length));
     assert!(
         timeout(Duration::from_secs(1), stream.next())
             .await
             .unwrap()
             .is_none()
     );
+    client.shutdown().await.unwrap();
+    engine_task.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn finished_requests_without_final_output_is_treated_as_unexpected_close() {
+    init_tracing();
+    let handshake_address = unique_tcp_endpoint();
+    let engine_identity = b"engine-finished-only".to_vec();
+
+    let engine_task = tokio::spawn({
+        let engine_handshake = handshake_address.clone();
+        let engine_identity = engine_identity.clone();
+        async move {
+            let (mut dealer, mut push) = setup_mock_engine(engine_handshake, engine_identity).await;
+
+            let add = recv_engine_message(&mut dealer).await;
+            assert_eq!(add[0].as_ref(), &[0x00]);
+
+            send_outputs(
+                &mut push,
+                EngineCoreOutputs {
+                    finished_requests: Some(BTreeSet::from(["req-1".to_string()])),
+                    ..Default::default()
+                },
+            )
+            .await;
+
+            assert!(
+                timeout(Duration::from_millis(200), dealer.recv())
+                    .await
+                    .is_err()
+            );
+        }
+    });
+
+    let client = EngineCoreClient::connect(EngineCoreClientConfig {
+        handshake_address,
+        local_host: "127.0.0.1".to_string(),
+        ready_timeout: Duration::from_secs(2),
+        client_index: 0,
+    })
+    .await
+    .unwrap();
+
+    let mut stream = client.call(sample_request()).await.unwrap();
+    let error = timeout(Duration::from_secs(1), stream.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        Error::RequestStreamClosed { request_id } if request_id == "req-1"
+    ));
+    assert!(
+        timeout(Duration::from_secs(1), stream.next())
+            .await
+            .unwrap()
+            .is_none()
+    );
+
     client.shutdown().await.unwrap();
     engine_task.await.unwrap();
 }

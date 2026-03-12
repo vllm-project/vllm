@@ -1,10 +1,10 @@
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::Weak;
 use std::task::Context;
 use std::task::Poll;
 
 use futures::Stream;
+use futures::stream::FusedStream;
 use parking_lot::Mutex;
 use thiserror_ext::AsReport as _;
 use tokio::sync::{Mutex as AsyncMutex, mpsc};
@@ -56,8 +56,8 @@ impl ClientInner {
         self.state.lock().sender_for_output(output)
     }
 
-    /// Remove requests that finished through the batched `finished_requests`
-    /// side channel rather than an inline final output.
+    /// Remove requests that the engine declared finished through the batched
+    /// `finished_requests` side channel.
     pub fn finish_requests<'a>(
         &self,
         request_ids: impl IntoIterator<Item = &'a String>,
@@ -72,14 +72,6 @@ impl ClientInner {
         for sender in senders {
             let _ = sender.send(Err(Error::Shared(error.clone())));
         }
-    }
-
-    /// Remove a request whose consumer disappeared and report whether the
-    /// engine still needs a best-effort abort for it.
-    pub fn drop_request_stream(&self, request_id: &str) -> bool {
-        let mut state = self.state.lock();
-        let removed = state.remove_request(request_id).is_some();
-        removed && state.is_running()
     }
 
     /// Send one lifecycle control message after local request bookkeeping has
@@ -116,16 +108,23 @@ impl ClientInner {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RequestStreamState {
+    Running,
+    Finished,
+    ClosedWithError,
+    UnexpectedClose,
+}
+
 /// Stream of raw engine-core outputs for one request.
 ///
 /// The stream yields only `EngineCoreOutput` values whose `request_id` matches
-/// the originating `add_request()` call. If the engine finishes the request via
-/// `finished_requests` without emitting a final output object, the stream ends
-/// with EOF and does not synthesize an extra item.
+/// the originating `add_request()` call. Normal request completion is expected
+/// to include a final output object whose `finish_reason` is non-`None`.
 pub struct RequestOutputStream {
     pub(super) request_id: String,
     pub(super) auto_abort_tx: mpsc::UnboundedSender<String>,
-    pub(super) inner: Weak<ClientInner>,
+    pub(super) state: RequestStreamState,
     pub(super) rx: RequestStreamReceiver,
 }
 
@@ -140,37 +139,49 @@ impl Stream for RequestOutputStream {
     type Item = Result<EngineCoreOutput>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        if self.is_terminated() {
+            return Poll::Ready(None);
+        }
+
         match Pin::new(&mut self.rx).poll_recv(cx) {
             Poll::Pending => Poll::Pending,
-            Poll::Ready(Some(item)) => Poll::Ready(Some(item)),
-            Poll::Ready(None) => {
-                let request_id = std::mem::take(&mut self.request_id);
-                if let Some(inner) = self.inner.upgrade()
-                    && inner.drop_request_stream(&request_id)
-                {
-                    return Poll::Ready(Some(Err(Error::RequestStreamClosed { request_id })));
+            Poll::Ready(Some(item)) => {
+                match &item {
+                    Ok(output) => {
+                        if output.finished() {
+                            self.state = RequestStreamState::Finished;
+                        }
+                    }
+                    Err(_) => {
+                        self.state = RequestStreamState::ClosedWithError;
+                    }
                 }
-                Poll::Ready(None)
+                Poll::Ready(Some(item))
+            }
+            Poll::Ready(None) => {
+                self.state = RequestStreamState::UnexpectedClose;
+
+                Poll::Ready(Some(Err(Error::RequestStreamClosed {
+                    request_id: self.request_id.clone(),
+                })))
             }
         }
     }
 }
 
+impl FusedStream for RequestOutputStream {
+    fn is_terminated(&self) -> bool {
+        !matches!(self.state, RequestStreamState::Running)
+    }
+}
+
 impl Drop for RequestOutputStream {
     fn drop(&mut self) {
-        if self.request_id.is_empty() {
+        if self.is_terminated() {
             return;
         }
 
-        let Some(inner) = self.inner.upgrade() else {
-            return;
-        };
-
-        let request_id = std::mem::take(&mut self.request_id);
-        if !inner.drop_request_stream(&request_id) {
-            return;
-        }
-
+        let request_id = self.request_id.clone();
         if self.auto_abort_tx.send(request_id.clone()).is_err() {
             warn!(
                 request_id,
@@ -188,6 +199,16 @@ pub(super) async fn run_auto_abort_loop(
     mut auto_abort_rx: mpsc::UnboundedReceiver<String>,
 ) {
     while let Some(request_id) = auto_abort_rx.recv().await {
+        let should_abort = {
+            let mut state = inner.state.lock();
+            let removed = state.remove_request(&request_id).is_some();
+            removed && state.is_running()
+        };
+        if !should_abort {
+            debug!(request_id, "skip auto-abort for inactive request");
+            continue;
+        }
+
         if let Err(error) = inner
             .send_to_engine(
                 &engine_identity,

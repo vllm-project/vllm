@@ -70,12 +70,9 @@ struct CompletedRequest {
     new_token_ids: Vec<u32>,
     finish_reason: Option<FinishReason>,
     stop_reason: Option<StopReason>,
-    finished_via_finished_requests: bool,
 }
 
-async fn wait_for_request_completion(
-    mut stream: RequestOutputStream,
-) -> vllm_engine_core_client::Result<CompletedRequest> {
+async fn wait_for_request_completion(mut stream: RequestOutputStream) -> Result<CompletedRequest> {
     let mut completed = CompletedRequest::default();
 
     while let Some(output) = stream.next().await {
@@ -90,8 +87,7 @@ async fn wait_for_request_completion(
         }
     }
 
-    completed.finished_via_finished_requests = true;
-    Ok(completed)
+    anyhow::bail!("request stream ended without a final output")
 }
 
 async fn wait_for_timeout(
@@ -147,10 +143,6 @@ async fn main() -> Result<()> {
     println!("new_token_ids={:?}", output.new_token_ids);
     println!("finish_reason={:?}", output.finish_reason);
     println!("stop_reason={:?}", output.stop_reason);
-    println!(
-        "finished_via_finished_requests={}",
-        output.finished_via_finished_requests
-    );
 
     Ok(())
 }

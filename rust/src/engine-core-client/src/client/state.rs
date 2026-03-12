@@ -83,8 +83,8 @@ impl RequestRegistry {
         }
     }
 
-    /// Close and remove requests that finished via the batched
-    /// `finished_requests` signal rather than an inline final output object.
+    /// Close and remove requests that were declared finished out-of-band via
+    /// the batched `finished_requests` signal.
     pub fn finish_requests<'a>(
         &mut self,
         request_ids: impl IntoIterator<Item = &'a String>,

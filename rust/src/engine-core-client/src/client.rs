@@ -6,7 +6,9 @@ use tokio::sync::{Mutex as AsyncMutex, mpsc};
 use tokio_util::task::AbortOnDropHandle;
 use tracing::debug;
 
-use crate::client::imp::{ClientInner, run_auto_abort_loop, run_output_dispatcher_loop};
+use crate::client::imp::{
+    ClientInner, RequestStreamState, run_auto_abort_loop, run_output_dispatcher_loop,
+};
 use crate::client::state::{ClientClosedState, RequestRegistry};
 use crate::error::Result;
 use crate::protocol::handshake::ReadyMessage;
@@ -150,7 +152,7 @@ impl EngineCoreClient {
         Ok(RequestOutputStream {
             request_id,
             auto_abort_tx: self.auto_abort_tx.clone(),
-            inner: Arc::downgrade(&self.inner),
+            state: RequestStreamState::Running,
             rx,
         })
     }
