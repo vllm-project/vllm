@@ -128,11 +128,8 @@ class DefaultModelState(ModelState):
             req_states.prefill_len.gpu,
             req_states.num_computed_tokens.gpu,
         )
-        return {
-            "positions": self.rope_state.get_positions(
-                input_batch.num_tokens_after_padding
-            )
-        }
+        positions = self.rope_state.get_positions(input_batch.num_tokens_after_padding)
+        return {"positions": positions}
 
     def prepare_dummy_inputs(self, num_reqs: int, num_tokens: int) -> dict[str, Any]:
         model_inputs = {}

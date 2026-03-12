@@ -13,6 +13,18 @@ class RopeState(ABC):
     per-step position tensors for the model forward pass.
     """
 
+    def __init__(
+        self,
+        max_num_reqs: int,
+        max_num_tokens: int,
+        max_model_len: int,
+        device: torch.device,
+    ):
+        self.max_num_reqs = max_num_reqs
+        self.max_num_tokens = max_num_tokens
+        self.max_model_len = max_model_len
+        self.device = device
+
     @abstractmethod
     def init_prefill_positions(
         self,

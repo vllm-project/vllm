@@ -19,10 +19,7 @@ class MRopeState(RopeState):
         max_model_len: int,
         device: torch.device,
     ):
-        self.max_num_reqs = max_num_reqs
-        self.max_num_tokens = max_num_tokens
-        self.max_model_len = max_model_len
-        self.device = device
+        super().__init__(max_num_reqs, max_num_tokens, max_model_len, device)
 
         # NOTE(woosuk): This tensor can be extremely large (e.g., several GBs)
         # wasting a lot of CPU memory.
