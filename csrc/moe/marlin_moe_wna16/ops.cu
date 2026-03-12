@@ -429,6 +429,7 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
   cudaDeviceGetAttribute(&max_shared_mem,
                          cudaDevAttrMaxSharedMemoryPerBlockOptin, dev);
   TORCH_CHECK(max_shared_mem > 0);
+  int device_max_shared_mem = max_shared_mem;
 
   int major_capability, minor_capability;
   cudaDeviceGetAttribute(&major_capability, cudaDevAttrComputeCapabilityMajor,
@@ -519,10 +520,10 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
   }
 
   cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
-                       max_shared_mem);
+                       device_max_shared_mem);
   // avoid ">>>" being formatted to "> > >"
   // clang-format off
-  kernel<<<blocks, num_threads, max_shared_mem, stream>>>(
+  kernel<<<blocks, num_threads, sh_cache_size, stream>>>(
       A_ptr, B_ptr, C_ptr, C_tmp_ptr, bias_ptr, a_s_ptr, b_s_ptr, g_s_ptr, zp_ptr, g_idx_ptr,
       sorted_token_ids_ptr, expert_ids_ptr, num_tokens_past_padded_ptr,
       topk_weights_ptr, top_k, mul_topk_weights, num_groups, prob_m,
@@ -691,9 +692,8 @@ torch::Tensor moe_wna16_marlin_gemm(
   torch::Tensor c_tmp;
   if (use_fp32_reduce && !use_atomic_add) {
     // max num of threadblocks is sms * 4
-    long max_c_tmp_size = min(
-        (long)size_n * sorted_token_ids.size(0),
-        (long)sms * 4 * moe_block_size * MARLIN_NAMESPACE_NAME::max_thread_n);
+    long max_c_tmp_size =
+        (long)sms * 4 * moe_block_size * MARLIN_NAMESPACE_NAME::max_thread_n;
     if (moe_block_size == 8) max_c_tmp_size *= 2;
     c_tmp = torch::empty({max_c_tmp_size}, options_fp32);
   } else {
