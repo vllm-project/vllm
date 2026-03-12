@@ -339,26 +339,91 @@ class SpeculativeConfig:
         return hf_config
 
     def __post_init__(self):
-        # Note: "method" is a new parameter that helps to extend the
-        # configuration of non-model-based proposers, and the "model" parameter
-        # will be used to set the draft model, eagle head, or additional weight
-        # when needed. If users do not specify "method", the speculative method
-        # will be detected automatically if possible. If the speculative method
-        # can not be detected, it will be considered as the "draft_model" by
-        # default.
-
-        # infer method from user args
+        self._normalize_aliases()
         if self.method is None:
-            if self.model in ("ngram", "[ngram]"):
-                self.method = "ngram"
-            else:
-                self.method = "draft_model"
+            self.method = self._detect_method()
 
+        if self.method in ("ngram", "ngram_gpu"):
+            self._init_ngram_family()
+        elif self.method == "suffix":
+            self._init_legacy_body()  # TODO: replace with _init_suffix_family()
+        elif self.method == "mtp":
+            self._init_legacy_body()  # TODO: replace with _init_mtp_family()
+        elif self.method in ("eagle", "eagle3", "extract_hidden_states"):
+            self._init_legacy_body()  # TODO: replace with _init_eagle_family()
+        else:
+            self._init_legacy_body()  # TODO: replace with _init_draft_model_family()
+
+        return self
+
+    def _normalize_aliases(self) -> None:
+        """Normalize deprecated method aliases to their canonical names."""
+        if self.method == "[ngram]":
+            self.method = "ngram"
         if self.method in get_args(MTPModelTypes) and self.method != "mtp":
             logger.warning(
                 "method `%s` is deprecated and replaced with mtp.", self.method
             )
             self.method = "mtp"
+
+    def _detect_method(self) -> SpeculativeMethod | None:
+        """
+        Detect the speculative method from user-provided arguments without
+        loading model weights. Returns None if detection requires inspecting
+        hf_config; that happens later inside _init_draft_model_family().
+        """
+        if self.model in ("ngram", "[ngram]"):
+            return "ngram"
+        if self.model == "ngram_gpu":
+            return "ngram_gpu"
+        if self.model == "suffix":
+            return "suffix"
+        if self.model == "extract_hidden_states":
+            return "extract_hidden_states"
+        return None
+
+    def _init_ngram_family(self) -> None:
+        """ngram / ngram_gpu: token-matching proposers, no model loading."""
+        if self.model is None:
+            self.model = "ngram" if self.method == "ngram" else "ngram_gpu"
+
+        # Set default values if not provided
+        if self.prompt_lookup_min is None and self.prompt_lookup_max is None:
+            # TODO(woosuk): Tune these values. They are arbitrarily chosen.
+            self.prompt_lookup_min = 5
+            self.prompt_lookup_max = 5
+        elif self.prompt_lookup_min is None:
+            if self.prompt_lookup_max is None:
+                raise ValueError(
+                    "Either prompt_lookup_max or prompt_lookup_min must be "
+                    "provided when using the ngram method."
+                )
+            self.prompt_lookup_min = self.prompt_lookup_max
+        elif self.prompt_lookup_max is None:
+            if self.prompt_lookup_min is None:
+                raise ValueError(
+                    "Either prompt_lookup_max or prompt_lookup_min must be "
+                    "provided when using the ngram method."
+                )
+            self.prompt_lookup_max = self.prompt_lookup_min
+
+        if self.prompt_lookup_min > self.prompt_lookup_max:
+            raise ValueError(
+                f"prompt_lookup_min={self.prompt_lookup_min} must "
+                f"be <= prompt_lookup_max={self.prompt_lookup_max}"
+            )
+
+        # Reuse target model config for vocab_size info only.
+        self.draft_model_config = self.target_model_config
+        self.draft_parallel_config = self.target_parallel_config
+
+    def _init_legacy_body(self) -> None:
+        """
+        Original __post_init__ logic. Replaced family by family with dedicated
+        _init_X_family() methods; delete once all families are implemented.
+        """
+        if self.method is None:
+            self.method = "draft_model"
 
         if self.model is None and self.num_speculative_tokens is not None:
             if self.method == "mtp":
@@ -374,7 +439,7 @@ class SpeculativeConfig:
                 # --quantization fp8 with a bf16 checkpoint.
                 if not self.quantization:
                     self.quantization = self.target_model_config.quantization
-            elif self.method in ("ngram", "[ngram]"):
+            elif self.method == "ngram":
                 self.model = "ngram"
             elif self.method == "ngram_gpu":
                 self.model = "ngram_gpu"
@@ -386,9 +451,6 @@ class SpeculativeConfig:
                 raise ValueError(
                     "num_speculative_tokens was provided but without speculative model."
                 )
-
-        if self.method in ("ngram", "[ngram]"):
-            self.method = "ngram"
 
         if self.method in ("ngram", "ngram_gpu"):
             # Set default values if not provided
@@ -479,17 +541,11 @@ class SpeculativeConfig:
                     config_format=self.target_model_config.config_format,
                 )
 
-                # Automatically detect the method
+                # Detect method from hf_config now that ModelConfig is loaded.
+                # Eagle methods are excluded: method='eagle' or 'eagle3' must be
+                # declared explicitly rather than inferred from the model path.
                 if self.method in ("eagle", "eagle3"):
                     pass
-                # examples:
-                # yuhuili/EAGLE-LLaMA3-Instruct-8B
-                # yuhuili/EAGLE3-LLaMA3.1-Instruct-8B
-                # AngelSlim/Qwen3-8B_eagle3
-                elif "eagle-" in self.draft_model_config.model.lower():
-                    self.method = "eagle"
-                elif "eagle3" in self.draft_model_config.model.lower():
-                    self.method = "eagle3"
                 elif self.draft_model_config.hf_config.model_type == "medusa":
                     self.method = "medusa"
                 elif self.draft_model_config.hf_config.model_type == "mlp_speculator":
@@ -518,7 +574,11 @@ class SpeculativeConfig:
                     pass
                 else:
                     raise NotImplementedError(
-                        f"Unsupported speculative method: '{self.method}'"
+                        f"Unsupported speculative method: '{self.method}' "
+                        f"(hf_config.model_type="
+                        f"'{self.draft_model_config.hf_config.model_type}'). "
+                        "If using an EAGLE model, set method='eagle' or "
+                        "method='eagle3' explicitly."
                     )
 
                 # Replace hf_config for EAGLE draft_model
@@ -604,7 +664,6 @@ class SpeculativeConfig:
                         self.target_parallel_config, self.draft_tensor_parallel_size
                     )
                 )
-        return self
 
     def _validate_suffix_decoding(self):
         if not has_arctic_inference():
