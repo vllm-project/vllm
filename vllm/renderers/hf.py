@@ -99,7 +99,13 @@ def _try_get_processor_chat_template(
     return None
 
 
-def resolve_chat_template(tokenizer, chat_template, tools, *, model_config):
+def resolve_chat_template(
+    tokenizer: "HfTokenizer",
+    chat_template: str | None,
+    tools: list[dict[str, Any]] | None,
+    *,
+    model_config: "ModelConfig",
+) -> str | None:
     # 1st priority: The given chat template
     if chat_template is not None:
         # FIX: Check if the tokenizer has named templates and if our string is one of those names
