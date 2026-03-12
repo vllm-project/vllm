@@ -1162,7 +1162,7 @@ class EngineCoreProc(EngineCore):
         # background threads (like NIXL handshake) to make progress.
         # Without this, the tight polling loop can starve background threads.
         if not model_executed and self.scheduler.has_requests():
-            time.sleep(0.1)
+            time.sleep(0.001)
 
         return model_executed
 
