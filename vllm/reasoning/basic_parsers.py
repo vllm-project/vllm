@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import regex as re
 from abc import abstractmethod
 from collections.abc import Iterable, Sequence
 from itertools import islice
@@ -11,12 +12,8 @@ from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
 from vllm.tokenizers import TokenizerLike
 
 if TYPE_CHECKING:
-    from vllm.entrypoints.openai.chat_completion.protocol import (
-        ChatCompletionRequest,
-    )
-    from vllm.entrypoints.openai.responses.protocol import (
-        ResponsesRequest,
-    )
+    from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+    from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 else:
     ChatCompletionRequest = Any
     ResponsesRequest = Any
@@ -27,11 +24,8 @@ class BaseThinkingReasoningParser(ReasoningParser):
     Base class for reasoning parsers that use thinking tokens.
 
     This class provides common functionality for parsers that use start and end
-    tokens to delimit reasoning content (
-        e.g., <think>...</think>, <seed:think>...</seed:think>).
-
-    Subclasses must implement the start and end tokens via abstract
-    properties.
+    tokens to delimit reasoning content (e.g., <think>...</think>,
+    <seed:think>...</seed:think>).
     """
 
     @property
@@ -60,6 +54,7 @@ class BaseThinkingReasoningParser(ReasoningParser):
 
         self.start_token_id = self.vocab.get(self.start_token)
         self.end_token_id = self.vocab.get(self.end_token)
+        
         if self.start_token_id is None or self.end_token_id is None:
             raise RuntimeError(
                 f"{self.__class__.__name__} reasoning parser could not locate "
@@ -78,15 +73,11 @@ class BaseThinkingReasoningParser(ReasoningParser):
         return False
 
     def is_reasoning_end_streaming(
-        self, input_ids: Sequence[int], delta_ids: Iterable[int]
-    ) -> bool:
-        end_token_id = self.end_token_id
-        return end_token_id in delta_ids
+        self, input_ids: Sequence[int], delta_ids: Iterable[int]) -> bool:
+        return self.end_token_id in delta_ids
 
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
-        """
-        Extract the content after the end tokens
-        """
+        """Extract the content after the end tokens."""
         if self.end_token_id not in islice(input_ids, 0, max(0, len(input_ids) - 1)):
             return []
         else:
@@ -104,85 +95,86 @@ class BaseThinkingReasoningParser(ReasoningParser):
         """
         Extract reasoning content from a delta message.
         Handles streaming output where previous + delta = current.
-        Uses token IDs for faster processing.
         """
-        # Skip single special tokens
         if len(delta_token_ids) == 1 and (
-            delta_token_ids[0] in [self.start_token_id, self.end_token_id]
-        ):
+            delta_token_ids[0] in [self.start_token_id, self.end_token_id]):
             return None
 
-        # Check if start token is present in previous or delta.
-        # Keep compatibility with models that don't generate start tokens.
         if self.start_token_id in previous_token_ids:
             if self.end_token_id in delta_token_ids:
-                # start token in previous, end token in delta,
-                # extract reasoning content
                 end_index = delta_text.find(self.end_token)
                 reasoning = delta_text[:end_index]
                 content = delta_text[end_index + len(self.end_token) :]
                 return DeltaMessage(
-                    reasoning=reasoning, content=content if content else None
-                )
+                    reasoning=reasoning, content=content if content else None)
             elif self.end_token_id in previous_token_ids:
-                # start token in previous, end token in previous,
-                # reasoning content continues
                 return DeltaMessage(content=delta_text)
             else:
-                # start token in previous, no end token in previous or delta,
-                # reasoning content continues
                 return DeltaMessage(reasoning=delta_text)
+                
         elif self.start_token_id in delta_token_ids:
             if self.end_token_id in delta_token_ids:
-                # start token in delta, end token in delta,
-                # extract reasoning content
                 start_index = delta_text.find(self.start_token)
                 end_index = delta_text.find(self.end_token)
                 reasoning = delta_text[start_index + len(self.start_token) : end_index]
                 content = delta_text[end_index + len(self.end_token) :]
                 return DeltaMessage(
-                    reasoning=reasoning, content=content if content else None
-                )
+                    reasoning=reasoning, content=content if content else None)
             else:
-                # start token in delta, no end token in delta,
-                # reasoning content continues
                 return DeltaMessage(reasoning=delta_text)
         else:
-            # not find thinking start token
             return DeltaMessage(content=delta_text)
 
     def extract_reasoning(
         self, model_output: str, request: ChatCompletionRequest | ResponsesRequest
-    ) -> tuple[str | None, str | None]:
+                         ) -> tuple[str | None, str]:
         """
-        Extract reasoning content from the model output.
-
-        This is the base implementation that works for most models.
-        Subclasses can override this method for specific behavior.
+        Extract reasoning and content from model output,
+        supporting both standard tags and escaped <\think> tags.
         """
-        # Check if the start token is present in the model output, remove it
-        # if it is present.
-        model_output_parts = model_output.partition(self.start_token)
-        model_output = (
-            model_output_parts[2] if model_output_parts[1] else model_output_parts[0]
-        )
+        if not model_output or not self.start_token or not self.end_token:
+            return None, model_output.strip()
 
-        # For models that may not generate start token,
-        # assume the reasoning content is always at the start.
-        if self.end_token not in model_output:
-            return model_output, None
-        else:
-            reasoning, _, content = model_output.partition(self.end_token)
-            # If generation stops right after end-of-think, return null content
-            final_content = content or None
-            return reasoning, final_content
+        # 构建正则模式，并处理转义（如 <\think>）
+    start_pattern = re.escape(self.start_token).replace(r"\<", r"\<\\?")
+    end_pattern = (
+        re.escape(self.end_token)
+        .replace(r"\<", r"\<\\?")
+        .replace(r"\/", r"\\?\/")
+    )
+    full_pattern = rf"({start_pattern})(.*?)({end_pattern})"
+
+    # 使用 finditer 进行匹配
+    matches = list(re.finditer(full_pattern, model_output, re.DOTALL))
+        
+        if not matches:
+            return None, model_output.strip()
+
+        reasoning_parts = []
+        content_parts = []
+        last_end = 0
+
+        for match in matches:
+            _ = match.group(1)
+            reasoning_text = match.group(2)
+            
+            # Text before the start tag belongs to main content
+            content_parts.append(model_output[last_end : match.start()])
+            # Text inside tags belongs to reasoning
+            reasoning_parts.append(reasoning_text.strip())
+            # Update cursor
+            last_end = match.end()
+
+        # Add remaining trailing text to main content
+        content_parts.append(model_output[last_end:].strip())
+
+        final_reasoning = "\n".join(reasoning_parts).strip()
+        final_content = "".join(content_parts).strip()
+
+        return final_reasoning if final_reasoning else None, final_content
 
     def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
-        """Count tokens that fall within start/end thinking markers.
-
-        Uses a depth counter so nested spans are handled safely and stray end
-        tokens do not drive the counter negative.
-        """
+        """Count tokens that fall within start/end thinking markers."""
         count = 0
         depth = 0
         for token_id in token_ids:
@@ -196,3 +188,4 @@ class BaseThinkingReasoningParser(ReasoningParser):
             if depth > 0:
                 count += 1
         return count
+        
