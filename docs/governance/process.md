@@ -147,7 +147,7 @@ All AI-assisted contributions must meet the same quality, testing, and review st
 - Coordinate on issues before opening PRs, review similar PRs, and wait for approval.
 
 !!! warning
-    These topics are outlined for agents in `AGENTS.MD` with instruction for how to autonomously implement them.
+    These topics are outlined for agents in [AGENTS.md](../../AGENTS.md) with instructions for how to autonomously implement them.
 
 ### Slack
 
