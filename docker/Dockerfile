@@ -714,7 +714,8 @@ ENV UV_INDEX_STRATEGY="unsafe-best-match"
 ENV UV_LINK_MODE=copy
 
 RUN apt-get update -y \
-    && apt-get install -y git
+    && apt-get install -y git libsodium23 \
+    && rm -rf /var/lib/apt/lists/*
 
 # We can specify the standard or nightly build of PyTorch
 ARG PYTORCH_NIGHTLY
@@ -744,6 +745,15 @@ RUN --mount=type=cache,target=/root/.cache/uv \
             --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
         fi \
     fi
+
+# install CI-specific test dependencies previously fetched at test runtime
+COPY requirements/test-ci.txt requirements/test-ci.txt
+COPY requirements/kv_connectors.txt requirements/kv_connectors.txt
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --system --no-build-isolation -r requirements/test-ci.txt \
+    && uv pip install --system torchao==0.14.1 \
+        --index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
+    && uv pip install --system -r requirements/kv_connectors.txt
 
 # install development dependencies (for testing)
 RUN --mount=type=cache,target=/root/.cache/uv \

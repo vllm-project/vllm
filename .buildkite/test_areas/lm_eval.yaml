@@ -84,7 +84,6 @@ steps:
   - vllm/model_executor/layers/quantization
   - tests/evals/gpt_oss/
   commands:
-    - uv pip install --system 'gpt-oss[eval]==0.0.5'
     - pytest -s -v evals/gpt_oss/test_gpqa_correctness.py --config-list-file=configs/models-h100.txt
 
 - label: GPQA Eval (GPT-OSS) (B200)
@@ -97,5 +96,4 @@ steps:
   - vllm/model_executor/layers/quantization
   - tests/evals/gpt_oss/
   commands:
-    - uv pip install --system 'gpt-oss[eval]==0.0.5'
     - pytest -s -v evals/gpt_oss/test_gpqa_correctness.py --config-list-file=configs/models-b200.txt
