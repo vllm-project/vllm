@@ -1222,9 +1222,8 @@ class GPUModelRunner(
                 if req_index is None:
                     req_state.prev_num_draft_len = 0
                 else:
-                    # Correction of num_computed_tokens is deferred to
-                    # _finalize_spec_cpu_state (after model forward). Here we
-                    # optimistically assume all spec tokens are accepted
+                    # Optimistically assume all accepted; corrected on GPU in
+                    # _prepare_inputs, on CPU in _finalize_spec_cpu_state.
                     num_accepted = req_state.prev_num_draft_len
                     self.spec_reqs_to_fix[req_id] = num_accepted
                     req_state.output_token_ids.extend([-1] * num_accepted)
@@ -1893,17 +1892,8 @@ class GPUModelRunner(
         )
         self.discard_request_mask.copy_to_gpu(num_reqs)
 
-        # Copy input_batch.num_accepted_tokens_cpu into
-        # self.num_accepted_tokens, then sync to GPU.
-        # Hybrid: input_batch.num_accepted_tokens_cpu has correct values,
-        #   set by _update_states_after_model_execute (async copy, needs
-        #   event sync).
-        # Non-hybrid: input_batch.num_accepted_tokens_cpu is always 1
-        #   (default), which is wrong for draft requests. In async mode,
-        #   self.num_accepted_tokens.gpu is corrected by
-        #   update_num_computed_tokens_for_batch_change below. In sync
-        #   mode, self.num_accepted_tokens.gpu is unused (only GDN/Mamba2
-        #   attention builders consume it).
+        # Sync num_accepted_tokens from CPU (set by
+        # _update_states_after_model_execute for hybrid models).
         if self.num_accepted_tokens_event is not None:
             self.num_accepted_tokens_event.synchronize()
             self.num_accepted_tokens.np[:num_reqs] = (
@@ -1915,12 +1905,10 @@ class GPUModelRunner(
             self.num_accepted_tokens.np.fill(1)
             self.num_accepted_tokens.gpu.fill_(1)
 
-        # Update num_computed_tokens on GPU.
-        # For async spec decode, the CPU values are optimistic (assume all
-        # draft tokens accepted). For requests that had drafts, we
-        # correct via: prev_gpu + valid_count. For requests without previous drafts
-        # (e.g. prefills), CPU values are already correct.
-        # For non-async paths, all CPU values are already corrected.
+        # Update num_computed_tokens on GPU. In async spec decode,
+        # CPU values are optimistic (all drafts accepted). The kernel
+        # corrects on GPU using the previous step's
+        # valid_sampled_token_count_gpu. Otherwise, just copy from CPU.
         if (
             self.use_async_spec_decode
             and self.valid_sampled_token_count_gpu is not None
@@ -1930,7 +1918,6 @@ class GPUModelRunner(
             cpu_values = self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs].to(
                 device=self.device, non_blocking=True
             )
-
             update_num_computed_tokens_for_batch_change(
                 self.num_computed_tokens,
                 self.num_accepted_tokens.gpu[:num_reqs],
