@@ -46,7 +46,7 @@ logger = init_logger(__name__)
 
 class DFlashQwen3Attention(nn.Module):
     """Cross-attention for DFlash: K/V from concat(context, query),
-    Q from query only."""
+    Q from query only. Adapted from Qwen3Attention."""
 
     def __init__(
         self,
@@ -124,6 +124,7 @@ class DFlashQwen3Attention(nn.Module):
         assert context_states is not None
         num_context = context_states.shape[0]
 
+        # TODO(ben): Is this safe to do when PIECEWISE graphs are on?
         concat_states = torch.cat([context_states, hidden_states], dim=0)
         qkv, _ = self.qkv_proj(concat_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)

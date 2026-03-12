@@ -1083,7 +1083,7 @@ def dflash_config():
     target_model = "Qwen/Qwen3-8B"
     draft_model = "z-lab/Qwen3-8B-DFlash-b16"
 
-    # Note, DFlash should enable both disable_padded_drafter_batch
+    # Note, DFlash should set both disable_padded_drafter_batch
     # and parallel_drafting automatically on startup
     return dict(
         model=target_model,
@@ -1099,7 +1099,7 @@ def dflash_config():
         gpu_memory_utilization=0.85,
         enforce_eager=False,
         disable_log_stats=False,
-        attention_config={"backend": "FLASH_ATTN"},
+        attention_config={"backend": "FLASH_ATTN"},  # Required for non-causal attention
     )
 
 

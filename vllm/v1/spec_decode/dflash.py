@@ -31,7 +31,9 @@ class DFlashProposer(SpecDecodeBaseProposer):
             runner=runner,
         )
 
+        # Only next_token_ids and mask tokens are query tokens, all other context is K/V
         self.max_query_tokens = self.max_batch_size * (1 + self.num_speculative_tokens)
+        # Positions covers both context states + query states
         self.max_positions = self.max_num_tokens + self.max_query_tokens
 
         # Expand data structures related to positions, since they must hold enough
@@ -72,7 +74,7 @@ class DFlashProposer(SpecDecodeBaseProposer):
         num_query_total = batch_size * num_query_per_req
         num_all_positions = num_context + num_query_total
 
-        # Store for propose() to use
+        # Store for build_model_inputs_first_pass to use
         self._dflash_num_context = num_context
         self._dflash_num_positions = num_all_positions
 
@@ -99,8 +101,10 @@ class DFlashProposer(SpecDecodeBaseProposer):
         all_positions = self.positions[:num_all_positions]
         block_numbers = all_positions // block_size
 
+        # TODO(ben): This may cause a sync, use output_size if possible
         req_lens = cad.query_start_loc[1:] - cad.query_start_loc[:-1]
         ctx_req_idx = torch.repeat_interleave(self.arange[:batch_size], req_lens)
+        assert ctx_req_idx.shape[0] == num_context
         q_req_idx = torch.repeat_interleave(self.arange[:batch_size], num_query_per_req)
         req_idx = torch.cat([ctx_req_idx, q_req_idx])
 
@@ -112,8 +116,6 @@ class DFlashProposer(SpecDecodeBaseProposer):
         offsets = self.arange[1 : self.num_speculative_tokens + 1]
         token_indices_to_sample = (base.unsqueeze(1) + offsets).flatten()
 
-        # 6. Build attention metadata for the query tokens.
-        # DFlash uses non-causal attention.
         new_query_start_loc = self.arange[: batch_size + 1] * num_query_per_req
         new_cad = CommonAttentionMetadata(
             query_start_loc=new_query_start_loc,
@@ -130,7 +132,7 @@ class DFlashProposer(SpecDecodeBaseProposer):
             max_seq_len=cad.max_seq_len + num_query_per_req,
             block_table_tensor=cad.block_table_tensor,
             slot_mapping=slot_mapping,
-            causal=False,
+            causal=False,  # Non-causal attention is required for DFlash
         )
 
         return num_query_total, token_indices_to_sample, new_cad
