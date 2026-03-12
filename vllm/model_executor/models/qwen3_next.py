@@ -657,45 +657,6 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         a: torch.Tensor,
         core_attn_out: torch.Tensor,
     ):
-        if not self.enable_packed_recurrent_decode:
-            return self._forward_core_baseline(mixed_qkv, b, a, core_attn_out)
-
-        forward_context = get_forward_context()
-        attn_metadata: AttentionMetadata = forward_context.attn_metadata
-
-        if attn_metadata is None:
-            return
-
-        assert isinstance(attn_metadata, dict)
-        attn_metadata = attn_metadata[self.prefix]
-        assert isinstance(attn_metadata, GDNAttentionMetadata)
-
-        if (
-            attn_metadata.spec_sequence_masks is not None
-            or attn_metadata.num_prefills > 0
-            or attn_metadata.num_decodes == 0
-        ):
-            return self._forward_core_baseline(mixed_qkv, b, a, core_attn_out)
-
-        return self._forward_core_decode_non_spec(
-            mixed_qkv=mixed_qkv,
-            b=b,
-            a=a,
-            core_attn_out=core_attn_out,
-            attn_metadata=attn_metadata,
-            virtual_engine=forward_context.virtual_engine,
-        )
-
-    def _forward_core_baseline(
-        self,
-        mixed_qkv: torch.Tensor,
-        b: torch.Tensor,
-        a: torch.Tensor,
-        core_attn_out: torch.Tensor,
-    ):
-        """
-        Core attention computation (called by custom op).
-        """
         forward_context = get_forward_context()
         attn_metadata: AttentionMetadata = forward_context.attn_metadata
 
@@ -706,6 +667,22 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         assert isinstance(attn_metadata, dict)
         attn_metadata = attn_metadata[self.prefix]
         assert isinstance(attn_metadata, GDNAttentionMetadata)
+
+        if (
+            self.enable_packed_recurrent_decode
+            and attn_metadata.spec_sequence_masks is None
+            and attn_metadata.num_prefills == 0
+            and attn_metadata.num_decodes > 0
+        ):
+            return self._forward_core_decode_non_spec(
+                mixed_qkv=mixed_qkv,
+                b=b,
+                a=a,
+                core_attn_out=core_attn_out,
+                attn_metadata=attn_metadata,
+                virtual_engine=forward_context.virtual_engine,
+            )
+
         has_initial_state = attn_metadata.has_initial_state
         spec_query_start_loc = attn_metadata.spec_query_start_loc
         non_spec_query_start_loc = attn_metadata.non_spec_query_start_loc
