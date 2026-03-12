@@ -197,8 +197,16 @@ class HermesTransformer(Transformer):
         chunk = str(items[0])
         return chunk
 
-    dict = dict
-    list = list
+    def dict(self, items):
+        if items == [None]:
+            return {}
+        return dict(items)
+
+    def list(self, items):
+        if items == [None]:
+            return []
+        return list(items)
+
     pair = tuple
     null = lambda self, _: None
     true = lambda self, _: True

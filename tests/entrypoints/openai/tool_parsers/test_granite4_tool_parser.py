@@ -177,6 +177,42 @@ def test_parser_invalid_input():
         )
 
 
+def test_empty_data_structures():
+    empty_dict = (
+        '<tool_call>\n{"name": "get_current_time", "arguments": {}}\n</tool_call>'
+    )
+    tool_calls = []
+
+    parser = HermesToolCallParser(
+        lambda x: None,
+        lambda x: tool_calls.append(x),
+        lambda x: None,
+    )
+
+    parser.feed(empty_dict)
+    parser.finish()
+
+    assert tool_calls == [{"name": "get_current_time", "arguments": {}}]
+
+    empty_list = (
+        "<tool_call>\n"
+        '{"name": "get_current_time", "arguments": {"where": []}}\n'
+        "</tool_call>"
+    )
+    tool_calls = []
+
+    parser = HermesToolCallParser(
+        lambda x: None,
+        lambda x: tool_calls.append(x),
+        lambda x: None,
+    )
+
+    parser.feed(empty_list)
+    parser.finish()
+
+    assert tool_calls == [{"name": "get_current_time", "arguments": {"where": []}}]
+
+
 # Test that we get the text right away
 def test_text_pipeline_depth():
     parsed_text = []
@@ -262,9 +298,8 @@ def test_tool_call_parser_complex():
         lambda x: tool_calls.append(x),
         lambda x: streamed_text_chunks.append(x),
     )
-    print(parser.parser.options.lexer)
+
     input_dicts = create_complex_input()
-    print(input_dicts)
 
     formatted_tcs = [
         "<tool_call> " + json.dumps(call) + " </tool_call>" for call in input_dicts
@@ -286,7 +321,6 @@ def test_tool_call_parser_complex():
         + formatted_tcs[2]
         + text_messages[3]
     )
-    print(test_input)
     parser.feed(test_input)
 
     streamed_text = "".join(streamed_text_chunks)
