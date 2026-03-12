@@ -7,6 +7,7 @@ import torch.nn as nn
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.tasks import GenerationTask
 from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
@@ -60,6 +61,28 @@ class DefaultModelState(ModelState):
                 max_model_len=self.max_model_len,
                 device=self.device,
             )
+
+    def get_supported_generation_tasks(self) -> tuple[GenerationTask, ...]:
+        from vllm.model_executor.models.interfaces import (
+            supports_realtime,
+            supports_transcription,
+        )
+        from vllm.model_executor.models.interfaces_base import is_text_generation_model
+
+        tasks = list[GenerationTask]()
+
+        if is_text_generation_model(self.model):
+            tasks.append("generate")
+
+        if supports_transcription(self.model):
+            if self.model.supports_transcription_only:
+                return ("transcription",)
+            tasks.append("transcription")
+
+        if supports_realtime(self.model):
+            tasks.append("realtime")
+
+        return tuple(tasks)
 
     def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
         if self.uses_mrope:
