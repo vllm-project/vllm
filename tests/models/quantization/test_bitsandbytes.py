@@ -138,6 +138,7 @@ def test_load_pp_4bit_bnb_model(model_name, description) -> None:
     compare_two_settings(model_name, common_args, pp_args)
 
 
+@pytest.mark.skip(reason="Need to add support for quantizing MoE experts with bnb in transformers")
 @pytest.mark.skipif(
     not is_quant_method_supported("bitsandbytes"),
     reason="bitsandbytes is not supported on this GPU type.",
