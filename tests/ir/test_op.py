@@ -55,6 +55,7 @@ def test_registration_overloads():
     assert custom_div.name == "_custom_div"
     assert "_custom_div" not in IrOp.registry
 
+    # Duplicate op registration not allowed
     with pytest.raises(AssertionError):
 
         @vllm.ir.register_op
