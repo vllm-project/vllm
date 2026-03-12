@@ -90,19 +90,16 @@ class KimiAudioWhisperEncoder(WhisperEncoder):
         model_path = vllm_config.model_config.model
 
         # Load WhisperConfig from the subfolder
-        whisper_dir = f"{model_path}/{KIMIA_WHISPER_SUBFOLDER}"
-        whisper_config = HFWhisperConfig.from_pretrained(whisper_dir)
-
-        # Temporarily replace hf_config for WhisperEncoder.__init__()
-        original_config = vllm_config.model_config.hf_config
-        vllm_config.model_config.hf_config = whisper_config
-
-        super().__init__(
-            vllm_config=vllm_config, prefix=prefix, init_in_fp32=init_in_fp32
+        whisper_config = HFWhisperConfig.from_pretrained(
+            model_path,
+            subfolder=KIMIA_WHISPER_SUBFOLDER,
         )
 
-        # Restore original config
-        vllm_config.model_config.hf_config = original_config
+        super().__init__(
+            vllm_config=vllm_config.with_hf_config(whisper_config),
+            prefix=prefix,
+            init_in_fp32=init_in_fp32,
+        )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
