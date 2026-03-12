@@ -1,12 +1,14 @@
 use std::time::Duration;
 
 use bytes::Bytes;
+use thiserror_ext::AsReport;
 use tokio::sync::mpsc;
 use tokio::time::timeout;
 use zeromq::prelude::{Socket, SocketRecv, SocketSend};
 use zeromq::{PullSocket, RouterRecvHalf, RouterSendHalf, RouterSocket, ZmqMessage};
 
-use crate::client::{Error, ReadyMessage, Result};
+use crate::client::ReadyMessage;
+use crate::error::{Error, Result};
 use crate::protocol::{EngineCoreOutputs, decode_msgpack};
 
 pub struct ConnectedTransport {
@@ -23,25 +25,18 @@ pub async fn connect(
     ready_timeout: Duration,
 ) -> Result<ConnectedTransport> {
     let mut input_socket = RouterSocket::new();
-    input_socket
-        .bind(input_address)
-        .await
-        .map_err(|error| Error::Transport(error.to_string()))?;
+    input_socket.bind(input_address).await?;
 
     let ready = timeout(ready_timeout, input_socket.recv())
         .await
         .map_err(|_| Error::ReadyTimeout {
             timeout: ready_timeout,
-        })?
-        .map_err(|error| Error::Transport(error.to_string()))?;
+        })??;
 
     let ready_message = decode_ready_message(ready, engine_identity)?;
 
     let mut output_socket = PullSocket::new();
-    output_socket
-        .connect(output_address)
-        .await
-        .map_err(|error| Error::Transport(error.to_string()))?;
+    output_socket.connect(output_address).await?;
 
     let (input_send, input_recv) = input_socket.split();
 
@@ -98,10 +93,8 @@ pub async fn send_message(
     ])
     .expect("router messages must contain identity and payload");
 
-    input_send
-        .send(message)
-        .await
-        .map_err(|error| Error::Transport(error.to_string()))
+    input_send.send(message).await?;
+    Ok(())
 }
 
 pub fn spawn_output_loop(
@@ -113,7 +106,7 @@ pub fn spawn_output_loop(
             let message = match output_socket.recv().await {
                 Ok(message) => message,
                 Err(error) => {
-                    let _ = tx.send(Err(Error::Transport(error.to_string()))).await;
+                    let _ = tx.send(Err(Error::Transport(error))).await;
                     return;
                 }
             };
@@ -145,7 +138,9 @@ pub fn spawn_input_monitor(
             let message = match input_recv.recv().await {
                 Ok(message) => message,
                 Err(error) => {
-                    let _ = tx.send(Err(Error::ControlClosed(error.to_string()))).await;
+                    let _ = tx
+                        .send(Err(Error::ControlClosed(error.to_report_string())))
+                        .await;
                     return;
                 }
             };

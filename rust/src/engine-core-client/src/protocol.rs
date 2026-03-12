@@ -8,7 +8,7 @@ use serde_default::DefaultFromSerde;
 use serde_repr::{Deserialize_repr, Serialize_repr};
 use serde_tuple::{Deserialize_tuple, Serialize_tuple};
 
-use crate::client::{Error, Result};
+use crate::error::{Error, Result};
 
 /// Dynamic msgpack value used for schema positions that are preserved but not
 /// yet strongly typed in the early-stage Rust client.
