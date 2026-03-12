@@ -351,6 +351,11 @@ class OutputProcessor:
         self.stream_interval = stream_interval
         self.request_states: dict[str, RequestState] = {}
         self.parent_requests: dict[str, ParentRequest] = {}
+        # Parent request states for parallel sampling child requests.
+        # When a parent request finishes, its RequestState is moved here
+        # so that child requests (which complete later) can still access
+        # the queue and other parent state.
+        self.parent_states: dict[str, RequestState] = {}
         self.lora_states = LoRARequestStates(log_stats)
         self.tracer: Tracer | None = None
         self._requests_drained = asyncio.Event()
@@ -475,8 +480,16 @@ class OutputProcessor:
             req_state = self.request_states.get(req_id)
 
             if req_state is None:
-                if (engine_core_output.parent_request_id is not None and engine_core_output.child_index > 0):
-                    parent_req_state = pending_parent_states.get(engine_core_output.parent_request_id)
+                if (engine_core_output.parent_request_id is not None
+                        and engine_core_output.child_index > 0):
+                    # Child request from parallel sampling.
+                    # First try pending_parent_states (same iteration, PD disaggregation),
+                    # then try self.parent_states (later iterations, PD colocated).
+                    parent_req_state = pending_parent_states.get(
+                        engine_core_output.parent_request_id
+                    ) or self.parent_states.get(
+                        engine_core_output.parent_request_id
+                    )
                     if parent_req_state is not None:
                         child_request_output = self._make_child_request_output(
                             engine_core_output, parent_req_state)
@@ -543,8 +556,15 @@ class OutputProcessor:
                 # pending_parent_states.pop(req_id, None)
                 # Remove parent request if applicable.
                 parent_req = req_state.parent_req
-                if parent_req and not parent_req.child_requests:
-                    self.parent_requests.pop(parent_req.request_id, None)
+                if parent_req:
+                    if parent_req.child_requests:
+                        # Parent request finished but children still running.
+                        # Save parent state so children can access it later.
+                        self.parent_states[parent_req.request_id] = req_state
+                    else:
+                        # All children finished, clean up parent request.
+                        self.parent_requests.pop(parent_req.request_id, None)
+                        self.parent_states.pop(parent_req.request_id, None)
                 if not self.request_states:
                     self._requests_drained.set()
                 if not engine_core_output.finished:
@@ -581,28 +601,38 @@ class OutputProcessor:
             parent_req_state: The RequestState of the parent request.
 
         Returns:
-            A RequestOutput for the child request, or None if aggregation
-            is not complete yet (in FINAL_ONLY mode).
+            A RequestOutput for the child request, or None if:
+            - The request is not finished (finish_reason is None)
+            - Aggregation is not complete yet (in FINAL_ONLY mode)
         """
+        # If the request is not finished, don't construct CompletionOutput.
+        if engine_core_output.finish_reason is None:
+            return None
+
         parent_req = parent_req_state.parent_req
         assert parent_req is not None, (
             "Child request requires parent_req_state to have parent_req"
         )
 
-        finished = engine_core_output.finish_reason is not None
-        delta = parent_req_state.output_kind == RequestOutputKind.DELTA
+        finished = True  # finish_reason is not None
 
-        if parent_req_state.detokenizer is not None:
-            text = parent_req_state.detokenizer.output_text
-            token_ids = parent_req_state.detokenizer.output_token_ids
+        # Unified handling: use engine_core_output's data directly
+        # token_ids from engine_core_output
+        token_ids = engine_core_output.new_token_ids
+
+        # Detokenize using tokenizer
+        if self.tokenizer is not None:
+            text = self.tokenizer.decode(token_ids)
         else:
             text = ""
-            token_ids = engine_core_output.new_token_ids
 
-        if parent_req_state.logprobs_processor is not None:
+        # logprobs: try engine_core_output first, fallback to parent_req_state
+        if engine_core_output.new_logprobs is not None:
+            # TODO: Implement logprobs conversion from LogprobsLists
+            logprobs = None
+            cumulative_logprob = None
+        elif parent_req_state.logprobs_processor is not None:
             logprobs = parent_req_state.logprobs_processor.logprobs
-            if delta and logprobs:
-                logprobs = logprobs[-len(token_ids):]
             cumulative_logprob = parent_req_state.logprobs_processor.cumulative_logprob
         else:
             logprobs = None
@@ -614,8 +644,7 @@ class OutputProcessor:
             token_ids=token_ids,
             logprobs=logprobs,
             cumulative_logprob=cumulative_logprob,
-            finish_reason=str(engine_core_output.finish_reason)
-            if engine_core_output.finish_reason else None,
+            finish_reason=str(engine_core_output.finish_reason),
             stop_reason=engine_core_output.stop_reason,
         )
 

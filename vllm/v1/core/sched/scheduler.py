@@ -1113,15 +1113,23 @@ class Scheduler(SchedulerInterface):
             # Check for stop and update request status.
             child_requests: list[Request] = []
             if new_token_ids:
+                is_first_token = request.num_output_tokens == 0
                 new_token_ids, stopped = self._update_request_with_output(
                     request, new_token_ids
                 )
                 # Split parallel sampling request after prefill completes.
                 if (
-                    stopped
+                    is_first_token
                     and request.parallel_sampling_n > 1
                 ):
-                    child_requests = self._split_parallel_sampling_request(request)
+                    # Determine if this is PD disaggregation scenario.
+                    # If connector exists, child requests need to be forwarded
+                    # to D-side via KV Transfer. Otherwise, child requests
+                    # continue decode on this instance (PD colocated).
+                    is_pd_disaggregation = self.connector is not None
+                    child_requests = self._split_parallel_sampling_request(
+                        request, is_pd_disaggregation=is_pd_disaggregation
+                    )
             # Stop checking for pooler models.
             pooler_output = None
             if pooler_outputs:
@@ -1177,44 +1185,48 @@ class Scheduler(SchedulerInterface):
                 )
 
                 # Generate EngineCoreOutput for child requests (parallel sampling).
-                # Child requests share the parent's first token and need kv_transfer_params
-                # to be forwarded to D side in PD disaggregation scenario.
-                for child_request in child_requests:
-                    child_kv_transfer_params = None
-                    if self.connector is not None:
+                # This is ONLY needed for PD disaggregation scenario, where child
+                # requests must be forwarded to D-side via EngineCoreOutput with
+                # kv_transfer_params.
+                # For PD colocated scenario, child requests continue decode on
+                # this instance, so they will generate their own EngineCoreOutput
+                # in subsequent iterations.
+                if self.connector is not None:  # PD disaggregation only
+                    for child_request in child_requests:
                         # Child request status is FINISHED_LENGTH_CAPPED,
                         # so _connector_finished will generate kv_transfer_params.
                         _, child_kv_transfer_params = self._connector_finished(
                             child_request)
 
-                    # Child shares parent's first token.
-                    child_new_token_ids = list(new_token_ids) if new_token_ids else []
+                        # Child shares parent's first token and logprobs.
+                        child_new_token_ids = list(new_token_ids) if new_token_ids else []
 
-                    if child_new_token_ids or child_kv_transfer_params:
-                        outputs[child_request.client_index].append(
-                            EngineCoreOutput(
-                                request_id=child_request.request_id,
-                                new_token_ids=child_new_token_ids,
-                                finish_reason=child_request.get_finished_reason(
-                                ),
-                                new_logprobs=None,  # Child logprobs handled on D side
-                                new_prompt_logprobs_tensors=None,
-                                pooling_output=None,
-                                stop_reason=None,
-                                events=[],
-                                kv_transfer_params=child_kv_transfer_params,
-                                trace_headers=child_request.trace_headers,
-                                num_cached_tokens=child_request.num_cached_tokens,
-                                num_nans_in_logits=0,
-                                parent_request_id=child_request.parent_request_id,
-                                child_index=child_request.child_index,
-                            ))
+                        if child_new_token_ids or child_kv_transfer_params:
+                            outputs[child_request.client_index].append(
+                                EngineCoreOutput(
+                                    request_id=child_request.request_id,
+                                    new_token_ids=child_new_token_ids,
+                                    finish_reason=child_request.get_finished_reason(
+                                    ),
+                                    # Child shares parent's first token logprobs
+                                    new_logprobs=new_logprobs,
+                                    new_prompt_logprobs_tensors=None,
+                                    pooling_output=None,
+                                    stop_reason=None,
+                                    events=[],
+                                    kv_transfer_params=child_kv_transfer_params,
+                                    trace_headers=child_request.trace_headers,
+                                    num_cached_tokens=child_request.num_cached_tokens,
+                                    num_nans_in_logits=0,
+                                    parent_request_id=child_request.parent_request_id,
+                                    child_index=child_request.child_index,
+                                ))
 
-                    # Mark child request as finished.
-                    self.finished_req_ids.add(child_request.request_id)
-                    if self.finished_req_ids_dict is not None:
-                        self.finished_req_ids_dict[child_request.client_index].add(
-                            child_request.request_id)
+                        # Mark child request as finished.
+                        self.finished_req_ids.add(child_request.request_id)
+                        if self.finished_req_ids_dict is not None:
+                            self.finished_req_ids_dict[child_request.client_index].add(
+                                child_request.request_id)
             else:
                 # Invariant: EngineCore returns no partial prefill outputs.
                 assert not prompt_logprobs_tensors
@@ -1300,7 +1312,31 @@ class Scheduler(SchedulerInterface):
                 break
         return new_token_ids, stopped
 
-    def _split_parallel_sampling_request(self, request: Request) -> list[Request]:
+    def _split_parallel_sampling_request(
+        self,
+        request: Request,
+        is_pd_disaggregation: bool = True,
+    ) -> list[Request]:
+        """Split a parallel sampling request (n > 1) after prefill completes.
+
+        This method creates n-1 child requests that share the parent's prefill
+        KV cache via block_hashes. The behavior differs based on deployment mode:
+
+        - PD Disaggregation (is_pd_disaggregation=True):
+            Child requests are forwarded to D-side via EngineCoreOutput.
+            Status = FINISHED_LENGTH_CAPPED, NOT added to waiting queue.
+
+        - PD Colocated (is_pd_disaggregation=False):
+            Child requests continue decode on the same instance.
+            Status = RUNNING, added to waiting queue for scheduling.
+
+        Args:
+            request: The parent request to split.
+            is_pd_disaggregation: Whether this is a PD disaggregation scenario.
+
+        Returns:
+            List of created child requests (excluding the parent which becomes child 0).
+        """
         n = request.parallel_sampling_n
         if n <= 1:
             return []
@@ -1357,18 +1393,28 @@ class Scheduler(SchedulerInterface):
 
             # Copy the first output token from parent.
             if request._output_token_ids:
+                from vllm.v1.utils import ConstantList
                 child_request._output_token_ids = request._output_token_ids.copy()
                 child_request._all_token_ids = request._all_token_ids.copy()
+                child_request.output_token_ids = ConstantList(
+                    child_request._output_token_ids)
+                child_request.all_token_ids = ConstantList(
+                    child_request._all_token_ids)
 
-            # Set status to FINISHED_LENGTH_CAPPED so that _connector_finished
-            # will generate kv_transfer_params for KV Transfer to D side.
-            # Note: This is specifically for PD disaggregation scenario where
-            # child requests need to be forwarded to D side after prefill.
-            child_request.status = RequestStatus.FINISHED_LENGTH_CAPPED
+            if is_pd_disaggregation:
+                # PD Disaggregation: child requests are forwarded to D-side.
+                # Set status to FINISHED_LENGTH_CAPPED so that _connector_finished
+                # will generate kv_transfer_params for KV Transfer to D-side.
+                child_request.status = RequestStatus.FINISHED_LENGTH_CAPPED
+                # NOT added to any queue - forwarded via EngineCoreOutput.
+            else:
+                # PD Colocated: child requests continue decode on this instance.
+                # Set status to RUNNING and add to running queue for immediate
+                # decode scheduling in the next iteration.
+                child_request.status = RequestStatus.WAITING
+                self.waiting.append(child_request)
 
-            # Add to scheduler (but NOT to waiting queue).
-            # Child requests will be forwarded to D side via EngineCoreOutput
-            # and kv_transfer_params.
+            # Add to scheduler's request map.
             self.requests[child_id] = child_request
 
             child_requests.append(child_request)

@@ -331,17 +331,41 @@ class AsyncLLM(EngineClient):
         parent_params = params
         assert isinstance(parent_params, SamplingParams)
 
-        # Check if this is a KV producer (P-side in PD disaggregation).
-        # P-side uses delayed split: keep as single request, split after prefill.
-        # D-side or non-PD scenario uses immediate split: create n child requests.
-        is_kv_producer = (
-            self.vllm_config.kv_transfer_config is not None
-            and self.vllm_config.kv_transfer_config.is_kv_producer
+        # Determine the parallel sampling strategy based on deployment mode:
+        #
+        # 1. PD Disaggregation - P-side (KV producer):
+        #    - Delayed split: prefill once, then forward child requests to D-side
+        #    - Child requests NOT added to waiting queue
+        #
+        # 2. PD Disaggregation - D-side (KV consumer):
+        #    - Immediate split: create n child requests at entry
+        #    - Each child request loads KV cache and decodes independently
+        #
+        # 3. PD Colocated (non-disaggregation):
+        #    - Delayed split: prefill once, then child requests continue decode
+        #    - Child requests added to waiting queue for scheduling
+        kv_transfer_config = self.vllm_config.kv_transfer_config
+        is_kv_consumer = (
+            kv_transfer_config is not None
+            and kv_transfer_config.is_kv_consumer
         )
 
-        if is_kv_producer:
-            # P-side (KV producer): delayed split for PD disaggregation.
-            # Keep as single request, set parallel_sampling_n for later split.
+        if is_kv_consumer:
+            # D-side (KV consumer) in PD disaggregation: immediate split.
+            # Each child request loads KV cache from P-side and decodes independently.
+            parent_request = ParentRequest(request_id, parent_params)
+            for idx in range(parent_params.n):
+                child_req_id, child_params = parent_request.get_child_info(idx)
+                child_request = request if idx == parent_params.n - 1 else copy(request)
+                child_request.request_id = child_req_id
+                child_request.sampling_params = child_params
+                await self._add_request(
+                    child_request, prompt_text, parent_request, idx, queue
+                )
+            return queue
+        else:
+            # P-side (KV producer) or PD colocated: delayed split.
+            # Keep as single request for prefill, split after prefill completes.
             request.parallel_sampling_n = parent_params.n
             parent_request = ParentRequest(request_id, parent_params)
             # Set n=1 for prefill (execute prefill only once).
@@ -352,19 +376,6 @@ class AsyncLLM(EngineClient):
                 _, _ = parent_request.get_child_info(idx)
 
             await self._add_request(request, prompt_text, parent_request, 0, queue)
-            return queue
-        else:
-            # D-side (KV consumer) or non-PD scenario: immediate split.
-            # Fan out n child requests for independent sampling.
-            parent_request = ParentRequest(request_id, parent_params)
-            for idx in range(parent_params.n):
-                child_req_id, child_params = parent_request.get_child_info(idx)
-                child_request = request if idx == parent_params.n - 1 else copy(request)
-                child_request.request_id = child_req_id
-                child_request.sampling_params = child_params
-                await self._add_request(
-                    child_request, prompt_text, parent_request, idx, queue
-                )
             return queue
 
     async def _add_request(
