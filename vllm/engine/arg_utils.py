@@ -48,6 +48,7 @@ from vllm.config import (
     ModelConfig,
     MultiModalConfig,
     ObservabilityConfig,
+    OffloadBackend,
     OffloadConfig,
     ParallelConfig,
     PoolerConfig,
@@ -447,7 +448,7 @@ class EngineArgs:
     )
     disable_sliding_window: bool = ModelConfig.disable_sliding_window
     disable_cascade_attn: bool = ModelConfig.disable_cascade_attn
-    offload_backend: str = OffloadConfig.offload_backend
+    offload_backend: OffloadBackend = OffloadConfig.offload_backend
     cpu_offload_gb: float = UVAOffloadConfig.cpu_offload_gb
     cpu_offload_params: set[str] = get_field(UVAOffloadConfig, "cpu_offload_params")
     offload_group_size: int = PrefetchOffloadConfig.offload_group_size

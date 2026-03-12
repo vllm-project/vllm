@@ -116,29 +116,29 @@ class PassConfig:
     """
 
     # New flags
-    fuse_norm_quant: bool = Field(default=None)
+    fuse_norm_quant: bool | None = Field(default=None)
     """Fuse the custom RMSNorm + quant ops."""
-    fuse_act_quant: bool = Field(default=None)
+    fuse_act_quant: bool | None = Field(default=None)
     """Fuse the custom SiluMul + quant ops."""
-    fuse_attn_quant: bool = Field(default=None)
+    fuse_attn_quant: bool | None = Field(default=None)
     """Fuse the custom attention + quant ops."""
     eliminate_noops: bool = Field(default=True)
     """Eliminate no-op ops."""
-    enable_sp: bool = Field(default=None)
+    enable_sp: bool | None = Field(default=None)
     """Enable sequence parallelism. Requires TP>1. Automatically disabled
     if the model's hidden_size is too small for SP to be beneficial
     (threshold is device-capability dependent)."""
-    fuse_gemm_comms: bool = Field(default=None)
+    fuse_gemm_comms: bool | None = Field(default=None)
     """Enable async TP."""
-    fuse_allreduce_rms: bool = Field(default=None)
+    fuse_allreduce_rms: bool | None = Field(default=None)
     """Enable flashinfer allreduce fusion."""
     enable_qk_norm_rope_fusion: bool = False
     """Enable fused Q/K RMSNorm + RoPE pass."""
 
     # ROCm/AITER specific fusions
-    fuse_act_padding: bool = Field(default=None)
+    fuse_act_padding: bool | None = Field(default=None)
     """Fuse the custom RMSNorm + padding ops."""
-    fuse_rope_kvcache: bool = Field(default=None)
+    fuse_rope_kvcache: bool | None = Field(default=None)
     """Fuse the QK rope + KV cache ops."""
 
     rope_kvcache_fusion_max_token_num: int = 256
@@ -405,7 +405,7 @@ class CompilationConfig:
     """
 
     # Top-level Compilation control
-    mode: CompilationMode = Field(default=None)
+    mode: CompilationMode | None = Field(default=None)
     """The compilation approach used for torch.compile-based compilation of the
     model.
 
@@ -523,7 +523,7 @@ class CompilationConfig:
     constructor, e.g. `CompilationConfig(inductor_passes={"a": func})`."""
 
     # CudaGraph compilation
-    cudagraph_mode: CUDAGraphMode = Field(default=None)
+    cudagraph_mode: CUDAGraphMode = Field(default=None)  # type: ignore[assignment]
     """
     The mode of the cudagraph:
 
@@ -585,7 +585,7 @@ class CompilationConfig:
     When `enable_lora` is False, this option has no effect.
     """
 
-    use_inductor_graph_partition: bool = Field(default=None)
+    use_inductor_graph_partition: bool = Field(default=False)
     """Use inductor graph partition to split the graph at cudagraph_unsafe ops.
     This partition happens at inductor codegen time after all passes and fusions
     are finished. It generates a single `call` function which wraps
@@ -728,7 +728,7 @@ class CompilationConfig:
         return hash_factors(factors)
 
     def __repr__(self) -> str:
-        exclude = {
+        exclude: dict[str, bool | dict[str, bool]] = {
             "static_forward_context": True,
             "enabled_custom_ops": True,
             "disabled_custom_ops": True,
@@ -740,7 +740,7 @@ class CompilationConfig:
         }
 
         # exclude default attr in pass_config
-        pass_config_exclude = {}
+        pass_config_exclude: dict[str, bool] = {}
         for attr, default_val in vars(PassConfig()).items():
             if getattr(self.pass_config, attr) == default_val:
                 pass_config_exclude[attr] = True

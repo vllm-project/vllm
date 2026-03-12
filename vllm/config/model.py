@@ -140,7 +140,7 @@ class ModelConfig:
     """Convert the model using adapters defined in
     [vllm.model_executor.models.adapters][]. The most common use case is to
     adapt a text generation model to be used for pooling tasks."""
-    tokenizer: str = Field(default=None)
+    tokenizer: str = Field(default=None)  # type: ignore[assignment]
     """Name or path of the Hugging Face tokenizer to use. If unspecified, model
     name or path will be used."""
     tokenizer_mode: TokenizerMode | str = "auto"
@@ -196,7 +196,7 @@ class ModelConfig:
     """The specific revision to use for the tokenizer on the Hugging Face Hub.
     It can be a branch name, a tag name, or a commit id. If unspecified, will
     use the default version."""
-    max_model_len: int = Field(default=None, ge=-1)
+    max_model_len: int = Field(default=None, ge=-1)  # type: ignore[assignment]
     """Model context length (prompt and output). If unspecified, will be
     automatically derived from the model config.
 
