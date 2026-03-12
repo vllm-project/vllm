@@ -1053,7 +1053,7 @@ def unified_attention(
 
     # Detect KV cache type from the actual tensor dtype (set by caller via .view()).
     # This is the authoritative signal — independent of which scale args are passed.
-    use_fp8_kv = k.dtype.is_floating_point() and k.element_size() == 1
+    use_fp8_kv = k.is_floating_point() and k.element_size() == 1
     use_int8_kv = k.dtype == torch.int8
 
     # INT8 scale granularity — only meaningful when use_int8_kv is True.
