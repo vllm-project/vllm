@@ -231,6 +231,44 @@ class Grok1MoE(nn.Module):
         final_hidden_states = self.experts(hidden_states, router_logits)
         return final_hidden_states.view(orig_shape)
 
+    def try_load_pre_sharded_expert_weight(
+        self,
+        param: nn.Parameter,
+        loaded_weight: torch.Tensor,
+        shard_id: str,
+        expert_id: int,
+    ) -> bool:
+        if loaded_weight.ndim == 0 or shard_id not in ("w1", "w2", "w3"):
+            return False
+
+        local_expert_id = self.experts._map_global_expert_id_to_local_expert_id(
+            expert_id
+        )
+        if local_expert_id == -1:
+            return True
+
+        expert_data = param.data[local_expert_id]
+        shard_dim = {"w1": 0, "w2": 1, "w3": 0}[shard_id]
+        if getattr(param, "is_transposed", False):
+            shard_dim = int(not shard_dim)
+
+        if shard_id in ("w1", "w3"):
+            shard_size = expert_data.shape[shard_dim]
+            if self.experts.moe_config.is_act_and_mul:
+                shard_size //= 2
+            shard_offset = 0 if shard_id == "w1" else shard_size
+            param_slice = expert_data.narrow(shard_dim, shard_offset, shard_size)
+        else:
+            param_slice = expert_data
+
+        if loaded_weight.shape != param_slice.shape:
+            return False
+
+        param_slice.copy_(
+            loaded_weight.to(device=param_slice.device, dtype=param_slice.dtype)
+        )
+        return True
+
 
 class Grok1Attention(nn.Module):
     def __init__(
@@ -528,6 +566,52 @@ class Grok1Model(nn.Module):
             num_experts=num_experts,
         )
 
+    def load_moe_expert_weights(
+        self,
+        name: str,
+        loaded_weight: torch.Tensor,
+        params_dict: dict[str, nn.Parameter],
+        loaded_params: set[str],
+        expert_params_mapping: list[tuple[str, str, int, str]],
+        modules_dict: dict[str, nn.Module],
+    ) -> bool:
+        for param_name, weight_name, expert_id, shard_id in expert_params_mapping:
+            if weight_name not in name:
+                continue
+
+            full_param_name = name.replace(weight_name, param_name)
+
+            if is_pp_missing_parameter(full_param_name, self):
+                continue
+            if (
+                full_param_name.endswith(".bias") or full_param_name.endswith("_bias")
+            ) and full_param_name not in params_dict:
+                continue
+
+            param = params_dict[full_param_name]
+            parent_name, _, _ = full_param_name.partition(".experts.")
+            parent_module = modules_dict.get(parent_name)
+            if isinstance(
+                parent_module, Grok1MoE
+            ) and parent_module.try_load_pre_sharded_expert_weight(
+                param, loaded_weight, shard_id, expert_id
+            ):
+                loaded_params.add(full_param_name)
+                return True
+
+            weight_loader = param.weight_loader
+            weight_loader(
+                param,
+                loaded_weight,
+                full_param_name,
+                shard_id=shard_id,
+                expert_id=expert_id,
+            )
+            loaded_params.add(full_param_name)
+            return True
+
+        return False
+
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
@@ -539,6 +623,7 @@ class Grok1Model(nn.Module):
         ]
 
         params_dict = dict(self.named_parameters())
+        modules_dict = dict(self.named_modules())
         loaded_params: set[str] = set()
         expert_params_mapping = self.get_expert_mapping()
         for name, loaded_weight in weights:
@@ -583,54 +668,39 @@ class Grok1Model(nn.Module):
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
-                for mapping in expert_params_mapping:
-                    param_name, weight_name, expert_id, shard_id = mapping
-                    if weight_name not in name:
-                        continue
-                    name = name.replace(weight_name, param_name)
-                    # Skip layers on other devices.
-                    if is_pp_missing_parameter(name, self):
-                        continue
-                    if (
-                        name.endswith(".bias") or name.endswith("_bias")
-                    ) and name not in params_dict:
-                        continue
-                    param = params_dict[name]
-                    weight_loader = param.weight_loader
-                    weight_loader(
-                        param,
-                        loaded_weight,
-                        name,
-                        shard_id=shard_id,
-                        expert_id=expert_id,
-                    )
-                    break
-                else:
-                    # Skip loading extra bias for GPTQ models.
-                    if (
-                        name.endswith(".bias") or name.endswith("_bias")
-                    ) and name not in params_dict:
-                        continue
-                    # Skip layers on other devices.
-                    if is_pp_missing_parameter(name, self):
-                        continue
+                if self.load_moe_expert_weights(
+                    name,
+                    loaded_weight,
+                    params_dict,
+                    loaded_params,
+                    expert_params_mapping,
+                    modules_dict,
+                ):
+                    continue
 
-                    # Remapping the name of FP8 kv-scale.
-                    name = maybe_remap_kv_scale_name(name, params_dict)
-                    if name is None:
-                        continue
+                # Skip loading extra bias for GPTQ models.
+                if (
+                    name.endswith(".bias") or name.endswith("_bias")
+                ) and name not in params_dict:
+                    continue
+                # Skip layers on other devices.
+                if is_pp_missing_parameter(name, self):
+                    continue
 
-                    # Handle Grok1-specific norm.scale naming
-                    if "norm.scale" in name:
-                        name = name.replace("scale", "weight")
+                # Remapping the name of FP8 kv-scale.
+                name = maybe_remap_kv_scale_name(name, params_dict)
+                if name is None:
+                    continue
 
-                    if name not in params_dict:
-                        continue
-                    param = params_dict[name]
-                    weight_loader = getattr(
-                        param, "weight_loader", default_weight_loader
-                    )
-                    weight_loader(param, loaded_weight)
+                # Handle Grok1-specific norm.scale naming
+                if "norm.scale" in name:
+                    name = name.replace("scale", "weight")
+
+                if name not in params_dict:
+                    continue
+                param = params_dict[name]
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                weight_loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params
 
