@@ -62,17 +62,21 @@ VLLM_USE_PRECOMPILED=1 uv pip install -e .
 
 # If you are also making C/C++ changes:
 uv pip install -e .
-
-# If you need to run tests:
-uv pip install pytest tblib
-
-# If you need to match the CI environment:
-uv pip install -r requirements/text.txt
 ```
 
 ### Running tests
 
+Tests require extra dependencies.
+All versions for test dependencies should be read from `requirements/test.txt`
+
 ```bash
+# Install bare minimum test dependencies:
+uv pip install pytest==<requirements/test.txt version>
+uv pip install tblib==<requirements/test.txt version>
+
+# Install additional required dependencies from `requirements/test.txt` as needed:
+uv pip install <requirements/test.txt dependency>==<requirements/test.txt version>
+
 # Run specific test from specific test file
 pytest tests/path/to/test.py -v -s -k test_name
 
