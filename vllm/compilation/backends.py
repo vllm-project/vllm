@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import ast
-import contextvars
 import dataclasses
 import hashlib
 import json
@@ -10,6 +9,7 @@ import operator
 import os
 import pprint
 import time
+from collections import defaultdict
 from collections.abc import Callable, Generator, Sequence
 from contextlib import contextmanager
 from copy import deepcopy
@@ -18,7 +18,7 @@ from typing import Any
 
 import torch
 import torch.fx as fx
-from torch._dispatch.python import enable_python_dispatcher
+from torch._dynamo.utils import dynamo_timed
 from torch._logging._internal import trace_structured
 
 import vllm.envs as envs
@@ -222,10 +222,28 @@ class CompilerManager:
     ) -> Callable[..., Any] | None:
         if (compile_range, graph_index, self.compiler.name) not in self.cache:
             return None
-        handle = self.cache[(compile_range, graph_index, self.compiler.name)]
+
+        def parse_value(value: Any) -> tuple[tuple[str, str], str]:
+            assert isinstance(value, dict)
+            handle = value["graph_handle"]
+            assert isinstance(handle[0], str)
+            assert isinstance(handle[1], str)
+            cache_key = value["cache_key"]
+            return handle, cache_key
+
+        try:
+            handle, cache_key = parse_value(
+                self.cache[(compile_range, graph_index, self.compiler.name)]
+            )
+        except Exception:
+            # When the cache is outdated, we should ignore the existing file.
+            # This should cause the correct cache to be generated again.
+            return None
+
         compiled_graph = self.compiler.load(
             handle, graph, example_inputs, graph_index, compile_range
         )
+        self.loaded_artifacts[cache_key] = compiled_graph
         logger.debug(
             "Directly load the %s-th graph for compile range %sfrom %s via handle %s",
             graph_index,
@@ -249,7 +267,7 @@ class CompilerManager:
         if graph_index == 0:
             # before compiling the first graph, record the start time
             global compilation_start_time
-            compilation_start_time = time.time()
+            compilation_start_time = time.perf_counter()
 
         compilation_counter.num_backend_compilations += 1
 
@@ -261,8 +279,7 @@ class CompilerManager:
             if graph_index == num_graphs - 1:
                 # after loading the last graph for this shape, record the time.
                 # there can be multiple graphs due to piecewise compilation.
-                now = time.time()
-                elapsed = now - compilation_start_time
+                elapsed = time.perf_counter() - compilation_start_time
                 compilation_config.compilation_time += elapsed
                 logger.info_once(
                     "Directly load the compiled graph(s) for compile range %s "
@@ -285,7 +302,7 @@ class CompilerManager:
         with self.compile_context(compile_range):
             # There is a compilation time optimization here.
             #
-            # If the (input metdata, graph, compiler config) are the same, then
+            # If the (input metadata, graph, compiler config) are the same, then
             # we want to avoid compiling the same artifact again. If we didn't
             # do this optimization, the backend compilation (InductorAdaptor or
             # InductorStandaloneAdaptor)
@@ -343,7 +360,10 @@ class CompilerManager:
 
         # store the artifact in the cache
         if is_compile_cache_enabled(additional_inductor_config) and handle is not None:
-            self.cache[(compile_range, graph_index, self.compiler.name)] = handle
+            self.cache[(compile_range, graph_index, self.compiler.name)] = {
+                "graph_handle": handle,
+                "cache_key": cache_key,
+            }
             compilation_counter.num_cache_entries_updated += 1
             self.is_cache_updated = True
             if graph_index == 0:
@@ -362,8 +382,7 @@ class CompilerManager:
 
         # after compiling the last graph, record the end time
         if graph_index == num_graphs - 1:
-            now = time.time()
-            elapsed = now - compilation_start_time
+            elapsed = time.perf_counter() - compilation_start_time
             compilation_config.compilation_time += elapsed
             logger.info_once(
                 "Compiling a graph for compile range %s takes %.2f s",
@@ -385,6 +404,71 @@ class SplitItem:
     graph_id: int
     is_splitting_graph: bool
     graph: fx.GraphModule
+
+
+def _is_empty_allocation_node(node: fx.Node) -> bool:
+    if node.op == "call_method":
+        return node.target == "new_empty"
+
+    if node.op != "call_function":
+        return False
+
+    target = node.target
+    if target in (torch.empty, torch.empty_like, torch.empty_strided):
+        return True
+
+    if isinstance(target, torch._ops.OpOverloadPacket):
+        packet_name = target._qualified_op_name
+    elif isinstance(target, torch._ops.OpOverload):
+        packet_name = target.name()
+    else:
+        return False
+
+    return packet_name.startswith("aten::empty") or packet_name.startswith(
+        "aten::new_empty"
+    )
+
+
+def _merge_empty_only_subgraphs(
+    node_to_subgraph_id: dict[fx.Node, int],
+    split_op_graphs: list[int],
+) -> None:
+    """
+    Merge a partition that only contains an empty allocation op into the
+    previous partition. This avoids generating standalone empty submodules,
+    which can lead to empty cudagraph captures.
+    """
+
+    nodes_by_subgraph_id: dict[int, list[fx.Node]] = defaultdict(list)
+    for node, subgraph_id in node_to_subgraph_id.items():
+        nodes_by_subgraph_id[subgraph_id].append(node)
+
+    splitting_subgraphs = set(split_op_graphs)
+    prev_non_splitting_subgraph_id: int | None = None
+
+    max_subgraph_id = max(node_to_subgraph_id.values(), default=-1)
+    for subgraph_id in range(max_subgraph_id + 1):
+        nodes = nodes_by_subgraph_id.get(subgraph_id, [])
+        if not nodes:
+            continue
+
+        is_non_splitting_subgraph = subgraph_id not in splitting_subgraphs
+        is_empty_only_subgraph = len(nodes) == 1 and _is_empty_allocation_node(nodes[0])
+        merged = False
+
+        if is_empty_only_subgraph and prev_non_splitting_subgraph_id is not None:
+            # Safety check: don't move allocation before any input producer.
+            empty_node = nodes[0]
+            if all(
+                input_node.op == "placeholder"
+                or node_to_subgraph_id[input_node] <= prev_non_splitting_subgraph_id
+                for input_node in empty_node.all_input_nodes
+            ):
+                node_to_subgraph_id[empty_node] = prev_non_splitting_subgraph_id
+                merged = True
+
+        if not merged and is_non_splitting_subgraph:
+            prev_non_splitting_subgraph_id = subgraph_id
 
 
 def split_graph(
@@ -424,6 +508,8 @@ def split_graph(
                 subgraph_id += 1
         else:
             node_to_subgraph_id[node] = subgraph_id
+
+    _merge_empty_only_subgraphs(node_to_subgraph_id, split_op_graphs)
 
     # `keep_original_order` is important!
     # otherwise pytorch might reorder the nodes and
@@ -512,9 +598,9 @@ def wrap_with_cudagraph_if_needed(
 
 class PiecewiseCompileInterpreter(torch.fx.Interpreter):  # type: ignore[misc]
     """Code adapted from `torch.fx.passes.shape_prop.ShapeProp`.
-    It runs the given graph with fake inputs, and compile some
-    submodules specified by `compile_submod_names` with the given
-    compilation configs.
+    It runs the given split graph interpreter, and for each submodule in
+    `compile_submod_names`, creates a PiecewiseBackend and compiles all
+    ranges up front.
 
     NOTE: the order in `compile_submod_names` matters, because
     it will be used to determine the order of the compiled piecewise
@@ -542,9 +628,6 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):  # type: ignore[misc]
         vllm_backend: "VllmBackend",
     ) -> None:
         super().__init__(module)
-        from torch._guards import detect_fake_mode
-
-        self.fake_mode = detect_fake_mode()
         self.compile_submod_names = compile_submod_names
         self.compilation_config = vllm_config.compilation_config
         self.vllm_config = vllm_config
@@ -554,13 +637,7 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):  # type: ignore[misc]
 
     @instrument(span_name="Inductor compilation")
     def run(self, *args: Any) -> Any:
-        # maybe instead just assert inputs are fake?
-        fake_args = [
-            self.fake_mode.from_tensor(t) if isinstance(t, torch.Tensor) else t
-            for t in args
-        ]
-        with self.fake_mode, enable_python_dispatcher():
-            return super().run(*fake_args)
+        return super().run(*args)
 
     def call_module(
         self,
@@ -615,21 +692,6 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):  # type: ignore[misc]
 # e.g. backbone/eagle_head
 model_tag: str = "backbone"
 model_is_encoder: bool = False
-
-_on_compilation_complete_callback: contextvars.ContextVar[Callable[[], None] | None] = (
-    contextvars.ContextVar("on_compilation_complete_callback", default=None)
-)
-
-
-@contextmanager
-def set_on_compilation_complete(
-    callback: Callable[[], None],
-) -> Generator[None, None, None]:
-    token = _on_compilation_complete_callback.set(callback)
-    try:
-        yield
-    finally:
-        _on_compilation_complete_callback.reset(token)
 
 
 @contextmanager
@@ -836,8 +898,8 @@ class VllmBackend:
                     "splitting_ops": list_to_str(cc.splitting_ops),
                     "cudagraph_mode": str(cc.cudagraph_mode),
                     "compile_sizes": list_to_str(cc.compile_sizes),
-                    "compile_ranges_split_points": list_to_str(
-                        cc.compile_ranges_split_points
+                    "compile_ranges_endpoints": list_to_str(
+                        cc.compile_ranges_endpoints
                     ),
                     "use_inductor_graph_partition": cc.use_inductor_graph_partition,
                     "inductor_passes": list_to_str(list(cc.inductor_passes.keys())),
@@ -848,6 +910,7 @@ class VllmBackend:
             ),
         )
 
+    @dynamo_timed("vllm_backend")
     def __call__(self, graph: fx.GraphModule, example_inputs: Sequence[Any]) -> Any:
         from .caching import (
             VllmSerializableFunction,
@@ -912,6 +975,13 @@ class VllmBackend:
         # Honors opt-outs such as CompilationMode.NONE or VLLM_DISABLE_COMPILE_CACHE.
         disable_cache = not is_compile_cache_enabled(self.inductor_config)
 
+        # TODO(patchy): ngram gpu kernel will cause vllm torch compile cache errors.
+        is_ngram_gpu_enabled = (
+            vllm_config.speculative_config is not None
+            and vllm_config.speculative_config.use_ngram_gpu()
+        )
+        disable_cache = disable_cache or is_ngram_gpu_enabled
+
         if disable_cache:
             logger.info_once("vLLM's torch.compile cache is disabled.", scope="local")
         else:
@@ -974,7 +1044,7 @@ class VllmBackend:
         compilation_counter.num_graphs_seen += 1
         from .monitor import torch_compile_start_time
 
-        dynamo_time = time.time() - torch_compile_start_time
+        dynamo_time = time.perf_counter() - torch_compile_start_time
         logger.info_once(
             "Dynamo bytecode transform time: %.2f s", dynamo_time, scope="local"
         )
@@ -1038,10 +1108,23 @@ class VllmBackend:
         ]
 
         # propagate the split graph to the piecewise backend,
-        # compile submodules with symbolic shapes
+        # compile submodules with symbolic shapes, and compile all ranges
+        # up front so that compilation is complete before the callable
+        # is returned.
         PiecewiseCompileInterpreter(
             self.split_gm, submod_names_to_compile, self.vllm_config, self
         ).run(*fake_args)
+
+        # All compilation is done. Save the cache.
+        time_before_saving = time.perf_counter()
+        self.compiler_manager.save_to_file()
+        elapsed = time.perf_counter() - time_before_saving
+        if elapsed > 1:
+            logger.info_once(
+                "Saved compiler manager cache in %.2f seconds.",
+                elapsed,
+                scope="local",
+            )
 
         from torch._guards import detect_fake_mode
 

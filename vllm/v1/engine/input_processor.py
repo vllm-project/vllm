@@ -22,10 +22,11 @@ from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
 )
 from vllm.multimodal.utils import argsort_mm_positions
+from vllm.platforms import current_platform
 from vllm.pooling_params import PoolingParams
 from vllm.renderers import BaseRenderer, renderer_from_config
 from vllm.sampling_params import SamplingParams
-from vllm.tasks import POOLING_TASKS, SupportedTask
+from vllm.tasks import GENERATION_TASKS, POOLING_TASKS, SupportedTask
 from vllm.tokenizers import TokenizerLike
 from vllm.utils import length_from_prompt_token_ids_or_embeds, random_uuid
 from vllm.utils.jsontree import json_iter_leaves
@@ -82,12 +83,16 @@ class InputProcessor:
     def _validate_params(
         self,
         params: SamplingParams | PoolingParams,
-        # TODO: Validate generation tasks as well once `supported_tasks`
-        # is passed to all `process_inputs` calls
-        supported_tasks: tuple[SupportedTask, ...] | None,
-    ):
+        supported_tasks: tuple[SupportedTask, ...],
+    ) -> None:
         """Raise `ValueError` if SamplingParams or PoolingParams is not valid."""
         if isinstance(params, SamplingParams):
+            supported_generation_tasks = [
+                task for task in supported_tasks if task in GENERATION_TASKS
+            ]
+            if not supported_generation_tasks:
+                raise ValueError("This model does not support generation")
+
             params.verify(
                 self.model_config,
                 self.speculative_config,
@@ -95,17 +100,13 @@ class InputProcessor:
                 self.tokenizer,
             )
         elif isinstance(params, PoolingParams):
-            if supported_tasks is None:
-                raise RuntimeError("`supported_tasks` must be passed for pooling")
-
             supported_pooling_tasks = [
                 task for task in supported_tasks if task in POOLING_TASKS
             ]
+            if not supported_pooling_tasks:
+                raise ValueError("This model does not support pooling")
 
             if params.task is None:
-                if not supported_pooling_tasks:
-                    raise ValueError("Pooling tasks are not supported")
-
                 if "token_embed" in supported_pooling_tasks:
                     params.task = "token_embed"
                 elif "token_classify" in supported_pooling_tasks:
@@ -166,7 +167,7 @@ class InputProcessor:
     @staticmethod
     def assign_request_id(request: EngineCoreRequest):
         """Replace the externally supplied request ID with an internal request ID
-        that adds 8 random characters in order to ensure uniquness.
+        that adds 8 random characters in order to ensure uniqueness.
         """
         if request.external_req_id is not None:
             raise ValueError(
@@ -188,17 +189,17 @@ class InputProcessor:
         request_id: str,
         prompt: PromptType | ProcessorInputs,
         params: SamplingParams | PoolingParams,
+        supported_tasks: tuple[SupportedTask, ...],
         arrival_time: float | None = None,
         lora_request: LoRARequest | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
         trace_headers: Mapping[str, str] | None = None,
         priority: int = 0,
         data_parallel_rank: int | None = None,
-        supported_tasks: tuple[SupportedTask, ...] | None = None,
         resumable: bool = False,
     ) -> EngineCoreRequest:
-        self._validate_lora(lora_request)
         self._validate_params(params, supported_tasks)
+        self._validate_lora(lora_request)
 
         parallel_config = self.vllm_config.parallel_config
         dp_size = parallel_config.data_parallel_size
@@ -211,11 +212,24 @@ class InputProcessor:
             )
 
         if isinstance(prompt, dict) and "type" in prompt:
+            if tokenization_kwargs:
+                logger.warning_once(
+                    "Passing tokenization_kwargs to InputProcessor is deprecated "
+                    "and will be removed in v0.18. You should instead pass "
+                    "them to Renderer.render_cmpl() or Renderer.render_chat()."
+                )
+
             if arrival_time is None:
                 arrival_time = prompt.get("arrival_time", time.time())  # type: ignore[assignment]
 
             processed_inputs: ProcessorInputs = prompt  # type: ignore[assignment]
         else:
+            logger.warning_once(
+                "Passing raw prompts to InputProcessor is deprecated "
+                "and will be removed in v0.18. You should instead pass "
+                "the outputs of Renderer.render_cmpl() or Renderer.render_chat()."
+            )
+
             if arrival_time is None:
                 arrival_time = time.time()
 
@@ -224,13 +238,7 @@ class InputProcessor:
                 tokenization_kwargs=tokenization_kwargs,
             )
 
-        from vllm.platforms import current_platform
-
-        current_platform.validate_request(
-            prompt=prompt,
-            params=params,
-            processed_inputs=processed_inputs,
-        )
+        current_platform.validate_request(processed_inputs, params)
 
         encoder_inputs, decoder_inputs = split_enc_dec_inputs(processed_inputs)
         self._validate_model_inputs(encoder_inputs, decoder_inputs)

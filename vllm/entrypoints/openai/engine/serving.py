@@ -2,9 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
 import json
-import sys
 import time
-import traceback
 from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from http import HTTPStatus
@@ -38,10 +36,10 @@ from vllm.entrypoints.openai.completion.protocol import (
     CompletionResponse,
 )
 from vllm.entrypoints.openai.engine.protocol import (
-    ErrorInfo,
     ErrorResponse,
     FunctionCall,
     FunctionDefinition,
+    GenerationError,
 )
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.openai.responses.context import (
@@ -61,17 +59,6 @@ from vllm.entrypoints.openai.speech_to_text.protocol import (
     TranscriptionRequest,
     TranscriptionResponse,
     TranslationRequest,
-)
-from vllm.entrypoints.pooling.classify.protocol import (
-    ClassificationChatRequest,
-    ClassificationCompletionRequest,
-    ClassificationResponse,
-)
-from vllm.entrypoints.pooling.embed.protocol import (
-    EmbeddingBytesResponse,
-    EmbeddingChatRequest,
-    EmbeddingCompletionRequest,
-    EmbeddingResponse,
 )
 from vllm.entrypoints.pooling.pooling.protocol import (
     IOProcessorRequest,
@@ -94,7 +81,7 @@ from vllm.entrypoints.serve.tokenize.protocol import (
     TokenizeCompletionRequest,
     TokenizeResponse,
 )
-from vllm.entrypoints.utils import get_max_tokens, sanitize_message
+from vllm.entrypoints.utils import create_error_response, get_max_tokens
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs.data import (
     ProcessorInputs,
@@ -128,15 +115,7 @@ from vllm.utils.async_utils import (
     collect_from_async_generator,
     merge_async_iterators,
 )
-
-
-class GenerationError(Exception):
-    """raised when finish_reason indicates internal server error (500)"""
-
-    def __init__(self, message: str = "Internal server error"):
-        super().__init__(message)
-        self.status_code = HTTPStatus.INTERNAL_SERVER_ERROR
-
+from vllm.utils.mistral import is_mistral_tokenizer
 
 logger = init_logger(__name__)
 
@@ -159,19 +138,13 @@ CompletionLikeRequest: TypeAlias = (
     CompletionRequest
     | TokenizeCompletionRequest
     | DetokenizeRequest
-    | EmbeddingCompletionRequest
-    | ClassificationCompletionRequest
     | RerankRequest
     | ScoreRequest
     | PoolingCompletionRequest
 )
 
 ChatLikeRequest: TypeAlias = (
-    ChatCompletionRequest
-    | TokenizeChatRequest
-    | EmbeddingChatRequest
-    | ClassificationChatRequest
-    | PoolingChatRequest
+    ChatCompletionRequest | TokenizeChatRequest | PoolingChatRequest
 )
 
 SpeechToTextRequest: TypeAlias = TranscriptionRequest | TranslationRequest
@@ -188,16 +161,12 @@ AnyRequest: TypeAlias = (
 AnyResponse: TypeAlias = (
     CompletionResponse
     | ChatCompletionResponse
-    | EmbeddingResponse
-    | EmbeddingBytesResponse
     | TranscriptionResponse
     | TokenizeResponse
     | PoolingResponse
-    | ClassificationResponse
     | ScoreResponse
     | GenerateResponse
 )
-
 
 RequestT = TypeVar("RequestT", bound=AnyRequest)
 
@@ -222,8 +191,7 @@ class ServeContext(Generic[RequestT]):
 
 class OpenAIServing:
     request_id_prefix: ClassVar[str] = """
-    A short string prepended to every request’s ID (e.g. "embd", "classify")
-    so you can easily tell “this ID came from Embedding vs Classification.”
+    A short string prepended to every request’s ID.
     """
 
     def __init__(
@@ -233,7 +201,6 @@ class OpenAIServing:
         *,
         request_logger: RequestLogger | None,
         return_tokens_as_token_ids: bool = False,
-        log_error_stack: bool = False,
     ):
         super().__init__()
 
@@ -243,8 +210,6 @@ class OpenAIServing:
 
         self.request_logger = request_logger
         self.return_tokens_as_token_ids = return_tokens_as_token_ids
-
-        self.log_error_stack = log_error_stack
 
         self.model_config = engine_client.model_config
         self.renderer = engine_client.renderer
@@ -272,13 +237,14 @@ class OpenAIServing:
 
         if prompt["type"] == "embeds":
             raise NotImplementedError("Embedding prompt not supported for beam search")
-        if prompt["type"] == "enc_dec":
-            raise NotImplementedError(
-                "Encoder-decoder prompt not supported for beam search"
-            )
 
-        prompt_text = prompt.get("prompt")
-        prompt_token_ids = prompt["prompt_token_ids"]
+        # Extract prompt tokens and text based on model type
+        decoder_prompt = (
+            prompt if prompt["type"] != "enc_dec" else prompt["decoder_prompt"]
+        )
+        prompt_text = decoder_prompt.get("prompt")
+        prompt_token_ids = decoder_prompt["prompt_token_ids"]
+
         tokenized_length = len(prompt_token_ids)
 
         logprobs_num = 2 * beam_width
@@ -454,8 +420,7 @@ class OpenAIServing:
         ctx: ServeContext,
     ) -> ErrorResponse | None:
         """
-        Default preprocessing hook. Subclasses may override
-        to prepare `ctx` (classification, embedding, etc.).
+        Default preprocessing hook. Subclasses may override to prepare `ctx`.
         """
         return None
 
@@ -534,133 +499,79 @@ class OpenAIServing:
         """Schedule the request and get the result generator."""
         generators: list[AsyncGenerator[PoolingRequestOutput, None]] = []
 
-        try:
-            trace_headers = (
-                None
-                if ctx.raw_request is None
-                else await self._get_trace_headers(ctx.raw_request.headers)
+        trace_headers = (
+            None
+            if ctx.raw_request is None
+            else await self._get_trace_headers(ctx.raw_request.headers)
+        )
+
+        pooling_params = self._create_pooling_params(ctx)
+        if isinstance(pooling_params, ErrorResponse):
+            return pooling_params
+
+        if ctx.engine_prompts is None:
+            return self.create_error_response("Engine prompts not available")
+
+        for i, engine_prompt in enumerate(ctx.engine_prompts):
+            request_id_item = f"{ctx.request_id}-{i}"
+
+            self._log_inputs(
+                request_id_item,
+                engine_prompt,
+                params=pooling_params,
+                lora_request=ctx.lora_request,
             )
 
-            pooling_params = self._create_pooling_params(ctx)
-            if isinstance(pooling_params, ErrorResponse):
-                return pooling_params
+            generator = self.engine_client.encode(
+                engine_prompt,
+                pooling_params,
+                request_id_item,
+                lora_request=ctx.lora_request,
+                trace_headers=trace_headers,
+                priority=getattr(ctx.request, "priority", 0),
+            )
 
-            if ctx.engine_prompts is None:
-                return self.create_error_response("Engine prompts not available")
+            generators.append(generator)
 
-            for i, engine_prompt in enumerate(ctx.engine_prompts):
-                request_id_item = f"{ctx.request_id}-{i}"
+        ctx.result_generator = merge_async_iterators(*generators)
 
-                self._log_inputs(
-                    request_id_item,
-                    engine_prompt,
-                    params=pooling_params,
-                    lora_request=ctx.lora_request,
-                )
-
-                generator = self.engine_client.encode(
-                    engine_prompt,
-                    pooling_params,
-                    request_id_item,
-                    lora_request=ctx.lora_request,
-                    trace_headers=trace_headers,
-                    priority=getattr(ctx.request, "priority", 0),
-                )
-
-                generators.append(generator)
-
-            ctx.result_generator = merge_async_iterators(*generators)
-
-            return None
-
-        except Exception as e:
-            return self.create_error_response(e)
+        return None
 
     async def _collect_batch(
         self,
         ctx: ServeContext,
     ) -> ErrorResponse | None:
         """Collect batch results from the result generator."""
-        try:
-            if ctx.engine_prompts is None:
-                return self.create_error_response("Engine prompts not available")
+        if ctx.engine_prompts is None:
+            return self.create_error_response("Engine prompts not available")
 
-            num_prompts = len(ctx.engine_prompts)
-            final_res_batch: list[PoolingRequestOutput | None]
-            final_res_batch = [None] * num_prompts
+        num_prompts = len(ctx.engine_prompts)
+        final_res_batch: list[PoolingRequestOutput | None]
+        final_res_batch = [None] * num_prompts
 
-            if ctx.result_generator is None:
-                return self.create_error_response("Result generator not available")
+        if ctx.result_generator is None:
+            return self.create_error_response("Result generator not available")
 
-            async for i, res in ctx.result_generator:
-                final_res_batch[i] = res
+        async for i, res in ctx.result_generator:
+            final_res_batch[i] = res
 
-            if None in final_res_batch:
-                return self.create_error_response(
-                    "Failed to generate results for all prompts"
-                )
+        if None in final_res_batch:
+            return self.create_error_response(
+                "Failed to generate results for all prompts"
+            )
 
-            ctx.final_res_batch = [res for res in final_res_batch if res is not None]
+        ctx.final_res_batch = [res for res in final_res_batch if res is not None]
 
-            return None
+        return None
 
-        except Exception as e:
-            return self.create_error_response(e)
-
+    @staticmethod
     def create_error_response(
-        self,
         message: str | Exception,
         err_type: str = "BadRequestError",
         status_code: HTTPStatus = HTTPStatus.BAD_REQUEST,
         param: str | None = None,
     ) -> ErrorResponse:
-        exc: Exception | None = None
-
-        if isinstance(message, Exception):
-            exc = message
-
-            from vllm.exceptions import VLLMValidationError
-
-            if isinstance(exc, VLLMValidationError):
-                err_type = "BadRequestError"
-                status_code = HTTPStatus.BAD_REQUEST
-                param = exc.parameter
-            elif isinstance(exc, (ValueError, TypeError, RuntimeError, OverflowError)):
-                # Common validation errors from user input
-                err_type = "BadRequestError"
-                status_code = HTTPStatus.BAD_REQUEST
-                param = None
-            elif isinstance(exc, NotImplementedError):
-                err_type = "NotImplementedError"
-                status_code = HTTPStatus.NOT_IMPLEMENTED
-                param = None
-            elif exc.__class__.__name__ == "TemplateError":
-                # jinja2.TemplateError (avoid importing jinja2)
-                err_type = "BadRequestError"
-                status_code = HTTPStatus.BAD_REQUEST
-                param = None
-            else:
-                err_type = "InternalServerError"
-                status_code = HTTPStatus.INTERNAL_SERVER_ERROR
-                param = None
-
-            message = str(exc)
-
-        if self.log_error_stack:
-            exc_type, _, _ = sys.exc_info()
-            if exc_type is not None:
-                traceback.print_exc()
-            else:
-                traceback.print_stack()
-
-        return ErrorResponse(
-            error=ErrorInfo(
-                message=sanitize_message(message),
-                type=err_type,
-                code=status_code.value,
-                param=param,
-            )
-        )
+        return create_error_response(message, err_type, status_code, param)
 
     def create_streaming_error_response(
         self,
@@ -687,16 +598,6 @@ class OpenAIServing:
                 request_id,
             )
             raise GenerationError("Internal server error")
-
-    def _convert_generation_error_to_response(
-        self, e: GenerationError
-    ) -> ErrorResponse:
-        """Convert GenerationError to ErrorResponse."""
-        return self.create_error_response(
-            str(e),
-            err_type="InternalServerError",
-            status_code=e.status_code,
-        )
 
     def _convert_generation_error_to_streaming_response(
         self, e: GenerationError
@@ -816,19 +717,14 @@ class OpenAIServing:
         token_num = len(input_ids)
         max_model_len = self.model_config.max_model_len
 
-        # Note: EmbeddingRequest, ClassificationRequest,
-        # and ScoreRequest doesn't have max_tokens
+        # Note: ScoreRequest doesn't have max_tokens
         if isinstance(
             request,
             (
-                EmbeddingChatRequest,
-                EmbeddingCompletionRequest,
                 ScoreDataRequest,
                 ScoreTextRequest,
                 ScoreQueriesDocumentsRequest,
                 RerankRequest,
-                ClassificationCompletionRequest,
-                ClassificationChatRequest,
             ),
         ):
             # Note: input length can be up to the entire model context length
@@ -838,8 +734,6 @@ class OpenAIServing:
                     ScoreDataRequest: "score",
                     ScoreTextRequest: "score",
                     ScoreQueriesDocumentsRequest: "score",
-                    ClassificationCompletionRequest: "classification",
-                    ClassificationChatRequest: "classification",
                 }
                 operation = operations.get(type(request), "embedding generation")
                 raise VLLMValidationError(
@@ -881,11 +775,15 @@ class OpenAIServing:
 
         if max_tokens is not None and token_num + max_tokens > max_model_len:
             raise VLLMValidationError(
-                "'max_tokens' or 'max_completion_tokens' is too large: "
-                f"{max_tokens}. This model's maximum context length is "
-                f"{max_model_len} tokens and your request has "
-                f"{token_num} input tokens ({max_tokens} > {max_model_len}"
-                f" - {token_num}).",
+                f"This model's maximum context length is "
+                f"{max_model_len} tokens. However, you requested "
+                f"{max_tokens} output tokens and your prompt contains "
+                f"{token_num} input tokens, for a total of "
+                f"{token_num + max_tokens} tokens "
+                f"({token_num} + {max_tokens} = "
+                f"{token_num + max_tokens} > {max_model_len}). "
+                f"Please reduce the length of the input prompt or the "
+                f"number of requested output tokens.",
                 parameter="max_tokens",
                 value=max_tokens,
             )
@@ -976,22 +874,26 @@ class OpenAIServing:
         tool_dicts: list[dict[str, Any]] | None = None,
         tool_parser: Callable[[TokenizerLike], ToolParser] | None = None,
     ) -> tuple[list[ConversationMessage], list[ProcessorInputs]]:
-        from vllm.tokenizers.mistral import MistralTokenizer
-
         renderer = self.renderer
 
         default_template_kwargs = merge_kwargs(
             default_template_kwargs,
             dict(
                 tools=tool_dicts,
-                tokenize=isinstance(renderer.tokenizer, MistralTokenizer),
+                tokenize=is_mistral_tokenizer(renderer.tokenizer),
             ),
         )
+
+        mm_config = self.model_config.multimodal_config
 
         tok_params = request.build_tok_params(self.model_config)
         chat_params = request.build_chat_params(
             default_template, default_template_content_format
-        ).with_defaults(default_template_kwargs)
+        ).with_defaults(
+            default_template_kwargs,
+            default_media_io_kwargs=(mm_config.media_io_kwargs if mm_config else None),
+            default_mm_processor_kwargs=getattr(request, "mm_processor_kwargs", None),
+        )
 
         (conversation,), (engine_prompt,) = await renderer.render_chat_async(
             [messages],

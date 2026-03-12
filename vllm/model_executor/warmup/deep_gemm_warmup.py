@@ -26,6 +26,7 @@ from vllm.utils.deep_gemm import (
     m_grouped_fp8_gemm_nt_contiguous,
 )
 from vllm.utils.math_utils import cdiv
+from vllm.utils.platform_utils import num_compute_units
 
 
 def _generate_optimal_warmup_m_values(
@@ -44,7 +45,7 @@ def _generate_optimal_warmup_m_values(
     # DeepGEMM's possible block sizes
     block_ms = [64, 128, 256]
     block_ns = list(range(16, min(257, n + 1), 16))
-    num_sms = torch.cuda.get_device_properties(device).multi_processor_count
+    num_sms = num_compute_units(device.index)
 
     m_values = set()
 
@@ -171,7 +172,7 @@ def _fused_moe_grouped_gemm_may_use_deep_gemm(module: torch.nn.Module) -> bool:
 
     # Further check if the ModularKernel implementation uses the DeepGemmExperts
     return isinstance(
-        module.quant_method.moe_mk, (DeepGemmExperts, TritonOrDeepGemmExperts)
+        module.quant_method.moe_kernel, (DeepGemmExperts, TritonOrDeepGemmExperts)
     )
 
 
