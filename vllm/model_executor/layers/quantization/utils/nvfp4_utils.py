@@ -141,6 +141,12 @@ def convert_to_nvfp4_linear_kernel_format(
     layer.weights_padding_cols = 0
 
     if backend == NvFp4LinearBackend.MARLIN:
+        logger.warning_once(
+            "Your GPU does not have native support for FP4 computation but "
+            "FP4 quantization is being used. Weight-only FP4 compression "
+            "will be used leveraging the Marlin kernel. This may degrade "
+            "performance for compute-heavy workloads."
+        )
         prepare_fp4_layer_for_marlin(layer)
     elif backend == NvFp4LinearBackend.FLASHINFER_TRTLLM:
         weight, weight_scale = prepare_weights_for_nvfp4_flashinfer_trtllm(
