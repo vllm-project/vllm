@@ -324,3 +324,52 @@ class TestToolResultContent:
             if m["role"] == "user" and isinstance(m.get("content"), list)
         ]
         assert len(user_follow_ups) == 0
+
+
+# ======================================================================
+# Attribution header stripping
+# ======================================================================
+
+
+class TestAttributionHeaderStripping:
+    def test_billing_header_stripped_from_system(self):
+        """Claude Code's x-anthropic-billing-header block should be
+        stripped to preserve prefix caching."""
+        request = _make_request(
+            [{"role": "user", "content": "Hello"}],
+            system=[
+                {"type": "text", "text": "You are a helpful assistant."},
+                {
+                    "type": "text",
+                    "text": "x-anthropic-billing-header: "
+                    "cc_version=2.1.37.abc; cc_entrypoint=cli;",
+                },
+            ],
+        )
+        result = _convert(request)
+        system_msg = result.messages[0]
+        assert system_msg["role"] == "system"
+        assert system_msg["content"] == "You are a helpful assistant."
+
+    def test_system_without_billing_header_unchanged(self):
+        """Normal system blocks should pass through unchanged."""
+        request = _make_request(
+            [{"role": "user", "content": "Hello"}],
+            system=[
+                {"type": "text", "text": "You are a helpful assistant."},
+                {"type": "text", "text": " Be concise."},
+            ],
+        )
+        result = _convert(request)
+        system_msg = result.messages[0]
+        assert system_msg["content"] == "You are a helpful assistant. Be concise."
+
+    def test_system_string_unchanged(self):
+        """String system prompts should pass through unchanged."""
+        request = _make_request(
+            [{"role": "user", "content": "Hello"}],
+            system="You are a helpful assistant.",
+        )
+        result = _convert(request)
+        system_msg = result.messages[0]
+        assert system_msg["content"] == "You are a helpful assistant."
