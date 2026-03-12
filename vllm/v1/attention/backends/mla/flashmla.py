@@ -21,6 +21,7 @@ from vllm.model_executor.layers.batch_invariant import (
     vllm_is_batch_invariant,
 )
 from vllm.platforms.interface import DeviceCapability
+from vllm.utils.platform_utils import num_compute_units
 from vllm.v1.attention.backend import (
     AttentionCGSupport,
     AttentionLayer,
@@ -98,6 +99,10 @@ class FlashMLABackend(MLACommonBackend):
 @dataclass
 class FlashMLADecodeMetadata(MLACommonDecodeMetadata):
     scheduler_metadata: FlashMLASchedMeta
+    # Pre-allocated CUDAGraph-stable buffers for FP8 tile scheduler metadata.
+    # These have fixed addresses so CUDAGraph replay reads correct memory.
+    cg_tile_scheduler_metadata: torch.Tensor | None = None
+    cg_num_splits: torch.Tensor | None = None
 
 
 @dataclass
@@ -127,6 +132,27 @@ class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
         )
 
         self.is_fp8_kvcache = vllm_config.cache_config.cache_dtype.startswith("fp8")
+
+        # Pre-allocate CUDAGraph-stable buffers for FP8 tile scheduler
+        # metadata. These tensors have fixed addresses so CUDAGraph replay
+        # reads from the same memory.
+        self.cg_buf_tile_scheduler_metadata = None
+        self.cg_buf_num_splits = None
+        if (
+            self.is_fp8_kvcache
+            and self.compilation_config.cudagraph_mode.has_full_cudagraphs()
+        ):
+            num_sms = num_compute_units(self.device.index)
+            self.cg_buf_tile_scheduler_metadata = torch.zeros(
+                (num_sms, 8),
+                device=self.device,
+                dtype=torch.int32,
+            )
+            self.cg_buf_num_splits = torch.zeros(
+                (vllm_config.scheduler_config.max_num_seqs + 1),
+                device=self.device,
+                dtype=torch.int32,
+            )
 
     def _build_decode(
         self,
@@ -160,6 +186,8 @@ class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
             seq_lens=seq_lens_device,
             scheduler_metadata=scheduler_metadata,
             dcp_tot_seq_lens=dcp_tot_seq_lens_device,
+            cg_tile_scheduler_metadata=self.cg_buf_tile_scheduler_metadata,
+            cg_num_splits=self.cg_buf_num_splits,
         )
 
 
@@ -266,24 +294,31 @@ class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
 
         if self.kv_cache_dtype.startswith("fp8"):
             # Compute FP8 tile scheduler metadata here (inside forward_mqa)
-            # so that it is captured by CUDAGraph and recomputed on replay.
-            # The metadata depends on cache_seqlens which changes each step.
-            # num_q_tokens_per_head_k = seq_len_q * num_heads_q / num_heads_k
-            # For MLA, num_heads_k = 1
+            # so that it is recomputed each step (not stale from build phase).
             num_q_tokens_per_head_k = q.shape[1] * q.shape[2]
-            tile_scheduler_metadata, num_splits = get_mla_metadata_dense_fp8(
+            tsm, ns = get_mla_metadata_dense_fp8(
                 attn_metadata.decode.seq_lens,
                 num_q_tokens_per_head_k,
                 1,  # MQA for the decode path
             )
+            # For CUDAGraph: copy into pre-allocated stable-address buffers
+            # so the kernel always reads from the same memory addresses
+            # across graph captures and replays.
+            cg_tsm = attn_metadata.decode.cg_tile_scheduler_metadata
+            cg_ns = attn_metadata.decode.cg_num_splits
+            if cg_tsm is not None:
+                cg_tsm[: tsm.shape[0], :].copy_(tsm)
+                cg_ns[: ns.shape[0]].copy_(ns)
+                tsm = cg_tsm[: tsm.shape[0], :]
+                ns = cg_ns[: ns.shape[0]]
             o, lse = flash_mla_with_kvcache_fp8(
                 q=q,
                 k_cache=kv_c_and_k_pe_cache.unsqueeze(-2),  # Add head dim of 1
                 block_table=attn_metadata.decode.block_table,
                 cache_seqlens=attn_metadata.decode.seq_lens,
                 head_dim_v=self.kv_lora_rank,
-                tile_scheduler_metadata=tile_scheduler_metadata,
-                num_splits=num_splits,
+                tile_scheduler_metadata=tsm,
+                num_splits=ns,
                 softmax_scale=self.scale,
                 causal=True,
                 descale_q=layer._q_scale.reshape(1),
