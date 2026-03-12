@@ -94,13 +94,9 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
 
     # --- Worker-side methods ---
 
-    def register_kv_caches(
-        self,
-        kv_caches: dict[str, torch.Tensor],
-        kv_cache_raw_tensors: dict[str, torch.Tensor] | None = None,
-    ) -> None:
+    def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
         if self.worker_handler is not None:
-            self.worker_handler.register_kv_caches(kv_caches, kv_cache_raw_tensors)
+            self.worker_handler.register_kv_caches(kv_caches)
 
     def bind_connector_metadata(
         self,

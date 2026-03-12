@@ -79,35 +79,54 @@ class SimpleCPUOffloadWorker:
     def register_kv_caches(
         self,
         kv_caches: dict[str, torch.Tensor],
-        kv_cache_raw_tensors: dict[str, torch.Tensor] | None = None,
     ) -> None:
         """Register GPU KV caches and allocate pinned CPU tensors.
+        The worker will infer the underlying raw storage from the kv_caches.
 
         Args:
-            kv_caches: Reshaped per-layer GPU KV caches.
-            kv_cache_raw_tensors: Raw int8 tensors before reshape. If provided,
-                used for transfers (HMA-safe). Falls back to kv_caches if None.
+            kv_caches: Per-layer GPU KV caches. Values are either a single
+                tensor (attention layers) or a list of tensors (Mamba layers
+                in hybrid models). All values are included for offloading
+                by resolving to their underlying raw storage.
         """
-        raw = kv_cache_raw_tensors if kv_cache_raw_tensors is not None else kv_caches
-        self.device = next(iter(raw.values())).device
+        if not kv_caches:
+            logger.warning("No KV caches to offload.")
+            return
 
-        # Deduplicate shared tensors (multiple layers may share the same tensor)
+        # Resolve each entry to a representative tensor for storage
+        # deduplication. For attention layers the value is already a tensor;
+        # for Mamba layers it is a list of tensors that all share the same
+        # underlying raw storage, so we take the first one.
+        def _representative_tensor(
+            v: torch.Tensor | list[torch.Tensor],
+        ) -> torch.Tensor:
+            if isinstance(v, torch.Tensor):
+                return v
+            return v[0]
+
+        first_tensor = _representative_tensor(next(iter(kv_caches.values())))
+        self.device = first_tensor.device
+
+        assert self.kv_cache_config is not None
+        num_blocks = self.kv_cache_config.num_blocks
+
+        # Deduplicate: multiple layers may share the same backing storage.
         seen_ptrs: dict[int, tuple[str, torch.Tensor]] = {}
-        for name, tensor in raw.items():
-            ptr = tensor.data_ptr()
+        for name, value in kv_caches.items():
+            tensor = _representative_tensor(value)
+            ptr = tensor.untyped_storage().data_ptr()
             if ptr not in seen_ptrs:
                 seen_ptrs[ptr] = (name, tensor)
 
-        # Build ordered dict of unique raw tensors for the Triton kernel
+        # Reconstruct [num_blocks, page_size_bytes] int8 views from storage
+        # so stride(0) gives page_size_bytes for the Triton copy kernel.
         unique_gpu_caches: dict[str, torch.Tensor] = {}
         for name, tensor in seen_ptrs.values():
-            # Raw tensors are 1D int8. Reshape to [num_blocks, page_size_bytes]
-            # so stride(0) gives page_size_bytes for the Triton kernel.
-            if tensor.dim() == 1:
-                assert self.kv_cache_config is not None
-                num_blocks = self.kv_cache_config.num_blocks
-                tensor = tensor.view(num_blocks, -1)
-            unique_gpu_caches[name] = tensor
+            storage = tensor.untyped_storage()
+            raw = torch.empty(0, dtype=torch.int8, device=self.device).set_(
+                storage, 0, (storage.nbytes(),)
+            )
+            unique_gpu_caches[name] = raw.view(num_blocks, -1)
 
         # Compute per-tensor bytes_per_block. Tensors may have different
         # page_size_bytes (e.g., UniformTypeKVCacheSpecs with varying head_size).
