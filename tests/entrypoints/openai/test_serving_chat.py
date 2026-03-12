@@ -23,7 +23,6 @@ from vllm.entrypoints.openai.engine.protocol import (
 )
 from vllm.entrypoints.openai.models.serving import (
     BaseModelPath,
-    OpenAIModelRegistry,
     OpenAIServingModels,
 )
 from vllm.entrypoints.openai.parser.harmony_utils import get_encoding
@@ -561,10 +560,8 @@ def _build_renderer(model_config: MockModelConfig):
     )
 
 
-def _build_serving_render(engine):
+def _build_serving_render(engine, model_registry):
     from vllm.entrypoints.serve.render.serving import OpenAIServingRender
-
-    model_registry = OpenAIModelRegistry(engine.model_config, BASE_MODEL_PATHS)
 
     return OpenAIServingRender(
         model_config=engine.model_config,
@@ -582,7 +579,7 @@ def _build_serving_chat(engine: AsyncLLM) -> OpenAIServingChat:
         engine_client=engine,
         base_model_paths=BASE_MODEL_PATHS,
     )
-    openai_serving_render = _build_serving_render(engine)
+    openai_serving_render = _build_serving_render(engine, models.registry)
 
     serving_chat = OpenAIServingChat(
         engine,
@@ -609,7 +606,7 @@ async def _async_serving_chat_init():
     engine = MockEngine()
 
     models = OpenAIServingModels(engine, BASE_MODEL_PATHS)
-    openai_serving_render = _build_serving_render(engine)
+    openai_serving_render = _build_serving_render(engine, models.registry)
 
     serving_completion = OpenAIServingChat(
         engine,
@@ -1741,7 +1738,7 @@ async def test_tool_choice_validation_without_parser():
         engine_client=mock_engine,
         base_model_paths=BASE_MODEL_PATHS,
     )
-    openai_serving_render = _build_serving_render(mock_engine)
+    openai_serving_render = _build_serving_render(mock_engine, models.registry)
 
     # Create serving_chat without tool_parser (enable_auto_tools=False)
     serving_chat = OpenAIServingChat(
