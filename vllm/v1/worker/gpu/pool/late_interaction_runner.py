@@ -9,7 +9,7 @@ from vllm.v1.outputs import PoolerOutput
 from vllm.v1.pool.late_interaction import (
     LATE_INTERACTION_MODE_CACHE_QUERY,
     LATE_INTERACTION_MODE_SCORE_DOC,
-    compute_maxsim_score,
+    compute_maxsim_scores,
 )
 
 
@@ -72,6 +72,11 @@ class LateInteractionRunner:
             return raw_pooler_output
 
         outputs: list[torch.Tensor | None] = list(raw_pooler_output)
+        score_indices: list[int] = []
+        score_req_ids: list[str] = []
+        score_query_keys: list[str] = []
+        score_queries: list[torch.Tensor] = []
+        score_docs: list[torch.Tensor] = []
         for i, (req_id, output, params, finished) in enumerate(
             zip(req_ids, outputs, pooling_params, finished_mask)
         ):
@@ -101,12 +106,23 @@ class LateInteractionRunner:
                         "before their paired document requests."
                     )
 
-                outputs[i] = compute_maxsim_score(query_output, output)
-                self._doc_query_keys.pop(req_id, None)
-                self._release_query_use(query_key)
+                score_indices.append(i)
+                score_req_ids.append(req_id)
+                score_query_keys.append(query_key)
+                score_queries.append(query_output)
+                score_docs.append(output)
                 continue
 
             raise ValueError(f"Unsupported late-interaction mode: {mode!r}")
+
+        if score_indices:
+            score_values = compute_maxsim_scores(score_queries, score_docs)
+            for i, req_id, query_key, score in zip(
+                score_indices, score_req_ids, score_query_keys, score_values
+            ):
+                outputs[i] = score
+                self._doc_query_keys.pop(req_id, None)
+                self._release_query_use(query_key)
 
         return outputs
 
