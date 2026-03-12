@@ -551,8 +551,10 @@ class Scheduler(SchedulerInterface):
             has_non_spec_decode = False
             for req in scheduled_running_reqs:
                 req_id = req.request_id
-                if (req_id not in scheduled_spec_decode_tokens
-                        and num_scheduled_tokens.get(req_id, 0) == 1):
+                if (
+                    req_id not in scheduled_spec_decode_tokens
+                    and num_scheduled_tokens.get(req_id, 0) == 1
+                ):
                     has_non_spec_decode = True
                     break
             if has_non_spec_decode:
