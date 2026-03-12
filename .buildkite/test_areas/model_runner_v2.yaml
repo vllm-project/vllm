@@ -47,8 +47,7 @@ steps:
     - python3 offline_inference/audio_language.py --seed 0
     - python3 offline_inference/vision_language.py --seed 0
     - python3 offline_inference/vision_language_multi_image.py --seed 0
-    # TODO: uncomment once https://github.com/vllm-project/vllm/pull/35790 is merged.
-    #- python3 offline_inference/encoder_decoder_multimodal.py --model-type whisper --seed 0  # TODO
+    - python3 offline_inference/encoder_decoder_multimodal.py --model-type whisper --seed 0
     # for pooling models
     - python3 pooling/embed/vision_embedding_offline.py --seed 0
     # for features demo
