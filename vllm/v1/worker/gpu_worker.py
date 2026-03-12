@@ -552,6 +552,9 @@ class Worker(WorkerBase):
         else:
             self.model_runner.initialize_kv_cache(kv_cache_config)
 
+        if self.model_config.enable_return_routed_experts:
+            self.model_runner.init_routed_experts_capturer()
+
         # Build KV-zero metadata outside the CuMem pool so the bookkeeping
         # GPU tensors (seg_addrs, block-id buffers) use the standard PyTorch
         # allocator and are not discarded during sleep/wake cycles.
@@ -1003,6 +1006,10 @@ class Worker(WorkerBase):
                 load_weights=load_weights_direct,
             )
 
+        # NCCL broadcast/packed path are asynchronous.
+        # Sync here so the next step uses the new weights.
+        torch.accelerator.synchronize()
+
     def shutdown(self) -> None:
         # has_kv_transfer_group can be None during interpreter shutdown.
         if ensure_kv_transfer_shutdown is not None:
@@ -1055,6 +1062,6 @@ def init_worker_distributed_environment(
         parallel_config.decode_context_parallel_size,
     )
 
-    # Init ec connector here before KV caches caches init
+    # Init ec connector here before KV caches init
     # NOTE: We do not init KV caches for Encoder-only instance in EPD disagg mode
     ensure_ec_transfer_initialized(vllm_config)
