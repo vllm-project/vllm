@@ -46,14 +46,17 @@ from vllm.v1.attention.backends.utils import get_kv_cache_layout
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.request import RequestStatus
 
+logger = init_logger(__name__)
+
 try:
     from mooncake.engine import TransferEngine
-except ImportError as e:
-    raise ImportError(
+except ImportError:
+    logger.warning(
         "Please install mooncake by following the instructions at "
         "https://github.com/kvcache-ai/Mooncake/blob/main/doc/en/build.md "
         "to run VLLM with MooncakeTransferEngine."
-    ) from e
+    )
+    TransferEngine = None
 
 if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
@@ -62,8 +65,6 @@ if TYPE_CHECKING:
 
 ReqId = str  # Internal scheduler request ID
 TransferId = str  # KV transfer coordination ID (shared by P/D)
-
-logger = init_logger(__name__)
 
 
 class MooncakeXferMetadata(
@@ -445,6 +446,9 @@ class MooncakeConnectorWorker:
     """Implementation of Worker side methods"""
 
     def __init__(self, vllm_config: VllmConfig, engine_id: str):
+        if TransferEngine is None:
+            logger.error("Mooncake is not available")
+            raise RuntimeError("Mooncake is not available")
         logger.info("Initializing Mooncake Transfer Engine worker %s", engine_id)
 
         self.vllm_config = vllm_config
@@ -526,9 +530,7 @@ class MooncakeConnectorWorker:
             # Start bootstrap server on global rank 0.
             if should_launch_bootstrap_server(vllm_config):
                 _, port = get_mooncake_bootstrap_addr(vllm_config)
-                self.bootstrap_server = MooncakeBootstrapServer(
-                    vllm_config, "0.0.0.0", port
-                )
+                self.bootstrap_server = MooncakeBootstrapServer("0.0.0.0", port)
                 self.bootstrap_server.start()
 
         if not self.is_kv_producer:
@@ -583,7 +585,9 @@ class MooncakeConnectorWorker:
             if self.sender_loop.is_running():
                 self.sender_loop.call_soon_threadsafe(self.sender_loop.stop)
                 self._sender_listener_t.join()
-            if should_launch_bootstrap_server(self.vllm_config):
+            if should_launch_bootstrap_server(self.vllm_config) and hasattr(
+                self, "bootstrap_server"
+            ):
                 self.bootstrap_server.shutdown()
         if not self.is_kv_producer and self.receiver_loop.is_running():
             self.receiver_loop.call_soon_threadsafe(self.receiver_loop.stop)
@@ -812,11 +816,15 @@ class MooncakeConnectorWorker:
                     del self.reqs_need_send[send_meta.transfer_id]
                     self.finished_sending_reqs.add(send_meta.p_req_id)
 
-            response = MooncakeXferResponse(
-                status=response_status,
-                ok_reqs=[d_req_id for d_req_id, _ in ready_reqs],
-            )
-            await sock.send_multipart((identity, self._encoder.encode(response)))
+            ok_reqs = [
+                d_req_id for d_req_id, _ in ready_reqs if d_req_id not in err_reqs
+            ]
+            if ok_reqs:
+                response = MooncakeXferResponse(
+                    status=response_status,
+                    ok_reqs=ok_reqs,
+                )
+                await sock.send_multipart((identity, self._encoder.encode(response)))
 
     def resolve_need_send(self, send_meta: SendBlockMeta, remote_tp_ranks: list[int]):
         # Prepare for heterogeneous TP (one P pairs to multiple D)
