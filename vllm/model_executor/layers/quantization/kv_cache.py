@@ -61,34 +61,74 @@ class BaseKVCacheMethod(QuantizeMethodBase):
             is_quantized_kv_cache(layer.kv_cache_dtype)
             and not layer.calculate_kv_scales
         ):
-            if layer.k_scale > 0.0 and layer.v_scale > 0.0:
-                # We prefer to use separate k_scale and v_scale if present
-                k_scale = layer.k_scale.to("cpu").tolist()
-                v_scale = layer.v_scale.to("cpu").tolist()
-                if current_platform.is_fp8_fnuz():
-                    k_scale *= 2
-                    v_scale *= 2
-            elif layer.k_scale < 0.0 and layer.v_scale < 0.0:
-                # If no scales were loaded (both scales are invalid negative
-                # values), use the default value of 1.0
+            is_int8 = layer.kv_cache_dtype.startswith("int8")
+            is_fp8 = layer.kv_cache_dtype.startswith("fp8")
+
+            # Use .all() so the comparisons work for both scalar and per-head
+            # [num_kv_heads] tensors (a tensor in a bool context raises an error).
+            k_scale_all_positive = bool((layer.k_scale > 0.0).all())
+            v_scale_all_positive = bool((layer.v_scale > 0.0).all())
+            k_scale_all_negative = bool((layer.k_scale < 0.0).all())
+            v_scale_all_negative = bool((layer.v_scale < 0.0).all())
+
+            if k_scale_all_positive and v_scale_all_positive:
+                # We prefer to use separate k_scale and v_scale if present.
+                # INT8 may carry per-head tensors ([num_kv_heads]); FP8 is
+                # always per-tensor (scalar float).
+                if is_int8 and layer.k_scale.numel() > 1:
+                    # Per-head INT8 scale — keep as CPU float32 tensor
+                    k_scale = layer.k_scale.to("cpu").to(torch.float32)
+                    v_scale = layer.v_scale.to("cpu").to(torch.float32)
+                else:
+                    k_scale = layer.k_scale.to("cpu").tolist()
+                    v_scale = layer.v_scale.to("cpu").tolist()
+                    # FNUZ fp32→fp8 range doubles the scale; INT8 unaffected
+                    if current_platform.is_fp8_fnuz() and is_fp8:
+                        k_scale *= 2
+                        v_scale *= 2
+            elif k_scale_all_negative and v_scale_all_negative:
+                # No scales in checkpoint.
+                if is_int8:
+                    # INT8 with scale=1.0 is catastrophic: typical attention
+                    # values (e.g. ±0.1–0.5) all round to 0 in int8, destroying
+                    # all KV cache information and producing garbage output.
+                    # Automatically enable dynamic scale computation instead.
+                    logger.warning_once(
+                        "INT8 KV cache: no calibrated k/v_scale found in "
+                        "checkpoint. Automatically enabling --calculate-kv-scales "
+                        "to compute scales from the first batch. For best accuracy, "
+                        "use a checkpoint with pre-calibrated k/v_scale values "
+                        "(scale = absmax(tensor) / 127 for INT8)."
+                    )
+                    layer.calculate_kv_scales = True
+                    # Exit early — dynamic computation will set _k_scale/_v_scale
+                    # on the first forward pass via calc_kv_scales().
+                    del layer.k_scale
+                    del layer.v_scale
+                    del layer.q_scale
+                    del layer.prob_scale
+                    return
+                # FP8 fall back to 1.0 (less catastrophic than INT8)
                 k_scale = 1.0
                 v_scale = 1.0
             else:
-                # If we find a single kv_scale in the checkpoint, we remap
-                # kv_scale to k_scale during weight loading, and duplicate
-                # k_scale to v_scale here
-                assert layer.k_scale > 0.0
+                # Single shared kv_scale in checkpoint — duplicate to k and v.
+                # Per-head shared scales are not supported in this path.
+                assert k_scale_all_positive
                 scale_to_duplicate = max(layer.k_scale, layer.v_scale)
                 k_scale = scale_to_duplicate.to("cpu").tolist()
                 v_scale = scale_to_duplicate.to("cpu").tolist()
-                if current_platform.is_fp8_fnuz():
+                # Only apply FNUZ scaling for FP8, not INT8
+                if current_platform.is_fp8_fnuz() and is_fp8:
                     k_scale *= 2
                     v_scale *= 2
 
-            if not isinstance(k_scale, float) or not isinstance(v_scale, float):
-                raise ValueError(
-                    "Only support per-tensor scaling factor for fp8 KV cache"
-                )
+            # FP8 must always be per-tensor (scalar float)
+            if is_fp8:
+                if not isinstance(k_scale, float) or not isinstance(v_scale, float):
+                    raise ValueError(
+                        "Only support per-tensor scaling factor for fp8 KV cache"
+                    )
 
             if layer.q_scale < 0.0:
                 logger.warning_once(
@@ -96,15 +136,47 @@ class BaseKVCacheMethod(QuantizeMethodBase):
                     "Setting it to k_scale. This only matters for "
                     "FP8 Attention backends (flash-attn or flashinfer)."
                 )
-                layer._q_scale.copy_(k_scale)
-                layer._q_scale_float = k_scale
+                layer._q_scale.copy_(k_scale if isinstance(k_scale, float) else 1.0)
+                layer._q_scale_float = k_scale if isinstance(k_scale, float) else 1.0
 
-            # These are used in the final Attention.forward()
-            layer._k_scale.copy_(k_scale)
-            layer._v_scale.copy_(v_scale)
-            layer._k_scale_float = k_scale
-            layer._v_scale_float = v_scale
-            if k_scale == 1.0 and v_scale == 1.0 and "e5m2" not in layer.kv_cache_dtype:
+            # Store scales for use in Attention.forward().
+            # INT8 per-head: replace the scalar buffer with the per-head tensor
+            # so the kernel can index into it by kv_head_idx.
+            if isinstance(k_scale, torch.Tensor) and k_scale.numel() > 1:
+                # Per-head INT8: replace scalar buffer with [num_kv_heads] tensor.
+                # _k_scale_float is set to 1.0 as a safe placeholder; the triton
+                # backend uses _k_scale (tensor) directly, and other backends do
+                # not support INT8 KV cache.
+                device = layer._k_scale.device
+                layer._k_scale = k_scale.to(device)
+                layer._v_scale = v_scale.to(device)
+                layer._k_scale_float = 1.0
+                layer._v_scale_float = 1.0
+            else:
+                layer._k_scale.copy_(k_scale)
+                layer._v_scale.copy_(v_scale)
+                layer._k_scale_float = float(k_scale)
+                layer._v_scale_float = float(v_scale)
+
+            # Warn about INT8 scale=1.0 (very likely to cause overflow)
+            if is_int8:
+                if isinstance(k_scale, float) and (k_scale == 1.0 or v_scale == 1.0):
+                    logger.warning_once(
+                        f"INT8 KV cache using scale k={k_scale:.6f}, "
+                        f"v={v_scale:.6f}. "
+                        "Scale=1.0 is likely incorrect for INT8 and "
+                        "will cause accuracy issues. "
+                        "Expected: scale = absmax(tensor) / 127 for INT8. "
+                        "This will result in value overflow and severe precision loss."
+                    )
+
+            # Warn about FP8 e4m3 with scale=1.0 (less critical, informational)
+            if (
+                is_fp8
+                and k_scale == 1.0
+                and v_scale == 1.0
+                and "e5m2" not in layer.kv_cache_dtype
+            ):
                 logger.warning_once(
                     "Using KV cache scaling factor 1.0 for fp8_e4m3. "
                     "If this is unintended, verify that k/v_scale "
