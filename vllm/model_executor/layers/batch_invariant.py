@@ -790,6 +790,7 @@ def mean_batch_invariant(input, dim, keepdim=False, dtype: torch.dtype | None = 
     return result
 
 
+@torch.library.wrap_triton  # needed for make_fx lowering to work
 @triton.jit
 def _rms_norm_kernel(
     input_ptr,

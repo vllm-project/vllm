@@ -92,7 +92,9 @@ class VllmIRLoweringPass(VllmInductorPass):
         # Defaults not present on node.args but required for replacement tracing
         bound_args = ir_op._py_signature.bind(*node.args)
         bound_args.apply_defaults()
-        match.replace_by_example(ir_op_impl.impl_fn, bound_args.args)
+        match.replace_by_example(
+            ir_op_impl.impl_fn, bound_args.args, run_functional_passes=False
+        )
 
     @VllmInductorPass.time_and_log
     def __call__(self, graph: fx.Graph) -> None:
