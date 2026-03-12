@@ -708,6 +708,27 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "Tensor? b_qzeros, "
       "SymInt n, SymInt group_size, SymInt sm_count, SymInt sm_version, SymInt "
       "CUBLAS_M_THRESHOLD, bool has_zp, bool n32k16_reorder) -> Tensor");
+
+  ops.def(
+      "minimax_allreduce_rms("
+      "Tensor input,"
+      "Tensor norm_weight,"
+      "Tensor workspace,"
+      "int rank,"
+      "int nranks,"
+      "float eps,"
+      "bool trigger_completion_at_end) -> Tensor");
+  ops.def(
+      "minimax_allreduce_rms_qk("
+      "Tensor q,"
+      "Tensor k,"
+      "Tensor norm_weight_q,"
+      "Tensor norm_weight_k,"
+      "Tensor workspace,"
+      "int rank,"
+      "int nranks,"
+      "float eps,"
+      "bool trigger_completion_at_end) -> Tensor[]");
   //  conditionally compiled so impl in source file
 #endif
 }
