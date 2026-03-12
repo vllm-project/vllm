@@ -416,7 +416,9 @@ class OffloadingConnectorScheduler:
 
             req = self._requests[req_id]
             new_tokens = scheduler_output.num_scheduled_tokens[req_id]
-            total_tokens = req.num_computed_tokens + new_tokens
+            expected_tokens = req.num_computed_tokens + new_tokens
+            # with async scheduling, some tokens may be missing
+            total_tokens = min(expected_tokens, req.num_tokens)
             num_blocks = total_tokens // self.offloaded_block_size
             start_block_idx = self._next_stored_block_idx.get(req_id, 0)
             num_new_blocks = num_blocks - start_block_idx
@@ -424,8 +426,8 @@ class OffloadingConnectorScheduler:
             if num_new_blocks <= 0:
                 continue
 
-            # NOTE: In async scheduling, placeholders may temporarily make
-            # len(req.block_hashes) < num_blocks * self.block_size_factor.
+            num_gpu_blocks = num_blocks * self.block_size_factor
+            assert len(req.block_hashes) >= num_gpu_blocks
 
             new_block_hashes = self._get_block_hashes(
                 req, start_idx=start_block_idx, end_idx=num_blocks
@@ -529,6 +531,9 @@ class OffloadingConnectorScheduler:
         req_id = request.request_id
         self._requests.pop(req_id, None)
         self._request_block_ids.pop(req_id, None)
+
+        # TODO(orozery): possibly kickoff offload for last block
+        # which may have been deferred due to async scheduling
         self._next_stored_block_idx.pop(req_id, None)
 
         request_being_stored = req_id in self._reqs_being_stored
