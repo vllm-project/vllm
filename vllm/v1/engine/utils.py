@@ -4,7 +4,7 @@
 import contextlib
 import os
 import weakref
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from dataclasses import dataclass
 from enum import Enum, auto
 from multiprocessing import Process, connection
@@ -85,7 +85,6 @@ class CoreEngineProcManager:
 
     def __init__(
         self,
-        target_fn: Callable,
         local_engine_count: int,
         start_index: int,
         local_start_index: int,
@@ -108,6 +107,10 @@ class CoreEngineProcManager:
         if client_handshake_address:
             common_kwargs["client_handshake_address"] = client_handshake_address
 
+        is_dp = vllm_config.parallel_config.data_parallel_size > 1
+
+        from vllm.v1.engine.core import EngineCoreProc
+
         self.processes: list[BaseProcess] = []
         local_dp_ranks = []
         for index in range(local_engine_count):
@@ -118,35 +121,27 @@ class CoreEngineProcManager:
             local_dp_ranks.append(local_index)
             self.processes.append(
                 context.Process(
-                    target=target_fn,
-                    name=f"EngineCore_DP{global_index}",
+                    target=EngineCoreProc.run_engine_core,
+                    name=f"EngineCore_DP{global_index}" if is_dp else "EngineCore",
                     kwargs=common_kwargs
-                    | {
-                        "dp_rank": global_index,
-                        "local_dp_rank": local_index,
-                    },
+                    | {"dp_rank": global_index, "local_dp_rank": local_index},
                 )
             )
 
         self._finalizer = weakref.finalize(self, shutdown, self.processes)
 
-        data_parallel = vllm_config.parallel_config.data_parallel_size > 1
         try:
             for proc, local_dp_rank in zip(self.processes, local_dp_ranks):
                 # Adjust device control in DP for non-CUDA platforms
                 # as well as external and ray launchers
                 # For CUDA platforms, we use torch.cuda.set_device()
-                with (
-                    set_device_control_env_var(vllm_config, local_dp_rank)
-                    if (
-                        data_parallel
-                        and (
-                            not current_platform.is_cuda_alike()
-                            or vllm_config.parallel_config.use_ray
-                        )
-                    )
-                    else contextlib.nullcontext()
+                if is_dp and (
+                    not current_platform.is_cuda_alike()
+                    or vllm_config.parallel_config.use_ray
                 ):
+                    with set_device_control_env_var(vllm_config, local_dp_rank):
+                        proc.start()
+                else:
                     proc.start()
         finally:
             # Kill other procs if not all are running.
@@ -926,12 +921,9 @@ def launch_core_engines(
     with zmq_socket_ctx(
         local_handshake_address, zmq.ROUTER, bind=True
     ) as handshake_socket:
-        from vllm.v1.engine.core import EngineCoreProc
-
         # Start local engines.
         if local_engine_count:
             local_engine_manager = CoreEngineProcManager(
-                EngineCoreProc.run_engine_core,
                 vllm_config=vllm_config,
                 executor_class=executor_class,
                 log_stats=log_stats,
