@@ -36,6 +36,9 @@ mod defaults {
 
 /// Request types are encoded as single-byte protocol constants so they can be
 /// sent over the ZMQ socket without an extra encoding step.
+///
+/// Original Python definition:
+/// <https://github.com/vllm-project/vllm/blob/f22d6e026798a74e6542a52ef776c054f2de572a/vllm/v1/engine/__init__.py#L217-L228>
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum EngineCoreRequestType {
@@ -60,6 +63,9 @@ impl EngineCoreRequestType {
 ///
 /// This mirrors the Python enum and uses integer encoding for compact wire
 /// representation.
+///
+/// Original Python definition:
+/// <https://github.com/vllm-project/vllm/blob/f22d6e026798a74e6542a52ef776c054f2de572a/vllm/v1/engine/__init__.py#L41-L63>
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize_repr, Deserialize_repr)]
 #[repr(u8)]
 pub enum FinishReason {
@@ -76,6 +82,9 @@ pub enum FinishReason {
 }
 
 /// Controls how intermediate outputs are returned to the frontend.
+///
+/// Original Python definition:
+/// <https://github.com/vllm-project/vllm/blob/f22d6e026798a74e6542a52ef776c054f2de572a/vllm/sampling_params.py#L146-152>
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize_repr, Deserialize_repr)]
 #[repr(u8)]
 pub enum RequestOutputKind {
@@ -89,6 +98,12 @@ pub enum RequestOutputKind {
 }
 
 /// The stop reason associated with a finished output.
+///
+/// Python models this as the union-typed `stop_reason: int | str | None`
+/// field on `EngineCoreOutput`; the Rust client narrows it into a tagged enum.
+///
+/// Original Python field:
+/// <https://github.com/vllm-project/vllm/blob/f22d6e026798a74e6542a52ef776c054f2de572a/vllm/v1/engine/__init__.py#L155>
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum StopReason {
@@ -100,6 +115,9 @@ pub enum StopReason {
 ///
 /// This is the first-stage strongly typed subset of Python `SamplingParams`.
 /// Complex or less stable fields remain dynamic values.
+///
+/// Original Python definition:
+/// <https://github.com/vllm-project/vllm/blob/f22d6e026798a74e6542a52ef776c054f2de572a/vllm/sampling_params.py#L155-L291>
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, DefaultFromSerde)]
 pub struct SamplingParams {
     /// Number of outputs to return for the given prompt request.
@@ -151,6 +169,9 @@ pub struct SamplingParams {
 }
 
 /// Engine-core add-request payload sent from frontend to engine.
+///
+/// Original Python definition:
+/// <https://github.com/vllm-project/vllm/blob/f22d6e026798a74e6542a52ef776c054f2de572a/vllm/v1/engine/__init__.py#L66-L110>
 #[derive(Debug, Clone, PartialEq, Serialize_tuple, Deserialize_tuple, DefaultFromSerde)]
 pub struct EngineCoreRequest {
     pub request_id: String,
@@ -205,6 +226,9 @@ impl EngineCoreRequest {
 }
 
 /// Engine-core output for a single request.
+///
+/// Original Python definition:
+/// <https://github.com/vllm-project/vllm/blob/f22d6e026798a74e6542a52ef776c054f2de572a/vllm/v1/engine/__init__.py#L140-L171>
 #[derive(Debug, Clone, PartialEq, Serialize_tuple, Deserialize_tuple, DefaultFromSerde)]
 pub struct EngineCoreOutput {
     pub request_id: String,
@@ -246,6 +270,9 @@ impl EngineCoreOutput {
 }
 
 /// Result of a utility call.
+///
+/// Original Python definition:
+/// <https://github.com/vllm-project/vllm/blob/f22d6e026798a74e6542a52ef776c054f2de572a/vllm/v1/engine/__init__.py#L174-L183>
 #[derive(Debug, Clone, PartialEq, Serialize_tuple, Deserialize_tuple, DefaultFromSerde)]
 pub struct UtilityOutput {
     pub call_id: i64,
@@ -257,6 +284,9 @@ pub struct UtilityOutput {
 }
 
 /// Batch of engine-core outputs returned to a frontend client.
+///
+/// Original Python definition:
+/// <https://github.com/vllm-project/vllm/blob/f22d6e026798a74e6542a52ef776c054f2de572a/vllm/v1/engine/__init__.py#L186-L214>
 #[derive(Debug, Clone, PartialEq, Serialize_tuple, Deserialize_tuple, DefaultFromSerde)]
 pub struct EngineCoreOutputs {
     #[serde(default)]

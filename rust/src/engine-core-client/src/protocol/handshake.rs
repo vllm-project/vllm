@@ -3,6 +3,9 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 /// Decoded engine startup-handshake payload.
+///
+/// Original Python payload construction:
+/// <https://github.com/vllm-project/vllm/blob/f22d6e026798a74e6542a52ef776c054f2de572a/vllm/v1/engine/core.py#L961-L981>
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReadyMessage {
     #[serde(default)]
@@ -21,6 +24,9 @@ pub struct ReadyMessage {
 
 /// Frontend-owned ZMQ addresses that are sent to the engine during startup
 /// handshake initialization.
+///
+/// Original Python definition (`EngineZmqAddresses`):
+/// <https://github.com/vllm-project/vllm/blob/f22d6e026798a74e6542a52ef776c054f2de572a/vllm/v1/engine/utils.py#L53-L67>
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HandshakeAddresses {
     pub inputs: Vec<String>,
@@ -32,6 +38,9 @@ pub struct HandshakeAddresses {
 
 /// Startup handshake payload sent from the frontend to initialize an engine
 /// after receiving `HELLO`.
+///
+/// Original Python definition (`EngineHandshakeMetadata`):
+/// <https://github.com/vllm-project/vllm/blob/f22d6e026798a74e6542a52ef776c054f2de572a/vllm/v1/engine/utils.py#L69-L77>
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HandshakeInitMessage {
     pub addresses: HandshakeAddresses,
