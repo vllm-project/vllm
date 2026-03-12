@@ -344,11 +344,7 @@ steps:
           echo ""
           echo "🎉 FULL CACHE HIT - Reusing both image and wheels"
           echo ""
-          
-          # Pull image for downstream jobs
-          docker pull "$${ECR_CACHE_TAG}"
-          docker tag "$${ECR_CACHE_TAG}" "rocm/vllm-dev:base-$${BUILDKITE_BUILD_NUMBER}"
-          
+
           # Download wheels
           .buildkite/scripts/cache-rocm-base-wheels.sh download
           
