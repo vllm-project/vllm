@@ -90,6 +90,19 @@ steps:
         env:
           DOCKER_BUILDKIT: "1"
 
+      - label: "Build wheel - x86_64 - CPU AVX2"
+        depends_on: ~
+        id: build-wheel-x86-cpu-avx2
+        agents:
+          queue: cpu_queue_postmerge
+        commands:
+          - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg GIT_REPO_CHECK=1 --build-arg VLLM_CPU_DISABLE_AVX512=true --build-arg VLLM_CPU_AVX2=1 --tag vllm-ci:build-image-avx2 --target vllm-build --progress plain -f docker/Dockerfile.cpu ."
+          - "mkdir -p artifacts"
+          - "docker run --rm -v $(pwd)/artifacts:/artifacts_host vllm-ci:build-image-avx2 bash -c 'cp -r dist /artifacts_host && chmod -R a+rw /artifacts_host'"
+          - "bash .buildkite/scripts/upload-nightly-wheels.sh manylinux_2_35"
+        env:
+          DOCKER_BUILDKIT: "1"
+
   - group: "Build release Docker images"
     key: "build-release-images"
     steps:
@@ -163,7 +176,7 @@ steps:
         depends_on: ~
 
       - label: "Build release image - arm64 - CPU"
-        depends_on: 
+        depends_on:
           - block-arm64-cpu-release-image-build
           - input-release-version
         agents:
@@ -173,6 +186,24 @@ steps:
           - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg GIT_REPO_CHECK=1 --tag public.ecr.aws/q9t5s3a7/vllm-arm64-cpu-release-repo:$(buildkite-agent meta-data get release-version) --tag public.ecr.aws/q9t5s3a7/vllm-arm64-cpu-release-repo:latest --progress plain --target vllm-openai -f docker/Dockerfile.cpu ."
           - "docker push public.ecr.aws/q9t5s3a7/vllm-arm64-cpu-release-repo:latest"
           - "docker push public.ecr.aws/q9t5s3a7/vllm-arm64-cpu-release-repo:$(buildkite-agent meta-data get release-version)"
+        env:
+          DOCKER_BUILDKIT: "1"
+
+      - block: "Build release image for x86_64 CPU AVX2 (GHA-compatible)"
+        key: block-cpu-avx2-release-image-build
+        depends_on: ~
+
+      - label: "Build release image - x86_64 - CPU AVX2"
+        depends_on:
+          - block-cpu-avx2-release-image-build
+          - input-release-version
+        agents:
+          queue: cpu_queue_postmerge
+        commands:
+          - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
+          - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg GIT_REPO_CHECK=1 --build-arg VLLM_CPU_DISABLE_AVX512=true --build-arg VLLM_CPU_AVX2=1 --tag public.ecr.aws/q9t5s3a7/vllm-cpu-release-repo:$(buildkite-agent meta-data get release-version)-avx2 --tag public.ecr.aws/q9t5s3a7/vllm-cpu-release-repo:latest-avx2 --progress plain --target vllm-openai -f docker/Dockerfile.cpu ."
+          - "docker push public.ecr.aws/q9t5s3a7/vllm-cpu-release-repo:latest-avx2"
+          - "docker push public.ecr.aws/q9t5s3a7/vllm-cpu-release-repo:$(buildkite-agent meta-data get release-version)-avx2"
         env:
           DOCKER_BUILDKIT: "1"
 

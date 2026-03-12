@@ -37,6 +37,7 @@ docker pull public.ecr.aws/q9t5s3a7/vllm-release-repo:${BUILDKITE_COMMIT}-rocm-b
 docker pull public.ecr.aws/q9t5s3a7/vllm-release-repo:${BUILDKITE_COMMIT}-rocm
 docker pull public.ecr.aws/q9t5s3a7/vllm-cpu-release-repo:v${RELEASE_VERSION}
 docker pull public.ecr.aws/q9t5s3a7/vllm-arm64-cpu-release-repo:v${RELEASE_VERSION}
+docker pull public.ecr.aws/q9t5s3a7/vllm-cpu-release-repo:v${RELEASE_VERSION}-avx2
 
 # Tag and push images:
 
@@ -93,6 +94,14 @@ docker tag vllm/vllm-openai-cpu:arm64 vllm/vllm-openai-cpu:latest-arm64
 docker tag vllm/vllm-openai-cpu:arm64 vllm/vllm-openai-cpu:v${RELEASE_VERSION}-arm64
 docker push vllm/vllm-openai-cpu:latest-arm64
 docker push vllm/vllm-openai-cpu:v${RELEASE_VERSION}-arm64
+
+## CPU AVX2 (GitHub Actions compatible - no AVX-512)
+
+docker tag public.ecr.aws/q9t5s3a7/vllm-cpu-release-repo:v${RELEASE_VERSION}-avx2 vllm/vllm-openai-cpu:avx2
+docker tag vllm/vllm-openai-cpu:avx2 vllm/vllm-openai-cpu:latest-avx2
+docker tag vllm/vllm-openai-cpu:avx2 vllm/vllm-openai-cpu:v${RELEASE_VERSION}-avx2
+docker push vllm/vllm-openai-cpu:latest-avx2
+docker push vllm/vllm-openai-cpu:v${RELEASE_VERSION}-avx2
 
 # Create multi-arch manifest:
 
