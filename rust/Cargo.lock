@@ -1070,6 +1070,7 @@ dependencies = [
 name = "vllm-engine-core-client"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "async-trait",
  "bytes",
  "clap",
@@ -1087,6 +1088,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "uuid",
  "zeromq",
 ]
 

@@ -1,6 +1,6 @@
-use std::io::{Error as IoError, ErrorKind};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use anyhow::{Context, Result};
 use clap::Parser;
 use tokio::time::timeout;
 use vllm_engine_core_client::{
@@ -8,7 +8,6 @@ use vllm_engine_core_client::{
     ZmqEngineCoreClient, ZmqEngineCoreClientConfig,
 };
 
-const MODEL_NAME: &str = "Qwen/Qwen3-0.6B";
 const PROMPT_TOKEN_IDS: &[u32] = &[20841, 448, 6896, 25, 23811];
 
 #[derive(Debug, Parser)]
@@ -16,6 +15,8 @@ const PROMPT_TOKEN_IDS: &[u32] = &[20841, 448, 6896, 25, 23811];
 struct Args {
     #[arg(long)]
     handshake_address: String,
+    #[arg(long, default_value = "Qwen/Qwen3-0.6B")]
+    model: String,
     #[arg(long, default_value = "127.0.0.1")]
     host: String,
     #[arg(long, default_value_t = 0)]
@@ -28,10 +29,6 @@ struct Args {
     max_tokens: u32,
 }
 
-fn invalid_input(message: String) -> IoError {
-    IoError::new(ErrorKind::InvalidInput, message)
-}
-
 fn unix_timestamp_secs() -> f64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -40,39 +37,20 @@ fn unix_timestamp_secs() -> f64 {
 }
 
 fn unique_request_id() -> String {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock is before unix epoch")
-        .as_nanos();
-    format!("rust-engine-core-smoke-{nanos}")
+    format!("rust-engine-core-smoke-{}", uuid::Uuid::new_v4())
 }
 
 fn build_request(request_id: String, max_tokens: u32) -> EngineCoreRequest {
     EngineCoreRequest {
         request_id,
         prompt_token_ids: Some(PROMPT_TOKEN_IDS.to_vec()),
-        mm_features: None,
         sampling_params: Some(SamplingParams {
-            temperature: 0.0,
-            top_p: 1.0,
-            top_k: 0,
             max_tokens: Some(max_tokens),
             output_kind: RequestOutputKind::FinalOnly,
             ..Default::default()
         }),
-        pooling_params: None,
         arrival_time: unix_timestamp_secs(),
-        lora_request: None,
-        cache_salt: None,
-        data_parallel_rank: None,
-        prompt_embeds: None,
-        client_index: 0,
-        current_wave: 0,
-        priority: 0,
-        trace_headers: None,
-        resumable: false,
-        external_req_id: None,
-        reasoning_ended: None,
+        ..Default::default()
     }
 }
 
@@ -96,21 +74,15 @@ async fn wait_for_timeout(
     client: &mut ZmqEngineCoreClient,
     request_id: &str,
     output_timeout: Duration,
-) -> Result<EngineCoreOutput, Box<dyn std::error::Error>> {
-    Ok(
-        timeout(output_timeout, wait_for_request_output(client, request_id))
-            .await
-            .map_err(|_| {
-                invalid_input(format!(
-                    "timed out waiting {:?} for output of request {request_id}",
-                    output_timeout
-                ))
-            })??,
-    )
+) -> Result<EngineCoreOutput> {
+    timeout(output_timeout, wait_for_request_output(client, request_id))
+        .await
+        .context("timed out waiting for request output")?
+        .context("failed to receive request output")
 }
 
 #[tokio::main(flavor = "multi_thread")]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> Result<()> {
     let args = Args::parse();
     let ready_timeout = Duration::from_secs(args.ready_timeout_secs);
     let output_timeout = Duration::from_secs(args.output_timeout_secs);
@@ -121,11 +93,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ready_timeout,
         client_index: args.client_index,
     })
-    .await?;
+    .await
+    .context("failed to connect to external vLLM engine")?;
+
+    println!("model={}", args.model);
+    println!("handshake_address={}", args.handshake_address);
+    println!("input_address={}", client.input_address());
+    println!("output_address={}", client.output_address());
+    println!("engine_identity={:x?}", client.engine_identity());
 
     let ready_message = client.ready_message.clone();
     let request = build_request(request_id.clone(), args.max_tokens);
-    client.add_request(request).await?;
+    println!("request_id={request_id}");
+    println!("prompt_token_ids={PROMPT_TOKEN_IDS:?}");
+    println!("ready_message={ready_message:?}");
+
+    client
+        .add_request(request)
+        .await
+        .context("failed to add request")?;
 
     let output = wait_for_timeout(&mut client, &request_id, output_timeout).await?;
     let cleanup_output = if output.finished() {
@@ -133,23 +119,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         client
             .abort_requests(std::slice::from_ref(&request_id))
-            .await?;
+            .await
+            .context("failed to abort request")?;
         Some(wait_for_timeout(&mut client, &request_id, output_timeout).await?)
     };
 
-    client.shutdown().await?;
+    client
+        .shutdown()
+        .await
+        .context("failed to shut down engine client")?;
 
-    println!("model={MODEL_NAME}");
-    println!("handshake_address={}", args.handshake_address);
-    println!("input_address={}", client.input_address());
-    println!("output_address={}", client.output_address());
-    println!(
-        "engine_identity_hex={}",
-        hex_string(client.engine_identity())
-    );
-    println!("request_id={request_id}");
-    println!("prompt_token_ids={PROMPT_TOKEN_IDS:?}");
-    println!("ready_message={ready_message:?}");
     println!("new_token_ids={:?}", output.new_token_ids);
     println!("finish_reason={:?}", output.finish_reason);
     println!("stop_reason={:?}", output.stop_reason);
@@ -158,12 +137,4 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
-}
-
-fn hex_string(bytes: &[u8]) -> String {
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        out.push_str(&format!("{byte:02x}"));
-    }
-    out
 }
