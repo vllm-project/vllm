@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+# Adapted from
+# https://github.com/zai-org/CogAgent
 from transformers import PreTrainedTokenizer
 from transformers.image_processing_utils_fast import BaseImageProcessorFast
 from transformers.image_utils import PILImageResampling

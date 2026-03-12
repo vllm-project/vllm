@@ -114,6 +114,7 @@ class LMCacheMPSchedulerAdapter:
         world_size: int,
         kv_rank: int,
         vllm_block_size: int,
+        tp_size: int = 1,
     ):
         """
         Args:
@@ -124,6 +125,8 @@ class LMCacheMPSchedulerAdapter:
             world_size: The world size used for LMCache keys
             kv_rank: The kv rank used for LMCache keys
             vllm_block_size: The block size used in vLLM
+            tp_size: Tensor-parallel size for MLA
+                multi-reader locking (default 1).
         """
         self.mq_client = MessageQueueClient(server_url, context)
 
@@ -133,6 +136,7 @@ class LMCacheMPSchedulerAdapter:
         self.model_name = model_name
         self.world_size = world_size
         self.worker_id = kv_rank
+        self.tp_size = tp_size
 
         # Read chunk size from lmcache
         self.chunk_size = get_lmcache_chunk_size(self.mq_client)
@@ -281,6 +285,7 @@ class LMCacheMPSchedulerAdapter:
             start=start,
             end=end,
             request_id=request_id,
+            tp_size=self.tp_size,
         )
 
     def _create_hash_key(
@@ -293,6 +298,7 @@ class LMCacheMPSchedulerAdapter:
             worker_id=None,
             chunk_hash=chunk_hash,
             request_id=request_id,
+            tp_size=self.tp_size,
         )
 
 

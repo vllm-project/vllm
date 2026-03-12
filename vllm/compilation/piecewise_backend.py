@@ -34,13 +34,14 @@ def get_fake_args_from_graph(graph: fx.GraphModule) -> list[Any]:
 
 
 def create_concrete_args(graph: fx.GraphModule, size: int) -> list[Any]:
-    """Create example inputs with symbolic dims replaced by a concrete size.
+    """Create Fake example inputs with symbolic dims replaced by a concrete size.
 
-    Used for single-size eager compilation where we need concrete-shaped
-    inputs but don't have real runtime tensors yet.
+    Used for single-size compilation where we need concrete-shaped inputs.
+    The Dynamo-captured graph gives us example inputs with SymInts in them.
     """
     from torch._prims_common import compute_required_storage_length
-    from torch.fx.experimental.symbolic_shapes import is_symbolic
+    from torch._subclasses.fake_tensor import FakeTensorMode
+    from torch.fx.experimental.symbolic_shapes import ShapeEnv, is_symbolic
 
     def concretize(sym_val: Any) -> int:
         """Replace all symbolic variables in a SymInt expression with size."""
@@ -49,25 +50,28 @@ def create_concrete_args(graph: fx.GraphModule, size: int) -> list[Any]:
         expr = sym_val.node.expr
         return int(expr.subs({s: size for s in expr.free_symbols}))
 
+    fake_mode = FakeTensorMode(shape_env=ShapeEnv())
+
     args: list[Any] = []
-    for node in graph.graph.nodes:
-        if node.op != "placeholder":
-            break
-        val = node.meta["example_value"]
-        if isinstance(val, torch.SymInt):
-            args.append(concretize(val))
-        elif isinstance(val, torch.Tensor):
-            new_shape = tuple(concretize(d) for d in val.shape)
-            new_strides = tuple(concretize(s) for s in val.stride())
-            new_storage_offset = concretize(val.storage_offset())
-            needed_size = compute_required_storage_length(
-                new_shape, new_strides, new_storage_offset
-            )
-            t = torch.empty(needed_size, dtype=val.dtype, device=val.device)
-            t = t.as_strided(new_shape, new_strides, new_storage_offset)
-            args.append(t)
-        else:
-            args.append(val)
+    with fake_mode:
+        for node in graph.graph.nodes:
+            if node.op != "placeholder":
+                break
+            val = node.meta["example_value"]
+            if isinstance(val, torch.SymInt):
+                args.append(concretize(val))
+            elif isinstance(val, torch.Tensor):
+                new_shape = tuple(concretize(d) for d in val.shape)
+                new_strides = tuple(concretize(s) for s in val.stride())
+                new_storage_offset = concretize(val.storage_offset())
+                needed_size = compute_required_storage_length(
+                    new_shape, new_strides, new_storage_offset
+                )
+                t = torch.empty(needed_size, dtype=val.dtype, device=val.device)
+                t = t.as_strided(new_shape, new_strides, new_storage_offset)
+                args.append(t)
+            else:
+                args.append(val)
     return args
 
 
