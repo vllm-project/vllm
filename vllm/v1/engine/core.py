@@ -1161,8 +1161,8 @@ class EngineCoreProc(EngineCore):
         # (e.g., WAITING_FOR_REMOTE_KVS), yield the GIL briefly to allow
         # background threads (like NIXL handshake) to make progress.
         # Without this, the tight polling loop can starve background threads.
-        if not model_executed and self.scheduler.has_unfinished_requests():
-            time.sleep(0.001)
+        if not model_executed and self.scheduler.has_requests():
+            time.sleep(0.1)
 
         return model_executed
 
