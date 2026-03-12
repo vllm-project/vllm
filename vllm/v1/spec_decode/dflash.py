@@ -22,7 +22,6 @@ class DFlashProposer(SpecDecodeBaseProposer):
         device: torch.device,
         runner=None,
     ):
-        logger.info("DFlash is enabled.")
         assert vllm_config.speculative_config is not None
         assert vllm_config.speculative_config.method == "dflash"
         super().__init__(
@@ -74,72 +73,41 @@ class DFlashProposer(SpecDecodeBaseProposer):
         self._dflash_num_context = num_context
         self._dflash_num_positions = num_all_positions
 
-        # 1. Set up query input_ids: [next_token, mask, mask, ...] x batch
-        for i in range(batch_size):
-            start = i * num_query_per_req
-            self.input_ids[start] = next_token_ids[i]
-            self.input_ids[start + 1 : start + num_query_per_req] = (
-                self.parallel_drafting_token_id
-            )
+        # input_ids: [next_token, mask, mask, ...] for each request
+        # First write all slots to the mask id
+        self.input_ids[:num_query_total] = self.parallel_drafting_token_id
+        # Then write the first slot of each query to the next_token_id
+        self.input_ids[self.arange[:batch_size] * num_query_per_req] = next_token_ids
 
-        # 2. Set up positions: [context_positions, query_positions]
+        # positions: [context_positions, query_positions]
         # Context positions are the target positions
         self.positions[:num_context] = target_positions
         # Query positions extend from each request's last position
-        query_start_loc = cad.query_start_loc
-        for i in range(batch_size):
-            ctx_end = query_start_loc[i + 1].item()
-            last_pos = target_positions[ctx_end - 1].item()
-            q_start = num_context + i * num_query_per_req
-            for j in range(num_query_per_req):
-                self.positions[q_start + j] = last_pos + 1 + j
+        last_pos = target_positions[cad.query_start_loc[1:] - 1]
+        offsets = self.arange[1 : num_query_per_req + 1]
+        self.positions[num_context:num_all_positions] = (
+            last_pos.unsqueeze(1) + offsets
+        ).flatten()
 
-        # 3. Context hidden states (combined target HS)
         self.hidden_states[:num_context] = target_hidden_states
 
-        # 4. Compute slot mapping for ALL K/V tokens (context + query)
+        # slot mapping also covers all K/V tokens (context + query)
         block_size = self.block_size
         all_positions = self.positions[:num_all_positions]
         block_numbers = all_positions // block_size
-        # For context tokens, use the original block table
-        # For query tokens, also use block table (same requests)
-        # Build expanded block table index for gathering
-        slot_mapping = torch.empty(
-            num_all_positions, dtype=torch.int64, device=self.device
-        )
-        for i in range(batch_size):
-            # Context tokens for request i
-            ctx_start = query_start_loc[i].item()
-            ctx_end = query_start_loc[i + 1].item()
-            ctx_block_nums = block_numbers[ctx_start:ctx_end]
-            ctx_block_ids = cad.block_table_tensor[i].gather(0, ctx_block_nums.long())
-            slot_mapping[ctx_start:ctx_end] = (
-                ctx_block_ids * block_size
-                + all_positions[ctx_start:ctx_end] % block_size
-            )
-            # Query tokens for request i
-            q_start = num_context + i * num_query_per_req
-            q_end = q_start + num_query_per_req
-            q_block_nums = block_numbers[q_start:q_end]
-            q_block_ids = cad.block_table_tensor[i].gather(0, q_block_nums.long())
-            slot_mapping[q_start:q_end] = (
-                q_block_ids * block_size + all_positions[q_start:q_end] % block_size
-            )
 
-        # 5. Token indices to sample: mask positions in query output
-        # Query output has num_query_per_req tokens per request.
-        # Skip index 0 (bonus token), take indices 1..num_spec_tokens.
-        token_indices_to_sample = torch.empty(
-            batch_size * self.num_speculative_tokens,
-            dtype=torch.int32,
-            device=self.device,
-        )
-        for i in range(batch_size):
-            base = i * num_query_per_req
-            for j in range(self.num_speculative_tokens):
-                token_indices_to_sample[i * self.num_speculative_tokens + j] = (
-                    base + 1 + j
-                )
+        req_lens = cad.query_start_loc[1:] - cad.query_start_loc[:-1]
+        ctx_req_idx = torch.repeat_interleave(self.arange[:batch_size], req_lens)
+        q_req_idx = torch.repeat_interleave(self.arange[:batch_size], num_query_per_req)
+        req_idx = torch.cat([ctx_req_idx, q_req_idx])
+
+        block_ids = cad.block_table_tensor[req_idx, block_numbers.long()]
+        slot_mapping = block_ids * block_size + (all_positions % block_size)
+
+        # skip index 0 (bonus token), sample from the indices of the mask tokens
+        base = self.arange[:batch_size] * num_query_per_req
+        offsets = self.arange[1 : self.num_speculative_tokens + 1]
+        token_indices_to_sample = (base.unsqueeze(1) + offsets).flatten()
 
         # 6. Build attention metadata for the query tokens.
         # DFlash uses non-causal attention.
