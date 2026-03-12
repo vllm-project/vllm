@@ -17,6 +17,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionReque
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
+    ModelList,
 )
 from vllm.entrypoints.openai.models.serving import OpenAIModelRegistry
 from vllm.entrypoints.openai.parser.harmony_utils import (
@@ -427,18 +428,7 @@ class OpenAIServingRender:
 
     async def show_available_models(self) -> ModelList:
         """Returns the models served by this render server."""
-        max_model_len = self.model_config.max_model_len
-        return ModelList(
-            data=[
-                ModelCard(
-                    id=name,
-                    max_model_len=max_model_len,
-                    root=self.model_config.model,
-                    permission=[ModelPermission()],
-                )
-                for name in self.served_model_names
-            ]
-        )
+        return await self.model_registry.show_available_models()
 
     async def create_tokenize(
         self,
