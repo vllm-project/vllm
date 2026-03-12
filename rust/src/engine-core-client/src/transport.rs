@@ -5,6 +5,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use tokio::sync::mpsc;
 use tokio::time::timeout;
+use tracing::{debug, error, warn};
 use zeromq::prelude::{Socket, SocketRecv, SocketSend};
 use zeromq::{PullSocket, RouterSendHalf, RouterSocket, ZmqMessage};
 
@@ -26,11 +27,18 @@ pub async fn connect(
     local_host: &str,
     ready_timeout: Duration,
 ) -> Result<ConnectedTransport> {
+    debug!(
+        handshake_address,
+        local_host,
+        ?ready_timeout,
+        "waiting for HELLO from engine"
+    );
     let mut handshake_socket = RouterSocket::new();
     handshake_socket.bind(handshake_address).await?;
 
     let (input_address, mut input_socket, output_address, output_socket) =
         bind_local_sockets(local_host).await?;
+    debug!(%input_address, %output_address, "bound local transport sockets");
 
     let hello = timeout(ready_timeout, handshake_socket.recv())
         .await
@@ -39,6 +47,7 @@ pub async fn connect(
             timeout: ready_timeout,
         })??;
     let (engine_identity, _) = decode_handshake_message(hello, None, "HELLO")?;
+    debug!(engine_identity = ?engine_identity, "received HELLO from engine");
 
     send_init_message(
         &mut handshake_socket,
@@ -47,7 +56,9 @@ pub async fn connect(
         &output_address,
     )
     .await?;
+    debug!(engine_identity = ?engine_identity, "sent INIT to engine");
 
+    debug!(engine_identity = ?engine_identity, "waiting for READY from engine");
     let ready = timeout(ready_timeout, handshake_socket.recv())
         .await
         .map_err(|_| Error::HandshakeTimeout {
@@ -55,7 +66,13 @@ pub async fn connect(
             timeout: ready_timeout,
         })??;
     let (_, ready_message) = decode_handshake_message(ready, Some(&engine_identity), "READY")?;
+    debug!(
+        engine_identity = ?engine_identity,
+        ready_message = ?ready_message,
+        "received READY from engine"
+    );
     wait_for_input_registration(&mut input_socket, &engine_identity, ready_timeout).await?;
+    debug!(engine_identity = ?engine_identity, "engine input registered");
 
     let (input_send, _) = input_socket.split();
 
@@ -202,6 +219,11 @@ pub async fn send_message(
     ])
     .expect("router messages must contain identity and payload");
 
+    debug!(
+        engine_identity = ?engine_identity,
+        frame_count = message.len(),
+        "sending ZMQ message"
+    );
     input_send.send(message).await?;
     Ok(())
 }
@@ -215,13 +237,19 @@ pub fn spawn_output_loop(
             let message = match output_socket.recv().await {
                 Ok(message) => message,
                 Err(error) => {
+                    error!(error = ?error, "failed to receive output message");
                     let _ = tx.send(Err(Error::Transport(error))).await;
                     return;
                 }
             };
 
             let frame_count = message.len();
+            debug!(frame_count, "received output message");
             if frame_count != 1 {
+                error!(
+                    frame_count,
+                    "unsupported auxiliary frames in output message"
+                );
                 let _ = tx
                     .send(Err(Error::UnsupportedAuxFrames { frame_count }))
                     .await;
@@ -229,9 +257,19 @@ pub fn spawn_output_loop(
             }
 
             let frame = message.into_vec().into_iter().next().unwrap();
-            let decoded = decode_msgpack(frame.as_ref());
+            let frame_len = frame.len();
+            let decoded = match decode_msgpack(frame.as_ref()) {
+                Ok(decoded) => {
+                    debug!(frame_len, outputs = ?decoded, "decoded output message");
+                    Ok(decoded)
+                }
+                Err(error) => {
+                    warn!(frame_len, error = ?error, "failed to decode output message");
+                    Err(error)
+                }
+            };
             if tx.send(decoded).await.is_err() {
-                tracing::warn!("output loop rx dropped, shutting down output loop");
+                warn!("output loop rx dropped, shutting down output loop");
                 return;
             }
         }

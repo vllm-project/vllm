@@ -2,9 +2,11 @@ use std::convert::TryFrom;
 use std::net::TcpListener;
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::Once;
 use std::time::Duration;
 
 use thiserror_ext::AsReport as _;
+use tracing_subscriber::EnvFilter;
 use vllm_engine_core_client::protocol::handshake::HandshakeInitMessage;
 use vllm_engine_core_client::{
     EngineCoreClient, EngineCoreOutput, EngineCoreOutputs, EngineCoreRequest, FinishReason,
@@ -14,6 +16,8 @@ use vllm_engine_core_client::{
 use zeromq::prelude::{Socket, SocketRecv, SocketSend};
 use zeromq::util::PeerIdentity;
 use zeromq::{DealerSocket, PushSocket, SocketOptions, ZmqMessage};
+
+static TRACING: Once = Once::new();
 
 fn unique_tcp_endpoint() -> String {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -60,8 +64,20 @@ fn sample_request() -> EngineCoreRequest {
     }
 }
 
+fn init_tracing() {
+    TRACING.call_once(|| {
+        let filter = EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| EnvFilter::new("vllm_engine_core_client=debug"));
+        let _ = tracing_subscriber::fmt()
+            .with_test_writer()
+            .with_env_filter(filter)
+            .try_init();
+    });
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn client_roundtrip_add_abort_and_finish() {
+    init_tracing();
     let handshake_address = unique_tcp_endpoint();
     let engine_identity = b"engine-0".to_vec();
 
@@ -219,6 +235,7 @@ async fn client_roundtrip_add_abort_and_finish() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn connect_times_out_without_ready_message() {
+    init_tracing();
     let handshake_address = unique_tcp_endpoint();
     let engine_handshake = handshake_address.clone();
     let engine_task = tokio::spawn(async move {
@@ -264,6 +281,7 @@ async fn connect_times_out_without_ready_message() {
 
 #[test]
 fn python_msgpack_fixtures_match_rust_encoding() {
+    init_tracing();
     let script = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/python_compat.py");
     let output = Command::new(&script)
         .output()

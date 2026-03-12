@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use thiserror_ext::AsReport;
 use tokio::sync::{Mutex, mpsc};
 use tokio_util::task::AbortOnDropHandle;
+use tracing::debug;
 
 use crate::error::{Error, Result};
 use crate::protocol::handshake::ReadyMessage;
@@ -100,9 +101,15 @@ impl ZmqEngineCoreClient {
 
     async fn send<T>(&self, request_type: EngineCoreRequestType, payload: &T) -> Result<()>
     where
-        T: serde::Serialize,
+        T: serde::Serialize + std::fmt::Debug,
     {
+        debug!(?request_type, request = ?payload, "encoding engine-core message");
         let payload = encode_msgpack(payload)?;
+        debug!(
+            ?request_type,
+            payload_bytes = payload.len(),
+            "sending engine-core message"
+        );
         let mut guard = self.input_send.lock().await;
         let input_send = guard.as_mut().ok_or_else(|| {
             Error::ControlClosed(
@@ -115,7 +122,9 @@ impl ZmqEngineCoreClient {
             request_type.as_frame(),
             payload,
         )
-        .await
+        .await?;
+        debug!(?request_type, "sent engine-core message");
+        Ok(())
     }
 }
 
@@ -137,6 +146,12 @@ impl EngineCoreClient for ZmqEngineCoreClient {
     async fn add_request(&self, mut req: EngineCoreRequest) -> Result<()> {
         req.client_index = self.config.client_index;
         req.validate()?;
+        debug!(
+            request_id = %req.request_id,
+            client_index = req.client_index,
+            request = ?req,
+            "sending add request"
+        );
 
         {
             let mut state = self.state.lock().await;
@@ -152,6 +167,8 @@ impl EngineCoreClient for ZmqEngineCoreClient {
             state.retain_abortable(ids)
         };
 
+        debug!(request_ids = ?ids, abortable_request_ids = ?abortable, "sending abort request ids");
+
         if abortable.is_empty() {
             return Ok(());
         }
@@ -165,15 +182,18 @@ impl EngineCoreClient for ZmqEngineCoreClient {
             let mut state = self.state.lock().await;
             state.observe_outputs(&outputs);
         }
+        debug!(outputs = ?outputs, "delivering engine-core outputs");
         Ok(outputs)
     }
 
     async fn shutdown(&mut self) -> Result<()> {
+        debug!("shutting down engine-core client");
         self.input_send.lock().await.take();
 
         if let Some(task) = self.output_task.take() {
             task.abort();
         }
+        debug!("engine-core client shut down");
         Ok(())
     }
 }

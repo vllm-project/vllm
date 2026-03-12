@@ -33,4 +33,5 @@ anyhow = "1.0.100"
 clap = { version = "4.5.38", features = ["derive"] }
 hex = "0.4.3"
 tempfile = "3.23.0"
+tracing-subscriber = { version = "0.3.20", features = ["env-filter", "fmt"] }
 uuid = { version = "1.22.0", features = ["v4"] }

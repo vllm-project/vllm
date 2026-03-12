@@ -3,6 +3,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result};
 use clap::Parser;
 use tokio::time::timeout;
+use tracing_subscriber::EnvFilter;
 use vllm_engine_core_client::{
     EngineCoreClient, EngineCoreOutput, EngineCoreRequest, RequestOutputKind, SamplingParams,
     ZmqEngineCoreClient, ZmqEngineCoreClientConfig,
@@ -38,6 +39,12 @@ fn unix_timestamp_secs() -> f64 {
 
 fn unique_request_id() -> String {
     format!("rust-engine-core-smoke-{}", uuid::Uuid::new_v4())
+}
+
+fn init_tracing() {
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("vllm_engine_core_client=debug"));
+    let _ = tracing_subscriber::fmt().with_env_filter(filter).try_init();
 }
 
 fn build_request(request_id: String, max_tokens: u32) -> EngineCoreRequest {
@@ -83,6 +90,7 @@ async fn wait_for_timeout(
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<()> {
+    init_tracing();
     let args = Args::parse();
     let ready_timeout = Duration::from_secs(args.ready_timeout_secs);
     let output_timeout = Duration::from_secs(args.output_timeout_secs);
