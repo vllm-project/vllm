@@ -10,7 +10,6 @@ from einops import rearrange
 from torch import nn
 from transformers.activations import ACT2FN
 
-from vllm import envs
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import (
     CacheConfig,
@@ -154,7 +153,15 @@ def fi_chunk_gated_delta_rule(
 class ChunkGatedDeltaRule(CustomOp):
     def __init__(self) -> None:
         super().__init__()
-        backend = envs.VLLM_GDN_PREFILL_BACKEND
+        backend = (
+            str(
+                get_current_vllm_config().additional_config.get(
+                    "gdn_prefill_backend", "auto"
+                )
+            )
+            .strip()
+            .lower()
+        )
         supports_flashinfer = (
             current_platform.is_cuda() and current_platform.is_device_capability(90)
         )
@@ -163,7 +170,7 @@ class ChunkGatedDeltaRule(CustomOp):
             use_flashinfer = supports_flashinfer
             if not use_flashinfer:
                 logger.warning_once(
-                    "VLLM_GDN_PREFILL_BACKEND=flashinfer is set but "
+                    "GDN prefill backend 'flashinfer' is selected but "
                     "cannot use this kernel on the current platform. "
                     "Falling back to Triton/FLA."
                 )
