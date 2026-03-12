@@ -15,8 +15,6 @@ use crate::error::{Error, Result};
 pub type OpaqueValue = Value;
 
 mod defaults {
-    use super::*;
-
     pub fn sampling_n() -> u32 {
         1
     }
@@ -31,10 +29,6 @@ mod defaults {
 
     pub fn max_tokens() -> Option<u32> {
         Some(16)
-    }
-
-    pub fn request_output_kind() -> RequestOutputKind {
-        RequestOutputKind::Cumulative
     }
 }
 
@@ -80,21 +74,16 @@ pub enum FinishReason {
 }
 
 /// Controls how intermediate outputs are returned to the frontend.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize_repr, Deserialize_repr)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize_repr, Deserialize_repr)]
 #[repr(u8)]
 pub enum RequestOutputKind {
     /// Return the entire output-so-far in every update.
+    #[default]
     Cumulative = 0,
     /// Return only token deltas in each update.
     Delta = 1,
     /// Suppress intermediate updates and return only the final output.
     FinalOnly = 2,
-}
-
-impl Default for RequestOutputKind {
-    fn default() -> Self {
-        Self::Cumulative
-    }
 }
 
 /// The stop reason associated with a finished output.
@@ -140,7 +129,7 @@ pub struct SamplingParams {
     #[serde(default)]
     pub ignore_eos: bool,
     /// Whether updates are cumulative, delta-based, or final-only.
-    #[serde(default = "defaults::request_output_kind")]
+    #[serde(default)]
     pub output_kind: RequestOutputKind,
     /// Structured output configuration carried through as an opaque msgpack value.
     #[serde(default)]

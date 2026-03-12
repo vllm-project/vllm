@@ -4,6 +4,7 @@ use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tempfile::tempdir;
+use thiserror_ext::AsReport as _;
 use vllm_engine_core_client::{
     EngineCoreClient, EngineCoreOutput, EngineCoreOutputs, EngineCoreRequest, FinishReason,
     ReadyMessage, RequestOutputKind, SamplingParams, ZmqEngineCoreClient,
@@ -203,24 +204,28 @@ async fn connect_times_out_without_ready_message() {
         Err(error) => error,
     };
 
-    let message = error.to_string();
+    let message = error.to_report_string();
     assert!(message.contains("timed out"));
 }
 
 #[test]
 fn python_msgpack_fixtures_match_rust_encoding() {
     let script = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/python_compat.py");
-    let output = Command::new(&script).output();
-
-    let output = match output {
-        Ok(output) if output.status.success() => output,
-        _ => return,
-    };
+    let output = Command::new(&script)
+        .output()
+        .unwrap_or_else(|error| panic!("failed to execute {:?}: {error}", script));
+    assert!(
+        output.status.success(),
+        "python fixture script failed: status={:?}\nstdout:\n{}\nstderr:\n{}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
 
     let stdout = String::from_utf8(output.stdout).unwrap();
     let mut lines = stdout.lines();
-    let request_hex = lines.next().unwrap();
-    let outputs_hex = lines.next().unwrap();
+    let request_hex = lines.next().expect("missing request fixture line");
+    let outputs_hex = lines.next().expect("missing outputs fixture line");
 
     let request_bytes = hex::decode(request_hex).unwrap();
     let outputs_bytes = hex::decode(outputs_hex).unwrap();

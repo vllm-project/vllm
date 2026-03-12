@@ -122,6 +122,7 @@ pub fn spawn_output_loop(
             let frame = message.into_vec().into_iter().next().unwrap();
             let decoded = decode_msgpack(frame.as_ref());
             if tx.send(decoded).await.is_err() {
+                tracing::warn!("output loop rx dropped, shutting down output loop");
                 return;
             }
         }
@@ -141,6 +142,7 @@ pub fn spawn_input_monitor(
                     let _ = tx
                         .send(Err(Error::ControlClosed(error.to_report_string())))
                         .await;
+                    tracing::warn!("input monitor rx dropped, shutting down input monitor");
                     return;
                 }
             };
