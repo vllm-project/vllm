@@ -376,11 +376,13 @@ class SpecDecodeBaseProposer:
 
         self.cudagraph_dispatcher.initialize_cudagraph_keys(eagle_cudagraph_mode)
 
-    def _greedy_sample(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def _greedy_sample(
+        self, hidden_states: torch.Tensor, spec_step_idx: int = 0
+    ) -> torch.Tensor:
         """Greedy-sample draft tokens from hidden states."""
         if self.use_local_argmax_reduction:
             return self.model.get_top_tokens(hidden_states)
-        return self.model.compute_logits(hidden_states).argmax(dim=-1)
+        return self.model.compute_logits(hidden_states, spec_step_idx).argmax(dim=-1)
 
     def propose(
         self,
@@ -621,6 +623,7 @@ class SpecDecodeBaseProposer:
                 "input_ids": input_ids,
                 "positions": self._get_positions(input_batch_size),
                 "inputs_embeds": inputs_embeds,
+                "spec_step_idx": token_index + 1,
             }
             if self.pass_hidden_states_to_model:
                 model_kwargs["hidden_states"] = self.hidden_states[:input_batch_size]
@@ -641,7 +644,10 @@ class SpecDecodeBaseProposer:
                     last_hidden_states, hidden_states = ret_hidden_states
 
             hidden_states = hidden_states[:batch_size]
-            draft_token_ids = self._greedy_sample(last_hidden_states[:batch_size])
+            draft_token_ids = self._greedy_sample(
+                last_hidden_states[:batch_size],
+                spec_step_idx=token_index + 1,
+            )
             draft_token_ids_list.append(draft_token_ids)
 
         # [batch_size, num_speculative_tokens]

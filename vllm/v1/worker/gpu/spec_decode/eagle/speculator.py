@@ -109,6 +109,7 @@ class EagleSpeculator:
         slot_mappings: dict[str, torch.Tensor] | None,
         num_tokens_across_dp: torch.Tensor | None,
         cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
+        spec_step_idx: int = 0,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         batch_descriptor = BatchDescriptor(num_tokens=num_tokens)
         with set_forward_context(
@@ -124,6 +125,7 @@ class EagleSpeculator:
                 input_ids=self.input_buffers.input_ids[:num_tokens],
                 positions=self.input_buffers.positions[:num_tokens],
                 hidden_states=self.hidden_states[:num_tokens],
+                spec_step_idx=spec_step_idx,
             )
         if self.method == "mtp":
             last_hidden_states = ret_hidden_states
@@ -153,10 +155,11 @@ class EagleSpeculator:
                 slot_mappings,
                 num_tokens_across_dp,
                 cudagraph_runtime_mode,
+                spec_step_idx=step,
             )
             last_hidden_states = last_hidden_states[:num_reqs]
             hidden_states = hidden_states[:num_reqs]
-            logits = self.model.compute_logits(last_hidden_states)
+            logits = self.model.compute_logits(last_hidden_states, spec_step_idx=step)
 
             # NOTE(woosuk): We must add 1 to the positions to match the Gumbel noise
             # used for draft and target sampling.
@@ -264,7 +267,7 @@ class EagleSpeculator:
             num_tokens_across_dp=num_tokens_across_dp,
         )
         sample_hidden_states = last_hidden_states[last_token_indices]
-        logits = self.model.compute_logits(sample_hidden_states)
+        logits = self.model.compute_logits(sample_hidden_states, spec_step_idx=0)
 
         num_reqs = input_batch.num_reqs
         num_reqs_padded = input_batch.num_reqs_after_padding
