@@ -2106,7 +2106,15 @@ class Scheduler(SchedulerInterface):
                 self._free_blocks(self.requests[req_id])
         for req_id in kv_connector_output.finished_sending or ():
             logger.debug("Finished sending KV transfer for request %s", req_id)
-            assert req_id in self.requests
+            if req_id not in self.requests:
+                # Request was already freed (e.g., by finished_recving above
+                # or by abort).  This can happen when the external KV store
+                # goes down and the connector drains pending futures.
+                logger.warning(
+                    "Skipping finished_sending for already-freed request %s",
+                    req_id,
+                )
+                continue
             self._free_blocks(self.requests[req_id])
 
     def _update_requests_with_invalid_blocks(
@@ -2192,7 +2200,9 @@ class Scheduler(SchedulerInterface):
                     req_num_computed_tokens - request.num_computed_tokens
                 )
                 total_affected_tokens += num_affected_tokens
-                request.num_external_computed_tokens -= num_affected_tokens
+                request.num_external_computed_tokens = max(
+                    0, request.num_external_computed_tokens - num_affected_tokens
+                )
                 # collect invalid block and all downstream dependent blocks
                 if evict_blocks:
                     blocks_to_evict.update(req_block_ids[idx:])

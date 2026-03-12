@@ -447,7 +447,7 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         )
         mq_timeout = float(
             vllm_config.kv_transfer_config.get_from_extra_config(
-                "lmcache.mp.mq_timeout", 30.0
+                "lmcache.mp.mq_timeout", 300.0
             )
         )
         heartbeat_interval = float(

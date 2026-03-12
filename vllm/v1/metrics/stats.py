@@ -279,6 +279,12 @@ class PromptTokenStats:
         # needs at least one input token to run a forward pass.
         recomputed = 1 if (num_cached_tokens + 1 == prompt_len) else 0
 
+        # Clamp external tokens to avoid negative local_cache_hit when
+        # error-block invalidation reduces num_cached_tokens independently.
+        num_external_computed_tokens = min(
+            num_external_computed_tokens, num_cached_tokens + recomputed
+        )
+
         self.computed += prompt_len - num_cached_tokens
         self.external_kv_transfer += num_external_computed_tokens
         self.local_cache_hit += (
