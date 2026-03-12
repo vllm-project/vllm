@@ -106,11 +106,6 @@ class KVTransferConfig:
                 f"is set, supported roles are {get_args(KVRole)}"
             )
 
-        if self.kv_buffer_device is None:
-            from vllm.platforms import current_platform
-
-            self.kv_buffer_device = current_platform.device_type
-
     @property
     def is_kv_transfer_instance(self) -> bool:
         return self.kv_connector is not None and self.kv_role in get_args(KVRole)
