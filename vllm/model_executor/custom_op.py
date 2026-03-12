@@ -22,6 +22,12 @@ op_registry: dict[str, type["CustomOp"] | type["PluggableLayer"]] = {}
 op_registry_oot: dict[str, type["CustomOp"] | type["PluggableLayer"]] = {}
 
 
+def get_oot_class_by_name(class_name: str) -> type | None:
+    if class_name in op_registry_oot:
+        return op_registry_oot[class_name]
+    return None
+
+
 class PluggableLayer(nn.Module):
     """
     Base class for pluggable layers.
