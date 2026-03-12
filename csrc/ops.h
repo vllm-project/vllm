@@ -411,7 +411,10 @@ fptr_t init_hierarchical_ar(fptr_t intra_ar_ptr,
 void hierarchical_all_reduce(fptr_t _har, torch::Tensor& inp,
                              torch::Tensor& out);
 void dispose_hierarchical_ar(fptr_t _har);
+void init_uccl_ep_ar(fptr_t _har, torch::Tensor& connection_info,
+                     int64_t num_remote_nodes);
 int64_t hier_signal_size();
+int64_t uccl_ep_connection_info_size();
 
 torch::Tensor hadacore_transform(torch::Tensor& x, bool inplace);
 

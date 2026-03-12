@@ -2821,6 +2821,19 @@ def hier_signal_size() -> int:
     return torch.ops._C_custom_ar.hier_signal_size()
 
 
+def init_uccl_ep_ar(
+    har: int,
+    connection_info: torch.Tensor,
+    num_remote_nodes: int,
+) -> None:
+    torch.ops._C_custom_ar.init_uccl_ep_ar(har, connection_info,
+                                            num_remote_nodes)
+
+
+def uccl_ep_connection_info_size() -> int:
+    return torch.ops._C_custom_ar.uccl_ep_connection_info_size()
+
+
 # quick all reduce
 def init_custom_qr(rank: int, world_size: int, qr_max_size: int | None = None) -> int:
     return torch.ops._C_custom_ar.init_custom_qr(rank, world_size, qr_max_size)

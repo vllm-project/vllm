@@ -105,6 +105,62 @@ void dispose_hierarchical_ar(fptr_t _har) {
 }
 
 /**
+ * Initialize UCCL-EP inter-node connections on a gateway GPU.
+ *
+ * Must be called AFTER init_hierarchical_ar and ONLY on gateway GPUs.
+ * The connection_info tensor contains serialized UCCL-EP ConnectionInfo
+ * structs from all remote gateways, packed contiguously.
+ *
+ * Args:
+ *   _har: HierarchicalAllreduce handle from init_hierarchical_ar
+ *   connection_info: 1-D uint8 tensor with packed remote gateway connection
+ *                    info (num_remote_nodes * sizeof(ConnectionInfo) bytes)
+ *   num_remote_nodes: number of remote gateway nodes
+ */
+void init_uccl_ep_ar(fptr_t _har, torch::Tensor& connection_info,
+                     int64_t num_remote_nodes) {
+#ifdef VLLM_USE_UCCL_EP
+  auto har = reinterpret_cast<vllm::HierarchicalAllreduce*>(_har);
+
+  TORCH_CHECK(har->is_gateway_,
+              "init_uccl_ep_ar must only be called on gateway GPUs");
+  TORCH_CHECK(connection_info.is_contiguous(),
+              "connection_info must be contiguous");
+
+  // Deserialize connection info from bytes
+  auto* raw = connection_info.data_ptr<uint8_t>();
+  size_t info_size = sizeof(uccl_ep::ConnectionInfo);
+  TORCH_CHECK(connection_info.numel() ==
+                  static_cast<int64_t>(num_remote_nodes * info_size),
+              "connection_info size mismatch: expected ",
+              num_remote_nodes * info_size, " bytes, got ",
+              connection_info.numel());
+
+  std::vector<uccl_ep::ConnectionInfo> remote_gateways(num_remote_nodes);
+  for (int64_t i = 0; i < num_remote_nodes; i++) {
+    std::memcpy(&remote_gateways[i], raw + i * info_size, info_size);
+  }
+
+  har->init_uccl_ep(remote_gateways);
+#else
+  throw std::runtime_error(
+      "init_uccl_ep_ar requires building with -DVLLM_USE_UCCL_EP=ON");
+#endif
+}
+
+/**
  * Return sizeof(HierSignal) for Python-side buffer allocation.
  */
 int64_t hier_signal_size() { return sizeof(vllm::HierSignal); }
+
+/**
+ * Return sizeof(UCCL-EP ConnectionInfo) for Python-side serialization.
+ * Returns 0 if UCCL-EP is not compiled in.
+ */
+int64_t uccl_ep_connection_info_size() {
+#ifdef VLLM_USE_UCCL_EP
+  return sizeof(uccl_ep::ConnectionInfo);
+#else
+  return 0;
+#endif
+}

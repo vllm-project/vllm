@@ -131,11 +131,75 @@ class HierarchicalAllreduce:
             num_proxy_threads,
         )
 
+        # ────────────────────────────────────────────
+        # Step 5: Initialize UCCL-EP on gateway GPUs
+        # ────────────────────────────────────────────
+        # Gateway GPUs exchange UCCL-EP connection info and establish
+        # RDMA connections to all other gateways. Non-gateway GPUs skip.
+        self._init_uccl_ep_if_gateway()
+
         logger.info(
             "HierarchicalAllreduce initialized: node %d/%d, "
             "local_rank %d/%d, gateway=%s",
             node_id, num_nodes, local_rank, local_world_size,
             self.is_gateway
+        )
+
+    def _init_uccl_ep_if_gateway(self):
+        """Exchange UCCL-EP connection info between gateways and init RDMA."""
+        if not self.is_gateway:
+            return
+
+        conn_info_size = ops.uccl_ep_connection_info_size()
+        if conn_info_size == 0:
+            # UCCL-EP not compiled in — skip silently
+            # (multi-node allreduce will fall back to NCCL at runtime)
+            logger.warning(
+                "UCCL-EP not available (conn_info_size=0). "
+                "Multi-node hierarchical AR will throw at runtime."
+            )
+            return
+
+        if self.gateway_group is None:
+            logger.warning(
+                "No gateway_group provided — cannot exchange UCCL-EP "
+                "connection info. Multi-node hierarchical AR will not "
+                "use UCCL-EP."
+            )
+            return
+
+        # Each gateway creates its own local connection info tensor
+        # and exchanges with all other gateways via all_gather
+        local_info = torch.zeros(conn_info_size, dtype=torch.uint8,
+                                 device='cpu')
+
+        # Gather connection info from all gateways
+        all_infos = [None] * self.num_nodes
+        dist.all_gather_object(all_infos, local_info.numpy().tobytes(),
+                               group=self.gateway_group)
+
+        # Build packed tensor of remote gateways' info (exclude self)
+        remote_infos = []
+        for i, info_bytes in enumerate(all_infos):
+            if i != self.node_id:
+                remote_infos.append(
+                    torch.frombuffer(
+                        bytearray(info_bytes),
+                        dtype=torch.uint8
+                    )
+                )
+
+        num_remote = len(remote_infos)
+        if num_remote == 0:
+            return
+
+        packed_info = torch.cat(remote_infos).contiguous()
+
+        # Call C++ to initialize UCCL-EP with the remote connection info
+        ops.init_uccl_ep_ar(self._ptr, packed_info, num_remote)
+        logger.info(
+            "UCCL-EP initialized on gateway node %d with %d remote gateways",
+            self.node_id, num_remote
         )
 
     def should_custom_ar(self, inp: torch.Tensor) -> bool:
