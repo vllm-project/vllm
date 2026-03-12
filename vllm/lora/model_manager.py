@@ -599,8 +599,8 @@ class LoRAModelManager:
                 replacement_loras[i] = None
             # HACK Temporary solution for the pool model.
             if self.is_pooling_model and not lora_model.check_lora_name(module_name):
-                replaced_module_name = module_name.replace("model.", "")
-                if lora_model.check_lora_name(module_name):
+                replaced_module_name = module_name.removeprefix("model.")
+                if lora_model.check_lora_name(replaced_module_name):
                     module_name = replaced_module_name
             if module_name.endswith(".experts"):
                 if self._is_non_gated_moe and len(replacement_loras) > 0:
@@ -745,7 +745,7 @@ class LoRAModelManager:
         if self.is_pooling_model and not lora_model.check_lora_name(module_name):
             # If it's a pool model, and the layer name is not found,
             # remove the prefix 'model.' and search again.
-            module_name = module_name.replace("model.", "")
+            module_name = module_name.removeprefix("model.")
             if lora_model.check_lora_name(module_name):
                 org_module_name = module_name
                 logger.info_once(

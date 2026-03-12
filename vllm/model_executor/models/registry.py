@@ -422,6 +422,7 @@ _MULTIMODAL_MODELS = {
     "RForConditionalGeneration": ("rvl", "RForConditionalGeneration"),
     "KimiVLForConditionalGeneration": ("kimi_vl", "KimiVLForConditionalGeneration"),  # noqa: E501
     "KimiK25ForConditionalGeneration": ("kimi_k25", "KimiK25ForConditionalGeneration"),  # noqa: E501
+    "MoonshotKimiaForCausalLM": ("kimi_audio", "KimiAudioForConditionalGeneration"),  # noqa: E501
     "LightOnOCRForConditionalGeneration": (
         "lightonocr",
         "LightOnOCRForConditionalGeneration",
@@ -551,6 +552,8 @@ _SPECULATIVE_DECODING_MODELS = {
         "mistral_large_3_eagle",
         "EagleMistralLarge3ForCausalLM",
     ),
+    "Eagle3DeepseekV2ForCausalLM": ("deepseek_eagle3", "Eagle3DeepseekV2ForCausalLM"),
+    "Eagle3DeepseekV3ForCausalLM": ("deepseek_eagle3", "Eagle3DeepseekV2ForCausalLM"),
     "EagleDeepSeekMTPModel": ("deepseek_eagle", "EagleDeepseekV3ForCausalLM"),
     "DeepSeekMTPModel": ("deepseek_mtp", "DeepSeekMTP"),
     "ErnieMTPModel": ("ernie_mtp", "ErnieMTP"),
