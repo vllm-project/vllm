@@ -247,11 +247,6 @@ class KVCacheCoordinator(ABC):
     ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
         pass
 
-    def new_step_starts(self) -> None:
-        """Called when a new step is started."""
-        for manager in self.single_type_managers:
-            manager.new_step_starts()
-
 
 class KVCacheCoordinatorNoPrefixCache(KVCacheCoordinator):
     """

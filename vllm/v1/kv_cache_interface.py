@@ -478,7 +478,12 @@ class KVCacheConfig:
     """
 
     num_blocks: int
-    """The number of KV cache blocks"""
+    """Number of logical KV cache blocks.
+
+    Default path: this is also the number of GPU KV cache blocks.
+    Sparse hot-cache path: this is the CPU logical/full KV capacity used by
+    the scheduler.
+    """
     kv_cache_tensors: list[KVCacheTensor]
     """How should model runner initialize the KV cache tensors for each layer"""
     kv_cache_groups: list[KVCacheGroupSpec]
@@ -489,3 +494,7 @@ class KVCacheConfig:
     For models with multiple types of attention, there will be multiple groups,
     see `_get_kv_cache_config_uniform_page_size` for more details.
     """
+    num_gpu_blocks: int | None = None
+    """Number of GPU hot-cache blocks used by workers."""
+    num_cpu_blocks: int | None = None
+    """Number of CPU full-cache blocks used by workers and scheduler."""

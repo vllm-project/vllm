@@ -229,19 +229,12 @@ class Attention(nn.Module, AttentionLayerBase):
             calculate_kv_scales = False
 
         # llm-compressor mdls need to set cache_dtype to "fp8" manually.
-        kv_cache_scheme = getattr(quant_config, "kv_cache_scheme", None)
-        if kv_cache_scheme is not None:
+        if getattr(quant_config, "kv_cache_scheme", None) is not None:
             kv_cache_dtype = "fp8"
             calculate_kv_scales = False
             if cache_config is not None:
                 cache_config.cache_dtype = "fp8"
                 cache_config.calculate_kv_scales = False
-
-        # Check if per-head quant scales are required based on kv_cache_scheme
-        use_per_head_quant_scales = (
-            kv_cache_scheme is not None
-            and kv_cache_scheme.get("strategy") == "attn_head"
-        )
 
         self.kv_cache_torch_dtype = kv_cache_dtype_str_to_dtype(
             kv_cache_dtype, vllm_config.model_config
@@ -279,7 +272,6 @@ class Attention(nn.Module, AttentionLayerBase):
                 use_mla=False,
                 has_sink=self.has_sink,
                 use_mm_prefix=self.use_mm_prefix,
-                use_per_head_quant_scales=use_per_head_quant_scales,
                 attn_type=attn_type,
             )
         else:
@@ -354,6 +346,10 @@ class Attention(nn.Module, AttentionLayerBase):
         # by bind_kv_cache
         # this variable will not be accessed if use_direct_call is True
         self.kv_cache = [
+            torch.tensor([])
+            for _ in range(vllm_config.parallel_config.pipeline_parallel_size)
+        ]
+        self.cpu_kv_cache = [
             torch.tensor([])
             for _ in range(vllm_config.parallel_config.pipeline_parallel_size)
         ]
@@ -440,7 +436,7 @@ class Attention(nn.Module, AttentionLayerBase):
                     and value is not None
                 ):
                     kv_cache_dummy_dep = unified_kv_cache_update(
-                        key, value, self.layer_name
+                        query, key, value, self.layer_name
                     )
                 unified_attention_with_output(
                     query,
@@ -459,7 +455,7 @@ class Attention(nn.Module, AttentionLayerBase):
                     and value is not None
                 ):
                     kv_cache_dummy_dep = torch.ops.vllm.unified_kv_cache_update(
-                        key, value, self.layer_name
+                        query, key, value, self.layer_name
                     )
                 torch.ops.vllm.unified_attention_with_output(
                     query,
@@ -578,11 +574,11 @@ direct_register_custom_op(
 
 def get_attention_context(
     layer_name: str,
-) -> tuple[Any, "Attention | MLAAttention", torch.Tensor, torch.Tensor]:
+) -> tuple[Any, "Attention | MLAAttention", torch.Tensor]:
     """Extract attention context for a given layer.
 
     This helper function extracts the attention metadata, attention layer
-    instance, KV cache tensor, and slot mapping for a specific layer.
+    instance, and KV cache tensor for a specific layer.
 
     Args:
         layer_name: The name/identifier of the attention layer.
@@ -593,7 +589,6 @@ def get_attention_context(
             no metadata available
         - attn_layer: The attention layer instance (Attention or MLAAttention)
         - kv_cache: The KV cache tensor for current virtual engine
-        - slot_mapping: The slot mapping for this specific layer
 
         Note: attn_metadata may be None, but attn_layer and kv_cache are always
         extracted from the forward context.
@@ -602,14 +597,9 @@ def get_attention_context(
     attn_metadata = forward_context.attn_metadata
     if isinstance(attn_metadata, dict):
         attn_metadata = attn_metadata[layer_name]
-    attn_layer: Attention | MLAAttention = forward_context.no_compile_layers[layer_name]
+    attn_layer = forward_context.no_compile_layers[layer_name]
     kv_cache = attn_layer.kv_cache[forward_context.virtual_engine]
-    slot_mapping = forward_context.slot_mapping
-    assert isinstance(slot_mapping, dict), (
-        f"Expected slot_mapping to be a dict, got {type(slot_mapping)}. "
-    )
-    layer_slot_mapping = slot_mapping.get(layer_name)
-    return attn_metadata, attn_layer, kv_cache, layer_slot_mapping
+    return attn_metadata, attn_layer, kv_cache
 
 
 @maybe_transfer_kv_layer
@@ -619,7 +609,7 @@ def unified_attention(
     value: torch.Tensor,
     layer_name: str,
 ) -> torch.Tensor:
-    attn_metadata, self, kv_cache, _ = get_attention_context(layer_name)
+    attn_metadata, self, kv_cache = get_attention_context(layer_name)
     output = self.impl.forward(self, query, key, value, kv_cache, attn_metadata)
 
     return output
@@ -642,6 +632,7 @@ direct_register_custom_op(
 
 
 def unified_kv_cache_update(
+    query: torch.Tensor,
     key: torch.Tensor,
     value: torch.Tensor,
     layer_name: str,
@@ -650,7 +641,29 @@ def unified_kv_cache_update(
     Returns a dummy that is passed to unified_attention to signal a side effect and
     the data dependency between them to ensure torch.compile preserves ordering.
     """
-    _, attn_layer, kv_cache, layer_slot_mapping = get_attention_context(layer_name)
+    forward_context = get_forward_context()
+    attn_layer = forward_context.no_compile_layers[layer_name]
+    kv_cache = attn_layer.kv_cache[forward_context.virtual_engine]
+
+    slot_mapping = forward_context.slot_mapping
+    assert isinstance(slot_mapping, dict), (
+        f"Expected slot_mapping to be a dict, got {type(slot_mapping)}. "
+    )
+    layer_slot_mapping = slot_mapping.get(layer_name)
+    gpu_cache_manager = forward_context.gpu_cache_manager
+    if gpu_cache_manager is not None and gpu_cache_manager.enabled:
+        attn_metadata = forward_context.attn_metadata
+        if isinstance(attn_metadata, dict):
+            layer_attn_metadata = attn_metadata.get(layer_name)
+        else:
+            layer_attn_metadata = None
+        _, layer_slot_mapping = gpu_cache_manager.prepare_layer(
+            layer_name,
+            layer_attn_metadata,
+            layer_slot_mapping,
+            query,
+        )
+        gpu_cache_manager.wait_for_swap_in(layer_name)
     if layer_slot_mapping is not None:
         assert hasattr(attn_layer.impl, "do_kv_cache_update"), (
             f"{attn_layer.impl.__class__.__name__} does not support kv cache update"
@@ -662,16 +675,19 @@ def unified_kv_cache_update(
             kv_cache,
             layer_slot_mapping,
         )
+        if gpu_cache_manager is not None and gpu_cache_manager.enabled:
+            gpu_cache_manager.mark_kv_update_done(layer_name)
 
     return torch.empty(0, device=kv_cache.device, dtype=kv_cache.dtype)
 
 
 def unified_kv_cache_update_fake(
+    query: torch.Tensor,
     key: torch.Tensor,
     value: torch.Tensor,
     layer_name: str,
 ) -> torch.Tensor:
-    return torch.empty(0, device=key.device, dtype=key.dtype)
+    return torch.empty(0, device=query.device, dtype=query.dtype)
 
 
 direct_register_custom_op(
@@ -697,19 +713,33 @@ def unified_attention_with_output(
     # that ensures torch.compile preserves ordering between KV cache update and
     # attention forward.
     del kv_cache_dummy_dep
-    attn_metadata, self, kv_cache, _ = get_attention_context(layer_name)
+    attn_metadata, self, kv_cache = get_attention_context(layer_name)
+    forward_context = get_forward_context()
+    gpu_cache_manager = forward_context.gpu_cache_manager
+    if gpu_cache_manager is not None and gpu_cache_manager.enabled:
+        attn_metadata = gpu_cache_manager.get_prepared_attn_metadata(
+            layer_name, attn_metadata
+        )
 
-    self.impl.forward(
-        self,
-        query,
-        key,
-        value,
-        kv_cache,
-        attn_metadata,
-        output=output,
-        output_scale=output_scale,
-        output_block_scale=output_block_scale,
-    )
+    success = False
+    try:
+        self.impl.forward(
+            self,
+            query,
+            key,
+            value,
+            kv_cache,
+            attn_metadata,
+            output=output,
+            output_scale=output_scale,
+            output_block_scale=output_block_scale,
+        )
+        success = True
+        if gpu_cache_manager is not None and gpu_cache_manager.enabled:
+            gpu_cache_manager.mark_attn_forward_done(layer_name)
+    finally:
+        if gpu_cache_manager is not None and gpu_cache_manager.enabled:
+            gpu_cache_manager.finish_layer(layer_name, skip_swap_out=not success)
 
 
 def unified_attention_with_output_fake(

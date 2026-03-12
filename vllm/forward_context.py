@@ -5,7 +5,7 @@ import time
 from collections import defaultdict
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, NamedTuple
 
 import torch
 
@@ -26,8 +26,7 @@ batchsize_logging_interval: float = envs.VLLM_LOG_BATCHSIZE_INTERVAL
 batchsize_forward_time: defaultdict = defaultdict(list)
 
 
-@dataclass(frozen=True)
-class BatchDescriptor:
+class BatchDescriptor(NamedTuple):
     """
     Batch descriptor for cudagraph dispatching. We should keep the num of
     items as minimal as possible to properly and uniquely describe the padded
@@ -56,6 +55,19 @@ class BatchDescriptor:
     (like fused_moe_lora) whose grid size depends on num_active_loras
     to be properly captured.
     """
+
+    def relax_for_mixed_batch_cudagraphs(self) -> "BatchDescriptor":
+        """
+        Return a relaxed version of current batch descriptor that is still compatible
+        with PIECEWISE cudagraphs (or mixed prefill-decode FA cudagraphs).
+        """
+        return BatchDescriptor(
+            self.num_tokens,
+            num_reqs=None,
+            uniform=False,
+            has_lora=self.has_lora,
+            num_active_loras=self.num_active_loras,
+        )
 
 
 def _compute_sp_num_tokens(
@@ -175,7 +187,7 @@ class DPMetadata:
     # Get the cumulative tokens across sequence parallel ranks.
     # In this case the input to the MoEs will be distributed w.r.t both
     # DP and TP rank.
-    # When sp_size==1, this is just the cumulative num tokens across DP.
+    # When sp_size==1, this is just the cummulative num tokens across DP.
     def cu_tokens_across_sp(self, sp_size: int) -> torch.Tensor:
         num_tokens_across_sp_cpu = (
             self.num_tokens_across_dp_cpu - 1 + sp_size
@@ -211,6 +223,8 @@ class ForwardContext:
     # If True, bypass the compiled model call, e.g. by using .forward() directly
     skip_compiled: bool = False
 
+    gpu_cache_manager: Any = None
+
     # For torch.compile cold start times, we need to avoid hard-coding
     # any strings into the graph. Right now, the vllm.moe_forward
     # and vllm.moe_forward_shared custom operators hard-code strings into
@@ -241,7 +255,7 @@ class ForwardContext:
     additional_kwargs: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
-        assert self.cudagraph_runtime_mode.is_valid_runtime_mode(), (
+        assert self.cudagraph_runtime_mode.valid_runtime_modes(), (
             f"Invalid cudagraph runtime mode: {self.cudagraph_runtime_mode}"
         )
 
@@ -271,6 +285,7 @@ def create_forward_context(
     batch_descriptor: BatchDescriptor | None = None,
     ubatch_slices: UBatchSlices | None = None,
     slot_mapping: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]] | None = None,
+    gpu_cache_manager: Any = None,
     additional_kwargs: dict[str, Any] | None = None,
     skip_compiled: bool = False,
 ):
@@ -285,6 +300,7 @@ def create_forward_context(
         virtual_engine=virtual_engine,
         attn_metadata=attn_metadata,
         slot_mapping=slot_mapping or {},
+        gpu_cache_manager=gpu_cache_manager,
         dp_metadata=dp_metadata,
         cudagraph_runtime_mode=cudagraph_runtime_mode,
         batch_descriptor=batch_descriptor,
@@ -320,6 +336,7 @@ def set_forward_context(
     batch_descriptor: BatchDescriptor | None = None,
     ubatch_slices: UBatchSlices | None = None,
     slot_mapping: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]] | None = None,
+    gpu_cache_manager: Any = None,
     skip_compiled: bool = False,
 ):
     """A context manager that stores the current forward context,
@@ -347,6 +364,7 @@ def set_forward_context(
                 num_tokens_unpadded=num_tokens,
                 parallel_config=vllm_config.parallel_config,
                 allow_microbatching=False,
+                allow_dp_padding=False,
             )
             assert num_tokens_across_dp is not None
         dp_metadata = DPMetadata.make(
@@ -380,6 +398,7 @@ def set_forward_context(
         batch_descriptor,
         ubatch_slices,
         slot_mapping,
+        gpu_cache_manager,
         additional_kwargs,
         skip_compiled,
     )

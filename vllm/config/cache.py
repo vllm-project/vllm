@@ -3,6 +3,7 @@
 
 import math
 from dataclasses import field
+from enum import Enum
 from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import Field, SkipValidation, field_validator
@@ -35,12 +36,29 @@ PrefixCachingHashAlgo = Literal["sha256", "sha256_cbor", "xxhash", "xxhash_cbor"
 KVOffloadingBackend = Literal["native", "lmcache"]
 
 
+class CopyMethod(str, Enum):
+    NON_MERGED = "non-merged"
+    MERGED = "merged"
+    TORCH = "torch"
+    GATHER_SCATTER = "gather-scatter"
+    CUSTOM = "custom"
+
+
+class CachePolicy(str, Enum):
+    LRU = "lru"
+    LFU = "lfu"
+    HOT_SCORE = "hot-score"
+    LRU_LAYERWISE = "lru-layerwise"
+    LRU_WITH_HOT_SCORE = "lru-hot-score"
+
+
 @config
 class CacheConfig:
     """Configuration for the KV cache."""
 
-    block_size: SkipValidation[BlockSize] = None  # type: ignore[assignment]
-    """Size of a contiguous cache block in number of tokens.
+    block_size: SkipValidation[BlockSize] = None  # type: ignore
+    """Size of a contiguous cache block in number of tokens. On CUDA devices,
+    only block sizes up to 32 are supported.
 
     This config has no static default. If left unspecified by the user, it will
     be set in `Platform.check_and_update_config()` based on the current
@@ -91,6 +109,15 @@ class CacheConfig:
     benefits before turning this on.\n
     - "xxhash_cbor" combines canonical CBOR serialization with xxHash for
     reproducible hashing. Requires the optional ``xxhash`` package."""
+    cpu_offload_gb: float = Field(default=0, ge=0)
+    """The space in GiB to offload to CPU, per GPU. Default is 0, which means
+    no offloading. Intuitively, this argument can be seen as a virtual way to
+    increase the GPU memory size. For example, if you have one 24 GB GPU and
+    set this to 10, virtually you can think of it as a 34 GB GPU. Then you can
+    load a 13B model with BF16 weight, which requires at least 26GB GPU memory.
+    Note that this requires fast CPU-GPU interconnect, as part of the model is
+    loaded from CPU memory to GPU memory on the fly in each model forward pass.
+    """
     calculate_kv_scales: bool = False
     """This enables dynamic calculation of `k_scale` and `v_scale` when
     kv_cache_dtype is fp8. If `False`, the scales will be loaded from the model
@@ -158,6 +185,18 @@ class CacheConfig:
     'native' (vLLM native CPU offloading), 'lmcache'.
     KV offloading is only activated when kv_offloading_size is set."""
 
+    enable_sparse_hot_cache: bool = False
+    """Enable the experimental sparse hot KV cache migration path."""
+
+    sparse_topk: int | None = None
+    """Maximum number of KV tokens selected per layer for sparse attention."""
+
+    copy_method: CopyMethod = CopyMethod.MERGED
+    """CPU<->GPU KV block transfer method for sparse hot cache."""
+
+    cache_policy: CachePolicy = CachePolicy.LRU_LAYERWISE
+    """GPU hot-cache eviction policy for sparse hot cache."""
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
@@ -185,6 +224,10 @@ class CacheConfig:
             "num_cpu_blocks",
             # WIP feature toggle not impacting compiled graph shape
             "kv_sharing_fast_prefill",
+            "enable_sparse_hot_cache",
+            "sparse_topk",
+            "copy_method",
+            "cache_policy",
         }
 
         from vllm.config.utils import get_hash_factors, hash_factors
@@ -213,6 +256,14 @@ class CacheConfig:
         self,
         parallel_config: ParallelConfig,
     ) -> None:
+        if self.enable_sparse_hot_cache and self.kv_offloading_size is not None:
+            raise ValueError(
+                "enable_sparse_hot_cache is not compatible with kv_offloading_size."
+            )
+        if self.enable_sparse_hot_cache and self.sparse_topk is not None:
+            if self.sparse_topk <= 0:
+                raise ValueError("sparse_topk must be positive when provided.")
+
         swap_space_bytes = math.ceil(self.swap_space * GiB_bytes)
         total_cpu_memory = get_cpu_memory()
         # FIXME(woosuk): Here, it is assumed that the GPUs in a tensor parallel

@@ -3,12 +3,10 @@
 """KV-Cache Utilities."""
 
 import copy
-import hashlib
 import os
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, replace
-from functools import partial
 from typing import Any, NewType, TypeAlias, overload
 
 from vllm import envs
@@ -476,19 +474,14 @@ def _gen_prompt_embeds_extra_hash_keys(
         end_token_idx: The end token index of the block.
 
     Returns:
-        Return a stable hash of the block prompt embeddings if prompt embeds
-        are present. Return empty list otherwise.
+        Return prompt embeddings data of the request if it has prompt embeds.
+        Return empty list otherwise.
     """
     if request.prompt_embeds is None:
         return []
-    block_range = (start_token_idx, end_token_idx)
-    embeds_hash = request._prompt_embeds_per_block_hashes.get(block_range)
-    if embeds_hash is None:
-        block_prompt_embeds = request.prompt_embeds[start_token_idx:end_token_idx]
-        # Hash prompt embeds once per block and cache on request
-        embeds_hash = hashlib.sha256(tensor_data(block_prompt_embeds)).digest()
-        request._prompt_embeds_per_block_hashes[block_range] = embeds_hash
-    return [embeds_hash]
+    block_prompt_embeds = request.prompt_embeds[start_token_idx:end_token_idx]
+    embeds_bytes = tensor_data(block_prompt_embeds).tobytes()
+    return [embeds_bytes]
 
 
 def generate_block_hash_extra_keys(
@@ -496,7 +489,7 @@ def generate_block_hash_extra_keys(
 ) -> tuple[tuple[Any, ...] | None, int]:
     """Generate extra keys for the block hash. The extra keys can come from
     the multi-modal inputs, request specific metadata (e.g., LoRA names), and
-    hashed data from prompt embeddings.
+    data from prompt embeddings.
 
     Args:
         request: The request object.
@@ -1094,9 +1087,14 @@ def get_kv_cache_config_from_groups(
         # Return num_blocks=1 as BlockPool always needs a null_block.
         return KVCacheConfig(
             num_blocks=1,
+            num_gpu_blocks=1,
+            num_cpu_blocks=1,
             kv_cache_tensors=[],
             kv_cache_groups=kv_cache_groups,
         )
+
+    sparse_hot_cache = vllm_config.cache_config.enable_sparse_hot_cache
+    available_cpu_memory = int(vllm_config.cache_config.swap_space * GiB_bytes)
 
     # Determine how model runners should initialize the KV cache tensors.
     if len(kv_cache_groups) == 1 and isinstance(
@@ -1105,11 +1103,25 @@ def get_kv_cache_config_from_groups(
         # Special case: all layers have the same type of KV cache but with
         # different hidden size. Allocate different amount of memory for each
         # layer based on its hidden size.
-        num_blocks = (
+        num_gpu_blocks = (
             available_memory // kv_cache_groups[0].kv_cache_spec.page_size_bytes
         )
-        num_blocks = may_override_num_blocks(vllm_config, num_blocks)
+        num_gpu_blocks = may_override_num_blocks(vllm_config, num_gpu_blocks)
         per_layer_specs = kv_cache_groups[0].kv_cache_spec.kv_cache_specs
+        if sparse_hot_cache:
+            total_cpu_page_size = sum(
+                per_layer_specs[layer_name].page_size_bytes
+                for layer_name in kv_cache_groups[0].layer_names
+            )
+            if total_cpu_page_size <= 0:
+                raise ValueError(
+                    "Sparse hot KV cache requires a positive CPU logical block size."
+                )
+            num_cpu_blocks = max(available_cpu_memory // total_cpu_page_size, 1)
+            num_blocks = num_cpu_blocks
+        else:
+            num_cpu_blocks = 0
+            num_blocks = num_gpu_blocks
         kv_cache_tensors = [
             KVCacheTensor(
                 size=per_layer_specs[layer_name].page_size_bytes * num_blocks,
@@ -1132,9 +1144,20 @@ def get_kv_cache_config_from_groups(
             [group.kv_cache_spec for group in kv_cache_groups]
         )
         assert group_size > 0, "group_size must be greater than 0"
-        num_blocks = get_num_blocks(
+        num_gpu_blocks = get_num_blocks(
             vllm_config, group_size, available_memory, page_size
         )
+        if sparse_hot_cache:
+            total_cpu_page_size = page_size * group_size
+            if total_cpu_page_size <= 0:
+                raise ValueError(
+                    "Sparse hot KV cache requires a positive CPU logical block size."
+                )
+            num_cpu_blocks = max(available_cpu_memory // total_cpu_page_size, 1)
+            num_blocks = num_cpu_blocks
+        else:
+            num_cpu_blocks = 0
+            num_blocks = num_gpu_blocks
         kv_cache_tensors = []
         for i in range(group_size):
             shared_by = []
@@ -1147,6 +1170,8 @@ def get_kv_cache_config_from_groups(
 
     return KVCacheConfig(
         num_blocks=num_blocks,
+        num_gpu_blocks=num_gpu_blocks,
+        num_cpu_blocks=num_cpu_blocks,
         kv_cache_tensors=kv_cache_tensors,
         kv_cache_groups=kv_cache_groups,
     )
@@ -1266,6 +1291,18 @@ def generate_scheduler_kv_cache_config(
     assert all(
         [cfg.num_blocks == kv_cache_configs[0].num_blocks for cfg in kv_cache_configs]
     )
+    assert all(
+        [
+            cfg.num_gpu_blocks == kv_cache_configs[0].num_gpu_blocks
+            for cfg in kv_cache_configs
+        ]
+    )
+    assert all(
+        [
+            cfg.num_cpu_blocks == kv_cache_configs[0].num_cpu_blocks
+            for cfg in kv_cache_configs
+        ]
+    )
     # All workers have the same kv_cache_config except layer names, so use
     # an arbitrary one to initialize the scheduler.
     cfg = copy.deepcopy(kv_cache_configs[0])
@@ -1311,7 +1348,25 @@ def _report_kv_cache_config(
             dcp_size,
         )
     num_tokens_str = f"{num_tokens:,}"
-    logger.info_once("GPU KV cache size: %s tokens", num_tokens_str, scope="local")
+    if vllm_config.cache_config.enable_sparse_hot_cache:
+        logger.info_once(
+            "CPU logical KV cache size: %s tokens", num_tokens_str, scope="local"
+        )
+        if kv_cache_config.num_gpu_blocks is not None:
+            gpu_tokens = (
+                kv_cache_config.num_gpu_blocks
+                // len(kv_cache_config.kv_cache_groups)
+                * min_block_size
+            )
+            if pcp_size * dcp_size > 1:
+                gpu_tokens *= pcp_size * dcp_size
+            logger.info_once(
+                "GPU hot KV cache size: %s tokens",
+                f"{gpu_tokens:,}",
+                scope="local",
+            )
+    else:
+        logger.info_once("GPU KV cache size: %s tokens", num_tokens_str, scope="local")
     max_model_len_str = f"{vllm_config.model_config.max_model_len:,}"
     max_concurrency = get_max_concurrency_for_kv_cache_config(
         vllm_config, kv_cache_config
@@ -1397,7 +1452,7 @@ def _estimate_max_model_len_from_groups(
 
 def _auto_fit_max_model_len(
     vllm_config: VllmConfig,
-    projected_groups_per_worker: list[list[KVCacheGroupSpec]],
+    kv_cache_groups: list[KVCacheGroupSpec],
     available_memory: list[int],
 ) -> None:
     """
@@ -1408,13 +1463,14 @@ def _auto_fit_max_model_len(
 
     Args:
         vllm_config: The global VllmConfig (will be modified in-place)
-        projected_groups_per_worker: KV cache groups projected to each worker.
+        kv_cache_groups: The global KV cache groups (from get_kv_cache_groups).
+            This correctly accounts for padding in hybrid models.
         available_memory: Memory available for KV cache in bytes for each
             worker.
     """
     original_max = vllm_config.model_config.max_model_len
 
-    if all(not groups for groups in projected_groups_per_worker):
+    if not kv_cache_groups:
         # All workers have empty specs (attention-free model)
         logger.info_once(
             "Auto-fit max_model_len: attention-free model, "
@@ -1424,16 +1480,11 @@ def _auto_fit_max_model_len(
         )
         return
 
-    # Find the max_model_len that fits across all workers.
-    auto_fit_max = original_max
-    limiting_worker_mem = available_memory[0]
-    for groups, avail_mem in zip(projected_groups_per_worker, available_memory):
-        if not groups:
-            continue
-        worker_max = _estimate_max_model_len_from_groups(vllm_config, groups, avail_mem)
-        if worker_max < auto_fit_max:
-            auto_fit_max = worker_max
-            limiting_worker_mem = avail_mem
+    # Use minimum available memory across all workers
+    min_available_memory = min(available_memory)
+    auto_fit_max = _estimate_max_model_len_from_groups(
+        vllm_config, kv_cache_groups, min_available_memory
+    )
 
     if auto_fit_max <= 0:
         raise ValueError(
@@ -1457,45 +1508,9 @@ def _auto_fit_max_model_len(
             "available GPU memory (%s GiB available for KV cache)",
             original_max,
             auto_fit_max,
-            format_gib(limiting_worker_mem),
+            format_gib(min_available_memory),
             scope="local",
         )
-
-
-def _project_kv_cache_groups_to_worker(
-    global_kv_cache_groups: list[KVCacheGroupSpec],
-    worker_spec: dict[str, KVCacheSpec],
-) -> list[KVCacheGroupSpec]:
-    """
-    Projects global KV cache groups onto a single worker's assigned layers.
-
-    In pipeline parallelism, each worker only owns a subset of layers. This
-    function filters the global groups to include only layers present on the
-    given worker, adjusting UniformTypeKVCacheSpecs accordingly.
-
-    Args:
-        global_kv_cache_groups: The global KV cache groups for the whole model.
-        worker_spec: The KV cache spec of each layer on this worker.
-
-    Returns:
-        The projected KV cache groups containing only this worker's layers.
-    """
-    projected_groups: list[KVCacheGroupSpec] = []
-    for group in global_kv_cache_groups:
-        worker_layer_names = [
-            layer_name for layer_name in group.layer_names if layer_name in worker_spec
-        ]
-        group_spec = group.kv_cache_spec
-        if worker_layer_names and isinstance(group_spec, UniformTypeKVCacheSpecs):
-            group_spec = UniformTypeKVCacheSpecs(
-                block_size=group_spec.block_size,
-                kv_cache_specs={
-                    layer_name: group_spec.kv_cache_specs[layer_name]
-                    for layer_name in worker_layer_names
-                },
-            )
-        projected_groups.append(KVCacheGroupSpec(worker_layer_names, group_spec))
-    return projected_groups
 
 
 def get_kv_cache_configs(
@@ -1515,8 +1530,7 @@ def get_kv_cache_configs(
        the whole model.
     2. Generate the KV cache groups based on the layer ratio of the whole model.
        This also handles spec unification for hybrid models.
-    3. Handle auto-fit max_model_len and memory checks using per-worker
-       projected groups to account for PP sharding.
+    3. Handle auto-fit max_model_len and memory checks using the unified specs.
     4. Generate the KV cache configs for each worker based on the KV cache
        grouping strategy. (This is reasonable because the layer ratio of
        different PP stages are similar.)
@@ -1554,50 +1568,68 @@ def get_kv_cache_configs(
 
     # If original_max_model_len was -1, automatically
     # determine the maximum model length that fits in available GPU memory.
-    # We use per-worker projected groups to account for PP sharding.
-    projected_groups_per_worker = [
-        _project_kv_cache_groups_to_worker(global_kv_cache_groups, worker_spec)
-        for worker_spec in kv_cache_specs
-    ]
-
+    # We use the global groups here to correctly account for padding.
     if vllm_config.model_config.original_max_model_len == -1:
-        _auto_fit_max_model_len(
-            vllm_config, projected_groups_per_worker, available_memory
-        )
+        _auto_fit_max_model_len(vllm_config, global_kv_cache_groups, available_memory)
 
-    # Check if the available memory is enough per worker.
-    for groups, avail_mem in zip(projected_groups_per_worker, available_memory):
-        if not groups:
-            continue
+    # Check if the available memory is enough (using min across all workers).
+    # We use the global groups to correctly account for padding.
+    if global_kv_cache_groups:
         _check_enough_kv_cache_memory(
-            avail_mem,
-            partial(_max_memory_usage_bytes_from_groups, vllm_config, groups),
+            min(available_memory),
+            lambda: _max_memory_usage_bytes_from_groups(
+                vllm_config, global_kv_cache_groups
+            ),
             vllm_config.model_config.max_model_len,
-            partial(_estimate_max_model_len_from_groups, vllm_config, groups),
+            lambda am: _estimate_max_model_len_from_groups(
+                vllm_config, global_kv_cache_groups, am
+            ),
         )
 
     kv_cache_configs: list[KVCacheConfig] = []
-    for projected_groups, kv_cache_spec_one_worker, available_memory_one_worker in zip(
-        projected_groups_per_worker, kv_cache_specs, available_memory
+    for kv_cache_spec_one_worker, available_memory_one_worker in zip(
+        kv_cache_specs, available_memory
     ):
-        assert sum(len(group.layer_names) for group in projected_groups) == len(
-            kv_cache_spec_one_worker
-        ), "Some layers are not assigned to any group."
+        kv_cache_groups_one_worker: list[KVCacheGroupSpec] = []
+        for group in global_kv_cache_groups:
+            group_layer_names_one_worker = [
+                layer_name
+                for layer_name in group.layer_names
+                if layer_name in kv_cache_spec_one_worker
+            ]
+            kv_cache_groups_one_worker.append(
+                KVCacheGroupSpec(group_layer_names_one_worker, group.kv_cache_spec)
+            )
+        assert sum(
+            len(group.layer_names) for group in kv_cache_groups_one_worker
+        ) == len(kv_cache_spec_one_worker), "Some layers are not assigned to any group."
         kv_cache_configs.append(
             get_kv_cache_config_from_groups(
-                vllm_config, projected_groups, available_memory_one_worker
+                vllm_config, kv_cache_groups_one_worker, available_memory_one_worker
             )
         )
 
-    # Change the num_blocks of each rank to the smallest among all ranks.
-    # We also need to shrink the tensor size proportionally to avoid
-    # allocating unused memory.
-    min_num_blocks = min(
-        kv_cache_config.num_blocks for kv_cache_config in kv_cache_configs
-    )
+    sparse_hot_cache = vllm_config.cache_config.enable_sparse_hot_cache
+    if sparse_hot_cache:
+        min_num_blocks = min(
+            kv_cache_config.num_cpu_blocks or kv_cache_config.num_blocks
+            for kv_cache_config in kv_cache_configs
+        )
+        min_num_gpu_blocks = min(
+            kv_cache_config.num_gpu_blocks or kv_cache_config.num_blocks
+            for kv_cache_config in kv_cache_configs
+        )
+    else:
+        min_num_blocks = min(
+            kv_cache_config.num_blocks for kv_cache_config in kv_cache_configs
+        )
+        min_num_gpu_blocks = min_num_blocks
+
     for kv_cache_config in kv_cache_configs:
         num_blocks_old = kv_cache_config.num_blocks
         kv_cache_config.num_blocks = min_num_blocks
+        kv_cache_config.num_gpu_blocks = min_num_gpu_blocks
+        kv_cache_config.num_cpu_blocks = min_num_blocks if sparse_hot_cache else 0
 
         # Shrink tensor size proportionally
         for tensor in kv_cache_config.kv_cache_tensors:
