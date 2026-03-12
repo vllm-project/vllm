@@ -428,7 +428,7 @@ class HfRunner:
             )
 
         # don't put this import at the top level
-        # it will call torch.cuda.device_count()
+        # it will call torch.accelerator.device_count()
         from transformers import AutoProcessor
 
         self.processor = AutoProcessor.from_pretrained(
@@ -1535,7 +1535,7 @@ def clean_gpu_memory_between_tests():
 
     from tests.utils import wait_for_gpu_memory_to_clear
 
-    num_gpus = torch.cuda.device_count()
+    num_gpus = torch.accelerator.device_count()
     if num_gpus > 0:
         try:
             wait_for_gpu_memory_to_clear(

@@ -33,7 +33,7 @@ def start_async_worker(
 
     def thread_target() -> None:
         assert device_index is not None
-        torch.cuda.set_device(device_index)
+        torch.accelerator.set_device_index(device_index)
         cuda_stream = torch.cuda.Stream(device=device_index)
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)

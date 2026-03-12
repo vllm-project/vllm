@@ -106,7 +106,7 @@ def main():
     # IPC requires the training model to be on the same GPU as the vLLM server
     # The server should be started on GPU 0 with reduced memory utilization
     device = "cuda:0"
-    torch.cuda.set_device(device)
+    torch.accelerator.set_device_index(device)
 
     # Load the training model on the same GPU as the server
     # Use bfloat16 to reduce memory footprint

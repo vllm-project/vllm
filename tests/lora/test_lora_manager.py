@@ -37,7 +37,7 @@ EMBEDDING_MODULES = {
 
 
 DEVICES = (
-    [f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)]
+    [f"cuda:{i}" for i in range(1 if torch.accelerator.device_count() == 1 else 2)]
     if current_platform.is_cuda_alike()
     else ["cpu"]
 )

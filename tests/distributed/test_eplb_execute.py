@@ -442,7 +442,7 @@ def test_rearrange_expert_weights_with_redundancy(
 ):
     """Test the functionality of rearranging expert weights with redundancy."""
 
-    if torch.cuda.device_count() < world_size:
+    if torch.accelerator.device_count() < world_size:
         pytest.skip(f"Need at least {world_size} GPUs to run the test")
     distributed_run(
         _test_rearrange_expert_weights_with_redundancy,
@@ -528,7 +528,7 @@ def test_async_transfer_layer_without_mtp(
 ):
     """Exercise async EPLB transfer path without MTP/spec decode."""
 
-    if torch.cuda.device_count() < world_size:
+    if torch.accelerator.device_count() < world_size:
         pytest.skip(f"Need at least {world_size} GPUs to run the test")
 
     distributed_run(
@@ -547,7 +547,7 @@ def test_rearrange_expert_weights_no_change(world_size):
     unchanged.
     """
 
-    if torch.cuda.device_count() < world_size:
+    if torch.accelerator.device_count() < world_size:
         pytest.skip(f"Need at least {world_size} GPUs to run the test")
     distributed_run(_test_rearrange_expert_weights_no_change, world_size)
 
@@ -623,6 +623,6 @@ def _test_rearrange_expert_weights_profile_mode(env, world_size) -> None:
 def test_rearrange_expert_weights_profile_mode(world_size):
     """Test profile mode (should not copy actual weights)"""
 
-    if torch.cuda.device_count() < world_size:
+    if torch.accelerator.device_count() < world_size:
         pytest.skip(f"Need at least {world_size} GPUs to run the test")
     distributed_run(_test_rearrange_expert_weights_profile_mode, world_size)
