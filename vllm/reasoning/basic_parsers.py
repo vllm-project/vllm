@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import re
+import regex as re
 from abc import abstractmethod
 from collections.abc import Iterable, Sequence
 from itertools import islice
@@ -24,7 +24,8 @@ class BaseThinkingReasoningParser(ReasoningParser):
     Base class for reasoning parsers that use thinking tokens.
 
     This class provides common functionality for parsers that use start and end
-    tokens to delimit reasoning content (e.g., <think>...</think>, <seed:think>...</seed:think>).
+    tokens to delimit reasoning content (e.g., <think>...</think>,
+    <seed:think>...</seed:think>).
     """
 
     @property
@@ -120,7 +121,8 @@ class BaseThinkingReasoningParser(ReasoningParser):
         else:
             return DeltaMessage(content=delta_text)
 
-    def extract_reasoning(self, model_output: str, request: ChatCompletionRequest | ResponsesRequest) -> tuple[str | None, str]:
+    def extract_reasoning(self, model_output: str, request: ChatCompletionRequest | ResponsesRequest
+                         ) -> tuple[str | None, str]:
         """
         Extract reasoning and content from model output, supporting both standard tags and escaped <\think> tags.
         """
@@ -143,7 +145,7 @@ class BaseThinkingReasoningParser(ReasoningParser):
         last_end = 0
 
         for match in matches:
-            start_tag = match.group(1)
+            _ = match.group(1)
             reasoning_text = match.group(2)
             
             # Text before the start tag belongs to main content
