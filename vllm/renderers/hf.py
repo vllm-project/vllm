@@ -108,13 +108,12 @@ def resolve_chat_template(
 ) -> str | None:
     # 1st priority: The given chat template
     if chat_template is not None:
-        # FIX: Check if the tokenizer has named templates and if our string is one of those names
-        if hasattr(tokenizer, "chat_template") and isinstance(tokenizer.chat_template, dict):
-            if chat_template in tokenizer.chat_template:
-                # Return the actual Jinja string from the dictionary
-                return tokenizer.chat_template[chat_template]
-
-        # If it's not a dictionary key, assume it's already a Jinja string and return as-is
+        # Check if tokenizer has named templates and string is a key
+        if (hasattr(tokenizer, "chat_template")
+            and isinstance(tokenizer.chat_template, dict)
+            and chat_template in tokenizer.chat_template):
+            return tokenizer.chat_template[chat_template]
+            
         return chat_template
     
     # ... rest of the function remains the same
