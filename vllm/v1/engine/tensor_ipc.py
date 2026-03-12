@@ -123,24 +123,10 @@ class TensorIpcReceiver:
 
     @staticmethod
     def is_handle_like(obj: Any) -> bool:
-        if isinstance(obj, TensorIpcHandle):
-            return True
-        if (
-            isinstance(obj, dict)
-            and "tensor_id" in obj
-            and "shape" in obj
-            and "dtype" in obj
-            and "device" in obj
-        ):
-            return True
         return isinstance(obj, (list, tuple)) and len(obj) == 5
 
     @staticmethod
     def parse_handle(obj: Any) -> TensorIpcHandle:
-        if isinstance(obj, TensorIpcHandle):
-            return obj
-        if isinstance(obj, dict):
-            return TensorIpcHandle(**obj)
         if isinstance(obj, (list, tuple)) and len(obj) == 5:
             return TensorIpcHandle(*obj)
         raise TypeError(f"Object is not a TensorIpcHandle: {type(obj)}")

@@ -19,7 +19,7 @@ from vllm.v1.engine.tensor_ipc import (
     TensorIpcReceiver,
     TensorIpcSender,
 )
-from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder, TensorIpcHandle
+from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -242,13 +242,7 @@ def test_decoder_buffer_management():
     receiver = TensorIpcReceiver(tensor_queue)
 
     # Request tensor_3 (should buffer tensor_1 and tensor_2)
-    handle = TensorIpcHandle(
-        request_id=None,
-        tensor_id="tensor_3",
-        shape=[6, 7],
-        dtype="float32",
-        device="cpu",
-    )
+    handle = [None, "tensor_3", [6, 7], "float32", "cpu"]
 
     result = receiver.recv_tensor(handle)
     assert result.shape == (6, 7)
@@ -258,13 +252,7 @@ def test_decoder_buffer_management():
     assert (None, "tensor_2") in receiver._tensor_buffer
 
     # Request buffered tensor
-    handle2 = TensorIpcHandle(
-        request_id=None,
-        tensor_id="tensor_1",
-        shape=[2, 3],
-        dtype="float32",
-        device="cpu",
-    )
+    handle2 = [None, "tensor_1", [2, 3], "float32", "cpu"]
 
     result2 = receiver.recv_tensor(handle2)
     assert result2.shape == (2, 3)
@@ -753,14 +741,14 @@ def test_tensor_cleanup_after_decode():
     # Create receiver directly
     receiver = TensorIpcReceiver(tensor_queue)
 
-    # Create a TensorIpcHandle to decode
-    handle = TensorIpcHandle(
-        request_id=request_id,
-        tensor_id=tensor_id,
-        shape=list(tensor.shape),
-        dtype=str(tensor.dtype).removeprefix("torch."),
-        device=str(tensor.device),
-    )
+    # Mirror the actual msgpack decode shape used in vLLM: a 5-element list.
+    handle = [
+        request_id,
+        tensor_id,
+        list(tensor.shape),
+        str(tensor.dtype).removeprefix("torch."),
+        str(tensor.device),
+    ]
 
     # Receive the tensor - this should retrieve it from the queue
     decoded_tensor = receiver.recv_tensor(handle)

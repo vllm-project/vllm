@@ -292,8 +292,8 @@ def test_non_multimodal_tensor_with_ipc():
     """Test that non-multimodal tensor fields work correctly with IPC enabled.
 
     This reproduces the bug where fields like prompt_embeds: torch.Tensor | None
-    would fail to decode when IPC is enabled because _decode_tensor expected a tuple
-    but received a TensorIpcHandle dict.
+    would fail to decode when IPC is enabled because _decode_tensor expected a
+    raw tensor tuple but received a msgpack-decoded TensorIpcHandle list.
     """
     import torch.multiprocessing as torch_mp
 
@@ -322,7 +322,8 @@ def test_non_multimodal_tensor_with_ipc():
     assert len(encoded) > 0
 
     # Decode the request - this should retrieve the tensor from IPC queue
-    # Previously this would fail with: TypeError: cannot unpack non-iterable dict object
+    # Previously this would fail because the decoder tried to unpack the
+    # handle list as raw tensor bytes metadata.
     decoded = decoder.decode(encoded)
 
     # Verify the decoded request matches the original
