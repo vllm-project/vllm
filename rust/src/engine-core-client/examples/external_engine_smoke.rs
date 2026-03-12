@@ -5,8 +5,8 @@ use clap::Parser;
 use tokio::time::timeout;
 use tracing_subscriber::EnvFilter;
 use vllm_engine_core_client::{
-    EngineCoreClient, EngineCoreRequest, FinishReason, RequestBatchOutputs, RequestOutputKind,
-    SamplingParams, StopReason, ZmqEngineCoreClient, ZmqEngineCoreClientConfig,
+    EngineCoreClient, EngineCoreClientConfig, EngineCoreRequest, FinishReason, RequestBatchOutputs,
+    RequestOutputKind, SamplingParams, StopReason,
 };
 
 const PROMPT_TOKEN_IDS: &[u32] = &[20841, 448, 6896, 25, 23811];
@@ -73,7 +73,7 @@ struct CompletedRequest {
 }
 
 async fn wait_for_request_completion(
-    client: &mut ZmqEngineCoreClient,
+    client: &mut EngineCoreClient,
     request_id: &str,
 ) -> vllm_engine_core_client::Result<CompletedRequest> {
     let mut completed = CompletedRequest::default();
@@ -114,7 +114,7 @@ async fn wait_for_request_completion(
 }
 
 async fn wait_for_timeout(
-    client: &mut ZmqEngineCoreClient,
+    client: &mut EngineCoreClient,
     request_id: &str,
     output_timeout: Duration,
 ) -> Result<CompletedRequest> {
@@ -134,7 +134,7 @@ async fn main() -> Result<()> {
     let ready_timeout = Duration::from_secs(args.ready_timeout_secs);
     let output_timeout = Duration::from_secs(args.output_timeout_secs);
     let request_id = unique_request_id();
-    let mut client = ZmqEngineCoreClient::connect(ZmqEngineCoreClientConfig {
+    let mut client = EngineCoreClient::connect(EngineCoreClientConfig {
         handshake_address: args.handshake_address.clone(),
         local_host: args.host.clone(),
         ready_timeout,

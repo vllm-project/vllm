@@ -1,7 +1,6 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use async_trait::async_trait;
 use thiserror_ext::AsReport;
 use tokio::sync::{Mutex, mpsc};
 use tokio_util::task::AbortOnDropHandle;
@@ -19,7 +18,7 @@ use crate::transport;
 /// Configuration for connecting a Rust frontend client to an already running
 /// Python `EngineCoreProc`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ZmqEngineCoreClientConfig {
+pub struct EngineCoreClientConfig {
     /// Startup handshake address that the Python engine connects to first.
     pub handshake_address: String,
     /// Local host/interface used when allocating the frontend input/output addresses.
@@ -30,7 +29,7 @@ pub struct ZmqEngineCoreClientConfig {
     pub client_index: u32,
 }
 
-impl ZmqEngineCoreClientConfig {
+impl EngineCoreClientConfig {
     pub fn new(handshake_address: impl Into<String>) -> Self {
         Self {
             handshake_address: handshake_address.into(),
@@ -43,8 +42,8 @@ impl ZmqEngineCoreClientConfig {
 
 /// Default ZMQ-based implementation that talks directly to a Python
 /// `EngineCoreProc`.
-pub struct ZmqEngineCoreClient {
-    config: ZmqEngineCoreClientConfig,
+pub struct EngineCoreClient {
+    config: EngineCoreClientConfig,
     input_address: String,
     output_address: String,
     engine_identity: Vec<u8>,
@@ -55,9 +54,9 @@ pub struct ZmqEngineCoreClient {
     pub ready_message: Option<ReadyMessage>,
 }
 
-impl ZmqEngineCoreClient {
+impl EngineCoreClient {
     /// Connect to an already running Python engine and complete the startup handshake.
-    pub async fn connect(config: ZmqEngineCoreClientConfig) -> Result<Self> {
+    pub async fn connect(config: EngineCoreClientConfig) -> Result<Self> {
         let connected = transport::connect(
             &config.handshake_address,
             &config.local_host,
@@ -68,7 +67,7 @@ impl ZmqEngineCoreClient {
     }
 
     fn from_connected(
-        config: ZmqEngineCoreClientConfig,
+        config: EngineCoreClientConfig,
         connected: transport::ConnectedTransport,
     ) -> Result<Self> {
         let (tx, rx) = mpsc::channel(64);
@@ -100,12 +99,6 @@ impl ZmqEngineCoreClient {
         &self.engine_identity
     }
 
-    /// Wait for the next batch of outputs and immediately classify the raw
-    /// wire message into a more semantic Rust enum.
-    pub async fn next_classified_output(&mut self) -> Result<ClassifiedEngineCoreOutputs> {
-        self.next_output().await.map(EngineCoreOutputs::classify)
-    }
-
     async fn send<T>(&self, request_type: EngineCoreRequestType, payload: &T) -> Result<()>
     where
         T: serde::Serialize + std::fmt::Debug,
@@ -135,22 +128,10 @@ impl ZmqEngineCoreClient {
     }
 }
 
-/// Minimal async engine-core client surface for the first-stage Rust frontend.
-#[async_trait]
-pub trait EngineCoreClient {
+// Client API implementation.
+impl EngineCoreClient {
     /// Add a new request to the engine.
-    async fn add_request(&self, req: EngineCoreRequest) -> Result<()>;
-    /// Abort currently in-flight requests by request ID.
-    async fn abort_requests(&self, ids: &[String]) -> Result<()>;
-    /// Wait for the next batch of outputs from the engine.
-    async fn next_output(&mut self) -> Result<EngineCoreOutputs>;
-    /// Shut down local client tasks and close transport state.
-    async fn shutdown(&mut self) -> Result<()>;
-}
-
-#[async_trait]
-impl EngineCoreClient for ZmqEngineCoreClient {
-    async fn add_request(&self, mut req: EngineCoreRequest) -> Result<()> {
+    pub async fn add_request(&self, mut req: EngineCoreRequest) -> Result<()> {
         req.client_index = self.config.client_index;
         req.validate()?;
         debug!(
@@ -168,7 +149,8 @@ impl EngineCoreClient for ZmqEngineCoreClient {
         self.send(EngineCoreRequestType::Add, &req).await
     }
 
-    async fn abort_requests(&self, ids: &[String]) -> Result<()> {
+    /// Abort currently in-flight requests by request ID.
+    pub async fn abort_requests(&self, ids: &[String]) -> Result<()> {
         let abortable = {
             let state = self.state.lock().await;
             state.retain_abortable(ids)
@@ -183,7 +165,8 @@ impl EngineCoreClient for ZmqEngineCoreClient {
         self.send(EngineCoreRequestType::Abort, &abortable).await
     }
 
-    async fn next_output(&mut self) -> Result<EngineCoreOutputs> {
+    /// Wait for the next batch of outputs from the engine.
+    pub async fn next_output(&mut self) -> Result<EngineCoreOutputs> {
         let outputs = self.output_rx.recv().await.ok_or(Error::OutputClosed)??;
         {
             let mut state = self.state.lock().await;
@@ -193,7 +176,14 @@ impl EngineCoreClient for ZmqEngineCoreClient {
         Ok(outputs)
     }
 
-    async fn shutdown(&mut self) -> Result<()> {
+    /// Wait for the next batch of outputs and immediately classify the raw
+    /// wire message into a more semantic Rust enum.
+    pub async fn next_classified_output(&mut self) -> Result<ClassifiedEngineCoreOutputs> {
+        self.next_output().await.map(EngineCoreOutputs::classify)
+    }
+
+    /// Shut down local client tasks and close transport state.
+    pub async fn shutdown(&mut self) -> Result<()> {
         debug!("shutting down engine-core client");
         self.input_send.lock().await.take();
 

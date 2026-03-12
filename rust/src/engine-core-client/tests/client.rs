@@ -9,9 +9,8 @@ use thiserror_ext::AsReport as _;
 use tracing_subscriber::EnvFilter;
 use vllm_engine_core_client::protocol::handshake::HandshakeInitMessage;
 use vllm_engine_core_client::{
-    EngineCoreClient, EngineCoreOutput, EngineCoreOutputs, EngineCoreRequest, FinishReason,
-    ReadyMessage, RequestOutputKind, SamplingParams, ZmqEngineCoreClient,
-    ZmqEngineCoreClientConfig,
+    EngineCoreOutput, EngineCoreOutputs, EngineCoreRequest, FinishReason, ReadyMessage,
+    RequestOutputKind, SamplingParams, EngineCoreClient, EngineCoreClientConfig,
 };
 use zeromq::prelude::{Socket, SocketRecv, SocketSend};
 use zeromq::util::PeerIdentity;
@@ -195,7 +194,7 @@ async fn client_roundtrip_add_abort_and_finish() {
         .unwrap();
     });
 
-    let mut client = ZmqEngineCoreClient::connect(ZmqEngineCoreClientConfig {
+    let mut client = EngineCoreClient::connect(EngineCoreClientConfig {
         handshake_address,
         local_host: "127.0.0.1".to_string(),
         ready_timeout: Duration::from_secs(2),
@@ -260,7 +259,7 @@ async fn connect_times_out_without_ready_message() {
         let _ = handshake.recv().await.unwrap();
     });
 
-    let result = ZmqEngineCoreClient::connect(ZmqEngineCoreClientConfig {
+    let result = EngineCoreClient::connect(EngineCoreClientConfig {
         handshake_address,
         local_host: "127.0.0.1".to_string(),
         ready_timeout: Duration::from_millis(100),
