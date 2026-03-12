@@ -63,7 +63,8 @@ def _xpu_ops_deepseek_scaling_rope_impl(
     cos_sin_cache: torch.Tensor | None,
     rotary_dim: int,
     is_neox_style: bool,
-) -> tuple[torch.Tensor, torch.Tensor | None]:
+) -> tuple[torch.Tensor, torch.Tensor]:
+    assert key is not None
     return torch.ops._xpu_C.deepseek_scaling_rope(
         positions, query, key, offsets, cos_sin_cache, rotary_dim, is_neox_style
     )
@@ -77,7 +78,7 @@ def _xpu_ops_deepseek_scaling_rope_fake(
     cos_sin_cache: torch.Tensor | None,
     rotary_dim: int,
     is_neox_style: bool,
-) -> tuple[torch.Tensor, torch.Tensor | None]:
+) -> tuple[torch.Tensor, torch.Tensor]:
     return query, key
 
 
