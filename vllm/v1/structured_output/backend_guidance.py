@@ -11,6 +11,10 @@ import torch
 
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
+from vllm.tokenizers.mistral import (
+    MistralTokenizer,
+    guidance_tokenizer_from_mistral_tokenizer,
+)
 from vllm.utils.import_utils import LazyLoader
 from vllm.v1.structured_output.backend_types import (
     StructuredOutputBackend,
@@ -92,9 +96,14 @@ class GuidanceBackend(StructuredOutputBackend):
             self.vllm_config.structured_outputs_config.disable_additional_properties
         )
 
-        self.ll_tokenizer = llguidance_hf.from_tokenizer(
-            self.tokenizer, max(self.vocab_size, len(self.tokenizer))
-        )
+        if isinstance(self.tokenizer, MistralTokenizer):
+            self.ll_tokenizer = guidance_tokenizer_from_mistral_tokenizer(
+                self.tokenizer
+            )
+        else:
+            self.ll_tokenizer = llguidance_hf.from_tokenizer(
+                self.tokenizer, max(self.vocab_size, len(self.tokenizer))
+            )
 
     def compile_grammar(
         self, request_type: StructuredOutputOptions, grammar_spec: str
@@ -152,7 +161,6 @@ class GuidanceGrammar(StructuredOutputGrammar):
         Returns True if the parser was advanced successfully.
         Returns False if the parser failed to advance.
         """
-
         if self.ll_tokenizer.eos_token in tokens:
             if self.ll_matcher.is_stopped() and not self.terminated:
                 self.rollback_lag = 1
@@ -244,6 +252,8 @@ def serialize_guidance_grammar(
             tp = "regex"
         elif request_type == StructuredOutputOptions.GRAMMAR:
             tp = "grammar"
+        elif request_type == StructuredOutputOptions.LARK:
+            tp = "lark"
         elif request_type == StructuredOutputOptions.CHOICE:
             tp = "choice"
         elif request_type == StructuredOutputOptions.STRUCTURAL_TAG:

@@ -3,6 +3,8 @@
 
 import json
 from collections.abc import Generator
+from typing import Any, Literal
+from unittest.mock import MagicMock, PropertyMock, patch
 
 import partial_json_parser
 import pytest
@@ -11,11 +13,21 @@ from mistral_common.protocol.instruct.request import InstructRequest
 from mistral_common.protocol.instruct.tool_calls import FunctionCall, ToolCall
 from partial_json_parser.core.options import Allow
 
-from vllm.entrypoints.openai.engine.protocol import DeltaMessage, DeltaToolCall
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.entrypoints.openai.engine.protocol import (
+    DeltaMessage,
+    DeltaToolCall,
+    FunctionDefinition,
+)
 from vllm.tokenizers import TokenizerLike, get_tokenizer
 from vllm.tokenizers.detokenizer_utils import detokenize_incrementally
 from vllm.tokenizers.mistral import MistralTokenizer
-from vllm.tool_parsers.mistral_tool_parser import MistralToolParser
+from vllm.tool_parsers.mistral_tool_parser import (
+    ChatCompletionToolsParam,
+    MistralGrammarFactory,
+    MistralToolParser,
+    ToolsLarkConverter,
+)
 
 
 @pytest.fixture(scope="module")
@@ -890,3 +902,528 @@ def test_extract_tool_calls_streaming_pre_v11_tokenizer_one_chunk(
         assert expected_content == ""
     else:
         assert delta_message.content == expected_content
+
+
+def _create_tool(
+    name: str, parameters: dict[str, Any], strict: bool = False
+) -> ChatCompletionToolsParam:
+    """Helper function to create a tool with optional strict attribute"""
+    func = FunctionDefinition(
+        name=name,
+        description="test",
+        parameters=parameters,
+    )
+    if strict:
+        func.strict = True  # type: ignore[attr-defined]
+    return ChatCompletionToolsParam(function=func)
+
+
+class TestToolsLarkConverter:
+    @pytest.mark.parametrize(
+        ("tool", "expected"),
+        [
+            (
+                _create_tool("function", {"parameter": 1}, strict=True),
+                {"parameter": 1},
+            ),
+            (
+                _create_tool("function", {"parameter": 1}, strict=False),
+                {"type": "object"},
+            ),
+            (
+                _create_tool("function", {}, strict=True),
+                {"type": "object", "properties": {}, "additionalProperties": False},
+            ),
+        ],
+    )
+    def test_get_args_json(
+        self, tool: ChatCompletionToolsParam, expected: dict[str, Any]
+    ) -> None:
+        assert ToolsLarkConverter().get_args_json(tool=tool) == expected
+
+    @pytest.mark.parametrize(
+        "tools,tokenizer_version,mode,parallel_tool_calls,expected",
+        [
+            # mode="none" always returns empty string
+            (
+                [_create_tool("non_strict_func", {"param": "value"}, strict=False)],
+                7,
+                "none",
+                True,
+                "",
+            ),
+            # Pre-v11: non-strict parallel vs no-parallel (maxItems difference)
+            (
+                [_create_tool("non_strict_func", {"param": "value"}, strict=False)],
+                7,
+                "auto",
+                True,
+                '<TOOL_CALLS> SAFE_WS? fcall_array SAFE_WS?\nfcall_array: %json {"minItems": 1, "type": "array", "items": {"type": "object", "additionalProperties": false, "properties": {"name": {"type": "string", "enum": ["non_strict_func"]}, "arguments": {"type": "object"}}, "required": ["name", "arguments"]}}\n',  # noqa: E501
+            ),
+            (
+                [_create_tool("non_strict_func", {"param": "value"}, strict=False)],
+                7,
+                "auto",
+                False,
+                '<TOOL_CALLS> SAFE_WS? fcall_array SAFE_WS?\nfcall_array: %json {"minItems": 1, "type": "array", "items": {"type": "object", "additionalProperties": false, "properties": {"name": {"type": "string", "enum": ["non_strict_func"]}, "arguments": {"type": "object"}}, "required": ["name", "arguments"]}, "maxItems": 1}\n',  # noqa: E501
+            ),
+            # Pre-v11: strict tool uses anyOf with const name
+            (
+                [_create_tool("strict_func", {"param": "value"}, strict=True)],
+                7,
+                "auto",
+                True,
+                '<TOOL_CALLS> SAFE_WS? fcall_array SAFE_WS?\nfcall_array: %json {"minItems": 1, "type": "array", "items": {"anyOf": [{"type": "object", "required": ["name", "arguments"], "additionalProperties": false, "properties": {"name": {"const": "strict_func"}, "arguments": {"param": "value"}}}]}}\n',  # noqa: E501
+            ),
+            # Pre-v11: empty strict params get default schema
+            (
+                [_create_tool("empty_strict_func", {}, strict=True)],
+                7,
+                "auto",
+                True,
+                '<TOOL_CALLS> SAFE_WS? fcall_array SAFE_WS?\nfcall_array: %json {"minItems": 1, "type": "array", "items": {"anyOf": [{"type": "object", "required": ["name", "arguments"], "additionalProperties": false, "properties": {"name": {"const": "empty_strict_func"}, "arguments": {"type": "object", "properties": {}, "additionalProperties": false}}}]}}\n',  # noqa: E501
+            ),
+            # Pre-v11: mixed strict/non-strict
+            (
+                [
+                    _create_tool("strict_func", {"param": "value"}, strict=True),
+                    _create_tool("non_strict_func", {"param": "value"}, strict=False),
+                ],
+                7,
+                "auto",
+                True,
+                '<TOOL_CALLS> SAFE_WS? fcall_array SAFE_WS?\nfcall_array: %json {"minItems": 1, "type": "array", "items": {"anyOf": [{"type": "object", "required": ["name", "arguments"], "additionalProperties": false, "properties": {"name": {"const": "strict_func"}, "arguments": {"param": "value"}}}, {"type": "object", "required": ["name", "arguments"], "additionalProperties": false, "properties": {"name": {"const": "non_strict_func"}, "arguments": {"type": "object"}}}]}}\n',  # noqa: E501
+            ),
+            # Post-v11: non-strict parallel vs no-parallel (+ suffix difference)
+            (
+                [_create_tool("non_strict_func", {"param": "value"}, strict=False)],
+                11,
+                "auto",
+                True,
+                '((<TOOL_CALLS> SAFE_WS? "non_strict_func" <ARGS> SAFE_WS? %json {"type": "object"} SAFE_WS?))+',  # noqa: E501
+            ),
+            (
+                [_create_tool("non_strict_func", {"param": "value"}, strict=False)],
+                11,
+                "auto",
+                False,
+                '(<TOOL_CALLS> SAFE_WS? "non_strict_func" <ARGS> SAFE_WS? %json {"type": "object"} SAFE_WS?)',  # noqa: E501
+            ),
+            # Post-v11: strict tool embeds schema directly
+            (
+                [_create_tool("strict_func", {"param": "value"}, strict=True)],
+                11,
+                "auto",
+                True,
+                '((<TOOL_CALLS> SAFE_WS? "strict_func" <ARGS> SAFE_WS? %json {"param": "value"} SAFE_WS?))+',  # noqa: E501
+            ),
+            # Post-v11: multiple tools use | separator
+            (
+                [
+                    _create_tool("strict_func", {"param": "value"}, strict=True),
+                    _create_tool("non_strict_func", {"param": "value"}, strict=False),
+                ],
+                11,
+                "auto",
+                True,
+                '((<TOOL_CALLS> SAFE_WS? "strict_func" <ARGS> SAFE_WS? %json {"param": "value"} SAFE_WS?) | (<TOOL_CALLS> SAFE_WS? "non_strict_func" <ARGS> SAFE_WS? %json {"type": "object"} SAFE_WS?))+',  # noqa: E501
+            ),
+            # mode="required" uses same grammar as "auto"
+            (
+                [_create_tool("test_func", {"param": "value"}, strict=True)],
+                7,
+                "required",
+                True,
+                '<TOOL_CALLS> SAFE_WS? fcall_array SAFE_WS?\nfcall_array: %json {"minItems": 1, "type": "array", "items": {"anyOf": [{"type": "object", "required": ["name", "arguments"], "additionalProperties": false, "properties": {"name": {"const": "test_func"}, "arguments": {"param": "value"}}}]}}\n',  # noqa: E501
+            ),
+        ],
+        ids=[
+            "none_returns_empty",
+            "pre_v11_non_strict_parallel",
+            "pre_v11_non_strict_no_parallel",
+            "pre_v11_strict",
+            "pre_v11_empty_strict",
+            "pre_v11_mixed",
+            "post_v11_non_strict_parallel",
+            "post_v11_non_strict_no_parallel",
+            "post_v11_strict",
+            "post_v11_mixed",
+            "required_same_as_auto",
+        ],
+    )
+    def test_convert(
+        self,
+        tools: list[ChatCompletionToolsParam] | None,
+        tokenizer_version: int,
+        mode: Literal["auto", "required", "none"],
+        parallel_tool_calls: bool,
+        expected: str,
+    ):
+        assert (
+            ToolsLarkConverter().convert(
+                tools=tools,
+                tokenizer_version=tokenizer_version,
+                mode=mode,
+                parallel_tool_calls=parallel_tool_calls,
+            )
+            == expected
+        )
+
+
+class TestMistralGrammarFactory:
+    @pytest.mark.parametrize(
+        "tokenizer_version,reasoning,expected_body_rule,expect_think",
+        [
+            # version < 13: BASE_LARK_GRAMMAR regardless of reasoning
+            (11, True, "body: content | (content? fcalls)", False),
+            # version >= 13, reasoning=False: BASE_LARK_GRAMMAR
+            (13, False, "body: content | (content? fcalls)", False),
+            # 13 <= version < 15, reasoning=True: OPTIONAL_THINK_LARK_GRAMMAR
+            (13, True, "body: think? (content | fcalls)", True),
+            # version >= 15, reasoning=False: BASE_LARK_GRAMMAR
+            (15, False, "body: content | (content? fcalls)", False),
+            # version >= 15, reasoning=True: THINK_LARK_GRAMMAR
+            (15, True, "body: (think (content | content? fcalls)) | fcalls", True),
+        ],
+        ids=[
+            "pre_v13_ignores_reasoning",
+            "v13_no_reasoning_base",
+            "v13_reasoning_optional_think",
+            "v15_no_reasoning_base",
+            "v15_reasoning_required_think",
+        ],
+    )
+    def test_get_lark_from_jinja_template_selection(
+        self,
+        tokenizer_version: int,
+        reasoning: bool,
+        expected_body_rule: str,
+        expect_think: bool,
+    ):
+        tools = [_create_tool("func", {}, strict=False)]
+
+        with patch(
+            "vllm.tool_parsers.mistral_tool_parser.is_mistral_tokenizer",
+            return_value=True,
+        ):
+            factory = MistralGrammarFactory.__new__(MistralGrammarFactory)
+            factory._tokenizer_version = tokenizer_version
+
+            grammar = factory.get_lark_from_jinja(
+                mode="auto",
+                tools=tools,
+                reasoning=reasoning,
+                parallel_tool_calls=True,
+            )
+
+        assert expected_body_rule in grammar
+
+        if expect_think:
+            assert "think: <THINK> content </THINK>" in grammar
+        else:
+            assert "think:" not in grammar
+
+    @pytest.mark.parametrize(
+        "mode,expected_body_rule",
+        [
+            ("auto", "body: content | (content? fcalls)"),
+            ("required", "body: content? fcalls"),
+            ("none", "body: content"),
+        ],
+        ids=["auto", "required", "none"],
+    )
+    def test_get_lark_from_jinja_mode_handling(
+        self,
+        mode: str,
+        expected_body_rule: str,
+    ):
+        tools = [_create_tool("func", {}, strict=False)]
+
+        with patch(
+            "vllm.tool_parsers.mistral_tool_parser.is_mistral_tokenizer",
+            return_value=True,
+        ):
+            factory = MistralGrammarFactory.__new__(MistralGrammarFactory)
+            factory._tokenizer_version = 11
+
+            grammar = factory.get_lark_from_jinja(
+                mode=mode,
+                tools=tools,
+                reasoning=False,
+                parallel_tool_calls=True,
+            )
+
+        assert expected_body_rule in grammar
+
+        # "none" mode should not have fcalls rule
+        if mode == "none":
+            assert "fcalls:" not in grammar
+        else:
+            assert "fcalls:" in grammar
+
+    def test_get_lark_from_jinja_none_mode_defaults_to_auto(self):
+        tools = [_create_tool("func", {}, strict=False)]
+
+        with patch(
+            "vllm.tool_parsers.mistral_tool_parser.is_mistral_tokenizer",
+            return_value=True,
+        ):
+            factory = MistralGrammarFactory.__new__(MistralGrammarFactory)
+            factory._tokenizer_version = 11
+
+            grammar_none = factory.get_lark_from_jinja(
+                mode=None,
+                tools=tools,
+                reasoning=False,
+                parallel_tool_calls=True,
+            )
+            grammar_auto = factory.get_lark_from_jinja(
+                mode="auto",
+                tools=tools,
+                reasoning=False,
+                parallel_tool_calls=True,
+            )
+
+        assert grammar_none == grammar_auto
+
+
+def _create_request(
+    tools: list[ChatCompletionToolsParam] | None = None,
+    tool_choice: str | None = None,
+    reasoning_effort: str | None = None,
+) -> ChatCompletionRequest:
+    if tool_choice is None:
+        tool_choice = "auto" if tools else "none"
+    return ChatCompletionRequest(
+        messages=[{"role": "user", "content": "test"}],
+        model="test-model",
+        tools=tools,
+        tool_choice=tool_choice,
+        reasoning_effort=reasoning_effort,
+    )
+
+
+def _create_mock_tool_parser(tokenizer_version: int, has_reasoning_parser: bool):
+    mock_tokenizer = MagicMock(spec=MistralTokenizer)
+    type(mock_tokenizer).version = PropertyMock(return_value=tokenizer_version)
+
+    # Set up a mock vocab with the TOOL_CALLS token
+    mock_tokenizer.get_vocab.return_value = {"[TOOL_CALLS]": 999}
+
+    with patch(
+        "vllm.tool_parsers.mistral_tool_parser.is_mistral_tokenizer",
+        return_value=True,
+    ):
+        parser = MistralToolParser.__new__(MistralToolParser)
+        parser.model_tokenizer = mock_tokenizer
+        parser.vocab = {"[TOOL_CALLS]": 999}
+        parser.bot_token = "[TOOL_CALLS]"
+        parser.bot_token_id = 999
+        parser._is_pre_v11 = tokenizer_version < 11
+        parser.prev_tool_call_arr = []
+        parser.current_tool_id = -1
+        parser._has_reasoning_parser = has_reasoning_parser
+
+        # Set up the grammar factory
+        factory = MistralGrammarFactory.__new__(MistralGrammarFactory)
+        factory._tokenizer = mock_tokenizer
+        factory._tokenizer_version = tokenizer_version
+        parser.grammar_factory = factory
+
+    return parser
+
+
+class TestAdjustRequestReasoningEffort:
+    @pytest.mark.parametrize(
+        "tokenizer_version,reasoning_effort",
+        [
+            (11, "high"),
+            (15, "high"),
+        ],
+        ids=["pre_v15", "v15"],
+    )
+    def test_should_reason_no_reasoning_parser(
+        self,
+        tokenizer_version: int,
+        reasoning_effort: str | None,
+    ):
+        parser = _create_mock_tool_parser(tokenizer_version, has_reasoning_parser=False)
+        request = _create_request(reasoning_effort=reasoning_effort)
+        assert parser._should_reason(request) is False
+
+    @pytest.mark.parametrize(
+        "tokenizer_version,reasoning_effort,expected",
+        [
+            # Pre-v15: always True regardless of effort
+            (13, None, True),
+            (13, "high", True),
+            (13, "none", True),
+            # V15+: depends on reasoning_effort
+            (15, None, False),
+            (15, "none", False),
+            (15, "high", True),
+        ],
+        ids=[
+            "pre_v15_none",
+            "pre_v15_high",
+            "pre_v15_effort_none",
+            "v15_none",
+            "v15_effort_none",
+            "v15_high",
+        ],
+    )
+    def test_should_reason_with_reasoning_parser(
+        self,
+        tokenizer_version: int,
+        reasoning_effort: str | None,
+        expected: bool,
+    ):
+        parser = _create_mock_tool_parser(tokenizer_version, has_reasoning_parser=True)
+        request = _create_request(reasoning_effort=reasoning_effort)
+        assert parser._should_reason(request) is expected
+
+    @pytest.mark.parametrize(
+        "tokenizer_version,reasoning_effort,has_reasoning_parser,"
+        "expected_body_rule,expect_think",
+        [
+            # Pre-v13 with parser: BASE (reasoning ignored below v13)
+            (11, "high", True, "body: content | (content? fcalls)", False),
+            # V13 with parser: OPTIONAL_THINK
+            (13, "high", True, "body: think? (content | fcalls)", True),
+            # V15 with parser + high effort: THINK (required)
+            (
+                15,
+                "high",
+                True,
+                "body: (think (content | content? fcalls)) | fcalls",
+                True,
+            ),
+            # V15 without parser: BASE regardless of effort
+            (15, "high", False, "body: content | (content? fcalls)", False),
+        ],
+        ids=[
+            "pre_v13_base",
+            "v13_optional_think",
+            "v15_required_think",
+            "v15_no_parser_base",
+        ],
+    )
+    def test_adjust_request_grammar_selection(
+        self,
+        tokenizer_version: int,
+        reasoning_effort: str | None,
+        has_reasoning_parser: bool,
+        expected_body_rule: str,
+        expect_think: bool,
+    ):
+        tools = [_create_tool("func", {"param": "value"}, strict=False)]
+        parser = _create_mock_tool_parser(
+            tokenizer_version, has_reasoning_parser=has_reasoning_parser
+        )
+
+        request = _create_request(
+            tools=tools,
+            tool_choice="auto",
+            reasoning_effort=reasoning_effort,
+        )
+
+        with patch(
+            "vllm.tool_parsers.mistral_tool_parser.is_mistral_tokenizer",
+            return_value=True,
+        ):
+            result = parser.adjust_request(request)
+
+        assert result.structured_outputs is not None
+        grammar = result.structured_outputs.lark
+        assert grammar is not None
+        assert expected_body_rule in grammar
+
+        if expect_think:
+            assert "think: <THINK> content </THINK>" in grammar
+        else:
+            assert "think:" not in grammar
+
+        assert result.response_format is None
+
+    def test_adjust_request_no_tools_sanitizes_tool_choice(self):
+        """When no tools are provided, tool_choice should be set to 'none'
+        by adjust_request, and the grammar should only allow content."""
+        parser = _create_mock_tool_parser(
+            tokenizer_version=11, has_reasoning_parser=False
+        )
+
+        request = _create_request(
+            tools=None,
+            tool_choice="none",
+            reasoning_effort=None,
+        )
+
+        with patch(
+            "vllm.tool_parsers.mistral_tool_parser.is_mistral_tokenizer",
+            return_value=True,
+        ):
+            result = parser.adjust_request(request)
+
+        assert result.tool_choice == "none"
+
+        assert result.structured_outputs is not None
+        grammar = result.structured_outputs.lark
+        assert grammar is not None
+        assert "body: content" in grammar
+        assert "fcalls:" not in grammar
+
+    @pytest.mark.parametrize(
+        "tokenizer_version,has_reasoning_parser,reasoning_effort,"
+        "expected_body_rule,expect_think",
+        [
+            # No reasoning: BASE grammar, body: content
+            (11, False, None, "body: content", False),
+            # Pre-v15 with reasoning parser: OPTIONAL_THINK, think is optional
+            (13, True, None, "body: think? content", True),
+            # V15 with reasoning enabled: THINK, think is required
+            (15, True, "high", "body: think content", True),
+            # V15 with reasoning disabled: BASE, no think
+            (15, True, None, "body: content", False),
+        ],
+        ids=[
+            "v11_no_reasoning_base",
+            "v13_with_reasoning_optional_think",
+            "v15_reasoning_high_required_think",
+            "v15_reasoning_none_base",
+        ],
+    )
+    def test_adjust_request_none_mode_grammar_with_tools(
+        self,
+        tokenizer_version: int,
+        has_reasoning_parser: bool,
+        reasoning_effort: str | None,
+        expected_body_rule: str,
+        expect_think: bool,
+    ):
+        tools = [_create_tool("func", {"param": "value"}, strict=False)]
+        parser = _create_mock_tool_parser(
+            tokenizer_version, has_reasoning_parser=has_reasoning_parser
+        )
+
+        request = _create_request(
+            tools=tools,
+            tool_choice="none",
+            reasoning_effort=reasoning_effort,
+        )
+
+        with patch(
+            "vllm.tool_parsers.mistral_tool_parser.is_mistral_tokenizer",
+            return_value=True,
+        ):
+            result = parser.adjust_request(request)
+
+        assert result.structured_outputs is not None
+        grammar = result.structured_outputs.lark
+        assert grammar is not None
+        assert expected_body_rule in grammar
+        assert "fcalls:" not in grammar
+
+        if expect_think:
+            assert "think: <THINK> content </THINK>" in grammar
+        else:
+            assert "think:" not in grammar

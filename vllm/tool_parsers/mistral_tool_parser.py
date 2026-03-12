@@ -6,14 +6,17 @@ from collections.abc import Sequence
 from enum import Enum, auto
 from random import choices
 from string import ascii_letters, digits
-from typing import Any
+from typing import Any, Literal
 
 import ijson
 import regex as re
+from jinja2 import Template
 from pydantic import Field
 
 from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionNamedToolChoiceParam,
     ChatCompletionRequest,
+    ChatCompletionToolsParam,
 )
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaFunctionCall,
@@ -23,8 +26,11 @@ from vllm.entrypoints.openai.engine.protocol import (
     FunctionCall,
     ToolCall,
 )
+from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.logger import init_logger
+from vllm.sampling_params import StructuredOutputsParams
 from vllm.tokenizers import TokenizerLike
+from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.tool_parsers.abstract_tool_parser import (
     ToolParser,
 )
@@ -33,6 +39,71 @@ from vllm.utils.mistral import is_mistral_tokenizer
 logger = init_logger(__name__)
 
 ALPHANUMERIC = ascii_letters + digits
+
+
+def is_mistral_lark_grammar_active(
+    request: ChatCompletionRequest,
+    tokenizer: TokenizerLike,
+    tool_parser_cls: type | None,
+) -> bool:
+    r"""Check if the Mistral lark grammar is active for the given request."""
+    return (
+        tool_parser_cls is not None
+        and issubclass(tool_parser_cls, MistralToolParser)
+        and is_mistral_tokenizer(tokenizer)
+        and getattr(request, "structured_outputs", None) is not None
+        and request.structured_outputs.lark is not None
+    )
+
+
+BASE_LARK_GRAMMAR = r"""start: body
+{% if mode == "auto" -%}
+{% if tokenizer_version < 7 -%}
+body: content | fcalls
+{% else -%}
+body: content | (content? fcalls)
+{% endif -%}
+fcalls: {{ fcall }}
+{% elif mode == "required" -%}
+body: content? fcalls
+fcalls: {{ fcall }}
+{% elif mode == "none" -%}
+body: content
+{% endif -%}
+{% if tokenizer_version < 7 -%}
+content: /(.|\n)+/
+{% else -%}
+content: (/(.|\n)+/)+
+{% endif -%}
+SAFE_WS: /[ \t\r\n]+/"""
+
+OPTIONAL_THINK_LARK_GRAMMAR = r"""start: body
+{% if mode == "auto" -%}
+body: think? (content | fcalls)
+fcalls: content? {{ fcall }}
+{% elif mode == "required" -%}
+body: think? fcalls
+fcalls: content? {{ fcall }}
+{% elif mode == "none" -%}
+body: think? content
+{% endif -%}
+think: <THINK> content </THINK>
+content: (/(.|\n)+/)+
+SAFE_WS: /[ \t\r\n]+/"""
+
+THINK_LARK_GRAMMAR = r"""start: body
+{% if mode == "auto" -%}
+body: (think (content | content? fcalls)) | fcalls
+fcalls: {{ fcall }}
+{% elif mode == "required" -%}
+body: (think content? fcalls) | fcalls
+fcalls: {{ fcall }}
+{% elif mode == "none" -%}
+body: think content
+{% endif -%}
+think: <THINK> content </THINK>
+content: (/(.|\n)+/)+
+SAFE_WS: /[ \t\r\n]+/"""
 
 
 class StreamingState(Enum):
@@ -49,6 +120,166 @@ class StreamingState(Enum):
     PARSING_ARGUMENTS_COMPLETED = auto()
     TOOL_COMPLETE = auto()
     ALL_TOOLS_COMPLETE = auto()
+
+
+def _is_strict_tool(tool: ChatCompletionToolsParam) -> bool:
+    return getattr(tool.function, "strict", False)
+
+
+class ToolsLarkConverter:
+    """Converts tools to a lark grammar"""
+
+    def _convert(
+        self,
+        tools: list[ChatCompletionToolsParam],
+        any_strict_true: bool,
+        parallel_tool_calls: bool,
+    ) -> str:
+        raise NotImplementedError
+
+    def get_args_json(self, tool: ChatCompletionToolsParam) -> dict[str, Any]:
+        args = tool.function.parameters if _is_strict_tool(tool) else {"type": "object"}
+        # Handle empty parameters case
+        if args == {}:
+            args = {"type": "object", "properties": {}, "additionalProperties": False}
+        return args
+
+    @staticmethod
+    def convert(
+        tools: list[ChatCompletionToolsParam],
+        tokenizer_version: int,
+        mode: Literal["auto", "required", "none"],
+        parallel_tool_calls: bool,
+    ) -> str:
+        if mode == "none":
+            return ""
+
+        any_strict_true = any(_is_strict_tool(tool) for tool in tools)
+        converter = (
+            PostV11ToolsLarkConverter()
+            if tokenizer_version >= 11
+            else PreV11ToolsLarkConverter()
+        )
+        return converter._convert(tools, any_strict_true, parallel_tool_calls)
+
+
+class PostV11ToolsLarkConverter(ToolsLarkConverter):
+    """Converts tools to a lark grammar for v11+ tokenizers"""
+
+    def _convert(
+        self,
+        tools: list[ChatCompletionToolsParam],
+        any_strict_true: bool,
+        parallel_tool_calls: bool,
+    ) -> str:
+        individual_tool_calls = []
+        for tool in tools:
+            # We enforce the naming to be correct even when strict is False but not
+            # arguments
+            args = self.get_args_json(tool) if any_strict_true else {"type": "object"}
+            individual_tool_calls.append(
+                f'(<TOOL_CALLS> SAFE_WS? "{tool.function.name}" <ARGS> '
+                f"SAFE_WS? %json {json.dumps(args, ensure_ascii=False)} SAFE_WS?)"
+            )
+
+        single_tool_call = f"{' | '.join(individual_tool_calls)}"
+        return f"({single_tool_call})+" if parallel_tool_calls else single_tool_call
+
+
+class PreV11ToolsLarkConverter(ToolsLarkConverter):
+    """Converts tools to a lark grammar for v10- tokenizers"""
+
+    def _convert(
+        self,
+        tools: list[ChatCompletionToolsParam],
+        any_strict_true: bool,
+        parallel_tool_calls: bool,
+    ) -> str:
+        if not any_strict_true:
+            # We enforce the naming to be correct even when strict is False.
+            tool_names = [tool.function.name for tool in tools]
+            items = {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "name": {"type": "string", "enum": tool_names},
+                    "arguments": {"type": "object"},
+                },
+                "required": ["name", "arguments"],
+            }
+        else:
+            items = self._from_tools(tools)
+
+        schema = {"minItems": 1, "type": "array", "items": items}
+
+        if not parallel_tool_calls:
+            schema["maxItems"] = 1
+
+        return f"""<TOOL_CALLS> SAFE_WS? fcall_array SAFE_WS?
+fcall_array: %json {json.dumps(schema, ensure_ascii=False)}
+"""
+
+    def _from_tools(self, tools: list[ChatCompletionToolsParam]) -> dict[str, Any]:
+        return {"anyOf": [self._tool_to_call(tool) for tool in tools]}
+
+    def _tool_to_call(self, tool: ChatCompletionToolsParam) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "required": ["name", "arguments"],
+            "additionalProperties": False,
+            "properties": {
+                "name": {"const": f"{tool.function.name}"},
+                "arguments": self.get_args_json(tool),
+            },
+        }
+
+
+class MistralGrammarFactory:
+    """Generates grammars for a given tokenizer version"""
+
+    def __init__(self, tokenizer: MistralTokenizer) -> None:
+        if not is_mistral_tokenizer(tokenizer):
+            raise ValueError("`MistralGrammarFactory` expects a `MistralTokenizer`.")
+        self._tokenizer = tokenizer
+        self._tokenizer_version = tokenizer.version
+
+    def get_lark_from_jinja(
+        self,
+        mode: Literal["auto", "required", "none"] | None,
+        tools: list[ChatCompletionToolsParam],
+        reasoning: bool,
+        parallel_tool_calls: bool,
+    ) -> str:
+        r"""Render a lark grammar from a jinja template.
+
+        Note:
+            Currently we support the following variables in the Lark jinja
+            template: `tokenizer_version`, `mode`, and `fcall`.
+
+        Args:
+            mode: Function calling mode (auto, required, none).
+            tools: The available tools.
+            reasoning: Whether to include think block rules in the grammar.
+            parallel_tool_calls: Whether parallel tool calls are allowed.
+        """
+        if mode is None:
+            mode = "auto"
+
+        if self._tokenizer_version < 13 or not reasoning:
+            jinja_template = BASE_LARK_GRAMMAR
+        elif self._tokenizer_version < 15:
+            jinja_template = OPTIONAL_THINK_LARK_GRAMMAR
+        else:
+            jinja_template = THINK_LARK_GRAMMAR
+
+        lark_grammar = Template(jinja_template).render(
+            tokenizer_version=self._tokenizer_version,
+            mode=mode,
+            fcall=ToolsLarkConverter.convert(
+                tools, self._tokenizer_version, mode, parallel_tool_calls
+            ),
+        )
+        return lark_grammar
 
 
 class MistralToolCall(ToolCall):
@@ -71,12 +302,17 @@ def _is_pre_v11_tokeniser(model_tokenizer: TokenizerLike) -> bool:
 
 class MistralToolParser(ToolParser):
     """
-    Tool call parser for Mistral 7B Instruct v0.3, intended for use with
+    Tool call parser for Mistral models, intended for use with either:
     - [`mistral_common`](https://github.com/mistralai/mistral-common/)
     - the examples/tool_chat_template_mistral.jinja template.
 
-    Used when --enable-auto-tool-choice --tool-call-parser mistral are all set
+    Used when `--enable-auto-tool-choice --tool-call-parser mistral` are all set
     """
+
+    # `_has_reasoning_parser`` is intentionally a class attribute rather than an
+    # instance attribute because the tool-parser is instantiated in multiple independent
+    # code paths do not receive not configuration state from the serving layer.
+    _has_reasoning_parser: bool = False
 
     def __init__(self, tokenizer: TokenizerLike):
         super().__init__(tokenizer)
@@ -109,20 +345,77 @@ class MistralToolParser(ToolParser):
                 "Mistral Tool Parser could not locate the tool call token in "
                 "the tokenizer!"
             )
+        self.grammar_factory = MistralGrammarFactory(tokenizer)
+
+    def _should_reason(self, request: ChatCompletionRequest) -> bool:
+        if not self.has_reasoning_parser:
+            return False
+        if (
+            isinstance(self.model_tokenizer, MistralTokenizer)
+            and self.model_tokenizer.version >= 15
+        ):
+            return request.reasoning_effort not in (None, "none")
+        return True
+
+    @property
+    def has_reasoning_parser(self) -> bool:
+        return self._has_reasoning_parser
 
     def adjust_request(self, request: ChatCompletionRequest) -> ChatCompletionRequest:
-        request = super().adjust_request(request)
+        if not is_mistral_tokenizer(self.model_tokenizer):
+            # For non-Mistral tokenizers, use the parent's adjust_request
+            # which sets JSON schema for required/named tool_choice.
+            request = super().adjust_request(request)
+            if request.tools and request.tool_choice != "none":
+                # Do not skip special tokens when using chat template
+                # with Mistral parser as TOOL_CALL token is needed
+                # for tool detection.
+                # Note: we don't want skip_special_tokens=False
+                # with MistralTokenizer as it is incompatible
+                request.skip_special_tokens = False
+            return request
+
         if (
-            not is_mistral_tokenizer(self.model_tokenizer)
-            and request.tools
-            and request.tool_choice != "none"
+            request.response_format is not None
+            and hasattr(request.response_format, "type")
+            and request.response_format.type != "text"
+        ) or (
+            # Skip if user explicitly set structured outputs
+            request.structured_outputs is not None
+            and (
+                request.structured_outputs.json is not None
+                or request.structured_outputs.json_object is not None
+            )
         ):
-            # Do not skip special tokens when using chat template
-            # with Mistral parser as TOOL_CALL token is needed
-            # for tool detection.
-            # Note: we don't want skip_special_tokens=False
-            # with MistralTokenizer as it is incompatible
-            request.skip_special_tokens = False
+            return request
+
+        if not request.tools:
+            # Sanitize tool_choice.
+            request.tool_choice = "none"
+
+        # Set structured output params for tool calling
+        if isinstance(request.tool_choice, ChatCompletionNamedToolChoiceParam):
+            selected_tools = [
+                tool
+                for tool in request.tools
+                if tool.function.name == request.tool_choice.function.name
+            ]
+            mode: Literal["auto", "required", "none"] | None = "required"
+        else:
+            selected_tools = request.tools
+            mode = request.tool_choice
+        lark_grammar = self.grammar_factory.get_lark_from_jinja(
+            mode=mode,
+            tools=selected_tools,
+            reasoning=self._should_reason(request=request),
+            parallel_tool_calls=True,
+        )
+        if isinstance(request, ChatCompletionRequest):
+            request.structured_outputs = StructuredOutputsParams(lark=lark_grammar)  # type: ignore[call-arg]
+            request.response_format = None
+        elif isinstance(request, ResponsesRequest):
+            raise ValueError("`ResponsesRequest` not supported.")
+
         return request
 
     def extract_tool_calls(
@@ -241,7 +534,10 @@ class MistralToolParser(ToolParser):
         delta_token_ids: Sequence[int],
         request: ChatCompletionRequest,
     ) -> DeltaMessage | None:
-        if self.bot_token_id not in current_token_ids:
+        has_bot_token = (
+            self.bot_token_id in current_token_ids or self.bot_token in current_text
+        )
+        if not has_bot_token:
             # if the tool call token is not in the tokens generated so far,
             # append output to contents since it's not a tool
             return DeltaMessage(content=delta_text)
@@ -275,7 +571,8 @@ class MistralToolParser(ToolParser):
         additional_content: str = ""
         if self.streaming_state == StreamingState.WAITING_FOR_TOOL_START:
             # this is the first tool call
-            assert self.bot_token_id in delta_token_ids
+            if self.bot_token not in delta_text:
+                return DeltaMessage(content=delta_text)
             if not delta_text.startswith(self.bot_token):
                 additional_content += delta_text.split(self.bot_token)[0]
                 delta_text = self.bot_token + "".join(
@@ -411,7 +708,7 @@ class MistralToolParser(ToolParser):
             index=self.current_tool_id, type="function"
         )
         current_tool_call_modified = False
-        if self.bot_token_id in delta_token_ids:
+        if self.bot_token_id in delta_token_ids or self.bot_token in delta_text:
             # this is the first tool call
             if not delta_text.startswith(self.bot_token):
                 content = delta_text.split(self.bot_token)[0]
