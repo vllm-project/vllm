@@ -1334,23 +1334,6 @@ class SpecDecodeBaseProposer:
         self._maybe_share_embeddings(target_language_model)
         self._maybe_share_lm_head(target_language_model)
 
-        # Initialize mask_hidden from embed_tokens if deferred during
-        # load_weights (embed_tokens wasn't available until after sharing).
-        mask_token_id = getattr(self.model, "_mask_token_id", None)
-        if mask_token_id is not None:
-            with torch.no_grad():
-                token_id = torch.tensor(
-                    [mask_token_id],
-                    device=self.model.mask_hidden.device,
-                )
-                embed = self.model.model.embed_tokens(token_id).squeeze(0)
-                self.model.mask_hidden.copy_(embed.unsqueeze(0))
-            logger.info(
-                "Initialized mask_hidden from embed_tokens[%d].",
-                mask_token_id,
-            )
-            del self.model._mask_token_id
-
         if (
             self.parallel_drafting
             and self.pass_hidden_states_to_model
