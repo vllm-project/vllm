@@ -264,7 +264,7 @@ class DefaultMoERunner(MoERunner):
             )
 
             # Record that the shared_experts_input will be used in the
-            # shared_experts_stream to to avoid gc issue from
+            # shared_experts_stream to avoid gc issue from
             # deallocation. For more details:
             # https://docs.pytorch.org/docs/stable/generated/torch.Tensor.record_stream.html # noqa: E501
             # NOTE: We don't need shared_output.record_stream(current_stream())
@@ -295,14 +295,17 @@ class DefaultMoERunner(MoERunner):
             states_shape = (moe.max_num_tokens, self.moe_config.hidden_dim)
             logits_shape = (moe.max_num_tokens, self.moe_config.num_logical_experts)
 
+        device = torch.accelerator.current_device_index()
         self.batched_hidden_states = torch.zeros(
-            states_shape, dtype=moe.in_dtype, device=torch.cuda.current_device()
+            states_shape,
+            dtype=moe.in_dtype,
+            device=device,
         )
 
         self.batched_router_logits = torch.zeros(
             logits_shape,
             dtype=moe.router_logits_dtype,
-            device=torch.cuda.current_device(),
+            device=device,
         )
 
     def must_reduce_shared_expert_outputs(self) -> bool:
