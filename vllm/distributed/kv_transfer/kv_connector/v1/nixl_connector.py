@@ -352,9 +352,6 @@ class NixlConnector(KVConnectorBase_V1, SupportsHMA):
         assert vllm_config.kv_transfer_config is not None
         assert vllm_config.kv_transfer_config.engine_id is not None
         self.kv_cache_config = kv_cache_config
-        # for group in kv_cache_config.kv_cache_groups:
-        # if isinstance(group.kv_cache_spec, MambaSpec):
-        # raise ValueError("NixlConnector does not support Mamba models.")
         self.engine_id: EngineId = vllm_config.kv_transfer_config.engine_id
         self.kv_transfer_config = vllm_config.kv_transfer_config
         if role == KVConnectorRole.SCHEDULER:
@@ -987,13 +984,13 @@ class NixlConnectorWorker:
         self.hma_group_size = len(kv_cache_config.kv_cache_tensors)
 
         # Mamba metadata
-        self._is_mamba_layer = [
+        self._is_mamba_group = [
             isinstance(group.kv_cache_spec, MambaSpec)
             for group in kv_cache_config.kv_cache_groups
         ]
         mamba_ssm_size = (0, 0)
-        self._is_mamba = any(self._is_mamba_layer)
-        if self._is_mamba:
+        self._has_mamba = any(self._is_mamba_group)
+        if self._has_mamba:
             assert self._is_hma_required
             mamba_spec = next(
                 spec
@@ -1009,8 +1006,8 @@ class NixlConnectorWorker:
                 torch.Size(mamba_spec.shapes[1]),
             )
             mamba_ssm_size = (
-                conv_shape.numel() * conv_nbytes,
                 ssm_shape.numel() * ssm_nbytes,
+                conv_shape.numel() * conv_nbytes,
             )
         self._mamba_ssm_size = mamba_ssm_size
 
@@ -1496,9 +1493,9 @@ class NixlConnectorWorker:
             attn_backends=self.attn_backends,
             # SSM States come in tuples (ssm, conv)
             tensor_shape=next(iter(kv_caches.values())).shape
-            if not self._is_mamba
+            if not self._has_mamba
             else None,
-            is_mamba=self._is_mamba,
+            is_mamba=self._has_mamba,
         )
         self.compat_hash = compute_nixl_compatibility_hash(
             self.vllm_config, self.backend_name, self.kv_topo.cross_layers_blocks
@@ -1586,7 +1583,7 @@ class NixlConnectorWorker:
                     # across groups. This results in skipping all tensors but the ones
                     # pointed to by group0. Also, generally we will have more blocks
                     # per tensor but fewer regions.
-                    logger.debug("Skipping", layer_name, "because it's already seen")
+                    logger.debug("Skipping %s because it's already seen", layer_name)
                     continue
                 logger.debug(
                     "Registering layer %s with cache shape: %s", layer_name, cache.shape
@@ -1613,7 +1610,6 @@ class NixlConnectorWorker:
         logger.debug(
             "Different block lengths collected: %s", set(self.block_len_per_layer)
         )
-        # Doesnt really matter unless its MLA anyway..
         self.block_len_per_layer = self.block_len_per_layer[: len(seen_base_addresses)]
         assert len(self.block_len_per_layer) == len(seen_base_addresses)
 
@@ -1736,8 +1732,7 @@ class NixlConnectorWorker:
                         v_addr = addr + kv_block_len
                         blocks_data.append((v_addr, second_split, self.device_id))
             logger.info(
-                "[INFO] Created %s blocks for src engine %s"
-                " and rank %s on device id %s",
+                "Created %s blocks for src engine %s and rank %s on device id %s",
                 len(blocks_data),
                 self.engine_id,
                 self.tp_rank,
@@ -1745,7 +1740,7 @@ class NixlConnectorWorker:
             )
 
         register_blocks(blocks_data, mamba=False)
-        if self._is_mamba:
+        if self._has_mamba:
             assert self.num_descs == len(blocks_data)
             logger.debug(
                 "Registering additional %s local Mamba blocks", len(blocks_data)
@@ -1958,7 +1953,7 @@ class NixlConnectorWorker:
             )
 
         register_remote_blocks(blocks_data, mamba=False)
-        if self._is_mamba:
+        if self._has_mamba:
             # Create extra descs for the Mamba "view" of the same KV cache tensors.
             assert self.num_descs == len(blocks_data)
             logger.debug(
@@ -2005,7 +2000,7 @@ class NixlConnectorWorker:
                 "HMA does not support different remote block size yet"
             )
         # Mamba additional constraints
-        if self._is_mamba:
+        if self._has_mamba:
             assert tp_ratio == 1, "Mamba does not support heterogeneous TP yet"
 
         kv_cache_layout = (
@@ -2668,7 +2663,7 @@ class NixlConnectorWorker:
         # num_blocks entries per region (kernel granularity), SSM descs have
         # logical_blocks entries per region (no kernel splitting).
         region_ids = region_ids[:, None]
-        if not self._is_mamba:
+        if not self._has_mamba:
             block_ids = np.concatenate(block_ids)[None, :]
             descs_ids = region_ids * num_blocks + block_ids
             return descs_ids.flatten()
@@ -2684,9 +2679,9 @@ class NixlConnectorWorker:
             logical_blocks = num_blocks // ratio
             all_descs = []
             for i, group in enumerate(block_ids):
-                stride = logical_blocks if self._is_mamba_layer[i] else num_blocks
+                stride = logical_blocks if self._is_mamba_group[i] else num_blocks
                 group_arr = np.asarray(group)[None, :]
-                offset = self.num_descs if self._is_mamba_layer[i] else 0
+                offset = self.num_descs if self._is_mamba_group[i] else 0
                 all_descs.append((region_ids * stride + group_arr + offset).flatten())
             return np.concatenate(all_descs)
 
@@ -2754,7 +2749,7 @@ class NixlConnectorWorker:
             if mamba_view:
                 # NOTE (NickLucche) Mamba Opt: this is already skipping the padding so
                 # we're only transferring the minimum required bytes.
-                block_len = self._mamba_ssm_size[first_split]
+                block_len = self._mamba_ssm_size[not first_split]
             else:
                 block_len = self.block_len_per_layer[layer_idx] // 2
         else:
