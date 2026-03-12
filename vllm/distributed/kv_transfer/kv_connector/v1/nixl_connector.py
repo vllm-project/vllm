@@ -1555,7 +1555,7 @@ class NixlConnectorWorker:
             )
             # `layer_spec.page_size_bytes` only accounts for logical page_size, that is
             # the page_size assuming constant `self._logical_num_blocks`.
-            page_size = (
+            physical_page_size = (
                 layer_spec.page_size_bytes
                 if isinstance(layer_spec, MambaSpec)
                 else layer_spec.page_size_bytes
@@ -1568,9 +1568,7 @@ class NixlConnectorWorker:
             )
             # `page_size` accounts for physical blocks, st KVCache is always
             # [`num_blocks` * `page_size`]
-            if not isinstance(layer_spec, MambaSpec):
-                self.block_len_per_layer.append(page_size)
-            curr_tensor_size_bytes = num_blocks * page_size
+            curr_tensor_size_bytes = num_blocks * physical_page_size
             if tensor_size_bytes is None:
                 tensor_size_bytes = curr_tensor_size_bytes
 
@@ -1589,6 +1587,13 @@ class NixlConnectorWorker:
                     "Registering layer %s with cache shape: %s", layer_name, cache.shape
                 )
                 seen_base_addresses.append(base_addr)
+                # Only record non-Mamba page sizes.
+                if isinstance(layer_spec, MambaSpec):
+                    self.block_len_per_layer.append(
+                        physical_page_size // self._physical_blocks_per_logical_kv_block
+                    )
+                else:
+                    self.block_len_per_layer.append(physical_page_size)
 
                 assert cache.shape[0] == num_blocks, (
                     "All kv cache tensors must have the same number of blocks"
@@ -1610,7 +1615,6 @@ class NixlConnectorWorker:
         logger.debug(
             "Different block lengths collected: %s", set(self.block_len_per_layer)
         )
-        self.block_len_per_layer = self.block_len_per_layer[: len(seen_base_addresses)]
         assert len(self.block_len_per_layer) == len(seen_base_addresses)
 
         self.kv_caches_base_addr[self.engine_id][self.tp_rank] = seen_base_addresses
@@ -1704,7 +1708,8 @@ class NixlConnectorWorker:
                     )
                     // block_size_ratio
                 )
-                # Jump one page_size, but ssm page_size may be bigger
+                # Jump one page_size, but ssm page_size may be bigger when kernel
+                # locks block size to a specific value.
                 block_len_per_layer = (
                     self.block_len_per_layer[i]
                     // block_size_ratio
@@ -1955,7 +1960,6 @@ class NixlConnectorWorker:
         register_remote_blocks(blocks_data, mamba=False)
         if self._has_mamba:
             # Create extra descs for the Mamba "view" of the same KV cache tensors.
-            assert self.num_descs == len(blocks_data)
             logger.debug(
                 "Registering additional %s remote Mamba blocks", len(blocks_data)
             )
