@@ -42,7 +42,7 @@ If work is duplicate/trivial busywork, **do not proceed**. Return a short explan
 ### Environment setup
 
 ```bash
-# Install uv if you don't have it already:
+# Install `uv` if you don't have it already:
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
 # Always use `uv` for Python environment management:
