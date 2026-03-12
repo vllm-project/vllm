@@ -619,7 +619,6 @@ class Scheduler(SchedulerInterface):
                             step_skipped_waiting.prepend_request(request)
                             continue
 
-                        request.num_external_computed_tokens = ext_tokens
                         num_external_computed_tokens = ext_tokens
 
                         connector_prefix_cache_queries = (
@@ -632,6 +631,16 @@ class Scheduler(SchedulerInterface):
                         num_new_local_computed_tokens + num_external_computed_tokens
                     )
                     assert num_computed_tokens <= request.num_tokens
+
+                    if request.num_preemptions == 0:
+                        # For request-level stats,
+                        # track hits only the first time a request gets scheduled.
+                        # If allocation will later fail, we will get back here
+                        # the next time the request re-tries scheduling
+                        request.num_cached_tokens = num_computed_tokens
+                        request.num_external_computed_tokens = (
+                            num_external_computed_tokens
+                        )
                 else:
                     # KVTransfer: WAITING reqs have num_computed_tokens > 0
                     # after async KV recvs are completed.
@@ -802,9 +811,6 @@ class Scheduler(SchedulerInterface):
                 token_budget -= num_new_tokens
                 request.status = RequestStatus.RUNNING
                 request.num_computed_tokens = num_computed_tokens
-                # Count the number of prefix cached tokens.
-                if request.num_cached_tokens < 0:
-                    request.num_cached_tokens = num_computed_tokens
                 # Encoder-related.
                 if encoder_inputs_to_schedule:
                     scheduled_encoder_inputs[request_id] = encoder_inputs_to_schedule
@@ -2158,6 +2164,7 @@ class Scheduler(SchedulerInterface):
                 req_num_computed_tokens = request.num_computed_tokens
             else:
                 # Sync loading. num_computed_tokens includes new tokens
+                # TODO(orozery): Bug below! Incorrect for preempted requests!
                 req_num_computed_tokens = request.num_cached_tokens
 
             req_num_computed_blocks = (
@@ -2192,7 +2199,19 @@ class Scheduler(SchedulerInterface):
                     req_num_computed_tokens - request.num_computed_tokens
                 )
                 total_affected_tokens += num_affected_tokens
-                request.num_external_computed_tokens -= num_affected_tokens
+                if request.num_preemptions == 0:
+                    # For request-level stats,
+                    # track hits only the first time a request gets scheduled.
+                    num_local_hit_tokens = (
+                        request.num_cached_tokens - request.num_external_computed_tokens
+                    )
+                    assert num_local_hit_tokens >= 0
+                    request.num_cached_tokens = min(
+                        request.num_cached_tokens, request.num_computed_tokens
+                    )
+                    request.num_external_computed_tokens = max(
+                        0, request.num_cached_tokens - num_local_hit_tokens
+                    )
                 # collect invalid block and all downstream dependent blocks
                 if evict_blocks:
                     blocks_to_evict.update(req_block_ids[idx:])
@@ -2204,6 +2223,8 @@ class Scheduler(SchedulerInterface):
                     # Revert to considering only cached tokens as computed.
                     # Currently this only applies to sync loading; Async
                     # loading does not yet support block sharing
+
+                    # TODO(orozery): Bug! Incorrect computation for preempted requests!
                     total_affected_tokens += (
                         request.num_computed_tokens - request.num_cached_tokens
                     )

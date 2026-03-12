@@ -145,9 +145,6 @@ class Request:
         self.all_token_ids = ConstantList(self._all_token_ids)
         # trace_headers
         self.trace_headers = trace_headers
-        # State
-        # The number of tokens with prefix cache hits.
-        self.num_cached_tokens = -1
 
         # True if this request is scheduled as a non-final prefill chunk.
         self.is_prefill_chunk = False
@@ -159,7 +156,14 @@ class Request:
         # The number of times this request has been preempted by the scheduler.
         self.num_preemptions = 0
 
-        # The number of tokens that have been computed remotely.
+        # Fields used for request-level cache stats
+        # These fields are only set on the first time a request gets scheduled
+        # Cache hits following request preemption are currently not tracked.
+
+        # Total number of KV cache hit tokens:
+        # local prefix cache hits + external (connector-based) hits
+        self.num_cached_tokens = 0
+        # Number of external tokens hit (excluding local prefix cache hits)
         self.num_external_computed_tokens = 0
 
         self.block_hashes: list[BlockHash] = []
