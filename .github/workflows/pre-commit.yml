@@ -20,11 +20,20 @@ jobs:
     - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
       with:
         python-version: "3.12"
+
+    - name: Cache pre-commit hooks
+      uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
+      with:
+        path: ~/.cache/pre-commit
+        key: pre-commit-3|${{ env.pythonLocation }}|${{ hashFiles('.pre-commit-config.yaml') }}
+        restore-keys: |
+          pre-commit-3|${{ env.pythonLocation }}|
+
     - run: echo "::add-matcher::.github/workflows/matchers/actionlint.json"
     - run: echo "::add-matcher::.github/workflows/matchers/markdownlint.json"
     - run: echo "::add-matcher::.github/workflows/matchers/mypy.json"
-    - name: Install & run pre-commit
+
+    - name: Run pre-commit
       run: |
         pip install pre-commit==4.5.1
-        pre-commit install
-        pre-commit run --all-files --hook-stage manual
+        pre-commit run --show-diff-on-failure --color=always --all-files --hook-stage manual
