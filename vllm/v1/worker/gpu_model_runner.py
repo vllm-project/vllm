@@ -4372,6 +4372,7 @@ class GPUModelRunner(
             self.valid_sampled_token_count_event.record()
 
         if self.use_async_spec_decode:
+            # Stash for GPU-side correction in _prepare_inputs.
             self.valid_sampled_token_count_gpu = valid_sampled_tokens_count
         self.input_batch.prev_sampled_token_ids = next_token_ids.unsqueeze(1)
 
