@@ -21,7 +21,11 @@ from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
     RequestResponseMetadata,
 )
-from vllm.entrypoints.openai.models.serving import BaseModelPath, OpenAIServingModels
+from vllm.entrypoints.openai.models.serving import (
+    BaseModelPath,
+    OpenAIModelRegistry,
+    OpenAIServingModels,
+)
 from vllm.entrypoints.openai.parser.harmony_utils import get_encoding
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs import TokensPrompt
@@ -560,11 +564,13 @@ def _build_renderer(model_config: MockModelConfig):
 def _build_serving_render(engine):
     from vllm.entrypoints.serve.render.serving import OpenAIServingRender
 
+    model_registry = OpenAIModelRegistry(engine.model_config, BASE_MODEL_PATHS)
+
     return OpenAIServingRender(
         model_config=engine.model_config,
         renderer=engine.renderer,
         io_processor=engine.io_processor,
-        served_model_names=[mp.name for mp in BASE_MODEL_PATHS],
+        model_registry=model_registry,
         request_logger=None,
         chat_template=CHAT_TEMPLATE,
         chat_template_content_format="auto",

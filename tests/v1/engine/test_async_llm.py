@@ -515,7 +515,7 @@ async def test_header_dp_rank_argument():
             model_config=engine.model_config,
             renderer=engine.renderer,
             io_processor=engine.io_processor,
-            served_model_names=[mp.name for mp in BASE_MODEL_PATHS],
+            model_registry=models.registry,
             request_logger=None,
             chat_template=None,
             chat_template_content_format="auto",

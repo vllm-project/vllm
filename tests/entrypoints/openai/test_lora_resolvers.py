@@ -150,7 +150,7 @@ def mock_serving_setup():
         model_config=mock_engine.model_config,
         renderer=mock_engine.renderer,
         io_processor=mock_engine.io_processor,
-        served_model_names=[mp.name for mp in BASE_MODEL_PATHS],
+        model_registry=models.registry,
         request_logger=None,
         chat_template=None,
         chat_template_content_format="auto",
