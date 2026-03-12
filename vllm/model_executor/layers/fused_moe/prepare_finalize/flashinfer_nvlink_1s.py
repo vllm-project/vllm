@@ -54,7 +54,7 @@ class FlashInferNVLinkOneSidedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeMo
         return False
 
     def topk_indices_dtype(self) -> torch.dtype | None:
-        return None
+        return torch.int32
 
     def prepare(
         self,
