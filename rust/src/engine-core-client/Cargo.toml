@@ -1,0 +1,21 @@
+[package]
+name = "vllm-engine-core-client"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+async-trait = "0.1.89"
+bytes = "1.10.1"
+futures = "0.3.31"
+rmp-serde = "1.3.1"
+rmpv = { version = "1.3.0", features = ["with-serde"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_repr = "0.1.20"
+serde_tuple = "1.1.3"
+thiserror = "2.0.16"
+tokio = { version = "1.47.1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+zeromq = { version = "0.6.0-pre.1", default-features = false, features = ["tokio-runtime", "all-transport"] }
+
+[dev-dependencies]
+hex = "0.4.3"
+tempfile = "3.23.0"

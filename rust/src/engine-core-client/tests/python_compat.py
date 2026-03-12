@@ -1,0 +1,132 @@
+from enum import Enum, IntEnum
+
+import msgspec
+
+
+class RequestOutputKind(Enum):
+    CUMULATIVE = 0
+    DELTA = 1
+    FINAL_ONLY = 2
+
+
+class FinishReason(IntEnum):
+    STOP = 0
+    LENGTH = 1
+    ABORT = 2
+    ERROR = 3
+    REPETITION = 4
+
+
+class SamplingParams(msgspec.Struct, omit_defaults=True, dict=True):
+    n: int = 1
+    temperature: float = 1.0
+    top_p: float = 1.0
+    top_k: int = 0
+    max_tokens: int | None = 16
+    min_tokens: int = 0
+    stop: list[str] = []
+    stop_token_ids: list[int] = []
+    ignore_eos: bool = False
+    output_kind: RequestOutputKind = RequestOutputKind.CUMULATIVE
+    structured_outputs: object | None = None
+    logit_bias: object | None = None
+    allowed_token_ids: list[int] | None = None
+    extra_args: object | None = None
+    repetition_detection: object | None = None
+
+
+class EngineCoreRequest(
+    msgspec.Struct,
+    array_like=True,
+    omit_defaults=True,
+):
+    request_id: str
+    prompt_token_ids: list[int] | None
+    mm_features: object | None
+    sampling_params: SamplingParams | None
+    pooling_params: object | None
+    arrival_time: float
+    lora_request: object | None = None
+    cache_salt: str | None = None
+    data_parallel_rank: int | None = None
+    prompt_embeds: object | None = None
+    client_index: int = 0
+    current_wave: int = 0
+    priority: int = 0
+    trace_headers: dict[str, str] | None = None
+    resumable: bool = False
+    external_req_id: str | None = None
+    reasoning_ended: bool | None = None
+
+
+class EngineCoreOutput(
+    msgspec.Struct,
+    array_like=True,
+    omit_defaults=True,
+):
+    request_id: str
+    new_token_ids: list[int]
+    new_logprobs: object | None = None
+    new_prompt_logprobs_tensors: object | None = None
+    pooling_output: object | None = None
+    finish_reason: FinishReason | None = None
+    stop_reason: int | str | None = None
+    events: object | None = None
+    kv_transfer_params: object | None = None
+    trace_headers: object | None = None
+    num_cached_tokens: int = 0
+    num_external_computed_tokens: int = 0
+    routed_experts: object | None = None
+    num_nans_in_logits: int = 0
+
+
+class EngineCoreOutputs(
+    msgspec.Struct,
+    array_like=True,
+    omit_defaults=True,
+):
+    engine_index: int = 0
+    outputs: list[EngineCoreOutput] = []
+    scheduler_stats: object | None = None
+    timestamp: float = 0.0
+    utility_output: object | None = None
+    finished_requests: set[str] | None = None
+    wave_complete: int | None = None
+    start_wave: int | None = None
+
+
+request = EngineCoreRequest(
+    request_id="req-1",
+    prompt_token_ids=[11, 22],
+    mm_features=None,
+    sampling_params=SamplingParams(
+        n=2,
+        temperature=0.8,
+        top_p=0.9,
+        top_k=8,
+        max_tokens=32,
+        min_tokens=1,
+        stop=["stop"],
+        stop_token_ids=[151643],
+        ignore_eos=True,
+        output_kind=RequestOutputKind.FINAL_ONLY,
+        allowed_token_ids=[1, 2, 3],
+    ),
+    pooling_params=None,
+    arrival_time=42.5,
+    client_index=0,
+)
+
+outputs = EngineCoreOutputs(
+    outputs=[
+        EngineCoreOutput(
+            request_id="req-1",
+            new_token_ids=[7, 8],
+            finish_reason=FinishReason.LENGTH,
+        )
+    ],
+    finished_requests={"req-1"},
+)
+
+print(msgspec.msgpack.encode(request).hex())
+print(msgspec.msgpack.encode(outputs).hex())

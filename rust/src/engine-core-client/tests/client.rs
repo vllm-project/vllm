@@ -1,0 +1,274 @@
+use std::convert::TryFrom;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use tempfile::tempdir;
+use vllm_engine_core_client::{
+    EngineCoreClient, EngineCoreOutput, EngineCoreOutputs, EngineCoreRequest, FinishReason,
+    ReadyMessage, RequestOutputKind, SamplingParams, ZmqEngineCoreClient,
+    ZmqEngineCoreClientConfig,
+};
+use zeromq::prelude::{Socket, SocketRecv, SocketSend};
+use zeromq::util::PeerIdentity;
+use zeromq::{DealerSocket, PushSocket, SocketOptions, ZmqMessage};
+
+fn unique_ipc_endpoint(tempdir: &Path, name: &str) -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    format!(
+        "ipc://{}",
+        tempdir.join(format!("{name}-{nanos}.sock")).display()
+    )
+}
+
+fn sample_request() -> EngineCoreRequest {
+    EngineCoreRequest {
+        request_id: "req-1".to_string(),
+        prompt_token_ids: Some(vec![11, 22]),
+        mm_features: None,
+        sampling_params: Some(SamplingParams {
+            n: 2,
+            temperature: 0.8,
+            top_p: 0.9,
+            top_k: 8,
+            max_tokens: Some(32),
+            min_tokens: 1,
+            stop: vec!["stop".to_string()],
+            stop_token_ids: vec![151643],
+            ignore_eos: true,
+            output_kind: RequestOutputKind::FinalOnly,
+            structured_outputs: None,
+            logit_bias: None,
+            allowed_token_ids: Some(vec![1, 2, 3]),
+            extra_args: None,
+            repetition_detection: None,
+        }),
+        pooling_params: None,
+        arrival_time: 42.5,
+        lora_request: None,
+        cache_salt: None,
+        data_parallel_rank: None,
+        prompt_embeds: None,
+        client_index: 0,
+        current_wave: 0,
+        priority: 0,
+        trace_headers: None,
+        resumable: false,
+        external_req_id: None,
+        reasoning_ended: None,
+    }
+}
+
+fn fixture_python() -> Option<PathBuf> {
+    if let Some(explicit) = std::env::var_os("VLLM_ENGINE_CORE_TEST_PYTHON") {
+        return Some(explicit.into());
+    }
+
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let sibling_venv = manifest_dir
+        .join("../../../vllm/.venv/bin/python")
+        .canonicalize()
+        .ok();
+    if sibling_venv.as_ref().is_some_and(|path| path.exists()) {
+        return sibling_venv;
+    }
+
+    Some(PathBuf::from("python3"))
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn client_roundtrip_add_abort_and_finish() {
+    let tempdir = tempdir().unwrap();
+    let input_address = unique_ipc_endpoint(tempdir.path(), "input");
+    let output_address = unique_ipc_endpoint(tempdir.path(), "output");
+    let engine_identity = b"engine-0".to_vec();
+
+    let engine_input = input_address.clone();
+    let engine_output = output_address.clone();
+    let engine_id = engine_identity.clone();
+    let engine_task = tokio::spawn(async move {
+        let mut push = PushSocket::new();
+        push.bind(&engine_output).await.unwrap();
+
+        let mut options = SocketOptions::default();
+        options.peer_identity(PeerIdentity::try_from(engine_id.clone()).unwrap());
+        let mut dealer = DealerSocket::with_options(options);
+        dealer.connect(&engine_input).await.unwrap();
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let ready = rmp_serde::to_vec_named(&ReadyMessage {
+            status: Some("READY".to_string()),
+            local: Some(true),
+            headless: Some(true),
+            num_gpu_blocks: None,
+            dp_stats_address: None,
+            parallel_config_hash: None,
+        })
+        .unwrap();
+        dealer.send(ZmqMessage::from(ready)).await.unwrap();
+
+        let add_message = dealer.recv().await.unwrap().into_vec();
+        assert_eq!(add_message[0].as_ref(), &[0x00]);
+        let request: EngineCoreRequest = rmp_serde::from_slice(&add_message[1]).unwrap();
+        assert_eq!(request.client_index, 7);
+        assert_eq!(request.request_id, "req-1");
+
+        let partial = EngineCoreOutputs {
+            outputs: vec![EngineCoreOutput {
+                request_id: "req-1".to_string(),
+                new_token_ids: vec![99],
+                new_logprobs: None,
+                new_prompt_logprobs_tensors: None,
+                pooling_output: None,
+                finish_reason: None,
+                stop_reason: None,
+                events: None,
+                kv_transfer_params: None,
+                trace_headers: None,
+                num_cached_tokens: 0,
+                num_external_computed_tokens: 0,
+                routed_experts: None,
+                num_nans_in_logits: 0,
+            }],
+            ..Default::default()
+        };
+        push.send(ZmqMessage::from(rmp_serde::to_vec_named(&partial).unwrap()))
+            .await
+            .unwrap();
+
+        let abort_message = dealer.recv().await.unwrap().into_vec();
+        assert_eq!(abort_message[0].as_ref(), &[0x01]);
+        let aborted_ids: Vec<String> = rmp_serde::from_slice(&abort_message[1]).unwrap();
+        assert_eq!(aborted_ids, vec!["req-1".to_string()]);
+
+        let finished = EngineCoreOutputs {
+            outputs: vec![EngineCoreOutput {
+                request_id: "req-1".to_string(),
+                new_token_ids: vec![],
+                new_logprobs: None,
+                new_prompt_logprobs_tensors: None,
+                pooling_output: None,
+                finish_reason: Some(FinishReason::Abort),
+                stop_reason: None,
+                events: None,
+                kv_transfer_params: None,
+                trace_headers: None,
+                num_cached_tokens: 0,
+                num_external_computed_tokens: 0,
+                routed_experts: None,
+                num_nans_in_logits: 0,
+            }],
+            finished_requests: Some(["req-1".to_string()].into_iter().collect()),
+            ..Default::default()
+        };
+        push.send(ZmqMessage::from(
+            rmp_serde::to_vec_named(&finished).unwrap(),
+        ))
+        .await
+        .unwrap();
+    });
+
+    let mut client = ZmqEngineCoreClient::connect(ZmqEngineCoreClientConfig {
+        input_address,
+        output_address,
+        engine_identity,
+        ready_timeout: Duration::from_secs(2),
+        client_index: 7,
+    })
+    .await
+    .unwrap();
+
+    client.add_request(sample_request()).await.unwrap();
+    let first = client.next_output().await.unwrap();
+    assert_eq!(first.outputs[0].new_token_ids, vec![99]);
+    assert_eq!(first.outputs[0].finish_reason, None);
+
+    client
+        .abort_requests(&["req-1".to_string(), "unknown".to_string()])
+        .await
+        .unwrap();
+    let final_output = client.next_output().await.unwrap();
+    assert_eq!(
+        final_output.outputs[0].finish_reason,
+        Some(FinishReason::Abort)
+    );
+
+    client.shutdown().await.unwrap();
+    engine_task.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn connect_times_out_without_ready_message() {
+    let tempdir = tempdir().unwrap();
+    let input_address = unique_ipc_endpoint(tempdir.path(), "input-timeout");
+    let output_address = unique_ipc_endpoint(tempdir.path(), "output-timeout");
+
+    let result = ZmqEngineCoreClient::connect(ZmqEngineCoreClientConfig {
+        input_address,
+        output_address,
+        engine_identity: b"engine-timeout".to_vec(),
+        ready_timeout: Duration::from_millis(100),
+        client_index: 0,
+    })
+    .await;
+
+    let error = match result {
+        Ok(_) => panic!("expected ready timeout"),
+        Err(error) => error,
+    };
+
+    let message = error.to_string();
+    assert!(message.contains("timed out"));
+}
+
+#[test]
+fn python_msgpack_fixtures_match_rust_encoding() {
+    let python = match fixture_python() {
+        Some(path) => path,
+        None => return,
+    };
+    let script = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/python_compat.py");
+    let output = Command::new(python).arg(script).output();
+
+    let output = match output {
+        Ok(output) if output.status.success() => output,
+        _ => return,
+    };
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let mut lines = stdout.lines();
+    let request_hex = lines.next().unwrap();
+    let outputs_hex = lines.next().unwrap();
+
+    let request_bytes = hex::decode(request_hex).unwrap();
+    let outputs_bytes = hex::decode(outputs_hex).unwrap();
+
+    let decoded_request: EngineCoreRequest = rmp_serde::from_slice(&request_bytes).unwrap();
+    let expected_request = sample_request();
+    assert_eq!(decoded_request.request_id, expected_request.request_id);
+    assert_eq!(
+        decoded_request.prompt_token_ids,
+        expected_request.prompt_token_ids
+    );
+    assert_eq!(
+        decoded_request.sampling_params,
+        expected_request.sampling_params
+    );
+    assert_eq!(decoded_request.arrival_time, expected_request.arrival_time);
+
+    let decoded_outputs: EngineCoreOutputs = rmp_serde::from_slice(&outputs_bytes).unwrap();
+    assert_eq!(decoded_outputs.outputs.len(), 1);
+    assert_eq!(decoded_outputs.outputs[0].request_id, "req-1");
+    assert_eq!(decoded_outputs.outputs[0].new_token_ids, vec![7, 8]);
+    assert_eq!(
+        decoded_outputs.outputs[0].finish_reason,
+        Some(FinishReason::Length)
+    );
+    assert_eq!(
+        decoded_outputs.finished_requests,
+        Some(["req-1".to_string()].into_iter().collect())
+    );
+}
