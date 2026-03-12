@@ -36,7 +36,31 @@ impl ZmqEngineCoreClient {
             config.ready_timeout,
         )
         .await?;
+        Self::from_connected(config, connected)
+    }
 
+    /// Complete the ready handshake using sockets that were already bound by
+    /// the caller. This is useful when the frontend must publish its ZMQ
+    /// addresses before the engine finishes startup.
+    pub async fn connect_with_sockets(
+        config: ZmqEngineCoreClientConfig,
+        input_socket: zeromq::RouterSocket,
+        output_socket: zeromq::PullSocket,
+    ) -> Result<Self> {
+        let connected = transport::connect_bound(
+            input_socket,
+            output_socket,
+            &config.engine_identity,
+            config.ready_timeout,
+        )
+        .await?;
+        Self::from_connected(config, connected)
+    }
+
+    fn from_connected(
+        config: ZmqEngineCoreClientConfig,
+        connected: transport::ConnectedTransport,
+    ) -> Result<Self> {
         let (tx, rx) = mpsc::channel(64);
         let output_task = AbortOnDropHandle::new(transport::spawn_output_loop(
             connected.output_socket,

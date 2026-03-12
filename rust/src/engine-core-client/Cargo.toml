@@ -21,5 +21,6 @@ tracing = "0.1.44"
 zeromq = { version = "0.6.0-pre.1", default-features = false, features = ["tokio-runtime", "all-transport"] }
 
 [dev-dependencies]
+clap = { version = "4.5.38", features = ["derive"] }
 hex = "0.4.3"
 tempfile = "3.23.0"

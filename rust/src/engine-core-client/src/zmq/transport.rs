@@ -18,15 +18,35 @@ pub struct ConnectedTransport {
     pub ready_message: Option<ReadyMessage>,
 }
 
+pub async fn bind(
+    input_address: &str,
+    output_address: &str,
+) -> Result<(RouterSocket, PullSocket)> {
+    let mut input_socket = RouterSocket::new();
+    input_socket.bind(input_address).await?;
+
+    let mut output_socket = PullSocket::new();
+    output_socket.bind(output_address).await?;
+
+    Ok((input_socket, output_socket))
+}
+
 pub async fn connect(
     input_address: &str,
     output_address: &str,
     engine_identity: &[u8],
     ready_timeout: Duration,
 ) -> Result<ConnectedTransport> {
-    let mut input_socket = RouterSocket::new();
-    input_socket.bind(input_address).await?;
+    let (input_socket, output_socket) = bind(input_address, output_address).await?;
+    connect_bound(input_socket, output_socket, engine_identity, ready_timeout).await
+}
 
+pub async fn connect_bound(
+    mut input_socket: RouterSocket,
+    output_socket: PullSocket,
+    engine_identity: &[u8],
+    ready_timeout: Duration,
+) -> Result<ConnectedTransport> {
     let ready = timeout(ready_timeout, input_socket.recv())
         .await
         .map_err(|_| Error::ReadyTimeout {
@@ -34,9 +54,6 @@ pub async fn connect(
         })??;
 
     let ready_message = decode_ready_message(ready, engine_identity)?;
-
-    let mut output_socket = PullSocket::new();
-    output_socket.connect(output_address).await?;
 
     let (input_send, input_recv) = input_socket.split();
 

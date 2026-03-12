@@ -1,4 +1,5 @@
 use std::convert::TryFrom;
+use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -13,6 +14,13 @@ use vllm_engine_core_client::{
 use zeromq::prelude::{Socket, SocketRecv, SocketSend};
 use zeromq::util::PeerIdentity;
 use zeromq::{DealerSocket, PushSocket, SocketOptions, ZmqMessage};
+
+fn unique_tcp_endpoint() -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    format!("tcp://127.0.0.1:{port}")
+}
 
 fn unique_ipc_endpoint(tempdir: &Path, name: &str) -> String {
     let nanos = SystemTime::now()
@@ -67,15 +75,14 @@ fn sample_request() -> EngineCoreRequest {
 async fn client_roundtrip_add_abort_and_finish() {
     let tempdir = tempdir().unwrap();
     let input_address = unique_ipc_endpoint(tempdir.path(), "input");
-    let output_address = unique_ipc_endpoint(tempdir.path(), "output");
+    let output_address = unique_tcp_endpoint();
     let engine_identity = b"engine-0".to_vec();
 
     let engine_input = input_address.clone();
     let engine_output = output_address.clone();
     let engine_id = engine_identity.clone();
     let engine_task = tokio::spawn(async move {
-        let mut push = PushSocket::new();
-        push.bind(&engine_output).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
 
         let mut options = SocketOptions::default();
         options.peer_identity(PeerIdentity::try_from(engine_id.clone()).unwrap());
@@ -99,6 +106,9 @@ async fn client_roundtrip_add_abort_and_finish() {
         let request: EngineCoreRequest = rmp_serde::from_slice(&add_message[1]).unwrap();
         assert_eq!(request.client_index, 7);
         assert_eq!(request.request_id, "req-1");
+
+        let mut push = PushSocket::new();
+        push.connect(&engine_output).await.unwrap();
 
         let partial = EngineCoreOutputs {
             outputs: vec![EngineCoreOutput {
@@ -186,9 +196,8 @@ async fn client_roundtrip_add_abort_and_finish() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn connect_times_out_without_ready_message() {
-    let tempdir = tempdir().unwrap();
-    let input_address = unique_ipc_endpoint(tempdir.path(), "input-timeout");
-    let output_address = unique_ipc_endpoint(tempdir.path(), "output-timeout");
+    let input_address = unique_tcp_endpoint();
+    let output_address = unique_tcp_endpoint();
 
     let result = ZmqEngineCoreClient::connect(ZmqEngineCoreClientConfig {
         input_address,
