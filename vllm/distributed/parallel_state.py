@@ -482,7 +482,7 @@ class GroupCoordinator:
             assert isinstance(self.device_communicator, CudaCommunicator)
             hier_comm = self.device_communicator.hier_comm
             if hier_comm is not None:
-                maybe_hier_context = hier_comm.capture()
+                maybe_hier_context = hier_comm.capture()  # type: ignore
 
         # ensure all initialization operations complete before attempting to
         # capture the graph on another stream

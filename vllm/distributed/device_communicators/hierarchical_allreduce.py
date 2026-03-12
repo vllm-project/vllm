@@ -184,9 +184,10 @@ class HierarchicalAllreduce:
         )
 
         # Build packed tensor of remote gateways' info (exclude self)
-        remote_infos = []
+        remote_infos: list[torch.Tensor] = []
         for i, info_bytes in enumerate(all_infos):
             if i != self.node_id:
+                assert isinstance(info_bytes, bytes)
                 remote_infos.append(
                     torch.frombuffer(bytearray(info_bytes), dtype=torch.uint8)
                 )
@@ -214,9 +215,7 @@ class HierarchicalAllreduce:
             return False
         if not is_weak_contiguous(inp):
             return False
-        if inp_size > self.max_size:
-            return False
-        return True
+        return inp_size <= self.max_size
 
     def all_reduce(
         self, inp: torch.Tensor, *, out: torch.Tensor = None
