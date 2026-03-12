@@ -5,6 +5,7 @@
 
 import contextlib
 import multiprocessing as mp
+from dataclasses import dataclass
 from multiprocessing.synchronize import Barrier as BarrierType
 from multiprocessing.synchronize import Event as EventType
 from typing import Any
@@ -18,7 +19,7 @@ from vllm.v1.engine.tensor_ipc import (
     TensorIpcReceiver,
     TensorIpcSender,
 )
-from vllm.v1.serial_utils import MsgpackEncoder, TensorIpcHandle
+from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder, TensorIpcHandle
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -30,19 +31,27 @@ def setup_multiprocessing():
     yield
 
 
+@dataclass
+# Use a typed container so the test covers the real vLLM path where tensor IPC
+# handles are encoded and decoded as fields nested inside larger msgpack payloads.
+class TensorEnvelope:
+    tensor: torch.Tensor
+    label: str
+
+
 def encoder_process(
     tensor_queue: torch_mp.Queue,
+    payload_queue: mp.Queue,
     result_queue: mp.Queue,
     tensor_data: dict[str, Any],
     ready_event: EventType,
+    retrieval_done: EventType,
 ):
-    """Process that encodes and sends CUDA tensors via queue."""
+    """Process that msgpack-encodes and sends tensors via IPC."""
     try:
-        # Create encoder with tensor IPC sender
         sender = TensorIpcSender(tensor_queue)
         encoder = MsgpackEncoder(tensor_ipc_sender=sender)
 
-        # Create a CUDA tensor if available
         if torch.cuda.is_available():
             device = "cuda:0"
             tensor = torch.randn(
@@ -53,10 +62,10 @@ def encoder_process(
             device = "cpu"
             tensor = torch.randn(*tensor_data["shape"], dtype=tensor_data["dtype"])
 
-        # Encode the tensor
-        encoded = encoder.encode({"test_tensor": tensor})
+        message = TensorEnvelope(tensor=tensor, label="cuda-msgpack")
+        encoded = encoder.encode(message)
+        payload_queue.put(encoded, timeout=10.0)
 
-        # Signal that encoding is complete before sending result
         ready_event.set()
 
         result_queue.put(
@@ -67,10 +76,12 @@ def encoder_process(
                 "tensor_shape": tuple(tensor.shape),
             }
         )
+        retrieval_done.wait(timeout=30.0)
     except Exception as e:
         import traceback
 
-        ready_event.set()  # Signal even on failure
+        ready_event.set()
+        retrieval_done.set()
         result_queue.put(
             {"success": False, "error": str(e), "traceback": traceback.format_exc()}
         )
@@ -78,67 +89,80 @@ def encoder_process(
 
 def decoder_process(
     tensor_queue: torch_mp.Queue,
+    payload_queue: mp.Queue,
     result_queue: mp.Queue,
     expected_shape: tuple,
     encoder_ready: EventType,
+    retrieval_done: EventType,
 ):
-    """Process that decodes and receives CUDA tensors from queue."""
+    """Process that msgpack-decodes tensors received via IPC."""
     try:
-        # Wait for encoder to finish sending
         if not encoder_ready.wait(timeout=10.0):
             raise TimeoutError("Encoder did not signal ready")
 
-        # Try to get tensor from queue directly for testing
-        ipc_data = tensor_queue.get(timeout=5.0)
+        encoded = payload_queue.get(timeout=5.0)
+        receiver = TensorIpcReceiver(tensor_queue)
+        decoder = MsgpackDecoder(TensorEnvelope, tensor_ipc_receiver=receiver)
+        decoded = decoder.decode(encoded)
 
         result_queue.put(
             {
                 "success": True,
-                "tensor_id": ipc_data.tensor_id,
-                "tensor_shape": tuple(ipc_data.tensor.shape),
-                "device": str(ipc_data.tensor.device),
-                "matches_expected": tuple(ipc_data.tensor.shape) == expected_shape,
+                "tensor_shape": tuple(decoded.tensor.shape),
+                "device": str(decoded.tensor.device),
+                "label": decoded.label,
+                "matches_expected": tuple(decoded.tensor.shape) == expected_shape,
             }
         )
     except Exception as e:
         import traceback
 
+        retrieval_done.set()
         result_queue.put(
             {"success": False, "error": str(e), "traceback": traceback.format_exc()}
         )
+    else:
+        retrieval_done.set()
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 def test_cuda_tensor_queue_basic():
-    """Test basic CUDA tensor sharing via queue."""
-    # Set up single queue and synchronization
+    """Test CUDA tensor IPC through the msgpack encoder/decoder path."""
     tensor_queue = torch_mp.Queue()
+    payload_queue: mp.Queue = mp.Queue()
     result_queue: mp.Queue = mp.Queue()
     encoder_ready = mp.Event()
+    retrieval_done = mp.Event()
 
     tensor_shape = (4, 8, 16)
     tensor_dtype = torch.float32
 
-    # Start encoder process
     encoder_proc = mp.Process(
         target=encoder_process,
         args=(
             tensor_queue,
+            payload_queue,
             result_queue,
             {"shape": tensor_shape, "dtype": tensor_dtype},
             encoder_ready,
+            retrieval_done,
         ),
     )
     encoder_proc.start()
 
-    # Start decoder process
     decoder_proc = mp.Process(
         target=decoder_process,
-        args=(tensor_queue, result_queue, tensor_shape, encoder_ready),
+        args=(
+            tensor_queue,
+            payload_queue,
+            result_queue,
+            tensor_shape,
+            encoder_ready,
+            retrieval_done,
+        ),
     )
     decoder_proc.start()
 
-    # Wait for processes and collect results
     encoder_result = result_queue.get(timeout=10.0)
     decoder_result = result_queue.get(timeout=10.0)
 
@@ -156,6 +180,7 @@ def test_cuda_tensor_queue_basic():
     )
     assert decoder_result["matches_expected"], "Tensor shape mismatch"
     assert "cuda" in decoder_result["device"], "Tensor not on CUDA device"
+    assert decoder_result["label"] == "cuda-msgpack"
 
 
 def test_cpu_tensor_fallback():
@@ -176,19 +201,26 @@ def test_cpu_tensor_fallback():
     # This is mainly to ensure no exceptions are raised
 
 
-def test_encoder_with_sender():
-    """Test that encoder works with a sender (always ready)."""
+def test_msgpack_encoder_decoder_with_ipc():
+    """Test the full msgpack + tensor IPC path in one process."""
     tensor_queue = torch_mp.Queue()
     sender = TensorIpcSender(tensor_queue)
     encoder = MsgpackEncoder(tensor_ipc_sender=sender)
+    receiver = TensorIpcReceiver(tensor_queue)
+    decoder = MsgpackDecoder(TensorEnvelope, tensor_ipc_receiver=receiver)
 
-    if torch.cuda.is_available():
-        tensor = torch.randn(2, 3, device="cuda:0")
-    else:
-        tensor = torch.randn(2, 3)
+    # Use CPU here to exercise the msgpack + sender/receiver integration
+    # without relying on same-process CUDA IPC behavior.
+    tensor = torch.randn(2, 3)
 
-    encoded = encoder.encode({"test_tensor": tensor})
+    message = TensorEnvelope(tensor=tensor, label="test")
+    encoded = encoder.encode(message)
     assert len(encoded) > 0
+
+    decoded = decoder.decode(encoded)
+    assert isinstance(decoded, TensorEnvelope)
+    assert decoded.label == "test"
+    assert torch.allclose(decoded.tensor, tensor)
 
 
 def test_decoder_buffer_management():
@@ -749,16 +781,25 @@ def test_tensor_cleanup_after_decode():
 
 
 def test_request_context_in_encoder():
-    """Test that encoder properly sets and clears request context."""
+    """Test that request context is owned by the tensor IPC sender."""
     encoder = MsgpackEncoder()
 
-    # Initially no request context
+    # Without a sender, request context is a no-op.
+    assert encoder._current_request_id is None
+    encoder.set_request_context("req123")
     assert encoder._current_request_id is None
 
-    # Set request context
+    tensor_queue = torch_mp.Queue()
+    sender = TensorIpcSender(tensor_queue)
+    encoder = MsgpackEncoder(tensor_ipc_sender=sender)
+
+    assert sender.current_request_id is None
+    assert encoder._current_request_id is None
+
     encoder.set_request_context("req123")
+    assert sender.current_request_id == "req123"
     assert encoder._current_request_id == "req123"
 
-    # Clear request context
     encoder.set_request_context(None)
+    assert sender.current_request_id is None
     assert encoder._current_request_id is None

@@ -81,18 +81,19 @@ def encoder_request_context(
     When tensor IPC is not in use, does nothing so the hot path has no
     extra ops.
     """
-    if encoder.tensor_ipc_sender is None:
+    sender = encoder.tensor_ipc_sender
+    if sender is None:
         yield encoder
         return
 
     # Set request context if this is an ADD request with a request_id
     if request_type == EngineCoreRequestType.ADD and hasattr(request, "request_id"):
-        encoder.set_request_context(request.request_id)
+        sender.set_request_context(request.request_id)
 
     try:
         yield encoder
     finally:
-        encoder.set_request_context(None)
+        sender.set_request_context(None)
 
 
 class EngineCoreClient(ABC):

@@ -4,13 +4,15 @@
 """Tensor IPC transport via torch.multiprocessing.Queue.
 
 This module contains the queue-based transport logic for sharing tensors
-between processes (e.g., API server -> engine core). The MsgpackEncoder/Decoder
-in serial_utils.py handle emitting/consuming tensor references
-(TensorIpcHandle), while this module handles the actual transport.
+between processes (e.g., API server -> engine core). The msgpack layer
+emits/consumes lightweight :class:`TensorIpcHandle` values, while transport
+state such as request association, handle generation, queue routing, buffering,
+and cleanup lives here.
 """
 
 import dataclasses
 import threading
+from multiprocessing.queues import Queue as MPQueue
 from typing import Any
 
 import torch
@@ -19,6 +21,8 @@ from vllm.logger import init_logger
 from vllm.v1.serial_utils import TensorIpcHandle
 
 logger = init_logger(__name__)
+
+TensorIpcQueue = MPQueue
 
 
 @dataclasses.dataclass
@@ -42,16 +46,37 @@ class TensorIpcSender:
     multimodal tensors during TP>1 / PP>1. Note: DP>1 not supported).
     """
 
-    def __init__(self, queue: Any):
+    def __init__(self, queue: TensorIpcQueue):
         self.queue = queue
+        self._tensor_id_counter = 0
+        self._current_request_id: str | None = None
+
+    @property
+    def current_request_id(self) -> str | None:
+        return self._current_request_id
+
+    def set_request_context(self, request_id: str | None) -> None:
+        self._current_request_id = request_id
+
+    def set_target_engine(self, target_engine: int) -> None:
+        if target_engine != 0:
+            raise IndexError(
+                "TensorIpcSender only supports a single queue; "
+                f"got target engine {target_engine}"
+            )
 
     def send_tensor(
         self,
         tensor: torch.Tensor,
-        request_id: str | None,
-        tensor_id: str,
+        request_id: str | None = None,
+        tensor_id: str | None = None,
     ) -> TensorIpcHandle:
         """Send tensor via queue, return its handle."""
+        if request_id is None:
+            request_id = self._current_request_id
+        if tensor_id is None:
+            tensor_id = f"{id(self)}_{self._tensor_id_counter}"
+            self._tensor_id_counter += 1
 
         # Move tensor to shared memory for IPC
         # This is required for proper inter-process communication
@@ -90,19 +115,44 @@ class TensorIpcReceiver:
     Wraps the queue receive logic previously embedded in MsgpackDecoder.
     """
 
-    def __init__(self, queue: Any):
+    def __init__(self, queue: TensorIpcQueue):
         self.queue = queue
         self._tensor_buffer: dict[tuple[str | None, str], torch.Tensor] = {}
         self._request_to_tensors: dict[str, list[tuple[str | None, str]]] = {}
         self._buffer_lock = threading.Lock()
 
-    def recv_tensor(self, handle: TensorIpcHandle) -> torch.Tensor:
+    @staticmethod
+    def is_handle_like(obj: Any) -> bool:
+        if isinstance(obj, TensorIpcHandle):
+            return True
+        if (
+            isinstance(obj, dict)
+            and "tensor_id" in obj
+            and "shape" in obj
+            and "dtype" in obj
+            and "device" in obj
+        ):
+            return True
+        return isinstance(obj, (list, tuple)) and len(obj) == 5
+
+    @staticmethod
+    def parse_handle(obj: Any) -> TensorIpcHandle:
+        if isinstance(obj, TensorIpcHandle):
+            return obj
+        if isinstance(obj, dict):
+            return TensorIpcHandle(**obj)
+        if isinstance(obj, (list, tuple)) and len(obj) == 5:
+            return TensorIpcHandle(*obj)
+        raise TypeError(f"Object is not a TensorIpcHandle: {type(obj)}")
+
+    def recv_tensor(self, handle: TensorIpcHandle | Any) -> torch.Tensor:
         """Retrieve a tensor from torch.multiprocessing.Queue.
 
         Uses a drain-and-buffer pattern: drains all available tensors from
         the queue, buffering them, until the requested tensor is found.
         Works for CUDA and CPU.
         """
+        handle = self.parse_handle(handle)
         # Create lookup key from handle
         lookup_key = (handle.request_id, handle.tensor_id)
 

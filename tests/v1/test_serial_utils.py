@@ -303,8 +303,7 @@ def test_non_multimodal_tensor_with_ipc():
     tensor_queues = [torch_mp.Queue()]
 
     # Create encoder with IPC sender
-    sender = TensorIpcSender(tensor_queues)
-    sender.set_target_engine(0)
+    sender = TensorIpcSender(tensor_queues[0])
     encoder = MsgpackEncoder(tensor_ipc_sender=sender)
     encoder.set_request_context("test_request_123")
 
@@ -345,8 +344,7 @@ def test_non_multimodal_tensor_with_ipc_none_value():
     tensor_queues = [torch_mp.Queue()]
 
     # Create encoder with IPC sender
-    sender = TensorIpcSender(tensor_queues)
-    sender.set_target_engine(0)
+    sender = TensorIpcSender(tensor_queues[0])
     encoder = MsgpackEncoder(tensor_ipc_sender=sender)
     encoder.set_request_context("test_request_456")
 
