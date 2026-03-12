@@ -105,7 +105,7 @@ def input_guard(fn: Callable[..., torch.Tensor]) -> Callable[..., torch.Tensor]:
                     break
 
         if tensor is not None:
-            ctx = torch.cuda.device(tensor.device.index)
+            ctx = torch.accelerator.device_index(tensor.device.index)
         else:
             ctx = contextlib.nullcontext()
 

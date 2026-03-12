@@ -32,7 +32,8 @@ def test_idefics_multimodal(
 
 
 def update_config(config):
-    config.text_config.update(
+    text_config = config.get_text_config()
+    text_config.update(
         {
             "architectures": ["Gemma3ForSequenceClassification"],
             "classifier_from_token": ["A", "B", "C", "D", "E"],

@@ -204,7 +204,8 @@ def _add_prefix(file: TextIO, worker_name: str, pid: int) -> None:
         prefix = f"({worker_name} pid={pid}) "
     else:
         prefix = f"{CYAN}({worker_name} pid={pid}){RESET} "
-    file_write = file.write
+    # Use the original write to avoid nesting prefixes on repeated calls.
+    file_write = getattr(file, "_original_write", file.write)
 
     def write_with_prefix(s: str):
         if not s:
@@ -224,6 +225,7 @@ def _add_prefix(file: TextIO, worker_name: str, pid: int) -> None:
         file.start_new_line = False  # type: ignore[attr-defined]
 
     file.start_new_line = True  # type: ignore[attr-defined]
+    file._original_write = file_write  # type: ignore[attr-defined]
     file.write = write_with_prefix  # type: ignore[method-assign]
 
 

@@ -44,6 +44,12 @@ For NixlConnector, you may also specify one or multiple NIXL_Backend. Such as:
   --kv-transfer-config '{"kv_connector":"OffloadingConnector","kv_role":"kv_both","kv_connector_extra_config":{"block_size": 64, "cpu_bytes_to_use": 1000000000}}'
   ```
 
+- **FlexKVConnectorV1**: refer to [examples/offline_inference/prefix_caching_flexkv.py](../../examples/offline_inference/prefix_caching_flexkv.py) for the example usage of FlexKVConnectorV1. FlexKV is a distributed KV Store and multi-level cache management system for ultra-large-scale LLM inference.
+
+  ```bash
+  --kv-transfer-config '{"kv_connector":"FlexKVConnectorV1","kv_role":"kv_both"}'
+  ```
+
 ## Benchmarks
 
 Please refer to [benchmarks/disagg_benchmarks](../../benchmarks/disagg_benchmarks) for disaggregated prefilling benchmarks.
