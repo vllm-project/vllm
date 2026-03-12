@@ -780,6 +780,13 @@ class Platform:
             "num_compute_units is not implemented for the current platform."
         )
 
+    @classmethod
+    def executors_supports_async_scheduling(cls) -> list:
+        """
+        Get the executors that support async scheduling for the current platform.
+        """
+        return ["mp", "uni", "external_launcher"]
+
 
 class UnspecifiedPlatform(Platform):
     _enum = PlatformEnum.UNSPECIFIED

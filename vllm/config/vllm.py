@@ -677,10 +677,13 @@ class VllmConfig:
             )
 
         executor_backend = self.parallel_config.distributed_executor_backend
-        executor_supports_async_sched = executor_backend in (
-            "mp",
-            "uni",
-            "external_launcher",
+        from vllm.platforms import current_platform
+
+        executors_with_async_sched_support = (
+            current_platform.executors_supports_async_scheduling()
+        )
+        executor_supports_async_sched = (
+            executor_backend in executors_with_async_sched_support
         )
 
         if self.scheduler_config.async_scheduling:
@@ -705,9 +708,9 @@ class VllmConfig:
                     )
             if not executor_supports_async_sched:
                 raise ValueError(
-                    "Currently, async scheduling only supports `mp`, `uni`, or "
-                    "`external_launcher` distributed executor backend, but you chose "
-                    f"`{executor_backend}`."
+                    f"Currently, async scheduling only supports "
+                    f"{executors_with_async_sched_support} distributed executor "
+                    f"backend, but you chose `{executor_backend}`."
                 )
         elif self.scheduler_config.async_scheduling is None:
             # Enable async scheduling unless there is an incompatible option.
@@ -736,9 +739,10 @@ class VllmConfig:
             elif not executor_supports_async_sched:
                 logger.warning_once(
                     "Async scheduling will be disabled because it is not supported "
-                    "with the `%s` distributed executor backend (only `mp`, `uni`, and "
-                    "`external_launcher` are supported).",
+                    "with the `%s` distributed executor backend "
+                    "(only %s are supported).",
                     executor_backend,
+                    executors_with_async_sched_support,
                     scope="local",
                 )
                 self.scheduler_config.async_scheduling = False
