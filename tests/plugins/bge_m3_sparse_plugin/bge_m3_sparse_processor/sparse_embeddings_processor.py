@@ -41,6 +41,14 @@ class BgeM3SparseEmbeddingsProcessor(
                     continue
                 self.default_pooling_params[param] = getattr(pooler_config, param)
         self.embed_dimensions = vllm_config.model_config.get_hidden_size()
+        logger.info(self)
+
+    def __repr__(self) -> str:
+        return (
+            f"BgeM3SparseEmbeddingsProcessor("
+            f"embed_dimensions={self.embed_dimensions}, "
+            f"default_pooling_params={self.default_pooling_params})"
+        )
 
     def merge_pooling_params(
         self,
