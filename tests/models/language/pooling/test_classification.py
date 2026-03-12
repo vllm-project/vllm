@@ -45,7 +45,7 @@ def test_models(
         # the tolerance value of 1e-2 is selected based on the
         # half datatype tests in
         # tests/models/language/pooling/test_embedding.py
-        torch.testing.assert_close(
+        assert torch.allclose(
             hf_output,
             vllm_output,
             atol=1e-3 if dtype == "float" else 1e-2,
