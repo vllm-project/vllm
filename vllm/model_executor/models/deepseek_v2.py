@@ -1205,6 +1205,11 @@ class DeepseekV2Model(nn.Module):
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
             else:
+                if input_ids is None:
+                    raise ValueError(
+                        "Either input_ids or inputs_embeds must be provided "
+                        "to DeepseekV2Model.forward"
+                    )
                 hidden_states = self.embed_input_ids(input_ids)
             residual = None
         else:
