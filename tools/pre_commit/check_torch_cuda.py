@@ -8,8 +8,8 @@ import regex as re
 # Regex: match `torch.cuda.xxx` but allow `torch.accelerator.xxx`
 # --------------------------------------------------------------------------- #
 _TORCH_CUDA_PATTERNS = [
-    r"\btorch\.cuda\.empty_cache\b",
-    r"\btorch\.cuda\.synchronize\b",
+    r"\btorch\.cuda\.(empty_cache|synchronize|device\()\b",
+    r"\bwith\btorch\.cuda\.device\b",
 ]
 
 ALLOWED_FILES = {"vllm/platforms/", "vllm/device_allocator/"}
