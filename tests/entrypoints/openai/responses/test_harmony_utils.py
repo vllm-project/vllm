@@ -13,6 +13,7 @@ from openai_harmony import Author, Message, Role, TextContent
 from vllm.entrypoints.openai.responses.harmony import (
     harmony_to_response_output,
     parser_state_to_response_output,
+    response_input_to_harmony,
     response_previous_input_to_harmony,
 )
 
@@ -461,3 +462,83 @@ def test_parser_state_to_response_output_analysis_channel() -> None:
     assert len(builtin_items) == 1
     assert not isinstance(builtin_items[0], McpCall)
     assert builtin_items[0].type == "reasoning"
+
+
+class TestResponseInputToHarmonyReasoning:
+    """Tests for response_input_to_harmony with reasoning type inputs."""
+
+    def test_reasoning_with_content(self):
+        """Test reasoning item with populated content field."""
+        reasoning_msg = ResponseReasoningItem(
+            id="rs_001",
+            type="reasoning",
+            summary=[],
+            content=[{"type": "reasoning_content", "text": "thinking step"}],
+            encrypted_content=None,
+        )
+
+        msg = response_input_to_harmony(reasoning_msg, [])
+
+        assert msg.role == Role.ASSISTANT
+        assert msg.content[0].text == "thinking step"
+
+    def test_reasoning_with_content_none_and_summary(self):
+        """Test reasoning item with content=None falls back to summary."""
+        reasoning_msg = ResponseReasoningItem(
+            id="rs_002",
+            type="reasoning",
+            summary=[{"type": "summary_text", "text": "We need to check the file"}],
+            content=None,
+            encrypted_content=None,
+        )
+
+        msg = response_input_to_harmony(reasoning_msg, [])
+
+        assert msg.role == Role.ASSISTANT
+        assert msg.content[0].text == "We need to check the file"
+
+    def test_reasoning_with_content_none_and_multiple_summaries(self):
+        """Test reasoning item with content=None and multiple summary entries."""
+        reasoning_msg = ResponseReasoningItem(
+            id="rs_003",
+            type="reasoning",
+            summary=[
+                {"type": "summary_text", "text": "First thought."},
+                {"type": "summary_text", "text": "Second thought."},
+            ],
+            content=None,
+            encrypted_content=None,
+        )
+
+        msg = response_input_to_harmony(reasoning_msg, [])
+
+        assert msg.role == Role.ASSISTANT
+        assert msg.content[0].text == "First thought. Second thought."
+
+    def test_reasoning_with_content_none_and_empty_summary(self):
+        """Test reasoning item with content=None and empty summary list."""
+        reasoning_msg = ResponseReasoningItem(
+            id="rs_004",
+            type="reasoning",
+            summary=[],
+            content=None,
+            encrypted_content=None,
+        )
+
+        msg = response_input_to_harmony(reasoning_msg, [])
+
+        assert msg.role == Role.ASSISTANT
+        assert msg.content[0].text == ""
+
+    def test_reasoning_with_content_none_and_no_summary(self):
+        """Test reasoning item with both content and summary absent."""
+        reasoning_msg = {
+            "id": "rs_005",
+            "type": "reasoning",
+            "content": None,
+        }
+
+        msg = response_input_to_harmony(reasoning_msg, [])
+
+        assert msg.role == Role.ASSISTANT
+        assert msg.content[0].text == ""
