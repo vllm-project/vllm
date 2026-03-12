@@ -6,6 +6,9 @@ Run `pytest tests/quantization/test_bitsandbytes.py`.
 """
 
 import pytest
+import importlib.metadata
+
+from packaging import version
 from transformers import BitsAndBytesConfig
 
 from tests.quantization.utils import is_quant_method_supported
@@ -138,7 +141,12 @@ def test_load_pp_4bit_bnb_model(model_name, description) -> None:
     compare_two_settings(model_name, common_args, pp_args)
 
 
-@pytest.mark.skip(reason="Need to add support for quantizing MoE experts with bnb in transformers")
+@pytest.mark.skipif(
+    version.parse(importlib.metadata.version("transformers")) >= version.parse("5.0.0"),
+    reason="Need to add support for quantizing MoE experts with bnb in transformers v5. "
+    "See https://github.com/bitsandbytes-foundation/bitsandbytes/issues/1849 "
+    "and https://github.com/huggingface/transformers/issues/43472",
+)
 @pytest.mark.skipif(
     not is_quant_method_supported("bitsandbytes"),
     reason="bitsandbytes is not supported on this GPU type.",
