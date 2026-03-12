@@ -60,6 +60,9 @@ VLLM_USE_PRECOMPILED=1 uv pip install -e .
 
 # If you are also making C/C++ changes:
 uv pip install -e .
+
+# If you need to match the CI environment:
+uv pip install -r requirements/text.txt
 ```
 
 ### Running linters
