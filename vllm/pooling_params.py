@@ -184,7 +184,7 @@ class PoolingParams(
                 elif self.dimensions < 1:
                     raise ValueError("Dimensions must be greater than 0")
 
-        elif self.task in ["classify", "score"]:
+        elif self.task in ["classify", "score", "token_classify"]:
             if self.use_activation is None:
                 self.use_activation = True
         else:
