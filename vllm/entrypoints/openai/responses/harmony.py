@@ -172,9 +172,19 @@ def response_input_to_harmony(
             response_msg["output"],
         )
     elif response_msg["type"] == "reasoning":
-        content = response_msg["content"]
-        assert len(content) == 1
-        msg = Message.from_role_and_content(Role.ASSISTANT, content[0]["text"])
+        content = response_msg.get("content")
+        if content is not None:
+            assert len(content) == 1
+            text = content[0]["text"]
+        else:
+            # content can be None when encrypted_content is used or
+            # when only summary is available. Fall back to summary.
+            summary = response_msg.get("summary")
+            if summary:
+                text = " ".join(s.get("text", "") for s in summary)
+            else:
+                text = ""
+        msg = Message.from_role_and_content(Role.ASSISTANT, text)
     elif response_msg["type"] == "function_call":
         msg = Message.from_role_and_content(Role.ASSISTANT, response_msg["arguments"])
         msg = msg.with_channel("commentary")
