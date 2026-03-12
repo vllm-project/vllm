@@ -10,28 +10,21 @@ use crate::protocol::{EngineCoreOutputs, EngineCoreRequest};
 /// Python `EngineCoreProc`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ZmqEngineCoreClientConfig {
-    /// ROUTER bind address used for frontend -> engine requests.
-    pub input_address: String,
-    /// PULL connect address used for engine -> frontend outputs.
-    pub output_address: String,
-    /// Expected engine DEALER identity used for ready-handshake validation and routing.
-    pub engine_identity: Vec<u8>,
-    /// Timeout while waiting for the engine ready message.
+    /// Startup handshake address that the Python engine connects to first.
+    pub handshake_address: String,
+    /// Local host/interface used when allocating the frontend input/output addresses.
+    pub local_host: String,
+    /// Timeout while waiting for each step of the startup handshake.
     pub ready_timeout: Duration,
     /// Frontend client index stamped onto every request.
     pub client_index: u32,
 }
 
 impl ZmqEngineCoreClientConfig {
-    pub fn new(
-        input_address: impl Into<String>,
-        output_address: impl Into<String>,
-        engine_identity: Vec<u8>,
-    ) -> Self {
+    pub fn new(handshake_address: impl Into<String>) -> Self {
         Self {
-            input_address: input_address.into(),
-            output_address: output_address.into(),
-            engine_identity,
+            handshake_address: handshake_address.into(),
+            local_host: "127.0.0.1".to_string(),
             ready_timeout: Duration::from_secs(30),
             client_index: 0,
         }

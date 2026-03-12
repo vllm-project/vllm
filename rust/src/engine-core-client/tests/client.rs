@@ -1,11 +1,11 @@
 use std::convert::TryFrom;
 use std::net::TcpListener;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
-use tempfile::tempdir;
 use thiserror_ext::AsReport as _;
+use vllm_engine_core_client::protocol::handshake::HandshakeInitMessage;
 use vllm_engine_core_client::{
     EngineCoreClient, EngineCoreOutput, EngineCoreOutputs, EngineCoreRequest, FinishReason,
     ReadyMessage, RequestOutputKind, SamplingParams, ZmqEngineCoreClient,
@@ -20,17 +20,6 @@ fn unique_tcp_endpoint() -> String {
     let port = listener.local_addr().unwrap().port();
     drop(listener);
     format!("tcp://127.0.0.1:{port}")
-}
-
-fn unique_ipc_endpoint(tempdir: &Path, name: &str) -> String {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    format!(
-        "ipc://{}",
-        tempdir.join(format!("{name}-{nanos}.sock")).display()
-    )
 }
 
 fn sample_request() -> EngineCoreRequest {
@@ -73,23 +62,51 @@ fn sample_request() -> EngineCoreRequest {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn client_roundtrip_add_abort_and_finish() {
-    let tempdir = tempdir().unwrap();
-    let input_address = unique_ipc_endpoint(tempdir.path(), "input");
-    let output_address = unique_tcp_endpoint();
+    let handshake_address = unique_tcp_endpoint();
     let engine_identity = b"engine-0".to_vec();
 
-    let engine_input = input_address.clone();
-    let engine_output = output_address.clone();
+    let engine_handshake = handshake_address.clone();
     let engine_id = engine_identity.clone();
     let engine_task = tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(200)).await;
 
         let mut options = SocketOptions::default();
         options.peer_identity(PeerIdentity::try_from(engine_id.clone()).unwrap());
-        let mut dealer = DealerSocket::with_options(options);
-        dealer.connect(&engine_input).await.unwrap();
+        let mut handshake = DealerSocket::with_options(options);
+        handshake.connect(&engine_handshake).await.unwrap();
 
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        let hello = rmp_serde::to_vec_named(&ReadyMessage {
+            status: Some("HELLO".to_string()),
+            local: Some(true),
+            headless: Some(true),
+            num_gpu_blocks: None,
+            dp_stats_address: None,
+            parallel_config_hash: None,
+        })
+        .unwrap();
+        handshake.send(ZmqMessage::from(hello)).await.unwrap();
+
+        let init_frames = handshake.recv().await.unwrap().into_vec();
+        assert_eq!(init_frames.len(), 1);
+        let init: HandshakeInitMessage = rmp_serde::from_slice(init_frames[0].as_ref()).unwrap();
+        assert_eq!(init.addresses.inputs.len(), 1);
+        assert_eq!(init.addresses.outputs.len(), 1);
+
+        let engine_input = init.addresses.inputs[0].clone();
+        let engine_output = init.addresses.outputs[0].clone();
+
+        let mut input_options = SocketOptions::default();
+        input_options.peer_identity(PeerIdentity::try_from(engine_id).unwrap());
+        let mut dealer = DealerSocket::with_options(input_options);
+        dealer.connect(&engine_input).await.unwrap();
+        dealer
+            .send(ZmqMessage::from(Vec::<u8>::new()))
+            .await
+            .unwrap();
+
+        let mut push = PushSocket::new();
+        push.connect(&engine_output).await.unwrap();
+
         let ready = rmp_serde::to_vec_named(&ReadyMessage {
             status: Some("READY".to_string()),
             local: Some(true),
@@ -99,16 +116,13 @@ async fn client_roundtrip_add_abort_and_finish() {
             parallel_config_hash: None,
         })
         .unwrap();
-        dealer.send(ZmqMessage::from(ready)).await.unwrap();
+        handshake.send(ZmqMessage::from(ready)).await.unwrap();
 
         let add_message = dealer.recv().await.unwrap().into_vec();
         assert_eq!(add_message[0].as_ref(), &[0x00]);
         let request: EngineCoreRequest = rmp_serde::from_slice(&add_message[1]).unwrap();
         assert_eq!(request.client_index, 7);
         assert_eq!(request.request_id, "req-1");
-
-        let mut push = PushSocket::new();
-        push.connect(&engine_output).await.unwrap();
 
         let partial = EngineCoreOutputs {
             outputs: vec![EngineCoreOutput {
@@ -166,14 +180,23 @@ async fn client_roundtrip_add_abort_and_finish() {
     });
 
     let mut client = ZmqEngineCoreClient::connect(ZmqEngineCoreClientConfig {
-        input_address,
-        output_address,
-        engine_identity,
+        handshake_address,
+        local_host: "127.0.0.1".to_string(),
         ready_timeout: Duration::from_secs(2),
         client_index: 7,
     })
     .await
     .unwrap();
+    assert_eq!(client.engine_identity(), b"engine-0");
+    assert_eq!(
+        client
+            .ready_message
+            .as_ref()
+            .and_then(|msg| msg.status.as_deref()),
+        Some("READY")
+    );
+    assert!(client.input_address().starts_with("tcp://127.0.0.1:"));
+    assert!(client.output_address().starts_with("tcp://127.0.0.1:"));
 
     client.add_request(sample_request()).await.unwrap();
     let first = client.next_output().await.unwrap();
@@ -196,13 +219,33 @@ async fn client_roundtrip_add_abort_and_finish() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn connect_times_out_without_ready_message() {
-    let input_address = unique_tcp_endpoint();
-    let output_address = unique_tcp_endpoint();
+    let handshake_address = unique_tcp_endpoint();
+    let engine_handshake = handshake_address.clone();
+    let engine_task = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let mut options = SocketOptions::default();
+        options.peer_identity(PeerIdentity::try_from(b"engine-timeout".to_vec()).unwrap());
+        let mut handshake = DealerSocket::with_options(options);
+        handshake.connect(&engine_handshake).await.unwrap();
+
+        let hello = rmp_serde::to_vec_named(&ReadyMessage {
+            status: Some("HELLO".to_string()),
+            local: Some(true),
+            headless: Some(true),
+            num_gpu_blocks: None,
+            dp_stats_address: None,
+            parallel_config_hash: None,
+        })
+        .unwrap();
+        handshake.send(ZmqMessage::from(hello)).await.unwrap();
+
+        let _ = handshake.recv().await.unwrap();
+    });
 
     let result = ZmqEngineCoreClient::connect(ZmqEngineCoreClientConfig {
-        input_address,
-        output_address,
-        engine_identity: b"engine-timeout".to_vec(),
+        handshake_address,
+        local_host: "127.0.0.1".to_string(),
         ready_timeout: Duration::from_millis(100),
         client_index: 0,
     })
@@ -215,6 +258,8 @@ async fn connect_times_out_without_ready_message() {
 
     let message = error.to_report_string();
     assert!(message.contains("timed out"));
+    assert!(message.contains("READY"));
+    engine_task.await.unwrap();
 }
 
 #[test]

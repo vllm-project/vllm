@@ -5,6 +5,7 @@ Start headless `vllm`:
 ```bash
 source ../vllm/.venv/bin/activate
 HF_HUB_OFFLINE=1 \
+VLLM_LOGGING_LEVEL=DEBUG \
 VLLM_CPU_KVCACHE_SPACE=2 \
 VLLM_HOST_IP=127.0.0.1 \
 VLLM_LOOPBACK_IP=127.0.0.1 \

@@ -18,6 +18,9 @@ use super::transport;
 /// `EngineCoreProc`.
 pub struct ZmqEngineCoreClient {
     config: ZmqEngineCoreClientConfig,
+    input_address: String,
+    output_address: String,
+    engine_identity: Vec<u8>,
     input_send: Arc<Mutex<Option<zeromq::RouterSendHalf>>>,
     output_rx: mpsc::Receiver<Result<EngineCoreOutputs>>,
     output_task: Option<AbortOnDropHandle<()>>,
@@ -27,30 +30,11 @@ pub struct ZmqEngineCoreClient {
 }
 
 impl ZmqEngineCoreClient {
-    /// Connect to an already running Python engine and complete the ready handshake.
+    /// Connect to an already running Python engine and complete the startup handshake.
     pub async fn connect(config: ZmqEngineCoreClientConfig) -> Result<Self> {
         let connected = transport::connect(
-            &config.input_address,
-            &config.output_address,
-            &config.engine_identity,
-            config.ready_timeout,
-        )
-        .await?;
-        Self::from_connected(config, connected)
-    }
-
-    /// Complete the ready handshake using sockets that were already bound by
-    /// the caller. This is useful when the frontend must publish its ZMQ
-    /// addresses before the engine finishes startup.
-    pub async fn connect_with_sockets(
-        config: ZmqEngineCoreClientConfig,
-        input_socket: zeromq::RouterSocket,
-        output_socket: zeromq::PullSocket,
-    ) -> Result<Self> {
-        let connected = transport::connect_bound(
-            input_socket,
-            output_socket,
-            &config.engine_identity,
+            &config.handshake_address,
+            &config.local_host,
             config.ready_timeout,
         )
         .await?;
@@ -62,25 +46,41 @@ impl ZmqEngineCoreClient {
         connected: transport::ConnectedTransport,
     ) -> Result<Self> {
         let (tx, rx) = mpsc::channel(64);
+        let engine_identity = connected.engine_identity.clone();
         let output_task = AbortOnDropHandle::new(transport::spawn_output_loop(
             connected.output_socket,
             tx.clone(),
         ));
         let input_monitor_task = AbortOnDropHandle::new(transport::spawn_input_monitor(
             connected.input_recv,
-            config.engine_identity.clone(),
+            connected.engine_identity,
             tx,
         ));
 
         Ok(Self {
             config,
+            input_address: connected.input_address,
+            output_address: connected.output_address,
+            engine_identity,
             input_send: Arc::new(Mutex::new(Some(connected.input_send))),
             output_rx: rx,
             output_task: Some(output_task),
             input_monitor_task: Some(input_monitor_task),
             state: Arc::new(Mutex::new(RequestTracker::default())),
-            ready_message: connected.ready_message,
+            ready_message: Some(connected.ready_message),
         })
+    }
+
+    pub fn input_address(&self) -> &str {
+        &self.input_address
+    }
+
+    pub fn output_address(&self) -> &str {
+        &self.output_address
+    }
+
+    pub fn engine_identity(&self) -> &[u8] {
+        &self.engine_identity
     }
 
     async fn send<T>(&self, request_type: EngineCoreRequestType, payload: &T) -> Result<()>
@@ -96,7 +96,7 @@ impl ZmqEngineCoreClient {
         })?;
         transport::send_message(
             input_send,
-            &self.config.engine_identity,
+            &self.engine_identity,
             request_type.as_frame(),
             payload,
         )

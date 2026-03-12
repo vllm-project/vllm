@@ -1,6 +1,6 @@
 mod client;
 mod error;
-mod protocol;
+pub mod protocol;
 mod state;
 mod zmq;
 

@@ -14,6 +14,8 @@ use crate::error::{Error, Result};
 /// yet strongly typed in the early-stage Rust client.
 pub type OpaqueValue = Value;
 
+pub mod handshake;
+
 mod defaults {
     pub fn sampling_n() -> u32 {
         1
