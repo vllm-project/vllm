@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import itertools
+import logging
 import time
 from collections import defaultdict, deque
 from collections.abc import Iterable
@@ -242,6 +243,10 @@ class Scheduler(SchedulerInterface):
         self.need_mamba_block_aligned_split = (
             self.has_mamba_layers and self.cache_config.mamba_cache_mode == "align"
         )
+        self.mamba_fragmentation_count = 0
+        self.mamba_zero_collapse_count = 0
+        # Number of schedule() iterations executed.
+        self._scheduler_iteration = 0
         self.perf_metrics: ModelMetrics | None = None
         if self.log_stats and vllm_config.observability_config.enable_mfu_metrics:
             self.perf_metrics = ModelMetrics(vllm_config)
@@ -292,6 +297,7 @@ class Scheduler(SchedulerInterface):
         num_new_local_computed_tokens: int = 0,
         num_external_computed_tokens: int = 0,
     ) -> int:
+        requested_tokens = num_new_tokens
         assert num_external_computed_tokens == 0, (
             "External KV connector is not verified yet"
         )
@@ -333,6 +339,30 @@ class Scheduler(SchedulerInterface):
             else:
                 # prefill the last few tokens
                 pass
+        aligned_tokens = num_new_tokens
+        fragmentation_event = aligned_tokens < requested_tokens
+        zero_collapse_event = requested_tokens > 0 and aligned_tokens == 0
+        if zero_collapse_event:
+            # Allow forward progress for sub-block requests.
+            num_new_tokens = max(1, requested_tokens)
+        if fragmentation_event:
+            self.mamba_fragmentation_count += 1
+        if zero_collapse_event:
+            self.mamba_zero_collapse_count += 1
+        if (fragmentation_event or zero_collapse_event) and logger.isEnabledFor(
+            logging.DEBUG
+        ):
+            logger.debug(
+                "[mamba_split] requested=%d aligned=%d round=%d "
+                "fragmentation_event=%d mamba_fragmentation_count=%d "
+                "mamba_zero_collapse_count=%d",
+                requested_tokens,
+                aligned_tokens,
+                self._scheduler_iteration,
+                int(fragmentation_event),
+                self.mamba_fragmentation_count,
+                self.mamba_zero_collapse_count,
+            )
         return num_new_tokens
 
     def schedule(self) -> SchedulerOutput:
@@ -369,6 +399,7 @@ class Scheduler(SchedulerInterface):
         scheduled_timestamp = time.monotonic()
 
         self.kv_cache_manager.new_step_starts()
+        self._scheduler_iteration += 1
 
         # First, schedule the RUNNING requests.
         req_index = 0
