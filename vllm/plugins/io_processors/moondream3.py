@@ -5,6 +5,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Literal, cast
 
+from vllm.inputs.data import PromptType
 from vllm.model_executor.models.moondream3_io import (
     MOONDREAM3_MAX_OBJECTS_DEFAULT,
     MOONDREAM3_TASK_DETECT,
@@ -97,7 +98,7 @@ class Moondream3DetectPointIOProcessor(
         prompt: Moondream3DetectPointRequest,
         request_id: str | None = None,
         **kwargs: Any,
-    ) -> dict[str, object]:
+    ) -> PromptType:
         return {
             "prompt": build_moondream3_detect_point_prompt(
                 prompt.task,

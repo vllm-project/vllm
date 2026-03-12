@@ -4,7 +4,7 @@
 import itertools
 from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import cloudpickle
 import torch.nn as nn
@@ -489,14 +489,14 @@ class LLM:
         if sampling_params is None:
             sampling_params = self.get_default_sampling_params()
 
-        seq_prompts = prompt_to_seq(prompts)
+        seq_prompts = prompt_to_seq(cast("PromptType | Sequence[PromptType]", prompts))
         has_io_processor_prompts = any(
             self._is_io_processor_prompt(prompt) for prompt in seq_prompts
         )
 
         if not has_io_processor_prompts:
             return self._run_completion(
-                prompts=prompts,
+                prompts=cast("PromptType | Sequence[PromptType]", prompts),
                 params=sampling_params,
                 output_type=RequestOutput,
                 use_tqdm=use_tqdm,
@@ -1816,7 +1816,7 @@ class LLM:
     ) -> tuple[Sequence[PromptType], Sequence[SamplingParams], Sequence[bool]]:
         assert self.io_processor is not None
 
-        seq_prompts = prompt_to_seq(prompts)
+        seq_prompts = prompt_to_seq(cast("PromptType | Sequence[PromptType]", prompts))
         seq_params = self._params_to_seq(params, len(seq_prompts))
 
         processed_prompts: list[PromptType] = []

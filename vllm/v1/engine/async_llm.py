@@ -7,7 +7,7 @@ import time
 import warnings
 from collections.abc import AsyncGenerator, Iterable, Mapping
 from copy import copy
-from typing import Any
+from typing import Any, cast
 
 import torch
 
@@ -574,7 +574,7 @@ class AsyncLLM(EngineClient):
                     prompt,
                     sampling_params,
                 ) = await self._prepare_generate_io_processor_input(
-                    prompt,
+                    cast(DataPrompt, prompt),
                     sampling_params,
                     request_id,
                 )
