@@ -250,8 +250,8 @@ def _reshape_cache_int8_per_token_head(
 def triton_reshape_and_cache_flash_int8_per_token(
     key: torch.Tensor,  # [num_tokens, num_kv_heads, head_size]
     value: torch.Tensor,  # [num_tokens, num_kv_heads, head_size_v]
-    key_cache: torch.Tensor,  # [num_blocks, block_size, num_kv_heads, head_size]  int8
-    value_cache: torch.Tensor,  # [num_blocks, block_size, num_kv_heads, head_size_v] int8
+    key_cache: torch.Tensor,  # [num_blocks, block_size, num_kv_heads, head_size]int8
+    value_cache: torch.Tensor,  # [num_blocks, block_size, num_kv_heads, head_size_v]int
     k_scale_cache: torch.Tensor,  # [num_blocks, block_size, num_kv_heads] float32
     v_scale_cache: torch.Tensor,  # [num_blocks, block_size, num_kv_heads] float32
     slot_mapping: torch.Tensor,  # [num_tokens]

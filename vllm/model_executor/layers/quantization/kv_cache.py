@@ -124,11 +124,12 @@ class BaseKVCacheMethod(QuantizeMethodBase):
                     v_scale *= 2
 
             # FP8 must always be per-tensor (scalar float)
-            if is_fp8:
-                if not isinstance(k_scale, float) or not isinstance(v_scale, float):
-                    raise ValueError(
-                        "Only support per-tensor scaling factor for fp8 KV cache"
-                    )
+            if is_fp8 and (
+                not isinstance(k_scale, float) or not isinstance(v_scale, float)
+            ):
+                raise ValueError(
+                    "Only support per-tensor scaling factor for fp8 KV cache"
+                )
 
             if layer.q_scale < 0.0:
                 logger.warning_once(
@@ -159,16 +160,19 @@ class BaseKVCacheMethod(QuantizeMethodBase):
                 layer._v_scale_float = float(v_scale)
 
             # Warn about INT8 scale=1.0 (very likely to cause overflow)
-            if is_int8:
-                if isinstance(k_scale, float) and (k_scale == 1.0 or v_scale == 1.0):
-                    logger.warning_once(
-                        f"INT8 KV cache using scale k={k_scale:.6f}, "
-                        f"v={v_scale:.6f}. "
-                        "Scale=1.0 is likely incorrect for INT8 and "
-                        "will cause accuracy issues. "
-                        "Expected: scale = absmax(tensor) / 127 for INT8. "
-                        "This will result in value overflow and severe precision loss."
-                    )
+            if (
+                is_int8
+                and isinstance(k_scale, float)
+                and (k_scale == 1.0 or v_scale == 1.0)
+            ):
+                logger.warning_once(
+                    f"INT8 KV cache using scale k={k_scale:.6f}, "
+                    f"v={v_scale:.6f}. "
+                    "Scale=1.0 is likely incorrect for INT8 and "
+                    "will cause accuracy issues. "
+                    "Expected: scale = absmax(tensor) / 127 for INT8. "
+                    "This will result in value overflow and severe precision loss."
+                )
 
             # Warn about FP8 e4m3 with scale=1.0 (less critical, informational)
             if (

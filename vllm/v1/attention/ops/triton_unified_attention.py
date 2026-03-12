@@ -109,7 +109,7 @@ def kernel_unified_attention_2d(
     INT8_PER_HEAD_SCALE: tl.constexpr = False,  # bool, True for int8 per-head scale
     FP8_MIN: tl.constexpr = float8_info.min,
     FP8_MAX: tl.constexpr = float8_info.max,
-    INT8_PER_TOKEN_SCALE: tl.constexpr = False,  # bool, True for per-(token,head) scale cache
+    INT8_PER_TOKEN_SCALE: tl.constexpr = False,  # bool, per-(token,head) scale cache
     k_scale_cache_ptr=None,  # [num_blocks, block_size, num_kv_heads] float32
     v_scale_cache_ptr=None,  # [num_blocks, block_size, num_kv_heads] float32
     stride_ks_blk=0,
@@ -501,7 +501,7 @@ def kernel_unified_attention_3d(
     MAX_MM_RANGES: tl.constexpr,  # int
     mm_prefix_range_ptr,  # [num_seqs] - prefix length for each sequence
     INT8_PER_HEAD_SCALE: tl.constexpr = False,  # bool, True for int8 per-head scale
-    INT8_PER_TOKEN_SCALE: tl.constexpr = False,  # bool, True for per-(token,head) scale cache
+    INT8_PER_TOKEN_SCALE: tl.constexpr = False,  # bool, per-(token,head) scale cache
     k_scale_cache_ptr=None,  # [num_blocks, block_size, num_kv_heads] float32
     v_scale_cache_ptr=None,  # [num_blocks, block_size, num_kv_heads] float32
     stride_ks_blk=0,
