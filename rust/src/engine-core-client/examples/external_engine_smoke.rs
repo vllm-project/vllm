@@ -5,8 +5,8 @@ use clap::Parser;
 use tokio::time::timeout;
 use tracing_subscriber::EnvFilter;
 use vllm_engine_core_client::{
-    EngineCoreClient, EngineCoreOutput, EngineCoreRequest, RequestOutputKind, SamplingParams,
-    ZmqEngineCoreClient, ZmqEngineCoreClientConfig,
+    EngineCoreClient, EngineCoreRequest, FinishReason, RequestOutputKind, SamplingParams,
+    StopReason, ZmqEngineCoreClient, ZmqEngineCoreClientConfig,
 };
 
 const PROMPT_TOKEN_IDS: &[u32] = &[20841, 448, 6896, 25, 23811];
@@ -26,7 +26,7 @@ struct Args {
     ready_timeout_secs: u64,
     #[arg(long, default_value_t = 120)]
     output_timeout_secs: u64,
-    #[arg(long, default_value_t = 1)]
+    #[arg(long, default_value_t = 5)]
     max_tokens: u32,
 }
 
@@ -53,7 +53,10 @@ fn build_request(request_id: String, max_tokens: u32) -> EngineCoreRequest {
         prompt_token_ids: Some(PROMPT_TOKEN_IDS.to_vec()),
         sampling_params: Some(SamplingParams {
             max_tokens: Some(max_tokens),
-            output_kind: RequestOutputKind::FinalOnly,
+            // Raw EngineCore outputs remain step/increment based even if
+            // `FinalOnly` is requested here; that behavior is enforced by the
+            // higher-level Python frontend output processor instead.
+            output_kind: RequestOutputKind::Delta,
             ..Default::default()
         }),
         arrival_time: unix_timestamp_secs(),
@@ -61,18 +64,45 @@ fn build_request(request_id: String, max_tokens: u32) -> EngineCoreRequest {
     }
 }
 
-async fn wait_for_request_output(
+#[derive(Debug, Default)]
+struct CompletedRequest {
+    new_token_ids: Vec<u32>,
+    finish_reason: Option<FinishReason>,
+    stop_reason: Option<StopReason>,
+    finished_via_finished_requests: bool,
+}
+
+async fn wait_for_request_completion(
     client: &mut ZmqEngineCoreClient,
     request_id: &str,
-) -> vllm_engine_core_client::Result<EngineCoreOutput> {
+) -> vllm_engine_core_client::Result<CompletedRequest> {
+    let mut completed = CompletedRequest::default();
+
     loop {
         let batch = client.next_output().await?;
+        let finished_via_finished_requests = batch
+            .finished_requests
+            .as_ref()
+            .is_some_and(|request_ids| request_ids.contains(request_id));
+
         if let Some(output) = batch
             .outputs
             .into_iter()
             .find(|output| output.request_id == request_id)
         {
-            return Ok(output);
+            let finished = output.finished();
+            completed.new_token_ids.extend(output.new_token_ids);
+
+            if finished {
+                completed.finish_reason = output.finish_reason;
+                completed.stop_reason = output.stop_reason;
+                return Ok(completed);
+            }
+        }
+
+        if finished_via_finished_requests {
+            completed.finished_via_finished_requests = true;
+            return Ok(completed);
         }
     }
 }
@@ -81,11 +111,14 @@ async fn wait_for_timeout(
     client: &mut ZmqEngineCoreClient,
     request_id: &str,
     output_timeout: Duration,
-) -> Result<EngineCoreOutput> {
-    timeout(output_timeout, wait_for_request_output(client, request_id))
-        .await
-        .context("timed out waiting for request output")?
-        .context("failed to receive request output")
+) -> Result<CompletedRequest> {
+    timeout(
+        output_timeout,
+        wait_for_request_completion(client, request_id),
+    )
+    .await
+    .context("timed out waiting for request output")?
+    .context("failed to receive request output")
 }
 
 #[tokio::main(flavor = "multi_thread")]
@@ -122,15 +155,6 @@ async fn main() -> Result<()> {
         .context("failed to add request")?;
 
     let output = wait_for_timeout(&mut client, &request_id, output_timeout).await?;
-    let cleanup_output = if output.finished() {
-        None
-    } else {
-        client
-            .abort_requests(std::slice::from_ref(&request_id))
-            .await
-            .context("failed to abort request")?;
-        Some(wait_for_timeout(&mut client, &request_id, output_timeout).await?)
-    };
 
     client
         .shutdown()
@@ -140,9 +164,10 @@ async fn main() -> Result<()> {
     println!("new_token_ids={:?}", output.new_token_ids);
     println!("finish_reason={:?}", output.finish_reason);
     println!("stop_reason={:?}", output.stop_reason);
-    if let Some(cleanup_output) = cleanup_output {
-        println!("cleanup_finish_reason={:?}", cleanup_output.finish_reason);
-    }
+    println!(
+        "finished_via_finished_requests={}",
+        output.finished_via_finished_requests
+    );
 
     Ok(())
 }

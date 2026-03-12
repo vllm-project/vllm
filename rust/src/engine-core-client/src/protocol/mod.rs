@@ -148,7 +148,13 @@ pub struct SamplingParams {
     /// Continue generation after EOS if set.
     #[serde(default)]
     pub ignore_eos: bool,
-    /// Whether updates are cumulative, delta-based, or final-only.
+    /// Whether higher-level frontend updates are cumulative, delta-based, or
+    /// final-only.
+    ///
+    /// Note: when talking directly to headless `EngineCoreProc` over the raw
+    /// engine-core ZMQ protocol, callers should still treat outputs as
+    /// incremental step updates. Python's frontend `OutputProcessor` is what
+    /// enforces `FINAL_ONLY` behavior for user-facing request outputs.
     #[serde(default)]
     pub output_kind: RequestOutputKind,
     /// Structured output configuration carried through as an opaque msgpack value.

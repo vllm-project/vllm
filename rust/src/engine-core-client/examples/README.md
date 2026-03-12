@@ -25,3 +25,5 @@ cargo run -p vllm-engine-core-client --example external_engine_smoke -- \
   --handshake-address tcp://127.0.0.1:62100 \
   --host 127.0.0.1
 ```
+
+IMPORTANT: You must restart `vllm` each time you run the smoke test, as the vLLM engine cannot manage frontend closures and subsequent reconnects. In other words, do not reuse existing `vllm` instances, if any.
