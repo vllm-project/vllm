@@ -3,7 +3,7 @@
 
 from collections.abc import Sequence
 
-from vllm.config import VllmConfig
+from vllm.config import ModelConfig, PoolerConfig, VllmConfig, get_current_vllm_config
 from vllm.entrypoints.openai.engine.protocol import UsageInfo
 from vllm.inputs.data import PromptType
 from vllm.logger import init_logger
@@ -44,6 +44,40 @@ class BgeM3SparseEmbeddingsProcessor(
             params = PoolingParams()
         # refer to PoolingCompletionRequest.to_pooling_params
         params.task = "embed&token_classify"
+        # set and verify pooling params
+        params.skip_reading_prefix_cache = True
+
+        model_config: ModelConfig = get_current_vllm_config().model_config
+        pooler_config: PoolerConfig = model_config.pooler_config
+        if pooler_config is not None:
+            for param in ["use_activation", "dimensions"]:
+                if getattr(pooler_config, param, None) is None:
+                    continue
+
+                if getattr(params, param, None) is None:
+                    setattr(params, param, getattr(pooler_config, param))
+
+        if params.use_activation is None:
+            params.use_activation = True
+        if params.dimensions is not None:
+            if not model_config.is_matryoshka:
+                raise ValueError(
+                    f'Model "{model_config.served_model_name}" does not '
+                    f"support matryoshka representation, "
+                    f"changing output dimensions will lead to poor results."
+                )
+
+            mds = model_config.matryoshka_dimensions
+            if mds is not None:
+                if params.dimensions not in mds:
+                    raise ValueError(
+                        f"Model {model_config.served_model_name!r} "
+                        f"only supports {str(mds)} matryoshka dimensions, "
+                        f"use other output dimensions will "
+                        f"lead to poor results."
+                    )
+            elif params.dimensions < 1:
+                raise ValueError("Dimensions must be greater than 0")
         return params
 
     def parse_request(
