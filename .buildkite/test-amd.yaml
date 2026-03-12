@@ -2530,6 +2530,16 @@ steps:
   - pytest -v -s kernels/moe --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
 
+- label: Kernels FP8 MoE Test # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
+  agent_pool: mi325_2
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  commands:
+    - pytest -v -s kernels/moe/test_deepep_moe.py
+
+
 - label: Kernels Mamba Test # 6.7m
   timeout_in_minutes: 12
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
@@ -4274,6 +4284,16 @@ steps:
   - vllm/config
   commands:
   - pytest -v -s kernels/moe --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+
+
+- label: Kernels FP8 MoE Test # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  agent_pool: mi355_2
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  commands:
+    - pytest -v -s kernels/moe/test_deepep_moe.py
 
 
 - label: Kernels Mamba Test # TBD
