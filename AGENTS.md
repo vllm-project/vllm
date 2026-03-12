@@ -65,6 +65,16 @@ uv pip install -e .
 uv pip install -r requirements/text.txt
 ```
 
+### Running tests
+
+```bash
+# Run specific test from specific test file
+pytest tests/path/to/test.py -v -s -k test_name
+
+# Run all tests in directory
+pytest tests/path/to/dir -v -s
+```
+
 ### Running linters
 
 ```bash
