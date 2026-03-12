@@ -112,9 +112,10 @@ class BgeM3SparseEmbeddingsProcessor(
         if request_id is not None:
             assert request_id not in self.online_requests, "request_id duplicated"
             self.online_requests[request_id] = prompt
+            self.embed_request_queue.extend(prompt.to_embed_requests_online())
         else:
             self.offline_requests.append(prompt)
-        self.embed_request_queue.extend(prompt.to_embed_requests())
+            self.embed_request_queue.extend(prompt.to_embed_requests_offline())
         return prompt.input
 
     def _get_sparse_embedding_request(self, request_id: str | None = None):

@@ -17,9 +17,12 @@ class SparseEmbeddingCompletionRequestMixin(CompletionRequestMixin, EmbedRequest
         "`None` or False means not return.",
     )
 
-    def to_embed_requests(self) -> list[EmbedRequestMixin]:
+    def to_embed_requests_offline(self) -> list[EmbedRequestMixin]:
         if isinstance(self.input, list):
             return [self] * len(self.input)
+        return [self]
+
+    def to_embed_requests_online(self) -> list[EmbedRequestMixin]:
         return [self]
 
 
