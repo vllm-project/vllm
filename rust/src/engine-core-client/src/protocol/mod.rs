@@ -14,7 +14,11 @@ use crate::error::{Error, Result};
 /// yet strongly typed in the early-stage Rust client.
 pub type OpaqueValue = Value;
 
+mod classfied_outputs;
 pub mod handshake;
+pub use classfied_outputs::{
+    ClassifiedEngineCoreOutputs, DpControlMessage, OtherEngineCoreOutputs, RequestBatchOutputs,
+};
 
 mod defaults {
     pub fn sampling_n() -> u32 {

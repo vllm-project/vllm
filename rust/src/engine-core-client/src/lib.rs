@@ -8,6 +8,7 @@ pub use client::{EngineCoreClient, ZmqEngineCoreClient, ZmqEngineCoreClientConfi
 pub use error::{Error, Result};
 pub use protocol::handshake::ReadyMessage;
 pub use protocol::{
-    EngineCoreOutput, EngineCoreOutputs, EngineCoreRequest, EngineCoreRequestType, FinishReason,
-    OpaqueValue, RequestOutputKind, SamplingParams, StopReason, UtilityOutput,
+    ClassifiedEngineCoreOutputs, DpControlMessage, EngineCoreOutput, EngineCoreOutputs,
+    EngineCoreRequest, EngineCoreRequestType, FinishReason, OpaqueValue, OtherEngineCoreOutputs,
+    RequestBatchOutputs, RequestOutputKind, SamplingParams, StopReason, UtilityOutput,
 };

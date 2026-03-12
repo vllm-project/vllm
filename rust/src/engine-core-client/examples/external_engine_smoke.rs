@@ -5,8 +5,8 @@ use clap::Parser;
 use tokio::time::timeout;
 use tracing_subscriber::EnvFilter;
 use vllm_engine_core_client::{
-    EngineCoreClient, EngineCoreRequest, FinishReason, RequestOutputKind, SamplingParams,
-    StopReason, ZmqEngineCoreClient, ZmqEngineCoreClientConfig,
+    EngineCoreClient, EngineCoreRequest, FinishReason, RequestBatchOutputs, RequestOutputKind,
+    SamplingParams, StopReason, ZmqEngineCoreClient, ZmqEngineCoreClientConfig,
 };
 
 const PROMPT_TOKEN_IDS: &[u32] = &[20841, 448, 6896, 25, 23811];
@@ -79,14 +79,20 @@ async fn wait_for_request_completion(
     let mut completed = CompletedRequest::default();
 
     loop {
-        let batch = client.next_output().await?;
-        let finished_via_finished_requests = batch
-            .finished_requests
+        let Ok(RequestBatchOutputs {
+            outputs,
+            finished_requests,
+            ..
+        }) = client.next_classified_output().await?.into_request_batch()
+        else {
+            continue;
+        };
+
+        let finished_via_finished_requests = finished_requests
             .as_ref()
             .is_some_and(|request_ids| request_ids.contains(request_id));
 
-        if let Some(output) = batch
-            .outputs
+        if let Some(output) = outputs
             .into_iter()
             .find(|output| output.request_id == request_id)
         {

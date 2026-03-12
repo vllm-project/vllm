@@ -10,7 +10,8 @@ use tracing::debug;
 use crate::error::{Error, Result};
 use crate::protocol::handshake::ReadyMessage;
 use crate::protocol::{
-    EngineCoreOutputs, EngineCoreRequest, EngineCoreRequestType, encode_msgpack,
+    ClassifiedEngineCoreOutputs, EngineCoreOutputs, EngineCoreRequest, EngineCoreRequestType,
+    encode_msgpack,
 };
 use crate::state::RequestTracker;
 use crate::transport;
@@ -97,6 +98,12 @@ impl ZmqEngineCoreClient {
 
     pub fn engine_identity(&self) -> &[u8] {
         &self.engine_identity
+    }
+
+    /// Wait for the next batch of outputs and immediately classify the raw
+    /// wire message into a more semantic Rust enum.
+    pub async fn next_classified_output(&mut self) -> Result<ClassifiedEngineCoreOutputs> {
+        self.next_output().await.map(EngineCoreOutputs::classify)
     }
 
     async fn send<T>(&self, request_type: EngineCoreRequestType, payload: &T) -> Result<()>
