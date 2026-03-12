@@ -5757,6 +5757,9 @@ class GPUModelRunner(
         # Max workspace sizes should have been captured during warmup/profiling.
         lock_workspace()
 
+        if envs.VLLM_ZERO_NULL_KV_BLOCK_AFTER_CUDA_GRAPH_CAPTURE:
+            self._zero_null_block_kv_data()
+
         end_time = time.perf_counter()
         elapsed_time = end_time - start_time
         cuda_graph_size = start_free_gpu_memory - end_free_gpu_memory
@@ -5768,6 +5771,39 @@ class GPUModelRunner(
             scope="local",
         )
         return cuda_graph_size
+
+    def _zero_null_block_kv_data(self) -> None:
+        """Zero out block 0 (the null block) of every KV cache layer.
+
+        During CUDA graph warmup, dummy forward passes run reshape_and_cache
+        with all-zeros block tables, which writes stale KV data into physical
+        block 0.  For hybrid models with sliding window attention, the block
+        table contains null-block entries (block_id=0) for positions outside
+        the sliding window.  Attention kernels that load KV data before
+        applying the window mask (e.g. FlashInfer) will read this stale
+        data; if it produces extreme values in Q@K, NaN can propagate through
+        softmax and corrupt the output.
+
+        Zeroing block 0 after capture ensures any such reads see zeros, which
+        are safely masked out.
+        """
+        for kv_cache in self.kv_caches:
+            if kv_cache is None or not isinstance(kv_cache, torch.Tensor):
+                continue
+            if kv_cache.dim() < 2:
+                continue
+            # KV cache layouts always have a dim of size 2 (K and V).
+            #   (num_blocks, 2, block_size, num_kv_heads, head_size)
+            #   (2, num_blocks, block_size, num_kv_heads, head_size)
+            assert kv_cache.shape[0] != 2 or kv_cache.shape[1] != 2, (
+                "Cannot determine whether the KV cache layout is "
+                "(2, num_blocks, ...) or (num_blocks, 2, ...) for "
+                f"a tensor of shape {kv_cache.shape}"
+            )
+            if kv_cache.shape[0] == 2:
+                kv_cache[:, 0].zero_()
+            else:
+                kv_cache[0].zero_()
 
     def _warmup_and_capture(
         self,
