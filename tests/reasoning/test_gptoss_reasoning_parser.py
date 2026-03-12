@@ -234,6 +234,12 @@ class TestGptOssStructuralTags:
         expected_tag_count = 1 + (2 * len(tools))
         assert len(parsed_result["format"]["tags"]) == expected_tag_count
 
+        # Verify triggers are correctly configured
+        expected_triggers = ["<|channel|>analysis"]
+        if tools:
+            expected_triggers.append("<|channel|>commentary to=")
+        assert set(parsed_result["format"]["triggers"]) == set(expected_triggers)
+
     def test_no_cross_request_state_pollution(self, reasoning_parser):
         """Test that sequential calls with different tool servers produce
         independent results, guarding against shared mutable state
