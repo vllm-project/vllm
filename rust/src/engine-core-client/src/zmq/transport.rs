@@ -3,15 +3,13 @@ use std::net::TcpListener;
 use std::time::Duration;
 
 use bytes::Bytes;
-use thiserror_ext::AsReport;
 use tokio::sync::mpsc;
 use tokio::time::timeout;
 use zeromq::prelude::{Socket, SocketRecv, SocketSend};
-use zeromq::{PullSocket, RouterRecvHalf, RouterSendHalf, RouterSocket, ZmqMessage};
+use zeromq::{PullSocket, RouterSendHalf, RouterSocket, ZmqMessage};
 
-use crate::client::ReadyMessage;
 use crate::error::{Error, Result};
-use crate::protocol::handshake::{HandshakeAddresses, HandshakeInitMessage};
+use crate::protocol::handshake::{HandshakeAddresses, HandshakeInitMessage, ReadyMessage};
 use crate::protocol::{EngineCoreOutputs, decode_msgpack, encode_msgpack};
 
 pub struct ConnectedTransport {
@@ -19,7 +17,6 @@ pub struct ConnectedTransport {
     pub output_address: String,
     pub engine_identity: Vec<u8>,
     pub input_send: RouterSendHalf,
-    pub input_recv: RouterRecvHalf,
     pub output_socket: PullSocket,
     pub ready_message: ReadyMessage,
 }
@@ -60,14 +57,13 @@ pub async fn connect(
     let (_, ready_message) = decode_handshake_message(ready, Some(&engine_identity), "READY")?;
     wait_for_input_registration(&mut input_socket, &engine_identity, ready_timeout).await?;
 
-    let (input_send, input_recv) = input_socket.split();
+    let (input_send, _) = input_socket.split();
 
     Ok(ConnectedTransport {
         input_address,
         output_address,
         engine_identity,
         input_send,
-        input_recv,
         output_socket,
         ready_message,
     })
@@ -237,35 +233,6 @@ pub fn spawn_output_loop(
             if tx.send(decoded).await.is_err() {
                 tracing::warn!("output loop rx dropped, shutting down output loop");
                 return;
-            }
-        }
-    })
-}
-
-pub fn spawn_input_monitor(
-    mut input_recv: RouterRecvHalf,
-    engine_identity: Vec<u8>,
-    tx: mpsc::Sender<Result<EngineCoreOutputs>>,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        loop {
-            let message = match input_recv.recv().await {
-                Ok(message) => message,
-                Err(error) => {
-                    let _ = tx
-                        .send(Err(Error::ControlClosed(error.to_report_string())))
-                        .await;
-                    tracing::warn!("input monitor rx dropped, shutting down input monitor");
-                    return;
-                }
-            };
-
-            match decode_handshake_message(message, Some(&engine_identity), "READY") {
-                Ok(_) => continue,
-                Err(error) => {
-                    let _ = tx.send(Err(error)).await;
-                    return;
-                }
             }
         }
     })

@@ -1,7 +1,6 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
 use crate::protocol::{EngineCoreOutputs, EngineCoreRequest};
@@ -29,23 +28,6 @@ impl ZmqEngineCoreClientConfig {
             client_index: 0,
         }
     }
-}
-
-/// Decoded engine ready-handshake payload.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct ReadyMessage {
-    #[serde(default)]
-    pub status: Option<String>,
-    #[serde(default)]
-    pub local: Option<bool>,
-    #[serde(default)]
-    pub headless: Option<bool>,
-    #[serde(default)]
-    pub num_gpu_blocks: Option<u64>,
-    #[serde(default)]
-    pub dp_stats_address: Option<String>,
-    #[serde(default)]
-    pub parallel_config_hash: Option<u64>,
 }
 
 /// Minimal async engine-core client surface for the first-stage Rust frontend.

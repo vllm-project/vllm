@@ -5,8 +5,9 @@ use thiserror_ext::AsReport;
 use tokio::sync::{Mutex, mpsc};
 use tokio_util::task::AbortOnDropHandle;
 
-use crate::client::{EngineCoreClient, ReadyMessage, ZmqEngineCoreClientConfig};
+use crate::client::{EngineCoreClient, ZmqEngineCoreClientConfig};
 use crate::error::{Error, Result};
+use crate::protocol::handshake::ReadyMessage;
 use crate::protocol::{
     EngineCoreOutputs, EngineCoreRequest, EngineCoreRequestType, encode_msgpack,
 };
@@ -24,7 +25,6 @@ pub struct ZmqEngineCoreClient {
     input_send: Arc<Mutex<Option<zeromq::RouterSendHalf>>>,
     output_rx: mpsc::Receiver<Result<EngineCoreOutputs>>,
     output_task: Option<AbortOnDropHandle<()>>,
-    input_monitor_task: Option<AbortOnDropHandle<()>>,
     state: Arc<Mutex<RequestTracker>>,
     pub ready_message: Option<ReadyMessage>,
 }
@@ -46,26 +46,17 @@ impl ZmqEngineCoreClient {
         connected: transport::ConnectedTransport,
     ) -> Result<Self> {
         let (tx, rx) = mpsc::channel(64);
-        let engine_identity = connected.engine_identity.clone();
-        let output_task = AbortOnDropHandle::new(transport::spawn_output_loop(
-            connected.output_socket,
-            tx.clone(),
-        ));
-        let input_monitor_task = AbortOnDropHandle::new(transport::spawn_input_monitor(
-            connected.input_recv,
-            connected.engine_identity,
-            tx,
-        ));
+        let output_task =
+            AbortOnDropHandle::new(transport::spawn_output_loop(connected.output_socket, tx));
 
         Ok(Self {
             config,
             input_address: connected.input_address,
             output_address: connected.output_address,
-            engine_identity,
+            engine_identity: connected.engine_identity,
             input_send: Arc::new(Mutex::new(Some(connected.input_send))),
             output_rx: rx,
             output_task: Some(output_task),
-            input_monitor_task: Some(input_monitor_task),
             state: Arc::new(Mutex::new(RequestTracker::default())),
             ready_message: Some(connected.ready_message),
         })
@@ -143,9 +134,6 @@ impl EngineCoreClient for ZmqEngineCoreClient {
     async fn shutdown(&mut self) -> Result<()> {
         self.input_send.lock().await.take();
 
-        if let Some(task) = self.input_monitor_task.take() {
-            task.abort();
-        }
         if let Some(task) = self.output_task.take() {
             task.abort();
         }
