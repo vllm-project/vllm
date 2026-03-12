@@ -335,10 +335,10 @@ class Qwen3CoderToolParser(ToolParser):
             idx = model_output.find(self.tool_call_prefix)
             content_index = content_index if content_index >= 0 else idx
             content = model_output[:content_index]  # .rstrip()
-
+            valid_tool_calls = [tc for tc in tool_calls if tc is not None]
             return ExtractedToolCallInformation(
-                tools_called=(len(self.prev_tool_call_arr) > 0),
-                tool_calls=tool_calls,
+                tools_called=(len(valid_tool_calls) > 0),
+                tool_calls=valid_tool_calls,
                 content=content if content else None,
             )
 
