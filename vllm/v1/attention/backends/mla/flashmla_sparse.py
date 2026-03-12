@@ -603,8 +603,7 @@ class FlashMLASparseImpl(SparseMLAAttentionImpl[FlashMLASparseMetadata]):
         attn_metadata: FlashMLASparseMetadata,
     ) -> torch.Tensor:
         # Convert per-request indices to global slots (decode) or workspace
-        # offsets (prefill). Also get valid counts per token to pass as
-        # topk_length for more precise attention masking.
+        # offsets (prefill).
         topk_indices, topk_length = triton_convert_req_index_to_global_index(
             attn_metadata.req_id_per_token,
             attn_metadata.block_table,
@@ -638,9 +637,9 @@ class FlashMLASparseImpl(SparseMLAAttentionImpl[FlashMLASparseMetadata]):
             has_prefill_workspace = True
 
         # Convert per-request indices to global slots (decode) or workspace
-        # offsets (prefill). Also get valid counts per token to pass as
-        # topk_length for the BF16 prefill kernel for more precise attention
-        # masking.
+        # offsets (prefill).
+        # For FP8 cache: prefill uses workspace mapping (upconverted to BF16)
+        # For BF16 cache: always use global cache slots (no workspace)
         # prefill_workspace_starts has been adjusted in-place per chunk so
         # prefill indices automatically come out chunk-local
         topk_indices, topk_length = triton_convert_req_index_to_global_index(
