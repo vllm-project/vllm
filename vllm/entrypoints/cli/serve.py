@@ -21,7 +21,6 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.network_utils import get_tcp_uri
 from vllm.utils.system_utils import decorate_logs, set_process_title
-from vllm.v1.engine.core import EngineCoreProc
 from vllm.v1.engine.utils import CoreEngineProcManager, launch_core_engines
 from vllm.v1.executor import Executor
 from vllm.v1.executor.multiproc_executor import MultiprocExecutor
@@ -210,7 +209,6 @@ def run_headless(args: argparse.Namespace):
 
     # Create the engines.
     engine_manager = CoreEngineProcManager(
-        target_fn=EngineCoreProc.run_engine_core,
         local_engine_count=local_engine_count,
         start_index=vllm_config.parallel_config.data_parallel_rank,
         local_start_index=0,
