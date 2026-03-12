@@ -1280,6 +1280,24 @@ class NanoNemotronVLProcessingInfo(BaseNanoNemotronVLProcessingInfo):
         audio_limit = {"audio": None} if self.audio_extractor is not None else {}
         return {**super().get_supported_mm_limits(), **video_limit, **audio_limit}
 
+    def get_mm_max_tokens_per_item(
+        self, seq_len: int, mm_counts: Mapping[str, int]
+    ) -> Mapping[str, int]:
+        mm_max_tokens: dict[str, int] = {}
+
+        if mm_counts.get("image", 0) > 0:
+            mm_max_tokens["image"] = seq_len
+
+        if mm_counts.get("video", 0) > 0:
+            assert self.supports_video
+            mm_max_tokens["video"] = seq_len
+
+        if mm_counts.get("audio", 0) > 0:
+            assert self.audio_extractor is not None
+            mm_max_tokens["audio"] = seq_len
+
+        return mm_max_tokens
+
     def get_video_token(self) -> str | None:
         return IMG_CONTEXT
 
