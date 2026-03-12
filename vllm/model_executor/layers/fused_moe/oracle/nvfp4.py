@@ -28,6 +28,9 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
     prepare_nvfp4_moe_layer_for_marlin,
 )
+from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
+    dequantize_to_dtype,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
 )
@@ -41,6 +44,7 @@ class NvFp4MoeBackend(Enum):
     FLASHINFER_CUTEDSL = "FLASHINFER_CUTEDSL"
     VLLM_CUTLASS = "VLLM_CUTLASS"
     MARLIN = "MARLIN"
+    EMULATION = "EMULATION"
 
 
 FLASHINFER_NVFP4_MOE_BACKENDS = [
@@ -106,6 +110,12 @@ def backend_to_kernel_cls(
         )
 
         return [MarlinExperts]
+    elif backend == NvFp4MoeBackend.EMULATION:
+        from vllm.model_executor.layers.fused_moe.quantization_emulation_moe import (
+            Nvfp4QuantizationEmulationTritonExperts,
+        )
+
+        return [Nvfp4QuantizationEmulationTritonExperts]
     else:
         raise ValueError(f"Unknown NvFP4 MoE backend: {backend.value}")
 
@@ -118,6 +128,7 @@ def map_nvfp4_backend(runner_backend: MoEBackend) -> NvFp4MoeBackend:
         "flashinfer_cutlass": NvFp4MoeBackend.FLASHINFER_CUTLASS,
         "flashinfer_cutedsl": NvFp4MoeBackend.FLASHINFER_CUTEDSL,
         "marlin": NvFp4MoeBackend.MARLIN,
+        "emulation": NvFp4MoeBackend.EMULATION,
     }
     if backend := mapping.get(runner_backend):
         return backend
@@ -144,6 +155,7 @@ def select_nvfp4_moe_backend(
         NvFp4MoeBackend.FLASHINFER_CUTLASS,
         NvFp4MoeBackend.VLLM_CUTLASS,
         NvFp4MoeBackend.MARLIN,
+        NvFp4MoeBackend.EMULATION,
     ]
 
     # NOTE(rob): this is kind of a hack. We need to peak into
@@ -276,6 +288,7 @@ def convert_to_nvfp4_moe_kernel_format(
     w2_scale_2: torch.Tensor,
     a2_scale: torch.Tensor | None,
     is_act_and_mul: bool,
+    emulation_dequantize_weights: bool | None = None,
 ) -> tuple[
     torch.Tensor,
     torch.Tensor,
@@ -286,6 +299,11 @@ def convert_to_nvfp4_moe_kernel_format(
     torch.Tensor,
     torch.Tensor,
 ]:
+    """
+    Args:
+        emulation_dequantize_weights: If True and backend is EMULATION,
+            dequantize weights ahead of time
+    """
     if (
         nvfp4_backend in FLASHINFER_NVFP4_MOE_BACKENDS
         or nvfp4_backend == NvFp4MoeBackend.VLLM_CUTLASS
@@ -332,6 +350,65 @@ def convert_to_nvfp4_moe_kernel_format(
             w2_scale_2=w2_scale_2,
             is_act_and_mul=is_act_and_mul,
         )
+    elif nvfp4_backend == NvFp4MoeBackend.EMULATION:
+        if a13_scale is None or a2_scale is None:
+            raise ValueError(
+                "Activation global scales should not be None, got"
+                f" a13_scale={a13_scale}, a2_scale={a2_scale}"
+            )
+
+        if torch.unique(a13_scale).numel() != 1 or torch.unique(a2_scale).numel() != 1:
+            logger.warning_once(
+                "In NVFP4 linear, the activation global scale for inputs are different"
+                " for MOE w13 (gate_up_proj) layer or MOE w2 (down_proj). Using"
+                " a13_scale = a13_scale.max() and a2_scale = a2_scale.max()."
+            )
+
+        # moe_kernel_quantize_input -> ref_nvfp4_quant_dequant use the inverse scale.
+        # Similar to model_executor/layers/quantization/utils/flashinfer_fp4_moe.py.
+        # NOTE: at this point `a13_scale` and `a2_scale` are the inverses such that:
+        # `x_fp8_range = x * 1 / global_scale`, and `global_scale` is small.
+        # We take the max following e.g. flashinfer_fp4_moe.py, which results in likely
+        # overflow of the fp8 range, and scale clamping!
+        # It may be better to use min here.
+        a13_scale = a13_scale.max().to(torch.float32)
+        a2_scale = a2_scale.max().to(torch.float32)
+
+        a13_scale = 1.0 / a13_scale
+        a2_scale = 1.0 / a2_scale
+
+        if emulation_dequantize_weights:
+            # For emulation backend, optionally dequantize weights ahead of time
+            target_dtype = torch.get_default_dtype()
+
+            # Dequantize w13 weights
+            w13_dequantized = dequantize_to_dtype(
+                tensor_fp4=w13,
+                tensor_sf=w13_scale,
+                global_scale=w13_scale_2,
+                dtype=target_dtype,
+                device=w13.device,
+                block_size=16,
+                swizzle=False,
+            )
+            w13 = w13_dequantized
+
+            # Dequantize w2 weights
+            w2_dequantized = dequantize_to_dtype(
+                tensor_fp4=w2,
+                tensor_sf=w2_scale,
+                global_scale=w2_scale_2,
+                dtype=target_dtype,
+                device=w2.device,
+                block_size=16,
+                swizzle=False,
+            )
+            w2 = w2_dequantized
+
+            w13_scale = None
+            w13_scale_2 = None
+            w2_scale = None
+            w2_scale_2 = None
     else:
         raise ValueError(f"Unknown NvFp4 backend for MoE: {nvfp4_backend}")
 
@@ -370,6 +447,15 @@ def make_nvfp4_moe_quant_config(
         return nvfp4_w4a16_moe_quant_config(
             g1_alphas=w13_scale_2,
             g2_alphas=w2_scale_2,
+            w1_scale=w13_scale,
+            w2_scale=w2_scale,
+        )
+    elif backend == NvFp4MoeBackend.EMULATION:
+        return nvfp4_moe_quant_config(
+            g1_alphas=w13_scale_2,
+            g2_alphas=w2_scale_2,
+            a1_gscale=a13_scale,
+            a2_gscale=a2_scale,
             w1_scale=w13_scale,
             w2_scale=w2_scale,
         )

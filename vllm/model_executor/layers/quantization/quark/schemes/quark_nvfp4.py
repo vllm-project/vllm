@@ -1,14 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 from collections.abc import Callable
 
 import torch
 from torch.nn.parameter import Parameter
 
 from vllm.logger import init_logger
-from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
-    CompressedTensorsScheme,
-)
+from vllm.model_executor.layers.quantization.quark.schemes import QuarkScheme
 from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
     NvFp4LinearBackend,
     apply_nvfp4_linear,
@@ -21,20 +20,36 @@ from vllm.model_executor.parameter import (
     PerTensorScaleParameter,
 )
 
+__all__ = ["QuarkNVFP4"]
+
 logger = init_logger(__name__)
 
 
-__all__ = ["CompressedTensorsW4A4Fp4"]
-logger = init_logger(__name__)
+class QuarkNVFP4(QuarkScheme):
+    """
+    Quark NVFP4 quantization scheme.
 
+    Supports loading NVFP4 checkpoints with the following structure:
+    - weight: uint8, shape [out_features, in_features // 2] (packed FP4)
+    - weight_scale: float8_e4m3fn, shape [out_features, in_features // group_size]
+    - weight_scale_2: bfloat16/float32, scalar (global weight scale)
+    - input_scale_2: bfloat16/float32, scalar (global input scale)
+    """
 
-class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
-    def __init__(self, emulation_dequantize_weights: bool | None = None):
-        self.backend = select_nvfp4_linear_backend()
+    def __init__(
+        self,
+        emulation_dequantize_weights: bool | None = None,
+    ):
         self.group_size = 16
+        self.backend = select_nvfp4_linear_backend()
 
-        self.swizzle = None
-        if self.backend == NvFp4LinearBackend.EMULATION:
+        if self.backend != NvFp4LinearBackend.EMULATION:
+            logger.warning_once(
+                "Only the backend NvFp4LinearBackend.EMULATION is tested with"
+                f" QuarkNVFP4, got backend={self.backend}. Use at your own risk."
+            )
+            self.swizzle: bool | None = None
+        else:
             self.swizzle = False
 
         self.emulation_dequantize_weights = emulation_dequantize_weights
@@ -49,12 +64,12 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
                 )
 
             logger.info_once(
-                "CompressedTensorsW4A4Fp4 simulated dense linear: "
-                "dequantizing weights ahead of time."
+                "QuarkNVFP4 simulated dense linear: dequantizing weights ahead of time."
             )
 
     @classmethod
     def get_min_capability(cls) -> int:
+        # FP4 requires Turing (75) or newer
         return 75
 
     def create_weights(
@@ -71,10 +86,16 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
         layer.input_size_per_partition = input_size_per_partition
         layer.output_size_per_partition = output_size_per_partition
 
-        # Weight
+        if input_size_per_partition % self.group_size != 0:
+            raise ValueError(
+                f"Input size per partition ({input_size_per_partition}) must be "
+                f"divisible by group size ({self.group_size})"
+            )
+
+        # Weight: FP4 packed as uint8 (2 FP4 values per uint8)
         weight = ModelWeightParameter(
             data=torch.empty(
-                sum(output_partition_sizes),
+                output_size_per_partition,
                 input_size_per_partition // 2,
                 dtype=torch.uint8,
             ),
@@ -82,19 +103,12 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
             output_dim=0,
             weight_loader=weight_loader,
         )
-        layer.register_parameter("weight_packed", weight)
+        layer.register_parameter("weight", weight)
 
-        # Global Weight Scale
-        weight_global_scale = PerTensorScaleParameter(
-            data=torch.empty(len(output_partition_sizes), dtype=torch.float32),
-            weight_loader=weight_loader,
-        )
-        layer.register_parameter("weight_global_scale", weight_global_scale)
-
-        # Per Group Weight Scale
+        # Per-group weight scale (FP8 E4M3)
         weight_scale = GroupQuantScaleParameter(
             data=torch.empty(
-                sum(output_partition_sizes),
+                output_size_per_partition,
                 input_size_per_partition // self.group_size,
                 dtype=torch.float8_e4m3fn,
             ),
@@ -102,53 +116,47 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
             output_dim=0,
             weight_loader=weight_loader,
         )
-
         layer.register_parameter("weight_scale", weight_scale)
 
-        input_global_scale = PerTensorScaleParameter(
+        # Global weight scale (scalar, per partition)
+        weight_scale_2 = PerTensorScaleParameter(
             data=torch.empty(len(output_partition_sizes), dtype=torch.float32),
             weight_loader=weight_loader,
         )
-        layer.register_parameter("input_global_scale", input_global_scale)
+        layer.register_parameter("weight_scale_2", weight_scale_2)
+
+        # Global input scale (scalar, per partition)
+        input_scale_2 = PerTensorScaleParameter(
+            data=torch.empty(len(output_partition_sizes), dtype=torch.float32),
+            weight_loader=weight_loader,
+        )
+        layer.register_parameter("input_scale_2", input_scale_2)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        # Rename CT checkpoint names to standardized names
-        layer.weight = layer.weight_packed
-        del layer.weight_packed
+        input_global_scale = layer.input_scale_2.max().to(torch.float32)
+        layer.input_global_scale = Parameter(input_global_scale, requires_grad=False)
+        del layer.input_scale_2
+
+        weight_global_scale = layer.weight_scale_2.to(torch.float32)
 
         if (
-            torch.unique(layer.input_global_scale).numel() != 1
-            or torch.unique(layer.weight_global_scale).numel() != 1
+            torch.unique(weight_global_scale).numel() != 1
+            and self.backend == NvFp4LinearBackend.EMULATION
         ):
-            logger.warning_once(
-                "In NVFP4 linear, the global scale for input or weight are different"
-                " for parallel layers (e.g. q_proj, k_proj, v_proj). This "
-                " will likely results in reduce accuracy. Please verify the model"
-                " accuracy. Consider using a checkpoint with a shared global NVFP4"
-                " scale for parallel layers."
+            raise ValueError(
+                "Different weight_global_scale has different values for "
+                "parallel layers (e.g. q_proj, k_proj, v_proj) is not supported."
             )
 
-        # Process global scales (CT stores as divisors, i.e. 1/scale)
-        # NOTE: compressed-tensors stores the scales as
-        # `x_fp8_range = x * global_scale`, and `global_scale` is large.
-        # Taking the max here is inconsistent with `modelopt.py` implementation
-        # that does the contrary.
-        # NOTE: Taking the max is not enough: the fp8 scales should be recomputed!
-        input_global_scale_inv = layer.input_global_scale.max().to(torch.float32)
-        layer.input_global_scale = Parameter(
-            (1.0 / input_global_scale_inv).to(torch.float32), requires_grad=False
-        )
-        weight_global_scale = layer.weight_global_scale.max().to(torch.float32)
-        layer.weight_global_scale = Parameter(
-            1.0 / weight_global_scale, requires_grad=False
-        )
+        weight_global_scale = weight_global_scale.max()
 
-        # Pre-compute alpha and inverse for runtime quantization
-        layer.input_global_scale_inv = Parameter(
-            input_global_scale_inv, requires_grad=False
-        )
+        layer.weight_global_scale = Parameter(weight_global_scale, requires_grad=False)
+
         layer.alpha = Parameter(
             layer.input_global_scale * layer.weight_global_scale, requires_grad=False
+        )
+        layer.input_global_scale_inv = Parameter(
+            (1.0 / layer.input_global_scale).to(torch.float32), requires_grad=False
         )
 
         # Convert layer to NVFP4 linear kernel format
@@ -157,6 +165,7 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
             layer,
             emulation_dequantize_weights=self.emulation_dequantize_weights,
         )
+        del layer.weight_scale_2
 
     def apply_weights(
         self,

@@ -382,6 +382,7 @@ class RocmPlatform(Platform):
         "petit_nvfp4",
         "torchao",
         "bitsandbytes",
+        "modelopt_fp4",
     ]
 
     @classmethod
