@@ -19,8 +19,6 @@
 from typing import TYPE_CHECKING
 
 import torch
-import transformers
-from packaging.version import Version
 
 from vllm.sequence import IntermediateTensors
 
@@ -31,17 +29,6 @@ if TYPE_CHECKING:
 class LegacyMixin:
     def __init__(self, *, vllm_config: "VllmConfig", prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
-
-        # In Transformers v5 this is handled by the conversion mapping
-        # TODO(hmellor): Remove this when we drop support for Transformers v4
-        if Version(transformers.__version__) < Version("5.0.0"):
-            # Replace legacy suffixes used for norms
-            self.hf_to_vllm_mapper.orig_to_new_suffix = {
-                ".gamma": ".weight",
-                ".beta": ".bias",
-            } | self.hf_to_vllm_mapper.orig_to_new_suffix
-            # Apply mapping to quantization config if needed
-            self._maybe_apply_model_mapping()
 
         # Skip unsupported/unwanted output embeddings layers
         self.skip_prefixes.extend(

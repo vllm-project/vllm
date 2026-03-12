@@ -17,6 +17,7 @@
 """Transformers modeling backend base class."""
 
 from collections.abc import Iterable
+from itertools import chain
 from typing import TYPE_CHECKING
 
 import regex as re
@@ -153,8 +154,8 @@ class Base(
             if "gptq" in quant_method_name:
                 self.ignore_unexpected_suffixes.append(".bias")
 
-        # Set correct attn and init on "meta" to delay allocating GPU tensors
-        self.text_config._attn_implementation = "vllm"
+        # Patch config and init on "meta" to delay allocating GPU tensors
+        self._patch_config()
         with init_on_device_without_buffers("meta"):
             self.model: PreTrainedModel = AutoModel.from_config(
                 self.config,
@@ -197,13 +198,32 @@ class Base(
             ["hidden_states"], self.text_config.hidden_size
         )
 
+    def _patch_config(self):
+        """
+        Patch the config to ensure that the model is created correctly.
+
+        This includes:
+
+        - Setting the attention implementation to "vllm"
+        - Ensuring that any sub-configs have the same dtype as the main config
+        """
+        self.text_config._attn_implementation = "vllm"
+
+        # TODO(hmellor): Remove this when Transformers v4 support is dropped
+        for sub_config_name in getattr(self.config, "sub_configs", {}):
+            sub_config = getattr(self.config, sub_config_name)
+            if sub_config.dtype != (dtype := self.config.dtype):
+                sub_config.dtype = dtype
+
     def _create_hf_to_vllm_mapper(self):
         """
         Create a WeightsMapper to map checkpoint weight names to module qualnames.
 
         This handles:
 
-        - Transformers weight renaming from `WeightRenaming`
+        - Transformers weight renaming:
+            - from `WeightRenaming` in Transformers v5
+            - from `_checkpoint_conversion_mapping` in Transformers v4
         - Checkpoints saved with a base model prefix that is not `model`
         - Checkpoints saved with no base model prefix
         - Any quantization config specific mappings
@@ -224,6 +244,21 @@ class Base(
                     target_pattern = mapping.target_patterns[0]
                     orig_to_new_regex[compiled_sources] = target_pattern
                 # TODO: Handle WeightConverter to enable layer merging
+        else:
+            # Replace legacy suffixes used for norms
+            # TODO(hmellor): Remove this when Transformers v4 support is dropped
+            orig_to_new_regex.update(
+                {
+                    re.compile(r"\.gamma$"): ".weight",
+                    re.compile(r"\.beta$"): ".bias",
+                }
+            )
+
+        # Handle weights which have been renamed in Transformers
+        # TODO(hmellor): Remove this when Transformers v4 support is dropped
+        ccm = getattr(self.model, "_checkpoint_conversion_mapping", {})
+        for source, target in ccm.items():
+            orig_to_new_regex[re.compile(source)] = target
 
         # Standardise base model prefix
         bmp = self.model.base_model_prefix
@@ -232,9 +267,14 @@ class Base(
         if bmp and bmp != "model":
             different_bmp_pattern = re.compile(rf"^{bmp}\.(.+)")
             orig_to_new_regex[different_bmp_pattern] = expected_bmp
-        # Handle checkpoints saved without base model prefix
-        model_children = "|".join(name for name, _ in self.model.named_children())
-        missing_bmp_pattern = re.compile(rf"^(?!model\.)(({model_children}).+)")
+        # Handle children of self.model which were saved without the model prefix
+        direct_children = chain(
+            self.model.named_children(),
+            self.model.named_parameters(recurse=False),
+            self.model.named_buffers(recurse=False),
+        )
+        model_children = "|".join(name for name, _ in direct_children)
+        missing_bmp_pattern = re.compile(rf"^(?!model\.)(({model_children}).*)")
         orig_to_new_regex[missing_bmp_pattern] = expected_bmp
 
         # Apply mapping to quantization config if needed
