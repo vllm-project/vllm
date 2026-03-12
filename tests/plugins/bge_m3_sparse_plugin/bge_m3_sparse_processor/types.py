@@ -4,15 +4,23 @@
 from pydantic import BaseModel, Field
 
 from vllm.entrypoints.openai.engine.protocol import UsageInfo
-from vllm.entrypoints.pooling.base.protocol import CompletionRequestMixin
+from vllm.entrypoints.pooling.base.protocol import (
+    CompletionRequestMixin,
+    EmbedRequestMixin,
+)
 
 
-class SparseEmbeddingCompletionRequestMixin(CompletionRequestMixin):
+class SparseEmbeddingCompletionRequestMixin(CompletionRequestMixin, EmbedRequestMixin):
     return_tokens: bool | None = Field(
         default=None,
         description="Whether to return dict shows the mapping of token_id to text."
         "`None` or False means not return.",
     )
+
+    def to_embed_requests(self) -> list[EmbedRequestMixin]:
+        if isinstance(self.input, list):
+            return [self] * len(self.input)
+        return [self]
 
 
 class SparseEmbeddingTokenWeight(BaseModel):

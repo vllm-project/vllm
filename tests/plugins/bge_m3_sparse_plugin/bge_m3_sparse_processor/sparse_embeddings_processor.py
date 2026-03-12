@@ -5,6 +5,7 @@ from collections.abc import Sequence
 
 from vllm.config import ModelConfig, PoolerConfig, VllmConfig
 from vllm.entrypoints.openai.engine.protocol import UsageInfo
+from vllm.entrypoints.pooling.base.protocol import EmbedRequestMixin
 from vllm.inputs.data import PromptType
 from vllm.logger import init_logger
 from vllm.outputs import PoolingRequestOutput
@@ -40,7 +41,8 @@ class BgeM3SparseEmbeddingsProcessor(
                 if getattr(pooler_config, param, None) is None:
                     continue
                 self.default_pooling_params[param] = getattr(pooler_config, param)
-        self.embed_dimensions = vllm_config.model_config.get_hidden_size()
+        self.embed_dimensions = vllm_config.model_config.embedding_size()
+        self.embed_request_queue: list[EmbedRequestMixin] = []
         logger.info(self)
 
     def __repr__(self) -> str:
@@ -60,6 +62,10 @@ class BgeM3SparseEmbeddingsProcessor(
         params.task = "embed&token_classify"
         # set and verify pooling params
         params.skip_reading_prefix_cache = True
+
+        raw_embed_request = self.embed_request_queue.pop(0)
+        params.use_activation = raw_embed_request.use_activation
+        params.dimensions = raw_embed_request.dimensions
 
         model_config: ModelConfig = self.vllm_config.model_config
         for param in self.default_pooling_params:
@@ -108,12 +114,13 @@ class BgeM3SparseEmbeddingsProcessor(
             self.online_requests[request_id] = prompt
         else:
             self.offline_requests.append(prompt)
+        self.embed_request_queue.extend(prompt.to_embed_requests())
         return prompt.input
 
     def _get_sparse_embedding_request(self, request_id: str | None = None):
         if request_id:
             return self.online_requests.pop(request_id, None)
-        return self.offline_requests.pop()
+        return self.offline_requests.pop(0)
 
     def _build_sparse_embedding_token_weights(
         self,
@@ -145,13 +152,18 @@ class BgeM3SparseEmbeddingsProcessor(
     ) -> SparseEmbeddingResponse:
         num_prompt_tokens = 0
         response_data = []
-        return_tokens = self._get_sparse_embedding_request(request_id).return_tokens
+        raw_request = self._get_sparse_embedding_request(request_id)
+        embed_dimensions = (
+            self.embed_dimensions
+            if raw_request.dimensions is None
+            else raw_request.dimensions
+        )
         for idx in range(len(model_output)):
             mo = model_output[idx]
             sparse_embedding: dict[int, float] = {}
             num_prompt_tokens += len(mo.prompt_token_ids)
-            dense_embedding = mo.outputs.data[: self.embed_dimensions].tolist()
-            sparse_weights = mo.outputs.data[self.embed_dimensions :].tolist()
+            dense_embedding = mo.outputs.data[:embed_dimensions].tolist()
+            sparse_weights = mo.outputs.data[embed_dimensions:].tolist()
             if len(mo.prompt_token_ids) != len(sparse_weights):
                 # this is the case that add_special_tokens is True,
                 # which means first token and last token are special tokens
@@ -165,7 +177,7 @@ class BgeM3SparseEmbeddingsProcessor(
                     index=idx,
                     sparse_embedding=self._build_sparse_embedding_token_weights(
                         sparse_embedding,
-                        return_tokens,
+                        raw_request.return_tokens,
                     ),
                     dense_embedding=dense_embedding,
                 )
