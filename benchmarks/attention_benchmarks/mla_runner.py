@@ -757,7 +757,7 @@ def _run_mla_benchmark_batched(
 
     backend_cfg = _get_backend_config(backend)
     device = torch.device(configs_with_params[0][0].device)
-    torch.cuda.set_device(device)
+    torch.accelerator.set_device_index(device)
 
     # Determine block size
     config_block_size = configs_with_params[0][0].block_size
