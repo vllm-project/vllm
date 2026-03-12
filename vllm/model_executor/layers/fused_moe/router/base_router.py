@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import abstractmethod
 from collections.abc import Callable
+from typing import Optional
 
 import torch
 
@@ -127,11 +128,29 @@ class BaseRouter(FusedMoERouter):
         self.eplb_state = eplb_state
         self.enable_eplb = enable_eplb
         self.indices_type_getter = indices_type_getter
-        self.capture_fn: Callable[[torch.Tensor], None] | None = None
+        # Routing capture: buffer-based (custom op) replaces old callback.
+        # When buffer is None (non-rank-0 or disabled), the guard compiles
+        # to False and the op is elided — keeping graph structure symmetric.
+        self._capture_buffer: Optional[torch.Tensor] = None
+        self._capture_layer_id: int = -1
 
-    def set_capture_fn(self, capture_fn: Callable[[torch.Tensor], None] | None) -> None:
-        """Set a capture callback for logical routed expert IDs."""
-        self.capture_fn = capture_fn
+    def set_capture_buffer(
+        self,
+        buffer: Optional[torch.Tensor],
+        layer_id: int,
+    ) -> None:
+        """Bind a device buffer + layer ID for routing capture.
+
+        Only rank-0 gets a real buffer; other ranks keep None so that the
+        custom-op call is compiled away, ensuring symmetric CUDA graphs.
+        """
+        self._capture_buffer = buffer
+        self._capture_layer_id = layer_id
+
+    @property
+    def has_routing_capture(self) -> bool:
+        """True if routing capture is active (buffer is bound)."""
+        return self._capture_buffer is not None
 
     def _validate_eplb_state(self) -> None:
         """Validate that EPLB state is properly initialized if EPLB is enabled."""
@@ -237,8 +256,14 @@ class BaseRouter(FusedMoERouter):
         )
 
         # Capture logical ids before EPLB mapping.
-        if self.capture_fn is not None:
-            self.capture_fn(topk_ids)
+        # Uses registered custom op so torch.compile traces through cleanly.
+        if self._capture_buffer is not None:
+            torch.ops.vllm.capture_routing(
+                self._capture_buffer,
+                topk_ids,
+                self._capture_layer_id,
+                topk_ids.shape[0],
+            )
 
         # Step 4: Apply EPLB mapping
         topk_ids = self._apply_eplb_mapping(topk_ids)
