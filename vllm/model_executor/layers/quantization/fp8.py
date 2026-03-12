@@ -284,7 +284,28 @@ class Fp8LinearMethod(LinearMethodBase):
         self.block_quant = self.weight_block_size is not None
         self.act_q_static = self.quant_config.activation_scheme == "static"
 
+        # Use per-token quantization for better perf if dynamic and cutlass
+        if self.act_q_static:
+            activation_quant_key = kFp8StaticTensorSym
+        elif cutlass_fp8_supported():
+            activation_quant_key = kFp8DynamicTokenSym
+        else:
+            activation_quant_key = kFp8DynamicTensorSym
+
         if self.block_quant:
+            weight_quant_key = kFp8Static128BlockSym
+        else:
+            weight_quant_key = kFp8StaticTensorSym
+
+        self.fp8_linear = init_fp8_linear_kernel(
+            activation_quant_key=activation_quant_key,
+            weight_quant_key=weight_quant_key,
+            out_dtype=torch.get_default_dtype(),
+            module_name=self.__class__.__name__,
+        )
+        self.use_marlin = isinstance(self.fp8_linear, MarlinFP8ScaledMMLinearKernel)
+
+        if self.block_quant and not self.use_marlin:
             assert not self.act_q_static
             assert self.weight_block_size is not None
             self.w8a8_block_fp8_linear = W8A8BlockFp8LinearOp(
@@ -293,27 +314,6 @@ class Fp8LinearMethod(LinearMethodBase):
                 cutlass_block_fp8_supported=self.cutlass_block_fp8_supported,
                 use_aiter_and_is_supported=self.use_aiter_and_is_supported,
             )
-        else:
-            # Use per-token quantization for better perf if dynamic and cutlass
-            if self.act_q_static:
-                activation_quant_key = kFp8StaticTensorSym
-            elif cutlass_fp8_supported():
-                activation_quant_key = kFp8DynamicTokenSym
-            else:
-                activation_quant_key = kFp8DynamicTensorSym
-
-            if self.block_quant:
-                weight_quant_key = kFp8Static128BlockSym
-            else:
-                weight_quant_key = kFp8StaticTensorSym
-
-            self.fp8_linear = init_fp8_linear_kernel(
-                activation_quant_key=activation_quant_key,
-                weight_quant_key=weight_quant_key,
-                out_dtype=torch.get_default_dtype(),
-                module_name=self.__class__.__name__,
-            )
-            self.use_marlin = isinstance(self.fp8_linear, MarlinFP8ScaledMMLinearKernel)
 
     def create_weights(
         self,
@@ -388,6 +388,7 @@ class Fp8LinearMethod(LinearMethodBase):
             self.fp8_linear.process_weights_after_loading(layer)
             return
 
+        input_scale = None
         # TODO(rob): refactor block quant into separate class.
         if self.block_quant:
             assert not self.act_q_static
@@ -406,7 +407,6 @@ class Fp8LinearMethod(LinearMethodBase):
             # shards in a fused module
             weight = layer.weight
             weight_scale = layer.weight_scale
-            input_scale = None
 
             # If using w8a8, torch._scaled_mm needs per tensor, so
             # requantize the logical shards as a single weight.
