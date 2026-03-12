@@ -65,20 +65,10 @@ def graph_quickreduce(
         for sz in test_sizes:
             for dtype in [torch.float16, torch.bfloat16]:
                 with graph_capture(device=device) as graph_capture_context:
-                    inp1 = torch.randint(
-                        1,
-                        23,
-                        (sz,),
-                        dtype=dtype,
-                        device=torch.accelerator.current_device_index(),
-                    )
-                    inp2 = torch.randint(
-                        -23,
-                        1,
-                        (sz,),
-                        dtype=dtype,
-                        device=torch.accelerator.current_device_index(),
-                    )
+                    device_idx = torch.accelerator.current_device_index()
+                    inp1 = torch.randint(1, 23, (sz,), dtype=dtype, device=device_idx)
+                    inp2 = torch.randint(-23, 1, (sz,), dtype=dtype, device=device_idx)
+
                     torch.accelerator.synchronize()
                     graph = torch.cuda.CUDAGraph()
                     with torch.cuda.graph(graph, stream=graph_capture_context.stream):
@@ -177,16 +167,13 @@ def qr_variable_input(rank, world_size):
     s1 = 1024
     while num < 50000:  # 50000 is sufficient to identify issues.
         dtype = torch.float16
+        device_idx = torch.accelerator.current_device_index()
         if num % 2 == 0:
             s2 = 1024
-            inp1 = torch.zeros(
-                (s1, s2), dtype=dtype, device=torch.accelerator.current_device_index()
-            )
+            inp1 = torch.zeros((s1, s2), dtype=dtype, device=device_idx)
         else:
             s2 = 2048
-            inp1 = torch.ones(
-                (s1, s2), dtype=dtype, device=torch.accelerator.current_device_index()
-            )
+            inp1 = torch.ones((s1, s2), dtype=dtype, device=device_idx)
         result = torch.empty_like(inp1)
         # FP = 0 INT8 = 1 INT6 = 2 INT4 = 3 NONE = 4
         ops.qr_all_reduce(_ptr, inp1, result, 3, cast_bf2half=True)

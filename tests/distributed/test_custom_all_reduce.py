@@ -62,20 +62,10 @@ def graph_allreduce(
             for dtype in [torch.float32, torch.float16, torch.bfloat16]:
                 with graph_capture(device=device) as graph_capture_context:
                     # use integers so result matches NCCL exactly
-                    inp1 = torch.randint(
-                        1,
-                        16,
-                        (sz,),
-                        dtype=dtype,
-                        device=torch.accelerator.current_device_index(),
-                    )
-                    inp2 = torch.randint(
-                        1,
-                        16,
-                        (sz,),
-                        dtype=dtype,
-                        device=torch.accelerator.current_device_index(),
-                    )
+                    device_idx = torch.accelerator.current_device_index()
+                    inp1 = torch.randint(1, 16, (sz,), dtype=dtype, device=device_idx)
+                    inp2 = torch.randint(1, 16, (sz,), dtype=dtype, device=device_idx)
+
                     torch.accelerator.synchronize()
                     graph = torch.cuda.CUDAGraph()
                     with torch.cuda.graph(graph, stream=graph_capture_context.stream):

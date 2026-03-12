@@ -539,6 +539,8 @@ def deserialize_tensorizer_model(
         )
     before_mem = get_mem_usage()
     start = time.perf_counter()
+    device_index = torch.accelerator.current_device_index()
+    device_type = current_platform.device_type
     with (
         open_stream(
             tensorizer_config.tensorizer_uri, mode="rb", **tensorizer_args.stream_kwargs
@@ -546,9 +548,7 @@ def deserialize_tensorizer_model(
         TensorDeserializer(
             stream,
             dtype=tensorizer_config.dtype,
-            device=f"xpu:{torch.xpu.current_device()}"
-            if current_platform.is_xpu()
-            else f"cuda:{torch.accelerator.current_device_index()}",
+            device=f"{device_type}:{device_index}",
             **tensorizer_args.deserialization_kwargs,
         ) as deserializer,
     ):

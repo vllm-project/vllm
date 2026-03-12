@@ -73,8 +73,8 @@ class SMControlContextManager:
         assert current_platform.is_cuda(), (
             "SM control is currently only supported on CUDA"
         )
-
-        total_sms = num_compute_units(torch.accelerator.current_device_index())
+        device = torch.accelerator.current_device_index()
+        total_sms = num_compute_units(device)
 
         assert comm_sms < total_sms
         self.total_sms = total_sms

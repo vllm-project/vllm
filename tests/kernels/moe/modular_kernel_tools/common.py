@@ -392,12 +392,8 @@ class RankTensors:
         Return hidden_states
         """
         m, k, dtype = (config.M, config.K, config.dtype)
-        a = (
-            torch.randn(
-                (m, k), device=torch.accelerator.current_device_index(), dtype=dtype
-            )
-            / 15.0
-        )
+        device = torch.accelerator.current_device_index()
+        a = torch.randn((m, k), device=device, dtype=dtype) / 15.0
 
         if config.quant_dtype is None:
             return a, None
@@ -433,9 +429,10 @@ class RankTensors:
         topk_weights, topk_ids, _ = fused_topk(hidden_states, score, topk, False)
 
         # distribute topk_ids evenly
+        device = torch.accelerator.current_device_index()
         for mi in range(m):
             topk_ids[mi] = torch.randperm(config.E)[:topk]
-        topk_ids = topk_ids.to(device=torch.accelerator.current_device_index())
+        topk_ids = topk_ids.to(device=device)
 
         expert_map = None
         if config.world_size > 1 and config.supports_expert_map():
@@ -445,9 +442,7 @@ class RankTensors:
             s = pgi.rank * num_local_experts
             e = s + num_local_experts
             expert_map[s:e] = torch.tensor(list(range(num_local_experts)))
-            expert_map = expert_map.to(
-                device=torch.accelerator.current_device_index(), dtype=torch.int32
-            )
+            expert_map = expert_map.to(device=device, dtype=torch.int32)
 
         return RankTensors(
             hidden_states=hidden_states,

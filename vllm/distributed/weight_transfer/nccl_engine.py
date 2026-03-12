@@ -140,13 +140,14 @@ class NCCLWeightTransferEngine(
         worker_rank = dp_rank * world_size_per_dp + rank_within_dp
         rank = worker_rank + init_info.rank_offset
         # Create stateless process group
+        device = torch.accelerator.current_device_index()
         self.model_update_group = (
             NCCLWeightTransferEngine._stateless_init_process_group(
                 init_info.master_address,
                 init_info.master_port,
                 rank,
                 init_info.world_size,
-                torch.accelerator.current_device_index(),
+                device=device,
             )
         )
 
@@ -309,12 +310,13 @@ class NCCLWeightTransferEngine(
             world_size = init_info.world_size
 
         # Trainer is always rank 0
+        device = torch.accelerator.current_device_index()
         return NCCLWeightTransferEngine._stateless_init_process_group(
             master_address,
             master_port,
             0,
             world_size,
-            torch.accelerator.current_device_index(),
+            device,
         )
 
     @staticmethod

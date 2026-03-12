@@ -36,7 +36,8 @@ class DualChunkRotaryEmbedding(CustomOp):
         self.chunk_size = chunk_size
         self.local_size = local_size
         self.dtype = dtype
-        self.device = torch.device(f"cuda:{torch.accelerator.current_device_index()}")
+        device_idx = torch.accelerator.current_device_index()
+        self.device = torch.device(f"cuda:{device_idx}")
         (q_cache, qc_cache, k_cache, qc_no_clamp_cache, q_inter_cache) = (
             self._compute_cos_sin_cache()
         )
