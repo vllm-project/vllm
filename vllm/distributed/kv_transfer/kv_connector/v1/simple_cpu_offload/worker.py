@@ -209,28 +209,39 @@ class SimpleCPUOffloadWorker:
             src_caches, dst_caches = self.gpu_kv_caches, self.cpu_kv_caches
             stream = self.store_stream
             events = self._store_events
+            launch_params = self._store_launch_params
         else:
             src_caches, dst_caches = self.cpu_kv_caches, self.gpu_kv_caches
             stream = self.load_stream
             events = self._load_events
+            launch_params = self._load_launch_params
 
         assert stream is not None
 
+        first_src = next(iter(src_caches.values()))
+        first_dst = next(iter(dst_caches.values()))
+        self._validate_block_ids(src_blocks, first_src.shape[0], "Source")
+        self._validate_block_ids(dst_blocks, first_dst.shape[0], "Dest")
+
+        block_mapping = torch.tensor(
+            list(zip(src_blocks, dst_blocks)),
+            dtype=torch.int64,
+            device=self.device,
+        )
+
         with torch.cuda.stream(stream):
-            self._copy_blocks(
+            copy_ops.copy_blocks(
                 src_caches,
                 dst_caches,
-                src_blocks,
-                dst_blocks,
-                is_store,
+                block_mapping,
+                launch_params=launch_params,
             )
             event = torch.cuda.Event()
             event.record(stream)
 
         events.append((event_idx, event))
         logger.debug(
-            "Submitted %s of %d blocks (event_idx=%d)",
-            "store" if is_store else "load",
+            "Submitted %s of %d blocks (event_idx=%d) store" if is_store else "load",
             len(src_blocks),
             event_idx,
         )
@@ -286,37 +297,6 @@ class SimpleCPUOffloadWorker:
         if lo < 0 or hi >= num_blocks:
             bad = lo if lo < 0 else hi
             raise ValueError(f"{label} block ID {bad} out of bounds [0, {num_blocks})")
-
-    def _copy_blocks(
-        self,
-        src_caches: dict[str, torch.Tensor],
-        dst_caches: dict[str, torch.Tensor],
-        src_block_ids: list[int],
-        dst_block_ids: list[int],
-        is_store: bool = True,
-    ) -> None:
-        """Execute multi-layer Triton kernel block transfer."""
-        first_src = next(iter(src_caches.values()))
-        first_dst = next(iter(dst_caches.values()))
-        self._validate_block_ids(src_block_ids, first_src.shape[0], "Source")
-        self._validate_block_ids(dst_block_ids, first_dst.shape[0], "Dest")
-
-        block_mapping = torch.tensor(
-            list(zip(src_block_ids, dst_block_ids)),
-            dtype=torch.int64,
-            device=self.device,
-        )
-
-        launch_params = (
-            self._store_launch_params if is_store else self._load_launch_params
-        )
-
-        copy_ops.copy_blocks(
-            src_caches,
-            dst_caches,
-            block_mapping,
-            launch_params=launch_params,
-        )
 
     def handle_preemptions(self) -> None:
         """Sync all in-flight transfers before preempted blocks are reused."""
