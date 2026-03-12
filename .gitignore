@@ -189,11 +189,9 @@ cython_debug/
 .vscode/
 
 # Claude
-CLAUDE.md
 .claude/
 
 # Codex
-AGENTS.md
 .codex/
 
 # Cursor

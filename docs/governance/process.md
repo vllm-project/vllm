@@ -139,9 +139,14 @@ In case where CI didn't pass due to the failure is not related to the PR, the PR
 
 AI tools can accelerate development, but contributors remain fully responsible for all code they submit. Like the Developer Certificate of Origin, this policy centers on accountability: contributors must believe they have the right to submit their contribution under vLLM's open source license, regardless of how the code was created.
 
-All AI-assisted contributions must meet the same quality, testing, and review standards as any other code. Contributors must review and understand AI-generated code before submission—just make sure it is good code.
+All AI-assisted contributions must meet the same quality, testing, and review standards as any other code. Contributors must review and understand AI-generated code before submission—just make sure it is good code:
 
-Attribution preserves legal clarity and community trust. Contributors must disclose AI assistance in pull requests and mark commits with appropriate trailers (e.g. `Co-authored-by:`).
+- Do not submit "pure agent" PRs. The human submitter is responsible for reviewing all changed lines, validating behavior end-to-end, and running relevant tests.
+- Attribution preserves legal clarity and community trust. Contributors must disclose AI assistance in pull requests and mark commits with appropriate trailers (e.g. `Co-authored-by:`).
+- Avoid one-off "busywork" PRs (single typo, isolated style cleanup, one mutable default fix, etc.). Bundle mechanical cleanups into a clear, systematic scope.
+
+!!! warning
+    These topics are outlined for agents in [AGENTS.md](../../AGENTS.md) with instructions for how to autonomously implement them.
 
 ### Slack
 
