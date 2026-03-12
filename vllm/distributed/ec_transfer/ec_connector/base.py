@@ -61,11 +61,22 @@ class ECConnectorBase(ABC):
         self._connector_metadata: ECConnectorMetadata | None = None
         self._vllm_config = vllm_config
         self._role = role
-        if vllm_config.ec_transfer_config is not None:
-            self._is_producer = vllm_config.ec_transfer_config.is_ec_producer
-            self._is_consumer = vllm_config.ec_transfer_config.is_ec_consumer
-        else:
+        ec_cfg = vllm_config.ec_transfer_config
+        if ec_cfg is None:
             raise ValueError("ec_transfer_config must be set for ECConnectorBase")
+
+        # Default behaviour follows ECTransferConfig's producer/consumer flags.
+        is_producer = ec_cfg.is_ec_producer
+        is_consumer = ec_cfg.is_ec_consumer
+
+        # If ec_role is "ec_both", enable both producer and consumer capabilities.
+        # This allows a single instance to both save and load encoder caches,
+        # useful for testing connector logic without needing separate encoder/PD instances.
+        if ec_cfg.ec_role == "ec_both":
+            is_producer, is_consumer = True, True
+ 
+        self._is_producer = is_producer
+        self._is_consumer = is_consumer
 
     @property
     def role(self) -> ECConnectorRole:
