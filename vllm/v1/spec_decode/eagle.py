@@ -442,13 +442,9 @@ class SpecDecodeBaseProposer:
 
         assert self.runner is not None
 
-        per_layer_attn_metadata: dict[str, object] = {}
-        for attn_group in self.draft_attn_groups:
-            attn_metadata = attn_group.get_metadata_builder().build_for_drafting(
-                common_attn_metadata=common_attn_metadata, draft_index=0
-            )
-            for layer_name in attn_group.layer_names:
-                per_layer_attn_metadata[layer_name] = attn_metadata
+        per_layer_attn_metadata = self.build_per_layer_attn_metadata(
+            common_attn_metadata
+        )
 
         cudagraph_runtime_mode, num_input_tokens, num_tokens_across_dp = (
             self._determine_batch_execution_and_padding(num_tokens)
@@ -488,7 +484,10 @@ class SpecDecodeBaseProposer:
             positions = self.positions[token_indices_to_sample]
         hidden_states = hidden_states[token_indices_to_sample]
 
-        if isinstance(attn_metadata, TreeAttentionMetadata):
+        if any(
+            isinstance(attn_metadata, TreeAttentionMetadata)
+            for attn_metadata in per_layer_attn_metadata.values()
+        ):
             # Draft using tree attention - requires full logits for top-k
             logits = self.model.compute_logits(sample_hidden_states)
             draft_token_ids_list = self.propose_tree(
@@ -504,15 +503,16 @@ class SpecDecodeBaseProposer:
 
         draft_token_ids = self._greedy_sample(sample_hidden_states)
 
-        if self.allowed_attn_types is not None and not isinstance(
-            attn_metadata, self.allowed_attn_types
-        ):
-            raise ValueError(
-                f"Unsupported attention metadata type for speculative "
-                "decoding with num_speculative_tokens > 1: "
-                f"{type(attn_metadata)}. Supported types are: "
-                f"{self.allowed_attn_types}"
-            )
+        for attn_metadata in per_layer_attn_metadata.values():
+            if self.allowed_attn_types is not None and not isinstance(
+                attn_metadata, self.allowed_attn_types
+            ):
+                raise ValueError(
+                    f"Unsupported attention metadata type for speculative "
+                    "decoding with num_speculative_tokens > 1: "
+                    f"{type(attn_metadata)}. Supported types are: "
+                    f"{self.allowed_attn_types}"
+                )
 
         # Generate the remaining draft tokens.
         draft_token_ids_list = [draft_token_ids]
@@ -593,13 +593,9 @@ class SpecDecodeBaseProposer:
                 common_attn_metadata._num_computed_tokens_cpu += 1
 
             # Rebuild attention metadata
-            for attn_group in self.draft_attn_groups:
-                attn_metadata = attn_group.get_metadata_builder().build_for_drafting(
-                    common_attn_metadata=common_attn_metadata,
-                    draft_index=token_index + 1,
-                )
-                for layer_name in attn_group.layer_names:
-                    per_layer_attn_metadata[layer_name] = attn_metadata
+            per_layer_attn_metadata = self.build_per_layer_attn_metadata(
+                common_attn_metadata, draft_index=token_index + 1
+            )
 
             # copy inputs to buffer for cudagraph
             self.input_ids[:batch_size] = input_ids
@@ -810,6 +806,18 @@ class SpecDecodeBaseProposer:
             model_kwargs["hidden_states"] = self.hidden_states[:num_input_tokens]
 
         return model_kwargs, num_input_tokens
+
+    def build_per_layer_attn_metadata(
+        self, common_attn_metadata: CommonAttentionMetadata, draft_index: int = 0
+    ) -> dict[str, object]:
+        per_layer_attn_metadata: dict[str, object] = {}
+        for attn_group in self.draft_attn_groups:
+            attn_metadata = attn_group.get_metadata_builder().build_for_drafting(
+                common_attn_metadata=common_attn_metadata, draft_index=draft_index
+            )
+            for layer_name in attn_group.layer_names:
+                per_layer_attn_metadata[layer_name] = attn_metadata
+        return per_layer_attn_metadata
 
     def model_returns_tuple(self) -> bool:
         return self.method not in ("mtp", "draft_model", "dflash")

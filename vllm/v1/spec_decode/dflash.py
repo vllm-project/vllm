@@ -202,3 +202,18 @@ class DFlashProposer(SpecDecodeBaseProposer):
             hidden_states=self.hidden_states[: self._dflash_num_context],
             inputs_embeds=None,
         ), self._dflash_num_positions
+
+    @override
+    def build_per_layer_attn_metadata(
+        self, cad: CommonAttentionMetadata, draft_index: int = 0
+    ) -> dict[str, object]:
+        per_layer_attention_metadata = super().build_per_layer_attn_metadata(
+            cad, draft_index
+        )
+        for layer_name, attn_metadata in per_layer_attention_metadata.items():
+            assert getattr(attn_metadata, "causal", None) is False, (
+                f"Attention metadata for layer {layer_name} does not have"
+                " non-causal support, which is required for DFlash."
+                " Consider using a different attention backend, such as FlashAttention."
+            )
+        return per_layer_attention_metadata

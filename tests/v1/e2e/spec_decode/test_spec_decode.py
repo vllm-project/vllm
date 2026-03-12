@@ -1055,6 +1055,7 @@ def compute_acceptance_len(
     return 1 + (n_accepted_toks / n_drafts)
 
 
+# Datasets in the format used in DFlash validations
 def load_and_process_dataset(data_name: str):
     if data_name == "gsm8k":
         dataset = load_dataset("openai/gsm8k", "main", split="test")
