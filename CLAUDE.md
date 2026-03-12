@@ -1,1 +1,1 @@
-/home/harry/.claude/project-configs/vllm/CLAUDE.md
+@AGENTS.md

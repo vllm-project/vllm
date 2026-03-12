@@ -27,14 +27,13 @@ Do not open one-off PRs for tiny edits (single typo, isolated lint fix, one muta
 - Pure code-agent PRs are **not allowed**. A human submitter must understand and defend the change end-to-end.
 - The submitting human must review every changed line and run relevant tests.
 - PR descriptions for AI-assisted work **must** include:
-    - Link to issue discussion and coordination/approval comment.
     - Why this is not duplicating an existing PR.
     - Test commands run and results.
     - Clear statement that AI assistance was used.
 
 ### Fail-closed behavior
 
-If coordination evidence is missing, or work is duplicate/trivial busywork, **do not proceed**. Return a short explanation of what is missing.
+If work is duplicate/trivial busywork, **do not proceed**. Return a short explanation of what is missing.
 
 ---
 
