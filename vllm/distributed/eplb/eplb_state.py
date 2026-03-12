@@ -212,16 +212,6 @@ class EplbModelState:
     """
     EPLB stats for the model.
     """
-    is_unchanged: np.ndarray
-    """
-    intermediate variable between `move_to_buffer` and `move_to_workspace`.
-    The size is same as the num of physical experts in the current layer.
-    """
-    is_received_locally: np.ndarray
-    """
-    intermediate variable between `move_to_buffer` and `move_to_workspace`.
-    The size is same as the num of physical experts in the current layer.
-    """
     recv_metadata: RecvMetadata
     """
     intermediate variable between `move_to_buffer` and `move_to_workspace`.
@@ -498,9 +488,9 @@ class EplbState:
             rebalanced=False,
             pending_global_ready_check=False,
             eplb_stats=None,
-            is_unchanged=np.array([]),
-            is_received_locally=np.array([]),
             recv_metadata=RecvMetadata(
+                is_unchanged=np.array([]),
+                is_received_locally=np.array([]),
                 recv_primary_mask=np.array([]),
                 recv_count=0,
                 recv_expert_ids=np.array([]),
@@ -943,8 +933,6 @@ class EplbState:
             move_from_buffer(
                 expert_weights=expert_weights,
                 expert_weights_buffers=expert_weights_buffer,
-                is_unchanged=model_state.is_unchanged,
-                is_received_locally=model_state.is_received_locally,
                 recv_metadata=model_state.recv_metadata,
                 new_indices=new_indices,
                 ep_rank=ep_group.rank(),
