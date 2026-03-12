@@ -1126,8 +1126,8 @@ class OpenAIServing:
             )
             content = None  # Clear content since tool is called.
         elif request.tool_choice == "required":
-            tool_calls = []
             with contextlib.suppress(ValidationError):
+                content = content or "[]"
                 tool_calls = TypeAdapter(list[FunctionDefinition]).validate_json(
                     content
                 )
