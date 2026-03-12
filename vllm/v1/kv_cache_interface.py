@@ -278,6 +278,7 @@ class MambaSpec(KVCacheSpec):
     mamba_type: str = "mamba2"
     mamba_cache_mode: str = "none"
     num_speculative_blocks: int = 0
+    async_scheduling: bool = False
 
     @property
     def page_size_bytes(self) -> int:

@@ -55,6 +55,7 @@ class MambaBase(AttentionLayerBase):
                 if vllm_config.speculative_config
                 else 0
             ),
+            async_scheduling=bool(vllm_config.scheduler_config.async_scheduling),
         )
 
     def get_attn_backend(self) -> type[AttentionBackend]:
