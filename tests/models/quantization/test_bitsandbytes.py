@@ -6,10 +6,9 @@ Run `pytest tests/quantization/test_bitsandbytes.py`.
 """
 
 import pytest
-import importlib.metadata
-
-from packaging import version
+from packaging.version import Version
 from transformers import BitsAndBytesConfig
+from transformers import __version__ as TRANSFORMERS_VERSION
 
 from tests.quantization.utils import is_quant_method_supported
 from vllm.platforms import current_platform
@@ -142,10 +141,10 @@ def test_load_pp_4bit_bnb_model(model_name, description) -> None:
 
 
 @pytest.mark.skipif(
-    version.parse(importlib.metadata.version("transformers")) >= version.parse("5.0.0"),
-    reason="Need to add support for quantizing MoE experts with bnb in transformers v5. "
-    "See https://github.com/bitsandbytes-foundation/bitsandbytes/issues/1849 "
-    "and https://github.com/huggingface/transformers/issues/43472",
+    Version(TRANSFORMERS_VERSION) >= Version("5.0.0"),
+    reason="Need to add support for quantizing MoE experts with bnb"
+    " in transformers v5. See"
+    " https://github.com/bitsandbytes-foundation/bitsandbytes/issues/1849",
 )
 @pytest.mark.skipif(
     not is_quant_method_supported("bitsandbytes"),
