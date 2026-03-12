@@ -3,7 +3,7 @@
 
 import math
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Annotated, Literal, cast
+from typing import Literal, cast
 
 import numpy as np
 import torch
@@ -30,7 +30,7 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.multimodal import MULTIMODAL_REGISTRY, NestedTensors
+from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalDataDict,
     MultiModalFieldConfig,
@@ -55,7 +55,6 @@ from vllm.transformers_utils.processors.cohere_asr import (
     CohereASRFeatureExtractor,
     CohereASRProcessor,
 )
-from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from vllm.v1.attention.backend import (
     AttentionType,
 )
@@ -87,19 +86,6 @@ ISO639_1_SUPPORTED_LANGS = {
     "vi": "Vietnamese",
     "zh": "Chinese",
 }
-
-
-class CohereASRAudioInputs(TensorSchema):
-    """
-    Dimensions:
-        - b: Batch size
-        - nmb: Number of mel bins
-        - t: Time frames (M)
-    """
-
-    input_features: Annotated[NestedTensors | None, TensorShape("b", "nmb", "t")]
-
-    input_features_list: list
 
 
 class CohereASRAttention(nn.Module):
@@ -522,22 +508,24 @@ class MaskedConvSequential(nn.Sequential):
         return x, current_lengths.long()
 
     def _create_mask(self, tensor, lengths):
-        """Create mask matching tensor dimensions."""
+        """Create broadcastable mask from per-sample lengths.
+
+        Returns a (B, 1, T, 1) mask that broadcasts over channels and
+        features without materializing a full (B, C, T, F) tensor.
+        """
         batch_size, channels, time, features = tensor.shape
         time_mask = torch.arange(time, device=tensor.device).expand(
             batch_size, time
         ) < lengths.unsqueeze(1)
-        return (
-            time_mask.unsqueeze(-1).expand(batch_size, time, features).to(tensor.dtype)
-        )
+        return time_mask.to(tensor.dtype).unsqueeze(1).unsqueeze(-1)
 
     def apply_channel_mask(self, tensor, mask):
-        """Apply mask to tensor with channel dimension."""
-        # tensor: (batch, channels, time, features)
-        # mask: (batch, time, features)
-        batch_size, channels, time, features = tensor.shape
-        expanded_mask = mask.unsqueeze(1).expand(batch_size, channels, time, features)
-        return tensor * expanded_mask
+        """Apply mask in-place via broadcasting.
+
+        tensor: (B, C, T, F),  mask: (B, 1, T, 1)
+        """
+        tensor.mul_(mask)
+        return tensor
 
     def calculate_conv_output_size(
         self,
@@ -882,29 +870,9 @@ class CausalConv1D(nn.Conv1d):
             dtype=dtype,
         )
 
-    def update_cache(self, x, cache=None):
-        assert cache is None, "non streaming has no cache in CausalConv1D."
-
-        if cache is None:
-            new_x = F.pad(x, pad=(self._left_padding, self._right_padding))
-            next_cache = cache
-        else:
-            new_x = F.pad(x, pad=(0, self._right_padding))
-            new_x = torch.cat([cache, new_x], dim=-1)
-            if self.cache_drop_size > 0:
-                next_cache = new_x[:, :, : -self.cache_drop_size]
-            else:
-                next_cache = new_x
-            next_cache = next_cache[:, :, -cache.size(-1) :]
-        return new_x, next_cache
-
-    def forward(self, x, cache=None):
-        x, cache = self.update_cache(x, cache=cache)
-        x = super().forward(x)
-        if cache is None:
-            return x
-        else:
-            return x, cache
+    def forward(self, x):
+        x = F.pad(x, pad=(self._left_padding, self._right_padding))
+        return super().forward(x)
 
 
 class ConformerConvolution(nn.Module):
@@ -977,7 +945,7 @@ class ConformerConvolution(nn.Module):
             bias=self.use_bias,
         )
 
-    def forward(self, x, pad_mask=None, cache=None):
+    def forward(self, x, pad_mask=None):
         x = x.transpose(1, 2)
         x = self.pointwise_conv1(x)
 
@@ -986,19 +954,14 @@ class ConformerConvolution(nn.Module):
         if pad_mask is not None:
             x = x.masked_fill(pad_mask.unsqueeze(1), 0.0)
 
-        x = self.depthwise_conv(x, cache=cache)
-        if cache is not None:
-            x, cache = x
+        x = self.depthwise_conv(x)
 
         x = self.batch_norm(x)
 
         x = self.activation(x)
         x = self.pointwise_conv2(x)
         x = x.transpose(1, 2)
-        if cache is None:
-            return x
-        else:
-            return x, cache
+        return x
 
 
 class CohereASRMultiHeadAttention(nn.Module):
@@ -1081,44 +1044,23 @@ class CohereASRMultiHeadAttention(nn.Module):
 
         return self.linear_out(x)  # (batch, time1, d_model)
 
-    def forward(self, query, key, value, mask, pos_emb=None, cache=None):
+    def forward(self, query, key, value, mask, pos_emb=None):
         """Compute 'Scaled Dot Product Attention'.
         Args:
             query (torch.Tensor): (batch, time1, size)
             key (torch.Tensor): (batch, time2, size)
             value(torch.Tensor): (batch, time2, size)
             mask (torch.Tensor): (batch, time1, time2)
-            cache (torch.Tensor) : (batch, time_cache, size)
 
         returns:
             output (torch.Tensor): transformed `value`
                 (batch, time1, d_model) weighted by the
                 query dot key attention
-            cache (torch.Tensor) :
-                (batch, time_cache_next, size)
         """
-        key, value, query, cache = self.update_cache(
-            key=key, value=value, query=query, cache=cache
-        )
-
         q, k, v = self.forward_qkv(query, key, value)
 
         scores = torch.matmul(q, k.transpose(-2, -1)) / self.s_d_k
-        out = self.forward_attention(v, scores, mask)
-
-        if cache is None:
-            return out
-        else:
-            return out, cache
-
-    def update_cache(self, key, value, query, cache):
-        if cache is not None:
-            key = value = torch.cat([cache, key], dim=1)
-            q_keep_size = query.shape[1] - self.cache_drop_size
-            cache = torch.cat(
-                [cache[:, q_keep_size:, :], query[:, :q_keep_size, :]], dim=1
-            )
-        return key, value, query, cache
+        return self.forward_attention(v, scores, mask)
 
 
 class RelPositionMultiHeadAttention(CohereASRMultiHeadAttention):
@@ -1177,7 +1119,7 @@ class RelPositionMultiHeadAttention(CohereASRMultiHeadAttention):
         x = x[:, :, 1:].view(b, h, qlen, pos_len)  # (b, h, t1, t2)
         return x
 
-    def forward(self, query, key, value, mask, pos_emb, cache=None):
+    def forward(self, query, key, value, mask, pos_emb):
         """Compute 'Scaled Dot Product Attention' with rel. positional encoding.
         Args:
             query (torch.Tensor): (batch, time1, size)
@@ -1185,19 +1127,12 @@ class RelPositionMultiHeadAttention(CohereASRMultiHeadAttention):
             value(torch.Tensor): (batch, time2, size)
             mask (torch.Tensor): (batch, time1, time2)
             pos_emb (torch.Tensor) : (batch, time1, size)
-            cache (torch.Tensor) : (batch, time_cache, size)
 
         Returns:
             output (torch.Tensor): transformed `value`
                 (batch, time1, d_model) weighted by the
                 query dot key attention
-            cache (torch.Tensor) :
-                (batch, time_cache_next, size)
         """
-        key, value, query, cache = self.update_cache(
-            key=key, value=value, query=query, cache=cache
-        )
-
         q, k, v = self.forward_qkv(query, key, value)
         q = q.transpose(1, 2)  # (batch, time1, head, d_k)
 
@@ -1224,12 +1159,7 @@ class RelPositionMultiHeadAttention(CohereASRMultiHeadAttention):
         matrix_ac = torch.matmul(q_with_bias_u, k.transpose(-2, -1))
         matrix_bd = matrix_bd[:, :, :, : matrix_ac.size(-1)]
         scores = (matrix_ac + matrix_bd) / self.s_d_k  # (batch, head, time1, time2)
-        out = self.forward_attention(v, scores, mask)
-
-        if cache is None:
-            return out
-        else:
-            return out, cache
+        return self.forward_attention(v, scores, mask)
 
 
 class ConformerLayer(torch.nn.Module):
@@ -1320,8 +1250,6 @@ class ConformerLayer(torch.nn.Module):
         att_mask=None,
         pos_emb=None,
         pad_mask=None,
-        cache_last_channel=None,
-        cache_last_time=None,
     ):
         """
         Args:
@@ -1329,16 +1257,8 @@ class ConformerLayer(torch.nn.Module):
             att_mask (torch.Tensor): attention masks(B, T, T)
             pos_emb (torch.Tensor): (L, 1, d_model)
             pad_mask (torch.tensor): padding mask
-            cache_last_channel (torch.tensor) : cache for
-                MHA layers (B, T_cache, d_model)
-            cache_last_time (torch.tensor) : cache for
-                conv layers (B, d_model, T_cache)
         Returns:
             x (torch.Tensor): (B, T, d_model)
-            cache_last_channel (torch.tensor) : next cache
-                for MHA layers (B, T_cache, d_model)
-            cache_last_time (torch.tensor) : next cache
-                for conv layers (B, d_model, T_cache)
         """
         residual = x
         x = self.norm_feed_forward1(x)
@@ -1353,7 +1273,6 @@ class ConformerLayer(torch.nn.Module):
                 value=x,
                 mask=att_mask,
                 pos_emb=pos_emb,
-                cache=cache_last_channel,
             )
         elif self.self_attention_model == "rel_pos_local_attn":
             x = self.self_attn(
@@ -1362,24 +1281,18 @@ class ConformerLayer(torch.nn.Module):
                 value=x,
                 pad_mask=pad_mask,
                 pos_emb=pos_emb,
-                cache=cache_last_channel,
             )
         elif self.self_attention_model == "abs_pos":
             x = self.self_attn(
-                query=x, key=x, value=x, mask=att_mask, cache=cache_last_channel
+                query=x, key=x, value=x, mask=att_mask
             )
         else:
             x = None
 
-        if x is not None and cache_last_channel is not None:
-            (x, cache_last_channel) = x
-
         residual = residual + x
 
         x = self.norm_conv(residual)
-        x = self.conv(x, pad_mask=pad_mask, cache=cache_last_time)
-        if cache_last_time is not None:
-            (x, cache_last_time) = x
+        x = self.conv(x, pad_mask=pad_mask)
         residual = residual + x
 
         x = self.norm_feed_forward2(residual)
@@ -1388,10 +1301,7 @@ class ConformerLayer(torch.nn.Module):
 
         x = self.norm_out(residual)
 
-        if cache_last_channel is None:
-            return x
-        else:
-            return x, cache_last_channel, cache_last_time
+        return x
 
 
 class ConformerEncoder(nn.Module):
@@ -1555,15 +1465,9 @@ class ConformerEncoder(nn.Module):
         self,
         audio_signal,
         length,
-        cache_last_channel=None,
-        cache_last_time=None,
-        cache_last_channel_len=None,
-        bypass_pre_encode=False,
     ):
-        assert not bypass_pre_encode
-        if not bypass_pre_encode and audio_signal.shape[-2] != self._feat_in:
+        if audio_signal.shape[-2] != self._feat_in:
             raise ValueError(
-                f"If bypass_pre_encode is False, "
                 f"audio_signal should have shape "
                 f"(batch, {self._feat_in}, n_frame) but "
                 f"got last dimension "
@@ -1573,20 +1477,12 @@ class ConformerEncoder(nn.Module):
         return self.forward_internal(
             audio_signal,
             length,
-            cache_last_channel=cache_last_channel,
-            cache_last_time=cache_last_time,
-            cache_last_channel_len=cache_last_channel_len,
-            bypass_pre_encode=bypass_pre_encode,
         )
 
     def forward_internal(
         self,
         audio_signal,
         length=None,
-        cache_last_channel=None,
-        cache_last_time=None,
-        cache_last_channel_len=None,
-        bypass_pre_encode=False,
     ):
         if length is None:
             length = audio_signal.new_full(
@@ -1605,17 +1501,14 @@ class ConformerEncoder(nn.Module):
         max_audio_length = audio_signal.size(1)
 
         padding_length = length
-        cache_len = 0
-        offset = None
 
-        audio_signal, pos_emb = self.pos_enc(x=audio_signal, cache_len=cache_len)
+        audio_signal, pos_emb = self.pos_enc(x=audio_signal, cache_len=0)
 
-        # Create the self-attention and padding masks
         pad_mask, att_mask = self._create_masks(
             att_context_size=cur_att_context_size,
             padding_length=padding_length,
             max_audio_length=max_audio_length,
-            offset=offset,
+            offset=None,
             device=audio_signal.device,
         )
 
@@ -1946,7 +1839,7 @@ class CohereASRProcessingInfo(BaseProcessingInfo):
                 mel_norm=preproc.get("mel_norm", "slaney"),
                 stft_exact_pad=preproc.get("stft_exact_pad", False),
                 stft_conv=preproc.get("stft_conv", False),
-                device=current_platform.device_type,
+                device="cpu"
             )
 
             tokenizer = self.ctx.tokenizer
@@ -2246,7 +2139,7 @@ class CohereASRForConditionalGeneration(
         # CohereASR does not have encoder text tokens.
         return self.model.decoder.get_input_embeddings(input_ids)
 
-    def _parse_and_validate_audio_input(self, **kwargs: object) -> CohereASRAudioInputs:
+    def _parse_and_validate_audio_input(self, **kwargs: object) -> tuple[torch.Tensor, torch.Tensor]:
         input_features = kwargs.pop("input_features", None)
         length = kwargs.pop("length", None)
 
