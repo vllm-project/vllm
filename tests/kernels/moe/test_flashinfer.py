@@ -19,7 +19,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     fp8_w8a8_moe_quant_config,
 )
 from vllm.model_executor.layers.fused_moe.experts.trtllm_fp8_moe import (
-    TrtLlmFp8Experts,
+    TrtLlmFp8ExpertsMonolithic,
 )
 from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
     FlashInferExperts,
@@ -247,7 +247,7 @@ def test_flashinfer_per_tensor_moe_fp8_no_graph(
                 allow_new_interface=True,
                 use_monolithic=True,
             ),
-            TrtLlmFp8Experts(
+            TrtLlmFp8ExpertsMonolithic(
                 moe_config=td.layer.moe,
                 quant_config=quant_config,
             ),
