@@ -4,7 +4,7 @@ pub mod protocol;
 mod state;
 mod transport;
 
-pub use client::{EngineCoreClient, EngineCoreClientConfig};
+pub use client::{EngineCoreClient, EngineCoreClientConfig, RequestOutputStream};
 pub use error::{Error, Result};
 pub use protocol::handshake::ReadyMessage;
 pub use protocol::{

@@ -1166,6 +1166,7 @@ dependencies = [
  "enum-as-inner",
  "futures",
  "hex",
+ "parking_lot",
  "rmp-serde",
  "rmpv",
  "serde",

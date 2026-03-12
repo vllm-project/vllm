@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::Duration;
 
 use thiserror::Error;
@@ -39,6 +40,15 @@ pub enum Error {
     },
     #[error("engine control channel closed unexpectedly: {0}")]
     ControlClosed(String),
-    #[error("output stream closed")]
-    OutputClosed,
+    #[error("request `{request_id}` is already in flight")]
+    DuplicateRequestId { request_id: String },
+    #[error("engine-core output dispatcher closed: {reason}")]
+    DispatcherClosed { reason: String },
+    #[error("engine-core client is closed: {reason}")]
+    ClientClosed { reason: String },
+    #[error("request output stream for `{request_id}` closed unexpectedly")]
+    RequestStreamClosed { request_id: String },
+
+    #[error(transparent)]
+    Shared(Arc<Self>),
 }

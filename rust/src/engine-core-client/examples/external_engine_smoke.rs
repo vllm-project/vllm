@@ -2,11 +2,12 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use futures::StreamExt;
 use tokio::time::timeout;
 use tracing_subscriber::EnvFilter;
 use vllm_engine_core_client::{
-    EngineCoreClient, EngineCoreClientConfig, EngineCoreRequest, FinishReason, RequestBatchOutputs,
-    RequestOutputKind, SamplingParams, StopReason,
+    EngineCoreClient, EngineCoreClientConfig, EngineCoreRequest, FinishReason, RequestOutputKind,
+    RequestOutputStream, SamplingParams, StopReason,
 };
 
 const PROMPT_TOKEN_IDS: &[u32] = &[20841, 448, 6896, 25, 23811];
@@ -73,58 +74,34 @@ struct CompletedRequest {
 }
 
 async fn wait_for_request_completion(
-    client: &mut EngineCoreClient,
-    request_id: &str,
+    mut stream: RequestOutputStream,
 ) -> vllm_engine_core_client::Result<CompletedRequest> {
     let mut completed = CompletedRequest::default();
 
-    loop {
-        let Ok(RequestBatchOutputs {
-            outputs,
-            finished_requests,
-            ..
-        }) = client.next_classified_output().await?.into_request_batch()
-        else {
-            continue;
-        };
+    while let Some(output) = stream.next().await {
+        let output = output?;
+        let finished = output.finished();
+        completed.new_token_ids.extend(output.new_token_ids);
 
-        let finished_via_finished_requests = finished_requests
-            .as_ref()
-            .is_some_and(|request_ids| request_ids.contains(request_id));
-
-        if let Some(output) = outputs
-            .into_iter()
-            .find(|output| output.request_id == request_id)
-        {
-            let finished = output.finished();
-            completed.new_token_ids.extend(output.new_token_ids);
-
-            if finished {
-                completed.finish_reason = output.finish_reason;
-                completed.stop_reason = output.stop_reason;
-                return Ok(completed);
-            }
-        }
-
-        if finished_via_finished_requests {
-            completed.finished_via_finished_requests = true;
+        if finished {
+            completed.finish_reason = output.finish_reason;
+            completed.stop_reason = output.stop_reason;
             return Ok(completed);
         }
     }
+
+    completed.finished_via_finished_requests = true;
+    Ok(completed)
 }
 
 async fn wait_for_timeout(
-    client: &mut EngineCoreClient,
-    request_id: &str,
+    stream: RequestOutputStream,
     output_timeout: Duration,
 ) -> Result<CompletedRequest> {
-    timeout(
-        output_timeout,
-        wait_for_request_completion(client, request_id),
-    )
-    .await
-    .context("timed out waiting for request output")?
-    .context("failed to receive request output")
+    timeout(output_timeout, wait_for_request_completion(stream))
+        .await
+        .context("timed out waiting for request output")?
+        .context("failed to receive request output")
 }
 
 #[tokio::main(flavor = "multi_thread")]
@@ -155,12 +132,12 @@ async fn main() -> Result<()> {
     println!("prompt_token_ids={PROMPT_TOKEN_IDS:?}");
     println!("ready_message={ready_message:?}");
 
-    client
+    let stream = client
         .add_request(request)
         .await
         .context("failed to add request")?;
 
-    let output = wait_for_timeout(&mut client, &request_id, output_timeout).await?;
+    let output = wait_for_timeout(stream, output_timeout).await?;
 
     client
         .shutdown()
