@@ -1,5 +1,4 @@
 
-
 # Enhancing vLLM Custom All-Reduce with UCCL-EP for Hierarchical Inter-Node Communication
 
 ## 1. Architectural Alignment: Why UCCL-EP Fits
@@ -111,6 +110,7 @@ Phase 3: INTRA-NODE BROADCAST (NVLink Direct Write)
 ### 3.1 Memory Layout Extension
 
 The existing vLLM custom AR allocates two sets of IPC-shared buffers:
+
 - `meta_ptrs`: Signal metadata + temp storage
 - `buffer_ptrs`: Pre-registered data staging buffer
 

@@ -15,7 +15,6 @@ Architecture:
 """
 
 from contextlib import contextmanager
-from typing import Optional
 
 import torch
 import torch.distributed as dist
@@ -46,7 +45,7 @@ class HierarchicalAllreduce:
         # Process groups
         local_group: ProcessGroup,
         global_group: ProcessGroup,
-        gateway_group: Optional[ProcessGroup],
+        gateway_group: ProcessGroup | None,
         # Device info
         device: torch.device,
         local_rank: int,
@@ -70,7 +69,7 @@ class HierarchicalAllreduce:
         self.local_world_size = local_world_size
         self.max_size = max_size
         self.gateway_local_rank = gateway_local_rank
-        self.is_gateway = (local_rank == gateway_local_rank)
+        self.is_gateway = local_rank == gateway_local_rank
         self.disabled = False
         self._IS_CAPTURING = False
         self._ptr = 0
@@ -83,7 +82,9 @@ class HierarchicalAllreduce:
         if local_world_size not in self._SUPPORTED_WORLD_SIZES:
             logger.warning(
                 "local_world_size %d not in %s; hierarchical AR disabled",
-                local_world_size, self._SUPPORTED_WORLD_SIZES)
+                local_world_size,
+                self._SUPPORTED_WORLD_SIZES,
+            )
             self.disabled = True
             return
 
@@ -96,8 +97,9 @@ class HierarchicalAllreduce:
             max_size=max_size,
         )
         if self.intra_ar.disabled:
-            logger.warning("Intra-node custom AR disabled; "
-                           "hierarchical AR disabled too")
+            logger.warning(
+                "Intra-node custom AR disabled; hierarchical AR disabled too"
+            )
             self.disabled = True
             return
 
@@ -141,8 +143,11 @@ class HierarchicalAllreduce:
         logger.info(
             "HierarchicalAllreduce initialized: node %d/%d, "
             "local_rank %d/%d, gateway=%s",
-            node_id, num_nodes, local_rank, local_world_size,
-            self.is_gateway
+            node_id,
+            num_nodes,
+            local_rank,
+            local_world_size,
+            self.is_gateway,
         )
 
     def _init_uccl_ep_if_gateway(self):
@@ -170,23 +175,20 @@ class HierarchicalAllreduce:
 
         # Each gateway creates its own local connection info tensor
         # and exchanges with all other gateways via all_gather
-        local_info = torch.zeros(conn_info_size, dtype=torch.uint8,
-                                 device='cpu')
+        local_info = torch.zeros(conn_info_size, dtype=torch.uint8, device="cpu")
 
         # Gather connection info from all gateways
         all_infos = [None] * self.num_nodes
-        dist.all_gather_object(all_infos, local_info.numpy().tobytes(),
-                               group=self.gateway_group)
+        dist.all_gather_object(
+            all_infos, local_info.numpy().tobytes(), group=self.gateway_group
+        )
 
         # Build packed tensor of remote gateways' info (exclude self)
         remote_infos = []
         for i, info_bytes in enumerate(all_infos):
             if i != self.node_id:
                 remote_infos.append(
-                    torch.frombuffer(
-                        bytearray(info_bytes),
-                        dtype=torch.uint8
-                    )
+                    torch.frombuffer(bytearray(info_bytes), dtype=torch.uint8)
                 )
 
         num_remote = len(remote_infos)
@@ -199,7 +201,8 @@ class HierarchicalAllreduce:
         ops.init_uccl_ep_ar(self._ptr, packed_info, num_remote)
         logger.info(
             "UCCL-EP initialized on gateway node %d with %d remote gateways",
-            self.node_id, num_remote
+            self.node_id,
+            num_remote,
         )
 
     def should_custom_ar(self, inp: torch.Tensor) -> bool:
@@ -224,9 +227,7 @@ class HierarchicalAllreduce:
         ops.hierarchical_all_reduce(self._ptr, inp, out)
         return out
 
-    def custom_all_reduce(
-        self, input: torch.Tensor
-    ) -> Optional[torch.Tensor]:
+    def custom_all_reduce(self, input: torch.Tensor) -> torch.Tensor | None:
         """Main API matching CustomAllreduce interface."""
         if self.disabled or not self.should_custom_ar(input):
             return None
@@ -259,9 +260,11 @@ class HierarchicalAllreduce:
             self._ptr = 0
             self.intra_ar.close()
             CustomAllreduce.free_shared_buffer(
-                self.broadcast_ptrs, rank=self.local_rank)
+                self.broadcast_ptrs, rank=self.local_rank
+            )
             CustomAllreduce.free_shared_buffer(
-                self.hier_signal_ptrs, rank=self.local_rank)
+                self.hier_signal_ptrs, rank=self.local_rank
+            )
 
     def __del__(self):
         self.close()

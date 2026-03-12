@@ -2826,8 +2826,7 @@ def init_uccl_ep_ar(
     connection_info: torch.Tensor,
     num_remote_nodes: int,
 ) -> None:
-    torch.ops._C_custom_ar.init_uccl_ep_ar(har, connection_info,
-                                            num_remote_nodes)
+    torch.ops._C_custom_ar.init_uccl_ep_ar(har, connection_info, num_remote_nodes)
 
 
 def uccl_ep_connection_info_size() -> int:

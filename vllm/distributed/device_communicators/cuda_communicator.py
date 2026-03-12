@@ -126,14 +126,15 @@ class CudaCommunicator(DeviceCommunicatorBase):
             from vllm.distributed.device_communicators.hierarchical_allreduce import (
                 HierarchicalAllreduce,
             )
+
             try:
                 # Derive topology from global info
                 import os
+
                 local_rank = int(os.environ.get("LOCAL_RANK", 0))
                 global_rank = torch.distributed.get_rank()
                 global_ws = global_world_size or torch.distributed.get_world_size()
-                local_ws = int(os.environ.get(
-                    "LOCAL_WORLD_SIZE", self.world_size))
+                local_ws = int(os.environ.get("LOCAL_WORLD_SIZE", self.world_size))
                 num_nodes = max(1, global_ws // local_ws)
                 node_id = global_rank // local_ws
 
@@ -153,8 +154,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
                     if self.hier_comm.disabled:
                         self.hier_comm = None
             except Exception as e:
-                logger.warning(
-                    "Failed to initialize hierarchical allreduce: %s", e)
+                logger.warning("Failed to initialize hierarchical allreduce: %s", e)
                 self.hier_comm = None
 
         if self.use_all2all:
