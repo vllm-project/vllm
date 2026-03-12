@@ -199,6 +199,11 @@ class Example:
 
 
 def on_startup(command: Literal["build", "gh-deploy", "serve"], dirty: bool):
+    # Monkey-patch dirname_to_title in awesome-nav so that sub-directory names are
+    # title-cased (e.g. "Offline Inference" instead of "Offline inference").
+    import mkdocs_awesome_nav.nav.directory as _nav_dir
+
+    _nav_dir.dirname_to_title = title
     logger.info("Generating example documentation")
     logger.debug("Root directory: %s", ROOT_DIR.resolve())
     logger.debug("Example directory: %s", EXAMPLE_DIR.resolve())
