@@ -1351,13 +1351,13 @@ class SpecDecodeBaseProposer:
             )
             del self.model._mask_token_id
 
-        if self.parallel_drafting and self.pass_hidden_states_to_model:
-            assert self.parallel_drafting_hidden_state_tensor is not None
+        if (
+            self.parallel_drafting
+            and self.pass_hidden_states_to_model
+            and self.parallel_drafting_hidden_state_tensor is not None
+        ):
             flat_mask = self.model.mask_hidden.view(-1)
-            if flat_mask.shape[0] == self.hidden_size:
-                # Already projected (e.g. DFlash), use directly
-                self.parallel_drafting_hidden_state_tensor.copy_(flat_mask)
-            elif self.eagle3_use_aux_hidden_state:
+            if self.eagle3_use_aux_hidden_state:
                 # EAGLE3: mask_hidden stores all aux hidden states,
                 # project through combine_hidden_states
                 self.parallel_drafting_hidden_state_tensor.copy_(
@@ -1584,22 +1584,17 @@ class SpecDecodeBaseProposer:
 
     def _get_eagle3_use_aux_hidden_state_from_config(self) -> bool:
         """
-        Some eagle3/dflash heads do not use auxiliary hidden states and
+        Some eagle3 heads do not use auxiliary hidden states and
         directly use the last layer output just like eagle1. They might
         indicate this by setting "use_aux_hidden_state" to False inside
-        the "eagle_config" or "dflash_config" dict of their hf_config.
+        the "eagle_config" dict of their hf_config.
         """
-        if self.method not in ("eagle3", "dflash"):
+        if self.method != "eagle3":
             return False
         use_aux_hidden_state = True
         eagle_config = getattr(self.draft_model_config.hf_config, "eagle_config", None)
         if eagle_config is not None:
             use_aux_hidden_state = eagle_config.get("use_aux_hidden_state", True)
-        dflash_config = getattr(
-            self.draft_model_config.hf_config, "dflash_config", None
-        )
-        if dflash_config is not None:
-            use_aux_hidden_state = dflash_config.get("use_aux_hidden_state", True)
         return use_aux_hidden_state
 
     def validate_same_kv_cache_group(self, kv_cache_config: KVCacheConfig) -> None:

@@ -50,6 +50,9 @@ class DFlashProposer(SpecDecodeBaseProposer):
             self.max_positions + 1, device=device, dtype=torch.int32
         )
 
+        # For DFlash we use the input embeddings to embed the mask token
+        self.parallel_drafting_hidden_state_tensor = None
+
     @override
     def set_inputs_first_pass(
         self,
@@ -217,3 +220,13 @@ class DFlashProposer(SpecDecodeBaseProposer):
                 " Consider using a different attention backend, such as FlashAttention."
             )
         return per_layer_attention_metadata
+
+    @override
+    def _get_eagle3_use_aux_hidden_state_from_config(self):
+        use_aux_hidden_state = True
+        dflash_config = getattr(
+            self.draft_model_config.hf_config, "dflash_config", None
+        )
+        if dflash_config is not None:
+            use_aux_hidden_state = dflash_config.get("use_aux_hidden_state", True)
+        return use_aux_hidden_state

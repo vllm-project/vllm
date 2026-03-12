@@ -375,14 +375,6 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
         )
         self.draft_id_to_target_id = None
 
-        # DFlash mask_hidden is already projected to hidden_size
-        # (unlike EAGLE3 where it stores all aux hidden states)
-        self.register_buffer(
-            "mask_hidden",
-            torch.zeros(1, self.config.hidden_size),
-            persistent=False,
-        )
-
     def embed_input_ids(
         self,
         input_ids: torch.Tensor,
@@ -435,17 +427,15 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
         model_weights = {}
         includes_draft_id_mapping = False
         includes_embed_tokens = False
-        includes_mask_hidden = False
         for name, loaded_weight in weights:
+            assert "mask_hidden" not in name, (
+                "DFlash should use mask_token_id to embed the padding hidden state"
+            )
             if "t2d" in name:
                 continue
             if "d2t" in name:
                 name = name.replace("d2t", "draft_id_to_target_id")
                 includes_draft_id_mapping = True
-            elif "mask_hidden" in name:
-                self.mask_hidden.copy_(loaded_weight.view(1, -1))
-                includes_mask_hidden = True
-                continue
             elif "lm_head" not in name:
                 name = "model." + name
             if "embed_tokens" in name:
@@ -453,7 +443,7 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
             model_weights[name] = loaded_weight
             process_eagle_weight(self, name)
 
-        skip_substrs = ["mask_hidden"]
+        skip_substrs = []
         if not includes_draft_id_mapping:
             skip_substrs.append("draft_id_to_target_id")
         if not includes_embed_tokens:
@@ -466,15 +456,3 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
             skip_substrs=skip_substrs,
         )
         loader.load_weights(model_weights.items())
-
-        if not includes_mask_hidden:
-            dflash_config = getattr(self.config, "dflash_config", {})
-            mask_token_id = dflash_config.get("mask_token_id", None)
-            if mask_token_id is None:
-                raise ValueError(
-                    "mask_hidden not found in weights and "
-                    "mask_token_id not set in dflash_config."
-                )
-            # Defer initialization until after embeddings are shared
-            # from the target model (see eagle.py load_model).
-            self._mask_token_id = mask_token_id
