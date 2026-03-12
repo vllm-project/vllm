@@ -405,7 +405,7 @@ class TritonAttentionImpl(AttentionImpl):
                 f"num_heads: {num_heads}."
             )
         self.use_alibi_sqrt = use_alibi_sqrt
-        self.supports_quant_query_input = current_platform.is_cuda()
+        self.supports_quant_query_input = False
 
     def forward(
         self,
