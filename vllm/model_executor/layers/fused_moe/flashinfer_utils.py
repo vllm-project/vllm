@@ -374,4 +374,4 @@ def prepare_fp8_moe_layer_for_fi(
         w13_scale.clamp_(min=_FI_CUTLASS_MIN_BLOCK_SCALE)
         w2_scale.clamp_(min=_FI_CUTLASS_MIN_BLOCK_SCALE)
 
-    return w13, w2, w13_scale
+    return w13, w2, w13_scale, w2_scale
