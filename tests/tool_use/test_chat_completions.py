@@ -215,7 +215,7 @@ async def test_max_tokens_with_tool_choice_required(
         model=model_name,
         tools=[WEATHER_TOOL],
         tool_choice="required",
-        max_tokens=5,
+        max_tokens=1,
     )
     # When `tool_choice="required"` and the tokens of `tools` exceed `max_tokens`,
     # both `tool_calls` and `content` should be empty.
