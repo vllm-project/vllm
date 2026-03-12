@@ -114,6 +114,12 @@ class Qwen3ReasoningParser(BaseThinkingReasoningParser):
         prompt_is_reasoning_end and routes deltas as content without
         calling this method.
         """
+        # If thinking is disabled, we should treat everything as content.
+        # But per docstring, serving layer might skip this. If we get here
+        # and thinking is disabled, we must return content.
+        if not self.thinking_enabled:
+            return DeltaMessage(content=delta_text)
+
         # Strip <think> from delta if present (old template / edge case
         # where the model generates <think> itself).
         if self.start_token_id in delta_token_ids:
