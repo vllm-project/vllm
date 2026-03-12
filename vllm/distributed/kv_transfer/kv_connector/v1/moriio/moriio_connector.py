@@ -281,6 +281,28 @@ class MoRIIOConnectorScheduler:
         self.transfer_id_to_request_id: dict[TransferId, ReqId] = {}
         self.request_id_to_transfer_id: dict[ReqId, TransferId] = {}
 
+    def map_request_id(self, request_id: ReqId, transfer_id: TransferId):
+        self.transfer_id_to_request_id[transfer_id] = request_id
+        self.request_id_to_transfer_id[request_id] = transfer_id
+
+    def unmap_request_id(self, request_id: ReqId):
+        if request_id in self.request_id_to_transfer_id:
+            transfer_id = self.request_id_to_transfer_id[request_id]
+            del self.request_id_to_transfer_id[request_id]
+            if transfer_id in self.transfer_id_to_request_id:
+                del self.transfer_id_to_request_id[transfer_id]
+            else:
+                logger.warning(
+                    "transfer id not in transfer_id_to_request_id lookup"
+                    "table. there is likely a bug!"
+                )
+        else:
+            logger.warning(
+                "Could not find %s  in transfer_id_to_request_id"
+                "lookup table.  This could lead to a possible hang.",
+                request_id,
+            )
+
     def get_num_new_matched_tokens(
         self,
         request: "Request",
@@ -349,8 +371,7 @@ class MoRIIOConnectorScheduler:
             return
         transfer_id = params["transfer_id"]
         request_id = request.request_id
-        self.transfer_id_to_request_id[transfer_id] = request_id
-        self.request_id_to_transfer_id[request_id] = transfer_id
+        self.map_request_id(request_id, transfer_id)
         if params.get("do_remote_decode"):
             local_block_ids = blocks.get_block_ids()[0]
             self._reqs_need_save[request.request_id] = (request, local_block_ids)
@@ -522,22 +543,7 @@ class MoRIIOConnectorScheduler:
         """
 
         request_id = request.request_id
-        if request_id in self.request_id_to_transfer_id:
-            transfer_id = self.request_id_to_transfer_id[request_id]
-            del self.request_id_to_transfer_id[request_id]
-            if transfer_id in self.transfer_id_to_request_id:
-                del self.transfer_id_to_request_id[transfer_id]
-            else:
-                logger.warning(
-                    "Transfer id not in transfer_id_to_request_id lookup"
-                    "table. There is likely a bug!"
-                )
-        else:
-            logger.warning(
-                "Could not find %s  in transfer_id_to_request_id"
-                "lookup table.  This could lead to a possible hang.",
-                request_id,
-            )
+        self.unmap_request_id(request_id)
 
         params = request.kv_transfer_params
         logger.debug(
