@@ -165,6 +165,14 @@ class TensorIpcReceiver:
                             if not tensors:
                                 del self._request_to_tensors[handle.request_id]
 
+                    logger.debug(
+                        "Received tensor %s for request %s "
+                        "(shape=%s, device=%s) via IPC queue (shared memory)",
+                        handle.tensor_id,
+                        handle.request_id,
+                        tensor.shape,
+                        tensor.device,
+                    )
                     return tensor
 
             # Release lock while waiting on queue (important to avoid

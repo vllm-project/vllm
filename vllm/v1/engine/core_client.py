@@ -634,14 +634,6 @@ class MPClient(EngineCoreClient):
             # Store tensor queues for routing
             self.resources.tensor_queues = tensor_queues
 
-            # Create input and output sockets.
-            self.input_socket = self.resources.input_socket = make_zmq_socket(
-                self.ctx, input_address, zmq.ROUTER, bind=True
-            )
-            self.resources.output_socket = make_zmq_socket(
-                self.ctx, output_address, zmq.PULL
-            )
-
             parallel_config = vllm_config.parallel_config
             dp_size = parallel_config.data_parallel_size
             dp_rank = parallel_config.data_parallel_index

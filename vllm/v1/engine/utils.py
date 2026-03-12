@@ -13,7 +13,6 @@ from typing import TYPE_CHECKING, Any
 from unittest.mock import patch
 
 import msgspec
-import torch.multiprocessing as torch_mp
 import zmq
 
 from vllm import envs
@@ -857,7 +856,8 @@ def launch_core_engines(
         vllm_config.model_config.multimodal_config is not None
         and vllm_config.model_config.multimodal_config.mm_tensor_ipc == "torch_shm"
     ):
-        addresses.tensor_queues = [torch_mp.Queue()]
+        mp_ctx = get_mp_context()
+        addresses.tensor_queues = [mp_ctx.Queue()]
 
     # Run the DP Coordinator process with rank 0 when in online DP mode.
     # The coordinator is needed for:
