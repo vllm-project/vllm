@@ -505,31 +505,32 @@ class TritonAttentionImpl(AttentionImpl):
         descale_shape = (cu_seqlens_q.shape[0] - 1, key_cache.shape[2])
         mm_prefix_range_tensor = attn_metadata.mm_prefix_range_tensor
 
-        # For INT8 per-token scale, pass scale caches directly; k_descale unused.
-        # For INT8 per-head scale (_k_scale is [num_kv_heads]), pass the 1-D
-        # tensor directly so unified_attention can detect the granularity.
-        # For FP8 / INT8 per-tensor, expand to (num_seqs, num_kv_heads) as usual.
         int8_k_scale_cache = None
         int8_v_scale_cache = None
-        if (
-            self.kv_cache_dtype.startswith("int8")
-            and self._int8_k_scale_cache is not None
-        ):
-            # Per-token path: scale caches hold the dequant scales; k_descale unused.
-            int8_k_scale_cache = self._int8_k_scale_cache
-            int8_v_scale_cache = self._int8_v_scale_cache
-            k_descale = None
-            v_descale = None
-        elif (
-            self.kv_cache_dtype.startswith("int8")
-            and layer._k_scale.ndim == 1
-            and layer._k_scale.numel() > 1
-        ):
-            k_descale = layer._k_scale  # [num_kv_heads]
-            v_descale = layer._v_scale  # [num_kv_heads]
-        else:
+        if self.kv_cache_dtype.startswith("int8"):
+            # INT8: three sub-cases, all keep k_descale/v_descale separate from FP8.
+            if self._int8_k_scale_cache is not None:
+                # Per-token path: dynamic per-(token,head) scales in cache buffers.
+                int8_k_scale_cache = self._int8_k_scale_cache
+                int8_v_scale_cache = self._int8_v_scale_cache
+                k_descale = None
+                v_descale = None
+            elif layer._k_scale.ndim == 1 and layer._k_scale.numel() > 1:
+                # Per-head path: 1-D [num_kv_heads] tensor from checkpoint.
+                k_descale = layer._k_scale
+                v_descale = layer._v_scale
+            else:
+                # Per-tensor path: scalar from checkpoint, expand for kernel.
+                k_descale = layer._k_scale.expand(descale_shape)
+                v_descale = layer._v_scale.expand(descale_shape)
+        elif self.kv_cache_dtype.startswith("fp8"):
+            # FP8: always per-tensor scalar scale, expanded to (num_seqs, num_kv_heads).
             k_descale = layer._k_scale.expand(descale_shape)
             v_descale = layer._v_scale.expand(descale_shape)
+        else:
+            # FP16 / auto: no KV quantization, no scales needed.
+            k_descale = None
+            v_descale = None
 
         unified_attention(
             q=query[:num_actual_tokens],

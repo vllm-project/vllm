@@ -105,7 +105,8 @@ def kernel_unified_attention_2d(
     num_seqs: tl.int32,
     BLOCK_M: tl.constexpr,  # int
     USE_FP8: tl.constexpr,  # bool
-    USE_QUANTIZED_KV: tl.constexpr,  # bool, True for fp8/int8 KV cache
+    USE_FP8_KV: tl.constexpr,  # bool, True only for fp8 KV cache
+    USE_INT8_KV: tl.constexpr,  # bool, True only for int8 KV cache
     INT8_PER_HEAD_SCALE: tl.constexpr = False,  # bool, True for int8 per-head scale
     FP8_MIN: tl.constexpr = float8_info.min,
     FP8_MAX: tl.constexpr = float8_info.max,
@@ -270,30 +271,36 @@ def kernel_unified_attention_2d(
             other=0.0,
         )
 
-        if USE_QUANTIZED_KV:
-            if K_load.dtype.is_fp8():
-                # FP8 KV: use native fp8 in the dot product
+        if USE_FP8_KV:
+            # FP8 KV cache — two sub-cases based on query dtype:
+            if Q.dtype.is_fp8():
+                # Both Q and K are fp8: Triton handles the dot natively.
                 K = K_load
             else:
-                # INT8 KV: dequantize with appropriate scale granularity
-                if INT8_PER_TOKEN_SCALE:
-                    # Per-(token,head) scale stored in scale cache
-                    k_scale_idx = (
-                        physical_block_idx * stride_ks_blk
-                        + (seq_offset % BLOCK_SIZE) * stride_ks_slot
-                        + kv_head_idx * stride_ks_head
-                    )
-                    k_token_scales = tl.load(
-                        k_scale_cache_ptr + k_scale_idx, mask=tile_mask, other=1.0
-                    )
-                    K = (K_load.to(tl.float32) * k_token_scales[None, :]).to(Q.dtype)
-                elif INT8_PER_HEAD_SCALE:
-                    k_scale_val = tl.load(k_scale + kv_head_idx)
-                    K = (K_load.to(tl.float32) * k_scale_val).to(Q.dtype)
-                else:
-                    k_scale_val = tl.load(k_scale)
-                    K = (K_load.to(tl.float32) * k_scale_val).to(Q.dtype)
+                # Q is bf16/fp16 (e.g. ROCm without query quantization):
+                # dequantize K to Q's dtype using the per-tensor fp8 scale.
+                K = (K_load.to(tl.float32) * tl.load(k_scale)).to(Q.dtype)
+        elif USE_INT8_KV:
+            # INT8 KV cache — three sub-cases by scale granularity:
+            if INT8_PER_TOKEN_SCALE:
+                # Per-(token, head) dynamic scale stored in scale cache.
+                k_scale_idx = (
+                    physical_block_idx * stride_ks_blk
+                    + (seq_offset % BLOCK_SIZE) * stride_ks_slot
+                    + kv_head_idx * stride_ks_head
+                )
+                k_token_scales = tl.load(
+                    k_scale_cache_ptr + k_scale_idx, mask=tile_mask, other=1.0
+                )
+                K = (K_load.to(tl.float32) * k_token_scales[None, :]).to(Q.dtype)
+            elif INT8_PER_HEAD_SCALE:
+                k_scale_val = tl.load(k_scale + kv_head_idx)
+                K = (K_load.to(tl.float32) * k_scale_val).to(Q.dtype)
+            else:
+                k_scale_val = tl.load(k_scale)
+                K = (K_load.to(tl.float32) * k_scale_val).to(Q.dtype)
         else:
+            # FP16 / auto: no quantization, pass through directly.
             K = K_load
 
         # V : (TILE_SIZE, HEAD_SIZE)
@@ -303,29 +310,34 @@ def kernel_unified_attention_2d(
             other=0.0,
         )
 
-        if USE_QUANTIZED_KV:
-            if V_load.dtype.is_fp8():
-                # FP8 KV: use native fp8 in the dot product
+        if USE_FP8_KV:
+            # FP8 KV cache — two sub-cases based on query dtype:
+            if Q.dtype.is_fp8():
+                # Both Q and V are fp8: Triton handles the dot natively.
                 V = V_load
             else:
-                # INT8 KV: dequantize with appropriate scale granularity
-                if INT8_PER_TOKEN_SCALE:
-                    v_scale_idx = (
-                        physical_block_idx * stride_vs_blk
-                        + (seq_offset % BLOCK_SIZE) * stride_vs_slot
-                        + kv_head_idx * stride_vs_head
-                    )
-                    v_token_scales = tl.load(
-                        v_scale_cache_ptr + v_scale_idx, mask=tile_mask, other=1.0
-                    )
-                    V = (V_load.to(tl.float32) * v_token_scales[:, None]).to(Q.dtype)
-                elif INT8_PER_HEAD_SCALE:
-                    v_scale_val = tl.load(v_scale + kv_head_idx)
-                    V = (V_load.to(tl.float32) * v_scale_val).to(Q.dtype)
-                else:
-                    v_scale_val = tl.load(v_scale)
-                    V = (V_load.to(tl.float32) * v_scale_val).to(Q.dtype)
+                # Q is bf16/fp16: dequantize V using the per-tensor fp8 scale.
+                V = (V_load.to(tl.float32) * tl.load(v_scale)).to(Q.dtype)
+        elif USE_INT8_KV:
+            # INT8 KV cache — three sub-cases by scale granularity:
+            if INT8_PER_TOKEN_SCALE:
+                v_scale_idx = (
+                    physical_block_idx * stride_vs_blk
+                    + (seq_offset % BLOCK_SIZE) * stride_vs_slot
+                    + kv_head_idx * stride_vs_head
+                )
+                v_token_scales = tl.load(
+                    v_scale_cache_ptr + v_scale_idx, mask=tile_mask, other=1.0
+                )
+                V = (V_load.to(tl.float32) * v_token_scales[:, None]).to(Q.dtype)
+            elif INT8_PER_HEAD_SCALE:
+                v_scale_val = tl.load(v_scale + kv_head_idx)
+                V = (V_load.to(tl.float32) * v_scale_val).to(Q.dtype)
+            else:
+                v_scale_val = tl.load(v_scale)
+                V = (V_load.to(tl.float32) * v_scale_val).to(Q.dtype)
         else:
+            # FP16 / auto: no quantization, pass through directly.
             V = V_load
 
         # Compute attention mask: causal by default (key <= query)
@@ -496,7 +508,8 @@ def kernel_unified_attention_3d(
     num_seqs: tl.int32,
     BLOCK_M: tl.constexpr,  # int
     NUM_SEGMENTS_PER_SEQ: tl.constexpr,  # int
-    USE_QUANTIZED_KV: tl.constexpr,  # bool, True for fp8/int8 KV cache
+    USE_FP8_KV: tl.constexpr,  # bool, True only for fp8 KV cache
+    USE_INT8_KV: tl.constexpr,  # bool, True only for int8 KV cache
     USE_MM_PREFIX: tl.constexpr,  # bool
     MAX_MM_RANGES: tl.constexpr,  # int
     mm_prefix_range_ptr,  # [num_seqs] - prefix length for each sequence
@@ -671,30 +684,36 @@ def kernel_unified_attention_3d(
             other=0.0,
         )
 
-        if USE_QUANTIZED_KV:
-            if K_load.dtype.is_fp8():
-                # FP8 KV: use native fp8 in the dot product
+        if USE_FP8_KV:
+            # FP8 KV cache — two sub-cases based on query dtype:
+            if Q.dtype.is_fp8():
+                # Both Q and K are fp8: Triton handles the dot natively.
                 K = K_load
             else:
-                # INT8 KV: dequantize with appropriate scale granularity
-                if INT8_PER_TOKEN_SCALE:
-                    # Per-(token,head) scale stored in scale cache
-                    k_scale_idx = (
-                        physical_block_idx * stride_ks_blk
-                        + (seq_offset % BLOCK_SIZE) * stride_ks_slot
-                        + kv_head_idx * stride_ks_head
-                    )
-                    k_token_scales = tl.load(
-                        k_scale_cache_ptr + k_scale_idx, mask=tile_mask, other=1.0
-                    )
-                    K = (K_load.to(tl.float32) * k_token_scales[None, :]).to(Q.dtype)
-                elif INT8_PER_HEAD_SCALE:
-                    k_scale_val = tl.load(k_scale + kv_head_idx)
-                    K = (K_load.to(tl.float32) * k_scale_val).to(Q.dtype)
-                else:
-                    k_scale_val = tl.load(k_scale)
-                    K = (K_load.to(tl.float32) * k_scale_val).to(Q.dtype)
+                # Q is bf16/fp16 (e.g. ROCm without query quantization):
+                # dequantize K to Q's dtype using the per-tensor fp8 scale.
+                K = (K_load.to(tl.float32) * tl.load(k_scale)).to(Q.dtype)
+        elif USE_INT8_KV:
+            # INT8 KV cache — three sub-cases by scale granularity:
+            if INT8_PER_TOKEN_SCALE:
+                # Per-(token, head) dynamic scale stored in scale cache.
+                k_scale_idx = (
+                    physical_block_idx * stride_ks_blk
+                    + (seq_offset % BLOCK_SIZE) * stride_ks_slot
+                    + kv_head_idx * stride_ks_head
+                )
+                k_token_scales = tl.load(
+                    k_scale_cache_ptr + k_scale_idx, mask=tile_mask, other=1.0
+                )
+                K = (K_load.to(tl.float32) * k_token_scales[None, :]).to(Q.dtype)
+            elif INT8_PER_HEAD_SCALE:
+                k_scale_val = tl.load(k_scale + kv_head_idx)
+                K = (K_load.to(tl.float32) * k_scale_val).to(Q.dtype)
+            else:
+                k_scale_val = tl.load(k_scale)
+                K = (K_load.to(tl.float32) * k_scale_val).to(Q.dtype)
         else:
+            # FP16 / auto: no quantization, pass through directly.
             K = K_load
 
         # V : (TILE_SIZE, HEAD_SIZE)
@@ -704,29 +723,34 @@ def kernel_unified_attention_3d(
             other=0.0,
         )
 
-        if USE_QUANTIZED_KV:
-            if V_load.dtype.is_fp8():
-                # FP8 KV: use native fp8 in the dot product
+        if USE_FP8_KV:
+            # FP8 KV cache — two sub-cases based on query dtype:
+            if Q.dtype.is_fp8():
+                # Both Q and V are fp8: Triton handles the dot natively.
                 V = V_load
             else:
-                # INT8 KV: dequantize with appropriate scale granularity
-                if INT8_PER_TOKEN_SCALE:
-                    v_scale_idx = (
-                        physical_block_idx * stride_vs_blk
-                        + (seq_offset % BLOCK_SIZE) * stride_vs_slot
-                        + kv_head_idx * stride_vs_head
-                    )
-                    v_token_scales = tl.load(
-                        v_scale_cache_ptr + v_scale_idx, mask=tile_mask, other=1.0
-                    )
-                    V = (V_load.to(tl.float32) * v_token_scales[:, None]).to(Q.dtype)
-                elif INT8_PER_HEAD_SCALE:
-                    v_scale_val = tl.load(v_scale + kv_head_idx)
-                    V = (V_load.to(tl.float32) * v_scale_val).to(Q.dtype)
-                else:
-                    v_scale_val = tl.load(v_scale)
-                    V = (V_load.to(tl.float32) * v_scale_val).to(Q.dtype)
+                # Q is bf16/fp16: dequantize V using the per-tensor fp8 scale.
+                V = (V_load.to(tl.float32) * tl.load(v_scale)).to(Q.dtype)
+        elif USE_INT8_KV:
+            # INT8 KV cache — three sub-cases by scale granularity:
+            if INT8_PER_TOKEN_SCALE:
+                v_scale_idx = (
+                    physical_block_idx * stride_vs_blk
+                    + (seq_offset % BLOCK_SIZE) * stride_vs_slot
+                    + kv_head_idx * stride_vs_head
+                )
+                v_token_scales = tl.load(
+                    v_scale_cache_ptr + v_scale_idx, mask=tile_mask, other=1.0
+                )
+                V = (V_load.to(tl.float32) * v_token_scales[:, None]).to(Q.dtype)
+            elif INT8_PER_HEAD_SCALE:
+                v_scale_val = tl.load(v_scale + kv_head_idx)
+                V = (V_load.to(tl.float32) * v_scale_val).to(Q.dtype)
+            else:
+                v_scale_val = tl.load(v_scale)
+                V = (V_load.to(tl.float32) * v_scale_val).to(Q.dtype)
         else:
+            # FP16 / auto: no quantization, pass through directly.
             V = V_load
 
         # Compute attention mask: causal by default (key <= query)
@@ -1026,16 +1050,19 @@ def unified_attention(
 
     use_alibi_slopes = alibi_slopes is not None
     use_qq_bias = qq_bias is not None
-    # True when KV cache is quantized (fp8/int8); kernel dequantizes with scale
-    use_quantized_kv = k_descale is not None or k_scale_cache is not None
-    # True when INT8 uses per-(token,head) scale caches (highest quality).
+
+    # Detect KV cache type from the actual tensor dtype (set by caller via .view()).
+    # This is the authoritative signal — independent of which scale args are passed.
+    use_fp8_kv = k.dtype.is_floating_point() and k.element_size() == 1
+    use_int8_kv = k.dtype == torch.int8
+
+    # INT8 scale granularity — only meaningful when use_int8_kv is True.
+    # Per-token (highest quality): caller passes k_scale_cache, sets k_descale=None.
     int8_per_token_scale = k_scale_cache is not None
-    # True when INT8 KV uses per-head scales: k_descale is a 1-D tensor
-    # [num_kv_heads] (passed directly from triton_attn, NOT expand'd).
-    # Per-token scale takes priority; per-head is the fallback.
+    # Per-head: caller passes 1-D [num_kv_heads] k_descale, no scale cache.
     int8_per_head_scale = (
-        not int8_per_token_scale
-        and use_quantized_kv
+        use_int8_kv
+        and not int8_per_token_scale
         and k_descale is not None
         and k_descale.ndim == 1
         and k_descale.numel() > 1
@@ -1149,7 +1176,8 @@ def unified_attention(
             num_seqs=num_seqs,
             BLOCK_M=BLOCK_M,
             USE_FP8=output_scale is not None,
-            USE_QUANTIZED_KV=use_quantized_kv,
+            USE_FP8_KV=use_fp8_kv,
+            USE_INT8_KV=use_int8_kv,
             INT8_PER_HEAD_SCALE=int8_per_head_scale,
             INT8_PER_TOKEN_SCALE=int8_per_token_scale,
             k_scale_cache_ptr=k_scale_cache,
@@ -1212,7 +1240,8 @@ def unified_attention(
             num_seqs=num_seqs,
             BLOCK_M=BLOCK_M,
             NUM_SEGMENTS_PER_SEQ=num_par_softmax_segments,
-            USE_QUANTIZED_KV=use_quantized_kv,
+            USE_FP8_KV=use_fp8_kv,
+            USE_INT8_KV=use_int8_kv,
             INT8_PER_HEAD_SCALE=int8_per_head_scale,
             INT8_PER_TOKEN_SCALE=int8_per_token_scale,
             k_scale_cache_ptr=k_scale_cache,
