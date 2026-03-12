@@ -155,25 +155,27 @@ class ChunkGatedDeltaRule(CustomOp):
     def __init__(self) -> None:
         super().__init__()
         backend = envs.VLLM_GDN_PREFILL_BACKEND
-        use_flashinfer = (
+        supports_flashinfer = (
             current_platform.is_cuda() and current_platform.is_device_capability(90)
         )
 
         if backend == "flashinfer":
-            use_flashinfer = current_platform.is_cuda()
+            use_flashinfer = supports_flashinfer
             if not use_flashinfer:
                 logger.warning_once(
                     "VLLM_GDN_PREFILL_BACKEND=flashinfer is set but "
-                    "can not use this kernel on current platform.s "
+                    "cannot use this kernel on the current platform. "
                     "Falling back to Triton/FLA."
                 )
         elif backend == "triton":
             use_flashinfer = False
+        else:
+            use_flashinfer = supports_flashinfer
 
-        if use_flashinfer and backend == "auto":
-            logger.info_once(
-                "Using FlashInfer GDN prefill kernel on CUDA compute capability 90"
-            )
+        if use_flashinfer:
+            logger.info_once("Using FlashInfer GDN prefill kernel")
+        else:
+            logger.info_once("Using Triton/FLA GDN prefill kernel")
 
         self._forward_method = (
             self.forward_cuda if use_flashinfer else self.forward_native
