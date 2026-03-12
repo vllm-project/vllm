@@ -42,12 +42,14 @@ If work is duplicate/trivial busywork, **do not proceed**. Return a short explan
 ### Environment setup
 
 ```bash
-# Always use `uv` for Python environment management:
+# Install uv if you don't have it already:
 curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Always use `uv` for Python environment management:
 uv venv
 source .venv/bin/activate
 
-# Always install `pre-commit` and its hooks:
+# Always make sure `pre-commit` and its hooks are installed:
 uv pip install pre-commit
 pre-commit install
 ```
