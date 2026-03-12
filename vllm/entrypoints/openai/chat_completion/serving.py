@@ -1507,6 +1507,7 @@ class OpenAIServingChat(OpenAIServing):
 
             elif request.tool_choice and request.tool_choice == "required":
                 tool_call_class_items = []
+                tool_calls = tool_calls or []
                 for idx, tool_call in enumerate(tool_calls):
                     # Use native ID if available,
                     # otherwise generate ID with correct id_type
