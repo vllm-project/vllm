@@ -41,6 +41,10 @@ class WorkerProfiler(ABC):
         self._profiling_for_iters = 0
         self._running = False
 
+    @property
+    def active(self) -> bool:
+        return self._active
+
     @abstractmethod
     def _start(self) -> None:
         """Start the profiler."""
