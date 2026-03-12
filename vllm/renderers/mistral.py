@@ -90,6 +90,8 @@ class MistralRenderer(BaseRenderer[MistralTokenizer]):
             messages,
             self.model_config,
             content_format="string",
+            media_io_kwargs=params.media_io_kwargs,
+            mm_processor_kwargs=params.mm_processor_kwargs,
         )
 
         prompt_raw = safe_apply_chat_template(
@@ -116,6 +118,8 @@ class MistralRenderer(BaseRenderer[MistralTokenizer]):
             messages,
             self.model_config,
             content_format="string",
+            media_io_kwargs=params.media_io_kwargs,
+            mm_processor_kwargs=params.mm_processor_kwargs,
         )
 
         prompt_raw = await self._apply_chat_template_async(

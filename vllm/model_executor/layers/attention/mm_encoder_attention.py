@@ -6,7 +6,7 @@ import numpy as np
 import torch
 
 from vllm.logger import init_logger
-from vllm.model_executor.custom_op import CustomOp
+from vllm.model_executor.custom_op import CustomOp, get_oot_class_by_name
 from vllm.model_executor.models.vision import get_vit_attn_backend
 from vllm.utils.math_utils import round_up
 from vllm.v1.attention.backends.fa_utils import get_flash_attn_version
@@ -119,16 +119,24 @@ class MMEncoderAttention(CustomOp):
         return max_seqlen
 
     @classmethod
-    def maybe_compute_sequence_lengths(
+    def maybe_compute_seq_lens(
         cls,
         attn_backend: AttentionBackendEnum,
         cu_seqlens: np.ndarray,
-    ) -> np.ndarray | None:
+        device: torch.device,
+    ) -> torch.Tensor | None:
+        if (oot_class := get_oot_class_by_name(cls.__name__)) is not None:
+            return oot_class.maybe_compute_seq_lens(attn_backend, cu_seqlens, device)  # type: ignore[attr-defined]
+
         if attn_backend != AttentionBackendEnum.FLASHINFER:
             return None
+
         sequence_lengths = cu_seqlens[1:] - cu_seqlens[:-1]
         sequence_lengths = add_padding_to_seqlens(
             sequence_lengths, len(sequence_lengths), 0
+        )
+        sequence_lengths = torch.from_numpy(sequence_lengths).to(
+            device, non_blocking=True
         )
         return sequence_lengths
 
@@ -139,24 +147,31 @@ class MMEncoderAttention(CustomOp):
         cu_seqlens: np.ndarray,
         hidden_size: int,
         tp_size: int,
-    ) -> np.ndarray:
-        if attn_backend != AttentionBackendEnum.FLASHINFER:
-            return cu_seqlens
+        device: torch.device,
+    ) -> torch.Tensor:
+        if (oot_class := get_oot_class_by_name(cls.__name__)) is not None:
+            return oot_class.maybe_recompute_cu_seqlens(  # type: ignore[attr-defined]
+                attn_backend, cu_seqlens, hidden_size, tp_size, device
+            )
 
-        batch_size = len(cu_seqlens) - 1
-        scale = hidden_size // tp_size
-        cu_seqlens = cu_seqlens * scale
+        if attn_backend == AttentionBackendEnum.FLASHINFER:
+            batch_size = len(cu_seqlens) - 1
+            scale = hidden_size // tp_size
+            cu_seqlens = cu_seqlens * scale
 
-        cu_seqlens_qko = cu_seqlens
-        cu_seqlens_v = cu_seqlens * 3
+            cu_seqlens_qko = cu_seqlens
+            cu_seqlens_v = cu_seqlens * 3
 
-        cu_seqlens_qko = add_padding_to_seqlens(
-            cu_seqlens_qko, batch_size, cu_seqlens_qko[-1]
-        )
-        cu_seqlens_v = add_padding_to_seqlens(
-            cu_seqlens_v, batch_size, cu_seqlens_v[-1]
-        )
-        return np.concatenate([cu_seqlens_qko, cu_seqlens_v])
+            cu_seqlens_qko = add_padding_to_seqlens(
+                cu_seqlens_qko, batch_size, cu_seqlens_qko[-1]
+            )
+            cu_seqlens_v = add_padding_to_seqlens(
+                cu_seqlens_v, batch_size, cu_seqlens_v[-1]
+            )
+            cu_seqlens = np.concatenate([cu_seqlens_qko, cu_seqlens_v])
+
+        cu_seqlens = torch.from_numpy(cu_seqlens).to(device, non_blocking=True)
+        return cu_seqlens
 
     def __init__(
         self,
@@ -204,7 +219,9 @@ class MMEncoderAttention(CustomOp):
         }
 
         self._fa_version = (
-            get_flash_attn_version() if self.is_flash_attn_backend else None
+            get_flash_attn_version(head_size=head_size)
+            if self.is_flash_attn_backend
+            else None
         )
 
         if self.attn_backend == AttentionBackendEnum.FLASHINFER:

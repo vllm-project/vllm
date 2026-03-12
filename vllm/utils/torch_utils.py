@@ -624,7 +624,7 @@ def cuda_device_count_stateless() -> int:
     """Get number of CUDA devices, caching based on the value of
     CUDA_VISIBLE_DEVICES at the time of call.
 
-    This should be used instead of torch.cuda.device_count()
+    This should be used instead of torch.accelerator.device_count()
     unless CUDA_VISIBLE_DEVICES has already been set to the desired
     value."""
 
@@ -738,6 +738,41 @@ def is_torch_equal(target: str) -> bool:
         return _is_torch_equal(target)
     except Exception:
         return Version(importlib.metadata.version("torch")) == Version(target)
+
+
+HAS_OPAQUE_TYPE = is_torch_equal_or_newer("2.11.0.dev")
+
+if HAS_OPAQUE_TYPE:
+    from torch._opaque_base import OpaqueBase
+else:
+    OpaqueBase = object  # type: ignore[misc, assignment]
+
+
+class ModuleName(OpaqueBase):  # type: ignore[misc]
+    """Wraps a module name string for use as a torch opaque type.
+
+    When torch >= 2.11, this is registered as a hoisted value-type opaque
+    object so that torch.compile lifts it as a graph input instead of baking
+    it as a constant.  This avoids per-layer recompilation for MOE ops.
+    """
+
+    def __init__(self, value: str):
+        self.value = value
+
+    def __eq__(self, other):
+        return isinstance(other, ModuleName) and self.value == other.value
+
+    def __hash__(self):
+        return hash(self.value)
+
+    def __fx_repr__(self):
+        return (f"ModuleName({self.value!r})", {ModuleName})
+
+
+if HAS_OPAQUE_TYPE:
+    from torch._library.opaque_object import register_opaque_type
+
+    register_opaque_type(ModuleName, typ="value", hoist=True)
 
 
 # Supports xccl with PyTorch versions >= 2.8.0.dev for XPU platform

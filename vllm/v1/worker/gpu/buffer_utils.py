@@ -84,6 +84,8 @@ class UvaBackedTensor:
     def __init__(
         self, size: int | Sequence[int], dtype: torch.dtype, max_concurrency: int = 2
     ):
+        self.dtype = dtype
+
         # Source of truth
         self.cpu = torch.zeros(size, dtype=dtype, device="cpu", pin_memory=False)
         self.np = self.cpu.numpy()

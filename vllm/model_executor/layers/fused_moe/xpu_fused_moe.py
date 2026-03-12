@@ -23,7 +23,7 @@ if current_platform.is_xpu():
     from vllm_xpu_kernels.fused_moe_interface import xpu_fused_moe
 
 
-class XPUExperts(mk.FusedMoEPermuteExpertsUnpermute):
+class XPUExperts(mk.FusedMoEExpertsModular):
     def __init__(
         self,
         moe_config: FusedMoEConfig,
@@ -78,9 +78,6 @@ class XPUExperts(mk.FusedMoEPermuteExpertsUnpermute):
             (kFp8StaticTensorSym, kFp8DynamicTensorSym),
         ]
         return (weight_key, activation_key) in SUPPORTED_W_A
-
-    def supports_chunking(self) -> bool:
-        return False
 
     def supports_expert_map(self) -> bool:
         return True
