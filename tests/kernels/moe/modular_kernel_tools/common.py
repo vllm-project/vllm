@@ -37,7 +37,6 @@ from vllm.utils.import_utils import (
     has_deep_ep,
     has_deep_gemm,
     has_mori,
-    has_pplx,
 )
 
 from .mk_objects import (
@@ -67,7 +66,7 @@ class Config:
     quant_config: TestMoEQuantConfig | None
 
     prepare_finalize_type: mk.FusedMoEPrepareAndFinalize
-    fused_experts_type: mk.FusedMoEPermuteExpertsUnpermute
+    fused_experts_type: mk.FusedMoEExperts
 
     fused_moe_chunk_size: int | None
     world_size: int
@@ -206,10 +205,6 @@ class Config:
         info = expert_info(self.fused_experts_type)
         return info.needs_deep_gemm
 
-    def needs_pplx(self):
-        info = prepare_finalize_info(self.prepare_finalize_type)
-        return info.backend == "pplx"
-
     def needs_deep_ep(self):
         info = prepare_finalize_info(self.prepare_finalize_type)
         return (
@@ -290,8 +285,6 @@ class Config:
             return False, "Needs DeepEP, but DeepEP not available."
         if self.needs_deep_gemm() and not has_deep_gemm():
             return False, "Needs DeepGEMM, but DeepGEMM not available."
-        if self.needs_pplx() and not has_pplx():  # noqa: SIM103
-            return False, "Needs PPLX, but PPLX not available."
         if self.needs_aiter() and not has_aiter():  # noqa: SIM103
             return False, "Needs Aiter, but Aiter not available."
         if self.needs_mori() and not has_mori():  # noqa: SIM103
@@ -329,7 +322,7 @@ class WeightTensors:
         )
 
     def to_current_device(self):
-        device = torch.cuda.current_device()
+        device = torch.accelerator.current_device_index()
         self.w1 = self.w1.to(device=device)
         self.w2 = self.w2.to(device=device)
 
@@ -399,7 +392,8 @@ class RankTensors:
         Return hidden_states
         """
         m, k, dtype = (config.M, config.K, config.dtype)
-        a = torch.randn((m, k), device=torch.cuda.current_device(), dtype=dtype) / 15.0
+        device = torch.accelerator.current_device_index()
+        a = torch.randn((m, k), device=device, dtype=dtype) / 15.0
 
         if config.quant_dtype is None:
             return a, None
@@ -435,9 +429,10 @@ class RankTensors:
         topk_weights, topk_ids, _ = fused_topk(hidden_states, score, topk, False)
 
         # distribute topk_ids evenly
+        device = torch.accelerator.current_device_index()
         for mi in range(m):
             topk_ids[mi] = torch.randperm(config.E)[:topk]
-        topk_ids = topk_ids.to(device=torch.cuda.current_device())
+        topk_ids = topk_ids.to(device=device)
 
         expert_map = None
         if config.world_size > 1 and config.supports_expert_map():
@@ -447,9 +442,7 @@ class RankTensors:
             s = pgi.rank * num_local_experts
             e = s + num_local_experts
             expert_map[s:e] = torch.tensor(list(range(num_local_experts)))
-            expert_map = expert_map.to(
-                device=torch.cuda.current_device(), dtype=torch.int32
-            )
+            expert_map = expert_map.to(device=device, dtype=torch.int32)
 
         return RankTensors(
             hidden_states=hidden_states,
@@ -565,7 +558,9 @@ def reference_moe_impl(
 
 def _make_gscale(num_experts: int) -> torch.Tensor:
     return torch.ones(
-        (num_experts,), device=torch.cuda.current_device(), dtype=torch.float32
+        (num_experts,),
+        device=torch.accelerator.current_device_index(),
+        dtype=torch.float32,
     )
 
 
@@ -573,7 +568,7 @@ def make_modular_kernel(
     config: Config,
     vllm_config: VllmConfig,
     quant_config: FusedMoEQuantConfig,
-) -> mk.FusedMoEModularKernel:
+) -> mk.FusedMoEKernel:
     def next_power_of_2(x):
         import math
 
@@ -620,7 +615,7 @@ def make_modular_kernel(
         config.N,
     )
 
-    modular_kernel = mk.FusedMoEModularKernel(
+    modular_kernel = mk.FusedMoEKernel(
         prepare_finalize=prepare_finalize,
         fused_experts=fused_experts,
         inplace=False,
@@ -674,6 +669,7 @@ def run_modular_kernel(
         "w2": rank_weights.w2,
         "topk_weights": rank_tensors.topk_weights,
         "topk_ids": topk_ids,
+        "activation": MoEActivation.SILU,
         "expert_map": rank_tensors.expert_map,
         "global_num_experts": config.E,
         "apply_router_weight_on_input": config.topk == 1
@@ -691,6 +687,6 @@ def run_modular_kernel(
         num_tokens=num_tokens,
         num_tokens_across_dp=num_tokens_across_dp,
     ):
-        out = mk.forward(**mk_kwargs)
+        out = mk.apply(**mk_kwargs)
 
     return out

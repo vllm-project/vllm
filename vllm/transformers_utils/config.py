@@ -24,7 +24,10 @@ from transformers.utils import CONFIG_NAME as HF_CONFIG_NAME
 from vllm import envs
 from vllm.logger import init_logger
 from vllm.transformers_utils.repo_utils import is_mistral_model_repo
-from vllm.transformers_utils.utils import parse_safetensors_file_metadata
+from vllm.transformers_utils.utils import (
+    parse_safetensors_file_metadata,
+    without_trust_remote_code,
+)
 
 from .config_parser_base import ConfigParserBase
 from .gguf_utils import (
@@ -74,12 +77,17 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     afmoe="AfmoeConfig",
     bagel="BagelConfig",
     chatglm="ChatGLMConfig",
+    colmodernvbert="ColModernVBertConfig",
+    colqwen3="ColQwen3Config",
+    ops_colqwen3="OpsColQwen3Config",
+    qwen3_vl_nemotron_embed="Qwen3VLNemotronEmbedConfig",
     deepseek_vl_v2="DeepseekVLV2Config",
     deepseek_v32="DeepseekV3Config",
     flex_olmo="FlexOlmoConfig",
     funaudiochat="FunAudioChatConfig",
     hunyuan_vl="HunYuanVLConfig",
     isaac="IsaacConfig",
+    kimi_k2="DeepseekV3Config",  # Kimi K2 uses same architecture as DeepSeek V3
     kimi_linear="KimiLinearConfig",
     kimi_vl="KimiVLConfig",
     kimi_k25="KimiK25Config",
@@ -93,6 +101,7 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     speculators="SpeculatorsConfig",
     nemotron="NemotronConfig",
     olmo3="Olmo3Config",
+    olmo_hybrid="OlmoHybridConfig",
     ovis="OvisConfig",
     ultravox="UltravoxConfig",
     step3_vl="Step3VLConfig",
@@ -100,6 +109,8 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     step3p5="Step3p5Config",
     qwen3_asr="Qwen3ASRConfig",
     qwen3_next="Qwen3NextConfig",
+    qwen3_5="Qwen3_5Config",
+    qwen3_5_moe="Qwen3_5MoeConfig",
     lfm2_moe="Lfm2MoeConfig",
     tarsier2="Tarsier2Config",
 )
@@ -133,11 +144,12 @@ class HFConfigParser(ConfigParserBase):
         **kwargs,
     ) -> tuple[dict, PretrainedConfig]:
         kwargs["local_files_only"] = huggingface_hub.constants.HF_HUB_OFFLINE
+        trust_remote_code |= kwargs.get("trust_remote_code", False)
+        kwargs = without_trust_remote_code(kwargs)
         config_dict, _ = PretrainedConfig.get_config_dict(
             model,
             revision=revision,
             code_revision=code_revision,
-            trust_remote_code=trust_remote_code,
             **kwargs,
         )
         # Use custom model class if it's in our registry
@@ -150,7 +162,16 @@ class HFConfigParser(ConfigParserBase):
             )
         # Allow hf_overrides to override model_type before checking _CONFIG_REGISTRY
         if (hf_overrides := kwargs.pop("hf_overrides", None)) is not None:
-            model_type = hf_overrides.get("model_type", model_type)
+            if isinstance(hf_overrides, dict) and "model_type" in hf_overrides:
+                model_type = hf_overrides["model_type"]
+            elif callable(hf_overrides):
+                # If hf_overrides doesn't modify model_type, it will be passed straight
+                # through and remain unchanged by this elif block
+                dummy_model_type = f"dummy_{model_type}"
+                dummy_kwargs = dict(architectures=[""], model_type=dummy_model_type)
+                dummy_config = PretrainedConfig(**dummy_kwargs)
+                dummy_model_type = hf_overrides(dummy_config).model_type
+                model_type = dummy_model_type.removeprefix("dummy_")
 
         if model_type in _CONFIG_REGISTRY:
             config_class = _CONFIG_REGISTRY[model_type]
@@ -218,7 +239,7 @@ class MistralConfigParser(ConfigParserBase):
                 model,
                 revision=revision,
                 code_revision=code_revision,
-                **kwargs,
+                **without_trust_remote_code(kwargs),
             )
         except OSError:  # Not found
             hf_config_dict = {}
@@ -514,8 +535,7 @@ def maybe_override_with_speculators(
     config_dict, _ = PretrainedConfig.get_config_dict(
         model if gguf_model_repo is None else gguf_model_repo,
         revision=revision,
-        trust_remote_code=trust_remote_code,
-        **kwargs,
+        **without_trust_remote_code(kwargs),
     )
     speculators_config = config_dict.get("speculators_config")
 
@@ -624,7 +644,7 @@ def get_config(
         trust_remote_code=trust_remote_code,
         revision=revision,
         code_revision=code_revision,
-        hf_overrides=hf_overrides_kw,
+        hf_overrides=hf_overrides_kw or hf_overrides_fn,
         **kwargs,
     )
 
@@ -1097,7 +1117,7 @@ def get_safetensors_params_metadata(
     revision: str | None = None,
 ) -> dict[str, Any]:
     """
-    Get the safetensors metadata for remote model repository.
+    Get the safetensors parameters metadata for remote/local model repository.
     """
     full_metadata = {}
     if (model_path := Path(model)).exists():

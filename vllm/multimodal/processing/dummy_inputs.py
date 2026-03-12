@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
-from dataclasses import dataclass, field
 from typing import Generic, TypeVar
 
 import numpy as np
@@ -18,25 +17,12 @@ from vllm.config.multimodal import (
 from vllm.logger import init_logger
 
 from ..inputs import MultiModalDataDict
-from ..parse import MultiModalDataItems
 from .context import BaseProcessingInfo
+from .inputs import ProcessorInputs
 
 _I = TypeVar("_I", bound=BaseProcessingInfo)
 
 logger = init_logger(__name__)
-
-
-@dataclass
-class ProcessorInputs:
-    """
-    Represents the keyword arguments to
-    [`vllm.multimodal.processing.BaseMultiModalProcessor.apply`][].
-    """
-
-    prompt: str | list[int]
-    mm_items: MultiModalDataItems
-    hf_processor_mm_kwargs: Mapping[str, object] = field(default_factory=dict)
-    tokenization_kwargs: Mapping[str, object] = field(default_factory=dict)
 
 
 class BaseDummyInputsBuilder(ABC, Generic[_I]):
@@ -62,8 +48,7 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
-        mm_processor_kwargs: Mapping[str, object] | None = None,
+        mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
         """
         Build the multimodal input which, after processing, results in
@@ -83,8 +68,7 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
-        mm_processor_kwargs: Mapping[str, object] | None = None,
+        mm_options: Mapping[str, BaseDummyOptions],
     ) -> ProcessorInputs:
         """
         Build the input which, after processing, results in
@@ -94,24 +78,16 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
             seq_len: Sequence length
             mm_counts: Count of items per modality
             mm_options: Configurable options per modality (optional)
-            mm_processor_kwargs: Additional keyword arguments
-                                for hf_processor (optional)
         """
         dummy_text = self.get_dummy_text(mm_counts)
-        dummy_mm_data = self.get_dummy_mm_data(
-            seq_len,
-            mm_counts,
-            mm_options,
-            mm_processor_kwargs=mm_processor_kwargs,
-        )
+        dummy_mm_data = self.get_dummy_mm_data(seq_len, mm_counts, mm_options)
         dummy_mm_items = self.info.parse_mm_data(dummy_mm_data, validate=False)
 
         tokenization_kwargs = {"truncation": False}
 
         return ProcessorInputs(
             prompt=dummy_text,
-            mm_items=dummy_mm_items,
-            hf_processor_mm_kwargs=mm_processor_kwargs or {},
+            mm_data_items=dummy_mm_items,
             tokenization_kwargs=tokenization_kwargs,
         )
 

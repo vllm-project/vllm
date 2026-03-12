@@ -84,7 +84,7 @@ Since simple RTN does not require data for weight quantization and the activatio
 Install `vllm` and `lm-evaluation-harness` for evaluation:
 
 ```bash
-pip install vllm "lm-eval[api]>=0.4.9.2"
+pip install vllm "lm-eval[api]>=0.4.11"
 ```
 
 Load and run the model in `vllm`:
@@ -114,7 +114,7 @@ Here's an example of the resulting scores:
 
 ```text
 |Tasks|Version|     Filter     |n-shot|  Metric   |   |Value|   |Stderr|
-|-----|------:|----------------|-----:|-----------|---|----:|---|-----:|
+| --- |------:| -------------- |-----:| --------- | - |----:| - |-----:|
 |gsm8k|      3|flexible-extract|     5|exact_match|↑  |0.768|±  |0.0268|
 |     |       |strict-match    |     5|exact_match|↑  |0.768|±  |0.0268|
 ```

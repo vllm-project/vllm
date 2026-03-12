@@ -52,14 +52,21 @@ class MockModelConfig:
     generation_config: str = "auto"
     skip_tokenizer_init: bool = False
     is_encoder_decoder: bool = False
+    is_multimodal_model: bool = False
 
     def get_diff_sampling_param(self):
         return self.diff_sampling_param or {}
 
 
 @dataclass
+class MockParallelConfig:
+    _api_process_rank: int = 0
+
+
+@dataclass
 class MockVllmConfig:
     model_config: MockModelConfig
+    parallel_config: MockParallelConfig
 
 
 class MockLoRAResolver(LoRAResolver):
@@ -95,8 +102,8 @@ def register_mock_resolver():
 def _build_renderer(model_config: MockModelConfig):
     _, tokenizer_name, _, kwargs = tokenizer_args_from_config(model_config)
 
-    return HfRenderer(
-        MockVllmConfig(model_config),
+    return HfRenderer.from_config(
+        MockVllmConfig(model_config, parallel_config=MockParallelConfig()),
         tokenizer_kwargs={**kwargs, "tokenizer_name": tokenizer_name},
     )
 

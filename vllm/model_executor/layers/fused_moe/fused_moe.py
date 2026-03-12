@@ -98,19 +98,19 @@ def fused_moe_kernel_gptq_awq(
     # moving by 1 element in a particular dimension. E.g. `stride_am` is
     # how much to increase `a_ptr` by to get the element one row down
     # (A has M rows).
-    stride_am: tl.int64,
-    stride_ak: tl.int64,
-    stride_be: tl.int64,
-    stride_bk: tl.int64,
-    stride_bn: tl.int64,
-    stride_cm: tl.int64,
-    stride_cn: tl.int64,
-    stride_bse: tl.int64,
-    stride_bsk: tl.int64,
-    stride_bsn: tl.int64,
-    stride_bze: tl.int64,
-    stride_bzk: tl.int64,
-    stride_bzn: tl.int64,
+    stride_am,
+    stride_ak,
+    stride_be,
+    stride_bk,
+    stride_bn,
+    stride_cm,
+    stride_cn,
+    stride_bse,
+    stride_bsk,
+    stride_bsn,
+    stride_bze,
+    stride_bzk,
+    stride_bzn,
     block_k_diviable: tl.constexpr,
     group_size: tl.constexpr,
     # Meta-parameters
@@ -175,7 +175,8 @@ def fused_moe_kernel_gptq_awq(
     if pid_m * BLOCK_SIZE_M >= num_tokens_post_padded:
         return
     offs_token_id = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M).to(tl.int64)
-    offs_token = tl.load(sorted_token_ids_ptr + offs_token_id)
+    # Cast to int64 to prevent overflow in stride*offset products
+    offs_token = tl.load(sorted_token_ids_ptr + offs_token_id).to(tl.int64)
     token_mask = offs_token < num_valid_tokens
 
     off_experts = tl.load(expert_ids_ptr + pid_m).to(tl.int64)
@@ -332,20 +333,20 @@ def fused_moe_kernel(
     # moving by 1 element in a particular dimension. E.g. `stride_am` is
     # how much to increase `a_ptr` by to get the element one row down
     # (A has M rows).
-    stride_am: tl.int64,
-    stride_ak: tl.int64,
-    stride_be: tl.int64,
-    stride_bk: tl.int64,
-    stride_bn: tl.int64,
-    stride_cm: tl.int64,
-    stride_cn: tl.int64,
-    stride_asm: tl.int64,
-    stride_ask: tl.int64,
-    stride_bse: tl.int64,
-    stride_bsk: tl.int64,
-    stride_bsn: tl.int64,
-    stride_bbe: tl.int64,  # bias expert stride
-    stride_bbn: tl.int64,  # bias N stride
+    stride_am,
+    stride_ak,
+    stride_be,
+    stride_bk,
+    stride_bn,
+    stride_cm,
+    stride_cn,
+    stride_asm,
+    stride_ask,
+    stride_bse,
+    stride_bsk,
+    stride_bsn,
+    stride_bbe,  # bias expert stride
+    stride_bbn,  # bias N stride
     # Block size for block-wise quantization
     group_n: tl.constexpr,
     group_k: tl.constexpr,
@@ -426,6 +427,9 @@ def fused_moe_kernel(
             pid_m,  # first element = pid_m
             num_valid_tokens,  # remaining elements = constant
         )
+    # Cast to int64 to prevent overflow in stride*offset products
+    # (e.g. stride_cm * offs_token can exceed int32 for large token counts)
+    offs_token = offs_token.to(tl.int64)
 
     token_mask = offs_token < num_valid_tokens
 
@@ -1229,28 +1233,31 @@ def get_default_config(
     block_shape: list[int] | None = None,
 ) -> dict[str, int]:
     if vllm_is_batch_invariant():
-        config = {
+        return {
             "BLOCK_SIZE_M": 64,
             "BLOCK_SIZE_N": 64,
             "BLOCK_SIZE_K": 32,
             "GROUP_SIZE_M": 8,
             "SPLIT_K": 1,
         }
-        return config
+
+    # num_stages can cause triton.runtime.errors.OutOfResources on ROCm.
+    num_stages_rocm = 2
 
     if dtype == "fp8_w8a8" and block_shape is not None:
-        # Block-wise quant: BLOCK_SIZE_N must be divisible by block_shape[0]
-        # BLOCK_SIZE_K must be divisible by block_shape[1]
-        # num_stages=3 can cause triton.runtime.errors.OutOfResources
-        # on ROCm, set it to 2 instead.
+        # Block-wise quant: tile sizes are constrained by block_shape.
+        # Use a small M tile for decode-like batches where tokens are
+        # spread thin across experts. Larger batches benefit from
+        # GROUP_SIZE_M > 1 because the per-block scales add memory
+        # traffic that benefits from L2 tile reuse.
         config = {
-            "BLOCK_SIZE_M": 64,
+            "BLOCK_SIZE_M": 16 if M <= 64 else 64,
             "BLOCK_SIZE_N": block_shape[0],
             "BLOCK_SIZE_K": block_shape[1],
-            "GROUP_SIZE_M": 32,
+            "GROUP_SIZE_M": 1 if M <= 16 else 32,
             "SPLIT_K": 1,
             "num_warps": 4,
-            "num_stages": 3 if not current_platform.is_rocm() else 2,
+            "num_stages": 3 if not current_platform.is_rocm() else num_stages_rocm,
         }
     elif dtype in ["int4_w4a16", "int8_w8a16"] and block_shape is not None:
         # moe wna16 kernels
@@ -1266,21 +1273,52 @@ def get_default_config(
             config = {"BLOCK_SIZE_M": 32, "GROUP_SIZE_M": 1, "SPLIT_K": 1}
         else:
             config = {"BLOCK_SIZE_M": 64, "GROUP_SIZE_M": 1, "SPLIT_K": 1}
-    elif M <= E:
-        config = {
-            "BLOCK_SIZE_M": 16,
-            "BLOCK_SIZE_N": 32,
-            "BLOCK_SIZE_K": 64,
-            "GROUP_SIZE_M": 1,
-            "SPLIT_K": 1,
-        }
     else:
+        # General defaults for bf16/fp16 and fp8 per-tensor.
+        # Tile sizes scale with batch: small batches are memory-bound
+        # (favor tall-K tiles), large batches are compute-bound (favor
+        # large M/N tiles with more warps).
+        if M <= 32:
+            block_m = 16
+        elif M <= 96:
+            block_m = 32
+        elif M <= 512:
+            block_m = 64
+        else:
+            block_m = 128
+
+        block_n = 64 if M <= 64 else 128
+
+        # Small batches benefit from longer reduction (larger K tile),
+        # while large batches prefer more output parallelism.
+        # FP8 elements are half-width so larger K tiles are always cheap.
+        block_k = 128 if dtype == "fp8_w8a8" or M <= 64 else 64
+
+        # Grouping adjacent M-blocks lets them share weight tiles in L2.
+        # Only helps when there are enough M-blocks per expert to group;
+        # with many experts each one sees few tokens so grouping is useless.
+        tokens_per_expert = M // max(E, 1)
+        group_m = 16 if tokens_per_expert > 128 else 1
+
+        # Large batches have enough blocks to saturate the GPU, so we
+        # use more warps per block to increase arithmetic intensity.
+        num_warps = 4 if M <= 128 else 8
+
+        if current_platform.is_rocm():
+            num_stages = num_stages_rocm
+        elif M <= 32:
+            num_stages = 4
+        else:
+            num_stages = 3
+
         config = {
-            "BLOCK_SIZE_M": 64,
-            "BLOCK_SIZE_N": 64,
-            "BLOCK_SIZE_K": 32,
-            "GROUP_SIZE_M": 8,
+            "BLOCK_SIZE_M": block_m,
+            "BLOCK_SIZE_N": block_n,
+            "BLOCK_SIZE_K": block_k,
+            "GROUP_SIZE_M": group_m,
             "SPLIT_K": 1,
+            "num_warps": num_warps,
+            "num_stages": num_stages,
         }
     return config
 
@@ -1698,7 +1736,7 @@ def fused_experts_impl(
     intermediate_cache3 = cache13[: M * top_k_num * K].view(M, top_k_num, K)
 
     # This needs separate memory since it's used concurrently with cache1
-    activation_out_dim = mk.FusedMoEPermuteExpertsUnpermute.adjust_N_for_activation(
+    activation_out_dim = mk.FusedMoEExpertsModular.adjust_N_for_activation(
         N, activation_enum
     )
     intermediate_cache2 = torch.empty(
@@ -1886,7 +1924,7 @@ def fused_experts_impl(
     return out_hidden_states
 
 
-class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
+class TritonExperts(mk.FusedMoEExpertsModular):
     """Triton-based fused MoE expert implementation."""
 
     def __init__(
@@ -1902,11 +1940,11 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     @staticmethod
     def _supports_current_device() -> bool:
-        return current_platform.is_cuda_alike()
+        return current_platform.is_cuda_alike() or current_platform.is_xpu()
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:
-        return False
+        return True
 
     @staticmethod
     def _supports_quant_scheme(
@@ -1921,8 +1959,10 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         else:
             is_rocm_on_gfx9 = False
 
-        device_supports_fp8 = is_rocm_on_gfx9 or (
-            p.is_cuda() and p.has_device_capability((8, 9))
+        device_supports_fp8 = (
+            is_rocm_on_gfx9
+            or (p.is_cuda() and p.has_device_capability((8, 9)))
+            or p.is_xpu()
         )
 
         if not device_supports_fp8:
@@ -1945,6 +1985,9 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
             MoEActivation.GELU,
             MoEActivation.SWIGLUOAI,
             MoEActivation.SWIGLUSTEP,
+            MoEActivation.SILU_NO_MUL,
+            MoEActivation.GELU_NO_MUL,
+            MoEActivation.RELU2_NO_MUL,
         ]
 
     @staticmethod

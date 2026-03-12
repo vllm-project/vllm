@@ -175,7 +175,7 @@ class DPMetadata:
     # Get the cumulative tokens across sequence parallel ranks.
     # In this case the input to the MoEs will be distributed w.r.t both
     # DP and TP rank.
-    # When sp_size==1, this is just the cummulative num tokens across DP.
+    # When sp_size==1, this is just the cumulative num tokens across DP.
     def cu_tokens_across_sp(self, sp_size: int) -> torch.Tensor:
         num_tokens_across_sp_cpu = (
             self.num_tokens_across_dp_cpu - 1 + sp_size
@@ -241,7 +241,7 @@ class ForwardContext:
     additional_kwargs: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
-        assert self.cudagraph_runtime_mode.valid_runtime_modes(), (
+        assert self.cudagraph_runtime_mode.is_valid_runtime_mode(), (
             f"Invalid cudagraph runtime mode: {self.cudagraph_runtime_mode}"
         )
 
@@ -347,7 +347,6 @@ def set_forward_context(
                 num_tokens_unpadded=num_tokens,
                 parallel_config=vllm_config.parallel_config,
                 allow_microbatching=False,
-                allow_dp_padding=False,
             )
             assert num_tokens_across_dp is not None
         dp_metadata = DPMetadata.make(

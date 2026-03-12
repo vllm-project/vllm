@@ -38,11 +38,18 @@ class MockModelConfig:
     enable_prompt_embeds: bool = True
     skip_tokenizer_init: bool = False
     is_encoder_decoder: bool = False
+    is_multimodal_model: bool = False
+
+
+@dataclass
+class MockParallelConfig:
+    _api_process_rank: int = 0
 
 
 @dataclass
 class MockVllmConfig:
     model_config: MockModelConfig
+    parallel_config: MockParallelConfig
 
 
 @dataclass
@@ -77,28 +84,29 @@ def _build_renderer(
     _, tokenizer_name, _, kwargs = tokenizer_args_from_config(model_config)
 
     renderer = HfRenderer(
-        MockVllmConfig(model_config),
-        tokenizer_kwargs={**kwargs, "tokenizer_name": tokenizer_name},
+        MockVllmConfig(model_config, parallel_config=MockParallelConfig()),
+        tokenizer=(
+            None
+            if model_config.skip_tokenizer_init
+            else DummyTokenizer(
+                truncation_side=truncation_side,
+                max_chars_per_token=max_chars_per_token,
+            )
+        ),
     )
-
-    if not model_config.skip_tokenizer_init:
-        renderer._tokenizer = DummyTokenizer(
-            truncation_side=truncation_side,
-            max_chars_per_token=max_chars_per_token,
-        )
 
     return renderer
 
 
 def _preprocess_prompt(
-    mdoel_config: ModelConfig,
+    model_config: ModelConfig,
     prompt_or_prompts: SingletonPrompt | bytes | Sequence[SingletonPrompt | bytes],
 ):
     return [
         (
             prompt
             if isinstance(prompt, bytes)
-            else parse_model_prompt(mdoel_config, prompt)
+            else parse_model_prompt(model_config, prompt)
         )
         for prompt in prompt_to_seq(prompt_or_prompts)
     ]
@@ -269,7 +277,7 @@ class TestRenderPrompt:
 
         with pytest.raises(
             ValueError,
-            match="input characters and requested .* context length is only",
+            match="maximum context length is",
         ):
             renderer.tokenize_prompts(
                 prompts,
@@ -277,7 +285,7 @@ class TestRenderPrompt:
             )
 
         # Should not even attempt tokenization
-        assert renderer._tokenizer._captured_encode_kwargs == {}
+        assert renderer.tokenizer._captured_encode_kwargs == {}
 
     def test_text_max_length_exceeded_nonobvious(self):
         renderer = _build_renderer(MockModelConfig(), max_chars_per_token=2)
@@ -290,7 +298,7 @@ class TestRenderPrompt:
 
         with pytest.raises(
             ValueError,
-            match="input tokens and requested .* context length is only",
+            match="maximum context length is",
         ):
             renderer.tokenize_prompts(
                 prompts,
@@ -298,8 +306,8 @@ class TestRenderPrompt:
             )
 
         # Should only tokenize the first max_total_tokens + 1 tokens
-        assert renderer._tokenizer._captured_encode_kwargs["truncation"] is True
-        assert renderer._tokenizer._captured_encode_kwargs["max_length"] == 101
+        assert renderer.tokenizer._captured_encode_kwargs["truncation"] is True
+        assert renderer.tokenizer._captured_encode_kwargs["max_length"] == 101
 
     def test_token_max_length_exceeded(self):
         renderer = _build_renderer(MockModelConfig())
@@ -311,7 +319,7 @@ class TestRenderPrompt:
 
         with pytest.raises(
             ValueError,
-            match="input tokens and requested .* context length is only",
+            match="maximum context length is",
         ):
             renderer.tokenize_prompts(
                 prompts,
