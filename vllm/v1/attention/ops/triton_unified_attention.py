@@ -67,6 +67,7 @@ def kernel_unified_attention_2d(
     alibi_slopes_ptr,  # [num_query_heads]
     qq_bias_ptr,  # [num_query_tokens, num_query_tokens]
     scale,  # float32
+    q_scale,  # float32
     k_scale,  # float32
     v_scale,  # float32
     out_scale,  # float32
@@ -105,6 +106,7 @@ def kernel_unified_attention_2d(
     num_seqs: tl.int32,
     BLOCK_M: tl.constexpr,  # int
     USE_FP8: tl.constexpr,  # bool
+    USE_Q_SCALE: tl.constexpr,  # bool
     FP8_MIN: tl.constexpr = float8_info.min,
     FP8_MAX: tl.constexpr = float8_info.max,
 ):
@@ -150,6 +152,10 @@ def kernel_unified_attention_2d(
         mask=dim_mask[None, :] & query_mask_0[:, None] & query_mask_1[:, None],
         other=0.0,
     )
+
+    # If Q is stored in FP8, optionally dequantize it using q_scale.
+    if USE_Q_SCALE and Q.dtype.is_fp8():
+        Q = (Q.to(tl.float32) * tl.load(q_scale)).to(Q.dtype)
 
     block_table_offset = seq_idx * block_table_stride
 
@@ -260,10 +266,8 @@ def kernel_unified_attention_2d(
         )
 
         if K_load.dtype.is_fp8():
-            if Q.dtype.is_fp8():
-                K = K_load
-            else:
-                K = (K_load.to(tl.float32) * tl.load(k_scale)).to(Q.dtype)
+            # Always dequantize K using k_scale when stored in fp8.
+            K = (K_load.to(tl.float32) * tl.load(k_scale)).to(Q.dtype)
         else:
             K = K_load
 
@@ -275,10 +279,8 @@ def kernel_unified_attention_2d(
         )
 
         if V_load.dtype.is_fp8():
-            if Q.dtype.is_fp8():
-                V = V_load
-            else:
-                V = (V_load.to(tl.float32) * tl.load(v_scale)).to(Q.dtype)
+            # Always dequantize V using v_scale when stored in fp8.
+            V = (V_load.to(tl.float32) * tl.load(v_scale)).to(Q.dtype)
         else:
             V = V_load
 
@@ -418,6 +420,7 @@ def kernel_unified_attention_3d(
     alibi_slopes_ptr,  # [num_query_heads]
     qq_bias_ptr,  # [num_query_tokens, num_query_tokens]
     scale,  # float32
+    q_scale,  # float32
     k_scale,  # float32
     v_scale,  # float32
     softcap,  # float32
@@ -453,6 +456,7 @@ def kernel_unified_attention_3d(
     USE_MM_PREFIX: tl.constexpr,  # bool
     MAX_MM_RANGES: tl.constexpr,  # int
     mm_prefix_range_ptr,  # [num_seqs] - prefix length for each sequence
+    USE_Q_SCALE: tl.constexpr,  # bool
 ):
     q_block_global_idx = tl.program_id(0)
     kv_head_idx = tl.program_id(1)
@@ -507,6 +511,10 @@ def kernel_unified_attention_3d(
         mask=dim_mask[None, :] & query_mask_0[:, None] & query_mask_1[:, None],
         other=0.0,
     )
+
+    # If Q is stored in FP8, optionally dequantize it using q_scale.
+    if USE_Q_SCALE and Q.dtype.is_fp8():
+        Q = (Q.to(tl.float32) * tl.load(q_scale)).to(Q.dtype)
 
     block_table_offset = seq_idx * block_table_stride
 
@@ -615,10 +623,8 @@ def kernel_unified_attention_3d(
         )
 
         if K_load.dtype.is_fp8():
-            if Q.dtype.is_fp8():
-                K = K_load
-            else:
-                K = (K_load.to(tl.float32) * tl.load(k_scale)).to(Q.dtype)
+            # Always dequantize K using k_scale when stored in fp8.
+            K = (K_load.to(tl.float32) * tl.load(k_scale)).to(Q.dtype)
         else:
             K = K_load
 
@@ -630,10 +636,8 @@ def kernel_unified_attention_3d(
         )
 
         if V_load.dtype.is_fp8():
-            if Q.dtype.is_fp8():
-                V = V_load
-            else:
-                V = (V_load.to(tl.float32) * tl.load(v_scale)).to(Q.dtype)
+            # Always dequantize V using v_scale when stored in fp8.
+            V = (V_load.to(tl.float32) * tl.load(v_scale)).to(Q.dtype)
         else:
             V = V_load
 
@@ -913,7 +917,6 @@ def unified_attention(
     use_alibi_sqrt=False,
 ):
     assert causal, "Only causal attention is supported"
-    assert q_descale is None, "Q scales not supported"
 
     if sinks is not None:
         assert sinks.shape[0] == q.shape[1], "Sinks must be num_query_heads size"
@@ -938,6 +941,8 @@ def unified_attention(
     num_kv_heads = k.shape[2]
     num_queries_per_kv = num_query_heads // num_kv_heads
     head_size = q.shape[2]
+
+    use_q_scale = q_descale is not None
 
     BLOCK_M = (
         16 if num_queries_per_kv <= 16 else triton.next_power_of_2(num_queries_per_kv)
@@ -1002,6 +1007,7 @@ def unified_attention(
             alibi_slopes_ptr=alibi_slopes,
             qq_bias_ptr=qq_bias,
             scale=softmax_scale,
+            q_scale=q_descale,
             k_scale=k_descale,
             v_scale=v_descale,
             out_scale=1 / output_scale if output_scale is not None else 1.0,
@@ -1040,6 +1046,7 @@ def unified_attention(
             num_seqs=num_seqs,
             BLOCK_M=BLOCK_M,
             USE_FP8=output_scale is not None,
+            USE_Q_SCALE=use_q_scale,
         )
     else:
         kernel_unified_attention_3d[
@@ -1057,6 +1064,7 @@ def unified_attention(
             alibi_slopes_ptr=alibi_slopes,
             qq_bias_ptr=qq_bias,
             scale=softmax_scale,
+            q_scale=q_descale,
             k_scale=k_descale,
             v_scale=v_descale,
             softcap=softcap,
@@ -1078,6 +1086,7 @@ def unified_attention(
             USE_MM_PREFIX=use_mm_prefix,
             MAX_MM_RANGES=max_mm_ranges,
             mm_prefix_range_ptr=mm_prefix_range,
+            USE_Q_SCALE=use_q_scale,
             SLIDING_WINDOW=(1 + window_size[0]),
             stride_k_cache_0=k.stride(0),
             stride_k_cache_1=k.stride(1),
