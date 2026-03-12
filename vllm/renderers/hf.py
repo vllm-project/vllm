@@ -99,17 +99,19 @@ def _try_get_processor_chat_template(
     return None
 
 
-def resolve_chat_template(
-    tokenizer: HfTokenizer,
-    chat_template: str | None,
-    tools: list[dict[str, Any]] | None,
-    *,
-    model_config: "ModelConfig",
-) -> str | None:
+def resolve_chat_template(tokenizer, chat_template, tools, *, model_config):
     # 1st priority: The given chat template
     if chat_template is not None:
-        return chat_template
+        # FIX: Check if the tokenizer has named templates and if our string is one of those names
+        if hasattr(tokenizer, "chat_template") and isinstance(tokenizer.chat_template, dict):
+            if chat_template in tokenizer.chat_template:
+                # Return the actual Jinja string from the dictionary
+                return tokenizer.chat_template[chat_template]
 
+        # If it's not a dictionary key, assume it's already a Jinja string and return as-is
+        return chat_template
+    
+    # ... rest of the function remains the same
     # 2nd priority: AutoProcessor chat template, unless tool calling is enabled
     if tools is None:
         chat_template = _try_get_processor_chat_template(
