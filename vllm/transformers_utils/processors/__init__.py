@@ -12,6 +12,7 @@ import importlib
 
 __all__ = [
     "BagelProcessor",
+    "CohereASRProcessor",
     "DeepseekVLV2Processor",
     "FireRedASR2Processor",
     "FunASRProcessor",
@@ -29,6 +30,7 @@ __all__ = [
 
 _CLASS_TO_MODULE: dict[str, str] = {
     "BagelProcessor": "vllm.transformers_utils.processors.bagel",
+    "CohereASRProcessor": "vllm.transformers_utils.processors.cohere_asr",
     "DeepseekVLV2Processor": "vllm.transformers_utils.processors.deepseek_vl2",
     "FireRedASR2Processor": "vllm.transformers_utils.processors.fireredasr2",
     "FunASRProcessor": "vllm.transformers_utils.processors.funasr",

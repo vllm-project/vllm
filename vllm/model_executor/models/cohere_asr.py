@@ -712,12 +712,8 @@ class PositionalEncoding(torch.nn.Module):
         super().__init__()
         self.d_model = d_model
         self.xscale = xscale
-        self.dropout = torch.nn.Dropout(p=dropout_rate)
         self.max_len = max_len
-        if dropout_rate_emb > 0:
-            self.dropout_emb = nn.Dropout(dropout_rate_emb)
-        else:
-            self.dropout_emb = None
+        
 
     def create_pe(self, positions, dtype):
         pos_length = positions.size(0)
@@ -842,16 +838,6 @@ class ConformerFeedForward(nn.Module):
         x = self.dropout(x)
         x = self.linear2(x)
         return x
-
-    def reset_parameters_ff(self):
-        ffn1_max = self.d_model**-0.5
-        ffn2_max = self.d_ff**-0.5
-        with torch.no_grad():
-            nn.init.uniform_(self.linear1.weight, -ffn1_max, ffn1_max)
-            nn.init.uniform_(self.linear2.weight, -ffn2_max, ffn2_max)
-            if self.use_bias:
-                nn.init.uniform_(self.linear1.bias, -ffn1_max, ffn1_max)
-                nn.init.uniform_(self.linear2.bias, -ffn2_max, ffn2_max)
 
 
 class CausalConv1D(nn.Conv1d):
@@ -2167,6 +2153,8 @@ class CohereASRDummyInputsBuilder(BaseDummyInputsBuilder[CohereASRProcessingInfo
 
 
 class CohereASRMultiModalProcessor(EncDecMultiModalProcessor[CohereASRProcessingInfo]):
+    skip_decoder_start_token: bool = True
+
     @property
     def pad_dummy_encoder_prompt(self) -> bool:
         return True
