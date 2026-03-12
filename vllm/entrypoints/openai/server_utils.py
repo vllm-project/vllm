@@ -65,7 +65,7 @@ class AuthenticationMiddleware:
         return token_match
 
     def __call__(self, scope: Scope, receive: Receive, send: Send) -> Awaitable[None]:
-        if scope["type"] not in ("http", "websocket") or (scope["type"] == "http" and scope["method"] == "OPTIONS"):
+        if scope["type"] not in ("http", "websocket") or scope.get("method") == "OPTIONS":
             # scope["type"] can be "lifespan" or "startup" for example,
             # in which case we don't need to do anything
             return self.app(scope, receive, send)
