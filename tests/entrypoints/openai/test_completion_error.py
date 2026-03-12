@@ -252,3 +252,20 @@ def test_negative_prompt_token_ids_flat():
             prompt=[-1],
             max_tokens=10,
         )
+
+
+def test_echo_without_generation_maps_to_score_only_sampling():
+    request = CompletionRequest(
+        model=MODEL_NAME,
+        prompt="Test prompt",
+        echo=True,
+        logprobs=2,
+        max_tokens=0,
+    )
+
+    sampling_params = request.to_sampling_params(max_tokens=16)
+
+    assert sampling_params.score_only is True
+    assert sampling_params.max_tokens == 1
+    assert sampling_params.prompt_logprobs == 2
+    assert sampling_params.skip_reading_prefix_cache is True

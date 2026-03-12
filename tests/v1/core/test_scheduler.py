@@ -31,7 +31,12 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
 )
-from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
+from vllm.v1.outputs import (
+    DraftTokenIds,
+    KVConnectorOutput,
+    LogprobsTensors,
+    ModelRunnerOutput,
+)
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.structured_output import StructuredOutputManager
 
@@ -501,6 +506,68 @@ def test_stop_via_update_from_output():
     assert len(scheduler.running) == 1
     assert not requests[0].is_finished()
     assert list(requests[0].output_token_ids) == [EOS_TOKEN_ID, 10, 11]
+
+
+def test_score_only_request_finishes_without_generated_tokens():
+    scheduler = create_scheduler()
+    request = create_requests(num_requests=1, prompt_logprobs=1)[0]
+    request.sampling_params = request.sampling_params.clone()
+    request.sampling_params.score_only = True
+    request.score_only = True
+    scheduler.add_request(request)
+
+    scheduler_output = scheduler.schedule()
+    req_id = request.request_id
+
+    prompt_logprobs = LogprobsTensors.empty_cpu(
+        len(request.prompt_token_ids) - 1, request.sampling_params.prompt_logprobs + 1
+    )
+    model_output = ModelRunnerOutput(
+        req_ids=[req_id],
+        req_id_to_index={req_id: 0},
+        sampled_token_ids=[[]],
+        logprobs=None,
+        prompt_logprobs_dict={req_id: prompt_logprobs},
+        pooler_output=[],
+    )
+
+    engine_core_outputs = scheduler.update_from_output(scheduler_output, model_output)[0]
+
+    assert request.status == RequestStatus.FINISHED_LENGTH_CAPPED
+    assert request.request_id in scheduler.finished_req_ids
+    assert len(scheduler.running) == 0
+    assert engine_core_outputs[0].new_token_ids == []
+    assert engine_core_outputs[0].new_prompt_logprobs_tensors is prompt_logprobs
+
+
+def test_schedule_does_not_mix_score_only_with_generation():
+    scheduler = create_scheduler()
+    score_only_request = create_requests(num_requests=1, req_ids=["score"])[0]
+    score_only_request.sampling_params = score_only_request.sampling_params.clone()
+    score_only_request.sampling_params.score_only = True
+    score_only_request.score_only = True
+    generation_request = create_requests(num_requests=1, req_ids=["gen"])[0]
+
+    scheduler.add_request(score_only_request)
+    scheduler.add_request(generation_request)
+
+    scheduler_output = scheduler.schedule()
+    assert set(scheduler_output.num_scheduled_tokens) == {score_only_request.request_id}
+    assert len(scheduler.running) == 1
+    assert len(scheduler.waiting) == 1
+
+    model_output = ModelRunnerOutput(
+        req_ids=[score_only_request.request_id],
+        req_id_to_index={score_only_request.request_id: 0},
+        sampled_token_ids=[[]],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+    scheduler.update_from_output(scheduler_output, model_output)
+
+    next_output = scheduler.schedule()
+    assert set(next_output.num_scheduled_tokens) == {generation_request.request_id}
 
 
 def test_check_stop_min_tokens():

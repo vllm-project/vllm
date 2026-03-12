@@ -253,6 +253,9 @@ class SamplingParams(
     performing a deep copy. This should only be set when the params object
     is guaranteed to be dedicated to a single request and won't be modified
     in ways that would affect other uses."""
+    score_only: bool = False
+    """Internal flag for requests that should score an existing sequence
+    without generating any new tokens."""
 
     # The below fields are not supposed to be used as an input.
     # They are set in post_init.
@@ -320,6 +323,7 @@ class SamplingParams(
         allowed_token_ids: list[int] | None = None,
         extra_args: dict[str, Any] | None = None,
         skip_clone: bool = False,
+        score_only: bool = False,
         repetition_detection: RepetitionDetectionParams | None = None,
     ) -> "SamplingParams":
         if logit_bias is not None:
@@ -360,6 +364,7 @@ class SamplingParams(
             allowed_token_ids=allowed_token_ids,
             extra_args=extra_args,
             skip_clone=skip_clone,
+            score_only=score_only,
             repetition_detection=repetition_detection,
         )
 
@@ -415,7 +420,9 @@ class SamplingParams(
             # If prefix caching is enabled,
             # the output of prompt logprobs may less than n_prompt_tokens,
             # we need to skip reading cache at this request.
-            self.skip_reading_prefix_cache = self.prompt_logprobs is not None
+            self.skip_reading_prefix_cache = (
+                self.prompt_logprobs is not None or self.score_only
+            )
 
     def _verify_args(self) -> None:
         if not isinstance(self.n, int):

@@ -321,6 +321,7 @@ class CompletionRequest(OpenAIBaseModel):
             allowed_token_ids=self.allowed_token_ids,
             extra_args=extra_args or None,
             skip_clone=True,  # Created fresh per request, safe to skip clone
+            score_only=echo_without_generation,
             repetition_detection=self.repetition_detection,
         )
 

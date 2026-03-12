@@ -94,6 +94,7 @@ class Request:
 
         # P/D: Connector-specific KV transfer parameters.
         self.kv_transfer_params: dict[str, Any] | None = None
+        self.score_only = False
 
         if pooling_params is not None:
             # Pooling models.
@@ -102,6 +103,7 @@ class Request:
             # Generative models.
             assert sampling_params.max_tokens is not None
             self.max_tokens = sampling_params.max_tokens
+            self.score_only = sampling_params.score_only
             if self.structured_output_request is not None:
                 self.status = RequestStatus.WAITING_FOR_FSM
 
