@@ -10,38 +10,6 @@ from vllm.config.model import ModelConfig
 
 logger = logging.getLogger(__name__)
 
-
-# ---------------------------------------------------------------------------
-# Custom op for routing capture — traceable by torch.compile / Dynamo.
-#
-# Using a registered custom op instead of a Python lambda callback avoids
-# CUDA graph breaks.  On non-rank-0 workers the buffer attribute is None,
-# so the call site's `if buffer is not None` guard compiles to False and
-# the op is elided entirely — giving identical graph structure across all
-# TP ranks and preventing NCCL collective deadlocks on multi-node setups.
-# ---------------------------------------------------------------------------
-
-@torch.library.custom_op("vllm::capture_routing", mutates_args={"buffer"})
-def capture_routing_op(
-    buffer: torch.Tensor,
-    topk_ids: torch.Tensor,
-    layer_id: int,
-    batch_size: int,
-) -> None:
-    buffer[layer_id, :batch_size, :].copy_(
-        topk_ids[:batch_size].to(buffer.dtype), non_blocking=True
-    )
-
-
-@capture_routing_op.register_fake
-def _capture_routing_op_fake(
-    buffer: torch.Tensor,
-    topk_ids: torch.Tensor,
-    layer_id: int,
-    batch_size: int,
-) -> None:
-    pass
-
 _GB = 1024 * 1024 * 1024
 _MB = 1024 * 1024
 

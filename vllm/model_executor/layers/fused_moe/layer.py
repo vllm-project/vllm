@@ -553,15 +553,12 @@ class FusedMoE(CustomOp):
         moe_layer_id = FusedMoE._next_moe_layer_id
         FusedMoE._next_moe_layer_id += 1
         self.moe_layer_id = moe_layer_id
-        # Bind the device buffer directly on the router so that capture
-        # uses the custom op (torch.ops.vllm.capture_routing) instead of
-        # a Python lambda.  Non-rank-0 capturers return None from
-        # get_device_cache(), so the buffer stays None and the op is
-        # elided — keeping CUDA graph structure symmetric across ranks.
-        capturer = get_global_experts_capturer()
-        device_cache = capturer.get_device_cache()
-        if device_cache is not None:
-            self.router.set_capture_buffer(device_cache.buffer, moe_layer_id)
+        self.router.set_capture_fn(
+            lambda topk_ids, _lid=moe_layer_id:
+                get_global_experts_capturer().capture(
+                    layer_id=_lid, topk_ids=topk_ids
+                )
+        )
 
         self.moe_config: FusedMoEConfig = FusedMoEConfig(
             num_experts=self.global_num_experts,
