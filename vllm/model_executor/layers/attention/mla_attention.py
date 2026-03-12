@@ -323,29 +323,51 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
         if cache_config is not None:
             kv_cache_dtype = cache_config.cache_dtype
-            block_size = cache_config.block_size
             calculate_kv_scales = cache_config.calculate_kv_scales
         else:
             kv_cache_dtype = "auto"
-            block_size = 16
             calculate_kv_scales = False
         self.quant_config = quant_config
-
-        # Initialize KV cache quantization attributes
-        self.kv_cache_dtype = kv_cache_dtype
-        self.calculate_kv_scales = calculate_kv_scales
-        _init_kv_cache_quant(self, quant_config, prefix)
 
         dtype = torch.get_default_dtype()
         self.attn_backend = get_attn_backend(
             self.head_size,
             dtype,
             kv_cache_dtype,
-            block_size,
             use_mla=True,
             use_sparse=use_sparse,
             num_heads=self.num_heads,
         )
+
+        # FlashMLA Sparse Attention fp8 backend uses "fp8_ds_mla" kv-cache format
+        # Automatically convert fp8 kv-cache format to "fp8_ds_mla"
+        if (
+            self.attn_backend.get_name() == "FLASHMLA_SPARSE"
+            and kv_cache_dtype.startswith("fp8")
+            and kv_cache_dtype != "fp8_ds_mla"
+        ):
+            assert cache_config is not None
+            cache_config.cache_dtype = "fp8_ds_mla"
+            kv_cache_dtype = "fp8_ds_mla"
+            logger.info_once(
+                "Using DeepSeek's fp8_ds_mla KV cache format. To use standard "
+                "fp8 kv-cache format, please set `--attention-backend "
+                "FLASHINFER_MLA_SPARSE`"
+            )
+
+        if (
+            self.attn_backend.get_name() == "FLASHINFER_MLA_SPARSE"
+            and kv_cache_dtype.startswith("fp8")
+        ):
+            logger.info_once(
+                "Using standard fp8 KV cache format. To use DeepSeek's fp8_ds_mla "
+                "KV cache format, please set `--attention-backend FLASHMLA_SPARSE`"
+            )
+
+        # Initialize KV cache quantization attributes
+        self.kv_cache_dtype = kv_cache_dtype
+        self.calculate_kv_scales = calculate_kv_scales
+        _init_kv_cache_quant(self, quant_config, prefix)
 
         if (
             cache_config is not None
@@ -424,16 +446,23 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         )
 
         # Attributes for forward_impl method
-        self.chunked_prefill_workspace_size = (
-            MLACommonMetadataBuilder.determine_chunked_prefill_workspace_size(
-                get_current_vllm_config()
-            )
-        )
+        self._vllm_config = get_current_vllm_config()
+        self._chunked_prefill_workspace_size: int | None = None
         self._decode_concat_quant_fp8_op = _DecodeConcatQuantFP8(
             static=True,
             group_shape=GroupShape.PER_TENSOR,
             compile_native=True,
         )
+
+    @property
+    def chunked_prefill_workspace_size(self) -> int:
+        if self._chunked_prefill_workspace_size is None:
+            self._chunked_prefill_workspace_size = (
+                MLACommonMetadataBuilder.determine_chunked_prefill_workspace_size(
+                    self._vllm_config
+                )
+            )
+        return self._chunked_prefill_workspace_size
 
     def forward(
         self,
@@ -905,6 +934,10 @@ def unified_mla_kv_cache_update(
     the data dependency between them to ensure torch.compile preserves ordering.
     """
     forward_context = get_forward_context()
+    if forward_context.attn_metadata is None:
+        # Dummy/profile forwards should not update live KV cache pages.
+        return torch.empty(0, device=kv_c_normed.device, dtype=kv_c_normed.dtype)
+
     attn_layer = forward_context.no_compile_layers[layer_name]
     kv_cache = attn_layer.kv_cache[forward_context.virtual_engine]
 
@@ -1115,7 +1148,7 @@ class MLACommonBackend(AttentionBackend):
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
-        return [576]
+        return [320, 576]
 
     @classmethod
     def is_mla(cls) -> bool:
