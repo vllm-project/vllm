@@ -7,6 +7,7 @@ from contextlib import nullcontext
 from copy import deepcopy
 
 import depyf
+import torch
 from torch import fx
 from torch._ops import OpOverload, OpOverloadPacket
 from torch.fx._utils import lazy_format_graph_code
@@ -68,7 +69,10 @@ class TestBackend:
         self.graph_pre_compile = deepcopy(graph)
         from torch._inductor.compile_fx import compile_fx
 
-        with self.debug_ctx:
+        # Set no_grad here so it automatically applies to all tests.
+        # In the future we could instead set it at the model or test level,
+        # or add a fixture.
+        with self.debug_ctx, torch.no_grad():
             return compile_fx(
                 graph, example_inputs, config_patches=self.inductor_config
             )
