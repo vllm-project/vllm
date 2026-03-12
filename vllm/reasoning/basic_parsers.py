@@ -147,7 +147,7 @@ class BaseThinkingReasoningParser(ReasoningParser):
             reasoning_text = match.group(2)
             
             # Text before the start tag belongs to main content
-            content_parts.append(model_output[last_end:match.start()])
+            content_parts.append(model_output[last_end : match.start()])
             # Text inside tags belongs to reasoning
             reasoning_parts.append(reasoning_text.strip())
             # Update cursor
@@ -176,3 +176,4 @@ class BaseThinkingReasoningParser(ReasoningParser):
             if depth > 0:
                 count += 1
         return count
+        
