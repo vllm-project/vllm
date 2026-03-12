@@ -176,25 +176,14 @@ class KVConnectorOutput:
         finished_recving = _combine_non_none(
             set.union, [output.finished_recving for output in outputs]
         )
-        kv_connector_stats: KVConnectorStats | None = None
-        for output in outputs:
-            stats = output.kv_connector_stats
-            if stats is None:
-                continue
-            if kv_connector_stats is None:
-                kv_connector_stats = stats
-            else:
-                kv_connector_stats = kv_connector_stats.aggregate(stats)
-
-        kv_cache_events: KVConnectorKVEvents | None = None
-        for output in outputs:
-            events = output.kv_cache_events
-            if events is None:
-                continue
-            if kv_cache_events is None:
-                kv_cache_events = events
-            else:
-                kv_cache_events = kv_cache_events.merge(events)
+        kv_connector_stats = _combine_non_none(
+            lambda x, y: x.aggregate(y),
+            [output.kv_connector_stats for output in outputs],
+        )
+        kv_cache_events = _combine_non_none(
+            lambda x, y: x.merge(y),
+            [output.kv_cache_events for output in outputs],
+        )
         invalid_block_ids = _combine_non_none(
             set.union, [output.invalid_block_ids for output in outputs]
         )
