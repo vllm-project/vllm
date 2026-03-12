@@ -104,14 +104,18 @@ case "${1:-}" in
         echo "Cache key: ${CACHE_KEY}"
         echo "Cache path: ${CACHE_PATH}"
         echo ""
-
+        
         mkdir -p artifacts/rocm-base-wheels
-        aws s3 cp --recursive "${CACHE_PATH}" artifacts/rocm-base-wheels/
-
+        
+        # Use sync with include/exclude to only download .whl files
+        aws s3 sync "${CACHE_PATH}" artifacts/rocm-base-wheels/ \
+            --exclude "*" \
+            --include "*.whl"
+        
         echo ""
         echo "Downloaded wheels:"
         find artifacts/rocm-base-wheels -maxdepth 1 -name '*.whl' -exec ls -lh {} \;
-
+        
         WHEEL_COUNT=$(find artifacts/rocm-base-wheels -maxdepth 1 -name '*.whl' 2>/dev/null | wc -l)
         echo ""
         echo "Total: $WHEEL_COUNT wheels"
