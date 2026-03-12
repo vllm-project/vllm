@@ -135,15 +135,17 @@ class BaseThinkingReasoningParser(ReasoningParser):
         if not model_output or not self.start_token or not self.end_token:
             return None, model_output.strip()
 
-        # Constructing robust regex pattern to handle escaped variations (e.g., <\think>)
-        start_pattern = re.escape(self.start_token).replace(r"\<", r"\<\\?")
-        end_pattern = (
-            re.escape(self.end_token)
-            .replace(r"\<", r"\<\\?")
-            .replace(r"\/", r"\\?\/")
-        )
-        # Using finditer for safer substring extraction without relying on str.index()
-        matches = list(re.finditer(full_pattern, model_output, re.DOTALL))
+        # 构建正则模式，并处理转义（如 <\think>）
+    start_pattern = re.escape(self.start_token).replace(r"\<", r"\<\\?")
+    end_pattern = (
+        re.escape(self.end_token)
+        .replace(r"\<", r"\<\\?")
+        .replace(r"\/", r"\\?\/")
+    )
+    full_pattern = rf"({start_pattern})(.*?)({end_pattern})"
+
+    # 使用 finditer 进行匹配
+    matches = list(re.finditer(full_pattern, model_output, re.DOTALL))
         
         if not matches:
             return None, model_output.strip()
