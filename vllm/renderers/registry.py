@@ -80,13 +80,6 @@ def renderer_from_config(config: "VllmConfig", **kwargs):
         model_config, **kwargs
     )
 
-    # Override tokenizer_mode for Kimi-Audio models
-    if model_config.architecture == "MoonshotKimiaForCausalLM":
-        tokenizer_mode = "kimi_audio"
-        # Update model_config so other components (e.g., multimodal registry)
-        # also use the correct tokenizer mode
-        model_config.tokenizer_mode = "kimi_audio"
-
     if (
         model_config.tokenizer_mode == "auto"
         and model_config.model_impl == "terratorch"
