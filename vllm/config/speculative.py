@@ -546,6 +546,15 @@ class SpeculativeConfig:
                         self.draft_model_config.hf_config = eagle_config
                         self.update_arch_()
 
+                if self.method == "dflash":
+                    self.parallel_drafting = True
+                    if not self.disable_padded_drafter_batch:
+                        logger.info(
+                            "Disabling padded drafter batch for DFlash."
+                            " This will break async scheduling compatibility."
+                        )
+                        self.disable_padded_drafter_batch = True
+
                 if self.num_speculative_tokens is not None and hasattr(
                     self.draft_model_config.hf_config, "num_lookahead_tokens"
                 ):

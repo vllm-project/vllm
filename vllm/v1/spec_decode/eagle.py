@@ -84,19 +84,16 @@ class SpecDecodeBaseProposer:
         self.hidden_size = self.draft_model_config.get_hidden_size()
         self.inputs_embeds_size = self.draft_model_config.get_inputs_embeds_size()
 
-        # Unifying eagle, draft model, and parallel drafting support
-        # DFlash always uses parallel drafting (all tokens in one pass)
+        # Unifying eagle, draft model, and parallel drafting support.
+        # DFlash always uses parallel drafting (all tokens in one pass),
+        # but has an additional slot for the next_token_id (does not shift like EAGLE)
         self.parallel_drafting: bool = self.speculative_config.parallel_drafting
         self.extra_slots_per_request = (
             1 if not self.parallel_drafting else self.num_speculative_tokens
         )
         self.net_num_new_slots_per_request = self.extra_slots_per_request - (
-            1 if self.pass_hidden_states_to_model else 0
+            1 if (self.pass_hidden_states_to_model and self.method != "dflash") else 0
         )
-        if self.method == "dflash":
-            self.parallel_drafting = True
-            self.extra_slots_per_request = self.num_speculative_tokens
-            self.net_num_new_slots_per_request = self.extra_slots_per_request
         self.needs_extra_input_slots = self.net_num_new_slots_per_request > 0
 
         self.parallel_drafting_token_id: int = 0

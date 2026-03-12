@@ -1382,6 +1382,22 @@ class SupportsEagle3(SupportsEagleBase, Protocol):
         num_layers = len(parent_ref.model.layers)
         return (2, num_layers // 2, num_layers - 3)
 
+    def _get_default_eagle3_aux_hidden_state_layers(self) -> tuple[int]:
+        assert hasattr(self, "vllm_config"), (
+            "Must have self.vllm_config to call the default eagle3 layers helper"
+        )
+        assert isinstance(self.vllm_config, VllmConfig)
+        spec_config = self.vllm_config.speculative_config
+        if spec_config and spec_config.draft_model_config:
+            hf_config = spec_config.draft_model_config.hf_config
+            dflash_config = getattr(hf_config, "dflash_config", None)
+            if dflash_config and isinstance(dflash_config, dict):
+                layer_ids = dflash_config.get("target_layer_ids")
+                if layer_ids:
+                    return tuple(layer_ids)
+        num_layers = len(self.model.layers)
+        return (2, num_layers // 2, num_layers - 3)
+
 
 @overload
 def supports_eagle3(model: type[object]) -> TypeIs[type[SupportsEagle3]]: ...

@@ -1092,7 +1092,6 @@ def dflash_config():
             "model": draft_model,
             "num_speculative_tokens": 16,
             "max_model_len": 32768,
-            "disable_padded_drafter_batch": True,
         },
         max_model_len=32768,
         max_num_seqs=128,
@@ -1112,7 +1111,7 @@ def test_dflash_acceptance_rates(dflash_config):
     """
     spec_llm = LLM(**dflash_config)
 
-    max_prompts_per_dataset = 200  # mt-bench has 80, humaneval has 164, truncate gsm8k
+    max_prompts_per_dataset = 200  # mt-bench has 80, humaneval has 164, truncates gsm8k
 
     # All scores from Table 1 in https://arxiv.org/pdf/2602.06036
     expected_acceptance_lengths = {
@@ -1150,14 +1149,15 @@ def test_dflash_acceptance_rates(dflash_config):
             acceptance_lengths.append(acceptance_len)
 
         mean_acceptance_length = sum(acceptance_lengths) / len(acceptance_lengths)
+        expected_len = expected_len * 0.9
         print(
             f"DFlash acceptance_len for {dataset_name}: {mean_acceptance_length:.2f}"
-            f" (expected {expected_len})"
+            f" (expected at least {expected_len})"
         )
 
-        assert mean_acceptance_length >= expected_len * 0.9, (
+        assert mean_acceptance_length >= expected_len, (
             f"DFlash acceptance_len for {dataset_name} is below expected threshold:"
-            f"{mean_acceptance_length:.2f} < {mean_acceptance_length * 0.9:.2f}"
+            f"{mean_acceptance_length:.2f} < {expected_len:.2f}"
         )
 
     del spec_llm
