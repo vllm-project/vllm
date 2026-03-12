@@ -21,9 +21,17 @@ def mock_cuda_platform():
     """
 
     @contextmanager
-    def _mock_platform(is_cuda: bool = True, capability: tuple[int, int] | None = None):
+    def _mock_platform(
+        is_cuda: bool = True,
+        is_cuda_alike: bool | None = None,
+        capability: tuple[int, int] | None = None,
+    ):
         mock_platform = MagicMock()
         mock_platform.is_cuda.return_value = is_cuda
+        # is_cuda_alike defaults to is_cuda if not explicitly set
+        mock_platform.is_cuda_alike.return_value = (
+            is_cuda_alike if is_cuda_alike is not None else is_cuda
+        )
         if capability is not None:
             mock_platform.get_device_capability.return_value = DeviceCapability(
                 *capability
