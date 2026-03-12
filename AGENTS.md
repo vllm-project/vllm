@@ -73,7 +73,7 @@ All versions for test dependencies should be read from `requirements/test.txt`
 # Install bare minimum test dependencies:
 uv pip install pytest pytest-asyncio tblib
 
-# Install additional required dependencies from `requirements/test.txt` as needed:
+# Install additional test dependencies as needed, or install them all as follows:
 uv pip install -r requirements/test.txt
 
 # Run specific test from specific test file
