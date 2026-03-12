@@ -456,7 +456,7 @@ class OpenAISpeechToText(OpenAIServing):
 
         lora_request = self._maybe_get_adapters(request)
 
-(
+        (
             engine_prompts,
             duration_s,
             chunk_start_times,
