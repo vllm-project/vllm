@@ -394,6 +394,20 @@ class Platform:
         pass
 
     @classmethod
+    def apply_config_platform_defaults(cls, vllm_config: "VllmConfig") -> None:
+        """
+        Apply the platform-specific default values to the config.
+
+        This function is called during the initialization of global VllmConfig, after
+        parsing cli arguments.
+        It can modify the defaults of the config according to the platform. For example,
+        it can enable custom_ops based on the enabled features.
+
+        The config is passed by reference, so it can be modified in place.
+        """
+        pass
+
+    @classmethod
     def check_and_update_config(cls, vllm_config: "VllmConfig") -> None:
         """
         Check and update the configuration for the current platform.
@@ -405,6 +419,56 @@ class Platform:
         The config is passed by reference, so it can be modified in place.
         """
         pass
+
+    @classmethod
+    def update_block_size_for_backend(cls, vllm_config: "VllmConfig") -> None:
+        """
+        Ensure block_size is compatible with the attention backend.
+        """
+        from vllm.config.cache import CacheConfig
+
+        cache_config = vllm_config.cache_config
+        if cache_config.user_specified_block_size:
+            # User specified --block-size; keep it.
+            return
+
+        model_config = vllm_config.model_config
+        # model_config may be None during testing.
+        # Skip hybrid models — their block_size is managed by
+        # HybridAttentionMambaModelConfig.
+        if model_config is None or model_config.is_hybrid:
+            cache_config.block_size = CacheConfig.DEFAULT_BLOCK_SIZE
+            return
+
+        from vllm.config.vllm import (
+            get_layers_from_vllm_config,
+            set_current_vllm_config,
+        )
+        from vllm.model_executor.layers.attention_layer_base import (
+            AttentionLayerBase,
+        )
+
+        attn_layers = get_layers_from_vllm_config(
+            vllm_config,
+            AttentionLayerBase,  # type: ignore[type-abstract]
+        )
+        if not attn_layers:
+            cache_config.block_size = CacheConfig.DEFAULT_BLOCK_SIZE
+            return
+
+        first_layer = next(iter(attn_layers.values()))
+        backend_cls = first_layer.get_attn_backend()
+        with set_current_vllm_config(vllm_config):
+            preferred = backend_cls.get_preferred_block_size(
+                CacheConfig.DEFAULT_BLOCK_SIZE
+            )
+        if preferred != CacheConfig.DEFAULT_BLOCK_SIZE:
+            logger.info(
+                "Setting kv cache block size to %d for %s backend.",
+                preferred,
+                backend_cls.get_name(),
+            )
+        cache_config.block_size = preferred
 
     @classmethod
     def verify_model_arch(cls, model_arch: str) -> None:
@@ -574,6 +638,11 @@ class Platform:
         """Raises if this request is unsupported on this platform"""
 
     def __getattr__(self, key: str):
+        # Pickle checks dunder methods like __getstate__. If we return None
+        # for them, pickle treats it like a real value and tries to call it.
+        if key.startswith("__") and key.endswith("__"):
+            raise AttributeError(key)
+
         device = getattr(torch, self.device_type, None)
         if device is not None and hasattr(device, key):
             attr = getattr(device, key)
@@ -637,6 +706,15 @@ class Platform:
     def support_static_graph_mode(cls) -> bool:
         """
         Returns if the graph mode is supported by the current platform.
+        """
+        return False
+
+    @classmethod
+    def use_custom_op_collectives(cls) -> bool:
+        """
+        Whether this platform should use torch.ops.vllm.* custom ops for collectives.
+
+        Returns False by default - platforms must explicitly opt-in.
         """
         return False
 

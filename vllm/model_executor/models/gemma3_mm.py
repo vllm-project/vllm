@@ -507,6 +507,11 @@ class Gemma3ForConditionalGeneration(
         self.quant_config = quant_config
         self.multimodal_config = multimodal_config
 
+        self.configure_mm_token_handling(
+            vocab_size=config.text_config.vocab_size,
+            mm_token_ids=[config.image_token_index],
+        )
+
         with self._mark_tower_model(vllm_config, "image"):
             self.vision_tower = SiglipVisionModel(
                 config.vision_config,
@@ -587,7 +592,6 @@ class Gemma3ForConditionalGeneration(
         multimodal_embeddings: MultiModalEmbeddings | None = None,
         *,
         is_multimodal: torch.Tensor | None = None,
-        handle_oov_mm_token: bool = True,
     ) -> torch.Tensor:
         # Early return for text-only inference (no multimodal data)
         if multimodal_embeddings is None or is_multimodal is None:
@@ -598,7 +602,6 @@ class Gemma3ForConditionalGeneration(
             input_ids,
             multimodal_embeddings=multimodal_embeddings,
             is_multimodal=is_multimodal,
-            handle_oov_mm_token=handle_oov_mm_token,
         )
 
     def forward(

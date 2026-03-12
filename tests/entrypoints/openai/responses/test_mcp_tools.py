@@ -97,16 +97,16 @@ class TestMCPToolServerUnit:
         assert server.get_tool_description("test_server", allowed_tools=[]) is None
 
     def test_builtin_tools_consistency(self):
-        """MCP_BUILTIN_TOOLS must match _BUILTIN_TOOL_TO_MCP_SERVER_LABEL values."""
+        """MCP_BUILTIN_TOOLS must match BUILTIN_TOOL_TO_MCP_SERVER_LABEL values."""
         from vllm.entrypoints.openai.parser.harmony_utils import (
-            _BUILTIN_TOOL_TO_MCP_SERVER_LABEL,
+            BUILTIN_TOOL_TO_MCP_SERVER_LABEL,
             MCP_BUILTIN_TOOLS,
         )
 
-        assert set(_BUILTIN_TOOL_TO_MCP_SERVER_LABEL.values()) == MCP_BUILTIN_TOOLS, (
+        assert set(BUILTIN_TOOL_TO_MCP_SERVER_LABEL.values()) == MCP_BUILTIN_TOOLS, (
             f"MCP_BUILTIN_TOOLS {MCP_BUILTIN_TOOLS} does not match "
-            f"_BUILTIN_TOOL_TO_MCP_SERVER_LABEL values "
-            f"{set(_BUILTIN_TOOL_TO_MCP_SERVER_LABEL.values())}"
+            f"BUILTIN_TOOL_TO_MCP_SERVER_LABEL values "
+            f"{set(BUILTIN_TOOL_TO_MCP_SERVER_LABEL.values())}"
         )
 
 
@@ -172,13 +172,13 @@ class TestMCPEnabled:
             recipient = message.get("recipient")
             if recipient and recipient.startswith("python"):
                 tool_call_found = True
-                assert message.get("channel") == "analysis"
+                assert message.get("channel") == "commentary"
             author = message.get("author", {})
             if author.get("role") == "tool" and (author.get("name") or "").startswith(
                 "python"
             ):
                 tool_response_found = True
-                assert message.get("channel") == "analysis"
+                assert message.get("channel") == "commentary"
 
         assert tool_call_found, (
             f"No Python tool call found. "

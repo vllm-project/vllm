@@ -31,11 +31,13 @@ from vllm.distributed.kv_transfer.kv_connector.v1.example_connector import (  # 
 from vllm.utils.hashing import sha256
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
+from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.scheduler import Scheduler, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
+    SlidingWindowSpec,
 )
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import Request
@@ -117,7 +119,6 @@ def create_vllm_config(
     cache_config = CacheConfig(
         block_size=block_size,
         gpu_memory_utilization=0.9,
-        swap_space=0,
         cache_dtype=cache_dtype,
         enable_prefix_caching=True,
     )
@@ -142,26 +143,32 @@ def create_vllm_config(
 def create_scheduler(
     vllm_config: VllmConfig,
     num_blocks: int = 10000,
-) -> Scheduler:
+    kv_cache_config: KVCacheConfig | None = None,
+) -> Scheduler | AsyncScheduler:
     """Initialize Scheduler For Testing."""
     block_size = vllm_config.cache_config.block_size
-    kv_cache_config = KVCacheConfig(
-        num_blocks=num_blocks,  # A large number of blocks to hold all requests
-        kv_cache_tensors=[],
-        kv_cache_groups=[
-            KVCacheGroupSpec(
-                ["layer"],
-                FullAttentionSpec(
-                    block_size=block_size,
-                    num_kv_heads=1,
-                    head_size=1,
-                    dtype=torch.float32,
-                ),
-            )
-        ],
-    )
+    if kv_cache_config is None:
+        kv_cache_config = KVCacheConfig(
+            num_blocks=num_blocks,  # A large number of blocks to hold all requests
+            kv_cache_tensors=[],
+            kv_cache_groups=[
+                KVCacheGroupSpec(
+                    ["layer"],
+                    FullAttentionSpec(
+                        block_size=block_size,
+                        num_kv_heads=1,
+                        head_size=1,
+                        dtype=torch.float32,
+                    ),
+                )
+            ],
+        )
     vllm_config.cache_config.num_gpu_blocks = num_blocks
-    return Scheduler(
+
+    scheduler_cls = (
+        AsyncScheduler if vllm_config.scheduler_config.async_scheduling else Scheduler
+    )
+    return scheduler_cls(
         vllm_config=vllm_config,
         kv_cache_config=kv_cache_config,
         log_stats=True,
@@ -412,3 +419,38 @@ KVConnectorFactory.register_connector(
 KVConnectorFactory.register_connector(
     "MockKVConnector", __name__, MockKVConnector.__name__
 )
+
+
+def make_kv_cache_config(
+    block_size: int,
+    hma_enabled: bool = False,
+    sw_size: int = 128,
+    num_blocks: int = 100,
+) -> KVCacheConfig:
+    kv_cache_groups = [
+        KVCacheGroupSpec(
+            ["layer0", "layer2"],
+            FullAttentionSpec(
+                block_size=block_size,
+                num_kv_heads=4,
+                head_size=16,
+                dtype=torch.float16,
+            ),
+        )
+    ]
+    if hma_enabled:
+        kv_cache_groups.append(
+            KVCacheGroupSpec(
+                ["layer1", "layer3"],
+                SlidingWindowSpec(
+                    block_size=block_size,
+                    num_kv_heads=4,
+                    head_size=16,
+                    dtype=torch.float16,
+                    sliding_window=sw_size,
+                ),
+            )
+        )
+    return KVCacheConfig(
+        num_blocks=num_blocks, kv_cache_tensors=[], kv_cache_groups=kv_cache_groups
+    )
