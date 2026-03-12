@@ -4,11 +4,11 @@
 
 import pytest
 
-from tests.entrypoints.openai.tool_parsers.common_tests import (
+from tests.tool_parsers.common_tests import (
     ToolParserTestConfig,
     ToolParserTests,
 )
-from tests.entrypoints.openai.tool_parsers.utils import run_tool_extraction
+from tests.tool_parsers.utils import run_tool_extraction
 
 
 class TestGraniteToolParser(ToolParserTests):

@@ -5,7 +5,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from tests.entrypoints.openai.tool_parsers.common_tests import (
+from tests.tool_parsers.common_tests import (
     ToolParserTestConfig,
     ToolParserTests,
 )
