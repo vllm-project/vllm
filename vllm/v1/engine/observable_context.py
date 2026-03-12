@@ -1,14 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import itertools
 from dataclasses import dataclass
 from typing import Any
 
 from vllm.tracing import HIDE_TOKEN_IDS
 from vllm.v1.engine import EngineCoreEvent, EngineCoreOutput
 from vllm.v1.outputs import IterStats
-
-NONES = itertools.repeat(None)
 
 
 @dataclass

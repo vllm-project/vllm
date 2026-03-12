@@ -665,9 +665,8 @@ class OutputProcessor:
                     # LLMEngine: return list of RequestOutputs.
                     request_outputs.append(request_output)
 
-            # Handle observable info, if enhanced trace is enabled.
-            if req_state.observable_context:
-                req_state.observable_context.update_from_output(engine_core_output)
+            # Handle observable info for token-level tracing (no-op when disabled).
+            req_state.observable_context.update_from_output(engine_core_output)
 
             # Free completed requests.
             if finish_reason is not None:
@@ -767,10 +766,14 @@ class OutputProcessor:
             )
         if req_state.n:
             attributes[SpanAttributes.GEN_AI_REQUEST_N] = req_state.n
+        if engine_core_output.finish_reason is not None:
+            attributes[SpanAttributes.GEN_AI_RESPONSE_FINISH_REASON] = str(
+                engine_core_output.finish_reason
+            )
 
         # Build events list for token level tracing
         events: list[dict[str, Any]] = []
-        if req_state.observable_context and req_state.observable_context.not_empty:
+        if req_state.observable_context.not_empty:
             attributes[SpanAttributes.GEN_AI_REQUEST_TRACE_LEVEL] = TOKEN_LEVEL_TRACE
             ob_context = req_state.observable_context
 
