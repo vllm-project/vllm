@@ -189,6 +189,12 @@ Using `-s` with `git commit` will automatically add this header.
 
 ### AI Assisted Contributions
 
+Before making an AI assisted contribution, you must:
+
+1. **Be involved**: Do not submit "pure agent" PRs. The human submitter is responsible for reviewing all changed lines, validating behavior end-to-end, and running relevant tests.
+2. **Ensure significance**: Avoid one-off "busywork" PRs (single typo, isolated style cleanup, one mutable default fix, etc.). Bundle mechanical cleanups into a clear, systematic scope.
+3. **Get permission**: Coordinate on issues before opening a PRs, review similar PRs, and wait for approval.
+
 When AI tools provide non-trivial assistance in generating or modifying code, you must:
 
 1. **Review thoroughly**: You remain responsible for all code you submit. Review and understand AI-generated code with the same care as code you write manually.
