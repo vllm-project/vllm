@@ -43,7 +43,6 @@ class DummyRequest(Request):
                 stop_token_ids=[STOP_TOKEN], max_tokens=max_tokens
             ),
             pooling_params=None,
-            eos_token_id=None,
             mm_features=mm_features,
             resumable=resumable,
         )

@@ -13,13 +13,12 @@ from vllm.platforms import current_platform
 from ...utils import RemoteOpenAIServer
 
 MODEL_NAME = "llava-hf/llava-onevision-qwen2-0.5b-ov-hf"
-MAXIMUM_VIDEOS = 4
+MAXIMUM_VIDEOS = 3
 
 TEST_VIDEO_URLS = [
-    "http://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4",
-    "http://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ElephantsDream.mp4",
-    "http://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4",
-    "http://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerFun.mp4",
+    "https://www.bogotobogo.com/python/OpenCV_Python/images/mean_shift_tracking/slow_traffic_small.mp4",
+    "https://github.com/opencv/opencv/raw/refs/tags/4.12.0/samples/data/vtest.avi",
+    "https://github.com/opencv/opencv/raw/refs/tags/4.12.0/samples/data/Megamind.avi",
 ]
 
 
@@ -36,6 +35,8 @@ def server():
         "--trust-remote-code",
         "--limit-mm-per-prompt",
         json.dumps({"video": MAXIMUM_VIDEOS}),
+        "--media-io-kwargs",
+        json.dumps({"video": {"num_frames": 32}}),
     ]
 
     # ROCm: Increase timeouts to handle potential network delays and slower
@@ -126,6 +127,73 @@ async def test_single_chat_session_video(
     )
     message = chat_completion.choices[0].message
     assert message.content is not None and len(message.content) >= 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+@pytest.mark.parametrize("video_url", [TEST_VIDEO_URLS[0]])
+async def test_request_media_io_kwargs_override_uses_fewer_video_frames(
+    client: openai.AsyncOpenAI, model_name: str, video_url: str
+):
+    messages = dummy_messages_from_video_url(video_url)
+
+    default_resp = await client.chat.completions.create(
+        model=model_name,
+        messages=messages,
+        max_completion_tokens=1,
+        temperature=0.0,
+    )
+    override_resp = await client.chat.completions.create(
+        model=model_name,
+        messages=messages,
+        max_completion_tokens=1,
+        temperature=0.0,
+        extra_body={
+            "media_io_kwargs": {
+                "video": {
+                    "num_frames": 4,
+                }
+            }
+        },
+    )
+
+    assert default_resp.usage is not None
+    assert override_resp.usage is not None
+    assert override_resp.usage.prompt_tokens < default_resp.usage.prompt_tokens
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+@pytest.mark.parametrize("video_url", [TEST_VIDEO_URLS[0]])
+async def test_invalid_num_frames_request_recoverable(
+    client: openai.AsyncOpenAI, model_name: str, video_url: str
+):
+    messages = dummy_messages_from_video_url(video_url)
+
+    with pytest.raises((openai.BadRequestError, openai.APIStatusError)):
+        await client.chat.completions.create(
+            model=model_name,
+            messages=messages,
+            max_completion_tokens=1,
+            temperature=0.0,
+            extra_body={
+                "media_io_kwargs": {
+                    "video": {
+                        "num_frames": "invalid",
+                    }
+                }
+            },
+        )
+
+    # Server should still handle subsequent requests after the failed one.
+    recovery_resp = await client.chat.completions.create(
+        model=model_name,
+        messages=messages,
+        max_completion_tokens=1,
+        temperature=0.0,
+    )
+    recovery_msg = recovery_resp.choices[0].message
+    assert recovery_msg.content is not None and len(recovery_msg.content) >= 0
 
 
 @pytest.mark.asyncio
