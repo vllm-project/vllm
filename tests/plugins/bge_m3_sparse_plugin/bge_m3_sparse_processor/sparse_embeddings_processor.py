@@ -3,7 +3,7 @@
 
 from collections.abc import Sequence
 
-from vllm.config import ModelConfig, PoolerConfig, VllmConfig, get_current_vllm_config
+from vllm.config import ModelConfig, PoolerConfig, VllmConfig
 from vllm.entrypoints.openai.engine.protocol import UsageInfo
 from vllm.inputs.data import PromptType
 from vllm.logger import init_logger
@@ -35,6 +35,14 @@ class BgeM3SparseEmbeddingsProcessor(
         self.offline_requests: list[SparseEmbeddingCompletionRequestMixin] = []
         self.online_requests: dict[str, SparseEmbeddingCompletionRequestMixin] = {}
         self.renderer: BaseRenderer = renderer
+        self.default_pooling_params = {}
+        pooler_config: PoolerConfig = vllm_config.model_config.pooler_config
+        if pooler_config is not None:
+            for param in ["use_activation", "dimensions"]:
+                if getattr(pooler_config, param, None) is None:
+                    continue
+                self.default_pooling_params[param] = getattr(pooler_config, param)
+        self.embed_dimensions = vllm_config.get("hidden_size", _BGE_M3_EMBED_DIM)
 
     def merge_pooling_params(
         self,
@@ -47,15 +55,10 @@ class BgeM3SparseEmbeddingsProcessor(
         # set and verify pooling params
         params.skip_reading_prefix_cache = True
 
-        model_config: ModelConfig = get_current_vllm_config().model_config
-        pooler_config: PoolerConfig = model_config.pooler_config
-        if pooler_config is not None:
-            for param in ["use_activation", "dimensions"]:
-                if getattr(pooler_config, param, None) is None:
-                    continue
-
-                if getattr(params, param, None) is None:
-                    setattr(params, param, getattr(pooler_config, param))
+        model_config: ModelConfig = self.vllm_config.model_config
+        for param in self.default_pooling_params:
+            if getattr(params, param, None) is None:
+                setattr(params, param, self.default_pooling_params[param])
 
         if params.use_activation is None:
             params.use_activation = True
@@ -141,8 +144,8 @@ class BgeM3SparseEmbeddingsProcessor(
             mo = model_output[idx]
             sparse_embedding: dict[int, float] = {}
             num_prompt_tokens += len(mo.prompt_token_ids)
-            dense_embedding = mo.outputs.data[:_BGE_M3_EMBED_DIM].tolist()
-            sparse_weights = mo.outputs.data[_BGE_M3_EMBED_DIM:].tolist()
+            dense_embedding = mo.outputs.data[: self.embed_dimensions].tolist()
+            sparse_weights = mo.outputs.data[self.embed_dimensions :].tolist()
             if len(mo.prompt_token_ids) != len(sparse_weights):
                 # this is the case that add_special_tokens is True,
                 # which means first token and last token are special tokens
