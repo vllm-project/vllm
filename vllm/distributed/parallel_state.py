@@ -477,13 +477,20 @@ class GroupCoordinator:
             if ca_comm is not None:
                 maybe_ca_context = ca_comm.capture()  # type: ignore
 
+        maybe_hier_context = nullcontext()
+        if self.device_communicator is not None:
+            assert isinstance(self.device_communicator, CudaCommunicator)
+            hier_comm = self.device_communicator.hier_comm
+            if hier_comm is not None:
+                maybe_hier_context = hier_comm.capture()  # type: ignore
+
         # ensure all initialization operations complete before attempting to
         # capture the graph on another stream
         curr_stream = torch.cuda.current_stream()
         if curr_stream != stream:
             stream.wait_stream(curr_stream)
 
-        with torch.cuda.stream(stream), maybe_ca_context:
+        with torch.cuda.stream(stream), maybe_ca_context, maybe_hier_context:
             yield graph_capture_context
 
     def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:

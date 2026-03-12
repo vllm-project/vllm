@@ -400,6 +400,22 @@ std::tuple<int64_t, torch::Tensor> allocate_shared_buffer_and_handle(
 int64_t open_mem_handle(torch::Tensor& mem_handle);
 void free_shared_buffer(int64_t buffer);
 
+// hierarchical allreduce (multi-node custom AR with UCCL-EP)
+fptr_t init_hierarchical_ar(fptr_t intra_ar_ptr,
+                            const std::vector<int64_t>& broadcast_ptrs,
+                            const std::vector<int64_t>& hier_signal_ptrs,
+                            int64_t local_rank, int64_t local_world_size,
+                            int64_t node_id, int64_t num_nodes,
+                            int64_t gateway_local_rank, int64_t max_size,
+                            int64_t num_proxy_threads);
+void hierarchical_all_reduce(fptr_t _har, torch::Tensor& inp,
+                             torch::Tensor& out);
+void dispose_hierarchical_ar(fptr_t _har);
+void init_uccl_ep_ar(fptr_t _har, torch::Tensor& connection_info,
+                     int64_t num_remote_nodes);
+int64_t hier_signal_size();
+int64_t uccl_ep_connection_info_size();
+
 torch::Tensor hadacore_transform(torch::Tensor& x, bool inplace);
 
 #ifdef USE_ROCM
