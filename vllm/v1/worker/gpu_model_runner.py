@@ -1196,11 +1196,7 @@ class GPUModelRunner(
                 self.input_batch.req_id_to_index,
             )
 
-        # Correction of num_computed_tokens is deferred to
-        # _finalize_spec_cpu_state (after model forward) where
-        # the sync on the D2H copy is effectively free.
         self.spec_reqs_to_fix.clear()
-
         for i, req_id in enumerate(req_data.req_ids):
             req_state = self.requests[req_id]
             num_computed_tokens = req_data.num_computed_tokens[i]
@@ -1226,14 +1222,12 @@ class GPUModelRunner(
                 if req_index is None:
                     req_state.prev_num_draft_len = 0
                 else:
+                    # Correction of num_computed_tokens is deferred to
+                    # _finalize_spec_cpu_state (after model forward). Here we
+                    # optimistically assume all spec tokens are accepted
                     num_accepted = req_state.prev_num_draft_len
-                    # Defer correction to _finalize_spec_cpu_state.
                     self.spec_reqs_to_fix[req_id] = num_accepted
-
-                    # update_async_output_token_ids will replace
-                    # placeholders with actual tokens and trim excess.
-                    if num_accepted > 0:
-                        req_state.output_token_ids.extend([-1] * num_accepted)
+                    req_state.output_token_ids.extend([-1] * num_accepted)
 
                     if is_ngram_gpu and num_accepted > 0 and req_index is not None:
                         self.input_batch.num_tokens_no_spec[req_index] += num_accepted
