@@ -188,8 +188,9 @@ class HierarchicalAllreduce {
   int num_fifos_;
 
   // Symmetric memory (RDMA-registered)
+  // Dynamically sized to support arbitrary number of nodes.
   void* uccl_send_buf_;
-  void* uccl_recv_bufs_[8];
+  std::vector<void*> uccl_recv_bufs_;
   size_t symmetric_buf_size_;
 
   // Device pointer array for recv bufs (passed to kernel)
@@ -250,12 +251,13 @@ class HierarchicalAllreduce {
 
     // Allocate symmetric memory (RDMA-registered)
     symmetric_buf_size_ = config_.max_size;
+    num_fifos_ = config_.num_nodes - 1;
+    uccl_recv_bufs_.resize(num_fifos_);
     uccl_ep::allocate_symmetric_mem(proxy_, symmetric_buf_size_,
-                                    &uccl_send_buf_, uccl_recv_bufs_,
+                                    &uccl_send_buf_, uccl_recv_bufs_.data(),
                                     remote_gateways);
 
     // Create FIFO channels (one per remote node)
-    num_fifos_ = config_.num_nodes - 1;
     fifos_ =
         uccl_ep::create_fifo_channels(proxy_, num_fifos_, /*kMaxInflight=*/64);
 
@@ -266,7 +268,7 @@ class HierarchicalAllreduce {
 
     // Allocate device pointer array for recv bufs
     CUDACHECK(cudaMalloc(&recv_bufs_device_ptrs_, num_fifos_ * sizeof(void*)));
-    CUDACHECK(cudaMemcpy(recv_bufs_device_ptrs_, uccl_recv_bufs_,
+    CUDACHECK(cudaMemcpy(recv_bufs_device_ptrs_, uccl_recv_bufs_.data(),
                          num_fifos_ * sizeof(void*), cudaMemcpyHostToDevice));
   }
 #endif

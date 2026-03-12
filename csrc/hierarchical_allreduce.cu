@@ -34,6 +34,11 @@ fptr_t init_hierarchical_ar(fptr_t intra_ar_ptr,
                             int64_t num_proxy_threads) {
   auto intra_ar = reinterpret_cast<vllm::CustomAllreduce*>(intra_ar_ptr);
 
+  TORCH_CHECK(local_world_size > 0 && local_world_size <= 8,
+              "HierarchicalAllreduce: local_world_size (GPUs per node) must be "
+              "1-8 (inherited from CustomAllreduce's fixed-size arrays), got ",
+              local_world_size);
+
   // Convert broadcast pointers
   void* bcast_ptrs[8];
   vllm::HierSignal* sig_ptrs[8];
