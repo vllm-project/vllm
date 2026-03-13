@@ -540,6 +540,8 @@ class ModelConfig:
                 self.tokenizer_mode = "kimi_audio"
             elif arch == "QwenVLForConditionalGeneration":
                 self.tokenizer_mode = "qwen_vl"
+            elif arch == "DeepseekV32ForCausalLM":
+                self.tokenizer_mode = "deepseek_v32"
 
             if self.tokenizer_mode != "auto":
                 logger.info(
