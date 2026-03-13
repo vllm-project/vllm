@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import os
 from collections import namedtuple
 from pathlib import Path
 from unittest.mock import patch
@@ -28,11 +27,11 @@ def test_data() -> TestData:
     return TestData(fx_graph, example_inputs, expected_output)
 
 
-def make_manager(backend: str) -> CompilerManager:
-    os.environ["VLLM_USE_STANDALONE_COMPILE"] = "0"
+def make_manager(backend: str, monkeypatch: "pytest.MonkeyPatch") -> CompilerManager:
+    monkeypatch.setenv("VLLM_USE_STANDALONE_COMPILE", "0")
     if backend == "inductor_standalone":
         backend = "inductor"
-        os.environ["VLLM_USE_STANDALONE_COMPILE"] = "1"
+        monkeypatch.setenv("VLLM_USE_STANDALONE_COMPILE", "1")
     config = CompilationConfig(
         backend=backend,
         cudagraph_mode=CUDAGraphMode.NONE,
@@ -53,7 +52,11 @@ def make_manager(backend: str) -> CompilerManager:
     ],
 )
 def test_no_cache(
-    backend: str, disable_cache: bool, test_data: TestData, tmp_path: Path
+    backend: str,
+    disable_cache: bool,
+    test_data: TestData,
+    tmp_path: Path,
+    monkeypatch: "pytest.MonkeyPatch",
 ):
     """
     Test that caching is disabled when disable_cache=True or when using Eager backend.
@@ -66,7 +69,7 @@ def test_no_cache(
     cache_dir = tmp_path
     compile_range = Range(0, 1)
 
-    compiler_manager = make_manager(backend=backend)
+    compiler_manager = make_manager(backend=backend, monkeypatch=monkeypatch)
     compiler_manager.initialize_cache(str(cache_dir), disable_cache=disable_cache)
 
     # Verify that cache should be empty at the start
@@ -103,7 +106,9 @@ def test_no_cache(
 
 
 @pytest.mark.parametrize("backend", ["inductor", "inductor_standalone"])
-def test_cache_miss_and_hit(backend: str, test_data: TestData, tmp_path: Path):
+def test_cache_miss_and_hit(
+    backend: str, test_data: TestData, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+):
     """
     Test cache miss and hit behavior for Inductor backends.
 
@@ -116,7 +121,7 @@ def test_cache_miss_and_hit(backend: str, test_data: TestData, tmp_path: Path):
     compile_range = Range(0, 1)
 
     # Initialize manager and cache
-    compiler_manager = make_manager(backend=backend)
+    compiler_manager = make_manager(backend=backend, monkeypatch=monkeypatch)
     compiler_manager.initialize_cache(str(cache_dir), disable_cache=False)
 
     # Verify that cache should be empty at the start
@@ -170,7 +175,7 @@ def test_cache_miss_and_hit(backend: str, test_data: TestData, tmp_path: Path):
 
 @pytest.mark.parametrize("backend", ["inductor", "inductor_standalone"])
 def test_cache_persistence_across_managers(
-    backend: str, test_data: TestData, tmp_path: Path
+    backend: str, test_data: TestData, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
 ):
     """Test that cache persists across different CompilerManager instances.
 
@@ -182,7 +187,7 @@ def test_cache_persistence_across_managers(
     compile_range = Range(0, 1)
 
     # === First manager: compile and save ===
-    manager_1 = make_manager(backend=backend)
+    manager_1 = make_manager(backend=backend, monkeypatch=monkeypatch)
     manager_1.initialize_cache(cache_dir=str(cache_dir), disable_cache=False)
     with patch.object(
         manager_1.compiler,
@@ -204,7 +209,7 @@ def test_cache_persistence_across_managers(
     assert (cache_dir / "vllm_compile_cache.py").exists()
 
     # === Second manager: load from cache ===
-    manager_2 = make_manager(backend=backend)
+    manager_2 = make_manager(backend=backend, monkeypatch=monkeypatch)
     manager_2.initialize_cache(cache_dir=str(cache_dir), disable_cache=False)
     with patch.object(
         manager_2.compiler,
