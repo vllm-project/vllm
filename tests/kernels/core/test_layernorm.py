@@ -16,8 +16,9 @@ ADD_RESIDUAL = [False, True]
 SEEDS = [0]
 DEVICES = ["cpu"]
 if torch.cuda.is_available():
-    DEVICES = [f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)]
-
+    DEVICES = [
+      f"cuda:{i}" for i in range(1 if torch.accelerator.device_count() == 1 else 2)
+    ]
 
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
 @pytest.mark.parametrize("hidden_size", HIDDEN_SIZES)
