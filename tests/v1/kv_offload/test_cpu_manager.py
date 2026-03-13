@@ -59,7 +59,6 @@ def verify_load_output(
 
 def verify_events(
     events: Iterable[OffloadingEvent],
-    block_size: int,
     expected_stores: tuple[set[int], ...] = (),
     expected_evictions: tuple[set[int], ...] = (),
 ):
@@ -67,7 +66,6 @@ def verify_events(
     evictions: list[set[OffloadKey]] = []
     for event in events:
         assert event.medium == CPULoadStoreSpec.medium()
-        assert event.block_size == block_size
         if event.removed:
             evictions.append(set(event.keys))
         else:
@@ -98,9 +96,7 @@ def test_already_stored_block_not_evicted_during_prepare_store(eviction_policy):
               candidate to make room for [3, 4, 5]
         - After complete_store([2, 3, 4, 5]), block 2 must still be present.
     """
-    block_size = 256
     manager = CPUOffloadingManager(
-        block_size=block_size,
         num_blocks=4,
         cache_policy=eviction_policy,
         enable_events=True,
@@ -138,10 +134,9 @@ def test_cpu_manager():
     """
     Tests CPUOffloadingManager with lru policy.
     """
-    # initialize a CPU backend with a capacity of 4 blocks
-    block_size = 256
+    # initialize a CPU manager with a capacity of 4 blocks
     cpu_manager = CPUOffloadingManager(
-        block_size=block_size, num_blocks=4, cache_policy="lru", enable_events=True
+        num_blocks=4, cache_policy="lru", enable_events=True
     )
 
     # prepare store [1, 2]
@@ -163,9 +158,7 @@ def test_cpu_manager():
 
     # complete store [1, 2]
     cpu_manager.complete_store(to_keys([1, 2]))
-    verify_events(
-        cpu_manager.take_events(), block_size=block_size, expected_stores=({1, 2},)
-    )
+    verify_events(cpu_manager.take_events(), expected_stores=({1, 2},))
 
     # lookup [1, 2]
     assert cpu_manager.lookup(to_keys([1])) == 1
@@ -184,9 +177,7 @@ def test_cpu_manager():
     )
 
     # verify eviction event
-    verify_events(
-        cpu_manager.take_events(), block_size=block_size, expected_evictions=({1},)
-    )
+    verify_events(cpu_manager.take_events(), expected_evictions=({1},))
 
     # prepare store with no space
     assert cpu_manager.prepare_store(to_keys([1, 6])) is None
@@ -241,7 +232,6 @@ def test_cpu_manager():
 
     verify_events(
         cpu_manager.take_events(),
-        block_size=block_size,
         expected_stores=({3, 4, 5}, {6, 7, 8}),
         expected_evictions=({2, 3, 4}, {8}),
     )
@@ -254,7 +244,6 @@ class TestARCPolicy:
         self, num_blocks: int = 4, enable_events: bool = True
     ) -> tuple[CPUOffloadingManager, ARCCachePolicy]:
         manager = CPUOffloadingManager(
-            block_size=256,
             num_blocks=num_blocks,
             cache_policy="arc",
             enable_events=enable_events,
@@ -289,9 +278,7 @@ class TestARCPolicy:
 
         # complete store [1, 2]
         cpu_manager.complete_store(to_keys([1, 2]))
-        verify_events(
-            cpu_manager.take_events(), block_size=256, expected_stores=({1, 2},)
-        )
+        verify_events(cpu_manager.take_events(), expected_stores=({1, 2},))
 
         # lookup [1, 2]
         assert cpu_manager.lookup(to_keys([1])) == 1
@@ -547,9 +534,8 @@ def test_filter_reused_manager():
     """
     Tests FilterReusedOffloadingManager with a CPUOffloadingManager.
     """
-    block_size = 256
     lru_manager = CPUOffloadingManager(
-        block_size=block_size, num_blocks=4, cache_policy="lru", enable_events=True
+        num_blocks=4, cache_policy="lru", enable_events=True
     )
 
     manager = FilterReusedOffloadingManager(
