@@ -272,6 +272,8 @@ class OpenAIServingRender:
         if error_check_ret is not None:
             return error_check_ret
         result = await self.render_completion(request)
+        if isinstance(result, ErrorResponse):
+            return result
         generate_requests: list[GenerateRequest] = []
         for engine_prompt in result:
             prompt_components = extract_prompt_components(
