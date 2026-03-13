@@ -35,7 +35,7 @@ else:
 @lru_cache
 def _cached_build_vllm_token_enforcer_tokenizer_data(
     tokenizer: PreTrainedTokenizerBase, vocab_size: int
-) -> "lmfe_vllm.TokenEnforcerTokenizerData":
+) -> lmfe_vllm.TokenEnforcerTokenizerData:
     return lmfe_vllm.build_vllm_token_enforcer_tokenizer_data(
         tokenizer, use_bitmask=True, vocab_size=vocab_size
     )
