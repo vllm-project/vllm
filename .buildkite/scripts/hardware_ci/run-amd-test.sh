@@ -382,6 +382,18 @@ HF_CACHE="$(realpath ~)/huggingface"
 mkdir -p "${HF_CACHE}"
 HF_MOUNT="/root/.cache/huggingface"
 
+MODELSCOPE_CACHE="$(realpath ~)/modelscope"
+mkdir -p "${MODELSCOPE_CACHE}"
+MODELSCOPE_MOUNT="/root/.cache/modelscope"
+
+VLLM_TEST_CACHE="$(realpath ~)/vllm-test-cache"
+mkdir -p "${VLLM_TEST_CACHE}"
+VLLM_TEST_CACHE_MOUNT="/root/.cache/vllm-test-cache"
+
+VLLM_CACHE="$(realpath ~)/vllm-cache"
+mkdir -p "${VLLM_CACHE}"
+VLLM_CACHE_MOUNT="/root/.cache/vllm"
+
 # ---- Command source selection ----
 # Prefer VLLM_TEST_COMMANDS (preserves all inner quoting intact).
 # Fall back to $* for backward compatibility, but warn that inner
@@ -493,7 +505,14 @@ else
     -e AWS_ACCESS_KEY_ID \
     -e AWS_SECRET_ACCESS_KEY \
     -v "${HF_CACHE}:${HF_MOUNT}" \
+    -v "${MODELSCOPE_CACHE}:${MODELSCOPE_MOUNT}" \
+    -v "${VLLM_TEST_CACHE}:${VLLM_TEST_CACHE_MOUNT}" \
+    -v "${VLLM_CACHE}:${VLLM_CACHE_MOUNT}" \
     -e "HF_HOME=${HF_MOUNT}" \
+    -e "MODELSCOPE_CACHE=${MODELSCOPE_MOUNT}" \
+    -e "VLLM_TEST_CACHE=${VLLM_TEST_CACHE_MOUNT}" \
+    -e "VLLM_CACHE_ROOT=${VLLM_CACHE_MOUNT}" \
+    -e "VLLM_MEDIA_CACHE=${VLLM_CACHE_MOUNT}/media_cache" \
     -e "PYTHONPATH=${MYPYTHONPATH}" \
     --name "${container_name}" \
     "${image_name}" \

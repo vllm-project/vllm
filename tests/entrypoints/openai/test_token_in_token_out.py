@@ -1,9 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import os
-import tempfile
-
 import pytest
 
 from vllm.model_executor.model_loader.weight_utils import download_weights_from_hf
@@ -12,7 +9,7 @@ from vllm.tokenizers import get_tokenizer
 from ...utils import RemoteOpenAIServer
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
-MODEL_PATH = os.path.join(tempfile.gettempdir(), "qwen3_06b")
+MODEL_PATH = MODEL_NAME
 
 
 @pytest.fixture(scope="module")
@@ -21,7 +18,7 @@ def server():
     MODEL_PATH = download_weights_from_hf(
         MODEL_NAME,
         allow_patterns=["*"],
-        cache_dir=MODEL_PATH,
+        cache_dir=None,
         ignore_patterns=["tokenizer*", "vocab*", "*.safetensors"],
     )
     args = [

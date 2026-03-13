@@ -3,6 +3,7 @@
 
 import base64
 import datetime
+import hashlib
 import os
 import tempfile
 import urllib.request
@@ -113,11 +114,24 @@ def read_geotiff(
 
         write_to_file = file_data
     elif file_path is not None and path_type == "url":
-        resp = urllib.request.urlopen(file_path)
-        # with tempfile.NamedTemporaryFile() as tmpfile:
-        #     tmpfile.write(resp.read())
-        #     path = tmpfile.name
-        write_to_file = resp.read()
+        # Cache URL downloads to avoid re-downloading in CI
+        cache_base = os.environ.get("VLLM_TEST_CACHE")
+        if cache_base:
+            cache_dir = os.path.join(cache_base, "prithvi")
+            os.makedirs(cache_dir, exist_ok=True)
+            url_hash = hashlib.sha256(file_path.encode()).hexdigest()[:16]
+            ext = os.path.splitext(file_path)[1] or ".tiff"
+            cached_path = os.path.join(cache_dir, f"{url_hash}{ext}")
+            if os.path.exists(cached_path):
+                path = cached_path
+            else:
+                resp = urllib.request.urlopen(file_path)
+                with open(cached_path, "wb") as f:
+                    f.write(resp.read())
+                path = cached_path
+        else:
+            resp = urllib.request.urlopen(file_path)
+            write_to_file = resp.read()
     elif file_path is not None and path_type == "path":
         path = file_path
     elif file_path is not None and path_type == "b64_json":
