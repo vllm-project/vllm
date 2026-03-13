@@ -311,6 +311,8 @@ class LMCacheMPWorkerAdapter:
         world_size: int,
         kv_rank: int,
         vllm_block_size: int,
+        use_mla: bool,
+        is_first_rank_of_pp_group: bool,
     ):
         self.mq_client = MessageQueueClient(server_url, context)
 
@@ -345,6 +347,8 @@ class LMCacheMPWorkerAdapter:
             "LMCache chunk size should be a multiple of vLLM block size"
         )
         self.blocks_in_chunk = chunk_size // vllm_block_size
+        self.use_mla = use_mla
+        self.is_first_rank_of_pp_group = is_first_rank_of_pp_group
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """
