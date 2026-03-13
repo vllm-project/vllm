@@ -63,7 +63,7 @@ EOF
 # separate remove_docker_containers and remove_docker_containers_and_exit
 # functions, while other platforms only need one remove_docker_container
 # function.
-EXITCODE=1
+EXITCODE=0
 remove_docker_containers() { docker rm -f "${container_name}" || true; }
 trap 'remove_docker_containers; exit $EXITCODE;' EXIT
 remove_docker_containers
@@ -77,9 +77,8 @@ docker run --rm --runtime=habana --name="${container_name}" --network=host \
   "${image_name}" \
   /bin/bash -c '
   cd vllm; timeout 120s python -u examples/basic/offline_inference/generate.py --model facebook/opt-125m
-'
+' || EXITCODE=$?
 
-EXITCODE=$?
 if [ $EXITCODE -eq 0 ]; then
   echo "Test with basic model passed"
 else
