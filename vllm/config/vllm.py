@@ -676,15 +676,12 @@ class VllmConfig:
                 self.model_config, self.load_config
             )
 
-        executor_backend = self.parallel_config.distributed_executor_backend
-        from vllm.platforms import current_platform
+        from vllm.v1.executor.abstract import Executor
 
-        executors_with_async_sched_support = (
-            current_platform.executors_supports_async_scheduling()
-        )
-        executor_supports_async_sched = (
-            executor_backend in executors_with_async_sched_support
-        )
+        executor_backend = self.parallel_config.distributed_executor_backend
+        executor_supports_async_sched = Executor.get_class(
+            self
+        ).supports_async_scheduling()
 
         if self.scheduler_config.async_scheduling:
             # Async scheduling explicitly enabled, hard fail any incompatibilities.
@@ -708,9 +705,7 @@ class VllmConfig:
                     )
             if not executor_supports_async_sched:
                 raise ValueError(
-                    f"Currently, async scheduling only supports "
-                    f"{executors_with_async_sched_support} distributed executor "
-                    f"backend, but you chose `{executor_backend}`."
+                    f"`{executor_backend}` does not support async scheduling yet."
                 )
         elif self.scheduler_config.async_scheduling is None:
             # Enable async scheduling unless there is an incompatible option.
@@ -739,10 +734,8 @@ class VllmConfig:
             elif not executor_supports_async_sched:
                 logger.warning_once(
                     "Async scheduling will be disabled because it is not supported "
-                    "with the `%s` distributed executor backend "
-                    "(only %s are supported).",
+                    "with the `%s` distributed executor backend. ",
                     executor_backend,
-                    executors_with_async_sched_support,
                     scope="local",
                 )
                 self.scheduler_config.async_scheduling = False

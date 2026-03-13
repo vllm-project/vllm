@@ -4,7 +4,6 @@
 import pytest
 import torch
 
-from vllm.platforms.interface import Platform
 from vllm.plugins import load_general_plugins
 
 
@@ -46,10 +45,3 @@ def test_oot_custom_op(default_vllm_config, monkeypatch: pytest.MonkeyPatch):
         "Expected DummyRotaryEmbedding to have an 'addition_config' attribute, "
         "which is set by the custom op."
     )
-
-
-def test_executors_supports_async_scheduling_default():
-    """Base Platform returns the default set of async-scheduling executors."""
-    result = Platform.executors_supports_async_scheduling()
-    assert isinstance(result, list)
-    assert set(result) == {"mp", "uni", "external_launcher"}
