@@ -232,6 +232,7 @@ class Grok2Tokenizer(TokenizerLike):
             vocab_file=vocab_file,
             name_or_path=str(path_or_repo_id),
             truncation_side=kwargs.get("truncation_side", "left"),
+            padding_side=kwargs.get("padding_side", "left"),
             chat_template=config.get("chat_template"),
             init_kwargs=config,
         )
@@ -242,12 +243,14 @@ class Grok2Tokenizer(TokenizerLike):
         vocab_file: Path,
         name_or_path: str,
         truncation_side: str,
+        padding_side: str,
         chat_template: str | None,
         init_kwargs: dict[str, Any] | None = None,
     ) -> None:
         super().__init__()
         self.name_or_path = name_or_path
         self._truncation_side = truncation_side
+        self._padding_side = padding_side
         self.init_kwargs = init_kwargs or {}
         self._chat_template = chat_template or DEFAULT_CHAT_TEMPLATE
 
@@ -321,6 +324,10 @@ class Grok2Tokenizer(TokenizerLike):
     @property
     def truncation_side(self) -> str:
         return self._truncation_side
+
+    @property
+    def padding_side(self) -> str:
+        return self._padding_side
 
     def get_vocab(self) -> dict[str, int]:
         return dict(self._token_to_id)

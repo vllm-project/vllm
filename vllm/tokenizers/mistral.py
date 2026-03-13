@@ -340,6 +340,10 @@ class MistralTokenizer(TokenizerLike):
     def truncation_side(self) -> str:
         return self.transformers_tokenizer.truncation_side
 
+    @property
+    def padding_side(self) -> str:
+        return self.transformers_tokenizer.padding_side
+
     def _is_special_token_id(self, token_id: int) -> bool:
         return token_id in self._special_token_ids_set
 

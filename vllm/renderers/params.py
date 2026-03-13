@@ -132,7 +132,7 @@ class TokenizeParams:
     max_total_tokens: int | None
     """
     Maximum allowed number of input + output tokens.
-    
+
     Usually, this refers to the model's context length.
     """
 
@@ -362,7 +362,10 @@ class TokenizeParams:
         if not isinstance(tokens, list):
             raise ValueError("Cannot pad tokens for embedding inputs")
 
-        return tokens + [tokenizer.pad_token_id] * (pad_length - len(tokens))
+        if tokenizer.padding_side == "left":
+            return [tokenizer.pad_token_id] * (pad_length - len(tokens)) + tokens
+        else:
+            return tokens + [tokenizer.pad_token_id] * (pad_length - len(tokens))
 
     def _token_truncation(self, tokenizer: TokenizerLike | None, tokens: _S) -> _S:
         """Apply truncation to prompt tokens if necessary."""
