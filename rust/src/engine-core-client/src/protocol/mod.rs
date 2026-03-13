@@ -10,6 +10,14 @@ use serde_tuple::{Deserialize_tuple, Serialize_tuple};
 
 use crate::error::{Error, Result};
 
+// TODO: This module currently mixes reusable frontend-facing semantic types
+// (for example `FinishReason`, `StopReason`, `RequestOutputKind`, and maybe a
+// future cleaned-up `SamplingParams`) with engine-core-specific wire DTOs and
+// handshake/control messages. While the Rust frontend is still evolving quickly,
+// keep them co-located here for iteration speed. Once the higher-level API
+// boundary stabilizes, move the truly reusable semantic types into a lower-level
+// common crate and keep the engine transport/wire messages here.
+
 /// Dynamic msgpack value used for schema positions that are preserved but not
 /// yet strongly typed in the early-stage Rust client.
 pub type OpaqueValue = Value;

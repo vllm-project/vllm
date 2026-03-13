@@ -1,19 +1,20 @@
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::Parser;
-use futures::StreamExt;
+use futures::StreamExt as _;
 use tokio::time::timeout;
 use tracing_subscriber::EnvFilter;
 use vllm_engine_core_client::protocol::{
-    EngineCoreRequest, FinishReason, RequestOutputKind, SamplingParams, StopReason,
+    FinishReason, RequestOutputKind, SamplingParams, StopReason,
 };
-use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig, EngineCoreOutputStream};
+use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig};
+use vllm_llm::{GenerateOutputStream, GenerateRequest, Llm};
 
 const PROMPT_TOKEN_IDS: &[u32] = &[20841, 448, 6896, 25, 23811];
 
 #[derive(Debug, Parser)]
-#[command(about = "Smoke-test a Rust EngineCoreClient against an external vLLM engine.")]
+#[command(about = "Smoke-test the Rust LLM facade against an external vLLM engine.")]
 struct Args {
     #[arg(long)]
     handshake_address: String,
@@ -31,15 +32,8 @@ struct Args {
     max_tokens: u32,
 }
 
-fn unix_timestamp_secs() -> f64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock is before unix epoch")
-        .as_secs_f64()
-}
-
 fn unique_request_id() -> String {
-    format!("rust-engine-core-smoke-{}", uuid::Uuid::new_v4())
+    format!("rust-llm-smoke-{}", uuid::Uuid::new_v4())
 }
 
 fn init_tracing() {
@@ -48,64 +42,58 @@ fn init_tracing() {
     let _ = tracing_subscriber::fmt().with_env_filter(filter).try_init();
 }
 
-fn build_request(request_id: String, max_tokens: u32) -> EngineCoreRequest {
-    EngineCoreRequest {
+fn build_request(request_id: String, max_tokens: u32) -> GenerateRequest {
+    GenerateRequest {
         request_id,
-        prompt_token_ids: Some(PROMPT_TOKEN_IDS.to_vec()),
-        sampling_params: Some(SamplingParams {
+        prompt_token_ids: PROMPT_TOKEN_IDS.to_vec(),
+        sampling_params: SamplingParams {
             max_tokens: Some(max_tokens),
-            // Raw EngineCore outputs remain step/increment based even if
-            // `FinalOnly` is requested here; that behavior is enforced by the
-            // higher-level Python frontend output processor instead.
-            output_kind: RequestOutputKind::Delta,
+            output_kind: RequestOutputKind::FinalOnly,
             ..Default::default()
-        }),
-        arrival_time: unix_timestamp_secs(),
-        ..Default::default()
+        },
+        arrival_time: None,
+        cache_salt: None,
+        trace_headers: None,
+        priority: 0,
+        data_parallel_rank: None,
+        reasoning_ended: None,
+        lora_request: None,
     }
 }
 
 #[derive(Debug, Default)]
 struct CompletedRequest {
-    new_token_ids: Vec<u32>,
+    token_ids: Vec<u32>,
     finish_reason: Option<FinishReason>,
     stop_reason: Option<StopReason>,
 }
 
-async fn wait_for_request_completion(
-    mut stream: EngineCoreOutputStream,
-) -> Result<CompletedRequest> {
-    let mut completed = CompletedRequest::default();
+async fn wait_for_request_completion(mut stream: GenerateOutputStream) -> Result<CompletedRequest> {
+    let output = match stream.next().await {
+        Some(output) => output.context("failed to receive request output")?,
+        None => bail!("request stream ended without a final output"),
+    };
 
-    while let Some(output) = stream.next().await {
-        let output = output?;
-        let finished = output.finished();
-        completed.new_token_ids.extend(output.new_token_ids);
+    let none = stream.next().await;
+    assert!(
+        none.is_none(),
+        "expected final-only stream to end after the final output"
+    );
 
-        if finished {
-            let none = stream.next().await;
-            assert!(
-                none.is_none(),
-                "expected stream to end after finished output"
-            );
-
-            completed.finish_reason = output.finish_reason;
-            completed.stop_reason = output.stop_reason;
-            return Ok(completed);
-        }
-    }
-
-    anyhow::bail!("request stream ended without a final output")
+    Ok(CompletedRequest {
+        token_ids: output.token_ids,
+        finish_reason: output.raw.finish_reason,
+        stop_reason: output.raw.stop_reason,
+    })
 }
 
 async fn wait_for_timeout(
-    stream: EngineCoreOutputStream,
+    stream: GenerateOutputStream,
     output_timeout: Duration,
 ) -> Result<CompletedRequest> {
     timeout(output_timeout, wait_for_request_completion(stream))
         .await
         .context("timed out waiting for request output")?
-        .context("failed to receive request output")
 }
 
 #[tokio::main(flavor = "multi_thread")]
@@ -129,26 +117,25 @@ async fn main() -> Result<()> {
     println!("input_address={}", client.input_address());
     println!("output_address={}", client.output_address());
     println!("engine_identity={:x?}", client.engine_identity());
+    println!("ready_message={:?}", client.ready_message);
 
-    let ready_message = client.ready_message.clone();
+    let llm = Llm::new(client);
     let request = build_request(request_id.clone(), args.max_tokens);
     println!("request_id={request_id}");
     println!("prompt_token_ids={PROMPT_TOKEN_IDS:?}");
-    println!("ready_message={ready_message:?}");
+    println!("output_kind={:?}", request.sampling_params.output_kind);
 
-    let stream = client
-        .call(request)
+    let stream = llm
+        .generate(request)
         .await
-        .context("failed to add request")?;
-
+        .context("failed to submit generate request")?;
     let output = wait_for_timeout(stream, output_timeout).await?;
 
-    client
-        .shutdown()
+    llm.shutdown()
         .await
-        .context("failed to shut down engine client")?;
+        .context("failed to shut down llm client")?;
 
-    println!("new_token_ids={:?}", output.new_token_ids);
+    println!("token_ids={:?}", output.token_ids);
     println!("finish_reason={:?}", output.finish_reason);
     println!("stop_reason={:?}", output.stop_reason);
 

@@ -1,4 +1,4 @@
-# Engine Core Smoke Test
+# LLM Smoke Test
 
 Start headless `vllm`:
 
@@ -18,10 +18,10 @@ python3 -m vllm.entrypoints.cli.main serve Qwen/Qwen3-0.6B \
   --dtype float16
 ```
 
-Run the Rust smoke test:
+Run the Rust smoke test through the `vllm-llm` generate interface:
 
 ```bash
-cargo run -p vllm-engine-core-client --example external_engine_smoke -- \
+cargo run -p vllm-llm --example external_engine_smoke -- \
   --handshake-address tcp://127.0.0.1:62100 \
   --host 127.0.0.1
 ```

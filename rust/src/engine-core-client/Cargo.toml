@@ -22,9 +22,6 @@ tracing.workspace = true
 zeromq.workspace = true
 
 [dev-dependencies]
-anyhow.workspace = true
-clap.workspace = true
 hex.workspace = true
 tempfile.workspace = true
 tracing-subscriber.workspace = true
-uuid.workspace = true

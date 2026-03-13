@@ -1160,9 +1160,7 @@ checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
 name = "vllm-engine-core-client"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "bytes",
- "clap",
  "enum-as-inner",
  "futures",
  "hex",
@@ -1180,7 +1178,6 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tracing-subscriber",
- "uuid",
  "zeromq",
 ]
 
@@ -1188,12 +1185,15 @@ dependencies = [
 name = "vllm-llm"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "bytes",
+ "clap",
  "futures",
  "rmp-serde",
  "thiserror 2.0.18",
  "tokio",
  "tracing-subscriber",
+ "uuid",
  "vllm-engine-core-client",
  "zeromq",
 ]
