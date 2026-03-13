@@ -360,23 +360,17 @@ class Worker(WorkerBase):
         )
         if not using_inductor:
             return 0
-        # Verify the PyTorch version supports quiesce — we need it
-        # to stop the pool before cudagraph capture. If missing,
-        # fall back to single-threaded compilation.
-        from torch._inductor.compile_worker.subproc_pool import (
-            SubprocPool,
-        )
-
-        if not hasattr(SubprocPool, "quiesce"):
-            return 0
         compile_processes = envs.VLLM_COMPILE_PROCESSES
         if compile_processes is not None:
             return compile_processes
         # Auto-compute parallel compile processes.
-        # - Cap at 8: vLLM's graph splitting typically does not produce
-        #   many inductor triton kernels
+        # - With graph splitting (default), each subgraph produces a
+        #   handful of Triton kernels — cap at 8 is sufficient.
+        # - Without splitting (inductor partition or no splitting_ops),
+        #   one large graph can produce many more kernels, so use all
+        #   available CPUs.
         # - Divide CPUs by GPU count: each GPU worker spawns its own
-        #   compile pool, so we split the machine's CPUs
+        #   compile pool, so we split the machine's CPUs.
         # - Reserve 1 core per worker for the main thread which runs
         #   Dynamo tracing and graph lowering concurrently.
         cpu_count = (
@@ -384,17 +378,22 @@ class Worker(WorkerBase):
             if hasattr(os, "sched_getaffinity")
             else os.cpu_count() or 1
         )
-        num_gpus = max(torch.cuda.device_count(), 1)
+        num_gpus = max(torch.accelerator.device_count(), 1)
         cpus_per_gpu = cpu_count // num_gpus
-        return max(1, min(8, cpus_per_gpu - 1))
+
+        cc = self.vllm_config.compilation_config
+        has_splitting = not cc.use_inductor_graph_partition and bool(
+            cc.splitting_ops
+        )
+        cap = 8 if has_splitting else cpus_per_gpu
+        return max(1, min(cap, cpus_per_gpu - 1))
 
     def _maybe_warm_up_compile_pool(self) -> None:
         """Set up parallel compile threads and pre-warm the inductor
         compile worker pool. Must be called before first torch.compile."""
         num_procs = self._num_parallel_compile_processes
-        # Always set compile_threads to ensure a safe value, even if
-        # env_override.py set a higher value at import time but the
-        # current environment can't support it (e.g., old PyTorch).
+        # Override the env_override.py safety default (compile_threads=1)
+        # now that we know the correct value for this environment.
         torch._inductor.config.compile_threads = max(1, num_procs)
         if num_procs <= 1:
             return
