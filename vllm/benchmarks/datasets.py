@@ -1881,6 +1881,12 @@ def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
             dataset_class = MTBenchDataset
             args.hf_split = args.hf_split if args.hf_split else "train"
         elif (
+            args.dataset_path in HumanEvalDataset.SUPPORTED_DATASET_PATHS
+            or args.hf_name in HumanEvalDataset.SUPPORTED_DATASET_PATHS
+        ):
+            dataset_class = HumanEvalDataset
+            args.hf_split = args.hf_split if args.hf_split else "test"
+        elif (
             args.dataset_path in MultiModalConversationDataset.SUPPORTED_DATASET_PATHS
             or args.hf_name in MultiModalConversationDataset.SUPPORTED_DATASET_PATHS
         ):
@@ -3030,6 +3036,75 @@ Please generate the new code file in the "New file" section below."""  # noqa: E
             sampled_requests, num_requests, request_id_prefix, no_oversample
         )
 
+        return sampled_requests
+
+
+# -----------------------------------------------------------------------------
+# HumanEval Dataset Implementation
+# -----------------------------------------------------------------------------
+
+
+class HumanEvalDataset(HuggingFaceDataset):
+    """
+    HumanEval Dataset.
+    https://huggingface.co/datasets/openai/openai_humaneval
+
+    OpenAI's HumanEval dataset of 164 hand-written Python programming
+    problems. Each prompt contains a function signature and docstring;
+    the model must produce a correct implementation that passes the
+    accompanying unit tests.
+
+    Prompt format follows the DFlash spec-decode validation setup.
+    """
+
+    DEFAULT_OUTPUT_LEN = 2048
+    SUPPORTED_DATASET_PATHS = {
+        "openai/openai_humaneval",
+    }
+
+    PROMPT_TEMPLATE = (
+        "Write a solution to the following problem and make sure"
+        " that it passes the tests:\n```python\n{prompt}\n```"
+    )
+
+    def sample(
+        self,
+        tokenizer: TokenizerLike,
+        num_requests: int,
+        output_len: int | None = None,
+        enable_multimodal_chat: bool = False,
+        skip_chat_template: bool = False,
+        request_id_prefix: str = "",
+        no_oversample: bool = False,
+        **kwargs,
+    ) -> list[SampleRequest]:
+        output_len = output_len if output_len is not None else self.DEFAULT_OUTPUT_LEN
+        sampled_requests = []
+
+        for i, item in enumerate(self.data):
+            if len(sampled_requests) >= num_requests:
+                break
+            prompt = self.PROMPT_TEMPLATE.format(prompt=item["prompt"])
+
+            if not skip_chat_template:
+                prompt = tokenizer.apply_chat_template(
+                    [{"role": "user", "content": prompt}],
+                    add_generation_prompt=True,
+                    tokenize=False,
+                )
+
+            prompt_len = len(tokenizer(prompt).input_ids)
+            sampled_requests.append(
+                SampleRequest(
+                    prompt=prompt,
+                    prompt_len=prompt_len,
+                    expected_output_len=output_len,
+                    request_id=request_id_prefix + str(i),
+                )
+            )
+        self.maybe_oversample_requests(
+            sampled_requests, num_requests, request_id_prefix, no_oversample
+        )
         return sampled_requests
 
 

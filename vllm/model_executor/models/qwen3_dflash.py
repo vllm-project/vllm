@@ -5,6 +5,7 @@ from collections.abc import Iterable
 
 import torch
 import torch.nn.functional as F
+from flashinfer import rmsnorm
 from flashinfer.rope import apply_rope_with_cos_sin_cache
 from torch import nn
 from transformers import Qwen3Config
@@ -429,7 +430,7 @@ class DFlashQwen3Model(nn.Module):
         # --- Fused KV projection (one GEMM for all layers) ---
         # [num_ctx, L * 2 * kv]
         all_kv_flat = F.linear(
-            context_states, self._fused_kv_weight, self._fused_kv_bias
+            self.hidden_norm(context_states), self._fused_kv_weight, self._fused_kv_bias
         )
         # [L, num_ctx, 2 * kv]
         all_kv = all_kv_flat.view(num_ctx, L, 2 * kv).transpose(0, 1).contiguous()
@@ -441,12 +442,10 @@ class DFlashQwen3Model(nn.Module):
         all_k = all_k.reshape(L, num_ctx * nkv, hd).contiguous()
         all_k = torch.stack(
             [
-                RMSNorm.forward_static(
-                    x=all_k[i],
+                rmsnorm(
+                    input=all_k[i],
                     weight=self._k_norm_weights[i],
-                    variance_epsilon=self._rms_norm_eps,
-                    hidden_size=hd,
-                    orig_dtype=all_k.dtype,
+                    eps=self._rms_norm_eps,
                 )
                 for i in range(L)
             ]
@@ -617,7 +616,7 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
         needs_squeeze = hidden_states.dim() == 1
         if needs_squeeze:
             hidden_states = hidden_states.unsqueeze(0)
-        result = self.model.hidden_norm(self.model.fc(hidden_states))
+        result = self.model.fc(hidden_states)
         if needs_squeeze:
             result = result.squeeze(0)
         return result

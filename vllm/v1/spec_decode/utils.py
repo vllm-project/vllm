@@ -463,3 +463,100 @@ def copy_and_expand_eagle_inputs_kernel(
         out_idx,
         mask=is_new_token_region & in_bounds,
     )
+
+
+@triton.jit
+def copy_and_expand_dflash_inputs_kernel(
+    # Inputs
+    next_token_ids_ptr,  # [num_reqs]
+    target_positions_ptr,  # [num_context]
+    # Outputs
+    out_input_ids_ptr,  # [num_query_total] (output)
+    out_positions_ptr,  # [num_all_positions] (output)
+    out_slot_mapping_ptr,  # [num_all_positions] (output)
+    out_token_indices_ptr,  # [num_reqs * num_speculative_tokens] (output)
+    # Block table
+    block_table_ptr,  # [max_reqs, max_blocks]
+    block_table_stride,  # stride of block_table dim 0 (in elements)
+    # Metadata
+    query_start_loc_ptr,  # [num_reqs + 1]
+    # Scalars
+    parallel_drafting_token_id,  # tl.int32
+    block_size,  # tl.int32
+    num_query_per_req,  # tl.int32
+    num_speculative_tokens,  # tl.int32
+    num_context,  # tl.int32
+    total_input_tokens,  # tl.int32
+    BLOCK_SIZE: tl.constexpr,
+):
+    """
+    Fused kernel for DFlash first-pass input setup.
+
+    Per request, this kernel:
+      1. Copies context positions from target_positions to out_positions.
+      2. Computes query positions (last_target_pos + 1 + offset) and writes
+         them to out_positions.
+      3. Writes input_ids for query tokens: [next_token, mask, mask, ...].
+      4. Computes slot_mapping for all positions (context + query) via
+         block_table lookup.
+      5. Writes token_indices_to_sample for the mask (speculative) tokens.
+    """
+    req_idx = tl.program_id(axis=0)
+    block_idx = tl.program_id(axis=1)
+
+    # Load context token range for this request
+    ctx_start = tl.load(query_start_loc_ptr + req_idx)
+    ctx_end = tl.load(query_start_loc_ptr + req_idx + 1)
+    num_ctx = ctx_end - ctx_start
+    total_tokens = num_ctx + num_query_per_req
+
+    j = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    in_bounds = j < total_tokens
+    is_ctx = j < num_ctx
+    is_query = (~is_ctx) & in_bounds
+    query_off = j - num_ctx  # offset within query portion (0-indexed)
+
+    # --- Positions ---
+    # Context: load from target_positions
+    ctx_pos_idx = tl.minimum(ctx_start + j, total_input_tokens - 1)
+    ctx_pos = tl.load(target_positions_ptr + ctx_pos_idx, mask=is_ctx, other=0)
+
+    # Query: last_target_pos + 1 + query_off
+    last_pos = tl.load(target_positions_ptr + ctx_end - 1)
+    query_pos = last_pos + 1 + query_off
+
+    positions = tl.where(is_ctx, ctx_pos, query_pos)
+
+    # Output index: context positions go at their original offsets,
+    # query positions go after all context tokens
+    ctx_pos_out = ctx_start + j
+    query_pos_out = num_context + req_idx * num_query_per_req + query_off
+    pos_out_idx = tl.where(is_ctx, ctx_pos_out, query_pos_out)
+
+    tl.store(out_positions_ptr + pos_out_idx, positions, mask=in_bounds)
+
+    # --- Slot mapping (block_table lookup for all positions) ---
+    block_num = positions // block_size
+    block_id = tl.load(
+        block_table_ptr + req_idx * block_table_stride + block_num,
+        mask=in_bounds,
+        other=0,
+    ).to(tl.int64)
+    slot = block_id * block_size + (positions % block_size)
+    tl.store(out_slot_mapping_ptr + pos_out_idx, slot, mask=in_bounds)
+
+    # --- Input IDs (query tokens only) ---
+    bonus_token = tl.load(next_token_ids_ptr + req_idx)
+    is_bonus = is_query & (query_off == 0)
+    input_id = tl.where(is_bonus, bonus_token, parallel_drafting_token_id)
+    query_id_out = req_idx * num_query_per_req + query_off
+    tl.store(out_input_ids_ptr + query_id_out, input_id, mask=is_query)
+
+    # --- Token indices to sample (mask tokens, skip the bonus token) ---
+    is_sample = is_query & (query_off > 0)
+    sample_out_idx = req_idx * num_speculative_tokens + (query_off - 1)
+    tl.store(
+        out_token_indices_ptr + sample_out_idx,
+        query_id_out,
+        mask=is_sample,
+    )
