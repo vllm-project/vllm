@@ -275,6 +275,8 @@ def prepare_nvfp4_moe_layer_for_fi_or_cutlass(
         else:
             layer.g1_scale_c = torch.ones_like(a13_scale) / a2_scale
         layer.a1_gscale = 1.0 / a13_scale
+        layer.g1_alphas = a13_scale * w13_scale_2
+        layer.g2_alphas = a2_scale * w2_scale_2
     else:
         # Swizzle the block scales for other FI NVFP4 MoE kernels.
         w13_scale = swizzle_blockscale(w13_scale)
