@@ -475,6 +475,15 @@ class SpeculativeConfig:
                     f" must be divisible by {n_predict=}"
                 )
 
+        # Propagate num_speculative_tokens to draft model configs that use it
+        # (e.g. Medusa num_heads, MLPSpeculator max_speculative_tokens).
+        if self.num_speculative_tokens is not None and hasattr(
+            self.draft_model_config.hf_config, "num_lookahead_tokens"
+        ):
+            self.draft_model_config.hf_config.num_lookahead_tokens = (
+                self.num_speculative_tokens
+            )
+
         if self.speculative_token_tree is None:
             if self.num_speculative_tokens is None:
                 raise ValueError(
@@ -540,13 +549,6 @@ class SpeculativeConfig:
             )
             self.draft_model_config.hf_config = eagle_config
             self.update_arch_()
-
-        if self.num_speculative_tokens is not None and hasattr(
-            self.draft_model_config.hf_config, "num_lookahead_tokens"
-        ):
-            self.draft_model_config.hf_config.num_lookahead_tokens = (
-                self.num_speculative_tokens
-            )
 
         self._init_model_config_tail()
 
@@ -627,9 +629,10 @@ class SpeculativeConfig:
             # Otherwise keep method="draft_model" — the user is using
             # a plain draft model (e.g. a smaller version of the target).
 
-        assert self.method in get_args(SpeculativeMethod), (
-            f"Unsupported speculative method: '{self.method}'"
-        )
+        if self.method not in get_args(SpeculativeMethod):
+            raise NotImplementedError(
+                f"Unsupported speculative method: '{self.method}'"
+            )
         self._init_model_config_tail()
 
     def _validate_suffix_decoding(self):
