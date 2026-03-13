@@ -23,28 +23,45 @@ class ReasoningConfig:
     think_end_str: str = "</think>"
     """String that indicates the end of reasoning content."""
 
-    think_start_token_ids: list[int] | None = field(
+    _think_start_token_ids: list[int] | None = field(
         default=None, init=False, repr=False
     )
-    """Token IDs derived from `think_start_str`. Set automatically by
+    """Private backing field for `think_start_token_ids`. Set by
     `initialize_token_ids`. Not intended to be configured directly."""
-    think_end_token_ids: list[int] | None = field(default=None, init=False, repr=False)
-    """Token IDs derived from `think_end_str`. Set automatically by
+    _think_end_token_ids: list[int] | None = field(default=None, init=False, repr=False)
+    """Private backing field for `think_end_token_ids`. Set by
     `initialize_token_ids`. Not intended to be configured directly."""
+
+    @property
+    def think_start_token_ids(self) -> list[int] | None:
+        """Token IDs derived from `think_start_str`. Set automatically by
+        `initialize_token_ids`. Not intended to be configured directly."""
+        return self._think_start_token_ids
+
+    @property
+    def think_end_token_ids(self) -> list[int] | None:
+        """Token IDs derived from `think_end_str`. Set automatically by
+        `initialize_token_ids`. Not intended to be configured directly."""
+        return self._think_end_token_ids
 
     def initialize_token_ids(self, model_config: ModelConfig) -> None:
         """Initialize reasoning token IDs from strings using the tokenizer."""
+        if (
+            self._think_start_token_ids is not None
+            and self._think_end_token_ids is not None
+        ):
+            return
+
         tokenizer = cached_tokenizer_from_config(model_config=model_config)
 
-        # Convert reasoning strings to token IDs
-        self.think_start_token_ids = tokenizer.encode(
+        self._think_start_token_ids = tokenizer.encode(
             self.think_start_str, add_special_tokens=False
         )
-        self.think_end_token_ids = tokenizer.encode(
+        self._think_end_token_ids = tokenizer.encode(
             self.think_end_str, add_special_tokens=False
         )
 
-        if not self.think_start_token_ids or not self.think_end_token_ids:
+        if not self._think_start_token_ids or not self._think_end_token_ids:
             raise ValueError(
                 f"ReasoningConfig: failed to tokenize reasoning strings: "
                 f"think_start_str='{self.think_start_str}', "
