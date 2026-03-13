@@ -104,8 +104,10 @@ class DPCoordinator:
         """Returns tuple of ZMQ input address, output address."""
         return self.coord_in_address, self.coord_out_address
 
-    def close(self):
-        self._finalizer()
+    def shutdown(self, timeout: float | None = None) -> None:
+        """Shutdown coordinator process with configurable timeout."""
+        if self._finalizer.detach() is not None:
+            shutdown([self.proc], timeout=timeout)
 
 
 class EngineState:
