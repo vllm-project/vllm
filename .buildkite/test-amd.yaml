@@ -505,7 +505,7 @@ steps:
   - vllm/
   - tests/v1
   commands:
-  - pytest -v -s v1/e2e/test_spec_decode.py -k "tensor_parallelism"
+    - pytest -v -s v1/e2e/spec_decode/test_spec_decode.py -k "tensor_parallelism"
 
 
 - label: V1 e2e (4 GPUs) # TBD
@@ -518,7 +518,7 @@ steps:
   - vllm/
   - tests/v1
   commands:
-  - pytest -v -s v1/e2e/test_spec_decode.py -k "eagle_correctness_heavy"
+    - pytest -v -s v1/e2e/spec_decode/test_spec_decode.py -k "eagle_correctness_heavy"
 
 
 - label: Entrypoints V1 # TBD
@@ -2171,7 +2171,8 @@ steps:
   - vllm/
   - tests/v1
   commands:
-  - pytest -v -s v1/e2e/test_spec_decode.py -k "tensor_parallelism"
+    # Only run tests that need exactly 2 GPUs
+    - pytest -v -s v1/e2e/spec_decode/test_spec_decode.py -k "tensor_parallelism"
 
 
 - label: V1 e2e (4 GPUs) # 52.6m
@@ -2185,7 +2186,8 @@ steps:
   - vllm/
   - tests/v1
   commands:
-  - pytest -v -s v1/e2e/test_spec_decode.py -k "eagle_correctness_heavy"
+    # Only run tests that need 4 GPUs
+    - pytest -v -s v1/e2e/spec_decode/test_spec_decode.py -k "eagle_correctness_heavy"
 
 
 - label: Entrypoints V1 # 25.7m
@@ -3936,7 +3938,8 @@ steps:
   - vllm/
   - tests/v1
   commands:
-  - pytest -v -s v1/e2e/test_spec_decode.py -k "tensor_parallelism"
+    # Only run tests that need exactly 2 GPUs
+    - pytest -v -s v1/e2e/spec_decode/test_spec_decode.py -k "tensor_parallelism"
 
 
 - label: V1 e2e (4 GPUs) # TBD
@@ -3950,7 +3953,8 @@ steps:
   - vllm/
   - tests/v1
   commands:
-  - pytest -v -s v1/e2e/test_spec_decode.py -k "eagle_correctness_heavy"
+    # Only run tests that need 4 GPUs
+    - pytest -v -s v1/e2e/spec_decode/test_spec_decode.py -k "eagle_correctness_heavy"
 
 
 - label: Entrypoints V1 # TBD

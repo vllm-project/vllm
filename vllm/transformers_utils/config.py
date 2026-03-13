@@ -78,6 +78,7 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     bagel="BagelConfig",
     chatglm="ChatGLMConfig",
     colmodernvbert="ColModernVBertConfig",
+    colpali="ColPaliConfig",
     colqwen3="ColQwen3Config",
     ops_colqwen3="OpsColQwen3Config",
     qwen3_vl_nemotron_embed="Qwen3VLNemotronEmbedConfig",
