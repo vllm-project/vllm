@@ -37,11 +37,11 @@ class ReasoningConfig:
         tokenizer = cached_tokenizer_from_config(model_config=model_config)
 
         # Convert reasoning strings to token IDs
-        self.think_start_token_ids = tokenizer.convert_tokens_to_ids(
-            tokenizer.tokenize(self.think_start_str)
+        self.think_start_token_ids = tokenizer.encode(
+            self.think_start_str, add_special_tokens=False
         )
-        self.think_end_token_ids = tokenizer.convert_tokens_to_ids(
-            tokenizer.tokenize(self.think_end_str)
+        self.think_end_token_ids = tokenizer.encode(
+            self.think_end_str, add_special_tokens=False
         )
 
         if not self.think_start_token_ids or not self.think_end_token_ids:
