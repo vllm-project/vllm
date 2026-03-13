@@ -13,7 +13,7 @@ from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.mm.encoder_runner import EncoderRunner
-from vllm.v1.worker.gpu.mm.rope import RopeState
+from vllm.v1.worker.gpu.mm.rope import get_rope_state
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.states import RequestState
 from vllm.v1.worker.utils import AttentionGroup
@@ -52,25 +52,14 @@ class DefaultModelState(ModelState):
                 device=self.device,
             )
 
-        self.rope_state: RopeState | None = None
-        if self.model_config.uses_mrope:
-            self.rope_state = RopeState(
-                num_dims=3,
-                has_delta=True,
-                max_num_reqs=self.max_num_reqs,
-                max_num_tokens=self.max_num_tokens,
-                max_model_len=self.max_model_len,
-                device=self.device,
-            )
-        elif self.model_config.uses_xdrope_dim > 0:
-            self.rope_state = RopeState(
-                num_dims=self.model_config.uses_xdrope_dim,
-                has_delta=False,
-                max_num_reqs=self.max_num_reqs,
-                max_num_tokens=self.max_num_tokens,
-                max_model_len=self.max_model_len,
-                device=self.device,
-            )
+        self.rope_state = get_rope_state(
+            self.model_config,
+            model,
+            max_num_reqs=self.max_num_reqs,
+            max_num_tokens=self.max_num_tokens,
+            max_model_len=self.max_model_len,
+            device=self.device,
+        )
 
     def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
         if self.rope_state is not None:

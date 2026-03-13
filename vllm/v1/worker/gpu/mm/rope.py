@@ -5,6 +5,7 @@ from typing import cast
 import torch
 import torch.nn as nn
 
+from vllm.config import ModelConfig
 from vllm.model_executor.models.interfaces import SupportsMRoPE, SupportsXDRoPE
 from vllm.triton_utils import tl, triton
 from vllm.v1.worker.gpu.buffer_utils import StagedWriteTensor, UvaBackedTensor
@@ -14,7 +15,7 @@ class RopeState:
     """Unified state for multi-dimensional RoPE variants (M-RoPE, XD-RoPE).
 
     M-RoPE: 3 dims, uses position delta for decode.
-    XD-RoPE: 3 or 4 dims, no delta (decode uses orig_pos for all dims).
+    XD-RoPE: 3 or 4 dims, delta is 0 (decode uses orig_pos for all dims).
 
     NOTE: `positions` is implemented with one additional dummy position on
     purpose to make it non-contiguous so that it can work with torch compile.
@@ -55,8 +56,8 @@ class RopeState:
             (num_dims, max_num_tokens + 1), dtype=torch.int64, device=device
         )
 
-        if has_delta:
-            self.prefill_delta = UvaBackedTensor(max_num_reqs, dtype=torch.int32)
+        # Delta is non-zero for M-RoPE, always 0 for XD-RoPE.
+        self.prefill_delta = UvaBackedTensor(max_num_reqs, dtype=torch.int32)
 
     def init_prefill_positions(
         self,
@@ -83,8 +84,7 @@ class RopeState:
 
     def apply_staged_writes(self) -> None:
         self.prefill_positions.apply_write()
-        if self.has_delta:
-            self.prefill_delta.copy_to_uva()
+        self.prefill_delta.copy_to_uva()
 
     def get_positions(self, num_tokens: int) -> torch.Tensor:
         return self.positions[:, :num_tokens]
@@ -103,15 +103,46 @@ class RopeState:
             self.prefill_positions.gpu,
             self.num_dims * self.max_model_len,
             self.max_model_len,
-            self.prefill_delta.gpu if self.has_delta else idx_mapping,
+            self.prefill_delta.gpu,
             idx_mapping,
             query_start_loc,
             prefill_lens,
             num_computed_tokens,
             BLOCK_SIZE=1024,
             NUM_DIMS=self.num_dims,
-            HAS_DELTA=self.has_delta,
         )
+
+
+def get_rope_state(
+    model_config: ModelConfig,
+    model: nn.Module,
+    max_num_reqs: int,
+    max_num_tokens: int,
+    max_model_len: int,
+    device: torch.device,
+) -> RopeState | None:
+    """Create a RopeState if the model uses multi-dimensional RoPE."""
+    if model_config.uses_mrope:
+        assert isinstance(model, SupportsMRoPE)
+        return RopeState(
+            num_dims=3,
+            has_delta=True,
+            max_num_reqs=max_num_reqs,
+            max_num_tokens=max_num_tokens,
+            max_model_len=max_model_len,
+            device=device,
+        )
+    elif model_config.uses_xdrope_dim > 0:
+        assert isinstance(model, SupportsXDRoPE)
+        return RopeState(
+            num_dims=model_config.uses_xdrope_dim,
+            has_delta=False,
+            max_num_reqs=max_num_reqs,
+            max_num_tokens=max_num_tokens,
+            max_model_len=max_model_len,
+            device=device,
+        )
+    return None
 
 
 @triton.jit
@@ -128,7 +159,6 @@ def _prepare_rope_positions_kernel(
     num_computed_tokens_ptr,
     BLOCK_SIZE: tl.constexpr,
     NUM_DIMS: tl.constexpr,
-    HAS_DELTA: tl.constexpr,
 ):
     batch_idx = tl.program_id(0)
     req_state_idx = tl.load(idx_mapping_ptr + batch_idx)
@@ -141,8 +171,7 @@ def _prepare_rope_positions_kernel(
     query_end = tl.load(query_start_loc_ptr + batch_idx + 1)
     query_len = query_end - query_start
 
-    if HAS_DELTA:
-        delta = tl.load(prefill_delta_ptr + req_state_idx)
+    delta = tl.load(prefill_delta_ptr + req_state_idx)
 
     for i in range(0, query_len, BLOCK_SIZE):
         block = i + tl.arange(0, BLOCK_SIZE)
@@ -159,7 +188,7 @@ def _prepare_rope_positions_kernel(
                     mask=mask,
                 )
             else:
-                pos = orig_pos + delta if HAS_DELTA else orig_pos
+                pos = orig_pos + delta
             tl.store(
                 positions_ptr + j * positions_stride + query_start + block,
                 pos,
