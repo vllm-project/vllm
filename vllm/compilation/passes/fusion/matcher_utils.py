@@ -197,8 +197,8 @@ class MatcherDeepseekScalingRotaryEmbedding(MatcherCustomOp):
         query: torch.Tensor,
         key: torch.Tensor | None,
         cos_sin_cache: torch.Tensor,
-    ) -> tuple[torch.Tensor | None]:
-        result: tuple[torch.Tensor | None] = (
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        result: tuple[torch.Tensor, torch.Tensor | None] = (
             DeepseekScalingRotaryEmbedding.forward_static(
                 positions,
                 query,
@@ -217,8 +217,8 @@ class MatcherDeepseekScalingRotaryEmbedding(MatcherCustomOp):
         query: torch.Tensor,
         key: torch.Tensor | None,
         cos_sin_cache: torch.Tensor,
-    ) -> tuple[torch.Tensor | None]:
-        result: tuple[torch.Tensor | None] = (
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        result: tuple[torch.Tensor, torch.Tensor | None] = (
             DeepseekScalingRotaryEmbedding.forward_static(
                 positions,
                 query,

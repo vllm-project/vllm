@@ -37,7 +37,9 @@ def fused_concat_and_cache_mla_rope_impl(
     forward_context = get_forward_context()
     attn_layer = forward_context.no_compile_layers[layer_name]
     kv_cache = attn_layer.kv_cache[forward_context.virtual_engine]
-    layer_slot_mapping = forward_context.slot_mapping.get(layer_name)
+    layer_slot_mapping: dict[str, torch.Tensor] | None = (
+        forward_context.slot_mapping.get(layer_name)
+    )
     if layer_slot_mapping is not None:
         ops.concat_and_cache_mla_rope_fused(
             positions,

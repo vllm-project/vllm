@@ -145,6 +145,12 @@ def enable_rope_kvcache_fusion(cfg: "VllmConfig") -> bool:
     )
 
 
+def enable_rope_kvcache_mla_fusion(cfg: "VllmConfig") -> bool:
+    """Enable if use_inductor_graph_partition is enabled."""
+
+    return cfg.compilation_config.use_inductor_graph_partition
+
+
 def enable_norm_pad_fusion(cfg: "VllmConfig") -> bool:
     """Enable if using AITER RMSNorm and AITER Triton GEMMs
     and hidden size is 2880 i.e. gpt-oss; otherwise Inductor handles fusion."""
@@ -189,7 +195,7 @@ OPTIMIZATION_LEVEL_01 = {
             "fuse_gemm_comms": False,
             "fuse_act_padding": enable_norm_pad_fusion,
             "fuse_rope_kvcache": enable_rope_kvcache_fusion,
-            "fuse_cache_mla_rope": True,
+            "fuse_cache_mla_rope": enable_rope_kvcache_mla_fusion,
         },
         "cudagraph_mode": CUDAGraphMode.PIECEWISE,
         "use_inductor_graph_partition": False,
@@ -209,7 +215,7 @@ OPTIMIZATION_LEVEL_02 = {
             "fuse_gemm_comms": IS_DENSE,
             "fuse_act_padding": enable_norm_pad_fusion,
             "fuse_rope_kvcache": enable_rope_kvcache_fusion,
-            "fuse_cache_mla_rope": True,
+            "fuse_cache_mla_rope": enable_rope_kvcache_mla_fusion,
         },
         "cudagraph_mode": CUDAGraphMode.FULL_AND_PIECEWISE,
         "use_inductor_graph_partition": False,
@@ -229,7 +235,7 @@ OPTIMIZATION_LEVEL_03 = {
             "fuse_gemm_comms": IS_DENSE,
             "fuse_act_padding": enable_norm_pad_fusion,
             "fuse_rope_kvcache": enable_rope_kvcache_fusion,
-            "fuse_cache_mla_rope": True,
+            "fuse_cache_mla_rope": enable_rope_kvcache_mla_fusion,
         },
         "cudagraph_mode": CUDAGraphMode.FULL_AND_PIECEWISE,
         "use_inductor_graph_partition": False,
