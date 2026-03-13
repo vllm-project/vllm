@@ -615,7 +615,9 @@ class SpeculativeConfig:
                 return
 
         # Auto-detect method from hf_config now that ModelConfig is loaded.
-        if self.method not in ("draft_model", "medusa", "mlp_speculator"):
+        # Only run when method is still the default ("draft_model"), i.e.
+        # the user didn't explicitly request a specific method.
+        if self.method == "draft_model":
             model_type = self.draft_model_config.hf_config.model_type
             if model_type == "medusa":
                 self.method = "medusa"
