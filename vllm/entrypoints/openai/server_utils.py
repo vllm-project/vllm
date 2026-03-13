@@ -11,7 +11,7 @@ from contextlib import asynccontextmanager
 from http import HTTPStatus
 
 import pydantic
-from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.concurrency import iterate_in_threadpool
@@ -350,7 +350,8 @@ async def engine_error_handler(
         server=req.app.state.server,
         engine=req.app.state.engine_client,
     )
-    return Response(status_code=HTTPStatus.INTERNAL_SERVER_ERROR)
+    err = create_error_response(exc)
+    return JSONResponse(err.model_dump(), status_code=HTTPStatus.INTERNAL_SERVER_ERROR)
 
 
 async def exception_handler(req: Request, exc: Exception):
