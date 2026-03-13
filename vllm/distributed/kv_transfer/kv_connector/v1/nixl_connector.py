@@ -998,10 +998,7 @@ class NixlConnectorWorker:
 
         # KV Caches and nixl tracking data.
         self.device_type = current_platform.device_type
-        kv_buffer_device = vllm_config.kv_transfer_config.kv_buffer_device
-        if kv_buffer_device is None:
-            raise ValueError("kv_buffer_device must be set for NixlConnector")
-        self.kv_buffer_device: str = kv_buffer_device
+        self.kv_buffer_device: str = vllm_config.kv_transfer_config.kv_buffer_device
         if self.device_type not in _NIXL_SUPPORTED_DEVICE:
             raise RuntimeError(f"{self.device_type} is not supported.")
         elif self.kv_buffer_device not in _NIXL_SUPPORTED_DEVICE[self.device_type]:
