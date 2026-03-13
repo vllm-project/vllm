@@ -205,6 +205,13 @@ re_quote_pytest_markers() {
       esac
 
       if $is_boundary; then
+        # Strip surrounding double quotes if present (from upstream
+        # single-to-double conversion); without this, wrapping below
+        # would produce '"expr"' with literal double-quote characters.
+        if [[ "$marker_buf" == '"'*'"' ]]; then
+          marker_buf="${marker_buf#\"}"
+          marker_buf="${marker_buf%\"}"
+        fi
         # Flush the collected marker expression
         if [[ "$marker_buf" == *" "* || "$marker_buf" == *"("* ]]; then
           output+="'${marker_buf}' "
@@ -242,6 +249,11 @@ re_quote_pytest_markers() {
 
   # Flush any trailing marker expression (marker at end of command)
   if $collecting && [[ -n "$marker_buf" ]]; then
+    # Strip surrounding double quotes (see mid-stream flush comment)
+    if [[ "$marker_buf" == '"'*'"' ]]; then
+      marker_buf="${marker_buf#\"}"
+      marker_buf="${marker_buf%\"}"
+    fi
     if [[ "$marker_buf" == *" "* || "$marker_buf" == *"("* ]]; then
       output+="'${marker_buf}'"
     else
@@ -492,6 +504,8 @@ else
     -e HF_TOKEN \
     -e AWS_ACCESS_KEY_ID \
     -e AWS_SECRET_ACCESS_KEY \
+    -e BUILDKITE_PARALLEL_JOB \
+    -e BUILDKITE_PARALLEL_JOB_COUNT \
     -v "${HF_CACHE}:${HF_MOUNT}" \
     -e "HF_HOME=${HF_MOUNT}" \
     -e "PYTHONPATH=${MYPYTHONPATH}" \
