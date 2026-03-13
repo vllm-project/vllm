@@ -384,3 +384,92 @@ jobs:
                 }
               }
             }
+
+      - name: Request missing ROCm info from issue author
+        if: contains(steps.label-step.outputs.labels_added, 'rocm') && contains(toJSON(github.event.issue.labels.*.name), 'bug')
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd  # v8.0.0
+        with:
+          script: |
+            const body = (context.payload.issue.body || '').toLowerCase();
+
+            // Check for existing bot comments to avoid duplicate requests
+            const comments = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            const botAlreadyAsked = comments.data.some(
+              c => c.user.type === 'Bot' && c.body.includes('<!-- rocm-info-request -->')
+            );
+            if (botAlreadyAsked) {
+              core.notice('ROCm info request already posted, skipping');
+              return;
+            }
+
+            // Define required information sections and their detection patterns
+            const requiredInfo = [
+              {
+                name: 'Reproducer',
+                patterns: [
+                  /reproduc/i, /minimal.?example/i, /repro\b/i, /steps to reproduce/i,
+                  /code.?snippet/i, /sample.?code/i, /```[\s\S]*```/,
+                ],
+                ask: 'A **minimal reproducer** (code snippet or script that triggers the issue)',
+              },
+              {
+                name: 'Environment',
+                patterns: [
+                  /rocm.?\d+\.\d+/i, /torch.?\d+\.\d+/i, /python.?\d+\.\d+/i,
+                  /vllm.?\d+\.\d+/i, /ubuntu/i, /os\s*:/i, /environment/i,
+                  /pip list/i, /pip freeze/i,
+                ],
+                ask: 'Your **environment details** (OS, Python version, PyTorch version, ROCm version, vLLM version)',
+              },
+              {
+                name: 'Docker image or build steps',
+                patterns: [
+                  /docker/i, /rocm\/pytorch/i, /dockerfile/i, /from source/i,
+                  /pip install/i, /build.?from/i, /container/i, /image/i,
+                ],
+                ask: 'The **Docker image** you are using, or **steps to build vLLM** if building from source',
+              },
+              {
+                name: 'GFX architecture',
+                patterns: [
+                  /gfx\d{3,4}/i, /mi\d{3}/i, /mi\d{2}\b/i, /radeon/i,
+                  /gpu.?arch/i, /rocm-smi/i, /rocminfo/i, /navi/i,
+                  /instinct/i,
+                ],
+                ask: 'Your **GPU model and GFX architecture** (e.g., MI300X / gfx942). You can find this by running `rocminfo | grep gfx`',
+              },
+            ];
+
+            const missing = requiredInfo.filter(info =>
+              !info.patterns.some(p => p.test(context.payload.issue.body || ''))
+            );
+
+            if (missing.length === 0) {
+              core.notice('All required ROCm info appears to be present');
+              return;
+            }
+
+            const author = context.payload.issue.user.login;
+            const missingList = missing.map(m => `- ${m.ask}`).join('\n');
+            const message = [
+              '<!-- rocm-info-request -->',
+              `Hi @${author}, thanks for reporting this ROCm issue!`,
+              '',
+              'To help us investigate, could you please provide the following information that appears to be missing:',
+              '',
+              missingList,
+              '',
+              'This will help us reproduce and resolve the issue faster. Thank you!',
+            ].join('\n');
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: message,
+            });
+            core.notice(`Requested missing ROCm info from @${author}: ${missing.map(m => m.name).join(', ')}`);
