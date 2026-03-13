@@ -1021,3 +1021,83 @@ def test_chat_completion_request_n_parameter_various_values():
         assert sampling_params.n == n_value, (
             f"Expected n={n_value}, got n={sampling_params.n}"
         )
+
+
+# Unit tests for skip_special_tokens server-side override
+
+
+def test_skip_special_tokens_default():
+    """Test that skip_special_tokens defaults to True."""
+    request = ChatCompletionRequest(
+        model="test-model",
+        messages=[{"role": "user", "content": "Hello"}],
+        max_tokens=10,
+    )
+    assert request.skip_special_tokens is True
+
+    sampling_params = request.to_sampling_params(
+        max_tokens=10,
+        default_sampling_params={},
+    )
+    assert sampling_params.skip_special_tokens is True
+
+
+def test_skip_special_tokens_server_override():
+    """Test that server-side skip_special_tokens overrides request default."""
+    request = ChatCompletionRequest(
+        model="test-model",
+        messages=[{"role": "user", "content": "Hello"}],
+        max_tokens=10,
+    )
+
+    # Simulate the serving layer override
+    default_sampling_params = {"skip_special_tokens": False}
+    if "skip_special_tokens" in default_sampling_params:
+        request.skip_special_tokens = (
+            default_sampling_params["skip_special_tokens"]
+        )
+
+    sampling_params = request.to_sampling_params(
+        max_tokens=10,
+        default_sampling_params=default_sampling_params,
+    )
+    assert sampling_params.skip_special_tokens is False
+
+
+def test_skip_special_tokens_client_explicit():
+    """Test that client-set skip_special_tokens is used when no server
+    override."""
+    request = ChatCompletionRequest(
+        model="test-model",
+        messages=[{"role": "user", "content": "Hello"}],
+        max_tokens=10,
+        skip_special_tokens=False,
+    )
+
+    sampling_params = request.to_sampling_params(
+        max_tokens=10,
+        default_sampling_params={},
+    )
+    assert sampling_params.skip_special_tokens is False
+
+
+def test_skip_special_tokens_cli_flag():
+    """Test that --skip-special-tokens and --no-skip-special-tokens CLI flags
+    work correctly."""
+    from vllm.entrypoints.openai.cli_args import BaseFrontendArgs
+    from vllm.utils.argparse_utils import FlexibleArgumentParser
+
+    parser = FlexibleArgumentParser()
+    BaseFrontendArgs.add_cli_args(parser)
+
+    # Default is True
+    args = parser.parse_args([])
+    assert args.skip_special_tokens is True
+
+    # --no-skip-special-tokens sets False
+    args = parser.parse_args(["--no-skip-special-tokens"])
+    assert args.skip_special_tokens is False
+
+    # --skip-special-tokens explicitly sets True
+    args = parser.parse_args(["--skip-special-tokens"])
+    assert args.skip_special_tokens is True
