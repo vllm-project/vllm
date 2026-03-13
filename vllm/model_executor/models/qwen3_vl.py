@@ -565,23 +565,25 @@ class Qwen3_VisionTransformer(nn.Module):
         # cu_seqlens from grid_thw
         grid_thw_np = np.array(grid_thw_list, dtype=np.int32)
         patches_per_frame = grid_thw_np[:, 1] * grid_thw_np[:, 2]
-        cu_seqlens = np.repeat(
-            patches_per_frame, grid_thw_np[:, 0]
-        ).cumsum(dtype=np.int32)
+        cu_seqlens = np.repeat(patches_per_frame, grid_thw_np[:, 0]).cumsum(
+            dtype=np.int32
+        )
         cu_seqlens = np.concatenate([np.zeros(1, dtype=np.int32), cu_seqlens])
 
         # Pad cu_seqlens if max_batch_size specified
         if max_batch_size is not None:
             num_seqs = len(cu_seqlens) - 1
             if num_seqs < max_batch_size:
-                cu_seqlens = np.concatenate([
-                    cu_seqlens,
-                    np.full(
-                        max_batch_size - num_seqs,
-                        cu_seqlens[-1],
-                        dtype=np.int32,
-                    ),
-                ])
+                cu_seqlens = np.concatenate(
+                    [
+                        cu_seqlens,
+                        np.full(
+                            max_batch_size - num_seqs,
+                            cu_seqlens[-1],
+                            dtype=np.int32,
+                        ),
+                    ]
+                )
 
         # sequence_lengths (backend-specific)
         metadata["sequence_lengths"] = MMEncoderAttention.maybe_compute_seq_lens(

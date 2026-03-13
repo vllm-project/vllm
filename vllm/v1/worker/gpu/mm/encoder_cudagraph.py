@@ -143,13 +143,11 @@ class EncoderCudaGraphManager:
                 return budget
         return None
 
-    def _get_per_item_out_tokens(
-        self, mm_kwargs: dict[str, Any]
-    ) -> list[int]:
+    def _get_per_item_out_tokens(self, mm_kwargs: dict[str, Any]) -> list[int]:
         """Get per-item output token counts as plain ints."""
         return [
-            int(t) for t in
-            self.model.get_encoder_cudagraph_per_item_output_tokens(mm_kwargs)
+            int(t)
+            for t in self.model.get_encoder_cudagraph_per_item_output_tokens(mm_kwargs)
         ]
 
     @staticmethod
@@ -312,7 +310,9 @@ class EncoderCudaGraphManager:
                 with torch.inference_mode():
                     raw = self.model.encoder_eager_forward(batch_mm_kwargs)
                 self._scatter_output_slices(
-                    raw, batch_orig_indices, per_item_out_tokens,
+                    raw,
+                    batch_orig_indices,
+                    per_item_out_tokens,
                     outputs_by_orig_idx,
                 )
             else:
@@ -334,8 +334,11 @@ class EncoderCudaGraphManager:
                 )
                 assert output is not None
                 self._scatter_output_slices(
-                    output, batch_orig_indices, per_item_out_tokens,
-                    outputs_by_orig_idx, clone=True,
+                    output,
+                    batch_orig_indices,
+                    per_item_out_tokens,
+                    outputs_by_orig_idx,
+                    clone=True,
                 )
 
         # Return in original batch order (caller maps outputs to token positions)
@@ -474,7 +477,9 @@ class EncoderCudaGraphManager:
             if count > 0:
                 rank_items = image_rank_assignment[current_idx : current_idx + count]
                 self._scatter_output_slices(
-                    rank_outputs[rank], rank_items, per_item_out_tokens,
+                    rank_outputs[rank],
+                    rank_items,
+                    per_item_out_tokens,
                     result,
                 )
                 current_idx += count
