@@ -254,20 +254,16 @@ def test_propose():
     # Sampled token IDs from target model
     sampled_token_ids = torch.tensor([42, 60], dtype=torch.int32, device=device)
 
-    # Mock scheduler output
-    mock_scheduler_output = mock.MagicMock()
-
     # Call propose
     with mock.patch(
         "vllm.v1.spec_decode.extract_hidden_states.has_kv_transfer_group"
     ) as mock_has_kv:
         mock_has_kv.return_value = False
 
-        draft_tokens, kv_connector_output = proposer.propose(
+        draft_tokens = proposer.propose(
             sampled_token_ids=sampled_token_ids,
             target_hidden_states=target_hidden_states,
             common_attn_metadata=common_attn_metadata,
-            scheduler_output=mock_scheduler_output,
             slot_mappings=None,
         )
 
@@ -327,18 +323,16 @@ def test_propose_different_layer_counts(num_hidden_layers):
     ]
 
     sampled_token_ids = torch.tensor([42, 60], dtype=torch.int32, device=device)
-    mock_scheduler_output = mock.MagicMock()
 
     with mock.patch(
         "vllm.v1.spec_decode.extract_hidden_states.has_kv_transfer_group"
     ) as mock_has_kv:
         mock_has_kv.return_value = False
 
-        draft_tokens, _ = proposer.propose(
+        draft_tokens = proposer.propose(
             sampled_token_ids=sampled_token_ids,
             target_hidden_states=target_hidden_states,
             common_attn_metadata=common_attn_metadata,
-            scheduler_output=mock_scheduler_output,
             slot_mappings=None,
         )
 

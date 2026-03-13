@@ -79,11 +79,10 @@ class ExtractHiddenStatesProposer:
         sampled_token_ids: torch.Tensor,
         target_hidden_states: list[torch.Tensor],
         common_attn_metadata: CommonAttentionMetadata,
-        scheduler_output: SchedulerOutput,
         slot_mappings: dict[str, torch.Tensor]
         | list[dict[str, torch.Tensor]]
         | None = None,
-    ) -> tuple[torch.Tensor, KVConnectorOutput | None]:
+    ) -> torch.Tensor:
         """Propose draft tokens by calling the ExtractHiddenStatesModel model.
 
         The ExtractHiddenStatesModel caches the hidden states in the KV cache
@@ -136,22 +135,15 @@ class ExtractHiddenStatesProposer:
         if num_tokens_across_dp is not None:
             num_tokens_across_dp[self.dp_rank] = num_input_tokens
 
-        with (
-            set_forward_context(
-                per_layer_attn_metadata,
-                self.vllm_config,
-                num_tokens=num_input_tokens,
-                num_tokens_across_dp=num_tokens_across_dp,
-                cudagraph_runtime_mode=cudagraph_runtime_mode,
-                slot_mapping=self._get_slot_mapping(
-                    num_input_tokens, common_attn_metadata.slot_mapping
-                ),
+        with set_forward_context(
+            per_layer_attn_metadata,
+            self.vllm_config,
+            num_tokens=num_input_tokens,
+            num_tokens_across_dp=num_tokens_across_dp,
+            cudagraph_runtime_mode=cudagraph_runtime_mode,
+            slot_mapping=self._get_slot_mapping(
+                num_input_tokens, common_attn_metadata.slot_mapping
             ),
-            (
-                KVConnectorModelRunnerMixin._get_kv_connector_output(scheduler_output)
-                if has_kv_transfer_group()
-                else nullcontext()
-            ) as kv_connector_output,
         ):
             self.model(
                 hidden_states=self.hidden_states[:num_input_tokens],
@@ -159,7 +151,7 @@ class ExtractHiddenStatesProposer:
 
         # Return the sampled tokens as "draft" tokens
         # Shape: [batch_size, 1] to match num_speculative_tokens=1
-        return sampled_token_ids.unsqueeze(-1), kv_connector_output
+        return sampled_token_ids.unsqueeze(-1)
 
     def _get_slot_mapping(
         self,
