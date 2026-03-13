@@ -389,7 +389,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
 
                 # Also handles the edge case where use_flattening=False
                 # but max_decode_len != next_n (e.g. a batch containing some
-                # single-token prefills and no decodes when num_speculative_tokens = 1).
+                # short prefills (q_len < next_n) and no true decodes).
 
                 # Assume 4 requests with seq_lens [10, 7, 12, 0] (the final req is
                 # padding) and decode_lens [3, 1, 4, 0] in the below example comments.
