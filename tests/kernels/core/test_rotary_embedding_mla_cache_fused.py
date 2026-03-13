@@ -133,7 +133,6 @@ def test_concat_and_cache_mla_rope_fused(
             kv_cache,
             kv_cache_dtype,
             kv_cache_scale,
-            True,
         ),
         test_utils=DEFAULT_OPCHECK_TEST_UTILS,
     )
@@ -149,7 +148,6 @@ def test_concat_and_cache_mla_rope_fused(
         kv_cache,
         kv_cache_dtype,
         kv_cache_scale,
-        True,
     )
 
     if kv_cache_dtype == "fp8":
