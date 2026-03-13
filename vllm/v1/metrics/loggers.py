@@ -19,6 +19,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
 from vllm.logger import init_logger
 from vllm.plugins import STAT_LOGGER_PLUGINS_GROUP, load_plugins_by_group
 from vllm.v1.engine import FinishReason
+from vllm.v1.metrics.buckets import BucketType, get_buckets
 from vllm.v1.metrics.perf import PerfMetricsLogging, PerfMetricsProm
 from vllm.v1.metrics.prometheus import unregister_vllm_metrics
 from vllm.v1.metrics.stats import (
@@ -660,7 +661,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         histogram_num_prompt_tokens_request = self._histogram_cls(
             name="vllm:request_prompt_tokens",
             documentation="Number of prefill tokens processed.",
-            buckets=build_1_2_5_buckets(max_model_len),
+            buckets=get_buckets(BucketType.REQUEST_TOKEN_COUNT, max_model_len),
             labelnames=labelnames,
         )
         self.histogram_num_prompt_tokens_request = make_per_engine(
@@ -670,7 +671,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         histogram_num_generation_tokens_request = self._histogram_cls(
             name="vllm:request_generation_tokens",
             documentation="Number of generation tokens processed.",
-            buckets=build_1_2_5_buckets(max_model_len),
+            buckets=get_buckets(BucketType.REQUEST_TOKEN_COUNT, max_model_len),
             labelnames=labelnames,
         )
         self.histogram_num_generation_tokens_request = make_per_engine(
@@ -683,7 +684,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         histogram_iteration_tokens = self._histogram_cls(
             name="vllm:iteration_tokens_total",
             documentation="Histogram of number of tokens per engine_step.",
-            buckets=[1, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384],
+            buckets=get_buckets(BucketType.BATCH_SIZE),
             labelnames=labelnames,
         )
         self.histogram_iteration_tokens = make_per_engine(
@@ -693,7 +694,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         histogram_max_num_generation_tokens_request = self._histogram_cls(
             name="vllm:request_max_num_generation_tokens",
             documentation="Histogram of maximum number of requested generation tokens.",
-            buckets=build_1_2_5_buckets(max_model_len),
+            buckets=get_buckets(BucketType.REQUEST_TOKEN_COUNT, max_model_len),
             labelnames=labelnames,
         )
         self.histogram_max_num_generation_tokens_request = make_per_engine(
@@ -703,7 +704,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         histogram_n_request = self._histogram_cls(
             name="vllm:request_params_n",
             documentation="Histogram of the n request parameter.",
-            buckets=[1, 2, 5, 10, 20],
+            buckets=get_buckets(BucketType.COMPLETION_COUNT),
             labelnames=labelnames,
         )
         self.histogram_n_request = make_per_engine(
@@ -713,7 +714,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         histogram_max_tokens_request = self._histogram_cls(
             name="vllm:request_params_max_tokens",
             documentation="Histogram of the max_tokens request parameter.",
-            buckets=build_1_2_5_buckets(max_model_len),
+            buckets=get_buckets(BucketType.REQUEST_TOKEN_COUNT, max_model_len),
             labelnames=labelnames,
         )
         self.histogram_max_tokens_request = make_per_engine(
@@ -726,30 +727,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         histogram_time_to_first_token = self._histogram_cls(
             name="vllm:time_to_first_token_seconds",
             documentation="Histogram of time to first token in seconds.",
-            buckets=[
-                0.001,
-                0.005,
-                0.01,
-                0.02,
-                0.04,
-                0.06,
-                0.08,
-                0.1,
-                0.25,
-                0.5,
-                0.75,
-                1.0,
-                2.5,
-                5.0,
-                7.5,
-                10.0,
-                20.0,
-                40.0,
-                80.0,
-                160.0,
-                640.0,
-                2560.0,
-            ],
+            buckets=get_buckets(BucketType.PREFILL_LATENCY),
             labelnames=labelnames,
         )
         self.histogram_time_to_first_token = make_per_engine(
@@ -759,27 +737,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         histogram_inter_token_latency = self._histogram_cls(
             name="vllm:inter_token_latency_seconds",
             documentation="Histogram of inter-token latency in seconds.",
-            buckets=[
-                0.01,
-                0.025,
-                0.05,
-                0.075,
-                0.1,
-                0.15,
-                0.2,
-                0.3,
-                0.4,
-                0.5,
-                0.75,
-                1.0,
-                2.5,
-                5.0,
-                7.5,
-                10.0,
-                20.0,
-                40.0,
-                80.0,
-            ],
+            buckets=get_buckets(BucketType.TOKEN_STEP_LATENCY),
             labelnames=labelnames,
         )
         self.histogram_inter_token_latency = make_per_engine(
@@ -789,56 +747,14 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         histogram_request_time_per_output_token = self._histogram_cls(
             name="vllm:request_time_per_output_token_seconds",
             documentation="Histogram of time_per_output_token_seconds per request.",
-            buckets=[
-                0.01,
-                0.025,
-                0.05,
-                0.075,
-                0.1,
-                0.15,
-                0.2,
-                0.3,
-                0.4,
-                0.5,
-                0.75,
-                1.0,
-                2.5,
-                5.0,
-                7.5,
-                10.0,
-                20.0,
-                40.0,
-                80.0,
-            ],
+            buckets=get_buckets(BucketType.TOKEN_STEP_LATENCY),
             labelnames=labelnames,
         )
         self.histogram_request_time_per_output_token = make_per_engine(
             histogram_request_time_per_output_token, engine_indexes, model_name
         )
 
-        request_latency_buckets = [
-            0.3,
-            0.5,
-            0.8,
-            1.0,
-            1.5,
-            2.0,
-            2.5,
-            5.0,
-            10.0,
-            15.0,
-            20.0,
-            30.0,
-            40.0,
-            50.0,
-            60.0,
-            120.0,
-            240.0,
-            480.0,
-            960.0,
-            1920.0,
-            7680.0,
-        ]
+        request_latency_buckets = get_buckets(BucketType.ACCUMULATED_PHASE_LATENCY)
         histogram_e2e_time_request = self._histogram_cls(
             name="vllm:e2e_request_latency_seconds",
             documentation="Histogram of e2e request latency in seconds.",
@@ -895,7 +811,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                 "Histogram of new KV tokens computed during prefill "
                 "(excluding cached tokens)."
             ),
-            buckets=build_1_2_5_buckets(max_model_len),
+            buckets=get_buckets(BucketType.REQUEST_TOKEN_COUNT, max_model_len),
             labelnames=labelnames,
         )
         self.histogram_prefill_kv_computed_request = make_per_engine(
@@ -906,29 +822,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         # KV Cache residency metrics
         #
         if self.kv_cache_metrics_enabled:
-            kv_cache_residency_buckets = [
-                0.001,
-                0.002,
-                0.005,
-                0.01,
-                0.02,
-                0.05,
-                0.1,
-                0.2,
-                0.5,
-                1,
-                2,
-                5,
-                10,
-                20,
-                30,
-                60,
-                120,
-                300,
-                600,
-                1200,
-                1800,
-            ]
+            kv_cache_residency_buckets = get_buckets(BucketType.CACHE_RESIDENCY)
 
             histogram_kv_block_lifetime = self._histogram_cls(
                 name="vllm:kv_block_lifetime_seconds",
@@ -1210,33 +1104,6 @@ def make_per_engine(
     metric: PromMetric, engine_idxs: list[int], model_name: object
 ) -> dict[int, PromMetric]:
     return {idx: metric.labels(model_name, str(idx)) for idx in engine_idxs}
-
-
-def build_buckets(mantissa_lst: list[int], max_value: int) -> list[int]:
-    """
-    Builds a list of buckets with increasing powers of 10 multiplied by
-    mantissa values until the value exceeds the specified maximum.
-
-    """
-    exponent = 0
-    buckets: list[int] = []
-    while True:
-        for m in mantissa_lst:
-            value = m * 10**exponent
-            if value <= max_value:
-                buckets.append(value)
-            else:
-                return buckets
-        exponent += 1
-
-
-def build_1_2_5_buckets(max_value: int) -> list[int]:
-    """
-    Example:
-    >>> build_1_2_5_buckets(100)
-    [1, 2, 5, 10, 20, 50, 100]
-    """
-    return build_buckets([1, 2, 5], max_value)
 
 
 class StatLoggerManager:
