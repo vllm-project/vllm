@@ -492,24 +492,33 @@ class PydanticMsgspecMixin:
             if name not in msgspec_fields:
                 # Skip ClassVar and other non-struct annotations.
                 continue
+            # Skip private fields — they are excluded from serialization
+            # and should not appear in the generated JSON/OpenAPI schema.
+            if name.startswith("_"):
+                continue
             msgspec_field = msgspec_fields[name]
 
             # typed_dict_field using the handler to get the schema
             field_schema = handler(hint)
 
             # Add default value to the schema.
+            # Mark fields with defaults as not required so the generated
+            # JSON Schema stays consistent with ``omit_defaults=True``
+            # serialization (fields at their default value may be absent).
             if msgspec_field.default_factory is not msgspec.NODEFAULT:
                 wrapped_schema = core_schema.with_default_schema(
                     schema=field_schema,
                     default_factory=msgspec_field.default_factory,
                 )
-                fields[name] = core_schema.typed_dict_field(wrapped_schema)
+                fields[name] = core_schema.typed_dict_field(
+                    wrapped_schema, required=False)
             elif msgspec_field.default is not msgspec.NODEFAULT:
                 wrapped_schema = core_schema.with_default_schema(
                     schema=field_schema,
                     default=msgspec_field.default,
                 )
-                fields[name] = core_schema.typed_dict_field(wrapped_schema)
+                fields[name] = core_schema.typed_dict_field(
+                    wrapped_schema, required=False)
             else:
                 # No default, so Pydantic will treat it as required
                 fields[name] = core_schema.typed_dict_field(field_schema)
