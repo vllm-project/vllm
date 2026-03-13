@@ -1,3 +1,5 @@
+//! SMG-backed chat rendering and tokenizer implementations.
+
 mod renderer;
 mod tokenizer;
 

@@ -11,6 +11,8 @@ use thiserror_ext::AsReport as _;
 use crate::error::{Error, Result};
 use crate::tokenizer::Tokenizer;
 
+/// [`Tokenizer`] implementation backed by the crates.io `llm-tokenizer` package, imported here as
+/// `smg_tokenizer`.
 #[derive(Clone)]
 pub struct SmgTokenizer {
     inner: Arc<dyn SmgTokenizerTrait>,
@@ -23,10 +25,12 @@ impl fmt::Debug for SmgTokenizer {
 }
 
 impl SmgTokenizer {
+    /// Load a tokenizer and any adjacent/default chat template for one model or local path.
     pub fn from_model_or_path(model_name_or_path: &str) -> Result<Self> {
         Self::from_model_or_path_with_chat_template(model_name_or_path, None::<&Path>)
     }
 
+    /// Load a tokenizer and optionally override the chat template path.
     pub fn from_model_or_path_with_chat_template(
         model_name_or_path: &str,
         chat_template_path: Option<impl AsRef<Path>>,
@@ -42,6 +46,7 @@ impl SmgTokenizer {
         Ok(Self { inner })
     }
 
+    /// Wrap an existing tokenizer trait object.
     pub fn from_arc(inner: Arc<dyn SmgTokenizerTrait>) -> Self {
         Self { inner }
     }
@@ -65,6 +70,7 @@ impl SmgTokenizer {
             .map_err(|error| Error::Tokenizer(error.to_report_string()))
     }
 
+    /// Return whether the resolved chat template expects plain string message content.
     pub(crate) fn supports_string_chat_template(&self) -> bool {
         matches!(
             self.inner.chat_template_content_format(),

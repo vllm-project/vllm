@@ -7,12 +7,17 @@ use crate::error::{Error, Result};
 use crate::renderer::{ChatRenderer, RenderedPrompt};
 use crate::request::ChatRequest;
 
+/// [`ChatRenderer`] implementation backed by [`SmgTokenizer`]'s chat-template support.
+///
+/// This currently supports only string-style chat templates, matching `ChatMessage { content:
+/// String }`.
 #[derive(Debug, Clone)]
 pub struct SmgTokenizerChatRenderer {
     tokenizer: SmgTokenizer,
 }
 
 impl SmgTokenizerChatRenderer {
+    /// Create a renderer from an SMG-backed tokenizer.
     pub fn new(tokenizer: SmgTokenizer) -> Self {
         Self { tokenizer }
     }

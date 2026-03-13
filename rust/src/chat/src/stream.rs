@@ -9,6 +9,7 @@ use crate::error::{Error, Result};
 use crate::event::ChatEvent;
 use crate::tokenizer::DynTokenizer;
 
+/// Per-request stream of chat events.
 pub struct ChatEventStream {
     request_id: String,
     inner: Pin<Box<dyn Stream<Item = Result<ChatEvent>> + Send>>,
@@ -26,10 +27,12 @@ impl ChatEventStream {
         }
     }
 
+    /// Return the request ID associated with this stream.
     pub fn request_id(&self) -> &str {
         &self.request_id
     }
 
+    /// Collect the stream to completion and return the final cumulative text.
     pub async fn collect_text(mut self) -> Result<String> {
         use futures::StreamExt as _;
 
