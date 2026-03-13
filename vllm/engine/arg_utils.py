@@ -285,15 +285,45 @@ def _compute_kwargs(cls: ConfigType) -> dict[str, dict[str, Any]]:
             "Should either be a valid JSON string or JSON keys passed individually."
         )
         if dataclass_cls is not None:
+            # Add documentation link for config classes
+            # dataclass_cls should be a type, not an instance
+            if not isinstance(dataclass_cls, type):
+                continue
+            config_module = dataclass_cls.__module__
+            config_name = dataclass_cls.__name__
+            # Extract parent module (e.g., vllm.config.speculative -> vllm/config)
+            parent_module = ".".join(config_module.split(".")[:-1])
+            doc_path = parent_module.replace(".", "/")
+            # Anchor: parent module + class name (e.g., vllm.config.SpeculativeConfig)
+            anchor = f"{parent_module}.{config_name}"
+            doc_link = f"https://docs.vllm.ai/en/latest/api/{doc_path}/#{anchor}"
 
-            def parse_dataclass(val: str, cls=dataclass_cls) -> Any:
+            def parse_dataclass(
+                val: str,
+                cls=dataclass_cls,
+                link=doc_link,
+                field_name=name,  # Bind loop variable
+            ) -> Any:
                 try:
                     return TypeAdapter(cls).validate_json(val)
                 except ValidationError as e:
-                    raise argparse.ArgumentTypeError(repr(e)) from e
+                    # Extract field errors for better error messages
+                    flag_name = field_name.replace("_", "-")
+                    error_msg = f"Invalid configuration for --{flag_name}:\n"
+                    if hasattr(e, "errors"):
+                        for error in e.errors():
+                            field = ".".join(str(loc) for loc in error["loc"])
+                            msg = error["msg"]
+                            error_msg += f"  - {field}: {msg}\n"
+                    else:
+                        error_msg += f"  {str(e)}\n"
+                    error_msg += f"\nFor all accepted keys and their types, see: {link}"
+                    raise argparse.ArgumentTypeError(error_msg) from e
 
             kwargs[name]["type"] = parse_dataclass
-            kwargs[name]["help"] += f"\n\n{json_tip}"
+            kwargs[name]["help"] += (
+                f"\n\nFor all accepted keys, see: {doc_link}\n\n{json_tip}"
+            )
         elif contains_type(type_hints, bool):
             # Creates --no-<name> and --<name> flags
             kwargs[name]["action"] = argparse.BooleanOptionalAction
@@ -527,7 +557,9 @@ class EngineArgs:
     reasoning_parser: str = StructuredOutputsConfig.reasoning_parser
     reasoning_parser_plugin: str | None = None
 
-    speculative_config: dict[str, Any] | None = None
+    speculative_config: SpeculativeConfig = get_field(VllmConfig, "speculative_config")
+    speculative_config_help: bool = False
+    """Print detailed help for --speculative-config and exit"""
 
     show_hidden_metrics_for_version: str | None = (
         ObservabilityConfig.show_hidden_metrics_for_version
@@ -1259,6 +1291,11 @@ class EngineArgs:
             "--speculative-config", **vllm_kwargs["speculative_config"]
         )
         vllm_group.add_argument(
+            "--speculative-config-help",
+            action="store_true",
+            help="Print detailed help for --speculative-config and exit",
+        )
+        vllm_group.add_argument(
             "--kv-transfer-config", **vllm_kwargs["kv_transfer_config"]
         )
         vllm_group.add_argument("--kv-events-config", **vllm_kwargs["kv_events_config"])
@@ -1312,6 +1349,11 @@ class EngineArgs:
 
     @classmethod
     def from_cli_args(cls, args: argparse.Namespace):
+        # Handle --speculative-config-help flag
+        if hasattr(args, "speculative_config_help") and args.speculative_config_help:
+            cls._print_speculative_config_help()
+            sys.exit(0)
+
         # Get the list of attributes of this dataclass.
         attrs = [attr.name for attr in dataclasses.fields(cls)]
         # Set the attributes from the parsed arguments.
@@ -1319,6 +1361,64 @@ class EngineArgs:
             **{attr: getattr(args, attr) for attr in attrs if hasattr(args, attr)}
         )
         return engine_args
+
+    @staticmethod
+    def _print_speculative_config_help():
+        """Print detailed help for --speculative-config"""
+        from dataclasses import fields as dc_fields
+
+        print("\n" + "=" * 80)
+        print("SPECULATIVE DECODING CONFIGURATION HELP")
+        print("=" * 80 + "\n")
+
+        print(
+            "The --speculative-config flag accepts a JSON object "
+            "with the following keys:\n"
+        )
+
+        # Get SpeculativeConfig fields
+        for field in dc_fields(SpeculativeConfig):
+            # Skip internal fields
+            if field.name.startswith("_") or field.name in [
+                "target_model_config",
+                "target_parallel_config",
+                "draft_model_config",
+                "draft_parallel_config",
+            ]:
+                continue
+
+            field_type = str(field.type).replace("typing.", "").replace("|", " or ")
+            default = (
+                field.default
+                if field.default is not dataclasses.MISSING
+                else field.default_factory()
+                if field.default_factory is not dataclasses.MISSING
+                else "None"
+            )
+
+            print(f"  {field.name}:")
+            print(f"    Type: {field_type}")
+            print(f"    Default: {default}")
+
+            # Get docstring if available
+            if field.metadata:
+                doc = field.metadata.get("description", "")
+                if doc:
+                    print(f"    Description: {doc}")
+
+            print()
+
+        print("\nFor complete documentation with examples, see:")
+        print(
+            "  https://docs.vllm.ai/en/latest/api/vllm/config/"
+            "#vllm.config.SpeculativeConfig"
+        )
+        print("\nExample usage:")
+        print(
+            "  vllm serve model --speculative-config "
+            '\'{"method": "ngram", "num_speculative_tokens": 5}\''
+        )
+        print("\n" + "=" * 80 + "\n")
 
     def create_model_config(self) -> ModelConfig:
         # gguf file needs a specific model loader
@@ -1442,13 +1542,11 @@ class EngineArgs:
         # Note(Shangming): These parameters are not obtained from the cli arg
         # '--speculative-config' and must be passed in when creating the engine
         # config.
-        self.speculative_config.update(
-            {
-                "target_model_config": target_model_config,
-                "target_parallel_config": target_parallel_config,
-            }
+        return dataclasses.replace(
+            self.speculative_config,
+            target_model_config=target_model_config,
+            target_parallel_config=target_parallel_config,
         )
-        return SpeculativeConfig(**self.speculative_config)
 
     def create_engine_config(
         self,
@@ -1472,15 +1570,26 @@ class EngineArgs:
         # HuggingFace cannot load configs directly from S3 URLs. S3 models can still
         # use speculators with explicit --speculative-config.
         if not is_cloud_storage(self.model):
-            (self.model, self.tokenizer, self.speculative_config) = (
-                maybe_override_with_speculators(
-                    model=self.model,
-                    tokenizer=self.tokenizer,
-                    revision=self.revision,
-                    trust_remote_code=self.trust_remote_code,
-                    vllm_speculative_config=self.speculative_config,
-                )
+            model, tokenizer, spec_config_dict = maybe_override_with_speculators(
+                model=self.model,
+                tokenizer=self.tokenizer,
+                revision=self.revision,
+                trust_remote_code=self.trust_remote_code,
+                vllm_speculative_config=(
+                    dataclasses.asdict(self.speculative_config)
+                    if self.speculative_config is not None
+                    else None
+                ),
             )
+            self.model = model
+            self.tokenizer = tokenizer
+            # Convert dict back to SpeculativeConfig if needed
+            if spec_config_dict is not None and spec_config_dict != (
+                dataclasses.asdict(self.speculative_config)
+                if self.speculative_config is not None
+                else None
+            ):
+                self.speculative_config = SpeculativeConfig(**spec_config_dict)
 
         model_config = self.create_model_config()
         self.model = model_config.model
