@@ -4154,65 +4154,91 @@ def test_srtf_priority_tiebreaker_preemption():
     preempt the one with the most remaining tokens
     (max_tokens - num_computed_tokens) rather than the most-recently-arrived
     one, so that nearly-finished requests are spared.
+
+    Scenario
+    --------
+    block_size=16, 2 usable blocks.
+    req_just_started : priority=0, 16 prompt tokens, max_tokens=200 → remaining≈184
+    req_almost_done  : priority=0, 16 prompt tokens, max_tokens=17  → remaining≈1
+
+    req_just_started is added FIRST (lower arrival_time, sits at index 0 in
+    self.running).  req_almost_done is added SECOND (higher arrival_time).
+
+    Old code (arrival_time tiebreaker only): max key = (priority, arrival_time)
+    → req_almost_done wins (later arrival_time) → req_almost_done preempted.
+
+    SRTF code: max key = (priority, remaining, arrival_time)
+    → req_just_started wins (remaining 184 >> 1) → req_just_started preempted.
     """
-    # 6 usable blocks (7 total; block 0 is the null block).
-    # req_almost_done and req_just_started each occupy 1 block after their
-    # initial prefill (10 prompt tokens < 16 = one block).  That leaves 4
-    # free blocks.  req_large needs ceil(80/16) = 5 blocks, so one running
-    # request must be preempted.
+    # 2 usable blocks (block 0 is the null block).
+    # Each request fills exactly one block → KV cache is full after prefill.
     scheduler = create_scheduler_with_priority(
         max_num_seqs=4,
         max_num_batched_tokens=8192,
-        num_blocks=7,
+        num_blocks=3,
         block_size=16,
+        enable_prefix_caching=False,
     )
 
-    # priority=0 for both → equal priority, SRTF tiebreaker applies.
-    req_almost_done = create_requests_with_priority(
-        num_requests=1,
-        priorities=[0],
-        arrival_times=[1.0],
-        num_tokens=10,
-        max_tokens=12,  # remaining after prefill ≈ 2
-        req_ids=["almost_done"],
-    )[0]
+    # req_just_started added FIRST (lower arrival_time).
     req_just_started = create_requests_with_priority(
         num_requests=1,
         priorities=[0],
-        arrival_times=[2.0],
-        num_tokens=10,
-        max_tokens=100,  # remaining after prefill ≈ 90
+        arrival_times=[1.0],
+        num_tokens=16,
+        max_tokens=200,  # remaining after prefill = 200 - 16 = 184
         req_ids=["just_started"],
     )[0]
-
-    scheduler.add_request(req_almost_done)
-    scheduler.add_request(req_just_started)
-
-    # First schedule: both requests become running (10 computed tokens each).
-    _ = scheduler.schedule()
-    assert len(scheduler.running) == 2
-
-    # Add a large request that forces a preemption.
-    req_large = create_requests_with_priority(
+    # req_almost_done added SECOND (higher arrival_time = old arrival_time victim).
+    req_almost_done = create_requests_with_priority(
         num_requests=1,
         priorities=[0],
-        arrival_times=[3.0],
-        num_tokens=80,
-        max_tokens=1,
-        req_ids=["large"],
+        arrival_times=[2.0],
+        num_tokens=16,
+        max_tokens=17,  # remaining after prefill = 17 - 16 = 1
+        req_ids=["almost_done"],
     )[0]
-    scheduler.add_request(req_large)
 
+    scheduler.add_request(req_just_started)
+    scheduler.add_request(req_almost_done)
+
+    # First schedule: both requests become running (16 computed tokens each).
+    # All 2 usable blocks are now occupied.
+    sched_out0 = scheduler.schedule()
+    assert len(scheduler.running) == 2
+
+    # Simulate one model step so each request has 1 output token.
+    # Without this, num_new_tokens == 0 for both in Phase 1 of the next
+    # schedule() call and no preemption is triggered.
+    mro = ModelRunnerOutput(
+        req_ids=[req_just_started.request_id, req_almost_done.request_id],
+        req_id_to_index={
+            req_just_started.request_id: 0,
+            req_almost_done.request_id: 1,
+        },
+        sampled_token_ids=[[1], [1]],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+    scheduler.update_from_output(sched_out0, mro)
+
+    # Second schedule: Phase 1 tries to allocate a 2nd block for the 17th
+    # token of req_just_started (first in self.running).  KV cache is full
+    # (0 free blocks) → preemption fires.
+    #
+    # SRTF:     preempt req_just_started (remaining 184 > 1) → itself → break.
+    # Old code: preempt req_almost_done  (later arrival_time) → req_just_started
+    #           retries and succeeds.
     _ = scheduler.schedule()
 
-    # SRTF: req_just_started has ~90 remaining tokens vs ~2 for req_almost_done.
     assert req_just_started.status == RequestStatus.PREEMPTED, (
-        "SRTF should preempt the request with more remaining tokens "
-        "(req_just_started, remaining≈90)"
+        "SRTF should preempt req_just_started which has far more remaining "
+        "tokens (≈184) to spare req_almost_done which is nearly done (≈1)"
     )
     assert req_almost_done.status == RequestStatus.RUNNING, (
-        "Request with fewer remaining tokens (req_almost_done, remaining≈2) "
-        "should be spared"
+        "Request with fewer remaining tokens (req_almost_done, remaining≈1) "
+        "should be spared under SRTF"
     )
 
 
@@ -4222,45 +4248,70 @@ def test_srtf_fcfs_preemption():
     Under the old LIFO policy the most-recently-added request was always
     preempted.  Under SRTF the request with the most remaining tokens is
     preempted instead, even if it was added first.
+
+    Scenario
+    --------
+    block_size=16, 2 usable blocks.
+    req_big  : 16 prompt tokens, max_tokens=200 → remaining≈184, added FIRST.
+    req_small: 16 prompt tokens, max_tokens=17  → remaining≈1,   added SECOND.
+
+    req_big sits at index 0 in self.running; req_small is at the end (LIFO
+    victim under old code).
+
+    After both are prefilled (KV cache full), one output token is produced.
+    Phase 1 of the next schedule() processes req_big first; it needs a 2nd
+    block for its 17th token but the cache is full → preemption fires.
+
+    LIFO:  self.running.pop() = req_small (last element) → req_small preempted.
+    SRTF:  max remaining = req_big (184 >> 1)            → req_big preempted.
     """
-    # Same block budget as above.
+    # 2 usable blocks (block 0 is the null block).
     scheduler = create_scheduler(
         max_num_seqs=4,
         max_num_batched_tokens=8192,
-        num_blocks=7,
+        num_blocks=3,
         block_size=16,
+        enable_prefix_caching=False,
     )
 
-    # req_a: added first, has many remaining tokens (old LIFO would spare it).
-    req_a = create_requests(
-        num_requests=1, num_tokens=10, max_tokens=100, req_ids=["a"]
+    # req_big is added FIRST (= index 0 in self.running).
+    req_big = create_requests(
+        num_requests=1, num_tokens=16, max_tokens=200, req_ids=["big"]
     )[0]
-    # req_b: added second (LIFO victim), has few remaining tokens.
-    req_b = create_requests(
-        num_requests=1, num_tokens=10, max_tokens=12, req_ids=["b"]
+    # req_small is added SECOND (= LIFO victim under old code).
+    req_small = create_requests(
+        num_requests=1, num_tokens=16, max_tokens=17, req_ids=["small"]
     )[0]
 
-    scheduler.add_request(req_a)
-    scheduler.add_request(req_b)
+    scheduler.add_request(req_big)
+    scheduler.add_request(req_small)
 
-    _ = scheduler.schedule()
+    # First schedule: both requests become running (16 computed tokens each).
+    # All 2 usable blocks are now occupied.
+    sched_out0 = scheduler.schedule()
     assert len(scheduler.running) == 2
 
-    # req_large needs 5 blocks; only 4 are free → preemption required.
-    req_large = create_requests(
-        num_requests=1, num_tokens=80, max_tokens=1, req_ids=["large"]
-    )[0]
-    scheduler.add_request(req_large)
+    # Simulate one model step so each request has 1 output token.
+    # Without this, num_new_tokens == 0 in Phase 1 and no preemption occurs.
+    mro = ModelRunnerOutput(
+        req_ids=[req_big.request_id, req_small.request_id],
+        req_id_to_index={req_big.request_id: 0, req_small.request_id: 1},
+        sampled_token_ids=[[1], [1]],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+    scheduler.update_from_output(sched_out0, mro)
 
+    # Second schedule: Phase 1 tries to decode req_big (index 0).
+    # Its 17th token crosses the block boundary → needs a new block.
+    # KV cache is full → preemption fires.
     _ = scheduler.schedule()
 
-    # SRTF: req_a (remaining≈90) should be preempted, not req_b (remaining≈2).
-    # Under the old LIFO policy req_b would have been chosen as the victim
-    # because it was added last.
-    assert req_a.status == RequestStatus.PREEMPTED, (
-        "SRTF should preempt req_a which has more remaining tokens (≈90), "
-        "not req_b which was added later"
+    assert req_big.status == RequestStatus.PREEMPTED, (
+        "SRTF should preempt req_big which has far more remaining tokens "
+        "(≈184) to spare req_small which is nearly done (≈1 token left)"
     )
-    assert req_b.status == RequestStatus.RUNNING, (
-        "req_b has fewer remaining tokens (≈2) and should be spared"
+    assert req_small.status == RequestStatus.RUNNING, (
+        "req_small has fewer remaining tokens (≈1) and should be spared"
     )
