@@ -5,11 +5,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::StreamExt as _;
-use llm_tokenizer::{ChatTemplateState, Decoder, Encoder, Encoding, SpecialTokens, TokenizerTrait};
+use smg_tokenizer::{ChatTemplateState, Decoder, Encoder, Encoding, SpecialTokens, TokenizerTrait};
 use tokio::time::timeout;
 use vllm_chat::{
     ChatEvent, ChatLlm, ChatMessage, ChatOptions, ChatRenderer, ChatRequest, ChatRole,
-    LlmTokenizer, LlmTokenizerChatRenderer, Tokenizer,
+    SmgTokenizer, SmgTokenizerChatRenderer, Tokenizer,
 };
 use vllm_engine_core_client::protocol::handshake::{HandshakeInitMessage, ReadyMessage};
 use vllm_engine_core_client::protocol::{
@@ -199,14 +199,14 @@ impl TokenizerTrait for FakeTemplateTokenizer {
     fn apply_chat_template(
         &self,
         messages: &[serde_json::Value],
-        params: llm_tokenizer::chat_template::ChatTemplateParams,
+        params: smg_tokenizer::chat_template::ChatTemplateParams,
     ) -> anyhow::Result<String> {
         self.chat_template.apply(messages, params)
     }
 
     fn chat_template_content_format(
         &self,
-    ) -> llm_tokenizer::chat_template::ChatTemplateContentFormat {
+    ) -> smg_tokenizer::chat_template::ChatTemplateContentFormat {
         self.chat_template.content_format()
     }
 }
@@ -308,8 +308,8 @@ async fn chat_streams_text_events() {
         }
     });
 
-    let renderer: Arc<dyn ChatRenderer> = Arc::new(LlmTokenizerChatRenderer::new(
-        LlmTokenizer::from_arc(Arc::new(
+    let renderer: Arc<dyn ChatRenderer> = Arc::new(SmgTokenizerChatRenderer::new(
+        SmgTokenizer::from_arc(Arc::new(
             FakeTemplateTokenizer::new(
                 "{% for message in messages %}{{ message.role }}: {{ message.content }}\n{% endfor %}{% if add_generation_prompt %}assistant:{% endif %}",
             )
@@ -374,7 +374,7 @@ fn renderer_requires_a_template() {
     let request = sample_request("chat-3").tap_mut(|request| {
         request.chat_options.chat_template = None;
     });
-    let renderer = LlmTokenizerChatRenderer::new(LlmTokenizer::from_arc(Arc::new(
+    let renderer = SmgTokenizerChatRenderer::new(SmgTokenizer::from_arc(Arc::new(
         FakeTemplateTokenizer::empty(),
     )));
     let error = renderer.render(&request).unwrap_err();
@@ -427,8 +427,8 @@ async fn chat_stream_reports_decode_failure_as_error_event() {
         }
     });
 
-    let renderer: Arc<dyn ChatRenderer> = Arc::new(LlmTokenizerChatRenderer::new(
-        LlmTokenizer::from_arc(Arc::new(
+    let renderer: Arc<dyn ChatRenderer> = Arc::new(SmgTokenizerChatRenderer::new(
+        SmgTokenizer::from_arc(Arc::new(
             FakeTemplateTokenizer::new("{{ messages[0].role }}: {{ messages[0].content }}")
                 .unwrap(),
         )),

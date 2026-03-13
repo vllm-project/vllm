@@ -2,16 +2,18 @@
 
 pub use error::{Error, Result};
 pub use event::ChatEvent;
-pub use renderer::{ChatRenderer, DynChatRenderer, LlmTokenizerChatRenderer, RenderedPrompt};
 pub use request::{ChatMessage, ChatOptions, ChatRequest, ChatRole, ChatTemplateContentFormat};
+pub use renderer::{ChatRenderer, DynChatRenderer, RenderedPrompt};
+pub use smg::{SmgTokenizer, SmgTokenizerChatRenderer};
 pub use stream::ChatEventStream;
-pub use tokenizer::{DynTokenizer, LlmTokenizer, Tokenizer};
+pub use tokenizer::{DynTokenizer, Tokenizer};
 
 mod error;
 mod event;
 mod lower;
-mod renderer;
 mod request;
+mod renderer;
+pub mod smg;
 mod stream;
 mod tokenizer;
 

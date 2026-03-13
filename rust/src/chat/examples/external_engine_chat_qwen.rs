@@ -5,8 +5,8 @@ use clap::Parser;
 use futures::StreamExt as _;
 use tracing_subscriber::EnvFilter;
 use vllm_chat::{
-    ChatEvent, ChatLlm, ChatMessage, ChatOptions, ChatRequest, ChatRole, LlmTokenizer,
-    LlmTokenizerChatRenderer,
+    ChatEvent, ChatLlm, ChatMessage, ChatOptions, ChatRequest, ChatRole, SmgTokenizer,
+    SmgTokenizerChatRenderer,
 };
 use vllm_engine_core_client::protocol::SamplingParams;
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig};
@@ -46,7 +46,7 @@ async fn main() -> Result<()> {
     init_tracing();
     let args = Args::parse();
     let tokenizer = std::sync::Arc::new(
-        LlmTokenizer::from_model_or_path(&args.model)
+        SmgTokenizer::from_model_or_path(&args.model)
             .with_context(|| format!("failed to load tokenizer for {}", args.model))?,
     );
 
@@ -63,8 +63,8 @@ async fn main() -> Result<()> {
     .context("failed to connect to external vLLM engine")?;
 
     println!("model={}", args.model);
-    println!("tokenizer_source=llm-tokenizer auto");
-    println!("chat_template_source=llm-tokenizer auto");
+    println!("tokenizer_source=smg_tokenizer (crates.io llm-tokenizer) auto");
+    println!("chat_template_source=smg_tokenizer (crates.io llm-tokenizer) auto");
     println!("handshake_address={}", args.handshake_address);
     println!("input_address={}", client.input_address());
     println!("output_address={}", client.output_address());
@@ -72,7 +72,7 @@ async fn main() -> Result<()> {
     println!("ready_message={:?}", client.ready_message);
 
     let llm = Llm::new(client);
-    let renderer = std::sync::Arc::new(LlmTokenizerChatRenderer::new((*tokenizer).clone()));
+    let renderer = std::sync::Arc::new(SmgTokenizerChatRenderer::new((*tokenizer).clone()));
     let chat = ChatLlm::new(llm, renderer, tokenizer);
 
     let request = ChatRequest {

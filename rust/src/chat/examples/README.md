@@ -29,7 +29,8 @@ cargo run -p vllm-chat --example external_engine_chat_qwen -- \
 
 The example now defaults to `Qwen/Qwen1.5-0.5B-Chat`, which is smaller and still
 uses a string-style chat template that works with the current text-only chat
-request model. The example now relies entirely on `llm-tokenizer` to download or
+request model. The example now relies entirely on the crates.io
+`llm-tokenizer` package, imported in Rust as `smg_tokenizer`, to download or
 reuse the tokenizer and to auto-discover the chat template from model metadata
 or adjacent template files.
 
