@@ -111,10 +111,16 @@ class OpenAIServingRender:
         self,
         request: ChatCompletionRequest,
     ) -> GenerateRequest | ErrorResponse:
-        """Render a chat completion request into a GenerateRequest.
+        """Validate the model and preprocess a chat completion request.
 
-        This is a pure preprocessing step: it does not generate text.
+        This is the authoritative implementation used directly by the
+        GPU-less render server and delegated to by OpenAIServingChat.
         """
+        error_check_ret = await self._check_model(request)
+        if error_check_ret is not None:
+            logger.error("Error with model %s", error_check_ret)
+            return error_check_ret
+
         if request.use_beam_search:
             return self.create_error_response(
                 "Beam search is not supported by the render endpoint"
@@ -180,11 +186,6 @@ class OpenAIServingRender:
         Called directly by render_chat_request and delegated to by
         OpenAIServingChat.render_chat_request after its engine-aware checks.
         """
-        error_check_ret = await self._check_model(request)
-        if error_check_ret is not None:
-            logger.error("Error with model %s", error_check_ret)
-            return error_check_ret
-
         tokenizer = self.renderer.tokenizer
 
         tool_parser = self.tool_parser
@@ -315,7 +316,7 @@ class OpenAIServingRender:
         self,
         request: CompletionRequest,
     ) -> list[ProcessorInputs] | ErrorResponse:
-         """Core preprocessing logic for completion requests (no model/engine check).
+        """Core preprocessing logic for completion requests (no model/engine check).
 
         Called directly by render_completion_request and delegated to by
         OpenAIServingCompletion.render_completion_request after its engine-aware checks.
