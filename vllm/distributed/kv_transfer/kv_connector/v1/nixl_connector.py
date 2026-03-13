@@ -979,9 +979,6 @@ class NixlConnectorWorker:
             for group in kv_cache_config.kv_cache_groups
             for layer in group.layer_names
         }
-        assert len(kv_cache_config.kv_cache_tensors) == max(
-            len(group.layer_names) for group in self.kv_cache_config.kv_cache_groups
-        )
         self.hma_group_size = len(kv_cache_config.kv_cache_tensors)
 
         # Mamba metadata
@@ -1746,7 +1743,7 @@ class NixlConnectorWorker:
                         # Register addresses for V cache (K registered first).
                         v_addr = addr + kv_block_len
                         blocks_data.append((v_addr, second_split, self.device_id))
-            logger.info(
+            logger.debug(
                 "Created %s blocks for src engine %s and rank %s on device id %s",
                 len(blocks_data),
                 self.engine_id,

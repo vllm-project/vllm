@@ -495,21 +495,18 @@ class TpKVTopology:
         """Return the cache tensor(s) to register as NIXL memory regions,
         also accounting for hybrid SSM models specificities.
         """
-        from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
-
         if isinstance(layer_spec, MambaSpec):
             # Register the whole kv cache shared tensor, including SSM/Conv. This is
             # similar to FI with the difference that SSM/Conv have different sizes
-            ssm, conv = cache
-            return [ssm]
+            conv, ssm = cache
+            return [conv]
 
-        # TODO (NickLucche) generalize check to non-natively blocks-first backends.
-        if self.is_mamba and any(
-            backend == FlashAttentionBackend for backend in self.attn_backends
-        ):
+        # Check may be hacky but it's matching `_update_hybrid_attention_mamba_layout`.
+        if self.is_mamba and cache.shape[0] == 2:
             # When MAMBA is present, all backends are blocks first, so that blocks
-            # can be shared between attention layers and mamba layers. KV manager
-            # already adjusted strides for FlashAttn so its num_blocks first.
+            # can be shared between attention layers and mamba layers. Runner
+            # `_update_hybrid_attention_mamba_layout` already adjusted strides
+            # for FlashAttn-like backends so its num_blocks first.
             # Swap [2<>num_blocks] dims to get required layout for hybrid SSM.
             cache = cache.transpose(0, 1)
 
