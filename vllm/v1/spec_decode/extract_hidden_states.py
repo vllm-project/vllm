@@ -93,7 +93,6 @@ class ExtractHiddenStatesProposer:
             target_hidden_states: List of hidden state tensors from target model
                                 (one per aux hidden state layer)
             common_attn_metadata: Attention metadata
-            scheduler_output: Scheduler output for KV connector
             slot_mappings: Slot mappings for KV cache (unused, provided for
                           interface compatibility)
 
