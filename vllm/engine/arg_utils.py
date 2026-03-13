@@ -606,8 +606,6 @@ class EngineArgs:
     kv_offloading_backend: KVOffloadingBackend = CacheConfig.kv_offloading_backend
     tokens_only: bool = False
 
-    shutdown_timeout: int = 0
-
     weight_transfer_config: WeightTransferConfig | None = get_field(
         VllmConfig,
         "weight_transfer_config",
@@ -1318,14 +1316,6 @@ class EngineArgs:
             default=None,
             help="Select GDN prefill backend.",
         )
-
-        parser.add_argument(
-            "--shutdown-timeout",
-            type=int,
-            default=0,
-            help="Shutdown timeout in seconds. 0 = abort, >0 = wait.",
-        )
-
         return parser
 
     @classmethod
@@ -1937,7 +1927,6 @@ class EngineArgs:
             optimization_level=self.optimization_level,
             performance_mode=self.performance_mode,
             weight_transfer_config=self.weight_transfer_config,
-            shutdown_timeout=self.shutdown_timeout,
         )
 
         return config

@@ -6,6 +6,7 @@ import torch
 import torch.nn as nn
 
 from vllm.config import VllmConfig
+from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
@@ -98,14 +99,17 @@ class DefaultModelState(ModelState):
             req_states.prefill_len.np[input_batch.idx_mapping_np],
             req_states.num_computed_prefill_tokens[input_batch.idx_mapping_np],
         )
+        # Use unpadded input_ids to match is_mm_embed size (num_tokens).
+        # input_batch.input_ids may be padded for CUDA graphs.
+        input_ids_unpadded = input_batch.input_ids[: input_batch.num_tokens]
         inputs_embeds = self.encoder_runner.get_inputs_embeds(
-            input_batch.input_ids, mm_embeds, is_mm_embed
+            input_ids_unpadded, mm_embeds, is_mm_embed
         )
         return inputs_embeds[: input_batch.num_tokens_after_padding]
 
     def prepare_inputs(
         self, input_batch: InputBatch, req_states: RequestState
-    ) -> dict[str, torch.Tensor | None]:
+    ) -> dict[str, Any]:
         if not self.uses_mrope:
             # Common case (1D positions).
             return {}
@@ -122,9 +126,7 @@ class DefaultModelState(ModelState):
         ]
         return {"positions": mrope_positions}
 
-    def prepare_dummy_inputs(
-        self, num_reqs: int, num_tokens: int
-    ) -> dict[str, torch.Tensor | None]:
+    def prepare_dummy_inputs(self, num_reqs: int, num_tokens: int) -> dict[str, Any]:
         model_inputs = {}
         if self.supports_mm_inputs:
             inputs_embeds = self.encoder_runner.inputs_embeds[:num_tokens]
@@ -137,14 +139,21 @@ class DefaultModelState(ModelState):
     def prepare_attn(
         self,
         input_batch: InputBatch,
+        cudagraph_mode: CUDAGraphMode,
         block_tables: tuple[torch.Tensor, ...],
         slot_mappings: torch.Tensor,
         attn_groups: list[list[AttentionGroup]],
         kv_cache_config: KVCacheConfig,
+        for_capture: bool = False,
     ) -> dict[str, Any]:
-        # Use padded sizes - padding is handled by model_runner.prepare_attn.
-        num_reqs = input_batch.num_reqs_after_padding
-        num_tokens = input_batch.num_tokens_after_padding
+        if cudagraph_mode == CUDAGraphMode.FULL:
+            # Use padded sizes - padding is handled by model_runner.prepare_attn.
+            num_reqs = input_batch.num_reqs_after_padding
+            num_tokens = input_batch.num_tokens_after_padding
+        else:
+            # For piecewise cudagraphs and eager, use unpadded sizes.
+            num_reqs = input_batch.num_reqs
+            num_tokens = input_batch.num_tokens
         query_start_loc_cpu = torch.from_numpy(input_batch.query_start_loc_np)
         max_query_len = input_batch.num_scheduled_tokens.max().item()
         attn_metadata = build_attn_metadata(
