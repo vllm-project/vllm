@@ -694,6 +694,11 @@ class MergedColumnParallelLinearVariableSliceWithLoRA(
                     while slice_idx < self.n_slices and consumed < b_dim:
                         consumed += output_sizes[slice_idx]
                         slice_idx += 1
+                    if consumed != b_dim:
+                        raise ValueError(
+                            f"Packed LoRA B dimension {b_dim} does not match "
+                            f"the sum of output sizes {consumed} for LoRA {i}."
+                        )
                     num_covered = slice_idx - start_slice
                     if num_covered == 1:
                         expanded_a.append(a_i)
