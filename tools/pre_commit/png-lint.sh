@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # Ensure that *.excalidraw.png files have the excalidraw metadata
 # embedded in them. This ensures they can be loaded back into

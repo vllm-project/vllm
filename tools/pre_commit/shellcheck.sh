@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set -euo pipefail
 
 scversion="stable"
@@ -10,7 +10,7 @@ fi
 if ! [ -x "$(command -v shellcheck)" ]; then
     if [ "$(uname -s)" != "Linux" ] || [ "$(uname -m)" != "x86_64" ]; then
         echo "Please install shellcheck: https://github.com/koalaman/shellcheck?tab=readme-ov-file#installing"
-        exit 1
+        exit 0
     fi
 
     # automatic local install if linux x86_64

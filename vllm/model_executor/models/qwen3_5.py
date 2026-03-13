@@ -364,6 +364,8 @@ class Qwen3_5Model(Qwen3NextModel):
         shard_id: str,
         num_experts: int,
     ) -> bool:
+        if name not in params_dict:
+            return False
         param = params_dict[name]
         weight_loader = typing.cast(Callable[..., bool], param.weight_loader)
         loaded_local_expert = False
@@ -401,6 +403,14 @@ class Qwen3_5Model(Qwen3NextModel):
 
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
+        ignore_suffixes = (
+            ".bias",
+            "_bias",
+            "_scale",
+            "_weight_scale",
+            "_input_scale",
+            "_output_scale",
+        )
         expert_params_mapping = self.get_expert_mapping()
         is_fused_expert = False
         fused_expert_params_mapping = [
@@ -434,19 +444,20 @@ class Qwen3_5Model(Qwen3NextModel):
                 if "mlp.experts" in name:
                     continue
 
-                name = name.replace(weight_name, param_name)
+                name_mapped = name.replace(weight_name, param_name)
                 # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
+                if name_mapped.endswith(".bias") and name_mapped not in params_dict:
                     continue
                 # Skip layers on other devices.
-                if is_pp_missing_parameter(name, self):
+                if is_pp_missing_parameter(name_mapped, self):
                     continue
                 # name = apply_attn_prefix(name, params_dict)
-                if name not in params_dict:
+                if name_mapped not in params_dict:
                     continue
-                param = params_dict[name]
+                param = params_dict[name_mapped]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
+                name = name_mapped
                 break
             else:
                 is_expert_weight = False
@@ -497,6 +508,10 @@ class Qwen3_5Model(Qwen3NextModel):
                             name_mapped.endswith(".bias")
                             or name_mapped.endswith("_bias")
                         ) and name_mapped not in params_dict:
+                            continue
+                        if name_mapped not in params_dict:
+                            if name_mapped.endswith(ignore_suffixes):
+                                continue
                             continue
                         param = params_dict[name_mapped]
                         weight_loader = param.weight_loader
