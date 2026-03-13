@@ -996,8 +996,8 @@ class NixlConnectorWorker:
                 if isinstance(spec, MambaSpec)
             )
             conv_nbytes, ssm_nbytes = (
-                torch.tensor([], dtype=mamba_spec.dtypes[0]).element_size(),
-                torch.tensor([], dtype=mamba_spec.dtypes[1]).element_size(),
+                torch.tensor([], dtype=mamba_spec.dtypes[0]).element_size(),  # type: ignore[misc]
+                torch.tensor([], dtype=mamba_spec.dtypes[1]).element_size(),  # type: ignore[misc]
             )
             conv_shape, ssm_shape = (
                 torch.Size(mamba_spec.shapes[0]),
