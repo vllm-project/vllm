@@ -7,7 +7,7 @@ import pytest
 from vllm import LLM, SamplingParams
 from vllm.platforms import current_platform
 
-from ...utils import check_answers, prep_prompts
+from ....utils import check_answers, prep_prompts
 
 
 @dataclass
