@@ -497,6 +497,6 @@ if __name__ == "__main__":
     
     Usage:
         cd vllm/
-        python -m pytest tests/v1/e2e/test_min_tokens.py -v
+        python -m pytest tests/v1/e2e/general/test_min_tokens.py -v
     """
     pytest.main([__file__, "-v"])
