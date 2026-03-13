@@ -465,18 +465,14 @@ class MergedColumnParallelLinearWithShardedLoRA(MergedColumnParallelLinearWithLo
     def slice_lora_a(
         self, lora_a: list[torch.Tensor | None]
     ) -> list[torch.Tensor | None]:
-        # NOTE: lora_a contains 2 subloras, and each sublora could be None.
         output_shard_size = self.lora_a_stacked[0].shape[2]
         output_start_idx = self.tp_rank * output_shard_size
-        lora_a = [
-            lora_a[0][output_start_idx : output_start_idx + output_shard_size, :]
-            if lora_a[0] is not None
-            else None,
-            lora_a[1][output_start_idx : output_start_idx + output_shard_size, :]
-            if lora_a[1] is not None
-            else None,
+        return [
+            a[output_start_idx : output_start_idx + output_shard_size, :]
+            if a is not None
+            else None
+            for a in lora_a
         ]
-        return lora_a
 
     def apply(self, x: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
         return _mcp_apply(x, bias, self)
@@ -547,21 +543,12 @@ class MergedQKVParallelLinearWithShardedLoRA(MergedQKVParallelLinearWithLoRA):
     def slice_lora_a(
         self, lora_a: list[torch.Tensor | None]
     ) -> list[torch.Tensor | None]:
-        # NOTE: lora_a contains 3 subloras, and each sublora could be None.
-        shard_size = [self.lora_a_stacked[i].shape[2] for i in range(3)]
-        start_idx = [self.tp_rank * shard_size[i] for i in range(3)]
-        lora_a = [
-            lora_a[0][start_idx[0] : start_idx[0] + shard_size[0], :]
-            if lora_a[0] is not None
-            else None,
-            lora_a[1][start_idx[1] : start_idx[1] + shard_size[1], :]
-            if lora_a[1] is not None
-            else None,
-            lora_a[2][start_idx[2] : start_idx[2] + shard_size[2], :]
-            if lora_a[2] is not None
-            else None,
+        return [
+            a[self.tp_rank * s.shape[2] : (self.tp_rank + 1) * s.shape[2], :]
+            if a is not None
+            else None
+            for a, s in zip(lora_a, self.lora_a_stacked)
         ]
-        return lora_a
 
     def apply(self, x: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
         return _mcp_apply(x, bias, self)
