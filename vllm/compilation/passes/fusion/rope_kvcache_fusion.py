@@ -104,6 +104,7 @@ class RopeReshapeKVCachePattern:
         self,
         layer: Attention,
         is_neox: bool,
+        use_flashinfer_rotary: bool = False,
     ) -> None:
         self.layer_name = layer.layer_name
         self.num_heads = layer.num_heads
@@ -111,6 +112,7 @@ class RopeReshapeKVCachePattern:
         self.head_size = layer.head_size
         self.head_size_v = layer.head_size_v
         self.is_neox = is_neox
+        self.use_flashinfer_rotary = use_flashinfer_rotary
 
         self.q_size = self.num_heads * self.head_size
         self.k_size = self.num_kv_heads * self.head_size
@@ -121,6 +123,7 @@ class RopeReshapeKVCachePattern:
             head_size=self.head_size,
             num_heads=self.num_heads,
             num_kv_heads=self.num_kv_heads,
+            use_flashinfer=self.use_flashinfer_rotary,
         )
 
     def get_inputs(self) -> list[torch.Tensor]:
@@ -211,10 +214,12 @@ class RopeKVCacheFusionPass(VllmPatternMatcherPass):
         for _, layer in attn_layers.items():
             if layer.impl.fused_rope_kvcache_supported():
                 for is_neox in [True, False]:
-                    RopeReshapeKVCachePattern(
-                        layer=layer,
-                        is_neox=is_neox,
-                    ).register(self.patterns)
+                    for use_flashinfer_rotary in [False, True]:
+                        RopeReshapeKVCachePattern(
+                            layer=layer,
+                            is_neox=is_neox,
+                            use_flashinfer_rotary=use_flashinfer_rotary,
+                        ).register(self.patterns)
 
         self.dump_patterns(config, self.patterns)
 
