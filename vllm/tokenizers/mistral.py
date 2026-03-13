@@ -195,14 +195,15 @@ def validate_request_params(request: "ChatCompletionRequest"):
     if request.chat_template is not None or request.chat_template_kwargs is not None:
         raise ValueError("chat_template is not supported for Mistral tokenizers.")
 
-    if request.reasoning_effort and request.reasoning_effort not in list(
-        ReasoningEffort
+    if (
+        request.reasoning_effort
+        and request.reasoning_effort not in ReasoningEffort
     ):
         raise ValueError(
             f"reasoning_effort={request.reasoning_effort} is not supported by "
-            "Mistral models. Only 'high' and 'none' are."
+            "Mistral models. Supported values are: "
+            f"{[e.value for e in ReasoningEffort]}."
         )
-
 
 def _tekken_token_to_id(tokenizer: "Tekkenizer", t: str | bytes) -> int:
     assert isinstance(tokenizer, Tekkenizer), type(tokenizer)
