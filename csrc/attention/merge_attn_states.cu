@@ -21,29 +21,44 @@ __global__ void merge_attn_states_kernel(
     const float* suffix_lse, const float* output_scale, const uint num_tokens,
     const uint num_heads, const uint head_size, const uint prefix_head_stride,
     const uint output_head_stride) {
-  // Inputs always load 128-bit packs (pack_size elements of scalar_t).
-  // Outputs store pack_size elements of output_t, which is smaller for FP8.
-  using input_pack_t = uint4;
-  using output_pack_t =
+  // 128-bit pack type for input loads (and full output stores).
+  using pack_128b_t = uint4;
+  constexpr uint pack_size = 16 / sizeof(scalar_t);  // elements per input pack
+  // FP8: process multiple input packs per thread so output writes are 128-bit.
+  // sizeof(scalar_t) gives: bf16/fp16 -> 2 packs, fp32 -> 4 packs.
+  constexpr uint packs_per_group = USE_FP8_OUTPUT ? sizeof(scalar_t) : 1;
+  constexpr uint elems_per_group = pack_size * packs_per_group;  // 16 for FP8
+  // Fallback pack type for boundary threads that can't fill a full 128-bit
+  // output store (pack_size fp8 bytes: uint2 for bf16, uint for fp32).
+  using small_pack_t =
       std::conditional_t<USE_FP8_OUTPUT,
                          std::conditional_t<sizeof(scalar_t) == 4, uint, uint2>,
-                         uint4>;
-  const uint pack_size = 16 / sizeof(scalar_t);
-  const uint threads_per_head = head_size / pack_size;
+                         pack_128b_t>;
+  // Use ceiling division so the last thread handles any remainder.
+  // One thread per pack group.
+  const uint threads_per_head =
+      (head_size + elems_per_group - 1) / elems_per_group;
 
   const uint global_idx = blockIdx.x * NUM_THREADS + threadIdx.x;
   const uint token_head_threads = num_tokens * num_heads * threads_per_head;
 
   if (global_idx >= token_head_threads) return;
 
-  // global_idx -> token_idx + head_idx + pack_idx
+  // global_idx -> token_idx + head_idx + pack_group_idx
   const uint token_head_idx = global_idx / threads_per_head;
-  const uint pack_idx = global_idx % threads_per_head;
+  const uint pack_group_idx = global_idx % threads_per_head;
 
   const uint token_idx = token_head_idx / num_heads;
   const uint head_idx = token_head_idx % num_heads;
 
-  const uint pack_offset = pack_idx * pack_size;  // (0~15)*8, etc.
+  // pack idx and elem offset of base (first) pack in thread
+  const uint base_pack_idx = pack_group_idx * packs_per_group;
+  const uint base_elem_offset = pack_group_idx * elems_per_group;
+  // How many elements this thread actually processes (may be < elems_per_group
+  // for the last thread when head_size is not a multiple of elems_per_group).
+  const uint num_elems = min(elems_per_group, head_size - base_elem_offset);
+  const uint num_packs = num_elems / pack_size;
+
   const uint src_head_offset = token_idx * num_heads * prefix_head_stride +
                                head_idx * prefix_head_stride;
   const uint dst_head_offset = token_idx * num_heads * output_head_stride +
@@ -68,37 +83,47 @@ __global__ void merge_attn_states_kernel(
   /* In certain edge cases, MLA can produce p_lse = s_lse = -inf;
      continuing the pipeline then yields NaN. Root cause: with chunked prefill
      a batch may be split into two chunks; if a request in that batch has no
-     prefix hit, every LSE entry for that request's position is -inf, and at
+     prefix hit, every LSE entry for that request’s position is -inf, and at
      this moment we merge cross-attention at first. For now we simply emit
      prefix_output (expected to be all zeros) and prefix_lse (-inf) to fix
      this problem.
   */
   if (std::isinf(max_lse)) {
-    if (pack_offset < head_size) {
-      input_pack_t p_out_pack = reinterpret_cast<const input_pack_t*>(
-          prefix_head_ptr)[pack_offset / pack_size];
-
-      if constexpr (USE_FP8_OUTPUT) {
-        // Convert prefix values to FP8 (since -inf means no data,
-        // prefix_output is expected to be zeros)
-        output_t o_out_pack[pack_size];
+    if constexpr (USE_FP8_OUTPUT) {
+      // Load input packs, convert to FP8, store
+      output_t o_fp8[elems_per_group];
 #pragma unroll
-        for (uint i = 0; i < pack_size; ++i) {
-          const float val =
-              vllm::to_float(reinterpret_cast<const scalar_t*>(&p_out_pack)[i]);
-          o_out_pack[i] =
-              vllm::scaled_fp8_conversion<true, output_t>(val, fp8_scale_inv);
+      for (uint p = 0; p < packs_per_group; ++p) {
+        if (p < num_packs) {
+          pack_128b_t p_pack = reinterpret_cast<const pack_128b_t*>(
+              prefix_head_ptr)[base_pack_idx + p];
+#pragma unroll
+          for (uint i = 0; i < pack_size; ++i) {
+            const float val =
+                vllm::to_float(reinterpret_cast<const scalar_t*>(&p_pack)[i]);
+            o_fp8[p * pack_size + i] =
+                vllm::scaled_fp8_conversion<true, output_t>(val, fp8_scale_inv);
+          }
         }
-        reinterpret_cast<output_pack_t*>(
-            output_head_ptr)[pack_offset / pack_size] =
-            *reinterpret_cast<output_pack_t*>(o_out_pack);
-      } else {
-        reinterpret_cast<output_pack_t*>(
-            output_head_ptr)[pack_offset / pack_size] = p_out_pack;
       }
+      // Full 128-bit store when we have all packs, otherwise fall back
+      if (num_packs == packs_per_group) {
+        reinterpret_cast<pack_128b_t*>(output_head_ptr)[pack_group_idx] =
+            *reinterpret_cast<pack_128b_t*>(o_fp8);
+      } else {
+        for (uint p = 0; p < num_packs; ++p) {
+          reinterpret_cast<small_pack_t*>(output_head_ptr)[base_pack_idx + p] =
+              *reinterpret_cast<small_pack_t*>(&o_fp8[p * pack_size]);
+        }
+      }
+    } else {
+      // Non-FP8: single 128-bit load and store
+      pack_128b_t p_pack =
+          reinterpret_cast<const pack_128b_t*>(prefix_head_ptr)[base_pack_idx];
+      reinterpret_cast<pack_128b_t*>(output_head_ptr)[base_pack_idx] = p_pack;
     }
     // We only need to write to output_lse once per head.
-    if (output_lse != nullptr && pack_idx == 0) {
+    if (output_lse != nullptr && pack_group_idx == 0) {
       output_lse[head_idx * num_tokens + token_idx] = max_lse;
     }
     return;
@@ -112,47 +137,58 @@ __global__ void merge_attn_states_kernel(
   const float p_scale = p_se / out_se;
   const float s_scale = s_se / out_se;
 
-  if (pack_offset < head_size) {
-    input_pack_t p_out_pack = reinterpret_cast<const input_pack_t*>(
-        prefix_head_ptr)[pack_offset / pack_size];
-    input_pack_t s_out_pack = reinterpret_cast<const input_pack_t*>(
-        suffix_head_ptr)[pack_offset / pack_size];
-
-    // Compute merged values in float32
-    float o_out_f[pack_size];
+  // Merge, convert, and store
+  if constexpr (USE_FP8_OUTPUT) {
+    output_t o_fp8[elems_per_group];
+#pragma unroll
+    for (uint p = 0; p < packs_per_group; ++p) {
+      if (p < num_packs) {
+        pack_128b_t p_pack = reinterpret_cast<const pack_128b_t*>(
+            prefix_head_ptr)[base_pack_idx + p];
+        pack_128b_t s_pack = reinterpret_cast<const pack_128b_t*>(
+            suffix_head_ptr)[base_pack_idx + p];
+#pragma unroll
+        for (uint i = 0; i < pack_size; ++i) {
+          const float p_out_f =
+              vllm::to_float(reinterpret_cast<const scalar_t*>(&p_pack)[i]);
+          const float s_out_f =
+              vllm::to_float(reinterpret_cast<const scalar_t*>(&s_pack)[i]);
+          const float merged = p_out_f * p_scale + (s_out_f * s_scale);
+          o_fp8[p * pack_size + i] =
+              vllm::scaled_fp8_conversion<true, output_t>(merged,
+                                                          fp8_scale_inv);
+        }
+      }
+    }
+    // Full 128-bit store when we have all packs, otherwise fall back
+    if (num_packs == packs_per_group) {
+      reinterpret_cast<pack_128b_t*>(output_head_ptr)[pack_group_idx] =
+          *reinterpret_cast<pack_128b_t*>(o_fp8);
+    } else {
+      for (uint p = 0; p < num_packs; ++p) {
+        reinterpret_cast<small_pack_t*>(output_head_ptr)[base_pack_idx + p] =
+            *reinterpret_cast<small_pack_t*>(&o_fp8[p * pack_size]);
+      }
+    }
+  } else {
+    pack_128b_t p_pack =
+        reinterpret_cast<const pack_128b_t*>(prefix_head_ptr)[base_pack_idx];
+    pack_128b_t s_pack =
+        reinterpret_cast<const pack_128b_t*>(suffix_head_ptr)[base_pack_idx];
+    pack_128b_t o_pack;
 #pragma unroll
     for (uint i = 0; i < pack_size; ++i) {
       const float p_out_f =
-          vllm::to_float(reinterpret_cast<const scalar_t*>(&p_out_pack)[i]);
+          vllm::to_float(reinterpret_cast<const scalar_t*>(&p_pack)[i]);
       const float s_out_f =
-          vllm::to_float(reinterpret_cast<const scalar_t*>(&s_out_pack)[i]);
-      o_out_f[i] = p_out_f * p_scale + (s_out_f * s_scale);
+          vllm::to_float(reinterpret_cast<const scalar_t*>(&s_pack)[i]);
+      const float merged = p_out_f * p_scale + (s_out_f * s_scale);
+      vllm::from_float(reinterpret_cast<scalar_t*>(&o_pack)[i], merged);
     }
-
-    // Convert and store
-    if constexpr (USE_FP8_OUTPUT) {
-      output_t o_out_pack[pack_size];
-#pragma unroll
-      for (uint i = 0; i < pack_size; ++i) {
-        o_out_pack[i] = vllm::scaled_fp8_conversion<true, output_t>(
-            o_out_f[i], fp8_scale_inv);
-      }
-      reinterpret_cast<output_pack_t*>(
-          output_head_ptr)[pack_offset / pack_size] =
-          *reinterpret_cast<output_pack_t*>(o_out_pack);
-    } else {
-      output_pack_t o_out_pack;
-#pragma unroll
-      for (uint i = 0; i < pack_size; ++i) {
-        vllm::from_float(reinterpret_cast<scalar_t*>(&o_out_pack)[i],
-                         o_out_f[i]);
-      }
-      reinterpret_cast<output_pack_t*>(
-          output_head_ptr)[pack_offset / pack_size] = o_out_pack;
-    }
+    reinterpret_cast<pack_128b_t*>(output_head_ptr)[base_pack_idx] = o_pack;
   }
   // We only need to write to output_lse once per head.
-  if (output_lse != nullptr && pack_idx == 0) {
+  if (output_lse != nullptr && pack_group_idx == 0) {
     float out_lse = logf(out_se) + max_lse;
     output_lse[head_idx * num_tokens + token_idx] = out_lse;
   }
@@ -217,10 +253,10 @@ void merge_attn_states_launcher(
   const uint head_size = prefix_output.size(2);
   const uint prefix_head_stride = prefix_output.stride(1);
   const uint output_head_stride = output.stride(1);
-  // Thread mapping is based on input BF16 pack_size
-  const uint pack_size = 16 / sizeof(scalar_t);
+  constexpr uint pack_size = 16 / sizeof(scalar_t);
   TORCH_CHECK(head_size % pack_size == 0,
               "headsize must be multiple of pack_size:", pack_size);
+
   float* output_lse_ptr = nullptr;
   if (output_lse.has_value()) {
     output_lse_ptr = output_lse.value().data_ptr<float>();
@@ -229,24 +265,28 @@ void merge_attn_states_launcher(
   if (output_scale.has_value()) {
     output_scale_ptr = output_scale.value().data_ptr<float>();
   }
-  // Process one pack elements per thread. for float, the
-  // pack_size is 4 for half/bf16, the pack_size is 8.
-  const uint threads_per_head = head_size / pack_size;
-  const uint total_threads = num_tokens * num_heads * threads_per_head;
-
-  dim3 block(NUM_THREADS);
-  dim3 grid((total_threads + NUM_THREADS - 1) / NUM_THREADS);
 
   const c10::cuda::OptionalCUDAGuard device_guard(prefix_output.device());
   auto stream = at::cuda::getCurrentCUDAStream();
 
   if (output_scale.has_value()) {
-    // FP8 output path - dispatch on output FP8 type
+    // FP8 output: each thread targets 16 elements for 128-bit output writes.
+    // Ceiling division so the last thread handles any remainder.
+    constexpr uint elems_per_group = 16;
+    const uint threads_per_head =
+        (head_size + elems_per_group - 1) / elems_per_group;
+    const uint total_threads = num_tokens * num_heads * threads_per_head;
+    dim3 grid((total_threads + NUM_THREADS - 1) / NUM_THREADS);
+    dim3 block(NUM_THREADS);
     VLLM_DISPATCH_FP8_TYPES(output.scalar_type(), "merge_attn_states_fp8", [&] {
       LAUNCH_MERGE_ATTN_STATES(scalar_t, fp8_t, NUM_THREADS, true);
     });
   } else {
-    // Original BF16/FP16/FP32 output path
+    // Non-FP8: each thread processes pack_size elements (128-bit I/O)
+    const uint threads_per_head = head_size / pack_size;
+    const uint total_threads = num_tokens * num_heads * threads_per_head;
+    dim3 grid((total_threads + NUM_THREADS - 1) / NUM_THREADS);
+    dim3 block(NUM_THREADS);
     LAUNCH_MERGE_ATTN_STATES(scalar_t, scalar_t, NUM_THREADS, false);
   }
 }
