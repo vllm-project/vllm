@@ -10,7 +10,6 @@ from vllm.distributed import (
     tensor_model_parallel_all_gather,
     tensor_model_parallel_all_reduce,
 )
-from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
 
@@ -894,30 +893,6 @@ def _fused_moe_lora_fp8(
 
             # reset max_lora_rank to the full rank after allgather
             max_lora_rank = a_intermediate_cache1.shape[-1]
-
-    # Dynamic quantization of intermediate cache for the expand pass.
-    # The shrink kernel outputs in output.dtype (bf16/fp16).
-    # The expand kernel needs FP8 activations to do FP8 dot with FP8 lora_b.
-    if use_fp8_w8a8:
-        orig_shape = a_intermediate_cache1.shape
-        flat_intermediate = a_intermediate_cache1.view(-1, orig_shape[-1])
-        quant_dtype = torch.float8_e4m3fn
-        # Clamp block_shape for intermediate cache: max_lora_rank may be
-        # smaller than the original block dimensions.
-        intermediate_block_shape = block_shape
-        if block_shape is not None:
-            intermediate_block_shape = [
-                min(block_shape[0], orig_shape[-1]),
-                min(block_shape[1], orig_shape[-1]),
-            ]
-        flat_intermediate, expand_act_scale = moe_kernel_quantize_input(
-            A=flat_intermediate,
-            A_scale=expand_act_scale,
-            quant_dtype=quant_dtype,
-            per_act_token_quant=per_channel_quant,
-            block_shape=intermediate_block_shape,
-        )
-        a_intermediate_cache1 = flat_intermediate.view(orig_shape)
 
     _fused_moe_lora_expand_fp8(
         output,
