@@ -59,6 +59,7 @@ class OpenAIServingTranscription(OpenAISpeechToText):
     ) -> (
         TranscriptionResponse
         | TranscriptionResponseVerbose
+        | str
         | AsyncGenerator[str, None]
         | ErrorResponse
     ):
@@ -130,6 +131,7 @@ class OpenAIServingTranslation(OpenAISpeechToText):
     ) -> (
         TranslationResponse
         | TranslationResponseVerbose
+        | str
         | AsyncGenerator[str, None]
         | ErrorResponse
     ):

@@ -87,6 +87,9 @@ ResponseType: TypeAlias = (
 
 logger = init_logger(__name__)
 
+# Response formats that require segment timestamps from the model.
+_SEGMENT_FORMATS: frozenset[str] = frozenset({"verbose_json", "srt", "vtt"})
+
 
 class OpenAISpeechToText(OpenAIServing):
     """Base class for speech-to-text operations like transcription and
@@ -280,7 +283,7 @@ class OpenAISpeechToText(OpenAIServing):
             )
 
             parsed_prompt: DictPrompt
-            if request.response_format == "verbose_json":
+            if request.response_format in _SEGMENT_FORMATS:
                 parsed_prompt = parse_enc_dec_prompt(prompt)
                 parsed_prompt = self._preprocess_verbose_prompt(parsed_prompt)
             else:
@@ -396,6 +399,48 @@ class OpenAISpeechToText(OpenAIServing):
                 avg_logprob += log_probs[idx - 1][token].logprob
         return segments
 
+    @staticmethod
+    def _format_timestamp_srt(seconds: float) -> str:
+        """Format seconds as SRT timestamp: HH:MM:SS,mmm"""
+        hours = int(seconds // 3600)
+        minutes = int((seconds % 3600) // 60)
+        secs = int(seconds % 60)
+        millis = int(round((seconds % 1) * 1000))
+        return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
+
+    @staticmethod
+    def _format_timestamp_vtt(seconds: float) -> str:
+        """Format seconds as VTT timestamp: HH:MM:SS.mmm"""
+        hours = int(seconds // 3600)
+        minutes = int((seconds % 3600) // 60)
+        secs = int(seconds % 60)
+        millis = int(round((seconds % 1) * 1000))
+        return f"{hours:02d}:{minutes:02d}:{secs:02d}.{millis:03d}"
+
+    @staticmethod
+    def _segments_to_srt(
+        segments: list[SpeechToTextSegment],
+    ) -> str:
+        """Convert segments to SRT subtitle format."""
+        parts = []
+        for i, seg in enumerate(segments, 1):
+            start = OpenAISpeechToText._format_timestamp_srt(seg.start)
+            end = OpenAISpeechToText._format_timestamp_srt(seg.end)
+            parts.append(f"{i}\n{start} --> {end}\n{seg.text.strip()}")
+        return "\n\n".join(parts) + "\n" if parts else ""
+
+    @staticmethod
+    def _segments_to_vtt(
+        segments: list[SpeechToTextSegment],
+    ) -> str:
+        """Convert segments to WebVTT subtitle format."""
+        parts = ["WEBVTT"]
+        for seg in segments:
+            start = OpenAISpeechToText._format_timestamp_vtt(seg.start)
+            end = OpenAISpeechToText._format_timestamp_vtt(seg.end)
+            parts.append(f"{start} --> {end}\n{seg.text.strip()}")
+        return "\n\n".join(parts) + "\n"
+
     async def _create_speech_to_text(
         self,
         audio_data: bytes,
@@ -403,7 +448,7 @@ class OpenAISpeechToText(OpenAIServing):
         raw_request: Request,
         response_class: type[ResponseType],
         stream_generator_method: Callable[..., AsyncGenerator[str, None]],
-    ) -> T | V | AsyncGenerator[str, None] | ErrorResponse:
+    ) -> T | V | str | AsyncGenerator[str, None] | ErrorResponse:
         """Base method for speech-to-text operations like transcription and
         translation."""
         if request.stream and request.use_beam_search:
@@ -421,23 +466,18 @@ class OpenAISpeechToText(OpenAIServing):
         if self.engine_client.errored:
             raise self.engine_client.dead_error
 
-        if request.response_format not in ["text", "json", "verbose_json"]:
-            return self.create_error_response(
-                "Currently only support response_format: "
-                "`text`, `json` or `verbose_json`"
-            )
-
         if (
-            request.response_format == "verbose_json"
+            request.response_format in _SEGMENT_FORMATS
             and not self.model_cls.supports_segment_timestamp
         ):
             return self.create_error_response(
-                f"Currently do not support verbose_json for {request.model}"
+                f"Currently do not support {request.response_format} for "
+                f"{request.model}"
             )
 
-        if request.response_format == "verbose_json" and request.stream:
+        if request.response_format in _SEGMENT_FORMATS and request.stream:
             return self.create_error_response(
-                "verbose_json format doesn't support streaming case"
+                f"{request.response_format} format doesn't support streaming"
             )
         request_id = f"{self.task_type}-{self._base_request_id(raw_request)}"
 
@@ -484,7 +524,7 @@ class OpenAISpeechToText(OpenAIServing):
                 self.default_sampling_params,
             )
 
-        if request.response_format == "verbose_json":
+        if request.response_format in _SEGMENT_FORMATS:
             sampling_params.logprobs = 1
 
         list_result_generator = []
@@ -548,7 +588,7 @@ class OpenAISpeechToText(OpenAIServing):
                     float(idx * chunk_size_in_s) if chunk_size_in_s is not None else 0.0
                 )
                 async for op in result_generator:
-                    if request.response_format == "verbose_json":
+                    if request.response_format in _SEGMENT_FORMATS:
                         assert op.outputs[0].logprobs
                         segments: list[SpeechToTextSegment] = (
                             self._get_verbose_segments(
@@ -566,6 +606,10 @@ class OpenAISpeechToText(OpenAIServing):
                         raw_text = op.outputs[0].text
                         text_parts.append(self.model_cls.post_process_output(raw_text))
             text = "".join(text_parts)
+            if request.response_format == "srt":
+                return self._segments_to_srt(total_segments)
+            elif request.response_format == "vtt":
+                return self._segments_to_vtt(total_segments)
             if self.task_type == "transcribe":
                 final_response: ResponseType
                 # add usage in TranscriptionResponse.

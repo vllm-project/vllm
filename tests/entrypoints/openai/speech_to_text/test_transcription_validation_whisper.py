@@ -373,6 +373,52 @@ async def test_whisper_beam_search_multibeam(mary_had_lamb, whisper_client):
 
 
 @pytest.mark.asyncio
+async def test_audio_srt_format(mary_had_lamb, whisper_client):
+    """Test SRT subtitle output format."""
+    transcription = await whisper_client.audio.transcriptions.create(
+        model=MODEL_NAME,
+        file=mary_had_lamb,
+        language="en",
+        response_format="srt",
+        temperature=0.0,
+    )
+    # SRT format: sequence number, timestamps with comma separator, text
+    assert "1\n" in transcription
+    assert " --> " in transcription
+    assert "," in transcription  # SRT uses comma in timestamps
+    assert "mary" in transcription.lower()
+
+
+@pytest.mark.asyncio
+async def test_audio_vtt_format(mary_had_lamb, whisper_client):
+    """Test WebVTT subtitle output format."""
+    transcription = await whisper_client.audio.transcriptions.create(
+        model=MODEL_NAME,
+        file=mary_had_lamb,
+        language="en",
+        response_format="vtt",
+        temperature=0.0,
+    )
+    # VTT format: WEBVTT header, timestamps with dot separator, text
+    assert transcription.startswith("WEBVTT")
+    assert " --> " in transcription
+    assert "mary" in transcription.lower()
+
+
+@pytest.mark.asyncio
+async def test_srt_streaming_raises(mary_had_lamb, whisper_client):
+    """Test that streaming is not supported with srt/vtt formats."""
+    with pytest.raises(openai.BadRequestError):
+        await whisper_client.audio.transcriptions.create(
+            model=MODEL_NAME,
+            file=mary_had_lamb,
+            language="en",
+            response_format="srt",
+            stream=True,
+        )
+
+
+@pytest.mark.asyncio
 async def test_stream_with_beams_raises(winning_call, whisper_client):
     """Test that stream=True + beam search raises bad request for now."""
     with pytest.raises(openai.BadRequestError):
