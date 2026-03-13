@@ -158,7 +158,7 @@ AnyResponseFormat: TypeAlias = (
 
 
 class StreamOptions(OpenAIBaseModel):
-    include_usage: bool | None = True
+    include_usage: bool | None = False
     continuous_usage_stats: bool | None = False
 
 

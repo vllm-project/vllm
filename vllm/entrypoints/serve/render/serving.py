@@ -175,9 +175,10 @@ class OpenAIServingRender:
         self,
         request: ChatCompletionRequest,
     ) -> tuple[list[ConversationMessage], list[ProcessorInputs]] | ErrorResponse:
-        """Copied from OpenAIServingChat.render_chat_request.
+        """Core preprocessing logic for chat requests (no model/engine check).
 
-        Differences: engine_client.errored check removed (no engine client).
+        Called directly by render_chat_request and delegated to by
+        OpenAIServingChat.render_chat_request after its engine-aware checks.
         """
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
@@ -261,9 +262,10 @@ class OpenAIServingRender:
         self,
         request: CompletionRequest,
     ) -> list[GenerateRequest] | ErrorResponse:
-        """Copied from OpenAIServingCompletion.render_completion_request.
+        """Validate the model and preprocess a completion request.
 
-        Differences: engine_client.errored check removed (no engine client).
+        This is the authoritative implementation used directly by the
+        GPU-less render server and delegated to by OpenAIServingCompletion.
         """
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
@@ -313,7 +315,7 @@ class OpenAIServingRender:
         self,
         request: CompletionRequest,
     ) -> list[ProcessorInputs] | ErrorResponse:
-        """Core preprocessing logic for completion requests (no model/engine check).
+         """Core preprocessing logic for completion requests (no model/engine check).
 
         Called directly by render_completion_request and delegated to by
         OpenAIServingCompletion.render_completion_request after its engine-aware checks.
@@ -370,7 +372,7 @@ class OpenAIServingRender:
         request: ChatCompletionRequest,
         should_include_tools: bool = True,
     ):
-        """Copied from OpenAIServingChat._make_request_with_harmony."""
+        """Build Harmony (GPT-OSS) messages and engine prompt from a chat request."""
         messages: list[OpenAIMessage] = []
 
         # because of issues with pydantic we need to potentially
