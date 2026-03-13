@@ -713,7 +713,7 @@ steps:
       DOCKER_BUILDKIT: "1"
       S3_BUCKET: "vllm-wheels"
 
-  # TODO: Move to use the unified build-rocm-release-image job
+  # TODO: Move to use the unified build-rocm-release-image job by @tjtanaa
   - label: ":docker: Build nightly ROCm image - x86_64 - ROCm"
     id: build-rocm-nightly-image
     depends_on: ~
