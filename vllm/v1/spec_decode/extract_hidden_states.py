@@ -145,7 +145,7 @@ class ExtractHiddenStatesProposer:
 
         # Return the sampled tokens as "draft" tokens
         # Shape: [batch_size, 1] to match num_speculative_tokens=1
-        return sampled_token_ids.unsqueeze(-1)
+        return sampled_token_ids
 
     def _get_slot_mapping(
         self,

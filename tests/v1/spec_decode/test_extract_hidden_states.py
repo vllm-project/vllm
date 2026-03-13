@@ -252,7 +252,9 @@ def test_propose():
     ]
 
     # Sampled token IDs from target model
-    sampled_token_ids = torch.tensor([42, 60], dtype=torch.int32, device=device)
+    sampled_token_ids = torch.tensor(
+        [42, 60], dtype=torch.int32, device=device
+    ).unsqueeze(-1)
 
     # Call propose
     draft_tokens = proposer.propose(
@@ -265,7 +267,7 @@ def test_propose():
     # Verify draft tokens match sampled tokens
     # Shape should be [batch_size, 1] for num_speculative_tokens=1
     assert draft_tokens.shape == (batch_size, 1)
-    assert torch.equal(draft_tokens[:, 0], sampled_token_ids)
+    assert torch.equal(draft_tokens, sampled_token_ids)
 
     # Verify the model was called
     model_mock.assert_called_once()
@@ -317,7 +319,9 @@ def test_propose_different_layer_counts(num_hidden_layers):
         for _ in range(num_hidden_layers)
     ]
 
-    sampled_token_ids = torch.tensor([42, 60], dtype=torch.int32, device=device)
+    sampled_token_ids = torch.tensor(
+        [42, 60], dtype=torch.int32, device=device
+    ).unsqueeze(-1)
 
     draft_tokens = proposer.propose(
         sampled_token_ids=sampled_token_ids,
@@ -327,4 +331,4 @@ def test_propose_different_layer_counts(num_hidden_layers):
     )
 
     assert draft_tokens.shape == (batch_size, 1)
-    assert torch.equal(draft_tokens[:, 0], sampled_token_ids)
+    assert torch.equal(draft_tokens, sampled_token_ids)
