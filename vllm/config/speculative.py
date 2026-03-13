@@ -600,6 +600,20 @@ class SpeculativeConfig:
 
         self._build_draft_model_config()
 
+        # Auto-detect eagle from model path substring.
+        # Delegates to _init_eagle_family() which rebuilds draft_model_config
+        # with EAGLEConfig wrapping.
+        model_lower = self.draft_model_config.model.lower()
+        if self.method == "draft_model":
+            if "eagle3" in model_lower:
+                self.method = "eagle3"
+                self._init_eagle_family()
+                return
+            elif "eagle-" in model_lower:
+                self.method = "eagle"
+                self._init_eagle_family()
+                return
+
         # Auto-detect method from hf_config now that ModelConfig is loaded.
         if self.method not in ("draft_model", "medusa", "mlp_speculator"):
             model_type = self.draft_model_config.hf_config.model_type
