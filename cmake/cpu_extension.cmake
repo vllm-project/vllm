@@ -102,11 +102,11 @@ if (CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64" OR ENABLE_X86_ISA)
         "-mavx512f"
         "-mavx512vl"
         "-mavx512bw"
-        "-mavx512dq"
-        "-mamx-bf16"
-        "-mamx-tile")
-    list(APPEND CXX_COMPILE_FLAGS_AVX512_SGL 
+        "-mavx512dq")
+    list(APPEND CXX_COMPILE_FLAGS_AVX512_AMX 
         ${CXX_COMPILE_FLAGS_AVX512}
+        "-mamx-bf16"
+        "-mamx-tile"
         "-mavx512bf16"
         "-mavx512vnni")
     list(APPEND CXX_COMPILE_FLAGS_AVX2
@@ -316,8 +316,8 @@ endif()
 
 # TODO: Refactor this
 if (ENABLE_X86_ISA)
-    message(STATUS "CPU extension (AVX512) compile flags: ${CXX_COMPILE_FLAGS_AVX512}")
-    message(STATUS "CPU extension (AVX512) for SGL kernels compile flags: ${CXX_COMPILE_FLAGS_AVX512_SGL}")
+    message(STATUS "CPU extension (AVX512F + BF16 + VNNI + AMX) compile flags: ${CXX_COMPILE_FLAGS_AVX512_AMX}")
+    message(STATUS "CPU extension (AVX512F) compile flags: ${CXX_COMPILE_FLAGS_AVX512}")
     message(STATUS "CPU extension (AVX2) compile flags: ${CXX_COMPILE_FLAGS_AVX2}")
 else()
     message(STATUS "CPU extension compile flags: ${CXX_COMPILE_FLAGS}")
@@ -369,7 +369,7 @@ if(USE_ONEDNN)
 endif()
 
 if (ENABLE_X86_ISA)
-    set(VLLM_EXT_SRC_AVX512_SGL
+    set(VLLM_EXT_SRC_SGL
         "csrc/cpu/sgl-kernels/gemm.cpp"
         "csrc/cpu/sgl-kernels/gemm_int8.cpp"
         "csrc/cpu/sgl-kernels/gemm_fp8.cpp"
@@ -403,24 +403,22 @@ if (ENABLE_X86_ISA)
         "csrc/cpu/pos_encoding.cpp"
         "csrc/moe/dynamic_4bit_int_moe_cpu.cpp") 
 
-    message(STATUS "CPU extension (AVX512) source files: ${VLLM_EXT_SRC_AVX512}")
-    message(STATUS "CPU extension (AVX512) of SGL kernels source files: ${VLLM_EXT_SRC_AVX512_SGL}")
+    message(STATUS "CPU extension (AVX512F + BF16 + VNNI + AMX) source files: ${VLLM_EXT_SRC_AVX512} ${VLLM_EXT_SRC_SGL}")
+    message(STATUS "CPU extension (AVX512F) source files: ${VLLM_EXT_SRC_AVX512}")
     message(STATUS "CPU extension (AVX2) source files: ${VLLM_EXT_SRC_AVX2}")
 
-    add_library(sgl_ext OBJECT ${VLLM_EXT_SRC_AVX512_SGL})
-    target_compile_options(sgl_ext PRIVATE ${CXX_COMPILE_FLAGS_AVX512_SGL} -fPIC)
-    target_link_libraries(sgl_ext PRIVATE torch)
-
-    set(_C_LIBS numa dnnl_ext sgl_ext)
+    set(_C_LIBS numa dnnl_ext)
+    set(_C_AVX512_LIBS numa dnnl_ext)
     set(_C_AVX2_LIBS numa)
 
+    # AMX + AVX512F + AVX512BF16 + AVX512VNNI
     define_extension_target(
         _C
         DESTINATION vllm
         LANGUAGE CXX
-        SOURCES ${VLLM_EXT_SRC_AVX512}
+        SOURCES ${VLLM_EXT_SRC_AVX512} ${VLLM_EXT_SRC_SGL}
         LIBRARIES ${_C_LIBS}
-        COMPILE_FLAGS ${CXX_COMPILE_FLAGS_AVX512}
+        COMPILE_FLAGS ${CXX_COMPILE_FLAGS_AVX512_AMX}
         USE_SABI 3
         WITH_SOABI
     )
@@ -428,6 +426,19 @@ if (ENABLE_X86_ISA)
     # For AMX kernels
     target_compile_definitions(_C PRIVATE "-DCPU_CAPABILITY_AMXBF16")
 
+    # AVX512F 
+    define_extension_target(
+        _C_AVX512
+        DESTINATION vllm
+        LANGUAGE CXX
+        SOURCES ${VLLM_EXT_SRC_AVX512}
+        LIBRARIES ${_C_AVX512_LIBS}
+        COMPILE_FLAGS ${CXX_COMPILE_FLAGS_AVX512}
+        USE_SABI 3
+        WITH_SOABI
+    )
+
+    # AVX2 
     define_extension_target(
         _C_AVX2
         DESTINATION vllm
