@@ -1179,18 +1179,16 @@ class OpenAIServingChat(OpenAIServing):
                         )
 
                         if has_content:
-                            content_choice = (
-                                ChatCompletionResponseStreamChoice(
-                                    index=i,
-                                    delta=delta_message,
-                                    logprobs=logprobs,
-                                    finish_reason=None,
-                                    token_ids=(
-                                        as_list(output.token_ids)
-                                        if request.return_token_ids
-                                        else None
-                                    ),
-                                )
+                            content_choice = ChatCompletionResponseStreamChoice(
+                                index=i,
+                                delta=delta_message,
+                                logprobs=logprobs,
+                                finish_reason=None,
+                                token_ids=(
+                                    as_list(output.token_ids)
+                                    if request.return_token_ids
+                                    else None
+                                ),
                             )
                             content_choice = maybe_filter_parallel_tool_calls(
                                 content_choice, request
@@ -1211,9 +1209,7 @@ class OpenAIServingChat(OpenAIServing):
                                         num_prompt_tokens + completion_tokens
                                     ),
                                 )
-                            data = content_chunk.model_dump_json(
-                                exclude_unset=True
-                            )
+                            data = content_chunk.model_dump_json(exclude_unset=True)
                             yield f"data: {data}\n\n"
 
                         # Yield the finish chunk with empty delta
