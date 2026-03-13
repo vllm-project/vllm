@@ -511,14 +511,16 @@ class PydanticMsgspecMixin:
                     default_factory=msgspec_field.default_factory,
                 )
                 fields[name] = core_schema.typed_dict_field(
-                    wrapped_schema, required=False)
+                    wrapped_schema, required=False
+                )
             elif msgspec_field.default is not msgspec.NODEFAULT:
                 wrapped_schema = core_schema.with_default_schema(
                     schema=field_schema,
                     default=msgspec_field.default,
                 )
                 fields[name] = core_schema.typed_dict_field(
-                    wrapped_schema, required=False)
+                    wrapped_schema, required=False
+                )
             else:
                 # No default, so Pydantic will treat it as required
                 fields[name] = core_schema.typed_dict_field(field_schema)
