@@ -8,6 +8,7 @@ import numpy as np
 import openai
 import pytest
 import pytest_asyncio
+import regex as re
 import requests
 import torch
 import torch.nn.functional as F
@@ -658,6 +659,26 @@ async def test_bytes_only_embed_dtype_and_endianness(
                 name_1="bytes_data",
                 tol=1e-2,
             )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_embedding_invalid_batched_token_ids(
+    client: openai.AsyncOpenAI, model_name: str
+):
+    """Tests that the server returns a 4xx error for invalid batched token IDs."""
+
+    # Test with a negative token ID in a batched request
+    with pytest.raises(
+        openai.BadRequestError,
+        match=re.compile(
+            r".*Input validation failed.*|.*greater than or equal to 0.*", re.DOTALL
+        ).pattern,
+    ):
+        await client.embeddings.create(
+            model=model_name,
+            input=[[100, 200], [-1, 300]],  # Contains a negative token ID
+        )
 
 
 @pytest.mark.asyncio

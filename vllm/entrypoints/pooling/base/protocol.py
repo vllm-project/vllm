@@ -60,7 +60,12 @@ class PoolingBasicRequestMixin(OpenAIBaseModel):
 
 class CompletionRequestMixin(OpenAIBaseModel):
     # --8<-- [start:completion-params]
-    input: list[int] | list[list[int]] | str | list[str]
+    input: (
+        list[Annotated[int, Field(ge=0)]]
+        | list[list[Annotated[int, Field(ge=0)]]]
+        | str
+        | list[str]
+    )
     # --8<-- [end:completion-params]
 
     # --8<-- [start:completion-extra-params]
