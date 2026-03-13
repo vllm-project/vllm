@@ -53,9 +53,10 @@ void silu_and_mul_scaled_fp4_experts_quant_sm1xxa(
     torch::Tensor const& output_scale_offset_by_experts);
 #endif
 
-void scaled_fp4_quant(torch::Tensor& output, torch::Tensor const& input,
-                      torch::Tensor& output_sf, torch::Tensor const& input_sf,
-                      bool is_sf_swizzled_layout) {
+void scaled_fp4_quant_out(torch::Tensor const& input,
+                          torch::Tensor const& input_sf,
+                          bool is_sf_swizzled_layout, torch::Tensor& output,
+                          torch::Tensor& output_sf) {
 #if (defined(ENABLE_NVFP4_SM100) && ENABLE_NVFP4_SM100) || \
     (defined(ENABLE_NVFP4_SM120) && ENABLE_NVFP4_SM120)
   return scaled_fp4_quant_sm1xxa(output, input, output_sf, input_sf,
@@ -64,7 +65,6 @@ void scaled_fp4_quant(torch::Tensor& output, torch::Tensor const& input,
   TORCH_CHECK_NOT_IMPLEMENTED(false, "No compiled nvfp4 quantization kernel");
 }
 
-// Functional variant: allocates output and output_scale, returns them
 std::tuple<torch::Tensor, torch::Tensor> scaled_fp4_quant_func(
     torch::Tensor const& input, torch::Tensor const& input_sf,
     bool is_sf_swizzled_layout) {
@@ -88,16 +88,9 @@ std::tuple<torch::Tensor, torch::Tensor> scaled_fp4_quant_func(
         torch::TensorOptions().device(device).dtype(torch::kUInt8));
   }
 
-  scaled_fp4_quant(output, input, output_sf, input_sf, is_sf_swizzled_layout);
+  scaled_fp4_quant_out(input, input_sf, is_sf_swizzled_layout, output,
+                       output_sf);
   return {output, output_sf};
-}
-
-// Out variant
-void scaled_fp4_quant_out(torch::Tensor const& input,
-                          torch::Tensor const& input_sf,
-                          bool is_sf_swizzled_layout, torch::Tensor& output,
-                          torch::Tensor& output_sf) {
-  scaled_fp4_quant(output, input, output_sf, input_sf, is_sf_swizzled_layout);
 }
 
 void scaled_fp4_experts_quant(

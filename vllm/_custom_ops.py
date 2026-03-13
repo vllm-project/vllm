@@ -103,9 +103,6 @@ if hasattr(torch.ops, "_C") and hasattr(torch.ops._C, "scaled_fp4_quant"):
     ) -> None:
         return None
 
-    # Tag so PyTorch's to_out_variant() can discover it
-    torch.ops._C.scaled_fp4_quant.out._tags.append(torch.Tag.out_variant)
-
 
 # page attention ops
 def paged_attention_v1(
