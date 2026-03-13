@@ -169,9 +169,7 @@ async def init_generate_state(
         model_config=engine_client.model_config,
         renderer=engine_client.renderer,
         io_processor=engine_client.io_processor,
-        served_model_names=[
-            mp.name for mp in state.openai_serving_models.base_model_paths
-        ],
+        model_registry=state.openai_serving_models.registry,
         request_logger=request_logger,
         chat_template=resolved_chat_template,
         chat_template_content_format=args.chat_template_content_format,
