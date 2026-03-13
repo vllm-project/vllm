@@ -148,7 +148,7 @@ class EngineCore:
         if self.scheduler.connector is not None:  # type: ignore
             self.model_executor.init_kv_output_aggregator(self.scheduler.connector)  # type: ignore
 
-        self.mm_registry = mm_registry = MULTIMODAL_REGISTRY
+        mm_registry = MULTIMODAL_REGISTRY
         self.mm_receiver_cache = mm_registry.engine_receiver_cache_from_config(
             vllm_config
         )
@@ -443,9 +443,10 @@ class EngineCore:
         deferred_scheduler_output = None
         if self.scheduler.has_requests():
             scheduler_output = self.scheduler.schedule()
-            exec_future = self.model_executor.execute_model(
-                scheduler_output, non_block=True
-            )
+            with self.log_error_detail(scheduler_output):
+                exec_future = self.model_executor.execute_model(
+                    scheduler_output, non_block=True
+                )
             if self.is_ec_consumer:
                 model_executed = scheduler_output.total_num_scheduled_tokens > 0
 
@@ -799,8 +800,6 @@ class EngineCoreProc(EngineCore):
             vllm_config,
             client_handshake_address,
         ) as addresses:
-            self.client_count = len(addresses.outputs)
-
             # Set up data parallel environment.
             self.has_coordinator = addresses.coordinator_output is not None
             self.frontend_stats_publish_address = (
@@ -1046,19 +1045,11 @@ class EngineCoreProc(EngineCore):
             data_parallel = parallel_config.data_parallel_size > 1 or dp_rank > 0
             if data_parallel:
                 parallel_config.data_parallel_rank_local = local_dp_rank
-                maybe_init_worker_tracer(
-                    instrumenting_module_name="vllm.engine_core",
-                    process_kind="engine_core",
-                    process_name=f"EngineCore_DP{dp_rank}",
-                )
-                set_process_title("EngineCore", f"DP{dp_rank}")
+                process_title = f"EngineCore_DP{dp_rank}"
             else:
-                maybe_init_worker_tracer(
-                    instrumenting_module_name="vllm.engine_core",
-                    process_kind="engine_core",
-                    process_name="EngineCore",
-                )
-                set_process_title("EngineCore")
+                process_title = "EngineCore"
+            set_process_title(process_title)
+            maybe_init_worker_tracer("vllm.engine_core", "engine_core", process_title)
             decorate_logs()
 
             if data_parallel and vllm_config.kv_transfer_config is not None:

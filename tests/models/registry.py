@@ -72,6 +72,12 @@ class _HfExamplesInfo:
     If False, we will use CUDA graph and eager execution in hybrid.
     """
 
+    enable_prefix_caching: bool = True
+    """
+    Whether to enable prefix caching for the model. If True, we will test the model with
+    prefix caching enabled. If False, we will test the model without prefix caching.
+    """
+
     is_available_online: bool = True
     """
     Set this to `False` if the name of this architecture no longer exists on
@@ -857,6 +863,15 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "Kwai-Keye/Keye-VL-1_5-8B",
         trust_remote_code=True,
     ),
+    "MoonshotKimiaForCausalLM": _HfExamplesInfo(
+        "moonshotai/Kimi-Audio-7B-Instruct",
+        tokenizer_mode="kimi_audio",
+        trust_remote_code=True,
+    ),
+    "KimiK25ForConditionalGeneration": _HfExamplesInfo(
+        "moonshotai/Kimi-K2.5",
+        trust_remote_code=True,
+    ),
     "KimiVLForConditionalGeneration": _HfExamplesInfo(
         "moonshotai/Kimi-VL-A3B-Instruct",
         extras={"thinking": "moonshotai/Kimi-VL-A3B-Thinking"},
@@ -869,10 +884,6 @@ _MULTIMODAL_EXAMPLE_MODELS = {
                 "https://huggingface.co/moonshotai/Kimi-VL-A3B-Instruct/discussions/31"
             )
         },
-    ),
-    "KimiK25ForConditionalGeneration": _HfExamplesInfo(
-        "moonshotai/Kimi-K2.5",
-        trust_remote_code=True,
     ),
     "LightOnOCRForConditionalGeneration": _HfExamplesInfo(
         "lightonai/LightOnOCR-1B-1025"
@@ -1132,6 +1143,18 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         speculative_model="yuhuili/EAGLE-LLaMA3-Instruct-8B",
         tokenizer="meta-llama/Meta-Llama-3-8B-Instruct",
     ),
+    "Eagle3DeepseekV2ForCausalLM": _HfExamplesInfo(
+        "moonshotai/Kimi-K2.5",
+        trust_remote_code=True,
+        speculative_model="AQ-MedAI/Kimi-K25-eagle3",
+        tokenizer="moonshotai/Kimi-K2.5",
+    ),
+    "Eagle3DeepseekV3ForCausalLM": _HfExamplesInfo(
+        "moonshotai/Kimi-K2.5",
+        trust_remote_code=True,
+        speculative_model="AQ-MedAI/Kimi-K25-eagle3",
+        tokenizer="moonshotai/Kimi-K2.5",
+    ),
     "Eagle3LlamaForCausalLM": _HfExamplesInfo(
         "meta-llama/Llama-3.1-8B-Instruct",
         trust_remote_code=True,
@@ -1189,6 +1212,7 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         "LGAI-EXAONE/K-EXAONE-236B-A23B",
         speculative_model="LGAI-EXAONE/K-EXAONE-236B-A23B",
         min_transformers_version="5.1.0",
+        enable_prefix_caching=False,
     ),
     "ExtractHiddenStatesModel": _HfExamplesInfo(
         "Qwen/Qwen3-8B",

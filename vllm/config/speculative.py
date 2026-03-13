@@ -57,6 +57,7 @@ SpeculativeMethod = Literal[
     EagleModelTypes,
     NgramGPUTypes,
 ]
+RejectionSampleMethod = Literal["strict", "probabilistic"]
 
 
 @config
@@ -170,6 +171,12 @@ class SpeculativeConfig:
     draft_load_config: LoadConfig | None = None
     """Load config for the draft model. If not specified, will use the load
     config from the target model."""
+
+    rejection_sample_method: RejectionSampleMethod = "strict"
+    """Whether to use strict (target and draft sampled tokens match exactly)
+    or probabilistic rejection sampling. Both respect the target model
+    distribution, but the latter yields a higher acceptance rate at the cost
+    of more memory to cache draft logits."""
 
     def compute_hash(self) -> str:
         """
@@ -779,6 +786,10 @@ class SpeculativeConfig:
             "hunyuan_v1_dense",
             "afmoe",
             "nemotron_h",
+            "deepseek_v2",
+            "deepseek_v3",
+            "kimi_k2",
+            "kimi_k25",
         ]
         if (
             self.method in ("eagle3", "extract_hidden_states")
