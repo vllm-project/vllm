@@ -32,7 +32,7 @@ MTP_SIMILARITY_RATE = 0.8
 
 def _skip_if_insufficient_gpus_for_tp(tp_size: int):
     """Skip test if available GPUs < tp_size on ROCm."""
-    available_gpus = torch.cuda.device_count()
+    available_gpus = torch.accelerator.device_count()
     if available_gpus < tp_size:
         pytest.skip(
             f"Test requires {tp_size} GPUs, but only {available_gpus} available"
