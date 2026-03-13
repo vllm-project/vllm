@@ -194,10 +194,7 @@ class SpecDecodeBaseProposer:
                 (self.max_num_tokens,), dtype=torch.bool, device=device
             )
 
-        # Only allocate inputs_embeds buffer for multimodal models.
-        # For text-only models, the buffer is never used since all code paths
-        # that access it are guarded by `if self.supports_mm_inputs:`.
-        # See: https://github.com/vllm-project/vllm/issues/35023
+        self.inputs_embeds: torch.Tensor | None = None
         if self.supports_mm_inputs:
             self.inputs_embeds = torch.zeros(
                 (self.max_num_tokens, self.inputs_embeds_size),
@@ -444,6 +441,7 @@ class SpecDecodeBaseProposer:
         )
 
         if self.supports_mm_inputs:
+            assert self.inputs_embeds is not None
             mm_embeds, is_mm_embed = mm_embed_inputs or (None, None)
 
             self.inputs_embeds[:num_tokens] = self.model.embed_input_ids(
@@ -613,6 +611,7 @@ class SpecDecodeBaseProposer:
             self.input_ids[:batch_size] = input_ids
             self.hidden_states[:batch_size] = hidden_states
             if self.supports_mm_inputs:
+                assert self.inputs_embeds is not None
                 self.inputs_embeds[:batch_size] = self.model.embed_input_ids(input_ids)
 
                 input_ids = None
@@ -1513,6 +1512,7 @@ class SpecDecodeBaseProposer:
                 slot_mapping=slot_mapping_dict,
             ):
                 if self.supports_mm_inputs:
+                    assert self.inputs_embeds is not None
                     input_ids = None
                     inputs_embeds = self.inputs_embeds[:num_input_tokens]
                 else:

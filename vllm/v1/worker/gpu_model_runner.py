@@ -664,12 +664,8 @@ class GPUModelRunner(
             self.dcp_local_seq_lens = self._make_buffer(
                 self.max_num_reqs, dtype=torch.int32
             )
-        # Only allocate the inputs_embeds buffer when the model actually needs
-        # embeddings as input (multimodal models or prompt_embeds feature).
-        # For pure text-only models, this saves significant GPU and pinned CPU
-        # memory (~64-256 MiB each depending on hidden size and max tokens).
-        # See: https://github.com/vllm-project/vllm/issues/35023
         self.needs_embeds_buffer = self.supports_mm_inputs or self.enable_prompt_embeds
+        self.inputs_embeds: CpuGpuBuffer | None = None
         if self.needs_embeds_buffer:
             # Because inputs_embeds may be bfloat16 and we don't need a numpy
             # version of this tensor, avoid a RuntimeError by not creating a
@@ -1524,6 +1520,7 @@ class GPUModelRunner(
             # Normal scheduling case
             self.input_ids.copy_to_gpu(total_num_scheduled_tokens)
             if self.enable_prompt_embeds:
+                assert self.inputs_embeds is not None
                 self.inputs_embeds.copy_to_gpu(total_num_scheduled_tokens)
                 self.is_token_ids.copy_to_gpu(total_num_scheduled_tokens)
             return
@@ -1574,6 +1571,7 @@ class GPUModelRunner(
             # We need to copy the input_ids_cpu to the GPU first.
             self.input_ids.copy_to_gpu(total_num_scheduled_tokens)
             if self.enable_prompt_embeds:
+                assert self.inputs_embeds is not None
                 self.inputs_embeds.copy_to_gpu(total_num_scheduled_tokens)
                 self.is_token_ids.copy_to_gpu(total_num_scheduled_tokens)
         if num_common_tokens == 0:
@@ -1753,6 +1751,7 @@ class GPUModelRunner(
         # the InputBatch, we need to fill in the prompt embeds into the expected
         # spots in the GpuModelRunner's pre-allocated prompt_embeds tensor.
         if self.input_batch.req_prompt_embeds:
+            assert self.inputs_embeds is not None
             output_idx = 0
             for req_idx in range(num_reqs):
                 num_sched = num_scheduled_tokens[req_idx]
@@ -2969,6 +2968,7 @@ class GPUModelRunner(
     def _prepare_mm_inputs(
         self, num_tokens: int
     ) -> tuple[torch.Tensor | None, torch.Tensor]:
+        assert self.inputs_embeds is not None
         if self.model.requires_raw_input_tokens:
             input_ids = self.input_ids.gpu[:num_tokens]
         else:
@@ -2999,6 +2999,7 @@ class GPUModelRunner(
         ec_connector_output = None
 
         if self.supports_mm_inputs and is_first_rank and not is_encoder_decoder:
+            assert self.inputs_embeds is not None
             # Run the multimodal encoder if any.
             with self.maybe_get_ec_connector_output(
                 scheduler_output,
@@ -3025,6 +3026,7 @@ class GPUModelRunner(
                 **self._extract_mm_kwargs(scheduler_output),
             }
         elif self.enable_prompt_embeds and is_first_rank:
+            assert self.inputs_embeds is not None
             # Get the input embeddings for the tokens that are not input embeds,
             # then put them into the appropriate positions.
             # TODO(qthequartermasterman): Since even when prompt embeds are
@@ -4921,12 +4923,12 @@ class GPUModelRunner(
             yield
             input_ids.fill_(0)
         else:
+            assert self.inputs_embeds is not None
+            inputs_embeds_gpu = self.inputs_embeds.gpu
 
             @functools.cache
             def rand_inputs_embeds() -> torch.Tensor:
-                return torch.randn_like(
-                    self.inputs_embeds.gpu,
-                )
+                return torch.randn_like(inputs_embeds_gpu)
 
             assert inputs_embeds is not None
             logger.debug_once("Randomizing dummy inputs_embeds for DP Rank")
@@ -5184,6 +5186,7 @@ class GPUModelRunner(
                     **self._dummy_mm_kwargs(num_reqs),
                 }
             elif self.enable_prompt_embeds:
+                assert self.inputs_embeds is not None
                 input_ids = None
                 inputs_embeds = self.inputs_embeds.gpu[:num_tokens_padded]
                 model_kwargs = self._init_model_kwargs()
