@@ -45,6 +45,7 @@ from vllm.benchmarks.datasets import SampleRequest, add_dataset_parser, get_samp
 from vllm.benchmarks.lib.endpoint_request_func import (
     ASYNC_REQUEST_FUNCS,
     OPENAI_COMPATIBLE_BACKENDS,
+    POOLING_BACKENDS,
     RequestFuncInput,
     RequestFuncOutput,
 )
@@ -1321,6 +1322,7 @@ def add_cli_args(parser: argparse.ArgumentParser):
         - "slow" will always use the slow tokenizer.\n
         - "mistral" will always use the tokenizer from `mistral_common`.\n
         - "deepseek_v32" will always use the tokenizer from `deepseek_v32`.\n
+        - "qwen_vl" will always use the tokenizer from `qwen_vl`.\n
         - Other custom values can be supported via plugins.""",
     )
     parser.add_argument("--use-beam-search", action="store_true")
@@ -1720,11 +1722,7 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
     goodput_config_dict = check_goodput_args(args)
 
     backend = args.backend
-    task_type = (
-        TaskType.POOLING
-        if "embeddings" in backend or "rerank" in backend
-        else TaskType.GENERATION
-    )
+    task_type = TaskType.POOLING if backend in POOLING_BACKENDS else TaskType.GENERATION
 
     # Collect the sampling parameters.
     if task_type == TaskType.GENERATION:

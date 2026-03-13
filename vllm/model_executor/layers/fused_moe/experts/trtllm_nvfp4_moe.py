@@ -323,4 +323,5 @@ class TrtLlmNvFp4ExpertsMonolithic(
             routed_scaling_factor=routed_scaling_factor,
             routing_method_type=self.routing_method_type,
             do_finalize=True,
+            activation_type=activation_to_flashinfer_int(activation),
         )[0]
