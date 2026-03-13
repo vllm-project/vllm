@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
+import contextlib
 import json
 import time
 from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
@@ -13,7 +14,7 @@ from fastapi import Request
 from openai.types.responses import (
     ToolChoiceFunction,
 )
-from pydantic import ConfigDict, TypeAdapter
+from pydantic import ConfigDict, TypeAdapter, ValidationError
 from starlette.datastructures import Headers
 
 import vllm.envs as envs
@@ -59,12 +60,6 @@ from vllm.entrypoints.openai.speech_to_text.protocol import (
     TranscriptionRequest,
     TranscriptionResponse,
     TranslationRequest,
-)
-from vllm.entrypoints.pooling.embed.protocol import (
-    EmbeddingBytesResponse,
-    EmbeddingChatRequest,
-    EmbeddingCompletionRequest,
-    EmbeddingResponse,
 )
 from vllm.entrypoints.pooling.pooling.protocol import (
     IOProcessorRequest,
@@ -144,17 +139,13 @@ CompletionLikeRequest: TypeAlias = (
     CompletionRequest
     | TokenizeCompletionRequest
     | DetokenizeRequest
-    | EmbeddingCompletionRequest
     | RerankRequest
     | ScoreRequest
     | PoolingCompletionRequest
 )
 
 ChatLikeRequest: TypeAlias = (
-    ChatCompletionRequest
-    | TokenizeChatRequest
-    | EmbeddingChatRequest
-    | PoolingChatRequest
+    ChatCompletionRequest | TokenizeChatRequest | PoolingChatRequest
 )
 
 SpeechToTextRequest: TypeAlias = TranscriptionRequest | TranslationRequest
@@ -171,8 +162,6 @@ AnyRequest: TypeAlias = (
 AnyResponse: TypeAlias = (
     CompletionResponse
     | ChatCompletionResponse
-    | EmbeddingResponse
-    | EmbeddingBytesResponse
     | TranscriptionResponse
     | TokenizeResponse
     | PoolingResponse
@@ -203,8 +192,7 @@ class ServeContext(Generic[RequestT]):
 
 class OpenAIServing:
     request_id_prefix: ClassVar[str] = """
-    A short string prepended to every request’s ID (e.g. "embd")
-    so you can easily tell “this ID came from Embedding.”
+    A short string prepended to every request’s ID.
     """
 
     def __init__(
@@ -250,13 +238,14 @@ class OpenAIServing:
 
         if prompt["type"] == "embeds":
             raise NotImplementedError("Embedding prompt not supported for beam search")
-        if prompt["type"] == "enc_dec":
-            raise NotImplementedError(
-                "Encoder-decoder prompt not supported for beam search"
-            )
 
-        prompt_text = prompt.get("prompt")
-        prompt_token_ids = prompt["prompt_token_ids"]
+        # Extract prompt tokens and text based on model type
+        decoder_prompt = (
+            prompt if prompt["type"] != "enc_dec" else prompt["decoder_prompt"]
+        )
+        prompt_text = decoder_prompt.get("prompt")
+        prompt_token_ids = decoder_prompt["prompt_token_ids"]
+
         tokenized_length = len(prompt_token_ids)
 
         logprobs_num = 2 * beam_width
@@ -432,8 +421,7 @@ class OpenAIServing:
         ctx: ServeContext,
     ) -> ErrorResponse | None:
         """
-        Default preprocessing hook. Subclasses may override
-        to prepare `ctx` (embedding, etc.).
+        Default preprocessing hook. Subclasses may override to prepare `ctx`.
         """
         return None
 
@@ -730,13 +718,10 @@ class OpenAIServing:
         token_num = len(input_ids)
         max_model_len = self.model_config.max_model_len
 
-        # Note: EmbeddingRequest,
-        # and ScoreRequest doesn't have max_tokens
+        # Note: ScoreRequest doesn't have max_tokens
         if isinstance(
             request,
             (
-                EmbeddingChatRequest,
-                EmbeddingCompletionRequest,
                 ScoreDataRequest,
                 ScoreTextRequest,
                 ScoreQueriesDocumentsRequest,
@@ -908,6 +893,7 @@ class OpenAIServing:
         ).with_defaults(
             default_template_kwargs,
             default_media_io_kwargs=(mm_config.media_io_kwargs if mm_config else None),
+            default_mm_processor_kwargs=getattr(request, "mm_processor_kwargs", None),
         )
 
         (conversation,), (engine_prompt,) = await renderer.render_chat_async(
@@ -1140,17 +1126,19 @@ class OpenAIServing:
             )
             content = None  # Clear content since tool is called.
         elif request.tool_choice == "required":
-            assert content is not None
-            tool_calls = TypeAdapter(list[FunctionDefinition]).validate_json(content)
-            function_calls.extend(
-                [
+            tool_calls = []
+            with contextlib.suppress(ValidationError):
+                content = content or ""
+                tool_calls = TypeAdapter(list[FunctionDefinition]).validate_json(
+                    content
+                )
+            for tool_call in tool_calls:
+                function_calls.append(
                     FunctionCall(
                         name=tool_call.name,
                         arguments=json.dumps(tool_call.parameters, ensure_ascii=False),
                     )
-                    for tool_call in tool_calls
-                ]
-            )
+                )
             content = None  # Clear content since tool is called.
         elif (
             tool_parser_cls
