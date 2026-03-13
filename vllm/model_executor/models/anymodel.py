@@ -334,25 +334,50 @@ def _create_layer_config(global_config, block_config, info: ArchInfo):
 
 def _apply_no_ops(layer: nn.Module, block_config, info: ArchInfo) -> None:
     """Replace sub-modules with no-ops per block_config."""
-    if _get_block_attr(block_config, "attention", "no_op", False):
-        setattr(layer, info.attn_module, NoOpAttention())
-        setattr(layer, info.attn_norm_module, NoOpNorm())
-    if _get_block_attr(block_config, "ffn", "no_op", False):
-        setattr(layer, info.ffn_module, NoOpMLP())
-        setattr(layer, info.ffn_norm_module, NoOpNorm())
+    attn_noop = _get_block_attr(block_config, "attention", "no_op", False)
+    ffn_noop = _get_block_attr(block_config, "ffn", "no_op", False)
+
+    shared_module = info.attn_module == info.ffn_module
+    shared_norm = info.attn_norm_module == info.ffn_norm_module
+
+    if shared_module:
+        if attn_noop and ffn_noop:
+            setattr(layer, info.attn_module, NoOpAttention())
+        if shared_norm and attn_noop and ffn_noop:
+            setattr(layer, info.attn_norm_module, NoOpNorm())
+    else:
+        if attn_noop:
+            setattr(layer, info.attn_module, NoOpAttention())
+            setattr(layer, info.attn_norm_module, NoOpNorm())
+        if ffn_noop:
+            setattr(layer, info.ffn_module, NoOpMLP())
+            if not shared_norm or attn_noop:
+                setattr(layer, info.ffn_norm_module, NoOpNorm())
 
 
 def _collect_noop_prefixes(block_configs: list, info: ArchInfo) -> frozenset[str]:
     """Build weight-name prefixes (ending with '.') for no-op sub-modules."""
     prefixes: set[str] = set()
+    shared_module = info.attn_module == info.ffn_module
+    shared_norm = info.attn_norm_module == info.ffn_norm_module
+
     for idx, bc in enumerate(block_configs):
         lp = f"{info.layers_path}.{idx}"
-        if _get_block_attr(bc, "attention", "no_op", False):
-            prefixes.add(f"{lp}.{info.attn_module}.")
-            prefixes.add(f"{lp}.{info.attn_norm_module}.")
-        if _get_block_attr(bc, "ffn", "no_op", False):
-            prefixes.add(f"{lp}.{info.ffn_module}.")
-            prefixes.add(f"{lp}.{info.ffn_norm_module}.")
+        attn_noop = _get_block_attr(bc, "attention", "no_op", False)
+        ffn_noop = _get_block_attr(bc, "ffn", "no_op", False)
+
+        if shared_module:
+            if attn_noop and ffn_noop:
+                prefixes.add(f"{lp}.{info.attn_module}.")
+                prefixes.add(f"{lp}.{info.attn_norm_module}.")
+        else:
+            if attn_noop:
+                prefixes.add(f"{lp}.{info.attn_module}.")
+                prefixes.add(f"{lp}.{info.attn_norm_module}.")
+            if ffn_noop:
+                prefixes.add(f"{lp}.{info.ffn_module}.")
+                if not shared_norm or attn_noop:
+                    prefixes.add(f"{lp}.{info.ffn_norm_module}.")
     return frozenset(prefixes)
 
 
@@ -413,6 +438,69 @@ def _has_overrides(block_config, info: ArchInfo | None = None) -> bool:
     return False
 
 
+def _overrides_differ(block_config, global_config, info: ArchInfo) -> bool:
+    """True if block_config values actually differ from global_config defaults.
+
+    Companion to ``_has_overrides``: while that function checks whether
+    override *keys* are present (not None), this function checks whether
+    the values are different from what the model was originally built with.
+    Skipping rebuilds for identical values avoids unnecessary GPU allocation
+    churn during ``_patch_anymodel_layers``.
+    """
+    attn = _get_block_section(block_config, "attention")
+    ffn = _get_block_section(block_config, "ffn")
+
+    kv = _get_attr(attn, "num_key_value_heads")
+    if kv is not None and kv != getattr(
+        global_config, info.kv_heads_field, None
+    ):
+        return True
+
+    intermediate = _get_attr(ffn, "intermediate_size")
+    if intermediate is not None and intermediate != getattr(
+        global_config, info.intermediate_size_field, None
+    ):
+        return True
+
+    hidden_act = _get_attr(ffn, "hidden_act")
+    if hidden_act is not None and hidden_act != getattr(
+        global_config, info.hidden_act_field, None
+    ):
+        return True
+
+    moe = _get_attr(ffn, "moe")
+    if moe is not None:
+        if info.moe_num_experts_field is None:
+            return True
+        n = _get_attr(moe, "num_local_experts")
+        if n is not None and n != getattr(
+            global_config, info.moe_num_experts_field, None
+        ):
+            return True
+        moe_size_field = (
+            info.moe_intermediate_size_field or info.intermediate_size_field
+        )
+        s = _get_attr(moe, "expert_intermediate_dim")
+        if s is not None and s != getattr(global_config, moe_size_field, None):
+            return True
+
+    if info and info.extra_config_fields:
+        for block_path, config_attr in info.extra_config_fields.items():
+            parts = block_path.split(".", 1)
+            if len(parts) != 2:
+                raise ValueError(
+                    f"extra_config_fields key {block_path!r} must be "
+                    f"'section.key' format (e.g. 'ffn.hidden_size')"
+                )
+            val = _get_block_attr(block_config, parts[0], parts[1])
+            if val is not None and val != getattr(
+                global_config, config_attr, None
+            ):
+                return True
+
+    return False
+
+
 def _unregister_layer(layer_prefix: str, vllm_config: VllmConfig) -> None:
     """Remove a layer's entries from static_forward_context and
     static_all_moe_layers to avoid stale references after replacement."""
@@ -464,31 +552,50 @@ def _patch_anymodel_layers(
         if isinstance(layer, PPMissingLayer):
             continue
 
-        per_layer_config = _create_layer_config(
-            layer_base_config, block_config, arch_info
-        )
-
-        if _has_overrides(block_config, arch_info):
+        if _has_overrides(block_config, arch_info) and _overrides_differ(
+            block_config, layer_base_config, arch_info
+        ):
+            per_layer_config = _create_layer_config(
+                layer_base_config, block_config, arch_info
+            )
             layer_cls = _resolve_layer_class(arch_info, layer_base_config, layer_idx)
             layer_prefix = f"{layers_prefix}.{layer_idx}"
             _unregister_layer(layer_prefix, vllm_config)
-            new_layer = _instantiate_layer(
-                layer_cls,
-                vllm_config,
-                layer_prefix,
-                per_layer_config,
-                layer_idx,
-            )
+            target_device = next(layer.parameters()).device
+            with torch.device("cpu"):
+                new_layer = _instantiate_layer(
+                    layer_cls,
+                    vllm_config,
+                    layer_prefix,
+                    per_layer_config,
+                    layer_idx,
+                )
             layers[layer_idx] = new_layer
+            del layer
+            new_layer.to(target_device)
             layer = new_layer
 
         _apply_no_ops(layer, block_config, arch_info)
 
         layer_prefix = maybe_prefix(layers_prefix, str(layer_idx))
-        if _get_block_attr(block_config, "attention", "no_op", False):
-            _unregister_layer(f"{layer_prefix}.{arch_info.attn_module}", vllm_config)
-        if _get_block_attr(block_config, "ffn", "no_op", False):
-            _unregister_layer(f"{layer_prefix}.{arch_info.ffn_module}", vllm_config)
+        attn_noop = _get_block_attr(block_config, "attention", "no_op", False)
+        ffn_noop = _get_block_attr(block_config, "ffn", "no_op", False)
+        shared_module = arch_info.attn_module == arch_info.ffn_module
+
+        if shared_module:
+            if attn_noop and ffn_noop:
+                _unregister_layer(
+                    f"{layer_prefix}.{arch_info.attn_module}", vllm_config
+                )
+        else:
+            if attn_noop:
+                _unregister_layer(
+                    f"{layer_prefix}.{arch_info.attn_module}", vllm_config
+                )
+            if ffn_noop:
+                _unregister_layer(
+                    f"{layer_prefix}.{arch_info.ffn_module}", vllm_config
+                )
 
 
 def _arch_info_from_config(hf_config) -> ArchInfo | None:
@@ -514,6 +621,36 @@ def _make_wrapper_cls(arch_name: str, arch_info: ArchInfo) -> type:
         (AnyModel, base_cls),
         {"_anymodel_arch_info": arch_info, "has_noops": True},
     )
+
+
+def _expand_noop_prefixes_for_mapper(
+    prefixes: frozenset[str], model_cls: type
+) -> frozenset[str]:
+    """Expand noop prefixes with HF-style equivalents via the weight mapper.
+
+    ``AnyModel.load_weights`` filters weights *before* the base model's
+    ``hf_to_vllm_mapper`` is applied, so noop prefixes (which use vLLM
+    names) won't match HF-style checkpoint names.  This reverse-maps the
+    prefixes so both naming conventions are covered.
+    """
+    mapper = getattr(model_cls, "hf_to_vllm_mapper", None)
+    if mapper is None:
+        return prefixes
+
+    expanded: set[str] = set(prefixes)
+    for orig, new in getattr(mapper, "orig_to_new_prefix", {}).items():
+        if new is None:
+            continue
+        for p in prefixes:
+            if p.startswith(new):
+                expanded.add(orig + p[len(new):])
+    for orig, new in getattr(mapper, "orig_to_new_substr", {}).items():
+        if new is None:
+            continue
+        for p in list(expanded):
+            if new in p:
+                expanded.add(p.replace(new, orig, 1))
+    return frozenset(expanded)
 
 
 class AnyModel(nn.Module, HasNoOps):
@@ -602,6 +739,9 @@ class AnyModel(nn.Module, HasNoOps):
             if block_configs:
                 noop_prefixes = _collect_noop_prefixes(block_configs, arch_info)
                 if noop_prefixes:
+                    noop_prefixes = _expand_noop_prefixes_for_mapper(
+                        noop_prefixes, type(self)
+                    )
                     weights = (
                         (name, tensor)
                         for name, tensor in weights
