@@ -52,74 +52,40 @@ logger = init_logger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# vllm::dflash_attn  –  custom op that wraps the DFlash cross-attention
-# (QKV projection on concat(context, query), per-head RMSNorm, RoPE,
-# context-Q slice, and the self-attention call).
+# vllm::dflash_attn  –  slim custom op for DFlash cross-attention.
 #
-# Everything that touches the dynamic-shaped context_states lives here so
-# it stays outside any piecewise-compiled / CUDA-graphed region.  The op
-# reads context_states and positions from the ForwardContext side-channel.
+# QKV projection, per-head norms, and RoPE for query tokens all live in the
+# compiled graph (DFlashQwen3Attention.forward).  This op only:
+#   1. Concats precomputed context K/V with query K/V
+#   2. Runs the self-attention backend
 # ---------------------------------------------------------------------------
 
 
 def dflash_attn(
-    hidden_states: torch.Tensor,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
     output: torch.Tensor,
     layer_name: str,
-    q_size: int,
 ) -> None:
-    """Run the full DFlash cross-attention (QKV + norms + RoPE + attention).
+    """Run DFlash cross-attention with precomputed context K/V.
 
-    hidden_states are the query hidden states (padded, fixed shape).
-    *output* is a pre-allocated buffer (allocated in the FX graph so its
-    address is managed by the CUDA graph pool and remains stable across
-    replays).  This follows the ``unified_attention_with_output`` pattern.
+    q, k, v are the fully-processed (projected, normed, RoPE'd) QKV of the
+    query tokens (padded, fixed shape – produced in the compiled graph).
+    *output* is a pre-allocated buffer whose address stays stable across
+    CUDA graph replays.
 
-    Context states, positions, and all layer weights are retrieved from the
-    ForwardContext side-channel (via no_compile_layers) so that no model
-    parameters are passed as op arguments -- matching the unified_attention
-    pattern and keeping the splitting-op interface tensor-light.
+    Precomputed context K/V is read from the ForwardContext side-channel.
     """
     fc = get_forward_context()
-    layer = fc.no_compile_layers[layer_name]  # DFlashQwen3Attention
-    context_states = fc.dflash_context_states
-    positions = fc.dflash_positions
+    context_k, context_v = fc.dflash_context_kv[layer_name]
 
-    num_context = context_states.shape[0]
-    concat_states = torch.cat([context_states, hidden_states], dim=0)
-
-    qkv = F.linear(concat_states, layer.qkv_proj.weight, layer.qkv_proj.bias)
-    q, k, v = qkv.split([layer.q_size, layer.kv_size, layer.kv_size], dim=-1)
-
-    # Per-head RMSNorm
-    q_by_head = q.view(*q.shape[:-1], q.shape[-1] // layer.head_dim, layer.head_dim)
-    k_by_head = k.view(*k.shape[:-1], k.shape[-1] // layer.head_dim, layer.head_dim)
-
-    q = rmsnorm(
-        input=q_by_head,
-        weight=layer.q_norm.weight.data,
-        eps=layer.q_norm.variance_epsilon,
-    ).view(q.shape)
-    k = rmsnorm(
-        input=k_by_head,
-        weight=layer.k_norm.weight.data,
-        eps=layer.q_norm.variance_epsilon,
-    ).view(k.shape)
-
-    # Rotary embeddings
-    q, k = apply_rope_with_cos_sin_cache(
-        positions=positions,
-        query=q,
-        key=k,
-        head_size=layer.rotary_emb.head_size,
-        cos_sin_cache=layer.rotary_emb.cos_sin_cache,
-        is_neox=layer.rotary_emb.is_neox_style,
-    )
-
-    # Only query tokens attend as queries; drop context rows from Q.
-    q = q[num_context:]
+    # Concat precomputed context K/V with query K/V
+    k = torch.cat([context_k, k], dim=0)
+    v = torch.cat([context_v, v], dim=0)
 
     # Run the self-attention (KV-cache update + backend) eagerly.
+    layer = fc.no_compile_layers[layer_name]  # DFlashQwen3Attention
     attn_layer = fc.no_compile_layers[layer.attn.layer_name]
     attn_output = attn_layer(q, k, v)
 
@@ -129,10 +95,11 @@ def dflash_attn(
 
 
 def dflash_attn_fake(
-    hidden_states: torch.Tensor,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
     output: torch.Tensor,
     layer_name: str,
-    q_size: int,
 ) -> None:
     return
 
@@ -226,8 +193,27 @@ class DFlashQwen3Attention(nn.Module):
 
     def forward(
         self,
+        positions: torch.Tensor,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
+        # QKV projection + per-head norms + RoPE run in the compiled graph
+        # (fixed-shape query tokens only).
+        qkv = F.linear(hidden_states, self.qkv_proj.weight, self.qkv_proj.bias)
+        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+
+        # Per-head RMSNorm (reshape so last dim = head_dim, use the
+        # vllm RMSNorm modules which are torch.compile-friendly).
+        q_shape, k_shape = q.shape, k.shape
+        q = self.q_norm(
+            q.view(*q_shape[:-1], q_shape[-1] // self.head_dim, self.head_dim)
+        ).view(q_shape)
+        k = self.k_norm(
+            k.view(*k_shape[:-1], k_shape[-1] // self.head_dim, self.head_dim)
+        ).view(k_shape)
+
+        # Rotary embeddings (CustomOp, torch.compile-friendly)
+        q, k = self.rotary_emb(positions, q, k)
+
         # Pre-allocate output buffer in the FX graph so that split_graph
         # places it in the compiled piece before the splitting op.  The
         # CUDA graph pool then keeps its address stable across replays.
@@ -238,10 +224,11 @@ class DFlashQwen3Attention(nn.Module):
             device=hidden_states.device,
         )
         torch.ops.vllm.dflash_attn(
-            hidden_states,
+            q,
+            k,
+            v,
             attn_output,
             layer_name=self.layer_name,
-            q_size=self.q_size,
         )
         output, _ = self.o_proj(attn_output)
         return output
@@ -290,6 +277,7 @@ class DFlashQwen3DecoderLayer(nn.Module):
 
     def forward(
         self,
+        positions: torch.Tensor,
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -300,6 +288,7 @@ class DFlashQwen3DecoderLayer(nn.Module):
             hidden_states = self.input_layernorm(hidden_states)
 
         hidden_states = self.self_attn(
+            positions=positions,
             hidden_states=hidden_states,
         )
 
@@ -380,9 +369,113 @@ class DFlashQwen3Model(nn.Module):
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
+    def _build_fused_kv_buffers(self) -> None:
+        """Build fused weight buffers for batched precompute_context_kv.
+
+        Must be called after weights are loaded.  Stacks the KV-projection
+        weights, K-norm weights, and RoPE parameters from every attention
+        layer so that precompute_context_kv can run one GEMM, one norm,
+        and one RoPE call for *all* layers at once.
+        """
+        layers_attn = [layer.self_attn for layer in self.layers]
+        attn0 = layers_attn[0]
+        has_bias = attn0.qkv_proj.bias is not None
+
+        # KV projection weights: [num_layers * 2 * kv_size, hidden_size]
+        kv_weights = [a.qkv_proj.weight[a.q_size :] for a in layers_attn]
+        self._fused_kv_weight = torch.cat(kv_weights, dim=0)
+        if has_bias:
+            kv_biases = [a.qkv_proj.bias[a.q_size :] for a in layers_attn]
+            self._fused_kv_bias: torch.Tensor | None = torch.cat(kv_biases, dim=0)
+        else:
+            self._fused_kv_bias = None
+
+        # K-norm weights: list of [head_dim] tensors, one per layer.
+        # Used with flashinfer rmsnorm (one fused kernel per layer).
+        self._k_norm_weights = [a.k_norm.weight.data for a in layers_attn]
+
+        # RoPE params (shared across all layers)
+        self._rope_head_size = attn0.rotary_emb.head_size
+        self._rope_cos_sin_cache = attn0.rotary_emb.cos_sin_cache
+        self._rope_is_neox = attn0.rotary_emb.is_neox_style
+
+        # Layer metadata
+        self._num_attn_layers = len(layers_attn)
+        self._kv_size = attn0.kv_size
+        self._head_dim = attn0.head_dim
+        self._num_kv_heads = attn0.num_kv_heads
+        self._attn_layer_names = [a.layer_name for a in layers_attn]
+        self._rms_norm_eps = attn0.q_norm.variance_epsilon
+
+    def precompute_context_kv(
+        self,
+        context_states: torch.Tensor,
+        context_positions: torch.Tensor,
+    ) -> dict[str, tuple[torch.Tensor, torch.Tensor]]:
+        """Precompute projected, normed, and RoPE'd K/V for context states.
+
+        All layers are processed in one fused GEMM, one fused RMSNorm, and
+        one fused RoPE call.  Requires _build_fused_kv_buffers() to have
+        been called after weight loading.
+
+        Returns a dict mapping layer_name -> (k, v).
+        """
+        num_ctx = context_states.shape[0]
+        L = self._num_attn_layers
+        kv = self._kv_size
+        hd = self._head_dim
+        nkv = self._num_kv_heads
+
+        # --- Fused KV projection (one GEMM for all layers) ---
+        # [num_ctx, L * 2 * kv]
+        all_kv_flat = F.linear(
+            context_states, self._fused_kv_weight, self._fused_kv_bias
+        )
+        # [L, num_ctx, 2 * kv]
+        all_kv = all_kv_flat.view(num_ctx, L, 2 * kv).transpose(0, 1).contiguous()
+        # Split K / V – each [L, num_ctx, kv]  (non-contiguous views)
+        all_k, all_v = all_kv.split(kv, dim=-1)
+
+        # --- Per-head RMSNorm on K (one flashinfer rmsnorm kernel per layer) ---
+        # [L, num_ctx, nkv, hd] -> per-layer [num_ctx * nkv, hd] rmsnorm
+        all_k = all_k.reshape(L, num_ctx * nkv, hd).contiguous()
+        all_k = torch.stack(
+            [
+                rmsnorm(
+                    input=all_k[i],
+                    weight=self._k_norm_weights[i],
+                    eps=self._rms_norm_eps,
+                )
+                for i in range(L)
+            ]
+        )
+        # [L, num_ctx, kv]
+        all_k = all_k.reshape(L, num_ctx, kv).contiguous()
+
+        # --- Fused RoPE on K (flatten layers into batch, tile positions) ---
+        # [L * num_ctx, kv]
+        k_flat = all_k.reshape(L * num_ctx, kv)
+        positions_tiled = context_positions.repeat(L)
+        _, k_rope = apply_rope_with_cos_sin_cache(
+            positions=positions_tiled,
+            query=k_flat,
+            key=k_flat,
+            head_size=self._rope_head_size,
+            cos_sin_cache=self._rope_cos_sin_cache,
+            is_neox=self._rope_is_neox,
+        )
+        # [L, num_ctx, kv]
+        all_k = k_rope.view(L, num_ctx, kv)
+        all_v = all_v.contiguous()
+
+        return {
+            name: (all_k[i], all_v[i]) for i, name in enumerate(self._attn_layer_names)
+        }
+
     def forward(
         self,
         input_ids: torch.Tensor,
+        positions: torch.Tensor,
         input_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if input_embeds is None:
@@ -393,6 +486,7 @@ class DFlashQwen3Model(nn.Module):
         residual = None
         for layer in self.layers:
             hidden_states, residual = layer(
+                positions=positions,
                 hidden_states=hidden_states,
                 residual=residual,
             )
@@ -481,9 +575,10 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
     def forward(
         self,
         input_ids: torch.Tensor,
+        positions: torch.Tensor,
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        return self.model(input_ids, inputs_embeds)
+        return self.model(input_ids, positions, inputs_embeds)
 
     def compute_logits(
         self,
@@ -501,6 +596,14 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
         )
         logits_new[:, targets] = logits
         return logits_new
+
+    def precompute_context_kv(
+        self,
+        context_states: torch.Tensor,
+        context_positions: torch.Tensor,
+    ) -> dict[str, tuple[torch.Tensor, torch.Tensor]]:
+        """Precompute projected + RoPE'd K/V for context states, all layers."""
+        return self.model.precompute_context_kv(context_states, context_positions)
 
     def combine_hidden_states(
         self,
@@ -549,3 +652,4 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
             skip_substrs=skip_substrs,
         )
         loader.load_weights(model_weights.items())
+        self.model._build_fused_kv_buffers()

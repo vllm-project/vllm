@@ -52,10 +52,19 @@ class DFlashProposer(SpecDecodeBaseProposer):
             self.max_positions + 1, device=device, dtype=torch.int32
         )
 
+        # Dedicated buffer for query positions so the slice always starts at
+        # offset 0 — required for CUDA graph address stability.
+        self.query_positions = torch.zeros(
+            self.max_positions,
+            dtype=torch.int64,
+            device=device,
+        )
+
         # For DFlash we use the input embeddings to embed the mask token
         self.parallel_drafting_hidden_state_tensor = None
 
     @override
+    @torch.cuda.nvtx.range("DFlashProposer.set_inputs_first_pass")
     def set_inputs_first_pass(
         self,
         target_token_ids: torch.Tensor,
@@ -174,6 +183,20 @@ class DFlashProposer(SpecDecodeBaseProposer):
         else:
             slot_mapping_dict = slot_mappings or {}
 
+        # Positions must cover context (unpadded) + query (padded to
+        # num_input_tokens) so that query_positions matches the model input.
+        num_pos_padded = num_tokens + num_input_tokens
+        all_positions = self._get_positions(num_pos_padded)
+        context_states = self.hidden_states[:num_tokens]
+        if all_positions.dim() == 1:
+            context_positions = all_positions[:num_tokens]
+            self.query_positions[:num_input_tokens] = all_positions[num_tokens:]
+        else:
+            context_positions = all_positions[:, :num_tokens]
+            self.query_positions[:num_input_tokens] = all_positions[:, num_tokens:]
+        dflash_context_kv = self.model.precompute_context_kv(
+            context_states, context_positions
+        )
         with set_forward_context(
             None,
             self.vllm_config,
@@ -183,14 +206,15 @@ class DFlashProposer(SpecDecodeBaseProposer):
             slot_mapping=slot_mapping_dict,
         ):
             fc = get_forward_context()
-            fc.dflash_context_states = self.hidden_states[:num_tokens]
-            fc.dflash_positions = self._get_positions(num_positions)
+            fc.dflash_context_kv = dflash_context_kv
             self.model(
                 input_ids=self.input_ids[:num_input_tokens],
+                positions=self.query_positions[:num_input_tokens],
                 inputs_embeds=None,
             )
 
     @override
+    @torch.cuda.nvtx.range("DFlashProposer.build_model_inputs_first_pass")
     def build_model_inputs_first_pass(
         self,
         num_tokens: int,
@@ -201,16 +225,27 @@ class DFlashProposer(SpecDecodeBaseProposer):
         # Positions: (unpadded) context tokens + (padded) query tokens
         # Hidden states: (unpadded) context tokens
         # Slot mapping size: unpadded number of positions
-        num_positions = self._dflash_num_context + num_input_tokens
+        num_context = self._dflash_num_context
+        num_positions = num_context + num_input_tokens
+        all_positions = self._get_positions(num_positions)
+        if all_positions.dim() == 1:
+            context_positions = all_positions[:num_context]
+            self.query_positions[:num_input_tokens] = all_positions[num_context:]
+        else:
+            context_positions = all_positions[:, :num_context]
+            self.query_positions[:num_input_tokens] = all_positions[:, num_context:]
+        context_kv = self.model.precompute_context_kv(
+            self.hidden_states[:num_context], context_positions
+        )
         return (
             dict(
                 input_ids=self.input_ids[:num_input_tokens],
+                positions=self.query_positions[:num_input_tokens],
                 inputs_embeds=None,
             ),
             self._dflash_num_positions,
             {
-                "dflash_context_states": self.hidden_states[: self._dflash_num_context],
-                "dflash_positions": self._get_positions(num_positions),
+                "dflash_context_kv": context_kv,
             },
         )
 
