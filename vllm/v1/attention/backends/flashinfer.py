@@ -1393,6 +1393,8 @@ class FlashInferImpl(AttentionImpl):
         key = key[:num_actual_tokens]
         value = value[:num_actual_tokens]
         positions = positions[:num_actual_tokens]
+        pos_ids = positions.to(torch.int32)
+        cos_sin_cache = cos_sin_cache.float()
 
         rotary_dim = cos_sin_cache.shape[-1]
         q_rope = query[..., :rotary_dim]
@@ -1429,7 +1431,7 @@ class FlashInferImpl(AttentionImpl):
             k_nope if k_nope.shape[-1] > 0 else None,
             value,
             cos_sin_cache,
-            positions,
+            pos_ids,
             (key_cache, value_cache),
             attn_metadata.paged_kv_indices,
             attn_metadata.paged_kv_indptr,
