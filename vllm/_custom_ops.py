@@ -502,7 +502,7 @@ def rms_norm_dynamic_per_token_quant(
     scale_ub: torch.Tensor | None = None,
     residual: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    output = torch.empty_like(input, dtype=quant_dtype)
+    output = torch.empty(input.shape, dtype=quant_dtype, device=input.device)
     scales = torch.empty(
         (input.numel() // input.shape[-1], 1), device=input.device, dtype=torch.float32
     )
@@ -526,7 +526,7 @@ def rms_norm_per_block_quant(
     tma_alignment: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     assert len(group_size) == 2
-    output = torch.empty_like(input, dtype=quant_dtype)
+    output = torch.empty(input.shape, dtype=quant_dtype, device=input.device)
     if is_scale_transposed:
         if tma_alignment == 0:
             scales = torch.empty(

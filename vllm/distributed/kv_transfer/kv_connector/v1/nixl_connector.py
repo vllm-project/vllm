@@ -50,7 +50,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
-    get_tp_group,
 )
 from vllm.forward_context import ForwardContext
 from vllm.logger import init_logger
@@ -564,7 +563,6 @@ class NixlConnectorScheduler:
 
         # Background thread for handling new handshake requests.
         self._nixl_handshake_listener_t: threading.Thread | None = None
-        self._encoded_xfer_handshake_metadata: dict[int, Any] = {}
         self._stop_event = threading.Event()
 
         # Requests that need to start recv/send.
@@ -650,7 +648,6 @@ class NixlConnectorScheduler:
                 tp_rank,
                 str(len(encoded_data[tp_rank])),
             )
-        self._encoded_xfer_handshake_metadata = encoded_data
 
         # Only start the listener when we have metadata to serve.
         if self._nixl_handshake_listener_t is None:
@@ -995,16 +992,13 @@ class NixlConnectorWorker:
         self.engine_id: EngineId = engine_id
         self.tp_rank = get_tensor_model_parallel_rank()
         self.world_size = get_tensor_model_parallel_world_size()
-        self.tp_group = get_tp_group()
+
         self.num_blocks = kv_cache_config.num_blocks
         self.enable_permute_local_kv = False
 
         # KV Caches and nixl tracking data.
         self.device_type = current_platform.device_type
-        kv_buffer_device = vllm_config.kv_transfer_config.kv_buffer_device
-        if kv_buffer_device is None:
-            raise ValueError("kv_buffer_device must be set for NixlConnector")
-        self.kv_buffer_device: str = kv_buffer_device
+        self.kv_buffer_device: str = vllm_config.kv_transfer_config.kv_buffer_device
         if self.device_type not in _NIXL_SUPPORTED_DEVICE:
             raise RuntimeError(f"{self.device_type} is not supported.")
         elif self.kv_buffer_device not in _NIXL_SUPPORTED_DEVICE[self.device_type]:
@@ -1064,7 +1058,6 @@ class NixlConnectorWorker:
         # Number of NIXL regions. Currently one region per cache
         # (so 1 per layer for MLA, otherwise 2 per layer)
         self.num_regions = 0
-        self.num_layers = 0
 
         # nixl_prepped_dlist_handle.
         self.src_xfer_handles_by_block_size: dict[int, int] = {}
@@ -1108,7 +1101,6 @@ class NixlConnectorWorker:
 
         self.block_size = vllm_config.cache_config.block_size
         self.model_config = vllm_config.model_config
-        self.cache_config = vllm_config.cache_config
 
         self.use_mla = self.model_config.use_mla
 
@@ -1540,7 +1532,6 @@ class NixlConnectorWorker:
 
         self.kv_caches_base_addr[self.engine_id][self.tp_rank] = seen_base_addresses
         self.num_regions = len(caches_data)
-        self.num_layers = len(xfer_buffers.keys())
 
         descs = self.nixl_wrapper.get_reg_descs(caches_data, self.nixl_memory_type)
         logger.debug("Registering descs: %s", caches_data)
