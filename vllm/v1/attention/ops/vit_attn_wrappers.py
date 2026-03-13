@@ -280,13 +280,50 @@ def flashinfer_wrapper(
     max_seqlen: torch.Tensor | None = None,
     sequence_lengths: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    from flashinfer.prefill import cudnn_batch_prefill_with_kv_cache
-
     is_reshaped = q.dim() == 4
 
     if is_reshaped:
         reshape_batch_size = q.shape[0]
         q, k, v = (einops.rearrange(x, "b s ... -> (b s) ...") for x in [q, k, v])
+
+    # cuDNN SDPA requires SM80+ (Ampere and newer).
+    # For Turing (SM75) and older GPUs, fall back to
+    # BatchPrefillWithRaggedKVCacheWrapper which internally uses the fa2
+    # backend (CUTLASS FlashAttention 2 compiled JIT for the target SM).
+    if not current_platform.has_device_capability(80):
+        from flashinfer import BatchPrefillWithRaggedKVCacheWrapper
+
+        assert sequence_lengths is not None
+        # sequence_lengths is [s1, s2, ..., sB, 0, ...(bucketing padding)].
+        # Strip zero-padded dummy entries before building qo_indptr.
+        seq_lens = sequence_lengths.view(-1).to(torch.int32)
+        real_seq_lens = seq_lens[seq_lens > 0]
+        qo_indptr = torch.cat(
+            [real_seq_lens.new_zeros(1), torch.cumsum(real_seq_lens, dim=0)]
+        ).cpu()
+
+        # ViT attention is full self-attention: kv layout matches qo.
+        wrapper = BatchPrefillWithRaggedKVCacheWrapper(workspace_buffer, "NHD")
+        wrapper.plan(
+            qo_indptr=qo_indptr,
+            kv_indptr=qo_indptr,
+            num_qo_heads=q.shape[1],
+            num_kv_heads=k.shape[1],
+            head_dim_qk=q.shape[2],
+            causal=False,
+            sm_scale=scale,
+            q_data_type=q.dtype,
+            kv_data_type=k.dtype,
+        )
+        output = wrapper.run(q, k, v)
+        if is_reshaped:
+            output = einops.rearrange(
+                output, "(b s) h d -> b s h d", b=reshape_batch_size
+            )
+        return output
+
+    from flashinfer.prefill import cudnn_batch_prefill_with_kv_cache
+
     # cuDNN <= 9.10.2.21 requires q, k to be contiguous
     # this comes with no cost for ViTs with RoPE because
     # RoPE has already made q and k contiguous.
