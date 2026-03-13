@@ -179,7 +179,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
         | ChatCompletionNamedToolChoiceParam
         | None
     ) = "none"
-    reasoning_effort: Literal["low", "medium", "high"] | None = None
+    reasoning_effort: Literal["none", "low", "medium", "high"] | None = None
     include_reasoning: bool = True
     parallel_tool_calls: bool | None = True
 
@@ -788,4 +788,11 @@ class ChatCompletionRequest(OpenAIBaseModel):
                                     part_type,
                                 )
 
+        return data
+
+    @model_validator(mode="before")
+    @classmethod
+    def set_include_reasoning_for_none_effort(cls, data: Any) -> Any:
+        if data.get("reasoning_effort") == "none":
+            data["include_reasoning"] = False
         return data
