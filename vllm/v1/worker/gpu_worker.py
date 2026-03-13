@@ -360,15 +360,6 @@ class Worker(WorkerBase):
         )
         if not using_inductor:
             return 0
-        # Verify the PyTorch version supports quiesce — we need it
-        # to stop the pool before cudagraph capture. If missing,
-        # fall back to single-threaded compilation.
-        from torch._inductor.compile_worker.subproc_pool import (
-            SubprocPool,
-        )
-
-        if not hasattr(SubprocPool, "quiesce"):
-            return 0
         compile_processes = envs.VLLM_COMPILE_PROCESSES
         if compile_processes is not None:
             return compile_processes
@@ -384,7 +375,7 @@ class Worker(WorkerBase):
             if hasattr(os, "sched_getaffinity")
             else os.cpu_count() or 1
         )
-        num_gpus = max(torch.cuda.device_count(), 1)
+        num_gpus = max(torch.accelerator.device_count(), 1)
         cpus_per_gpu = cpu_count // num_gpus
         return max(1, min(8, cpus_per_gpu - 1))
 
