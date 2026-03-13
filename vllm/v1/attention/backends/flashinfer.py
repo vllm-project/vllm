@@ -929,9 +929,21 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             query_start_loc=qo_indptr,
         )
 
+        needs_rope_kvcache_indices = (
+            self.compilation_config.pass_config.fuse_rope_kvcache
+            and flashinfer_rope_append_paged_kv_cache is not None
+        )
+
         # Guard access to seq_lens_cpu, which may not always be needed
-        # and can be expensive to retrieve in async mode.
-        needs_seq_lens_cpu = self.use_dcp or use_cascade or not is_only_trtllm_decode
+        # and can be expensive to retrieve in async mode. The stage1
+        # rope+kv-cache fusion fast path also needs seq_lens to materialize
+        # FlashInfer paged-kv metadata during warmup/graph capture.
+        needs_seq_lens_cpu = (
+            self.use_dcp
+            or use_cascade
+            or not is_only_trtllm_decode
+            or needs_rope_kvcache_indices
+        )
         seq_lens_cpu = common_attn_metadata.seq_lens_cpu if needs_seq_lens_cpu else None
         seq_lens_np = seq_lens_cpu.numpy() if seq_lens_cpu is not None else None
         num_blocks_np = (
@@ -969,10 +981,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             num_blocks_np -= num_common_kv_blocks
 
         # Compute paged_kv_indices if necessary
-        needs_rope_kvcache_indices = (
-            self.compilation_config.pass_config.fuse_rope_kvcache
-            and flashinfer_rope_append_paged_kv_cache is not None
-        )
         needs_paged_kv_indices = (
             use_cascade or not is_only_trtllm_decode or needs_rope_kvcache_indices
         )
