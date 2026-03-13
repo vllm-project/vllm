@@ -9,7 +9,7 @@
 #
 # Build targets:
 #   vllm-openai (default): used for serving deployment
-#   vllm-openai-amd-source: AMD Zen optimized serving image with zentorch (source build)
+#   vllm-openai-amd: vLLM from source + zentorch from PyPI via vllm[zen]
 #   vllm-test: used for CI tests
 #   vllm-dev: used for development
 #
@@ -255,29 +255,17 @@ LABEL ai.vllm.build.python-version="${PYTHON_VERSION:-3.12}"
 ENTRYPOINT ["vllm", "serve"]
 
 
-######################### AMD SOURCE BUILD IMAGE #########################
-FROM vllm-openai AS vllm-openai-amd-source
+######################### AMD PYPI IMAGE #########################
+FROM vllm-openai AS vllm-openai-amd
 
 ARG TARGETARCH
-ARG ZENTORCH_REPO=https://github.com/amd/ZenDNN-pytorch-plugin.git
 
 RUN if [ "$TARGETARCH" != "amd64" ]; then \
-        echo "ERROR: vllm-openai-amd-source only supports --platform=linux/amd64"; \
+        echo "ERROR: vllm-openai-amd only supports --platform=linux/amd64"; \
         exit 1; \
     fi
 
-RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    --mount=type=cache,target=/var/lib/apt,sharing=locked \
-    --mount=type=cache,target=/root/.cache/uv \
-    apt-get update -y && \
-    apt-get install -y --no-install-recommends make && \
-    uv pip install cmake && \
-    git clone "${ZENTORCH_REPO}" /tmp/zentorch && \
-    cd /tmp/zentorch && \
-    ZENTORCH_VLLM_PLUGIN_BUILD=0 python3 setup.py bdist_wheel && \
-    uv pip install dist/*.whl && \
-    cd / && rm -rf /tmp/zentorch && \
-    uv pip uninstall cmake && \
-    apt-get purge -y --auto-remove make
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install "vllm[zen]"
 
 ENTRYPOINT ["vllm", "serve"]
