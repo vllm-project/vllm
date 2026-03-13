@@ -149,13 +149,21 @@ class VoxtralDummyInputsBuilder(BaseDummyInputsBuilder[VoxtralProcessingInfo]):
         seq_len: int,
         mm_counts: Mapping[str, int],
         mm_options: Mapping[str, BaseDummyOptions],
+        mm_data: MultiModalDataDict | None = None,
     ) -> ProcessorInputs:
         tokenizer = self.info.get_tokenizer()
         feature_extractor = self.info.get_hf_processor().feature_extractor
 
         dummy_text = self.get_dummy_text(mm_counts)
-        dummy_mm_data = self.get_dummy_mm_data(seq_len, mm_counts, mm_options)
-        dummy_audios = dummy_mm_data.get("audio", [])
+        dummy_mm_data = (
+            self.get_dummy_mm_data(seq_len, mm_counts, mm_options)
+            if mm_data is None
+            else mm_data
+        )
+        dummy_mm_items = self.info.parse_mm_data(dummy_mm_data)
+        dummy_audios = (
+            [] if "audio" not in dummy_mm_data else dummy_mm_items["audio"].get_all()
+        )
 
         audio_chunks: list[AudioChunk] = []
         format = "wav"

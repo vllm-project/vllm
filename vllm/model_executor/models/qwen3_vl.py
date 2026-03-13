@@ -550,13 +550,9 @@ class Qwen3_VisionTransformer(nn.Module):
             axis=0, dtype=np.int32
         )
         cu_seqlens = np.concatenate([np.zeros(1, dtype=np.int32), cu_seqlens])
-        sequence_lengths = MMEncoderAttention.maybe_compute_sequence_lengths(
-            self.attn_backend, cu_seqlens
+        sequence_lengths = MMEncoderAttention.maybe_compute_seq_lens(
+            self.attn_backend, cu_seqlens, self.device
         )
-        if sequence_lengths is not None:
-            sequence_lengths = torch.from_numpy(sequence_lengths).to(
-                self.device, non_blocking=True
-            )
         max_seqlen = torch.tensor(
             MMEncoderAttention.compute_max_seqlen(self.attn_backend, cu_seqlens),
             dtype=torch.int32,
@@ -567,8 +563,8 @@ class Qwen3_VisionTransformer(nn.Module):
             cu_seqlens,
             self.hidden_size,
             self.tp_size,
+            self.device,
         )
-        cu_seqlens = torch.from_numpy(cu_seqlens).to(self.device, non_blocking=True)
         hidden_states = hidden_states.unsqueeze(1)
 
         deepstack_feature_lists = []
