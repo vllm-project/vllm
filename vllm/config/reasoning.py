@@ -18,6 +18,8 @@ class ReasoningConfig:
     `initialize_token_ids` and are not intended to be set directly.
     """
 
+    # NOTE: These parameters are temporary, the intent is to derive them
+    # automatically from the reasoning parser in a future version.
     think_start_str: str = "<think>"
     """String that indicates the start of reasoning."""
     think_end_str: str = "</think>"
