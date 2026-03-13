@@ -265,6 +265,11 @@ class Base(
         for source, target in ccm.items():
             orig_to_new_regex[re.compile(source)] = target
 
+        # Handle unexpected weights which should be ignored
+        if self.model._keys_to_ignore_on_load_unexpected is not None:
+            for key in self.model._keys_to_ignore_on_load_unexpected:
+                orig_to_new_regex[re.compile(key)] = None
+
         # Standardise base model prefix
         bmp = self.model.base_model_prefix
         expected_bmp = r"model.\1"
