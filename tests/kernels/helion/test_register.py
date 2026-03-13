@@ -134,14 +134,14 @@ class TestValidateHelionSettings:
             validate_helion_settings(settings, "test_kernel")
 
     def test_warns_on_static_shapes_true(self):
-        """Test that static_shapes=True emits a warning."""
+        """Test that static_shapes=True emits a warning about being overridden."""
         settings = helion.Settings()
         settings.static_shapes = True
 
         with patch("vllm.kernels.helion.register.logger") as mock_logger:
             validate_helion_settings(settings, "test_kernel")
             mock_logger.warning.assert_called_once()
-            assert "static_shapes=True" in mock_logger.warning.call_args[0][0]
+            assert "overridden to False" in mock_logger.warning.call_args[0][0]
 
 
 def create_configured_kernel_with_configs(
@@ -259,7 +259,6 @@ class TestConfiguredHelionKernel:
 
         settings = helion.Settings()
         settings.print_output_code = True
-        # Note: helion.Settings() defaults static_shapes to True
 
         mock_config_manager = Mock(spec=ConfigManager)
         mock_config_manager.get_platform_configs = Mock(return_value=sample_configs)
@@ -288,46 +287,8 @@ class TestConfiguredHelionKernel:
             call_kwargs = mock_kernel.call_args[1]
             assert "print_output_code" in call_kwargs
             assert call_kwargs["print_output_code"] is True
-            # helion.Settings() defaults to static_shapes=True, so it should remain True
-            assert call_kwargs["static_shapes"] is True
-
-    def test_create_decorated_kernel_preserves_static_shapes_true(
-        self, sample_kernel, sample_configs
-    ):
-        """Test that explicit static_shapes=True is preserved."""
-
-        def default_picker(args, config_keys):
-            return "default"
-
-        settings = helion.Settings()
-        settings.static_shapes = True
-
-        mock_config_manager = Mock(spec=ConfigManager)
-        mock_config_manager.get_platform_configs = Mock(return_value=sample_configs)
-
-        with (
-            patch("vllm.kernels.helion.register.helion.kernel") as mock_kernel,
-            patch(
-                "vllm.kernels.helion.config_manager.ConfigManager.get_instance",
-                return_value=mock_config_manager,
-            ),
-            patch(
-                "vllm.kernels.helion.utils.get_canonical_gpu_name",
-                return_value="nvidia_h200",
-            ),
-        ):
-            mock_decorated = Mock()
-            mock_kernel.return_value = Mock(return_value=mock_decorated)
-
-            ConfiguredHelionKernel(
-                op_name="test_kernel",
-                config_picker=default_picker,
-                raw_kernel_func=sample_kernel,
-                helion_settings=settings,
-            )
-
-            call_kwargs = mock_kernel.call_args[1]
-            assert call_kwargs["static_shapes"] is True
+            # static_shapes is always forced to False by vLLM
+            assert call_kwargs["static_shapes"] is False
 
     def test_key_and_config_selector_use_same_logic(
         self, sample_kernel, sample_configs
@@ -760,20 +721,6 @@ class TestKernelRegistry:
             @register_kernel("test", helion_settings=mock_settings)
             def test_kernel(x):
                 return x
-
-    def test_register_kernel_warns_with_static_shapes_true(self):
-        """Test register_kernel warns when static_shapes=True."""
-        mock_settings = Mock()
-        mock_settings.to_dict.return_value = {"static_shapes": True}
-
-        with patch("vllm.kernels.helion.register.logger") as mock_logger:
-
-            @register_kernel("test", helion_settings=mock_settings)
-            def test_kernel(x):
-                return x
-
-            mock_logger.warning.assert_called_once()
-            assert "static_shapes=True" in mock_logger.warning.call_args[0][0]
 
     def test_register_kernel_no_warning_with_static_shapes_false(self):
         """Test register_kernel doesn't warn with static_shapes=False."""
