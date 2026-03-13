@@ -4,6 +4,8 @@ import asyncio
 import contextlib
 import queue
 import sys
+import os
+import re
 import uuid
 import weakref
 from abc import ABC, abstractmethod
@@ -21,6 +23,7 @@ import zmq.asyncio
 
 from vllm.config import VllmConfig
 from vllm.envs import VLLM_ENGINE_READY_TIMEOUT_S
+from vllm.utils import is_restore
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.tasks import SupportedTask
@@ -52,6 +55,7 @@ from vllm.v1.engine.utils import (
     CoreEngineProcManager,
     get_engine_zmq_addresses,
     launch_core_engines,
+    get_new_dp_master_ip
 )
 from vllm.v1.executor import Executor
 from vllm.v1.pool.late_interaction import get_late_interaction_engine_index
@@ -537,6 +541,18 @@ class MPClient(EngineCoreClient):
                 ) as (engine_manager, coordinator, addresses, tensor_queue):
                     self.resources.coordinator = coordinator
                     self.resources.engine_manager = engine_manager
+                # if is_restore() and  self.vllm_config is not None and self.vllm_config.parallel_config.data_parallel_size > 1:
+                #     new_dp_master_ip = get_new_dp_master_ip()
+                #     addresses.inputs[0] = re.sub(r"\d+\.\d+\.\d+\.\d+", new_dp_master_ip, addresses.inputs[0])
+                #     addresses.outputs[0] = re.sub(r"\d+\.\d+\.\d+\.\d+", new_dp_master_ip, addresses.outputs[0])
+                #     if addresses.coordinator_input is not None:
+                #         addresses.coordinator_input = re.sub(r"\d+\.\d+\.\d+\.\d+", new_dp_master_ip, addresses.coordinator_input)
+                #     if addresses.coordinator_output is not None:
+                #         addresses.coordinator_output = re.sub(r"\d+\.\d+\.\d+\.\d+", new_dp_master_ip, addresses.coordinator_output)
+                #     if addresses.frontend_stats_publish_address is not None:
+                #         addresses.frontend_stats_publish_address = re.sub(r"\d+\.\d+\.\d+\.\d+", new_dp_master_ip,
+                #                                                 addresses.frontend_stats_publish_address)
+                # logger.info(f"address:::{addresses}")
 
                 self.stats_update_address = addresses.frontend_stats_publish_address
                 if coordinator is not None:

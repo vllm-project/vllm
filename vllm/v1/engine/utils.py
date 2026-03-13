@@ -16,6 +16,8 @@ from unittest.mock import patch
 
 import msgspec
 import zmq
+import socket
+import time
 
 from vllm import envs
 from vllm.config import CacheConfig, ParallelConfig, VllmConfig
@@ -1278,3 +1280,54 @@ def wait_for_engine_startup(
             "local" if local else "remote",
             eng_index,
         )
+
+def get_new_dp_master_ip() -> str:
+    max_retries = 10
+    retry_interval = 1
+    retry_count = 0
+    # 获取PD角色
+    role = os.environ.get('ROLE', '')
+    master_hostname = ''
+    if role == 'PREFILLER-0' :
+        master_hostname = "p0.vllm-pd.svc.cluster.local"
+    elif role == 'PREFILLER-1' :
+        master_hostname = "p1.vllm-pd.svc.cluster.local"
+    elif role == 'DECODER_MASTER' :
+        master_hostname = "d-master.vllm-pd.svc.cluster.local"
+    elif role == 'DECODER_WORKER' :
+        master_hostname = "d-master.vllm-pd.svc.cluster.local"
+    
+    data_parallel_master_ip = ""
+    while retry_count < max_retries:
+        try:
+            # 解析主机名并获取 IP 地址
+            data_parallel_master_ip = socket.gethostbyname(master_hostname)
+            print(f"get new dp master ip : {data_parallel_master_ip}")
+            break  # 如果成功，退出循环
+        except socket.gaierror as e:
+            retry_count += 1
+            if retry_count < max_retries:
+                print(f"解析主机名失败: {e}, 1秒后重试... (重试次数: {retry_count}/{max_retries})")
+                time.sleep(retry_interval)  # 等待 1 秒后重试
+            else:
+                print(f"解析主机名失败: {e}, 已达到最大重试次数 ({max_retries})")
+                raise  # 重新抛出异常
+    # data_parallel_master_ip = "127.0.0.1"
+    return data_parallel_master_ip
+
+# def get_new_pod_ip() -> str:
+#     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+#     s.settimeout(0.1)
+#     # 连接到外部服务器（这里用Google的DNS）
+#     s.connect(("8.8.8.8", 80))
+#     # 获取本地套接字的地址
+#     ip = s.getsockname()[0]
+#     s.close()
+#     logger.warning(f"local pod IP: {ip}")
+#     return ip
+
+# def is_exist_grus_file() -> bool:
+#     return os.path.exists("/root/.grusflag")
+
+def is_use_tcp_zmq(handshake_address):
+    return handshake_address[:3] == "tcp"

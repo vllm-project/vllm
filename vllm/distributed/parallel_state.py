@@ -1064,7 +1064,7 @@ class GroupCoordinator:
 
     def destroy(self):
         if hasattr(self, "device_group"):
-            torch.distributed.destroy_process_group(self.device_group)
+            self.device_group._get_backend(torch.device('npu')).abort_hccl_comm("reinit")
             del self.device_group
         if hasattr(self, "cpu_group"):
             torch.distributed.destroy_process_group(self.cpu_group)
@@ -1866,31 +1866,37 @@ def destroy_model_parallel():
 
     if _TP:
         _TP.destroy()
+    del _TP
     _TP = None
 
     global _DCP
     if _DCP:
         _DCP.destroy()
+    del _DCP
     _DCP = None
 
     global _PCP
     if _PCP:
         _PCP.destroy()
+    del _PCP
     _PCP = None
 
     global _PP
     if _PP:
         _PP.destroy()
+    del _PP
     _PP = None
 
     global _DP
     if _DP:
         _DP.destroy()
+    del _DP
     _DP = None
 
     global _EP
     if _EP:
         _EP.destroy()
+    del _EP
     _EP = None
 
     global _EPLB
@@ -1903,6 +1909,7 @@ def destroy_distributed_environment():
     global _WORLD, _NODE_COUNT
     if _WORLD:
         _WORLD.destroy()
+    del _WORLD
     _WORLD = None
     _NODE_COUNT = None
     if torch.distributed.is_initialized():
@@ -1944,6 +1951,14 @@ def cleanup_dist_env_and_memory(shutdown_ray: bool = False):
                 "torch._C._host_emptyCache() only available in Pytorch >=2.5"
             )
 
+# snapshot clean dist env
+def cleanup_dist_env_for_snapshot(shutdown_ray: bool = False):
+    destroy_model_parallel()
+    logger.info("destroy_model_parallel() end")
+    destroy_distributed_environment()
+    if shutdown_ray:
+        import ray  # Lazy import Ray
+        ray.shutdown()
 
 def in_the_same_node_as(
     pg: ProcessGroup | StatelessProcessGroup, source_rank: int = 0

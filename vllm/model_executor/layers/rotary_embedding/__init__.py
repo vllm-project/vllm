@@ -27,6 +27,10 @@ from .telechat3_scaling_rope import TeleChat3RoPEScaledRotaryEmbedding
 from .xdrope import XDRotaryEmbedding
 from .yarn_scaling_rope import YaRNScalingRotaryEmbedding
 
+from vllm.utils import is_restore
+
+restore_visit = set()
+
 _ROPE_DICT: dict[tuple[Any, ...], RotaryEmbedding] = {}
 
 
@@ -81,7 +85,11 @@ def get_rope(
         dtype,
     )
     if key in _ROPE_DICT:
-        return _ROPE_DICT[key]
+        if not is_restore() or key in restore_visit:
+            return _ROPE_DICT[key]
+        else:
+            restore_visit.add(key)
+            print(f"[rope] create rotary embedding cache for key {key}", flush=True)
 
     if dual_chunk_attention_config is not None:
         extra_kwargs = {

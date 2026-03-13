@@ -16,6 +16,14 @@ from inspect import isclass, signature
 from logging import DEBUG
 from multiprocessing.queues import Queue
 from typing import Any, TypeVar, cast
+import urllib.parse
+import requests_unixsocket
+import shutil
+import socket
+import re
+import vllm.envs as envs
+import gc
+from vllm.utils import get_containerd_id, is_restore, get_pod_ip
 
 import msgspec
 import zmq
@@ -70,6 +78,8 @@ from vllm.v1.engine.utils import (
     EngineZmqAddresses,
     SignalCallback,
     get_device_indices,
+    get_new_dp_master_ip,
+    is_use_tcp_zmq
 )
 from vllm.v1.executor import Executor
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -89,6 +99,51 @@ _R = TypeVar("_R")  # Return type for collective_rpc
 
 
 class EngineCore:
+
+    def do_host_snapshot(self):
+        # del tmp path (eg. ascend log)
+        try:
+            shutil.rmtree("/root/ascend/log")
+            print(f"目录 /root/ascend/log 及其所有内容已删除")
+        except OSError as e:
+            print(f"删除目录 /root/ascend/log 时出错: {e}")
+        
+        # get container_id and snapshot_image save path
+        container_id = get_containerd_id()
+        snapshot_image_save_dir = "/home/liziyu/snapshot_image/"
+        
+        # grus service url ("http+unix://{encoded_socket_path}/checkpoint")
+        socket_path = '/var/run/grus/grus.sock'
+        encoded_socket_path = urllib.parse.quote(socket_path, safe='')
+        url = f'http+unix://{encoded_socket_path}/checkpoint'
+
+       # create data
+        data = {
+            'container_id': container_id,
+            'location': snapshot_image_save_dir + container_id,
+            'timeout': 0
+        }
+
+        # post grus service
+        with requests_unixsocket.Session() as session:
+            response = session.post(url, data=data)
+            # Check response status
+            if response.status_code == 200:
+                logger.info(f"Successfully checkpointed container {container_id}")
+                logger.info(f"Response: {response.text}")
+            else:
+                logger.error(f"Failed to checkpoint container {container_id}")
+                logger.error(f"HTTP Status: {response.status_code}, Response: {response.text}")
+                
+    # 快照restore之后信息刷新：1. 刷新HCCL_IF_IP环境变量的值为新调度的pod ip 2. 刷新data_parallel_master_ip的值为最新的主节点pod ip
+    def after_snapshot_restore_update_info_for_core(self, hccl_if_ip: str, data_parallel_master_ip: str):
+        os.environ['HCCL_IF_IP'] = hccl_if_ip
+        os.environ['VLLM_HOST_IP'] = hccl_if_ip
+        envs.VLLM_HOST_IP = hccl_if_ip
+        self.vllm_config.parallel_config.data_parallel_master_ip = data_parallel_master_ip
+        logger.warning(
+            f"[snapshot] core : After snapshot restore, update HCCL_IF_IP to {hccl_if_ip}, data_parallel_master_ip to {data_parallel_master_ip}")
+
     """Inner loop of vLLM's Engine."""
 
     def __init__(
@@ -125,7 +180,89 @@ class EngineCore:
             self._eep_scale_up_before_kv_init()
 
         # Setup KV Caches and update CacheConfig after profiling.
-        kv_cache_config = self._initialize_kv_caches(vllm_config)
+        num_gpu_blocks, num_cpu_blocks, kv_cache_config = self._initialize_kv_caches(
+            vllm_config
+        )
+
+        vllm_config.cache_config.num_gpu_blocks = num_gpu_blocks
+        vllm_config.cache_config.num_cpu_blocks = num_cpu_blocks
+        self.collective_rpc("initialize_cache", args=(num_gpu_blocks, num_cpu_blocks))
+
+        self.collective_rpc("dump_model")
+
+        gc.collect()
+        logger.info("snapshot ------------------------ gc.collect() --------------------------- snapshot")
+        logger.info("snapshot ------------------------ reach the snapshot steady state point --------------------------- snapshot")
+        
+        logger.info("[snapshot] Synchronize all processes and all containers to the same steady state point.")
+        # TODO: Synchronize all processes and all containers to the same steady state point.
+        # exec aclrtSnapShotProcessLock()
+        self.collective_rpc("aclrt_snapshot_process_lock")
+        # exec aclrtSnapShotProcessBackup() 
+        self.collective_rpc("aclrt_snapshot_process_backup")
+
+        logger.info("[snapshot] will do host snapshot for container.")
+        # do host snapshot for container.
+        # 一个pod只需要打一次快照
+        # from vllm.distributed.parallel_state import get_world_group
+        # local_rank = get_world_group().local_rank
+        # if local_rank == 0 :
+        import os
+        ROLE = os.getenv("ROLE", None)
+        logger.info(f"[snapshot] start restore the NPU snapshot. {is_restore()=} {ROLE=}")
+        self.do_host_snapshot()
+        
+        # wait for grus to start
+        time.sleep(3)
+        
+        logger.info("[snapshot] do host snapshot and npu snapshot end.")
+        
+        ROLE = os.getenv("ROLE", None)
+        # NPU restore for aclrt
+        logger.info(f"[snapshot] start restore the NPU snapshot. {is_restore()=} {ROLE=}")
+        if is_restore():
+            logger.info("[snapshot] do host restore for container.")
+            # TODO: do host restore for container.
+
+            # exec aclrtSnapShotProcessRestore()
+            self.collective_rpc("aclrt_snapshot_process_restore")
+
+        # exec aclrtSnapShotProcessUnlock()
+        self.collective_rpc("aclrt_snapshot_process_unlock")
+                
+        logger.info("Synchronize and ensure that each process completes the restore of the NPU snapshot")
+        
+        # 是否跨机判断
+        is_cross_machine =  self.vllm_config is not None and self.vllm_config.parallel_config.data_parallel_size > 1 
+        
+        if is_cross_machine and is_restore():
+            data_parallel_master_ip = get_new_dp_master_ip()
+            vllm_config.parallel_config.data_parallel_master_ip = data_parallel_master_ip
+            logger.info(f"--- new data_parallel_master_ip ---:{data_parallel_master_ip}.....")
+            pod_ip = get_pod_ip()
+            hccl_if_ip = pod_ip
+            self.after_snapshot_restore_update_info_for_core(hccl_if_ip, data_parallel_master_ip)
+            self.collective_rpc("after_snapshot_restore_update_info_for_worker",
+                                args=(hccl_if_ip, data_parallel_master_ip))
+        
+        if is_restore():
+            logger.info("--- start to rebuild process group ---")
+            self.collective_rpc("rebuild_group_lhc")
+            logger.info("--- end to rebuild process group ---")
+
+        if is_restore():
+            logger.info("--- start to reload model weight ---")
+            # reload weights
+            self.collective_rpc("re_load_weights")
+            logger.info(f"--- end to reload model weight ---env::hccl_if_ip:{os.environ['HCCL_IF_IP']}")
+            if hasattr(self, 'dp_group') and self.dp_group is not None:
+                logger.info("--- start to rebuild core process group ---")
+                stateless_destroy_torch_distributed_process_group(self.dp_group)
+                vllm_config.parallel_config.data_parallel_master_port = vllm_config.parallel_config.data_parallel_master_port + 1000
+                logger.info("--- end destroy core process group ---port : %s",vllm_config.parallel_config.data_parallel_master_port)
+                self.dp_group = vllm_config.parallel_config.stateless_init_dp_group()
+                logger.info("--- end init core process group ---")
+
         self.structured_output_manager = StructuredOutputManager(vllm_config)
 
         # Setup scheduler.
@@ -885,6 +1022,20 @@ class EngineCoreProc(EngineCore):
                 internal_dp_balancing,
             )
 
+            logger.info(f"[lhc] handshake_address is {handshake_address}, client_handshake_address is {client_handshake_address}")
+            logger.info(f"[lhc] addresses is {addresses}")
+            logger.info(f"[lhc] addresses.inputs is {addresses.inputs},addresses.coordinator_input:{addresses.coordinator_input}")
+            if os.path.exists("/root/.grusflag") and self.vllm_config is not None and self.vllm_config.parallel_config.data_parallel_size > 1:
+                handshake_address = re.sub(r"\d+\.\d+\.\d+\.\d+", vllm_config.parallel_config.data_parallel_master_ip, handshake_address)
+                addresses.inputs[0] = re.sub(r"\d+\.\d+\.\d+\.\d+", vllm_config.parallel_config.data_parallel_master_ip, addresses.inputs[0])
+                addresses.outputs[0] = re.sub(r"\d+\.\d+\.\d+\.\d+", vllm_config.parallel_config.data_parallel_master_ip, addresses.outputs[0])
+                addresses.coordinator_input = re.sub(r"\d+\.\d+\.\d+\.\d+", vllm_config.parallel_config.data_parallel_master_ip, addresses.coordinator_input)
+                addresses.coordinator_output = re.sub(r"\d+\.\d+\.\d+\.\d+", vllm_config.parallel_config.data_parallel_master_ip, addresses.coordinator_output)
+                if addresses.frontend_stats_publish_address is not None:
+                    addresses.frontend_stats_publish_address = re.sub(r"\d+\.\d+\.\d+\.\d+", vllm_config.parallel_config.data_parallel_master_ip,
+                                                                addresses.frontend_stats_publish_address)
+                logger.info(f"[lhc] addresses.inputs is {addresses.inputs},addresses.coordinator_input:{addresses.coordinator_input}")
+
             # Background Threads and Queues for IO. These enable us to
             # overlap ZMQ socket IO with GPU since they release the GIL,
             # and to overlap some serialization/deserialization with the
@@ -1011,6 +1162,26 @@ class EngineCoreProc(EngineCore):
                 handshake_socket, local_client, headless, parallel_config_to_update
             )
             yield addresses
+            
+            socket_send = handshake_socket
+            logger.info(f"handshake_address:::::{handshake_address}")
+            logger.info(f"vllm_config.parallel_config.data_parallel_master_ip:::{vllm_config.parallel_config.data_parallel_master_ip}")
+            if os.path.exists("/root/.grusflag") and self.vllm_config is not None and self.vllm_config.parallel_config.data_parallel_size > 1:
+                before_restore_handshake_address = handshake_address
+                handshake_address = re.sub(r"\d+\.\d+\.\d+\.\d+", vllm_config.parallel_config.data_parallel_master_ip, handshake_address)
+                self.frontend_stats_publish_address = re.sub(r"\d+\.\d+\.\d+\.\d+", vllm_config.parallel_config.data_parallel_master_ip,
+                                                             self.frontend_stats_publish_address)
+                logger.info(f"[after restore] handshake_address:::::{handshake_address}, self.frontend_stats_publish_address is {self.frontend_stats_publish_address}")
+                if is_use_tcp_zmq(handshake_address) and before_restore_handshake_address != handshake_address:
+                    socket_send = make_zmq_socket(
+                        ctx,
+                        handshake_address,
+                        zmq.DEALER,
+                        identity=identity,
+                        linger=5000,
+                        bind=False
+                    )
+                    
 
             # Send ready message.
             ready_msg = {
@@ -1024,7 +1195,8 @@ class EngineCoreProc(EngineCore):
                     vllm_config.parallel_config.compute_hash()
                 )
 
-            handshake_socket.send(msgspec.msgpack.encode(ready_msg))
+            socket_send.send(msgspec.msgpack.encode(ready_msg))
+            logger.info("send ready local:%s, headless:%s, dp_stats_address:%s",local_client,headless,dp_stats_address)
 
     @staticmethod
     def startup_handshake(
