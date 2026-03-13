@@ -43,6 +43,7 @@ All2AllBackend = Literal[
     "deepep_high_throughput",
     "deepep_low_latency",
     "mori",
+    "nixl_ep",
     "allgather_reducescatter",
     "flashinfer_all2allv",
 ]
@@ -156,6 +157,7 @@ class ParallelConfig:
     - "deepep_high_throughput": Use deepep high-throughput kernels\n
     - "deepep_low_latency": Use deepep low-latency kernels\n
     - "mori": Use mori kernels\n
+    - "nixl_ep": Use nixl-ep kernels\n
     - "flashinfer_all2allv": Use flashinfer alltoallv kernels for mnnvl"""
 
     max_parallel_loading_workers: int | None = None
@@ -234,8 +236,14 @@ class ParallelConfig:
     """distributed node rank for multi-node distributed 
     inference when distributed_executor_backend is mp."""
     nnodes: int = 1
-    """num of nodes for multi-node distributed 
+    """num of nodes for multi-node distributed
     inference when distributed_executor_backend is mp."""
+
+    distributed_timeout_seconds: int | None = None
+    """Timeout in seconds for distributed operations (e.g., init_process_group).
+    If set, this value is passed to torch.distributed.init_process_group as the
+    timeout parameter. If None, PyTorch's default timeout is used (600s for NCCL).
+    Increase this for multi-node setups where model downloads may be slow."""
 
     world_size: int = Field(init=False)
     """world_size is TPxPP, it affects the number of workers we create."""
@@ -574,6 +582,7 @@ class ParallelConfig:
                 "deepep_high_throughput",
                 "deepep_low_latency",
                 "mori",
+                "nixl_ep",
             )
             and self.enable_expert_parallel
             and self.tensor_parallel_size > 1

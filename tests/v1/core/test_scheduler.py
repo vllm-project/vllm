@@ -1115,12 +1115,16 @@ def _step_until_done(
         all_finished = all_done
 
 
+def _num_waiting_requests(scheduler: Scheduler) -> int:
+    return len(scheduler.waiting) + len(scheduler.skipped_waiting)
+
+
 def _step_until_kv_transfer_finished(scheduler: Scheduler, req_ids: list[str]):
-    """Cycle requests through a KV transfer cyle."""
+    """Cycle requests through a KV transfer cycle."""
 
     # Requests should first transition to WAITING_FOR_REMOTE_KVS
     output = scheduler.schedule()
-    assert len(scheduler.waiting) == len(req_ids)
+    assert _num_waiting_requests(scheduler) == len(req_ids)
     assert len(scheduler.running) == 0
     assert len(output.scheduled_new_reqs) == 0
     for req in scheduler.requests.values():
@@ -1139,7 +1143,7 @@ def _step_until_kv_transfer_finished(scheduler: Scheduler, req_ids: list[str]):
 
     # Simulate KV transfer completion using KVConnectorOutput.finished_recving
     output = scheduler.schedule()
-    assert len(scheduler.waiting) == len(req_ids)
+    assert _num_waiting_requests(scheduler) == len(req_ids)
     assert len(scheduler.running) == 0
 
     MODEL_RUNNER_OUTPUT = ModelRunnerOutput(
@@ -1546,7 +1550,7 @@ def test_kv_connector_handles_preemption(is_async, use_ec_connector, ec_role):
     # All can be scheduled - 1st token.
     output = scheduler.schedule()
     if is_async:
-        assert len(scheduler.waiting) == 2
+        assert _num_waiting_requests(scheduler) == 2
         assert scheduler.running == []
         _step_until_kv_transfer_finished(scheduler, req_ids)
         output = scheduler.schedule()
@@ -1604,7 +1608,11 @@ def test_kv_connector_handles_preemption(is_async, use_ec_connector, ec_role):
     # This will have a local and remote cache hit.
     output = scheduler.schedule()
     if is_async:
-        waiting_req_ids = [req.request_id for req in scheduler.waiting]
+        waiting_req_ids = [
+            req.request_id
+            for req in scheduler.skipped_waiting
+            if req.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+        ]
         assert len(waiting_req_ids) == 1
         _step_until_kv_transfer_finished(scheduler, waiting_req_ids)
         output = scheduler.schedule()
@@ -1776,7 +1784,6 @@ def create_scheduler_with_priority(
     cache_config = CacheConfig(
         block_size=block_size,
         gpu_memory_utilization=0.9,
-        swap_space=0,
         cache_dtype="auto",
         enable_prefix_caching=enable_prefix_caching,
     )
@@ -2440,7 +2447,8 @@ def test_schedule_skip_tokenizer_init_structured_output_request():
     output = scheduler.schedule()
     assert len(output.scheduled_new_reqs) == 0
     assert len(scheduler.running) == 0
-    assert len(scheduler.waiting) == 1
+    assert len(scheduler.waiting) == 0
+    assert len(scheduler.skipped_waiting) == 1
 
 
 @pytest.mark.parametrize(
@@ -2714,7 +2722,7 @@ def _assert_right_encoder_inputs(
         if expected_total_reqs == 0:
             return
 
-    # Number of expected enocder inputs should match number of requests
+    # Number of expected encoder inputs should match number of requests
     if expected_encoder_inputs:
         assert check_exist and requests is not None  # only support expect input exist
         assert len(requests) == len(expected_encoder_inputs)
@@ -2964,7 +2972,7 @@ def test_ec_connector_with_partial_cache_hit_multi_round(use_kv_connector):
     )
     scheduler.update_from_output(output, model_output)
 
-    # request1 is finished after outputing 1 token
+    # request1 is finished after outputting 1 token
     # Finish request
     scheduler.finish_requests(request1.request_id, RequestStatus.FINISHED_LENGTH_CAPPED)
 
@@ -3060,14 +3068,14 @@ def test_ec_connector_schedule_multiple_requests(cache_exist, use_kv_connector):
     for request in requests:
         scheduler.add_request(request)
 
-    # Set up to test different encoder cache exsistence scenario after preemption
+    # Set up to test different encoder cache existence scenario after preemption
     # Order of getting encoder cache should be: local cache -> connector-> compute
     scheduler.ec_connector.update_state_after_alloc = Mock(
         wraps=scheduler.ec_connector.update_state_after_alloc
     )
 
     if cache_exist == "local":
-        # Allocate cache to cache manager manually to mimick
+        # Allocate cache to cache manager manually to mimic
         for req in requests:
             scheduler.encoder_cache_manager.allocate(req, 0)
     else:
@@ -3384,13 +3392,13 @@ def test_priority_scheduling_ec_connector_preemption_and_resumption(
         pooler_output=[],
     )
     # Finish the requests to make room for the preempted requests to resume
-    # req_high is finished after outputing 2 tokens
+    # req_high is finished after outputting 2 tokens
     scheduler.update_from_output(output, model_output)
     scheduler.finish_requests(
         request_high.request_id, RequestStatus.FINISHED_LENGTH_CAPPED
     )
 
-    # Set up to test different encoder cache exsistence scenario after preemption
+    # Set up to test different encoder cache existence scenario after preemption
     # Order of getting encoder cache should be: local cache -> connector-> compute
     # By default, the cache should still exist in local in this test case
     if cache_exist != "local":
@@ -3483,7 +3491,7 @@ def test_ec_connector_allocate_encoder_tokens_with_external_load(use_kv_connecto
         ec_role="ec_consumer",
     )
 
-    # Limit the number of availiable slots of EncoderCacheManager
+    # Limit the number of available slots of EncoderCacheManager
     scheduler.encoder_cache_manager = EncoderCacheManager(cache_size=32)
 
     # Create MM request1
@@ -3574,7 +3582,7 @@ def test_ec_connector_allocate_encoder_tokens_with_external_load(use_kv_connecto
     )
     scheduler.update_from_output(output, model_output)
 
-    # request1 is finished after outputing 1 token
+    # request1 is finished after outputting 1 token
     # Finish request
     scheduler.finish_requests(request1.request_id, RequestStatus.FINISHED_LENGTH_CAPPED)
     assert scheduler.get_num_unfinished_requests() == 1
@@ -3627,6 +3635,9 @@ def test_prepend_skipped_requests_order():
     # simulate first 2 waiting requests are waiting for remote KVs
     for req in expected_waiting_reqs[:2]:
         req.status = RequestStatus.WAITING_FOR_REMOTE_KVS
+    scheduler.waiting.remove_requests(expected_waiting_reqs[:2])
+    for req in expected_waiting_reqs[:2]:
+        scheduler.skipped_waiting.add_request(req)
 
     # schedule step
     # expect the first 2 waiting to be skipped, the third running,
@@ -3637,7 +3648,87 @@ def test_prepend_skipped_requests_order():
     expected_waiting_reqs.pop(2)
 
     # verify waiting order is preserved
-    assert list(scheduler.waiting) == expected_waiting_reqs
+    waiting_reqs = list(scheduler.skipped_waiting) + list(scheduler.waiting)
+    assert waiting_reqs == expected_waiting_reqs
+
+
+def test_remote_kv_promotion_keeps_fcfs_with_fsm_prefix():
+    scheduler = create_scheduler(max_num_seqs=1)
+    scheduler.connector = Mock()
+    scheduler.connector.get_num_new_matched_tokens.return_value = (0, False)
+
+    requests = create_requests(num_requests=4)
+    for request in requests:
+        scheduler.add_request(request)
+
+    req_fsm_1, req_fsm_2, req_remote, req_tail = list(scheduler.waiting)
+
+    # simulate two FSM requests at the waiting head that become ready now.
+    req_fsm_1.status = RequestStatus.WAITING_FOR_FSM
+    req_fsm_1.structured_output_request = Mock(grammar=object())
+    req_fsm_2.status = RequestStatus.WAITING_FOR_FSM
+    req_fsm_2.structured_output_request = Mock(grammar=object())
+
+    # simulate a remote-KV request that is ready to be promoted now.
+    req_remote.status = RequestStatus.WAITING_FOR_REMOTE_KVS
+    scheduler.waiting.remove_requests([req_fsm_1, req_fsm_2, req_remote])
+    scheduler.skipped_waiting.add_request(req_fsm_1)
+    scheduler.skipped_waiting.add_request(req_fsm_2)
+    scheduler.skipped_waiting.add_request(req_remote)
+    scheduler.finished_recving_kv_req_ids.add(req_remote.request_id)
+    scheduler._update_waiting_for_remote_kv = Mock()
+
+    output = scheduler.schedule()
+
+    assert output.scheduled_new_reqs
+    assert output.scheduled_new_reqs[0].req_id == req_fsm_1.request_id
+    waiting_req_ids = [
+        req.request_id
+        for req in list(scheduler.skipped_waiting) + list(scheduler.waiting)
+    ]
+    assert waiting_req_ids == [
+        req_fsm_2.request_id,
+        req_remote.request_id,
+        req_tail.request_id,
+    ]
+
+
+def test_fcfs_mixed_skipped_waiting_types_keep_order():
+    scheduler = create_scheduler(max_num_batched_tokens=20)
+    scheduler._update_waiting_for_remote_kv = Mock()
+
+    mk_req = lambda req_id, num_tokens=1: create_requests(  # noqa: E731
+        num_requests=1, num_tokens=num_tokens, req_ids=[req_id]
+    )[0]
+    req_fsm, req_remote, req_stream = mk_req("fsm"), mk_req("remote"), mk_req("stream")
+    req_regular, req_tail = mk_req("regular", 20), mk_req("tail")
+    req_fsm.status = RequestStatus.WAITING_FOR_FSM
+    req_fsm.structured_output_request = Mock(grammar=None)
+    req_remote.status = RequestStatus.WAITING_FOR_REMOTE_KVS
+    req_stream.status = RequestStatus.WAITING_FOR_STREAMING_REQ
+
+    for req in (req_fsm, req_remote, req_stream, req_regular, req_tail):
+        scheduler.add_request(req)
+    scheduler.schedule()
+    assert list(scheduler.skipped_waiting) == [req_fsm, req_remote, req_stream]
+
+    scheduler.finish_requests(req_regular.request_id, RequestStatus.FINISHED_ABORTED)
+    assert not scheduler.running
+
+    req_fsm.structured_output_request = Mock(grammar=object())
+    scheduler.finished_recving_kv_req_ids.add(req_remote.request_id)
+    req_stream.status = RequestStatus.WAITING
+
+    second_output = scheduler.schedule()
+    expected_order = [
+        req_fsm.request_id,
+        req_remote.request_id,
+        req_stream.request_id,
+        req_tail.request_id,
+    ]
+    assert [req.req_id for req in second_output.scheduled_new_reqs] == expected_order
+    assert [req.request_id for req in scheduler.running] == expected_order
+    scheduler._update_waiting_for_remote_kv.assert_called_once_with(req_remote)
 
 
 def test_abort_request_waiting_for_remote_kvs():
@@ -3726,7 +3817,6 @@ def _create_encoder_decoder_scheduler(
     cache_config = CacheConfig(
         block_size=block_size,
         gpu_memory_utilization=0.9,
-        swap_space=0,
         cache_dtype="auto",
         enable_prefix_caching=False,
     )

@@ -4,6 +4,7 @@
 # Adapted from
 # https://github.com/lm-sys/FastChat/blob/168ccc29d3f7edc50823016105c024fe2282732a/fastchat/protocol/openai_api_protocol.py
 import time
+from http import HTTPStatus
 from typing import Any, ClassVar, Literal, TypeAlias
 
 import regex as re
@@ -48,7 +49,7 @@ class OpenAIBaseModel(BaseModel):
 
         # Compare against both field names and aliases
         if any(k not in field_names for k in data):
-            logger.warning(
+            logger.debug(
                 "The following fields were present in the request but ignored: %s",
                 data.keys() - field_names,
             )
@@ -158,7 +159,7 @@ AnyResponseFormat: TypeAlias = (
 
 
 class StreamOptions(OpenAIBaseModel):
-    include_usage: bool | None = True
+    include_usage: bool | None = False
     continuous_usage_stats: bool | None = False
 
 
@@ -260,6 +261,14 @@ class DeltaMessage(OpenAIBaseModel):
     content: str | None = None
     reasoning: str | None = None
     tool_calls: list[DeltaToolCall] = Field(default_factory=list)
+
+
+class GenerationError(Exception):
+    """raised when finish_reason indicates internal server error (500)"""
+
+    def __init__(self, message: str = "Internal server error"):
+        super().__init__(message)
+        self.status_code = HTTPStatus.INTERNAL_SERVER_ERROR
 
 
 ####### Tokens IN <> Tokens OUT #######
