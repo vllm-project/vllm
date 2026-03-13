@@ -1471,11 +1471,18 @@ class FlashInferImpl(AttentionImpl):
                     # with fp8 kv cache, we can construct a mock block
                     # and mock kv cache with BF16 KV involved in the prefill
                     #
-                    # The FP8 dequant Triton kernel computes strides from
-                    # shape, so it requires a strictly contiguous kv_cache.
-                    assert is_strictly_contiguous(kv_cache_permute), (
-                        "FP8 KV cache dequantization requires strictly "
-                        "contiguous kv_cache tensor"
+                    # The inner (block_size, head_size) dims must be
+                    # contiguous; outer dims may have non-canonical strides
+                    # (e.g. cross-layer unified allocation).
+                    # Degenerate strides on outer dims break TMA descriptors
+                    # (see flashinfer-ai/flashinfer#2232).
+                    kv_strides = kv_cache_permute.stride()
+                    assert (
+                        kv_strides[-1] == 1
+                        and kv_strides[-2] == kv_cache_permute.shape[-1]
+                    ), (
+                        "KV cache inner dims (block_size, head_size) must be "
+                        f"contiguous, got strides {kv_strides}"
                     )
                     mock_kv_cache, mock_block_table = trtllm_prefill_attn_kvfp8_dequant(
                         kv_cache_permute,
@@ -1568,6 +1575,18 @@ class FlashInferImpl(AttentionImpl):
                 assert is_strictly_contiguous(workspace_buffer)
                 assert is_strictly_contiguous(block_tables_decode)
                 assert is_strictly_contiguous(seq_lens_decode)
+                # kv_cache outer dims may be non-contiguous (e.g.
+                # cross-layer unified allocation), but inner dims
+                # (block_size, head_size) must be contiguous and
+                # strides must be canonical to avoid TMA descriptor
+                # failures (see flashinfer-ai/flashinfer#2232).
+                kv_strides = kv_cache_permute.stride()
+                assert (
+                    kv_strides[-1] == 1 and kv_strides[-2] == kv_cache_permute.shape[-1]
+                ), (
+                    "KV cache inner dims (block_size, head_size) must be "
+                    f"contiguous, got strides {kv_strides}"
+                )
 
                 if output.dtype == FP4_DTYPE:
                     assert self.o_sf_scale is not None
