@@ -57,7 +57,7 @@ class CPUWorker(Worker):
             ld_preload_list = os.environ.get("LD_PRELOAD", "")
             if name not in ld_preload_list:
                 raise RuntimeError(
-                    f"{name} is not founded in LD_PRELOAD. "
+                    f"{name} is not found in LD_PRELOAD. "
                     "Please follow the section `set LD_PRELOAD` in "
                     "https://docs.vllm.ai/en/latest/getting_started/installation/cpu/ "
                     "to setup required pre-loaded libraries."
