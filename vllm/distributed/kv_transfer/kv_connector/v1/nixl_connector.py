@@ -1010,6 +1010,60 @@ class NixlConnectorWorker:
                 ssm_shape.numel() * ssm_nbytes,
             )
         self._mamba_ssm_size = mamba_ssm_size
+        logger.info(
+            "[MAMBA-LOG] Mamba metadata: has_mamba=%s, is_hma_required=%s, "
+            "is_mamba_group=%s, _mamba_ssm_size(ssm_bytes=%s, conv_bytes=%s)",
+            self._has_mamba,
+            self._is_hma_required,
+            self._is_mamba_group,
+            mamba_ssm_size[0],
+            mamba_ssm_size[1],
+        )
+        if self._has_mamba:
+            logger.info(
+                "[MAMBA-LOG] MambaSpec details: ssm_shape=%s, conv_shape=%s, "
+                "ssm_dtype=%s, conv_dtype=%s, ssm_nbytes_per_elem=%s, "
+                "conv_nbytes_per_elem=%s",
+                mamba_spec.shapes[0],
+                mamba_spec.shapes[1],
+                mamba_spec.dtypes[0],
+                mamba_spec.dtypes[1],
+                ssm_nbytes,
+                conv_nbytes,
+            )
+
+        # Mamba conv split params for hetero TP post-processing.
+        # Derived from MambaSpec shapes (model-agnostic for mamba2):
+        #   shapes[0] = conv state = (conv_rows, local_conv_dim)
+        #   shapes[1] = temporal   = (local_num_heads, head_dim, state_size)
+        self._mamba_conv_split: tuple[int, int, int, int, torch.dtype] | None = None
+        if self._has_mamba:
+            local_tp = vllm_config.parallel_config.tensor_parallel_size
+            conv_rows = mamba_spec.shapes[0][0]
+            local_conv_dim = mamba_spec.shapes[0][1]
+            head_dim = mamba_spec.shapes[1][1]
+            local_num_heads = mamba_spec.shapes[1][0]
+            intermediate_size = local_num_heads * local_tp * head_dim
+            groups_ss = (local_conv_dim * local_tp - intermediate_size) // 2
+            conv_dtype = mamba_spec.dtypes[0]
+            self._mamba_conv_split = (
+                conv_rows,
+                intermediate_size,
+                groups_ss,
+                local_tp,
+                conv_dtype,
+            )
+            logger.info(
+                "[MAMBA-LOG] Conv split params: conv_rows=%s, "
+                "intermediate_size=%s, groups_ss=%s, local_tp=%s, "
+                "conv_dtype=%s, local_conv_dim=%s",
+                conv_rows,
+                intermediate_size,
+                groups_ss,
+                local_tp,
+                conv_dtype,
+                local_conv_dim,
+            )
 
         # Agent.
         non_ucx_backends = [b for b in self.nixl_backends if b != "UCX"]
@@ -1121,7 +1175,16 @@ class NixlConnectorWorker:
         # Map of engine_id -> num_blocks. All ranks in the same deployment will
         # have the same number of blocks.
         self.dst_num_blocks: dict[EngineId, int] = {}
+        # Map of engine_id -> num_descs (attention-only descriptor count).
         self._registered_descs: list[Any] = []
+
+        # Mamba conv staging buffer for heterogeneous TP (Option B).
+        # When D_TP > P_TP, P's full conv state is RDMA-read into a staging
+        # buffer, then locally extracted into D's actual KV cache.
+        # tp_ratio -> list of staging tensors (one per mamba region)
+        self._mamba_conv_staging_bufs: dict[int, list[torch.Tensor]] = {}
+        # tp_ratio -> local xfer handle with mamba conv descs -> staging buf
+        self._mamba_staging_xfer_handles: dict[int, int] = {}
 
         # In progress transfers.
         # [req_id -> list[handle]]
@@ -1587,6 +1650,18 @@ class NixlConnectorWorker:
                     "Registering layer %s with cache shape: %s", layer_name, cache.shape
                 )
                 seen_base_addresses.append(base_addr)
+                logger.info(
+                    "[MAMBA-LOG] register_kv_caches layer=%s, "
+                    "is_mamba=%s, cache_shape=%s, physical_page_size=%s, "
+                    "num_blocks=%s, tensor_bytes=%s, base_addr=0x%x",
+                    layer_name,
+                    isinstance(layer_spec, MambaSpec),
+                    cache.shape,
+                    physical_page_size,
+                    num_blocks,
+                    curr_tensor_size_bytes,
+                    base_addr,
+                )
                 # Only record non-Mamba page sizes.
                 if isinstance(layer_spec, MambaSpec):
                     self.block_len_per_layer.append(
@@ -1658,6 +1733,22 @@ class NixlConnectorWorker:
                 set(self.block_len_per_layer),
             )
 
+        self._mamba_conv_caches: list[torch.Tensor] = []
+        if self._has_mamba:
+            seen_addrs: set[int] = set()
+            for layer_name, spec in self._layer_specs.items():
+                if isinstance(spec, MambaSpec):
+                    conv_cache = self.device_kv_caches[layer_name][0]
+                    addr = conv_cache.data_ptr()
+                    if addr not in seen_addrs:
+                        seen_addrs.add(addr)
+                        self._mamba_conv_caches.append(conv_cache)
+            logger.info(
+                "Stored %d mamba conv cache refs (shapes=%s)",
+                len(self._mamba_conv_caches),
+                [c.shape for c in self._mamba_conv_caches],
+            )
+
         # Register local/src descr for NIXL xfer.
         self.src_xfer_handles_by_block_size[self.block_size], self.src_blocks_data = (
             self.register_local_xfer_handler(self.block_size)
@@ -1707,6 +1798,7 @@ class NixlConnectorWorker:
         local_base_addresses = self.kv_caches_base_addr[self.engine_id][self.tp_rank]
 
         def register_blocks(blocks_data: list[tuple[int, int, int]], mamba: bool):
+            descs_before = len(blocks_data)
             for i, base_addr in enumerate(local_base_addresses):
                 # The new block_len is using prefill block_len;
                 # and num_blocks is multiple with N
@@ -1725,6 +1817,18 @@ class NixlConnectorWorker:
                 )
                 num_blocks = self._logical_num_blocks if mamba else self.num_blocks
                 num_blocks = num_blocks * block_size_ratio
+                if i == 0:
+                    logger.info(
+                        "[MAMBA-LOG] register_blocks(mamba=%s) layer0: "
+                        "kv_block_len=%s, block_len_per_layer=%s, "
+                        "num_blocks=%s, base_addr=0x%x, block_size_ratio=%s",
+                        mamba,
+                        kv_block_len,
+                        block_len_per_layer,
+                        num_blocks,
+                        base_addr,
+                        block_size_ratio,
+                    )
                 for block_id in range(num_blocks):
                     block_offset = block_id * block_len_per_layer
                     addr = base_addr + block_offset
@@ -1735,6 +1839,13 @@ class NixlConnectorWorker:
                     second_split = self.get_backend_aware_kv_block_len(
                         layer_idx=i, first_split=False, mamba_view=mamba
                     )
+                    if i == 0:
+                        logger.info(
+                            "[MAMBA-LOG] register_blocks(mamba=%s) layer0 "
+                            "second_split(ssm/V)=%s",
+                            mamba,
+                            second_split,
+                        )
                     # Separate and interleave K/V regions to maintain the same
                     # descs ordering. This is needed for selecting contiguous heads
                     # when split across TP ranks.
@@ -1744,6 +1855,15 @@ class NixlConnectorWorker:
                         # Register addresses for V cache (K registered first).
                         v_addr = addr + kv_block_len
                         blocks_data.append((v_addr, second_split, self.device_id))
+            new_descs = len(blocks_data) - descs_before
+            logger.info(
+                "[MAMBA-LOG] register_blocks(mamba=%s) done: "
+                "added %s descs, total_descs=%s, sample_first=(%s)",
+                mamba,
+                new_descs,
+                len(blocks_data),
+                blocks_data[descs_before] if new_descs > 0 else "N/A",
+            )
             logger.info(
                 "Created %s blocks for src engine %s and rank %s on device id %s",
                 len(blocks_data),
@@ -1763,6 +1883,203 @@ class NixlConnectorWorker:
         descs = self.nixl_wrapper.get_xfer_descs(blocks_data, self.nixl_memory_type)
         # NIXL_INIT_AGENT to be used for preparations of local descs.
         return self.nixl_wrapper.prep_xfer_dlist("NIXL_INIT_AGENT", descs), blocks_data
+
+    def _allocate_mamba_conv_staging(self, tp_ratio: int):
+        """Allocate staging buffers for mamba conv state in hetero TP.
+
+        When D_TP > P_TP, P's conv state is TP-sharded on the inner dim so
+        a simple byte-offset split doesn't work. Instead, D reads P's FULL
+        conv state into a staging buffer, then locally extracts its shard.
+
+        Creates a new local xfer handle where:
+          - Attention descs → same as original (D's KV cache)
+          - Mamba conv (first split) descs → staging buffer, len=P_conv_bytes
+          - Mamba temporal (second split) descs → same as original (D's KV cache)
+        """
+        device = torch.device(f"cuda:{self.device_id}")
+        num_blocks = self._logical_num_blocks
+
+        attn_data = self.src_blocks_data[: self.num_descs]
+        mamba_data = self.src_blocks_data[self.num_descs :]
+
+        entries_per_region = num_blocks * 2
+        num_mamba_regions = len(mamba_data) // entries_per_region
+        assert len(mamba_data) == num_mamba_regions * entries_per_region
+
+        staging_bufs: list[torch.Tensor] = []
+        staging_blocks_data: list[tuple[int, int, int]] = list(attn_data)
+        total_staging_bytes = 0
+
+        idx = 0
+        for region in range(num_mamba_regions):
+            local_conv_bytes = mamba_data[idx][1]
+            p_conv_bytes = local_conv_bytes * tp_ratio
+
+            buf_size = p_conv_bytes * num_blocks
+            buf = torch.empty(buf_size, dtype=torch.uint8, device=device)
+            staging_bufs.append(buf)
+            total_staging_bytes += buf_size
+
+            reg_data = [(buf.data_ptr(), buf_size, self.device_id, "")]
+            reg_descs = self.nixl_wrapper.get_reg_descs(reg_data, self.nixl_memory_type)
+            self.nixl_wrapper.register_memory(reg_descs, backends=self.nixl_backends)
+            self._registered_descs.append(reg_descs)
+
+            buf_base = buf.data_ptr()
+            for block_id in range(num_blocks):
+                staging_blocks_data.append(
+                    (buf_base + block_id * p_conv_bytes, p_conv_bytes, self.device_id)
+                )
+            idx += num_blocks
+
+            for block_id in range(num_blocks):
+                staging_blocks_data.append(mamba_data[idx + block_id])
+            idx += num_blocks
+
+        assert len(staging_blocks_data) == len(self.src_blocks_data)
+
+        descs = self.nixl_wrapper.get_xfer_descs(
+            staging_blocks_data, self.nixl_memory_type
+        )
+        handle = self.nixl_wrapper.prep_xfer_dlist("NIXL_INIT_AGENT", descs)
+
+        self._mamba_conv_staging_bufs[tp_ratio] = staging_bufs
+        self._mamba_staging_xfer_handles[tp_ratio] = handle
+
+        total_gpu_mem = torch.cuda.get_device_properties(device).total_memory
+        pct = total_staging_bytes / total_gpu_mem * 100
+        logger.info(
+            "[MAMBA-LOG] Mamba conv staging buffer allocated "
+            "(tp_ratio=%s): %.2f GiB (%d bytes, %.1f%% of %.2f GiB GPU), "
+            "%d regions × %d blocks × %d bytes/block, "
+            "new handle has %d descs (same as src_blocks_data)",
+            tp_ratio,
+            total_staging_bytes / (1024**3),
+            total_staging_bytes,
+            pct,
+            total_gpu_mem / (1024**3),
+            num_mamba_regions,
+            num_blocks,
+            p_conv_bytes,
+            len(staging_blocks_data),
+        )
+
+    def _post_process_mamba_conv_staging(
+        self,
+        tp_ratio: int,
+        mamba_block_ids: list[int],
+    ):
+        """Extract D's conv shard from staging buffer into D's KV cache.
+
+        After RDMA, each staging buffer region holds P's full conv state
+        for the corresponding physical tensor. We iterate over all regions,
+        split [x|B|C], extract this rank's shard, and copy to D's cache.
+        """
+        assert self._mamba_conv_split is not None
+        assert self._mamba_conv_caches
+        conv_rows, intermediate_size, groups_ss, local_tp, conv_dtype = (
+            self._mamba_conv_split
+        )
+
+        staging_bufs = self._mamba_conv_staging_bufs[tp_ratio]
+        assert len(staging_bufs) == len(self._mamba_conv_caches), (
+            f"staging regions ({len(staging_bufs)}) != "
+            f"conv caches ({len(self._mamba_conv_caches)})"
+        )
+
+        remote_x_dim = intermediate_size * tp_ratio // local_tp
+        remote_bc = groups_ss * tp_ratio // local_tp
+        p_conv_dim = remote_x_dim + 2 * remote_bc
+
+        local_x = intermediate_size // local_tp
+        local_bc = groups_ss // local_tp
+        r = self.tp_rank % tp_ratio
+
+        block_ids_t = torch.tensor(
+            mamba_block_ids,
+            dtype=torch.long,
+            device=staging_bufs[0].device,
+        )
+
+        for region_idx, (buf, conv_cache) in enumerate(
+            zip(staging_bufs, self._mamba_conv_caches)
+        ):
+            staged = buf.view(conv_dtype).reshape(-1, conv_rows, p_conv_dim)
+            selected = staged.index_select(0, block_ids_t)
+
+            # Diagnostic: check staging buffer data before extraction
+            sel_f = selected.float()
+            cache_before = conv_cache.index_select(0, block_ids_t).float()
+            logger.info(
+                "[MAMBA-LOG] post_process DIAG region=%d: "
+                "staged_norm=%.4f, staged_nonzero=%d/%d, "
+                "staged_first8=%s, "
+                "cache_before_norm=%.4f",
+                region_idx,
+                sel_f.norm().item(),
+                (sel_f != 0).sum().item(),
+                sel_f.numel(),
+                selected.flatten()[:8].tolist(),
+                cache_before.norm().item(),
+            )
+
+            x, B, C = torch.split(
+                selected, [remote_x_dim, remote_bc, remote_bc], dim=-1
+            )
+            shards = torch.cat(
+                [
+                    x[:, :, r * local_x : (r + 1) * local_x],
+                    B[:, :, r * local_bc : (r + 1) * local_bc],
+                    C[:, :, r * local_bc : (r + 1) * local_bc],
+                ],
+                dim=-1,
+            )
+
+            logger.info(
+                "[MAMBA-LOG] post_process DIAG region=%d: "
+                "shard_norm=%.4f, shard_first8=%s, "
+                "x_shape=%s, B_shape=%s, C_shape=%s",
+                region_idx,
+                shards.float().norm().item(),
+                shards.flatten()[:8].tolist(),
+                x.shape,
+                B.shape,
+                C.shape,
+            )
+
+            conv_cache.index_copy_(0, block_ids_t, shards)
+
+            # Verify write
+            cache_after = conv_cache.index_select(0, block_ids_t).float()
+            logger.info(
+                "[MAMBA-LOG] post_process DIAG region=%d: "
+                "cache_after_norm=%.4f, cache_after_first8=%s, "
+                "match_shard=%s",
+                region_idx,
+                cache_after.norm().item(),
+                conv_cache.index_select(0, block_ids_t).flatten()[:8].tolist(),
+                torch.allclose(
+                    cache_after,
+                    shards.float(),
+                    atol=1e-3,
+                ),
+            )
+
+        logger.info(
+            "[MAMBA-LOG] post_process_mamba_conv: tp_ratio=%s, rank=%s, "
+            "blocks=%s, num_regions=%s, shard_shape=%s, "
+            "remote_dims=(x=%s,bc=%s), local_dims=(x=%s,bc=%s), r=%s",
+            tp_ratio,
+            self.tp_rank,
+            mamba_block_ids,
+            len(staging_bufs),
+            shards.shape,
+            remote_x_dim,
+            remote_bc,
+            local_x,
+            local_bc,
+            r,
+        )
 
     def add_remote_agent(
         self,
@@ -1932,15 +2249,37 @@ class NixlConnectorWorker:
                 page_size = nixl_agent_meta.block_lens[i] * (
                     1 if not mamba else self._physical_blocks_per_logical_kv_block
                 )
+                if mamba and indexes_into_remote:
+                    # Mamba hetero TP: conv state's TP-sharded dim is the
+                    # inner (last) dim, so byte offset can't split it.
+                    # Read P's FULL conv (no rank_offset, full remote size)
+                    # into a staging buffer, then extract shard locally.
+                    remote_conv_bytes = local_block_len * tp_ratio
+                    conv_rank_offset = 0
+                    conv_block_len = remote_conv_bytes
+                    if num_blocks > 0:
+                        logger.info(
+                            "[MAMBA-LOG] register_remote_blocks 1st split "
+                            "(conv): region=%s, tp_rank=%s, tp_ratio=%s, "
+                            "local_conv=%s, remote_conv=%s, "
+                            "rank_offset=%s, len=%s (full remote conv)",
+                            i,
+                            self.tp_rank,
+                            tp_ratio,
+                            local_block_len,
+                            remote_conv_bytes,
+                            conv_rank_offset,
+                            conv_block_len,
+                        )
+                else:
+                    conv_rank_offset = rank_offset
+                    conv_block_len = local_block_len
+
                 for block_id in range(num_blocks):
                     block_offset = block_id * page_size
-                    # For each block, grab the heads chunk belonging to rank_i
-                    # of size remote_nheads // tp_ratio, which correspond to
-                    # self.block_len == remote_block_len//tp_ratio bytes.
-                    addr = base_addr + block_offset + rank_offset
-                    # (addr, len, device id)
+                    addr = base_addr + block_offset + conv_rank_offset
                     blocks_data.append(
-                        (addr, local_block_len, nixl_agent_meta.device_id)
+                        (addr, conv_block_len, nixl_agent_meta.device_id)
                     )
 
                 if kv_topo.is_kv_layout_blocks_first:
@@ -1948,10 +2287,39 @@ class NixlConnectorWorker:
                     second_split = self.get_backend_aware_kv_block_len(
                         layer_idx=i, first_split=False, mamba_view=mamba
                     )
+                    if indexes_into_remote and num_blocks > 0:
+                        logger.info(
+                            "[MAMBA-LOG] register_remote_blocks 2nd split "
+                            "(%s): region=%s, tp_rank=%s, tp_ratio=%s, "
+                            "local_1st=%s, remote_1st=%s, "
+                            "local_2nd=%s, rank_offset_2nd=%s",
+                            "temporal" if mamba else "V",
+                            i,
+                            self.tp_rank,
+                            tp_ratio,
+                            local_block_len,
+                            local_block_len * tp_ratio,
+                            second_split,
+                            self.tp_rank % tp_ratio * second_split,
+                        )
                     for block_id in range(num_blocks):
                         block_offset = block_id * page_size
-                        addr = base_addr + block_offset + rank_offset
-                        v_addr = addr + local_block_len
+                        if indexes_into_remote:
+                            # Hetero TP (both mamba and attention):
+                            # The 2nd split (V for attn, temporal for mamba)
+                            # starts after the REMOTE's full 1st split, not
+                            # the local's. Each TP worker reads its chunk.
+                            remote_first_split = local_block_len * tp_ratio
+                            v_rank_offset = self.tp_rank % tp_ratio * second_split
+                            v_addr = (
+                                base_addr
+                                + block_offset
+                                + remote_first_split
+                                + v_rank_offset
+                            )
+                        else:
+                            addr = base_addr + block_offset + rank_offset
+                            v_addr = addr + local_block_len
                         blocks_data.append(
                             (v_addr, second_split, nixl_agent_meta.device_id)
                         )
@@ -1986,6 +2354,14 @@ class NixlConnectorWorker:
                 self.register_local_xfer_handler(nixl_agent_meta.block_size)[0]
             )
 
+        if (
+            self._has_mamba
+            and indexes_into_remote
+            and tp_ratio > 1
+            and tp_ratio not in self._mamba_staging_xfer_handles
+        ):
+            self._allocate_mamba_conv_staging(tp_ratio)
+
         return remote_agent_name
 
     def _validate_remote_agent_handshake(
@@ -2012,8 +2388,12 @@ class NixlConnectorWorker:
                 "HMA does not support different remote block size yet"
             )
         # Mamba additional constraints
-        if self._has_mamba:
-            assert tp_ratio == 1, "Mamba does not support heterogeneous TP yet"
+        if self._has_mamba and tp_ratio != 1:
+            logger.warning(
+                "[MAMBA-LOG] Mamba heterogeneous TP detected (tp_ratio=%s). "
+                "This is experimental — conv state transfer may be incorrect.",
+                tp_ratio,
+            )
 
         kv_cache_layout = (
             self.kv_cache_layout
@@ -2217,8 +2597,27 @@ class NixlConnectorWorker:
             meta = self._recving_metadata.pop(req_id, None)
             assert meta is not None, f"{req_id} not found in recving_metadata list"
             assert meta.remote is not None
+            logger.info(
+                "[MAMBA-LOG] get_finished: req=%s DONE, "
+                "remote_engine=%s, block_ids_per_group=%s, "
+                "group_types=%s",
+                req_id[:8],
+                meta.remote.engine_id[:8],
+                [len(g) for g in meta.local_physical_block_ids],
+                ["mamba" if m else "attn" for m in self._is_mamba_group],
+            )
             if self.use_host_buffer:
                 self.sync_recved_kv_to_device(req_id, meta)
+
+            # Post-process mamba conv from staging buffer → D's KV cache
+            tp_ratio = self.kv_topo.tp_ratio_from_engine_id(meta.remote.engine_id)
+            if self._has_mamba and tp_ratio in self._mamba_conv_staging_bufs:
+                mamba_block_ids: list[int] = []
+                for i, is_mamba in enumerate(self._is_mamba_group):
+                    if is_mamba:
+                        mamba_block_ids.extend(meta.local_physical_block_ids[i])
+                if mamba_block_ids:
+                    self._post_process_mamba_conv_staging(tp_ratio, mamba_block_ids)
 
             # post processing for heteroblocksize
             block_size_ratio = self.kv_topo.block_size_ratio_from_engine_id(
@@ -2431,6 +2830,20 @@ class NixlConnectorWorker:
             meta.remote.engine_id
         )
         tp_ratio = self.kv_topo.tp_ratio_from_engine_id(meta.remote.engine_id)
+        group_types = ["mamba" if m else "attn" for m in self._is_mamba_group]
+        logger.info(
+            "[MAMBA-LOG] _read_blocks_for_req: req=%s, remote_engine=%s, "
+            "tp_ratio=%s, remote_ranks=%s, "
+            "local_block_ids=[%s], remote_block_ids=[%s], "
+            "group_types=%s",
+            req_id[:8],
+            meta.remote.engine_id[:8],
+            tp_ratio,
+            remote_ranks,
+            [len(g) for g in meta.local_physical_block_ids],
+            [len(g) for g in meta.remote.block_ids],
+            group_types,
+        )
         # D may have to perform multiple reads from different remote ranks.
         for i, remote_rank in enumerate(remote_ranks):
             if self.use_mla and tp_ratio < 0 and i > 0:
@@ -2453,12 +2866,30 @@ class NixlConnectorWorker:
                 # Remote tp_size > local tp_size: we must perform multiple
                 # reads. Get the memory chunk onto which we will write to.
                 local_xfer_side_handle = self.src_xfer_handles_by_tp_ratio[tp_ratio][i]
+                logger.info(
+                    "[MAMBA-LOG] _read_blocks_for_req: using tp_ratio "
+                    "handle path (P_TP > D_TP), tp_ratio=%s, i=%s",
+                    tp_ratio,
+                    i,
+                )
+            elif self._has_mamba and tp_ratio in self._mamba_staging_xfer_handles:
+                local_xfer_side_handle = self._mamba_staging_xfer_handles[tp_ratio]
+                logger.info(
+                    "[MAMBA-LOG] _read_blocks_for_req: using mamba "
+                    "staging handle for tp_ratio=%s",
+                    tp_ratio,
+                )
             else:
                 # Single read from remote, we write to the whole memory region.
                 # Also handle remote block size different from local block size.
                 local_xfer_side_handle = self.src_xfer_handles_by_block_size[
                     remote_block_size
                 ]
+                logger.info(
+                    "[MAMBA-LOG] _read_blocks_for_req: using block_size "
+                    "handle path, remote_block_size=%s",
+                    remote_block_size,
+                )
 
             # Destination handle: remote_engine_id -> remote_rank -> handle.
             remote_xfer_side_handle = self.dst_xfer_side_handles[meta.remote.engine_id][
@@ -2579,6 +3010,16 @@ class NixlConnectorWorker:
         # workers will issue xfers to parts of the P worker remote kv caches.
 
         # Get descs ids.
+        logger.info(
+            "[MAMBA-LOG] _read_blocks: req=%s, block_size_ratio=%s, "
+            "local_block_ids_per_group=%s, remote_block_ids_per_group=%s, "
+            "group_types=%s",
+            request_id[:8],
+            block_size_ratio,
+            [list(g) for g in local_block_ids],
+            [list(g) for g in remote_block_ids],
+            ["mamba" if m else "attn" for m in self._is_mamba_group],
+        )
         remote_block_descs_ids = self._get_block_descs_ids(
             dst_engine_id,
             remote_block_ids,
@@ -2590,6 +3031,14 @@ class NixlConnectorWorker:
         )
 
         assert len(local_block_descs_ids) == len(remote_block_descs_ids)
+        logger.info(
+            "[MAMBA-LOG] _read_blocks: desc_ids computed, "
+            "local_descs=%s (shape=%s), remote_descs=%s (shape=%s)",
+            local_block_descs_ids,
+            local_block_descs_ids.shape,
+            remote_block_descs_ids,
+            remote_block_descs_ids.shape,
+        )
 
         # Prepare transfer with Nixl.
         handle = None
