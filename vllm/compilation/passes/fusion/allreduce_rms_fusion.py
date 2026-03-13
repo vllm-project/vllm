@@ -861,6 +861,7 @@ class AllReduceFusionPass(VllmPatternMatcherPass):
         # During Python shutdown, sys.meta_path may be None and imports fail.
         # Skip cleanup in that case - resources are freed by the GC anyway.
         import sys
+
         if sys is None or sys.meta_path is None:
             return
         with contextlib.suppress(Exception):
