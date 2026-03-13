@@ -570,12 +570,14 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.impl("scaled_fp4_quant", torch::kCUDA, &scaled_fp4_quant_func);
 
   // Out variant
+  // TODO: Add {at::Tag::out_variant} tag and update all call sites
+  // to use the functional variant once vLLM upgrades PyTorch.
+  // See pytorch/pytorch#176117.
   ops.def(
       "scaled_fp4_quant.out(Tensor input,"
       "                     Tensor input_scale, bool "
       "is_sf_swizzled_layout, *, Tensor(a!) output, Tensor(b!) output_scale) "
-      "-> ()",
-      {at::Tag::out_variant});
+      "-> ()");
   ops.impl("scaled_fp4_quant.out", torch::kCUDA, &scaled_fp4_quant_out);
 
   // Compute NVFP4 experts quantization.
