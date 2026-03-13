@@ -648,7 +648,7 @@ class SpeculativeConfig:
             with open(self.dynamic_config_path) as f:
                 data = json.load(f)
 
-            self.dynamic_config = DynamicSpeculativeConfig.model_validate(data)
+            self.dynamic_config = DynamicSpeculativeConfig(**data)
         else:
             self.dynamic_config = None
 
