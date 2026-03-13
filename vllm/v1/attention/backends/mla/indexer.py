@@ -203,6 +203,8 @@ def get_max_prefill_buffer_size(vllm_config: VllmConfig):
 
 class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
     reorder_batch_threshold: int = 1
+    natively_supported_next_n: list[int] = [1, 2]
+    # TODO (matt): integrate kernel with next_n = 4 support
 
     @classmethod
     def get_cudagraph_support(
@@ -229,6 +231,9 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             else 0
         )
         self.reorder_batch_threshold += self.num_speculative_tokens
+        self.use_flattening = (
+            self.num_speculative_tokens + 1
+        ) not in self.natively_supported_next_n
 
         sm_count = num_compute_units(self.device.index)
         self.num_sms = sm_count
@@ -320,7 +325,9 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
             split_decodes_and_prefills(
-                common_attn_metadata, decode_threshold=self.reorder_batch_threshold
+                common_attn_metadata,
+                decode_threshold=self.reorder_batch_threshold,
+                require_uniform=not self.use_flattening,
             )
         )
 
@@ -369,10 +376,20 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             block_table.clamp_(min=0)
 
             max_decode_len = int(decode_lens_cpu.max().item())
-            if max_decode_len > 1:
+            next_n = 1 + self.num_speculative_tokens
+            use_native = not self.use_flattening and max_decode_len == next_n
+
+            if use_native and next_n > 1:
+                offsets = torch.arange(next_n, device=self.device, dtype=torch.int32)
+                batch_size = num_decodes
+            elif max_decode_len > 1:
                 # Flatten multi-token decode requests into single-token
                 # batch entries, expanding seq_lens and block tables so
                 # the kernel always sees next_n=1.
+
+                # Also handles the edge case where use_flattening=False
+                # but max_decode_len != next_n (e.g. a batch containing some
+                # single-token prefills and no decodes when num_speculative_tokens = 1).
 
                 # Assume 4 requests with seq_lens [10, 7, 12, 0] (the final req is
                 # padding) and decode_lens [3, 1, 4, 0] in the below example comments.
@@ -425,13 +442,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 offsets = None
                 batch_size = num_decode_tokens
             else:
-                next_n = 1 + self.num_speculative_tokens
-                if next_n > 1:
-                    offsets = torch.arange(
-                        next_n, device=self.device, dtype=torch.int32
-                    )
-                else:
-                    offsets = None
+                offsets = None
                 batch_size = num_decodes
 
             # DeepGEMM is required for the paged MQA logits on CUDA devices
