@@ -618,14 +618,20 @@ class SpeculativeConfig:
             elif model_type == "mlp_speculator":
                 self.method = "mlp_speculator"
             elif model_type in get_args(MTPModelTypes):
-                # This also catches "longcat_flash_mtp" since it's in MTPModelTypes.
                 self.method = "mtp"
                 if self.num_speculative_tokens > 1:
-                    logger.warning(
-                        "Enabling num_speculative_tokens > 1 will run "
-                        "multiple times of forward on same MTP layer"
-                        ",which may result in lower acceptance rate"
-                    )
+                    if model_type == "longcat_flash_mtp":
+                        logger.warning(
+                            "LongCat MTP models only have "
+                            "one layer. Might need some code changes "
+                            "to support multiple layers."
+                        )
+                    else:
+                        logger.warning(
+                            "Enabling num_speculative_tokens > 1 will run "
+                            "multiple times of forward on same MTP layer"
+                            ",which may result in lower acceptance rate"
+                        )
             # Otherwise keep method="draft_model" — the user is using
             # a plain draft model (e.g. a smaller version of the target).
 
