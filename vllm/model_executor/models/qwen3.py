@@ -310,9 +310,25 @@ class Qwen3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle3):
     def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
         self.model.aux_hidden_state_layers = layers
 
-    def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:
+    def build_target_layer_ids(self, num_target_layers: int, num_draft_layers: int):
+        if num_draft_layers == 1:
+            return [num_target_layers // 2]
+        start = 1
+        end = num_target_layers - 3
+        span = end - start
+        target_layer_ids = [
+            int(round(start + (i * span) / (num_draft_layers - 1)))
+            for i in range(num_draft_layers)
+        ]
+        return target_layer_ids
+
+    def get_eagle3_aux_hidden_state_layers(self, method) -> tuple[int, ...]:
         num_layers = len(self.model.layers)
-        return (2, num_layers // 2, num_layers - 3)
+        if method == "dflash":
+            return_layers = self.build_target_layer_ids(num_layers, 5)
+        else:
+            return_layers = [2, num_layers // 2, num_layers - 3]
+        return tuple(return_layers)
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)

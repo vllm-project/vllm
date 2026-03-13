@@ -23,6 +23,7 @@ from vllm.model_executor.models import supports_multimodal
 from vllm.model_executor.models.deepseek_eagle3 import Eagle3DeepseekV2ForCausalLM
 from vllm.model_executor.models.interfaces import SupportsMultiModal
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
+from vllm.model_executor.models.qwen3_dflash import DFlashQwen3ForCausalLM
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
 from vllm.triton_utils import triton
@@ -147,7 +148,7 @@ class SpecDecodeBaseProposer:
             # 1D-RoPE.
             # See page 5 of https://arxiv.org/abs/2409.12191
             self.mrope_positions = torch.zeros(
-                (3, self.max_num_tokens + 1), dtype=torch.int64, device=device
+                (3, 2 * (self.max_num_tokens + 1)), dtype=torch.int64, device=device
             )
         elif self.uses_xdrope_dim > 0 and self.draft_uses_xdrope_dim > 0:
             self.xdrope_positions = torch.zeros(
@@ -158,11 +159,22 @@ class SpecDecodeBaseProposer:
         else:
             # RoPE need (max_num_tokens,)
             self.positions = torch.zeros(
-                self.max_num_tokens, dtype=torch.int64, device=device
+                2 * self.max_num_tokens, dtype=torch.int64, device=device
             )
         self.hidden_states = torch.zeros(
             (self.max_num_tokens, self.hidden_size), dtype=self.dtype, device=device
         )
+        if self.method == "dflash":
+            # --- DFlash scratch state (kept across () call) ---
+            self._dflash_ctx_len: int = 0
+            self.dflash_mask_token_id: int = 151669
+            self._dflash_kv_len: int = 0
+            self._dflash_num_query_tokens: int = 0
+
+            # Cached query_start_loc buffers for (batch_size, num_query_tokens) layout
+            self._dflash_query_start_loc_buffer: torch.Tensor | None = None
+            self._dflash_query_start_loc_cpu_buffer: torch.Tensor | None = None
+            self._dflash_query_offsets: torch.Tensor | None = None
 
         # Will be set when we initialize the attention backend
         self.block_size: int = -1
@@ -359,6 +371,12 @@ class SpecDecodeBaseProposer:
         view = self._slot_mapping_buffer[:num_tokens]
         return {name: view for name in self._draft_attn_layer_names}
 
+    def _get_dflash_slot_mapping(
+        self,
+        slot_mapping: torch.Tensor,
+    ) -> dict[str, torch.Tensor]:
+        return {name: slot_mapping for name in self._draft_attn_layer_names}
+
     def initialize_cudagraph_keys(self, cudagraph_mode: CUDAGraphMode) -> None:
         """Initialize cudagraph dispatcher keys for eagle.
 
@@ -403,9 +421,14 @@ class SpecDecodeBaseProposer:
     ) -> torch.Tensor:
         batch_size = common_attn_metadata.batch_size()
 
-        if self.method == "eagle3":
+        if self.method in ("eagle3", "dflash"):
             assert isinstance(
-                self.model, (Eagle3LlamaForCausalLM, Eagle3DeepseekV2ForCausalLM)
+                self.model,
+                (
+                    Eagle3LlamaForCausalLM,
+                    Eagle3DeepseekV2ForCausalLM,
+                    DFlashQwen3ForCausalLM,
+                ),
             )
             target_hidden_states = self.model.combine_hidden_states(
                 target_hidden_states
@@ -453,13 +476,29 @@ class SpecDecodeBaseProposer:
             input_ids = self.input_ids[:num_input_tokens]
             inputs_embeds = None
 
+        if self.method == "dflash":
+            positions_len = self._dflash_kv_len
+            hidden_states_len = self._dflash_ctx_len
+        else:
+            positions_len = num_input_tokens
+            hidden_states_len = num_input_tokens
+
         model_kwargs = {
             "input_ids": input_ids,
-            "positions": self._get_positions(num_input_tokens),
+            "positions": self._get_positions(positions_len),
             "inputs_embeds": inputs_embeds,
         }
         if self.pass_hidden_states_to_model:
-            model_kwargs["hidden_states"] = self.hidden_states[:num_input_tokens]
+            model_kwargs["hidden_states"] = self.hidden_states[:hidden_states_len]
+
+        if self.method == "dflash":
+            forward_slot_mapping = self._get_dflash_slot_mapping(
+                common_attn_metadata.slot_mapping
+            )
+        else:
+            forward_slot_mapping = self._get_slot_mapping(
+                num_input_tokens, common_attn_metadata.slot_mapping
+            )
 
         with set_forward_context(
             per_layer_attn_metadata,
@@ -467,9 +506,7 @@ class SpecDecodeBaseProposer:
             num_tokens=num_input_tokens,
             num_tokens_across_dp=num_tokens_across_dp,
             cudagraph_runtime_mode=cudagraph_runtime_mode,
-            slot_mapping=self._get_slot_mapping(
-                num_input_tokens, common_attn_metadata.slot_mapping
-            ),
+            slot_mapping=forward_slot_mapping,
         ):
             ret_hidden_states = self.model(**model_kwargs)
             if not self.model_returns_tuple():
@@ -481,7 +518,11 @@ class SpecDecodeBaseProposer:
         sample_hidden_states = last_hidden_states[token_indices_to_sample]
 
         # Early exit if there is only one draft token to be generated.
-        if self.num_speculative_tokens == 1 or self.parallel_drafting:
+        if (
+            self.num_speculative_tokens == 1
+            or self.parallel_drafting
+            or self.method == "dflash"
+        ):
             draft_token_ids = self._greedy_sample(sample_hidden_states)
             return draft_token_ids.view(-1, self.num_speculative_tokens)
 
@@ -648,6 +689,141 @@ class SpecDecodeBaseProposer:
         draft_token_ids = torch.stack(draft_token_ids_list, dim=1)
         return draft_token_ids
 
+    def set_dflash_first_pass(
+        self,
+        target_token_ids: torch.Tensor,
+        next_token_ids: torch.Tensor,
+        target_positions: torch.Tensor,
+        target_hidden_states: torch.Tensor,
+        token_indices_to_sample: torch.Tensor | None,
+        cad: CommonAttentionMetadata,
+        num_rejected_tokens_gpu: torch.Tensor | None,
+    ) -> tuple[int, torch.Tensor, CommonAttentionMetadata]:
+        if self.dflash_mask_token_id is None:
+            raise ValueError("DFlash requires mask_token_id.")
+
+        if target_positions.dim() != 1:
+            target_positions = target_positions[0]
+
+        batch_size = cad.batch_size()
+        device = target_hidden_states.device
+        num_query_tokens = 1 + self.num_speculative_tokens
+        num_query_tokens_total = batch_size * num_query_tokens
+
+        num_context_tokens = target_hidden_states.shape[0]
+        num_kv_tokens = num_context_tokens + num_query_tokens_total
+
+        self._dflash_ctx_len = num_context_tokens
+        self._dflash_kv_len = num_kv_tokens
+        self._dflash_num_query_tokens = num_query_tokens
+        self._dflash_num_query_tokens_total = num_query_tokens_total
+
+        self.input_ids[:num_query_tokens_total].fill_(self.dflash_mask_token_id)
+        self.input_ids[:num_query_tokens_total:num_query_tokens] = next_token_ids
+        last_positions = cad.seq_lens.to(torch.long) - 1
+
+        query_offsets = self._dflash_query_offsets
+        if query_offsets is None or (
+            query_offsets.device != device
+            or query_offsets.shape[1] != num_query_tokens
+            or query_offsets.dtype != target_positions.dtype
+        ):
+            self._dflash_query_offsets = torch.arange(
+                num_query_tokens,
+                device=device,
+                dtype=target_positions.dtype,
+            ).view(1, -1)
+            query_offsets = self._dflash_query_offsets
+
+        assert query_offsets is not None
+        query_positions = last_positions.view(-1, 1) + 1 + query_offsets
+        query_positions_flat = query_positions.reshape(-1)
+
+        self.positions[:num_context_tokens] = target_positions[:num_context_tokens]
+        self.positions[num_context_tokens:num_kv_tokens] = query_positions_flat
+
+        self.hidden_states[:num_context_tokens] = target_hidden_states
+
+        token_indices_to_sample = (
+            torch.arange(
+                num_query_tokens_total,
+                device=device,
+                dtype=torch.int32,
+            )
+            .view(batch_size, num_query_tokens)[:, 1:]
+            .reshape(-1)
+        )
+
+        block_size = self.block_size
+
+        block_table_tensor = getattr(cad, "block_table_tensor", None)
+        if block_table_tensor is None:
+            raise RuntimeError(
+                "DFlash requires block_table_tensor in CommonAttentionMetadata."
+            )
+
+        block_numbers_bt = (query_positions // block_size).to(torch.long)
+        block_ids = block_table_tensor.gather(dim=1, index=block_numbers_bt)
+        query_slot_mapping = (
+            block_ids * block_size + (query_positions % block_size)
+        ).reshape(-1)
+
+        ctx_slot_mapping = cad.slot_mapping[:num_context_tokens]
+        full_slot_mapping = torch.cat([ctx_slot_mapping, query_slot_mapping], dim=0)
+
+        query_start_loc_buffer = self._dflash_query_start_loc_buffer
+        if query_start_loc_buffer is None or (
+            query_start_loc_buffer.shape[0] < batch_size + 1
+            or query_start_loc_buffer.device != device
+        ):
+            self._dflash_query_start_loc_buffer = torch.empty(
+                batch_size + 1,
+                device=device,
+                dtype=torch.int32,
+            )
+            query_start_loc_buffer = self._dflash_query_start_loc_buffer
+
+        assert query_start_loc_buffer is not None
+        qsl = query_start_loc_buffer[: batch_size + 1]
+        qsl.copy_(torch.arange(batch_size + 1, device=device, dtype=torch.int32))
+        qsl.mul_(num_query_tokens)
+
+        query_start_loc_cpu_buffer = self._dflash_query_start_loc_cpu_buffer
+        if query_start_loc_cpu_buffer is None or (
+            query_start_loc_cpu_buffer.shape[0] < batch_size + 1
+        ):
+            self._dflash_query_start_loc_cpu_buffer = torch.empty(
+                batch_size + 1,
+                dtype=torch.int32,
+                pin_memory=is_pin_memory_available(),
+            )
+            query_start_loc_cpu_buffer = self._dflash_query_start_loc_cpu_buffer
+
+        assert query_start_loc_cpu_buffer is not None
+        qsl_cpu = query_start_loc_cpu_buffer[: batch_size + 1]
+        qsl_cpu.copy_(
+            torch.arange(batch_size + 1, dtype=torch.int32).mul_(num_query_tokens)
+        )
+
+        new_cad = replace(
+            cad,
+            slot_mapping=full_slot_mapping,
+            num_actual_tokens=num_query_tokens_total,
+            max_query_len=num_query_tokens,
+            query_start_loc=qsl,
+            query_start_loc_cpu=qsl_cpu,
+            max_seq_len=min(
+                int(cad.max_seq_len + num_query_tokens), self.max_model_len
+            ),
+            seq_lens=(cad.seq_lens + num_query_tokens),
+            causal=False,
+        )
+
+        new_cad._seq_lens_cpu = None
+        new_cad._num_computed_tokens_cpu = None
+
+        return num_query_tokens_total, token_indices_to_sample, new_cad
+
     def set_inputs_first_pass(
         self,
         target_token_ids: torch.Tensor,
@@ -658,6 +834,16 @@ class SpecDecodeBaseProposer:
         cad: CommonAttentionMetadata,
         num_rejected_tokens_gpu: torch.Tensor | None,
     ) -> tuple[int, torch.Tensor, CommonAttentionMetadata]:
+        if self.method == "dflash":
+            return self.set_dflash_first_pass(
+                target_token_ids=target_token_ids,
+                next_token_ids=next_token_ids,
+                target_positions=target_positions,
+                target_hidden_states=target_hidden_states,
+                token_indices_to_sample=token_indices_to_sample,
+                cad=cad,
+                num_rejected_tokens_gpu=num_rejected_tokens_gpu,
+            )
         if not self.needs_extra_input_slots:
             # Default EAGLE pathway: no reshaping of input tensors needed.
             # Simply rotate the input ids and leave the positions unchanged,
@@ -784,7 +970,7 @@ class SpecDecodeBaseProposer:
             return total_num_output_tokens, token_indices_to_sample, new_cad
 
     def model_returns_tuple(self) -> bool:
-        return self.method not in ("mtp", "draft_model")
+        return self.method not in ("mtp", "draft_model", "dflash")
 
     def prepare_next_token_ids_cpu(
         self,
@@ -1499,6 +1685,8 @@ class SpecDecodeBaseProposer:
             else:
                 slot_mapping_dict = slot_mappings or {}
 
+            is_dflash = self.method == "dflash"
+
             with set_forward_context(
                 None,
                 self.vllm_config,
@@ -1514,14 +1702,33 @@ class SpecDecodeBaseProposer:
                     input_ids = self.input_ids[:num_input_tokens]
                     inputs_embeds = None
 
-                kwargs = dict(
-                    input_ids=input_ids,
-                    positions=self._get_positions(num_input_tokens),
-                    inputs_embeds=inputs_embeds,
-                )
-                if self.pass_hidden_states_to_model:
-                    kwargs["hidden_states"] = self.hidden_states[:num_input_tokens]
-                self.model(**kwargs)
+                if is_dflash:
+                    ctx_len = 0
+                    q_len = num_input_tokens
+                    kv_len = q_len  # positions length == concat_states length
+                    if input_ids is not None:
+                        self.input_ids[:q_len].fill_(1)
+                        input_ids = self.input_ids[:q_len]
+
+                    kwargs = dict(
+                        input_ids=input_ids,
+                        positions=self._get_positions(kv_len),
+                        inputs_embeds=inputs_embeds,
+                    )
+                    if self.pass_hidden_states_to_model:
+                        kwargs["hidden_states"] = self.hidden_states[:ctx_len]
+
+                    self.model(**kwargs)
+
+                else:
+                    kwargs = dict(
+                        input_ids=input_ids,
+                        positions=self._get_positions(num_input_tokens),
+                        inputs_embeds=inputs_embeds,
+                    )
+                    if self.pass_hidden_states_to_model:
+                        kwargs["hidden_states"] = self.hidden_states[:num_input_tokens]
+                    self.model(**kwargs)
 
     def _get_eagle3_use_aux_hidden_state_from_config(self) -> bool:
         """
@@ -1530,13 +1737,17 @@ class SpecDecodeBaseProposer:
         They might indicate this by setting "use_aux_hidden_state" to False
         inside the "eagle_config" dict of their hf_config.
         """
-        if self.method != "eagle3":
+        if self.method not in ("eagle3", "dflash"):
             return False
-        # Assume that eagle3 heads use aux hidden states by default
         use_aux_hidden_state = True
         eagle_config = getattr(self.draft_model_config.hf_config, "eagle_config", None)
+        dflash_config = getattr(
+            self.draft_model_config.hf_config, "dflash_config", None
+        )
         if eagle_config is not None:
             use_aux_hidden_state = eagle_config.get("use_aux_hidden_state", True)
+        if dflash_config is not None:
+            use_aux_hidden_state = dflash_config.get("use_aux_hidden_state", True)
         return use_aux_hidden_state
 
     def validate_same_kv_cache_group(self, kv_cache_config: KVCacheConfig) -> None:

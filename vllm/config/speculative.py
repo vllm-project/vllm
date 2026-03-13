@@ -46,7 +46,9 @@ MTPModelTypes = Literal[
     "pangu_ultra_moe_mtp",
     "step3p5_mtp",
 ]
-EagleModelTypes = Literal["eagle", "eagle3", "extract_hidden_states", MTPModelTypes]
+DFlashModelTypes = Literal["dflash"]
+EagleModelTypes = Literal["eagle", "eagle3", MTPModelTypes, DFlashModelTypes]
+
 NgramGPUTypes = Literal["ngram_gpu"]
 SpeculativeMethod = Literal[
     "ngram",
@@ -193,7 +195,11 @@ class SpeculativeConfig:
         factors: list[Any] = []
         # Eagle3 and extract_hidden_states affect the computation graph because
         # they return intermediate hidden states in addition to the final hidden state.
-        uses_aux_hidden_states = self.method in ("eagle3", "extract_hidden_states")
+        uses_aux_hidden_states = self.method in (
+            "eagle3",
+            "extract_hidden_states",
+            "dflash",
+        )
         factors.append(uses_aux_hidden_states)
 
         # The specific layers used also affect the computation graph
@@ -477,7 +483,7 @@ class SpeculativeConfig:
                 )
 
                 # Automatically detect the method
-                if self.method in ("eagle", "eagle3"):
+                if self.method in ("eagle", "eagle3", "dflash"):
                     pass
                 # examples:
                 # yuhuili/EAGLE-LLaMA3-Instruct-8B
@@ -487,6 +493,8 @@ class SpeculativeConfig:
                     self.method = "eagle"
                 elif "eagle3" in self.draft_model_config.model.lower():
                     self.method = "eagle3"
+                elif "dflash" in self.draft_model_config.model.lower():
+                    self.method = "dflash"
                 elif self.draft_model_config.hf_config.model_type == "medusa":
                     self.method = "medusa"
                 elif self.draft_model_config.hf_config.model_type == "mlp_speculator":
@@ -792,7 +800,7 @@ class SpeculativeConfig:
             "kimi_k25",
         ]
         if (
-            self.method in ("eagle3", "extract_hidden_states")
+            self.method in ("eagle3", "extract_hidden_states", "dflash")
             and self.target_model_config
             and not any(
                 supported_model in self.target_model_config.hf_text_config.model_type
@@ -840,7 +848,7 @@ class SpeculativeConfig:
         return slots_per_req
 
     def use_eagle(self) -> bool:
-        return self.method in ("eagle", "eagle3", "mtp")
+        return self.method in ("eagle", "eagle3", "mtp", "dflash")
 
     def uses_draft_model(self) -> bool:
         return self.method == "draft_model"
