@@ -484,7 +484,11 @@ class CpuPlatform(Platform):
                 try:
                     import vllm._C_AVX2  # noqa: F401
                 except ImportError as e:
-                    logger.warning("Failed to import from vllm._C_AVX2: %r", e)
+                    ignored_msg = (
+                        "dynamic module does not define module export function"
+                    )
+                    if ignored_msg not in e.msg:
+                        logger.warning("Failed to import from vllm._C_AVX2: %r", e)
         else:
             try:
                 import vllm._C  # noqa: F401
