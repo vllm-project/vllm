@@ -997,17 +997,17 @@ class NixlConnectorWorker:
                 for spec in self._layer_specs.values()
                 if isinstance(spec, MambaSpec)
             )
-            ssm_nbytes, conv_nbytes = (
+            conv_nbytes, ssm_nbytes = (
                 torch.tensor([], dtype=mamba_spec.dtypes[0]).element_size(),
                 torch.tensor([], dtype=mamba_spec.dtypes[1]).element_size(),
             )
-            ssm_shape, conv_shape = (
+            conv_shape, ssm_shape = (
                 torch.Size(mamba_spec.shapes[0]),
                 torch.Size(mamba_spec.shapes[1]),
             )
             mamba_ssm_size = (
-                ssm_shape.numel() * ssm_nbytes,
                 conv_shape.numel() * conv_nbytes,
+                ssm_shape.numel() * ssm_nbytes,
             )
         self._mamba_ssm_size = mamba_ssm_size
 
@@ -1620,25 +1620,6 @@ class NixlConnectorWorker:
         self.kv_caches_base_addr[self.engine_id][self.tp_rank] = seen_base_addresses
         self.num_regions = len(caches_data)
 
-        # TODO (NickLucche) Adapt to different descs views (engine_id->tp_rank) to
-        # support heterogeneous TP.
-        # `seen_base_addresses*num_blocks=num_descs` we register below.
-        # x2 factor is for when a region is registered packed or unpacked with descs.
-        self.num_descs = (
-            len(seen_base_addresses)
-            * self.num_blocks
-            * (2 if self.kv_topo.is_kv_layout_blocks_first else 1)
-        )
-
-        descs = self.nixl_wrapper.get_reg_descs(caches_data, self.nixl_memory_type)
-        logger.debug("Registering descs: %s", caches_data)
-        self.nixl_wrapper.register_memory(descs, backends=self.nixl_backends)
-        logger.debug("Done registering descs")
-        self._registered_descs.append(descs)
-
-        self.device_kv_caches = kv_caches
-        self.dst_num_blocks[self.engine_id] = self.num_blocks
-
         if self.kv_topo.is_kv_layout_blocks_first:
             # NOTE (NickLucche) When FlashInfer is used, memory is registered
             # with joint KV for each block. This minimizes the overhead in
@@ -1649,6 +1630,33 @@ class NixlConnectorWorker:
             # Similarly for Mamba layers, we register SSM+Conv as a single region and
             # then duplicate it logically to be able to index SSM/Conv separately.
             self.num_regions *= 2
+
+        # TODO (NickLucche) Adapt to different descs views (engine_id->tp_rank) to
+        # support heterogeneous TP.
+        self.num_descs = self.num_regions * self.num_blocks
+
+        descs = self.nixl_wrapper.get_reg_descs(caches_data, self.nixl_memory_type)
+        logger.debug("Registering descs: %s", caches_data)
+        self.nixl_wrapper.register_memory(descs, backends=self.nixl_backends)
+        logger.debug("Done registering descs")
+        self._registered_descs.append(descs)
+
+        self.device_kv_caches = kv_caches
+        self.dst_num_blocks[self.engine_id] = self.num_blocks
+
+        if self._has_mamba:
+            logger.info(
+                "Hybrid SSM registration: num_blocks=%s, "
+                "logical_num_blocks=%s, ratio=%s, num_regions=%s, "
+                "num_descs=%s, mamba_ssm_size=%s, block_len_per_layer=%s",
+                self.num_blocks,
+                self._logical_num_blocks,
+                self._physical_blocks_per_logical_kv_block,
+                self.num_regions,
+                self.num_descs,
+                self._mamba_ssm_size,
+                set(self.block_len_per_layer),
+            )
 
         # Register local/src descr for NIXL xfer.
         self.src_xfer_handles_by_block_size[self.block_size], self.src_blocks_data = (
@@ -2675,17 +2683,19 @@ class NixlConnectorWorker:
             # NOTE (NickLucche) SSM and Attention blocks regions can be exchanged
             # arbitrarily by manager. Therefore, descs are duplicated for SSM and
             # Attention like so:
-            # desc_handle->[descs_attn (all regions) | descs_ssm (all regions)].
+            # desc_handle->[descs_fa (all regions) | descs_ssm (all regions)].
             # This is like having two "low-level views" of the same storage.
-            # `num_descs` offset ensures SSM descs are selected for respective block
-            # groups, "hopping" over *all* descs_attn.
+            # `num_fa_descs` offset must be computed per-engine since P and D can
+            # have different num_blocks (and thus different FA descs counts).
             ratio = self._physical_blocks_per_logical_kv_block
+            # SSM may register fewer num_blocks than FA
             logical_blocks = num_blocks // ratio
+            num_fa_descs = self.num_regions * num_blocks
             all_descs = []
             for i, group in enumerate(block_ids):
                 stride = logical_blocks if self._is_mamba_group[i] else num_blocks
                 group_arr = np.asarray(group)[None, :]
-                offset = self.num_descs if self._is_mamba_group[i] else 0
+                offset = num_fa_descs if self._is_mamba_group[i] else 0
                 all_descs.append((region_ids * stride + group_arr + offset).flatten())
             return np.concatenate(all_descs)
 
