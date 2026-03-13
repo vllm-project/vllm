@@ -21,14 +21,15 @@ from vllm.model_executor.layers.fused_moe import (
     fused_experts,
     fused_topk,
 )
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+from vllm.model_executor.layers.fused_moe.all2all_utils import (
+    maybe_make_prepare_finalize,
+)
 from vllm.model_executor.layers.fused_moe.config import (
     fp8_w8a8_moe_quant_config,
 )
 from vllm.model_executor.layers.fused_moe.deep_gemm_moe import (
     _valid_deep_gemm_shape,
-)
-from vllm.model_executor.layers.fused_moe.prepare_finalize import (
-    MoEPrepareAndFinalizeNoEP,
 )
 from vllm.model_executor.layers.fused_moe.triton_deep_gemm_moe import (
     TritonOrDeepGemmExperts,
@@ -157,8 +158,6 @@ def test_w8a8_block_fp8_fused_moe(
 
     torch.manual_seed(seed)
 
-    monkeypatch.setenv("VLLM_FUSED_MOE_CHUNK_SIZE", "2048")
-
     a = torch.randn((M, K), dtype=dtype) / 10
     score = torch.randn((M, E), dtype=dtype)
 
@@ -193,7 +192,17 @@ def test_w8a8_block_fp8_fused_moe(
             a, w1, w2, topk_weights, topk_ids, quant_config=quant_config
         )
 
-        m_out = m_fused_moe(a, w1, w2, topk_weights, topk_ids)
+        m_out = m_fused_moe.apply(
+            a,
+            w1,
+            w2,
+            topk_weights,
+            topk_ids,
+            activation=MoEActivation.SILU,
+            apply_router_weight_on_input=False,
+            expert_map=None,
+            global_num_experts=w1.shape[0],
+        )
 
     # 0.039 only needed for M >= 8192
     tol = 0.035 if M < 8192 else 0.039
@@ -215,11 +224,8 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, seed, monkeypatch)
     if not _valid_deep_gemm_shape(M, N, K):
         pytest.skip(f"Skipping test: invalid size m={M}, n={N}, k={K}")
 
-    chunk_size = 1024
-
     torch.manual_seed(seed)
 
-    monkeypatch.setenv("VLLM_FUSED_MOE_CHUNK_SIZE", str(chunk_size))
     block_size = get_mk_alignment_for_contiguous_layout()
     dtype = torch.bfloat16
 
@@ -241,9 +247,7 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, seed, monkeypatch)
     # setup code in case we are able to revisit this later.
     use_compile = False
 
-    use_cudagraph = (
-        chunk_size < M and N >= 1024 and K >= 1024 and current_platform.is_cuda_alike()
-    )
+    use_cudagraph = N >= 1024 and K >= 1024 and current_platform.is_cuda_alike()
 
     topk_weights, topk_ids, _ = fused_topk(a, score.float(), topk, False)
 
@@ -252,23 +256,33 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, seed, monkeypatch)
         w2_scale=w2_s,
         block_shape=block_size,
     )
+    moe_config = make_dummy_moe_config()
 
-    deep_gemm_experts = mk.FusedMoEModularKernel(
-        prepare_finalize=MoEPrepareAndFinalizeNoEP(),
+    deep_gemm_experts = mk.FusedMoEKernel(
+        prepare_finalize=maybe_make_prepare_finalize(
+            moe=moe_config,
+            quant_config=quant_config,
+            allow_new_interface=True,
+            use_monolithic=False,
+        ),
         fused_experts=TritonOrDeepGemmExperts(
-            moe_config=make_dummy_moe_config(),
+            moe_config=moe_config,
             quant_config=quant_config,
         ),
         inplace=False,
     )
 
     def deep_gemm_moe_fp8(a, w1, w2, w1_s, w2_s, topk_weights, topk_ids):
-        return deep_gemm_experts(
+        return deep_gemm_experts.apply(
             hidden_states=a,
             w1=w1,
             w2=w2,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
+            global_num_experts=E,
+            activation=MoEActivation.SILU,
+            apply_router_weight_on_input=False,
+            expert_map=False,
         )
 
     # Set the context to avoid lots of warning spam.
@@ -297,8 +311,8 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, seed, monkeypatch)
                 out = deep_gemm_moe_fp8_fn(
                     a, w1, w2, w1_s, w2_s, topk_weights, topk_ids
                 )
-            torch.cuda.synchronize()
+            torch.accelerator.synchronize()
             graph.replay()
-            torch.cuda.synchronize()
+            torch.accelerator.synchronize()
 
     torch.testing.assert_close(out, ref_out, atol=0.035, rtol=0.035)

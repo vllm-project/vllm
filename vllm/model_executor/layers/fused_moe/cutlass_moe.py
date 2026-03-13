@@ -21,7 +21,7 @@ from vllm.model_executor.layers.fused_moe.moe_permute_unpermute import (
     moe_unpermute,
 )
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
-    MoEPrepareAndFinalizeNoEP,
+    MoEPrepareAndFinalizeNoDPEPModular,
 )
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate,
@@ -166,7 +166,7 @@ def run_cutlass_moe_fp8(
         problem_sizes1 = torch.empty((local_E, 3), dtype=torch.int32, device=device)
         problem_sizes2 = torch.empty((local_E, 3), dtype=torch.int32, device=device)
 
-        ops.get_cutlass_pplx_moe_mm_data(
+        ops.get_cutlass_batched_moe_mm_data(
             expert_offsets,
             problem_sizes1,
             problem_sizes2,
@@ -262,7 +262,7 @@ def run_cutlass_moe_fp8(
         )
 
 
-class CutlassExpertsFp8Base(mk.FusedMoEPermuteExpertsUnpermute):
+class CutlassExpertsFp8Base(mk.FusedMoEExpertsModular):
     def __init__(
         self,
         moe_config: FusedMoEConfig,
@@ -400,9 +400,6 @@ class CutlassExpertsFp8(CutlassExpertsFp8Base):
             or moe_parallel_config.use_deepep_ht_kernels
         )
 
-    def supports_chunking(self) -> bool:
-        return True
-
     def supports_expert_map(self) -> bool:
         return False
 
@@ -444,9 +441,6 @@ class CutlassBatchedExpertsFp8(CutlassExpertsFp8Base):
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.BatchedExperts
-
-    def supports_chunking(self) -> bool:
-        return False
 
     def supports_expert_map(self) -> bool:
         return False
@@ -661,7 +655,7 @@ def run_cutlass_moe_fp4(
     return
 
 
-class CutlassExpertsFp4(mk.FusedMoEPermuteExpertsUnpermute):
+class CutlassExpertsFp4(mk.FusedMoEExpertsModular):
     """CUTLASS FP4 fused MoE expert implementation."""
 
     @property
@@ -690,10 +684,14 @@ class CutlassExpertsFp4(mk.FusedMoEPermuteExpertsUnpermute):
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
+        # SILU uses a fused silu+mul+fp4_quant kernel path.
+        # Other gated activations use the generic apply_moe_activation()
+        # fallback + separate fp4 quantization in run_cutlass_moe_fp4().
         return activation in [
             MoEActivation.SILU,
             MoEActivation.GELU,
             MoEActivation.SWIGLUOAI,
+            MoEActivation.SWIGLUSTEP,
         ]
 
     @staticmethod
@@ -708,9 +706,6 @@ class CutlassExpertsFp4(mk.FusedMoEPermuteExpertsUnpermute):
 
     def supports_expert_map(self) -> bool:
         return False
-
-    def supports_chunking(self) -> bool:
-        return True
 
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         return TopKWeightAndReduceNoOP()
@@ -924,7 +919,7 @@ def run_cutlass_moe_w4a8_fp8(
     )
 
 
-class CutlassExpertsW4A8Fp8(mk.FusedMoEPermuteExpertsUnpermute):
+class CutlassExpertsW4A8Fp8(mk.FusedMoEExpertsModular):
     def __init__(
         self,
         out_dtype: torch.dtype | None,
@@ -993,9 +988,6 @@ class CutlassExpertsW4A8Fp8(mk.FusedMoEPermuteExpertsUnpermute):
             "CutlassExpertsW4A8Fp8 is not yet used by an Oracle. "
             "This method should not be called."
         )
-
-    def supports_chunking(self) -> bool:
-        return True
 
     def supports_expert_map(self) -> bool:
         return True
@@ -1166,8 +1158,8 @@ def cutlass_moe_w4a8_fp8(
 
     num_experts = global_num_experts if global_num_experts != -1 else w1_q.size(0)
 
-    fn = mk.FusedMoEModularKernel(
-        MoEPrepareAndFinalizeNoEP(),
+    fn = mk.FusedMoEKernel(
+        MoEPrepareAndFinalizeNoDPEPModular(),
         CutlassExpertsW4A8Fp8(
             out_dtype=a.dtype,
             a_strides1=a_strides1,
@@ -1182,10 +1174,9 @@ def cutlass_moe_w4a8_fp8(
             quant_config=quant_config,
             group_size=group_size,
         ),
-        inplace=False,
     )
 
-    return fn(
+    return fn.apply(
         a,
         w1_q,
         w2_q,

@@ -8,7 +8,7 @@ import torch
 from torch.nn import Parameter
 
 from vllm.logger import init_logger
-from vllm.model_executor.layers.quantization.kernels.scaled_mm import (
+from vllm.model_executor.kernels.linear import (
     init_fp8_linear_kernel,
 )
 from vllm.model_executor.layers.quantization.quark.schemes import QuarkScheme

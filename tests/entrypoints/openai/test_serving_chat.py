@@ -21,8 +21,14 @@ from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
     RequestResponseMetadata,
 )
-from vllm.entrypoints.openai.models.serving import BaseModelPath, OpenAIServingModels
+from vllm.entrypoints.openai.models.serving import (
+    BaseModelPath,
+    OpenAIModelRegistry,
+    OpenAIServingModels,
+)
 from vllm.entrypoints.openai.parser.harmony_utils import get_encoding
+from vllm.entrypoints.serve.render.serving import OpenAIServingRender
+from vllm.exceptions import VLLMValidationError
 from vllm.inputs import TokensPrompt
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.renderers.hf import HfRenderer
@@ -126,7 +132,7 @@ def gptoss_speculative_server(default_server_args: list[str]):
     if is_aiter_found_and_supported():
         env_dict = {"VLLM_ROCM_USE_AITER": "1"}
     with RemoteOpenAIServer(
-        GPT_OSS_MODEL_NAME, server_args, env_dict=env_dict
+        GPT_OSS_MODEL_NAME, server_args, env_dict=env_dict, max_wait_seconds=480
     ) as remote_server:
         yield remote_server
 
@@ -537,16 +543,36 @@ class MockModelConfig:
 
 
 @dataclass
+class MockParallelConfig:
+    _api_process_rank: int = 0
+
+
+@dataclass
 class MockVllmConfig:
     model_config: MockModelConfig
+    parallel_config: MockParallelConfig
 
 
 def _build_renderer(model_config: MockModelConfig):
     _, tokenizer_name, _, kwargs = tokenizer_args_from_config(model_config)
 
     return HfRenderer.from_config(
-        MockVllmConfig(model_config),
+        MockVllmConfig(model_config, parallel_config=MockParallelConfig()),
         tokenizer_kwargs={**kwargs, "tokenizer_name": tokenizer_name},
+    )
+
+
+def _build_serving_render(
+    engine, model_registry: OpenAIModelRegistry
+) -> OpenAIServingRender:
+    return OpenAIServingRender(
+        model_config=engine.model_config,
+        renderer=engine.renderer,
+        io_processor=engine.io_processor,
+        model_registry=model_registry,
+        request_logger=None,
+        chat_template=CHAT_TEMPLATE,
+        chat_template_content_format="auto",
     )
 
 
@@ -555,10 +581,13 @@ def _build_serving_chat(engine: AsyncLLM) -> OpenAIServingChat:
         engine_client=engine,
         base_model_paths=BASE_MODEL_PATHS,
     )
+    openai_serving_render = _build_serving_render(engine, models.registry)
+
     serving_chat = OpenAIServingChat(
         engine,
         models,
         response_role="assistant",
+        openai_serving_render=openai_serving_render,
         chat_template=CHAT_TEMPLATE,
         chat_template_content_format="auto",
         request_logger=None,
@@ -579,10 +608,13 @@ async def _async_serving_chat_init():
     engine = MockEngine()
 
     models = OpenAIServingModels(engine, BASE_MODEL_PATHS)
+    openai_serving_render = _build_serving_render(engine, models.registry)
+
     serving_completion = OpenAIServingChat(
         engine,
         models,
         response_role="assistant",
+        openai_serving_render=openai_serving_render,
         chat_template=CHAT_TEMPLATE,
         chat_template_content_format="auto",
         request_logger=None,
@@ -796,7 +828,7 @@ async def test_serving_chat_mistral_token_ids_prompt_is_validated():
 
     mock_tokenizer = MagicMock(spec=MistralTokenizer)
     mock_renderer = MistralRenderer(
-        MockVllmConfig(mock_engine.model_config),
+        MockVllmConfig(mock_engine.model_config, parallel_config=MockParallelConfig()),
         tokenizer=mock_tokenizer,
     )
     # Force the Mistral chat template renderer to return token IDs.
@@ -818,9 +850,8 @@ async def test_serving_chat_mistral_token_ids_prompt_is_validated():
         max_tokens=10,
     )
 
-    resp = await serving_chat.create_chat_completion(req)
-    assert isinstance(resp, ErrorResponse)
-    assert "context length is only" in resp.error.message
+    with pytest.raises(VLLMValidationError):
+        await serving_chat.create_chat_completion(req)
 
 
 @pytest.mark.asyncio
@@ -837,7 +868,7 @@ async def test_serving_chat_mistral_token_ids_prompt_too_long_is_rejected():
 
     mock_tokenizer = MagicMock(spec=MistralTokenizer)
     mock_renderer = MistralRenderer(
-        MockVllmConfig(mock_engine.model_config),
+        MockVllmConfig(mock_engine.model_config, parallel_config=MockParallelConfig()),
         tokenizer=mock_tokenizer,
     )
     # prompt_token_ids length == max_model_len should be rejected for
@@ -860,9 +891,8 @@ async def test_serving_chat_mistral_token_ids_prompt_too_long_is_rejected():
         max_tokens=1,
     )
 
-    resp = await serving_chat.create_chat_completion(req)
-    assert isinstance(resp, ErrorResponse)
-    assert "context length is only" in resp.error.message
+    with pytest.raises(VLLMValidationError):
+        await serving_chat.create_chat_completion(req)
 
 
 @pytest.mark.asyncio
@@ -1177,7 +1207,9 @@ class TestServingChatWithHarmony:
 
         # Test the Harmony messages for the first turn's input
         req = ChatCompletionRequest(model=MODEL_NAME, messages=messages)
-        input_messages, _ = serving_chat._make_request_with_harmony(req)
+        input_messages, _ = (
+            serving_chat.openai_serving_render._make_request_with_harmony(req)
+        )
         verify_harmony_messages(
             input_messages,
             [
@@ -1204,7 +1236,9 @@ class TestServingChatWithHarmony:
 
         # Test the Harmony messages for the second turn's input
         req_2 = ChatCompletionRequest(model=MODEL_NAME, messages=messages)
-        input_messages_2, _ = serving_chat._make_request_with_harmony(req_2)
+        input_messages_2, _ = (
+            serving_chat.openai_serving_render._make_request_with_harmony(req_2)
+        )
         verify_harmony_messages(
             input_messages_2,
             [
@@ -1225,7 +1259,9 @@ class TestServingChatWithHarmony:
 
         # Test the Harmony messages for the first turn's input
         req = ChatCompletionRequest(model=MODEL_NAME, messages=messages, tools=tools)
-        input_messages, _ = serving_chat._make_request_with_harmony(req)
+        input_messages, _ = (
+            serving_chat.openai_serving_render._make_request_with_harmony(req)
+        )
         verify_harmony_messages(
             input_messages,
             [
@@ -1269,7 +1305,9 @@ class TestServingChatWithHarmony:
 
         # Test the Harmony messages for the second turn's input
         req_2 = ChatCompletionRequest(model=MODEL_NAME, messages=messages, tools=tools)
-        input_messages_2, _ = serving_chat._make_request_with_harmony(req_2)
+        input_messages_2, _ = (
+            serving_chat.openai_serving_render._make_request_with_harmony(req_2)
+        )
         verify_harmony_messages(
             input_messages_2,
             [
@@ -1306,7 +1344,9 @@ class TestServingChatWithHarmony:
 
         # Test the Harmony messages for the first turn's input
         req = ChatCompletionRequest(model=MODEL_NAME, messages=messages, tools=tools)
-        input_messages, _ = serving_chat._make_request_with_harmony(req)
+        input_messages, _ = (
+            serving_chat.openai_serving_render._make_request_with_harmony(req)
+        )
         verify_harmony_messages(
             input_messages,
             [
@@ -1350,7 +1390,9 @@ class TestServingChatWithHarmony:
 
         # Test the Harmony messages for the second turn's input
         req_2 = ChatCompletionRequest(model=MODEL_NAME, messages=messages, tools=tools)
-        input_messages_2, _ = serving_chat._make_request_with_harmony(req_2)
+        input_messages_2, _ = (
+            serving_chat.openai_serving_render._make_request_with_harmony(req_2)
+        )
         verify_harmony_messages(
             input_messages_2,
             [
@@ -1387,7 +1429,9 @@ class TestServingChatWithHarmony:
 
         # Test the Harmony messages for the first turn's input
         req = ChatCompletionRequest(model=MODEL_NAME, messages=messages, tools=tools)
-        input_messages, _ = serving_chat._make_request_with_harmony(req)
+        input_messages, _ = (
+            serving_chat.openai_serving_render._make_request_with_harmony(req)
+        )
         verify_harmony_messages(
             input_messages,
             [
@@ -1431,7 +1475,9 @@ class TestServingChatWithHarmony:
 
         # Test the Harmony messages for the second turn's input
         req_2 = ChatCompletionRequest(model=MODEL_NAME, messages=messages, tools=tools)
-        input_messages_2, _ = serving_chat._make_request_with_harmony(req_2)
+        input_messages_2, _ = (
+            serving_chat.openai_serving_render._make_request_with_harmony(req_2)
+        )
         verify_harmony_messages(
             input_messages_2,
             [
@@ -1481,7 +1527,9 @@ class TestServingChatWithHarmony:
 
         # Test the Harmony messages for the third turn's input
         req_3 = ChatCompletionRequest(model=MODEL_NAME, messages=messages, tools=tools)
-        input_messages_3, _ = serving_chat._make_request_with_harmony(req_3)
+        input_messages_3, _ = (
+            serving_chat.openai_serving_render._make_request_with_harmony(req_3)
+        )
         verify_harmony_messages(
             input_messages_3,
             [
@@ -1544,7 +1592,9 @@ class TestServingChatWithHarmony:
 
         # Test the Harmony messages for the fourth turn's input
         req_4 = ChatCompletionRequest(model=MODEL_NAME, messages=messages, tools=tools)
-        input_messages_4, _ = serving_chat._make_request_with_harmony(req_4)
+        input_messages_4, _ = (
+            serving_chat.openai_serving_render._make_request_with_harmony(req_4)
+        )
         verify_harmony_messages(
             input_messages_4,
             [
@@ -1593,7 +1643,9 @@ class TestServingChatWithHarmony:
             },
         ]
         req = ChatCompletionRequest(model=MODEL_NAME, messages=messages)
-        input_messages, _ = serving_chat._make_request_with_harmony(req)
+        input_messages, _ = (
+            serving_chat.openai_serving_render._make_request_with_harmony(req)
+        )
 
         verify_harmony_messages(
             input_messages,
@@ -1624,7 +1676,9 @@ class TestServingChatWithHarmony:
             },
         ]
         req = ChatCompletionRequest(model=MODEL_NAME, messages=messages)
-        input_messages, _ = serving_chat._make_request_with_harmony(req)
+        input_messages, _ = (
+            serving_chat.openai_serving_render._make_request_with_harmony(req)
+        )
 
         verify_harmony_messages(
             input_messages,
@@ -1653,7 +1707,9 @@ class TestServingChatWithHarmony:
             },
         ]
         req = ChatCompletionRequest(model=MODEL_NAME, messages=messages)
-        input_messages, _ = serving_chat._make_request_with_harmony(req)
+        input_messages, _ = (
+            serving_chat.openai_serving_render._make_request_with_harmony(req)
+        )
 
         verify_harmony_messages(
             input_messages,
@@ -1684,11 +1740,14 @@ async def test_tool_choice_validation_without_parser():
         engine_client=mock_engine,
         base_model_paths=BASE_MODEL_PATHS,
     )
+    openai_serving_render = _build_serving_render(mock_engine, models.registry)
+
     # Create serving_chat without tool_parser (enable_auto_tools=False)
     serving_chat = OpenAIServingChat(
         mock_engine,
         models,
         response_role="assistant",
+        openai_serving_render=openai_serving_render,
         chat_template=CHAT_TEMPLATE,
         chat_template_content_format="auto",
         request_logger=None,

@@ -24,9 +24,9 @@ class KVTransferConfig:
     engine_id: str | None = None
     """The engine id for KV transfers."""
 
-    kv_buffer_device: str = "cuda"
-    """The device used by kv connector to buffer the KV cache. Choices are 
-    'cuda' and 'cpu'."""
+    kv_buffer_device: str | None = None
+    """The device used by kv connector to buffer the KV cache. Choices are
+    'cuda','cpu' and 'xpu'."""
 
     kv_buffer_size: float = 1e9
     """The buffer size for TorchDistributedConnector. Measured in number of
@@ -61,10 +61,10 @@ class KVTransferConfig:
     enable_permute_local_kv: bool = False
     """Experiment feature flag to enable HND to NHD KV Transfer"""
 
-    kv_load_failure_policy: Literal["recompute", "fail"] = "recompute"
+    kv_load_failure_policy: Literal["recompute", "fail"] = "fail"
     """Policy for handling KV cache load failures.
-    'recompute': reschedule the request to recompute failed blocks (default)
-    'fail': immediately fail the request with an error finish reason"""
+    'recompute': reschedule the request to recompute failed blocks
+    'fail': immediately fail the request with an error finish reason (default)"""
 
     def compute_hash(self) -> str:
         """
@@ -99,6 +99,11 @@ class KVTransferConfig:
                 "Please specify kv_role when kv_connector "
                 f"is set, supported roles are {get_args(KVRole)}"
             )
+
+        if self.kv_buffer_device is None:
+            from vllm.platforms import current_platform
+
+            self.kv_buffer_device = current_platform.device_type
 
     @property
     def is_kv_transfer_instance(self) -> bool:
