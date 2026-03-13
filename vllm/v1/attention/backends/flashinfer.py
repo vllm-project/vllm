@@ -670,16 +670,16 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
     def _update_batch_indices_buffer(
         self,
         query_start_loc_cpu: torch.Tensor,
-        num_actual_tokens: int,
     ) -> torch.Tensor:
         query_start_loc_np = query_start_loc_cpu.numpy()
         query_lens_np = query_start_loc_np[1:] - query_start_loc_np[:-1]
-        self.batch_indices.np[:num_actual_tokens] = np.repeat(
+        num_valid_tokens = int(query_start_loc_np[-1])
+        self.batch_indices.np[:num_valid_tokens] = np.repeat(
             np.arange(query_lens_np.shape[0], dtype=np.int32),
             query_lens_np,
         )
-        self.batch_indices.copy_to_gpu(num_actual_tokens)
-        return self.batch_indices.gpu[:num_actual_tokens]
+        self.batch_indices.copy_to_gpu(num_valid_tokens)
+        return self.batch_indices.gpu[:num_valid_tokens]
 
     @override  # type: ignore[misc]
     @classmethod
@@ -955,7 +955,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         if needs_rope_kvcache_indices:
             attn_metadata.batch_indices = self._update_batch_indices_buffer(
                 qo_indptr_cpu,
-                num_actual_tokens,
             )
 
         # Guard access to seq_lens_cpu, which may not always be needed
@@ -1368,6 +1367,11 @@ class FlashInferImpl(AttentionImpl):
             if attn_metadata is not None
             else layer_slot_mapping.shape[0]
         )
+        num_rope_kvcache_tokens = (
+            attn_metadata.batch_indices.shape[0]
+            if attn_metadata is not None and attn_metadata.batch_indices is not None
+            else num_actual_tokens
+        )
 
         can_use_fast_path = (
             flashinfer_rope_append_paged_kv_cache is not None
@@ -1396,7 +1400,7 @@ class FlashInferImpl(AttentionImpl):
                 is_neox,
                 kv_cache,
                 layer_slot_mapping,
-                num_actual_tokens,
+                num_rope_kvcache_tokens,
             )
             return
 
@@ -1406,10 +1410,10 @@ class FlashInferImpl(AttentionImpl):
         assert attn_metadata.paged_kv_indices is not None
         assert attn_metadata.paged_kv_last_page_len is not None
 
-        query = query[:num_actual_tokens]
-        key = key[:num_actual_tokens]
-        value = value[:num_actual_tokens]
-        positions = positions[:num_actual_tokens]
+        query = query[:num_rope_kvcache_tokens]
+        key = key[:num_rope_kvcache_tokens]
+        value = value[:num_rope_kvcache_tokens]
+        positions = positions[:num_rope_kvcache_tokens]
         pos_ids = positions.to(torch.int32)
         cos_sin_cache = cos_sin_cache.float()
 
@@ -1453,7 +1457,7 @@ class FlashInferImpl(AttentionImpl):
             attn_metadata.paged_kv_indptr,
             attn_metadata.paged_kv_last_page_len,
             batch_indices,
-            positions,
+            pos_ids,
             is_neox=is_neox,
             kv_scale=kv_scale,
             page_size=page_size,
