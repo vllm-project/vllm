@@ -4,14 +4,15 @@
 
 ## Usage
 
-Set your Crusoe API key and point the OpenAI client at the Crusoe endpoint:
+Set your `CRUSOE_API_KEY` environment variable and point the OpenAI client at the Crusoe endpoint:
 
 ```python
+import os
 from openai import OpenAI
 
 client = OpenAI(
     base_url="https://managed-inference-api-proxy.crusoecloud.com/v1/",
-    api_key="<YOUR_API_KEY>",
+    api_key=os.environ["CRUSOE_API_KEY"],
 )
 
 response = client.chat.completions.create(
