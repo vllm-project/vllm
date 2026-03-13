@@ -1,16 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import threading
 from typing import Any
 
 import torch
-import torch.distributed as dist
 
 import vllm.envs as envs
 from vllm.distributed import get_dp_group, get_ep_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.utils.flashinfer import has_flashinfer_all2all
-from vllm.utils.import_utils import has_deep_ep, has_mori, has_pplx
+from vllm.utils.import_utils import has_deep_ep, has_mori
 
 from .base_device_communicator import All2AllManagerBase, Cache
 
@@ -32,8 +32,8 @@ class NaiveAll2AllManager(All2AllManagerBase):
     debugging.
     """
 
-    def __init__(self, cpu_group):
-        super().__init__(cpu_group)
+    def __init__(self, cpu_group, tcp_store_group=None):
+        super().__init__(cpu_group, tcp_store_group)
 
     def naive_multicast(
         self,
@@ -139,8 +139,8 @@ class AgRsAll2AllManager(All2AllManagerBase):
     all-gather (dispatch) and reduce-scatter (combine).
     """
 
-    def __init__(self, cpu_group):
-        super().__init__(cpu_group)
+    def __init__(self, cpu_group, tcp_store_group=None):
+        super().__init__(cpu_group, tcp_store_group)
 
     def dispatch_router_logits(
         self,
@@ -235,107 +235,17 @@ class AgRsAll2AllManager(All2AllManagerBase):
         pass
 
 
-class PPLXAll2AllManager(All2AllManagerBase):
-    """
-    All2All communication based on PPLX kernels.
-    """
-
-    def __init__(self, cpu_group):
-        assert has_pplx(), (
-            "pplx_kernels not found. Please follow https://github.com/vllm-project/vllm/blob/main/tools/ep_kernels/README.md"
-            " to install pplx_kernels."
-        )
-        super().__init__(cpu_group)
-
-        if self.internode:
-            # inter-node communication needs nvshmem,
-            # intra-node communication uses p2p mapping directly
-            from pplx_kernels.nvshmem import (  # type: ignore[import-not-found]
-                nvshmem_alloc_empty_unique_id,
-                nvshmem_get_unique_id,
-                nvshmem_init,
-            )
-
-            logger.debug(
-                "Initialize NVSHMEM for pplx_kernels: rank=%d, world size=%d",
-                self.rank,
-                self.world_size,
-            )
-            uid = (
-                nvshmem_get_unique_id()
-                if self.rank == 0
-                else nvshmem_alloc_empty_unique_id()
-            )
-            dist.broadcast(
-                uid,
-                src=dist.get_process_group_ranks(self.cpu_group)[0],
-                group=self.cpu_group,
-            )
-            logger.debug("PPLX NVSHMEM UID = %s", uid)
-            nvshmem_init(uid, self.rank, self.world_size)
-
-        self.handle_cache = Cache()
-
-    def get_handle(self, kwargs):
-        import pplx_kernels as pplx  # type: ignore[import-not-found]
-
-        return self.handle_cache.get_or_create(
-            kwargs,
-            pplx.AllToAll.internode if self.internode else pplx.AllToAll.intranode,
-        )
-
-    def dispatch_router_logits(
-        self,
-        hidden_states: torch.Tensor,
-        router_logits: torch.Tensor,
-        is_sequence_parallel: bool = False,
-        extra_tensors: list[torch.Tensor] | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        raise NotImplementedError
-
-    def dispatch(
-        self,
-        hidden_states: torch.Tensor,
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
-        is_sequence_parallel: bool = False,
-        extra_tensors: list[torch.Tensor] | None = None,
-    ) -> (
-        tuple[torch.Tensor, torch.Tensor, torch.Tensor]
-        | tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[torch.Tensor]]
-    ):
-        raise NotImplementedError
-
-    def combine(
-        self, hidden_states: torch.Tensor, is_sequence_parallel: bool = False
-    ) -> torch.Tensor:
-        raise NotImplementedError
-
-    def destroy(self):
-        with self.handle_cache._lock:
-            for _, handle in self.handle_cache._cache.items():
-                handle.destroy()
-
-        if self.internode:
-            from pplx_kernels.nvshmem import (
-                nvshmem_finalize,  # type: ignore[import-not-found]
-            )
-
-            logger.debug("PPLX NVSHMEM finalize")
-            nvshmem_finalize()
-
-
 class DeepEPAll2AllManagerBase(All2AllManagerBase):
     """
     All2All communication based on DeepEP High-Throughput kernels.
     """
 
-    def __init__(self, cpu_group):
+    def __init__(self, cpu_group, tcp_store_group=None):
         assert has_deep_ep(), (
             "DeepEP kernels not found. Please follow https://github.com/vllm-project/vllm/blob/main/tools/ep_kernels/README.md"
             " to install DeepEP kernels."
         )  # noqa
-        super().__init__(cpu_group)
+        super().__init__(cpu_group, tcp_store_group)
         self.handle_cache = Cache()
 
         # This is the DeepEP default. Stick to it till we can establish
@@ -373,7 +283,10 @@ class DeepEPAll2AllManagerBase(All2AllManagerBase):
         raise NotImplementedError
 
     def destroy(self):
-        pass
+        with self.handle_cache._lock:
+            for _, handle in self.handle_cache._cache.items():
+                handle.destroy()
+            self.handle_cache._cache.clear()
 
 
 class DeepEPHTAll2AllManager(DeepEPAll2AllManagerBase):
@@ -381,8 +294,8 @@ class DeepEPHTAll2AllManager(DeepEPAll2AllManagerBase):
     All2All communication based on DeepEP High-Throughput kernels.
     """
 
-    def __init__(self, cpu_group):
-        super().__init__(cpu_group)
+    def __init__(self, cpu_group, tcp_store_group=None):
+        super().__init__(cpu_group, tcp_store_group)
 
     def _make_all2all_kwargs(self) -> dict[Any, Any]:
         # Defaults for internode and intranode are taken from DeepEP tests.
@@ -405,6 +318,7 @@ class DeepEPHTAll2AllManager(DeepEPAll2AllManagerBase):
             num_rdma_bytes=num_rdma_bytes,
             low_latency_mode=False,
             num_qps_per_rank=num_qps_per_rank,
+            explicitly_destroy=True,
         )
 
     def get_handle(self, kwargs):
@@ -438,8 +352,8 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
     All2All communication based on DeepEP Low-Latency kernels.
     """
 
-    def __init__(self, cpu_group):
-        super().__init__(cpu_group)
+    def __init__(self, cpu_group, tcp_store_group=None):
+        super().__init__(cpu_group, tcp_store_group)
 
     def _make_all2all_kwargs(
         self,
@@ -478,6 +392,7 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
             num_qps_per_rank=num_qps_per_rank,
             allow_nvlink_for_low_latency_mode=True,
             allow_mnnvl=envs.VLLM_DEEPEP_LOW_LATENCY_USE_MNNVL,
+            explicitly_destroy=True,
         )
 
     def get_handle(self, kwargs):
@@ -499,6 +414,121 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
         return 0
 
 
+class NixlEPAll2AllManager(All2AllManagerBase):
+    """
+    All2All communication based on NIXL EP kernels.
+    This backend supports elastic EP with dynamic rank connection/disconnection.
+    """
+
+    # (nixl_ep_buffer, ep_size)
+    _buffer: tuple[Any, int] | None = None
+    _lock = threading.Lock()
+
+    def __init__(self, cpu_group, tcp_store_group=None):
+        super().__init__(cpu_group, tcp_store_group)
+
+        self.max_num_ep_ranks = envs.VLLM_NIXL_EP_MAX_NUM_RANKS
+
+    def _init_buffer(
+        self,
+        max_num_tokens_per_dp_rank: int,
+        token_hidden_size: int,
+        num_experts_per_rank: int,
+    ) -> None:
+        from nixl_ep import Buffer  # type: ignore[import-not-found]
+
+        max_num_global_experts = self.max_num_ep_ranks * num_experts_per_rank
+        num_rdma_bytes = Buffer.get_rdma_size_hint(
+            num_max_dispatch_tokens_per_rank=max_num_tokens_per_dp_rank,
+            hidden=token_hidden_size,
+            num_ranks=self.max_num_ep_ranks,
+            num_experts=max_num_global_experts,
+        )
+        assert NixlEPAll2AllManager._buffer is None, (
+            "NIXL EP buffer already initialized"
+        )
+        buffer = Buffer(
+            rank=self.rank,
+            tcp_store_group=self.tcp_store_group.store,
+        )
+        buffer.update_memory_buffers(
+            num_ranks=self.max_num_ep_ranks,
+            num_experts_per_rank=num_experts_per_rank,
+            num_rdma_bytes=num_rdma_bytes,
+        )
+        ranks_to_connect = list(range(self.cpu_group.size()))
+        buffer.connect_ranks(ranks_to_connect)
+        NixlEPAll2AllManager._buffer = (buffer, self.cpu_group.size())
+
+    def _update_buffer(self):
+        assert NixlEPAll2AllManager._buffer is not None
+        buffer, current_ep_size = NixlEPAll2AllManager._buffer
+        current_ranks = list(range(current_ep_size))
+        new_ep_size = self.cpu_group.size()
+        buffer.set_tcp_store_group(self.tcp_store_group.store)
+        if new_ep_size > len(current_ranks):
+            ranks_to_connect = list(range(len(current_ranks), new_ep_size))
+            buffer.connect_ranks(ranks_to_connect)
+        else:
+            ranks_to_disconnect = current_ranks[new_ep_size:]
+            buffer.disconnect_ranks(ranks_to_disconnect)
+        NixlEPAll2AllManager._buffer = (buffer, new_ep_size)
+
+    def get_handle(self, kwargs):
+        with NixlEPAll2AllManager._lock:
+            if (
+                NixlEPAll2AllManager._buffer is not None
+                and NixlEPAll2AllManager._buffer[1] == self.cpu_group.size()
+            ):
+                return NixlEPAll2AllManager._buffer[0]
+
+            num_experts_per_rank = (
+                kwargs["num_global_experts"] // kwargs["num_ep_ranks"]
+            )
+            nixl_kwargs = dict(
+                max_num_tokens_per_dp_rank=kwargs["max_num_tokens_per_dp_rank"],
+                token_hidden_size=kwargs["token_hidden_size"],
+                num_experts_per_rank=num_experts_per_rank,
+            )
+            if NixlEPAll2AllManager._buffer is None:
+                self._init_buffer(**nixl_kwargs)
+            else:
+                self._update_buffer()
+
+            assert NixlEPAll2AllManager._buffer is not None
+            handle = NixlEPAll2AllManager._buffer[0]
+            return handle
+
+    def dispatch(
+        self,
+        hidden_states: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        is_sequence_parallel: bool = False,
+        extra_tensors: list[torch.Tensor] | None = None,
+    ) -> (
+        tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+        | tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[torch.Tensor]]
+    ):
+        raise NotImplementedError
+
+    def combine(
+        self, hidden_states: torch.Tensor, is_sequence_parallel: bool = False
+    ) -> torch.Tensor:
+        raise NotImplementedError
+
+    def destroy(self):
+        # NOTE(yongji): NIXLEPAll2AllManager instance is recreated during
+        # scale-up/down, so we cannot destroy the persistent buffer here.
+        assert NixlEPAll2AllManager._buffer is not None
+        buffer = NixlEPAll2AllManager._buffer[0]
+        buffer.set_tcp_store_group(None)
+
+    # NIXL EP uses RDMA so no SMs are used for communication
+    def max_sms_used(self) -> int | None:
+        return 0
+
+
 class FlashInferAllToAllManager(All2AllManagerBase):
     """
     All2All communication based on flashinfer kernels.
@@ -509,11 +539,11 @@ class FlashInferAllToAllManager(All2AllManagerBase):
     rank: int
     world_size: int
 
-    def __init__(self, cpu_group):
+    def __init__(self, cpu_group, tcp_store_group=None):
         assert has_flashinfer_all2all(), (
             "flashinfer all2all module not found. Please install/check flashinfer"
         )  # noqa
-        super().__init__(cpu_group)
+        super().__init__(cpu_group, tcp_store_group)
         logger.debug(
             "Initialize for flashinfer All2All rank=%d, world size=%d",
             self.rank,
@@ -577,7 +607,7 @@ class FlashInferAllToAllManager(All2AllManagerBase):
             self.initialize(
                 world_size=self.world_size,
                 rank=self.rank,
-                gpus_per_node=torch.cuda.device_count,
+                gpus_per_node=torch.accelerator.device_count,
             )
         return self.initialized
 

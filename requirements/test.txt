@@ -66,7 +66,7 @@ backoff==2.2.1
     # via
     #   -r requirements/test.in
     #   schemathesis
-bitsandbytes==0.46.1
+bitsandbytes==0.49.2
     # via
     #   -r requirements/test.in
     #   lightning
@@ -202,6 +202,8 @@ email-validator==2.2.0
     # via pydantic
 encodec==0.1.1
     # via vocos
+et-xmlfile==2.0.0
+    # via openpyxl
 evaluate==0.4.3
     # via lm-eval
 fastapi==0.128.0
@@ -287,10 +289,11 @@ greenlet==3.2.3
     # via sqlalchemy
 grpcio==1.78.0
     # via
-    #   grpcio-tools
+    #   -r requirements/test.in
+    #   grpcio-reflection
     #   ray
     #   tensorboard
-grpcio-tools==1.78.0
+grpcio-reflection==1.78.0
     # via -r requirements/test.in
 h11==0.14.0
     # via
@@ -413,6 +416,8 @@ jsonschema-specifications==2024.10.1
     # via jsonschema
 junit-xml==1.9
     # via schemathesis
+kaldi-native-fbank==1.22.3
+    # via -r requirements/test.in
 kaleido==0.2.1
     # via genai-perf
 kiwisolver==1.4.7
@@ -487,7 +492,7 @@ msgpack==1.1.0
     # via
     #   librosa
     #   ray
-mteb==2.1.2
+mteb==2.8.3
     # via -r requirements/test.in
 multidict==6.1.0
     # via
@@ -631,6 +636,8 @@ opencv-python-headless==4.13.0.90
     #   albucore
     #   albumentations
     #   mistral-common
+openpyxl==3.1.5
+    # via -r requirements/test.in
 opentelemetry-api==1.35.0
     # via
     #   opentelemetry-exporter-prometheus
@@ -653,6 +660,7 @@ orjson==3.11.5
 packaging==24.2
     # via
     #   accelerate
+    #   bitsandbytes
     #   black
     #   datamodel-code-generator
     #   datasets
@@ -730,7 +738,9 @@ platformdirs==4.3.6
     #   virtualenv
     #   wandb
 plotly==5.24.1
-    # via genai-perf
+    # via
+    #   -r requirements/test.in
+    #   genai-perf
 pluggy==1.5.0
     # via
     #   pytest
@@ -757,7 +767,7 @@ protobuf==6.33.2
     # via
     #   google-api-core
     #   googleapis-common-protos
-    #   grpcio-tools
+    #   grpcio-reflection
     #   opentelemetry-proto
     #   proto-plus
     #   ray
@@ -1037,7 +1047,6 @@ sentry-sdk==2.52.0
     # via wandb
 setuptools==77.0.3
     # via
-    #   grpcio-tools
     #   lightning-utilities
     #   pytablewriter
     #   tensorboard

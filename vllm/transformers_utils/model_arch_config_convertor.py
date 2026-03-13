@@ -18,7 +18,7 @@ from vllm.config.utils import getattr_iter
 from vllm.logger import init_logger
 from vllm.transformers_utils.config import (
     ConfigFormat,
-    try_get_safetensors_metadata,
+    get_safetensors_params_metadata,
 )
 from vllm.utils.torch_utils import common_broadcastable_dtype
 
@@ -79,10 +79,10 @@ class ModelArchConfigConvertorBase:
         if getattr(self.hf_text_config, "hidden_size_per_head", None) is not None:
             return self.hf_text_config.hidden_size_per_head
 
+        if (total_num_attention_heads := self.get_total_num_attention_heads()) == 0:
+            return 0
         # FIXME(woosuk): This may not be true for all models.
-        return (
-            self.hf_text_config.hidden_size // self.hf_text_config.num_attention_heads
-        )
+        return self.get_hidden_size() // total_num_attention_heads
 
     def get_total_num_kv_heads(self) -> int:
         attributes = [
@@ -96,7 +96,7 @@ class ModelArchConfigConvertorBase:
         ]
         # For non-grouped-query attention models, the number of KV heads is
         # equal to the number of attention heads.
-        default_factory = lambda: self.hf_text_config.num_attention_heads
+        default_factory = self.get_total_num_attention_heads
         return getattr_iter(
             self.hf_text_config, attributes, default_factory=default_factory
         )
@@ -165,14 +165,14 @@ class ModelArchConfigConvertorBase:
         # Try to read the dtype of the weights if they are in safetensors format
         if config_dtype is None:
             with _maybe_patch_hf_hub_constants(config_format):
-                repo_mt = try_get_safetensors_metadata(model_id, revision=revision)
+                param_mt = get_safetensors_params_metadata(model_id, revision=revision)
 
-            if repo_mt and (files_mt := repo_mt.files_metadata):
+            if param_mt:
                 param_dtypes: set[torch.dtype] = {
-                    _SAFETENSORS_TO_TORCH_DTYPE[dtype_str]
-                    for file_mt in files_mt.values()
-                    for dtype_str in file_mt.parameter_count
-                    if dtype_str in _SAFETENSORS_TO_TORCH_DTYPE
+                    _SAFETENSORS_TO_TORCH_DTYPE[dtype]
+                    for info in param_mt.values()
+                    if (dtype := info.get("dtype", None))
+                    and dtype in _SAFETENSORS_TO_TORCH_DTYPE
                 }
 
                 if param_dtypes:
@@ -233,6 +233,7 @@ class ModelArchConfigConvertorBase:
         if not hasattr(self.hf_text_config, "model_type"):
             return False
         elif self.hf_text_config.model_type in (
+            "AXK1",
             "deepseek_v2",
             "deepseek_v3",
             "deepseek_v32",
@@ -245,6 +246,7 @@ class ModelArchConfigConvertorBase:
             "longcat_flash",
             "pangu_ultra_moe",
             "pangu_ultra_moe_mtp",
+            "bailing_hybrid",
         ):
             return self.hf_text_config.kv_lora_rank is not None
         elif self.hf_text_config.model_type == "eagle":
@@ -252,7 +254,13 @@ class ModelArchConfigConvertorBase:
             # underlying architecture
             return (
                 self.hf_text_config.model.model_type
-                in ("deepseek_v2", "deepseek_v3", "deepseek_v32", "deepseek_mtp")
+                in (
+                    "AXK1",
+                    "deepseek_v2",
+                    "deepseek_v3",
+                    "deepseek_v32",
+                    "deepseek_mtp",
+                )
                 and self.hf_text_config.kv_lora_rank is not None
             )
         return False

@@ -113,7 +113,7 @@ def _valid_deep_gemm(
     return True
 
 
-class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
+class DeepGemmExperts(mk.FusedMoEExpertsModular):
     """DeepGemm-based fused MoE expert implementation."""
 
     def __init__(self, moe_config: FusedMoEConfig, quant_config: FusedMoEQuantConfig):
@@ -153,9 +153,6 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
         # NOTE(rob): discovered an IMA with this combination. Needs investigation.
         return not moe_parallel_config.use_fi_all2allv_kernels
-
-    def supports_chunking(self) -> bool:
-        return True
 
     def supports_expert_map(self) -> bool:
         return True

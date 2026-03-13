@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Mapping
-from typing import Any, Literal, TypeAlias
+from typing import Any, Literal, TypeAlias, TypedDict, final
 
 from pydantic import ConfigDict, Field, field_validator, model_validator
 from pydantic.dataclasses import dataclass
@@ -43,11 +43,29 @@ class AudioDummyOptions(BaseDummyOptions):
     length: int | None = Field(None, gt=0)
 
 
+@final
+class MultiModalDummyOptionsBuiltins(TypedDict, total=False):
+    """Type annotations for modality types predefined by vLLM."""
+
+    image: ImageDummyOptions
+    """Options for dummy images."""
+
+    video: VideoDummyOptions
+    """Options for dummy videos."""
+
+    audio: AudioDummyOptions
+    """Options for dummy audios."""
+
+
 MMEncoderTPMode = Literal["weights", "data"]
 MMCacheType = Literal["shm", "lru"]
-DummyOptions: TypeAlias = (
-    BaseDummyOptions | VideoDummyOptions | ImageDummyOptions | AudioDummyOptions
-)
+MMDummyOptions: TypeAlias = dict[str, BaseDummyOptions]
+"""
+A dictionary containing an entry for each modality type of dummy data.
+
+The built-in modalities are defined by
+[`MultiModalDummyOptionsBuiltins`][vllm.config.multimodal.MultiModalDummyOptionsBuiltins].
+"""
 
 
 @config
@@ -57,7 +75,7 @@ class MultiModalConfig:
     language_model_only: bool = False
     """If True, disables all multimodal inputs by setting all modality limits to 0.
     Equivalent to setting `--limit-mm-per-prompt` to 0 for every modality."""
-    limit_per_prompt: dict[str, DummyOptions] = Field(default_factory=dict)
+    limit_per_prompt: MMDummyOptions = Field(default_factory=dict)
     """The maximum number of input items and options allowed per
     prompt for each modality.
 
@@ -158,22 +176,27 @@ class MultiModalConfig:
     @field_validator("limit_per_prompt", mode="before")
     @classmethod
     def _validate_limit_per_prompt(
-        cls, value: dict[str, int | dict[str, int]]
-    ) -> dict[str, DummyOptions]:
+        cls,
+        value: dict[str, int | dict[str, int]],
+    ) -> MMDummyOptions:
+        out: MMDummyOptions = {}
+
         for k, v in value.items():
             # Handle legacy format where only count is specified
             if isinstance(v, int):
                 v = {"count": v}
+
             # Convert to the appropriate DummyOptions subclass
             if k == "video":
-                value[k] = VideoDummyOptions(**v)
+                out[k] = VideoDummyOptions(**v)
             elif k == "image":
-                value[k] = ImageDummyOptions(**v)
+                out[k] = ImageDummyOptions(**v)
             elif k == "audio":
-                value[k] = AudioDummyOptions(**v)
+                out[k] = AudioDummyOptions(**v)
             else:
-                value[k] = BaseDummyOptions(**v)
-        return value
+                out[k] = BaseDummyOptions(**v)
+
+        return out
 
     @field_validator("mm_encoder_attn_backend", mode="before")
     @classmethod
@@ -240,15 +263,8 @@ class MultiModalConfig:
         if limit_data is None:
             # Unspecified modality is set to 999 by default
             return 999
-        return limit_data.count
 
-    def get_dummy_options(self, modality: str) -> BaseDummyOptions | None:
-        """
-        Get the configurable dummy data options for a modality.
-        Returns None if no options are configured for this modality.
-        """
-        # All values are now DummyOptions after normalization
-        return self.limit_per_prompt.get(modality)
+        return limit_data.count
 
     def merge_mm_processor_kwargs(
         self,

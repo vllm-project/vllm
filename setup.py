@@ -18,8 +18,6 @@ import torch
 from packaging.version import Version, parse
 from setuptools import Extension, setup
 from setuptools.command.build_ext import build_ext
-from setuptools.command.build_py import build_py
-from setuptools.command.develop import develop
 from setuptools_scm import get_version
 from torch.utils.cpp_extension import CUDA_HOME, ROCM_HOME
 
@@ -79,81 +77,6 @@ def is_ninja_available() -> bool:
 
 def is_freethreaded():
     return bool(sysconfig.get_config_var("Py_GIL_DISABLED"))
-
-
-def compile_grpc_protos():
-    """Compile gRPC protobuf definitions during build.
-
-    This generates *_pb2.py, *_pb2_grpc.py, and *_pb2.pyi files from
-    the vllm_engine.proto definition.
-    """
-    try:
-        from grpc_tools import protoc
-    except ImportError:
-        logger.warning(
-            "grpcio-tools not installed, skipping gRPC proto compilation. "
-            "gRPC server functionality will not be available."
-        )
-        return False
-
-    proto_file = ROOT_DIR / "vllm" / "grpc" / "vllm_engine.proto"
-    if not proto_file.exists():
-        logger.warning("Proto file not found at %s, skipping compilation", proto_file)
-        return False
-
-    logger.info("Compiling gRPC protobuf: %s", proto_file)
-
-    result = protoc.main(
-        [
-            "grpc_tools.protoc",
-            f"--proto_path={ROOT_DIR}",
-            f"--python_out={ROOT_DIR}",
-            f"--grpc_python_out={ROOT_DIR}",
-            f"--pyi_out={ROOT_DIR}",
-            str(proto_file),
-        ]
-    )
-
-    if result != 0:
-        logger.error("protoc failed with exit code %s", result)
-        return False
-
-    # Add SPDX headers and mypy ignore to generated files
-    spdx_header = (
-        "# SPDX-License-Identifier: Apache-2.0\n"
-        "# SPDX-FileCopyrightText: Copyright contributors to the vLLM project\n"
-        "# mypy: ignore-errors\n"
-    )
-
-    grpc_dir = ROOT_DIR / "vllm" / "grpc"
-    for generated_file in [
-        grpc_dir / "vllm_engine_pb2.py",
-        grpc_dir / "vllm_engine_pb2_grpc.py",
-        grpc_dir / "vllm_engine_pb2.pyi",
-    ]:
-        if generated_file.exists():
-            content = generated_file.read_text()
-            if not content.startswith("# SPDX-License-Identifier"):
-                generated_file.write_text(spdx_header + content)
-
-    logger.info("gRPC protobuf compilation successful")
-    return True
-
-
-class BuildPyAndGenerateGrpc(build_py):
-    """Build Python modules and generate gRPC stubs from proto files."""
-
-    def run(self):
-        compile_grpc_protos()
-        super().run()
-
-
-class DevelopAndGenerateGrpc(develop):
-    """Develop mode that also generates gRPC stubs from proto files."""
-
-    def run(self):
-        compile_grpc_protos()
-        super().run()
 
 
 class CMakeExtension(Extension):
@@ -818,7 +741,7 @@ def _is_xpu() -> bool:
 
 
 def _build_custom_ops() -> bool:
-    return _is_cuda() or _is_hip() or _is_cpu()
+    return _is_cuda() or _is_hip()
 
 
 def get_rocm_version():
@@ -976,6 +899,11 @@ if _is_cuda():
     ):
         # FA3 requires CUDA 12.3 or later
         ext_modules.append(CMakeExtension(name="vllm.vllm_flash_attn._vllm_fa3_C"))
+    # FA4 CuteDSL - Python-only component for FA4's cute DSL support
+    # Optional since this doesn't produce a .so file, just copies Python files
+    ext_modules.append(
+        CMakeExtension(name="vllm.vllm_flash_attn._vllm_fa4_cutedsl_C", optional=True)
+    )
     if envs.VLLM_USE_PRECOMPILED or (
         CUDA_HOME and get_nvcc_cuda_version() >= Version("12.9")
     ):
@@ -986,6 +914,15 @@ if _is_cuda():
         ext_modules.append(
             CMakeExtension(name="vllm._flashmla_extension_C", optional=True)
         )
+
+if _is_cpu():
+    import platform
+
+    if platform.machine() in ("x86_64", "AMD64"):
+        ext_modules.append(CMakeExtension(name="vllm._C"))
+        ext_modules.append(CMakeExtension(name="vllm._C_AVX2"))
+    else:
+        ext_modules.append(CMakeExtension(name="vllm._C"))
 
 if _build_custom_ops():
     ext_modules.append(CMakeExtension(name="vllm._C"))
@@ -1014,17 +951,12 @@ if _no_device():
     ext_modules = []
 
 if not ext_modules:
-    cmdclass = {
-        "build_py": BuildPyAndGenerateGrpc,
-        "develop": DevelopAndGenerateGrpc,
-    }
+    cmdclass = {}
 else:
     cmdclass = {
         "build_ext": precompiled_build_ext
         if envs.VLLM_USE_PRECOMPILED
         else cmake_build_ext,
-        "build_py": BuildPyAndGenerateGrpc,
-        "develop": DevelopAndGenerateGrpc,
     }
 
 setup(
@@ -1033,7 +965,7 @@ setup(
     ext_modules=ext_modules,
     install_requires=get_requirements(),
     extras_require={
-        "bench": ["pandas", "matplotlib", "seaborn", "datasets", "scipy"],
+        "bench": ["pandas", "matplotlib", "seaborn", "datasets", "scipy", "plotly"],
         "tensorizer": ["tensorizer==2.10.1"],
         "fastsafetensors": ["fastsafetensors >= 0.2.2"],
         "runai": ["runai-model-streamer[s3,gcs] >= 0.15.3"],
@@ -1042,6 +974,7 @@ setup(
             "scipy",
             "soundfile",
             "mistral_common[audio]",
+            "av",
         ],  # Required for audio processing
         "video": [],  # Kept for backwards compatibility
         "flashinfer": [],  # Kept for backwards compatibility
@@ -1049,6 +982,8 @@ setup(
         "petit-kernel": ["petit-kernel"],
         # Optional deps for Helion kernel development
         "helion": ["helion"],
+        # Optional deps for gRPC server (vllm serve --grpc)
+        "grpc": ["smg-grpc-servicer[vllm] >= 0.5.0"],
         # Optional deps for OpenTelemetry tracing
         "otel": [
             "opentelemetry-sdk>=1.26.0",
