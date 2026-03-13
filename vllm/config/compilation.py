@@ -97,6 +97,9 @@ class CUDAGraphMode(enum.Enum):
     def __str__(self) -> str:
         return self.name
 
+    def __bool__(self) -> bool:
+        return self != CUDAGraphMode.NONE
+
 
 @config
 class PassConfig:
@@ -382,8 +385,8 @@ class CompilationConfig:
         [vllm.config.CompilationConfig.cudagraph_copy_inputs]
     - Inductor compilation:
         - [`compile_sizes`][vllm.config.CompilationConfig.compile_sizes]
-        - [`compile_ranges_split_points`]
-            [vllm.config.CompilationConfig.compile_ranges_split_points]
+        - [`compile_ranges_endpoints`]
+            [vllm.config.CompilationConfig.compile_ranges_endpoints]
         - [`inductor_compile_config`]
         [vllm.config.CompilationConfig.inductor_compile_config]
         - [`inductor_passes`][vllm.config.CompilationConfig.inductor_passes]
@@ -492,12 +495,12 @@ class CompilationConfig:
     to integers, it also supports "cudagraph_capture_sizes" to
     specify the sizes for cudagraph capture."""
 
-    compile_ranges_split_points: list[int] | None = None
-    """Split points that represent compile ranges for inductor.
+    compile_ranges_endpoints: list[int] | None = None
+    """Endpoints for Inductor compile ranges.
     The compile ranges are
-    [1, split_points[0]],
-    [split_points[0] + 1, split_points[1]], ...,
-    [split_points[-1] + 1, max_num_batched_tokens].
+    [1, endpoints[0]],
+    [endpoints[0] + 1, endpoints[1]], ...,
+    [endpoints[-1] + 1, max_num_batched_tokens].
     Compile sizes are also used single element ranges,
     the range is represented as [compile_sizes[i], compile_sizes[i]].
 
@@ -1246,10 +1249,9 @@ class CompilationConfig:
 
     def get_compile_ranges(self) -> list[Range]:
         """Get the compile ranges for the compilation config."""
-        if self.compile_ranges_split_points is None:
+        if self.compile_ranges_endpoints is None:
             return []
-        split_points = sorted(set(self.compile_ranges_split_points))
+        endpoints = sorted(set(self.compile_ranges_endpoints))
         return [
-            Range(start=s + 1, end=e)
-            for s, e in zip([0] + split_points[:-1], split_points)
+            Range(start=s + 1, end=e) for s, e in zip([0] + endpoints[:-1], endpoints)
         ]
