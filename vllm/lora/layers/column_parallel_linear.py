@@ -616,9 +616,8 @@ class MergedColumnParallelLinearVariableSliceWithLoRA(
         # count. E.g. Qwen3.5 GDN layers have 2 packed modules
         # (in_proj_qkv, in_proj_z) but 4 output_sizes — one HF weight
         # covers multiple output slices.
-        if (
-            hasattr(source_layer, "output_sizes")
-            and len(packed_modules_list) != len(source_layer.output_sizes)
+        if hasattr(source_layer, "output_sizes") and len(packed_modules_list) != len(
+            source_layer.output_sizes
         ):
             return True
 
@@ -705,8 +704,7 @@ class MergedColumnParallelLinearVariableSliceWithLoRA(
                         for j in range(start_slice, slice_idx):
                             sz = output_sizes[j]
                             expanded_a.append(a_i)
-                            expanded_b.append(
-                                b_i[split_start:split_start + sz, :])
+                            expanded_b.append(b_i[split_start : split_start + sz, :])
                             split_start += sz
 
             # Pad remaining slices with None (e.g. dummy LoRA warmup
