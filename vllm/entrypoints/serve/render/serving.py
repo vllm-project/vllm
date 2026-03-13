@@ -261,7 +261,8 @@ class OpenAIServingRender:
         self,
         request: CompletionRequest,
     ) -> list[GenerateRequest] | ErrorResponse:
-        """
+        """Copied from OpenAIServingCompletion.render_completion_request.
+
         Differences: engine_client.errored check removed (no engine client).
         """
         error_check_ret = await self._check_model(request)
