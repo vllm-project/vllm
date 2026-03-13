@@ -5,16 +5,17 @@ import pprint
 import time
 from pathlib import Path
 
-from vllm.benchmarks.datasets import add_dataset_parser
-from vllm.benchmarks.datasets import get_samples
+from transformers import AutoTokenizer
+
+from vllm import LLM
+from vllm.benchmarks.datasets import add_dataset_parser, get_samples
 from vllm.benchmarks.sweep.param_sweep import ParameterSweep
 from vllm.benchmarks.sweep.serve import SweepServeArgs, run_main
 from vllm.config.speculative import DynamicSpeculativeConfig
-from vllm import LLM
-from transformers import AutoTokenizer
 from vllm.sampling_params import SamplingParams
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.v1.metrics.reader import Counter, Vector
+
 
 def build_serve_params(
     method,
@@ -272,9 +273,9 @@ def get_acceptance_rate_per_pos(args):
 
     sampling_params = SamplingParams(temperature=args.temp, max_tokens=args.output_len)
     if args.backend == "openai-chat":
-        outputs = llm.chat(llm_prompts, sampling_params=sampling_params)
+        _ = llm.chat(llm_prompts, sampling_params=sampling_params)
     else:
-        outputs = llm.generate(
+        _ = llm.generate(
             llm_prompts,
             sampling_params=sampling_params,
         )
@@ -299,7 +300,6 @@ def get_acceptance_rate_per_pos(args):
             assert isinstance(metric, Vector)
             for pos in range(len(metric.values)):
                 acceptance_counts[pos] += metric.values[pos]
-
 
     acceptance_length = 1 + (num_accepted_tokens / num_drafts) if num_drafts > 0 else 1
     print(f"mean acceptance length: {acceptance_length:.2f}")

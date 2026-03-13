@@ -4243,19 +4243,12 @@ class GPUModelRunner(
         common_attn_metadata: CommonAttentionMetadata,
         slot_mappings: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]] | None,
     ) -> list[list[int]] | torch.Tensor:
-
-        # REMOVE
-        print(f"scheduler_output.spec_decoding_stats_all: {scheduler_output.spec_decoding_stats_all}")
-        print(f"self.input_batch.num_reqs: {self.input_batch.num_reqs}")
-
         optimal_num_speculative_tokens = None
         if self.dynamic_sd_manager:
             optimal_num_speculative_tokens = self.dynamic_sd_manager.step(
                 scheduler_output.spec_decoding_stats_all,
                 self.input_batch.num_reqs,
             )
-
-        print(f"optimal_num_speculative_tokens: {optimal_num_speculative_tokens}")
 
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         spec_config = self.speculative_config
@@ -4504,6 +4497,20 @@ class GPUModelRunner(
                 num_rejected_tokens_gpu=num_rejected_tokens_gpu,
                 slot_mappings=slot_mappings,
             )
+
+        if (
+            optimal_num_speculative_tokens is not None
+            and isinstance(draft_token_ids, torch.Tensor)
+            and draft_token_ids.dim() == 2
+            and draft_token_ids.shape[1] < self.num_spec_tokens
+        ):
+            padding = torch.zeros(
+                draft_token_ids.shape[0],
+                self.num_spec_tokens - draft_token_ids.shape[1],
+                device=draft_token_ids.device,
+                dtype=draft_token_ids.dtype,
+            )
+            draft_token_ids = torch.cat([draft_token_ids, padding], dim=1)
 
         return draft_token_ids
 
