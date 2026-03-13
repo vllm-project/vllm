@@ -12,7 +12,7 @@ START_REASONING = "<think>\n"
 START_RESPONSE = "\n</think>\n<answer>\n"
 END_RESPONSE = "\n</answer>"
 
-NO_REASONING_QUICK_THROUGHT = {
+NO_REASONING_QUICK_THOUGHT = {
     "output": f"{START_REASONING}{START_RESPONSE}This is the rest{END_RESPONSE}",  # noqa: E501
     "reasoning": None,
     "content": "This is the rest",
@@ -81,7 +81,7 @@ TEST_CASES = [
         NO_REASONING,
         id="no_reasoning",
     ),
-    pytest.param(False, NO_REASONING_QUICK_THROUGHT, id="no_reasoning_quick"),
+    pytest.param(False, NO_REASONING_QUICK_THOUGHT, id="no_reasoning_quick"),
     pytest.param(
         False,
         MULTIPLE_LINES,
@@ -117,7 +117,7 @@ TEST_CASES = [
         NO_REASONING,
         id="no_reasoning_streaming",
     ),
-    pytest.param(True, NO_REASONING_QUICK_THROUGHT, id="no_reasoning_quick_stream"),
+    pytest.param(True, NO_REASONING_QUICK_THOUGHT, id="no_reasoning_quick_stream"),
     pytest.param(
         True,
         MULTIPLE_LINES,

@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import io
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -9,8 +10,11 @@ import pybase64
 import pytest
 import torch
 
+from vllm.config import ModelConfig
+from vllm.inputs import SingletonPrompt
 from vllm.renderers import TokenizeParams
 from vllm.renderers.hf import HfRenderer
+from vllm.renderers.inputs.preprocess import parse_model_prompt, prompt_to_seq
 from vllm.tokenizers.registry import tokenizer_args_from_config
 
 MODEL_NAME = "openai-community/gpt2"
@@ -33,6 +37,19 @@ class MockModelConfig:
     encoder_config: dict[str, Any] | None = None
     enable_prompt_embeds: bool = True
     skip_tokenizer_init: bool = False
+    is_encoder_decoder: bool = False
+    is_multimodal_model: bool = False
+
+
+@dataclass
+class MockParallelConfig:
+    _api_process_rank: int = 0
+
+
+@dataclass
+class MockVllmConfig:
+    model_config: MockModelConfig
+    parallel_config: MockParallelConfig
 
 
 @dataclass
@@ -67,78 +84,48 @@ def _build_renderer(
     _, tokenizer_name, _, kwargs = tokenizer_args_from_config(model_config)
 
     renderer = HfRenderer(
-        model_config,
-        tokenizer_kwargs={**kwargs, "tokenizer_name": tokenizer_name},
+        MockVllmConfig(model_config, parallel_config=MockParallelConfig()),
+        tokenizer=(
+            None
+            if model_config.skip_tokenizer_init
+            else DummyTokenizer(
+                truncation_side=truncation_side,
+                max_chars_per_token=max_chars_per_token,
+            )
+        ),
     )
-
-    if not model_config.skip_tokenizer_init:
-        renderer._tokenizer = DummyTokenizer(
-            truncation_side=truncation_side,
-            max_chars_per_token=max_chars_per_token,
-        )
 
     return renderer
 
 
+def _preprocess_prompt(
+    model_config: ModelConfig,
+    prompt_or_prompts: SingletonPrompt | bytes | Sequence[SingletonPrompt | bytes],
+):
+    return [
+        (
+            prompt
+            if isinstance(prompt, bytes)
+            else parse_model_prompt(model_config, prompt)
+        )
+        for prompt in prompt_to_seq(prompt_or_prompts)
+    ]
+
+
 class TestValidatePrompt:
-    STRING_INPUTS = [
-        "",
-        "foo",
-        "foo bar",
-        "foo baz bar",
-        "foo bar qux baz",
-    ]
-
-    TOKEN_INPUTS = [
-        [-1],
-        [1],
-        [1, 2],
-        [1, 3, 4],
-        [1, 2, 4, 3],
-    ]
-
-    INPUTS_SLICES = [
-        slice(None, None, -1),
-        slice(None, None, 2),
-        slice(None, None, -2),
-    ]
-
-    # Test that a nested mixed-type list of lists raises a TypeError.
     def test_empty_input(self):
         renderer = _build_renderer(MockModelConfig())
 
         with pytest.raises(ValueError, match="at least one prompt"):
-            renderer.render_completions([])
+            renderer.render_prompts(_preprocess_prompt(renderer.model_config, []))
 
     def test_invalid_type(self):
         renderer = _build_renderer(MockModelConfig())
 
-        with pytest.raises(TypeError, match="string or an array of tokens"):
-            renderer.render_completions([[1, 2], ["foo", "bar"]])
-
-    @pytest.mark.parametrize("string_input", STRING_INPUTS)
-    def test_string_consistent(self, string_input: str):
-        renderer = _build_renderer(MockModelConfig())
-
-        assert renderer.render_completions(string_input) == renderer.render_completions(
-            [string_input]
-        )
-
-    @pytest.mark.parametrize("token_input", TOKEN_INPUTS)
-    def test_token_consistent(self, token_input: list[int]):
-        renderer = _build_renderer(MockModelConfig())
-
-        assert renderer.render_completions(token_input) == renderer.render_completions(
-            [token_input]
-        )
-
-    @pytest.mark.parametrize("inputs_slice", INPUTS_SLICES)
-    def test_string_slice(self, inputs_slice: slice):
-        renderer = _build_renderer(MockModelConfig())
-
-        assert renderer.render_completions(self.STRING_INPUTS)[
-            inputs_slice
-        ] == renderer.render_completions(self.STRING_INPUTS[inputs_slice])
+        with pytest.raises(TypeError, match="should be a list of integers"):
+            renderer.render_prompts(
+                _preprocess_prompt(renderer.model_config, [[1, 2], ["foo", "bar"]])  # type: ignore[arg-type]
+            )
 
 
 class TestRenderPrompt:
@@ -146,7 +133,9 @@ class TestRenderPrompt:
         renderer = _build_renderer(MockModelConfig())
 
         tokens = [101, 7592, 2088]
-        prompts = renderer.render_completions(tokens)
+        prompts = renderer.render_prompts(
+            _preprocess_prompt(renderer.model_config, tokens)
+        )
         results = renderer.tokenize_prompts(
             prompts,
             TokenizeParams(max_total_tokens=100),
@@ -159,7 +148,9 @@ class TestRenderPrompt:
         renderer = _build_renderer(MockModelConfig())
 
         token_lists = [[101, 7592, 2088], [102, 1234, 5678, 9012], [103, 4567]]
-        prompts = renderer.render_completions(token_lists)
+        prompts = renderer.render_prompts(
+            _preprocess_prompt(renderer.model_config, token_lists)
+        )
         results = renderer.tokenize_prompts(
             prompts,
             TokenizeParams(max_total_tokens=100),
@@ -174,7 +165,9 @@ class TestRenderPrompt:
         renderer = _build_renderer(MockModelConfig())
 
         text_input = "x" * 10
-        prompts = renderer.render_completions(text_input)
+        prompts = renderer.render_prompts(
+            _preprocess_prompt(renderer.model_config, text_input)
+        )
         results = renderer.tokenize_prompts(
             prompts,
             TokenizeParams(max_total_tokens=100),
@@ -187,7 +180,9 @@ class TestRenderPrompt:
         renderer = _build_renderer(MockModelConfig())
 
         text_list_input = ["x" * 10, "x" * 12, "x" * 14]
-        prompts = renderer.render_completions(text_list_input)
+        prompts = renderer.render_prompts(
+            _preprocess_prompt(renderer.model_config, text_list_input)
+        )
         results = renderer.tokenize_prompts(
             prompts,
             TokenizeParams(max_total_tokens=100),
@@ -200,7 +195,9 @@ class TestRenderPrompt:
     def test_zero_truncation(self):
         renderer = _build_renderer(MockModelConfig())
 
-        prompts = renderer.render_completions("x" * 200)
+        prompts = renderer.render_prompts(
+            _preprocess_prompt(renderer.model_config, "x" * 200)
+        )
         results = renderer.tokenize_prompts(
             prompts,
             TokenizeParams(max_total_tokens=100, truncate_prompt_tokens=0),
@@ -212,7 +209,9 @@ class TestRenderPrompt:
     def test_pos_truncation(self):
         renderer = _build_renderer(MockModelConfig())
 
-        prompts = renderer.render_completions("x" * 200)
+        prompts = renderer.render_prompts(
+            _preprocess_prompt(renderer.model_config, "x" * 200)
+        )
         results = renderer.tokenize_prompts(
             prompts,
             TokenizeParams(max_total_tokens=100, truncate_prompt_tokens=50),
@@ -224,7 +223,9 @@ class TestRenderPrompt:
     def test_neg_truncation(self):
         renderer = _build_renderer(MockModelConfig())
 
-        prompts = renderer.render_completions("x" * 200)
+        prompts = renderer.render_prompts(
+            _preprocess_prompt(renderer.model_config, "x" * 200)
+        )
         results = renderer.tokenize_prompts(
             prompts,
             TokenizeParams(max_total_tokens=100, truncate_prompt_tokens=-1),
@@ -237,7 +238,9 @@ class TestRenderPrompt:
         renderer = _build_renderer(MockModelConfig(), truncation_side="left")
 
         long_tokens = [100, 101, 102, 103, 104, 105, 106, 107, 108, 109]  # 10 tokens
-        prompts = renderer.render_completions(long_tokens)
+        prompts = renderer.render_prompts(
+            _preprocess_prompt(renderer.model_config, long_tokens)
+        )
         results = renderer.tokenize_prompts(
             prompts,
             TokenizeParams(max_total_tokens=100, truncate_prompt_tokens=5),
@@ -251,7 +254,9 @@ class TestRenderPrompt:
         renderer = _build_renderer(MockModelConfig(), truncation_side="right")
 
         long_tokens = [100, 101, 102, 103, 104, 105, 106, 107, 108, 109]  # 10 tokens
-        prompts = renderer.render_completions(long_tokens)
+        prompts = renderer.render_prompts(
+            _preprocess_prompt(renderer.model_config, long_tokens)
+        )
         results = renderer.tokenize_prompts(
             prompts,
             TokenizeParams(max_total_tokens=100, truncate_prompt_tokens=5),
@@ -266,11 +271,13 @@ class TestRenderPrompt:
 
         # Exceeds max_total_tokens and max_total_tokens * VLLM_MAX_CHARS_PER_TOKEN
         long_tokens = "x" * 150
-        prompts = renderer.render_completions(long_tokens)
+        prompts = renderer.render_prompts(
+            _preprocess_prompt(renderer.model_config, long_tokens)
+        )
 
         with pytest.raises(
             ValueError,
-            match="input characters and requested .* context length is only",
+            match="maximum context length is",
         ):
             renderer.tokenize_prompts(
                 prompts,
@@ -278,18 +285,20 @@ class TestRenderPrompt:
             )
 
         # Should not even attempt tokenization
-        assert renderer._tokenizer._captured_encode_kwargs == {}
+        assert renderer.tokenizer._captured_encode_kwargs == {}
 
     def test_text_max_length_exceeded_nonobvious(self):
         renderer = _build_renderer(MockModelConfig(), max_chars_per_token=2)
 
         # Exceeds max_total_tokens but not max_total_tokens * VLLM_MAX_CHARS_PER_TOKEN
         long_tokens = "x" * 150
-        prompts = renderer.render_completions(long_tokens)
+        prompts = renderer.render_prompts(
+            _preprocess_prompt(renderer.model_config, long_tokens)
+        )
 
         with pytest.raises(
             ValueError,
-            match="input tokens and requested .* context length is only",
+            match="maximum context length is",
         ):
             renderer.tokenize_prompts(
                 prompts,
@@ -297,18 +306,20 @@ class TestRenderPrompt:
             )
 
         # Should only tokenize the first max_total_tokens + 1 tokens
-        assert renderer._tokenizer._captured_encode_kwargs["truncation"] is True
-        assert renderer._tokenizer._captured_encode_kwargs["max_length"] == 101
+        assert renderer.tokenizer._captured_encode_kwargs["truncation"] is True
+        assert renderer.tokenizer._captured_encode_kwargs["max_length"] == 101
 
     def test_token_max_length_exceeded(self):
         renderer = _build_renderer(MockModelConfig())
 
         long_tokens = list(range(150))  # Exceeds max_total_tokens=100
-        prompts = renderer.render_completions(long_tokens)
+        prompts = renderer.render_prompts(
+            _preprocess_prompt(renderer.model_config, long_tokens)
+        )
 
         with pytest.raises(
             ValueError,
-            match="input tokens and requested .* context length is only",
+            match="maximum context length is",
         ):
             renderer.tokenize_prompts(
                 prompts,
@@ -318,7 +329,9 @@ class TestRenderPrompt:
     def test_no_tokenizer_for_text(self):
         renderer = _build_renderer(MockModelConfig(skip_tokenizer_init=True))
 
-        prompts = renderer.render_completions("Hello world")
+        prompts = renderer.render_prompts(
+            _preprocess_prompt(renderer.model_config, "Hello world")
+        )
 
         with pytest.raises(ValueError, match="`skip_tokenizer_init=True`"):
             renderer.tokenize_prompts(
@@ -330,7 +343,9 @@ class TestRenderPrompt:
         renderer = _build_renderer(MockModelConfig())
 
         tokens = [1, 2, 3, 4]
-        prompts = renderer.render_completions(tokens)
+        prompts = renderer.render_prompts(
+            _preprocess_prompt(renderer.model_config, tokens)
+        )
         results = renderer.tokenize_prompts(
             prompts,
             TokenizeParams(
@@ -359,7 +374,9 @@ class TestRenderEmbedPrompt:
         tensor_input = torch.randn(10, 768, dtype=torch.float32)
         embed_bytes = self._create_test_embed_bytes(tensor_input)
 
-        prompts = renderer.render_completions(prompt_embeds=embed_bytes)
+        prompts = renderer.render_prompts(
+            _preprocess_prompt(renderer.model_config, embed_bytes)
+        )
         results = renderer.tokenize_prompts(
             prompts,
             TokenizeParams(max_total_tokens=100),
@@ -377,8 +394,11 @@ class TestRenderEmbedPrompt:
             torch.randn(12, 512, dtype=torch.float32),
         ]
 
-        prompts = renderer.render_completions(
-            prompt_embeds=[self._create_test_embed_bytes(t) for t in tensor_inputs],
+        prompts = renderer.render_prompts(
+            _preprocess_prompt(
+                renderer.model_config,
+                [self._create_test_embed_bytes(t) for t in tensor_inputs],
+            )
         )
         results = renderer.tokenize_prompts(
             prompts,
@@ -395,8 +415,10 @@ class TestRenderEmbedPrompt:
         # Create tensor with more tokens than truncation limit
         tensor_input = torch.randn(20, 768, dtype=torch.float32)
 
-        prompts = renderer.render_completions(
-            prompt_embeds=self._create_test_embed_bytes(tensor_input),
+        prompts = renderer.render_prompts(
+            _preprocess_prompt(
+                renderer.model_config, self._create_test_embed_bytes(tensor_input)
+            )
         )
         results = renderer.tokenize_prompts(
             prompts,
@@ -420,8 +442,10 @@ class TestRenderEmbedPrompt:
         for dtype in dtypes:
             tensor_input = torch.randn(5, 256, dtype=dtype)
 
-            prompts = renderer.render_completions(
-                prompt_embeds=self._create_test_embed_bytes(tensor_input),
+            prompts = renderer.render_prompts(
+                _preprocess_prompt(
+                    renderer.model_config, self._create_test_embed_bytes(tensor_input)
+                )
             )
             results = renderer.tokenize_prompts(
                 prompts,
@@ -437,8 +461,10 @@ class TestRenderEmbedPrompt:
         # Test tensor with batch dimension gets squeezed
         tensor_input = torch.randn(1, 10, 768, dtype=torch.float32)
 
-        prompts = renderer.render_completions(
-            prompt_embeds=self._create_test_embed_bytes(tensor_input),
+        prompts = renderer.render_prompts(
+            _preprocess_prompt(
+                renderer.model_config, self._create_test_embed_bytes(tensor_input)
+            )
         )
         results = renderer.tokenize_prompts(
             prompts,
@@ -455,9 +481,11 @@ class TestRenderEmbedPrompt:
         text_input = "Hello world"
         tensor_input = torch.randn(5, 256, dtype=torch.float32)
 
-        prompts = renderer.render_completions(
-            text_input,
-            prompt_embeds=self._create_test_embed_bytes(tensor_input),
+        prompts = renderer.render_prompts(
+            _preprocess_prompt(
+                renderer.model_config,
+                [text_input, self._create_test_embed_bytes(tensor_input)],
+            )
         )
         results = renderer.tokenize_prompts(
             prompts,
@@ -465,8 +493,8 @@ class TestRenderEmbedPrompt:
         )
 
         assert len(results) == 2
-        # First should be embed prompt
-        assert torch.equal(results[0]["prompt_embeds"], tensor_input)
-        # Second should be tokens prompt
-        assert "prompt_token_ids" in results[1]
-        assert len(results[1]["prompt_token_ids"]) == len(text_input)
+        # First should be tokens prompt
+        assert "prompt_token_ids" in results[0]
+        assert len(results[0]["prompt_token_ids"]) == len(text_input)
+        # Second should be embed prompt
+        assert torch.equal(results[1]["prompt_embeds"], tensor_input)

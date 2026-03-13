@@ -1,14 +1,13 @@
 #pragma once
 
-template <typename T, bool CHECK_SKIPPED, bool ALIGN_BLOCK_SIZE>
+template <typename T, bool CHECK_SKIPPED>
 __global__ void expandInputRowsKernel(
     T const* unpermuted_input, T* permuted_output, int* sorted_experts,
     int const* expanded_dest_row_to_expanded_source_row,
     int* expanded_source_row_to_expanded_dest_row, int* permuted_idx,
-    int64_t const* expert_first_token_offset,
-    int64_t const* aligned_expert_first_token_offset, int64_t const num_rows,
+    int64_t const* expert_first_token_offset, int64_t const num_rows,
     int64_t const* num_dest_rows, int64_t const cols, int64_t k,
-    int num_local_experts, int align_block_size) {
+    int num_local_experts) {
   // Reverse permutation map.
   // I do this so that later, we can use the source -> dest map to do the k-way
   // reduction and unpermuting. I need the reverse map for that reduction to
@@ -18,24 +17,6 @@ __global__ void expandInputRowsKernel(
   int64_t const expanded_source_row =
       expanded_dest_row_to_expanded_source_row[expanded_dest_row];
   int expert_id = sorted_experts[expanded_dest_row];
-
-  if constexpr (ALIGN_BLOCK_SIZE) {
-    // convert (unaligned) expanded_dest_row -> aligned expanded_dest_row.
-    // aligned_expert_first_token_offset[e] provides the aligned prefix start
-    // for expert e. For non-local experts we map to the end (total aligned M).
-    int64_t aligned_base = 0;
-    int64_t token_offset_in_expert = 0;
-    if (expert_id >= num_local_experts) {
-      aligned_base =
-          __ldg(aligned_expert_first_token_offset + num_local_experts);
-      token_offset_in_expert = 0;
-    } else {
-      aligned_base = __ldg(aligned_expert_first_token_offset + expert_id);
-      token_offset_in_expert =
-          expanded_dest_row - __ldg(expert_first_token_offset + expert_id);
-    }
-    expanded_dest_row = aligned_base + token_offset_in_expert;
-  }
 
   if (threadIdx.x == 0) {
     assert(expanded_dest_row <= INT32_MAX);
@@ -76,29 +57,25 @@ void expandInputRowsKernelLauncher(
     T const* unpermuted_input, T* permuted_output, int* sorted_experts,
     int const* expanded_dest_row_to_expanded_source_row,
     int* expanded_source_row_to_expanded_dest_row, int* permuted_idx,
-    int64_t const* expert_first_token_offset,
-    int64_t const* aligned_expert_first_token_offset, int64_t const num_rows,
+    int64_t const* expert_first_token_offset, int64_t const num_rows,
     int64_t const* num_valid_tokens_ptr, int64_t const cols, int const k,
-    int num_local_experts, const int& align_block_size, cudaStream_t stream) {
+    int num_local_experts, cudaStream_t stream) {
   int64_t const blocks = num_rows * k;
   int64_t const threads = 256;
-  using FuncPtr = decltype(&expandInputRowsKernel<T, true, true>);
-  FuncPtr func_map[2][2] = {
-      {&expandInputRowsKernel<T, false, false>,
-       &expandInputRowsKernel<T, false, true>},
-      {&expandInputRowsKernel<T, true, false>,
-       &expandInputRowsKernel<T, true, true>},
+  using FuncPtr = decltype(&expandInputRowsKernel<T, true>);
+  FuncPtr func_map[2] = {
+      &expandInputRowsKernel<T, false>,
+      &expandInputRowsKernel<T, true>,
   };
   bool is_check_skip = num_valid_tokens_ptr != nullptr;
-  bool is_align_block_size = align_block_size != -1;
-  auto func = func_map[is_check_skip][is_align_block_size];
+  auto func = func_map[is_check_skip];
 
   func<<<blocks, threads, 0, stream>>>(
       unpermuted_input, permuted_output, sorted_experts,
       expanded_dest_row_to_expanded_source_row,
       expanded_source_row_to_expanded_dest_row, permuted_idx,
-      expert_first_token_offset, aligned_expert_first_token_offset, num_rows,
-      num_valid_tokens_ptr, cols, k, num_local_experts, align_block_size);
+      expert_first_token_offset, num_rows, num_valid_tokens_ptr, cols, k,
+      num_local_experts);
 }
 
 template <class T, class U>

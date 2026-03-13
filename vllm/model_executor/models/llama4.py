@@ -828,53 +828,38 @@ class Llama4ForCausalLM(LlamaForCausalLM, MixtureOfExperts):
         name: str,
         loaded_weight: torch.Tensor,
     ) -> tuple[str, torch.Tensor]:
-        # Helper function to permute the weight's channels
-        def permute(w: torch.Tensor, n_heads: int, is_weight_scale: bool):
-            # Calculate the expected shape of the weight.
-            # Do not rely on w's shape, as it may be in another layout.
-            attn_in = self.config.head_dim * n_heads
-            attn_out = self.config.hidden_size
+        modules = name.split(".")
+        # Permute Q/K weights and corresponding scales for rotary embedding.
+        # This pathway is validated against modelopt and compressed-tensors ckpts,
+        # and for per-tensor, per-group (e.g. GPTQ), and per-channel quant schemes.
+        # Note: permutations are not feasible only for per-block (e.g. DeepSeek 128x128)
+        # For per-block quantization, consider not quantizing q/k_proj.
+        is_weight = modules[-1] in ("weight", "weight_packed")
+        is_weight_scale = (
+            modules[-1] == "weight_scale"
+            and loaded_weight.numel() > 1  # no need to permute per-tensor scales
+        )
+        is_k_proj = "wk" in modules or "k_proj" in modules
+        is_q_proj = "wq" in modules or "q_proj" in modules
 
-            # If the weight is FP4 packed as uint8, we need to divide attn_out
-            # by 2.
-            if w.dtype == torch.uint8 and w.shape[1] * 2 == attn_out:
-                attn_out = attn_out // 2
+        if (is_weight or is_weight_scale) and (is_k_proj or is_q_proj):
+            original_ndim = loaded_weight.ndim
+            if original_ndim == 1:
+                loaded_weight = loaded_weight.unsqueeze(-1)
 
-            # If the weight is a weight scale, we need to divide attn_out by
-            # block size, which is currently 16.
-            elif (
-                w.dtype == torch.float8_e4m3fn
-                and is_weight_scale
-                and w.shape[1] * 16 == attn_out
-            ):
-                attn_out = attn_out // 16
-
-            return (
-                w.view(n_heads, attn_in // n_heads // 2, 2, attn_out)
+            f_out, f_in = loaded_weight.shape
+            n_heads = (
+                self.config.num_key_value_heads
+                if is_k_proj
+                else self.config.num_attention_heads
+            )
+            loaded_weight = (
+                loaded_weight.view(n_heads, f_out // n_heads // 2, 2, f_in)
                 .transpose(1, 2)
-                .reshape(attn_in, attn_out)
+                .reshape(f_out, f_in)
             )
 
-        modules = name.split(".")
-
-        # Permute Q/K weights and weight block scales for rotary embedding
-        is_weight = modules[-1] == "weight"
-        is_nvfp4_weight_scale = (
-            modules[-1] == "weight_scale" and loaded_weight.dtype == torch.float8_e4m3fn
-        )
-
-        if is_weight or is_nvfp4_weight_scale:
-            if "wk" in modules or "k_proj" in modules:
-                loaded_weight = permute(
-                    loaded_weight,
-                    self.config.num_key_value_heads,
-                    is_nvfp4_weight_scale,
-                )
-            elif "wq" in modules or "q_proj" in modules:
-                loaded_weight = permute(
-                    loaded_weight,
-                    self.config.num_attention_heads,
-                    is_nvfp4_weight_scale,
-                )
+            if original_ndim == 1:
+                loaded_weight = loaded_weight.squeeze(-1)
 
         return name, loaded_weight

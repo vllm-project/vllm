@@ -2,10 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from __future__ import annotations
 
-import re
 from collections import defaultdict
 from collections.abc import Iterable
 
+import regex as re
 import torch
 import torch.nn as nn
 

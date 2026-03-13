@@ -2,15 +2,17 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Sequence
+from typing import TYPE_CHECKING
 
 from transformers import PreTrainedTokenizerBase
 
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionRequest,
-)
 from vllm.entrypoints.openai.engine.protocol import DeltaMessage
 from vllm.logger import init_logger
 from vllm.reasoning.basic_parsers import BaseThinkingReasoningParser
+
+if TYPE_CHECKING:
+    from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+    from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 
 logger = init_logger(__name__)
 
@@ -18,7 +20,7 @@ logger = init_logger(__name__)
 class Ernie45ReasoningParser(BaseThinkingReasoningParser):
     """
     Reasoning parser for Ernie45 thinking model.
-    The Ernie45 thinking model ouput format is
+    The Ernie45 thinking model output format is
         abc\n</think>\n\n<response>\ndef\n</response>\n
     or  abc\n</think>\ndef
     """
@@ -46,19 +48,11 @@ class Ernie45ReasoningParser(BaseThinkingReasoningParser):
                 "constructor during construction."
             )
 
-        self.start_token_id = self.vocab.get(self.start_token)
-        self.end_token_id = self.vocab.get(self.end_token)
         self.response_start_token_id = self.vocab.get(self.response_start_token)
         self.response_end_token_id = self.vocab.get(self.response_end_token)
         self.newline_token_id = self.vocab.get(self.newline_token)
 
         self.parser_token_ids = [self.end_token_id, self.response_end_token_id]
-
-        if self.start_token_id is None or self.end_token_id is None:
-            raise RuntimeError(
-                "Ernie45 reasoning parser could not locate think start/end "
-                "tokens in the tokenizer!"
-            )
 
     def extract_reasoning_streaming(
         self,
@@ -73,7 +67,7 @@ class Ernie45ReasoningParser(BaseThinkingReasoningParser):
         Extract reasoning content from a delta message.
         Handles streaming output where previous + delta = current.
         Uses token IDs for faster processing.
-        The Ernie45 thinking model ouput format is
+        The Ernie45 thinking model output format is
             abc\n</think>\n\n<response>\ndef\n</response>\n
         or  abc\n</think>\ndef
         - 'abc' goes to reasoning
@@ -144,11 +138,11 @@ class Ernie45ReasoningParser(BaseThinkingReasoningParser):
             return DeltaMessage(reasoning=delta_text)
 
     def extract_reasoning(
-        self, model_output: str, request: ChatCompletionRequest
+        self, model_output: str, request: "ChatCompletionRequest | ResponsesRequest"
     ) -> tuple[str | None, str | None]:
         """
         Extract reasoning content from the model output.
-        The Ernie45 thinking model ouput format is
+        The Ernie45 thinking model output format is
             abc\n</think>\n\n\n<response>\ndef\n</response>\n
         or  abc\n</think>\ndef
         - 'abc' goes to reasoning
