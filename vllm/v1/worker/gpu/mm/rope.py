@@ -84,7 +84,8 @@ class RopeState:
 
     def apply_staged_writes(self) -> None:
         self.prefill_positions.apply_write()
-        self.prefill_delta.copy_to_uva()
+        if self.has_delta:
+            self.prefill_delta.copy_to_uva()
 
     def get_positions(self, num_tokens: int) -> torch.Tensor:
         return self.positions[:, :num_tokens]
@@ -132,7 +133,7 @@ def get_rope_state(
             max_model_len=max_model_len,
             device=device,
         )
-    elif model_config.uses_xdrope_dim > 0:
+    if model_config.uses_xdrope_dim > 0:
         assert isinstance(model, SupportsXDRoPE)
         return RopeState(
             num_dims=model_config.uses_xdrope_dim,
