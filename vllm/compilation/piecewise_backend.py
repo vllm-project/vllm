@@ -34,13 +34,14 @@ def get_fake_args_from_graph(graph: fx.GraphModule) -> list[Any]:
 
 
 def create_concrete_args(graph: fx.GraphModule, size: int) -> list[Any]:
-    """Create example inputs with symbolic dims replaced by a concrete size.
+    """Create Fake example inputs with symbolic dims replaced by a concrete size.
 
-    Used for single-size eager compilation where we need concrete-shaped
-    inputs but don't have real runtime tensors yet.
+    Used for single-size compilation where we need concrete-shaped inputs.
+    The Dynamo-captured graph gives us example inputs with SymInts in them.
     """
     from torch._prims_common import compute_required_storage_length
-    from torch.fx.experimental.symbolic_shapes import is_symbolic
+    from torch._subclasses.fake_tensor import FakeTensorMode
+    from torch.fx.experimental.symbolic_shapes import ShapeEnv, is_symbolic
 
     def concretize(sym_val: Any) -> int:
         """Replace all symbolic variables in a SymInt expression with size."""
@@ -49,25 +50,28 @@ def create_concrete_args(graph: fx.GraphModule, size: int) -> list[Any]:
         expr = sym_val.node.expr
         return int(expr.subs({s: size for s in expr.free_symbols}))
 
+    fake_mode = FakeTensorMode(shape_env=ShapeEnv())
+
     args: list[Any] = []
-    for node in graph.graph.nodes:
-        if node.op != "placeholder":
-            break
-        val = node.meta["example_value"]
-        if isinstance(val, torch.SymInt):
-            args.append(concretize(val))
-        elif isinstance(val, torch.Tensor):
-            new_shape = tuple(concretize(d) for d in val.shape)
-            new_strides = tuple(concretize(s) for s in val.stride())
-            new_storage_offset = concretize(val.storage_offset())
-            needed_size = compute_required_storage_length(
-                new_shape, new_strides, new_storage_offset
-            )
-            t = torch.empty(needed_size, dtype=val.dtype, device=val.device)
-            t = t.as_strided(new_shape, new_strides, new_storage_offset)
-            args.append(t)
-        else:
-            args.append(val)
+    with fake_mode:
+        for node in graph.graph.nodes:
+            if node.op != "placeholder":
+                break
+            val = node.meta["example_value"]
+            if isinstance(val, torch.SymInt):
+                args.append(concretize(val))
+            elif isinstance(val, torch.Tensor):
+                new_shape = tuple(concretize(d) for d in val.shape)
+                new_strides = tuple(concretize(s) for s in val.stride())
+                new_storage_offset = concretize(val.storage_offset())
+                needed_size = compute_required_storage_length(
+                    new_shape, new_strides, new_storage_offset
+                )
+                t = torch.empty(needed_size, dtype=val.dtype, device=val.device)
+                t = t.as_strided(new_shape, new_strides, new_storage_offset)
+                args.append(t)
+            else:
+                args.append(val)
     return args
 
 
@@ -258,31 +262,15 @@ class PiecewiseBackend:
             else:
                 args_list = get_fake_args_from_graph(self.graph)
 
-            # TODO(https://github.com/vllm-project/vllm/issues/35766)
-            # Can we remove strict_autograd_cache and
-            # force_non_lazy_backward_lowering overrides?
-            # I added them explicitly because this is what they are
-            # set to before the refactor
-            # (https://github.com/vllm-project/vllm/pull/35472).
-            # They affect the aotautograd cache key computation
-            # but they shouldn't have any effect on the actual
-            # compilation.
-            config_patches = dict(
-                bundled_autograd_cache=True,
-                strict_autograd_cache=False,
+            range_entry.runnable = self.vllm_backend.compiler_manager.compile(
+                self.graph,
+                args_list,
+                self.vllm_backend.inductor_config,
+                self.compilation_config,
+                compile_range=range_entry.compile_range,
+                graph_index=self.piecewise_compile_index,
+                num_graphs=self.total_piecewise_compiles,
             )
-            if hasattr(torch._functorch.config, "force_non_lazy_backward_lowering"):
-                config_patches["force_non_lazy_backward_lowering"] = False
-            with torch._functorch.config.patch(**config_patches):
-                range_entry.runnable = self.vllm_backend.compiler_manager.compile(
-                    self.graph,
-                    args_list,
-                    self.vllm_backend.inductor_config,
-                    self.compilation_config,
-                    compile_range=range_entry.compile_range,
-                    graph_index=self.piecewise_compile_index,
-                    num_graphs=self.total_piecewise_compiles,
-                )
 
             range_entry.compiled = True
 
