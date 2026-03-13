@@ -584,8 +584,11 @@ class OpenAIServing:
             )
             raise GenerationError("Internal server error")
         if finish_reason == "rejected":
-            if self.request_logger is not None:
-                self.request_logger.log_rejected_request(request_id)
+            logger.warning_every_n(
+                "Request %s was rejected due to "
+                "a full waiting queue (log every %d requests)",
+                request_id,
+            )
             raise RequestRejectedError()
 
     def _convert_generation_error_to_response(self, e: Exception) -> ErrorResponse:

@@ -7,12 +7,14 @@ import json
 import logging
 import os
 import sys
+from collections import defaultdict
 from collections.abc import Generator, Hashable
 from contextlib import contextmanager
 from functools import lru_cache, partial
 from logging import Logger
 from logging.config import dictConfig
 from os import path
+from threading import Lock
 from types import MethodType
 from typing import Any, Literal, cast
 
@@ -92,6 +94,26 @@ def _print_warning_once(logger: Logger, msg: str, *args: Hashable) -> None:
 
 LogScope = Literal["process", "global", "local"]
 
+_warning_every_n_counters = defaultdict(int)
+_warning_every_n_lock = Lock()
+
+
+def _print_warning_every_n(
+    logger: Logger,
+    msg: str,
+    *args: Hashable,
+    n: int = 100,
+    scope: LogScope = "process",
+) -> None:
+    key = (scope, id(logger), msg)
+
+    with _warning_every_n_lock:
+        _warning_every_n_counters[key] += 1
+        count = _warning_every_n_counters[key]
+
+    if count == 1 or count % n == 0:
+        logger.warning(msg, *args)
+
 
 def _should_log_with_scope(scope: LogScope) -> bool:
     """Decide whether to log based on scope"""
@@ -146,6 +168,22 @@ class _VllmLogger(Logger):
         if not _should_log_with_scope(scope):
             return
         _print_warning_once(self, msg, *args)
+
+    def warning_every_n(
+        self,
+        msg: str,
+        *args: Hashable,
+        n: int = 100,
+        scope: LogScope = "process",
+    ) -> None:
+        """
+        As `warning`, but only logs once every `n` calls.
+        """
+
+        if not _should_log_with_scope(scope):
+            return
+
+        _print_warning_every_n(self, msg, *args, n=n)
 
 
 # Pre-defined methods mapping to avoid repeated dictionary creation
