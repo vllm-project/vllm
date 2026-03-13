@@ -44,8 +44,9 @@ class ZenCpuPlatform(CpuPlatform):
         """
         from torch.torch_version import TorchVersion
 
-        if (TorchVersion(torch.__version__) < (2, 10)
-                or TorchVersion(torch.__version__) >= (2, 11)):
+        if TorchVersion(torch.__version__) < (2, 10) or TorchVersion(
+            torch.__version__
+        ) >= (2, 11):
             return
 
         cls._patch_fxgraphcache_pickle()
