@@ -230,10 +230,9 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             if self.vllm_config.speculative_config
             else 0
         )
+        next_n = self.num_speculative_tokens + 1
         self.reorder_batch_threshold += self.num_speculative_tokens
-        self.use_flattening = (
-            self.num_speculative_tokens + 1
-        ) not in self.natively_supported_next_n
+        self.use_flattening = next_n not in self.natively_supported_next_n
 
         sm_count = num_compute_units(self.device.index)
         self.num_sms = sm_count
@@ -243,10 +242,11 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             dtype=torch.int32,
             device=self.device,
         )
-
-        # Pre-allocated buffers for flattening (spec decode).
+        self.offsets_buffer = torch.arange(
+            next_n, device=self.device, dtype=torch.int32
+        )
         self.arange_buffer = torch.arange(
-            scheduler_config.max_num_seqs * (1 + self.num_speculative_tokens),
+            scheduler_config.max_num_seqs * next_n,
             dtype=torch.int32,
             device=self.device,
         )
@@ -380,7 +380,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             use_native = not self.use_flattening and max_decode_len == next_n
 
             if use_native and next_n > 1:
-                offsets = torch.arange(next_n, device=self.device, dtype=torch.int32)
+                offsets = self.offsets_buffer
                 batch_size = num_decodes
             elif max_decode_len > 1:
                 # Flatten multi-token decode requests into single-token
