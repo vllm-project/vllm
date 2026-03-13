@@ -361,6 +361,8 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         quant_config: QuantizationConfig | None = None,
         speculative_config: SpeculativeConfig | None = None,
         prefix: str = "",
+        *,
+        create_in_proj_qkvz: bool = True,
     ) -> None:
         super().__init__()
         self.tp_size = get_tensor_model_parallel_world_size()
@@ -404,13 +406,16 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         # projection of the input hidden states
         # Qwen3-Next and Qwen3.5 has a different qkv_proj layout,
         # we need to create qkvz_proj adaptively here.
-        self.in_proj_qkvz = self.create_qkvz_proj(
-            hidden_size=self.hidden_size,
-            key_dim=self.key_dim,
-            value_dim=self.value_dim,
-            quant_config=quant_config,
-            prefix=f"{prefix}.in_proj_qkvz",
-        )
+        # When create_in_proj_qkvz is False (e.g. LoRA enabled in Qwen3.5),
+        # the subclass creates in_proj_qkv and in_proj_z separately.
+        if create_in_proj_qkvz:
+            self.in_proj_qkvz = self.create_qkvz_proj(
+                hidden_size=self.hidden_size,
+                key_dim=self.key_dim,
+                value_dim=self.value_dim,
+                quant_config=quant_config,
+                prefix=f"{prefix}.in_proj_qkvz",
+            )
         # ba_proj doesn't support blockwise fp8 quantization.
         # Qwen3-Next and Qwen3.5 have different in_proj_ba checkpoint
         # layouts, so we use a factory method to create the projection.
