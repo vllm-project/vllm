@@ -280,6 +280,7 @@ def flashinfer_wrapper(
     max_seqlen: torch.Tensor | None = None,
     sequence_lengths: torch.Tensor | None = None,
 ) -> torch.Tensor:
+    assert sequence_lengths is not None
     is_reshaped = q.dim() == 4
 
     if is_reshaped:
@@ -293,10 +294,9 @@ def flashinfer_wrapper(
     if not current_platform.has_device_capability(80):
         from flashinfer import BatchPrefillWithRaggedKVCacheWrapper
 
-        assert sequence_lengths is not None
         # sequence_lengths is [s1, s2, ..., sB, 0, ...(bucketing padding)].
         # Strip zero-padded dummy entries before building qo_indptr.
-        seq_lens = sequence_lengths.view(-1).to(torch.int32)
+        seq_lens = sequence_lengths.view(-1)
         real_seq_lens = seq_lens[seq_lens > 0]
         qo_indptr = torch.cat(
             [real_seq_lens.new_zeros(1), torch.cumsum(real_seq_lens, dim=0)]
