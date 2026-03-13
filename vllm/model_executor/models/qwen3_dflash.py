@@ -4,11 +4,16 @@
 from collections.abc import Iterable
 
 import torch
+import torch.nn.functional as F
+from flashinfer.norm import rmsnorm
+from flashinfer.rope import apply_rope_with_cos_sin_cache
 from torch import nn
 from transformers import Qwen3Config
 
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -29,7 +34,9 @@ from vllm.model_executor.model_loader.weight_utils import (
     maybe_remap_kv_scale_name,
 )
 from vllm.multimodal.inputs import NestedTensors
+from vllm.platforms import current_platform
 from vllm.transformers_utils.config import set_default_rope_theta
+from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backend import AttentionType
 
 from .qwen2 import Qwen2MLP as Qwen3MLP
@@ -42,6 +49,101 @@ from .utils import (
 )
 
 logger = init_logger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# vllm::dflash_attn  –  custom op that wraps the DFlash cross-attention
+# (QKV projection on concat(context, query), per-head RMSNorm, RoPE,
+# context-Q slice, and the self-attention call).
+#
+# Everything that touches the dynamic-shaped context_states lives here so
+# it stays outside any piecewise-compiled / CUDA-graphed region.  The op
+# reads context_states and positions from the ForwardContext side-channel.
+# ---------------------------------------------------------------------------
+
+
+def dflash_attn(
+    hidden_states: torch.Tensor,
+    output: torch.Tensor,
+    layer_name: str,
+    q_size: int,
+) -> None:
+    """Run the full DFlash cross-attention (QKV + norms + RoPE + attention).
+
+    hidden_states are the query hidden states (padded, fixed shape).
+    *output* is a pre-allocated buffer (allocated in the FX graph so its
+    address is managed by the CUDA graph pool and remains stable across
+    replays).  This follows the ``unified_attention_with_output`` pattern.
+
+    Context states, positions, and all layer weights are retrieved from the
+    ForwardContext side-channel (via no_compile_layers) so that no model
+    parameters are passed as op arguments -- matching the unified_attention
+    pattern and keeping the splitting-op interface tensor-light.
+    """
+    fc = get_forward_context()
+    layer = fc.no_compile_layers[layer_name]  # DFlashQwen3Attention
+    context_states = fc.dflash_context_states
+    positions = fc.dflash_positions
+
+    num_context = context_states.shape[0]
+    concat_states = torch.cat([context_states, hidden_states], dim=0)
+
+    qkv = F.linear(concat_states, layer.qkv_proj.weight, layer.qkv_proj.bias)
+    q, k, v = qkv.split([layer.q_size, layer.kv_size, layer.kv_size], dim=-1)
+
+    # Per-head RMSNorm
+    q_by_head = q.view(*q.shape[:-1], q.shape[-1] // layer.head_dim, layer.head_dim)
+    k_by_head = k.view(*k.shape[:-1], k.shape[-1] // layer.head_dim, layer.head_dim)
+
+    q = rmsnorm(
+        input=q_by_head,
+        weight=layer.q_norm.weight.data,
+        eps=layer.q_norm.variance_epsilon,
+    ).view(q.shape)
+    k = rmsnorm(
+        input=k_by_head,
+        weight=layer.k_norm.weight.data,
+        eps=layer.q_norm.variance_epsilon,
+    ).view(k.shape)
+
+    # Rotary embeddings
+    q, k = apply_rope_with_cos_sin_cache(
+        positions=positions,
+        query=q,
+        key=k,
+        head_size=layer.rotary_emb.head_size,
+        cos_sin_cache=layer.rotary_emb.cos_sin_cache,
+        is_neox=layer.rotary_emb.is_neox_style,
+    )
+
+    # Only query tokens attend as queries; drop context rows from Q.
+    q = q[num_context:]
+
+    # Run the self-attention (KV-cache update + backend) eagerly.
+    attn_layer = fc.no_compile_layers[layer.attn.layer_name]
+    attn_output = attn_layer(q, k, v)
+
+    # Write into the pre-allocated output buffer so its address stays stable
+    # for piecewise CUDA graph replay.
+    output.copy_(attn_output)
+
+
+def dflash_attn_fake(
+    hidden_states: torch.Tensor,
+    output: torch.Tensor,
+    layer_name: str,
+    q_size: int,
+) -> None:
+    return
+
+
+direct_register_custom_op(
+    op_name="dflash_attn",
+    op_func=dflash_attn,
+    mutates_args=["output"],
+    fake_impl=dflash_attn_fake,
+    dispatch_key=current_platform.dispatch_key,
+)
 
 
 class DFlashQwen3Attention(nn.Module):
@@ -64,6 +166,7 @@ class DFlashQwen3Attention(nn.Module):
         attn_type: str = AttentionType.DECODER,
     ) -> None:
         super().__init__()
+        self.layer_name = prefix
         self.hidden_size = hidden_size
         tp_size = get_tensor_model_parallel_world_size()
         self.total_num_heads = num_heads
@@ -101,6 +204,7 @@ class DFlashQwen3Attention(nn.Module):
             self.head_dim,
             max_position=max_position,
             rope_parameters=rope_parameters,
+            dtype=torch.float32,  # required for float32
         )
         self.attn = Attention(
             self.num_heads,
@@ -115,31 +219,30 @@ class DFlashQwen3Attention(nn.Module):
         self.q_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
         self.k_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
 
+        compilation_config = get_current_vllm_config().compilation_config
+        if prefix in compilation_config.static_forward_context:
+            raise ValueError(f"Duplicate layer name: {prefix}")
+        compilation_config.static_forward_context[prefix] = self
+
     def forward(
         self,
-        positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        context_states: torch.Tensor,
     ) -> torch.Tensor:
-        assert context_states is not None
-        num_context = context_states.shape[0]
-
-        # TODO(ben): Is this safe to do when PIECEWISE graphs are on?
-        concat_states = torch.cat([context_states, hidden_states], dim=0)
-        qkv, _ = self.qkv_proj(concat_states)
-        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-
-        q_by_head = q.view(*q.shape[:-1], q.shape[-1] // self.head_dim, self.head_dim)
-        k_by_head = k.view(*k.shape[:-1], k.shape[-1] // self.head_dim, self.head_dim)
-        q = self.q_norm(q_by_head).view(q.shape)
-        k = self.k_norm(k_by_head).view(k.shape)
-
-        q, k = self.rotary_emb(positions, q, k)
-
-        # Remove context states from Q
-        q = q[num_context:]
-
-        attn_output = self.attn(q, k, v)
+        # Pre-allocate output buffer in the FX graph so that split_graph
+        # places it in the compiled piece before the splitting op.  The
+        # CUDA graph pool then keeps its address stable across replays.
+        attn_output = torch.empty(
+            hidden_states.shape[0],
+            self.q_size,
+            dtype=hidden_states.dtype,
+            device=hidden_states.device,
+        )
+        torch.ops.vllm.dflash_attn(
+            hidden_states,
+            attn_output,
+            layer_name=self.layer_name,
+            q_size=self.q_size,
+        )
         output, _ = self.o_proj(attn_output)
         return output
 
@@ -187,9 +290,7 @@ class DFlashQwen3DecoderLayer(nn.Module):
 
     def forward(
         self,
-        positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        context_states: torch.Tensor,
         residual: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if residual is not None:
@@ -199,9 +300,7 @@ class DFlashQwen3DecoderLayer(nn.Module):
             hidden_states = self.input_layernorm(hidden_states)
 
         hidden_states = self.self_attn(
-            positions=positions,
             hidden_states=hidden_states,
-            context_states=context_states,
         )
 
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
@@ -210,6 +309,7 @@ class DFlashQwen3DecoderLayer(nn.Module):
 
 
 # NOTE: torch.compile is not stable here
+@support_torch_compile
 class DFlashQwen3Model(nn.Module):
     def __init__(
         self,
@@ -283,23 +383,17 @@ class DFlashQwen3Model(nn.Module):
     def forward(
         self,
         input_ids: torch.Tensor,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
         input_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if input_embeds is None:
             input_embeds = self.embed_input_ids(input_ids)
-        assert hidden_states.shape[-1] == input_embeds.shape[-1]
 
-        context_states = hidden_states
         hidden_states = input_embeds
 
         residual = None
         for layer in self.layers:
             hidden_states, residual = layer(
-                positions=positions,
                 hidden_states=hidden_states,
-                context_states=context_states,
                 residual=residual,
             )
         hidden_states, _ = self.norm(hidden_states, residual)
@@ -387,11 +481,9 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
     def forward(
         self,
         input_ids: torch.Tensor,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        return self.model(input_ids, positions, hidden_states, inputs_embeds)
+        return self.model(input_ids, inputs_embeds)
 
     def compute_logits(
         self,

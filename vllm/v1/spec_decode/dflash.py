@@ -7,7 +7,7 @@ import torch
 from typing_extensions import override
 
 from vllm.config import VllmConfig
-from vllm.forward_context import set_forward_context
+from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.logger import init_logger
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.spec_decode.eagle import SpecDecodeBaseProposer
@@ -170,7 +170,7 @@ class DFlashProposer(SpecDecodeBaseProposer):
             and slot_mappings is not None
             and next(iter(self._draft_attn_layer_names)) in slot_mappings
         ):
-            slot_mapping_dict = self._get_slot_mapping(num_input_tokens)
+            slot_mapping_dict = self._get_slot_mapping(num_positions)
         else:
             slot_mapping_dict = slot_mappings or {}
 
@@ -182,10 +182,11 @@ class DFlashProposer(SpecDecodeBaseProposer):
             cudagraph_runtime_mode=cudagraph_runtime_mode,
             slot_mapping=slot_mapping_dict,
         ):
+            fc = get_forward_context()
+            fc.dflash_context_states = self.hidden_states[:num_tokens]
+            fc.dflash_positions = self._get_positions(num_positions)
             self.model(
                 input_ids=self.input_ids[:num_input_tokens],
-                positions=self._get_positions(num_positions),
-                hidden_states=self.hidden_states[:num_tokens],
                 inputs_embeds=None,
             )
 
@@ -195,18 +196,23 @@ class DFlashProposer(SpecDecodeBaseProposer):
         num_tokens: int,
         num_input_tokens: int,
         mm_embed_inputs: tuple[list[torch.Tensor], torch.Tensor] | None,
-    ) -> tuple[dict[str, Any], int]:
+    ) -> tuple[dict[str, Any], int, dict[str, Any]]:
         # Input ids: (padded) query tokens
         # Positions: (unpadded) context tokens + (padded) query tokens
         # Hidden states: (unpadded) context tokens
         # Slot mapping size: unpadded number of positions
         num_positions = self._dflash_num_context + num_input_tokens
-        return dict(
-            input_ids=self.input_ids[:num_input_tokens],
-            positions=self._get_positions(num_positions),
-            hidden_states=self.hidden_states[: self._dflash_num_context],
-            inputs_embeds=None,
-        ), self._dflash_num_positions
+        return (
+            dict(
+                input_ids=self.input_ids[:num_input_tokens],
+                inputs_embeds=None,
+            ),
+            self._dflash_num_positions,
+            {
+                "dflash_context_states": self.hidden_states[: self._dflash_num_context],
+                "dflash_positions": self._get_positions(num_positions),
+            },
+        )
 
     @override
     def build_per_layer_attn_metadata(

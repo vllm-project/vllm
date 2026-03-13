@@ -206,6 +206,12 @@ class ForwardContext:
 
     ubatch_slices: UBatchSlices | None = None
 
+    # DFlash speculative decoding: dynamic-shaped context states and positions
+    # are stored here (instead of as model args) so they stay outside compiled
+    # / CUDA-graphed pieces.  The vllm::dflash_rope custom op reads them.
+    dflash_context_states: torch.Tensor | None = None
+    dflash_positions: torch.Tensor | None = None
+
     # If True, bypass the compiled model call, e.g. by using .forward() directly
     skip_compiled: bool = False
 
