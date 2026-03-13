@@ -832,18 +832,12 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 state_indices_tensor_d_input = state_indices_tensor_d
                 state_indices_tensor_d_output = state_indices_tensor_d
 
-            if has_initial_states_d is not None:
-                indices = state_indices_tensor_d_input
-
-                ssm_gathered = ssm_state[indices]
-                keep_ssm = has_initial_states_d.to(ssm_gathered.dtype)
-                keep_ssm = keep_ssm.view(-1, *([1] * (ssm_gathered.dim() - 1)))
-                ssm_state[indices] = ssm_gathered * keep_ssm
-
-                conv_gathered = conv_state[indices]
-                keep_conv = has_initial_states_d.to(conv_gathered.dtype)
-                keep_conv = keep_conv.view(-1, *([1] * (conv_gathered.dim() - 1)))
-                conv_state[indices] = conv_gathered * keep_conv
+            self.clear_stale_decode_states(
+                has_initial_states_d,
+                state_indices_tensor_d_input,
+                ssm_state,
+                conv_state,
+            )
 
             # 2. Convolution sequence transformation
             hidden_states_B_C_d = causal_conv1d_update(
