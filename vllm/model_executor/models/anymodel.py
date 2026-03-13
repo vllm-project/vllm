@@ -451,9 +451,7 @@ def _overrides_differ(block_config, global_config, info: ArchInfo) -> bool:
     ffn = _get_block_section(block_config, "ffn")
 
     kv = _get_attr(attn, "num_key_value_heads")
-    if kv is not None and kv != getattr(
-        global_config, info.kv_heads_field, None
-    ):
+    if kv is not None and kv != getattr(global_config, info.kv_heads_field, None):
         return True
 
     intermediate = _get_attr(ffn, "intermediate_size")
@@ -493,9 +491,7 @@ def _overrides_differ(block_config, global_config, info: ArchInfo) -> bool:
                     f"'section.key' format (e.g. 'ffn.hidden_size')"
                 )
             val = _get_block_attr(block_config, parts[0], parts[1])
-            if val is not None and val != getattr(
-                global_config, config_attr, None
-            ):
+            if val is not None and val != getattr(global_config, config_attr, None):
                 return True
 
     return False
@@ -593,9 +589,7 @@ def _patch_anymodel_layers(
                     f"{layer_prefix}.{arch_info.attn_module}", vllm_config
                 )
             if ffn_noop:
-                _unregister_layer(
-                    f"{layer_prefix}.{arch_info.ffn_module}", vllm_config
-                )
+                _unregister_layer(f"{layer_prefix}.{arch_info.ffn_module}", vllm_config)
 
 
 def _arch_info_from_config(hf_config) -> ArchInfo | None:
@@ -643,7 +637,7 @@ def _expand_noop_prefixes_for_mapper(
             continue
         for p in prefixes:
             if p.startswith(new):
-                expanded.add(orig + p[len(new):])
+                expanded.add(orig + p[len(new) :])
     for orig, new in getattr(mapper, "orig_to_new_substr", {}).items():
         if new is None:
             continue
