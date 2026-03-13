@@ -639,13 +639,8 @@ class SpeculativeConfig:
                         "one layer. Might need some code changes "
                         "to support multiple layers."
                     )
-            else:
-                raise NotImplementedError(
-                    f"Unsupported speculative method: '{self.method}' "
-                    f"(hf_config.model_type='{model_type}'). "
-                    "If using an EAGLE model, set method='eagle' or "
-                    "method='eagle3' explicitly."
-                )
+            # Otherwise keep method="draft_model" — the user is using
+            # a plain draft model (e.g. a smaller version of the target).
 
         self._init_model_config_tail()
 
