@@ -69,6 +69,9 @@ class XPUPlatform(Platform):
         if selected_backend == AttentionBackendEnum.TRITON_ATTN:
             logger.info_once("Using Triton backend.")
             return AttentionBackendEnum.TRITON_ATTN.get_path()
+        elif selected_backend == AttentionBackendEnum.TRITON_ATTN_TD:
+            logger.info_once("Using Triton TD backend.")
+            return AttentionBackendEnum.TRITON_ATTN_TD.get_path()
         elif dtype == torch.float32:
             logger.warning_once(
                 "Flash Attention on XPU does not support float32 dtype. "
