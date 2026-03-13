@@ -574,6 +574,11 @@ class MPClient(EngineCoreClient):
         try:
             # State used for data parallel.
             self.engines_running = False
+            parallel_config = vllm_config.parallel_config
+            # Elastic EP can remove a rank and later add it back with the same
+            # identity. The client input ROUTER needs handover to allow the new
+            # engine to replace the dead connection.
+            enable_input_socket_handover = parallel_config.enable_elastic_ep
 
             self.stats_update_address: str | None = None
             tensor_queues: list[Any] | None = None
@@ -585,7 +590,11 @@ class MPClient(EngineCoreClient):
                 # Tensor queues passed via client_addresses for multi-API-server case
                 tensor_queues = client_addresses.get("tensor_queues")  # type: ignore[assignment]
                 self.input_socket = self.resources.input_socket = make_zmq_socket(
-                    self.ctx, input_address, zmq.ROUTER, bind=True
+                    self.ctx,
+                    input_address,
+                    zmq.ROUTER,
+                    bind=True,
+                    router_handover=enable_input_socket_handover,
                 )
                 self.resources.output_socket = make_zmq_socket(
                     self.ctx, output_address, zmq.PULL
@@ -596,7 +605,11 @@ class MPClient(EngineCoreClient):
                 input_address = addresses.inputs[0]
                 output_address = addresses.outputs[0]
                 self.input_socket = self.resources.input_socket = make_zmq_socket(
-                    self.ctx, addresses.inputs[0], zmq.ROUTER, bind=True
+                    self.ctx,
+                    addresses.inputs[0],
+                    zmq.ROUTER,
+                    bind=True,
+                    router_handover=enable_input_socket_handover,
                 )
                 self.resources.output_socket = make_zmq_socket(
                     self.ctx, addresses.outputs[0], zmq.PULL
@@ -633,8 +646,6 @@ class MPClient(EngineCoreClient):
             self.decoder = MsgpackDecoder(EngineCoreOutputs)
             # Store tensor queues for routing
             self.resources.tensor_queues = tensor_queues
-
-            parallel_config = vllm_config.parallel_config
             dp_size = parallel_config.data_parallel_size
             dp_rank = parallel_config.data_parallel_index
             dp_local_size = parallel_config.data_parallel_size_local
