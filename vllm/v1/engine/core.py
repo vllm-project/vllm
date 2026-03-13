@@ -1082,6 +1082,8 @@ class EngineCoreProc(EngineCore):
 
         except SystemExit:
             logger.debug("EngineCore exiting.")
+            if engine_core is not None:
+                engine_core._abort_and_drain_outputs()
             raise
         except Exception as e:
             if engine_core is None:
@@ -1234,6 +1236,32 @@ class EngineCoreProc(EngineCore):
             else v
             for v, p in zip(args, arg_types)
         )
+
+    def _abort_and_drain_outputs(self):
+        """Abort all in-flight requests and drain the output queue.
+
+        Called during graceful shutdown (SIGTERM/SIGINT) to ensure clients
+        receive abort responses before the engine core process exits.
+        """
+        aborted_reqs = self.scheduler.finish_requests(
+            None, RequestStatus.FINISHED_ABORTED
+        )
+        if aborted_reqs:
+            logger.info(
+                "Aborting %d in-flight request(s) during shutdown.",
+                len(aborted_reqs),
+            )
+            self._send_abort_outputs(aborted_reqs)
+
+        if not hasattr(self, "output_thread"):
+            return
+
+        # Signal the output thread to exit and wait for it to flush
+        # all pending messages (including the abort outputs above).
+        self.output_queue.put_nowait(EngineCoreProc.ENGINE_CORE_DEAD)
+        self.output_thread.join(timeout=5.0)
+        if self.output_thread.is_alive():
+            logger.warning("Output thread did not drain within 5 s during shutdown.")
 
     def _send_engine_dead(self):
         """Send EngineDead status to the EngineCoreClient."""
