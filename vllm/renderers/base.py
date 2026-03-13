@@ -648,6 +648,8 @@ class BaseRenderer(ABC, Generic[_T]):
 
         if prompt_text := prompt.get("prompt"):
             inputs["prompt"] = prompt_text
+        elif (tokenizer := self.get_tokenizer()) is not None:
+            inputs["prompt"] = tokenizer.decode(prompt_token_ids)
         if cache_salt := prompt.get("cache_salt"):
             inputs["cache_salt"] = cache_salt
 
