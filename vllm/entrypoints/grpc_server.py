@@ -38,7 +38,6 @@ except ImportError:
 import uvloop
 
 from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.utils import log_version_and_model
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
@@ -76,10 +75,9 @@ async def serve_grpc(args: argparse.Namespace):
         enable_log_requests=args.enable_log_requests,
         disable_log_stats=args.disable_log_stats,
     )
-    request_logger = RequestLogger() if args.enable_log_requests else None
 
     # Create servicer
-    servicer = VllmEngineServicer(async_llm, start_time, request_logger=request_logger)
+    servicer = VllmEngineServicer(async_llm, start_time)
 
     # Create gRPC server
     server = grpc.aio.server(
