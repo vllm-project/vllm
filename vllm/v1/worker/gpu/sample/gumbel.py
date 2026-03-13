@@ -81,7 +81,7 @@ def _gumbel_sample_kernel(
     logits = logits.to(tl.float32)
 
     temp = tl.load(temp_ptr + req_state_idx).to(tl.float32)
-    if (temp != 0.0) and APPLY_TEMPERATURE:
+    if temp != 0.0 and APPLY_TEMPERATURE:
         # Apply temperature.
         # NOTE(woosuk): Match the behavior of _temperature_kernel.
         # E.g., if the kernel uses tl.div_rn, we should use tl.div_rn here too.
@@ -127,18 +127,8 @@ def gumbel_sample(
     num_tokens, vocab_size = logits.shape
     BLOCK_SIZE = 1024
     num_blocks = triton.cdiv(vocab_size, BLOCK_SIZE)
-    local_argmax = torch.empty(
-        num_tokens,
-        num_blocks,
-        dtype=torch.int64,
-        device=logits.device,
-    )
-    local_max = torch.empty(
-        num_tokens,
-        num_blocks,
-        dtype=torch.float32,
-        device=logits.device,
-    )
+    local_argmax = logits.new_empty(num_tokens, num_blocks, dtype=torch.int64)
+    local_max = logits.new_empty(num_tokens, num_blocks, dtype=torch.float32)
     _gumbel_sample_kernel[(num_tokens, num_blocks)](
         local_argmax,
         local_argmax.stride(0),
