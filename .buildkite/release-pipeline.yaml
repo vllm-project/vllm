@@ -716,9 +716,7 @@ steps:
   # TODO: Move to use the unified build-rocm-release-image job
   - label: ":docker: Build nightly ROCm image - x86_64 - ROCm"
     id: build-rocm-nightly-image
-    depends_on:
-      - step: ~
-        allow_failure: false
+    depends_on: ~
     agents:
       queue: cpu_queue_postmerge
     timeout_in_minutes: 60
