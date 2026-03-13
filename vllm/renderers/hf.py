@@ -5,7 +5,7 @@ import itertools
 from collections import defaultdict, deque
 from collections.abc import Set
 from functools import lru_cache
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Literal, cast, overload
 
 import jinja2
 import jinja2.ext
@@ -14,7 +14,7 @@ import jinja2.nodes
 import jinja2.parser
 import jinja2.sandbox
 
-from vllm.config import ModelConfig
+from vllm.config import ModelConfig, VllmConfig
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormat,
@@ -32,10 +32,10 @@ from vllm.transformers_utils.chat_templates import get_chat_template_fallback_pa
 from vllm.transformers_utils.processor import cached_get_processor
 from vllm.utils.func_utils import supports_kw
 
+from .base import BaseRenderer
 from .inputs import DictPrompt
 from .inputs.preprocess import parse_dec_only_prompt
 from .params import ChatParams
-from .protocol import BaseRenderer
 
 if TYPE_CHECKING:
     from vllm.multimodal.inputs import MultiModalDataDict, MultiModalUUIDDict
@@ -439,6 +439,28 @@ def resolve_chat_template_kwargs(
     return {k: v for k, v in chat_template_kwargs.items() if k in accept_vars}
 
 
+@overload
+def safe_apply_chat_template(
+    model_config: "ModelConfig",
+    tokenizer: HfTokenizer,
+    conversation: list[ConversationMessage],
+    *,
+    tools: list[dict[str, Any]] | None = ...,
+    chat_template: str | None = ...,
+    tokenize: Literal[True] = ...,
+    **kwargs,
+) -> list[int]: ...
+@overload
+def safe_apply_chat_template(
+    model_config: "ModelConfig",
+    tokenizer: HfTokenizer,
+    conversation: list[ConversationMessage],
+    *,
+    tools: list[dict[str, Any]] | None = ...,
+    chat_template: str | None = ...,
+    tokenize: Literal[False] = ...,
+    **kwargs,
+) -> str: ...
 def safe_apply_chat_template(
     model_config: "ModelConfig",
     tokenizer: HfTokenizer,
@@ -564,7 +586,7 @@ def replace_vision_chunk_video_placeholder(
     mm_data: "MultiModalDataDict",
     video_placeholder: str | None,
 ) -> str | list[int]:
-    # get video placehoder, replace it with runtime video-chunk prompts
+    # get video placeholder, replace it with runtime video-chunk prompts
     if video_placeholder and isinstance(prompt_raw, str):
         video_prompts = build_video_prompts_from_mm_data(mm_data)
 
@@ -585,27 +607,15 @@ def replace_vision_chunk_video_placeholder(
     return prompt_raw
 
 
-class HfRenderer(BaseRenderer):
+class HfRenderer(BaseRenderer[HfTokenizer]):
     @classmethod
-    def from_config(
+    def from_config(  # type: ignore[override]
         cls,
-        config: ModelConfig,
+        config: VllmConfig,
         tokenizer_kwargs: dict[str, Any],
-    ) -> "BaseRenderer":
-        return cls(config, tokenizer_kwargs)
-
-    def __init__(
-        self,
-        config: ModelConfig,
-        tokenizer_kwargs: dict[str, Any],
-    ) -> None:
-        super().__init__(config)
-
-        self.use_unified_vision_chunk = getattr(
-            config.hf_config, "use_unified_vision_chunk", False
-        )
-
-        if config.skip_tokenizer_init:
+    ) -> "HfRenderer":
+        model_config = config.model_config
+        if model_config.skip_tokenizer_init:
             tokenizer = None
         else:
             tokenizer = cast(
@@ -616,25 +626,25 @@ class HfRenderer(BaseRenderer):
                 ),
             )
 
-        self._tokenizer = tokenizer
+        return cls(config, tokenizer)
 
-    @property
-    def tokenizer(self) -> HfTokenizer | None:
-        return self._tokenizer
+    def __init__(
+        self,
+        config: VllmConfig,
+        tokenizer: HfTokenizer | None,
+    ) -> None:
+        super().__init__(config, tokenizer)
 
-    def get_tokenizer(self) -> HfTokenizer:
-        tokenizer = self.tokenizer
-        if tokenizer is None:
-            raise ValueError("Tokenizer not available when `skip_tokenizer_init=True`")
-
-        return tokenizer
+        self.use_unified_vision_chunk = getattr(
+            config.model_config.hf_config, "use_unified_vision_chunk", False
+        )
 
     def render_messages(
         self,
         messages: list[ChatCompletionMessageParam],
         params: ChatParams,
     ) -> tuple[list[ConversationMessage], DictPrompt]:
-        model_config = self.config
+        model_config = self.model_config
         tokenizer = self.get_tokenizer()
 
         conversation, mm_data, mm_uuids = parse_chat_messages(
@@ -647,6 +657,8 @@ class HfRenderer(BaseRenderer):
                 tokenizer=tokenizer,
                 model_config=model_config,
             ),
+            media_io_kwargs=params.media_io_kwargs,
+            mm_processor_kwargs=params.mm_processor_kwargs,
         )
 
         prompt_raw = safe_apply_chat_template(
@@ -688,7 +700,7 @@ class HfRenderer(BaseRenderer):
         messages: list[ChatCompletionMessageParam],
         params: ChatParams,
     ) -> tuple[list[ConversationMessage], DictPrompt]:
-        model_config = self.config
+        model_config = self.model_config
         tokenizer = self.get_tokenizer()
 
         conversation, mm_data, mm_uuids = await parse_chat_messages_async(
@@ -701,6 +713,8 @@ class HfRenderer(BaseRenderer):
                 tokenizer=tokenizer,
                 model_config=model_config,
             ),
+            media_io_kwargs=params.media_io_kwargs,
+            mm_processor_kwargs=params.mm_processor_kwargs,
         )
 
         prompt_raw = safe_apply_chat_template(

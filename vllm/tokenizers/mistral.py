@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast, overload
 
@@ -17,6 +18,7 @@ from mistral_common.tokens.tokenizers.sentencepiece import (
     SentencePieceTokenizer,
 )
 from mistral_common.tokens.tokenizers.tekken import Tekkenizer
+from pydantic import ValidationError
 
 from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
@@ -43,7 +45,7 @@ def maybe_serialize_tool_calls(request: "MistralChatCompletionRequest"):
     # SEE: https://github.com/vllm-project/vllm/pull/9951
     # Credits go to: @gcalmettes
     # NOTE: There is currently a bug in pydantic where attributes
-    # declared as iterables are replaced in in the instances by
+    # declared as iterables are replaced in the instances by
     # pydantic-core ValidatorIterator instance. In particular, this
     # affects tool_calls defined in ChatCompletionAssistantMessageParam
     # model:
@@ -64,14 +66,16 @@ def maybe_serialize_tool_calls(request: "MistralChatCompletionRequest"):
     # TODO: remove when pydantic v2.11 is released
     for i, message in enumerate(request.messages):
         if message.get("role") == "assistant":
-            tool_calls_validator = message.get("tool_calls", ().__iter__())
-            validated_tool_calls = []
-            while True:
+            if (tool_calls_validator := message.get("tool_calls", None)) is not None:
                 try:
-                    tool_call = next(tool_calls_validator)  # type: ignore
-                    validated_tool_calls.append(tool_call)
-                except StopIteration:
-                    break
+                    validated_tool_calls = list(tool_calls_validator)
+                except ValidationError as e:
+                    raise ValueError(
+                        "Validating messages' `tool_calls` raised an error. "
+                        "Please ensure `tool_calls` are iterable of tool calls."
+                    ) from e
+            else:
+                validated_tool_calls = []
 
             request.messages[i]["tool_calls"] = validated_tool_calls
 
@@ -166,7 +170,7 @@ def _prepare_apply_chat_template_tools_and_messages(
                     tool.pop(tool_key)
                     logger.warning_once(
                         f"'{tool_key}' is not supported by mistral-common for tools. "
-                        "It has been poped from the tool definition."
+                        "It has been popped from the tool definition."
                     )
                 if tool["type"] == "function":
                     function_keys = list(tool["function"].keys())
@@ -175,7 +179,7 @@ def _prepare_apply_chat_template_tools_and_messages(
                             tool["function"].pop(function_key)
                             logger.warning_once(
                                 f"'{function_key}' is not supported by mistral-common "
-                                "for function tools. It has been poped from the "
+                                "for function tools. It has been popped from the "
                                 "function definition."
                             )
                 else:
@@ -207,6 +211,8 @@ def _tekken_token_to_id(tokenizer: "Tekkenizer", t: str | bytes) -> int:
 
 
 class MistralTokenizer(TokenizerLike):
+    IS_MISTRAL_TOKENIZER = True  # used by vllm.utils.mistral
+
     @classmethod
     def from_pretrained(
         cls,
@@ -429,7 +435,9 @@ class MistralTokenizer(TokenizerLike):
             return_dict=False,
         )
 
-    def decode(self, ids: list[int] | int, skip_special_tokens: bool = False) -> str:
+    def decode(
+        self, ids: Sequence[int] | int, skip_special_tokens: bool = False
+    ) -> str:
         # TODO(juliendenize): once https://github.com/huggingface/transformers/pull/41962
         # is in, directly call self.transformers_tokenizer.decode(...).
         if isinstance(ids, int):
@@ -507,14 +515,14 @@ class MistralTokenizer(TokenizerLike):
 
     def convert_ids_to_tokens(
         self,
-        ids: list[int],
+        ids: Sequence[int],
         skip_special_tokens: bool = False,
     ) -> list[str]:
         if not skip_special_tokens:
             return [self.tokenizer.id_to_piece(token_id) for token_id in ids]
 
         non_skip_special_tokens_ids = {
-            self.tokenizer.get_control_token(SpecialTokens.tool_calls),
+            self.tokenizer.get_special_token(SpecialTokens.tool_calls),
         }
         if isinstance(self.instruct, InstructTokenizerV13):
             if self.instruct.BEGIN_THINK:

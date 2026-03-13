@@ -5,7 +5,6 @@ from dataclasses import dataclass
 from functools import cached_property
 from typing import TYPE_CHECKING
 
-from vllm._bc_linter import bc_linter_include
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 
 if TYPE_CHECKING:
@@ -30,7 +29,6 @@ else:
     Request = object
 
 
-@bc_linter_include
 @dataclass
 class NewRequestData:
     req_id: str
@@ -110,7 +108,6 @@ class NewRequestData:
         )
 
 
-@bc_linter_include
 @dataclass
 class CachedRequestData:
     req_ids: list[str]
@@ -180,7 +177,6 @@ class CachedRequestData:
         )
 
 
-@bc_linter_include
 @dataclass
 class SchedulerOutput:
     # list of the requests that are scheduled for the first time.
@@ -241,6 +237,11 @@ class SchedulerOutput:
 
     # Spec Decoding stats for all requests.
     spec_decoding_stats_all: SpecDecodingStats | None = None
+
+    # Block IDs freshly allocated from the pool during this scheduling step.
+    # The worker zeros the corresponding GPU memory before the blocks are used,
+    # preventing stale NaN/data from corrupting attention or SSM computation.
+    new_block_ids_to_zero: list[int] | None = None
 
     @classmethod
     def make_empty(cls) -> "SchedulerOutput":
