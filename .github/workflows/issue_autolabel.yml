@@ -406,32 +406,42 @@ jobs:
               return;
             }
 
-            // Define required information sections and their detection patterns
+            // Define required information and detection patterns
             const requiredInfo = [
               {
                 name: 'Reproducer',
                 patterns: [
                   /reproduc/i, /minimal.?example/i, /repro\b/i, /steps to reproduce/i,
-                  /code.?snippet/i, /sample.?code/i, /```[\s\S]*```/,
+                  /code.?snippet/i, /sample.?code/i,
+                  /```python[\s\S]*?```/, /```bash[\s\S]*?```/, /```sh[\s\S]*?```/,
                 ],
-                ask: 'A **minimal reproducer** (code snippet or script that triggers the issue)',
+                ask: 'A minimal reproducer (code snippet or script that triggers the issue)',
               },
               {
-                name: 'Environment',
+                name: 'Error message',
                 patterns: [
-                  /rocm.?\d+\.\d+/i, /torch.?\d+\.\d+/i, /python.?\d+\.\d+/i,
-                  /vllm.?\d+\.\d+/i, /ubuntu/i, /os\s*:/i, /environment/i,
-                  /pip list/i, /pip freeze/i,
+                  /error/i, /traceback/i, /exception/i, /fault/i, /crash/i,
+                  /failed/i, /abort/i, /panic/i,
                 ],
-                ask: 'Your **environment details** (OS, Python version, PyTorch version, ROCm version, vLLM version)',
+                ask: 'The full error message or traceback',
               },
               {
-                name: 'Docker image or build steps',
+                name: 'Installation method',
                 patterns: [
                   /docker/i, /rocm\/pytorch/i, /dockerfile/i, /from source/i,
                   /pip install/i, /build.?from/i, /container/i, /image/i,
+                  /wheel/i, /\.whl/i, /nightly/i,
                 ],
-                ask: 'The **Docker image** you are using, or **steps to build vLLM** if building from source',
+                ask: 'How you installed vLLM (Docker image name, pip install, or build from source steps)',
+              },
+              {
+                name: 'Command',
+                patterns: [
+                  /vllm serve/i, /python\s+\S+\.py/i, /```bash[\s\S]*?```/,
+                  /```sh[\s\S]*?```/, /command/i, /launch/i, /run\s/i,
+                  /--model/i, /--tensor-parallel/i, /--gpu-memory/i,
+                ],
+                ask: 'The command you used to launch vLLM (e.g., `vllm serve ...` or the Python script)',
               },
               {
                 name: 'GFX architecture',
@@ -440,12 +450,13 @@ jobs:
                   /gpu.?arch/i, /rocm-smi/i, /rocminfo/i, /navi/i,
                   /instinct/i,
                 ],
-                ask: 'Your **GPU model and GFX architecture** (e.g., MI300X / gfx942). You can find this by running `rocminfo | grep gfx`',
+                ask: 'Your GPU model and GFX architecture (e.g., MI300X / gfx942) — run `rocminfo | grep gfx`',
               },
             ];
 
+            const issueBody = context.payload.issue.body || '';
             const missing = requiredInfo.filter(info =>
-              !info.patterns.some(p => p.test(context.payload.issue.body || ''))
+              !info.patterns.some(p => p.test(issueBody))
             );
 
             if (missing.length === 0) {
@@ -454,16 +465,19 @@ jobs:
             }
 
             const author = context.payload.issue.user.login;
-            const missingList = missing.map(m => `- ${m.ask}`).join('\n');
+            const checklist = requiredInfo.map(info => {
+              const found = !missing.includes(info);
+              return `- [${found ? 'x' : ' '}] ${info.ask}`;
+            }).join('\n');
             const message = [
               '<!-- rocm-info-request -->',
               `Hi @${author}, thanks for reporting this ROCm issue!`,
               '',
-              'To help us investigate, could you please provide the following information that appears to be missing:',
+              'To help us investigate, please make sure the following information is included:',
               '',
-              missingList,
+              checklist,
               '',
-              'This will help us reproduce and resolve the issue faster. Thank you!',
+              'Please provide any unchecked items above. This will help us reproduce and resolve the issue faster. Thank you!',
             ].join('\n');
 
             await github.rest.issues.createComment({
