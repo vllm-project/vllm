@@ -147,6 +147,7 @@ class DefaultModelLoader(BaseModelLoader):
                 self.load_config.download_dir,
                 allow_patterns,
                 revision,
+                subfolder=subfolder,
                 ignore_patterns=self.load_config.ignore_patterns,
             )
         else:
