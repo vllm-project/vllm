@@ -502,6 +502,7 @@ class FlashInferMetadata:
     query_start_loc: torch.Tensor | None = None
     paged_kv_indptr: torch.Tensor | None = None
     paged_kv_indices: torch.Tensor | None = None
+    paged_kv_last_page_len: torch.Tensor | None = None
 
 
 class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
@@ -999,6 +1000,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
         attn_metadata.paged_kv_indptr = self.paged_kv_indptr.gpu[: num_reqs + 1]
         attn_metadata.paged_kv_indices = paged_kv_indices
+        attn_metadata.paged_kv_last_page_len = self.paged_kv_last_page_len.gpu[
+            :num_reqs
+        ]
 
         # Early-out for cascade attention
         if use_cascade:
@@ -1363,6 +1367,7 @@ class FlashInferImpl(AttentionImpl):
             and attn_metadata.query_start_loc is not None
             and attn_metadata.paged_kv_indptr is not None
             and attn_metadata.paged_kv_indices is not None
+            and attn_metadata.paged_kv_last_page_len is not None
         )
         if self.kv_cache_dtype.startswith("fp8"):
             can_use_fast_path = can_use_fast_path and (
@@ -1388,6 +1393,7 @@ class FlashInferImpl(AttentionImpl):
         assert attn_metadata.query_start_loc is not None
         assert attn_metadata.paged_kv_indptr is not None
         assert attn_metadata.paged_kv_indices is not None
+        assert attn_metadata.paged_kv_last_page_len is not None
 
         query = query[:num_actual_tokens]
         key = key[:num_actual_tokens]
@@ -1435,6 +1441,7 @@ class FlashInferImpl(AttentionImpl):
             (key_cache, value_cache),
             attn_metadata.paged_kv_indices,
             attn_metadata.paged_kv_indptr,
+            attn_metadata.paged_kv_last_page_len,
             batch_indices,
             positions,
             is_neox=is_neox,
