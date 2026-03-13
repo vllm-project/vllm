@@ -147,7 +147,7 @@ class RequestState:
         prompt_token_ids: list[int] | None,
         prompt_embeds: torch.Tensor | None,
         logprobs_processor: LogprobsProcessor | None,
-        observable_context: ObservableContext,
+        observable_context: ObservableContext | None,
         detokenizer: IncrementalDetokenizer | None,
         max_tokens_param: int | None,
         arrival_time: float,
@@ -225,6 +225,7 @@ class RequestState:
         queue: RequestOutputCollector | None,
         log_stats: bool,
         stream_interval: int,
+        tracing_enabled: bool = False,
     ) -> "RequestState":
         if sampling_params := request.sampling_params:
             if not sampling_params.detokenize:
@@ -264,7 +265,9 @@ class RequestState:
             prompt_token_ids=request.prompt_token_ids,
             prompt_embeds=request.prompt_embeds,
             logprobs_processor=logprobs_processor,
-            observable_context=ObservableContext.from_new_request(),
+            observable_context=ObservableContext.from_new_request()
+            if tracing_enabled
+            else None,
             detokenizer=detokenizer,
             max_tokens_param=max_tokens_param,
             top_p=top_p,
@@ -539,6 +542,7 @@ class OutputProcessor:
             queue=queue,
             log_stats=self.log_stats,
             stream_interval=self.stream_interval,
+            tracing_enabled=self.tracing_enabled,
         )
         self.request_states[request_id] = req_state
         if parent_req:
@@ -665,8 +669,9 @@ class OutputProcessor:
                     # LLMEngine: return list of RequestOutputs.
                     request_outputs.append(request_output)
 
-            # Handle observable info for token-level tracing (no-op when disabled).
-            req_state.observable_context.update_from_output(engine_core_output)
+            # Handle observable info for token-level tracing.
+            if req_state.observable_context is not None:
+                req_state.observable_context.update_from_output(engine_core_output)
 
             # Free completed requests.
             if finish_reason is not None:
@@ -773,27 +778,25 @@ class OutputProcessor:
 
         # Build events list for token level tracing
         events: list[dict[str, Any]] = []
+        assert req_state.observable_context is not None
         if req_state.observable_context.not_empty:
             attributes[SpanAttributes.GEN_AI_REQUEST_TRACE_LEVEL] = TOKEN_LEVEL_TRACE
             ob_context = req_state.observable_context
-
-            for event in ob_context.engine_core_events:
-                events.append(
-                    {
-                        "name": get_event_name(event.type),
-                        "timestamp": int(event.wall_clock_timestamp * 1e9),
-                        "attributes": event.attributes,
-                    }
-                )
-
-            for event_ in ob_context.token_related_events:
-                events.append(
-                    {
-                        "name": event_.name,
-                        "timestamp": int(event_.timestamp * 1e9),
-                        "attributes": event_.attributes,
-                    }
-                )
+            events = [
+                {
+                    "name": get_event_name(e.type),
+                    "timestamp": int(e.wall_clock_timestamp * 1e9),
+                    "attributes": e.attributes,
+                }
+                for e in ob_context.engine_core_events
+            ] + [
+                {
+                    "name": e.name,
+                    "timestamp": int(e.timestamp * 1e9),
+                    "attributes": e.attributes,
+                }
+                for e in ob_context.token_related_events
+            ]
         else:
             attributes[SpanAttributes.GEN_AI_REQUEST_TRACE_LEVEL] = NORMAL_TRACE
 

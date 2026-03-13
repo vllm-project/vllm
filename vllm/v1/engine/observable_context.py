@@ -8,7 +8,7 @@ from vllm.v1.engine import EngineCoreEvent, EngineCoreOutput
 from vllm.v1.outputs import IterStats
 
 
-@dataclass
+@dataclass(slots=True)
 class Event:
     name: str
     timestamp: float
