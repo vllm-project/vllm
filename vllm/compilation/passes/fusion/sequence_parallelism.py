@@ -329,87 +329,6 @@ class MiddleAllReduceRMSNormStaticFP8Pattern(_SequenceParallelPatternHelper):
         )
 
 
-class AiterFirstAllReduceRMSNormPattern(_SequenceParallelPatternHelper):
-    """ROCm AITER variant: matches AITER RMSNorm ops after AllReduce."""
-
-    def __init__(self, epsilon: float, dtype: torch.dtype, device: str | None) -> None:
-        super().__init__(epsilon, dtype, device)
-        self.rmsnorm_matcher = MatcherRMSNorm(epsilon, match_rocm_aiter=True)
-
-    def get_inputs(self) -> list[torch.Tensor]:
-        input = torch.empty([1, 8, 4], device=self.device, dtype=self.dtype)
-        arg3_1 = torch.empty([4], device=self.device, dtype=self.dtype)
-        return [input, arg3_1]
-
-    def register(self, pm_pass: PatternMatcherPass) -> None:
-        def pattern(
-            input: torch.Tensor,
-            arg3_1: torch.Tensor,
-        ) -> tuple[torch.Tensor, torch.Tensor]:
-            all_reduce = self._all_reduce(input)
-            rmsnorm = self.rmsnorm_matcher(all_reduce, arg3_1)
-            return rmsnorm, all_reduce
-
-        def replacement(
-            input: torch.Tensor,
-            arg3_1: torch.Tensor,
-        ) -> tuple[torch.Tensor, torch.Tensor]:
-            reduce_scatter = self._reduce_scatter(input)
-            rmsnorm = self.rmsnorm_matcher(reduce_scatter, arg3_1)
-            all_gather = self._all_gather(rmsnorm)
-            return all_gather, reduce_scatter
-
-        pm.register_replacement(
-            pattern, replacement, self.get_inputs(), pm.fwd_only, pm_pass
-        )
-
-
-class AiterMiddleAllReduceRMSNormPattern(_SequenceParallelPatternHelper):
-    """ROCm AITER variant: matches AITER FusedAddRMSNorm ops after AllReduce."""
-
-    def __init__(self, epsilon: float, dtype: torch.dtype, device: str | None) -> None:
-        super().__init__(epsilon, dtype, device)
-        self.rmsnorm_matcher = MatcherFusedAddRMSNorm(epsilon, match_rocm_aiter=True)
-
-    def get_inputs(self) -> list[torch.Tensor]:
-        mm_1 = torch.empty([4, 4], device=self.device, dtype=self.dtype)
-        residual = torch.empty([4, 4], device=self.device, dtype=self.dtype)
-        rms_norm_weights = torch.empty([4, 4], device=self.device, dtype=self.dtype)
-        return [residual, mm_1, rms_norm_weights]
-
-    def register(self, pm_pass: PatternMatcherPass) -> None:
-        def pattern(
-            residual: torch.Tensor,
-            mm_1: torch.Tensor,
-            rms_norm_weights: torch.Tensor,
-        ) -> tuple[torch.Tensor, torch.Tensor]:
-            all_reduce = self._all_reduce(mm_1)
-            rmsnorm = self.rmsnorm_matcher(all_reduce, rms_norm_weights, residual)
-            return rmsnorm[0], rmsnorm[1]
-
-        def replacement(
-            residual: torch.Tensor,
-            mm_1: torch.Tensor,
-            rms_norm_weights: torch.Tensor,
-        ) -> tuple[torch.Tensor, torch.Tensor]:
-            reduce_scatter = self._reduce_scatter(mm_1)
-            residual = residual[0 : reduce_scatter.size(0), ...]
-            rmsnorm = self.rmsnorm_matcher(reduce_scatter, rms_norm_weights, residual)
-            all_gather = self._all_gather(rmsnorm[0])
-            return all_gather, rmsnorm[1]
-
-        pm.register_replacement(
-            pattern, replacement, self.get_inputs(), pm.fwd_only, pm_pass
-        )
-        pm.register_replacement(
-            get_first_out_wrapper(pattern),
-            get_first_out_wrapper(replacement),
-            self.get_inputs(),
-            pm.fwd_only,
-            pm_pass,
-        )
-
-
 class SequenceParallelismPass(VllmPatternMatcherPass):
     """
     This pass enables sequence parallelism for models.
@@ -477,10 +396,6 @@ class SequenceParallelismPass(VllmPatternMatcherPass):
             pass_name="sequence_parallelism_pass"
         )
 
-        from vllm._aiter_ops import rocm_aiter_ops
-
-        use_aiter = bool(rocm_aiter_ops.is_rmsnorm_enabled())
-
         for epsilon in [1e-5, 1e-6]:
             # RMSNorm + Static FP8 quantization patterns
             FirstAllReduceRMSNormStaticFP8Pattern(
@@ -490,22 +405,13 @@ class SequenceParallelismPass(VllmPatternMatcherPass):
                 epsilon, self.model_dtype, self.device
             ).register(self.patterns)
 
-            # Normal RMSNorm patterns (CUDA C++ ops)
+            # Normal RMSNorm patterns
             FirstAllReduceRMSNormPattern(
                 epsilon, self.model_dtype, self.device
             ).register(self.patterns)
             MiddleAllReduceRMSNormPattern(
                 epsilon, self.model_dtype, self.device
             ).register(self.patterns)
-
-            # ROCm AITER RMSNorm patterns
-            if use_aiter:
-                AiterFirstAllReduceRMSNormPattern(
-                    epsilon, self.model_dtype, self.device
-                ).register(self.patterns)
-                AiterMiddleAllReduceRMSNormPattern(
-                    epsilon, self.model_dtype, self.device
-                ).register(self.patterns)
 
         self.dump_patterns(config, self.patterns)
 
