@@ -191,6 +191,7 @@ _METHODS_TO_PATCH = {
     "debug_once": _VllmLogger.debug_once,
     "info_once": _VllmLogger.info_once,
     "warning_once": _VllmLogger.warning_once,
+    "warning_every_n": _VllmLogger.warning_every_n,
 }
 
 
