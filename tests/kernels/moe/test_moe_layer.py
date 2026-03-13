@@ -1024,7 +1024,6 @@ def _test_body_regular(
     vllm_config: VllmConfig,
     num_tokens: int,
     num_tokens_across_dp: torch.Tensor,
-    device: torch.device,
     **kwargs,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Regular MoE test body: compare layer output to baseline."""
@@ -1050,7 +1049,6 @@ def _test_body_eplb(
     num_tokens: int,
     num_tokens_across_dp: torch.Tensor,
     cpu_group,
-    device: torch.device,
     in_dtype: torch.dtype,
     quantization: str | None,
     use_ep: bool,
@@ -1070,6 +1068,8 @@ def _test_body_eplb(
     routed_output_transform: torch.nn.Module | None,
     **kwargs,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    device = torch.cuda.current_device()
+
     """EPLB test body: compare output before and after expert weight rearrangement."""
     # Get "before" output with original weight arrangement
     with set_forward_context(
@@ -1165,13 +1165,14 @@ def _test_body_eplb(
     return output_before, output_after
 
 
+# TODO: make this take a MoETestConfig
 def _test_loop(
-    pgi: ProcessGroupInfo,
     vllm_config: VllmConfig,
-    cpu_group,
     ep_size: int,
     dp_size: int,
     tp_size: int,
+    dp_rank: int,
+    tp_rank: int,
     m: int,
     n: int,
     k: int,
@@ -1233,9 +1234,6 @@ def _test_loop(
         parallel_config=baseline_parallel_config,
         compilation_config=vllm_config.compilation_config,
     )
-
-    dp_rank = vllm_config.parallel_config.data_parallel_rank
-    tp_rank = pgi.rank % tp_size
 
     with set_current_vllm_config(baseline_vllm_config):
         baseline_layer = make_fake_moe_layer(
@@ -1322,9 +1320,6 @@ def _test_loop(
             vllm_config=vllm_config,
             num_tokens=num_tokens,
             num_tokens_across_dp=num_tokens_across_dp,
-            pgi=pgi,
-            cpu_group=cpu_group,
-            device=device,
             in_dtype=in_dtype,
             quantization=quantization,
             use_ep=use_ep,
@@ -1386,10 +1381,7 @@ def test_moe_layer_no_parallel(
     use_routed_input_transform: bool,
     monkeypatch,
 ):
-    """Test MoE layer without parallelism (dp_size=1, tp_size=1, use_ep=False).
-
-    Backend doesn't matter when there's no parallelism, so we don't parametrize on it.
-    """
+    """Test MoE layer without parallelism (dp_size=1, tp_size=1, use_ep=False)."""
     test_config = MoETestConfig(
         m,
         n,
@@ -1409,12 +1401,6 @@ def test_moe_layer_no_parallel(
 
     set_random_seed(7)
 
-    dp_size = 1
-    tp_size = 1
-    world_size = 1
-    ep_size = 1
-    use_ep = False
-
     parallel_config = ParallelConfig()
     compilation_config = CompilationConfig()
     compilation_config.pass_config.fuse_allreduce_rms = False
@@ -1423,125 +1409,41 @@ def test_moe_layer_no_parallel(
         parallel_config=parallel_config, compilation_config=compilation_config
     )
 
-    in_dtype = torch.bfloat16
-
-    # Setup test data and transforms (includes creating w1 and w2)
-    test_data = setup_moe_test_data(
-        m=m,
-        k=k,
-        n=n,
-        num_experts=num_experts,
-        in_dtype=in_dtype,
-        use_shared_experts=use_shared_experts,
-        use_gate=use_gate,
-        use_routed_input_transform=use_routed_input_transform,
-        backend=None,
-        device="cuda",
-    )
-
-    with set_current_vllm_config(vllm_config):
-        baseline_layer = make_fake_moe_layer(
-            w1=test_data.w1,
-            w2=test_data.w2,
-            top_k=top_k,
-            global_num_experts=num_experts,
-            in_dtype=in_dtype,
-            quant_dtype=None,
-            renormalize=False,
-            shared_experts_config=test_data.shared_experts_config,
-            gate=test_data.gate,
-            routed_input_transform=test_data.routed_input_transform,
-            routed_output_transform=test_data.routed_output_transform,
-        )
-
-    baseline_output = baseline_layer(
-        test_data.hidden_states,
-        test_data.router_logits,
-    )
-
-    del baseline_layer
-    torch.accelerator.empty_cache()
-
     # Initialize distributed environment for single GPU
-    _set_vllm_config(vllm_config, world_size, rank=0, local_rank=0)
+    _set_vllm_config(vllm_config, 1, rank=0, local_rank=0)
 
     init_workspace_manager("cuda")
 
-    with set_current_vllm_config(vllm_config):
-        # Setup shared experts if needed
-        shared_experts = create_shared_experts_from_config(
-            test_data.shared_experts_config, in_dtype
-        )
-
-        # Create MoE layer
-        # Use routed_expert_hidden_size (not k) when routed_input_transform is used
-        # to match the weight dimensions
-        moe_fn, moe_layer = make_fused_moe_layer(
-            quantization=quantization,
-            use_ep=use_ep,
-            hidden_size=test_data.routed_expert_hidden_size,
-            intermediate_size=n,
-            in_dtype=in_dtype,
-            tp_size=tp_size,
-            ep_size=ep_size,
-            dp_size=dp_size,
-            reduce_results=False,
-            w1=test_data.w1,
-            w2=test_data.w2,
-            top_k=top_k,
-            global_num_experts=num_experts,
-            shared_experts=shared_experts,
-            gate=test_data.gate,
-            routed_input_transform=test_data.routed_input_transform,
-            routed_output_transform=test_data.routed_output_transform,
-        )
-
-        num_tokens = m
-        num_tokens_across_dp = torch.tensor(
-            [num_tokens] * world_size,
-            device="cuda",
-            dtype=torch.int,
-        )
-
-        # Call _test_body_regular to get expected and actual outputs
-        with set_forward_context(
-            None,
-            vllm_config,
-            num_tokens=num_tokens,
-            num_tokens_across_dp=num_tokens_across_dp,
-        ):
-            actual = moe_fn(
-                test_data.hidden_states,
-                test_data.router_logits,
-            )
-
-    # Set tolerances based on quantization
-    if quantization is None:
-        atol, rtol = 3.5e-2, 3.5e-2
-    elif quantization in ("fp8", "modelopt_fp8"):
-        atol, rtol = 6e-2, 6e-2
-    elif quantization == "modelopt_fp4":
-        atol = rtol = 1e-1 + k * 5e-4
-    else:
-        atol, rtol = 6e-2, 6e-2
-
-    try:
-        # Compare outputs
-        torch.testing.assert_close(baseline_output, actual, atol=atol, rtol=rtol)
-    finally:
-        # Cleanup GPU memory
-        torch.cuda.synchronize()
-        torch.accelerator.empty_cache()
+    _test_loop(
+        vllm_config,
+        test_config.ep_size,
+        test_config.dp_size,
+        test_config.tp_size,
+        0,
+        0,
+        test_config.m,
+        test_config.n,
+        test_config.k,
+        test_config.num_experts,
+        test_config.top_k,
+        test_config.quantization,
+        test_config.reduce_results,
+        test_config.backend,
+        _test_body_regular,
+        use_shared_experts=test_config.use_shared_experts,
+        use_gate=test_config.use_gate,
+        use_routed_input_transform=test_config.use_routed_input_transform,
+    )
 
 
-def _test_body_config(test_config: MoETestConfig, **kwargs):
+def _test_body_config(test_config: MoETestConfig, cpu_group, **kwargs):
     if not test_config.enable_eplb:
         return _test_body_regular(**kwargs)
     else:
-        return _test_body_eplb(**kwargs)
+        return _test_body_eplb(**kwargs, cpu_group=cpu_group)
 
 
-def _test_loop_config(
+def _parallel_worker(
     pgi: ProcessGroupInfo,
     vllm_config: VllmConfig,
     cpu_group,
@@ -1557,6 +1459,9 @@ def _test_loop_config(
     passed = 0
     failed = 0
 
+    dp_rank = vllm_config.parallel_config.data_parallel_rank
+    tp_rank = pgi.rank % tp_size
+
     for test_config in test_configs:
         cc = vllm_config.compilation_config
         if "from_forward_context" in cc.static_forward_context:
@@ -1566,12 +1471,12 @@ def _test_loop_config(
         print(f"TESTING {test_config}")
         try:
             _test_loop(
-                pgi,
                 vllm_config,
-                cpu_group,
                 test_config.ep_size,
                 test_config.dp_size,
                 test_config.tp_size,
+                dp_rank,
+                tp_rank,
                 test_config.m,
                 test_config.n,
                 test_config.k,
@@ -1580,7 +1485,9 @@ def _test_loop_config(
                 test_config.quantization,
                 test_config.reduce_results,
                 test_config.backend,
-                functools.partial(_test_body_config, test_config=test_config),
+                functools.partial(
+                    _test_body_config, test_config=test_config, cpu_group=cpu_group
+                ),
                 use_shared_experts=test_config.use_shared_experts,
                 use_gate=test_config.use_gate,
                 use_routed_input_transform=test_config.use_routed_input_transform,
@@ -1600,7 +1507,7 @@ def _test_loop_config(
 # TODO: add cudagraphs/torch.compile tests
 @pytest.mark.parametrize("dp_size, tp_size, use_ep", PARALLEL_COMBOS)
 @pytest.mark.parametrize("backend", BACKENDS)
-def test_moe_layer_configs(
+def test_moe_layer(
     dp_size: int,
     tp_size: int,
     use_ep: bool,
@@ -1647,7 +1554,7 @@ def test_moe_layer_configs(
     try:
         parallel_launch_with_config(
             world_size,
-            _test_loop_config,
+            _parallel_worker,
             vllm_config,
             test_env,
             ep_size,
