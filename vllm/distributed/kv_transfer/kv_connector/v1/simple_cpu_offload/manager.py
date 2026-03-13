@@ -278,7 +278,9 @@ class SimpleCPUOffloadScheduler:
                 [self._gpu_block_pool.blocks[bid] for bid in gpu_block_ids]
             )
 
-        assert req_id not in self._reqs_to_load
+        # Clean up stale state if the request was preempted and re-scheduled.
+        if req_id in self._reqs_to_load:
+            self._cleanup_load_request(req_id)
         self._reqs_to_load[req_id] = RequestState(
             request=request,
             gpu_block_ids=block_ids_by_group,
