@@ -335,7 +335,9 @@ def env_with_choices(
                 f"Valid options: {actual_choices}."
             )
 
-        return value
+        # Return the canonical choice to preserve expected casing
+        # (e.g. "HIGH" -> "high" when case_sensitive=False)
+        return actual_choices[check_choices.index(check_value)]
 
     return _get_validated_env
 
