@@ -447,12 +447,13 @@ class SpeculativeConfig:
             # FIXME(luccafong): cudagraph with v32 MTP is not supported,
             # remove this when the issue is fixed.
             self.enforce_eager = True
-        # Use the draft model from the same model.
-        self.model = self.target_model_config.model
-        # Align the quantization of draft model for cases such as
-        # --quantization fp8 with a bf16 checkpoint.
-        if not self.quantization:
-            self.quantization = self.target_model_config.quantization
+        if self.model is None:
+            # MTP reuses the target model weights by default.
+            self.model = self.target_model_config.model
+            # Align the quantization of draft model for cases such as
+            # --quantization fp8 with a bf16 checkpoint.
+            if not self.quantization:
+                self.quantization = self.target_model_config.quantization
 
         self._build_draft_model_config()
         self._init_model_config_tail()
@@ -587,7 +588,7 @@ class SpeculativeConfig:
 
         if self.model is None:
             raise ValueError(
-                "num_speculative_tokens was provided but without speculative model."
+                f"Speculative method '{self.method}' requires a model path."
             )
 
         # Auto-detect eagle from model path substring before loading config.
@@ -626,6 +627,9 @@ class SpeculativeConfig:
             # Otherwise keep method="draft_model" — the user is using
             # a plain draft model (e.g. a smaller version of the target).
 
+        assert self.method in get_args(SpeculativeMethod), (
+            f"Unsupported speculative method: '{self.method}'"
+        )
         self._init_model_config_tail()
 
     def _validate_suffix_decoding(self):
