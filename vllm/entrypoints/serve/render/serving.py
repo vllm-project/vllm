@@ -16,10 +16,8 @@ from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionReque
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
-    ModelCard,
-    ModelList,
-    ModelPermission,
 )
+from vllm.entrypoints.openai.models.serving import OpenAIModelRegistry
 from vllm.entrypoints.openai.parser.harmony_utils import (
     get_developer_message,
     get_system_message,
@@ -46,7 +44,7 @@ class OpenAIServingRender:
         model_config: ModelConfig,
         renderer: BaseRenderer,
         io_processor: Any,
-        served_model_names: list[str],
+        model_registry: OpenAIModelRegistry,
         *,
         request_logger: RequestLogger | None,
         chat_template: str | None,
@@ -61,7 +59,7 @@ class OpenAIServingRender:
         self.model_config = model_config
         self.renderer = renderer
         self.io_processor = io_processor
-        self.served_model_names = served_model_names
+        self.model_registry = model_registry
         self.request_logger = request_logger
         self.chat_template = chat_template
         self.chat_template_content_format: ChatTemplateContentFormatOption = (
@@ -89,15 +87,26 @@ class OpenAIServingRender:
         self,
         request: ChatCompletionRequest,
     ) -> tuple[list[ConversationMessage], list[ProcessorInputs]] | ErrorResponse:
-        """Copied from OpenAIServingChat.render_chat_request.
+        """Validate the model and preprocess a chat completion request.
 
-        Differences: engine_client.errored check removed (no engine client).
+        This is the authoritative implementation used directly by the
+        GPU-less render server and delegated to by OpenAIServingChat.
         """
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             logger.error("Error with model %s", error_check_ret)
             return error_check_ret
+        return await self.render_chat(request)
 
+    async def render_chat(
+        self,
+        request: ChatCompletionRequest,
+    ) -> tuple[list[ConversationMessage], list[ProcessorInputs]] | ErrorResponse:
+        """Core preprocessing logic for chat requests (no model/engine check).
+
+        Called directly by render_chat_request and delegated to by
+        OpenAIServingChat.render_chat_request after its engine-aware checks.
+        """
         tokenizer = self.renderer.tokenizer
 
         tool_parser = self.tool_parser
@@ -175,14 +184,25 @@ class OpenAIServingRender:
         self,
         request: CompletionRequest,
     ) -> list[ProcessorInputs] | ErrorResponse:
-        """Copied from OpenAIServingCompletion.render_completion_request.
+        """Validate the model and preprocess a completion request.
 
-        Differences: engine_client.errored check removed (no engine client).
+        This is the authoritative implementation used directly by the
+        GPU-less render server and delegated to by OpenAIServingCompletion.
         """
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             return error_check_ret
+        return await self.render_completion(request)
 
+    async def render_completion(
+        self,
+        request: CompletionRequest,
+    ) -> list[ProcessorInputs] | ErrorResponse:
+        """Core preprocessing logic for completion requests (no model/engine check).
+
+        Called directly by render_completion_request and delegated to by
+        OpenAIServingCompletion.render_completion_request after its engine-aware checks.
+        """
         # Return error for unsupported features.
         if request.suffix is not None:
             return self.create_error_response("suffix is not currently supported")
@@ -208,7 +228,7 @@ class OpenAIServingRender:
         request: ChatCompletionRequest,
         should_include_tools: bool = True,
     ):
-        """Copied from OpenAIServingChat._make_request_with_harmony."""
+        """Build Harmony (GPT-OSS) messages and engine prompt from a chat request."""
         messages: list[OpenAIMessage] = []
 
         # because of issues with pydantic we need to potentially
@@ -221,8 +241,10 @@ class OpenAIServingRender:
         # if the model supports it. TODO: Support browsing.
         assert not self.supports_browsing
         assert not self.supports_code_interpreter
+        if (reasoning_effort := request.reasoning_effort) == "none":
+            raise ValueError(f"Harmony does not support {reasoning_effort=}")
         sys_msg = get_system_message(
-            reasoning_effort=request.reasoning_effort,
+            reasoning_effort=reasoning_effort,
             browser_description=None,
             python_description=None,
             with_custom_tools=should_include_tools,
@@ -249,21 +271,6 @@ class OpenAIServingRender:
 
         return messages, [engine_prompt]
 
-    async def show_available_models(self) -> ModelList:
-        """Returns the models served by this render server."""
-        max_model_len = self.model_config.max_model_len
-        return ModelList(
-            data=[
-                ModelCard(
-                    id=name,
-                    max_model_len=max_model_len,
-                    root=self.model_config.model,
-                    permission=[ModelPermission()],
-                )
-                for name in self.served_model_names
-            ]
-        )
-
     def create_error_response(
         self,
         message: str | Exception,
@@ -273,23 +280,11 @@ class OpenAIServingRender:
     ) -> ErrorResponse:
         return create_error_response(message, err_type, status_code, param)
 
-    def _is_model_supported(self, model_name: str) -> bool:
-        """Simplified from OpenAIServing._is_model_supported (no LoRA support)."""
-        return model_name in self.served_model_names
-
     async def _check_model(
         self,
         request: Any,
     ) -> ErrorResponse | None:
-        """Simplified from OpenAIServing._check_model (no LoRA support)."""
-        if self._is_model_supported(request.model):
-            return None
-        return self.create_error_response(
-            message=f"The model `{request.model}` does not exist.",
-            err_type="NotFoundError",
-            status_code=HTTPStatus.NOT_FOUND,
-            param="model",
-        )
+        return await self.model_registry.check_model(request.model)
 
     def _validate_chat_template(
         self,
