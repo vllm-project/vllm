@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass, field
-from http import HTTPStatus
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -11,9 +10,10 @@ import pytest
 from vllm.config.multimodal import MultiModalConfig
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
-from vllm.entrypoints.openai.engine.protocol import ErrorResponse
+from vllm.entrypoints.openai.engine.protocol import GenerationError
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+from vllm.entrypoints.serve.render.serving import OpenAIServingRender
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.renderers.hf import HfRenderer
 from vllm.tokenizers.registry import tokenizer_args_from_config
@@ -61,15 +61,21 @@ class MockModelConfig:
 
 
 @dataclass
+class MockParallelConfig:
+    _api_process_rank: int = 0
+
+
+@dataclass
 class MockVllmConfig:
     model_config: MockModelConfig
+    parallel_config: MockParallelConfig
 
 
 def _build_renderer(model_config: MockModelConfig):
     _, tokenizer_name, _, kwargs = tokenizer_args_from_config(model_config)
 
     return HfRenderer.from_config(
-        MockVllmConfig(model_config),
+        MockVllmConfig(model_config, parallel_config=MockParallelConfig()),
         tokenizer_kwargs={**kwargs, "tokenizer_name": tokenizer_name},
     )
 
@@ -79,10 +85,20 @@ def _build_serving_chat(engine: AsyncLLM) -> OpenAIServingChat:
         engine_client=engine,
         base_model_paths=BASE_MODEL_PATHS,
     )
+    serving_render = OpenAIServingRender(
+        model_config=engine.model_config,
+        renderer=engine.renderer,
+        io_processor=engine.io_processor,
+        model_registry=models.registry,
+        request_logger=None,
+        chat_template=None,
+        chat_template_content_format="auto",
+    )
     serving_chat = OpenAIServingChat(
         engine,
         models,
         response_role="assistant",
+        openai_serving_render=serving_render,
         request_logger=None,
         chat_template=None,
         chat_template_content_format="auto",
@@ -95,7 +111,9 @@ def _build_serving_chat(engine: AsyncLLM) -> OpenAIServingChat:
             [{"prompt_token_ids": [1, 2, 3]}],
         )
 
-    serving_chat._preprocess_chat = AsyncMock(side_effect=_fake_preprocess_chat)
+    serving_chat.openai_serving_render._preprocess_chat = AsyncMock(
+        side_effect=_fake_preprocess_chat
+    )
     return serving_chat
 
 
@@ -145,12 +163,8 @@ async def test_chat_error_non_stream():
         stream=False,
     )
 
-    response = await serving_chat.create_chat_completion(request)
-
-    assert isinstance(response, ErrorResponse)
-    assert response.error.type == "InternalServerError"
-    assert response.error.message == "Internal server error"
-    assert response.error.code == HTTPStatus.INTERNAL_SERVER_ERROR
+    with pytest.raises(GenerationError):
+        await serving_chat.create_chat_completion(request)
 
 
 @pytest.mark.asyncio

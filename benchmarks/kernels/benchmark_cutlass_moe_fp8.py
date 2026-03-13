@@ -64,7 +64,7 @@ def bench_run(
     per_out_ch: bool,
     mkn: tuple[int, int, int],
 ):
-    init_workspace_manager(torch.cuda.current_device())
+    init_workspace_manager(torch.accelerator.current_device_index())
     (m, k, n) = mkn
 
     dtype = torch.half
@@ -171,7 +171,7 @@ def bench_run(
                 activation=MoEActivation.SILU,
                 global_num_experts=num_experts,
             )
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     # Create CUDA graphs for Triton (match benchmark_moe.py pattern exactly)
     triton_stream = torch.cuda.Stream()
@@ -187,14 +187,14 @@ def bench_run(
                 topk_ids,
                 quant_config=quant_config,
             )
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     def bench_cuda_graph(graph, num_warmup=5, num_iters=100):
         """Benchmark CUDA graph using events like benchmark_moe.py"""
         # Warmup
         for _ in range(num_warmup):
             graph.replay()
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
 
         # Timing
         start_event = torch.Event(enable_timing=True)
@@ -202,7 +202,7 @@ def bench_run(
 
         latencies = []
         for _ in range(num_iters):
-            torch.cuda.synchronize()
+            torch.accelerator.synchronize()
             start_event.record()
             graph.replay()
             end_event.record()
