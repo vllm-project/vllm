@@ -5757,8 +5757,8 @@ class GPUModelRunner(
         # Max workspace sizes should have been captured during warmup/profiling.
         lock_workspace()
 
-        if envs.VLLM_ZERO_NULL_KV_BLOCK_AFTER_CUDA_GRAPH_CAPTURE:
-            self._zero_null_block_kv_data()
+        # clean up any stale kv cache data from the null block
+        self._zero_null_block_kv_data()
 
         end_time = time.perf_counter()
         elapsed_time = end_time - start_time
