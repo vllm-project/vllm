@@ -276,6 +276,11 @@ class OpenAIServingChat(OpenAIServing):
                 self.override_max_tokens,
             )
 
+            if "skip_special_tokens" in self.default_sampling_params:
+                request.skip_special_tokens = (
+                    self.default_sampling_params["skip_special_tokens"]
+                )
+
             sampling_params: SamplingParams | BeamSearchParams
             if request.use_beam_search:
                 sampling_params = request.to_beam_search_params(

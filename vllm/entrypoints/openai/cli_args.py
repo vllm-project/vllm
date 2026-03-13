@@ -154,9 +154,11 @@ class BaseFrontendArgs:
     """
     log_error_stack: bool = envs.VLLM_SERVER_DEV_MODE
     """If set to True, log the stack trace of error responses"""
+    skip_special_tokens: bool = True
+    """Whether to skip special tokens in the output."""
     tokens_only: bool = False
     """
-    If set to True, only enable the Tokens In<>Out endpoint. 
+    If set to True, only enable the Tokens In<>Out endpoint.
     This is intended for use in a Disaggregated Everything setup.
     """
 

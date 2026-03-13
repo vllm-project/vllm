@@ -153,6 +153,17 @@ async def init_generate_state(
         if "generate" in supported_tasks
         else None
     )
+    # Inject server-side skip_special_tokens into default sampling params
+    for serving in (
+        state.openai_serving_responses,
+        state.openai_serving_chat,
+        state.openai_serving_completion,
+    ):
+        if serving is not None:
+            serving.default_sampling_params["skip_special_tokens"] = (
+                args.skip_special_tokens
+            )
+
     state.anthropic_serving_messages = (
         AnthropicServingMessages(
             engine_client,
