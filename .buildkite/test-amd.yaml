@@ -369,7 +369,7 @@ steps:
     - vllm/
     - tests/v1
   commands:
-    - pytest -v -s v1/e2e/test_spec_decode.py -k "tensor_parallelism"
+    - pytest -v -s v1/e2e/spec_decode/test_spec_decode.py -k "tensor_parallelism"
 
 - label: V1 Test e2e (4 GPUs) # 65min
   timeout_in_minutes: 90
@@ -380,7 +380,7 @@ steps:
     - vllm/
     - tests/v1
   commands:
-    - pytest -v -s v1/e2e/test_spec_decode.py -k "eagle_correctness_heavy"
+    - pytest -v -s v1/e2e/spec_decode/test_spec_decode.py -k "eagle_correctness_heavy"
 
 - label: V1 Test entrypoints # 35min
   timeout_in_minutes: 50
@@ -1744,7 +1744,7 @@ steps:
     - tests/v1
   commands:
     # Only run tests that need exactly 2 GPUs
-    - pytest -v -s v1/e2e/test_spec_decode.py -k "tensor_parallelism"
+    - pytest -v -s v1/e2e/spec_decode/test_spec_decode.py -k "tensor_parallelism"
 
 - label: V1 Test e2e (4 GPUs) # 65min
   timeout_in_minutes: 90
@@ -1759,7 +1759,7 @@ steps:
     - tests/v1
   commands:
     # Only run tests that need 4 GPUs
-    - pytest -v -s v1/e2e/test_spec_decode.py -k "eagle_correctness_heavy"
+    - pytest -v -s v1/e2e/spec_decode/test_spec_decode.py -k "eagle_correctness_heavy"
 
 - label: V1 Test entrypoints # 35min
   timeout_in_minutes: 50
@@ -3494,7 +3494,7 @@ steps:
     - tests/v1
   commands:
     # Only run tests that need exactly 2 GPUs
-    - pytest -v -s v1/e2e/test_spec_decode.py -k "tensor_parallelism"
+    - pytest -v -s v1/e2e/spec_decode/test_spec_decode.py -k "tensor_parallelism"
 
 - label: V1 Test e2e (4 GPUs) # 65min
   timeout_in_minutes: 90
@@ -3509,7 +3509,7 @@ steps:
     - tests/v1
   commands:
     # Only run tests that need 4 GPUs
-    - pytest -v -s v1/e2e/test_spec_decode.py -k "eagle_correctness_heavy"
+    - pytest -v -s v1/e2e/spec_decode/test_spec_decode.py -k "eagle_correctness_heavy"
 
 - label: V1 Test entrypoints # 35min
   timeout_in_minutes: 50
