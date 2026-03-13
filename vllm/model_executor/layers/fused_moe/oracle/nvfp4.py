@@ -374,11 +374,15 @@ def make_nvfp4_moe_quant_config(
             w2_scale=w2_scale,
         )
 
-    g1_alphas = a13_scale * w13_scale_2
-    g2_alphas = a2_scale * w2_scale_2
+    # Inplace fusions so we shuffle the fused scales with EPLB.
+    # When EPLB rearranges w13_scale_2 / w2_scale_2 (which are registered
+    # parameters), the quant config's g1/g2_alphas reference the same
+    # tensors and stay in sync automatically.
+    w13_scale_2 *= a13_scale
+    w2_scale_2 *= a2_scale
     return nvfp4_moe_quant_config(
-        g1_alphas=g1_alphas,
-        g2_alphas=g2_alphas,
+        g1_alphas=w13_scale_2,
+        g2_alphas=w2_scale_2,
         a1_gscale=(1.0 / a13_scale),
         a2_gscale=(1.0 / a2_scale),
         w1_scale=w13_scale,
