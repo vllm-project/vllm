@@ -1,15 +1,13 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use parking_lot::Mutex;
-use tokio::sync::{Mutex as AsyncMutex, mpsc};
+use tokio::sync::mpsc;
 use tokio_util::task::AbortOnDropHandle;
 use tracing::debug;
 
 use crate::client::imp::{
-    ClientInner, RequestStreamState, run_auto_abort_loop, run_output_dispatcher_loop,
+    ClientInner, RequestStreamState, run_abort_loop, run_output_dispatcher_loop,
 };
-use crate::client::state::{ClientClosedState, RequestRegistry};
 use crate::error::Result;
 use crate::protocol::handshake::ReadyMessage;
 use crate::protocol::{EngineCoreRequest, EngineCoreRequestType};
@@ -22,8 +20,8 @@ pub use imp::RequestOutputStream;
 
 const CLIENT_SHUTDOWN_REASON: &str = "engine-core client shut down";
 
-/// Configuration for connecting a Rust frontend client to an already running
-/// Python `EngineCoreProc`.
+/// Configuration for connecting a Rust frontend client to an already running Python
+/// `EngineCoreProc`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EngineCoreClientConfig {
     /// Startup handshake address that the Python engine connects to first.
@@ -47,18 +45,17 @@ impl EngineCoreClientConfig {
     }
 }
 
-/// Default ZMQ-based implementation that talks directly to a Python
-/// `EngineCoreProc`.
+/// Default ZMQ-based implementation that talks directly to a Python `EngineCoreProc`.
 pub struct EngineCoreClient {
     config: EngineCoreClientConfig,
     input_address: String,
     output_address: String,
     engine_identity: Vec<u8>,
     inner: Arc<ClientInner>,
-    auto_abort_tx: mpsc::UnboundedSender<String>,
+    abort_tx: mpsc::UnboundedSender<String>,
     output_task: AbortOnDropHandle<()>,
     dispatcher_task: AbortOnDropHandle<()>,
-    auto_abort_task: AbortOnDropHandle<()>,
+    abort_task: AbortOnDropHandle<()>,
     pub ready_message: Option<ReadyMessage>,
 }
 
@@ -74,27 +71,28 @@ impl EngineCoreClient {
         Self::from_connected(config, connected)
     }
 
+    /// Create a new client instance from the connected transport state after the startup handshake
+    /// completes.
     fn from_connected(
         config: EngineCoreClientConfig,
         connected: transport::ConnectedTransport,
     ) -> Result<Self> {
-        let (output_tx, rx) = mpsc::channel(64);
-        let (auto_abort_tx, auto_abort_rx) = mpsc::unbounded_channel();
-        let inner = Arc::new(ClientInner {
-            input_send: AsyncMutex::new(Some(connected.input_send)),
-            state: Mutex::new(RequestRegistry::default()),
-        });
+        let (output_tx, output_rx) = mpsc::channel(64);
+        let (abort_tx, abort_rx) = mpsc::unbounded_channel();
+        let inner = Arc::new(ClientInner::new(connected.input_send));
         let engine_identity = connected.engine_identity;
         let output_task = AbortOnDropHandle::new(tokio::spawn(transport::run_output_loop(
             connected.output_socket,
             output_tx,
         )));
-        let dispatcher_task =
-            AbortOnDropHandle::new(tokio::spawn(run_output_dispatcher_loop(inner.clone(), rx)));
-        let auto_abort_task = AbortOnDropHandle::new(tokio::spawn(run_auto_abort_loop(
+        let dispatcher_task = AbortOnDropHandle::new(tokio::spawn(run_output_dispatcher_loop(
+            inner.clone(),
+            output_rx,
+        )));
+        let abort_task = AbortOnDropHandle::new(tokio::spawn(run_abort_loop(
             inner.clone(),
             engine_identity.clone(),
-            auto_abort_rx,
+            abort_rx,
         )));
 
         Ok(Self {
@@ -103,10 +101,10 @@ impl EngineCoreClient {
             output_address: connected.output_address,
             engine_identity,
             inner,
-            auto_abort_tx,
+            abort_tx,
             output_task,
             dispatcher_task,
-            auto_abort_task,
+            abort_task,
             ready_message: Some(connected.ready_message),
         })
     }
@@ -126,8 +124,7 @@ impl EngineCoreClient {
 
 // Client API implementation.
 impl EngineCoreClient {
-    /// Add a new request to the engine and return a per-request raw output
-    /// stream.
+    /// Add a new request to the engine and return a per-request raw output stream.
     pub async fn call(&self, mut req: EngineCoreRequest) -> Result<RequestOutputStream> {
         req.client_index = self.config.client_index;
         req.validate()?;
@@ -151,7 +148,7 @@ impl EngineCoreClient {
 
         Ok(RequestOutputStream {
             request_id,
-            auto_abort_tx: self.auto_abort_tx.clone(),
+            abort_tx: self.abort_tx.clone(),
             state: RequestStreamState::Running,
             rx,
         })
@@ -180,24 +177,25 @@ impl EngineCoreClient {
     pub async fn shutdown(self) -> Result<()> {
         let Self {
             inner,
-            auto_abort_tx,
+            abort_tx,
             output_task,
             dispatcher_task,
-            auto_abort_task,
+            abort_task,
             ..
         } = self;
 
         debug!("shutting down engine-core client");
-        inner.close_requests(ClientClosedState::ClientShutdown {
-            reason: CLIENT_SHUTDOWN_REASON.to_string(),
-        });
-        drop(auto_abort_tx);
-        inner.input_send.lock().await.take();
-        auto_abort_task.abort();
+        inner.shutdown().await;
+        drop(abort_tx);
+
+        // Abort all client tasks and wait for them to finish.
+        // Note the aborting orders here.
+        abort_task.abort();
         dispatcher_task.abort();
         output_task.abort();
-        debug!("engine-core client shut down");
+        let _ = tokio::join!(abort_task, dispatcher_task, output_task);
 
+        debug!("engine-core client shut down");
         Ok(())
     }
 }

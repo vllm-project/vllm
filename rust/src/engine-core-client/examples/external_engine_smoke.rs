@@ -5,10 +5,10 @@ use clap::Parser;
 use futures::StreamExt;
 use tokio::time::timeout;
 use tracing_subscriber::EnvFilter;
-use vllm_engine_core_client::{
-    EngineCoreClient, EngineCoreClientConfig, RequestOutputStream,
-    protocol::{EngineCoreRequest, FinishReason, RequestOutputKind, SamplingParams, StopReason},
+use vllm_engine_core_client::protocol::{
+    EngineCoreRequest, FinishReason, RequestOutputKind, SamplingParams, StopReason,
 };
+use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig, RequestOutputStream};
 
 const PROMPT_TOKEN_IDS: &[u32] = &[20841, 448, 6896, 25, 23811];
 
@@ -81,6 +81,12 @@ async fn wait_for_request_completion(mut stream: RequestOutputStream) -> Result<
         completed.new_token_ids.extend(output.new_token_ids);
 
         if finished {
+            let none = stream.next().await;
+            assert!(
+                none.is_none(),
+                "expected stream to end after finished output"
+            );
+
             completed.finish_reason = output.finish_reason;
             completed.stop_reason = output.stop_reason;
             return Ok(completed);

@@ -15,8 +15,7 @@ pub enum ClientClosedState {
 }
 
 impl ClientClosedState {
-    /// Convert the internal closed-state marker into the public client error
-    /// that callers should observe after request lifecycle processing stops.
+    /// Convert the closed state into a corresponding error for reporting to active request streams.
     pub fn error(&self) -> Error {
         match self {
             Self::DispatcherFailed { reason } => Error::DispatcherClosed {
@@ -36,6 +35,10 @@ enum ClientState {
     Closed(ClientClosedState),
 }
 
+/// Internal registry for tracking active requests and their output stream senders.
+///
+/// This is used to route incoming outputs to the correct request stream, and to ensure proper
+/// cleanup of senders when requests finish or the client shuts down.
 #[derive(Debug, Default)]
 pub struct RequestRegistry {
     state: ClientState,
@@ -43,8 +46,8 @@ pub struct RequestRegistry {
 }
 
 impl RequestRegistry {
-    /// Register a newly added request before it is sent to the engine and
-    /// create the per-request output channel bound to its `request_id`.
+    /// Register a newly added request. Create the per-request output channel bound to its
+    /// `request_id`.
     pub fn register(&mut self, request_id: String) -> Result<RequestStreamReceiver> {
         self.ensure_running()?;
         if self.requests.contains_key(&request_id) {
@@ -56,14 +59,8 @@ impl RequestRegistry {
         Ok(rx)
     }
 
-    /// Remove a request registration when `add_request()` fails after local
-    /// state has already been installed.
-    pub fn rollback(&mut self, request_id: &str) {
-        self.requests.remove(request_id);
-    }
-
-    /// Filter a caller-provided abort list down to requests that are still
-    /// locally tracked as in flight.
+    /// Filter the given request IDs to the subset that are still tracked as active and can be
+    /// aborted.
     pub fn abortable_request_ids(&self, request_ids: &[String]) -> Result<Vec<String>> {
         self.ensure_running()?;
         Ok(request_ids
@@ -73,8 +70,8 @@ impl RequestRegistry {
             .collect())
     }
 
-    /// Look up the stream sender for one output and detach it immediately if
-    /// this output marks the request finished.
+    /// Obtain the stream sender for one output. If it indicates the request is finished, it will be
+    /// removed from the registry.
     pub fn sender_for_output(&mut self, output: &EngineCoreOutput) -> Option<RequestStreamSender> {
         if output.finished() {
             self.requests.remove(output.request_id.as_str())
@@ -83,9 +80,8 @@ impl RequestRegistry {
         }
     }
 
-    /// Close and remove requests that were declared finished out-of-band via
-    /// the batched `finished_requests` signal.
-    pub fn finish_requests<'a>(
+    /// Remove a batch of requests that have finished or aborted, returning their stream senders.
+    pub fn finish_many<'a>(
         &mut self,
         request_ids: impl IntoIterator<Item = &'a String>,
     ) -> Vec<RequestStreamSender> {
@@ -95,10 +91,11 @@ impl RequestRegistry {
             .collect()
     }
 
-    /// Transition the registry into a closed state and detach every active
-    /// request stream for terminal error propagation.
+    /// Mark the registry as closed with the given state, detach and return all tracked senders.
+    /// This will reject any future operations on the registry.
     pub fn close(&mut self, closed_state: ClientClosedState) -> Vec<RequestStreamSender> {
         if matches!(self.state, ClientState::Closed(_)) {
+            // Already closed, no-op.
             return Vec::new();
         }
 
@@ -106,9 +103,9 @@ impl RequestRegistry {
         std::mem::take(&mut self.requests).into_values().collect()
     }
 
-    /// Remove one request from local tracking, typically because its stream was
-    /// dropped before the engine declared completion.
-    pub fn remove_request(&mut self, request_id: &str) -> Option<RequestStreamSender> {
+    /// Remove one request from the local registry. Returns the corresponding sender if exists.
+    #[must_use]
+    pub fn remove(&mut self, request_id: &str) -> Option<RequestStreamSender> {
         self.requests.remove(request_id)
     }
 
@@ -117,35 +114,24 @@ impl RequestRegistry {
         self.requests.contains_key(request_id)
     }
 
-    /// Return the terminal client state, if request lifecycle processing has
-    /// already been shut down.
-    pub fn closed_state(&self) -> Option<&ClientClosedState> {
-        match &self.state {
-            ClientState::Running => None,
-            ClientState::Closed(closed_state) => Some(closed_state),
-        }
-    }
-
-    /// Report whether request registration and dispatch are still allowed.
+    /// Returns true if the registry is still running.
     pub fn is_running(&self) -> bool {
         matches!(self.state, ClientState::Running)
     }
 
-    /// Reject request-lifecycle operations after the client has already been
-    /// closed by shutdown or dispatcher failure.
+    /// Ensure the state of the registry is still running, returning an error if it has been closed.
     fn ensure_running(&self) -> Result<()> {
-        if let Some(closed_state) = self.closed_state() {
-            return Err(closed_state.error());
+        match &self.state {
+            ClientState::Running => Ok(()),
+            ClientState::Closed(closed_state) => Err(closed_state.error()),
         }
-        Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::protocol::{EngineCoreOutput, FinishReason};
-
     use super::{ClientClosedState, RequestRegistry};
+    use crate::protocol::{EngineCoreOutput, FinishReason};
 
     #[test]
     fn registry_rejects_duplicate_request_ids() {

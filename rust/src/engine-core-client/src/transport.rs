@@ -1,8 +1,7 @@
-use std::collections::BTreeMap;
-use std::net::TcpListener;
 use std::time::Duration;
 
 use bytes::Bytes;
+use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tokio::time::timeout;
 use tracing::{debug, error, warn};
@@ -13,20 +12,32 @@ use crate::error::{Error, Result};
 use crate::protocol::handshake::{HandshakeAddresses, HandshakeInitMessage, ReadyMessage};
 use crate::protocol::{EngineCoreOutputs, decode_msgpack, encode_msgpack};
 
+/// Represents the connected transport components after a successful startup handshake, which the
+/// client can use for subsequent communication with the engine.
 pub struct ConnectedTransport {
+    /// The local address of the input socket that the engine connects to for receiving requests.
     pub input_address: String,
+    /// The local address of the output socket that the engine connects to for sending responses.
     pub output_address: String,
+    /// The identity of the connected engine.
     pub engine_identity: Vec<u8>,
+
+    /// The sending half of the input socket.
     pub input_send: RouterSendHalf,
+    /// The output socket for receiving responses from the engine.
     pub output_socket: PullSocket,
+
+    /// The READY message received from the engine during the handshake.
     pub ready_message: ReadyMessage,
 }
 
+/// Connect to the engine through the startup handshake protocol, returning [`ConnectedTransport`].
 pub async fn connect(
     handshake_address: &str,
     local_host: &str,
     ready_timeout: Duration,
 ) -> Result<ConnectedTransport> {
+    // 1. Bind handshake socket and local input/output sockets.
     debug!(
         handshake_address,
         local_host,
@@ -40,6 +51,8 @@ pub async fn connect(
         bind_local_sockets(local_host).await?;
     debug!(%input_address, %output_address, "bound local transport sockets");
 
+    // 2. Wait for HELLO from engine, extract engine identity, and send INIT with local socket
+    //    addresses.
     let hello = timeout(ready_timeout, handshake_socket.recv())
         .await
         .map_err(|_| Error::HandshakeTimeout {
@@ -58,6 +71,7 @@ pub async fn connect(
     .await?;
     debug!(engine_identity = ?engine_identity, "sent INIT to engine");
 
+    // 3. Wait for READY from engine and for the engine to connect to the input socket.
     debug!(engine_identity = ?engine_identity, "waiting for READY from engine");
     let ready = timeout(ready_timeout, handshake_socket.recv())
         .await
@@ -71,6 +85,8 @@ pub async fn connect(
         ready_message = ?ready_message,
         "received READY from engine"
     );
+
+    // 4. Wait for the engine to connect to the input socket and register itself.
     wait_for_input_registration(&mut input_socket, &engine_identity, ready_timeout).await?;
     debug!(engine_identity = ?engine_identity, "engine input registered");
 
@@ -86,11 +102,12 @@ pub async fn connect(
     })
 }
 
+/// Bind new input and output sockets.
 async fn bind_local_sockets(
     local_host: &str,
 ) -> Result<(String, RouterSocket, String, PullSocket)> {
-    let input_address = allocate_tcp_address(local_host)?;
-    let output_address = allocate_tcp_address(local_host)?;
+    let input_address = allocate_tcp_address(local_host).await?;
+    let output_address = allocate_tcp_address(local_host).await?;
 
     let mut input_socket = RouterSocket::new();
     input_socket.bind(&input_address).await?;
@@ -101,13 +118,15 @@ async fn bind_local_sockets(
     Ok((input_address, input_socket, output_address, output_socket))
 }
 
-fn allocate_tcp_address(local_host: &str) -> Result<String> {
-    let listener = TcpListener::bind((local_host, 0))?;
+/// Allocate a port on the local host and return the corresponding TCP address.
+async fn allocate_tcp_address(local_host: &str) -> Result<String> {
+    let listener = TcpListener::bind((local_host, 0)).await?;
     let port = listener.local_addr()?.port();
     drop(listener);
     Ok(format!("tcp://{local_host}:{port}"))
 }
 
+/// Decode a handshake message and validate its structure, identity, and status.
 fn decode_handshake_message(
     message: ZmqMessage,
     expected_identity: Option<&[u8]>,
@@ -143,6 +162,8 @@ fn decode_handshake_message(
     Ok((actual_identity, handshake_message))
 }
 
+/// Send an INIT message to the engine with the local socket addresses for the engine to connect to,
+/// using the handshake socket.
 async fn send_init_message(
     handshake_socket: &mut RouterSocket,
     engine_identity: &[u8],
@@ -157,7 +178,7 @@ async fn send_init_message(
             coordinator_output: None,
             frontend_stats_publish_address: None,
         },
-        parallel_config: BTreeMap::new(),
+        parallel_config: Default::default(),
     };
     let payload = encode_msgpack(&init_message)?;
     let message = ZmqMessage::try_from(vec![
@@ -169,6 +190,9 @@ async fn send_init_message(
     Ok(())
 }
 
+/// Receive the input registration message from the engine and validate its identity.
+///
+/// There will 2 frames: [identity, empty-payload].
 async fn wait_for_input_registration(
     input_socket: &mut RouterSocket,
     expected_identity: &[u8],
@@ -206,6 +230,7 @@ async fn wait_for_input_registration(
     Ok(())
 }
 
+/// Send an encoded message to the engine through the input socket.
 pub async fn send_message(
     input_send: &mut RouterSendHalf,
     engine_identity: &[u8],
@@ -228,6 +253,7 @@ pub async fn send_message(
     Ok(())
 }
 
+/// Run the output loop to receive messages from the engine and send them to the provided channel.
 pub async fn run_output_loop(
     mut output_socket: PullSocket,
     tx: mpsc::Sender<Result<EngineCoreOutputs>>,
@@ -236,6 +262,9 @@ pub async fn run_output_loop(
         let message = match output_socket.recv().await {
             Ok(message) => message,
             Err(error) => {
+                // If we fail to receive a message from the engine, it's likely that the engine has
+                // crashed or become unreachable, so we should notify the client and shut down the
+                // output loop.
                 error!(error = ?error, "failed to receive output message");
                 let _ = tx.send(Err(Error::Transport(error))).await;
                 return;
@@ -263,11 +292,16 @@ pub async fn run_output_loop(
                 Ok(decoded)
             }
             Err(error) => {
+                // If we fail to decode the message from the engine, notify the client but keep the
+                // output loop running to continue processing future messages from the engine.
                 warn!(frame_len, error = ?error, "failed to decode output message");
                 Err(error)
             }
         };
+
         if tx.send(decoded).await.is_err() {
+            // If we fail to send the decoded message to the client, it's likely that the client has
+            // shut down, so we should shut down the output loop as well.
             warn!("output loop rx dropped, shutting down output loop");
             return;
         }

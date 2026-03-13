@@ -2,11 +2,13 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::protocol::OpaqueValue;
+
 /// Decoded engine startup-handshake payload.
 ///
 /// Original Python payload construction:
 /// <https://github.com/vllm-project/vllm/blob/f22d6e026798a74e6542a52ef776c054f2de572a/vllm/v1/engine/core.py#L961-L981>
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ReadyMessage {
     #[serde(default)]
     pub status: Option<String>,
@@ -27,7 +29,7 @@ pub struct ReadyMessage {
 ///
 /// Original Python definition (`EngineZmqAddresses`):
 /// <https://github.com/vllm-project/vllm/blob/f22d6e026798a74e6542a52ef776c054f2de572a/vllm/v1/engine/utils.py#L53-L67>
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HandshakeAddresses {
     pub inputs: Vec<String>,
     pub outputs: Vec<String>,
@@ -41,8 +43,8 @@ pub struct HandshakeAddresses {
 ///
 /// Original Python definition (`EngineHandshakeMetadata`):
 /// <https://github.com/vllm-project/vllm/blob/f22d6e026798a74e6542a52ef776c054f2de572a/vllm/v1/engine/utils.py#L69-L77>
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HandshakeInitMessage {
     pub addresses: HandshakeAddresses,
-    pub parallel_config: BTreeMap<String, u32>,
+    pub parallel_config: BTreeMap<String, OpaqueValue>,
 }

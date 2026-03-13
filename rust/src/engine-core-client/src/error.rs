@@ -49,6 +49,7 @@ pub enum Error {
     #[error("request output stream for `{request_id}` closed unexpectedly")]
     RequestStreamClosed { request_id: String },
 
+    /// A special variant to allow cloning the same error.
     #[error(transparent)]
     Shared(Arc<Self>),
 }

@@ -1,81 +1,84 @@
 use std::pin::Pin;
 use std::sync::Arc;
-use std::task::Context;
-use std::task::Poll;
+use std::task::{Context, Poll};
 
 use futures::Stream;
 use futures::stream::FusedStream;
 use parking_lot::Mutex;
 use thiserror_ext::AsReport as _;
 use tokio::sync::{Mutex as AsyncMutex, mpsc};
-use tracing::debug;
-use tracing::warn;
+use tracing::{debug, warn};
+use zeromq::RouterSendHalf;
 
-use crate::Error;
-use crate::Result;
-use crate::protocol::ClassifiedEngineCoreOutputs;
-use crate::protocol::EngineCoreOutputs;
-use crate::protocol::EngineCoreRequestType;
-use crate::protocol::encode_msgpack;
-use crate::transport;
-use crate::{
-    client::state::{ClientClosedState, RequestRegistry, RequestStreamReceiver},
-    protocol::EngineCoreOutput,
+use crate::client::CLIENT_SHUTDOWN_REASON;
+use crate::client::state::{ClientClosedState, RequestRegistry, RequestStreamReceiver};
+use crate::protocol::{
+    ClassifiedEngineCoreOutputs, EngineCoreOutput, EngineCoreOutputs, EngineCoreRequestType,
+    encode_msgpack,
 };
+use crate::{Error, Result, transport};
 
 pub(super) struct ClientInner {
-    pub(super) input_send: AsyncMutex<Option<zeromq::RouterSendHalf>>,
-    pub(super) state: Mutex<RequestRegistry>,
+    input_send: AsyncMutex<Option<RouterSendHalf>>,
+    request_reg: Mutex<RequestRegistry>,
 }
 
 impl ClientInner {
-    /// Install local request lifecycle state before the `Add` message is sent,
-    /// so output dispatch can start immediately if the engine replies fast.
+    /// Create a new instance with the given input send half after the startup handshake completes.
+    pub fn new(input_send: RouterSendHalf) -> Self {
+        Self {
+            input_send: AsyncMutex::new(Some(input_send)),
+            request_reg: Mutex::new(RequestRegistry::default()),
+        }
+    }
+
+    /// Register a newly added request. Return the per-request output channel bound to its
+    /// `request_id`.
     pub fn register_request(&self, request_id: String) -> Result<RequestStreamReceiver> {
-        self.state.lock().register(request_id)
+        self.request_reg.lock().register(request_id)
     }
 
-    /// Undo local lifecycle state when the outbound `Add` send fails after
-    /// registration.
+    /// Undo a request registration when `add_request()` fails.
     pub fn rollback_request(&self, request_id: &str) {
-        self.state.lock().rollback(request_id);
+        let _ = self.request_reg.lock().remove(request_id);
     }
 
-    /// Keep explicit aborts limited to requests that are still locally tracked
-    /// as in flight.
+    /// Filter the given request IDs to the subset that are still tracked as active and can be
+    /// aborted.
     pub fn abortable_request_ids(&self, request_ids: &[String]) -> Result<Vec<String>> {
-        self.state.lock().abortable_request_ids(request_ids)
+        self.request_reg.lock().abortable_request_ids(request_ids)
     }
 
-    /// Resolve the per-request stream sender for one output, removing the
-    /// request first if this output already completes its lifecycle.
+    /// Obtain the stream sender for one output. If it indicates the request is finished, it will be
+    /// removed from the registry.
     pub fn take_sender_for_output(
         &self,
         output: &EngineCoreOutput,
     ) -> Option<mpsc::UnboundedSender<Result<EngineCoreOutput>>> {
-        self.state.lock().sender_for_output(output)
+        self.request_reg.lock().sender_for_output(output)
     }
 
-    /// Remove requests that the engine declared finished through the batched
-    /// `finished_requests` side channel.
+    /// Remove a batch of requests that have finished or aborted, returning their stream senders.
     pub fn finish_requests<'a>(
         &self,
         request_ids: impl IntoIterator<Item = &'a String>,
     ) -> Vec<mpsc::UnboundedSender<Result<EngineCoreOutput>>> {
-        self.state.lock().finish_requests(request_ids)
+        self.request_reg.lock().finish_many(request_ids)
     }
 
-    /// Close all active request streams with the same terminal lifecycle error.
+    /// Close all active request streams with an error message based on the given closed state.
     pub fn close_requests(&self, closed_state: ClientClosedState) {
         let error = Arc::new(closed_state.error());
-        let senders = self.state.lock().close(closed_state);
+        let senders = self.request_reg.lock().close(closed_state);
+
+        // Notify all ongoing requests that the client is closed.
         for sender in senders {
             let _ = sender.send(Err(Error::Shared(error.clone())));
         }
     }
 
-    /// Send one lifecycle control message after local request bookkeeping has
-    /// already been updated.
+    /// Send the given message to the engine. The request should be first registered via
+    /// `register_request()` to ensure the request stream is tracked.
     pub async fn send_to_engine<T>(
         &self,
         engine_identity: &[u8],
@@ -83,15 +86,9 @@ impl ClientInner {
         payload: &T,
     ) -> Result<()>
     where
-        T: serde::Serialize + std::fmt::Debug,
+        T: serde::Serialize,
     {
-        debug!(?request_type, request = ?payload, "encoding engine-core message");
         let payload = encode_msgpack(payload)?;
-        debug!(
-            ?request_type,
-            payload_bytes = payload.len(),
-            "sending engine-core message"
-        );
         let mut guard = self.input_send.lock().await;
         let input_send = guard
             .as_mut()
@@ -103,8 +100,16 @@ impl ClientInner {
             payload,
         )
         .await?;
-        debug!(?request_type, "sent engine-core message");
         Ok(())
+    }
+
+    /// Shut down by closing all active request streams and then closing the input socket to signal
+    /// the engine that no more messages will be sent.
+    pub async fn shutdown(&self) {
+        self.close_requests(ClientClosedState::ClientShutdown {
+            reason: CLIENT_SHUTDOWN_REASON.to_string(),
+        });
+        self.input_send.lock().await.take();
     }
 }
 
@@ -118,12 +123,12 @@ pub(super) enum RequestStreamState {
 
 /// Stream of raw engine-core outputs for one request.
 ///
-/// The stream yields only `EngineCoreOutput` values whose `request_id` matches
-/// the originating `add_request()` call. Normal request completion is expected
-/// to include a final output object whose `finish_reason` is non-`None`.
+/// The stream yields only [`EngineCoreOutput`] values whose `request_id` matches the originating
+/// `add_request()` call. Normal request completion is expected to include a final output object
+/// whose `finish_reason` is non-`None`.
 pub struct RequestOutputStream {
     pub(super) request_id: String,
-    pub(super) auto_abort_tx: mpsc::UnboundedSender<String>,
+    pub(super) abort_tx: mpsc::UnboundedSender<String>,
     pub(super) state: RequestStreamState,
     pub(super) rx: RequestStreamReceiver,
 }
@@ -148,17 +153,28 @@ impl Stream for RequestOutputStream {
             Poll::Ready(Some(item)) => {
                 match &item {
                     Ok(output) => {
+                        // If the output indicates the request is finished, mark the stream as
+                        // terminated with cleanly-finished state and expect no more outputs to
+                        // come.
                         if output.finished() {
+                            debug!(self.request_id, "request completed via final output");
                             self.state = RequestStreamState::Finished;
                         }
                     }
-                    Err(_) => {
+                    Err(error) => {
+                        // If we get an error from the output stream, mark the stream as terminated
+                        // with an error.
+                        debug!(self.request_id, error = %error.as_report(), "request encountered an error");
                         self.state = RequestStreamState::ClosedWithError;
                     }
                 }
                 Poll::Ready(Some(item))
             }
             Poll::Ready(None) => {
+                // If we get a `None` without seeing a finished output, this is an unexpected close
+                // from the engine side. Mark the stream as terminated with an unexpected close
+                // state and send an error down the stream to notify the caller.
+                debug!(self.request_id, "request stream closed unexpectedly");
                 self.state = RequestStreamState::UnexpectedClose;
 
                 Poll::Ready(Some(Err(Error::RequestStreamClosed {
@@ -178,11 +194,14 @@ impl FusedStream for RequestOutputStream {
 impl Drop for RequestOutputStream {
     fn drop(&mut self) {
         if self.is_terminated() {
+            // If it's terminated, it means that the request either finished cleanly, or encountered
+            // an error or unexpected close from the engine. In any case, the request stream is
+            // already considered inactive and there's no need to abort it on the engine side.
             return;
         }
 
         let request_id = self.request_id.clone();
-        if self.auto_abort_tx.send(request_id.clone()).is_err() {
+        if self.abort_tx.send(request_id.clone()).is_err() {
             warn!(
                 request_id,
                 "auto-abort worker already shut down; skip auto-abort"
@@ -191,18 +210,20 @@ impl Drop for RequestOutputStream {
     }
 }
 
-/// Serialize auto-aborts for request streams that were dropped before the
-/// engine declared completion.
-pub(super) async fn run_auto_abort_loop(
+/// Background loop that listens for request IDs to abort and sends abort messages to the engine.
+/// This is used to implement the auto-abort behavior when a request stream is dropped without being
+/// properly terminated.
+pub(super) async fn run_abort_loop(
     inner: Arc<ClientInner>,
     engine_identity: Vec<u8>,
-    mut auto_abort_rx: mpsc::UnboundedReceiver<String>,
+    mut abort_rx: mpsc::UnboundedReceiver<String>,
 ) {
-    while let Some(request_id) = auto_abort_rx.recv().await {
+    // TODO: receive and abort requests in batch
+    while let Some(request_id) = abort_rx.recv().await {
         let should_abort = {
-            let mut state = inner.state.lock();
-            let removed = state.remove_request(&request_id).is_some();
-            removed && state.is_running()
+            let mut registry = inner.request_reg.lock();
+            let removed = registry.remove(&request_id).is_some();
+            removed && registry.is_running()
         };
         if !should_abort {
             debug!(request_id, "skip auto-abort for inactive request");
@@ -226,8 +247,8 @@ pub(super) async fn run_auto_abort_loop(
     }
 }
 
-/// Consume raw engine outputs and dispatch only request-scoped lifecycle
-/// events into the matching per-request streams.
+/// Background loop that listens for engine-core outputs and dispatches them to the corresponding
+/// request streams based on their `request_id`.
 pub(super) async fn run_output_dispatcher_loop(
     inner: Arc<ClientInner>,
     mut output_rx: mpsc::Receiver<Result<EngineCoreOutputs>>,
@@ -247,7 +268,6 @@ pub(super) async fn run_output_dispatcher_loop(
             ClassifiedEngineCoreOutputs::RequestBatch(batch) => {
                 for output in batch.outputs {
                     let request_id = output.request_id.clone();
-                    let finished = output.finished();
                     let Some(sender) = inner.take_sender_for_output(&output) else {
                         debug!(request_id, "dropping output for inactive request");
                         continue;
@@ -256,12 +276,11 @@ pub(super) async fn run_output_dispatcher_loop(
                     if sender.send(Ok(output)).is_err() {
                         debug!(request_id, "request output stream receiver dropped");
                     }
-
-                    if finished {
-                        debug!(request_id, "request completed via final output");
-                    }
                 }
 
+                // The sender for normally-finished requests should have already been removed from
+                // the registry when their final output was dispatched above. This serves as a
+                // safety net to capture any requests marked as finished by the engine.
                 if let Some(finished_requests) = batch.finished_requests.as_ref() {
                     for request_id in finished_requests {
                         debug!(request_id, "request completed via finished_requests");
@@ -275,6 +294,7 @@ pub(super) async fn run_output_dispatcher_loop(
             }
             ClassifiedEngineCoreOutputs::Other(other) => {
                 debug!(outputs = ?other, "ignoring non-request engine-core output");
+                // TODO: handle other outputs, like utility call
             }
         }
     }

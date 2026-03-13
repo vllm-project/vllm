@@ -10,14 +10,12 @@ use futures::StreamExt;
 use thiserror_ext::AsReport as _;
 use tokio::time::timeout;
 use tracing_subscriber::EnvFilter;
-use vllm_engine_core_client::protocol::UtilityOutput;
-use vllm_engine_core_client::protocol::handshake::HandshakeInitMessage;
-use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig, Error};
-
+use vllm_engine_core_client::protocol::handshake::{HandshakeInitMessage, ReadyMessage};
 use vllm_engine_core_client::protocol::{
     EngineCoreOutput, EngineCoreOutputs, EngineCoreRequest, FinishReason, RequestOutputKind,
-    SamplingParams, handshake::ReadyMessage,
+    SamplingParams, UtilityOutput,
 };
+use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig, Error};
 use zeromq::prelude::{Socket, SocketRecv, SocketSend};
 use zeromq::util::PeerIdentity;
 use zeromq::{DealerSocket, PushSocket, SocketOptions, ZmqMessage};
