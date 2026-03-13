@@ -140,19 +140,19 @@ class RopeKVCachePattern:
             qkv: torch.Tensor,
             positions: torch.Tensor,
             cos_sin_cache: torch.Tensor,
-        ) -> tuple[torch.Tensor, torch.Tensor]:
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
             q, k, v = qkv.split([self.q_size, self.k_size, self.v_size], dim=-1)
             q, k = self.rope_matcher(positions, q, k, cos_sin_cache)
             k = k.view(-1, self.num_kv_heads, self.head_size)
             v = v.view(-1, self.num_kv_heads, self.head_size_v)
             dummy = torch.ops.vllm.unified_kv_cache_update(k, v, self.layer_name)
-            return dummy, q
+            return dummy, q, k, v
 
         def replacement(
             qkv: torch.Tensor,
             positions: torch.Tensor,
             cos_sin_cache: torch.Tensor,
-        ) -> tuple[torch.Tensor, torch.Tensor]:
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
             q, k, v = qkv.split([self.q_size, self.k_size, self.v_size], dim=-1)
             q_3d = q.view(-1, self.num_heads, self.head_size)
             k_3d = k.view(-1, self.num_kv_heads, self.head_size)
@@ -167,7 +167,12 @@ class RopeKVCachePattern:
                 is_neox=self.is_neox,
                 layer_name=self.layer_name,
             )
-            return results[0], results[1].reshape(-1, self.q_size)
+            return (
+                results[0],
+                results[1].reshape(-1, self.q_size),
+                results[2],
+                v_3d,
+            )
 
         def fwd_and_view_to_reshape(*args, **kwargs) -> fx.GraphModule:
             gm = pm.fwd_only(*args, **kwargs)
