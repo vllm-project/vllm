@@ -676,13 +676,6 @@ class VllmConfig:
                 self.model_config, self.load_config
             )
 
-        executor_backend = self.parallel_config.distributed_executor_backend
-        executor_supports_async_sched = executor_backend in (
-            "mp",
-            "uni",
-            "external_launcher",
-        )
-
         if self.scheduler_config.async_scheduling:
             # Async scheduling explicitly enabled, hard fail any incompatibilities.
             # Currently, async scheduling only support eagle speculative
@@ -703,12 +696,6 @@ class VllmConfig:
                         "Async scheduling is not compatible with "
                         "disable_padded_drafter_batch=True."
                     )
-            if not executor_supports_async_sched:
-                raise ValueError(
-                    "Currently, async scheduling only supports `mp`, `uni`, or "
-                    "`external_launcher` distributed executor backend, but you chose "
-                    f"`{executor_backend}`."
-                )
         elif self.scheduler_config.async_scheduling is None:
             # Enable async scheduling unless there is an incompatible option.
             if (
@@ -730,15 +717,6 @@ class VllmConfig:
                 logger.warning_once(
                     "Async scheduling is not compatible with "
                     "disable_padded_drafter_batch=True and will be disabled.",
-                    scope="local",
-                )
-                self.scheduler_config.async_scheduling = False
-            elif not executor_supports_async_sched:
-                logger.warning_once(
-                    "Async scheduling will be disabled because it is not supported "
-                    "with the `%s` distributed executor backend (only `mp`, `uni`, and "
-                    "`external_launcher` are supported).",
-                    executor_backend,
                     scope="local",
                 )
                 self.scheduler_config.async_scheduling = False

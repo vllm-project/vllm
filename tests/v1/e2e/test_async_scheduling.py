@@ -82,6 +82,12 @@ def test_without_spec_decoding(
         (False, "mp", True, None, True),
         (True, "mp", True, None, True),
         (True, "uni", True, None, True),
+        (False, "ray", False, None, False),
+        (True, "ray", False, None, True),
+        (False, "ray", True, None, False),
+        (True, "ray", True, None, False),
+        (False, "ray", True, None, True),
+        (True, "ray", True, None, True),
     ]
 
     if current_platform.is_rocm():
@@ -145,6 +151,13 @@ def test_with_eagle3_spec_decoding(sample_json_schema, monkeypatch: pytest.Monke
         (True, "uni", True, spec_config_short, False),
         (True, "mp", True, spec_config, True),
         (True, "uni", True, spec_config_short, True),
+        (False, "ray", False, None, False),
+        (False, "ray", False, spec_config, False),
+        (True, "ray", False, spec_config, True),
+        (False, "ray", True, spec_config, False),
+        (True, "ray", True, spec_config, False),
+        (False, "ray", True, spec_config_short, True),
+        (True, "ray", True, spec_config, True),
     ]
 
     run_tests(monkeypatch, MTP_MODEL, test_configs, test_sampling_params)
