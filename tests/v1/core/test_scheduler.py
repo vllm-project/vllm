@@ -4140,3 +4140,127 @@ def test_eagle3_mm_encoder_cache_with_shift():
         f"shifted_end={scheduled_end_with_shift}) overlapping MM at "
         f"{start_pos}. The fix must schedule encoder inputs."
     )
+
+
+# ---------------------------------------------------------------------------
+# SRTF preemption victim selection tests
+# ---------------------------------------------------------------------------
+
+
+def test_srtf_priority_tiebreaker_preemption():
+    """SRTF tiebreaker for priority policy.
+
+    When two running requests share the same priority, the scheduler should
+    preempt the one with the most remaining tokens
+    (max_tokens - num_computed_tokens) rather than the most-recently-arrived
+    one, so that nearly-finished requests are spared.
+    """
+    # 6 usable blocks (7 total; block 0 is the null block).
+    # req_almost_done and req_just_started each occupy 1 block after their
+    # initial prefill (10 prompt tokens < 16 = one block).  That leaves 4
+    # free blocks.  req_large needs ceil(80/16) = 5 blocks, so one running
+    # request must be preempted.
+    scheduler = create_scheduler_with_priority(
+        max_num_seqs=4,
+        max_num_batched_tokens=8192,
+        num_blocks=7,
+        block_size=16,
+    )
+
+    # priority=0 for both → equal priority, SRTF tiebreaker applies.
+    req_almost_done = create_requests_with_priority(
+        num_requests=1,
+        priorities=[0],
+        arrival_times=[1.0],
+        num_tokens=10,
+        max_tokens=12,  # remaining after prefill ≈ 2
+        req_ids=["almost_done"],
+    )[0]
+    req_just_started = create_requests_with_priority(
+        num_requests=1,
+        priorities=[0],
+        arrival_times=[2.0],
+        num_tokens=10,
+        max_tokens=100,  # remaining after prefill ≈ 90
+        req_ids=["just_started"],
+    )[0]
+
+    scheduler.add_request(req_almost_done)
+    scheduler.add_request(req_just_started)
+
+    # First schedule: both requests become running (10 computed tokens each).
+    _ = scheduler.schedule()
+    assert len(scheduler.running) == 2
+
+    # Add a large request that forces a preemption.
+    req_large = create_requests_with_priority(
+        num_requests=1,
+        priorities=[0],
+        arrival_times=[3.0],
+        num_tokens=80,
+        max_tokens=1,
+        req_ids=["large"],
+    )[0]
+    scheduler.add_request(req_large)
+
+    _ = scheduler.schedule()
+
+    # SRTF: req_just_started has ~90 remaining tokens vs ~2 for req_almost_done.
+    assert req_just_started.status == RequestStatus.PREEMPTED, (
+        "SRTF should preempt the request with more remaining tokens "
+        "(req_just_started, remaining≈90)"
+    )
+    assert req_almost_done.status == RequestStatus.RUNNING, (
+        "Request with fewer remaining tokens (req_almost_done, remaining≈2) "
+        "should be spared"
+    )
+
+
+def test_srtf_fcfs_preemption():
+    """SRTF victim selection for FCFS policy.
+
+    Under the old LIFO policy the most-recently-added request was always
+    preempted.  Under SRTF the request with the most remaining tokens is
+    preempted instead, even if it was added first.
+    """
+    # Same block budget as above.
+    scheduler = create_scheduler(
+        max_num_seqs=4,
+        max_num_batched_tokens=8192,
+        num_blocks=7,
+        block_size=16,
+    )
+
+    # req_a: added first, has many remaining tokens (old LIFO would spare it).
+    req_a = create_requests(
+        num_requests=1, num_tokens=10, max_tokens=100, req_ids=["a"]
+    )[0]
+    # req_b: added second (LIFO victim), has few remaining tokens.
+    req_b = create_requests(
+        num_requests=1, num_tokens=10, max_tokens=12, req_ids=["b"]
+    )[0]
+
+    scheduler.add_request(req_a)
+    scheduler.add_request(req_b)
+
+    _ = scheduler.schedule()
+    assert len(scheduler.running) == 2
+
+    # req_large needs 5 blocks; only 4 are free → preemption required.
+    req_large = create_requests(
+        num_requests=1, num_tokens=80, max_tokens=1, req_ids=["large"]
+    )[0]
+    scheduler.add_request(req_large)
+
+    _ = scheduler.schedule()
+
+    # SRTF: req_a (remaining≈90) should be preempted, not req_b (remaining≈2).
+    # Under the old LIFO policy req_b would have been chosen as the victim
+    # because it was added last.
+    assert req_a.status == RequestStatus.PREEMPTED, (
+        "SRTF should preempt req_a which has more remaining tokens (≈90), "
+        "not req_b which was added later"
+    )
+    assert req_b.status == RequestStatus.RUNNING, (
+        "req_b has fewer remaining tokens (≈2) and should be spared"
+    )

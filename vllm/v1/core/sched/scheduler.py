@@ -461,33 +461,48 @@ class Scheduler(SchedulerInterface):
                         break
 
                     # The request cannot be scheduled.
-                    # Preempt the lowest-priority request.
+                    # Preempt the request with most remaining work (SRTF) to
+                    # minimise wasted computation. For the priority policy,
+                    # lower-priority requests are preferred; remaining tokens
+                    # break ties so that nearly-finished requests are spared.
                     if self.policy == SchedulingPolicy.PRIORITY:
                         preempted_req = max(
                             self.running,
-                            key=lambda r: (r.priority, r.arrival_time),
+                            key=lambda r: (
+                                r.priority,
+                                r.max_tokens - r.num_computed_tokens,
+                                r.arrival_time,
+                            ),
                         )
-                        self.running.remove(preempted_req)
-                        if preempted_req in scheduled_running_reqs:
-                            preempted_req_id = preempted_req.request_id
-                            scheduled_running_reqs.remove(preempted_req)
-                            token_budget += num_scheduled_tokens.pop(preempted_req_id)
-                            req_to_new_blocks.pop(preempted_req_id)
-                            scheduled_spec_decode_tokens.pop(preempted_req_id, None)
-                            preempted_encoder_inputs = scheduled_encoder_inputs.pop(
-                                preempted_req_id, None
-                            )
-                            if preempted_encoder_inputs:
-                                # Restore encoder compute budget if the preempted
-                                # request had encoder inputs scheduled in this step.
-                                num_embeds_to_restore = sum(
-                                    preempted_req.get_num_encoder_embeds(i)
-                                    for i in preempted_encoder_inputs
-                                )
-                                encoder_compute_budget += num_embeds_to_restore
-                            req_index -= 1
                     else:
-                        preempted_req = self.running.pop()
+                        # FCFS: among equal-priority requests preempt the one
+                        # with the most remaining tokens (SRTF tiebreaker).
+                        preempted_req = max(
+                            self.running,
+                            key=lambda r: (
+                                r.max_tokens - r.num_computed_tokens,
+                                r.arrival_time,
+                            ),
+                        )
+                    self.running.remove(preempted_req)
+                    if preempted_req in scheduled_running_reqs:
+                        preempted_req_id = preempted_req.request_id
+                        scheduled_running_reqs.remove(preempted_req)
+                        token_budget += num_scheduled_tokens.pop(preempted_req_id)
+                        req_to_new_blocks.pop(preempted_req_id)
+                        scheduled_spec_decode_tokens.pop(preempted_req_id, None)
+                        preempted_encoder_inputs = scheduled_encoder_inputs.pop(
+                            preempted_req_id, None
+                        )
+                        if preempted_encoder_inputs:
+                            # Restore encoder compute budget if the preempted
+                            # request had encoder inputs scheduled in this step.
+                            num_embeds_to_restore = sum(
+                                preempted_req.get_num_encoder_embeds(i)
+                                for i in preempted_encoder_inputs
+                            )
+                            encoder_compute_budget += num_embeds_to_restore
+                        req_index -= 1
 
                     self._preempt_request(preempted_req, scheduled_timestamp)
                     preempted_reqs.append(preempted_req)
