@@ -62,5 +62,6 @@ class MoEConfig:
 
     def compute_hash(self) -> str:
         from vllm.config.utils import get_hash_factors, hash_factors
-        factors = get_hash_factors(self)
+
+        factors = get_hash_factors(self, set())
         return hash_factors(factors)

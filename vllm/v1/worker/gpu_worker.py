@@ -344,10 +344,11 @@ class Worker(WorkerBase):
         # remains active during inference (set_current_vllm_config
         # resets it to None on exit).
         if self.vllm_config.moe_config is not None:
-            from vllm.model_executor.layers.fused_moe.gpt_oss_triton_kernels_moe import (
-                set_moe_config,
+            from vllm.model_executor.layers.fused_moe import (
+                gpt_oss_triton_kernels_moe as moe_kernels,
             )
-            set_moe_config(self.vllm_config.moe_config)
+
+            moe_kernels.set_moe_config(self.vllm_config.moe_config)
 
     def update_config(self, overrides: dict[str, Any]) -> None:
         self.model_runner.update_config(overrides)

@@ -1712,10 +1712,10 @@ def set_current_vllm_config(
     # Save the actual _moe_config value (not derived from old_vllm_config)
     # so we restore correctly even when _moe_config was set externally
     # (e.g. persisted in gpu_worker.load_model after the context exits).
+    from vllm.compilation.counter import compilation_counter
     from vllm.model_executor.layers.fused_moe.gpt_oss_triton_kernels_moe import (
         _moe_config as _saved_moe_config,
     )
-    from vllm.compilation.counter import compilation_counter
 
     num_models_seen = compilation_counter.num_models_seen
     try:

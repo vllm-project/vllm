@@ -364,7 +364,6 @@ def triton_kernel_moe_forward(
     unpadded_N_w2=None,
     unpadded_K_w2=None,
 ) -> torch.Tensor:
-    
     gating_output = _fused_prune_experts(gating_output, topk=topk)
 
     if (
@@ -425,7 +424,7 @@ def triton_kernel_moe_forward(
         )
         effective_expert_map = expert_map
         effective_global_num_experts = global_num_experts
-    
+
     output = torch.empty_like(hidden_states)
     effective_quant_config = (
         quant_config if quant_config is not None else FUSED_MOE_UNQUANTIZED_CONFIG
