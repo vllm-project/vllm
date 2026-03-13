@@ -897,10 +897,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         req_ids = list(scheduler_output.num_scheduled_tokens.keys())
         num_active_loras = get_num_active_loras_for_dispatch(
-            self.lora_config,
-            self.lora_state,
-            req_ids,
-            dummy_run,
+            self.lora_config, self.lora_state, req_ids, dummy_run
         )
 
         batch_desc = self.cudagraph_manager.dispatch(
