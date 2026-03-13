@@ -1356,6 +1356,8 @@ class FlashInferImpl(AttentionImpl):
         self.bmm1_scale: float | None = None
         self.bmm2_scale: float | None = None
         self.o_sf_scale: float | None = None
+        self._flashinfer_cos_sin_cache_fp32: torch.Tensor | None = None
+        self._flashinfer_cos_sin_cache_key: tuple[int, tuple[int, ...]] | None = None
 
         dcp_a2a = (
             vllm_config is not None
@@ -1413,6 +1415,20 @@ class FlashInferImpl(AttentionImpl):
             kv_cache,
             layer_slot_mapping[:num_actual_tokens],
         )
+
+    def _get_flashinfer_cos_sin_cache(
+        self, cos_sin_cache: torch.Tensor
+    ) -> torch.Tensor:
+        if cos_sin_cache.dtype == torch.float32:
+            return cos_sin_cache
+
+        cache_key = (cos_sin_cache.data_ptr(), tuple(cos_sin_cache.shape))
+        if self._flashinfer_cos_sin_cache_key != cache_key:
+            self._flashinfer_cos_sin_cache_fp32 = cos_sin_cache.to(torch.float32)
+            self._flashinfer_cos_sin_cache_key = cache_key
+
+        assert self._flashinfer_cos_sin_cache_fp32 is not None
+        return self._flashinfer_cos_sin_cache_fp32
 
     def do_rope_and_kv_cache_update(
         self,
@@ -1479,7 +1495,7 @@ class FlashInferImpl(AttentionImpl):
         key = key[:num_rope_kvcache_tokens]
         value = value[:num_rope_kvcache_tokens]
         pos_ids = attn_metadata.rope_pos_ids
-        cos_sin_cache = cos_sin_cache.float()
+        cos_sin_cache = self._get_flashinfer_cos_sin_cache(cos_sin_cache)
 
         rotary_dim = cos_sin_cache.shape[-1]
         q_rope = query[..., :rotary_dim]
