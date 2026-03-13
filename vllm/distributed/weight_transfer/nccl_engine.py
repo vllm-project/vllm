@@ -132,7 +132,7 @@ class NCCLWeightTransferEngine(
 
         # Calculate the global rank in the trainer-worker process group
         # Must account for data parallel to get unique ranks across all workers
-        dp_rank = self.parallel_config.data_parallel_rank
+        dp_rank = self.parallel_config.data_parallel_index
         world_size_per_dp = self.parallel_config.world_size  # TP * PP
         rank_within_dp = self.parallel_config.rank
 
