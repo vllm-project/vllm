@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import contextlib
+import multiprocessing
 import os
 import weakref
 from collections.abc import Iterator
@@ -64,9 +65,6 @@ class EngineZmqAddresses:
     # Not used by engine, just relayed to front-end in handshake response.
     # Only required for external DP LB case.
     frontend_stats_publish_address: str | None = None
-    # Tensor IPC queues for sharing CUDA tensors between API servers and engines
-    # One queue per engine core for direct GPU tensor transfer
-    tensor_queues: list[Any] | None = None
     # Index of this engine's tensor queue (set during handshake)
     tensor_queue_index: int | None = None
 
@@ -80,7 +78,7 @@ class EngineHandshakeMetadata:
 
     addresses: EngineZmqAddresses
     parallel_config: dict[str, int | str | list[int]]
-    # Index of this engine's tensor queue in addresses.tensor_queues
+    # Index into the tensor_queues list passed directly to engine processes
     tensor_queue_index: int | None = None
 
 
@@ -836,6 +834,7 @@ def launch_core_engines(
         CoreEngineProcManager | CoreEngineActorManager | None,
         DPCoordinator | None,
         EngineZmqAddresses,
+        list[multiprocessing.Queue] | None,
     ]
 ]:
     """Launch engine and DP coordinator processes as needed."""
@@ -852,12 +851,13 @@ def launch_core_engines(
 
     # Create a single tensor IPC queue for sharing multimodal tensors between
     # API servers and engine core.
+    tensor_queues: list[multiprocessing.Queue] | None = None
     if (
         vllm_config.model_config.multimodal_config is not None
         and vllm_config.model_config.multimodal_config.mm_tensor_ipc == "torch_shm"
     ):
         mp_ctx = get_mp_context()
-        addresses.tensor_queues = [mp_ctx.Queue()]
+        tensor_queues = [mp_ctx.Queue()]
 
     # Run the DP Coordinator process with rank 0 when in online DP mode.
     # The coordinator is needed for:
@@ -894,7 +894,7 @@ def launch_core_engines(
             log_stats=log_stats,
         )
 
-        yield engine_actor_manager, coordinator, addresses
+        yield engine_actor_manager, coordinator, addresses, tensor_queues
         return
 
     if offline_mode:
@@ -956,12 +956,12 @@ def launch_core_engines(
                 local_engine_count=local_engine_count,
                 start_index=dp_rank,
                 local_start_index=local_start_index or 0,
-                tensor_queues=addresses.tensor_queues,
+                tensor_queues=tensor_queues,
             )
         else:
             local_engine_manager = None
 
-        yield local_engine_manager, coordinator, addresses
+        yield local_engine_manager, coordinator, addresses, tensor_queues
 
         # Now wait for engines to start.
         wait_for_engine_startup(
@@ -1064,21 +1064,10 @@ def wait_for_engine_startup(
 
         if status == "HELLO" and engine.state == CoreEngineState.NEW:
             # Send init message with DP config info.
-            # Note: tensor_queues are excluded from serialization as they can't be
-            # serialized by msgspec. They are passed directly to engine processes
-            # when spawning them.
-            addresses_for_handshake = EngineZmqAddresses(
-                inputs=addresses.inputs,
-                outputs=addresses.outputs,
-                coordinator_input=addresses.coordinator_input,
-                coordinator_output=addresses.coordinator_output,
-                frontend_stats_publish_address=addresses.frontend_stats_publish_address,
-                tensor_queues=None,  # Don't serialize queues
-                tensor_queue_index=None,  # Will be set separately
-            )
+
             init_message = msgspec.msgpack.encode(
                 EngineHandshakeMetadata(
-                    addresses=addresses_for_handshake,
+                    addresses=addresses,
                     parallel_config={
                         k: getattr(parallel_config, k)
                         for k in (

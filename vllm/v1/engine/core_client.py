@@ -607,12 +607,12 @@ class MPClient(EngineCoreClient):
                     executor_class,
                     log_stats,
                     addresses,
-                ) as (engine_manager, coordinator, addresses):
+                ) as (engine_manager, coordinator, addresses, _tensor_queues):
                     self.resources.coordinator = coordinator
                     self.resources.engine_manager = engine_manager
 
                 self.stats_update_address = addresses.frontend_stats_publish_address
-                tensor_queues = addresses.tensor_queues
+                tensor_queues = _tensor_queues
                 if coordinator is not None:
                     assert self.stats_update_address == (
                         coordinator.get_stats_publish_address()
