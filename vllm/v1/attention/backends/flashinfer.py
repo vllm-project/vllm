@@ -504,6 +504,7 @@ class FlashInferMetadata:
     paged_kv_indices: torch.Tensor | None = None
     paged_kv_last_page_len: torch.Tensor | None = None
     batch_indices: torch.Tensor | None = None
+    rope_pos_ids: torch.Tensor | None = None
 
 
 class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
@@ -646,6 +647,10 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self.batch_indices = self._make_buffer(
             vllm_config.scheduler_config.max_num_batched_tokens
         )
+        self.rope_pos_ids = self._make_buffer(
+            vllm_config.scheduler_config.max_num_batched_tokens
+        )
+        self._uniform_decode_batch_indices: dict[int, torch.Tensor] = {}
 
         if self.head_dim == 256 and current_platform.is_device_capability_family(100):
             # https://github.com/flashinfer-ai/flashinfer/issues/1993 reports that
@@ -670,16 +675,69 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
     def _update_batch_indices_buffer(
         self,
         query_start_loc_cpu: torch.Tensor,
-    ) -> torch.Tensor:
+        seq_lens_cpu: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         query_start_loc_np = query_start_loc_cpu.numpy()
+        seq_lens_np = seq_lens_cpu.numpy()
         query_lens_np = query_start_loc_np[1:] - query_start_loc_np[:-1]
         num_valid_tokens = int(query_start_loc_np[-1])
-        self.batch_indices.np[:num_valid_tokens] = np.repeat(
-            np.arange(query_lens_np.shape[0], dtype=np.int32),
-            query_lens_np,
-        )
+        if num_valid_tokens == 0:
+            return self.batch_indices.gpu[:0], self.rope_pos_ids.gpu[:0]
+
+        active_mask = query_lens_np > 0
+        active_query_lens_np = query_lens_np[active_mask]
+        if np.all(active_query_lens_np == active_query_lens_np[0]):
+            query_len = int(active_query_lens_np[0])
+            batch_indices = self._get_uniform_decode_batch_indices(query_len)[
+                :num_valid_tokens
+            ]
+            starts_np = seq_lens_np[active_mask] - query_len
+            if query_len == 1:
+                self.rope_pos_ids.np[:num_valid_tokens] = starts_np
+            else:
+                offsets_np = np.arange(query_len, dtype=np.int32)
+                self.rope_pos_ids.np[:num_valid_tokens] = (
+                    starts_np[:, None] + offsets_np
+                ).reshape(-1)
+            self.rope_pos_ids.copy_to_gpu(num_valid_tokens)
+            return batch_indices, self.rope_pos_ids.gpu[:num_valid_tokens]
+
+        write_offset = 0
+        for batch_idx, query_len in enumerate(query_lens_np):
+            if query_len == 0:
+                continue
+            next_offset = write_offset + int(query_len)
+            self.batch_indices.np[write_offset:next_offset] = batch_idx
+            start_pos = int(seq_lens_np[batch_idx] - query_len)
+            self.rope_pos_ids.np[write_offset:next_offset] = np.arange(
+                start_pos,
+                start_pos + int(query_len),
+                dtype=np.int32,
+            )
+            write_offset = next_offset
+
+        assert write_offset == num_valid_tokens
         self.batch_indices.copy_to_gpu(num_valid_tokens)
-        return self.batch_indices.gpu[:num_valid_tokens]
+        self.rope_pos_ids.copy_to_gpu(num_valid_tokens)
+        return (
+            self.batch_indices.gpu[:num_valid_tokens],
+            self.rope_pos_ids.gpu[:num_valid_tokens],
+        )
+
+    def _get_uniform_decode_batch_indices(self, query_len: int) -> torch.Tensor:
+        batch_indices = self._uniform_decode_batch_indices.get(query_len)
+        if batch_indices is None:
+            max_num_tokens = self.vllm_config.scheduler_config.max_num_batched_tokens
+            max_num_reqs = cdiv(max_num_tokens, query_len)
+            batch_indices_cpu = np.repeat(
+                np.arange(max_num_reqs, dtype=np.int32),
+                query_len,
+            )
+            batch_indices = torch.from_numpy(batch_indices_cpu).to(
+                self.device, non_blocking=True
+            )
+            self._uniform_decode_batch_indices[query_len] = batch_indices
+        return batch_indices
 
     @override  # type: ignore[misc]
     @classmethod
@@ -951,11 +1009,11 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         needs_rope_kvcache_indices = (
             self.compilation_config.pass_config.fuse_rope_kvcache
             and flashinfer_rope_append_paged_kv_cache is not None
+            and self.attn_type == AttentionType.DECODER
+            and self.kv_sharing_target_layer_name is None
+            and not use_cascade
+            and num_prefills == 0
         )
-        if needs_rope_kvcache_indices:
-            attn_metadata.batch_indices = self._update_batch_indices_buffer(
-                qo_indptr_cpu,
-            )
 
         # Guard access to seq_lens_cpu, which may not always be needed
         # and can be expensive to retrieve in async mode. The stage1
@@ -974,6 +1032,15 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             if seq_lens_np is not None
             else None
         )
+
+        if needs_rope_kvcache_indices:
+            assert seq_lens_cpu is not None
+            # Keep global positions for the fused rope+append fast path before any
+            # DCP-local seq_len adjustment mutates the CPU view in-place.
+            (
+                attn_metadata.batch_indices,
+                attn_metadata.rope_pos_ids,
+            ) = self._update_batch_indices_buffer(qo_indptr_cpu, seq_lens_cpu)
 
         # Adjust seq_lens_cpu for DCP
         if self.use_dcp:
@@ -1379,10 +1446,11 @@ class FlashInferImpl(AttentionImpl):
             and self.kv_sharing_target_layer_name is None
             and attn_metadata is not None
             and attn_metadata.num_prefill_tokens == 0
-            and attn_metadata.query_start_loc is not None
             and attn_metadata.paged_kv_indptr is not None
             and attn_metadata.paged_kv_indices is not None
             and attn_metadata.paged_kv_last_page_len is not None
+            and attn_metadata.batch_indices is not None
+            and attn_metadata.rope_pos_ids is not None
         )
         if self.kv_cache_dtype.startswith("fp8"):
             can_use_fast_path = can_use_fast_path and (
@@ -1405,7 +1473,6 @@ class FlashInferImpl(AttentionImpl):
             return
 
         assert attn_metadata is not None
-        assert attn_metadata.query_start_loc is not None
         assert attn_metadata.paged_kv_indptr is not None
         assert attn_metadata.paged_kv_indices is not None
         assert attn_metadata.paged_kv_last_page_len is not None
@@ -1413,8 +1480,7 @@ class FlashInferImpl(AttentionImpl):
         query = query[:num_rope_kvcache_tokens]
         key = key[:num_rope_kvcache_tokens]
         value = value[:num_rope_kvcache_tokens]
-        positions = positions[:num_rope_kvcache_tokens]
-        pos_ids = positions.to(torch.int32)
+        pos_ids = attn_metadata.rope_pos_ids
         cos_sin_cache = cos_sin_cache.float()
 
         rotary_dim = cos_sin_cache.shape[-1]
@@ -1439,7 +1505,6 @@ class FlashInferImpl(AttentionImpl):
         kv_scale = (
             layer._k_scale_float if self.kv_cache_dtype.startswith("fp8") else 1.0
         )
-        assert attn_metadata.batch_indices is not None
         batch_indices = attn_metadata.batch_indices
 
         # Pure decode only: downstream attention reads K/V from cache, so we
