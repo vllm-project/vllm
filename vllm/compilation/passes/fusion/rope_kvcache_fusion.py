@@ -86,16 +86,17 @@ direct_register_custom_op(
 )
 
 
-class RopeReshapeKVCachePattern:
+class RopeKVCachePattern:
     """
-    This pattern matches the following unfused inplace ops:
-      q, k = rotary_embedding(positions, q, k, head_size, cos_sin_cache, is_neox)
-      kv_cache_dummy = unified_kv_cache_update(k, v, layer_name)
+    Match the stage1 subgraph when the roped query continues into an inline
+    quantization chain, while the key/value branches flow into
+    unified_kv_cache_update.
 
-    and replaces it with the fused inplace op:
-      kv_cache_dummy = fused_rope_and_unified_kv_cache_update(
-        q, k, v, positions, cos_sin_cache, is_neox, layer_name
-      )
+      q, k = rotary_embedding(...)
+      kv_cache_dummy = unified_kv_cache_update(reshape(k), reshape(v), layer_name)
+
+    The query branch is intentionally left as the flat post-rope tensor so the
+    downstream quantization chain stays in the graph.
     """
 
     FUSED_OP = torch.ops.vllm.fused_rope_and_unified_kv_cache_update.default
@@ -127,55 +128,47 @@ class RopeReshapeKVCachePattern:
         )
 
     def get_inputs(self) -> list[torch.Tensor]:
-        # Sample inputs to help pattern tracing
         T = 5
         L = 4096
         qkv = empty_bf16(T, self.q_size + self.k_size + self.v_size)
         positions = empty_i64(T)
         cos_sin_cache = empty_bf16(L, self.head_size)
-        return [
-            qkv,
-            positions,
-            cos_sin_cache,
-        ]
+        return [qkv, positions, cos_sin_cache]
 
     def register(self, pm_pass: PatternMatcherPass) -> None:
         def pattern(
             qkv: torch.Tensor,
             positions: torch.Tensor,
             cos_sin_cache: torch.Tensor,
-        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        ) -> tuple[torch.Tensor, torch.Tensor]:
             q, k, v = qkv.split([self.q_size, self.k_size, self.v_size], dim=-1)
             q, k = self.rope_matcher(positions, q, k, cos_sin_cache)
-            q = q.view(-1, self.num_heads, self.head_size)
             k = k.view(-1, self.num_kv_heads, self.head_size)
             v = v.view(-1, self.num_kv_heads, self.head_size_v)
             dummy = torch.ops.vllm.unified_kv_cache_update(k, v, self.layer_name)
-            return dummy, q, k, v
+            return dummy, q
 
         def replacement(
             qkv: torch.Tensor,
             positions: torch.Tensor,
             cos_sin_cache: torch.Tensor,
-        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        ) -> tuple[torch.Tensor, torch.Tensor]:
             q, k, v = qkv.split([self.q_size, self.k_size, self.v_size], dim=-1)
-            q = q.view(-1, self.num_heads, self.head_size)
-            k = k.view(-1, self.num_kv_heads, self.head_size)
-            v = v.view(-1, self.num_kv_heads, self.head_size_v)
+            q_3d = q.view(-1, self.num_heads, self.head_size)
+            k_3d = k.view(-1, self.num_kv_heads, self.head_size)
+            v_3d = v.view(-1, self.num_kv_heads, self.head_size_v)
             results = auto_functionalized(
                 self.FUSED_OP,
-                query=q,
-                key=k,
-                value=v,
+                query=q_3d,
+                key=k_3d,
+                value=v_3d,
                 positions=positions,
                 cos_sin_cache=cos_sin_cache,
                 is_neox=self.is_neox,
                 layer_name=self.layer_name,
             )
-            return results[0], results[1], results[2], v
+            return results[0], results[1].reshape(-1, self.q_size)
 
-        # NOTE: use view_to_reshape to unify view/reshape to simplify
-        # pattern and increase matching opportunities
         def fwd_and_view_to_reshape(*args, **kwargs) -> fx.GraphModule:
             gm = pm.fwd_only(*args, **kwargs)
             view_to_reshape(gm)
@@ -215,7 +208,7 @@ class RopeKVCacheFusionPass(VllmPatternMatcherPass):
             if layer.impl.fused_rope_kvcache_supported():
                 for is_neox in [True, False]:
                     for use_flashinfer_rotary in [False, True]:
-                        RopeReshapeKVCachePattern(
+                        RopeKVCachePattern(
                             layer=layer,
                             is_neox=is_neox,
                             use_flashinfer_rotary=use_flashinfer_rotary,
@@ -235,4 +228,4 @@ class RopeKVCacheFusionPass(VllmPatternMatcherPass):
         return compile_range.end <= self.max_token_num
 
     def uuid(self) -> str:
-        return VllmInductorPass.hash_source(self, RopeReshapeKVCachePattern)
+        return VllmInductorPass.hash_source(self, RopeKVCachePattern)
