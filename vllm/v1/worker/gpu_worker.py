@@ -437,10 +437,11 @@ class Worker(WorkerBase):
         )
 
         unrequested_memory = self.init_snapshot.free_memory - self.requested_memory
+        gpu_memory_utilization = self.cache_config.resolved_gpu_memory_utilization()
         logger.debug(
             "Initial free memory: %s GiB; Requested memory: %f (util), %s GiB",
             format_gib(self.init_snapshot.free_memory),
-            self.cache_config.gpu_memory_utilization,
+            gpu_memory_utilization,
             format_gib(self.requested_memory),
         )
         logger.debug(
@@ -457,7 +458,7 @@ class Worker(WorkerBase):
 
         if cudagraph_memory_estimate > 0:
             total_mem = self.init_snapshot.total_memory
-            current_util = self.cache_config.gpu_memory_utilization
+            current_util = gpu_memory_utilization
             cg_util_delta = cudagraph_memory_estimate / total_mem
             if envs.VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS:
                 equiv_util = round(current_util - cg_util_delta, 4)
@@ -600,6 +601,7 @@ class Worker(WorkerBase):
         # cuda graph capture.
         kernel_warmup(self)
 
+        gpu_memory_utilization = self.cache_config.resolved_gpu_memory_utilization()
         cuda_graph_memory_bytes = 0
         if not self.model_config.enforce_eager:
             cuda_graph_memory_bytes = self.model_runner.capture_model()
@@ -657,7 +659,7 @@ class Worker(WorkerBase):
                 f"({format_gib(self.init_snapshot.free_memory)}/"
                 f"{format_gib(self.init_snapshot.total_memory)} GiB) on startup. "
                 f"Desired GPU memory utilization is "
-                f"({self.cache_config.gpu_memory_utilization}, "
+                f"({gpu_memory_utilization}, "
                 f"{format_gib(self.requested_memory)} GiB). "
                 f"Actual usage is {format_gib(self.model_runner.model_memory_usage)} "
                 f"GiB for weight, {format_gib(self.peak_activation_memory)} GiB "

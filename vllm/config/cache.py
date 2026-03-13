@@ -189,6 +189,14 @@ class CacheConfig:
         # metrics info
         return {key: str(value) for key, value in self.__dict__.items()}
 
+    def resolved_gpu_memory_utilization(self) -> float:
+        """Return a concrete gpu_memory_utilization value after config resolution."""
+        if self.gpu_memory_utilization is None:
+            raise RuntimeError(
+                "gpu_memory_utilization must be resolved before worker startup"
+            )
+        return self.gpu_memory_utilization
+
     _block_size_resolved: bool = field(default=False, init=False)
     """Guard against pydantic re-running _apply_block_size_default."""
 
