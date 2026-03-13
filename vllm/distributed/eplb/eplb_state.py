@@ -304,7 +304,7 @@ class EplbState:
         if self.device.type == "cuda":
             self.cuda_device_index = self.device.index
             if self.cuda_device_index is None and torch.cuda.is_available():
-                self.cuda_device_index = torch.cuda.current_device()
+                self.cuda_device_index = torch.accelerator.current_device_index()
 
     @staticmethod
     def build_initial_global_physical_to_logical_map(
