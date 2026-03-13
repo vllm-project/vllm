@@ -28,7 +28,8 @@ from vllm.utils.torch_utils import set_random_seed
 @pytest.mark.parametrize("block_size", [16, 64, 256])
 @pytest.mark.parametrize("seed", [0])
 @pytest.mark.parametrize(
-    "device", [f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)]
+    "device",
+    [f"cuda:{i}" for i in range(1 if torch.accelerator.device_count() == 1 else 2)],
 )
 @torch.inference_mode()
 def test_concat_and_cache_mla_rope_fused(

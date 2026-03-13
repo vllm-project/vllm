@@ -28,7 +28,7 @@ class TrtLlmGenExperts(mk.FusedMoEExpertsModular):
         max_capture_size,
     ):
         super().__init__(moe_config, quant_config)
-        self.device = torch.cuda.current_device()
+        self.device = torch.accelerator.current_device_index()
         self.num_experts = moe_config.num_local_experts
         self.gemm1_alpha = torch.tensor(
             [1.702] * self.num_experts, dtype=torch.float32, device=self.device
@@ -82,9 +82,6 @@ class TrtLlmGenExperts(mk.FusedMoEExpertsModular):
             "TrtLlmGenExperts is not yet used by an Oracle. "
             "This method should not be called."
         )
-
-    def supports_chunking(self) -> bool:
-        return True
 
     def supports_expert_map(self) -> bool:
         return True

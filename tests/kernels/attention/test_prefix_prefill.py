@@ -21,7 +21,9 @@ NUM_HEADS = [64]
 NUM_QUERIES_PER_KV = [1, 64]
 HEAD_SIZES = [24, 128]
 DTYPES = [torch.float16]
-CUDA_DEVICES = [f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)]
+CUDA_DEVICES = [
+    f"cuda:{i}" for i in range(1 if torch.accelerator.device_count() == 1 else 2)
+]
 SLIDING_WINDOW = [0, 16, 2048]
 KV_CACHE_DTYPES = ["auto", "fp8", "fp8_e5m2"]
 
@@ -135,7 +137,7 @@ def test_contexted_kv_attention(
     # for GPU 1 would run on both GPU0 and GPU1 and things would hang
     #
     # see also similar issue: https://github.com/Dao-AILab/flash-attention/issues/523
-    torch.cuda.set_device(device)
+    torch.accelerator.set_device_index(device)
 
     MAX_SEQ_LEN = 1024
     MAX_CTX_LEN = 1024
@@ -356,7 +358,7 @@ def test_contexted_kv_attention_alibi(
     # for GPU 1 would run on both GPU0 and GPU1 and things would hang
     #
     # see also similar issue: https://github.com/Dao-AILab/flash-attention/issues/523
-    torch.cuda.set_device(device)
+    torch.accelerator.set_device_index(device)
 
     def _get_alibi_slopes(total_num_heads: int) -> torch.Tensor:
         # Fork from: vllm/vllm/model_executor/models/bloom.py#L44

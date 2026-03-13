@@ -13,7 +13,9 @@ QUANT_DTYPES = [current_platform.fp8_dtype()]
 NUM_TOKENS = [1, 17, 86, 1234, 3045]  # Arbitrary values for testing
 HIDDEN_SIZES = [16, 48, 128, 1562, 4096]  # Arbitrary values for testing
 SEEDS = [0]
-CUDA_DEVICES = [f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)]
+CUDA_DEVICES = [
+    f"cuda:{i}" for i in range(1 if torch.accelerator.device_count() == 1 else 2)
+]
 
 
 def ref_impl(

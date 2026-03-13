@@ -50,7 +50,7 @@ class SymmMemCommunicator:
             device = torch.device(f"cuda:{device}")
         elif isinstance(device, str):
             device = torch.device(device)
-        torch.cuda.set_device(device)
+        torch.accelerator.set_device_index(device)
         self.dtype = torch.bfloat16
         self.device = device
         self.group = group

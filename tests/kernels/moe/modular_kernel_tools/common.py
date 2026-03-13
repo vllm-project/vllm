@@ -68,7 +68,6 @@ class Config:
     prepare_finalize_type: mk.FusedMoEPrepareAndFinalize
     fused_experts_type: mk.FusedMoEExperts
 
-    fused_moe_chunk_size: int | None
     world_size: int
 
     torch_trace_dir_path: str | None = None
@@ -89,7 +88,6 @@ class Config:
         s += f" K={self.K}\n"
         s += f" topk={self.topks}\n"
         s += f" dtype={self.dtype}\n"
-        s += f" fused_moe_chunk_size={self.fused_moe_chunk_size}\n"
         s += " Quant:\n"
         if self.quant_config is not None:
             s += f"     q_dtype={self.quant_dtype}\n"
@@ -152,11 +150,6 @@ class Config:
 
         vllm_config.parallel_config.all2all_backend = self.all2all_backend()
 
-        if self.fused_moe_chunk_size is not None:
-            env_dict.update(
-                {"VLLM_FUSED_MOE_CHUNK_SIZE": str(self.fused_moe_chunk_size)}
-            )
-
         return vllm_config, env_dict
 
     def is_fp8_block_quantized(self):
@@ -188,10 +181,6 @@ class Config:
     def is_block_quant_supported(self):
         info = expert_info(self.fused_experts_type)
         return info.blocked_quantization_support
-
-    def is_fe_supports_chunking(self):
-        info = expert_info(self.fused_experts_type)
-        return info.supports_chunking
 
     def supports_expert_map(self):
         info = expert_info(self.fused_experts_type)
@@ -232,10 +221,6 @@ class Config:
         else:
             if not self.is_standard_fused_experts():
                 return False, "Mismatched format."
-
-        use_chunking = self.fused_moe_chunk_size is not None
-        if use_chunking and not self.is_fe_supports_chunking():
-            return False, "Chunking not supported."
 
         # Check quantization sanity
         if (
@@ -322,7 +307,7 @@ class WeightTensors:
         )
 
     def to_current_device(self):
-        device = torch.cuda.current_device()
+        device = torch.accelerator.current_device_index()
         self.w1 = self.w1.to(device=device)
         self.w2 = self.w2.to(device=device)
 
@@ -392,7 +377,8 @@ class RankTensors:
         Return hidden_states
         """
         m, k, dtype = (config.M, config.K, config.dtype)
-        a = torch.randn((m, k), device=torch.cuda.current_device(), dtype=dtype) / 15.0
+        device = torch.accelerator.current_device_index()
+        a = torch.randn((m, k), device=device, dtype=dtype) / 15.0
 
         if config.quant_dtype is None:
             return a, None
@@ -428,9 +414,10 @@ class RankTensors:
         topk_weights, topk_ids, _ = fused_topk(hidden_states, score, topk, False)
 
         # distribute topk_ids evenly
+        device = torch.accelerator.current_device_index()
         for mi in range(m):
             topk_ids[mi] = torch.randperm(config.E)[:topk]
-        topk_ids = topk_ids.to(device=torch.cuda.current_device())
+        topk_ids = topk_ids.to(device=device)
 
         expert_map = None
         if config.world_size > 1 and config.supports_expert_map():
@@ -440,9 +427,7 @@ class RankTensors:
             s = pgi.rank * num_local_experts
             e = s + num_local_experts
             expert_map[s:e] = torch.tensor(list(range(num_local_experts)))
-            expert_map = expert_map.to(
-                device=torch.cuda.current_device(), dtype=torch.int32
-            )
+            expert_map = expert_map.to(device=device, dtype=torch.int32)
 
         return RankTensors(
             hidden_states=hidden_states,
@@ -558,7 +543,9 @@ def reference_moe_impl(
 
 def _make_gscale(num_experts: int) -> torch.Tensor:
     return torch.ones(
-        (num_experts,), device=torch.cuda.current_device(), dtype=torch.float32
+        (num_experts,),
+        device=torch.accelerator.current_device_index(),
+        dtype=torch.float32,
     )
 
 

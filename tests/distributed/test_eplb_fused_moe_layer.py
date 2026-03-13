@@ -257,7 +257,7 @@ def test_eplb_fml(
     intermediate_size: int,
     column_major_scales: bool,
 ):
-    if torch.cuda.device_count() < world_size:
+    if torch.accelerator.device_count() < world_size:
         pytest.skip(f"Need at least {world_size} GPUs to run the test")
 
     num_local_experts = num_experts // world_size

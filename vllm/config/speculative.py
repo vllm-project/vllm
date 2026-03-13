@@ -57,10 +57,7 @@ SpeculativeMethod = Literal[
     EagleModelTypes,
     NgramGPUTypes,
 ]
-RejectionSampleMethod = Literal[
-    "strict",
-    "probabilistic",
-]
+RejectionSampleMethod = Literal["strict", "probabilistic"]
 
 
 @config

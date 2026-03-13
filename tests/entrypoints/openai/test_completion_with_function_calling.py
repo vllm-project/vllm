@@ -514,3 +514,27 @@ async def test_inconsistent_tool_choice_and_tools(
             ],
             tool_choice={},
         )
+
+
+@pytest.mark.asyncio
+async def test_max_tokens_with_tool_choice_required(client: openai.AsyncOpenAI):
+    """ """
+    models = await client.models.list()
+    model_name: str = models.data[0].id
+
+    # This combination previously crashed the engine
+    chat_completion = await client.chat.completions.create(
+        messages=messages,
+        temperature=0,
+        max_completion_tokens=1,
+        model=model_name,
+        tools=tools,
+        tool_choice="required",
+    )
+    # When `tool_choice="required"` and the tokens of `tools` exceed `max_tokens`,
+    # both `tool_calls` and `content` should be empty.
+    # This behavior should be consistent with OpenAI.
+    choice = chat_completion.choices[0]
+    assert choice.finish_reason == "length"
+    assert len(choice.message.tool_calls) == 0
+    assert choice.message.content == ""
