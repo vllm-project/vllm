@@ -69,6 +69,7 @@ trap 'remove_docker_containers; exit $EXITCODE;' EXIT
 remove_docker_containers
 
 echo "Running HPU plugin v1 test"
+set +e
 docker run --rm --runtime=habana --name="${container_name}" --network=host \
   -e HABANA_VISIBLE_DEVICES=all \
   -e VLLM_SKIP_WARMUP=true \
@@ -78,8 +79,9 @@ docker run --rm --runtime=habana --name="${container_name}" --network=host \
   /bin/bash -c '
   cd vllm; timeout 120s python -u examples/basic/offline_inference/generate.py --model facebook/opt-125m
 '
-
 EXITCODE=$?
+set -e
+
 if [ $EXITCODE -eq 0 ]; then
   echo "Test with basic model passed"
 else
