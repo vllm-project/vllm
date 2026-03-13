@@ -33,7 +33,7 @@ class OffloadingSpecFactory:
     def create_spec(
         cls,
         config: "VllmConfig",
-        kv_cache_config: "KVCacheConfig | None",
+        kv_cache_config: "KVCacheConfig",
     ) -> OffloadingSpec:
         kv_transfer_config = config.kv_transfer_config
         assert kv_transfer_config is not None
