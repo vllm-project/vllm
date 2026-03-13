@@ -36,6 +36,7 @@ from .kv_transfer import KVTransferConfig
 from .load import LoadConfig
 from .lora import LoRAConfig
 from .model import ModelConfig
+from .moe import MoEConfig
 from .observability import ObservabilityConfig
 from .offload import OffloadConfig
 from .parallel import ParallelConfig
@@ -327,6 +328,9 @@ class VllmConfig:
     weight_transfer_config: WeightTransferConfig | None = None
     """The configurations for weight transfer during RL training."""
 
+    moe_config: MoEConfig | None = None
+    """Configuration for Mixture of Experts optimizations."""
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
@@ -411,6 +415,10 @@ class VllmConfig:
             vllm_factors.append("None")
         if self.ec_transfer_config:
             vllm_factors.append(self.ec_transfer_config.compute_hash())
+        else:
+            vllm_factors.append("None")
+        if self.moe_config:
+            vllm_factors.append(self.moe_config.compute_hash())
         else:
             vllm_factors.append("None")
         if self.additional_config:
@@ -1701,7 +1709,13 @@ def set_current_vllm_config(
     global _current_vllm_config, _current_prefix
     old_vllm_config = _current_vllm_config
     old_prefix = _current_prefix
+    # Save the actual _moe_config value (not derived from old_vllm_config)
+    # so we restore correctly even when _moe_config was set externally
+    # (e.g. persisted in gpu_worker.load_model after the context exits).
     from vllm.compilation.counter import compilation_counter
+    from vllm.model_executor.layers.fused_moe.gpt_oss_triton_kernels_moe import (
+        _moe_config as _saved_moe_config,
+    )
 
     num_models_seen = compilation_counter.num_models_seen
     try:
@@ -1712,6 +1726,15 @@ def set_current_vllm_config(
 
         _current_vllm_config = vllm_config
         _current_prefix = prefix
+
+        # Propagate MoE config to the pruning module (always call, even with
+        # None, so config is cleared when context manager is re-entered)
+        from vllm.model_executor.layers.fused_moe.gpt_oss_triton_kernels_moe import (
+            set_moe_config,
+        )
+
+        set_moe_config(vllm_config.moe_config if vllm_config is not None else None)
+
         yield
     except Exception:
         raise
@@ -1740,6 +1763,11 @@ def set_current_vllm_config(
         _current_prefix = old_prefix
         # Clear the compilation config cache when context changes
         get_cached_compilation_config.cache_clear()
+        # Restore MoE config to what it was before entering this context.
+        # We restore the saved value (not derived from old_vllm_config) so
+        # that externally-set _moe_config persists across context manager
+        # entries/exits (e.g. during initialize_from_config after load_model).
+        set_moe_config(_saved_moe_config)
 
 
 @lru_cache(maxsize=1)

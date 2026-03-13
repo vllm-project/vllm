@@ -340,6 +340,16 @@ class Worker(WorkerBase):
             )
             self.model_runner.eep_eplb_suppressed = True
 
+        # Persist MoE config beyond the context manager so pruning
+        # remains active during inference (set_current_vllm_config
+        # resets it to None on exit).
+        if self.vllm_config.moe_config is not None:
+            from vllm.model_executor.layers.fused_moe import (
+                gpt_oss_triton_kernels_moe as moe_kernels,
+            )
+
+            moe_kernels.set_moe_config(self.vllm_config.moe_config)
+
     def update_config(self, overrides: dict[str, Any]) -> None:
         self.model_runner.update_config(overrides)
 
