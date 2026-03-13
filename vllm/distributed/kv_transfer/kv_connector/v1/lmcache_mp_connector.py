@@ -94,8 +94,8 @@ def extract_world_size_and_kv_rank(
         # vLLM constructs TP groups first, and then construct other
         # parallel groups on top of TP groups.
         # for example, TP=4, PP=2,
-        # TP group: [0, 1, 2, 3], [4, 5, 6, 7]
-        # PP group: [0, 4], [1, 5], [2, 6], [3, 7]
+        # PP group: [0, 1, 2, 3], [4, 5, 6, 7]
+        # TP group: [0, 4], [1, 5], [2, 6], [3, 7]
         # So we can "exclude" the effect of TP by rank // tp_size.
         return world_size // tp_size, rank // tp_size
 
@@ -145,6 +145,8 @@ def create_worker_adapter(
         vllm_config.parallel_config.rank,
         vllm_config,
     )
+    use_mla = mla_enabled(vllm_config.model_config)
+    is_first_rank_of_pp_group = vllm_config.parallel_config.rank % vllm_config.parallel_config.tensor_parallel_size == 0
     return LMCacheMPWorkerAdapter(
         server_url,
         zmq_context,
@@ -152,6 +154,8 @@ def create_worker_adapter(
         world_size,
         kv_rank,
         vllm_config.cache_config.block_size,
+        use_mla,
+        is_first_rank_of_pp_group,
         mq_timeout=mq_timeout,
         heartbeat_interval=heartbeat_interval,
     )
@@ -591,6 +595,11 @@ class LMCacheMPConnector(KVConnectorBase_V1):
 
         This prevents overwrites of paged KV buffer before saving done.
         """
+        # In MLA scenario, only the first rank of the pipeline group
+        # needs to save the KV cache.
+        if self.worker_adapter.use_mla and not self.worker_adapter.is_first_rank_of_pp_group:
+            return
+
         metadata = self._get_connector_metadata()
         assert isinstance(metadata, LMCacheMPConnectorMetadata)
 
