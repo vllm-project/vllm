@@ -529,6 +529,88 @@ class Qwen3_VisionTransformer(nn.Module):
 
         return torch.cat(outputs, dim=0)
 
+    def prepare_encoder_metadata(
+        self,
+        grid_thw_list: list[list[int]],
+        *,
+        max_batch_size: int | None = None,
+        max_seqlen_override: int | None = None,
+        device: torch.device | None = None,
+    ) -> dict[str, torch.Tensor | None]:
+        """Compute encoder metadata from grid_thw_list.
+
+        Shared by the eager forward path, CUDA graph capture, and
+        CUDA graph replay to avoid duplicated implementation.
+
+        Args:
+            grid_thw_list: Grid configurations as list of [t, h, w].
+            max_batch_size: If set, pad cu_seqlens to this size
+                (needed for CUDA graph capture/replay).
+            max_seqlen_override: If set, use this value for max_seqlen
+                instead of computing from cu_seqlens (needed for CUDA
+                graph capture to cover worst-case replay scenarios).
+            device: Device to place tensors on. Defaults to self.device.
+        """
+        if device is None:
+            device = self.device
+
+        metadata: dict[str, torch.Tensor | None] = {}
+
+        # Positional embeddings
+        metadata["pos_embeds"] = self.fast_pos_embed_interpolate(grid_thw_list)
+        rotary_cos, rotary_sin = self.rot_pos_emb(grid_thw_list)
+        metadata["rotary_pos_emb_cos"] = rotary_cos
+        metadata["rotary_pos_emb_sin"] = rotary_sin
+
+        # cu_seqlens from grid_thw
+        grid_thw_np = np.array(grid_thw_list, dtype=np.int32)
+        patches_per_frame = grid_thw_np[:, 1] * grid_thw_np[:, 2]
+        cu_seqlens = np.repeat(
+            patches_per_frame, grid_thw_np[:, 0]
+        ).cumsum(dtype=np.int32)
+        cu_seqlens = np.concatenate([np.zeros(1, dtype=np.int32), cu_seqlens])
+
+        # Pad cu_seqlens if max_batch_size specified
+        if max_batch_size is not None:
+            num_seqs = len(cu_seqlens) - 1
+            if num_seqs < max_batch_size:
+                cu_seqlens = np.concatenate([
+                    cu_seqlens,
+                    np.full(
+                        max_batch_size - num_seqs,
+                        cu_seqlens[-1],
+                        dtype=np.int32,
+                    ),
+                ])
+
+        # sequence_lengths (backend-specific)
+        metadata["sequence_lengths"] = MMEncoderAttention.maybe_compute_seq_lens(
+            self.attn_backend, cu_seqlens, device
+        )
+
+        # max_seqlen
+        if max_seqlen_override is not None:
+            max_seqlen_val = max_seqlen_override
+        else:
+            max_seqlen_val = MMEncoderAttention.compute_max_seqlen(
+                self.attn_backend, cu_seqlens
+            )
+        # Keep max_seqlen on CPU: attention wrappers call .item() on it,
+        # and having it on GPU would capture a wasteful D2H copy in CUDA
+        # graphs without changing behavior (the scalar is baked at capture).
+        metadata["max_seqlen"] = torch.tensor(max_seqlen_val, dtype=torch.int32)
+
+        # Recompute cu_seqlens (backend-specific transformation)
+        metadata["cu_seqlens"] = MMEncoderAttention.maybe_recompute_cu_seqlens(
+            self.attn_backend,
+            cu_seqlens,
+            self.hidden_size,
+            self.tp_size,
+            device,
+        )
+
+        return metadata
+
     def forward(
         self,
         x: torch.Tensor,
@@ -542,41 +624,11 @@ class Qwen3_VisionTransformer(nn.Module):
         if encoder_metadata is None:
             if isinstance(grid_thw, list):
                 grid_thw_list = grid_thw
-                grid_thw = np.array(grid_thw, dtype=np.int32)
             else:
                 grid_thw_list = grid_thw.tolist()
-                grid_thw = grid_thw.numpy()
+            encoder_metadata = self.prepare_encoder_metadata(grid_thw_list)
 
-            pos_embeds = self.fast_pos_embed_interpolate(grid_thw_list)
-            rotary_pos_emb_cos, rotary_pos_emb_sin = self.rot_pos_emb(grid_thw_list)
-
-            cu_seqlens = np.repeat(
-                grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]
-            ).cumsum(axis=0, dtype=np.int32)
-            cu_seqlens = np.concatenate([np.zeros(1, dtype=np.int32), cu_seqlens])
-            sequence_lengths = MMEncoderAttention.maybe_compute_seq_lens(
-                self.attn_backend, cu_seqlens, self.device
-            )
-            max_seqlen = torch.tensor(
-                MMEncoderAttention.compute_max_seqlen(self.attn_backend, cu_seqlens),
-                dtype=torch.int32,
-                device=self.device,
-            )
-            cu_seqlens = MMEncoderAttention.maybe_recompute_cu_seqlens(
-                self.attn_backend,
-                cu_seqlens,
-                self.hidden_size,
-                self.tp_size,
-                self.device,
-            )
-        else:
-            pos_embeds = encoder_metadata["pos_embeds"]
-            rotary_pos_emb_cos = encoder_metadata["rotary_pos_emb_cos"]
-            rotary_pos_emb_sin = encoder_metadata["rotary_pos_emb_sin"]
-            cu_seqlens = encoder_metadata["cu_seqlens"]
-            max_seqlen = encoder_metadata["max_seqlen"]
-            sequence_lengths = encoder_metadata.get("sequence_lengths")
-
+        pos_embeds = encoder_metadata["pos_embeds"]
         hidden_states = hidden_states + pos_embeds
         hidden_states = hidden_states.unsqueeze(1)
 
@@ -584,11 +636,11 @@ class Qwen3_VisionTransformer(nn.Module):
         for layer_num, blk in enumerate(self.blocks):
             hidden_states = blk(
                 hidden_states,
-                cu_seqlens=cu_seqlens,
-                rotary_pos_emb_cos=rotary_pos_emb_cos,
-                rotary_pos_emb_sin=rotary_pos_emb_sin,
-                max_seqlen=max_seqlen,
-                sequence_lengths=sequence_lengths,
+                cu_seqlens=encoder_metadata["cu_seqlens"],
+                rotary_pos_emb_cos=encoder_metadata["rotary_pos_emb_cos"],
+                rotary_pos_emb_sin=encoder_metadata["rotary_pos_emb_sin"],
+                max_seqlen=encoder_metadata["max_seqlen"],
+                sequence_lengths=encoder_metadata.get("sequence_lengths"),
             )
             if layer_num in self.deepstack_visual_indexes:
                 deepstack_merger_idx = self.deepstack_visual_indexes.index(layer_num)
@@ -1625,59 +1677,16 @@ class Qwen3VLForConditionalGeneration(
             total_patches, flattened_patch_size, device=device, dtype=dtype
         )
 
-        # Compute buffers
-        buffers: dict[str, torch.Tensor] = {}
-        buffers["pos_embeds"] = self.visual.fast_pos_embed_interpolate(grid_config)
-        rotary_cos, rotary_sin = self.visual.rot_pos_emb(grid_config)
-        buffers["rotary_pos_emb_cos"] = rotary_cos
-        buffers["rotary_pos_emb_sin"] = rotary_sin
-
-        # Compute sequence metadata
-        grid_thw_np = np.array(grid_config, dtype=np.int32)
-        patches_per_frame = grid_thw_np[:, 1] * grid_thw_np[:, 2]
-        cu_seqlens_np = np.repeat(patches_per_frame, grid_thw_np[:, 0]).cumsum(
-            dtype=np.int32
-        )
-        cu_seqlens_np = np.concatenate([np.zeros(1, dtype=np.int32), cu_seqlens_np])
-
-        # Pad cu_seqlens to max_batch_size
-        num_seqs = len(cu_seqlens_np) - 1
-        if num_seqs < max_batch_size:
-            cu_seqlens_np = np.concatenate(
-                [
-                    cu_seqlens_np,
-                    np.full(
-                        max_batch_size - num_seqs,
-                        cu_seqlens_np[-1],
-                        dtype=np.int32,
-                    ),
-                ]
-            )
-
-        sequence_lengths = MMEncoderAttention.maybe_compute_sequence_lengths(
-            self.visual.attn_backend, cu_seqlens_np
-        )
-        if sequence_lengths is not None:
-            buffers["sequence_lengths"] = torch.from_numpy(
-                sequence_lengths.astype(np.int32)
-            ).to(device, non_blocking=True)
-
         # Override max_seqlen with a safe upper bound for capture.
         # max_seqlen.item() gets baked into the CUDA graph (not replayed),
         # so the capture value must cover any replay scenario.
         # Worst case: 1 image consuming the full budget ->
         # seq_len = token_budget * spatial_merge_size^2.
-        max_seqlen_safe = token_budget * (spatial_merge_size**2)
-        buffers["max_seqlen"] = torch.tensor(max_seqlen_safe, dtype=torch.int32)
-
-        cu_seqlens_np = MMEncoderAttention.maybe_recompute_cu_seqlens(
-            self.visual.attn_backend,
-            cu_seqlens_np,
-            self.visual.hidden_size,
-            self.visual.tp_size,
-        )
-        buffers["cu_seqlens"] = torch.from_numpy(cu_seqlens_np).to(
-            device, non_blocking=True
+        buffers = self.visual.prepare_encoder_metadata(
+            grid_config,
+            max_batch_size=max_batch_size,
+            max_seqlen_override=token_budget * (spatial_merge_size**2),
+            device=device,
         )
 
         mm_kwargs = {
@@ -1701,57 +1710,9 @@ class Qwen3VLForConditionalGeneration(
 
         grid_thw_list = mm_kwargs["image_grid_thw"]
 
-        buffers: dict[str, torch.Tensor | None] = {}
-        buffers["pos_embeds"] = self.visual.fast_pos_embed_interpolate(grid_thw_list)
-        rotary_cos, rotary_sin = self.visual.rot_pos_emb(grid_thw_list)
-        buffers["rotary_pos_emb_cos"] = rotary_cos
-        buffers["rotary_pos_emb_sin"] = rotary_sin
-
-        # Compute sequence metadata
-        grid_thw_np = np.array(grid_thw_list, dtype=np.int32)
-        patches_per_frame = grid_thw_np[:, 1] * grid_thw_np[:, 2]
-        cu_seqlens_np = np.repeat(patches_per_frame, grid_thw_np[:, 0]).cumsum(
-            dtype=np.int32
-        )
-        cu_seqlens_np = np.concatenate([np.zeros(1, dtype=np.int32), cu_seqlens_np])
-
-        # Pad cu_seqlens to max_batch_size
-        num_seqs = len(cu_seqlens_np) - 1
-        if num_seqs < max_batch_size:
-            cu_seqlens_np = np.concatenate(
-                [
-                    cu_seqlens_np,
-                    np.full(
-                        max_batch_size - num_seqs,
-                        cu_seqlens_np[-1],
-                        dtype=np.int32,
-                    ),
-                ]
-            )
-
-        sequence_lengths = MMEncoderAttention.maybe_compute_sequence_lengths(
-            self.visual.attn_backend, cu_seqlens_np
-        )
-        if sequence_lengths is not None:
-            buffers["sequence_lengths"] = torch.from_numpy(
-                sequence_lengths.astype(np.int32)
-            ).to(self.visual.device, non_blocking=True)
-        else:
-            buffers["sequence_lengths"] = None
-
-        max_seqlen_val = MMEncoderAttention.compute_max_seqlen(
-            self.visual.attn_backend, cu_seqlens_np
-        )
-        buffers["max_seqlen"] = torch.tensor(max_seqlen_val, dtype=torch.int32)
-
-        cu_seqlens_np = MMEncoderAttention.maybe_recompute_cu_seqlens(
-            self.visual.attn_backend,
-            cu_seqlens_np,
-            self.visual.hidden_size,
-            self.visual.tp_size,
-        )
-        buffers["cu_seqlens"] = torch.from_numpy(cu_seqlens_np).to(
-            self.visual.device, non_blocking=True
+        buffers = self.visual.prepare_encoder_metadata(
+            grid_thw_list,
+            max_batch_size=max_batch_size,
         )
 
         return EncoderCudaGraphReplayBuffers(buffers=buffers)
