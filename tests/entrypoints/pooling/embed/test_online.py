@@ -672,7 +672,7 @@ async def test_embedding_invalid_batched_token_ids(
     with pytest.raises(
         openai.BadRequestError,
         match=re.compile(
-            r".*Input validation failed.*|.*greater than or equal to 0.*", re.DOTALL
+            r".*Input validation failed.*greater than or equal to 0.*", re.DOTALL
         ).pattern,
     ):
         await client.embeddings.create(
