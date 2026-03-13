@@ -99,6 +99,11 @@ def _try_get_processor_chat_template(
     return None
 
 
+def _looks_like_jinja(text: str) -> bool:
+    """Check whether a string contains Jinja delimiters."""
+    return any(delim in text for delim in ("{{", "{%", "{#"))
+
+
 def resolve_chat_template(
     tokenizer: HfTokenizer,
     chat_template: str | None,
@@ -108,6 +113,22 @@ def resolve_chat_template(
 ) -> str | None:
     # 1st priority: The given chat template
     if chat_template is not None:
+        # If the string has no Jinja delimiters it's probably a template name
+        # (e.g. "tool_use", "default").  Try to resolve it to actual Jinja
+        # content via the tokenizer so that downstream kwargs detection works
+        # correctly.  Fall back to returning the name as-is if the tokenizer
+        # doesn't recognise it – apply_chat_template can still handle names.
+        if not _looks_like_jinja(chat_template):
+            try:
+                resolved = tokenizer.get_chat_template(chat_template, tools=tools)
+                if resolved is not None:
+                    return resolved
+            except Exception:
+                logger.debug(
+                    "Could not resolve chat template name '%s' via "
+                    "tokenizer, passing through as-is",
+                    chat_template,
+                )
         return chat_template
 
     # 2nd priority: AutoProcessor chat template, unless tool calling is enabled
