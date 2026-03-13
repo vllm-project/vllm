@@ -938,6 +938,15 @@ class AsyncLLM(EngineClient):
         if self.logger_manager is not None:
             self.logger_manager.record_sleep_state(0, 0)
 
+    async def suspend(self, model_save_path=None) -> None:
+        await self.engine_core.suspend_async(model_save_path=model_save_path)
+
+    async def resume(self, data_parallel_master_ip:str | None = None, model_path=None) -> None:
+        await self.engine_core.resume_async(data_parallel_master_ip=data_parallel_master_ip, model_path=model_path)
+
+    async def device_unlock(self) -> None:
+        await self.engine_core.device_unlock_async()
+
     async def is_sleeping(self) -> bool:
         return await self.engine_core.is_sleeping_async()
 

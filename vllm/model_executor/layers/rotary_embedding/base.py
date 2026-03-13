@@ -60,7 +60,7 @@ class RotaryEmbeddingBase(CustomOp):
             if not self.use_flashinfer:
                 cache = cache.to(dtype)
             self.cos_sin_cache: torch.Tensor
-            self.register_buffer("cos_sin_cache", cache, persistent=False)
+            self.register_buffer("cos_sin_cache", cache, persistent=True)
 
         self.apply_rotary_emb = ApplyRotaryEmb(
             is_neox_style=self.is_neox_style,
