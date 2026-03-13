@@ -31,7 +31,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update -y \
     && apt-get install -y --no-install-recommends sudo ccache git curl wget ca-certificates \
-    gcc-12 g++-12 libtcmalloc-minimal4 libnuma-dev ffmpeg libsm6 libxext6 libgl1 jq lsof \
+    gcc-12 g++-12 libtcmalloc-minimal4 libnuma-dev ffmpeg libsm6 libxext6 libgl1 jq lsof xz-utils \
     && update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-12 10 --slave /usr/bin/g++ g++ /usr/bin/g++-12 \
     && curl -LsSf https://astral.sh/uv/install.sh | sh
 
@@ -154,7 +154,7 @@ WORKDIR /vllm-workspace
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
-    apt-get install -y --no-install-recommends vim numactl xz-utils make clangd-14
+    apt-get install -y --no-install-recommends vim numactl make clangd-14
 
 RUN ln -s /usr/bin/clangd-14 /usr/bin/clangd
 
