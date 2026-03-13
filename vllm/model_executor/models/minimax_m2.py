@@ -46,7 +46,7 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.mamba.linear_attn import MiniMaxText01RMSNormTP
+from vllm.model_executor.layers.mamba.linear_attn import MiniMaxText01RMSNormTP,MiniMaxText01RMSNormAR
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -224,6 +224,7 @@ class MiniMaxM2Attention(nn.Module):
         self.k_norm = MiniMaxText01RMSNormTP(
             self.head_dim * self.total_num_kv_heads, eps=rms_norm_eps
         )
+        self.fused_qk_rom=MiniMaxText01RMSNormAR()
 
     def forward(
         self,
@@ -232,7 +233,10 @@ class MiniMaxM2Attention(nn.Module):
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        q, k = MiniMaxText01RMSNormTP.forward_qk(
+        # q, k = MiniMaxText01RMSNormTP.forward_qk(
+        #     self.q_norm, self.k_norm, q.contiguous(), k.contiguous()
+        # )
+        q, k = self.fused_qk_rom(
             self.q_norm, self.k_norm, q.contiguous(), k.contiguous()
         )
         q, k = self.rotary_emb(positions, q, k)

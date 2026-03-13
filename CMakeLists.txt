@@ -292,6 +292,7 @@ set(VLLM_EXT_SRC
   "csrc/layernorm_kernels.cu"
   "csrc/fused_qknorm_rope_kernel.cu"
   "csrc/layernorm_quant_kernels.cu"
+  "csrc/minimax_reduce_rms_kernel.cu"
   "csrc/sampler.cu"
   "csrc/topk.cu"
   "csrc/cuda_view.cu"
