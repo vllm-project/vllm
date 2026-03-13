@@ -6,11 +6,10 @@ from vllm.config import VllmConfig
 from vllm.tokenizers import cached_get_tokenizer
 from vllm.tokenizers.qwen_vl import QwenVLTokenizer
 
-from .base import BaseRenderer
 from .hf import HfRenderer
 
 
-class QwenVLRenderer(BaseRenderer[QwenVLTokenizer]):
+class QwenVLRenderer(HfRenderer):
     @classmethod
     def from_config(  # type: ignore[override]
         cls,
