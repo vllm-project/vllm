@@ -1166,7 +1166,7 @@ def _test_body_eplb(
 
 
 # TODO: make this take a MoETestConfig
-def _test_loop(
+def _run_one_config(
     vllm_config: VllmConfig,
     ep_size: int,
     dp_size: int,
@@ -1414,7 +1414,7 @@ def test_moe_layer_no_parallel(
 
     init_workspace_manager("cuda")
 
-    _test_loop(
+    _run_one_config(
         vllm_config,
         test_config.ep_size,
         test_config.dp_size,
@@ -1447,9 +1447,6 @@ def _parallel_worker(
     pgi: ProcessGroupInfo,
     vllm_config: VllmConfig,
     cpu_group,
-    ep_size: int,
-    dp_size: int,
-    tp_size: int,
     test_configs: list[MoETestConfig],
     **kwargs,
 ) -> None:
@@ -1460,7 +1457,6 @@ def _parallel_worker(
     failed = 0
 
     dp_rank = vllm_config.parallel_config.data_parallel_rank
-    tp_rank = pgi.rank % tp_size
 
     for test_config in test_configs:
         cc = vllm_config.compilation_config
@@ -1468,9 +1464,11 @@ def _parallel_worker(
             del cc.static_forward_context["from_forward_context"]
             cc.static_all_moe_layers.remove("from_forward_context")
 
+        tp_rank = pgi.rank % test_config.tp_size
+
         print(f"TESTING {test_config}")
         try:
-            _test_loop(
+            _run_one_config(
                 vllm_config,
                 test_config.ep_size,
                 test_config.dp_size,
@@ -1531,6 +1529,13 @@ def test_moe_layer(
     test_env["VLLM_MOE_DP_CHUNK_SIZE"] = "128"
     monkeypatch.setenv("VLLM_MOE_DP_CHUNK_SIZE", "128")
 
+    # TODO
+    # VLLM_FLASHINFER_MOE_BACKEND=latency
+    # VLLM_USE_FLASHINFER_MOE_FP16=1
+    # VLLM_USE_FLASHINFER_MOE_FP8
+    # VLLM_USE_FLASHINFER_MOE_FP4
+    # VLLM_USE_FLASHINFER_MOE_INT4
+
     parallel_config = ParallelConfig(
         pipeline_parallel_size=1,
         data_parallel_size=dp_size,
@@ -1557,9 +1562,6 @@ def test_moe_layer(
             _parallel_worker,
             vllm_config,
             test_env,
-            ep_size,
-            dp_size,
-            tp_size,
             test_configs,
         )
     finally:
