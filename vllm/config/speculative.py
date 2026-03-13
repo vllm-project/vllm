@@ -60,7 +60,8 @@ SpeculativeMethod = Literal[
 RejectionSampleMethod = Literal["strict", "probabilistic"]
 
 
-class DynamicSpeculativeConfig(BaseModel):
+@config
+class DynamicSpeculativeConfig:
     # """A mapping from batch size to optimal number of drafts to use for that
     # batch size. This is used to dynamically adjust the number of drafts used
     # based on the current batch size."""
