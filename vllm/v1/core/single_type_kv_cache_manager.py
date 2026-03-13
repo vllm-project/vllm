@@ -290,6 +290,54 @@ class SingleTypeKVCacheManager(ABC):
         self.block_pool.free_blocks(ordered_blocks)
         self.num_cached_block.pop(request_id, None)
 
+    def free_tail_blocks(self, request_id: str,
+                         effective_kv_len: int) -> None:
+        """
+        Free tail blocks that are no longer needed after KV cache compression.
+
+        After compression, the effective KV cache length is shorter, so
+        blocks beyond the needed range can be returned to the free pool.
+        Also invalidates prefix cache hashes on remaining blocks since
+        compression changes their content.
+
+        Args:
+            request_id: The request ID.
+            effective_kv_len: The effective KV cache length after compression.
+        """
+        req_blocks = self.req_to_blocks.get(request_id)
+        if req_blocks is None:
+            return
+
+        needed_blocks = cdiv(effective_kv_len, self.block_size)
+        if needed_blocks >= len(req_blocks):
+            # No blocks to free
+            return
+
+        # Invalidate prefix cache hashes on ALL remaining blocks since
+        # compression reorders/changes their content. Without this,
+        # a future request could match stale hashes and get wrong data.
+        for blk in req_blocks[:needed_blocks]:
+            if blk.block_hash is not None:
+                self.block_pool._maybe_evict_cached_block(blk)
+
+        # Extract tail blocks to free
+        tail_blocks = req_blocks[needed_blocks:]
+        # Also evict hashes from tail blocks before freeing, otherwise
+        # they remain in cached_block_hash_to_block and a future request
+        # could hit them in the free queue with stale KV data.
+        for blk in tail_blocks:
+            if blk.block_hash is not None:
+                self.block_pool._maybe_evict_cached_block(blk)
+        # Free in reverse order (tail first)
+        self.block_pool.free_blocks(reversed(tail_blocks))
+        # Truncate the block list
+        del req_blocks[needed_blocks:]
+
+        # Reset cached block count to 0 since compression changed content.
+        # Setting to 0 (not popping) so cache_blocks doesn't KeyError.
+        if request_id in self.num_cached_block:
+            self.num_cached_block[request_id] = 0
+
     @abstractmethod
     def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
         """

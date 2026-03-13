@@ -221,6 +221,9 @@ class ModelRunnerOutput:
     # req_id -> index
     req_id_to_index: dict[str, int]
 
+    # the number of tokens dropped due to kv cache compression for every request
+    num_dropped_tokens_list: list[int]
+    
     # num_reqs x num_generated_tokens
     # num_generated_tokens is the number of tokens
     # generated in the current step. It can be different for
@@ -252,6 +255,8 @@ class ModelRunnerOutput:
 
     # information related to cudagraph execution
     cudagraph_stats: CUDAGraphStat | None = None
+
+
 
 
 # ModelRunnerOutput wrapper for async scheduling.
@@ -302,7 +307,8 @@ def make_empty_encoder_model_runner_output(
         req_id_to_index=req_id_to_index,
         sampled_token_ids=sampled_token_ids,
         pooler_output=pooler_output,
+        num_dropped_tokens_list=[0] * len(req_ids),
     )
 
 
-EMPTY_MODEL_RUNNER_OUTPUT = ModelRunnerOutput(req_ids=[], req_id_to_index={})
+EMPTY_MODEL_RUNNER_OUTPUT = ModelRunnerOutput(req_ids=[], req_id_to_index={}, num_dropped_tokens_list=[])

@@ -134,6 +134,7 @@ class Request:
         self.spec_token_ids: list[int] = []
         self.num_computed_tokens = 0
         self.cache_salt: str | None = cache_salt
+        self.num_dropped_tokens = 0
 
         # Multi-modal related
         self.mm_features = mm_features or []

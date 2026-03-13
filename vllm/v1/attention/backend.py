@@ -347,6 +347,12 @@ class CommonAttentionMetadata:
 
     block_table_tensor: torch.Tensor
     slot_mapping: torch.Tensor
+    occupied_slot_mapping: torch.Tensor | None = None
+    """KVCrush: physical cache slots still live after compression (None when inactive)"""
+    total_num_kv_cache_tokens: int = 0
+    """Total number of kv cache tokens in batch (num_computed - num_dropped)"""
+    req_ids: list[str] | None = None
+    """List of request IDs in the batch"""
 
     causal: bool = True
 
@@ -400,7 +406,7 @@ class CommonAttentionMetadata:
     @deprecated(
         """
     Prefer using device seq_lens directly to avoid implicit H<>D sync which breaks full
-    async scheduling. If a CPU copy is needed, it can be derived from 
+    async scheduling. If a CPU copy is needed, it can be derived from
     query_start_loc_cpu and seq_lens.
     Will be removed in a future release, please migrate as soon as possible.
     """

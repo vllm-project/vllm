@@ -198,6 +198,18 @@ class KVCacheCoordinator(ABC):
         for manager in self.single_type_managers:
             manager.free(request_id)
 
+    def free_tail_blocks(self, request_id: str,
+                         effective_kv_len: int) -> None:
+        """
+        Free tail blocks that are no longer needed after KV cache compression.
+
+        Args:
+            request_id: The request ID.
+            effective_kv_len: The effective KV cache length after compression.
+        """
+        for manager in self.single_type_managers:
+            manager.free_tail_blocks(request_id, effective_kv_len)
+
     def get_num_common_prefix_blocks(self, running_request_id: str) -> list[int]:
         """
         Get the number of common prefix blocks for all requests with allocated

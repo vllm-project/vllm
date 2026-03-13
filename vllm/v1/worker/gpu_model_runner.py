@@ -3,6 +3,7 @@
 
 import functools
 import gc
+import os
 import itertools
 import threading
 import time
@@ -759,6 +760,39 @@ class GPUModelRunner(
         self.query_pos = self._make_buffer(arange_size, dtype=torch.int64)
         self._arange_scratch = np.empty(arange_size, dtype=np.int64)
 
+        self.logical_positions_cpu = torch.zeros(self.max_num_tokens,
+                                         dtype=torch.int64,
+                                         device="cpu",
+                                         pin_memory=self.pin_memory)
+        self.logical_positions_np = self.logical_positions_cpu.numpy()
+        self.physical_positions_cpu = torch.zeros(self.max_num_tokens,
+                                         dtype=torch.int64,
+                                         device="cpu",
+                                         pin_memory=self.pin_memory)
+        self.physical_positions_np = self.physical_positions_cpu.numpy()
+        # NOTE(woosuk): These tensors are "stateless", i.e., they are literally
+        # a faster version of creating a new tensor every time. Thus, we should
+        # not make any assumptions about the values in these tensors.
+        self.input_ids_cpu = torch.zeros(self.max_num_tokens,
+                                         dtype=torch.int32,
+                                         device="cpu",
+                                         pin_memory=self.pin_memory)
+        self.positions_cpu = torch.zeros(self.max_num_tokens,
+                                         dtype=torch.int64,
+                                         device="cpu",
+                                         pin_memory=self.pin_memory)
+        self.positions_np = self.positions_cpu.numpy()
+        self.query_start_loc_cpu = torch.zeros(self.max_num_reqs + 1,
+                                               dtype=torch.int32,
+                                               device="cpu",
+                                               pin_memory=self.pin_memory)
+        self.query_start_loc_np = self.query_start_loc_cpu.numpy()
+        self.seq_lens_cpu = torch.zeros(self.max_num_reqs,
+                                        dtype=torch.int32,
+                                        device="cpu",
+                                        pin_memory=self.pin_memory)
+        self.seq_lens_np = self.seq_lens_cpu.numpy()
+
         # Layer pairings for cross-layer KV sharing.
         # If an Attention layer `layer_name` is in the keys of this dict, it
         # means this layer will perform attention using the keys and values
@@ -1065,6 +1099,15 @@ class GPUModelRunner(
         for req_id in scheduler_output.finished_req_ids:
             self.requests.pop(req_id, None)
             self.num_prompt_logprobs.pop(req_id, None)
+            # Clear any pending KVCrush drops for this request
+            if hasattr(self, '_pending_kvc_drops'):
+                self._pending_kvc_drops.pop(req_id, None)
+            # Clean up KVCrush prefill queries across all layers
+            if hasattr(self, 'model'):
+                attn_layers = get_layers_from_vllm_config(self.vllm_config, Attention)
+                for layer in attn_layers.values():
+                    if hasattr(layer.impl, 'prefill_queries'):
+                        layer.impl.prefill_queries.pop(req_id, None)
         self.late_interaction_runner.on_requests_finished(
             scheduler_output.finished_req_ids
         )
@@ -1107,6 +1150,16 @@ class GPUModelRunner(
         # sets of requests), this optimization becomes very inefficient.
         for req_id in unscheduled_req_ids:
             self.input_batch.remove_request(req_id)
+            # Clear any pending KVCrush drops for preempted/unscheduled requests
+            if hasattr(self, '_pending_kvc_drops'):
+                self._pending_kvc_drops.pop(req_id, None)
+            # Clean up KVCrush prefill queries for preempted/unscheduled requests
+            # to prevent stale queries from being concatenated with new ones on resume
+            if hasattr(self, 'model'):
+                attn_layers = get_layers_from_vllm_config(self.vllm_config, Attention)
+                for layer in attn_layers.values():
+                    if hasattr(layer.impl, 'prefill_queries'):
+                        layer.impl.prefill_queries.pop(req_id, None)
 
         is_ngram_gpu = (
             self.speculative_config is not None
@@ -1256,6 +1309,7 @@ class GPUModelRunner(
                         self.input_batch.num_tokens_no_spec[req_index] += (
                             optimistic_num_accepted
                         )
+            num_dropped_tokens = req_data.num_dropped_tokens_list[i]
 
             # Update the cached states.
             req_state.num_computed_tokens = num_computed_tokens
@@ -1293,6 +1347,19 @@ class GPUModelRunner(
                     )
                     self.input_batch.num_tokens_no_spec[req_index] = end_idx
 
+            # If compression freed tail blocks, truncate req_state.block_ids
+            # BEFORE appending new blocks, so the new blocks land at the
+            # correct (post-compression) offset.
+            if num_dropped_tokens > 0:
+                effective_kv_len = num_computed_tokens - num_dropped_tokens
+                for group_block_ids, bt in zip(
+                        req_state.block_ids,
+                        self.input_batch.block_table.block_tables):
+                    bs = bt.block_size
+                    needed = (effective_kv_len + bs - 1) // bs
+                    if len(group_block_ids) > needed:
+                        del group_block_ids[needed:]
+
             # Update the block IDs.
             if not resumed_from_preemption:
                 if new_block_ids is not None:
@@ -1324,7 +1391,22 @@ class GPUModelRunner(
                 continue
 
             # Update the persistent batch.
-            self.input_batch.num_computed_tokens_cpu[req_index] = num_computed_tokens
+            self.input_batch.num_computed_tokens_cpu[req_index] = (
+                num_computed_tokens)
+            self.input_batch.num_dropped_tokens_list_cpu[req_index] = (
+                num_dropped_tokens)
+            # If compression happened, truncate the block_table row before
+            # appending new blocks, so append_row starts at the right offset.
+            if num_dropped_tokens > 0:
+                effective_kv_len = num_computed_tokens - num_dropped_tokens
+                for bt in self.input_batch.block_table.block_tables:
+                    bs = bt.block_size
+                    needed = (effective_kv_len + bs - 1) // bs
+                    current = bt.num_blocks_per_row[req_index]
+                    if needed < current:
+                        bt.num_blocks_per_row[req_index] = needed
+                        bt.block_table.np[
+                            req_index, needed:current] = 0
             if new_block_ids is not None:
                 self.input_batch.block_table.append_row(new_block_ids, req_index)
 
@@ -1803,21 +1885,64 @@ class GPUModelRunner(
         # This way, we can overlap the copy with the following CPU operations.
         self.input_batch.block_table.commit_block_table(num_reqs)
 
+        use_kv_compression = int(os.environ.get("VLLM_V1_KVC_BUDGET", "0")) > 0
+
+        # Apply any KVCrush drops that fired in the previous forward step but
+        # haven't been reflected yet by _update_states (async scheduling lag).
+        # _update_states uses the scheduler's accumulated total, which is 1
+        # step behind when async scheduling is active.  The pending dict is
+        # keyed by req_id so index changes between steps are handled correctly.
+        if use_kv_compression and hasattr(self, '_pending_kvc_drops') and self._pending_kvc_drops:
+            for i in range(num_reqs):
+                req_id = self.input_batch.req_ids[i]
+                if req_id in self._pending_kvc_drops:
+                    self.input_batch.num_dropped_tokens_list_cpu[i] += (
+                        self._pending_kvc_drops.pop(req_id)
+                    )
+
+        num_kv_cache_tokens = (
+            self.input_batch.num_computed_tokens_cpu
+            - self.input_batch.num_dropped_tokens_list_cpu
+        )[:num_reqs]
+        # Safety check: ensure no negative values (can happen with stale data)
+        np.maximum(num_kv_cache_tokens, 0, out=num_kv_cache_tokens)
+        if use_kv_compression:
+            total_num_kv_cache_tokens = num_kv_cache_tokens.sum()
+        else:
+            total_num_kv_cache_tokens = 0
+
+        # Persist for use by _get_slot_mappings in execute_model
+        self._total_num_kv_cache_tokens = int(total_num_kv_cache_tokens)
+
         # Get request indices.
         # E.g., [2, 5, 3] -> [0, 0, 1, 1, 1, 1, 1, 2, 2, 2]
         req_indices = np.repeat(self.arange_np[:num_reqs], num_scheduled_tokens)
+        if use_kv_compression:
+            occupied_indices = np.repeat(self.arange_np[:num_reqs],
+                                    num_kv_cache_tokens)
 
         # cu_num_tokens: [2, 5, 3] -> [2, 7, 10]
         # self.query_pos.np[:10]: [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
         cu_num_tokens = self._get_cumsum_and_arange(
             num_scheduled_tokens, self.query_pos.np
         )
+        arange = self.query_pos.np[:total_num_scheduled_tokens]
+        if use_kv_compression:
+            # For occupied positions, we need to handle potentially large KV cache sizes
+            # that may exceed the pre-allocated arange_np buffer
+            cu_num_kv_tokens = np.cumsum(num_kv_cache_tokens, dtype=np.int32)
+            cumsums_offsets = np.repeat(cu_num_kv_tokens - num_kv_cache_tokens, num_kv_cache_tokens)
+            occupied_positions_np = np.arange(int(total_num_kv_cache_tokens), dtype=np.int64) - cumsums_offsets
 
         # Get positions.
-        positions_np = (
-            self.input_batch.num_computed_tokens_cpu[req_indices]
-            + self.query_pos.np[: cu_num_tokens[-1]]
-        )
+        logical_positions_np = self.logical_positions_np[:total_num_scheduled_tokens]
+        np.add(self.input_batch.num_computed_tokens_cpu[req_indices],
+               arange,
+               out=logical_positions_np)
+        physical_positions_np = self.physical_positions_np[:total_num_scheduled_tokens]
+        np.add(num_kv_cache_tokens[req_indices],
+               arange,
+               out=physical_positions_np)
 
         # Calculate M-RoPE positions.
         # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
@@ -1834,7 +1959,7 @@ class GPUModelRunner(
         # -> [0, 1, M, M + 1, M + 2, M + 3, M + 4, 2 * M, 2 * M + 1, 2 * M + 2]
         # where M is the max_model_len.
         token_indices = (
-            positions_np + req_indices * self.input_batch.token_ids_cpu.shape[1]
+            logical_positions_np + req_indices * self.input_batch.token_ids_cpu.shape[1]
         )
         token_indices_tensor = torch.from_numpy(token_indices)
 
@@ -1847,6 +1972,7 @@ class GPUModelRunner(
             token_indices_tensor,
             out=self.input_ids.cpu[:total_num_scheduled_tokens],
         )
+
         if self.enable_prompt_embeds:
             is_token_ids = self.input_batch.is_token_ids_tensor.flatten()
             torch.index_select(
@@ -1855,6 +1981,7 @@ class GPUModelRunner(
                 token_indices_tensor,
                 out=self.is_token_ids.cpu[:total_num_scheduled_tokens],
             )
+
 
         # Because we did not pre-allocate a massive prompt_embeds CPU tensor on
         # the InputBatch, we need to fill in the prompt embeds into the expected
@@ -1894,6 +2021,14 @@ class GPUModelRunner(
 
                 output_idx += num_sched
 
+        if use_kv_compression:
+            self.input_batch.block_table._compute_slot_mapping_numpy(
+                req_indices, physical_positions_np, False)
+            self.input_batch.block_table._compute_slot_mapping_numpy(
+                occupied_indices, occupied_positions_np, True)
+            self.input_batch.block_table.commit_slot_mapping(
+                total_num_scheduled_tokens, total_num_kv_cache_tokens)
+
         # Prepare the attention metadata.
         self.query_start_loc.np[0] = 0
         self.query_start_loc.np[1 : num_reqs + 1] = cu_num_tokens
@@ -1912,6 +2047,9 @@ class GPUModelRunner(
             torch.from_numpy(num_scheduled_tokens),
             out=self.optimistic_seq_lens_cpu[:num_reqs],
         )
+        self.seq_lens_np[:num_reqs] = (
+            num_kv_cache_tokens + num_scheduled_tokens
+        )
         self.optimistic_seq_lens_cpu[num_reqs:].fill_(0)
 
         # Build prev_positions mapping: current pos -> prev pos (-1 if new).
@@ -1923,9 +2061,15 @@ class GPUModelRunner(
         num_tokens_np = np.array(num_tokens, dtype=np.int32)
 
         # Record which requests should not be sampled,
-        # so that we could clear the sampled tokens before returning
+        # so that we could clear the sampled tokens before returning.
+        # NOTE: We intentionally use num_computed_tokens_cpu + num_scheduled_tokens
+        # (the logical token count) rather than seq_lens (which is
+        # num_kv_cache_tokens + num_scheduled and subtracts KVCrush drops).
+        # Using seq_lens would cause discard_request_mask to fire incorrectly
+        # for any request that has had KV cache tokens compressed/dropped,
+        # treating a normal decode step as an in-progress chunked prefill.
         self.discard_request_mask.np[:num_reqs] = (
-            self.optimistic_seq_lens_cpu[:num_reqs].numpy() < num_tokens_np
+            self.input_batch.num_computed_tokens_cpu[:num_reqs] + num_scheduled_tokens < num_tokens_np
         )
         self.discard_request_mask.copy_to_gpu(num_reqs)
 
@@ -1982,16 +2126,22 @@ class GPUModelRunner(
             self.num_computed_tokens[req_indices_gpu].to(torch.int64)
             + self.query_pos.gpu[:total_num_scheduled_tokens]
         )
-        self.seq_lens[:num_reqs] = (
-            self.num_computed_tokens[:num_reqs] + num_scheduled_tokens_gpu
-        )
+        if use_kv_compression:
+            self.seq_lens[:num_reqs].copy_(
+                self.seq_lens_cpu[:num_reqs], non_blocking=True
+            )
+        else:
+            self.seq_lens[:num_reqs] = (
+                self.num_computed_tokens[:num_reqs] + num_scheduled_tokens_gpu
+            )
         self.seq_lens[num_reqs:].fill_(0)
 
-        self.input_batch.block_table.compute_slot_mapping(
-            num_reqs,
-            self.query_start_loc.gpu[: num_reqs + 1],
-            self.positions[:total_num_scheduled_tokens],
-        )
+        if not use_kv_compression:
+            self.input_batch.block_table.compute_slot_mapping(
+                num_reqs,
+                self.query_start_loc.gpu[: num_reqs + 1],
+                self.positions[:total_num_scheduled_tokens],
+            )
 
         # Copy the tensors to the GPU.
         self._prepare_input_ids(
@@ -2021,6 +2171,11 @@ class GPUModelRunner(
             )
             target = self.mrope_positions if self.uses_mrope else self.xdrope_positions
             target.gpu[:, :total_num_scheduled_tokens] += drift
+        else:
+            # Common case (1D positions)
+            self.positions[:total_num_scheduled_tokens].copy_(
+                self.logical_positions_cpu[:total_num_scheduled_tokens],
+                non_blocking=True)
 
         use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0
         if not use_spec_decode:
@@ -2091,6 +2246,9 @@ class GPUModelRunner(
         num_scheduled_tokens: dict[str, int] | None = None,
         cascade_attn_prefix_lens: list[list[int]] | None = None,
         slot_mappings: dict[int, torch.Tensor] | None = None,
+        occupied_slot_mappings: dict[int, torch.Tensor] | None = None,
+        total_num_kv_cache_tokens: int = 0,
+        req_ids: list[str] | None = None,
     ) -> tuple[PerLayerAttnMetadata, CommonAttentionMetadata | None]:
         """
         :return: tuple[attn_metadata, spec_decode_common_attn_metadata]
@@ -2138,6 +2296,11 @@ class GPUModelRunner(
         assert slot_mappings is not None
         block_table_gid_0 = _get_block_table(0)
         slot_mapping_gid_0 = slot_mappings[0]
+        occupied_slot_mapping_gid_0 = (
+            occupied_slot_mappings[0]
+            if occupied_slot_mappings is not None
+            else None
+        )
 
         if self.routed_experts_initialized:
             attn_gid = self.routed_experts_attn_gid
@@ -2173,6 +2336,9 @@ class GPUModelRunner(
             max_seq_len=max_seq_len,
             block_table_tensor=block_table_gid_0,
             slot_mapping=slot_mapping_gid_0,
+            occupied_slot_mapping=occupied_slot_mapping_gid_0,
+            total_num_kv_cache_tokens=total_num_kv_cache_tokens,
+            req_ids=req_ids,
             causal=True,
             is_prefilling=is_prefilling,
         )
@@ -2287,6 +2453,8 @@ class GPUModelRunner(
             if kv_cache_gid > 0:
                 cm.block_table_tensor = _get_block_table(kv_cache_gid)
                 cm.slot_mapping = slot_mappings[kv_cache_gid]
+                if occupied_slot_mappings is not None:
+                    cm.occupied_slot_mapping = occupied_slot_mappings[kv_cache_gid]
 
             if self.speculative_config and spec_decode_common_attn_metadata is None:
                 if isinstance(self.drafter, EagleProposer):
@@ -3142,6 +3310,7 @@ class GPUModelRunner(
             req_ids=self.input_batch.req_ids.copy(),
             req_id_to_index=self.input_batch.req_id_to_index.copy(),
             kv_connector_output=kv_connector_output,
+            num_dropped_tokens_list=[0] * num_reqs,
         )
 
         if raw_pooler_output is None or not any(finished_mask):
@@ -3682,10 +3851,12 @@ class GPUModelRunner(
         num_tokens_padded: int,
         num_reqs_padded: int,
         num_tokens_unpadded: int,
+        total_num_kv_cache_tokens: int = 0,
         ubatch_slices: "UBatchSlices | None" = None,
     ) -> tuple[
         dict[int, torch.Tensor] | None,
         dict[str, torch.Tensor] | list[dict[str, torch.Tensor]] | None,
+        dict[int, torch.Tensor] | None,
     ]:
         """
         Build slot mappings in both formats needed by the system.
@@ -3694,21 +3865,31 @@ class GPUModelRunner(
             num_tokens_padded: Total number of tokens (padded)
             num_reqs_padded: Total number of requests (padded)
             num_tokens_unpadded: Actual number of tokens (unpadded)
+            total_num_kv_cache_tokens: Total number of KV-cache tokens after
+                KVCrush compression (i.e. num_computed_tokens - num_dropped_tokens).
+                Used to slice ``occupied_slot_mapping`` per group.  Pass 0 when
+                KVCrush is not active.
             ubatch_slices: Optional ubatch slicing info for DBO
 
         Returns:
-            A tuple of:
-            - slot_mappings_by_gid: dict[int, torch.Tensor] for attention metadata
-            - slot_mappings_by_layer: dict[str, torch.Tensor] or list for ForwardContext
+            A 3-tuple of:
+            - slot_mappings_by_gid: dict[int, Tensor] — regular slot mappings
+              keyed by kv_cache_group id, for attention metadata.
+            - slot_mappings_by_layer: dict[str, Tensor] or list[dict] — regular
+              slot mappings keyed by layer name, for ForwardContext.
+            - occupied_slot_mappings_by_gid: dict[int, Tensor] — KVCrush
+              occupied-slot mappings keyed by kv_cache_group id, covering only
+              the ``total_num_kv_cache_tokens`` live entries (tail filled -1).
+              None when kv_cache_config is absent.
         """
         if not (
             hasattr(self, "kv_cache_config")
             and self.kv_cache_config is not None
             and len(self.kv_cache_config.kv_cache_groups) > 0
         ):
-            return None, None
+            return None, None, None
 
-        def _get_slot_mapping(kv_cache_gid: int):
+        def _get_slot_mapping(kv_cache_gid: int) -> torch.Tensor:
             assert num_reqs_padded is not None and num_tokens_padded is not None
             kv_cache_spec = self.kv_cache_config.kv_cache_groups[
                 kv_cache_gid
@@ -3729,10 +3910,31 @@ class GPUModelRunner(
 
             return slot_mapping
 
-        slot_mappings_by_gid = {
+        def _get_occupied_slot_mapping(kv_cache_gid: int) -> torch.Tensor:
+            """Return the occupied-slot mapping for KVCrush.
+
+            The first ``total_num_kv_cache_tokens`` entries are the physical
+            cache slots that are still live after compression; the remainder
+            are filled with -1 to avoid stale values.
+            """
+            blk_table = self.input_batch.block_table[kv_cache_gid]
+            occupied = blk_table.occupied_slot_mapping
+            occupied[total_num_kv_cache_tokens:].fill_(-1)
+            return occupied[:total_num_kv_cache_tokens]
+
+        slot_mappings_by_gid: dict[int, torch.Tensor] = {
             gid: _get_slot_mapping(gid)
             for gid, _ in enumerate(self.kv_cache_config.kv_cache_groups)
         }
+
+        occupied_slot_mappings_by_gid: dict[int, torch.Tensor] | None = (
+            {
+                gid: _get_occupied_slot_mapping(gid)
+                for gid, _ in enumerate(self.kv_cache_config.kv_cache_groups)
+            }
+            if total_num_kv_cache_tokens > 0
+            else None
+        )
 
         slot_mappings_by_layer: dict[str, torch.Tensor] = {}
         for gid, kv_cache_group in enumerate(self.kv_cache_config.kv_cache_groups):
@@ -3747,9 +3949,9 @@ class GPUModelRunner(
                 for layer_name, slot_mapping in slot_mappings_by_layer.items():
                     sliced_mappings[layer_name] = slot_mapping[ubatch.token_slice]
                 result.append(sliced_mappings)
-            return slot_mappings_by_gid, result
+            return slot_mappings_by_gid, result, occupied_slot_mappings_by_gid
 
-        return slot_mappings_by_gid, slot_mappings_by_layer
+        return slot_mappings_by_gid, slot_mappings_by_layer, occupied_slot_mappings_by_gid
 
     @torch.inference_mode()
     def execute_model(
@@ -3940,15 +4142,22 @@ class GPUModelRunner(
             use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0
             ubatch_slices_attn = ubatch_slices_padded if pad_attn else ubatch_slices
 
-            slot_mappings_by_group, slot_mappings = self._get_slot_mappings(
-                num_tokens_padded=num_tokens_padded
-                if pad_attn or has_separate_kv_update
-                else num_tokens_unpadded,
-                num_reqs_padded=(
-                    num_reqs_padded if pad_attn or has_separate_kv_update else num_reqs
-                ),
-                num_tokens_unpadded=num_tokens_unpadded,
-                ubatch_slices=ubatch_slices_padded,
+            slot_mappings_by_group, slot_mappings, occupied_slot_mappings_by_group = (
+                self._get_slot_mappings(
+                    num_tokens_padded=num_tokens_padded
+                    if pad_attn or has_separate_kv_update
+                    else num_tokens_unpadded,
+                    num_reqs_padded=(
+                        num_reqs_padded
+                        if pad_attn or has_separate_kv_update
+                        else num_reqs
+                    ),
+                    num_tokens_unpadded=num_tokens_unpadded,
+                    total_num_kv_cache_tokens=getattr(
+                        self, "_total_num_kv_cache_tokens", 0
+                    ),
+                    ubatch_slices=ubatch_slices_padded,
+                )
             )
 
             attn_metadata, spec_decode_common_attn_metadata = (
@@ -3964,6 +4173,11 @@ class GPUModelRunner(
                     num_scheduled_tokens=scheduler_output.num_scheduled_tokens,
                     cascade_attn_prefix_lens=cascade_attn_prefix_lens,
                     slot_mappings=slot_mappings_by_group,
+                    occupied_slot_mappings=occupied_slot_mappings_by_group,
+                    total_num_kv_cache_tokens=getattr(
+                        self, "_total_num_kv_cache_tokens", 0
+                    ),
+                    req_ids=self.input_batch.req_ids[:num_reqs]
                 )
             )
 
@@ -4023,6 +4237,36 @@ class GPUModelRunner(
                 inputs_embeds=inputs_embeds,
                 **model_kwargs,
             )
+
+        # Copy KVCrush drop counts from attn_metadata (written in forward())
+        # into a per-step delta list. We must NOT accumulate into
+        # input_batch.num_dropped_tokens_list_cpu here because that holds the
+        # *accumulated* total (set by _update_states from the scheduler).
+        # ModelRunnerOutput must send the *delta* so the scheduler can do +=.
+        self._kvcrush_step_drops = [0] * self.input_batch.num_reqs
+        if int(os.environ.get("VLLM_V1_KVC_BUDGET", "0")) > 0:
+            if isinstance(attn_metadata, dict) and attn_metadata:
+                first_meta = next(iter(attn_metadata.values()))
+                if hasattr(first_meta, 'num_dropped_tokens_list'):
+                    for i, d in enumerate(
+                            first_meta.num_dropped_tokens_list):
+                        if d > 0:
+                            self._kvcrush_step_drops[i] = d
+
+        # With async scheduling (batch_queue_size=2), the scheduler processes
+        # step N's output while step N+1 is already being prepared.  That means
+        # _update_states for step N+1 carries a stale num_dropped value (before
+        # step N's drops are reflected).  To fix the 1-step lag we store the
+        # per-request drop deltas here (indexed by req_id so they survive index
+        # reshuffling) and apply them in _prepare_inputs of the next step.
+        if not hasattr(self, '_pending_kvc_drops'):
+            self._pending_kvc_drops: dict[str, int] = {}
+        for i, d in enumerate(self._kvcrush_step_drops):
+            if d > 0:
+                req_id = self.input_batch.req_ids[i]
+                self._pending_kvc_drops[req_id] = (
+                    self._pending_kvc_drops.get(req_id, 0) + d
+                )
 
         with record_function_or_nullcontext("gpu_model_runner: postprocess"):
             if self.use_aux_hidden_state_outputs:
@@ -4307,6 +4551,7 @@ class GPUModelRunner(
                 logprobs=logprobs_lists,
                 prompt_logprobs_dict=prompt_logprobs_dict,
                 kv_connector_output=kv_connector_output,
+                num_dropped_tokens_list=getattr(self, '_kvcrush_step_drops', [0] * self.input_batch.num_reqs),
                 ec_connector_output=ec_connector_output
                 if self.supports_mm_inputs
                 else None,
@@ -5339,11 +5584,13 @@ class GPUModelRunner(
 
         attn_metadata: PerLayerAttnMetadata | None = None
 
-        slot_mappings_by_group, slot_mappings = self._get_slot_mappings(
-            num_tokens_padded=num_tokens,
-            num_reqs_padded=num_reqs_padded,
-            num_tokens_unpadded=num_tokens_unpadded,
-            ubatch_slices=ubatch_slices_padded,
+        slot_mappings_by_group, slot_mappings, occupied_slot_mappings_by_group = (
+            self._get_slot_mappings(
+                num_tokens_padded=num_tokens,
+                num_reqs_padded=num_reqs_padded,
+                num_tokens_unpadded=num_tokens_unpadded,
+                ubatch_slices=ubatch_slices_padded,
+            )
         )
 
         # _dummy_run shares pinned CPU buffers (seq_lens, query_start_loc,
@@ -5391,6 +5638,11 @@ class GPUModelRunner(
                     ubatch_slices=(ubatch_slices_padded if pad_attn else ubatch_slices),
                     for_cudagraph_capture=is_graph_capturing,
                     slot_mappings=slot_mappings_by_group,
+                    occupied_slot_mappings=occupied_slot_mappings_by_group,
+                    total_num_kv_cache_tokens=getattr(
+                        self, "_total_num_kv_cache_tokens", 0
+                    ),
+                    req_ids=[],
                     use_spec_decode=self.speculative_config is not None,
                 )
 

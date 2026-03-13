@@ -354,6 +354,7 @@ def make_local_attention_virtual_batches(
         max_seq_len=max_seq_len,
         block_table_tensor=block_table_local,
         slot_mapping=common_attn_metadata.slot_mapping,
+        req_ids=common_attn_metadata.req_ids,
         causal=True,
         _seq_lens_cpu=seq_lens_cpu,
         _num_computed_tokens_cpu=torch.from_numpy(num_computed_tokens_local),

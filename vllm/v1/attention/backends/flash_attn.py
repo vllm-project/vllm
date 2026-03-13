@@ -9,6 +9,7 @@ from typing import ClassVar
 import numpy as np
 import torch
 
+from vllm import _custom_ops as ops
 from vllm.model_executor.layers.attention import Attention
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -42,6 +43,9 @@ from vllm.config import (
 )
 from vllm.config.cache import CacheDType
 from vllm.distributed.parallel_state import get_dcp_group
+from vllm.envs import (VLLM_V1_KVC_BUDGET, VLLM_V1_KVCRUSH_START_SIZE, VLLM_V1_KVCRUSH_WINDOW_SIZE,
+                       VLLM_V1_KVCRUSH_RECENT_SIZE, VLLM_V1_KVCRUSH_ANCHOR_MODE,
+                       VLLM_V1_KVCRUSH_RATIO)
 from vllm.logger import init_logger
 from vllm.platforms.interface import DeviceCapability
 from vllm.utils.math_utils import cdiv, round_up
@@ -213,6 +217,9 @@ class FlashAttentionMetadata:
     seq_lens: torch.Tensor
     block_table: torch.Tensor
     slot_mapping: torch.Tensor
+    num_reqs: int
+    num_dropped_tokens_list: list[int]
+    occupied_slot_mapping: torch.Tensor | None
 
     # For cascade attention.
     use_cascade: bool
@@ -229,6 +236,7 @@ class FlashAttentionMetadata:
     scheduler_metadata: torch.Tensor | None = None
     prefix_scheduler_metadata: torch.Tensor | None = None
     max_num_splits: int = 0
+    req_ids: list[str] | None = None
 
     causal: bool = True
 
@@ -363,10 +371,12 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         max_query_len = common_attn_metadata.max_query_len
         max_seq_len = common_attn_metadata.max_seq_len
+        total_num_kv_cache_tokens = common_attn_metadata.total_num_kv_cache_tokens
         query_start_loc = common_attn_metadata.query_start_loc
         seq_lens = common_attn_metadata.seq_lens
         block_table_tensor = common_attn_metadata.block_table_tensor
         slot_mapping = common_attn_metadata.slot_mapping
+        occupied_slot_mapping = common_attn_metadata.occupied_slot_mapping
         causal = common_attn_metadata.causal
 
         # the overhead of the aot schedule is not worth it for spec-decode
@@ -512,6 +522,16 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             self.scheduler_metadata[n:] = 0
             scheduler_metadata = self.scheduler_metadata[:n]
 
+        max_num_splits = 0
+        if (self.use_full_cuda_graph
+                and num_actual_tokens <= self.max_cudagraph_size):
+            # NOTE(woosuk): Setting num_splits > 1 may increase the memory
+            # usage, because the intermediate buffers of size [num_splits,
+            # num_heads, num_tokens, head_size] are allocated. Therefore,
+            # we only set num_splits when using cuda graphs.
+            max_num_splits = self.max_num_splits
+        num_dropped_tokens_list = [0] * num_reqs
+
         attn_metadata = FlashAttentionMetadata(
             num_actual_tokens=num_actual_tokens,
             max_query_len=max_query_len,
@@ -530,8 +550,11 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             suffix_kv_lens=suffix_kv_lens,
             prefix_scheduler_metadata=prefix_scheduler_metadata,
             max_num_splits=max_num_splits,
-            causal=causal,
-        )
+            num_reqs=num_reqs,
+            num_dropped_tokens_list=num_dropped_tokens_list,
+            occupied_slot_mapping=occupied_slot_mapping,
+            req_ids=common_attn_metadata.req_ids,
+            causal=causal)
         return attn_metadata
 
     def update_block_table(
@@ -551,6 +574,8 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
 
 class FlashAttentionImpl(AttentionImpl):
     can_return_lse_for_decode: bool = True
+    # Class-level counter to track layer indices
+    _layer_counter: int = 0
 
     def __init__(
         self,
@@ -566,6 +591,10 @@ class FlashAttentionImpl(AttentionImpl):
         kv_sharing_target_layer_name: str | None = None,
         sinks: torch.Tensor | None = None,
     ) -> None:
+        # Assign and increment layer index
+        self.layer_idx = FlashAttentionImpl._layer_counter
+        FlashAttentionImpl._layer_counter += 1
+
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
@@ -605,6 +634,41 @@ class FlashAttentionImpl(AttentionImpl):
             raise NotImplementedError(
                 "FlashAttention does not support fp8 kv-cache on this device."
             )
+
+        # Initialize KVCrush compressor and prefill query storage per layer.
+        # KVCrush is only supported in eager mode (--enforce-eager)
+        vllm_cfg = get_current_vllm_config_or_none()
+        is_eager = (vllm_cfg is not None
+                    and vllm_cfg.model_config.enforce_eager)
+        if VLLM_V1_KVC_BUDGET > 0 and is_eager:
+            from vllm.v1.attention.backends.kvcrush import H2OKVCrushCluster
+            logger.info(
+                "Layer %d: Initializing H2OKVCrushCluster with "
+                "max_capacity_prompt=%d, start_size=%d, window_size=%d, "
+                "recent_size=%d, anchor_mode=%s, kvcrush_ratio=%s",
+                self.layer_idx, VLLM_V1_KVC_BUDGET,
+                VLLM_V1_KVCRUSH_START_SIZE, VLLM_V1_KVCRUSH_WINDOW_SIZE,
+                VLLM_V1_KVCRUSH_RECENT_SIZE, VLLM_V1_KVCRUSH_ANCHOR_MODE,
+                VLLM_V1_KVCRUSH_RATIO)
+            self.h2O_kvcrushcompressor = H2OKVCrushCluster(
+                max_capacity_prompt=VLLM_V1_KVC_BUDGET,
+                start_size=VLLM_V1_KVCRUSH_START_SIZE,
+                window_size=VLLM_V1_KVCRUSH_WINDOW_SIZE,
+                recent_size=VLLM_V1_KVCRUSH_RECENT_SIZE,
+                anchor_mode=VLLM_V1_KVCRUSH_ANCHOR_MODE,
+                kvcrush_ratio=VLLM_V1_KVCRUSH_RATIO
+            )
+            # Store prefill queries for compression
+            # (key: request_id, value: list of query tensor chunks)
+            self.prefill_queries: dict[str, list[torch.Tensor]] = {}
+        else:
+            if VLLM_V1_KVC_BUDGET > 0 and not is_eager:
+                logger.warning_once(
+                    "KVCrush requires --enforce-eager. Disabling KVCrush "
+                    "compression because CUDA graphs are enabled.",
+                    scope="local")
+            self.h2O_kvcrushcompressor = None
+            self.prefill_queries = {}
 
         self.sinks = sinks
         if self.sinks is not None:
@@ -696,6 +760,13 @@ class FlashAttentionImpl(AttentionImpl):
         # For decoder and cross-attention, use KV cache as before
         key_cache, value_cache = kv_cache.unbind(0)
 
+        # Save float query for KVCrush scoring BEFORE fp8 quantization.
+        # In the fp8 path, `query` is reassigned to fp8 dtype below, so
+        # any clone taken after that block would be fp8 — incompatible with
+        # update_kv()'s torch.matmul.  We keep a float reference here and
+        # use it exclusively in the KVCrush accumulation/compression block.
+        query_float = query  # float16/bf16; still valid in "auto" path too
+
         if self.kv_cache_dtype.startswith("fp8"):
             # queries are quantized in the attention layer
             dtype = FlashAttentionBackend.get_fp8_dtype_for_flashattn(
@@ -731,7 +802,6 @@ class FlashAttentionImpl(AttentionImpl):
                     k_descale=k_descale,
                     v_descale=v_descale,
                 )
-                return output
             else:
                 sliding_window_size = (
                     list(self.sliding_window)
@@ -761,7 +831,186 @@ class FlashAttentionImpl(AttentionImpl):
                     num_splits=attn_metadata.max_num_splits,
                     s_aux=self.sinks,
                 )
-                return output
+            if VLLM_V1_KVC_BUDGET > 0 and self.dcp_world_size == 1 and self.h2O_kvcrushcompressor is not None:
+                # if attn_metadata.occupied_slot_mapping is None:
+                #     return output
+
+                if not self.prefill_queries and attn_metadata.max_query_len == 1:
+                    # print("No prefill queries stored, and max_query_len is 1, skipping KVCrush compression")
+                    return output
+
+                block_size = key_cache.size(1)  # block_size dimension
+
+                # Get request IDs from metadata
+                req_ids = attn_metadata.req_ids if hasattr(attn_metadata, 'req_ids') and attn_metadata.req_ids is not None else [str(i) for i in range(attn_metadata.num_reqs)]
+
+                # Batch GPU->CPU transfers to avoid per-request .item() syncs
+                query_start_locs = attn_metadata.query_start_loc[:attn_metadata.num_reqs + 1].tolist()
+                seq_lens_list = attn_metadata.seq_lens[:attn_metadata.num_reqs].tolist()
+
+                occupied_slot_start = 0
+                for i in range(attn_metadata.num_reqs):
+                    request_id = req_ids[i]
+                    query_start = query_start_locs[i]
+                    query_end = query_start_locs[i + 1]
+                    seq_len = seq_lens_list[i]
+
+                    num_kv_tokens = seq_len - (query_end - query_start)
+                    occupied_slot_end = occupied_slot_start + num_kv_tokens
+
+                    num_query_tokens = query_end - query_start
+
+                    # --- Prefill phase: accumulate queries ---
+                    if num_query_tokens != 1:
+                        # Multi-token chunk - still in prefill, accumulate
+                        if request_id in self.prefill_queries:
+                            self.prefill_queries[request_id].append(
+                                query_float[query_start:query_end].clone()
+                            )
+                        else:
+                            self.prefill_queries[request_id] = [
+                                query_float[query_start:query_end].clone()
+                            ]
+                        occupied_slot_start = occupied_slot_end
+                        continue
+
+                    if num_kv_tokens == 0:
+                        # Single-token prefill (first token of the sequence)
+                        self.prefill_queries[request_id] = [
+                            query_float[query_start:query_end].clone()
+                        ]
+                        occupied_slot_start = occupied_slot_end
+                        continue
+
+                    # --- Decode phase: single token with existing KV cache ---
+                    if seq_len < VLLM_V1_KVC_BUDGET + self.h2O_kvcrushcompressor.start_size + self.h2O_kvcrushcompressor.recent_size:
+                        self.prefill_queries.pop(request_id, None)
+                        occupied_slot_start = occupied_slot_end
+                        continue
+
+                    if request_id not in self.prefill_queries:
+                        # Already compressed
+                        occupied_slot_start = occupied_slot_end
+                        continue
+
+                    # First decode after prefill so should compress the KV cache for this request
+                    # Concatenate accumulated prefill query chunks
+                    chunks = self.prefill_queries[request_id]
+                    if len(chunks) > 1:
+                        current_query = torch.cat(chunks, dim=0)
+                    else:
+                        current_query = chunks[0]
+
+                    # Reshape for KVCrush: [seq_len, num_heads, head_dim]
+                    #   -> [batch=1, num_heads, seq_len, head_dim]
+                    current_query = current_query.transpose(0, 1).unsqueeze(0)
+
+                    req_occupied_slots = attn_metadata.occupied_slot_mapping[occupied_slot_start:occupied_slot_end]
+
+                    if req_occupied_slots.numel() == 0:
+                        # Clean up stale prefill_queries so they don't
+                        # persist and cause a length mismatch on future steps.
+                        self.prefill_queries.pop(request_id, None)
+                        occupied_slot_start = occupied_slot_end
+                        continue
+
+                    # Extract current KV cache for this request
+                    flat_key = key_cache.view(-1, key_cache.size(-2), key_cache.size(-1))
+                    flat_val = value_cache.view(-1, value_cache.size(-2), value_cache.size(-1))
+
+                    # When the KV cache is fp8-quantized, flat_key/flat_val contain
+                    # fp8 bytes (already viewed as fp8_dtype by the main forward path
+                    # above).  update_kv() calls torch.matmul on key_states, so it
+                    # requires float inputs — read the raw fp8 slots and dequantize
+                    # to the query dtype before passing them in.
+                    # For non-quantized caches ("auto") the tensors are already float
+                    # and no conversion is needed.
+                    is_fp8_kv = self.kv_cache_dtype.startswith("fp8")
+                    if is_fp8_kv:
+                        fp8_dtype = FlashAttentionBackend.get_fp8_dtype_for_flashattn(
+                            self.kv_cache_dtype)
+                        raw_key_slots = flat_key[req_occupied_slots]   # fp8_dtype
+                        raw_val_slots = flat_val[req_occupied_slots]   # fp8_dtype
+                        key_slots_f = torch.empty(raw_key_slots.shape,
+                                                  dtype=current_query.dtype,
+                                                  device=raw_key_slots.device)
+                        val_slots_f = torch.empty(raw_val_slots.shape,
+                                                  dtype=current_query.dtype,
+                                                  device=raw_val_slots.device)
+                        # dequantize: fp8 → float
+                        ops.convert_fp8(key_slots_f, raw_key_slots,
+                                        layer._k_scale.item())
+                        ops.convert_fp8(val_slots_f, raw_val_slots,
+                                        layer._v_scale.item())
+                        current_key_cache = key_slots_f.transpose(0, 1).unsqueeze(0)
+                        current_value_cache = val_slots_f.transpose(0, 1).unsqueeze(0)
+                    else:
+                        current_key_cache = flat_key[req_occupied_slots].transpose(0, 1).unsqueeze(0)
+                        current_value_cache = flat_val[req_occupied_slots].transpose(0, 1).unsqueeze(0)
+                    current_kv_len = current_key_cache.size(2)
+
+                    # Guard: accumulated prefill queries must match the KV
+                    # cache length.  A mismatch indicates stale prefill_queries
+                    # (e.g. left over from a req_occupied_slots.numel()==0 skip
+                    # or a chunked-prefill/async-scheduling edge case).  Clean
+                    # up and skip rather than crashing inside update_kv.
+                    if current_query.shape[2] != current_kv_len:
+                        del self.prefill_queries[request_id]
+                        occupied_slot_start = occupied_slot_end
+                        continue
+
+                    compressed_key_cache, compressed_value_cache = \
+                        self.h2O_kvcrushcompressor.update_kv(
+                            current_key_cache, current_query,
+                            current_value_cache, page_size=block_size
+                        )
+
+                    compressed_kv_len = compressed_key_cache.size(2)
+
+                    # Reshape back: [1, num_kv_heads, kv_len, head_dim]
+                    #            -> [kv_len, num_kv_heads, head_dim]
+                    compressed_key_cache = compressed_key_cache.squeeze(0).transpose(0, 1)
+                    compressed_value_cache = compressed_value_cache.squeeze(0).transpose(0, 1)
+
+                    if is_fp8_kv:
+                        # Re-quantize compressed float K/V back to fp8 before
+                        # writing into the paged cache buffer.
+                        # (output fp8, input float → quantize direction)
+                        ck_fp8 = torch.empty(compressed_key_cache.shape,
+                                             dtype=fp8_dtype,
+                                             device=compressed_key_cache.device)
+                        cv_fp8 = torch.empty(compressed_value_cache.shape,
+                                             dtype=fp8_dtype,
+                                             device=compressed_value_cache.device)
+                        ops.convert_fp8(ck_fp8, compressed_key_cache,
+                                        layer._k_scale.item())
+                        ops.convert_fp8(cv_fp8, compressed_value_cache,
+                                        layer._v_scale.item())
+                        flat_key[req_occupied_slots[:compressed_kv_len]] = ck_fp8
+                        flat_val[req_occupied_slots[:compressed_kv_len]] = cv_fp8
+                    else:
+                        flat_key[req_occupied_slots[:compressed_kv_len]] = compressed_key_cache
+                        flat_val[req_occupied_slots[:compressed_kv_len]] = compressed_value_cache
+
+                    # Track dropped tokens (only layer 0 writes to shared metadata)
+                    if self.layer_idx == 0:
+                        num_dropped_tokens_i = current_kv_len - compressed_kv_len
+                        attn_metadata.num_dropped_tokens_list[i] = num_dropped_tokens_i
+
+                    # Relocate the decode token from its old position
+                    # to immediately after the compressed cache
+                    if current_kv_len > compressed_kv_len:
+                        old_token_slot = attn_metadata.slot_mapping[query_start].item()
+                        new_token_slot = req_occupied_slots[compressed_kv_len].item()
+                        flat_key[new_token_slot] = flat_key[old_token_slot]
+                        flat_val[new_token_slot] = flat_val[old_token_slot]
+
+                    # Clean up stored prefill queries
+                    del self.prefill_queries[request_id]
+
+                    #Move to next request's occupied slots
+                    occupied_slot_start = occupied_slot_end
+            return output
 
         # Cascade attention (rare case).
         cascade_attention(

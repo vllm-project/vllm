@@ -358,12 +358,12 @@ class KVCacheManager:
             num_local_computed_tokens + num_external_computed_tokens,
             self.max_model_len,
         )
-        num_tokens_main_model = total_computed_tokens + num_new_tokens
+        effective_computed_tokens = total_computed_tokens - request.num_dropped_tokens
+        num_tokens_main_model = effective_computed_tokens + num_new_tokens
         num_tokens_need_slot = min(
             num_tokens_main_model + num_lookahead_tokens,
             self.max_model_len,
         )
-
         # Free the blocks that are skipped during the attention computation
         # (e.g., tokens outside the sliding window).
         # We can do this even if we cannot schedule this request due to
@@ -413,6 +413,12 @@ class KVCacheManager:
         if not self.enable_caching or delay_cache_blocks:
             return self.create_kv_cache_blocks(new_blocks)
 
+        # Don't re-cache blocks for compressed requests - their KV data
+        # no longer matches token IDs, so hashes would be incorrect and
+        # future prefix cache hits would get corrupted data.
+        if request.num_dropped_tokens > 0:
+            return self.create_kv_cache_blocks(new_blocks)
+
         # NOTE(woosuk): We want to commit (cache) up to num_local_computed_tokens
         # + num_external_computed_tokens + num_new_tokens, but must exclude
         # "non-committable" tokens (e.g., draft tokens that could be rejected).
@@ -425,6 +431,16 @@ class KVCacheManager:
         self.coordinator.cache_blocks(request, num_tokens_to_cache)
 
         return self.create_kv_cache_blocks(new_blocks)
+
+    def free_tail_blocks(self, request_id: str,
+                         effective_kv_len: int) -> None:
+        """Free tail blocks and evict all prefix-cache hashes after compression.
+
+        Args:
+            request_id: The request ID.
+            effective_kv_len: The effective number of KV tokens after compression (num_computed_tokens - num_dropped_tokens).
+        """
+        self.coordinator.free_tail_blocks(request_id, effective_kv_len)
 
     def free(self, request: Request) -> None:
         """Free the blocks allocated for the request.
@@ -531,7 +547,7 @@ class KVCacheManager:
             num_computed_tokens: The number of computed tokens, including tokens
                 that are already cached and tokens to be cached.
         """
-        if self.enable_caching:
+        if self.enable_caching and request.num_dropped_tokens == 0:
             self.coordinator.cache_blocks(request, num_computed_tokens)
 
     def create_kv_cache_blocks(

@@ -148,6 +148,14 @@ class InputBatch:
             pin_memory=pin_memory,
         )
         self.num_computed_tokens_cpu = self.num_computed_tokens_cpu_tensor.numpy()
+        self.num_dropped_tokens_list_cpu_tensor = torch.zeros(
+             (max_num_reqs, ),
+             device="cpu",
+             dtype=torch.int32,
+             pin_memory=pin_memory,
+         )
+        self.num_dropped_tokens_list_cpu = \
+            self.num_dropped_tokens_list_cpu_tensor.numpy()
 
         # Block table.
         self.block_table = MultiGroupBlockTable(
@@ -351,6 +359,7 @@ class InputBatch:
         self.num_tokens_no_spec[req_index] = request.num_tokens
 
         self.num_computed_tokens_cpu[req_index] = request.num_computed_tokens
+        self.num_dropped_tokens_list_cpu[req_index] = 0
         self.block_table.add_row(request.block_ids, req_index)
 
         if sampling_params := request.sampling_params:
@@ -531,6 +540,8 @@ class InputBatch:
             # False means we don't fill with -inf.
             self.allowed_token_ids_mask_cpu_tensor[req_index].fill_(False)
         self.bad_words_token_ids.pop(req_index, None)
+        # Reset num_dropped_tokens to avoid stale data
+        self.num_dropped_tokens_list_cpu[req_index] = 0
         return req_index
 
     def swap_states(self, i1: int, i2: int) -> None:
@@ -568,6 +579,8 @@ class InputBatch:
             self.num_computed_tokens_cpu[i2],
             self.num_computed_tokens_cpu[i1],
         )
+        self.num_dropped_tokens_list_cpu[i1], self.num_dropped_tokens_list_cpu[i2] =\
+            self.num_dropped_tokens_list_cpu[i2], self.num_dropped_tokens_list_cpu[i1]
 
         # NOTE: the following is unsafe
         # self.token_ids_cpu[i1, ...], self.token_ids_cpu[i2, ...], =\
@@ -724,6 +737,8 @@ class InputBatch:
             self.num_computed_tokens_cpu[empty_index] = self.num_computed_tokens_cpu[
                 last_req_index
             ]
+            self.num_dropped_tokens_list_cpu[
+                empty_index] = self.num_dropped_tokens_list_cpu[last_req_index]
             self.block_table.move_row(last_req_index, empty_index)
 
             self.request_lora_mapping[empty_index] = self.request_lora_mapping[

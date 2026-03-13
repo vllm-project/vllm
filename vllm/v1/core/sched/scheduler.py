@@ -26,6 +26,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
+from vllm.envs import VLLM_V1_KVC_BUDGET
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     RoutedExpertsReader,
@@ -168,6 +169,11 @@ class Scheduler(SchedulerInterface):
         self.skipped_waiting = create_request_queue(self.policy)
         self.running: list[Request] = []
 
+        # Batch size tracking (updated every schedule() call)
+        self.max_observed_batch_size: int = 0
+        self._batch_size_sum: int = 0
+        self._batch_size_count: int = 0
+
         # The request IDs that are finished in between the previous and the
         # current steps. This is used to notify the workers about the finished
         # requests so that they can free the cached states for those requests.
@@ -222,10 +228,22 @@ class Scheduler(SchedulerInterface):
                 self.num_lookahead_tokens = self.num_spec_tokens
 
         # Create the KV cache manager.
+        # Disable prefix caching when KVCrush compression is active.
+        # Compressed blocks contain shuffled/merged KV data that no longer
+        # matches token hashes, so prefix cache hits would return corrupt
+        # data. Also, cached prefill tokens skip query computation, leaving
+        # prefill_queries incomplete for KVCrush importance scoring.
+        enable_caching = self.cache_config.enable_prefix_caching
+        if VLLM_V1_KVC_BUDGET > 0 and enable_caching:
+            logger.info("KVCrush compression is active "
+                        "(VLLM_V1_KVC_BUDGET=%d). "
+                        "Disabling prefix caching to ensure correct "
+                        "compression.", VLLM_V1_KVC_BUDGET)
+            enable_caching = False
         self.kv_cache_manager = KVCacheManager(
             kv_cache_config=kv_cache_config,
             max_model_len=self.max_model_len,
-            enable_caching=self.cache_config.enable_prefix_caching,
+            enable_caching=enable_caching,
             use_eagle=self.use_eagle,
             log_stats=self.log_stats,
             enable_kv_cache_events=self.enable_kv_cache_events,
@@ -372,6 +390,13 @@ class Scheduler(SchedulerInterface):
         scheduled_timestamp = time.monotonic()
 
         self.kv_cache_manager.new_step_starts()
+
+        # Track running batch size at the start of this step.
+        _cur_batch = len(self.running)
+        if _cur_batch > self.max_observed_batch_size:
+            self.max_observed_batch_size = _cur_batch
+        self._batch_size_sum += _cur_batch
+        self._batch_size_count += 1
 
         # First, schedule the RUNNING requests.
         req_index = 0
@@ -959,6 +984,7 @@ class Scheduler(SchedulerInterface):
         self.encoder_cache_manager.free(request)
         request.status = RequestStatus.PREEMPTED
         request.num_computed_tokens = 0
+        request.num_dropped_tokens = 0
         if request.spec_token_ids:
             request.spec_token_ids = []
         request.num_preemptions += 1
@@ -1060,6 +1086,7 @@ class Scheduler(SchedulerInterface):
         num_computed_tokens: list[int] = []
         num_output_tokens: list[int] = []
         resumed_req_ids = set()
+        num_dropped_tokens_list: list[int] = []
 
         num_running_reqs = len(running_reqs)
         for idx, req in enumerate(itertools.chain(running_reqs, resumed_reqs)):
@@ -1091,6 +1118,7 @@ class Scheduler(SchedulerInterface):
                 req_to_new_blocks[req_id].get_block_ids(allow_none=True)
             )
             num_computed_tokens.append(req.num_computed_tokens)
+            num_dropped_tokens_list.append(req.num_dropped_tokens)
             num_output_tokens.append(
                 req.num_output_tokens + req.num_output_placeholders
             )
@@ -1103,6 +1131,7 @@ class Scheduler(SchedulerInterface):
             new_block_ids=new_block_ids,
             num_computed_tokens=num_computed_tokens,
             num_output_tokens=num_output_tokens,
+            num_dropped_tokens_list=num_dropped_tokens_list,
         )
 
     def _try_schedule_encoder_inputs(
@@ -1303,6 +1332,7 @@ class Scheduler(SchedulerInterface):
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
         pooler_outputs = model_runner_output.pooler_output
         num_nans_in_logits = model_runner_output.num_nans_in_logits
+        num_dropped_tokens_list = model_runner_output.num_dropped_tokens_list
         kv_connector_output = model_runner_output.kv_connector_output
         cudagraph_stats = model_runner_output.cudagraph_stats
 
@@ -1354,7 +1384,21 @@ class Scheduler(SchedulerInterface):
             req_index = model_runner_output.req_id_to_index[req_id]
             generated_token_ids = (
                 sampled_token_ids[req_index] if sampled_token_ids else []
+
             )
+            request.num_dropped_tokens += num_dropped_tokens_list[req_index]
+
+            # Free tail blocks after KV cache compression
+            if num_dropped_tokens_list[req_index] > 0:
+                free_before = self.kv_cache_manager.block_pool.get_num_free_blocks()
+                effective_kv_len = (request.num_computed_tokens
+                                    - request.num_dropped_tokens)
+                self.kv_cache_manager.free_tail_blocks(
+                    req_id, effective_kv_len)
+                free_after = self.kv_cache_manager.block_pool.get_num_free_blocks()
+                # print("Freed {} blocks for request {} after dropping {} tokens".format(
+                #     free_after - free_before, req_id, num_dropped_tokens_list[req_index]
+                # ))
 
             scheduled_spec_token_ids = (
                 scheduler_output.scheduled_spec_decode_tokens.get(req_id)
@@ -1469,7 +1513,6 @@ class Scheduler(SchedulerInterface):
             else:
                 # Invariant: EngineCore returns no partial prefill outputs.
                 assert not prompt_logprobs_tensors
-
         # Remove the stopped requests from the running and waiting queues.
         if stopped_running_reqs:
             self.running = remove_all(self.running, stopped_running_reqs)

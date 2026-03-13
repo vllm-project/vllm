@@ -122,7 +122,7 @@ class CachedRequestData:
     new_block_ids: list[tuple[list[int], ...] | None]
     num_computed_tokens: list[int]
     num_output_tokens: list[int]
-
+    num_dropped_tokens_list: list[int]
     # Version of dataclass repr with token IDs obfuscated.
     def anon_repr(self) -> str:
         new_token_ids_lens = [len(toks) for toks in self.new_token_ids]
@@ -137,12 +137,14 @@ class CachedRequestData:
             f"all_token_ids_lens={all_token_ids_lens},"
             f"new_block_ids={self.new_block_ids},"
             f"num_computed_tokens={self.num_computed_tokens},"
-            f"num_output_tokens={self.num_output_tokens}"
+            f"num_output_tokens={self.num_output_tokens}",
+            f"num_dropped_tokens_list={self.num_dropped_tokens_list}"
             f")"
         )
 
     def __repr__(self) -> str:
         return self.anon_repr()
+
 
     @property
     def num_reqs(self) -> int:
@@ -172,6 +174,7 @@ class CachedRequestData:
             new_block_ids=[],
             num_computed_tokens=[],
             num_output_tokens=[],
+            num_dropped_tokens_list=[],
         )
 
 

@@ -248,6 +248,12 @@ if TYPE_CHECKING:
     VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS: bool = False
     VLLM_NIXL_EP_MAX_NUM_RANKS: int = 32
     VLLM_XPU_ENABLE_XPU_GRAPH: bool = False
+    VLLM_V1_KVC_BUDGET: int = 64
+    VLLM_V1_KVCRUSH_START_SIZE: int = 32
+    VLLM_V1_KVCRUSH_WINDOW_SIZE: int = 8
+    VLLM_V1_KVCRUSH_RECENT_SIZE: int = 128
+    VLLM_V1_KVCRUSH_ANCHOR_MODE: str = "mean"
+    VLLM_V1_KVCRUSH_RATIO: float = 0.0
 
 
 def get_default_cache_root():
@@ -1648,6 +1654,23 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_XPU_ENABLE_XPU_GRAPH": lambda: bool(
         int(os.getenv("VLLM_XPU_ENABLE_XPU_GRAPH", "0"))
     ),
+    # Sets the total KV size budget (in number of tokens) used during compression.
+    # After compression the size of KVCache is start+budget+recent.
+    # The default value is 0.
+    "VLLM_V1_KVC_BUDGET":
+    lambda: int(os.getenv("VLLM_V1_KVC_BUDGET", "0")),
+
+    # Other KVCrush compression parameters
+    "VLLM_V1_KVCRUSH_START_SIZE":
+    lambda: int(os.getenv("VLLM_V1_KVCRUSH_START_SIZE", "32")),
+    "VLLM_V1_KVCRUSH_WINDOW_SIZE":
+    lambda: int(os.getenv("VLLM_V1_KVCRUSH_WINDOW_SIZE", "8")),
+    "VLLM_V1_KVCRUSH_RECENT_SIZE":
+    lambda: int(os.getenv("VLLM_V1_KVCRUSH_RECENT_SIZE", "128")),
+    "VLLM_V1_KVCRUSH_ANCHOR_MODE":
+    lambda: os.getenv("VLLM_V1_KVCRUSH_ANCHOR_MODE", "mean"),
+    "VLLM_V1_KVCRUSH_RATIO":
+    lambda: float(os.getenv("VLLM_V1_KVCRUSH_RATIO", "0.0")),
 }
 
 
