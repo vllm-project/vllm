@@ -216,6 +216,19 @@ class OpenAIServing:
         self.renderer = engine_client.renderer
         self.io_processor = engine_client.io_processor
         self.input_processor = engine_client.input_processor
+        self.default_sampling_params: dict[str, Any] = {}
+
+    def _apply_default_sampling_overrides(self, request: Any) -> None:
+        """Apply server-side sampling param overrides to the request.
+
+        Only overrides fields that the client did not explicitly set.
+        """
+        if "skip_special_tokens" not in getattr(
+            request, "model_fields_set", set()
+        ):
+            request.skip_special_tokens = self.default_sampling_params.get(
+                "skip_special_tokens", request.skip_special_tokens
+            )
 
     async def beam_search(
         self,

@@ -427,10 +427,7 @@ class OpenAIServingResponses(OpenAIServing):
                 self.override_max_tokens,
             )
 
-            if "skip_special_tokens" in self.default_sampling_params:
-                request.skip_special_tokens = (
-                    self.default_sampling_params["skip_special_tokens"]
-                )
+            self._apply_default_sampling_overrides(request)
 
             sampling_params = request.to_sampling_params(
                 default_max_tokens, self.default_sampling_params

@@ -1043,19 +1043,22 @@ def test_skip_special_tokens_default():
 
 
 def test_skip_special_tokens_server_override():
-    """Test that server-side skip_special_tokens overrides request default."""
+    """Test that server-side skip_special_tokens overrides request default
+    when client does not explicitly set it."""
     request = ChatCompletionRequest(
         model="test-model",
         messages=[{"role": "user", "content": "Hello"}],
         max_tokens=10,
     )
+    # Client did not explicitly set skip_special_tokens
+    assert "skip_special_tokens" not in request.model_fields_set
 
-    # Simulate the serving layer override
+    # Simulate _apply_default_sampling_overrides
     default_sampling_params = {"skip_special_tokens": False}
-    if "skip_special_tokens" in default_sampling_params:
-        request.skip_special_tokens = (
-            default_sampling_params["skip_special_tokens"]
-        )
+    if "skip_special_tokens" not in request.model_fields_set:
+        request.skip_special_tokens = default_sampling_params[
+            "skip_special_tokens"
+        ]
 
     sampling_params = request.to_sampling_params(
         max_tokens=10,
@@ -1064,7 +1067,34 @@ def test_skip_special_tokens_server_override():
     assert sampling_params.skip_special_tokens is False
 
 
-def test_skip_special_tokens_client_explicit():
+def test_skip_special_tokens_client_override():
+    """Test that client-set skip_special_tokens takes precedence over
+    server default."""
+    request = ChatCompletionRequest(
+        model="test-model",
+        messages=[{"role": "user", "content": "Hello"}],
+        max_tokens=10,
+        skip_special_tokens=True,
+    )
+    # Client explicitly set skip_special_tokens
+    assert "skip_special_tokens" in request.model_fields_set
+
+    # Simulate _apply_default_sampling_overrides with server default False
+    default_sampling_params = {"skip_special_tokens": False}
+    if "skip_special_tokens" not in request.model_fields_set:
+        request.skip_special_tokens = default_sampling_params[
+            "skip_special_tokens"
+        ]
+
+    sampling_params = request.to_sampling_params(
+        max_tokens=10,
+        default_sampling_params=default_sampling_params,
+    )
+    # Client's explicit True wins over server's False
+    assert sampling_params.skip_special_tokens is True
+
+
+def test_skip_special_tokens_client_explicit_no_server_override():
     """Test that client-set skip_special_tokens is used when no server
     override."""
     request = ChatCompletionRequest(
