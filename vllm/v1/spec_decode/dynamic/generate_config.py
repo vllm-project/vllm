@@ -5,14 +5,16 @@ import pprint
 import time
 from pathlib import Path
 
-from vllm.v1.spec_decode.offline import main as spec_decode_main
-
 from vllm.benchmarks.datasets import add_dataset_parser
+from vllm.benchmarks.datasets import get_samples
 from vllm.benchmarks.sweep.param_sweep import ParameterSweep
 from vllm.benchmarks.sweep.serve import SweepServeArgs, run_main
 from vllm.config.speculative import DynamicSpeculativeConfig
+from vllm import LLM
+from transformers import AutoTokenizer
+from vllm.sampling_params import SamplingParams
 from vllm.utils.argparse_utils import FlexibleArgumentParser
-
+from vllm.v1.metrics.reader import Counter, Vector
 
 def build_serve_params(
     method,
@@ -128,7 +130,6 @@ def run_profiling_sweep(args):
         "vllm",
         "serve",
         args.model_dir,
-        "--disable-log-requests",
         "--gpu-memory-utilization",
         "0.95",
         "--max-num-seqs",
@@ -188,10 +189,130 @@ def run_profiling_sweep(args):
         resume=None,
         link_vars=[],
         server_ready_timeout=600,
+        experiment_name=f"{args.method}-{args.num_spec_tokens}",
     )
 
     result_df = run_main(sweep_args)
     return result_df
+
+
+def get_acceptance_rate_per_pos(args):
+    """Get acceptance rate per position."""
+
+    tokenizer = AutoTokenizer.from_pretrained(args.model_dir)
+    prompts = get_samples(args, tokenizer)
+    if args.enable_multimodal_chat:
+        llm_prompts = [p.prompt for p in prompts]
+    else:
+        # add_special_tokens is False to avoid adding bos twice
+        # when using chat templates
+        llm_prompts = [
+            {
+                "prompt_token_ids": tokenizer.encode(
+                    prompt.prompt, add_special_tokens=False
+                ),
+                "multi_modal_data": prompt.multi_modal_data,
+            }
+            for prompt in prompts
+        ]
+    if args.method == "eagle" or args.method == "eagle3":
+        eagle_dir = args.eagle_dir
+        if args.method == "eagle" and eagle_dir is None:
+            eagle_dir = "yuhuili/EAGLE-LLaMA3.1-Instruct-8B"
+
+        elif args.method == "eagle3" and eagle_dir is None:
+            eagle_dir = "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B"
+        speculative_config = {
+            "method": args.method,
+            "model": eagle_dir,
+            "num_speculative_tokens": args.num_spec_tokens,
+            "disable_padded_drafter_batch": args.disable_padded_drafter_batch,
+            "parallel_drafting": args.parallel_drafting,
+        }
+    elif args.method == "ngram":
+        speculative_config = {
+            "method": "ngram",
+            "num_speculative_tokens": args.num_spec_tokens,
+            "prompt_lookup_max": args.prompt_lookup_max,
+            "prompt_lookup_min": args.prompt_lookup_min,
+        }
+    elif args.method == "draft_model":
+        assert args.draft_model is not None and args.draft_model != ""
+        speculative_config = {
+            "method": args.method,
+            "model": args.draft_model,
+            "num_speculative_tokens": args.num_spec_tokens,
+            "enforce_eager": args.enforce_eager,
+            "max_model_len": args.max_model_len,
+            "parallel_drafting": args.parallel_drafting,
+        }
+    elif args.method == "mtp":
+        speculative_config = {
+            "method": "mtp",
+            "num_speculative_tokens": args.num_spec_tokens,
+        }
+    else:
+        raise ValueError(f"unknown method: {args.method}")
+
+    llm = LLM(
+        model=args.model_dir,
+        trust_remote_code=True,
+        tensor_parallel_size=args.tp,
+        enable_chunked_prefill=args.enable_chunked_prefill,
+        enforce_eager=args.enforce_eager,
+        gpu_memory_utilization=args.gpu_memory_utilization,
+        speculative_config=speculative_config,
+        disable_log_stats=False,
+        max_model_len=args.max_model_len,
+        limit_mm_per_prompt={"image": 5},
+        disable_chunked_mm_input=True,
+        max_num_seqs=args.max_vllm_batch_size,
+        allowed_local_media_path=args.allowed_local_media_path,
+    )
+
+    sampling_params = SamplingParams(temperature=args.temp, max_tokens=args.output_len)
+    if args.backend == "openai-chat":
+        outputs = llm.chat(llm_prompts, sampling_params=sampling_params)
+    else:
+        outputs = llm.generate(
+            llm_prompts,
+            sampling_params=sampling_params,
+        )
+
+    metrics = llm.get_metrics()
+
+    num_drafts = 0
+    num_draft_tokens = 0
+    num_accepted_tokens = 0
+    acceptance_counts = [0] * args.num_spec_tokens
+    for metric in metrics:
+        if metric.name == "vllm:spec_decode_num_drafts":
+            assert isinstance(metric, Counter)
+            num_drafts += metric.value
+        elif metric.name == "vllm:spec_decode_num_draft_tokens":
+            assert isinstance(metric, Counter)
+            num_draft_tokens += metric.value
+        elif metric.name == "vllm:spec_decode_num_accepted_tokens":
+            assert isinstance(metric, Counter)
+            num_accepted_tokens += metric.value
+        elif metric.name == "vllm:spec_decode_num_accepted_tokens_per_pos":
+            assert isinstance(metric, Vector)
+            for pos in range(len(metric.values)):
+                acceptance_counts[pos] += metric.values[pos]
+
+
+    acceptance_length = 1 + (num_accepted_tokens / num_drafts) if num_drafts > 0 else 1
+    print(f"mean acceptance length: {acceptance_length:.2f}")
+    print("-" * 50)
+
+    # print acceptance at each token position
+    acceptance_rate_per_pos = []
+    for i in range(len(acceptance_counts)):
+        acceptance_rate = acceptance_counts[i] / num_drafts if num_drafts > 0 else 0
+        print(f"acceptance at token {i}: {acceptance_rate:.2f}")
+        acceptance_rate_per_pos.append(acceptance_rate)
+
+    return acceptance_length, acceptance_rate_per_pos
 
 
 def main():
@@ -217,7 +338,12 @@ def main():
         type=int,
         help="Max vllm server batch size (max concurrency)",
     )
+    parser.add_argument("--backend", type=str, default="openai")
     parser.add_argument("--tp", type=int, default=1)
+    parser.add_argument("--enforce-eager", action="store_true")
+    parser.add_argument("--enable-chunked-prefill", action="store_true")
+    parser.add_argument("--gpu-memory-utilization", type=float, default=0.9)
+    parser.add_argument("--disable-padded-drafter-batch", action="store_true")
     parser.add_argument("--result-dir", type=str, default="./log/dynamic_sd")
     parser.add_argument("--prompt-lookup-max", type=int, default=5)
     parser.add_argument("--prompt-lookup-min", type=int, default=2)
@@ -226,6 +352,8 @@ def main():
     parser.add_argument("--top-p", type=float, default=1.0)
     parser.add_argument("--top-k", type=int, default=-1)
     parser.add_argument("--output-len", type=int, default=256)
+    parser.add_argument("--parallel-drafting", action="store_true")
+    parser.add_argument("--allowed-local-media-path", type=str, default="")
     parser.add_argument(
         "--num-batches",
         type=int,
@@ -254,7 +382,7 @@ def main():
     start = time.time()
 
     # Step 1: get acceptance_rate_per_pos
-    acceptance_length, acceptance_rate_per_pos = spec_decode_main(args)
+    acceptance_length, acceptance_rate_per_pos = get_acceptance_rate_per_pos(args)
     print(f"Acceptance length: {acceptance_length}")
     print(f"Acceptance rate per position: {acceptance_rate_per_pos}")
     print("✅ Step 1: obtained acceptance rate per position.")
