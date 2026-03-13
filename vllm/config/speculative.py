@@ -392,18 +392,10 @@ class SpeculativeConfig:
             self.prompt_lookup_min = 5
             self.prompt_lookup_max = 5
         elif self.prompt_lookup_min is None:
-            if self.prompt_lookup_max is None:
-                raise ValueError(
-                    "Either prompt_lookup_max or prompt_lookup_min must be "
-                    "provided when using the ngram method."
-                )
+            # prompt_lookup_max is set (guaranteed by the first branch)
             self.prompt_lookup_min = self.prompt_lookup_max
         elif self.prompt_lookup_max is None:
-            if self.prompt_lookup_min is None:
-                raise ValueError(
-                    "Either prompt_lookup_max or prompt_lookup_min must be "
-                    "provided when using the ngram method."
-                )
+            # prompt_lookup_min is set (guaranteed by the first branch)
             self.prompt_lookup_max = self.prompt_lookup_min
 
         if self.prompt_lookup_min > self.prompt_lookup_max:
@@ -598,13 +590,10 @@ class SpeculativeConfig:
                 "num_speculative_tokens was provided but without speculative model."
             )
 
-        self._build_draft_model_config()
-
-        # Auto-detect eagle from model path substring.
-        # Delegates to _init_eagle_family() which rebuilds draft_model_config
-        # with EAGLEConfig wrapping.
-        model_lower = self.draft_model_config.model.lower()
+        # Auto-detect eagle from model path substring before loading config.
+        # Delegates to _init_eagle_family() which builds its own draft config.
         if self.method == "draft_model":
+            model_lower = self.model.lower()
             if "eagle3" in model_lower:
                 self.method = "eagle3"
                 self._init_eagle_family()
@@ -613,6 +602,8 @@ class SpeculativeConfig:
                 self.method = "eagle"
                 self._init_eagle_family()
                 return
+
+        self._build_draft_model_config()
 
         # Auto-detect method from hf_config now that ModelConfig is loaded.
         # Only run when method is still the default ("draft_model"), i.e.
@@ -624,20 +615,13 @@ class SpeculativeConfig:
             elif model_type == "mlp_speculator":
                 self.method = "mlp_speculator"
             elif model_type in get_args(MTPModelTypes):
+                # This also catches "longcat_flash_mtp" since it's in MTPModelTypes.
                 self.method = "mtp"
                 if self.num_speculative_tokens > 1:
                     logger.warning(
                         "Enabling num_speculative_tokens > 1 will run "
                         "multiple times of forward on same MTP layer"
                         ",which may result in lower acceptance rate"
-                    )
-            elif model_type == "longcat_flash_mtp":
-                self.method = "longcat_flash_mtp"
-                if self.num_speculative_tokens > 1:
-                    logger.warning(
-                        "LongCat MTP models only have "
-                        "one layer. Might need some code changes "
-                        "to support multiple layers."
                     )
             # Otherwise keep method="draft_model" — the user is using
             # a plain draft model (e.g. a smaller version of the target).
