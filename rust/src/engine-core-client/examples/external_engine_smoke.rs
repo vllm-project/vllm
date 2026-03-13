@@ -72,7 +72,9 @@ struct CompletedRequest {
     stop_reason: Option<StopReason>,
 }
 
-async fn wait_for_request_completion(mut stream: EngineCoreOutputStream) -> Result<CompletedRequest> {
+async fn wait_for_request_completion(
+    mut stream: EngineCoreOutputStream,
+) -> Result<CompletedRequest> {
     let mut completed = CompletedRequest::default();
 
     while let Some(output) = stream.next().await {

@@ -1,5 +1,5 @@
 [workspace]
-members = ["src/engine-core-client"]
+members = ["src/engine-core-client", "src/llm"]
 resolver = "3"
 
 [workspace.package]

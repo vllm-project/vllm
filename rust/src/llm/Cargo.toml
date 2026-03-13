@@ -1,0 +1,19 @@
+[package]
+name = "vllm-llm"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+futures = "0.3.31"
+thiserror = "2.0.16"
+vllm-engine-core-client = { path = "../engine-core-client" }
+
+[dev-dependencies]
+bytes = "1.11.1"
+rmp-serde = "1.3.1"
+tokio = { version = "1.47.1", features = ["macros", "rt-multi-thread", "time"] }
+tracing-subscriber = { version = "0.3.20", features = ["env-filter", "fmt"] }
+zeromq = { version = "0.6.0-pre.1", default-features = false, features = [
+    "tokio-runtime",
+    "all-transport",
+] }
