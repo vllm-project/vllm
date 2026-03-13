@@ -6,9 +6,11 @@ Run `pytest tests/kernels/test_moe_layer.py`.
 """
 
 import functools
+import types
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import astuple, dataclass, fields
 from itertools import product
+from typing import get_args
 
 import pytest
 import torch
@@ -217,12 +219,47 @@ class MoETestConfig:
     dp_size: int = 1
     tp_size: int = 1
 
+    # TODO: add more error messages
+    def id(self) -> str:
+        def proc(s: str) -> str:
+            return s.removeprefix("torch.")
+
+        id_str = "-".join([proc(str(f)) for f in astuple(self)])
+        return f"[{id_str}]"
+
+    # TODO: add more error messages
+    @staticmethod
+    def from_id(id: str) -> "MoETestConfig":
+        id = id[1:-1]
+        str_values = id.split("-")
+
+        def convert(v: str, ty):
+            if isinstance(ty, types.UnionType):
+                sub_ty = list(get_args(ty))
+                assert len(sub_ty) == 2 and types.NoneType in sub_ty
+                sub_ty.remove(types.NoneType)
+                return sub_ty[0](v) if v != "None" else None
+            elif ty is torch.dtype:
+                ty_val = getattr(torch, v, None)
+                assert isinstance(ty_val, torch.dtype)
+                return ty_val
+            elif ty is bool:
+                return v == "True"
+            else:
+                return ty(v)
+
+        values = tuple(
+            [convert(v, f.type) for v, f in zip(str_values, fields(MoETestConfig))]
+        )
+        return MoETestConfig(*values)
+
 
 def generate_valid_test_configs(
     backend: str,
     ep_size: int,
     dp_size: int,
     tp_size: int,
+    verbosity: int = 0,
 ) -> list[MoETestConfig]:
     configs: list[MoETestConfig] = []
 
@@ -269,6 +306,8 @@ def generate_valid_test_configs(
         valid, reason = is_valid_config(config)
         if valid:
             configs.append(config)
+        elif verbosity > 1:
+            print(f"Skipping invalid config {config} - {reason}")
 
     return configs
 
@@ -1443,11 +1482,28 @@ def _test_body_config(test_config: MoETestConfig, cpu_group, **kwargs):
         return _test_body_eplb(**kwargs, cpu_group=cpu_group)
 
 
+# def format_result(verbosity: int, msg: str, ex=None):
+#     if ex is not None:
+#         x = str(ex)
+#         newx = x.strip(" \n\t")[:16]
+#         if len(newx) < len(x):
+#             newx = newx + " ..."
+
+#         prefix = "E\t"
+#         print(f"{textwrap.indent(traceback.format_exc(), prefix)}")
+#         print(f"FAILED {msg} - {newx}\n")
+#     elif verbosity > 0:
+#         print(f"PASSED {msg}")
+#     else:
+#         print(".", end="")
+
+
 def _parallel_worker(
     pgi: ProcessGroupInfo,
     vllm_config: VllmConfig,
     cpu_group,
     test_configs: list[MoETestConfig],
+    verbosity: int,
     **kwargs,
 ) -> None:
     set_random_seed(7)
@@ -1466,7 +1522,9 @@ def _parallel_worker(
 
         tp_rank = pgi.rank % test_config.tp_size
 
-        print(f"TESTING {test_config}")
+        if verbosity > 0:
+            print(f"{test_config.id()}")
+
         try:
             _run_one_config(
                 vllm_config,
@@ -1490,16 +1548,27 @@ def _parallel_worker(
                 use_gate=test_config.use_gate,
                 use_routed_input_transform=test_config.use_routed_input_transform,
             )
-            print("PASSED")
+            if verbosity > 0:
+                print(" PASSED")
+            else:
+                print(".", end="")
             passed = passed + 1
+            # format_result(verbosity, test_config.id())
         except Exception as ex:
-            print(f"FAILED {ex}")
+            # print(f"FAILED {ex}")
             failed = failed + 1
+            if verbosity > 0:
+                print(f"{ex} FAILED")
+            else:
+                print("F")
+            # format_result(verbosity, test_config.id(), ex)
         finally:
             total = total + 1
 
     if failed > 0:
         raise RuntimeError(f"{failed} of {total} tests failed.")
+    else:
+        print(f"{passed} of {total} tests passed.")
 
 
 # TODO: add cudagraphs/torch.compile tests
@@ -1511,6 +1580,8 @@ def test_moe_layer(
     use_ep: bool,
     backend: str,
     monkeypatch,
+    pytestconfig,
+    subtest,
 ):
     """Test MoE layer with parallelism (multi-GPU or TP/EP enabled).
 
@@ -1524,6 +1595,8 @@ def test_moe_layer(
     # Check if enough GPUs available
     if world_size is not None and num_gpus is not None and world_size > num_gpus:
         pytest.skip(f"Not enough GPUs got {num_gpus}, expected {world_size}.")
+
+    verbosity = pytestconfig.getoption("verbose")
 
     test_env = dict()
     test_env["VLLM_MOE_DP_CHUNK_SIZE"] = "128"
@@ -1552,9 +1625,16 @@ def test_moe_layer(
         parallel_config=parallel_config, compilation_config=compilation_config
     )
 
-    test_configs = generate_valid_test_configs(backend, ep_size, dp_size, tp_size)
+    test_configs = generate_valid_test_configs(
+        backend, ep_size, dp_size, tp_size, verbosity
+    )
 
-    print(f"Collected {len(test_configs)} MoE test configs")
+    if subtest is not None:
+        sub_test_config = MoETestConfig.from_id(subtest)
+        if sub_test_config in test_configs:
+            test_configs = [sub_test_config]
+        else:
+            pytest.skip("subtest config does not match any valid test configuation")
 
     try:
         parallel_launch_with_config(
@@ -1563,6 +1643,7 @@ def test_moe_layer(
             vllm_config,
             test_env,
             test_configs,
+            verbosity,
         )
     finally:
         # Cleanup GPU memory after spawned processes complete
