@@ -126,9 +126,12 @@ def test_hf_model_weights_mapper(model_arch: str):
     # after they are tied in the model, so the mapper will not be able to map them.
     # We exclude them from the reference weight names for this test.
     if isinstance(tied := getattr(hf_dummy_model, "_tied_weights_keys", None), dict):
-        mapped_tied_weights = mapper.apply((k, None) for k in tied)
-        tied_weight_names = set(map(lambda x: x[0], mapped_tied_weights))
-        ref_weight_names -= tied_weight_names
+        config = hf_dummy_model.config
+        key = "tie_word_embeddings"
+        if getattr(config.get_text_config(), key, False) or getattr(config, key, False):
+            mapped_tied_weights = mapper.apply((k, None) for k in tied)
+            tied_weight_names = set(map(lambda x: x[0], mapped_tied_weights))
+            ref_weight_names -= tied_weight_names
 
     weights_missing = ref_weight_names - weight_names
     weights_unmapped = weight_names - ref_weight_names
