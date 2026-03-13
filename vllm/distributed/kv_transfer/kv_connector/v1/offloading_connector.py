@@ -126,6 +126,7 @@ class OffloadingConnector(KVConnectorBase_V1):
     ):
         super().__init__(vllm_config, role, kv_cache_config)
 
+        assert kv_cache_config is not None
         spec = OffloadingSpecFactory.create_spec(vllm_config, kv_cache_config)
 
         self.connector_scheduler: OffloadingConnectorScheduler | None = None
@@ -245,9 +246,10 @@ class OffloadingConnectorScheduler:
     """Implementation of Scheduler side methods"""
 
     def __init__(self, spec: OffloadingSpec):
-        self.gpu_block_size = spec.gpu_block_size
-        self.offloaded_block_size = spec.offloaded_block_size
-        self.block_size_factor = self.offloaded_block_size // self.gpu_block_size
+        assert len(spec.gpu_block_size) == 1
+        self.gpu_block_size = spec.gpu_block_size[0]
+        self.offloaded_block_size = self.gpu_block_size * spec.block_size_factor
+        self.block_size_factor = spec.block_size_factor
         self.manager: OffloadingManager = spec.get_manager()
 
         self._requests: dict[ReqId, Request] = {}
