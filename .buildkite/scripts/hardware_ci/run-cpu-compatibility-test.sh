@@ -18,4 +18,4 @@ tar -xvf ./sde-external-10.7.0-2026-02-18-lin.tar.xz --strip-components=1 -C ./s
 ./sde/sde64 -clx -- python3 examples/basic/offline_inference/generate.py --model facebook/opt-125m --dtype bfloat16
 
 # Test Cooper Lake (AVX512F + VNNI + BF16)
-./sde/sde64 -clx -- python3 examples/basic/offline_inference/generate.py --model facebook/opt-125m --dtype bfloat16
+./sde/sde64 -cpx -- python3 examples/basic/offline_inference/generate.py --model facebook/opt-125m --dtype bfloat16
