@@ -630,7 +630,7 @@ curl -s http://localhost:8000/rerank -H "Content-Type: application/json" -d '{
 ColQwen3.5 is based on [ColPali](https://arxiv.org/abs/2407.01449), extending ColBERT's late interaction approach to **multi-modal** inputs. It uses the Qwen3.5 hybrid backbone (linear + full attention) and produces per-token L2-normalized vectors for MaxSim scoring.
 
 | Architecture | Backbone | Example HF Models |
-|---|---|---|
+| - | - | - |
 | `ColQwen3_5` | Qwen3.5 | `athrael-soju/colqwen3.5-4.5B` |
 
 Start the server:
