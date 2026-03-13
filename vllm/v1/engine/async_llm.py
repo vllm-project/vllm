@@ -940,12 +940,18 @@ class AsyncLLM(EngineClient):
         timeout: float | None = None,
         args: tuple = (),
         kwargs: dict | None = None,
+        idle: bool = False,
     ):
         """
         Perform a collective RPC call to the given path.
+
+        Args:
+            idle: If True, defer execution in DP mode until all engines are
+                idle.  Required for cross-engine collectives (e.g. weight
+                sync) that would otherwise deadlock against the DP step loop.
         """
         return await self.engine_core.collective_rpc_async(
-            method, timeout, args, kwargs
+            method, timeout, args, kwargs, idle=idle
         )
 
     async def wait_for_requests_to_drain(self, drain_timeout: int = 300):
@@ -1050,7 +1056,9 @@ class AsyncLLM(EngineClient):
             raise TypeError(f"Expected WeightTransferInitRequest, got {type(request)}")
 
         await self.collective_rpc(
-            "init_weight_transfer_engine", kwargs={"init_info": init_info_dict}
+            "init_weight_transfer_engine",
+            kwargs={"init_info": init_info_dict},
+            idle=True,
         )
 
     async def update_weights(self, request: WeightTransferUpdateRequest) -> None:
@@ -1069,5 +1077,7 @@ class AsyncLLM(EngineClient):
             )
 
         await self.collective_rpc(
-            "update_weights", kwargs={"update_info": update_info_dict}
+            "update_weights",
+            kwargs={"update_info": update_info_dict},
+            idle=True,
         )

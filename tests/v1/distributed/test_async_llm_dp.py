@@ -362,9 +362,9 @@ async def test_dp_pause_keep_race_staggered_engines():
         original_call_utility = client.call_utility_async
         mid_pause_tasks: list[asyncio.Task] = []
 
-        async def staggered_pause_keep(method: str, *args) -> Any:
+        async def staggered_pause_keep(method: str, *args, **kwargs) -> Any:
             if method != "pause_scheduler" or not args or args[0] != "keep":
-                return await original_call_utility(method, *args)
+                return await original_call_utility(method, *args, **kwargs)
             # Send pause(keep) to engine 0 first
             await client._call_utility_async(
                 method, *args, engine=client.core_engines[0]
@@ -397,4 +397,83 @@ async def test_dp_pause_keep_race_staggered_engines():
         await engine.resume_generation()
         assert not await engine.is_paused()
         # Let the two requests we sent mid-pause complete
+        await asyncio.gather(*mid_pause_tasks)
+
+
+def _ep_barrier(worker) -> None:
+    """Callable for collective_rpc: blocking barrier on the EP group."""
+    import torch.distributed as dist
+
+    from vllm.distributed.parallel_state import get_ep_group
+
+    print(f"Barrier on EP group {get_ep_group().device_group}")
+    dist.barrier(group=get_ep_group().device_group)
+
+
+@pytest.mark.asyncio
+async def test_dp_pause_keep_race_collective_rpc():
+    """Race: send pause(keep) to engine 0, then submit requests AND
+    a collective RPC (dist.barrier on the EP group) before pausing
+    engine 1. The barrier blocks until every rank enters it, so if the
+    paused engine can't service the RPC the call will deadlock."""
+    if DP_SIZE != 2:
+        pytest.skip("test_dp_pause_keep_race_collective_rpc requires DP_SIZE=2")
+
+    with ExitStack() as after:
+        engine_args = _get_dp_pause_engine_args(expert_parallel=True)
+        engine = AsyncLLM.from_engine_args(engine_args)
+        after.callback(engine.shutdown)
+
+        client = engine.engine_core
+
+        original_call_utility = client.call_utility_async
+        mid_pause_tasks: list[asyncio.Task] = []
+
+        async def staggered_pause_with_collective(method: str, *args, **kwargs) -> Any:
+            if method != "pause_scheduler" or not args or args[0] != "keep":
+                return await original_call_utility(method, *args, **kwargs)
+            # Send pause(keep) to engine 0 first
+            await client._call_utility_async(
+                method, *args, engine=client.core_engines[0]
+            )
+            # In the middle: send two requests (race window)
+            sp = SamplingParams(max_tokens=5, ignore_eos=True)
+
+            async def consume_gen(req_id: str) -> None:
+                async for _ in engine.generate(
+                    request_id=req_id,
+                    prompt=DP_PAUSE_PROMPT,
+                    sampling_params=sp,
+                ):
+                    pass
+
+            t1 = asyncio.create_task(consume_gen("race-rpc-1"))
+            t2 = asyncio.create_task(consume_gen("race-rpc-2"))
+            mid_pause_tasks.extend([t1, t2])
+
+            # Fire collective RPCs (real dist.barrier on EP group) while
+            # engine 0 is paused but engine 1 is still running.
+            # collective_rpc fans out to ALL engine cores in parallel;
+            # the barrier blocks until every rank enters it.
+            for i in range(10):
+                await asyncio.sleep(0.02)
+                collective_task = asyncio.create_task(
+                    engine.collective_rpc(_ep_barrier, timeout=30, idle=True)
+                )
+                mid_pause_tasks.append(collective_task)
+            await asyncio.sleep(2)
+
+            # Then send pause(keep) to engine 1
+            result = await client._call_utility_async(
+                method, *args, engine=client.core_engines[1]
+            )
+            return result
+
+        client.call_utility_async = staggered_pause_with_collective
+
+        await engine.pause_generation(mode="keep")
+        assert await engine.is_paused()
+        await engine.resume_generation()
+        assert not await engine.is_paused()
+        # Let the requests and the collective RPC complete
         await asyncio.gather(*mid_pause_tasks)

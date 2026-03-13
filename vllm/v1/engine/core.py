@@ -727,6 +727,7 @@ class EngineCore:
         timeout: float | None = None,
         args: tuple = (),
         kwargs: dict[str, Any] | None = None,
+        idle: bool = False,
     ) -> list[_R]:
         return self.model_executor.collective_rpc(method, timeout, args, kwargs)
 
@@ -1182,7 +1183,7 @@ class EngineCoreProc(EngineCore):
         elif request_type == EngineCoreRequestType.ABORT:
             self.abort_requests(request)
         elif request_type == EngineCoreRequestType.UTILITY:
-            client_idx, call_id, method_name, args = request
+            client_idx, call_id, method_name, args, idle = request
             output = UtilityOutput(call_id)
             # Lazily look-up utility method so that failure will be handled/returned.
             get_result = lambda: (method := getattr(self, method_name)) and method(
@@ -1191,7 +1192,9 @@ class EngineCoreProc(EngineCore):
             enqueue_output = lambda out: self.output_queue.put_nowait(
                 (client_idx, EngineCoreOutputs(utility_output=out))
             )
-            self._invoke_utility_method(method_name, get_result, output, enqueue_output)
+            self._invoke_utility_method(
+                method_name, get_result, output, enqueue_output, idle=idle
+            )
         elif request_type == EngineCoreRequestType.EXECUTOR_FAILED:
             raise RuntimeError("Executor failed.")
         else:
@@ -1199,15 +1202,25 @@ class EngineCoreProc(EngineCore):
                 "Unrecognized input request type encountered: %s", request_type
             )
 
-    @staticmethod
     def _invoke_utility_method(
-        name: str, get_result: Callable, output: UtilityOutput, enqueue_output: Callable
+        self,
+        name: str,
+        get_result: Callable,
+        output: UtilityOutput,
+        enqueue_output: Callable,
+        idle: bool = False,
     ):
+        if idle and self.engines_running:
+            self._idle_state_callbacks.append(
+                lambda engine: self._invoke_utility_method(
+                    name, get_result, output, enqueue_output
+                )
+            )
+            return
         try:
             result = get_result()
             if isinstance(result, Future):
-                # Defer utility output handling until future completion.
-                callback = lambda future: EngineCoreProc._invoke_utility_method(
+                callback = lambda future: self._invoke_utility_method(
                     name, future.result, output, enqueue_output
                 )
                 result.add_done_callback(callback)

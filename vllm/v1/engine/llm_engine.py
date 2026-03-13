@@ -418,8 +418,9 @@ class LLMEngine:
         timeout: float | None = None,
         args: tuple = (),
         kwargs: dict[str, Any] | None = None,
+        idle: bool = False,
     ) -> list[_R]:
-        return self.engine_core.collective_rpc(method, timeout, args, kwargs)
+        return self.engine_core.collective_rpc(method, timeout, args, kwargs, idle=idle)
 
     def apply_model(self, func: Callable[[nn.Module], _R]) -> list[_R]:
         return self.collective_rpc("apply_model", args=(func,))

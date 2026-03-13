@@ -194,6 +194,7 @@ class EngineCoreClient(ABC):
         timeout: float | None = None,
         args: tuple = (),
         kwargs: dict[str, Any] | None = None,
+        idle: bool = False,
     ) -> list[_R]:
         raise NotImplementedError
 
@@ -265,6 +266,7 @@ class EngineCoreClient(ABC):
         timeout: float | None = None,
         args: tuple = (),
         kwargs: dict[str, Any] | None = None,
+        idle: bool = False,
     ) -> list[_R]:
         raise NotImplementedError
 
@@ -355,6 +357,7 @@ class InprocClient(EngineCoreClient):
         timeout: float | None = None,
         args: tuple = (),
         kwargs: dict[str, Any] | None = None,
+        idle: bool = False,
     ) -> list[_R]:
         return self.engine_core.collective_rpc(method, timeout, args, kwargs)
 
@@ -821,11 +824,13 @@ class SyncMPClient(MPClient):
         tracker = self.input_socket.send_multipart(msg, copy=False, track=True)
         self.add_pending_message(tracker, request)
 
-    def call_utility(self, method: str, *args) -> Any:
+    def call_utility(self, method: str, *args, idle: bool = False) -> Any:
         call_id = uuid.uuid1().int >> 64
         future: Future[Any] = Future()
         self.utility_results[call_id] = future
-        self._send_input(EngineCoreRequestType.UTILITY, (0, call_id, method, args))
+        self._send_input(
+            EngineCoreRequestType.UTILITY, (0, call_id, method, args, idle)
+        )
 
         return future.result()
 
@@ -887,8 +892,11 @@ class SyncMPClient(MPClient):
         timeout: float | None = None,
         args: tuple = (),
         kwargs: dict[str, Any] | None = None,
+        idle: bool = False,
     ) -> list[_R]:
-        return self.call_utility("collective_rpc", method, timeout, args, kwargs)
+        return self.call_utility(
+            "collective_rpc", method, timeout, args, kwargs, idle=idle
+        )
 
     def save_sharded_state(
         self, path: str, pattern: str | None = None, max_size: int | None = None
@@ -1047,18 +1055,20 @@ class AsyncMPClient(MPClient):
         future.add_done_callback(add_pending)
         return future
 
-    async def call_utility_async(self, method: str, *args) -> Any:
-        return await self._call_utility_async(method, *args, engine=self.core_engine)
+    async def call_utility_async(self, method: str, *args, idle: bool = False) -> Any:
+        return await self._call_utility_async(
+            method, *args, engine=self.core_engine, idle=idle
+        )
 
     async def _call_utility_async(
-        self, method: str, *args, engine: EngineIdentity
+        self, method: str, *args, engine: EngineIdentity, idle: bool = False
     ) -> Any:
         call_id = uuid.uuid1().int >> 64
         future = asyncio.get_running_loop().create_future()
         self.utility_results[call_id] = future
         message = (
             EngineCoreRequestType.UTILITY.value,
-            *self.encoder.encode((self.client_index, call_id, method, args)),
+            *self.encoder.encode((self.client_index, call_id, method, args, idle)),
         )
         await self._send_input_message(message, engine, args)
         self._ensure_output_queue_task()
@@ -1140,9 +1150,10 @@ class AsyncMPClient(MPClient):
         timeout: float | None = None,
         args: tuple = (),
         kwargs: dict[str, Any] | None = None,
+        idle: bool = False,
     ) -> list[_R]:
         return await self.call_utility_async(
-            "collective_rpc", method, timeout, args, kwargs
+            "collective_rpc", method, timeout, args, kwargs, idle=idle
         )
 
 
@@ -1389,12 +1400,12 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         self.reqs_in_flight[request.request_id] = chosen_engine
         return chosen_engine
 
-    async def call_utility_async(self, method: str, *args) -> Any:
+    async def call_utility_async(self, method: str, *args, idle: bool = False) -> Any:
         # Only the result from the first engine is returned.
         return (
             await asyncio.gather(
                 *[
-                    self._call_utility_async(method, *args, engine=engine)
+                    self._call_utility_async(method, *args, engine=engine, idle=idle)
                     for engine in self.core_engines
                 ]
             )

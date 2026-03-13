@@ -637,6 +637,7 @@ class LLM:
         timeout: float | None = None,
         args: tuple = (),
         kwargs: dict[str, Any] | None = None,
+        idle: bool = False,
     ) -> list[_R]:
         """
         Execute an RPC call on all workers.
@@ -652,6 +653,9 @@ class LLM:
                 [`TimeoutError`][] on timeout. `None` means wait indefinitely.
             args: Positional arguments to pass to the worker method.
             kwargs: Keyword arguments to pass to the worker method.
+            idle: If True, defer execution in DP mode until all engines are
+                idle. Required for cross-engine collectives (e.g. weight
+                sync) that would otherwise deadlock against the DP step loop.
 
         Returns:
             A list containing the results from each worker.
@@ -661,7 +665,7 @@ class LLM:
             and set up data-plane communication to pass data.
         """
 
-        return self.llm_engine.collective_rpc(method, timeout, args, kwargs)
+        return self.llm_engine.collective_rpc(method, timeout, args, kwargs, idle=idle)
 
     def apply_model(self, func: Callable[[nn.Module], _R]) -> list[_R]:
         """
@@ -2022,7 +2026,9 @@ class LLM:
         )
 
         self.llm_engine.collective_rpc(
-            "init_weight_transfer_engine", kwargs={"init_info": init_info_dict}
+            "init_weight_transfer_engine",
+            kwargs={"init_info": init_info_dict},
+            idle=True,
         )
 
     def update_weights(self, request: WeightTransferUpdateRequest | dict) -> None:
@@ -2037,7 +2043,9 @@ class LLM:
         )
 
         self.llm_engine.collective_rpc(
-            "update_weights", kwargs={"update_info": update_info_dict}
+            "update_weights",
+            kwargs={"update_info": update_info_dict},
+            idle=True,
         )
 
     def __repr__(self) -> str:
