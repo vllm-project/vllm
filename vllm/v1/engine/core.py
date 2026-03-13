@@ -501,6 +501,11 @@ class EngineCore:
         # Before processing the model output, process any aborts that happened
         # during the model execution.
         self._process_aborts_queue()
+
+        # Abort requests triggered by observation plugins.
+        if getattr(model_output, "aborted_req_ids", None):
+            self.abort_requests(model_output.aborted_req_ids)
+
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, model_output
         )
