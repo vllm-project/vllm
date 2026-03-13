@@ -1019,6 +1019,8 @@ class VllmConfig:
                 "to True to enable."
             )
         current_platform.check_and_update_config(self)
+        if self.cache_config.gpu_memory_utilization is None:
+            self.cache_config.gpu_memory_utilization = 0.9
 
         # Do this after all the updates to compilation_config.mode
         effective_dp_size = (

@@ -453,7 +453,7 @@ class EngineArgs:
     offload_num_in_group: int = PrefetchOffloadConfig.offload_num_in_group
     offload_prefetch_step: int = PrefetchOffloadConfig.offload_prefetch_step
     offload_params: set[str] = get_field(PrefetchOffloadConfig, "offload_params")
-    gpu_memory_utilization: float = CacheConfig.gpu_memory_utilization
+    gpu_memory_utilization: float | None = None
     kv_cache_memory_bytes: int | None = CacheConfig.kv_cache_memory_bytes
     max_num_batched_tokens: int | None = None
     max_num_partial_prefills: int = SchedulerConfig.max_num_partial_prefills
@@ -951,9 +951,9 @@ class EngineArgs:
             description=CacheConfig.__doc__,
         )
         cache_group.add_argument("--block-size", **cache_kwargs["block_size"])
-        cache_group.add_argument(
-            "--gpu-memory-utilization", **cache_kwargs["gpu_memory_utilization"]
-        )
+        gpu_mem_util_kwargs = cache_kwargs["gpu_memory_utilization"].copy()
+        gpu_mem_util_kwargs["default"] = None
+        cache_group.add_argument("--gpu-memory-utilization", **gpu_mem_util_kwargs)
         cache_group.add_argument(
             "--kv-cache-memory-bytes", **cache_kwargs["kv_cache_memory_bytes"]
         )
@@ -1509,9 +1509,12 @@ class EngineArgs:
             "enable_prefix_caching must be set by this point"
         )
 
+        cache_config_kwargs: dict[str, Any] = {}
+        if self.gpu_memory_utilization is not None:
+            cache_config_kwargs["gpu_memory_utilization"] = self.gpu_memory_utilization
+
         cache_config = CacheConfig(
             block_size=self.block_size,  # type: ignore[arg-type]
-            gpu_memory_utilization=self.gpu_memory_utilization,
             kv_cache_memory_bytes=self.kv_cache_memory_bytes,
             cache_dtype=resolved_cache_dtype,  # type: ignore[arg-type]
             is_attention_free=model_config.is_attention_free,
@@ -1527,6 +1530,7 @@ class EngineArgs:
             mamba_cache_mode=self.mamba_cache_mode,
             kv_offloading_size=self.kv_offloading_size,
             kv_offloading_backend=self.kv_offloading_backend,
+            **cache_config_kwargs,
         )
 
         ray_runtime_env = None
