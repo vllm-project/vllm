@@ -93,6 +93,10 @@ def _expand_transfer_regions(
     block_lens: list[int],
     is_kv_layout_blocks_first: bool,
 ) -> list[TransferRegion]:
+    assert len(base_addrs) == len(block_lens), (
+        "Mooncake transfer regions require matching numbers of base addresses "
+        f"and block lengths, got {len(base_addrs)} and {len(block_lens)}."
+    )
     regions: list[TransferRegion] = []
     for base_addr, block_len in zip(base_addrs, block_lens):
         kv_block_len = block_len // 2 if is_kv_layout_blocks_first else block_len
@@ -194,7 +198,9 @@ def _validate_asymmetric_region_lengths(
             )
         else:
             ratio_abs = -tp_ratio
-            assert local_region.kv_block_len == remote_region.kv_block_len * ratio_abs, (
+            assert (
+                local_region.kv_block_len == remote_region.kv_block_len * ratio_abs
+            ), (
                 "Mooncake source KV region length does not match the consumer "
                 "TP ratio at region "
                 f"{idx}: local={local_region.kv_block_len}, "
@@ -999,8 +1005,10 @@ class MooncakeConnectorWorker:
                 # If not, we should set expire_time to normal and skip the below.
                 send_meta.sending -= 1
                 send_meta.sent += 1
-                if send_meta.sent == send_meta.need_send:
-                    del self.reqs_need_send[send_meta.transfer_id]
+                if (
+                    send_meta.sent == send_meta.need_send
+                    and self.reqs_need_send.pop(send_meta.transfer_id, None) is not None
+                ):
                     self.finished_sending_reqs.add(send_meta.p_req_id)
 
             response = MooncakeXferResponse(
@@ -1225,12 +1233,14 @@ class MooncakeConnectorWorker:
                 assert cache.shape[0] == self.num_blocks, (
                     "All kv cache tensors must have the same number of blocks"
                 )
-                self.block_len_per_layer.append(curr_tensor_size_bytes // self.num_blocks)
+                assert curr_tensor_size_bytes % self.num_blocks == 0, (
+                    "Mooncake expects each kv cache tensor size to be "
+                    "divisible by the number of blocks."
+                )
+                self.block_len_per_layer.append(
+                    curr_tensor_size_bytes // self.num_blocks
+                )
 
-                if not self.use_mla:
-                    assert tensor_size_bytes == curr_tensor_size_bytes, (
-                        "All kv cache tensors must have the same size"
-                    )
                 kernel_block_size = cache.shape[-2 if self.use_mla else -3]
                 assert self.block_size == kernel_block_size
                 kv_data_ptrs.append(base_addr)

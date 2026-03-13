@@ -453,7 +453,7 @@ class TpKVTopology:
         number of TP workers being greater than the number of KV heads.
         """
         tp_size = self.remote_tp_size[engine_id]
-        return tp_size // self.total_num_kv_heads >= 1
+        return tp_size // self.total_num_kv_heads > 1
 
     def replicates_kv_cache(self, remote_engine_id: EngineId) -> bool:
         # MLA is always replicated as the hidden dim can't be split.
