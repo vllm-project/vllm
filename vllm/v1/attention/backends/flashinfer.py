@@ -1009,8 +1009,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         needs_rope_kvcache_indices = (
             self.compilation_config.pass_config.fuse_rope_kvcache
             and flashinfer_rope_append_paged_kv_cache is not None
-            and self.attn_type == AttentionType.DECODER
-            and self.kv_sharing_target_layer_name is None
             and not use_cascade
             and num_prefills == 0
         )
