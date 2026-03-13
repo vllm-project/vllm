@@ -240,7 +240,10 @@ class Base(
             for mapping in get_model_conversion_mapping(self.model):
                 # Handle weights which have been renamed in Transformers
                 if isinstance(mapping, WeightRenaming):
-                    compiled_sources = mapping.compiled_sources
+                    # Recompile using regex (Transformers used re)
+                    compiled_sources = re.compile(
+                        mapping.compiled_sources.pattern, mapping.compiled_sources.flags
+                    )
                     target_pattern = mapping.target_patterns[0]
                     orig_to_new_regex[compiled_sources] = target_pattern
                 # TODO: Handle WeightConverter to enable layer merging
