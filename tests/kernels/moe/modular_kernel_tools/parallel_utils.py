@@ -117,7 +117,6 @@ def _worker_parallel_launch(
         raise
     finally:
         cleanup_dist_env_and_memory()
-        # torch.distributed.destroy_process_group()
 
 
 def parallel_launch_with_config(

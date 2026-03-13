@@ -6,6 +6,7 @@ Run `pytest tests/kernels/test_moe_layer.py`.
 """
 
 import functools
+import os
 import types
 from collections.abc import Callable
 from dataclasses import astuple, dataclass, fields
@@ -1418,7 +1419,6 @@ def test_moe_layer_no_parallel(
     use_shared_experts: bool,
     use_gate: bool,
     use_routed_input_transform: bool,
-    monkeypatch,
 ):
     """Test MoE layer without parallelism (dp_size=1, tp_size=1, use_ep=False)."""
     test_config = MoETestConfig(
@@ -1511,6 +1511,7 @@ def _parallel_worker(
     total = 0
     passed = 0
     failed = 0
+    fail_ids = []
 
     dp_rank = vllm_config.parallel_config.data_parallel_rank
 
@@ -1523,7 +1524,7 @@ def _parallel_worker(
         tp_rank = pgi.rank % test_config.tp_size
 
         if verbosity > 0:
-            print(f"{test_config.id()}")
+            print(f"subtest: {test_config.id()}", end="")
 
         try:
             _run_one_config(
@@ -1553,22 +1554,36 @@ def _parallel_worker(
             else:
                 print(".", end="")
             passed = passed + 1
-            # format_result(verbosity, test_config.id())
         except Exception as ex:
-            # print(f"FAILED {ex}")
+            fail_ids.append(test_config.id())
             failed = failed + 1
             if verbosity > 0:
-                print(f"{ex} FAILED")
+                print(f"\n{ex}\nFAILED")
             else:
-                print("F")
-            # format_result(verbosity, test_config.id(), ex)
+                print("F", end="")
         finally:
             total = total + 1
 
+    skipped = total - (passed + failed)
+
+    fails = f"{failed} failed" if failed > 0 else ""
+    sep = ", " if fails != "" else ""
+    skips = f"{sep}{skipped} skipped" if skipped > 0 else ""
+    sep = ", " if skips != "" or fails != "" else ""
+    passes = f"{sep}{passed} passed" if passed > 0 else ""
+
+    report = (
+        f"============= {fails}{skips}{passes} of {total} total tests ============="
+    )
+
+    sep = "\n" if verbosity == 0 else ""
+    print(f"{sep}{report}")
+
     if failed > 0:
-        raise RuntimeError(f"{failed} of {total} tests failed.")
-    else:
-        print(f"{passed} of {total} tests passed.")
+        fail_ids_str = "\n".join(fail_ids)
+        raise RuntimeError(
+            f"\n============= Failed subtests =============\n{fail_ids_str}\n{report}"
+        )
 
 
 # TODO: add cudagraphs/torch.compile tests
@@ -1601,6 +1616,8 @@ def test_moe_layer(
     test_env = dict()
     test_env["VLLM_MOE_DP_CHUNK_SIZE"] = "128"
     monkeypatch.setenv("VLLM_MOE_DP_CHUNK_SIZE", "128")
+    if os.environ.get("VLLM_LOGGING_LEVEL") is None:
+        monkeypatch.setenv("VLLM_LOGGING_LEVEL", "ERROR")
 
     # TODO
     # VLLM_FLASHINFER_MOE_BACKEND=latency
