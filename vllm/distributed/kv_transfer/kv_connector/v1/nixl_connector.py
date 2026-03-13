@@ -164,6 +164,7 @@ class NixlAgentMetadata:
     block_lens: list[int]
     kv_cache_layout: str
     block_size: int
+    ssm_sizes: tuple[int, int]
 
 
 @dataclass
@@ -1675,6 +1676,7 @@ class NixlConnectorWorker:
             if not self.use_host_buffer
             else self.host_buffer_kv_cache_layout,
             block_size=self.block_size,
+            ssm_sizes=self._mamba_ssm_size,
         )
         # Wrap metadata in payload with hash for defensive decoding
         assert self.compat_hash is not None
@@ -1951,7 +1953,11 @@ class NixlConnectorWorker:
                     for block_id in range(num_blocks):
                         block_offset = block_id * page_size
                         addr = base_addr + block_offset + rank_offset
-                        v_addr = addr + local_block_len
+                        # Hop over the first split of remote page: either K or Conv.
+                        if mamba:
+                            v_addr = addr + nixl_agent_meta.ssm_sizes[0]
+                        else:
+                            v_addr = addr + nixl_agent_meta.block_lens[i] // 2
                         blocks_data.append(
                             (v_addr, second_split, nixl_agent_meta.device_id)
                         )
