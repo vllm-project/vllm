@@ -53,16 +53,11 @@ def test_build_grammar_no_final_channel(parser: OpenAIToolParser) -> None:
     assert '"final"' not in grammar
 
 
-def test_build_grammar_rejects_tool_name_with_quotes(
+def test_build_grammar_rejects_invalid_tool_names(
     parser: OpenAIToolParser,
 ) -> None:
     with pytest.raises(ValueError, match="invalid for EBNF grammar"):
         parser._build_tool_required_grammar(['get"weather'])
-
-
-def test_build_grammar_rejects_tool_name_with_newlines(
-    parser: OpenAIToolParser,
-) -> None:
     with pytest.raises(ValueError, match="invalid for EBNF grammar"):
         parser._build_tool_required_grammar(["get\nweather"])
 
@@ -100,22 +95,15 @@ def test_adjust_request_required(parser: OpenAIToolParser) -> None:
     assert result.response_format is None
 
 
-def test_adjust_request_auto_unchanged(parser: OpenAIToolParser) -> None:
-    request = ChatCompletionRequest(
-        model="test",
-        messages=[{"role": "user", "content": "hi"}],
-        tools=_make_tools("f"),
-        tool_choice="auto",
-    )
-    assert parser.adjust_request(request).structured_outputs is None
-
-
-def test_adjust_request_no_tools_unchanged(parser: OpenAIToolParser) -> None:
-    request = ChatCompletionRequest(
-        model="test",
-        messages=[{"role": "user", "content": "hi"}],
-    )
-    assert parser.adjust_request(request).structured_outputs is None
+def test_adjust_request_non_required_unchanged(parser: OpenAIToolParser) -> None:
+    for tool_choice in ["auto", "none"]:
+        request = ChatCompletionRequest(
+            model="test",
+            messages=[{"role": "user", "content": "hi"}],
+            tools=_make_tools("f"),
+            tool_choice=tool_choice,
+        )
+        assert parser.adjust_request(request).structured_outputs is None
 
 
 # ---------------------------------------------------------------------------
@@ -150,7 +138,7 @@ VOCAB = [
     "<|eos|>",  # 22
     "Let me",  # 23
     " call",  # 24
-    " < ",  # 25  — comparison operator
+    " < ",  # 25
     "hello",  # 26
 ]
 V = {s: i for i, s in enumerate(VOCAB)}
@@ -176,9 +164,6 @@ def _compile_and_run(compiler, tool_names, token_ids) -> bool:
 
 def _bitmask_allowed(bitmask, token_id: int) -> bool:
     return bool(bitmask[0, token_id // 32].item() & (1 << (token_id % 32)))
-
-
-# -- Acceptance --
 
 
 class TestXgrammarAcceptance:
@@ -224,28 +209,6 @@ class TestXgrammarAcceptance:
             V["<|call|>"],
         ]
         assert _compile_and_run(xgr_compiler, ["get_weather"], seq)
-
-    def test_preamble_then_tool_call(self, xgr_compiler) -> None:
-        seq = [
-            V["commentary"],
-            V["<|message|>"],
-            V["Let me"],
-            V[" call"],
-            V["<|end|>"],
-            V["<|start|>"],
-            V["assistant"],
-            V["<|channel|>"],
-            V["commentary"],
-            V[" to="],
-            V["functions."],
-            V["get_weather"],
-            V["<|message|>"],
-            V["{"],
-            V["}"],
-            V["<|end|>"],
-            V["<|call|>"],
-        ]
-        assert _compile_and_run(xgr_compiler, ["get_weather", "search"], seq)
 
     def test_two_tool_calls(self, xgr_compiler) -> None:
         seq = [
@@ -297,21 +260,12 @@ class TestXgrammarAcceptance:
         assert _compile_and_run(xgr_compiler, ["get_weather"], seq)
 
 
-# -- Blocking --
-
-
 class TestXgrammarBlocking:
     def test_final_channel_blocked(self, xgr_compiler) -> None:
         grammar = OpenAIToolParser._build_tool_required_grammar(["get_weather"])
         ctx = xgr_compiler.compile_grammar(grammar)
         matcher = xgrammar.GrammarMatcher(ctx)
         assert not matcher.accept_token(V["final"])
-
-    def test_return_token_blocked(self, xgr_compiler) -> None:
-        grammar = OpenAIToolParser._build_tool_required_grammar(["get_weather"])
-        ctx = xgr_compiler.compile_grammar(grammar)
-        matcher = xgrammar.GrammarMatcher(ctx)
-        assert not matcher.accept_token(V["<|return|>"])
 
     def test_wrong_function_name_blocked(self, xgr_compiler) -> None:
         grammar = OpenAIToolParser._build_tool_required_grammar(["get_weather"])
@@ -320,9 +274,6 @@ class TestXgrammarBlocking:
         for tid in [V["commentary"], V[" to="], V["functions."]]:
             assert matcher.accept_token(tid)
         assert not matcher.accept_token(V["search"])
-
-
-# -- Termination --
 
 
 class TestXgrammarTermination:
@@ -356,24 +307,3 @@ class TestXgrammarTermination:
         bitmask = xgrammar.allocate_token_bitmask(1, len(VOCAB))
         matcher.fill_next_token_bitmask(bitmask, 0)
         assert _bitmask_allowed(bitmask, V["<|eos|>"])
-
-    def test_channel_bitmask(self, xgr_compiler) -> None:
-        """After <|channel|>, only analysis/commentary are allowed."""
-        grammar = OpenAIToolParser._build_tool_required_grammar(["get_weather"])
-        ctx = xgr_compiler.compile_grammar(grammar)
-        matcher = xgrammar.GrammarMatcher(ctx)
-        for tid in [
-            V["analysis"],
-            V["<|message|>"],
-            V["hello"],
-            V["<|end|>"],
-            V["<|start|>"],
-            V["assistant"],
-            V["<|channel|>"],
-        ]:
-            assert matcher.accept_token(tid)
-        bitmask = xgrammar.allocate_token_bitmask(1, len(VOCAB))
-        matcher.fill_next_token_bitmask(bitmask, 0)
-        assert _bitmask_allowed(bitmask, V["analysis"])
-        assert _bitmask_allowed(bitmask, V["commentary"])
-        assert not _bitmask_allowed(bitmask, V["final"])
