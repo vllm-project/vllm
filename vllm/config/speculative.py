@@ -629,6 +629,16 @@ class SpeculativeConfig:
             # Otherwise keep method="draft_model" — the user is using
             # a plain draft model (e.g. a smaller version of the target).
 
+        if (
+            self.method != "draft_model"
+            and self.draft_model_config.hf_config.model_type != self.method
+        ):
+            logger.warning(
+                "Explicit method `%s` does not match model type `%s`",
+                self.method,
+                self.draft_model_config.hf_config.model_type,
+            )
+
         if self.method not in get_args(SpeculativeMethod):
             raise NotImplementedError(
                 f"Unsupported speculative method: '{self.method}'"
