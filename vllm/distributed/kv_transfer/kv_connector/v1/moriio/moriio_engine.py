@@ -170,7 +170,7 @@ class MoRIIOWriter:
         """Get remote allocation info for a request.
 
         Args:
-            request_id: The request ID
+            request_id:ReqId The request ID
 
         Returns:
             Remote allocation information
