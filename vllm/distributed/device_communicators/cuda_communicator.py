@@ -143,6 +143,12 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 from .all2all import MoriAll2AllManager
 
                 self.all2all_manager = MoriAll2AllManager(self.cpu_group)
+            elif self.all2all_backend == "nixl_ep":
+                from .all2all import NixlEPAll2AllManager
+
+                self.all2all_manager = NixlEPAll2AllManager(
+                    self.cpu_group, tcp_store_group
+                )
             elif self.all2all_backend == "flashinfer_all2allv":
                 from .all2all import FlashInferAllToAllManager
 
