@@ -8,20 +8,5 @@ mantis-ml @ git+https://github.com/TIGER-AI-Lab/Mantis.git
 mamba-ssm @ git+https://github.com/state-spaces/mamba@v2.3.0
 causal-conv1d @ git+https://github.com/Dao-AILab/causal-conv1d@v1.5.2
 
-# Streaming API integration test (misc.yaml)
-lm-evaluation-harness @ git+https://github.com/robertgshaw2-redhat/lm-evaluation-harness.git@streaming-api
-
-# Metrics/Tracing tests (misc.yaml)
-opentelemetry-sdk>=1.26.0
-opentelemetry-api>=1.26.0
-opentelemetry-exporter-otlp>=1.26.0
-opentelemetry-semantic-conventions-ai>=0.4.1
-
 # GPQA eval tests (lm_eval.yaml)
 gpt-oss[eval]==0.0.5
-
-# Quantization tests (quantization.yaml)
-conch-triton-kernels
-
-# Helion kernel tests (kernels.yaml)
-helion

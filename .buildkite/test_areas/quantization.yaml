@@ -9,6 +9,8 @@ steps:
   - vllm/model_executor/layers/quantization
   - tests/quantization
   commands:
+  - uv pip install --system torchao==0.14.1 --index-url https://download.pytorch.org/whl/cu129
+  - uv pip install --system conch-triton-kernels
   - VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization/ --ignore quantization/test_blackwell_moe.py
 
 - label: Quantized MoE Test (B200)
