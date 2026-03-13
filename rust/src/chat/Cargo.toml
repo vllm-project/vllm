@@ -1,0 +1,23 @@
+[package]
+name = "vllm-chat"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+futures.workspace = true
+llm-tokenizer.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+vllm-engine-core-client.workspace = true
+vllm-llm.workspace = true
+
+[dev-dependencies]
+anyhow.workspace = true
+bytes.workspace = true
+clap.workspace = true
+rmp-serde.workspace = true
+tokio.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
+zeromq.workspace = true
