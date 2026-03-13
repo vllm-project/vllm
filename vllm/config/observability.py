@@ -46,8 +46,8 @@ class ObservabilityConfig:
     expensive."""
 
     token_level_profiling: bool = False
-    """Enable token-level profiling to collect detailed timing information for each 
-    token to trace."""
+    """Enable token-level profiling to collect detailed timing information for
+    each token to trace."""
 
     kv_cache_metrics: bool = False
     """Enable KV cache residency metrics (lifetime, idle time, reuse gaps).

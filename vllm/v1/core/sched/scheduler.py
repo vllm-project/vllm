@@ -1299,19 +1299,15 @@ class Scheduler(SchedulerInterface):
         if self.perf_metrics and self.perf_metrics.is_enabled():
             perf_stats = self.perf_metrics.get_step_perf_stats_per_gpu(scheduler_output)
 
-        (
-            iter_batch_size,
-            iter_waiting_size,
-            iter_total_tokens_count,
-            token_output_time,
-            schedule_time,
-        ) = 0, 0, 0, 0.0, 0.0
+        iter_stats: IterStats | None = None
         if self.vllm_config.observability_config.token_level_profiling:
-            iter_batch_size = len(self.running)
-            iter_waiting_size = len(self.waiting)
-            iter_total_tokens_count = sum(r.num_tokens for r in self.running)
-            token_output_time = time.time()
-            schedule_time = scheduler_output.scheduled_at
+            iter_stats = IterStats(
+                iter_batch_size=len(self.running),
+                iter_waiting_size=len(self.waiting),
+                iter_total_tokens_count=sum(r.num_tokens for r in self.running),
+                token_scheduled_time=scheduler_output.scheduled_at,
+                token_output_time=time.time(),
+            )
 
         outputs: dict[int, list[EngineCoreOutput]] = defaultdict(list)
         spec_decoding_stats: SpecDecodingStats | None = None
@@ -1425,18 +1421,6 @@ class Scheduler(SchedulerInterface):
                 and logprobs
             ):
                 new_logprobs = logprobs.slice_request(req_index, len(new_token_ids))
-
-            iter_stats = (
-                IterStats(
-                    iter_total_tokens_count=iter_total_tokens_count,
-                    iter_waiting_size=iter_waiting_size,
-                    iter_batch_size=iter_batch_size,
-                    token_scheduled_time=schedule_time,
-                    token_output_time=token_output_time,
-                )
-                if self.vllm_config.observability_config.token_level_profiling
-                else None
-            )
 
             if new_token_ids and self.structured_output_manager.should_advance(request):
                 struct_output_request = request.structured_output_request
@@ -2146,11 +2130,9 @@ class Scheduler(SchedulerInterface):
             logger.debug("Finished sending KV transfer for request %s", req_id)
             assert req_id in self.requests
             if self.vllm_config.observability_config.token_level_profiling:
-                request = self.requests.get(req_id)
-                if request is not None:
-                    request.record_event(
-                        EngineCoreEventType.KV_CACHE_TRANSFER_SENDING_FINISHED
-                    )
+                self.requests[req_id].record_event(
+                    EngineCoreEventType.KV_CACHE_TRANSFER_SENDING_FINISHED
+                )
             self._free_blocks(self.requests[req_id])
 
     def _update_requests_with_invalid_blocks(

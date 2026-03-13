@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import os
 from collections.abc import Mapping
 
+from vllm import envs
 from vllm.logger import init_logger
 from vllm.utils.func_utils import run_once
 
@@ -18,10 +18,7 @@ TOKEN_LEVEL_TRACE = 2
 
 # Token ID hiding switch
 # When set to 1/true, token level profiling trace will not include new_token_ids
-HIDE_TOKEN_IDS = os.environ.get("VLLM_TRACE_HIDE_TOKEN_IDS", "").lower() in (
-    "1",
-    "true",
-)
+HIDE_TOKEN_IDS = envs.VLLM_TRACE_HIDE_TOKEN_IDS
 
 
 class SpanAttributes:
