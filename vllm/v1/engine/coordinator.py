@@ -4,13 +4,15 @@ import copy
 import multiprocessing
 import time
 import weakref
+from contextlib import ExitStack
+from multiprocessing.connection import Connection
 
 import msgspec.msgpack
 import zmq
 
 from vllm.config import ParallelConfig
 from vllm.logger import init_logger
-from vllm.utils.network_utils import make_zmq_socket
+from vllm.utils.network_utils import is_wildcard_addr, make_zmq_socket
 from vllm.utils.system_utils import get_mp_context, set_process_title
 from vllm.v1.engine import EngineCoreOutputs, EngineCoreRequestType
 from vllm.v1.serial_utils import MsgpackDecoder
@@ -77,6 +79,12 @@ class DPCoordinator:
         back_publish_address = get_engine_client_zmq_addr(local_only_eng, host)
         back_output_address = get_engine_client_zmq_addr(local_only_eng, host)
 
+        # Create pipe for late binding address reporting from coordinator
+        # process. When wildcard addresses (port 0) are used, the
+        # coordinator binds and discovers actual ports, then reports them
+        # back via this pipe (issue #28498).
+        parent_conn, child_conn = multiprocessing.Pipe()
+
         context = get_mp_context()
         self.proc: multiprocessing.Process = context.Process(
             target=DPCoordinatorProc.run_coordinator,
@@ -86,11 +94,39 @@ class DPCoordinator:
                 "front_publish_address": front_publish_address,
                 "back_output_address": back_output_address,
                 "back_publish_address": back_publish_address,
+                "address_report_pipe": child_conn,
                 "enable_wave_coordination": enable_wave_coordination,
             },
             daemon=True,
         )
         self.proc.start()
+
+        # Wait for coordinator to report actual bound addresses when using
+        # late binding (wildcard port addresses).
+        needs_late_binding = any(
+            is_wildcard_addr(x)
+            for x in (front_publish_address, back_publish_address, back_output_address)
+        )
+
+        if needs_late_binding:
+            if not parent_conn.poll(timeout=30.0):
+                raise TimeoutError(
+                    "DP Coordinator did not report bound addresses within 30 seconds"
+                )
+            addr_report = parent_conn.recv()
+            front_publish_address = addr_report.get(
+                "front_publish", front_publish_address
+            )
+            back_publish_address = addr_report.get("back_publish", back_publish_address)
+            back_output_address = addr_report.get("back_output", back_output_address)
+            logger.debug(
+                "DP Coordinator reported bound addresses: "
+                "front=%s, back_pub=%s, back_out=%s",
+                front_publish_address,
+                back_publish_address,
+                back_output_address,
+            )
+        parent_conn.close()
 
         self.stats_publish_address = front_publish_address
         self.coord_in_address = back_publish_address
@@ -134,6 +170,7 @@ class DPCoordinatorProc:
         front_publish_address: str,
         back_output_address: str,
         back_publish_address: str,
+        address_report_pipe: Connection | None = None,
         min_stats_update_interval_ms: int = 100,
         enable_wave_coordination: bool = True,
     ):
@@ -147,6 +184,7 @@ class DPCoordinatorProc:
                 front_publish_address,
                 back_output_address,
                 back_publish_address,
+                address_report_pipe,
             )
         except KeyboardInterrupt:
             logger.info("DP Coordinator process exiting")
@@ -156,6 +194,7 @@ class DPCoordinatorProc:
         front_publish_address: str,
         back_output_address: str,
         back_publish_address: str,
+        address_report_pipe: Connection | None = None,
     ):
         decoder = MsgpackDecoder(EngineCoreOutputs)
 
@@ -169,26 +208,47 @@ class DPCoordinatorProc:
         last_stats_wave = -1
         last_step_counts: list[list[int]] | None = None
 
-        with (
-            make_zmq_socket(
-                path=front_publish_address,  # IPC
+        # Bind sockets with late binding support. Use ExitStack to
+        # manage socket lifetimes and return_address=True to discover
+        # actual ports from wildcard addresses (issue #28498).
+        with ExitStack() as stack:
+            publish_front, actual_front = make_zmq_socket(
                 ctx=self.ctx,
+                path=front_publish_address,  # IPC
                 socket_type=zmq.XPUB,
                 bind=True,
-            ) as publish_front,
-            make_zmq_socket(
-                path=back_output_address,  # IPC or TCP
+                return_address=True,
+            )
+            stack.enter_context(publish_front)
+
+            output_back, actual_back_out = make_zmq_socket(
                 ctx=self.ctx,
+                path=back_output_address,  # IPC or TCP
                 socket_type=zmq.PULL,
                 bind=True,
-            ) as output_back,
-            make_zmq_socket(
-                path=back_publish_address,  # IPC or TCP
+                return_address=True,
+            )
+            stack.enter_context(output_back)
+
+            publish_back, actual_back_pub = make_zmq_socket(
                 ctx=self.ctx,
+                path=back_publish_address,  # IPC or TCP
                 socket_type=zmq.XPUB,
                 bind=True,
-            ) as publish_back,
-        ):
+                return_address=True,
+            )
+            stack.enter_context(publish_back)
+
+            # Report actual bound addresses to parent process.
+            if address_report_pipe is not None:
+                address_report_pipe.send(
+                    {
+                        "front_publish": actual_front,
+                        "back_output": actual_back_out,
+                        "back_publish": actual_back_pub,
+                    }
+                )
+                address_report_pipe.close()
             # Wait until all engines subscribe.
             for _ in self.engines:
                 if publish_back.recv() != b"\x01":
