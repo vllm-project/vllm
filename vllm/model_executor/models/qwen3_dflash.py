@@ -5,7 +5,6 @@ from collections.abc import Iterable
 
 import torch
 import torch.nn.functional as F
-from flashinfer.norm import rmsnorm
 from flashinfer.rope import apply_rope_with_cos_sin_cache
 from torch import nn
 from transformers import Qwen3Config
@@ -407,6 +406,7 @@ class DFlashQwen3Model(nn.Module):
         self._attn_layer_names = [a.layer_name for a in layers_attn]
         self._rms_norm_eps = attn0.q_norm.variance_epsilon
 
+    @torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
     def precompute_context_kv(
         self,
         context_states: torch.Tensor,
@@ -441,10 +441,12 @@ class DFlashQwen3Model(nn.Module):
         all_k = all_k.reshape(L, num_ctx * nkv, hd).contiguous()
         all_k = torch.stack(
             [
-                rmsnorm(
-                    input=all_k[i],
+                RMSNorm.forward_static(
+                    x=all_k[i],
                     weight=self._k_norm_weights[i],
-                    eps=self._rms_norm_eps,
+                    variance_epsilon=self._rms_norm_eps,
+                    hidden_size=hd,
+                    orig_dtype=all_k.dtype,
                 )
                 for i in range(L)
             ]
@@ -456,6 +458,7 @@ class DFlashQwen3Model(nn.Module):
         # [L * num_ctx, kv]
         k_flat = all_k.reshape(L * num_ctx, kv)
         positions_tiled = context_positions.repeat(L)
+        # Use torch.compile-able vllm rope
         _, k_rope = apply_rope_with_cos_sin_cache(
             positions=positions_tiled,
             query=k_flat,

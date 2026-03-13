@@ -7,7 +7,11 @@ import torch
 from typing_extensions import override
 
 from vllm.config import VllmConfig
-from vllm.forward_context import get_forward_context, set_forward_context
+from vllm.forward_context import (
+    current_platform,
+    get_forward_context,
+    set_forward_context,
+)
 from vllm.logger import init_logger
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.spec_decode.eagle import SpecDecodeBaseProposer
@@ -63,6 +67,64 @@ class DFlashProposer(SpecDecodeBaseProposer):
         # For DFlash we use the input embeddings to embed the mask token
         self.parallel_drafting_hidden_state_tensor = None
 
+    @torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
+    def _compiled_set_inputs_first_pass(
+        self,
+        num_query_total: int,
+        num_context: int,
+        num_query_per_req: int,
+        batch_size: int,
+        num_all_positions: int,
+        next_token_ids: torch.Tensor,
+        target_positions: torch.Tensor,
+        target_hidden_states: torch.Tensor,
+        query_start_loc: torch.Tensor,
+        block_table_tensor: torch.Tensor,
+    ) -> tuple[int, torch.Tensor, CommonAttentionMetadata]:
+        # input_ids: [next_token, mask, mask, ...] for each request
+        # First write all slots to the mask id
+        self.input_ids[:num_query_total] = self.parallel_drafting_token_id
+        # Then write the first slot of each query to the next_token_id
+        self.input_ids[self.arange[:batch_size] * num_query_per_req] = next_token_ids
+
+        # positions: [context_positions, query_positions]
+        # Context positions are the target positions
+        self.positions[:num_context] = target_positions
+        # Query positions extend from each request's last position
+        last_pos = target_positions[query_start_loc[1:] - 1]
+        offsets = self.arange[1 : num_query_per_req + 1]
+        self.positions[num_context:num_all_positions] = (
+            last_pos.unsqueeze(1) + offsets
+        ).flatten()
+
+        self.hidden_states[:num_context] = target_hidden_states
+
+        # slot mapping also covers all K/V tokens (context + query)
+        block_size = self.block_size
+        all_positions = self.positions[:num_all_positions]
+        block_numbers = all_positions // block_size
+
+        req_lens = query_start_loc[1:] - query_start_loc[:-1]
+        ctx_req_idx = torch.repeat_interleave(
+            self.arange[:batch_size], req_lens, output_size=num_context
+        )
+        q_req_idx = torch.repeat_interleave(
+            self.arange[:batch_size], num_query_per_req, output_size=num_query_total
+        )
+        req_idx = torch.cat([ctx_req_idx, q_req_idx])
+
+        block_ids = block_table_tensor[req_idx, block_numbers.long()]
+        slot_mapping = block_ids * block_size + (all_positions % block_size)
+
+        # skip index 0 (bonus token), sample from the indices of the mask tokens
+        base = self.arange[:batch_size] * num_query_per_req
+        offsets = self.arange[1 : self.num_speculative_tokens + 1]
+        token_indices_to_sample = (base.unsqueeze(1) + offsets).flatten()
+
+        new_query_start_loc = self.arange[: batch_size + 1] * num_query_per_req
+
+        return slot_mapping, token_indices_to_sample, new_query_start_loc
+
     @override
     @torch.cuda.nvtx.range("DFlashProposer.set_inputs_first_pass")
     def set_inputs_first_pass(
@@ -87,45 +149,21 @@ class DFlashProposer(SpecDecodeBaseProposer):
         self._dflash_num_context = num_context
         self._dflash_num_positions = num_all_positions
 
-        # input_ids: [next_token, mask, mask, ...] for each request
-        # First write all slots to the mask id
-        self.input_ids[:num_query_total] = self.parallel_drafting_token_id
-        # Then write the first slot of each query to the next_token_id
-        self.input_ids[self.arange[:batch_size] * num_query_per_req] = next_token_ids
-
-        # positions: [context_positions, query_positions]
-        # Context positions are the target positions
-        self.positions[:num_context] = target_positions
-        # Query positions extend from each request's last position
-        last_pos = target_positions[cad.query_start_loc[1:] - 1]
-        offsets = self.arange[1 : num_query_per_req + 1]
-        self.positions[num_context:num_all_positions] = (
-            last_pos.unsqueeze(1) + offsets
-        ).flatten()
-
-        self.hidden_states[:num_context] = target_hidden_states
-
-        # slot mapping also covers all K/V tokens (context + query)
-        block_size = self.block_size
-        all_positions = self.positions[:num_all_positions]
-        block_numbers = all_positions // block_size
-
-        req_lens = cad.query_start_loc[1:] - cad.query_start_loc[:-1]
-        ctx_req_idx = torch.repeat_interleave(
-            self.arange[:batch_size], req_lens, output_size=num_context
+        slot_mapping, token_indices_to_sample, new_query_start_loc = (
+            self._compiled_set_inputs_first_pass(
+                num_query_total=num_query_total,
+                num_context=num_context,
+                num_query_per_req=num_query_per_req,
+                batch_size=batch_size,
+                num_all_positions=num_all_positions,
+                next_token_ids=next_token_ids,
+                target_positions=target_positions,
+                target_hidden_states=target_hidden_states,
+                query_start_loc=cad.query_start_loc,
+                block_table_tensor=cad.block_table_tensor,
+            )
         )
-        q_req_idx = torch.repeat_interleave(self.arange[:batch_size], num_query_per_req)
-        req_idx = torch.cat([ctx_req_idx, q_req_idx])
 
-        block_ids = cad.block_table_tensor[req_idx, block_numbers.long()]
-        slot_mapping = block_ids * block_size + (all_positions % block_size)
-
-        # skip index 0 (bonus token), sample from the indices of the mask tokens
-        base = self.arange[:batch_size] * num_query_per_req
-        offsets = self.arange[1 : self.num_speculative_tokens + 1]
-        token_indices_to_sample = (base.unsqueeze(1) + offsets).flatten()
-
-        new_query_start_loc = self.arange[: batch_size + 1] * num_query_per_req
         new_cad = CommonAttentionMetadata(
             query_start_loc=new_query_start_loc,
             seq_lens=cad.seq_lens + num_query_per_req,
