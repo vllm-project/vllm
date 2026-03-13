@@ -242,10 +242,7 @@ fn sample_request(request_id: &str) -> ChatRequest {
             max_tokens: Some(8),
             ..Default::default()
         },
-        chat_options: ChatOptions {
-            chat_template: None,
-            ..Default::default()
-        },
+        chat_options: ChatOptions::default(),
         cache_salt: Some("salt".to_string()),
         trace_headers: None,
         priority: 2,
@@ -356,12 +353,9 @@ async fn chat_streams_text_events() {
 
 #[test]
 fn chat_request_rejects_conflicting_generation_modes() {
-    let error = sample_request("chat-2")
-        .tap_mut(|request| {
-            request.chat_options.continue_final_message = true;
-        })
-        .validate()
-        .unwrap_err();
+    let mut request = sample_request("chat-2");
+    request.chat_options.continue_final_message = true;
+    let error = request.validate().unwrap_err();
 
     assert!(matches!(
         error,
@@ -371,25 +365,12 @@ fn chat_request_rejects_conflicting_generation_modes() {
 
 #[test]
 fn renderer_requires_a_template() {
-    let request = sample_request("chat-3").tap_mut(|request| {
-        request.chat_options.chat_template = None;
-    });
+    let request = sample_request("chat-3");
     let renderer = SmgTokenizerChatRenderer::new(SmgTokenizer::from_arc(Arc::new(
         FakeTemplateTokenizer::empty(),
     )));
     let error = renderer.render(&request).unwrap_err();
     assert!(matches!(error, vllm_chat::Error::MissingChatTemplate));
-}
-
-trait TapMut: Sized {
-    fn tap_mut(self, f: impl FnOnce(&mut Self)) -> Self;
-}
-
-impl<T> TapMut for T {
-    fn tap_mut(mut self, f: impl FnOnce(&mut Self)) -> Self {
-        f(&mut self);
-        self
-    }
 }
 
 #[derive(Debug)]

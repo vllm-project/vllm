@@ -6,23 +6,6 @@ use vllm_engine_core_client::protocol::SamplingParams;
 
 use crate::error::{Error, Result};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum ChatTemplateContentFormat {
-    #[default]
-    String,
-    OpenAi,
-}
-
-impl std::fmt::Display for ChatTemplateContentFormat {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::String => write!(f, "string"),
-            Self::OpenAi => write!(f, "openai"),
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ChatRole {
@@ -39,8 +22,6 @@ pub struct ChatMessage {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ChatOptions {
-    pub chat_template: Option<String>,
-    pub chat_template_content_format: ChatTemplateContentFormat,
     pub add_generation_prompt: bool,
     pub continue_final_message: bool,
     pub template_kwargs: BTreeMap<String, Value>,
@@ -58,8 +39,6 @@ impl ChatOptions {
 impl Default for ChatOptions {
     fn default() -> Self {
         Self {
-            chat_template: None,
-            chat_template_content_format: ChatTemplateContentFormat::String,
             add_generation_prompt: true,
             continue_final_message: false,
             template_kwargs: BTreeMap::new(),

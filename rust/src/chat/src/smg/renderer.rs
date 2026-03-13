@@ -1,16 +1,11 @@
 use std::collections::HashMap;
 
-use smg_tokenizer::chat_template::{
-    ChatTemplateContentFormat as SmgChatTemplateContentFormat, ChatTemplateParams,
-    ChatTemplateProcessor, detect_chat_template_content_format,
-};
 use serde_json::json;
-use thiserror_ext::AsReport as _;
 
 use super::SmgTokenizer;
 use crate::error::{Error, Result};
 use crate::renderer::{ChatRenderer, RenderedPrompt};
-use crate::request::{ChatRequest, ChatTemplateContentFormat};
+use crate::request::ChatRequest;
 
 #[derive(Debug, Clone)]
 pub struct SmgTokenizerChatRenderer {
@@ -25,11 +20,6 @@ impl SmgTokenizerChatRenderer {
 
 impl ChatRenderer for SmgTokenizerChatRenderer {
     fn render(&self, request: &ChatRequest) -> Result<RenderedPrompt> {
-        match request.chat_options.chat_template_content_format {
-            ChatTemplateContentFormat::String => {}
-            format => return Err(Error::UnsupportedChatTemplateContentFormat(format)),
-        }
-
         let messages = request
             .messages
             .iter()
@@ -44,46 +34,22 @@ impl ChatRenderer for SmgTokenizerChatRenderer {
                 .collect::<HashMap<_, _>>()
         });
 
-        let prompt = if let Some(template) = request.chat_options.chat_template.as_deref() {
-            let content_format = match detect_chat_template_content_format(template) {
-                SmgChatTemplateContentFormat::String => ChatTemplateContentFormat::String,
-                SmgChatTemplateContentFormat::OpenAI => ChatTemplateContentFormat::OpenAi,
-            };
-            if content_format != ChatTemplateContentFormat::String {
-                return Err(Error::UnsupportedChatTemplateContentFormat(content_format));
-            }
+        if !self.tokenizer.supports_string_chat_template() {
+            return Err(Error::UnsupportedChatTemplateFormat);
+        }
 
-            ChatTemplateProcessor::new(template.to_string())
-                .map_err(|error| Error::Tokenizer(error.to_report_string()))?
-                .apply_chat_template(
-                    &messages,
-                    ChatTemplateParams {
-                        add_generation_prompt: request.chat_options.add_generation_prompt,
-                        tools: None,
-                        documents: None,
-                        template_kwargs: template_kwargs.as_ref(),
-                    },
-                )
-                .map_err(|error| Error::Tokenizer(error.to_report_string()))?
-        } else {
-            let content_format = self.tokenizer.chat_template_content_format();
-            if content_format != ChatTemplateContentFormat::String {
-                return Err(Error::UnsupportedChatTemplateContentFormat(content_format));
+        let prompt = match self.tokenizer.apply_chat_template(
+            &messages,
+            request.chat_options.add_generation_prompt,
+            template_kwargs.as_ref(),
+        ) {
+            Ok(prompt) => prompt,
+            Err(Error::Tokenizer(message))
+                if message.contains("tokenizer.chat_template is not set") =>
+            {
+                return Err(Error::MissingChatTemplate);
             }
-
-            match self.tokenizer.apply_chat_template(
-                &messages,
-                request.chat_options.add_generation_prompt,
-                template_kwargs.as_ref(),
-            ) {
-                Ok(prompt) => prompt,
-                Err(Error::Tokenizer(message))
-                    if message.contains("tokenizer.chat_template is not set") =>
-                {
-                    return Err(Error::MissingChatTemplate);
-                }
-                Err(error) => return Err(error),
-            }
+            Err(error) => return Err(error),
         };
 
         Ok(RenderedPrompt::Text { prompt })
@@ -94,6 +60,7 @@ impl ChatRenderer for SmgTokenizerChatRenderer {
 mod tests {
     use std::sync::Arc;
 
+    use smg_tokenizer::chat_template::ChatTemplateParams;
     use smg_tokenizer::{
         ChatTemplateState, Decoder, Encoder, Encoding, SpecialTokens, TokenizerTrait,
     };
@@ -102,7 +69,6 @@ mod tests {
     use crate::renderer::{ChatRenderer, RenderedPrompt};
     use crate::request::{ChatMessage, ChatOptions, ChatRequest, ChatRole};
     use crate::smg::SmgTokenizer;
-    use smg_tokenizer::chat_template::ChatTemplateParams;
 
     struct FakeSmgTokenizer {
         chat_template: ChatTemplateState,

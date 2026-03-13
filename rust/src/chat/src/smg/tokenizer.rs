@@ -9,7 +9,6 @@ use smg_tokenizer::factory::create_tokenizer_with_chat_template_blocking;
 use thiserror_ext::AsReport as _;
 
 use crate::error::{Error, Result};
-use crate::request::ChatTemplateContentFormat;
 use crate::tokenizer::Tokenizer;
 
 #[derive(Clone)]
@@ -66,15 +65,11 @@ impl SmgTokenizer {
             .map_err(|error| Error::Tokenizer(error.to_report_string()))
     }
 
-    pub(crate) fn chat_template_content_format(&self) -> ChatTemplateContentFormat {
-        match self.inner.chat_template_content_format() {
-            smg_tokenizer::chat_template::ChatTemplateContentFormat::String => {
-                ChatTemplateContentFormat::String
-            }
-            smg_tokenizer::chat_template::ChatTemplateContentFormat::OpenAI => {
-                ChatTemplateContentFormat::OpenAi
-            }
-        }
+    pub(crate) fn supports_string_chat_template(&self) -> bool {
+        matches!(
+            self.inner.chat_template_content_format(),
+            smg_tokenizer::chat_template::ChatTemplateContentFormat::String
+        )
     }
 }
 

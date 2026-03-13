@@ -2,7 +2,7 @@
 
 pub use error::{Error, Result};
 pub use event::ChatEvent;
-pub use request::{ChatMessage, ChatOptions, ChatRequest, ChatRole, ChatTemplateContentFormat};
+pub use request::{ChatMessage, ChatOptions, ChatRequest, ChatRole};
 pub use renderer::{ChatRenderer, DynChatRenderer, RenderedPrompt};
 pub use smg::{SmgTokenizer, SmgTokenizerChatRenderer};
 pub use stream::ChatEventStream;

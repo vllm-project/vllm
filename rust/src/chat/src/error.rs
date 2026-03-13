@@ -1,8 +1,6 @@
 use thiserror::Error;
 use vllm_llm::Error as LlmError;
 
-use crate::request::ChatTemplateContentFormat;
-
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("chat request must contain at least one message")]
@@ -13,10 +11,10 @@ pub enum Error {
     ConflictingGenerationPromptMode,
     #[error("chat template is required but none was configured")]
     MissingChatTemplate,
-    #[error("chat template content format `{0}` is not supported yet")]
-    UnsupportedChatTemplateContentFormat(ChatTemplateContentFormat),
     #[error("rendered token prompts are not supported by this chat renderer yet")]
     UnsupportedRenderedTokens,
+    #[error("only string-format chat templates are supported")]
+    UnsupportedChatTemplateFormat,
     #[error("tokenizer error: {0}")]
     Tokenizer(String),
     #[error("chat request stream `{request_id}` closed before terminal output")]
