@@ -126,8 +126,18 @@ def read_geotiff(
                 path = cached_path
             else:
                 resp = urllib.request.urlopen(file_path)
-                with open(cached_path, "wb") as f:
-                    f.write(resp.read())
+                # Write to a temporary file and atomically rename
+                # to prevent race conditions with parallel tests.
+                with tempfile.NamedTemporaryFile(
+                    mode="wb", dir=cache_dir, delete=False
+                ) as tmp_file:
+                    tmp_file.write(resp.read())
+                    tmp_path = tmp_file.name
+                try:
+                    os.rename(tmp_path, cached_path)
+                except OSError:
+                    # Another process may have already written the file.
+                    os.remove(tmp_path)
                 path = cached_path
         else:
             resp = urllib.request.urlopen(file_path)

@@ -5,6 +5,7 @@ import asyncio
 import atexit
 import hashlib
 import os
+import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, TypeVar
@@ -142,7 +143,18 @@ class MediaConnector:
         if not self._media_cache_dir:
             return
         cache_path = self._media_cache_path(url)
-        cache_path.write_bytes(data)
+        # Write to a temporary file and atomically rename to prevent
+        # race conditions when multiple processes cache the same URL.
+        with tempfile.NamedTemporaryFile(
+            mode="wb", dir=self._media_cache_dir, delete=False
+        ) as tmp_file:
+            tmp_file.write(data)
+            tmp_path = tmp_file.name
+        try:
+            os.rename(tmp_path, str(cache_path))
+        except OSError:
+            # Another process may have already written the file.
+            os.remove(tmp_path)
 
     def _media_cache_path(self, url: str) -> Path:
         url_hash = hashlib.sha256(url.encode()).hexdigest()[:20]
