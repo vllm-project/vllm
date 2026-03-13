@@ -1,22 +1,17 @@
-use std::collections::VecDeque;
 use std::pin::Pin;
-use std::task::{Context, Poll, ready};
+use std::task::{Context, Poll};
 
 use futures::Stream;
-use futures::stream::FusedStream;
+use futures_async_stream::try_stream;
 use vllm_llm::GenerateOutputStream;
 
+use crate::error::{Error, Result};
 use crate::event::ChatEvent;
 use crate::tokenizer::DynTokenizer;
 
 pub struct ChatEventStream {
     request_id: String,
-    tokenizer: DynTokenizer,
-    raw_stream: GenerateOutputStream,
-    pending: VecDeque<ChatEvent>,
-    emitted_text: String,
-    done_emitted: bool,
-    terminated: bool,
+    inner: Pin<Box<dyn Stream<Item = Result<ChatEvent>> + Send>>,
 }
 
 impl ChatEventStream {
@@ -25,116 +20,76 @@ impl ChatEventStream {
         tokenizer: DynTokenizer,
         raw_stream: GenerateOutputStream,
     ) -> Self {
-        let mut pending = VecDeque::new();
-        pending.push_back(ChatEvent::Start {
-            request_id: request_id.clone(),
-        });
         Self {
+            inner: chat_event_stream(request_id.clone(), tokenizer, raw_stream),
             request_id,
-            tokenizer,
-            raw_stream,
-            pending,
-            emitted_text: String::new(),
-            done_emitted: false,
-            terminated: false,
         }
     }
 
-    pub async fn collect_text(mut self) -> String {
+    pub fn request_id(&self) -> &str {
+        &self.request_id
+    }
+
+    pub async fn collect_text(mut self) -> Result<String> {
         use futures::StreamExt as _;
 
         let mut text = String::new();
-        while let Some(event) = self.next().await {
+        while let Some(event) = self.next().await.transpose()? {
             match event {
                 ChatEvent::TextDelta { text: next, .. } | ChatEvent::Done { text: next, .. } => {
                     text = next;
                 }
-                ChatEvent::Start { .. } | ChatEvent::Error { .. } => {}
+                ChatEvent::Start => {}
             }
         }
-        text
-    }
-
-    fn push_error(&mut self, message: impl Into<String>) {
-        self.pending.push_back(ChatEvent::Error {
-            request_id: self.request_id.clone(),
-            message: message.into(),
-        });
-        self.terminated = true;
+        Ok(text)
     }
 }
 
 impl Stream for ChatEventStream {
-    type Item = ChatEvent;
+    type Item = Result<ChatEvent>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        loop {
-            if let Some(event) = self.pending.pop_front() {
-                return Poll::Ready(Some(event));
-            }
-
-            if self.terminated {
-                return Poll::Ready(None);
-            }
-
-            let next = match ready!(Pin::new(&mut self.raw_stream).poll_next(cx)) {
-                Some(next) => next,
-                None if self.done_emitted => {
-                    self.terminated = true;
-                    return Poll::Ready(None);
-                }
-                None => {
-                    self.push_error("request stream closed before terminal output");
-                    continue;
-                }
-            };
-
-            let output = match next {
-                Ok(output) => output,
-                Err(error) => {
-                    self.push_error(error.to_string());
-                    continue;
-                }
-            };
-
-            let decoded = match self.tokenizer.decode(&output.token_ids, false) {
-                Ok(decoded) => decoded,
-                Err(error) => {
-                    self.push_error(error.to_string());
-                    continue;
-                }
-            };
-
-            let delta = suffix_after_lcp(&self.emitted_text, &decoded).to_string();
-            self.emitted_text = decoded.clone();
-
-            if !delta.is_empty() {
-                let request_id = self.request_id.clone();
-                self.pending.push_back(ChatEvent::TextDelta {
-                    request_id,
-                    delta,
-                    text: decoded.clone(),
-                });
-            }
-
-            if output.raw.finished() {
-                self.done_emitted = true;
-                let request_id = self.request_id.clone();
-                self.pending.push_back(ChatEvent::Done {
-                    request_id,
-                    text: decoded,
-                    finish_reason: output.raw.finish_reason,
-                    stop_reason: output.raw.stop_reason.clone(),
-                });
-            }
-        }
+        Pin::new(&mut self.inner).poll_next(cx)
     }
 }
 
-impl FusedStream for ChatEventStream {
-    fn is_terminated(&self) -> bool {
-        self.terminated && self.pending.is_empty()
+#[try_stream(boxed, ok = ChatEvent, error = Error)]
+async fn chat_event_stream(
+    request_id: String,
+    tokenizer: DynTokenizer,
+    raw_stream: GenerateOutputStream,
+) {
+    yield ChatEvent::Start;
+
+    let mut emitted_text = String::new();
+
+    #[for_await]
+    for next in raw_stream {
+        let output: vllm_llm::GenerateOutput = next?;
+        let decoded = tokenizer.decode(&output.token_ids, false)?;
+
+        let delta = suffix_after_lcp(&emitted_text, &decoded).to_string();
+        emitted_text = decoded.clone();
+
+        if !delta.is_empty() {
+            yield ChatEvent::TextDelta {
+                delta,
+                text: decoded.clone(),
+            };
+        }
+
+        if output.raw.finished() {
+            yield ChatEvent::Done {
+                text: decoded,
+                finish_reason: output.raw.finish_reason,
+                stop_reason: output.raw.stop_reason,
+            };
+            return Ok(());
+        }
     }
+
+    return Err(Error::StreamClosedBeforeTerminalOutput { request_id });
 }
 
 fn suffix_after_lcp<'a>(before: &str, after: &'a str) -> &'a str {

@@ -321,37 +321,28 @@ async fn chat_streams_text_events() {
 
     let mut stream = chat.chat(sample_request("chat-1")).await.unwrap();
 
+    assert_eq!(stream.next().await.unwrap().unwrap(), ChatEvent::Start);
     assert_eq!(
-        stream.next().await,
-        Some(ChatEvent::Start {
-            request_id: "chat-1".to_string()
-        })
-    );
-    assert_eq!(
-        stream.next().await,
-        Some(ChatEvent::TextDelta {
-            request_id: "chat-1".to_string(),
+        stream.next().await.unwrap().unwrap(),
+        ChatEvent::TextDelta {
             delta: "H".to_string(),
             text: "H".to_string(),
-        })
+        }
     );
     assert_eq!(
-        stream.next().await,
-        Some(ChatEvent::TextDelta {
-            request_id: "chat-1".to_string(),
+        stream.next().await.unwrap().unwrap(),
+        ChatEvent::TextDelta {
             delta: "i!".to_string(),
             text: "Hi!".to_string(),
-        })
+        }
     );
 
     match stream.next().await {
-        Some(ChatEvent::Done {
-            request_id,
+        Some(Ok(ChatEvent::Done {
             text,
             finish_reason,
             ..
-        }) => {
-            assert_eq!(request_id, "chat-1");
+        })) => {
             assert_eq!(text, "Hi!");
             assert_eq!(finish_reason, Some(FinishReason::Stop));
         }
@@ -446,18 +437,15 @@ async fn chat_stream_reports_decode_failure_as_error_event() {
     let chat = connect_chat_llm(handshake_address, renderer, tokenizer).await;
 
     let mut stream = chat.chat(sample_request("chat-4")).await.unwrap();
-    assert!(matches!(stream.next().await, Some(ChatEvent::Start { .. })));
+    assert_eq!(stream.request_id(), "chat-4");
+    assert!(matches!(stream.next().await, Some(Ok(ChatEvent::Start))));
 
     match timeout(Duration::from_secs(2), stream.next())
         .await
         .unwrap()
     {
-        Some(ChatEvent::Error {
-            request_id,
-            message,
-        }) => {
-            assert_eq!(request_id, "chat-4");
-            assert_eq!(message, "tokenizer error: decode failed");
+        Some(Err(vllm_chat::Error::Tokenizer(message))) => {
+            assert_eq!(message, "decode failed");
         }
         other => panic!("unexpected event after close: {other:?}"),
     }

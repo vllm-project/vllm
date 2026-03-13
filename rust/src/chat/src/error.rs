@@ -19,6 +19,8 @@ pub enum Error {
     UnsupportedRenderedTokens,
     #[error("tokenizer error: {0}")]
     Tokenizer(String),
+    #[error("chat request stream `{request_id}` closed before terminal output")]
+    StreamClosedBeforeTerminalOutput { request_id: String },
     #[error("llm request failed: {0}")]
     Llm(#[from] LlmError),
 }

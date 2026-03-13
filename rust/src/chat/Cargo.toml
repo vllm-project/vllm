@@ -5,10 +5,12 @@ edition.workspace = true
 
 [dependencies]
 futures.workspace = true
+futures-async-stream.workspace = true
 llm-tokenizer.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+thiserror-ext.workspace = true
 vllm-engine-core-client.workspace = true
 vllm-llm.workspace = true
 

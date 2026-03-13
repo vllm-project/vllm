@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use llm_tokenizer::chat_template::{
     ChatTemplateContentFormat as LlmChatTemplateContentFormat, ChatTemplateParams,
@@ -24,6 +25,8 @@ pub enum RenderedPrompt {
 pub trait ChatRenderer: Send + Sync {
     fn render(&self, request: &ChatRequest) -> Result<RenderedPrompt>;
 }
+
+pub type DynChatRenderer = Arc<dyn ChatRenderer>;
 
 #[derive(Debug, Clone)]
 pub struct LlmTokenizerChatRenderer {

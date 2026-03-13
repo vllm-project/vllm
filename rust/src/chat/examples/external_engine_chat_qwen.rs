@@ -105,9 +105,9 @@ async fn main() -> Result<()> {
         let mut finish_reason = None;
         let mut saw_start = false;
 
-        while let Some(event) = stream.next().await {
+        while let Some(event) = stream.next().await.transpose()? {
             match event {
-                ChatEvent::Start { .. } => {
+                ChatEvent::Start => {
                     saw_start = true;
                 }
                 ChatEvent::TextDelta { delta, .. } => {
@@ -122,7 +122,6 @@ async fn main() -> Result<()> {
                     finish_reason = reason;
                     break;
                 }
-                ChatEvent::Error { message, .. } => bail!("chat stream failed: {message}"),
             }
         }
 

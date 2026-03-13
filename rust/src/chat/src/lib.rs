@@ -1,4 +1,11 @@
-use std::sync::Arc;
+#![feature(coroutines)]
+
+pub use error::{Error, Result};
+pub use event::ChatEvent;
+pub use renderer::{ChatRenderer, DynChatRenderer, LlmTokenizerChatRenderer, RenderedPrompt};
+pub use request::{ChatMessage, ChatOptions, ChatRequest, ChatRole, ChatTemplateContentFormat};
+pub use stream::ChatEventStream;
+pub use tokenizer::{DynTokenizer, LlmTokenizer, Tokenizer};
 
 mod error;
 mod event;
@@ -8,13 +15,7 @@ mod request;
 mod stream;
 mod tokenizer;
 
-pub use error::{Error, Result};
-pub use event::ChatEvent;
 use lower::lower_chat_request;
-pub use renderer::{ChatRenderer, LlmTokenizerChatRenderer, RenderedPrompt};
-pub use request::{ChatMessage, ChatOptions, ChatRequest, ChatRole, ChatTemplateContentFormat};
-pub use stream::ChatEventStream;
-pub use tokenizer::{DynTokenizer, LlmTokenizer, Tokenizer};
 use vllm_llm::Llm;
 
 /// Text-only chat facade layered above [`vllm_llm::Llm`].
@@ -23,12 +24,12 @@ use vllm_llm::Llm;
 /// `messages -> rendered prompt -> tokenized prompt -> engine request -> streamed text events`.
 pub struct ChatLlm {
     llm: Llm,
-    renderer: Arc<dyn ChatRenderer>,
+    renderer: DynChatRenderer,
     tokenizer: DynTokenizer,
 }
 
 impl ChatLlm {
-    pub fn new(llm: Llm, renderer: Arc<dyn ChatRenderer>, tokenizer: DynTokenizer) -> Self {
+    pub fn new(llm: Llm, renderer: DynChatRenderer, tokenizer: DynTokenizer) -> Self {
         Self {
             llm,
             renderer,

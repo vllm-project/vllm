@@ -12,6 +12,7 @@ bytes = "1.11.1"
 clap = { version = "4.5.38", features = ["derive"] }
 enum-as-inner = "0.7.0"
 futures = "0.3.31"
+futures-async-stream = "0.2.13"
 hex = "0.4.3"
 llm-tokenizer = { path = "../smg/crates/tokenizer" }
 parking_lot = "0.12.5"
