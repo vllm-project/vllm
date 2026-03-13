@@ -243,94 +243,72 @@ struct BF16Vec32 : public Vec<BF16Vec32> {
 struct BF16Vec8 : public Vec<BF16Vec8> {
   constexpr static int VEC_ELEM_NUM = 8;
   fixed_vfloat32m2_t reg_fp32;
+
   explicit BF16Vec8(const void* ptr) {
-    const uint16_t* u16 = static_cast<const uint16_t*>(ptr);
-    float tmp[8];
-    for (int i = 0; i < 8; ++i) {
-      uint32_t v = static_cast<uint32_t>(u16[i]) << 16;
-      std::memcpy(&tmp[i], &v, 4);
-    }
-    reg_fp32 = __riscv_vle32_v_f32m2(tmp, 8);
+    vuint16m1_t b_u16 = __riscv_vle16_v_u16m1(
+        reinterpret_cast<const uint16_t*>(ptr), VEC_ELEM_NUM);
+    vuint32m2_t b_u32 = __riscv_vzext_vf2_u32m2(b_u16, VEC_ELEM_NUM);
+    b_u32 = __riscv_vsll_vx_u32m2(b_u32, 16, VEC_ELEM_NUM);
+    reg_fp32 = __riscv_vreinterpret_v_u32m2_f32m2(b_u32);
   }
+
   explicit BF16Vec8(const FP32Vec8&);
+
   void save(void* ptr) const {
-    float tmp[8];
-    __riscv_vse32_v_f32m2(tmp, reg_fp32, 8);
-    uint16_t* u16 = static_cast<uint16_t*>(ptr);
-    for (int i = 0; i < 8; ++i) {
-      uint32_t v;
-      std::memcpy(&v, &tmp[i], 4);
-      u16[i] = static_cast<uint16_t>(v >> 16);
-    }
+    vuint32m2_t b_u32 = __riscv_vreinterpret_v_f32m2_u32m2(reg_fp32);
+    b_u32 = __riscv_vsrl_vx_u32m2(b_u32, 16, VEC_ELEM_NUM);
+    vuint16m1_t b_u16 = __riscv_vncvt_x_x_w_u16m1(b_u32, VEC_ELEM_NUM);
+    __riscv_vse16_v_u16m1(reinterpret_cast<uint16_t*>(ptr), b_u16, VEC_ELEM_NUM);
   }
+
   void save(void* ptr, int elem_num) const {
-    float tmp[8];
-    __riscv_vse32_v_f32m2(tmp, reg_fp32, 8);
-    uint16_t* u16 = static_cast<uint16_t*>(ptr);
-    for (int i = 0; i < elem_num; ++i) {
-      uint32_t v;
-      std::memcpy(&v, &tmp[i], 4);
-      u16[i] = static_cast<uint16_t>(v >> 16);
-    }
+    vuint32m2_t b_u32 = __riscv_vreinterpret_v_f32m2_u32m2(reg_fp32);
+    b_u32 = __riscv_vsrl_vx_u32m2(b_u32, 16, elem_num);
+    vuint16m1_t b_u16 = __riscv_vncvt_x_x_w_u16m1(b_u32, elem_num);
+    __riscv_vse16_v_u16m1(reinterpret_cast<uint16_t*>(ptr), b_u16, elem_num);
   }
+
   void save_strided(void* ptr, ptrdiff_t stride) const {
-    float tmp[8];
-    __riscv_vse32_v_f32m2(tmp, reg_fp32, 8);
-    uint8_t* u8 = static_cast<uint8_t*>(ptr);
-    ptrdiff_t byte_stride = stride * sizeof(uint16_t);
-    for (int i = 0; i < 8; ++i) {
-      uint32_t v;
-      std::memcpy(&v, &tmp[i], 4);
-      uint16_t val = static_cast<uint16_t>(v >> 16);
-      *reinterpret_cast<uint16_t*>(u8 + i * byte_stride) = val;
-    }
+    vuint32m2_t b_u32 = __riscv_vreinterpret_v_f32m2_u32m2(reg_fp32);
+    b_u32 = __riscv_vsrl_vx_u32m2(b_u32, 16, VEC_ELEM_NUM);
+    vuint16m1_t b_u16 = __riscv_vncvt_x_x_w_u16m1(b_u32, VEC_ELEM_NUM);
+    __riscv_vsse16_v_u16m1(reinterpret_cast<uint16_t*>(ptr), stride, b_u16, VEC_ELEM_NUM);
   }
 };
 
 struct BF16Vec16 : public Vec<BF16Vec16> {
   constexpr static int VEC_ELEM_NUM = 16;
   fixed_vfloat32m4_t reg_fp32;
+
   explicit BF16Vec16(const void* ptr) {
-    const uint16_t* u16 = static_cast<const uint16_t*>(ptr);
-    float tmp[16];
-    for (int i = 0; i < 16; ++i) {
-      uint32_t v = static_cast<uint32_t>(u16[i]) << 16;
-      std::memcpy(&tmp[i], &v, 4);
-    }
-    reg_fp32 = __riscv_vle32_v_f32m4(tmp, 16);
+    vuint16m2_t b_u16 = __riscv_vle16_v_u16m2(
+        reinterpret_cast<const uint16_t*>(ptr), VEC_ELEM_NUM);
+    vuint32m4_t b_u32 = __riscv_vzext_vf2_u32m4(b_u16, VEC_ELEM_NUM);
+    b_u32 = __riscv_vsll_vx_u32m4(b_u32, 16, VEC_ELEM_NUM);
+    reg_fp32 = __riscv_vreinterpret_v_u32m4_f32m4(b_u32);
   }
+
   explicit BF16Vec16(const FP32Vec16&);
+
   void save(void* ptr) const {
-    float tmp[16];
-    __riscv_vse32_v_f32m4(tmp, reg_fp32, 16);
-    uint16_t* u16 = static_cast<uint16_t*>(ptr);
-    for (int i = 0; i < 16; ++i) {
-      uint32_t v;
-      std::memcpy(&v, &tmp[i], 4);
-      u16[i] = static_cast<uint16_t>(v >> 16);
-    }
+    vuint32m4_t b_u32 = __riscv_vreinterpret_v_f32m4_u32m4(reg_fp32);
+    b_u32 = __riscv_vsrl_vx_u32m4(b_u32, 16, VEC_ELEM_NUM);
+    vuint16m2_t b_u16 = __riscv_vncvt_x_x_w_u16m2(b_u32, VEC_ELEM_NUM);
+    __riscv_vse16_v_u16m2(reinterpret_cast<uint16_t*>(ptr), b_u16, VEC_ELEM_NUM);
   }
+
   void save(void* ptr, int elem_num) const {
-    float tmp[16];
-    __riscv_vse32_v_f32m4(tmp, reg_fp32, 16);
-    uint16_t* u16 = static_cast<uint16_t*>(ptr);
-    for (int i = 0; i < elem_num; ++i) {
-      uint32_t v;
-      std::memcpy(&v, &tmp[i], 4);
-      u16[i] = static_cast<uint16_t>(v >> 16);
-    }
+    vuint32m4_t b_u32 = __riscv_vreinterpret_v_f32m4_u32m4(reg_fp32);
+    b_u32 = __riscv_vsrl_vx_u32m4(b_u32, 16, elem_num);
+    vuint16m2_t b_u16 = __riscv_vncvt_x_x_w_u16m2(b_u32, elem_num);
+    __riscv_vse16_v_u16m2(reinterpret_cast<uint16_t*>(ptr), b_u16, elem_num);
   }
+
   void save_strided(void* ptr, ptrdiff_t stride) const {
-    float tmp[16];
-    __riscv_vse32_v_f32m4(tmp, reg_fp32, 16);
-    uint8_t* u8 = static_cast<uint8_t*>(ptr);
-    ptrdiff_t byte_stride = stride * sizeof(uint16_t);
-    for (int i = 0; i < 16; ++i) {
-      uint32_t v;
-      std::memcpy(&v, &tmp[i], 4);
-      uint16_t val = static_cast<uint16_t>(v >> 16);
-      *reinterpret_cast<uint16_t*>(u8 + i * byte_stride) = val;
-    }
+    vuint32m4_t b_u32 = __riscv_vreinterpret_v_f32m4_u32m4(reg_fp32);
+    b_u32 = __riscv_vsrl_vx_u32m4(b_u32, 16, VEC_ELEM_NUM);
+    vuint16m2_t b_u16 = __riscv_vncvt_x_x_w_u16m2(b_u32, VEC_ELEM_NUM);
+    __riscv_vsse16_v_u16m2(reinterpret_cast<uint16_t*>(ptr), stride, b_u16, VEC_ELEM_NUM);
   }
 };
 
@@ -339,58 +317,36 @@ struct BF16Vec32 : public Vec<BF16Vec32> {
   fixed_vfloat32m8_t reg_fp32;
 
   explicit BF16Vec32(const void* ptr) {
-    const uint16_t* u16 = static_cast<const uint16_t*>(ptr);
-    float tmp[32];
-    for (int i = 0; i < 32; ++i) {
-      uint32_t v = static_cast<uint32_t>(u16[i]) << 16;
-      std::memcpy(&tmp[i], &v, 4);
-    }
-    reg_fp32 = __riscv_vle32_v_f32m8(tmp, 32);
+    vuint16m4_t b_u16 = __riscv_vle16_v_u16m4(
+        reinterpret_cast<const uint16_t*>(ptr), VEC_ELEM_NUM);
+    vuint32m8_t b_u32 = __riscv_vzext_vf2_u32m8(b_u16, VEC_ELEM_NUM);
+    b_u32 = __riscv_vsll_vx_u32m8(b_u32, 16, VEC_ELEM_NUM);
+    reg_fp32 = __riscv_vreinterpret_v_u32m8_f32m8(b_u32);
   }
 
   explicit BF16Vec32(const BF16Vec8& v) {
-    float tmp_small[8];
-    __riscv_vse32_v_f32m2(tmp_small, v.reg_fp32, 8);
-    float tmp_large[32];
-    for (int i = 0; i < 4; ++i) {
-      std::memcpy(tmp_large + (i * 8), tmp_small, 8 * sizeof(float));
-    }
-    reg_fp32 = __riscv_vle32_v_f32m8(tmp_large, 32);
+    reg_fp32 = __riscv_vbroadcast_vf8_f32m8(v.reg_fp32, VEC_ELEM_NUM);
   }
 
   void save(void* ptr) const {
-    float tmp[32];
-    __riscv_vse32_v_f32m8(tmp, reg_fp32, 32);
-    uint16_t* u16 = static_cast<uint16_t*>(ptr);
-    for (int i = 0; i < 32; ++i) {
-      uint32_t v;
-      std::memcpy(&v, &tmp[i], 4);
-      u16[i] = static_cast<uint16_t>(v >> 16);
-    }
+    vuint32m8_t b_u32 = __riscv_vreinterpret_v_f32m8_u32m8(reg_fp32);
+    b_u32 = __riscv_vsrl_vx_u32m8(b_u32, 16, VEC_ELEM_NUM);
+    vuint16m4_t b_u16 = __riscv_vncvt_x_x_w_u16m4(b_u32, VEC_ELEM_NUM);
+    __riscv_vse16_v_u16m4(reinterpret_cast<uint16_t*>(ptr), b_u16, VEC_ELEM_NUM);
   }
 
   void save(void* ptr, int elem_num) const {
-    float tmp[32];
-    __riscv_vse32_v_f32m8(tmp, reg_fp32, 32);
-    uint16_t* u16 = static_cast<uint16_t*>(ptr);
-    for (int i = 0; i < elem_num; ++i) {
-      uint32_t v;
-      std::memcpy(&v, &tmp[i], 4);
-      u16[i] = static_cast<uint16_t>(v >> 16);
-    }
+    vuint32m8_t b_u32 = __riscv_vreinterpret_v_f32m8_u32m8(reg_fp32);
+    b_u32 = __riscv_vsrl_vx_u32m8(b_u32, 16, elem_num);
+    vuint16m4_t b_u16 = __riscv_vncvt_x_x_w_u16m4(b_u32, elem_num);
+    __riscv_vse16_v_u16m4(reinterpret_cast<uint16_t*>(ptr), b_u16, elem_num);
   }
 
   void save_strided(void* ptr, ptrdiff_t stride) const {
-    float tmp[32];
-    __riscv_vse32_v_f32m8(tmp, reg_fp32, 32);
-    uint8_t* u8 = static_cast<uint8_t*>(ptr);
-    ptrdiff_t byte_stride = stride * sizeof(uint16_t);
-    for (int i = 0; i < 32; ++i) {
-      uint32_t v;
-      std::memcpy(&v, &tmp[i], 4);
-      uint16_t val = static_cast<uint16_t>(v >> 16);
-      *reinterpret_cast<uint16_t*>(u8 + i * byte_stride) = val;
-    }
+    vuint32m8_t b_u32 = __riscv_vreinterpret_v_f32m8_u32m8(reg_fp32);
+    b_u32 = __riscv_vsrl_vx_u32m8(b_u32, 16, VEC_ELEM_NUM);
+    vuint16m4_t b_u16 = __riscv_vncvt_x_x_w_u16m4(b_u32, VEC_ELEM_NUM);
+    __riscv_vsse16_v_u16m4(reinterpret_cast<uint16_t*>(ptr), stride, b_u16, VEC_ELEM_NUM);
   }
 };
 #endif
@@ -501,16 +457,11 @@ struct FP32Vec8 : public Vec<FP32Vec8> {
 
     fixed_vfloat32m2_t poly =
         __riscv_vfmv_v_f_f32m2(0.001333355810164f, VEC_ELEM_NUM);
-    poly = __riscv_vfmul_vv_f32m2(poly, r, VEC_ELEM_NUM);
-    poly = __riscv_vfadd_vf_f32m2(poly, 0.009618129107628f, VEC_ELEM_NUM);
-    poly = __riscv_vfmul_vv_f32m2(poly, r, VEC_ELEM_NUM);
-    poly = __riscv_vfadd_vf_f32m2(poly, 0.055504108664821f, VEC_ELEM_NUM);
-    poly = __riscv_vfmul_vv_f32m2(poly, r, VEC_ELEM_NUM);
-    poly = __riscv_vfadd_vf_f32m2(poly, 0.240226506959101f, VEC_ELEM_NUM);
-    poly = __riscv_vfmul_vv_f32m2(poly, r, VEC_ELEM_NUM);
-    poly = __riscv_vfadd_vf_f32m2(poly, 0.693147180559945f, VEC_ELEM_NUM);
-    poly = __riscv_vfmul_vv_f32m2(poly, r, VEC_ELEM_NUM);
-    poly = __riscv_vfadd_vf_f32m2(poly, 1.0f, VEC_ELEM_NUM);
+    poly = __riscv_vfmadd_vv_f32m2(poly, r, __riscv_vfmv_v_f_f32m2(0.009618129107628f, VEC_ELEM_NUM), VEC_ELEM_NUM);
+    poly = __riscv_vfmadd_vv_f32m2(poly, r, __riscv_vfmv_v_f_f32m2(0.055504108664821f, VEC_ELEM_NUM), VEC_ELEM_NUM);
+    poly = __riscv_vfmadd_vv_f32m2(poly, r, __riscv_vfmv_v_f_f32m2(0.240226506959101f, VEC_ELEM_NUM), VEC_ELEM_NUM);
+    poly = __riscv_vfmadd_vv_f32m2(poly, r, __riscv_vfmv_v_f_f32m2(0.693147180559945f, VEC_ELEM_NUM), VEC_ELEM_NUM);
+    poly = __riscv_vfmadd_vv_f32m2(poly, r, __riscv_vfmv_v_f_f32m2(1.0f, VEC_ELEM_NUM), VEC_ELEM_NUM);
 
     fixed_vint32m2_t biased_exp =
         __riscv_vadd_vx_i32m2(n_int, 127, VEC_ELEM_NUM);
@@ -546,14 +497,10 @@ struct FP32Vec8 : public Vec<FP32Vec8> {
     t = __riscv_vfrdiv_vf_f32m2(t, 1.0f, VEC_ELEM_NUM);
 
     fixed_vfloat32m2_t poly = __riscv_vfmv_v_f_f32m2(a5, VEC_ELEM_NUM);
-    poly = __riscv_vfadd_vf_f32m2(__riscv_vfmul_vv_f32m2(poly, t, VEC_ELEM_NUM),
-                                  a4, VEC_ELEM_NUM);
-    poly = __riscv_vfadd_vf_f32m2(__riscv_vfmul_vv_f32m2(poly, t, VEC_ELEM_NUM),
-                                  a3, VEC_ELEM_NUM);
-    poly = __riscv_vfadd_vf_f32m2(__riscv_vfmul_vv_f32m2(poly, t, VEC_ELEM_NUM),
-                                  a2, VEC_ELEM_NUM);
-    poly = __riscv_vfadd_vf_f32m2(__riscv_vfmul_vv_f32m2(poly, t, VEC_ELEM_NUM),
-                                  a1, VEC_ELEM_NUM);
+    poly = __riscv_vfmadd_vv_f32m2(poly, t, __riscv_vfmv_v_f_f32m2(a4, VEC_ELEM_NUM), VEC_ELEM_NUM);
+    poly = __riscv_vfmadd_vv_f32m2(poly, t, __riscv_vfmv_v_f_f32m2(a3, VEC_ELEM_NUM), VEC_ELEM_NUM);
+    poly = __riscv_vfmadd_vv_f32m2(poly, t, __riscv_vfmv_v_f_f32m2(a2, VEC_ELEM_NUM), VEC_ELEM_NUM);
+    poly = __riscv_vfmadd_vv_f32m2(poly, t, __riscv_vfmv_v_f_f32m2(a1, VEC_ELEM_NUM), VEC_ELEM_NUM);
     poly = __riscv_vfmul_vv_f32m2(poly, t, VEC_ELEM_NUM);
 
     fixed_vfloat32m2_t exp_val =
@@ -682,16 +629,11 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
 
     fixed_vfloat32m4_t poly =
         __riscv_vfmv_v_f_f32m4(0.001333355810164f, VEC_ELEM_NUM);
-    poly = __riscv_vfadd_vf_f32m4(__riscv_vfmul_vv_f32m4(poly, r, VEC_ELEM_NUM),
-                                  0.009618129107628f, VEC_ELEM_NUM);
-    poly = __riscv_vfadd_vf_f32m4(__riscv_vfmul_vv_f32m4(poly, r, VEC_ELEM_NUM),
-                                  0.055504108664821f, VEC_ELEM_NUM);
-    poly = __riscv_vfadd_vf_f32m4(__riscv_vfmul_vv_f32m4(poly, r, VEC_ELEM_NUM),
-                                  0.240226506959101f, VEC_ELEM_NUM);
-    poly = __riscv_vfadd_vf_f32m4(__riscv_vfmul_vv_f32m4(poly, r, VEC_ELEM_NUM),
-                                  0.693147180559945f, VEC_ELEM_NUM);
-    poly = __riscv_vfadd_vf_f32m4(__riscv_vfmul_vv_f32m4(poly, r, VEC_ELEM_NUM),
-                                  1.0f, VEC_ELEM_NUM);
+    poly = __riscv_vfmadd_vv_f32m4(poly, r, __riscv_vfmv_v_f_f32m4(0.009618129107628f, VEC_ELEM_NUM), VEC_ELEM_NUM);
+    poly = __riscv_vfmadd_vv_f32m4(poly, r, __riscv_vfmv_v_f_f32m4(0.055504108664821f, VEC_ELEM_NUM), VEC_ELEM_NUM);
+    poly = __riscv_vfmadd_vv_f32m4(poly, r, __riscv_vfmv_v_f_f32m4(0.240226506959101f, VEC_ELEM_NUM), VEC_ELEM_NUM);
+    poly = __riscv_vfmadd_vv_f32m4(poly, r, __riscv_vfmv_v_f_f32m4(0.693147180559945f, VEC_ELEM_NUM), VEC_ELEM_NUM);
+    poly = __riscv_vfmadd_vv_f32m4(poly, r, __riscv_vfmv_v_f_f32m4(1.0f, VEC_ELEM_NUM), VEC_ELEM_NUM);
 
     fixed_vint32m4_t biased_exp = __riscv_vmax_vx_i32m4(
         __riscv_vadd_vx_i32m4(n_int, 127, VEC_ELEM_NUM), 0, VEC_ELEM_NUM);
@@ -721,14 +663,10 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
         1.0f, VEC_ELEM_NUM);
 
     fixed_vfloat32m4_t poly = __riscv_vfmv_v_f_f32m4(a5, VEC_ELEM_NUM);
-    poly = __riscv_vfadd_vf_f32m4(__riscv_vfmul_vv_f32m4(poly, t, VEC_ELEM_NUM),
-                                  a4, VEC_ELEM_NUM);
-    poly = __riscv_vfadd_vf_f32m4(__riscv_vfmul_vv_f32m4(poly, t, VEC_ELEM_NUM),
-                                  a3, VEC_ELEM_NUM);
-    poly = __riscv_vfadd_vf_f32m4(__riscv_vfmul_vv_f32m4(poly, t, VEC_ELEM_NUM),
-                                  a2, VEC_ELEM_NUM);
-    poly = __riscv_vfadd_vf_f32m4(__riscv_vfmul_vv_f32m4(poly, t, VEC_ELEM_NUM),
-                                  a1, VEC_ELEM_NUM);
+    poly = __riscv_vfmadd_vv_f32m4(poly, t, __riscv_vfmv_v_f_f32m4(a4, VEC_ELEM_NUM), VEC_ELEM_NUM);
+    poly = __riscv_vfmadd_vv_f32m4(poly, t, __riscv_vfmv_v_f_f32m4(a3, VEC_ELEM_NUM), VEC_ELEM_NUM);
+    poly = __riscv_vfmadd_vv_f32m4(poly, t, __riscv_vfmv_v_f_f32m4(a2, VEC_ELEM_NUM), VEC_ELEM_NUM);
+    poly = __riscv_vfmadd_vv_f32m4(poly, t, __riscv_vfmv_v_f_f32m4(a1, VEC_ELEM_NUM), VEC_ELEM_NUM);
     poly = __riscv_vfmul_vv_f32m4(poly, t, VEC_ELEM_NUM);
 
     fixed_vfloat32m4_t exp_val =
