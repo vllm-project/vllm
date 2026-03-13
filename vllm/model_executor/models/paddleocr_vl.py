@@ -250,12 +250,12 @@ class PaddleOCRVLMultiModalProcessor(
         tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         if mm_data:
-            mm_kwargs = mm_kwargs or {}
-            mm_kwargs["images_kwargs"] = mm_kwargs.get("images_kwargs", {})
+            final_mm_kwargs = dict(mm_kwargs or {})
+            final_mm_kwargs.setdefault("images_kwargs", {})
             # vLLM use PIL.Image, always set channel_last
-            mm_kwargs["input_data_format"] = ChannelDimension.LAST
+            final_mm_kwargs["input_data_format"] = ChannelDimension.LAST
             processed_outputs = self.info.ctx.call_hf_processor(
-                self.info.get_hf_processor(**mm_kwargs),
+                self.info.get_hf_processor(**final_mm_kwargs),
                 dict(text=prompt, **mm_data),
                 dict(**mm_kwargs, **tok_kwargs),
             )
