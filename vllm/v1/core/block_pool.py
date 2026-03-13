@@ -484,6 +484,41 @@ class BlockPool:
         """
         return self.free_block_queue.num_free_blocks
 
+    def get_num_cached_blocks(self) -> int:
+        """Get the number of blocks currently in the prefix cache.
+
+        This counts actual blocks, not unique hashes. When multiple blocks
+        share the same hash, each block is counted separately.
+
+        Returns:
+            The number of prefix cached blocks.
+        """
+        return sum(self.get_num_cached_blocks_per_group().values())
+
+    def get_num_cached_blocks_per_group(self) -> dict[int, int]:
+        """Get the number of blocks currently in the prefix cache per group.
+
+        This counts actual blocks, not unique hashes. When multiple blocks
+        share the same hash, each block is counted separately.
+
+        Returns:
+            A dictionary mapping group ID to the number of prefix cached
+            blocks.
+        """
+        from collections import defaultdict
+
+        from vllm.v1.core.kv_cache_utils import get_group_id
+
+        counts: dict[int, int] = defaultdict(int)
+        for key, blocks in self.cached_block_hash_to_block._cache.items():
+            group_id = get_group_id(key)
+            if isinstance(blocks, KVCacheBlock):
+                counts[group_id] += 1
+            else:
+                # It's a dict of block_id -> KVCacheBlock
+                counts[group_id] += len(blocks)
+        return counts
+
     def get_usage(self) -> float:
         """Get the KV cache usage.
 
