@@ -54,6 +54,10 @@ class SimpleCPUOffloadWorker:
         # Ordered (event_idx, event) — stream ordering lets us break early
         self._load_events: list[tuple[int, torch.cuda.Event]] = []
         self._store_events: list[tuple[int, torch.cuda.Event]] = []
+        # High-water marks: highest event_idx completed per stream.
+        # When the event list is empty, the hwm covers all prior events.
+        self._load_hwm: int = -1
+        self._store_hwm: int = -1
 
         # Metadata for the current step
         self._connector_metadata: SimpleCPUOffloadMetadata | None = None
@@ -163,35 +167,69 @@ class SimpleCPUOffloadWorker:
         self._connector_metadata = None
 
     def start_load_kv(self) -> None:
-        # NOTE: we defer launching the load kernel to `wait_for_save()` after the
-        # main model computation kernels/CUDA graphs have been launched to hide
-        # the CPU-side KV block copy kernel launching overhead.
+        # NOTE: we defer launching both load and store kernels to
+        # get_finished(), which runs after model execution in both the
+        # normal forward path and the no_forward path. This hides the
+        # CPU-side Triton kernel launch overhead behind GPU compute.
         pass
 
     def wait_for_save(self) -> None:
-        """Submit async load (CPU->GPU) and store (GPU->CPU) transfers.
+        # Transfers are submitted in get_finished() instead, so that
+        # they work correctly in both the forward and no_forward paths.
+        pass
 
-        Both are deferred here (after forward-pass kernels are enqueued) to
-        hide the CPU-side Triton kernel launch overhead behind GPU compute.
+    def get_finished(
+        self,
+        finished_req_ids: set[str],
+    ) -> tuple[set[str] | None, set[str] | None]:
+        """Updates from worker to scheduler on completed transfer events.
+
+        Additionally, it will submit deferred load and store transfers, after
+        model execution, to hide CPU-side Triton launch overhead behind
+        GPU compute.
+
+        Returns:
+            tuple of (finished_sending, finished_recving).
+            - finish_sending is only used by connector scheduler, and we use it to
+            store the finished store event ids rather than req_ids.
+            - finished_recving still tracks the req_ids that have finished loading.
         """
-        if not self._is_initialized or self._connector_metadata is None:
-            return
+        # (1) Optionally submit deferred transfers
+        if self._is_initialized and self._connector_metadata is not None:
+            metadata = self._connector_metadata
+            self._launch_copy_kernel(  # Launch the load kernel
+                src_blocks=metadata.load_cpu_blocks,
+                dst_blocks=metadata.load_gpu_blocks,
+                event_idx=metadata.load_event,
+                is_store=False,
+            )
+            self._launch_copy_kernel(  # Launch the store kernel
+                src_blocks=metadata.store_gpu_blocks,
+                dst_blocks=metadata.store_cpu_blocks,
+                event_idx=metadata.store_event,
+                is_store=True,
+            )
 
-        metadata = self._connector_metadata
-        self._submit_copy(  # submit the load kernel
-            src_blocks=metadata.load_cpu_blocks,
-            dst_blocks=metadata.load_gpu_blocks,
-            event_idx=metadata.load_event,
-            is_store=False,
-        )
-        self._submit_copy(  # submit the store kernel
-            src_blocks=metadata.store_gpu_blocks,
-            dst_blocks=metadata.store_cpu_blocks,
-            event_idx=metadata.store_event,
-            is_store=True,
-        )
+        # (2) Track completed transfer events
+        finished_recving: set[str] = set()
+        finished_sending: set[str] = set()
 
-    def _submit_copy(
+        load_wm = self._drain_stream_events(is_store=False)
+        meta = self._connector_metadata
+        for j in [j for j in self._pending_load_event_indices if j <= load_wm]:
+            req_ids = meta.load_event_to_reqs.get(j) if meta is not None else None
+            if req_ids:
+                finished_recving.update(req_ids)
+                self._pending_load_event_indices.discard(j)
+
+        store_wm = self._drain_stream_events(is_store=True)
+        for j in [j for j in self._pending_store_event_indices if j <= store_wm]:
+            self._pending_store_event_indices.discard(j)
+            finished_sending.add(f"__store_done_{j}")
+
+        return finished_sending or None, finished_recving or None
+
+    def _launch_copy_kernel(
         self,
         src_blocks: list[int],
         dst_blocks: list[int],
@@ -246,48 +284,27 @@ class SimpleCPUOffloadWorker:
             event_idx,
         )
 
-    def get_finished(
-        self,
-        finished_req_ids: set[str],
-    ) -> tuple[set[str] | None, set[str] | None]:
-        """Updates from worker to scheduler on completed transfer events.
+    def _drain_stream_events(self, is_store: bool) -> int:
+        """Drain completed events and return the high-water mark.
 
-        Returns:
-            tuple of (finished_sending, finished_recving).
-            - finish_sending is only used by connector scheduler, and we use it to
-            store the finished store event ids rather than req_ids.
-            - finished_recving still tracks the req_ids that have finished loading.
+        Returns the highest event_idx known to have completed. The hwm
+        is persisted so that when the event list is empty, all prior
+        events are still recognized as finished.
         """
-        finished_recving: set[str] = set()
-        finished_sending: set[str] = set()
-
-        load_wm = self._drain_stream_events(self._load_events)
-        meta = self._connector_metadata
-        for j in [j for j in self._pending_load_event_indices if j <= load_wm]:
-            req_ids = meta.load_event_to_reqs.get(j) if meta is not None else None
-            if req_ids:
-                finished_recving.update(req_ids)
-                self._pending_load_event_indices.discard(j)
-
-        store_wm = self._drain_stream_events(self._store_events)
-
-        for j in [j for j in self._pending_store_event_indices if j <= store_wm]:
-            self._pending_store_event_indices.discard(j)
-            finished_sending.add(f"__store_done_{j}")
-
-        return finished_sending or None, finished_recving or None
-
-    @staticmethod
-    def _drain_stream_events(events: list[tuple[int, torch.cuda.Event]]) -> int:
-        watermark = -1
+        events = self._store_events if is_store else self._load_events
+        hwm = self._store_hwm if is_store else self._load_hwm
         while events:
             event_idx, event = events[0]
             if event.query():
-                watermark = event_idx
+                hwm = event_idx
                 events.pop(0)
             else:
                 break  # Stream ordering: nothing after this can have fired.
-        return watermark
+        if is_store:
+            self._store_hwm = hwm
+        else:
+            self._load_hwm = hwm
+        return hwm
 
     @staticmethod
     def _validate_block_ids(block_ids: list[int], num_blocks: int, label: str) -> None:
@@ -297,13 +314,3 @@ class SimpleCPUOffloadWorker:
         if lo < 0 or hi >= num_blocks:
             bad = lo if lo < 0 else hi
             raise ValueError(f"{label} block ID {bad} out of bounds [0, {num_blocks})")
-
-    def handle_preemptions(self) -> None:
-        """Sync all in-flight transfers before preempted blocks are reused."""
-        for _, event in self._load_events:
-            event.synchronize()
-        self._load_events.clear()
-
-        for _, event in self._store_events:
-            event.synchronize()
-        self._store_events.clear()
