@@ -10,6 +10,11 @@ import numpy as np
 import torch
 from typing_extensions import deprecated
 
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kFp8StaticTensorSym,
+    kNvfp4Dynamic,
+)
+
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.config.cache import CacheDType
@@ -852,11 +857,6 @@ class MLAAttentionImpl(AttentionImplBase[T], Generic[T]):
         Since MLA quantization is done manually in forward_impl (common code),
         all MLA backends support it by default.
         """
-        from vllm.model_executor.layers.quantization.utils.quant_utils import (
-            kFp8StaticTensorSym,
-            kNvfp4Dynamic,
-        )
-
         return quant_key in (kFp8StaticTensorSym, kNvfp4Dynamic)
 
     def do_kv_cache_update(
@@ -895,11 +895,6 @@ class SparseMLAAttentionImpl(AttentionImplBase[T], Generic[T]):
         Since MLA quantization is done manually in forward_impl (common code),
         all MLA backends support it by default.
         """
-        from vllm.model_executor.layers.quantization.utils.quant_utils import (
-            kFp8StaticTensorSym,
-            kNvfp4Dynamic,
-        )
-
         return quant_key in (kFp8StaticTensorSym, kNvfp4Dynamic)
 
     @abstractmethod
