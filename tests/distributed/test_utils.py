@@ -66,7 +66,7 @@ def cpu_worker(rank, WORLD_SIZE, port1, port2):
 
 
 def gpu_worker(rank, WORLD_SIZE, port1, port2):
-    torch.cuda.set_device(rank)
+    torch.accelerator.set_device_index(rank)
     pg1 = StatelessProcessGroup.create(
         host="127.0.0.1", port=port1, rank=rank, world_size=WORLD_SIZE
     )

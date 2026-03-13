@@ -169,7 +169,7 @@ class IPCWeightTransferEngine(
             update_info.shapes,
             update_info.ipc_handles,
         ):
-            device_index = torch.cuda.current_device()
+            device_index = torch.accelerator.current_device_index()
             props = torch.cuda.get_device_properties(device_index)
             physical_gpu_id = str(props.uuid)
 
@@ -242,7 +242,7 @@ class IPCWeightTransferEngine(
             args = trainer_args
 
         # Get physical GPU UUID
-        device_index = torch.cuda.current_device()
+        device_index = torch.accelerator.current_device_index()
         props = torch.cuda.get_device_properties(device_index)
         gpu_uuid = str(props.uuid)
 
