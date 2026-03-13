@@ -97,6 +97,13 @@ class TokenizerLike(Protocol):
     ) -> list[int]:
         raise NotImplementedError
 
+    def get_chat_template(
+        self,
+        chat_template: str | None,
+        tools: list[dict[str, Any]] | None = None,
+    ) -> str | None:
+        raise NotImplementedError
+
     def apply_chat_template(
         self,
         messages: list["ChatCompletionMessageParam"],
