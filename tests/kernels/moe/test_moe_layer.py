@@ -1868,6 +1868,9 @@ def _test_loop_config(
 ) -> None:
     set_random_seed(7)
 
+    passed = 0
+    failed = 0
+
     for test_config in test_configs:
         valid, reason = is_valid_parallel_config(
             test_config, ep_size > 1, dp_size, tp_size
@@ -1905,8 +1908,13 @@ def _test_loop_config(
                 use_routed_input_transform=test_config.use_routed_input_transform,
             )
             print("PASSED")
+            passed = passed + 1
         except Exception as ex:
             print(f"FAILED {ex}")
+            failed = failed + 1
+
+    if failed > 0:
+        raise RuntimeError(f"{failed} of {failed + passed} tests failed.")
 
 
 # TODO: add cudagraphs/torch.compile tests
