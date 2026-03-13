@@ -267,7 +267,7 @@ class Base(
         if bmp and bmp != "model":
             different_bmp_pattern = re.compile(rf"^{bmp}\.(.+)")
             orig_to_new_regex[different_bmp_pattern] = expected_bmp
-        # Handle children of self.model which were saved without the model prefix
+        # Handle direct children of self.model which were saved without the model prefix
         direct_children = chain(
             self.model.named_children(),
             self.model.named_parameters(recurse=False),
@@ -276,6 +276,12 @@ class Base(
         model_children = "|".join(name for name, _ in direct_children)
         missing_bmp_pattern = re.compile(rf"^(?!model\.)(({model_children}).*)")
         orig_to_new_regex[missing_bmp_pattern] = expected_bmp
+        # Handle weights saved as direct children of self.model which no longer are
+        unexpected_bmp_pattern = re.compile(rf"^(model\.)((?!{model_children}).+)")
+        orig_to_new_regex[unexpected_bmp_pattern] = r"\2"
+        # Handle lm_head which was saved inside the base model
+        nested_lm_head_pattern = re.compile(r"^model\.(.+\.)*(lm_head.+)")
+        orig_to_new_regex[nested_lm_head_pattern] = r"\2"
 
         # Apply mapping to quantization config if needed
         self._maybe_apply_model_mapping()
