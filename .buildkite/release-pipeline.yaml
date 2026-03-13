@@ -700,6 +700,7 @@ steps:
           --build-arg SCCACHE_BUCKET_NAME=vllm-build-sccache \
           --build-arg SCCACHE_REGION_NAME=us-west-2 \
           --build-arg SCCACHE_S3_NO_CREDENTIALS=0 \
+          --build-arg GIT_REPO_CHECK=1 \
           --tag public.ecr.aws/q9t5s3a7/vllm-release-repo:$${BUILDKITE_COMMIT}-rocm \
           --target vllm-openai \
           --progress plain \
@@ -713,6 +714,7 @@ steps:
       S3_BUCKET: "vllm-wheels"
 
   - label: "Publish nightly ROCm image to DockerHub"
+    id: publish-nightly-rocm-image
     depends_on:
       - build-rocm-release-image
     if: build.env("NIGHTLY") == "1"
