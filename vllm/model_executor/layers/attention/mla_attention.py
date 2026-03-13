@@ -323,11 +323,9 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
         if cache_config is not None:
             kv_cache_dtype = cache_config.cache_dtype
-            block_size = cache_config.block_size
             calculate_kv_scales = cache_config.calculate_kv_scales
         else:
             kv_cache_dtype = "auto"
-            block_size = 16
             calculate_kv_scales = False
         self.quant_config = quant_config
 
@@ -336,7 +334,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             self.head_size,
             dtype,
             kv_cache_dtype,
-            block_size,
             use_mla=True,
             use_sparse=use_sparse,
             num_heads=self.num_heads,
@@ -449,16 +446,23 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         )
 
         # Attributes for forward_impl method
-        self.chunked_prefill_workspace_size = (
-            MLACommonMetadataBuilder.determine_chunked_prefill_workspace_size(
-                get_current_vllm_config()
-            )
-        )
+        self._vllm_config = get_current_vllm_config()
+        self._chunked_prefill_workspace_size: int | None = None
         self._decode_concat_quant_fp8_op = _DecodeConcatQuantFP8(
             static=True,
             group_shape=GroupShape.PER_TENSOR,
             compile_native=True,
         )
+
+    @property
+    def chunked_prefill_workspace_size(self) -> int:
+        if self._chunked_prefill_workspace_size is None:
+            self._chunked_prefill_workspace_size = (
+                MLACommonMetadataBuilder.determine_chunked_prefill_workspace_size(
+                    self._vllm_config
+                )
+            )
+        return self._chunked_prefill_workspace_size
 
     def forward(
         self,
@@ -1144,7 +1148,7 @@ class MLACommonBackend(AttentionBackend):
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
-        return [576]
+        return [320, 576]
 
     @classmethod
     def is_mla(cls) -> bool:
@@ -1278,8 +1282,6 @@ def is_deepseek_r1_mla_compatible(vllm_config: VllmConfig) -> bool:
 
 @functools.cache
 def use_flashinfer_prefill() -> bool:
-    # For blackwell default to flashinfer prefill if it's available since
-    # it is faster than FA2.
     from vllm.config import get_current_vllm_config
 
     vllm_config = get_current_vllm_config()
@@ -2150,13 +2152,16 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
 
             # For MLA the v head dim is smaller than qk head dim so we pad out
             # v with 0s to match the qk head dim for attention backends that do
-            # not support different headdims
-            # We don't need to pad V if we are on a hopper system with FA3
+            # not support different headdims.
+            # FA3 on Hopper (SM90) and FA4 natively handle diff headdims.
             device_capability = current_platform.get_device_capability()
             self._pad_v = self.vllm_flash_attn_version is None or not (
-                self.vllm_flash_attn_version == 3
-                and device_capability is not None
-                and device_capability[0] == 9
+                (
+                    self.vllm_flash_attn_version == 3
+                    and device_capability is not None
+                    and device_capability[0] == 9
+                )
+                or self.vllm_flash_attn_version == 4
             )
 
         self.dcp_world_size: int = -1
