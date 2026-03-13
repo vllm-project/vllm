@@ -503,6 +503,7 @@ class FlashInferMetadata:
     paged_kv_indptr: torch.Tensor | None = None
     paged_kv_indices: torch.Tensor | None = None
     paged_kv_last_page_len: torch.Tensor | None = None
+    batch_indices: torch.Tensor | None = None
 
 
 class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
@@ -642,6 +643,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         )  # Extra buffer for mutable paged_kv_indptr.cpu in cuda graph mode
         self.paged_kv_indices = self._make_buffer(max_num_pages)
         self.paged_kv_last_page_len = self._make_buffer(max_num_reqs)
+        self.batch_indices = self._make_buffer(
+            vllm_config.scheduler_config.max_num_batched_tokens
+        )
 
         if self.head_dim == 256 and current_platform.is_device_capability_family(100):
             # https://github.com/flashinfer-ai/flashinfer/issues/1993 reports that
@@ -662,6 +666,20 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             pin_memory=self.pin_memory,
             with_numpy=True,
         )
+
+    def _update_batch_indices_buffer(
+        self,
+        query_start_loc_cpu: torch.Tensor,
+        num_actual_tokens: int,
+    ) -> torch.Tensor:
+        query_start_loc_np = query_start_loc_cpu.numpy()
+        query_lens_np = query_start_loc_np[1:] - query_start_loc_np[:-1]
+        self.batch_indices.np[:num_actual_tokens] = np.repeat(
+            np.arange(query_lens_np.shape[0], dtype=np.int32),
+            query_lens_np,
+        )
+        self.batch_indices.copy_to_gpu(num_actual_tokens)
+        return self.batch_indices.gpu[:num_actual_tokens]
 
     @override  # type: ignore[misc]
     @classmethod
@@ -934,6 +952,11 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             self.compilation_config.pass_config.fuse_rope_kvcache
             and flashinfer_rope_append_paged_kv_cache is not None
         )
+        if needs_rope_kvcache_indices:
+            attn_metadata.batch_indices = self._update_batch_indices_buffer(
+                qo_indptr_cpu,
+                num_actual_tokens,
+            )
 
         # Guard access to seq_lens_cpu, which may not always be needed
         # and can be expensive to retrieve in async mode. The stage1
@@ -1327,18 +1350,6 @@ class FlashInferImpl(AttentionImpl):
             layer_slot_mapping[:num_actual_tokens],
         )
 
-    @staticmethod
-    def _get_batch_indices(query_start_loc: torch.Tensor) -> torch.Tensor:
-        query_lens = query_start_loc[1:] - query_start_loc[:-1]
-        return torch.repeat_interleave(
-            torch.arange(
-                query_lens.shape[0],
-                device=query_start_loc.device,
-                dtype=torch.int32,
-            ),
-            query_lens.to(torch.int64),
-        )
-
     def do_rope_and_kv_cache_update(
         self,
         layer: AttentionLayer,
@@ -1424,9 +1435,8 @@ class FlashInferImpl(AttentionImpl):
         kv_scale = (
             layer._k_scale_float if self.kv_cache_dtype.startswith("fp8") else 1.0
         )
-        batch_indices = self._get_batch_indices(attn_metadata.query_start_loc).to(
-            positions.device
-        )
+        assert attn_metadata.batch_indices is not None
+        batch_indices = attn_metadata.batch_indices
 
         # Pure decode only: downstream attention reads K/V from cache, so we
         # only need the roped query written back in-place here.
