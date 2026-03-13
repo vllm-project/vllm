@@ -5,8 +5,8 @@ use tokio::sync::mpsc;
 use crate::error::{Error, Result};
 use crate::protocol::EngineCoreOutput;
 
-pub type RequestStreamSender = mpsc::UnboundedSender<Result<EngineCoreOutput>>;
-pub type RequestStreamReceiver = mpsc::UnboundedReceiver<Result<EngineCoreOutput>>;
+pub type OutputSender = mpsc::UnboundedSender<Result<EngineCoreOutput>>;
+pub type OutputReceiver = mpsc::UnboundedReceiver<Result<EngineCoreOutput>>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClientClosedState {
@@ -42,13 +42,13 @@ enum ClientState {
 #[derive(Debug, Default)]
 pub struct RequestRegistry {
     state: ClientState,
-    requests: BTreeMap<String, RequestStreamSender>,
+    requests: BTreeMap<String, OutputSender>,
 }
 
 impl RequestRegistry {
     /// Register a newly added request. Create the per-request output channel bound to its
     /// `request_id`.
-    pub fn register(&mut self, request_id: String) -> Result<RequestStreamReceiver> {
+    pub fn register(&mut self, request_id: String) -> Result<OutputReceiver> {
         self.ensure_running()?;
         if self.requests.contains_key(&request_id) {
             return Err(Error::DuplicateRequestId { request_id });
@@ -72,7 +72,7 @@ impl RequestRegistry {
 
     /// Obtain the stream sender for one output. If it indicates the request is finished, it will be
     /// removed from the registry.
-    pub fn sender_for_output(&mut self, output: &EngineCoreOutput) -> Option<RequestStreamSender> {
+    pub fn sender_for_output(&mut self, output: &EngineCoreOutput) -> Option<OutputSender> {
         if output.finished() {
             self.requests.remove(output.request_id.as_str())
         } else {
@@ -84,7 +84,7 @@ impl RequestRegistry {
     pub fn finish_many<'a>(
         &mut self,
         request_ids: impl IntoIterator<Item = &'a String>,
-    ) -> Vec<RequestStreamSender> {
+    ) -> Vec<OutputSender> {
         request_ids
             .into_iter()
             .filter_map(|request_id| self.requests.remove(request_id.as_str()))
@@ -93,7 +93,7 @@ impl RequestRegistry {
 
     /// Mark the registry as closed with the given state, detach and return all tracked senders.
     /// This will reject any future operations on the registry.
-    pub fn close(&mut self, closed_state: ClientClosedState) -> Vec<RequestStreamSender> {
+    pub fn close(&mut self, closed_state: ClientClosedState) -> Vec<OutputSender> {
         if matches!(self.state, ClientState::Closed(_)) {
             // Already closed, no-op.
             return Vec::new();
@@ -105,7 +105,7 @@ impl RequestRegistry {
 
     /// Remove one request from the local registry. Returns the corresponding sender if exists.
     #[must_use]
-    pub fn remove(&mut self, request_id: &str) -> Option<RequestStreamSender> {
+    pub fn remove(&mut self, request_id: &str) -> Option<OutputSender> {
         self.requests.remove(request_id)
     }
 

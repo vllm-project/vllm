@@ -8,7 +8,7 @@ use tracing_subscriber::EnvFilter;
 use vllm_engine_core_client::protocol::{
     EngineCoreRequest, FinishReason, RequestOutputKind, SamplingParams, StopReason,
 };
-use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig, RequestOutputStream};
+use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig, EngineCoreOutputStream};
 
 const PROMPT_TOKEN_IDS: &[u32] = &[20841, 448, 6896, 25, 23811];
 
@@ -72,7 +72,7 @@ struct CompletedRequest {
     stop_reason: Option<StopReason>,
 }
 
-async fn wait_for_request_completion(mut stream: RequestOutputStream) -> Result<CompletedRequest> {
+async fn wait_for_request_completion(mut stream: EngineCoreOutputStream) -> Result<CompletedRequest> {
     let mut completed = CompletedRequest::default();
 
     while let Some(output) = stream.next().await {
@@ -97,7 +97,7 @@ async fn wait_for_request_completion(mut stream: RequestOutputStream) -> Result<
 }
 
 async fn wait_for_timeout(
-    stream: RequestOutputStream,
+    stream: EngineCoreOutputStream,
     output_timeout: Duration,
 ) -> Result<CompletedRequest> {
     timeout(output_timeout, wait_for_request_completion(stream))

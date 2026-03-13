@@ -1,24 +1,19 @@
-use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context, Poll};
 
-use futures::Stream;
-use futures::stream::FusedStream;
 use parking_lot::Mutex;
 use thiserror_ext::AsReport as _;
 use tokio::sync::{Mutex as AsyncMutex, mpsc};
 use tracing::{debug, warn};
 use zeromq::RouterSendHalf;
 
-use crate::client::CLIENT_SHUTDOWN_REASON;
-use crate::client::state::{ClientClosedState, RequestRegistry, RequestStreamReceiver};
+use crate::client::state::{ClientClosedState, OutputReceiver, RequestRegistry};
 use crate::protocol::{
     ClassifiedEngineCoreOutputs, EngineCoreOutput, EngineCoreOutputs, EngineCoreRequestType,
     encode_msgpack,
 };
 use crate::{Error, Result, transport};
 
-pub(super) struct ClientInner {
+pub(crate) struct ClientInner {
     input_send: AsyncMutex<Option<RouterSendHalf>>,
     request_reg: Mutex<RequestRegistry>,
 }
@@ -34,7 +29,7 @@ impl ClientInner {
 
     /// Register a newly added request. Return the per-request output channel bound to its
     /// `request_id`.
-    pub fn register_request(&self, request_id: String) -> Result<RequestStreamReceiver> {
+    pub fn register_request(&self, request_id: String) -> Result<OutputReceiver> {
         self.request_reg.lock().register(request_id)
     }
 
@@ -107,113 +102,16 @@ impl ClientInner {
     /// the engine that no more messages will be sent.
     pub async fn shutdown(&self) {
         self.close_requests(ClientClosedState::ClientShutdown {
-            reason: CLIENT_SHUTDOWN_REASON.to_string(),
+            reason: "engine-core client shut down".to_string(),
         });
         self.input_send.lock().await.take();
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum RequestStreamState {
-    Running,
-    Finished,
-    ClosedWithError,
-    UnexpectedClose,
-}
-
-/// Stream of raw engine-core outputs for one request.
-///
-/// The stream yields only [`EngineCoreOutput`] values whose `request_id` matches the originating
-/// `add_request()` call. Normal request completion is expected to include a final output object
-/// whose `finish_reason` is non-`None`.
-pub struct RequestOutputStream {
-    pub(super) request_id: String,
-    pub(super) abort_tx: mpsc::UnboundedSender<String>,
-    pub(super) state: RequestStreamState,
-    pub(super) rx: RequestStreamReceiver,
-}
-
-impl RequestOutputStream {
-    /// Return the engine-core `request_id` bound to this stream.
-    pub fn request_id(&self) -> &str {
-        &self.request_id
-    }
-}
-
-impl Stream for RequestOutputStream {
-    type Item = Result<EngineCoreOutput>;
-
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        if self.is_terminated() {
-            return Poll::Ready(None);
-        }
-
-        match Pin::new(&mut self.rx).poll_recv(cx) {
-            Poll::Pending => Poll::Pending,
-            Poll::Ready(Some(item)) => {
-                match &item {
-                    Ok(output) => {
-                        // If the output indicates the request is finished, mark the stream as
-                        // terminated with cleanly-finished state and expect no more outputs to
-                        // come.
-                        if output.finished() {
-                            debug!(self.request_id, "request completed via final output");
-                            self.state = RequestStreamState::Finished;
-                        }
-                    }
-                    Err(error) => {
-                        // If we get an error from the output stream, mark the stream as terminated
-                        // with an error.
-                        debug!(self.request_id, error = %error.as_report(), "request encountered an error");
-                        self.state = RequestStreamState::ClosedWithError;
-                    }
-                }
-                Poll::Ready(Some(item))
-            }
-            Poll::Ready(None) => {
-                // If we get a `None` without seeing a finished output, this is an unexpected close
-                // from the engine side. Mark the stream as terminated with an unexpected close
-                // state and send an error down the stream to notify the caller.
-                debug!(self.request_id, "request stream closed unexpectedly");
-                self.state = RequestStreamState::UnexpectedClose;
-
-                Poll::Ready(Some(Err(Error::RequestStreamClosed {
-                    request_id: self.request_id.clone(),
-                })))
-            }
-        }
-    }
-}
-
-impl FusedStream for RequestOutputStream {
-    fn is_terminated(&self) -> bool {
-        !matches!(self.state, RequestStreamState::Running)
-    }
-}
-
-impl Drop for RequestOutputStream {
-    fn drop(&mut self) {
-        if self.is_terminated() {
-            // If it's terminated, it means that the request either finished cleanly, or encountered
-            // an error or unexpected close from the engine. In any case, the request stream is
-            // already considered inactive and there's no need to abort it on the engine side.
-            return;
-        }
-
-        let request_id = self.request_id.clone();
-        if self.abort_tx.send(request_id.clone()).is_err() {
-            warn!(
-                request_id,
-                "auto-abort worker already shut down; skip auto-abort"
-            );
-        }
     }
 }
 
 /// Background loop that listens for request IDs to abort and sends abort messages to the engine.
 /// This is used to implement the auto-abort behavior when a request stream is dropped without being
 /// properly terminated.
-pub(super) async fn run_abort_loop(
+pub(crate) async fn run_abort_loop(
     inner: Arc<ClientInner>,
     engine_identity: Vec<u8>,
     mut abort_rx: mpsc::UnboundedReceiver<String>,
@@ -249,7 +147,7 @@ pub(super) async fn run_abort_loop(
 
 /// Background loop that listens for engine-core outputs and dispatches them to the corresponding
 /// request streams based on their `request_id`.
-pub(super) async fn run_output_dispatcher_loop(
+pub(crate) async fn run_output_dispatcher_loop(
     inner: Arc<ClientInner>,
     mut output_rx: mpsc::Receiver<Result<EngineCoreOutputs>>,
 ) {

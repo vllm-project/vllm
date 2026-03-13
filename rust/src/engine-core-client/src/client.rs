@@ -5,9 +5,7 @@ use tokio::sync::mpsc;
 use tokio_util::task::AbortOnDropHandle;
 use tracing::debug;
 
-use crate::client::imp::{
-    ClientInner, RequestStreamState, run_abort_loop, run_output_dispatcher_loop,
-};
+use crate::client::imp::{ClientInner, run_abort_loop, run_output_dispatcher_loop};
 use crate::error::Result;
 use crate::protocol::handshake::ReadyMessage;
 use crate::protocol::{EngineCoreRequest, EngineCoreRequestType};
@@ -15,10 +13,9 @@ use crate::transport;
 
 mod imp;
 mod state;
+mod stream;
 
-pub use imp::RequestOutputStream;
-
-const CLIENT_SHUTDOWN_REASON: &str = "engine-core client shut down";
+pub use stream::EngineCoreOutputStream;
 
 /// Configuration for connecting a Rust frontend client to an already running Python
 /// `EngineCoreProc`.
@@ -125,7 +122,7 @@ impl EngineCoreClient {
 // Client API implementation.
 impl EngineCoreClient {
     /// Add a new request to the engine and return a per-request raw output stream.
-    pub async fn call(&self, mut req: EngineCoreRequest) -> Result<RequestOutputStream> {
+    pub async fn call(&self, mut req: EngineCoreRequest) -> Result<EngineCoreOutputStream> {
         req.client_index = self.config.client_index;
         req.validate()?;
         debug!(
@@ -146,12 +143,11 @@ impl EngineCoreClient {
             return Err(error);
         }
 
-        Ok(RequestOutputStream {
+        Ok(EngineCoreOutputStream::new(
             request_id,
-            abort_tx: self.abort_tx.clone(),
-            state: RequestStreamState::Running,
+            self.abort_tx.clone(),
             rx,
-        })
+        ))
     }
 
     /// Abort currently in-flight requests by request ID.
