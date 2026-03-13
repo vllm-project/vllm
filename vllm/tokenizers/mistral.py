@@ -195,9 +195,8 @@ def validate_request_params(request: "ChatCompletionRequest"):
     if request.chat_template is not None or request.chat_template_kwargs is not None:
         raise ValueError("chat_template is not supported for Mistral tokenizers.")
 
-    if (
-        request.reasoning_effort
-        and request.reasoning_effort not in ReasoningEffort.__members__.values()
+    if request.reasoning_effort and request.reasoning_effort not in list(
+        ReasoningEffort
     ):
         raise ValueError(
             f"reasoning_effort={request.reasoning_effort} is not supported by "
