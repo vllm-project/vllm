@@ -207,8 +207,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # CUDA graphs.
         self.decode_query_len = self.num_speculative_steps + 1
         self.lora_capture_cases = get_lora_capture_cases(
-            self.lora_config,
-            self.compilation_config,
+            self.lora_config, self.compilation_config
         )
         self.cudagraph_manager = ModelCudaGraphManager(
             self.vllm_config,
