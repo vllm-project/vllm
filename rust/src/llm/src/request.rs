@@ -7,11 +7,26 @@ use vllm_engine_core_client::protocol::{
 
 use crate::error::{Error, Result};
 
+/// Tokenized decoder-only generate request accepted by [`crate::Llm`].
+///
+/// This is the first-stage Rust subset of the inputs that eventually flow into Python
+/// `AsyncLLM.generate()`. The boundary is intentionally above [`EngineCoreRequest`], but below
+/// higher-level text and multimodal preprocessing.
+///
+/// Original Python API reference:
+/// <https://github.com/vllm-project/vllm/blob/bc2c0c86efb28e77677a3cfb8687e976914a313a/vllm/engine/protocol.py#L67-L84>
 #[derive(Debug, Clone, PartialEq)]
 pub struct GenerateRequest {
+    /// Unique ID of the request.
     pub request_id: String,
+    /// Token IDs of the prompt.
     pub prompt_token_ids: Vec<u32>,
+    /// Sampling parameters forwarded to engine-core.
+    ///
+    /// The `output_kind` field controls whether [`crate::GenerateOutput::token_ids`] is
+    /// delta-only, cumulative, or final-only.
     pub sampling_params: SamplingParams,
+
     pub arrival_time: Option<f64>,
     pub cache_salt: Option<String>,
     pub trace_headers: Option<BTreeMap<String, String>>,
@@ -27,6 +42,7 @@ pub(crate) struct PreparedGenerateRequest {
 }
 
 impl GenerateRequest {
+    /// Validate and lower this request into the raw engine-core request format.
     pub(crate) fn prepare(self) -> Result<PreparedGenerateRequest> {
         if self.prompt_token_ids.is_empty() {
             return Err(Error::EmptyPromptTokenIds {
@@ -78,6 +94,7 @@ impl GenerateRequest {
 }
 
 impl PreparedGenerateRequest {
+    /// Return the requested output aggregation mode.
     pub fn output_kind(&self) -> RequestOutputKind {
         self.engine_request
             .sampling_params
@@ -86,6 +103,7 @@ impl PreparedGenerateRequest {
             .output_kind
     }
 
+    /// Return the original prompt token IDs copied into the raw engine request.
     pub fn prompt_token_ids(&self) -> &[u32] {
         self.engine_request
             .prompt_token_ids
