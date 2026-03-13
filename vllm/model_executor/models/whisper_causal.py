@@ -150,8 +150,6 @@ def create_whisper_attention_backend_with_block_pooling(
             new_common_attn_metadata.query_start_loc *= block_pool_size
             new_common_attn_metadata.query_start_loc_cpu *= block_pool_size
             new_common_attn_metadata.seq_lens *= block_pool_size
-            new_common_attn_metadata._seq_lens_cpu *= block_pool_size
-            new_common_attn_metadata._num_computed_tokens_cpu *= block_pool_size
             new_common_attn_metadata.num_actual_tokens *= block_pool_size
             new_common_attn_metadata.max_query_len *= block_pool_size
             new_common_attn_metadata.max_seq_len *= block_pool_size
