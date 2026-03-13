@@ -6,9 +6,6 @@ from typing import Any
 
 import torch
 
-from vllm.forward_context import get_forward_context
-from vllm.utils.torch_utils import aux_stream, direct_register_custom_op
-
 
 def maybe_execute_in_parallel(
     fn0: Callable[[], Any],
