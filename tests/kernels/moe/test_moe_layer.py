@@ -5,8 +5,10 @@
 Run `pytest tests/kernels/test_moe_layer.py`.
 """
 
+import functools
 from collections.abc import Callable
 from dataclasses import dataclass
+from itertools import product
 
 import pytest
 import torch
@@ -183,6 +185,183 @@ def tp_chunk_gate_up(
         w.narrow(dim, half, half), tp_rank, tp_size, dim=dim, device=device
     )
     return torch.cat([gate, up], dim=dim)
+
+
+# TODO could add parallel info
+@dataclass
+class MoETestConfig:
+    m: int
+    n: int
+    k: int
+    num_experts: int
+    top_k: int
+    in_dtype: torch.dtype
+    quantization: str | None
+    use_shared_experts: bool
+    use_gate: bool
+    use_routed_input_transform: bool
+    enable_eplb: bool
+    reduce_results: bool
+    backend: str | None
+
+
+def generate_valid_test_configs(backend: str) -> list[MoETestConfig]:
+    configs: list[MoETestConfig] = []
+    for (
+        shape,
+        num_experts,
+        top_k,
+        quantization,
+        use_shared_experts,
+        use_gate,
+        use_routed_input_transform,
+        enable_eplb,
+        reduce_results,
+    ) in product(
+        SHAPE_COMBOS,
+        NUM_EXPERTS,
+        TOP_KS,
+        QUANT_METHODS,
+        [False, True],  # shared
+        [False, True],  # gate
+        [False, True],  # routed input exform
+        [False],  # [False, True], # eplb
+        [False, True],  # reduce results
+    ):
+        config = MoETestConfig(
+            shape[0],  # m
+            shape[1],  # n
+            shape[2],  # k
+            num_experts,
+            top_k,
+            torch.bfloat16,
+            quantization,
+            use_shared_experts,
+            use_gate,
+            use_routed_input_transform,
+            enable_eplb,
+            reduce_results,
+            backend,
+        )
+
+        valid, reason = is_valid_config(config)
+        if valid:
+            configs.append(config)
+
+    return configs
+
+
+def is_valid_config(config: MoETestConfig) -> tuple[bool, str | None]:
+    # routed_input_transform only makes sense with shared_experts (latent MoE)
+    # TODO: not sure this is true
+    if config.use_routed_input_transform and not config.use_shared_experts:
+        return False, "routed_input_transform requires shared_experts"
+
+    # gate requires shared_experts (use_overlapped mode)
+    # TODO: also not sure this is true
+    if config.use_gate and not config.use_shared_experts:
+        return False, "gate requires shared_experts (use_overlapped mode)"
+
+    # TODO: disable for now
+    if config.use_routed_input_transform and config.enable_eplb:
+        return False, "routed_input_transform not supported with EPLB."
+
+    # TODO: disable for now
+    if config.use_routed_input_transform and config.use_gate:
+        return (
+            False,
+            "routed_input_transform not supported with gate because of "
+            "padding problems",
+        )
+
+    # TODO: disable for now
+    if config.use_routed_input_transform and config.backend in [
+        "deepep_low_latency",
+        "deepep_high_throughput",
+    ]:
+        return (
+            False,
+            "routed_input_transform not supported with DeepEP backends because "
+            "of padding problems",
+        )
+
+    # routed_input_transform + quantization + high hidden dimensions
+    if (
+        config.use_routed_input_transform
+        and config.quantization is not None
+        and config.k >= 2048
+    ):
+        return (
+            False,
+            "routed_input_transform + quantization + higher hidden dimensions "
+            "leads to large differences.",
+        )
+
+    # Skip modelopt_fp4 if not on B100+ (compute capability 10.0+)
+    if (
+        config.quantization == "modelopt_fp4"
+        and not current_platform.has_device_capability(100)
+    ):
+        return False, "modelopt_fp4 not supported on H100+ GPUs"
+
+    # Skip flashinfer_all2allv if not on B100+ (compute capability 10.0+)
+    if (
+        config.backend == "flashinfer_all2allv"
+        and not current_platform.has_device_capability(100)
+    ):
+        return False, "flashinfer_all2allv not supported on H100+ GPUs"
+
+    # reduce_results incompatibilities
+    if config.reduce_results and config.use_shared_experts:
+        return False, "reduce_results=True is not compatible with shared_experts=True"
+
+    if config.reduce_results and config.quantization is not None:
+        return (
+            False,
+            "reduce_results=True only tested with unquantized data types in "
+            "order to limit number of tests run",
+        )
+
+    # Backend-specific checks
+    if config.backend is not None:
+        supported_quants = BACKEND_SUPPORTED_QUANTS.get(config.backend)
+        if supported_quants is not None and config.quantization not in supported_quants:
+            return (
+                False,
+                f"{config.backend} does not support quantization={config.quantization}",
+            )
+
+        if config.backend == "deepep_low_latency":
+            from vllm.model_executor.layers.fused_moe.deepep_ll_prepare_finalize import (  # noqa: E501
+                DeepEPLLPrepareAndFinalize,
+            )
+
+            if config.k not in DeepEPLLPrepareAndFinalize.SUPPORTED_HIDDEN_SIZES:
+                return (
+                    False,
+                    f"Skipping unsupported K {config.k} in {config.backend} w/o EP.",
+                )
+
+    return True, None
+
+
+def is_valid_parallel_config(
+    config: MoETestConfig,
+    use_ep: bool,
+    dp_size: int,
+    tp_size: int,
+) -> tuple[bool, str | None]:
+    world_size = tp_size * dp_size
+    if config.reduce_results and world_size == 1:
+        return False, "reduce_results=True only makes sense for multi-GPU tests"
+
+    if config.backend == "flashinfer_all2allv" and use_ep:
+        return False, "flashinfer_all2allv EP not yet supported."
+
+    if config.enable_eplb and config.num_experts % dp_size != 0:
+        return False, "EPLB requires num_experts divisible by ep_size"
+
+    return True, None
 
 
 def apply_test_filter(
@@ -578,6 +757,7 @@ def create_shared_experts_from_config(
     ).to(device)
 
 
+# Make version that takes a MoETestConfig
 def setup_moe_test_data(
     m: int,
     k: int,
@@ -1106,7 +1286,7 @@ def _test_loop(
     top_k: int,
     quantization: str | None,
     reduce_results: bool,
-    backend: str,
+    backend: str | None,
     test_body_fn: Callable,
     use_shared_experts: bool,
     use_gate: bool,
@@ -1662,6 +1842,128 @@ def test_moe_layer_eplb(
             use_shared_experts,
             use_gate,
             use_routed_input_transform,
+        )
+    finally:
+        # Cleanup GPU memory after spawned processes complete
+        torch.cuda.synchronize()
+        torch.accelerator.empty_cache()
+
+
+def _test_body_config(test_config: MoETestConfig, **kwargs):
+    if not test_config.enable_eplb:
+        return _test_body_regular(**kwargs)
+    else:
+        return _test_body_eplb(**kwargs)
+
+
+def _test_loop_config(
+    pgi: ProcessGroupInfo,
+    vllm_config: VllmConfig,
+    cpu_group,
+    ep_size: int,
+    dp_size: int,
+    tp_size: int,
+    test_configs: list[MoETestConfig],
+    **kwargs,
+) -> None:
+    set_random_seed(7)
+
+    for test_config in test_configs:
+        valid, reason = is_valid_parallel_config(
+            test_config, ep_size > 1, dp_size, tp_size
+        )
+
+        if not valid:
+            print(reason)
+            continue
+
+        cc = vllm_config.compilation_config
+        if "from_forward_context" in cc.static_forward_context:
+            del cc.static_forward_context["from_forward_context"]
+            cc.static_all_moe_layers.remove("from_forward_context")
+
+        print(f"TESTING {test_config}")
+        try:
+            _test_loop(
+                pgi,
+                vllm_config,
+                cpu_group,
+                ep_size,
+                dp_size,
+                tp_size,
+                test_config.m,
+                test_config.n,
+                test_config.k,
+                test_config.num_experts,
+                test_config.top_k,
+                test_config.quantization,
+                test_config.reduce_results,
+                test_config.backend,
+                functools.partial(_test_body_config, test_config=test_config),
+                use_shared_experts=test_config.use_shared_experts,
+                use_gate=test_config.use_gate,
+                use_routed_input_transform=test_config.use_routed_input_transform,
+            )
+            print("PASSED")
+        except Exception as ex:
+            print(f"FAILED {ex}")
+
+
+# TODO: add cudagraphs/torch.compile tests
+@pytest.mark.parametrize("dp_size, tp_size, use_ep", PARALLEL_COMBOS)
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_moe_layer_configs(
+    dp_size: int,
+    tp_size: int,
+    use_ep: bool,
+    backend: str,
+    monkeypatch,
+):
+    """Test MoE layer with parallelism (multi-GPU or TP/EP enabled).
+
+    For non-parallel cases (world_size == 1), use test_moe_layer_no_parallel instead.
+    """
+    num_gpus = cuda_device_count_stateless()
+    world_size = tp_size * dp_size
+    ep_size = 1 if not use_ep else world_size  # or dp_size?
+    assert world_size > 1
+
+    # Check if enough GPUs available
+    if world_size is not None and num_gpus is not None and world_size > num_gpus:
+        pytest.skip(f"Not enough GPUs got {num_gpus}, expected {world_size}.")
+
+    test_env = dict()
+    test_env["VLLM_MOE_DP_CHUNK_SIZE"] = "128"
+    monkeypatch.setenv("VLLM_MOE_DP_CHUNK_SIZE", "128")
+
+    parallel_config = ParallelConfig(
+        pipeline_parallel_size=1,
+        data_parallel_size=dp_size,
+        tensor_parallel_size=tp_size,
+        enable_expert_parallel=use_ep,
+        all2all_backend=backend,
+    )
+
+    compilation_config = CompilationConfig()
+    # compilation_config.mode = CompilationMode.NONE  # for now
+    compilation_config.pass_config.fuse_allreduce_rms = False  # for now
+
+    vllm_config = VllmConfig(
+        parallel_config=parallel_config, compilation_config=compilation_config
+    )
+
+    test_configs = generate_valid_test_configs(backend)
+
+    try:
+        parallel_launch_with_config(
+            world_size,
+            _test_loop_config,
+            vllm_config,
+            test_env,
+            ep_size,
+            dp_size,
+            tp_size,
+            test_configs,
         )
     finally:
         # Cleanup GPU memory after spawned processes complete
