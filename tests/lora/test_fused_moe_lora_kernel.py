@@ -6,7 +6,7 @@ import random
 import pytest
 import torch
 
-from tests.utils import multi_gpu_test
+from tests.utils import ensure_current_vllm_config, multi_gpu_test
 from vllm import _custom_ops as ops
 from vllm.distributed import (
     init_distributed_environment,
@@ -187,7 +187,8 @@ def use_fused_moe_lora_kernel(
 
     # num_active_loras is the number of active LoRAs
     # (max_loras + 1 to include no-lora case)
-    num_active_loras = max_loras + 1
+    # Stored as CPU tensor to match the kernel API (torch.compile compatibility)
+    num_active_loras = torch.tensor([max_loras + 1], dtype=torch.int32, device="cpu")
 
     fused_moe_lora(
         output,
@@ -231,17 +232,22 @@ def use_torch(
     lora_a_stacked,
     lora_b_stacked,
     top_k_num,
+    num_slices=1,
 ):
     outputs = []
     for i in range(hidden_states.shape[0]):
-        lora_idx = token_lora_mapping[i]
-        expert_ids = topk_ids[i]
-        lora_a = lora_a_stacked[0][lora_idx][expert_ids]
-        lora_b = lora_b_stacked[0][lora_idx][expert_ids]
-        tensors = [
-            hidden_states[i] @ lora_a[x].T @ lora_b[x].T for x in range(top_k_num)
-        ]
-        outputs.append(torch.stack(tensors, dim=0))
+        slice_tensors = []
+        for slice_id in range(num_slices):
+            lora_idx = token_lora_mapping[i]
+            expert_ids = topk_ids[i]
+            lora_a = lora_a_stacked[slice_id][lora_idx][expert_ids]
+            lora_b = lora_b_stacked[slice_id][lora_idx][expert_ids]
+            tensors = [
+                hidden_states[i] @ lora_a[x].T @ lora_b[x].T for x in range(top_k_num)
+            ]
+            slice_tensors.append(torch.stack(tensors, dim=0))
+
+        outputs.append(torch.concat(slice_tensors, dim=-1))
     return torch.stack(outputs, dim=0)
 
 
@@ -259,6 +265,7 @@ SEED = [42]
 @pytest.mark.parametrize("K", [2048])
 @pytest.mark.parametrize("max_lora_rank", [16, 32, 64])
 @pytest.mark.parametrize("block_size", [16])
+@pytest.mark.parametrize("num_slices", [1, 2])
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("seed", SEED)
@@ -271,6 +278,7 @@ def test_fused_moe_lora_kernel(
     K,
     max_lora_rank,
     block_size,
+    num_slices,
     dtype,
     device,
     seed,
@@ -295,17 +303,19 @@ def test_fused_moe_lora_kernel(
             ),
             dtype=dtype,
         )
+        for _ in range(num_slices)
     ]
     lora_b_stacked = [
         torch.rand(
             (
                 max_loras,
                 num_experts,
-                N,
+                N // num_slices,
                 max_lora_rank,
             ),
             dtype=dtype,
         )
+        for _ in range(num_slices)
     ]
     hidden_states = torch.rand(
         (
@@ -340,6 +350,7 @@ def test_fused_moe_lora_kernel(
         lora_a_stacked,
         lora_b_stacked,
         top_k_num,
+        num_slices,
     )
 
     torch.testing.assert_close(output, output2, atol=1e-2, rtol=1e-2)
@@ -389,7 +400,8 @@ def use_fused_moe_lora_kernel_naive(
 
     # num_active_loras is the number of active LoRAs
     # (max_loras + 1 to include no-lora case)
-    num_active_loras = max_loras + 1
+    # Stored as CPU tensor to match the kernel API (torch.compile compatibility)
+    num_active_loras = torch.tensor([max_loras + 1], dtype=torch.int32, device="cpu")
 
     fused_moe_lora(
         output,
@@ -434,6 +446,7 @@ def use_fused_moe_lora_kernel_naive(
 @pytest.mark.parametrize("K", [2048])
 @pytest.mark.parametrize("max_lora_rank", [16, 32])
 @pytest.mark.parametrize("block_size", [16])
+@pytest.mark.parametrize("num_slices", [1, 2])
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("seed", SEED)
@@ -446,6 +459,7 @@ def test_fused_moe_lora_kernel_naive_block_assignment(
     K,
     max_lora_rank,
     block_size,
+    num_slices,
     dtype,
     device,
     seed,
@@ -484,17 +498,19 @@ def test_fused_moe_lora_kernel_naive_block_assignment(
             ),
             dtype=dtype,
         )
+        for _ in range(num_slices)
     ]
     lora_b_stacked = [
         torch.rand(
             (
                 max_loras,
                 num_experts,
-                N,
+                N // num_slices,
                 max_lora_rank,
             ),
             dtype=dtype,
         )
+        for _ in range(num_slices)
     ]
     hidden_states = torch.rand(
         (
@@ -529,6 +545,7 @@ def test_fused_moe_lora_kernel_naive_block_assignment(
         lora_a_stacked,
         lora_b_stacked,
         top_k_num,
+        num_slices,
     )
 
     torch.testing.assert_close(output, output_ref, atol=1e-2, rtol=1e-2)
@@ -621,7 +638,7 @@ def use_fused_moe_lora_kernel_tensor_parallel(
     set_random_seed(seed)
 
     device = torch.device(f"cuda:{local_rank}")
-    torch.cuda.set_device(device)
+    torch.accelerator.set_device_index(device)
     torch.set_default_device(device)
     torch.set_default_dtype(dtype)
 
@@ -631,7 +648,8 @@ def use_fused_moe_lora_kernel_tensor_parallel(
         local_rank=local_rank,
         distributed_init_method=init_method,
     )
-    initialize_model_parallel(world_size, 1)
+    with ensure_current_vllm_config():
+        initialize_model_parallel(world_size, 1)
     tp_size = get_tensor_model_parallel_world_size()
 
     input_dim = K if column_parallel else N

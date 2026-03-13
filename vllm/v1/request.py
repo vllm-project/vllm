@@ -9,7 +9,6 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import torch
-from typing_extensions import deprecated
 
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.pooling_params import PoolingParams
@@ -177,17 +176,6 @@ class Request:
         # None entry in the queue means finished.
         self.streaming_queue: deque[StreamingUpdate | None] | None = None
 
-    @property
-    @deprecated(
-        "Request.eos_token_id will be removed in v0.18. "
-        "Please use Request.sampling_params.eos_token_id instead."
-    )
-    def eos_token_id(self) -> int | None:
-        if self.sampling_params is None:
-            return None
-
-        return self.sampling_params.eos_token_id
-
     @classmethod
     def from_engine_core_request(
         cls,
@@ -320,6 +308,7 @@ class RequestStatus(enum.IntEnum):
     FINISHED_ABORTED = enum.auto()
     FINISHED_IGNORED = enum.auto()
     FINISHED_ERROR = enum.auto()
+    FINISHED_REPETITION = enum.auto()
 
     def __str__(self) -> str:
         return self.name
@@ -344,4 +333,5 @@ _FINISHED_REASON_MAP = {
     RequestStatus.FINISHED_IGNORED: FinishReason.LENGTH,
     RequestStatus.FINISHED_ERROR: FinishReason.ERROR,
     RequestStatus.WAITING_FOR_STREAMING_REQ: FinishReason.STOP,
+    RequestStatus.FINISHED_REPETITION: FinishReason.REPETITION,
 }

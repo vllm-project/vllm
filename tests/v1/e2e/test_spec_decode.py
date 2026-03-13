@@ -32,7 +32,7 @@ MTP_SIMILARITY_RATE = 0.8
 
 def _skip_if_insufficient_gpus_for_tp(tp_size: int):
     """Skip test if available GPUs < tp_size on ROCm."""
-    available_gpus = torch.cuda.device_count()
+    available_gpus = torch.accelerator.device_count()
     if available_gpus < tp_size:
         pytest.skip(
             f"Test requires {tp_size} GPUs, but only {available_gpus} available"
@@ -179,7 +179,35 @@ def test_ngram_and_suffix_correctness(
     )
     evaluate_llm_for_gsm8k(spec_llm)
     del spec_llm
-    torch.cuda.empty_cache()
+    torch.accelerator.empty_cache()
+    cleanup_dist_env_and_memory()
+
+
+@pytest.mark.parametrize("async_scheduling", [True], ids=["async"])
+@single_gpu_only
+@large_gpu_mark(min_gb=20)
+def test_ngram_gpu_default_with_async_scheduling(
+    async_scheduling: bool,
+):
+    """
+    Test ngram_gpu speculative decoding (k=3) correctness with and without
+    async scheduling, validated via GSM8K accuracy.
+    Uses Qwen/Qwen3-8B (ref GSM8K accuracy: 87%-92%).
+    """
+    qwen3_model = "Qwen/Qwen3-8B"
+    spec_llm = LLM(
+        model=qwen3_model,
+        speculative_config={
+            "method": "ngram_gpu",
+            "prompt_lookup_max": 3,
+            "prompt_lookup_min": 2,
+            "num_speculative_tokens": 2,
+        },
+        max_model_len=4096,
+        async_scheduling=async_scheduling,
+    )
+    evaluate_llm_for_gsm8k(spec_llm, expected_accuracy_threshold=0.8)
+    del spec_llm
     cleanup_dist_env_and_memory()
 
 
@@ -240,7 +268,7 @@ def test_suffix_decoding_acceptance(
     assert last_accept_rate > 0.80
 
     del spec_llm
-    torch.cuda.empty_cache()
+    torch.accelerator.empty_cache()
     cleanup_dist_env_and_memory()
 
 
@@ -307,14 +335,14 @@ def test_speculators_model_integration(
     verifier_model = spec_llm.llm_engine.vllm_config.model_config.model
 
     del spec_llm
-    torch.cuda.empty_cache()
+    torch.accelerator.empty_cache()
     cleanup_dist_env_and_memory()
 
     # Second run: Reference without speculative decoding
     ref_llm = LLM(model=verifier_model, max_model_len=4096)
     ref_outputs = ref_llm.chat(test_prompts, sampling_config)
     del ref_llm
-    torch.cuda.empty_cache()
+    torch.accelerator.empty_cache()
     cleanup_dist_env_and_memory()
 
     # Compare outputs
@@ -410,7 +438,7 @@ def _run_eagle_correctness(
         )
         ref_outputs = ref_llm.chat(test_prompts, sampling_config)
         del ref_llm
-        torch.cuda.empty_cache()
+        torch.accelerator.empty_cache()
         cleanup_dist_env_and_memory()
 
         spec_llm = LLM(
@@ -445,7 +473,7 @@ def _run_eagle_correctness(
 
         assert matches > int(0.6 * len(ref_outputs))
         del spec_llm
-        torch.cuda.empty_cache()
+        torch.accelerator.empty_cache()
         cleanup_dist_env_and_memory()
 
 
@@ -630,7 +658,7 @@ def test_eagle_correctness_medium(
             False,
             "auto",
             0.8,
-            marks=multi_gpu_marks(num_gpus=4),
+            marks=[*multi_gpu_marks(num_gpus=4), large_gpu_mark(min_gb=40)],
             id="llama4_eagle",
         ),
         pytest.param(
@@ -704,18 +732,20 @@ def test_mtp_correctness(
         method, model_name, tp_size = model_setup
         _skip_if_insufficient_gpus_for_tp(tp_size)
 
+        attn_backend = "TRITON_ATTN" if current_platform.is_rocm() else "auto"
         ref_llm = LLM(
             model=model_name,
             max_model_len=2048,
             tensor_parallel_size=tp_size,
             trust_remote_code=True,
+            attention_backend=attn_backend,
         )
         ref_outputs = ref_llm.chat(test_prompts, sampling_config)
         evaluate_llm_for_gsm8k(
             ref_llm, expected_accuracy_threshold=expected_accuracy_threshold
         )
         del ref_llm
-        torch.cuda.empty_cache()
+        torch.accelerator.empty_cache()
         cleanup_dist_env_and_memory()
 
         spec_llm = LLM(
@@ -728,6 +758,7 @@ def test_mtp_correctness(
                 "max_model_len": 2048,
             },
             max_model_len=2048,
+            attention_backend=attn_backend,
         )
         evaluate_llm_for_gsm8k(
             spec_llm, expected_accuracy_threshold=expected_accuracy_threshold
@@ -747,7 +778,7 @@ def test_mtp_correctness(
         # Upon failure, inspect the outputs to check for inaccuracy.
         assert matches > int(MTP_SIMILARITY_RATE * len(ref_outputs))
         del spec_llm
-        torch.cuda.empty_cache()
+        torch.accelerator.empty_cache()
         cleanup_dist_env_and_memory()
 
 
@@ -952,7 +983,7 @@ def assert_draft_model_correctness(args: ArgsTest):
     )
 
     del spec_llm  # CLEANUP
-    torch.cuda.empty_cache()
+    torch.accelerator.empty_cache()
     cleanup_dist_env_and_memory()
 
     print(

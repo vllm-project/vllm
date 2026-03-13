@@ -177,10 +177,11 @@ def determine_expert_placement_strategy(
         if (
             moe_parallel_config.use_all2all_kernels
             and not moe_parallel_config.use_deepep_ll_kernels
+            and not moe_parallel_config.use_nixl_ep_kernels
         ):
             logger.warning(
                 "Round-robin expert placement currently only supports "
-                "the DeepEP low-latency backend, but '%s' was configured. "
+                "the DeepEP low-latency or NIXL EP backend, but '%s' was configured. "
                 "Falling back to linear expert placement.",
                 moe_parallel_config.all2all_backend,
             )
@@ -627,6 +628,7 @@ class FusedMoE(CustomOp):
             moe_quant_params["intermediate_size_full"] = intermediate_size
 
         self.quant_method.create_weights(layer=self, **moe_quant_params)
+        self.base_quant_method = self.quant_method
 
         # Disable shared expert overlap if:
         #   - we are using eplb with non-default backend, because of correctness issues
@@ -683,7 +685,7 @@ class FusedMoE(CustomOp):
         # routing_tables only needed for round-robin expert placement with
         # DeepEP all2all backend.
         routing_tables = self._maybe_init_expert_routing_tables()
-        prepare_finalize = self.quant_method.maybe_make_prepare_finalize(
+        prepare_finalize = self.base_quant_method.maybe_make_prepare_finalize(
             routing_tables=routing_tables
         )
         if prepare_finalize is not None:
@@ -693,7 +695,7 @@ class FusedMoE(CustomOp):
             self._replace_quant_method(
                 FusedMoEModularMethod.make(
                     self,
-                    self.quant_method,
+                    self.base_quant_method,
                     prepare_finalize,
                     self.shared_experts,
                     inplace=not self.moe_config.disable_inplace,
@@ -744,10 +746,10 @@ class FusedMoE(CustomOp):
         self,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
         # Currently routing_tables only needed for round-robin expert placement
-        # with DeepEP-ll all2all backend.
-        if (
-            self.expert_placement_strategy != "round_robin"
-            or not self.moe_parallel_config.use_deepep_ll_kernels
+        # with DeepEP-ll or NIXL EP all2all backends.
+        if self.expert_placement_strategy != "round_robin" or (
+            not self.moe_parallel_config.use_deepep_ll_kernels
+            and not self.moe_parallel_config.use_nixl_ep_kernels
         ):
             return None
 
@@ -1203,17 +1205,26 @@ class FusedMoE(CustomOp):
             # Determine per-tensor weight scale patterns based on variant
             # Use the dedicated method instead of brittle string matching
             uses_weight_scale_2 = self.quant_method.uses_weight_scale_2_pattern()
+            quant_method = getattr(param, "quant_method", None)
 
             # Call _load_per_tensor_weight_scale() to load per-tensor (scalar)
             # weights scales.
             # Input scales are always per-tensor.
             # Weight scales: FP4 uses "weight_scale_2" and FP8 uses
             # "weight_scale" for per-tensor scales.
+            # NOTE: ModelOpt MXFP8 MoE uses block scales in weight_scale
+            # tensors (quant_method=BLOCK), so those must not be treated
+            # as per-tensor scalars here.
+            is_block_weight_scale = (
+                "weight_scale" in weight_name
+                and quant_method == FusedMoeWeightScaleSupported.BLOCK.value
+            )
             is_per_tensor = (
                 "weight_scale_2" in weight_name
                 if uses_weight_scale_2
                 else "weight_scale" in weight_name
             ) or "input_scale" in weight_name
+            is_per_tensor = is_per_tensor and not is_block_weight_scale
             if is_per_tensor:
                 self._load_per_tensor_weight_scale(
                     shard_id=shard_id,
