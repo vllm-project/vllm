@@ -17,7 +17,7 @@ set -ex
 BUILDKITE_COMMIT="${BUILDKITE_COMMIT:?Set BUILDKITE_COMMIT to the commit SHA that has the ROCm image in ECR (e.g. from a previous release pipeline run)}"
 DRY_RUN="${DRY_RUN:-0}"
 
-BASE_ORIG_TAG="${BUILDKITE_COMMIT}-base-rocm"
+BASE_ORIG_TAG="${BUILDKITE_COMMIT}-rocm-base"
 ORIG_TAG="${BUILDKITE_COMMIT}-rocm"
 BASE_TAG_NAME="base-nightly"
 TAG_NAME="nightly"
