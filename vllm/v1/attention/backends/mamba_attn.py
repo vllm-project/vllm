@@ -149,6 +149,12 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                 device=device,
             )
 
+        self.has_initial_states_d: torch.Tensor = torch.ones(
+            (self.decode_cudagraph_max_bs,),
+            dtype=torch.bool,
+            device=device,
+        )
+
         self._init_reorder_batch_threshold(1, self.use_spec_decode)
         if self.use_spec_decode:
             self.supports_update_block_table = False
@@ -501,6 +507,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         Currently, only decode is supported for full cudagraphs with Mamba.
         """
         state_indices_tensor_d = metadata.state_indices_tensor_d
+        has_initial_states_d = metadata.has_initial_states_d
         query_start_loc_d = metadata.query_start_loc_d
         num_accepted_tokens = metadata.num_accepted_tokens
         block_idx_last_scheduled_token = metadata.block_idx_last_scheduled_token
@@ -516,6 +523,13 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             )
             state_indices_tensor_d = self.state_indices_tensor_d[:padded_bs]
             state_indices_tensor_d[metadata.num_decodes :] = PAD_SLOT_ID
+
+            if has_initial_states_d is not None:
+                self.has_initial_states_d[: metadata.num_decodes].copy_(
+                    has_initial_states_d, non_blocking=True
+                )
+                self.has_initial_states_d[metadata.num_decodes :] = True
+                has_initial_states_d = self.has_initial_states_d[:padded_bs]
 
             if self.use_spec_decode:
                 assert query_start_loc_d is not None
@@ -551,6 +565,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         return replace(
             metadata,
             state_indices_tensor_d=state_indices_tensor_d,
+            has_initial_states_d=has_initial_states_d,
             query_start_loc_d=query_start_loc_d,
             num_accepted_tokens=num_accepted_tokens,
             block_idx_last_scheduled_token=block_idx_last_scheduled_token,

@@ -271,6 +271,7 @@ class MambaMixer(MambaBase, PluggableLayer):
             conv_state = self_kv_cache[0].transpose(-1, -2)
             ssm_state = self_kv_cache[1]
             has_initial_states_p = attn_metadata.has_initial_states_p
+            has_initial_states_d = attn_metadata.has_initial_states_d
             cu_chunk_seqlen_p = attn_metadata.cu_chunk_seqlen_p
             last_chunk_indices_p = attn_metadata.last_chunk_indices_p
 
@@ -394,6 +395,14 @@ class MambaMixer(MambaBase, PluggableLayer):
             else:
                 state_indices_tensor_d_input = state_indices_tensor_d
                 state_indices_tensor_d_output = state_indices_tensor_d
+
+            self.clear_stale_decode_states(
+                has_initial_states_d,
+                state_indices_tensor_d_input,
+                ssm_state,
+                conv_state,
+            )
+
             # 2. Convolution sequence transformation
             conv_out_d = causal_conv1d_update(
                 hidden_states_BC_d.transpose(0, 1),

@@ -580,6 +580,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
             conv_state = self_kv_cache[0].transpose(-1, -2)
             ssm_state = self_kv_cache[1]
             has_initial_states_p = attn_metadata.has_initial_states_p
+            has_initial_states_d = attn_metadata.has_initial_states_d
             prep_initial_states = attn_metadata.prep_initial_states
             chunk_size = attn_metadata.chunk_size
             seq_idx_p = attn_metadata.seq_idx_p
@@ -830,6 +831,13 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 # Without caching, read and write in-place to the same blocks:
                 state_indices_tensor_d_input = state_indices_tensor_d
                 state_indices_tensor_d_output = state_indices_tensor_d
+
+            self.clear_stale_decode_states(
+                has_initial_states_d,
+                state_indices_tensor_d_input,
+                ssm_state,
+                conv_state,
+            )
 
             # 2. Convolution sequence transformation
             hidden_states_B_C_d = causal_conv1d_update(

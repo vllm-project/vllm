@@ -3683,12 +3683,6 @@ class GPUModelRunner(
                 )
             )
 
-            mamba_utils.clear_stale_mamba_states(
-                attn_metadata,
-                self.attn_groups,
-                self.compilation_config.static_forward_context,
-            )
-
             (
                 input_ids,
                 inputs_embeds,

@@ -57,6 +57,22 @@ class MambaBase(AttentionLayerBase):
             ),
         )
 
+    @staticmethod
+    def clear_stale_decode_states(
+        has_initial_states_d: torch.Tensor | None,
+        indices: torch.Tensor,
+        ssm_state: torch.Tensor,
+        conv_state: torch.Tensor,
+    ) -> None:
+        if has_initial_states_d is None:
+            return
+
+        for state in (ssm_state, conv_state):
+            gathered = state[indices]
+            keep_state = has_initial_states_d.to(gathered.dtype)
+            keep_state = keep_state.view(-1, *([1] * (gathered.dim() - 1)))
+            state[indices] = gathered * keep_state
+
     def get_attn_backend(self) -> type[AttentionBackend]:
         """Get the attention backend class for this Mamba layer."""
         return get_mamba_attn_backend(self.mamba_type)
