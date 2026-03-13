@@ -118,10 +118,10 @@ class ColQwen3_5Model(
     linear projection layer for per-token embeddings. It supports:
     - "token_embed" task: Per-token embeddings for late interaction scoring
 
-    The model produces L2-normalized per-token embeddings by:
+    The model produces per-token embeddings by:
     1. Running the Qwen3.5 backbone (vision + language) to get hidden states
     2. Projecting hidden states through a linear layer (hidden_size -> embed_dim)
-    3. L2-normalizing the projected embeddings
+    3. L2 normalization is handled by the pooler via PoolerNormalize
 
     Attributes:
         custom_text_proj: Linear projection from hidden_size to embed_dim
@@ -213,9 +213,8 @@ class ColQwen3_5Model(
         if hidden_states.dtype != proj_dtype:
             hidden_states = hidden_states.to(proj_dtype)
 
-        # Project to embedding dimension and L2 normalize
-        proj = self.custom_text_proj(hidden_states)  # type: ignore
-        return torch.nn.functional.normalize(proj, p=2, dim=-1)
+        # Project to embedding dimension (normalization handled by pooler)
+        return self.custom_text_proj(hidden_states)  # type: ignore
 
     # Names used for the projection layer across different ColQwen3.5 variants
     _PROJ_LAYER_NAMES = {
