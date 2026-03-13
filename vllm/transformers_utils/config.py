@@ -78,6 +78,7 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     bagel="BagelConfig",
     chatglm="ChatGLMConfig",
     colmodernvbert="ColModernVBertConfig",
+    colpali="ColPaliConfig",
     colqwen3="ColQwen3Config",
     ops_colqwen3="OpsColQwen3Config",
     qwen3_vl_nemotron_embed="Qwen3VLNemotronEmbedConfig",
@@ -87,6 +88,7 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     funaudiochat="FunAudioChatConfig",
     hunyuan_vl="HunYuanVLConfig",
     isaac="IsaacConfig",
+    kimi_k2="DeepseekV3Config",  # Kimi K2 uses same architecture as DeepSeek V3
     kimi_linear="KimiLinearConfig",
     kimi_vl="KimiVLConfig",
     kimi_k25="KimiK25Config",
@@ -1116,7 +1118,7 @@ def get_safetensors_params_metadata(
     revision: str | None = None,
 ) -> dict[str, Any]:
     """
-    Get the safetensors metadata for remote model repository.
+    Get the safetensors parameters metadata for remote/local model repository.
     """
     full_metadata = {}
     if (model_path := Path(model)).exists():
