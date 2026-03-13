@@ -1326,6 +1326,17 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
                     use_audio_in_video = True
                 else:
                     use_audio_in_video = False
+            # for mutilmodality cache
+            if any(item is None for item in mm_kwargs["video"]):
+                video_token_id = self.info.get_hf_config().video_token_id
+                audio_token_id = self.info.get_hf_config().audio_token_id
+                video_audio_item_num = sum(
+                    id in (video_token_id, audio_token_id) for id in prompt_ids
+                )
+                audio_updates_num = len(mm_prompt_updates.get("audio", []))
+                video_updates_num = len(mm_prompt_updates.get("video", []))
+                if video_audio_item_num != video_updates_num + audio_updates_num:
+                    use_audio_in_video = True
 
         # normal case with `use_audio_in_video=False`
         if is_update_applied:
