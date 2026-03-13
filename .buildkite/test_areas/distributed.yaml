@@ -56,6 +56,8 @@ steps:
   num_devices: 4
   source_file_dependencies:
   - vllm/distributed/
+  - tests/distributed/test_torchrun_example.py
+  - tests/distributed/test_torchrun_example_moe.py
   - examples/offline_inference/rlhf.py
   - examples/offline_inference/rlhf_colocate.py
   - examples/offline_inference/new_weight_syncing/
