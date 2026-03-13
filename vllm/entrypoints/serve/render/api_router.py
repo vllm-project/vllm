@@ -40,7 +40,7 @@ async def render_chat_completion(request: ChatCompletionRequest, raw_request: Re
             "The model does not support Chat Completions Render API"
         )
 
-    result = await handler.render_chat_completion(request)
+    result = await handler.render_chat_request(request)
 
     if isinstance(result, ErrorResponse):
         return JSONResponse(content=result.model_dump(), status_code=result.error.code)
@@ -63,7 +63,7 @@ async def render_completion(request: CompletionRequest, raw_request: Request):
     if handler is None:
         raise NotImplementedError("The model does not support Completions Render API")
 
-    result = await handler.render_completion(request)
+    result = await handler.render_completion_request(request)
 
     if isinstance(result, ErrorResponse):
         return JSONResponse(content=result.model_dump(), status_code=result.error.code)

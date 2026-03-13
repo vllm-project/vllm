@@ -4,7 +4,6 @@ from collections.abc import Callable, Sequence
 from http import HTTPStatus
 from typing import Any
 
-import jinja2
 from openai_harmony import Message as OpenAIMessage
 
 from vllm.config import ModelConfig
@@ -17,7 +16,6 @@ from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionReque
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
-    ModelList,
 )
 from vllm.entrypoints.openai.models.serving import OpenAIModelRegistry
 from vllm.entrypoints.openai.parser.harmony_utils import (
@@ -30,13 +28,6 @@ from vllm.entrypoints.serve.disagg.protocol import (
     GenerateRequest,
     MultiModalFeatures,
     PlaceholderRangeInfo,
-)
-from vllm.entrypoints.serve.tokenize.protocol import (
-    DetokenizeRequest,
-    DetokenizeResponse,
-    TokenizeChatRequest,
-    TokenizeRequest,
-    TokenizeResponse,
 )
 from vllm.entrypoints.utils import (
     create_error_response,
@@ -116,7 +107,7 @@ class OpenAIServingRender:
             else getattr(mc, "override_generation_config", {}).get("max_new_tokens")
         )
 
-    async def render_chat_completion(
+    async def render_chat_request(
         self,
         request: ChatCompletionRequest,
     ) -> GenerateRequest | ErrorResponse:
@@ -129,7 +120,7 @@ class OpenAIServingRender:
                 "Beam search is not supported by the render endpoint"
             )
 
-        result = await self.render_chat_request(request)
+        result = await self.render_chat(request)
         if isinstance(result, ErrorResponse):
             return result
 
@@ -180,13 +171,14 @@ class OpenAIServingRender:
             priority=request.priority,
         )
 
-    async def render_chat_request(
+    async def render_chat(
         self,
         request: ChatCompletionRequest,
     ) -> tuple[list[ConversationMessage], list[ProcessorInputs]] | ErrorResponse:
-        """Copied from OpenAIServingChat.render_chat_request.
+        """Core preprocessing logic for chat requests (no model/engine check).
 
-        Differences: engine_client.errored check removed (no engine client).
+        Called directly by render_chat_request and delegated to by
+        OpenAIServingChat.render_chat_request after its engine-aware checks.
         """
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
@@ -269,47 +261,16 @@ class OpenAIServingRender:
     async def render_completion_request(
         self,
         request: CompletionRequest,
-    ) -> list[ProcessorInputs] | ErrorResponse:
-        """Copied from OpenAIServingCompletion.render_completion_request.
+    ) -> list[GenerateRequest] | ErrorResponse:
+        """Validate the model and preprocess a completion request.
 
-        Differences: engine_client.errored check removed (no engine client).
+        This is the authoritative implementation used directly by the
+        GPU-less render server and delegated to by OpenAIServingCompletion.
         """
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             return error_check_ret
-
-        # Return error for unsupported features.
-        if request.suffix is not None:
-            return self.create_error_response("suffix is not currently supported")
-
-        if request.echo and request.prompt_embeds is not None:
-            return self.create_error_response("Echo is unsupported with prompt embeds.")
-
-        if request.prompt_logprobs is not None and request.prompt_embeds is not None:
-            return self.create_error_response(
-                "prompt_logprobs is not compatible with prompt embeds."
-            )
-
-        engine_prompts = await self._preprocess_completion(
-            request,
-            prompt_input=request.prompt,
-            prompt_embeds=request.prompt_embeds,
-        )
-
-        return engine_prompts
-
-    async def render_completion(
-        self,
-        request: CompletionRequest,
-    ) -> list[GenerateRequest] | ErrorResponse:
-        """Render a completion request into a list of GenerateRequest DTOs.
-
-        This is a pure preprocessing step: it does not generate text.
-        """
-        result = await self.render_completion_request(request)
-        if isinstance(result, ErrorResponse):
-            return result
-
+        result = await self.render_completion(request)
         generate_requests: list[GenerateRequest] = []
         for engine_prompt in result:
             prompt_components = extract_prompt_components(
@@ -350,6 +311,35 @@ class OpenAIServingRender:
 
         return generate_requests
 
+    async def render_completion(
+        self,
+        request: CompletionRequest,
+    ) -> list[ProcessorInputs] | ErrorResponse:
+        """Core preprocessing logic for completion requests (no model/engine check).
+
+        Called directly by render_completion_request and delegated to by
+        OpenAIServingCompletion.render_completion_request after its engine-aware checks.
+        """
+        # Return error for unsupported features.
+        if request.suffix is not None:
+            return self.create_error_response("suffix is not currently supported")
+
+        if request.echo and request.prompt_embeds is not None:
+            return self.create_error_response("Echo is unsupported with prompt embeds.")
+
+        if request.prompt_logprobs is not None and request.prompt_embeds is not None:
+            return self.create_error_response(
+                "prompt_logprobs is not compatible with prompt embeds."
+            )
+
+        engine_prompts = await self._preprocess_completion(
+            request,
+            prompt_input=request.prompt,
+            prompt_embeds=request.prompt_embeds,
+        )
+
+        return engine_prompts
+
     @staticmethod
     def _extract_mm_features(
         engine_prompt: ProcessorInputs,
@@ -382,7 +372,7 @@ class OpenAIServingRender:
         request: ChatCompletionRequest,
         should_include_tools: bool = True,
     ):
-        """Copied from OpenAIServingChat._make_request_with_harmony."""
+        """Build Harmony (GPT-OSS) messages and engine prompt from a chat request."""
         messages: list[OpenAIMessage] = []
 
         # because of issues with pydantic we need to potentially
@@ -425,91 +415,6 @@ class OpenAIServingRender:
             engine_prompt["cache_salt"] = request.cache_salt
 
         return messages, [engine_prompt]
-
-    async def show_available_models(self) -> ModelList:
-        """Returns the models served by this render server."""
-        return await self.model_registry.show_available_models()
-
-    async def create_tokenize(
-        self,
-        request: TokenizeRequest,
-        raw_request: Any,
-    ) -> TokenizeResponse | ErrorResponse:
-        """Tokenize a prompt or chat messages (no engine required)."""
-        error_check_ret = await self._check_model(request)
-        if error_check_ret is not None:
-            return error_check_ret
-
-        try:
-            if isinstance(request, TokenizeChatRequest):
-                tool_dicts = (
-                    None
-                    if request.tools is None
-                    else [tool.model_dump() for tool in request.tools]
-                )
-                error_check_ret = self._validate_chat_template(
-                    request_chat_template=request.chat_template,
-                    chat_template_kwargs=request.chat_template_kwargs,
-                    trust_request_chat_template=self.trust_request_chat_template,
-                )
-                if error_check_ret is not None:
-                    return error_check_ret
-
-                _, engine_prompts = await self._preprocess_chat(
-                    request,
-                    request.messages,
-                    default_template=self.chat_template,
-                    default_template_content_format=(self.chat_template_content_format),
-                    default_template_kwargs=self.default_chat_template_kwargs,
-                    tool_dicts=tool_dicts,
-                )
-            else:
-                engine_prompts = await self._preprocess_completion(
-                    request,
-                    prompt_input=request.prompt,
-                    prompt_embeds=None,
-                )
-        except (ValueError, TypeError, RuntimeError, jinja2.TemplateError) as e:
-            logger.exception("Error in tokenization preprocessing")
-            return self.create_error_response(e)
-
-        input_ids: list[int] = []
-        for engine_prompt in engine_prompts:
-            prompt_components = extract_prompt_components(
-                self.model_config, engine_prompt
-            )
-            if prompt_components.token_ids is not None:
-                input_ids.extend(prompt_components.token_ids)
-
-        token_strs = None
-        if request.return_token_strs:
-            tokenizer = self.renderer.get_tokenizer()
-            token_strs = tokenizer.convert_ids_to_tokens(input_ids)
-
-        return TokenizeResponse(
-            tokens=input_ids,
-            token_strs=token_strs,
-            count=len(input_ids),
-            max_model_len=self.model_config.max_model_len,
-        )
-
-    async def create_detokenize(
-        self,
-        request: DetokenizeRequest,
-        raw_request: Any,
-    ) -> DetokenizeResponse | ErrorResponse:
-        """Detokenize token IDs back to text (no engine required)."""
-        error_check_ret = await self._check_model(request)
-        if error_check_ret is not None:
-            return error_check_ret
-
-        engine_prompt = await self.renderer.tokenize_prompt_async(
-            TokensPrompt(prompt_token_ids=request.tokens),
-            request.build_tok_params(self.model_config),
-        )
-        prompt_text = engine_prompt["prompt"]  # type: ignore[typeddict-item]
-
-        return DetokenizeResponse(prompt=prompt_text)
 
     def create_error_response(
         self,

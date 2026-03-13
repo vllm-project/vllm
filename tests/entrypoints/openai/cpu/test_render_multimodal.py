@@ -7,7 +7,7 @@ import httpx
 import pytest
 import pytest_asyncio
 
-from tests.utils import RemoteLaunchRenderServer
+from tests.utils import RemoteOpenAIServer
 from vllm.multimodal.utils import encode_image_url
 
 VISION_MODEL_NAME = "Qwen/Qwen3-VL-2B-Instruct"
@@ -31,7 +31,7 @@ def vision_server():
 
     env_overrides: dict[str, str] = {}
 
-    with RemoteLaunchRenderServer(
+    with RemoteOpenAIServer(
         VISION_MODEL_NAME,
         args,
         env_dict=env_overrides,
