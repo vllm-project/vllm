@@ -1169,17 +1169,60 @@ class OpenAIServingChat(OpenAIServing):
                             finish_reason_ = (
                                 output.finish_reason if output.finish_reason else "stop"
                             )
+                        # OpenAI convention: when finish_reason is set,
+                        # delta should be empty. If there's remaining
+                        # content, yield it first with finish_reason=None.
+                        has_content = (
+                            delta_message.content
+                            or delta_message.reasoning
+                            or delta_message.tool_calls
+                        )
+
+                        if has_content:
+                            content_choice = (
+                                ChatCompletionResponseStreamChoice(
+                                    index=i,
+                                    delta=delta_message,
+                                    logprobs=logprobs,
+                                    finish_reason=None,
+                                    token_ids=(
+                                        as_list(output.token_ids)
+                                        if request.return_token_ids
+                                        else None
+                                    ),
+                                )
+                            )
+                            content_choice = maybe_filter_parallel_tool_calls(
+                                content_choice, request
+                            )
+                            content_chunk = ChatCompletionStreamResponse(
+                                id=request_id,
+                                object=chunk_object_type,
+                                created=created_time,
+                                choices=[content_choice],
+                                model=model_name,
+                            )
+                            if include_continuous_usage:
+                                completion_tokens = previous_num_tokens[i]
+                                content_chunk.usage = UsageInfo(
+                                    prompt_tokens=num_prompt_tokens,
+                                    completion_tokens=completion_tokens,
+                                    total_tokens=(
+                                        num_prompt_tokens + completion_tokens
+                                    ),
+                                )
+                            data = content_chunk.model_dump_json(
+                                exclude_unset=True
+                            )
+                            yield f"data: {data}\n\n"
+
+                        # Yield the finish chunk with empty delta
                         choice_data = ChatCompletionResponseStreamChoice(
                             index=i,
-                            delta=delta_message,
-                            logprobs=logprobs,
+                            delta=DeltaMessage(),
+                            logprobs=None,
                             finish_reason=finish_reason_,
                             stop_reason=output.stop_reason,
-                            token_ids=(
-                                as_list(output.token_ids)
-                                if request.return_token_ids
-                                else None
-                            ),
                         )
 
                         finish_reason_sent[i] = True
