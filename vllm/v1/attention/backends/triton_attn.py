@@ -472,10 +472,9 @@ class TritonAttentionImpl(AttentionImpl):
 
         # For decoder and cross-attention, use KV cache as before
         key_cache, value_cache = kv_cache.unbind(1)
-        if self.kv_cache_dtype.startswith("fp8"):
-            if key_cache.dtype != self.fp8_dtype:
-                key_cache = key_cache.view(self.fp8_dtype)
-                value_cache = value_cache.view(self.fp8_dtype)
+        if self.kv_cache_dtype.startswith("fp8") and key_cache.dtype != self.fp8_dtype:
+            key_cache = key_cache.view(self.fp8_dtype)
+            value_cache = value_cache.view(self.fp8_dtype)
 
         cu_seqlens_q = attn_metadata.query_start_loc
         seqused_k = attn_metadata.seq_lens
