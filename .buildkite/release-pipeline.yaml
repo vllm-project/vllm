@@ -728,6 +728,8 @@ steps:
         aws ecr-public get-login-password --region us-east-1 | \
           docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7
 
+        docker pull rocm/vllm-dev:base
+        
         # Extract GPU architectures from Dockerfile.rocm_base (single source of truth)
         PYTORCH_ROCM_ARCH=$$(grep '^ARG PYTORCH_ROCM_ARCH=' docker/Dockerfile.rocm_base | sed 's/^ARG PYTORCH_ROCM_ARCH=//')
 
@@ -747,7 +749,7 @@ steps:
           -f docker/Dockerfile.rocm .
 
         # Push to ECR
-        docker tag "rocm/vllm-dev:base" public.ecr.aws/q9t5s3a7/vllm-release-repo:$${BUILDKITE_COMMIT}-rocm-base
+        docker tag rocm/vllm-dev:base public.ecr.aws/q9t5s3a7/vllm-release-repo:$${BUILDKITE_COMMIT}-rocm-base
         docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$${BUILDKITE_COMMIT}-rocm-base
         echo "Pushed base image: public.ecr.aws/q9t5s3a7/vllm-release-repo:$${BUILDKITE_COMMIT}-rocm-base"
         docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$${BUILDKITE_COMMIT}-rocm
