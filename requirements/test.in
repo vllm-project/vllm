@@ -75,4 +75,4 @@ datasets>=3.3.0,<=3.6.0
 openpyxl # required for perf comparison excel report
 plotly # required for perf comparison html report
 
-mantis-ml @ git+https://github.com/TIGER-AI-Lab/Mantis.git # required for multimodal tests
+mantis-vl @ git+https://github.com/TIGER-AI-Lab/Mantis.git # required for multimodal tests
