@@ -200,15 +200,17 @@ class Base(
 
     def _patch_config(self):
         """
-        Patch the config to ensure that the model is created correctly.
+        Patch the config to ensure that the model is created correctly:
 
-        This includes:
-
-        - Setting the attention implementation to "vllm"
-        - Ensuring that any sub-configs have the same dtype as the main config
+        - Sets the attention implementation to "vllm" so the attention instances from
+        `create_attention_instances` are used
+        - Sets the dtype to the default torch dtype set by vLLM because Transformers
+        uses the config dtype when creating the model
+        - Propagates this dtype to any sub-configs because Transformers model
+        implementations do not support/use different dtypes in sub-models
         """
         self.text_config._attn_implementation = "vllm"
-
+        self.config.dtype = torch.get_default_dtype()
         # TODO(hmellor): Remove this when Transformers v4 support is dropped
         for sub_config_name in getattr(self.config, "sub_configs", {}):
             sub_config = getattr(self.config, sub_config_name)
