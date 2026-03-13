@@ -470,7 +470,8 @@ class Scheduler(SchedulerInterface):
                             self.running,
                             key=lambda r: (
                                 r.priority,
-                                r.max_tokens - r.num_computed_tokens,
+                                r.num_prompt_tokens + r.max_tokens
+                                - r.num_computed_tokens,
                                 r.arrival_time,
                             ),
                         )
@@ -480,7 +481,8 @@ class Scheduler(SchedulerInterface):
                         preempted_req = max(
                             self.running,
                             key=lambda r: (
-                                r.max_tokens - r.num_computed_tokens,
+                                r.num_prompt_tokens + r.max_tokens
+                                - r.num_computed_tokens,
                                 r.arrival_time,
                             ),
                         )

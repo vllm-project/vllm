@@ -4315,3 +4315,92 @@ def test_srtf_fcfs_preemption():
     assert req_small.status == RequestStatus.RUNNING, (
         "req_small has fewer remaining tokens (≈1) and should be spared"
     )
+
+
+def test_srtf_mixed_prompt_length_preemption():
+    """SRTF key must use num_prompt_tokens + max_tokens - num_computed_tokens.
+
+    Using only max_tokens - num_computed_tokens (without num_prompt_tokens)
+    produces incorrect results when requests have different prompt lengths:
+    a request with a long prompt gets a smaller (even negative) key after
+    prefill, making it appear nearly-finished even if it has many decode
+    tokens left.
+
+    Scenario (FCFS, block_size=16, 4 usable blocks)
+    -------------------------------------------------
+    req_long_prompt : prompt=48 tokens (3 blocks), max_tokens=50
+        correct remaining  = (48+50) - 48 = 50
+        wrong   remaining  = 50     - 48 = 2   ← appears nearly done
+
+    req_short_prompt: prompt=16 tokens (1 block), max_tokens=30
+        correct remaining  = (16+30) - 16 = 30
+        wrong   remaining  = 30     - 16 = 14
+
+    Wrong formula:  max(2, 14)  → preempts req_short_prompt  (WRONG)
+    Correct formula: max(50, 30) → preempts req_long_prompt   (CORRECT)
+
+    After prefill, 4 usable blocks are fully occupied (3 + 1).
+    One output token is produced; Phase 1 tries to allocate the 49th-token
+    block for req_long_prompt → KV cache full → preemption fires.
+    """
+    # 4 usable blocks (block 0 is the null block, num_blocks=5).
+    scheduler = create_scheduler(
+        max_num_seqs=4,
+        max_num_batched_tokens=8192,
+        num_blocks=5,
+        block_size=16,
+        enable_prefix_caching=False,
+    )
+
+    # req_long_prompt occupies 3 blocks after prefill; added first.
+    req_long_prompt = create_requests(
+        num_requests=1,
+        num_tokens=48,
+        max_tokens=50,
+        req_ids=["long_prompt"],
+    )[0]
+    # req_short_prompt occupies 1 block after prefill; added second.
+    req_short_prompt = create_requests(
+        num_requests=1,
+        num_tokens=16,
+        max_tokens=30,
+        req_ids=["short_prompt"],
+    )[0]
+
+    scheduler.add_request(req_long_prompt)
+    scheduler.add_request(req_short_prompt)
+
+    # Prefill: req_long_prompt uses 3 blocks, req_short_prompt uses 1 block.
+    # All 4 usable blocks occupied; 0 free.
+    sched_out0 = scheduler.schedule()
+    assert len(scheduler.running) == 2
+
+    # Simulate one output token so Phase 1 tries to decode both requests.
+    mro = ModelRunnerOutput(
+        req_ids=[req_long_prompt.request_id, req_short_prompt.request_id],
+        req_id_to_index={
+            req_long_prompt.request_id: 0,
+            req_short_prompt.request_id: 1,
+        },
+        sampled_token_ids=[[1], [1]],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+    scheduler.update_from_output(sched_out0, mro)
+
+    # Phase 1 processes req_long_prompt first (index 0).
+    # Its 49th token crosses a block boundary → needs a 4th block.
+    # KV cache is full → preemption fires.
+    #
+    # Correct SRTF key: max(50, 30) → preempts req_long_prompt (itself).
+    # Wrong  SRTF key:  max(2,  14) → would preempt req_short_prompt instead.
+    _ = scheduler.schedule()
+
+    assert req_long_prompt.status == RequestStatus.PREEMPTED, (
+        "SRTF should preempt req_long_prompt (correct remaining=50) "
+        "not req_short_prompt (correct remaining=30)"
+    )
+    assert req_short_prompt.status == RequestStatus.RUNNING, (
+        "req_short_prompt has fewer remaining tokens (30) and should be spared"
+    )
