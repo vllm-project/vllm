@@ -346,10 +346,10 @@ class HummingConfig(QuantizationConfig):
 class HummingLayerQuantizationConfig(HummingConfig):
     def __init__(
         self,
-        weight_schema: BaseWeightSchema,
-        input_schema: BaseInputSchema | None = None,
-        force_weight_schema: HummingWeightSchema | None = None,
-        force_input_schema: HummingInputSchema | None = None,
+        weight_schema: "BaseWeightSchema",
+        input_schema: "BaseInputSchema | None" = None,
+        force_weight_schema: "HummingWeightSchema | None" = None,
+        force_input_schema: "HummingInputSchema | None" = None,
         is_online_quant: bool = False,
     ):
         self.weight_schema = weight_schema
