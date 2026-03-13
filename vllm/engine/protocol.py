@@ -121,6 +121,14 @@ class EngineClient(ABC):
         ...
 
     @abstractmethod
+    async def check_health_gpu(self) -> None:
+        """Raise if GPU is unhealthy.
+
+        Runs a dummy forward pass to verify GPU can execute inference.
+        """
+        ...
+
+    @abstractmethod
     async def start_profile(self) -> None:
         """Start profiling the engine"""
         ...
