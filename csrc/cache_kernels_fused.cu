@@ -81,10 +81,7 @@ __global__ void concat_and_cache_mla_rope_fused_kernel(
     q_pe_head_ptr[pair_idx_y] = y_dst;
   }
 
-  const int64_t slot_idx = kv_cache_slot_mapping != nullptr
-      ? kv_cache_slot_mapping[token_idx]
-      : 0; // set to 0 because we don't want to return early
-
+  const int64_t slot_idx = kv_cache_slot_mapping[token_idx];
   const int64_t block_idx = slot_idx / block_size;
   const int64_t entry_idx = slot_idx % block_size;
 
@@ -122,10 +119,6 @@ __global__ void concat_and_cache_mla_rope_fused_kernel(
     k_pe_head_ptr[pair_idx_x] = x_dst;
     k_pe_head_ptr[pair_idx_y] = y_dst;
 
-    if (kv_cache_slot_mapping == nullptr) {
-      return;
-    }
-
     // NOTE Why is this monster necessary?
     // When K is of type float16, the actual template replacement for
     // raw_kv_scalar_t with be u16. That's why it's used at the last moment
@@ -150,10 +143,6 @@ __global__ void concat_and_cache_mla_rope_fused_kernel(
           fp8::scaled_convert<cache_t, raw_kv_scalar_t, kv_dt>(
               raw_y_value, *kv_cache_quant_scale);
     }
-  }
-
-  if (kv_cache_slot_mapping == nullptr) {
-    return;
   }
 
   // NOPE
@@ -189,7 +178,7 @@ __global__ void concat_and_cache_mla_rope_fused_kernel(
                 rope_cos_sin_cache.data_ptr<qk_t>(), rot_dim,                  \
                 q_pe_stride_token, q_pe_stride_head, k_pe_stride, kv_c_stride, \
                 num_q_heads, reinterpret_cast<CACHE_T*>(kv_cache.data_ptr()),  \
-                has_slot_mapping ? kv_cache_slot_mapping.data_ptr<int64_t>() : nullptr, block_stride,       \
+                kv_cache_slot_mapping.data_ptr<int64_t>(), block_stride,       \
                 entry_stride, kv_lora_rank, block_size,                        \
                 kv_cache_quant_scale.data_ptr<float>());                       \
       } else {                                                                 \
@@ -201,7 +190,7 @@ __global__ void concat_and_cache_mla_rope_fused_kernel(
                 rope_cos_sin_cache.data_ptr<qk_t>(), rot_dim,                  \
                 q_pe_stride_token, q_pe_stride_head, k_pe_stride, kv_c_stride, \
                 num_q_heads, reinterpret_cast<CACHE_T*>(kv_cache.data_ptr()),  \
-                has_slot_mapping ? kv_cache_slot_mapping.data_ptr<int64_t>() : nullptr, block_stride,       \
+                kv_cache_slot_mapping.data_ptr<int64_t>(), block_stride,       \
                 entry_stride, kv_lora_rank, block_size,                        \
                 kv_cache_quant_scale.data_ptr<float>());                       \
       }                                                                        \
@@ -223,8 +212,7 @@ void concat_and_cache_mla_rope_fused(
         kv_cache_slot_mapping,  // [num_tokens] or [num_actual_tokens]
     torch::Tensor&
         kv_cache,  // [num_blocks, block_size, (kv_lora_rank + rot_dim)]
-    const std::string& kv_cache_dtype, torch::Tensor& kv_cache_quant_scale,
-    bool has_slot_mapping) {
+    const std::string& kv_cache_dtype, torch::Tensor& kv_cache_quant_scale) {
   const int64_t num_tokens = q_pe.size(0);
 
   const int num_q_heads = q_pe.size(1);
@@ -255,16 +243,14 @@ void concat_and_cache_mla_rope_fused(
   TORCH_CHECK_EQ(rope_cos_sin_cache.size(1), rot_dim);
   TORCH_CHECK_EQ(rope_cos_sin_cache.scalar_type(), q_pe.scalar_type());
 
-  if (has_slot_mapping) {
-    TORCH_CHECK_EQ(kv_cache_slot_mapping.size(0), num_tokens);
-    TORCH_CHECK_EQ(kv_cache_slot_mapping.scalar_type(), c10::ScalarType::Long);
+  TORCH_CHECK_EQ(kv_cache_slot_mapping.size(0), num_tokens);
+  TORCH_CHECK_EQ(kv_cache_slot_mapping.scalar_type(), c10::ScalarType::Long);
 
-    TORCH_CHECK_EQ(kv_cache.dim(), 3);
-    TORCH_CHECK_EQ(kv_cache.size(2), kv_lora_rank + rot_dim);
-  
-    TORCH_CHECK_EQ(kv_cache_quant_scale.numel(), 1);
-    TORCH_CHECK_EQ(kv_cache_quant_scale.scalar_type(), c10::ScalarType::Float);
-  }
+  TORCH_CHECK_EQ(kv_cache.size(2), kv_lora_rank + rot_dim);
+  TORCH_CHECK_EQ(kv_cache.dim(), 3);
+
+  TORCH_CHECK_EQ(kv_cache_quant_scale.numel(), 1);
+  TORCH_CHECK_EQ(kv_cache_quant_scale.scalar_type(), c10::ScalarType::Float);
 
   int64_t q_pe_stride_token = q_pe.stride(0);
   int64_t q_pe_stride_head = q_pe.stride(1);
@@ -272,10 +258,10 @@ void concat_and_cache_mla_rope_fused(
   int64_t k_pe_stride = k_pe.stride(0);
   int64_t kv_c_stride = kv_c.stride(0);
 
-  int block_size = has_slot_mapping ? kv_cache.size(1) : -1;
+  int block_size = kv_cache.size(1);
 
-  int block_stride = has_slot_mapping ? kv_cache.stride(0) : -1;
-  int entry_stride = has_slot_mapping ? kv_cache.stride(1) : -1;
+  int block_stride = kv_cache.stride(0);
+  int entry_stride = kv_cache.stride(1);
 
   int rope_block_size = std::min(num_q_heads * rot_dim / 2, 512);
   int mla_block_size = kv_lora_rank;

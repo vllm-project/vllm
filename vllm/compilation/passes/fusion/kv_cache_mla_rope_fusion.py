@@ -38,19 +38,31 @@ def fused_concat_and_cache_mla_rope_impl(
     attn_layer = forward_context.no_compile_layers[layer_name]
     kv_cache = attn_layer.kv_cache[forward_context.virtual_engine]
     layer_slot_mapping = forward_context.slot_mapping.get(layer_name)
-    ops.concat_and_cache_mla_rope_fused(
-        positions,
-        q_pe,
-        k_pe,
-        kv_c,
-        cos_sin_cache,
-        is_neox,
-        layer_slot_mapping,
-        kv_cache,
-        kv_cache_dtype,
-        kv_cache_scale,
-        layer_slot_mapping is not None,
-    )
+    if layer_slot_mapping is not None:
+        ops.concat_and_cache_mla_rope_fused(
+            positions,
+            q_pe,
+            k_pe,
+            kv_c,
+            cos_sin_cache,
+            is_neox,
+            layer_slot_mapping,
+            kv_cache,
+            kv_cache_dtype,
+            kv_cache_scale,
+        )
+    else:
+        # if slot mapping is not available, kv update is not performed,
+        # run only RoPE instead
+        RotaryEmbedding.forward_static(
+            positions,
+            q_pe,
+            k_pe,
+            q_pe.shape[2],
+            q_pe.shape[2],
+            cos_sin_cache,
+            is_neox,
+        )
 
 
 def fused_concat_and_cache_mla_rope_fake(
