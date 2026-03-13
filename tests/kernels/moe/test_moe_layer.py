@@ -95,6 +95,17 @@ BACKEND_SUPPORTED_QUANTS: dict[str, set[str | None]] = {
 }
 # fmt: on
 
+# Which quantization methods support EPLB.
+# ModelOptFp8MoEMethod inherits supports_eplb=False from FusedMoEMethodBase.
+# TODO: double check modelopt fp8
+# modelopt_fp4 excluded: get_expert_weights() can't handle NvFP4 packed format.
+EPLB_SUPPORTED_QUANTS: list[str | None] = [None, "fp8"]
+
+# Which backends support EPLB.
+# deepep backends fail in get_expert_weights / rearrange_expert_weights_inplace.
+# TODO(bnell): check this
+EPLB_SUPPORTED_BACKENDS: list[str] = ["allgather_reducescatter"]
+
 
 def maybe_roundup_layer_hidden_size(
     hidden_size: int,
@@ -199,12 +210,12 @@ class MoETestConfig:
     use_shared_experts: bool
     use_gate: bool
     use_routed_input_transform: bool
-    enable_eplb: bool
-    reduce_results: bool
-    backend: str | None
-    ep_size: int
-    dp_size: int
-    tp_size: int
+    enable_eplb: bool = False
+    reduce_results: bool = False
+    backend: str | None = None
+    ep_size: int = 1
+    dp_size: int = 1
+    tp_size: int = 1
 
 
 def generate_valid_test_configs(
@@ -262,16 +273,12 @@ def generate_valid_test_configs(
     return configs
 
 
+# TODO: break this up into sections
 def is_valid_config(config: MoETestConfig) -> tuple[bool, str | None]:
     # routed_input_transform only makes sense with shared_experts (latent MoE)
     # TODO: not sure this is true
     if config.use_routed_input_transform and not config.use_shared_experts:
         return False, "routed_input_transform requires shared_experts"
-
-    # gate requires shared_experts (use_overlapped mode)
-    # TODO: also not sure this is true
-    if config.use_gate and not config.use_shared_experts:
-        return False, "gate requires shared_experts (use_overlapped mode)"
 
     # TODO: disable for now
     if config.use_routed_input_transform and config.enable_eplb:
@@ -307,6 +314,11 @@ def is_valid_config(config: MoETestConfig) -> tuple[bool, str | None]:
             "routed_input_transform + quantization + higher hidden dimensions "
             "leads to large differences.",
         )
+
+    # gate requires shared_experts (use_overlapped mode)
+    # TODO: also not sure this is true
+    if config.use_gate and not config.use_shared_experts:
+        return False, "gate requires shared_experts (use_overlapped mode)"
 
     # Skip modelopt_fp4 if not on B100+ (compute capability 10.0+)
     if (
@@ -354,10 +366,10 @@ def is_valid_config(config: MoETestConfig) -> tuple[bool, str | None]:
                 )
 
     if config.enable_eplb and config.quantization not in EPLB_SUPPORTED_QUANTS:
-        return False, "EPLB not supported with {config.quantization} quantization."
+        return False, f"EPLB not supported with {config.quantization} quantization."
 
     if config.enable_eplb and config.backend not in EPLB_SUPPORTED_BACKENDS:
-        return False, "EPLB not supported with {config.backend}."
+        return False, f"EPLB not supported with {config.backend}."
 
     world_size = config.tp_size * config.dp_size
     if config.reduce_results and world_size == 1:
@@ -373,136 +385,6 @@ def is_valid_config(config: MoETestConfig) -> tuple[bool, str | None]:
         return False, "EPLB only works with EP+DP"
 
     return True, None
-
-
-def apply_test_filter(
-    *,
-    use_routed_input_transform: bool = False,
-    use_shared_experts: bool = False,
-    use_gate: bool = False,
-    quantization: str | None = None,
-    k: int | None = None,
-    world_size: int | None = None,
-    num_gpus: int | None = None,
-    reduce_results: bool = False,
-    backend: str | None = None,
-    use_ep: bool = False,
-    num_experts: int | None = None,
-    dp_size: int | None = None,
-    enable_eplb: bool = False,
-) -> None:
-    """Apply common pytest.skip conditions for MOE layer tests.
-
-    Args:
-        use_routed_input_transform: Whether routed_input_transform is used
-        use_shared_experts: Whether shared_experts is used
-        use_gate: Whether gate is used
-        quantization: Quantization method being tested
-        k: Hidden dimension size
-        world_size: Total number of GPUs in the test
-        num_gpus: Number of available GPUs
-        reduce_results: Whether reduce_results is enabled
-        backend: MOE backend being tested
-        use_ep: Whether expert parallelism is enabled
-        num_experts: Number of experts
-        dp_size: Data parallel size
-    """
-    # routed_input_transform only makes sense with shared_experts (latent MoE)
-    # TODO: not sure this is true
-    if use_routed_input_transform and not use_shared_experts:
-        pytest.skip("routed_input_transform requires shared_experts")
-
-    # gate requires shared_experts (use_overlapped mode)
-    # TODO: also not sure this is true
-    if use_gate and not use_shared_experts:
-        pytest.skip("gate requires shared_experts (use_overlapped mode)")
-
-    # TODO: disable for now
-    if use_routed_input_transform and enable_eplb:
-        pytest.skip("routed_input_transform not supported with EPLB.")
-
-    # TODO: disable for now
-    if use_routed_input_transform and use_gate:
-        pytest.skip(
-            "routed_input_transform not supported with gate because of padding problems"
-        )
-
-    # TODO: disable for now
-    if use_routed_input_transform and backend in [
-        "deepep_low_latency",
-        "deepep_high_throughput",
-    ]:
-        pytest.skip(
-            "routed_input_transform not supported with DeepEP backends because "
-            "of padding problems"
-        )
-
-    # routed_input_transform + quantization + high hidden dimensions
-    if (
-        k is not None
-        and use_routed_input_transform
-        and quantization is not None
-        and k >= 2048
-    ):
-        pytest.skip(
-            "routed_input_transform + quantization + higher hidden dimensions "
-            "leads to large differences."
-        )
-
-    # Skip modelopt_fp4 if not on B100+ (compute capability 10.0+)
-    if quantization == "modelopt_fp4" and not current_platform.has_device_capability(
-        100
-    ):
-        pytest.skip("modelopt_fp4 not supported on H100+ GPUs")
-
-    # Skip flashinfer_all2allv if not on B100+ (compute capability 10.0+)
-    if backend == "flashinfer_all2allv" and not current_platform.has_device_capability(
-        100
-    ):
-        pytest.skip("flashinfer_all2allv not supported on H100+ GPUs")
-
-    # Check if enough GPUs available
-    if world_size is not None and num_gpus is not None and world_size > num_gpus:
-        pytest.skip(f"Not enough GPUs got {num_gpus}, expected {world_size}.")
-
-    # reduce_results incompatibilities
-    if reduce_results and use_shared_experts:
-        pytest.skip("reduce_results=True is not compatible with shared_experts=True")
-
-    if reduce_results and world_size == 1:
-        pytest.skip("reduce_results=True only makes sense for multi-GPU tests")
-
-    if reduce_results and quantization is not None:
-        pytest.skip(
-            "reduce_results=True only tested with unquantized data types in order "
-            "to limit number of tests run"
-        )
-
-    # Backend-specific checks
-    if backend is not None:
-        supported_quants = BACKEND_SUPPORTED_QUANTS.get(backend)
-        if supported_quants is not None and quantization not in supported_quants:
-            pytest.skip(f"{backend} does not support quantization={quantization}")
-
-        if backend == "flashinfer_all2allv" and use_ep:
-            pytest.skip("flashinfer_all2allv EP not yet supported.")
-
-        if backend == "deepep_low_latency" and k is not None:
-            from vllm.model_executor.layers.fused_moe.deepep_ll_prepare_finalize import (  # noqa: E501
-                DeepEPLLPrepareAndFinalize,
-            )
-
-            if k not in DeepEPLLPrepareAndFinalize.SUPPORTED_HIDDEN_SIZES:
-                pytest.skip(f"Skipping unsupported K {k} in {backend} w/o EP.")
-
-    # EPLB-specific checks
-    if (
-        enable_eplb
-        and num_experts is not None
-        and dp_size is not None
-        and num_experts % dp_size != 0
-    ):
-        pytest.skip("EPLB requires num_experts divisible by ep_size")
 
 
 def chunk_scales_by_rank(
@@ -768,7 +650,7 @@ def create_shared_experts_from_config(
     ).to(device)
 
 
-# Make version that takes a MoETestConfig
+# Make version that takes a MoETestConfig?
 def setup_moe_test_data(
     m: int,
     k: int,
@@ -1508,13 +1390,22 @@ def test_moe_layer_no_parallel(
 
     Backend doesn't matter when there's no parallelism, so we don't parametrize on it.
     """
-    apply_test_filter(
-        use_routed_input_transform=use_routed_input_transform,
-        use_shared_experts=use_shared_experts,
-        use_gate=use_gate,
-        quantization=quantization,
-        k=k,
+    test_config = MoETestConfig(
+        m,
+        n,
+        k,
+        num_experts,
+        top_k,
+        torch.bfloat16,
+        quantization,
+        use_shared_experts,
+        use_gate,
+        use_routed_input_transform,
     )
+
+    valid, reason = is_valid_config(test_config)
+    if not valid:
+        pytest.skip(reason)
 
     set_random_seed(7)
 
@@ -1639,223 +1530,6 @@ def test_moe_layer_no_parallel(
         torch.testing.assert_close(baseline_output, actual, atol=atol, rtol=rtol)
     finally:
         # Cleanup GPU memory
-        torch.cuda.synchronize()
-        torch.accelerator.empty_cache()
-
-
-# TODO: add cudagraphs/torch.compile tests
-@pytest.mark.parametrize("m, n, k", SHAPE_COMBOS)
-@pytest.mark.parametrize("num_experts", NUM_EXPERTS)
-@pytest.mark.parametrize("top_k", TOP_KS)
-@pytest.mark.parametrize("quantization", QUANT_METHODS)
-@pytest.mark.parametrize("dp_size, tp_size, use_ep", PARALLEL_COMBOS)
-@pytest.mark.parametrize("backend", BACKENDS)
-@pytest.mark.parametrize("use_shared_experts", [False, True])
-@pytest.mark.parametrize("reduce_results", [False, True])
-@pytest.mark.parametrize("use_gate", [False, True])
-@pytest.mark.parametrize("use_routed_input_transform", [False, True])
-def test_moe_layer(
-    m: int,
-    n: int,
-    k: int,
-    num_experts: int,
-    top_k: int,
-    quantization: str | None,
-    dp_size: int,
-    tp_size: int,
-    use_ep: bool,
-    backend: str,
-    use_shared_experts: bool,
-    reduce_results: bool,
-    use_gate: bool,
-    use_routed_input_transform: bool,
-    monkeypatch,
-):
-    """Test MoE layer with parallelism (multi-GPU or TP/EP enabled).
-
-    For non-parallel cases (world_size == 1), use test_moe_layer_no_parallel instead.
-    """
-    num_gpus = cuda_device_count_stateless()
-    world_size = tp_size * dp_size
-    ep_size = 1 if not use_ep else world_size  # or dp_size?
-    assert world_size > 1
-
-    apply_test_filter(
-        use_routed_input_transform=use_routed_input_transform,
-        use_shared_experts=use_shared_experts,
-        use_gate=use_gate,
-        quantization=quantization,
-        k=k,
-        world_size=world_size,
-        num_gpus=num_gpus,
-        reduce_results=reduce_results,
-        backend=backend,
-        use_ep=use_ep,
-    )
-
-    test_env = dict()
-    test_env["VLLM_MOE_DP_CHUNK_SIZE"] = "128"
-    monkeypatch.setenv("VLLM_MOE_DP_CHUNK_SIZE", "128")
-
-    # TODO
-    # VLLM_FLASHINFER_MOE_BACKEND=latency
-    # VLLM_USE_FLASHINFER_MOE_FP16=1
-    # VLLM_USE_FLASHINFER_MOE_FP8
-    # VLLM_USE_FLASHINFER_MOE_FP4
-    # VLLM_USE_FLASHINFER_MOE_INT4
-
-    parallel_config = ParallelConfig(
-        pipeline_parallel_size=1,
-        data_parallel_size=dp_size,
-        tensor_parallel_size=tp_size,
-        enable_expert_parallel=use_ep,
-        all2all_backend=backend,
-    )
-
-    compilation_config = CompilationConfig()
-    # compilation_config.mode = CompilationMode.NONE  # for now
-    compilation_config.pass_config.fuse_allreduce_rms = False  # for now
-
-    vllm_config = VllmConfig(
-        parallel_config=parallel_config, compilation_config=compilation_config
-    )
-
-    try:
-        parallel_launch_with_config(
-            world_size,
-            _test_loop,
-            vllm_config,
-            test_env,
-            ep_size,
-            dp_size,
-            tp_size,
-            m,
-            n,
-            k,
-            num_experts,
-            top_k,
-            quantization,
-            reduce_results,
-            backend,
-            _test_body_regular,
-            use_shared_experts,
-            use_gate,
-            use_routed_input_transform,
-        )
-    finally:
-        # Cleanup GPU memory after spawned processes complete
-        torch.cuda.synchronize()
-        torch.accelerator.empty_cache()
-
-
-# Which quantization methods support EPLB.
-# ModelOptFp8MoEMethod inherits supports_eplb=False from FusedMoEMethodBase.
-# TODO: double check modelopt fp8
-# modelopt_fp4 excluded: get_expert_weights() can't handle NvFP4 packed format.
-EPLB_SUPPORTED_QUANTS: list[str | None] = [None, "fp8"]
-
-# Which backends support EPLB.
-# deepep backends fail in get_expert_weights / rearrange_expert_weights_inplace.
-# TODO(bnell): check this
-EPLB_SUPPORTED_BACKENDS: list[str] = ["allgather_reducescatter"]
-
-# EPLB only works with EP and specific quant methods.
-EPLB_PARALLEL_COMBOS = [
-    [2, 1, True],
-    [4, 1, True],
-]
-
-
-@pytest.mark.parametrize("m, n, k", SHAPE_COMBOS)
-@pytest.mark.parametrize("num_experts", NUM_EXPERTS)
-@pytest.mark.parametrize("top_k", TOP_KS)
-@pytest.mark.parametrize("quantization", EPLB_SUPPORTED_QUANTS)
-@pytest.mark.parametrize("dp_size, tp_size, use_ep", EPLB_PARALLEL_COMBOS)
-@pytest.mark.parametrize("backend", EPLB_SUPPORTED_BACKENDS)
-@pytest.mark.parametrize("use_shared_experts", [False, True])
-@pytest.mark.parametrize("reduce_results", [False, True])
-@pytest.mark.parametrize("use_gate", [False, True])
-@pytest.mark.parametrize("use_routed_input_transform", [False, True])
-def test_moe_layer_eplb(
-    m: int,
-    n: int,
-    k: int,
-    num_experts: int,
-    top_k: int,
-    quantization: str | None,
-    dp_size: int,
-    tp_size: int,
-    use_ep: bool,
-    backend: str,
-    use_shared_experts: bool,
-    reduce_results: bool,
-    use_gate: bool,
-    use_routed_input_transform: bool,
-    monkeypatch,
-):
-    num_gpus = cuda_device_count_stateless()
-    world_size = tp_size * dp_size
-
-    assert world_size > 1
-
-    apply_test_filter(
-        use_routed_input_transform=use_routed_input_transform,
-        use_shared_experts=use_shared_experts,
-        use_gate=use_gate,
-        quantization=quantization,
-        k=k,
-        world_size=world_size,
-        num_gpus=num_gpus,
-        reduce_results=reduce_results,
-        backend=backend,
-        num_experts=num_experts,
-        dp_size=dp_size,
-        enable_eplb=True,
-    )
-
-    test_env = dict()
-    test_env["VLLM_MOE_DP_CHUNK_SIZE"] = "128"
-    monkeypatch.setenv("VLLM_MOE_DP_CHUNK_SIZE", "128")
-
-    parallel_config = ParallelConfig(
-        pipeline_parallel_size=1,
-        data_parallel_size=dp_size,
-        tensor_parallel_size=tp_size,
-        enable_expert_parallel=use_ep,
-        all2all_backend=backend,
-    )
-
-    compilation_config = CompilationConfig()
-    compilation_config.pass_config.fuse_allreduce_rms = False
-
-    vllm_config = VllmConfig(
-        parallel_config=parallel_config, compilation_config=compilation_config
-    )
-
-    try:
-        parallel_launch_with_config(
-            world_size,
-            _test_loop,
-            vllm_config,
-            test_env,
-            world_size,  # ep_size = world_size for EPLB
-            dp_size,
-            tp_size,
-            m,
-            n,
-            k,
-            num_experts,
-            top_k,
-            quantization,
-            reduce_results,
-            backend,
-            _test_body_eplb,
-            use_shared_experts,
-            use_gate,
-            use_routed_input_transform,
-        )
-    finally:
-        # Cleanup GPU memory after spawned processes complete
         torch.cuda.synchronize()
         torch.accelerator.empty_cache()
 
