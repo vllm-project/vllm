@@ -5,7 +5,7 @@ import ast
 import copy
 from typing import TYPE_CHECKING, Any, Literal, get_args
 
-from pydantic import BaseModel, Field, SkipValidation, model_validator
+from pydantic import Field, SkipValidation, model_validator
 from typing_extensions import Self
 
 from vllm.config import LoadConfig
@@ -62,15 +62,14 @@ RejectionSampleMethod = Literal["strict", "probabilistic"]
 
 @config
 class DynamicSpeculativeConfig:
-    # """A mapping from batch size to optimal number of drafts to use for that
-    # batch size. This is used to dynamically adjust the number of drafts used
-    # based on the current batch size."""
-    # optimal_num_speculative_tokens: dict[int, int] = None
-
-    """Whether the statistics are updated online or not during inference."""
+    """A mapping from batch size to optimal number of drafts to use for that
+    batch size. This is used to dynamically adjust the number of drafts used
+    based on the current batch size."""
 
     is_online: bool = False
+    """Whether the statistics are updated online or not during inference."""
 
+    batch_stats: dict[int, dict[int, float]] = None
     """ 
     Batch statistics for different batch sizes and number of drafts.
     The structure is as follows:
@@ -88,13 +87,12 @@ class DynamicSpeculativeConfig:
 
     where bs 1 at K=3 has itl 9.41ms. K=0 means no speculative decoding.
     """
-    batch_stats: dict[int, dict[int, float]] = None
 
-    """Maximum number of speculative tokens supported in the statistics."""
     max_num_speculative_tokens: int = None
+    """Maximum number of speculative tokens supported in the statistics."""
 
-    """Acceptance rate per position on an offline dataset."""
     acceptance_rate_per_pos: list[float] = None
+    """Acceptance rate per position on an offline dataset."""
 
 
 @config
