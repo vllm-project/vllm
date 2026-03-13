@@ -175,10 +175,9 @@ class OpenAIServingRender:
         self,
         request: ChatCompletionRequest,
     ) -> tuple[list[ConversationMessage], list[ProcessorInputs]] | ErrorResponse:
-        """Core preprocessing logic for chat requests (no model/engine check).
+        """Copied from OpenAIServingChat.render_chat_request.
 
-        Called directly by render_chat_request and delegated to by
-        OpenAIServingChat.render_chat_request after its engine-aware checks.
+        Differences: engine_client.errored check removed (no engine client).
         """
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
@@ -262,10 +261,8 @@ class OpenAIServingRender:
         self,
         request: CompletionRequest,
     ) -> list[GenerateRequest] | ErrorResponse:
-        """Validate the model and preprocess a completion request.
-
-        This is the authoritative implementation used directly by the
-        GPU-less render server and delegated to by OpenAIServingCompletion.
+        """
+        Differences: engine_client.errored check removed (no engine client).
         """
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
@@ -372,7 +369,7 @@ class OpenAIServingRender:
         request: ChatCompletionRequest,
         should_include_tools: bool = True,
     ):
-        """Build Harmony (GPT-OSS) messages and engine prompt from a chat request."""
+        """Copied from OpenAIServingChat._make_request_with_harmony."""
         messages: list[OpenAIMessage] = []
 
         # because of issues with pydantic we need to potentially
