@@ -326,15 +326,13 @@ class TestWorkspaceManagerNeverZeros:
     @pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
     def test_workspace_manager_returns_uninitialized_memory(self):
         """WorkspaceManager.get_simultaneous returns views into torch.empty."""
-        from vllm.v1.worker.workspace import WorkspaceManager, set_workspace_manager
+        import vllm.v1.worker.workspace as ws_module
+        from vllm.v1.worker.workspace import init_workspace_manager, current_workspace_manager
 
-        device = torch.device("cuda:0")
-        manager = WorkspaceManager(device)
-        set_workspace_manager(manager)
-
+        old_manager = ws_module._manager
         try:
-            from vllm.v1.worker.workspace import current_workspace_manager
-
+            ws_module._manager = None
+            init_workspace_manager(torch.device("cuda:0"), num_ubatches=1)
             ws_mgr = current_workspace_manager()
 
             # First allocation - get a workspace
@@ -357,21 +355,19 @@ class TestWorkspaceManagerNeverZeros:
                 "Workspace reuse should preserve stale data (NaN)"
             )
         finally:
-            set_workspace_manager(None)
+            ws_module._manager = old_manager
 
     @pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
     def test_workspace_shared_between_workspace13_and_fused_out(self):
         """When num_chunks==1, workspace13 and fused_out share memory.
         This is the modular_kernel.py:1143-1150 optimization."""
-        from vllm.v1.worker.workspace import WorkspaceManager, set_workspace_manager
+        import vllm.v1.worker.workspace as ws_module
+        from vllm.v1.worker.workspace import init_workspace_manager, current_workspace_manager
 
-        device = torch.device("cuda:0")
-        manager = WorkspaceManager(device)
-        set_workspace_manager(manager)
-
+        old_manager = ws_module._manager
         try:
-            from vllm.v1.worker.workspace import current_workspace_manager
-
+            ws_module._manager = None
+            init_workspace_manager(torch.device("cuda:0"), num_ubatches=1)
             ws_mgr = current_workspace_manager()
 
             # Simulate the allocation pattern from _allocate_buffers
@@ -407,7 +403,7 @@ class TestWorkspaceManagerNeverZeros:
                 "from the shared workspace"
             )
         finally:
-            set_workspace_manager(None)
+            ws_module._manager = old_manager
 
 
 class TestEndToEndNaNContaminationScenario:
