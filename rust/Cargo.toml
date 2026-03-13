@@ -7,3 +7,34 @@ version = "0.1.0"
 edition = "2024"
 
 [workspace.dependencies]
+anyhow = "1.0.100"
+bytes = "1.11.1"
+clap = { version = "4.5.38", features = ["derive"] }
+enum-as-inner = "0.7.0"
+futures = "0.3.31"
+hex = "0.4.3"
+parking_lot = "0.12.5"
+rmp-serde = "1.3.1"
+rmpv = { version = "1.3.0", features = ["with-serde"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_default = "0.2.0"
+serde_repr = "0.1.20"
+serde_tuple = "1.1.3"
+tempfile = "3.23.0"
+thiserror = "2.0.16"
+thiserror-ext = "0.3.0"
+tokio = { version = "1.47.1", features = [
+    "macros",
+    "rt-multi-thread",
+    "sync",
+    "time",
+] }
+tokio-util = { version = "0.7.18", features = ["rt"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.20", features = ["env-filter", "fmt"] }
+uuid = { version = "1.22.0", features = ["v4"] }
+vllm-engine-core-client = { path = "src/engine-core-client" }
+zeromq = { version = "0.6.0-pre.1", default-features = false, features = [
+    "tokio-runtime",
+    "all-transport",
+] }
