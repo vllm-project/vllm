@@ -187,7 +187,6 @@ def tp_chunk_gate_up(
     return torch.cat([gate, up], dim=dim)
 
 
-# TODO could add parallel info
 @dataclass
 class MoETestConfig:
     m: int
@@ -203,10 +202,19 @@ class MoETestConfig:
     enable_eplb: bool
     reduce_results: bool
     backend: str | None
+    ep_size: int
+    dp_size: int
+    tp_size: int
 
 
-def generate_valid_test_configs(backend: str) -> list[MoETestConfig]:
+def generate_valid_test_configs(
+    backend: str,
+    ep_size: int,
+    dp_size: int,
+    tp_size: int,
+) -> list[MoETestConfig]:
     configs: list[MoETestConfig] = []
+
     for (
         shape,
         num_experts,
@@ -225,7 +233,7 @@ def generate_valid_test_configs(backend: str) -> list[MoETestConfig]:
         [False, True],  # shared
         [False, True],  # gate
         [False, True],  # routed input exform
-        [False],  # [False, True], # eplb
+        [False, True],  # eplb
         [False, True],  # reduce results
     ):
         config = MoETestConfig(
@@ -242,6 +250,9 @@ def generate_valid_test_configs(backend: str) -> list[MoETestConfig]:
             enable_eplb,
             reduce_results,
             backend,
+            ep_size,
+            dp_size,
+            tp_size,
         )
 
         valid, reason = is_valid_config(config)
@@ -342,24 +353,24 @@ def is_valid_config(config: MoETestConfig) -> tuple[bool, str | None]:
                     f"Skipping unsupported K {config.k} in {config.backend} w/o EP.",
                 )
 
-    return True, None
+    if config.enable_eplb and config.quantization not in EPLB_SUPPORTED_QUANTS:
+        return False, "EPLB not supported with {config.quantization} quantization."
 
+    if config.enable_eplb and config.backend not in EPLB_SUPPORTED_BACKENDS:
+        return False, "EPLB not supported with {config.backend}."
 
-def is_valid_parallel_config(
-    config: MoETestConfig,
-    use_ep: bool,
-    dp_size: int,
-    tp_size: int,
-) -> tuple[bool, str | None]:
-    world_size = tp_size * dp_size
+    world_size = config.tp_size * config.dp_size
     if config.reduce_results and world_size == 1:
         return False, "reduce_results=True only makes sense for multi-GPU tests"
 
-    if config.backend == "flashinfer_all2allv" and use_ep:
+    if config.backend == "flashinfer_all2allv" and config.ep_size > 1:
         return False, "flashinfer_all2allv EP not yet supported."
 
-    if config.enable_eplb and config.num_experts % dp_size != 0:
+    if config.enable_eplb and config.num_experts % config.dp_size != 0:
         return False, "EPLB requires num_experts divisible by ep_size"
+
+    if config.enable_eplb and config.ep_size == 1:
+        return False, "EPLB only works with EP+DP"
 
     return True, None
 
@@ -1868,18 +1879,11 @@ def _test_loop_config(
 ) -> None:
     set_random_seed(7)
 
+    total = 0
     passed = 0
     failed = 0
 
     for test_config in test_configs:
-        valid, reason = is_valid_parallel_config(
-            test_config, ep_size > 1, dp_size, tp_size
-        )
-
-        if not valid:
-            print(reason)
-            continue
-
         cc = vllm_config.compilation_config
         if "from_forward_context" in cc.static_forward_context:
             del cc.static_forward_context["from_forward_context"]
@@ -1891,9 +1895,9 @@ def _test_loop_config(
                 pgi,
                 vllm_config,
                 cpu_group,
-                ep_size,
-                dp_size,
-                tp_size,
+                test_config.ep_size,
+                test_config.dp_size,
+                test_config.tp_size,
                 test_config.m,
                 test_config.n,
                 test_config.k,
@@ -1912,9 +1916,11 @@ def _test_loop_config(
         except Exception as ex:
             print(f"FAILED {ex}")
             failed = failed + 1
+        finally:
+            total = total + 1
 
     if failed > 0:
-        raise RuntimeError(f"{failed} of {failed + passed} tests failed.")
+        raise RuntimeError(f"{failed} of {total} tests failed.")
 
 
 # TODO: add cudagraphs/torch.compile tests
@@ -1960,7 +1966,9 @@ def test_moe_layer_configs(
         parallel_config=parallel_config, compilation_config=compilation_config
     )
 
-    test_configs = generate_valid_test_configs(backend)
+    test_configs = generate_valid_test_configs(backend, ep_size, dp_size, tp_size)
+
+    print(f"Collected {len(test_configs)} MoE test configs")
 
     try:
         parallel_launch_with_config(
