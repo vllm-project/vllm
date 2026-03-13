@@ -255,7 +255,7 @@ class LoRAModelManager:
         for module_name, module in self.modules.items():
             module_lora = self._get_lora_layer_weights(lora_model, module_name)
             if not module_lora:
-                module.reset_lora(index)
+                logger.debug("No LoRA weights retrieved for %s", module_name)
                 continue
 
             module.set_lora(

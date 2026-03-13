@@ -273,15 +273,13 @@ class PixtralForConditionalGeneration(
         },
         orig_to_new_substr={
             ".linear_1.": ".w_in.",
-            "linear_2.": ".w_out.",
+            ".linear_2.": ".w_out.",
         },
     )
 
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
-        "wqkv": [".wk", ".wq", ".wv"],
-        "w13": ["w1", "w3"],
     }
 
     @classmethod
@@ -413,16 +411,16 @@ class PixtralForConditionalGeneration(
     ) -> torch.Tensor | None:
         return self.language_model.compute_logits(hidden_states)
 
-    _vision_encoder_stacked_params = [
-        # (param_name, weight_name, shard_id)
-        (".wqkv", ".wq", "q"),
-        (".wqkv", ".wk", "k"),
-        (".wqkv", ".wv", "v"),
-        (".w13", ".w1", 0),
-        (".w13", ".w3", 1),
-    ]
-
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
+        _vision_encoder_stacked_params = [
+            # (param_name, shard_name, shard_id)
+            (".qkv_proj", ".q_proj", "q"),
+            (".qkv_proj", ".k_proj", "k"),
+            (".qkv_proj", ".v_proj", "v"),
+            (".gate_up_proj", ".gate_proj", 0),
+            (".gate_up_proj", ".up_proj", 1),
+        ]
+
         def is_vision_encoder_weights(weight: tuple[str, torch.Tensor]):
             return weight[0].startswith(("vision_encoder", "vision_tower"))
 
@@ -468,7 +466,7 @@ class PixtralForConditionalGeneration(
                         param_name,
                         weight_name,
                         shard_id,
-                    ) in self._vision_encoder_stacked_params:
+                    ) in _vision_encoder_stacked_params:
                         if weight_name in trimmed_name:
                             trimmed_name = trimmed_name.replace(weight_name, param_name)
                             param = vision_encoder_dict[trimmed_name]
@@ -621,7 +619,8 @@ class FeedForward(nn.Module):
         disable_tp: bool = False,
     ) -> None:
         super().__init__()
-        self.w13 = MergedColumnParallelLinear(
+
+        self.gate_up_proj = MergedColumnParallelLinear(
             input_size=hidden_size,
             output_sizes=[intermediate_size] * 2,
             bias=bias,
@@ -629,7 +628,7 @@ class FeedForward(nn.Module):
             disable_tp=disable_tp,
             prefix=f"{prefix}.w13",
         )
-        self.w2 = RowParallelLinear(
+        self.down_proj = RowParallelLinear(
             input_size=intermediate_size,
             output_size=hidden_size,
             bias=bias,
@@ -642,9 +641,9 @@ class FeedForward(nn.Module):
         self.act_fn = SiluAndMul()
 
     def forward(self, x):
-        x, _ = self.w13(x)
+        x, _ = self.gate_up_proj(x)
         x = self.act_fn(x)
-        x, _ = self.w2(x)
+        x, _ = self.down_proj(x)
         return x
 
 
@@ -661,7 +660,7 @@ class Attention(nn.Module):
         assert not args.hidden_size % args.num_attention_heads
         self.head_dim = args.hidden_size // args.num_attention_heads
 
-        self.wqkv = QKVParallelLinear(
+        self.qkv_proj = QKVParallelLinear(
             hidden_size=args.hidden_size,
             head_size=self.head_dim,
             total_num_heads=args.num_attention_heads,
@@ -670,7 +669,7 @@ class Attention(nn.Module):
             prefix=f"{prefix}.wqkv",
             disable_tp=disable_tp,
         )
-        self.wo = RowParallelLinear(
+        self.o_proj = RowParallelLinear(
             input_size=args.hidden_size,
             output_size=args.hidden_size,
             bias=False,
@@ -690,7 +689,7 @@ class Attention(nn.Module):
     ) -> torch.Tensor:
         batch, patches, _ = x.shape
 
-        qkv, _ = self.wqkv(x)
+        qkv, _ = self.qkv_proj(x)
         q, k, v = qkv.chunk(3, dim=-1)
         q = q.reshape(batch, patches, self.n_heads, self.head_dim)
         k = k.reshape(batch, patches, self.n_heads, self.head_dim)
@@ -708,7 +707,7 @@ class Attention(nn.Module):
             out = out.transpose(1, 2)
 
         out = out.reshape(batch, patches, self.n_heads * self.head_dim)
-        out, _ = self.wo(out)
+        out, _ = self.o_proj(out)
         return out
 
 
