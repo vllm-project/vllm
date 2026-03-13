@@ -363,7 +363,7 @@ def triton_reshape_and_cache_flash(
         key_cache = key_cache.view(kv_cache_torch_dtype)
         value_cache = value_cache.view(kv_cache_torch_dtype)
 
-    assert kv_cache_dtype != torch.uint8, (
+    assert kv_cache_torch_dtype != torch.uint8, (
         "explicit cast and store to "
         "uint8 is not supported by triton reshape_and_cache_flash"
     )
