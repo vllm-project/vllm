@@ -300,6 +300,17 @@ void scaled_fp4_quant(torch::Tensor& output, torch::Tensor const& input,
                       torch::Tensor const& input_scale,
                       bool is_sf_swizzled_layout);
 
+// Functional variant of scaled_fp4_quant (allocates outputs)
+std::tuple<torch::Tensor, torch::Tensor> scaled_fp4_quant_func(
+    torch::Tensor const& input, torch::Tensor const& input_scale,
+    bool is_sf_swizzled_layout);
+
+// Out variant with PyTorch standard signature
+void scaled_fp4_quant_out(torch::Tensor const& input,
+                          torch::Tensor const& input_scale,
+                          bool is_sf_swizzled_layout, torch::Tensor& output,
+                          torch::Tensor& output_scale);
+
 void scaled_fp4_experts_quant(
     torch::Tensor& output, torch::Tensor& output_scale,
     torch::Tensor const& input, torch::Tensor const& input_global_scale,
