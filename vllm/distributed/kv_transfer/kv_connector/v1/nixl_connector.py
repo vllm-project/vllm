@@ -1954,6 +1954,10 @@ class NixlConnectorWorker:
                     second_split = self.get_backend_aware_kv_block_len(
                         layer_idx=i, first_split=False, mamba_view=mamba
                     )
+                    # Apply the same scaling as local_block_len above for when we read
+                    # a chunk of local V from `tp_ratio` separate remote workers.
+                    if tp_ratio < 0 and not self.use_mla:
+                        second_split = second_split // (-tp_ratio)
                     for block_id in range(num_blocks):
                         block_offset = block_id * page_size
                         addr = base_addr + block_offset + rank_offset
