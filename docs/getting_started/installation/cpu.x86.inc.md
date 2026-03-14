@@ -7,7 +7,7 @@ vLLM supports basic model inferencing and serving on x86 CPU platform, with data
 --8<-- [start:requirements]
 
 - OS: Linux
-- CPU flags: `avx512f` (Recommended), `avx512_bf16` (Optional), `avx512_vnni` (Optional)
+- CPU flags: `avx512f` (Recommended), `avx2` (Limited features)
 
 !!! tip
     Use `lscpu` to check the CPU flags.
@@ -18,7 +18,7 @@ vLLM supports basic model inferencing and serving on x86 CPU platform, with data
 --8<-- [end:set-up-using-python]
 --8<-- [start:pre-built-wheels]
 
-Pre-built vLLM wheels for x86 with AVX512 are available since version 0.13.0. To install release wheels:
+Pre-built vLLM wheels for x86 with AVX512/AVX2 are available since version 0.17.0. To install release wheels:
 
 ```bash
 export VLLM_VERSION=$(curl -s https://api.github.com/repos/vllm-project/vllm/releases/latest | jq -r .tag_name | sed 's/^v//')
@@ -108,13 +108,13 @@ VLLM_TARGET_DEVICE=cpu uv pip install . --no-build-isolation
 If you want to develop vLLM, install it in editable mode instead.
 
 ```bash
-VLLM_TARGET_DEVICE=cpu uv pip install -e . --no-build-isolation
+VLLM_TARGET_DEVICE=cpu python3 setup.py develop
 ```
 
 Optionally, build a portable wheel which you can then install elsewhere:
 
 ```bash
-VLLM_TARGET_DEVICE=cpu uv build --wheel
+VLLM_TARGET_DEVICE=cpu uv build --wheel --no-build-isolation
 ```
 
 ```bash
@@ -185,11 +185,8 @@ docker run \
     -v ~/.cache/huggingface:/root/.cache/huggingface \
     -p 8000:8000 \
     --env "HF_TOKEN=<secret>" \
-vllm/vllm-openai-cpu:latest-x86_64 <args...>
+    vllm/vllm-openai-cpu:latest-x86_64 <args...>
 ```
-
-!!! warning
-    If deploying the pre-built images on machines without `avx512f`, `avx512_bf16`, or `avx512_vnni` support, an `Illegal instruction` error may be raised. See the build-image-from-source section below for build arguments to match your target CPU capabilities.
 
 --8<-- [end:pre-built-images]
 --8<-- [start:build-image-from-source]
@@ -198,47 +195,8 @@ vllm/vllm-openai-cpu:latest-x86_64 <args...>
 
 ```bash
 docker build -f docker/Dockerfile.cpu \
-        --build-arg VLLM_CPU_DISABLE_AVX512=<false (default)|true> \
-        --build-arg VLLM_CPU_AVX2=<false (default)|true> \
-        --build-arg VLLM_CPU_AVX512=<false (default)|true> \
-        --build-arg VLLM_CPU_AVX512BF16=<false (default)|true> \
-        --build-arg VLLM_CPU_AVX512VNNI=<false (default)|true> \
-        --build-arg VLLM_CPU_AMXBF16=<false|true (default)> \
+        --build-arg VLLM_CPU_X86=<false (default)|true> \ # For cross-compilation
         --tag vllm-cpu-env \
-        --target vllm-openai .
-```
-
-!!! note "Auto-detection by default"
-    By default, CPU instruction sets (AVX512, AVX2, etc.) are automatically detected from the build system's CPU flags. Build arguments like `VLLM_CPU_AVX2`, `VLLM_CPU_AVX512`, `VLLM_CPU_AVX512BF16`, `VLLM_CPU_AVX512VNNI`, and `VLLM_CPU_AMXBF16` are used for cross-compilation:
-
-    - `VLLM_CPU_{ISA}=true` - Force-enable the instruction set (build with ISA regardless of build system capabilities)
-    - `VLLM_CPU_{ISA}=false` - Rely on auto-detection (default)
-
-##### Examples
-
-###### Auto-detection build (default)
-
-```bash
-docker build -f docker/Dockerfile.cpu --tag vllm-cpu-env --target vllm-openai .
-```
-
-###### Cross-compile for AVX512
-
-```bash
-docker build -f docker/Dockerfile.cpu \
-        --build-arg VLLM_CPU_AVX512=true \
-        --build-arg VLLM_CPU_AVX512BF16=true \
-        --build-arg VLLM_CPU_AVX512VNNI=true \
-        --tag vllm-cpu-avx512 \
-        --target vllm-openai .
-```
-
-###### Cross-compile for AVX2
-
-```bash
-docker build -f docker/Dockerfile.cpu \
-        --build-arg VLLM_CPU_AVX2=true \
-        --tag vllm-cpu-avx2 \
         --target vllm-openai .
 ```
 
