@@ -24,6 +24,7 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizeMethodBase,
 )
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
@@ -255,6 +256,40 @@ class TorchAOConfig(QuantizationConfig):
         return []
 
 
+def _is_float8_config(torchao_config: Any) -> bool:
+    """Check if a torchao config uses Float8 quantization."""
+    config_cls_name = type(torchao_config).__name__
+    return "Float8" in config_cls_name or "float8" in config_cls_name
+
+
+def _check_fp8_compute_capability(torchao_config: Any) -> None:
+    """Validate GPU compute capability for FP8 quantization configs.
+
+    FP8 (Float8) quantization requires GPUs with compute capability >= 8.9
+    (e.g., Ada Lovelace GPUs like RTX 4090, or Hopper GPUs like H100).
+    The upstream torchao error message incorrectly refers to "CUDA>=8.9"
+    which is misleading since CUDA toolkit versions are unrelated to this
+    requirement.
+    """
+    if not _is_float8_config(torchao_config):
+        return
+
+    if not torch.cuda.is_available():
+        return
+
+    if not current_platform.has_device_capability(89):
+        capability = current_platform.get_device_capability()
+        capability_str = (
+            f"{capability.major}.{capability.minor}" if capability else "unknown"
+        )
+        raise ValueError(
+            f"Float8 quantization requires a GPU with compute capability "
+            f">= 8.9 (e.g., Ada Lovelace or Hopper GPUs), but the current "
+            f"GPU has compute capability {capability_str}. This is a GPU "
+            f"hardware limitation, not a CUDA toolkit version issue."
+        )
+
+
 def torchao_quantize_param_data(
     param: torch.Tensor, torchao_config: Any
 ) -> torch.nn.Parameter:
@@ -269,6 +304,10 @@ def torchao_quantize_param_data(
     from torchao.quantization import quantize_
 
     assert isinstance(torchao_config, AOBaseConfig), f"{torchao_config}"
+
+    # Validate compute capability early with a clear error message,
+    # before torchao raises a misleading "CUDA>=8.9" assertion.
+    _check_fp8_compute_capability(torchao_config)
     """
     Avoid real weight allocation for faster load, since we will
     end up setting it to param.
