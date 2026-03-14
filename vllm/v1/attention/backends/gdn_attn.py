@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Backend for GatedDeltaNet attention."""
 
+import logging
 from dataclasses import dataclass
 
 import torch
@@ -20,6 +21,33 @@ from vllm.v1.attention.backends.utils import (
     split_decodes_and_prefills,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec
+
+# Module-level logger to avoid repeated initialization in hot paths
+logger = logging.getLogger(__name__)
+
+
+def _warn_about_spec_token_limitation(
+    num_spec: int, max_allowed: int | None = None
+) -> None:
+    """Helper function to warn about FlashInfer GDN kernel limitations."""
+    if max_allowed is not None and max_allowed < num_spec + 1:
+        logger.warning(
+            "FlashInfer GDN kernel does not fully support "
+            "%d speculative tokens (>4). Using %d tokens "
+            "instead to prevent CUDA errors. Consider reducing "
+            "num_speculative_tokens to 4 or fewer.",
+            num_spec,
+            max_allowed - 1,
+        )
+    elif num_spec > 4:
+        logger.warning(
+            "GDN attention backend with FlashInfer kernel has known "
+            "issues with >4 speculative tokens. You specified %d "
+            "tokens, which may cause CUDA illegal memory access "
+            "errors under load. Consider setting "
+            "num_speculative_tokens to 4 or fewer for stability.",
+            num_spec,
+        )
 
 
 class GDNAttentionBackend(AttentionBackend):
@@ -88,18 +116,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             self.num_spec: int = self.speculative_config.num_speculative_tokens
 
             # Warn about FlashInfer GDN kernel limitation with >4 speculative tokens
-            if self.num_spec > 4:
-                import logging
-
-                logger = logging.getLogger(__name__)
-                logger.warning(
-                    "GDN attention backend with FlashInfer kernel has known "
-                    "issues with >4 speculative tokens. You specified %d "
-                    "tokens, which may cause CUDA illegal memory access "
-                    "errors under load. Consider setting "
-                    "num_speculative_tokens to 4 or fewer for stability.",
-                    self.num_spec,
-                )
+            _warn_about_spec_token_limitation(self.num_spec)
         else:
             self.num_spec = 0
         self.use_spec_decode: bool = self.num_spec > 0
@@ -254,16 +271,8 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                     self.num_spec + 1, block_table_tensor.size(1)
                 )
                 if max_allowed_spec_tokens < self.num_spec + 1:
-                    import logging
-
-                    logger = logging.getLogger(__name__)
-                    logger.warning(
-                        "FlashInfer GDN kernel does not fully support "
-                        "%d speculative tokens (>4). Using %d tokens "
-                        "instead to prevent CUDA errors. Consider reducing "
-                        "num_speculative_tokens to 4 or fewer.",
-                        self.num_spec,
-                        max_allowed_spec_tokens - 1,
+                    _warn_about_spec_token_limitation(
+                        self.num_spec, max_allowed_spec_tokens
                     )
 
                 spec_state_indices_tensor = block_table_tensor[
@@ -291,16 +300,8 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                     self.num_spec + 1, block_table_tensor.size(1)
                 )
                 if max_allowed_spec_tokens < self.num_spec + 1:
-                    import logging
-
-                    logger = logging.getLogger(__name__)
-                    logger.warning(
-                        "FlashInfer GDN kernel does not fully support "
-                        "%d speculative tokens (>4). Using %d tokens "
-                        "instead to prevent CUDA errors. Consider reducing "
-                        "num_speculative_tokens to 4 or fewer.",
-                        self.num_spec,
-                        max_allowed_spec_tokens - 1,
+                    _warn_about_spec_token_limitation(
+                        self.num_spec, max_allowed_spec_tokens
                     )
 
                 spec_state_indices_tensor = block_table_tensor[
