@@ -583,6 +583,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             assert new_req_data.prompt_token_ids is not None
             assert new_req_data.prefill_token_ids is not None
             req_id = new_req_data.req_id
+
+            # Streaming input update: request already exists from a prior
+            # chunk. Remove old state so it can be cleanly re-added below
+            # with the updated prompt_token_ids and mm_features.
+            if req_id in self.req_states.req_id_to_index:
+                self.req_states.remove_request(req_id)
+                if self.encoder_cache is not None:
+                    self.encoder_cache.remove_request(req_id)
+                if self.prompt_logprobs_worker is not None:
+                    self.prompt_logprobs_worker.remove_request(req_id)
+                self.lora_state.remove_request(req_id)
+
             prompt_len = len(new_req_data.prompt_token_ids)
             self.req_states.add_request(
                 req_id=req_id,
