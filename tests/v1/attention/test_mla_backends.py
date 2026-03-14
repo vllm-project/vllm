@@ -1033,7 +1033,7 @@ def test_backend_correctness(
             common_attn_metadata=common_attn_metadata,
             randomize_blocks=True,
             kv_cache_dtype=kv_cache_dtype,
-            scale=MOCK_KV_SCALE,
+            scale=MOCK_K_SCALE,
         )
         kv_cache_per_block_size[block_size] = kv_cache
 
