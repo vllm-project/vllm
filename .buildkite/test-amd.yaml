@@ -798,7 +798,7 @@ steps:
   - tests/compile
   - vllm/platforms/rocm.py
   commands:
-  - 'find compile/fullgraph/ -name ''test_*.py'' -not -name ''test_full_graph.py'' -exec pytest -s -v {} \;'
+  - "find compile/fullgraph/ -name 'test_*.py' -not -name 'test_full_graph.py' -exec pytest -s -v {} \\\\;"
 
 
 - label: PyTorch Fullgraph # TBD
