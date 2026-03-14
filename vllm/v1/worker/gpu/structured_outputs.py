@@ -18,7 +18,7 @@ class StructuredOutputsWorker:
             (max_num_logits, cdiv(vocab_size, 32)), dtype=torch.int32, device=device
         )
         self.device = device
-        self.copy_stream = torch.cuda.Stream()
+        self.copy_stream = torch.Stream()
 
     def apply_grammar_bitmask(
         self,

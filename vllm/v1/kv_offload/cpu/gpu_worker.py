@@ -62,7 +62,7 @@ def _select_swap_blocks_fn(
 @dataclass
 class Transfer:
     job_id: int
-    stream: torch.cuda.Stream
+    stream: torch.Stream
     start_event: torch.Event
     end_event: torch.Event
     num_bytes: int
@@ -206,7 +206,7 @@ class SingleDirectionOffloadingHandler:
         # queue of transfers (job_id, stream, event)
         self._transfers: deque[Transfer] = deque()
         # list of CUDA streams available for re-use
-        self._stream_pool: list[torch.cuda.Stream] = []
+        self._stream_pool: list[torch.Stream] = []
         # list of CUDA events available for re-use
         self._event_pool: list[torch.Event] = []
         # list of pinned descriptor buffer sets available for re-use

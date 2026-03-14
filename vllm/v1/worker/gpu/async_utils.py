@@ -15,8 +15,8 @@ class AsyncOutput(AsyncModelRunnerOutput):
         model_runner_output: ModelRunnerOutput,
         sampler_output: SamplerOutput,
         num_sampled_tokens: torch.Tensor,
-        main_stream: torch.cuda.Stream,
-        copy_stream: torch.cuda.Stream,
+        main_stream: torch.Stream,
+        copy_stream: torch.Stream,
     ):
         # NOTE(woosuk): We must retain references to the GPU tensors,
         # as the copy operations are performed on a different CUDA stream than
@@ -75,8 +75,8 @@ class AsyncPoolingOutput(AsyncModelRunnerOutput):
         model_runner_output: ModelRunnerOutput,
         pooler_output: torch.Tensor,
         is_valid: torch.Tensor | None,
-        main_stream: torch.cuda.Stream,
-        copy_stream: torch.cuda.Stream,
+        main_stream: torch.Stream,
+        copy_stream: torch.Stream,
     ):
         self.model_runner_output = model_runner_output
         self.pooler_output = pooler_output
@@ -109,7 +109,7 @@ def async_copy_to_np(x: torch.Tensor) -> np.ndarray:
 
 
 @contextlib.contextmanager
-def stream(to_stream: torch.cuda.Stream, from_stream: torch.cuda.Stream):
+def stream(to_stream: torch.Stream, from_stream: torch.Stream):
     """Lightweight version of torch.cuda.stream() context manager which
     avoids current_stream and device lookups.
     """

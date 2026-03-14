@@ -353,7 +353,7 @@ def _test_async_transfer_layer_without_mtp_worker(
         new_indices_cpu = new_indices.cpu()
 
         expert_buffer = [torch.empty_like(w) for w in expert_weights[0]]
-        cuda_stream = torch.cuda.Stream(device=device)
+        cuda_stream = torch.Stream(device=device)
 
         communicator = create_eplb_communicator_or_raise(
             group_coordinator=ep_group_coordinator,
