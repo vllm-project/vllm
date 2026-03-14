@@ -218,6 +218,7 @@ class Base(
         with torch.device("meta"):
             model: PreTrainedModel = AutoModel.from_config(**kwargs)
         decoder_cls = type(model.get_decoder())
+        logger.debug("Identified decoder class as: %s", decoder_cls)
         del model
         return decoder_cls
 
@@ -237,7 +238,6 @@ class Base(
                 [`support_torch_compile`][vllm.compilation.decorators.support_torch_compile]
                 for more details.
         """
-        logger.debug("Decorating `%s` for torch compile", cls.__name__)
         if dynamic_arg_dims is None:
             # Applied to a PreTrainedModel so the batch dimension will exist
             dynamic_arg_dims = dict[str, int](
@@ -245,8 +245,11 @@ class Base(
                 inputs_embeds=1,  # shape: [1, seq_len, hidden_size]
                 position_ids=1,  # shape: [1, seq_len]
             )
+            logger.debug("Using default dynamic arg dims: %s", dynamic_arg_dims)
         if enable_if is None:
             enable_if = can_enable_torch_compile
+
+        logger.debug("Decorating `%s` for torch compile", cls.__name__)
 
         # Decorate the cls for torch compile
         @support_torch_compile(dynamic_arg_dims=dynamic_arg_dims, enable_if=enable_if)

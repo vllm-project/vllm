@@ -297,6 +297,7 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
         with torch.device("meta"):
             model: PreTrainedModel = AutoModel.from_config(**kwargs)
         encoder_cls = type(model.get_encoder(modality=modality))
+        logger.debug("Identified encoder class as: %s", encoder_cls)
         if type(model) is encoder_cls:
             raise ValueError(
                 "Unable to infer vision encoder class from the model. "
@@ -326,6 +327,7 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
                 inputs_embeds=1,  # shape: [1, seq_len, hidden_size]
                 position_ids=2,  # shape: [3, 1, seq_len]
             )
+            logger.debug("Using MRoPE default dynamic arg dims: %s", dynamic_arg_dims)
         super()._decorate_for_torch_compile(
             cls=cls, dynamic_arg_dims=dynamic_arg_dims, enable_if=enable_if
         )
