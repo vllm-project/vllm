@@ -803,8 +803,8 @@ VLM_TEST_SETTINGS = {
         models=["AIDC-AI/Ovis2-1B"],
         test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
         prompt_formatter=lambda img_prompt: (
-            f"<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n{img_prompt}<|im_end|>\n<|im_start|>assistant\n"
-        ),  # noqa: E501
+            f"<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n{img_prompt}<|im_end|>\n<|im_start|>assistant\n"  # noqa: E501
+        ),
         img_idx_to_prompt=lambda idx: "<image>\n",
         max_model_len=4096,
         max_num_seqs=2,
@@ -817,8 +817,8 @@ VLM_TEST_SETTINGS = {
         models=["AIDC-AI/Ovis2.5-2B"],
         test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE, VLMTestType.VIDEO),
         prompt_formatter=lambda img_prompt: (
-            f"<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n{img_prompt}<|im_end|>\n<|im_start|>assistant\n"
-        ),  # noqa: E501
+            f"<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n{img_prompt}<|im_end|>\n<|im_start|>assistant\n"  # noqa: E501
+        ),
         img_idx_to_prompt=lambda idx: "<image>\n",
         video_idx_to_prompt=lambda idx: "<video>\n",
         max_model_len=4096,
@@ -957,8 +957,8 @@ VLM_TEST_SETTINGS = {
             VLMTestType.VIDEO,
         ),
         prompt_formatter=lambda img_prompt: (
-            f"<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n{img_prompt}<|im_end|>\n<|im_start|>assistant\n"
-        ),  # noqa: E501
+            f"<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n{img_prompt}<|im_end|>\n<|im_start|>assistant\n"  # noqa: E501
+        ),
         img_idx_to_prompt=lambda idx: "<|vision_start|><|image_pad|><|vision_end|>",
         video_idx_to_prompt=lambda idx: "<|vision_start|><|video_pad|><|vision_end|>",
         max_model_len=4096,

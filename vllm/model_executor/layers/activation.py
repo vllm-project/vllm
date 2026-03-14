@@ -640,7 +640,7 @@ _ACTIVATION_REGISTRY = LazyDict(
         "gelu_new": lambda: NewGELU(),
         "gelu_pytorch_tanh": lambda: (
             (
-                # TODO:[ROCm] PyTorch native GELU with tanh is unstable with torch.compile
+                # TODO:[ROCm] PyTorch native GELU with tanh is unstable with torch.compile  # noqa: E501
                 logger.warning_once(
                     "[ROCm] PyTorch's native GELU with tanh approximation is unstable. "
                     "Falling back to GELU(approximate='none')."
