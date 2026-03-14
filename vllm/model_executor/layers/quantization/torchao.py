@@ -258,6 +258,15 @@ class TorchAOConfig(QuantizationConfig):
 
 def _is_float8_config(torchao_config: Any) -> bool:
     """Check if a torchao config uses Float8 quantization."""
+    # The torchao API is not stable, so we check for FP8 dtypes in the config
+    # attributes first for robustness, then fall back to a class name check.
+    fp8_dtypes = (torch.float8_e4m3fn, torch.float8_e5m2)
+    if getattr(torchao_config, "weight_dtype", None) in fp8_dtypes:
+        return True
+    if getattr(torchao_config, "activation_dtype", None) in fp8_dtypes:
+        return True
+
+    # Fallback to class name check for other configs
     config_cls_name = type(torchao_config).__name__
     return "Float8" in config_cls_name or "float8" in config_cls_name
 
