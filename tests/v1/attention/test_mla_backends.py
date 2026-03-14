@@ -270,13 +270,13 @@ class MockAttentionLayer:
     """A mock attention layer for testing."""
 
     def __init__(self, device: torch.device):
-        self._q_scale = torch.tensor(1.0, device=device)
-        self._k_scale = torch.tensor(1.0, device=device)
-        self._v_scale = torch.tensor(1.0, device=device)
+        self._q_scale = torch.tensor(2.0, device=device)
+        self._k_scale = torch.tensor(3.0, device=device)
+        self._v_scale = torch.tensor(4.0, device=device)
         self._prob_scale = torch.tensor(1.0, device=device)
-        self._q_scale_float = 1.0
-        self._k_scale_float = 1.0
-        self._v_scale_float = 1.0
+        self._q_scale_float = 2.0
+        self._k_scale_float = 3.0
+        self._v_scale_float = 4.0
 
     def forward(self, *_args, **_kwargs):
         raise NotImplementedError
@@ -319,13 +319,13 @@ class MockSparseMLAAttentionLayer:
         self.W_UV = W_UV.transpose(0, 1)
 
         # Scale attributes needed by attention backends
-        self._q_scale = torch.tensor(1.0, device=device)
-        self._k_scale = torch.tensor(1.0, device=device)
-        self._v_scale = torch.tensor(1.0, device=device)
+        self._q_scale = torch.tensor(2.0, device=device)
+        self._k_scale = torch.tensor(3.0, device=device)
+        self._v_scale = torch.tensor(4.0, device=device)
         self._prob_scale = torch.tensor(1.0, device=device)
-        self._q_scale_float = 1.0
-        self._k_scale_float = 1.0
-        self._v_scale_float = 1.0
+        self._q_scale_float = 2.0
+        self._k_scale_float = 3.0
+        self._v_scale_float = 4.0
 
         self._decode_concat_quant_fp8_op = _DecodeConcatQuantFP8(
             static=True,
@@ -443,13 +443,13 @@ class MockMLAAttentionLayer(AttentionLayerBase):
         self.W_UK_T = W_UK.permute(1, 2, 0)
 
         # Scale attributes needed by attention backends
-        self._q_scale = torch.tensor(1.0, device=device)
-        self._k_scale = torch.tensor(1.0, device=device)
-        self._v_scale = torch.tensor(1.0, device=device)
+        self._q_scale = torch.tensor(2.0, device=device)
+        self._k_scale = torch.tensor(3.0, device=device)
+        self._v_scale = torch.tensor(4.0, device=device)
         self._prob_scale = torch.tensor(1.0, device=device)
-        self._q_scale_float = 1.0
-        self._k_scale_float = 1.0
-        self._v_scale_float = 1.0
+        self._q_scale_float = 2.0
+        self._k_scale_float = 3.0
+        self._v_scale_float = 4.0
 
         self._decode_concat_quant_fp8_op = _DecodeConcatQuantFP8(
             static=True,
