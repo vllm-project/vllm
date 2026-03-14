@@ -191,8 +191,8 @@ def resample_audio_pyav(
     frame = av.AudioFrame.from_ndarray(audio_f32, format="fltp", layout="mono")
     frame.sample_rate = orig_sr_int
 
-    out_frames = list(resampler.resample(frame))
-    out_frames += list(resampler.resample(None))  # flush buffered samples
+    out_frames = resampler.resample(frame)
+    out_frames.extend(resampler.resample(None))  # flush buffered samples
 
     result = np.concatenate([f.to_ndarray() for f in out_frames], axis=1).squeeze(0)
     return result[:expected_len]
