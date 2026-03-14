@@ -976,6 +976,7 @@ setup(
             "soundfile",
             "mistral_common[audio]",
             "av",
+            "torchcodec",
         ],  # Required for audio processing
         "video": [],  # Kept for backwards compatibility
         "flashinfer": [],  # Kept for backwards compatibility
