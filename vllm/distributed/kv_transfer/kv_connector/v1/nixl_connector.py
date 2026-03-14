@@ -1559,6 +1559,8 @@ class NixlConnectorWorker:
                 else layer_spec.page_size_bytes
                 // self._physical_blocks_per_logical_kv_block
             )
+            # For when registering multiple tensors eg K/V in separate regions.
+            physical_page_size = physical_page_size // len(cache_list)
             num_blocks = (
                 self._logical_num_blocks
                 if isinstance(layer_spec, MambaSpec)
