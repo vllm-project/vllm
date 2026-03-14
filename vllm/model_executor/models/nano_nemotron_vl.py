@@ -14,6 +14,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from functools import cached_property
+from io import BytesIO
 from typing import Annotated, Any, Literal, TypeAlias, TypeVar
 
 import einops
@@ -63,7 +64,7 @@ from vllm.multimodal.inputs import (
     MultiModalKwargsItems,
     VideoItem,
 )
-from vllm.multimodal.media.audio import extract_audio_from_video_bytes
+from vllm.multimodal.media.audio import load_audio_pyav
 from vllm.multimodal.parse import (
     AudioProcessorItems,
     ImageEmbeddingItems,
@@ -1431,7 +1432,7 @@ class NanoNemotronVLMultiModalProcessor(
                     "video must be loaded with keep_video_bytes=True (e.g. via "
                     "the chat API with a model that sets use_audio_in_video)."
                 )
-            audio_items.append(extract_audio_from_video_bytes(video_bytes))
+            audio_items.append(load_audio_pyav(BytesIO(video_bytes)))
 
         # Create a new VideoProcessorItems with metadata that does not contain
         # the large video bytes, to avoid modifying the input `mm_items`.

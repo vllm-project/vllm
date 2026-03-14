@@ -25,7 +25,12 @@ except ImportError:
     soundfile = PlaceholderModule("soundfile")  # type: ignore[assignment]
 
 
-def load_audio_pyav(source: BytesIO | Path) -> tuple[npt.NDArray, float]:
+# Default 22.05kHz to align with `librosa.load`
+def load_audio_pyav(
+    path: BytesIO | Path | str,
+    *,
+    sr: float | None = 22050,
+) -> tuple[npt.NDArray, float]:
     """Load an audio file using PyAV (FFmpeg), returning float32 mono waveform.
 
     Decodes the audio stream at its native sample rate. Channel reduction to
@@ -33,77 +38,28 @@ def load_audio_pyav(source: BytesIO | Path) -> tuple[npt.NDArray, float]:
     model-specific rate is left to the downstream :class:`AudioResampler`.
 
     Args:
-        source: A :class:`~io.BytesIO` buffer or a filesystem
-            :class:`~pathlib.Path`.
+        path: A :class:`~io.BytesIO` buffer, a filesystem
+            :class:`~pathlib.Path`, or a string path.
 
     Returns:
         ``(waveform, sample_rate)`` where *waveform* is a 1-D float32
         NumPy array and *sample_rate* is the native sample rate in Hz.
     """
-    with av.open(source) as container:
-        if not container.streams.audio:
-            raise ValueError("No audio stream found.")
-        stream = container.streams.audio[0]
-        native_sr = stream.rate
-
-        # Normalize to float32 planar at the native sample rate so that
-        # `to_ndarray()` always returns a consistent (channels, samples) array.
-        resampler = av.AudioResampler(format="fltp", rate=native_sr)
-
-        chunks: list[npt.NDArray] = []
-        for frame in container.decode(stream):
-            for out_frame in resampler.resample(frame):
-                chunks.append(out_frame.to_ndarray())
-        for out_frame in resampler.resample(None):
-            chunks.append(out_frame.to_ndarray())
-
-    if not chunks:
-        raise ValueError("No audio data found in the file.")
-
-    # (channels, samples) → average to mono → (samples,)
-    audio = np.concatenate(chunks, axis=-1)
-    if audio.ndim > 1:
-        audio = audio.mean(axis=0)
-    return audio.astype(np.float32), float(native_sr)
-
-
-def extract_audio_from_video_bytes(
-    data: bytes,
-) -> tuple[npt.NDArray, float]:
-    """Extract the audio track from raw video bytes using PyAV.
-
-    PyAV wraps FFmpeg's C libraries in-process — no subprocess is
-    spawned, which is critical to avoid crashing CUDA-active vLLM
-    worker processes.
-
-    The returned waveform is at the native sample rate of the video's
-    audio stream.  Resampling to a model-specific rate is left to the
-    downstream :class:`AudioResampler` in the parsing pipeline.
-
-    Args:
-        data: Raw video file bytes (e.g. from an mp4 file).
-
-    Returns:
-        A tuple of ``(waveform, sample_rate)`` suitable for use as an
-        :class:`AudioItem`.
-    """
-    if data is None or len(data) == 0:
-        raise ValueError(
-            "Cannot extract audio: video bytes are missing or empty. "
-            "Ensure video was loaded with keep_video_bytes=True for "
-            "audio-in-video extraction."
-        )
     try:
-        with av.open(BytesIO(data)) as container:
+        with av.open(path) as container:
             if not container.streams.audio:
-                raise ValueError("No audio stream found in the video.")
+                raise ValueError("No audio stream found.")
             stream = container.streams.audio[0]
             native_sr = stream.rate
 
+            # Enforce calling resampler to return mono audio in float32
+            resampler = av.AudioResampler(
+                format="fltp", layout="mono", rate=sr or native_sr
+            )
             chunks: list[npt.NDArray] = []
-            for frame in container.decode(audio=0):
-                arr = frame.to_ndarray()
-                chunks.append(arr.mean(axis=0) if arr.ndim > 1 else arr)
+            for frame in container.decode(stream):
+                for out_frame in resampler.resample(frame):
+                    chunks.append(out_frame.to_ndarray())
     except ValueError:
         raise
     except Exception as e:
@@ -117,35 +73,6 @@ def extract_audio_from_video_bytes(
 
     audio = np.concatenate(chunks).astype(np.float32)
     return audio, float(native_sr)
-
-
-def is_video(data: bytes) -> bool:
-    """Check if the fetched bytes are video"""
-    if len(data) < 12:
-        return False
-
-    box_type = data[4:8]
-    major_brand = data[8:12]
-
-    MP4_BRANDS = {
-        b"mp41",
-        b"mp42",  # MP4
-        b"isom",  # ISO Base Media
-        b"iso2",
-        b"iso4",
-        b"iso5",
-        b"iso6",
-        b"M4V ",
-        b"M4A ",  # Apple
-        b"avc1",  # H.264
-        b"dash",  # DASH
-        b"mmp4",
-        b"MSNV",
-    }
-
-    is_avi = data[:4] == b"RIFF" and major_brand == b"AVI "
-    is_mp4 = box_type == b"ftyp" and major_brand in MP4_BRANDS
-    return is_mp4 or is_avi
 
 
 class AudioMediaIO(MediaIO[tuple[npt.NDArray, float]]):
@@ -166,8 +93,6 @@ class AudioMediaIO(MediaIO[tuple[npt.NDArray, float]]):
         self.kwargs = kwargs
 
     def load_bytes(self, data: bytes) -> tuple[npt.NDArray, float]:
-        if is_video(data):
-            return extract_audio_from_video_bytes(data)
         return load_audio_pyav(BytesIO(data))
 
     def load_base64(
