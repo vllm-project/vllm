@@ -122,7 +122,9 @@ BATCH_SPECS = {
     ),
 }
 
-MOCK_KV_SCALE = 3.0
+MOCK_Q_SCALE = 2.0
+MOCK_K_SCALE = 3.0
+MOCK_V_SCALE = float("nan")  # Not used in MLA!
 
 
 def create_and_prepopulate_kv_cache(
@@ -272,13 +274,13 @@ class MockAttentionLayer:
     """A mock attention layer for testing."""
 
     def __init__(self, device: torch.device):
-        self._q_scale = torch.tensor(2.0, device=device)
-        self._k_scale = torch.tensor(MOCK_KV_SCALE, device=device)
-        self._v_scale = torch.tensor(float("nan"), device=device)
+        self._q_scale = torch.tensor(MOCK_Q_SCALE, device=device)
+        self._k_scale = torch.tensor(MOCK_K_SCALE, device=device)
+        self._v_scale = torch.tensor(MOCK_V_SCALE, device=device)
         self._prob_scale = torch.tensor(1.0, device=device)
-        self._q_scale_float = 2.0
-        self._k_scale_float = MOCK_KV_SCALE
-        self._v_scale_float = float("nan")
+        self._q_scale_float = MOCK_Q_SCALE
+        self._k_scale_float = MOCK_K_SCALE
+        self._v_scale_float = MOCK_V_SCALE
 
     def forward(self, *_args, **_kwargs):
         raise NotImplementedError
@@ -321,13 +323,13 @@ class MockSparseMLAAttentionLayer:
         self.W_UV = W_UV.transpose(0, 1)
 
         # Scale attributes needed by attention backends
-        self._q_scale = torch.tensor(2.0, device=device)
-        self._k_scale = torch.tensor(MOCK_KV_SCALE, device=device)
-        self._v_scale = torch.tensor(float("nan"), device=device)
+        self._q_scale = torch.tensor(MOCK_Q_SCALE, device=device)
+        self._k_scale = torch.tensor(MOCK_K_SCALE, device=device)
+        self._v_scale = torch.tensor(MOCK_V_SCALE, device=device)
         self._prob_scale = torch.tensor(1.0, device=device)
-        self._q_scale_float = 2.0
-        self._k_scale_float = MOCK_KV_SCALE
-        self._v_scale_float = float("nan")
+        self._q_scale_float = MOCK_Q_SCALE
+        self._k_scale_float = MOCK_K_SCALE
+        self._v_scale_float = MOCK_V_SCALE
 
         self._decode_concat_quant_fp8_op = _DecodeConcatQuantFP8(
             static=True,
@@ -445,13 +447,13 @@ class MockMLAAttentionLayer(AttentionLayerBase):
         self.W_UK_T = W_UK.permute(1, 2, 0)
 
         # Scale attributes needed by attention backends
-        self._q_scale = torch.tensor(2.0, device=device)
-        self._k_scale = torch.tensor(MOCK_KV_SCALE, device=device)
-        self._v_scale = torch.tensor(float("nan"), device=device)
+        self._q_scale = torch.tensor(MOCK_Q_SCALE, device=device)
+        self._k_scale = torch.tensor(MOCK_K_SCALE, device=device)
+        self._v_scale = torch.tensor(MOCK_V_SCALE, device=device)
         self._prob_scale = torch.tensor(1.0, device=device)
-        self._q_scale_float = 2.0
-        self._k_scale_float = MOCK_KV_SCALE
-        self._v_scale_float = float("nan")
+        self._q_scale_float = MOCK_Q_SCALE
+        self._k_scale_float = MOCK_K_SCALE
+        self._v_scale_float = MOCK_V_SCALE
 
         self._decode_concat_quant_fp8_op = _DecodeConcatQuantFP8(
             static=True,
