@@ -920,6 +920,7 @@ if _is_cpu():
 
     if platform.machine() in ("x86_64", "AMD64"):
         ext_modules.append(CMakeExtension(name="vllm._C"))
+        ext_modules.append(CMakeExtension(name="vllm._C_AVX512"))
         ext_modules.append(CMakeExtension(name="vllm._C_AVX2"))
     else:
         ext_modules.append(CMakeExtension(name="vllm._C"))
@@ -975,13 +976,14 @@ setup(
             "soundfile",
             "mistral_common[audio]",
             "av",
+            "torchcodec",
         ],  # Required for audio processing
         "video": [],  # Kept for backwards compatibility
         "flashinfer": [],  # Kept for backwards compatibility
         # Optional deps for AMD FP4 quantization support
         "petit-kernel": ["petit-kernel"],
         # Optional deps for Helion kernel development
-        "helion": ["helion"],
+        "helion": ["helion==0.3.2"],
         # Optional deps for gRPC server (vllm serve --grpc)
         "grpc": ["smg-grpc-servicer[vllm] >= 0.5.0"],
         # Optional deps for OpenTelemetry tracing
