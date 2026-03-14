@@ -14,6 +14,7 @@ from vllm.entrypoints.openai.completion.serving import OpenAIServingCompletion
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+from vllm.entrypoints.serve.render.serving import OpenAIServingRender
 from vllm.lora.request import LoRARequest
 from vllm.lora.resolver import LoRAResolver, LoRAResolverRegistry
 from vllm.renderers.hf import HfRenderer
@@ -145,8 +146,17 @@ def mock_serving_setup():
         base_model_paths=BASE_MODEL_PATHS,
     )
 
+    serving_render = OpenAIServingRender(
+        model_config=mock_engine.model_config,
+        renderer=mock_engine.renderer,
+        io_processor=mock_engine.io_processor,
+        model_registry=models.registry,
+        request_logger=None,
+        chat_template=None,
+        chat_template_content_format="auto",
+    )
     serving_completion = OpenAIServingCompletion(
-        mock_engine, models, request_logger=None
+        mock_engine, models, openai_serving_render=serving_render, request_logger=None
     )
 
     return mock_engine, serving_completion
