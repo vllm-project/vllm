@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from vllm.config import ModelConfig
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionLogProbs
@@ -62,6 +62,13 @@ class GenerateRequest(BaseModel):
     )
     token_ids: list[int]
     """The token ids to generate text from."""
+
+    @field_validator("token_ids")
+    @classmethod
+    def validate_token_ids(cls, v: list[int]) -> list[int]:
+        if any(t < 0 for t in v):
+            raise ValueError("token_ids must not contain negative values")
+        return v
 
     features: MultiModalFeatures | None = None
     """Multimodal hashes and placeholder positions (populated for MM inputs)."""

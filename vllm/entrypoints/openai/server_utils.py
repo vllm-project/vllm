@@ -351,7 +351,7 @@ async def engine_error_handler(
         engine=req.app.state.engine_client,
     )
     err = create_error_response(exc)
-    return JSONResponse(err.model_dump(), status_code=HTTPStatus.INTERNAL_SERVER_ERROR)
+    return JSONResponse(err.model_dump(), status_code=err.error.code)
 
 
 async def exception_handler(req: Request, exc: Exception):
