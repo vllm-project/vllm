@@ -1580,6 +1580,27 @@ class VllmConfig:
                     f"Model: {self.model_config.model}"
                 )
 
+        # Resolve kv_cache_dtype="auto" using the model's quantization config.
+        # When a checkpoint specifies kv_cache_quant_algo (e.g., FP8), we
+        # should auto-detect and use it instead of falling back to model dtype.
+        if (
+            self.cache_config is not None
+            and self.cache_config.cache_dtype == "auto"
+        ):
+            from vllm.utils.torch_utils import resolve_kv_cache_dtype_string
+
+            resolved = resolve_kv_cache_dtype_string(
+                "auto", self.model_config
+            )
+            if resolved != "auto":
+                logger.info(
+                    "Auto-detected kv_cache_dtype='%s' from model "
+                    "checkpoint quantization config.", resolved,
+                )
+                object.__setattr__(
+                    self.cache_config, "cache_dtype", resolved
+                )
+
     def compile_debug_dump_path(self) -> Path | None:
         """Returns a rank-aware path for dumping
         torch.compile debug information.
