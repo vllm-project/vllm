@@ -138,6 +138,7 @@ steps:
   - tests/renderers
   - tests/standalone_tests/lazy_imports.py
   - tests/tokenizers_
+  - tests/reasoning
   - tests/tool_parsers
   - tests/transformers_utils
   - tests/config
@@ -151,6 +152,7 @@ steps:
   - pytest -v -s -m 'cpu_test' multimodal
   - pytest -v -s renderers
   - pytest -v -s tokenizers_
+  - pytest -v -s reasoning
   - pytest -v -s tool_parsers
   - pytest -v -s transformers_utils
   - pytest -v -s config
