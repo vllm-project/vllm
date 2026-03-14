@@ -943,6 +943,56 @@ async def test_serving_chat_could_load_correct_generation_config():
     assert mock_engine.generate.call_args.args[1].repetition_penalty == 1.05
 
 
+@pytest.mark.asyncio
+async def test_serving_chat_override_presence_and_frequency_penalty():
+    mock_model_config = MockModelConfig()
+    mock_model_config.diff_sampling_param = {
+        "presence_penalty": 1.5,
+        "frequency_penalty": 0.8,
+    }
+
+    mock_engine = MagicMock(spec=AsyncLLM)
+    mock_engine.errored = False
+    mock_engine.model_config = mock_model_config
+    mock_engine.input_processor = MagicMock()
+    mock_engine.io_processor = MagicMock()
+    mock_engine.renderer = _build_renderer(mock_engine.model_config)
+
+    serving_chat = _build_serving_chat(mock_engine)
+
+    # Server defaults should apply when user doesn't set them
+    req = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "what is 1+1?"}],
+    )
+
+    with suppress(Exception):
+        await serving_chat.create_chat_completion(req)
+
+    assert mock_engine.generate.call_args.args[1].presence_penalty == 1.5
+    assert mock_engine.generate.call_args.args[1].frequency_penalty == 0.8
+
+    # User explicitly sets values (user takes precedence)
+    req.presence_penalty = 0.5
+    req.frequency_penalty = 0.3
+
+    with suppress(Exception):
+        await serving_chat.create_chat_completion(req)
+
+    assert mock_engine.generate.call_args.args[1].presence_penalty == 0.5
+    assert mock_engine.generate.call_args.args[1].frequency_penalty == 0.3
+
+    # User explicitly sets to 0.0 (should use 0.0, not the server default)
+    req.presence_penalty = 0.0
+    req.frequency_penalty = 0.0
+
+    with suppress(Exception):
+        await serving_chat.create_chat_completion(req)
+
+    assert mock_engine.generate.call_args.args[1].presence_penalty == 0.0
+    assert mock_engine.generate.call_args.args[1].frequency_penalty == 0.0
+
+
 @pytest.mark.parametrize("model_type", ["gpt_oss", "any"])
 @pytest.mark.asyncio
 async def test_serving_chat_did_set_correct_cache_salt(model_type):

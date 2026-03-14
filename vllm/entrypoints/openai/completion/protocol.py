@@ -51,12 +51,12 @@ class CompletionRequest(OpenAIBaseModel):
         | None
     ) = None
     echo: bool | None = False
-    frequency_penalty: float | None = 0.0
+    frequency_penalty: float | None = None
     logit_bias: dict[str, float] | None = None
     logprobs: int | None = None
     max_tokens: int | None = 16
     n: int = 1
-    presence_penalty: float | None = 0.0
+    presence_penalty: float | None = None
     seed: int | None = Field(None, ge=_LONG_INFO.min, le=_LONG_INFO.max)
     stop: str | list[str] | None = []
     stream: bool | None = False
@@ -197,6 +197,8 @@ class CompletionRequest(OpenAIBaseModel):
         "top_p": 1.0,
         "top_k": 0,
         "min_p": 0.0,
+        "presence_penalty": 0.0,
+        "frequency_penalty": 0.0,
     }
 
     def to_beam_search_params(
@@ -250,6 +252,14 @@ class CompletionRequest(OpenAIBaseModel):
             min_p = default_sampling_params.get(
                 "min_p", self._DEFAULT_SAMPLING_PARAMS["min_p"]
             )
+        if (presence_penalty := self.presence_penalty) is None:
+            presence_penalty = default_sampling_params.get(
+                "presence_penalty", self._DEFAULT_SAMPLING_PARAMS["presence_penalty"]
+            )
+        if (frequency_penalty := self.frequency_penalty) is None:
+            frequency_penalty = default_sampling_params.get(
+                "frequency_penalty", self._DEFAULT_SAMPLING_PARAMS["frequency_penalty"]
+            )
 
         prompt_logprobs = self.prompt_logprobs
         if prompt_logprobs is None and self.echo:
@@ -295,8 +305,8 @@ class CompletionRequest(OpenAIBaseModel):
             extra_args["kv_transfer_params"] = self.kv_transfer_params
         return SamplingParams.from_optional(
             n=self.n,
-            presence_penalty=self.presence_penalty,
-            frequency_penalty=self.frequency_penalty,
+            presence_penalty=presence_penalty,
+            frequency_penalty=frequency_penalty,
             repetition_penalty=repetition_penalty,
             temperature=temperature,
             top_p=top_p,
