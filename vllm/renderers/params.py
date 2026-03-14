@@ -315,6 +315,7 @@ class TokenizeParams:
                     f"number of requested output tokens.",
                     parameter="input_text",
                     value=len(text),
+                    error_code="context_length_exceeded",
                 )
 
         return text
@@ -403,6 +404,7 @@ class TokenizeParams:
                 f"number of requested output tokens.",
                 parameter="input_tokens",
                 value=token_count,
+                error_code="context_length_exceeded",
             )
 
         return tokens
