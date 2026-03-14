@@ -9,6 +9,7 @@ import torch.nn.functional as F
 from einops import rearrange
 from torch import nn
 
+import vllm._custom_ops  # noqa: F401 — registers fake-tensor impls for torch.compile
 from vllm.config import CacheConfig, ModelConfig, get_current_vllm_config
 from vllm.distributed.communication_op import tensor_model_parallel_all_reduce
 from vllm.distributed.parallel_state import (
@@ -102,7 +103,7 @@ class MiniMaxText01RMSNormTP(CustomOp):
         return q, k
 
 
-class MiniMaxText01RMSNormAR(CustomOp):
+class MiniMaxText01RMSNormAR(nn.Module):
     name = "MiniMaxText01RMSNormTP"
 
     def __init__(self, max_token: int = 0) -> None:
@@ -121,11 +122,11 @@ class MiniMaxText01RMSNormAR(CustomOp):
 
     def forward(
         self,
-        q_norm_weights:torch.Tensor,
+        q_norm_weights: torch.Tensor,
         k_norm_weights: torch.Tensor,
         q: torch.Tensor,
         k: torch.Tensor,
-        eps:float=1e-6
+        eps: float = 1e-6,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # orig_dtype = q.dtype
         # q_1 = q.clone()
