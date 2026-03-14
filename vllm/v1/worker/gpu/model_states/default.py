@@ -13,7 +13,7 @@ from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.mm.encoder_runner import EncoderRunner
-from vllm.v1.worker.gpu.mm.mrope_utils import MRopeState
+from vllm.v1.worker.gpu.mm.rope import get_rope_state
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.states import RequestState
 from vllm.v1.worker.utils import AttentionGroup
@@ -52,29 +52,28 @@ class DefaultModelState(ModelState):
                 device=self.device,
             )
 
-        self.uses_mrope = self.model_config.uses_mrope
-        if self.uses_mrope:
-            self.mrope_state = MRopeState(
-                max_num_reqs=self.max_num_reqs,
-                max_num_tokens=self.max_num_tokens,
-                max_model_len=self.max_model_len,
-                device=self.device,
-            )
+        self.rope_state = get_rope_state(
+            self.model_config,
+            model,
+            max_num_reqs=self.max_num_reqs,
+            max_num_tokens=self.max_num_tokens,
+            max_model_len=self.max_model_len,
+            device=self.device,
+        )
 
     def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
-        if self.uses_mrope:
-            # Pre-compute M-RoPE positions for prefill.
+        if self.rope_state is not None:
             assert new_req_data.prefill_token_ids is not None
-            self.mrope_state.init_prefill_mrope_positions(
+            self.rope_state.init_prefill_positions(
                 req_index,
-                self.model,  # type: ignore
+                self.model,
                 new_req_data.prefill_token_ids,
                 mm_features=new_req_data.mm_features,
             )
 
     def apply_staged_writes(self) -> None:
-        if self.uses_mrope:
-            self.mrope_state.apply_staged_writes()
+        if self.rope_state is not None:
+            self.rope_state.apply_staged_writes()
 
     def get_mm_embeddings(
         self,
@@ -109,31 +108,26 @@ class DefaultModelState(ModelState):
 
     def prepare_inputs(
         self, input_batch: InputBatch, req_states: RequestState
-    ) -> dict[str, Any]:
-        if not self.uses_mrope:
-            # Common case (1D positions).
-            return {}
+    ) -> dict[str, torch.Tensor | None]:
+        if self.rope_state is None:
+            return {}  # Common case (1D positions).
 
-        # Prepare M-RoPE positions.
-        self.mrope_state.prepare_mrope_positions(
+        self.rope_state.prepare_positions(
             input_batch.idx_mapping,
             input_batch.query_start_loc,
             req_states.prefill_len.gpu,
             req_states.num_computed_tokens.gpu,
         )
-        mrope_positions = self.mrope_state.mrope_positions[
-            :, : input_batch.num_tokens_after_padding
-        ]
-        return {"positions": mrope_positions}
+        positions = self.rope_state.get_positions(input_batch.num_tokens_after_padding)
+        return {"positions": positions}
 
     def prepare_dummy_inputs(self, num_reqs: int, num_tokens: int) -> dict[str, Any]:
         model_inputs = {}
         if self.supports_mm_inputs:
             inputs_embeds = self.encoder_runner.inputs_embeds[:num_tokens]
             model_inputs["inputs_embeds"] = inputs_embeds
-        if self.uses_mrope:
-            mrope_positions = self.mrope_state.mrope_positions[:, :num_tokens]
-            model_inputs["positions"] = mrope_positions
+        if self.rope_state is not None:
+            model_inputs["positions"] = self.rope_state.get_positions(num_tokens)
         return model_inputs
 
     def prepare_attn(
