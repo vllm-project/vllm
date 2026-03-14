@@ -52,6 +52,9 @@ class DefaultModelLoader(BaseModelLoader):
         revision: str | None
         """The optional model revision."""
 
+        subfolder: str | None = None
+        """The subfolder inside the model repo."""
+
         prefix: str = ""
         """A prefix to prepend to all weights."""
 
@@ -81,6 +84,7 @@ class DefaultModelLoader(BaseModelLoader):
     def _prepare_weights(
         self,
         model_name_or_path: str,
+        subfolder: str | None,
         revision: str | None,
         fall_back_to_pt: bool,
         allow_patterns_overrides: list[str] | None,
@@ -143,10 +147,14 @@ class DefaultModelLoader(BaseModelLoader):
                 self.load_config.download_dir,
                 allow_patterns,
                 revision,
+                subfolder=subfolder,
                 ignore_patterns=self.load_config.ignore_patterns,
             )
         else:
             hf_folder = model_name_or_path
+
+        if subfolder is not None:
+            hf_folder = os.path.join(hf_folder, subfolder)
 
         hf_weights_files: list[str] = []
         for pattern in allow_patterns:
@@ -166,8 +174,9 @@ class DefaultModelLoader(BaseModelLoader):
                 download_safetensors_index_file_from_hf(
                     model_name_or_path,
                     index_file,
-                    self.load_config.download_dir,
-                    revision,
+                    cache_dir=self.load_config.download_dir,
+                    subfolder=subfolder,
+                    revision=revision,
                 )
             hf_weights_files = filter_duplicate_safetensors_files(
                 hf_weights_files, hf_folder, index_file
@@ -189,6 +198,7 @@ class DefaultModelLoader(BaseModelLoader):
         extra_config = self.load_config.model_loader_extra_config
         hf_folder, hf_weights_files, use_safetensors = self._prepare_weights(
             source.model_or_path,
+            source.subfolder,
             source.revision,
             source.fall_back_to_pt,
             source.allow_patterns_overrides,
@@ -269,8 +279,9 @@ class DefaultModelLoader(BaseModelLoader):
 
     def download_model(self, model_config: ModelConfig) -> None:
         self._prepare_weights(
-            model_config.model,
-            model_config.revision,
+            model_name_or_path=model_config.model,
+            subfolder=None,
+            revision=model_config.revision,
             fall_back_to_pt=True,
             allow_patterns_overrides=None,
         )
