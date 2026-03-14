@@ -170,7 +170,7 @@ def trtllm_prefill_attn_kvfp8_dequant(
 
     strides = kv_cache.stride()
     assert strides[3] == head_size and strides[4] == 1, (
-        f"(block_size, head_size) must be contiguous, got strides {strides}"
+        f"For kv cache layouts, (block_size, head_size) dimensions must be contiguous, got strides {strides}"
     )
 
     new_s = (batch_size * num_of_page_per_token + 1, s[1], s[2], s[3], s[4])
