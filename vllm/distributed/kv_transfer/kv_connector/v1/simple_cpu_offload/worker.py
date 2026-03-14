@@ -280,19 +280,22 @@ class SimpleCPUOffloadWorker:
         self._validate_block_ids(src_blocks, first_src.shape[0], "Source")
         self._validate_block_ids(dst_blocks, first_dst.shape[0], "Dest")
 
-        block_mapping = torch.tensor(
-            list(zip(src_blocks, dst_blocks)),
-            dtype=torch.int64,
-            device=self.device,
-        )
-
         with torch.cuda.stream(stream):
+            block_mapping = torch.tensor(
+                list(zip(src_blocks, dst_blocks)),
+                dtype=torch.int64,
+                device=self.device,
+            )
+
             copy_ops.copy_blocks(
                 src_caches,
                 dst_caches,
                 block_mapping,
                 launch_params=launch_params,
             )
+            # record_stream here after kernel launch to prevent the caching allocator
+            # from recycling block_mapping before the kernel finishes reading it.
+            block_mapping.record_stream(stream)
             event = torch.cuda.Event()
             event.record(stream)
 
