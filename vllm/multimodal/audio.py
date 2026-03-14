@@ -161,8 +161,7 @@ def resample_audio_pyav(
     """Resample audio using PyAV (libswresample via FFmpeg).
 
     Args:
-        audio: Input audio as a float array. 1D ``(samples,)`` for mono,
-            or 2D ``(channels, samples)`` for multi-channel.
+        audio: Input audio as an 1D mono audio float array (samples,).
         orig_sr: Original sample rate in Hz.
         target_sr: Target sample rate in Hz.
 
@@ -173,29 +172,16 @@ def resample_audio_pyav(
     target_sr_int = int(round(target_sr))
 
     audio_f32 = np.asarray(audio, dtype=np.float32)
-    is_1d = audio_f32.ndim == 1
-    if is_1d:
-        audio_f32 = audio_f32[np.newaxis, :]  # (1, samples)
 
-    num_channels = audio_f32.shape[0]
-    if num_channels == 1:
-        layout = "mono"
-    elif num_channels == 2:
-        layout = "stereo"
-    else:
-        layout = f"{num_channels}c"
+    resampler = av.AudioResampler(format="fltp", layout="mono", rate=target_sr_int)
 
-    resampler = av.AudioResampler(format="fltp", layout=layout, rate=target_sr_int)
-
-    frame = av.AudioFrame.from_ndarray(audio_f32, format="fltp", layout=layout)
+    frame = av.AudioFrame.from_ndarray(audio_f32, format="fltp", layout="mono")
     frame.sample_rate = orig_sr_int
 
-    out_frames = resampler.resample(frame) + resampler.resample(None)
-    if not out_frames:
-        return audio.astype(np.float32)
+    out_frames = resampler.resample(frame)
 
-    result = np.concatenate([f.to_ndarray() for f in out_frames], axis=-1)
-    return result[0] if is_1d else result
+    result = np.concatenate([f.to_ndarray() for f in out_frames])
+    return result
 
 
 def resample_audio_scipy(
