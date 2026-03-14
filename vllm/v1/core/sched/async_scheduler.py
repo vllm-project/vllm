@@ -1,10 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 from vllm.logger import init_logger
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.request import Request, RequestStatus
+
+if TYPE_CHECKING:
+    from vllm.v1.engine import EngineCoreOutputs
+    from vllm.v1.outputs import ModelRunnerOutput
 
 logger = init_logger(__name__)
 
@@ -14,6 +22,28 @@ class AsyncScheduler(Scheduler):
         super().__init__(*args, **kwargs)
         # reusable read-only placeholder list for speculative decoding.
         self._spec_token_placeholders: list[int] = [-1] * self.num_spec_tokens
+        # Dynamic SD: effective K for the current step, updated from
+        # ModelRunnerOutput after each model execution.
+        self._dynamic_num_spec_tokens: int | None = None
+
+    def _update_placeholders_from_dynamic_sd(self, optimal_k: int | None) -> None:
+        """Update placeholder count based on Dynamic SD decision."""
+        if optimal_k is None:
+            self._dynamic_num_spec_tokens = None
+            self._spec_token_placeholders = [-1] * self.num_spec_tokens
+        elif optimal_k != self._dynamic_num_spec_tokens:
+            self._dynamic_num_spec_tokens = optimal_k
+            self._spec_token_placeholders = [-1] * optimal_k
+
+    def update_from_output(
+        self,
+        scheduler_output: SchedulerOutput,
+        model_runner_output: ModelRunnerOutput,
+    ) -> dict[int, EngineCoreOutputs]:
+        self._update_placeholders_from_dynamic_sd(
+            model_runner_output.optimal_num_speculative_tokens
+        )
+        return super().update_from_output(scheduler_output, model_runner_output)
 
     def _update_after_schedule(self, scheduler_output: SchedulerOutput) -> None:
         super()._update_after_schedule(scheduler_output)

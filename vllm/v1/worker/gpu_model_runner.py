@@ -767,6 +767,7 @@ class GPUModelRunner(
 
         # Cached outputs.
         self._draft_token_ids: list[list[int]] | torch.Tensor | None = None
+        self._optimal_num_speculative_tokens: int | None = None
         # N-gram GPU path: async D2H buffer/event for per-request valid draft counts.
         self._num_valid_draft_tokens: torch.Tensor | None = None
         self._num_valid_draft_tokens_cpu: torch.Tensor | None = None
@@ -4083,6 +4084,7 @@ class GPUModelRunner(
                 else None,
                 num_nans_in_logits=num_nans_in_logits,
                 cudagraph_stats=cudagraph_stats,
+                optimal_num_speculative_tokens=(self._optimal_num_speculative_tokens),
             )
 
         if not self.use_async_scheduling:
@@ -4154,6 +4156,12 @@ class GPUModelRunner(
         if not self.num_spec_tokens or not self._draft_token_req_ids:
             return None
         draft_token_ids, req_ids = self._get_draft_token_ids_cpu()
+        # When Dynamic SD reduced the number of speculative tokens,
+        # the GPU tensor was zero-padded to num_spec_tokens for scatter
+        # indexing, but the scheduler should only see the real draft tokens.
+        k = self._optimal_num_speculative_tokens
+        if k is not None and k < self.num_spec_tokens:
+            draft_token_ids = [ids[:k] for ids in draft_token_ids]
         return DraftTokenIds(req_ids, draft_token_ids)
 
     def _copy_draft_token_ids_to_cpu(
@@ -4249,6 +4257,7 @@ class GPUModelRunner(
                 scheduler_output.spec_decoding_stats_all,
                 self.input_batch.num_reqs,
             )
+        self._optimal_num_speculative_tokens = optimal_num_speculative_tokens
 
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         spec_config = self.speculative_config

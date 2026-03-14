@@ -113,7 +113,6 @@ class DynamicSpeculativeDecodingManager:
         self.update_optimal_num_speculative_tokens()
 
     def _get_batch_stats(self, batch_size: int) -> dict:
-        # import pdb; pdb.set_trace()
         if batch_size not in self.batch_stats:
             # find the nearest batch size smaller and bigger than the given batch size
             # and return the weighted avg of their stats
