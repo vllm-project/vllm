@@ -43,10 +43,22 @@ If you are only developing vLLM's Python code, install vLLM using:
 VLLM_USE_PRECOMPILED=1 uv pip install -e .
 ```
 
-If you are developing vLLM's Python and CUDA/C++ code, install vLLM using:
+If you are developing vLLM's Python and CUDA/C++ code, install Pytorch first:
 
 ```bash
-uv pip install -e .
+uv pip install torch torchvision torchaudio --extra-index-url https://download.pytorch.org/whl/cu129
+```
+
+Then install the necessary build dependencies from `requirements/build.txt`, skipping `torch` as it was installed in the previous step:
+
+```bash
+grep -v '^torch==' requirements/build.txt | uv pip install -r -
+```
+
+Finally install vLLM using:
+
+```bash
+uv pip install -e . --no-build-isolation
 ```
 
 For more details about installing from source and installing for other hardware, check out the [installation instructions](../getting_started/installation/README.md) for your hardware and head to the "Build wheel from source" section.
@@ -82,7 +94,6 @@ vLLM's `pre-commit` hooks will now run automatically every time you commit.
     Some `pre-commit` hooks only run in CI. If you need to, you can run them locally with:
 
     ```bash
-    pre-commit run --hook-stage manual markdownlint
     pre-commit run --hook-stage manual mypy-3.10
     ```
 
@@ -175,6 +186,30 @@ Using `-s` with `git commit` will automatically add this header.
       It will bring up a `git` window where you can modify the `Author` and enable `Sign-off commit`.
     - **VSCode**: Open the [Settings editor](https://code.visualstudio.com/docs/configure/settings)
       and enable the `Git: Always Sign Off` (`git.alwaysSignOff`) field.
+
+### AI Assisted Contributions
+
+Before making an AI assisted contribution, you must:
+
+1. **Be involved**: Do not submit "pure agent" PRs. The human submitter is responsible for reviewing all changed lines, validating behavior end-to-end, and running relevant tests.
+2. **Ensure significance**: Avoid one-off "busywork" PRs (single typo, isolated style cleanup, one mutable default fix, etc.). Bundle mechanical cleanups into a clear, systematic scope.
+
+When AI tools provide non-trivial assistance in generating or modifying code, you must:
+
+1. **Review thoroughly**: You remain responsible for all code you submit. Review and understand AI-generated code with the same care as code you write manually.
+2. **Disclose in PR**: Always mention when a pull request includes AI-generated code. Add a note in the PR description.
+3. **Mark commits**: Add attribution using commit trailers such as `Co-authored-by:` (other projects use `Assisted-by:` or `Generated-by:`). For example:
+
+   ```text
+   Your commit message here
+
+   Co-authored-by: GitHub Copilot
+   Co-authored-by: Claude
+   Co-authored-by: gemini-code-assist
+   Signed-off-by: Your Name <your.email@example.com>
+   ```
+
+AI-assisted code must meet all quality standards: proper testing, documentation, adherence to style guides, and thorough review. Attribution helps reviewers evaluate contributions in context and maintains legal clarity for the project.
 
 ### PR Title and Classification
 

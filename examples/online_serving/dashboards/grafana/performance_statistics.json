@@ -884,7 +884,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "rate(vllm:time_per_output_token_seconds_sum[$__interval]) / rate(vllm:time_per_output_token_seconds_count[$__interval])",
+          "expr": "rate(vllm:inter_token_latency_seconds_sum[$__interval]) / rate(vllm:inter_token_latency_seconds_count[$__interval])",
           "legendFormat": "ITL (Avg)",
           "range": true,
           "refId": "A"
@@ -895,7 +895,7 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.50, sum by(le) (rate(vllm:time_per_output_token_seconds_bucket[$__interval])))",
+          "expr": "histogram_quantile(0.50, sum by(le) (rate(vllm:inter_token_latency_seconds_bucket[$__interval])))",
           "hide": false,
           "instant": false,
           "legendFormat": "ITL (p50)",
@@ -908,7 +908,7 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.90, sum by(le) (rate(vllm:time_per_output_token_seconds_bucket[$__interval])))",
+          "expr": "histogram_quantile(0.90, sum by(le) (rate(vllm:inter_token_latency_seconds_bucket[$__interval])))",
           "hide": false,
           "instant": false,
           "legendFormat": "ITL (p90)",
@@ -921,7 +921,7 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.99, sum by(le) (rate(vllm:time_per_output_token_seconds_bucket[$__interval])))",
+          "expr": "histogram_quantile(0.99, sum by(le) (rate(vllm:inter_token_latency_seconds_bucket[$__interval])))",
           "hide": false,
           "instant": false,
           "legendFormat": "ITL (p99)",
@@ -990,7 +990,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "histogram_quantile(0.90, sum by(le) (rate(vllm:time_per_output_token_seconds_bucket[$__range])))",
+          "expr": "histogram_quantile(0.90, sum by(le) (rate(vllm:inter_token_latency_seconds_bucket[$__range])))",
           "legendFormat": "__auto",
           "range": true,
           "refId": "A"
@@ -1057,7 +1057,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "histogram_quantile(0.99, sum by(le) (rate(vllm:time_per_output_token_seconds_bucket[$__range])))",
+          "expr": "histogram_quantile(0.99, sum by(le) (rate(vllm:inter_token_latency_seconds_bucket[$__range])))",
           "legendFormat": "__auto",
           "range": true,
           "refId": "A"
@@ -1124,7 +1124,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "(sum(increase(vllm:time_per_output_token_seconds_sum[$__range])) / sum(increase(vllm:time_per_output_token_seconds_count[$__range])))",
+          "expr": "(sum(increase(vllm:inter_token_latency_seconds_sum[$__range])) / sum(increase(vllm:inter_token_latency_seconds_count[$__range])))",
           "legendFormat": "__auto",
           "range": true,
           "refId": "A"
@@ -1191,7 +1191,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "histogram_quantile(0.50, sum by(le) (rate(vllm:time_per_output_token_seconds_bucket[$__range])))",
+          "expr": "histogram_quantile(0.50, sum by(le) (rate(vllm:inter_token_latency_seconds_bucket[$__range])))",
           "legendFormat": "__auto",
           "range": true,
           "refId": "A"

@@ -24,7 +24,7 @@ pytestmark = pytest.mark.cpu_test
 def get_sliding_window_manager(sliding_window_spec, block_pool, enable_caching=True):
     return SlidingWindowManager(
         sliding_window_spec,
-        block_pool,
+        block_pool=block_pool,
         enable_caching=enable_caching,
         kv_cache_group_id=0,
     )
@@ -35,7 +35,7 @@ def get_chunked_local_attention_manager(
 ):
     return ChunkedLocalAttentionManager(
         chunked_local_attention_spec,
-        block_pool,
+        block_pool=block_pool,
         enable_caching=enable_caching,
         kv_cache_group_id=0,
     )
@@ -342,11 +342,15 @@ def test_get_num_blocks_to_allocate():
     ]
 
     assert (
-        manager.get_num_blocks_to_allocate("1", 20 * block_size, cached_blocks_1, 0)
+        manager.get_num_blocks_to_allocate(
+            "1", 20 * block_size, cached_blocks_1, 0, 20 * block_size
+        )
         == 20
     )
     assert (
-        manager.get_num_blocks_to_allocate("2", 20 * block_size, cached_blocks_2, 0)
+        manager.get_num_blocks_to_allocate(
+            "2", 20 * block_size, cached_blocks_2, 0, 20 * block_size
+        )
         == 15
     )
 
@@ -375,6 +379,7 @@ def test_evictable_cached_blocks_not_double_allocated():
         num_tokens=2 * block_size,
         new_computed_blocks=[evictable_block],
         total_computed_tokens=block_size,
+        num_tokens_main_model=2 * block_size,
     )
     # Free capacity check should count evictable cached blocks, but allocation
     # should only allocate the truly new block.
@@ -386,7 +391,9 @@ def test_evictable_cached_blocks_not_double_allocated():
         num_local_computed_tokens=block_size,
         num_external_computed_tokens=0,
     )
-    new_blocks = manager.allocate_new_blocks(request_id, num_tokens=4)
+    new_blocks = manager.allocate_new_blocks(
+        request_id, num_tokens=4, num_tokens_main_model=4
+    )
     assert len(new_blocks) == 1
     assert len(manager.req_to_blocks[request_id]) == 2
 
@@ -411,10 +418,14 @@ def test_chunked_local_attention_get_num_blocks_to_allocate():
     ]
 
     assert (
-        manager.get_num_blocks_to_allocate("1", 20 * block_size, cached_blocks_1, 0)
+        manager.get_num_blocks_to_allocate(
+            "1", 20 * block_size, cached_blocks_1, 0, 20 * block_size
+        )
         == 20
     )
     assert (
-        manager.get_num_blocks_to_allocate("2", 20 * block_size, cached_blocks_2, 0)
+        manager.get_num_blocks_to_allocate(
+            "2", 20 * block_size, cached_blocks_2, 0, 20 * block_size
+        )
         == 15
     )

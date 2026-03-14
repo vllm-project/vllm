@@ -2,14 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Mapping
-from typing import Any, Literal, TypeAlias
+from typing import Any, Literal, TypeAlias, TypedDict, final
 
 from pydantic import ConfigDict, Field, field_validator, model_validator
 from pydantic.dataclasses import dataclass
 
-from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.config.utils import config
 from vllm.utils.hashing import safe_hash
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 
 @dataclass
@@ -43,32 +43,53 @@ class AudioDummyOptions(BaseDummyOptions):
     length: int | None = Field(None, gt=0)
 
 
+@final
+class MultiModalDummyOptionsBuiltins(TypedDict, total=False):
+    """Type annotations for modality types predefined by vLLM."""
+
+    image: ImageDummyOptions
+    """Options for dummy images."""
+
+    video: VideoDummyOptions
+    """Options for dummy videos."""
+
+    audio: AudioDummyOptions
+    """Options for dummy audios."""
+
+
 MMEncoderTPMode = Literal["weights", "data"]
 MMCacheType = Literal["shm", "lru"]
-DummyOptions: TypeAlias = (
-    BaseDummyOptions | VideoDummyOptions | ImageDummyOptions | AudioDummyOptions
-)
+MMDummyOptions: TypeAlias = dict[str, BaseDummyOptions]
+"""
+A dictionary containing an entry for each modality type of dummy data.
+
+The built-in modalities are defined by
+[`MultiModalDummyOptionsBuiltins`][vllm.config.multimodal.MultiModalDummyOptionsBuiltins].
+"""
 
 
 @config
-@dataclass
 class MultiModalConfig:
     """Controls the behavior of multimodal models."""
 
-    limit_per_prompt: dict[str, DummyOptions] = Field(default_factory=dict)
-    """The maximum number of input items and options allowed per 
-        prompt for each modality.
+    language_model_only: bool = False
+    """If True, disables all multimodal inputs by setting all modality limits to 0.
+    Equivalent to setting `--limit-mm-per-prompt` to 0 for every modality."""
+    limit_per_prompt: MMDummyOptions = Field(default_factory=dict)
+    """The maximum number of input items and options allowed per
+    prompt for each modality.
+
     Defaults to 999 for each modality.
 
     Legacy format (count only):
         {"image": 16, "video": 2}
 
     Configurable format (with options):
-        {"video": {"count": 1, "num_frames": 32, "width": 512, "height": 512}, 
+        {"video": {"count": 1, "num_frames": 32, "width": 512, "height": 512},
         "image": {"count": 5, "width": 512, "height": 512}}
 
     Mixed format (combining both):
-        {"image": 16, "video": {"count": 1, "num_frames": 32, "width": 512, 
+        {"image": 16, "video": {"count": 1, "num_frames": 32, "width": 512,
         "height": 512}}
     """
     enable_mm_embeds: bool = False
@@ -76,6 +97,11 @@ class MultiModalConfig:
     for `LLM` class, this refers to tensor inputs under `multi_modal_data`;
     for the OpenAI-compatible server, this refers to chat messages with content
     `"type": "*_embeds"`.
+
+    When enabled with `--limit-mm-per-prompt` set to 0 for a modality,
+    precomputed embeddings skip count validation for that modality, 
+    saving memory by not loading encoder modules while still enabling 
+    embeddings as an input. Limits greater than 0 still apply to embeddings.
 
     WARNING: The vLLM engine may crash if incorrect shape of embeddings is passed.
     Only enable this flag for trusted users!"""
@@ -108,6 +134,12 @@ class MultiModalConfig:
     """Size limit (in MiB) for each object stored in the multi-modal processor
     shared memory cache. Only effective when `mm_processor_cache_type` is
     `"shm"`."""
+    mm_encoder_only: bool = False
+    """
+    When enabled, skips the language component of the model.
+
+    This is usually only valid in disaggregated Encoder process.
+    """
     mm_encoder_tp_mode: MMEncoderTPMode = "weights"
     """Indicates how to optimize multi-modal encoder inference using tensor
     parallelism (TP).
@@ -124,7 +156,7 @@ class MultiModalConfig:
     mm_encoder_attn_backend: AttentionBackendEnum | None = None
     """Optional override for the multi-modal encoder attention backend when
     using vision transformers. Accepts any value from
-    `vllm.attention.backends.registry.AttentionBackendEnum` (e.g. `FLASH_ATTN`)."""
+    `vllm.v1.attention.backends.registry.AttentionBackendEnum` (e.g. `FLASH_ATTN`)."""
     interleave_mm_strings: bool = False
     """Enable fully interleaved support for multimodal prompts, while using
     --chat-template-content-format=string."""
@@ -144,22 +176,27 @@ class MultiModalConfig:
     @field_validator("limit_per_prompt", mode="before")
     @classmethod
     def _validate_limit_per_prompt(
-        cls, value: dict[str, int | dict[str, int]]
-    ) -> dict[str, DummyOptions]:
+        cls,
+        value: dict[str, int | dict[str, int]],
+    ) -> MMDummyOptions:
+        out: MMDummyOptions = {}
+
         for k, v in value.items():
             # Handle legacy format where only count is specified
             if isinstance(v, int):
                 v = {"count": v}
+
             # Convert to the appropriate DummyOptions subclass
             if k == "video":
-                value[k] = VideoDummyOptions(**v)
+                out[k] = VideoDummyOptions(**v)
             elif k == "image":
-                value[k] = ImageDummyOptions(**v)
+                out[k] = ImageDummyOptions(**v)
             elif k == "audio":
-                value[k] = AudioDummyOptions(**v)
+                out[k] = AudioDummyOptions(**v)
             else:
-                value[k] = BaseDummyOptions(**v)
-        return value
+                out[k] = BaseDummyOptions(**v)
+
+        return out
 
     @field_validator("mm_encoder_attn_backend", mode="before")
     @classmethod
@@ -207,7 +244,8 @@ class MultiModalConfig:
         factors: list[Any] = [
             self.mm_encoder_attn_backend.name
             if self.mm_encoder_attn_backend is not None
-            else None
+            else None,
+            self.mm_encoder_tp_mode,
         ]
         hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
@@ -217,20 +255,16 @@ class MultiModalConfig:
         Get the maximum number of input items allowed per prompt
         for the given modality (backward compatible).
         """
+        if self.language_model_only:
+            return 0
+
         limit_data = self.limit_per_prompt.get(modality)
 
         if limit_data is None:
             # Unspecified modality is set to 999 by default
             return 999
-        return limit_data.count
 
-    def get_dummy_options(self, modality: str) -> BaseDummyOptions | None:
-        """
-        Get the configurable dummy data options for a modality.
-        Returns None if no options are configured for this modality.
-        """
-        # All values are now DummyOptions after normalization
-        return self.limit_per_prompt.get(modality)
+        return limit_data.count
 
     def merge_mm_processor_kwargs(
         self,

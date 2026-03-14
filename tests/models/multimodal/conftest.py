@@ -2,11 +2,29 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Pytest configuration for vLLM multimodal tests."""
 
+import os
 import warnings
 
 import torch
 
 from vllm.platforms import current_platform
+
+
+def pytest_configure(config):
+    """Early ROCm configuration that must happen before test collection."""
+    if not current_platform.is_rocm():
+        return
+
+    # Disable skinny GEMM on ROCm to avoid non-deterministic results
+    # from atomic reductions in wvSplitKrc kernel.
+    # See: https://github.com/vllm-project/vllm/pull/33493#issuecomment-3906083975
+    os.environ["VLLM_ROCM_USE_SKINNY_GEMM"] = "0"
+    warnings.warn(
+        "ROCm: Set VLLM_ROCM_USE_SKINNY_GEMM=0 to avoid non-deterministic "
+        "results from skinny GEMM atomic reductions",
+        UserWarning,
+        stacklevel=1,
+    )
 
 
 def pytest_collection_modifyitems(config, items):
@@ -30,3 +48,22 @@ def pytest_collection_modifyitems(config, items):
         UserWarning,
         stacklevel=1,
     )
+
+
+def patch_hf_vision_attn_for_rocm(model):
+    """Force SDPA for HF vision encoders on ROCm.
+
+    HF's flash_attention_2 has accuracy issues on ROCm that bypass
+    torch.backends.cuda settings. This forces SDPA which then uses
+    math_sdp via the pytest_collection_modifyitems settings.
+    """
+    if not current_platform.is_rocm():
+        return
+
+    inner = getattr(model, "model", model)
+
+    if hasattr(inner, "vision_embedding"):
+        vit = inner.vision_embedding[0]
+        for layer in vit.encoder.layers:
+            if hasattr(layer, "self_attn"):
+                layer.self_attn.vision_config._attn_implementation = "sdpa"

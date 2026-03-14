@@ -76,7 +76,6 @@ def make_request(sampling_params: SamplingParams) -> EngineCoreRequest:
         mm_features=None,
         sampling_params=sampling_params,
         pooling_params=None,
-        eos_token_id=None,
         arrival_time=0.0,
         lora_request=None,
         cache_salt=None,

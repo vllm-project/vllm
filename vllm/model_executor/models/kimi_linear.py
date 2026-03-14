@@ -26,6 +26,8 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.mamba_utils import (
+    MambaStateCopyFunc,
+    MambaStateCopyFuncCalculator,
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
 )
@@ -391,7 +393,6 @@ class KimiLinearModel(nn.Module):
         parallel_config = vllm_config.parallel_config
         self.config = config
 
-        self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
 
         if get_pp_group().is_first_rank:
@@ -504,7 +505,7 @@ class KimiLinearForCausalLM(
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
@@ -544,6 +545,14 @@ class KimiLinearForCausalLM(
             num_spec=num_spec,
         )
 
+    @classmethod
+    def get_mamba_state_copy_func(
+        cls,
+    ) -> tuple[
+        MambaStateCopyFunc, MambaStateCopyFunc, MambaStateCopyFunc, MambaStateCopyFunc
+    ]:
+        return MambaStateCopyFuncCalculator.kda_state_copy_func()
+
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
@@ -560,6 +569,7 @@ class KimiLinearForCausalLM(
             # Params for weights, fp8 weight scales, fp8 activation scales
             # (param_name, weight_name, expert_id, shard_id)
             expert_params_mapping = FusedMoE.make_expert_params_mapping(
+                self,
                 ckpt_gate_proj_name="w1",
                 ckpt_down_proj_name="w2",
                 ckpt_up_proj_name="w3",

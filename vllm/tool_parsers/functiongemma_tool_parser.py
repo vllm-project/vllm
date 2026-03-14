@@ -7,8 +7,10 @@ from collections.abc import Sequence
 import regex as re
 
 from vllm.entrypoints.chat_utils import make_tool_call_id
-from vllm.entrypoints.openai.protocol import (
+from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
+)
+from vllm.entrypoints.openai.engine.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
     DeltaToolCall,
@@ -70,7 +72,7 @@ class FunctionGemmaToolParser(ToolParser):
 
     def _parse_arguments(self, args_str: str) -> dict:
         """Parse FunctionGemma argument string into a dictionary."""
-        arguments = {}
+        arguments: dict = {}
         if not args_str:
             return arguments
 

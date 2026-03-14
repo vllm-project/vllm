@@ -1,7 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from unittest.mock import patch
+
 import pytest
+from openai.types.chat import ChatCompletionMessageParam
 from openai.types.responses.response_function_tool_call import ResponseFunctionToolCall
 from openai.types.responses.response_function_tool_call_output_item import (
     ResponseFunctionToolCallOutputItem,
@@ -14,10 +17,13 @@ from openai.types.responses.response_reasoning_item import (
     Summary,
 )
 
-from vllm.entrypoints.responses_utils import (
+from vllm.entrypoints.constants import MCP_PREFIX
+from vllm.entrypoints.openai.responses.utils import (
     _construct_single_message_from_response_item,
+    _maybe_combine_reasoning_and_tool_call,
     construct_chat_messages_with_tool_call,
     convert_tool_responses_to_completions_format,
+    should_continue_final_message,
 )
 
 
@@ -160,3 +166,575 @@ class TestResponsesUtils:
         formatted_item = _construct_single_message_from_response_item(output_item)
         assert formatted_item["role"] == "assistant"
         assert formatted_item["content"] == "dongyi"
+
+
+class TestReasoningItemContentPriority:
+    """Tests that content is prioritized over summary for reasoning items."""
+
+    def test_content_preferred_over_summary(self):
+        """When both content and summary are present, content should win."""
+        item = ResponseReasoningItem(
+            id="reasoning_1",
+            summary=[
+                Summary(
+                    text="This is a summary",
+                    type="summary_text",
+                )
+            ],
+            type="reasoning",
+            content=[
+                Content(
+                    text="This is the actual content",
+                    type="reasoning_text",
+                )
+            ],
+            encrypted_content=None,
+            status=None,
+        )
+        formatted = _construct_single_message_from_response_item(item)
+        assert formatted["reasoning"] == "This is the actual content"
+
+    def test_content_only(self):
+        """When only content is present (no summary), content is used."""
+        item = ResponseReasoningItem(
+            id="reasoning_2",
+            summary=[],
+            type="reasoning",
+            content=[
+                Content(
+                    text="Content without summary",
+                    type="reasoning_text",
+                )
+            ],
+            encrypted_content=None,
+            status=None,
+        )
+        formatted = _construct_single_message_from_response_item(item)
+        assert formatted["reasoning"] == "Content without summary"
+
+    @patch("vllm.entrypoints.openai.responses.utils.logger")
+    def test_summary_fallback_when_no_content(self, mock_logger):
+        """When content is absent, summary is used as fallback with warning."""
+        item = ResponseReasoningItem(
+            id="reasoning_3",
+            summary=[
+                Summary(
+                    text="Fallback summary text",
+                    type="summary_text",
+                )
+            ],
+            type="reasoning",
+            content=None,
+            encrypted_content=None,
+            status=None,
+        )
+        formatted = _construct_single_message_from_response_item(item)
+        assert formatted["reasoning"] == "Fallback summary text"
+        mock_logger.warning.assert_called_once()
+        assert (
+            "summary text as reasoning content" in mock_logger.warning.call_args[0][0]
+        )
+
+    @patch("vllm.entrypoints.openai.responses.utils.logger")
+    def test_summary_fallback_when_content_empty(self, mock_logger):
+        """When content is an empty list, summary is used as fallback."""
+        item = ResponseReasoningItem(
+            id="reasoning_4",
+            summary=[
+                Summary(
+                    text="Summary when content empty",
+                    type="summary_text",
+                )
+            ],
+            type="reasoning",
+            content=[],
+            encrypted_content=None,
+            status=None,
+        )
+        formatted = _construct_single_message_from_response_item(item)
+        assert formatted["reasoning"] == "Summary when content empty"
+        mock_logger.warning.assert_called_once()
+        assert (
+            "summary text as reasoning content" in mock_logger.warning.call_args[0][0]
+        )
+
+    def test_neither_content_nor_summary(self):
+        """When neither content nor summary is present, reasoning is empty."""
+        item = ResponseReasoningItem(
+            id="reasoning_5",
+            summary=[],
+            type="reasoning",
+            content=None,
+            encrypted_content=None,
+            status=None,
+        )
+        formatted = _construct_single_message_from_response_item(item)
+        assert formatted["reasoning"] == ""
+
+    def test_encrypted_content_raises(self):
+        """Encrypted content should still raise ValueError."""
+        item = ResponseReasoningItem(
+            id="reasoning_6",
+            summary=[
+                Summary(
+                    text="Some summary",
+                    type="summary_text",
+                )
+            ],
+            type="reasoning",
+            content=[
+                Content(
+                    text="Some content",
+                    type="reasoning_text",
+                )
+            ],
+            encrypted_content="ENCRYPTED",
+            status=None,
+        )
+        with pytest.raises(ValueError):
+            _construct_single_message_from_response_item(item)
+
+    @patch("vllm.entrypoints.openai.responses.utils.logger")
+    def test_summary_with_multiple_entries_uses_first(self, mock_logger):
+        """When multiple summary entries exist, the first one is used."""
+        item = ResponseReasoningItem(
+            id="reasoning_7",
+            summary=[
+                Summary(
+                    text="First summary",
+                    type="summary_text",
+                ),
+                Summary(
+                    text="Second summary",
+                    type="summary_text",
+                ),
+            ],
+            type="reasoning",
+            content=None,
+            encrypted_content=None,
+            status=None,
+        )
+        formatted = _construct_single_message_from_response_item(item)
+        assert formatted["reasoning"] == "First summary"
+        mock_logger.warning.assert_called_once()
+        assert (
+            "summary text as reasoning content" in mock_logger.warning.call_args[0][0]
+        )
+
+    @patch("vllm.entrypoints.openai.responses.utils.logger")
+    def test_no_warning_when_content_used(self, mock_logger):
+        """No warning should be emitted when content is available."""
+        item = ResponseReasoningItem(
+            id="reasoning_8",
+            summary=[
+                Summary(
+                    text="Summary text",
+                    type="summary_text",
+                )
+            ],
+            type="reasoning",
+            content=[
+                Content(
+                    text="Content text",
+                    type="reasoning_text",
+                )
+            ],
+            encrypted_content=None,
+            status=None,
+        )
+        _construct_single_message_from_response_item(item)
+        mock_logger.warning.assert_not_called()
+
+
+class TestShouldContinueFinalMessage:
+    """Tests for should_continue_final_message function.
+
+    This function enables Anthropic-style partial message completion, where
+    users can provide an incomplete assistant message and have the model
+    continue from where it left off.
+    """
+
+    def test_string_input_returns_false(self):
+        """String input is always a user message, so should not continue."""
+        assert should_continue_final_message("Hello, world!") is False
+
+    def test_empty_list_returns_false(self):
+        """Empty list should not continue."""
+        assert should_continue_final_message([]) is False
+
+    def test_completed_message_returns_false(self):
+        """Completed message should not be continued."""
+        output_item = ResponseOutputMessage(
+            id="msg_123",
+            content=[
+                ResponseOutputText(
+                    annotations=[],
+                    text="The answer is 42.",
+                    type="output_text",
+                    logprobs=None,
+                )
+            ],
+            role="assistant",
+            status="completed",
+            type="message",
+        )
+        assert should_continue_final_message([output_item]) is False
+
+    def test_in_progress_message_returns_true(self):
+        """In-progress message should be continued.
+
+        This is the key use case for partial message completion.
+        Example: The user provides "The best answer is (" and wants
+        the model to continue from there.
+        """
+        output_item = ResponseOutputMessage(
+            id="msg_123",
+            content=[
+                ResponseOutputText(
+                    annotations=[],
+                    text="The best answer is (",
+                    type="output_text",
+                    logprobs=None,
+                )
+            ],
+            role="assistant",
+            status="in_progress",
+            type="message",
+        )
+        assert should_continue_final_message([output_item]) is True
+
+    def test_incomplete_message_returns_true(self):
+        """Incomplete message should be continued."""
+        output_item = ResponseOutputMessage(
+            id="msg_123",
+            content=[
+                ResponseOutputText(
+                    annotations=[],
+                    text="The answer",
+                    type="output_text",
+                    logprobs=None,
+                )
+            ],
+            role="assistant",
+            status="incomplete",
+            type="message",
+        )
+        assert should_continue_final_message([output_item]) is True
+
+    def test_in_progress_reasoning_returns_true(self):
+        """In-progress reasoning should be continued."""
+        reasoning_item = ResponseReasoningItem(
+            id="reasoning_123",
+            summary=[],
+            type="reasoning",
+            content=[
+                Content(
+                    text="Let me think about this...",
+                    type="reasoning_text",
+                )
+            ],
+            encrypted_content=None,
+            status="in_progress",
+        )
+        assert should_continue_final_message([reasoning_item]) is True
+
+    def test_incomplete_reasoning_returns_true(self):
+        """Incomplete reasoning should be continued."""
+        reasoning_item = ResponseReasoningItem(
+            id="reasoning_123",
+            summary=[],
+            type="reasoning",
+            content=[
+                Content(
+                    text="Let me think",
+                    type="reasoning_text",
+                )
+            ],
+            encrypted_content=None,
+            status="incomplete",
+        )
+        assert should_continue_final_message([reasoning_item]) is True
+
+        reasoning_item = {
+            "id": "reasoning_123",
+            "summary": [],
+            "type": "reasoning",
+            "content": [],
+            "status": "incomplete",
+        }
+        assert should_continue_final_message([reasoning_item]) is True
+
+    def test_completed_reasoning_returns_false(self):
+        """Completed reasoning should not be continued."""
+        reasoning_item = ResponseReasoningItem(
+            id="reasoning_123",
+            summary=[],
+            type="reasoning",
+            content=[
+                Content(
+                    text="I have thought about this.",
+                    type="reasoning_text",
+                )
+            ],
+            encrypted_content=None,
+            status="completed",
+        )
+        assert should_continue_final_message([reasoning_item]) is False
+
+    def test_reasoning_with_none_status_returns_false(self):
+        """Reasoning with None status should not be continued."""
+        reasoning_item = ResponseReasoningItem(
+            id="reasoning_123",
+            summary=[],
+            type="reasoning",
+            content=[
+                Content(
+                    text="Some reasoning",
+                    type="reasoning_text",
+                )
+            ],
+            encrypted_content=None,
+            status=None,
+        )
+        assert should_continue_final_message([reasoning_item]) is False
+
+    def test_only_last_item_matters(self):
+        """Only the last item in the list determines continuation."""
+        completed_item = ResponseOutputMessage(
+            id="msg_1",
+            content=[
+                ResponseOutputText(
+                    annotations=[],
+                    text="Complete message.",
+                    type="output_text",
+                    logprobs=None,
+                )
+            ],
+            role="assistant",
+            status="completed",
+            type="message",
+        )
+        in_progress_item = ResponseOutputMessage(
+            id="msg_2",
+            content=[
+                ResponseOutputText(
+                    annotations=[],
+                    text="Partial message...",
+                    type="output_text",
+                    logprobs=None,
+                )
+            ],
+            role="assistant",
+            status="in_progress",
+            type="message",
+        )
+
+        # In-progress as last item -> should continue
+        assert should_continue_final_message([completed_item, in_progress_item]) is True
+
+        # Completed as last item -> should not continue
+        assert (
+            should_continue_final_message([in_progress_item, completed_item]) is False
+        )
+
+    def test_tool_call_returns_false(self):
+        """Tool calls should not trigger continuation."""
+        tool_call = ResponseFunctionToolCall(
+            id="fc_123",
+            call_id="call_123",
+            type="function_call",
+            status="in_progress",
+            name="get_weather",
+            arguments='{"location": "NYC"}',
+        )
+        assert should_continue_final_message([tool_call]) is False
+
+        tool_call = {
+            "id": "msg_123",
+            "call_id": "call_123",
+            "type": "function_call",
+            "status": "in_progress",
+            "name": "get_weather",
+            "arguments": '{"location": "NYC"}',
+        }
+        assert should_continue_final_message([tool_call]) is False
+
+    # Tests for dict inputs (e.g., from curl requests)
+    def test_dict_in_progress_message_returns_true(self):
+        """Dict with in_progress status should be continued (curl input)."""
+        dict_item = {
+            "id": "msg_123",
+            "type": "message",
+            "role": "assistant",
+            "status": "in_progress",
+            "content": [{"type": "output_text", "text": "The answer is ("}],
+        }
+        assert should_continue_final_message([dict_item]) is True
+
+    def test_dict_incomplete_message_returns_true(self):
+        """Dict with incomplete status should be continued (curl input)."""
+        dict_item = {
+            "id": "msg_123",
+            "type": "message",
+            "role": "assistant",
+            "status": "incomplete",
+            "content": [{"type": "output_text", "text": "Partial answer"}],
+        }
+        assert should_continue_final_message([dict_item]) is True
+
+    def test_dict_completed_message_returns_false(self):
+        """Dict with completed status should not be continued (curl input)."""
+        dict_item = {
+            "id": "msg_123",
+            "type": "message",
+            "role": "assistant",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": "Complete answer."}],
+        }
+        assert should_continue_final_message([dict_item]) is False
+
+    def test_dict_reasoning_in_progress_returns_true(self):
+        """Dict reasoning item with in_progress status should be continued."""
+        dict_item = {
+            "id": "reasoning_123",
+            "type": "reasoning",
+            "status": "in_progress",
+            "content": [{"type": "reasoning_text", "text": "Let me think..."}],
+        }
+        assert should_continue_final_message([dict_item]) is True
+
+    def test_dict_without_status_returns_false(self):
+        """Dict without status field should not be continued."""
+        dict_item = {
+            "id": "msg_123",
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "Some text"}],
+        }
+        assert should_continue_final_message([dict_item]) is False
+
+    def test_dict_with_none_status_returns_false(self):
+        """Dict with None status should not be continued."""
+        dict_item = {
+            "id": "msg_123",
+            "type": "message",
+            "role": "assistant",
+            "status": None,
+            "content": [{"type": "output_text", "text": "Some text"}],
+        }
+        assert should_continue_final_message([dict_item]) is False
+
+
+class TestMaybeCombineReasoningAndToolCall:
+    """Tests for _maybe_combine_reasoning_and_tool_call function."""
+
+    def test_returns_none_when_item_id_is_none(self):
+        """
+        Test fix from PR #31999: when item.id is None, should return None
+        instead of raising TypeError on startswith().
+        """
+        item = ResponseFunctionToolCall(
+            type="function_call",
+            id=None,  # This was causing TypeError before the fix
+            call_id="call_123",
+            name="test_function",
+            arguments="{}",
+        )
+        messages: list[ChatCompletionMessageParam] = []
+
+        result = _maybe_combine_reasoning_and_tool_call(item, messages)
+
+        assert result is None
+
+    def test_returns_none_when_id_does_not_start_with_mcp_prefix(self):
+        """Test that non-MCP tool calls are not combined."""
+        item = ResponseFunctionToolCall(
+            type="function_call",
+            id="regular_id",  # Does not start with MCP_PREFIX
+            call_id="call_123",
+            name="test_function",
+            arguments="{}",
+        )
+        messages = [{"role": "assistant", "reasoning": "some reasoning"}]
+
+        result = _maybe_combine_reasoning_and_tool_call(item, messages)
+
+        assert result is None
+
+    def test_returns_none_when_last_message_is_not_assistant(self):
+        """Test that non-assistant last message returns None."""
+        item = ResponseFunctionToolCall(
+            type="function_call",
+            id=f"{MCP_PREFIX}tool_id",
+            call_id="call_123",
+            name="test_function",
+            arguments="{}",
+        )
+        messages = [{"role": "user", "content": "hello"}]
+
+        result = _maybe_combine_reasoning_and_tool_call(item, messages)
+
+        assert result is None
+
+    def test_returns_none_when_last_message_has_no_reasoning(self):
+        """Test that assistant message without reasoning returns None."""
+        item = ResponseFunctionToolCall(
+            type="function_call",
+            id=f"{MCP_PREFIX}tool_id",
+            call_id="call_123",
+            name="test_function",
+            arguments="{}",
+        )
+        messages = [{"role": "assistant", "content": "some content"}]
+
+        result = _maybe_combine_reasoning_and_tool_call(item, messages)
+
+        assert result is None
+
+    def test_combines_reasoning_and_mcp_tool_call(self):
+        """Test successful combination of reasoning message and MCP tool call."""
+        item = ResponseFunctionToolCall(
+            type="function_call",
+            id=f"{MCP_PREFIX}tool_id",
+            call_id="call_123",
+            name="test_function",
+            arguments='{"arg": "value"}',
+        )
+        messages = [{"role": "assistant", "reasoning": "I need to call this tool"}]
+
+        result = _maybe_combine_reasoning_and_tool_call(item, messages)
+
+        assert result is not None
+        assert result["role"] == "assistant"
+        assert result["reasoning"] == "I need to call this tool"
+        assert "tool_calls" in result
+        assert len(result["tool_calls"]) == 1
+        assert result["tool_calls"][0]["id"] == "call_123"
+        assert result["tool_calls"][0]["function"]["name"] == "test_function"
+        assert result["tool_calls"][0]["function"]["arguments"] == '{"arg": "value"}'
+        assert result["tool_calls"][0]["type"] == "function"
+
+    def test_returns_none_for_non_function_tool_call_type(self):
+        """Test that non-ResponseFunctionToolCall items return None."""
+        # Pass a dict instead of ResponseFunctionToolCall
+        item = {"type": "message", "content": "hello"}
+        messages = [{"role": "assistant", "reasoning": "some reasoning"}]
+
+        result = _maybe_combine_reasoning_and_tool_call(item, messages)
+
+        assert result is None
+
+    def test_returns_none_when_id_is_empty_string(self):
+        """Test that empty string id returns None (falsy check)."""
+        item = ResponseFunctionToolCall(
+            type="function_call",
+            id="",  # Empty string is falsy
+            call_id="call_123",
+            name="test_function",
+            arguments="{}",
+        )
+        messages = [{"role": "assistant", "reasoning": "some reasoning"}]
+
+        result = _maybe_combine_reasoning_and_tool_call(item, messages)
+
+        assert result is None

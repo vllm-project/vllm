@@ -3,6 +3,7 @@ pull_request_rules:
   description: Automatically apply documentation label
   conditions:
     - label != stale
+    - -closed
     - or:
       - files~=^[^/]+\.md$
       - files~=^docs/
@@ -37,15 +38,13 @@ pull_request_rules:
 
         > [!TIP]
         > <details>
-        > <summary>Is <code>mypy</code> or <code>markdownlint</code> failing?</summary>
+        > <summary>Is <code>mypy</code> failing?</summary>
         > <br/>
-        > <code>mypy</code> and <code>markdownlint</code> are run differently in CI. If the failure is related to either of these checks, please use the following commands to run them locally:
+        > <code>mypy</code> is run differently in CI. If the failure is related to this check, please use the following command to run it locally:
         >
         > ```bash
         > # For mypy (substitute "3.10" with the failing version if needed)
         > pre-commit run --hook-stage manual mypy-3.10
-        > # For markdownlint
-        > pre-commit run --hook-stage manual markdownlint
         > ```
         > </details>
 
@@ -222,10 +221,10 @@ pull_request_rules:
       - files~=^csrc/rocm/
       - files~=^docker/Dockerfile.rocm
       - files~=^requirements/rocm.*\.txt
-      - files~=^vllm/attention/backends/rocm.*\.py
-      - files~=^vllm/attention/ops/rocm.*\.py
       - files~=^vllm/model_executor/layers/fused_moe/rocm.*\.py
+      - files~=^vllm/v1/attention/backends/rocm.*\.py
       - files~=^vllm/v1/attention/backends/mla/rocm.*\.py
+      - files~=^vllm/v1/attention/ops/rocm.*\.py
       - files~=^tests/kernels/.*_rocm.*\.py
       - files=vllm/platforms/rocm.py
       - title~=(?i)AMD
@@ -259,8 +258,7 @@ pull_request_rules:
       - files=benchmarks/run_structured_output_benchmark.sh
       - files=docs/features/structured_outputs.md
       - files=examples/offline_inference/structured_outputs.py
-      - files=examples/online_serving/openai_chat_completion_structured_outputs.py
-      - files=examples/online_serving/openai_chat_completion_structured_outputs_with_reasoning.py
+      - files=examples/online_serving/structured_outputs/structured_outputs.py
       - files~=^tests/v1/structured_output/
       - files=tests/v1/entrypoints/llm/test_struct_output_generate.py
       - files~=^vllm/v1/structured_output/
@@ -336,7 +334,7 @@ pull_request_rules:
     - or:
       - files~=^tests/tool_use/
       - files~=^tests/entrypoints/openai/tool_parsers/
-      - files=tests/entrypoints/openai/test_chat_with_tool_reasoning.py
+      - files=tests/entrypoints/openai/chat_completion/test_chat_with_tool_reasoning.py
       - files~=^vllm/entrypoints/openai/tool_parsers/
       - files=docs/features/tool_calling.md
       - files~=^examples/tool_chat_*
@@ -413,6 +411,18 @@ pull_request_rules:
     label:
       remove:
         - needs-rebase
+
+- name: label-bug
+  description: Automatically apply bug label
+  conditions:
+    - label != stale
+    - or:
+      - title~=(?i)\bbug\b
+      - title~=(?i)\bbugfix\b
+  actions:
+    label:
+      add:
+        - bug
 
 - name: label-kv-connector
   description: Automatically apply kv-connector label

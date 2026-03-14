@@ -7,15 +7,15 @@ import torch
 from tabulate import tabulate
 
 from vllm import _custom_ops as ops
-from vllm.attention.ops.triton_reshape_and_cache_flash import (
-    triton_reshape_and_cache_flash,
-)
 from vllm.logger import init_logger
-from vllm.platforms import current_platform
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.torch_utils import (
     STR_DTYPE_TO_TORCH_DTYPE,
     create_kv_caches_with_random_flash,
+    set_random_seed,
+)
+from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
+    triton_reshape_and_cache_flash,
 )
 
 logger = init_logger(__name__)
@@ -49,7 +49,7 @@ def run_benchmark(
     if implementation == "triton" and kv_cache_layout == "HND":
         return float("nan")  # Triton does not support HND layout yet.
 
-    current_platform.seed_everything(42)
+    set_random_seed(42)
     torch.set_default_device(device)
 
     # create random key / value tensors [T, H, D].
@@ -109,16 +109,16 @@ def run_benchmark(
         g = torch.cuda.CUDAGraph()
         with torch.cuda.graph(g):
             function_under_test()
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         function_under_test = lambda: g.replay()
 
     def run_cuda_benchmark(n_iters: int) -> float:
         nonlocal key, value, key_cache, value_cache, slot_mapping
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         start = time.perf_counter()
         for _ in range(n_iters):
             function_under_test()
-            torch.cuda.synchronize()
+            torch.accelerator.synchronize()
         end = time.perf_counter()
         return (end - start) / n_iters
 
@@ -129,7 +129,7 @@ def run_benchmark(
 
     # free tensors to mitigate OOM when sweeping
     del key, value, key_cache, value_cache, slot_mapping
-    torch.cuda.empty_cache()
+    torch.accelerator.empty_cache()
 
     return lat
 

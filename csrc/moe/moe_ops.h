@@ -4,7 +4,13 @@
 
 void topk_softmax(torch::Tensor& topk_weights, torch::Tensor& topk_indices,
                   torch::Tensor& token_expert_indices,
-                  torch::Tensor& gating_output, bool renormalize);
+                  torch::Tensor& gating_output, bool renormalize,
+                  std::optional<torch::Tensor> bias);
+
+void topk_sigmoid(torch::Tensor& topk_weights, torch::Tensor& topk_indices,
+                  torch::Tensor& token_expert_indices,
+                  torch::Tensor& gating_output, bool renormalize,
+                  std::optional<torch::Tensor> bias);
 
 void moe_sum(torch::Tensor& input, torch::Tensor& output);
 
@@ -50,3 +56,18 @@ bool moe_permute_unpermute_supported();
 void shuffle_rows(const torch::Tensor& input_tensor,
                   const torch::Tensor& dst2src_map,
                   torch::Tensor& output_tensor);
+
+#ifndef USE_ROCM
+// cuBLAS bf16 x bf16 -> fp32 router GEMM (fallback for non-SM90 / batch > 16)
+torch::Tensor router_gemm_bf16_fp32(torch::Tensor const& input,
+                                    torch::Tensor const& weight);
+
+// DeepSeek V3 optimized router GEMM kernel for SM90+
+// Computes output = mat_a @ mat_b.T where:
+//   mat_a: [num_tokens, hidden_dim] in bf16
+//   mat_b: [num_experts, hidden_dim] in bf16
+//   output: [num_tokens, num_experts] in bf16 or fp32
+// Supports num_tokens in [1, 16], num_experts in {256, 384}, hidden_dim = 7168
+void dsv3_router_gemm(torch::Tensor& output, const torch::Tensor& mat_a,
+                      const torch::Tensor& mat_b);
+#endif

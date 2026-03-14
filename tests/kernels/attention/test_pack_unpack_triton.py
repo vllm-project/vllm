@@ -4,7 +4,7 @@
 import torch
 from torch.testing import assert_close
 
-from vllm.attention.ops.common import pack_seq_triton, unpack_seq_triton
+from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
 
 
 def test_pack_seq_basic_fp8():

@@ -48,7 +48,7 @@ void computeExpertFirstTokenOffset(int const* sorted_indices,
                                    int64_t* expert_first_token_offset,
                                    cudaStream_t stream);
 
-void sortAndScanExpert(int* expert_for_source_row, const int* source_rows,
+void sortAndScanExpert(const int* expert_for_source_row, const int* source_rows,
                        int* permuted_experts, int* permuted_rows,
                        int64_t* expert_first_token_offset, int num_rows,
                        int num_experts, int num_experts_per_node, int k,
@@ -60,9 +60,9 @@ void expandInputRowsKernelLauncher(
     T const* unpermuted_input, T* permuted_output, int* sorted_experts,
     int const* expanded_dest_row_to_expanded_source_row,
     int* expanded_source_row_to_expanded_dest_row, int* permuted_idx,
-    int64_t* expert_first_token_offset, int64_t const num_rows,
+    int64_t const* expert_first_token_offset, int64_t const num_rows,
     int64_t const* num_valid_tokens_ptr, int64_t const cols, int const k,
-    int num_local_experts, const int& align_block_size, cudaStream_t stream);
+    int num_local_experts, cudaStream_t stream);
 
 template <class T, class OutputType>
 void finalizeMoeRoutingKernelLauncher(
@@ -74,10 +74,5 @@ void finalizeMoeRoutingKernelLauncher(
 void preprocessTopkIdLauncher(int* topk_id_ptr, int size,
                               const int* expert_map_ptr, int num_experts,
                               cudaStream_t stream);
-
-void getMIndices(int64_t* expert_first_token_offset,
-                 int64_t* align_expert_first_token_offset, int* m_indices,
-                 int num_local_expert, const int align_block_size,
-                 cudaStream_t stream);
 
 #include "moe_permute_unpermute_kernel.inl"

@@ -18,6 +18,7 @@
 
 import sys
 from collections.abc import Callable, Iterable
+from itertools import chain
 from typing import TYPE_CHECKING
 
 import regex as re
@@ -28,14 +29,15 @@ from torch import nn
 from transformers import AutoModel
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 
-from vllm.attention.backends.abstract import AttentionType
-from vllm.attention.layer import Attention
-from vllm.attention.layers.encoder_only_attention import EncoderOnlyAttention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config.utils import getattr_iter
 from vllm.distributed import get_pp_group, get_tp_group
 from vllm.distributed.utils import get_pp_indices
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention import (
+    Attention,
+    EncoderOnlyAttention,
+)
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.models.interfaces import (
     SupportsEagle,
@@ -50,6 +52,7 @@ from vllm.model_executor.models.transformers.utils import (
     get_feature_request_tip,
     init_on_device_without_buffers,
     log_replacement,
+    replace_conv_class,
     replace_linear_class,
     replace_rms_norm_class,
 )
@@ -61,6 +64,7 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
 )
 from vllm.sequence import IntermediateTensors
+from vllm.v1.attention.backend import AttentionType
 
 if TYPE_CHECKING:
     from transformers import PreTrainedModel
@@ -107,27 +111,6 @@ class Base(
     SupportsEagle3,
 ):
     embedding_modules = ["embed_tokens"]  # TODO transformers will have a util to get it
-    hf_to_vllm_mapper = WeightsMapper(
-        orig_to_new_prefix={
-            # Add `model.` prefix for base model checkpoints,
-            # handling the case where it is already present
-            "": "model.",
-            "model.model.": "model.",
-            # Heads will be adjacent to `model` (pooling included because of adapters)
-            "model.lm_head.": "lm_head.",
-            "model.score.": "classifier.",
-            "model.classifier.": "classifier.",
-        }
-    )
-
-    def __init_subclass__(cls, *args, **kwargs):
-        """Merge hf_to_vllm_mapper in MRO from most specific to least specific."""
-        super().__init_subclass__(*args, **kwargs)
-        hf_to_vllm_mapper = WeightsMapper()
-        for base in cls.__mro__:
-            if base_hf_to_vllm_mapper := getattr(base, "hf_to_vllm_mapper", None):
-                hf_to_vllm_mapper |= base_hf_to_vllm_mapper
-        cls.hf_to_vllm_mapper = hf_to_vllm_mapper
 
     def __init__(self, *, vllm_config: "VllmConfig", prefix: str = ""):
         super().__init__()
@@ -174,9 +157,7 @@ class Base(
             if "gptq" in quant_method_name:
                 self.ignore_unexpected_suffixes.append(".bias")
 
-        # Set correct attn
-        self.text_config._attn_implementation = "vllm"
-
+        self._patch_config()
         from_config_kwargs = dict(
             config=self.config,
             dtype=self.model_config.dtype,
@@ -189,6 +170,8 @@ class Base(
         with init_on_device_without_buffers("meta"):
             self.model: PreTrainedModel = AutoModel.from_config(**from_config_kwargs)
 
+        # Create weight name to module qualname mapper
+        self._create_hf_to_vllm_mapper()
         # Remove layers not on this pipeline parallel rank
         self.pipeline_parallel()
         # Substitute remaining layers with vLLM's layers as needed
@@ -197,6 +180,7 @@ class Base(
         self.attention_instances = self.create_attention_instances()
 
         # Input embeddings
+        self.embed_scale = None
         input_embeddings = self.model.get_input_embeddings()
         if not isinstance(input_embeddings, PPMissingLayer):
             # Some models scale embeddings inside the input embedding layer
@@ -272,6 +256,104 @@ class Base(
         module = sys.modules[cls.__module__]
         setattr(module, cls.__name__, SupportTorchCompileWrapper)
 
+    def _patch_config(self):
+        """
+        Patch the config to ensure that the model is created correctly:
+
+        - Sets the attention implementation to "vllm" so the attention instances from
+        `create_attention_instances` are used
+        - Sets the dtype to the default torch dtype set by vLLM because Transformers
+        uses the config dtype when creating the model
+        - Propagates this dtype to any sub-configs because Transformers model
+        implementations do not support/use different dtypes in sub-models
+        """
+        self.text_config._attn_implementation = "vllm"
+        self.config.dtype = torch.get_default_dtype()
+        # TODO(hmellor): Remove this when Transformers v4 support is dropped
+        for sub_config_name in getattr(self.config, "sub_configs", {}):
+            sub_config = getattr(self.config, sub_config_name)
+            if sub_config.dtype != (dtype := self.config.dtype):
+                sub_config.dtype = dtype
+
+    def _create_hf_to_vllm_mapper(self):
+        """
+        Create a WeightsMapper to map checkpoint weight names to module qualnames.
+
+        This handles:
+
+        - Transformers weight renaming:
+            - from `WeightRenaming` in Transformers v5
+            - from `_checkpoint_conversion_mapping` in Transformers v4
+        - Checkpoints saved with a base model prefix that is not `model`
+        - Checkpoints saved with no base model prefix
+        - Any quantization config specific mappings
+        """
+        self.hf_to_vllm_mapper = WeightsMapper()
+        orig_to_new_regex = self.hf_to_vllm_mapper.orig_to_new_regex
+
+        if Version(transformers.__version__) >= Version("5.0.0"):
+            from transformers.conversion_mapping import (
+                WeightRenaming,
+                get_model_conversion_mapping,
+            )
+
+            for mapping in get_model_conversion_mapping(self.model):
+                # Handle weights which have been renamed in Transformers
+                if isinstance(mapping, WeightRenaming):
+                    # Recompile using regex (Transformers used re)
+                    compiled_sources = re.compile(
+                        mapping.compiled_sources.pattern, mapping.compiled_sources.flags
+                    )
+                    target_pattern = mapping.target_patterns[0]
+                    orig_to_new_regex[compiled_sources] = target_pattern
+                # TODO: Handle WeightConverter to enable layer merging
+        else:
+            # Replace legacy suffixes used for norms
+            # TODO(hmellor): Remove this when Transformers v4 support is dropped
+            orig_to_new_regex.update(
+                {
+                    re.compile(r"\.gamma$"): ".weight",
+                    re.compile(r"\.beta$"): ".bias",
+                }
+            )
+
+        # Handle weights which have been renamed in Transformers
+        # TODO(hmellor): Remove this when Transformers v4 support is dropped
+        ccm = getattr(self.model, "_checkpoint_conversion_mapping", {})
+        for source, target in ccm.items():
+            orig_to_new_regex[re.compile(source)] = target
+
+        # Handle unexpected weights which should be ignored
+        if self.model._keys_to_ignore_on_load_unexpected is not None:
+            for key in self.model._keys_to_ignore_on_load_unexpected:
+                orig_to_new_regex[re.compile(key)] = None
+
+        # Standardise base model prefix
+        bmp = self.model.base_model_prefix
+        expected_bmp = r"model.\1"
+        # Handle checkpoints saved with different base model prefix
+        if bmp and bmp != "model":
+            different_bmp_pattern = re.compile(rf"^{bmp}\.(.+)")
+            orig_to_new_regex[different_bmp_pattern] = expected_bmp
+        # Handle direct children of self.model which were saved without the model prefix
+        direct_children = chain(
+            self.model.named_children(),
+            self.model.named_parameters(recurse=False),
+            self.model.named_buffers(recurse=False),
+        )
+        model_children = "|".join(name for name, _ in direct_children)
+        missing_bmp_pattern = re.compile(rf"^(?!model\.)(({model_children}).*)")
+        orig_to_new_regex[missing_bmp_pattern] = expected_bmp
+        # Handle weights saved as direct children of self.model which no longer are
+        unexpected_bmp_pattern = re.compile(rf"^(model\.)((?!{model_children}).+)")
+        orig_to_new_regex[unexpected_bmp_pattern] = r"\2"
+        # Handle lm_head which was saved inside the base model
+        nested_lm_head_pattern = re.compile(r"^model\.(.+\.)*(lm_head.+)")
+        orig_to_new_regex[nested_lm_head_pattern] = r"\2"
+
+        # Apply mapping to quantization config if needed
+        self._maybe_apply_model_mapping()
+
     def pipeline_parallel(self):
         """
         Apply the model's pipeline parallelization plan.
@@ -306,7 +388,8 @@ class Base(
         # Layers before module list
         for name in pp_plan[:module_list_idx]:
             if self.pp_group.is_first_rank or (
-                self.text_config.tie_word_embeddings and self.pp_group.is_last_rank
+                getattr(self.text_config, "tie_word_embeddings", False)
+                and self.pp_group.is_last_rank
             ):
                 continue
             setattr(self.model, name, PPMissingLayer())
@@ -355,14 +438,26 @@ class Base(
             for child_name, child_module in module.named_children():
                 new_module = child_module
                 qual_name = maybe_prefix(prefix, child_name)
-                # Populate Eagle3 attrs
                 if (
                     isinstance(module, nn.ModuleList)
                     and len(module) == self.text_config.num_hidden_layers
                 ):
+                    # Populate Eagle3 attrs
                     self._target_class = type(child_module)
                     layer_name = qual_name.removeprefix("model.")
                     self._layer_names[int(child_name)] = layer_name
+                    # MTP weights should not be loaded into the base model
+                    num_hidden_layers = self.text_config.num_hidden_layers
+                    names = (
+                        "n_predict",  # Override from SpeculativeConfig
+                        "num_nextn_predict_layers",  # Most models
+                        "mtp_num_hidden_layers",  # Qwen 3.5
+                    )
+                    n_predict = getattr_iter(self.text_config, names, 0)
+                    for i in range(num_hidden_layers, num_hidden_layers + n_predict):
+                        mtp_prefix = f"{prefix}.{i}."
+                        if mtp_prefix not in self.ignore_unexpected_prefixes:
+                            self.ignore_unexpected_prefixes.append(mtp_prefix)
                 # Replace modules as needed
                 if isinstance(child_module, nn.Linear):
                     generator = (p for p in tp_plan if re.match(p, qual_name))
@@ -374,6 +469,8 @@ class Base(
                     new_module = replace_linear_class(
                         child_module, style, self.quant_config, prefix=qual_name
                     )
+                elif isinstance(child_module, (nn.Conv2d, nn.Conv3d)):
+                    new_module = replace_conv_class(child_module)
                 elif child_module.__class__.__name__.endswith("RMSNorm"):
                     new_module = replace_rms_norm_class(
                         child_module, self.text_config.hidden_size
@@ -405,7 +502,7 @@ class Base(
         # vLLM does not support encoder-decoder models, so if any encoder layer is
         # found in a text only model, we assume the whole model is an encoder model
         if has_encoder(self.model) and not is_multimodal(self.config):
-            self.check_version("5.0.0.dev0", "encoder models support")
+            self.check_version("5.0.0", "encoder models support")
             attn_type = AttentionType.ENCODER_ONLY
         else:
             attn_type = AttentionType.DECODER
@@ -559,8 +656,11 @@ class Base(
             )
 
     def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
-        self.check_version("5.0.0.dev0", "Eagle3 support")
-        from transformers.utils.generic import OutputRecorder
+        self.check_version("5.2.0", "Eagle3 support")
+        from transformers.utils.output_capturing import (
+            OutputRecorder,
+            maybe_install_capturing_hooks,
+        )
 
         # The default value in PreTrainedModel is None
         if self.model._can_record_outputs is None:
@@ -575,6 +675,9 @@ class Base(
             self.model._can_record_outputs[layer_key] = aux_hidden_state_i
             self._output_aux_hidden_states_kwargs[f"output_{layer_key}"] = True
 
-    def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:
+        # Ensure that the capture hooks are installed before dynamo traces the model
+        maybe_install_capturing_hooks(self.model)
+
+    def get_eagle3_default_aux_hidden_state_layers(self) -> tuple[int, ...]:
         num_layers = self.text_config.num_hidden_layers
         return (2, num_layers // 2, num_layers - 3)

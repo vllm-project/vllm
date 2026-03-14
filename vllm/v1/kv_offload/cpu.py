@@ -4,29 +4,51 @@ from collections.abc import Iterator
 
 import torch
 
-from vllm.attention.backends.abstract import AttentionBackend
 from vllm.config import VllmConfig
 from vllm.platforms import current_platform
+from vllm.v1.attention.backend import AttentionBackend
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.kv_offload.abstract import LoadStoreSpec, OffloadingManager
 from vllm.v1.kv_offload.arc_manager import ARCOffloadingManager
 from vllm.v1.kv_offload.backends.cpu import CPUBackend
 from vllm.v1.kv_offload.lru_manager import LRUOffloadingManager
 from vllm.v1.kv_offload.mediums import CPULoadStoreSpec, GPULoadStoreSpec
+from vllm.v1.kv_offload.reuse_manager import FilterReusedOffloadingManager
 from vllm.v1.kv_offload.spec import OffloadingSpec
 from vllm.v1.kv_offload.worker.cpu_gpu import CpuGpuOffloadingHandlers
 from vllm.v1.kv_offload.worker.worker import OffloadingHandler
 
 
 class CPUOffloadingSpec(OffloadingSpec):
-    def __init__(self, vllm_config: VllmConfig):
-        super().__init__(vllm_config)
+    def __init__(self, vllm_config: VllmConfig, kv_cache_config: KVCacheConfig):
+        super().__init__(vllm_config, kv_cache_config)
 
-        num_cpu_blocks = self.extra_config.get("num_cpu_blocks")
-        if not num_cpu_blocks:
+        cpu_bytes_to_use = self.extra_config.get("cpu_bytes_to_use")
+        if not cpu_bytes_to_use:
             raise Exception(
-                "num_cpu_blocks must be specified in kv_connector_extra_config"
+                "cpu_bytes_to_use must be specified in kv_connector_extra_config"
             )
-        self.num_cpu_blocks: int = num_cpu_blocks
+
+        # calculate kv_bytes_per_offloaded_block
+        assert kv_cache_config is not None
+        page_sizes = {
+            kv_cache_group.kv_cache_spec.page_size_bytes
+            for kv_cache_group in kv_cache_config.kv_cache_groups
+        }
+        assert len(page_sizes) == 1
+        page_size_bytes = page_sizes.pop()
+        kv_bytes_per_block = (
+            page_size_bytes
+            * len(kv_cache_config.kv_cache_tensors)
+            * vllm_config.parallel_config.world_size
+        )
+
+        kv_bytes_per_offloaded_block = kv_bytes_per_block * self.block_size_factor
+        self.num_blocks = (
+            int(cpu_bytes_to_use) // kv_bytes_per_offloaded_block
+            if kv_bytes_per_offloaded_block > 0
+            else 0
+        )
 
         # scheduler-side
         self._manager: OffloadingManager | None = None
@@ -43,8 +65,11 @@ class CPUOffloadingSpec(OffloadingSpec):
                 kv_events_config is not None and kv_events_config.enable_kv_cache_events
             )
 
+            assert len(self.gpu_block_size) == 1
+            gpu_block_size = self.gpu_block_size[0]
+            offloaded_block_size = gpu_block_size * self.block_size_factor
             backend = CPUBackend(
-                block_size=self.offloaded_block_size, num_blocks=self.num_cpu_blocks
+                block_size=offloaded_block_size, num_blocks=self.num_blocks
             )
 
             if self.eviction_policy == "lru":
@@ -60,6 +85,20 @@ class CPUOffloadingSpec(OffloadingSpec):
                     f"Unknown eviction policy: {self.eviction_policy}. "
                     f"Supported policies: lru, arc"
                 )
+
+            # store_threshold: how many times a block must appear in lookup()
+            # before it is eligible for CPU offloading.  Values < 2 disable
+            # filtering (a threshold of 1 equals no filter; 0 is the default).
+            store_threshold = int(self.extra_config.get("store_threshold", 0))
+            if store_threshold >= 2:
+                max_tracker_size = int(
+                    self.extra_config.get("max_tracker_size", 64_000)
+                )
+                self._manager = FilterReusedOffloadingManager(
+                    backing=self._manager,
+                    store_threshold=store_threshold,
+                    max_tracker_size=max_tracker_size,
+                )
         return self._manager
 
     def get_handlers(
@@ -73,11 +112,14 @@ class CPUOffloadingSpec(OffloadingSpec):
                     "CPU Offloading is currently only supported on CUDA-alike GPUs"
                 )
 
+            assert len(self.gpu_block_size) == 1
+            gpu_block_size = self.gpu_block_size[0]
+
             self._handlers = CpuGpuOffloadingHandlers(
                 attn_backends=attn_backends,
-                gpu_block_size=self.gpu_block_size,
-                cpu_block_size=self.offloaded_block_size,
-                num_cpu_blocks=self.num_cpu_blocks,
+                gpu_block_size=gpu_block_size,
+                cpu_block_size=gpu_block_size * self.block_size_factor,
+                num_cpu_blocks=self.num_blocks,
                 gpu_caches=kv_caches,
             )
 

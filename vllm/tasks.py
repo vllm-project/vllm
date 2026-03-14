@@ -2,12 +2,21 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import Literal, get_args
 
-GenerationTask = Literal["generate", "transcription"]
-GENERATION_TASKS = get_args(GenerationTask)
+GenerationTask = Literal["generate", "transcription", "realtime"]
+GENERATION_TASKS: tuple[GenerationTask, ...] = get_args(GenerationTask)
 
 PoolingTask = Literal[
     "embed", "classify", "score", "token_embed", "token_classify", "plugin"
 ]
-POOLING_TASKS = get_args(PoolingTask)
+POOLING_TASKS: tuple[PoolingTask, ...] = get_args(PoolingTask)
 
-SupportedTask = Literal[GenerationTask, PoolingTask]
+# Score API handles score/rerank for:
+# - "score" task (score_type: cross-encoder models)
+# - "embed" task (score_type: bi-encoder models)
+# - "token_embed" task (score_type: late interaction models)
+ScoreType = Literal["bi-encoder", "cross-encoder", "late-interaction"]
+
+FrontendTask = Literal["render"]
+FRONTEND_TASKS: tuple[FrontendTask, ...] = get_args(FrontendTask)
+
+SupportedTask = Literal[GenerationTask, PoolingTask, FrontendTask]

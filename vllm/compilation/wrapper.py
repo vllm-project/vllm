@@ -4,9 +4,10 @@
 import os
 import sys
 from abc import abstractmethod
+from collections.abc import Callable, Generator
 from contextlib import contextmanager, nullcontext
 from types import CodeType
-from typing import Any
+from typing import Any, ParamSpec, TypeVar
 
 import torch
 import torch._C._dynamo.guards
@@ -19,19 +20,26 @@ from vllm.utils.nvtx_pytorch_hooks import layerwise_nvtx_marker_context
 
 logger = init_logger(__name__)
 
+R = TypeVar("R")
+P = ParamSpec("P")
 
-def _noop_add_global_state_guard(self, *args, **kwargs):
+
+def _noop_add_global_state_guard(
+    self: torch._C._dynamo.guards.GuardManager, *args: Any, **kwargs: Any
+) -> None:
     """No-op to skip the GLOBAL_STATE guard entirely"""
     pass
 
 
-def _noop_add_torch_function_mode_stack_guard(self, *args, **kwargs):
+def _noop_add_torch_function_mode_stack_guard(
+    self: torch._C._dynamo.guards.GuardManager, *args: Any, **kwargs: Any
+) -> None:
     """No-op to skip the TORCH_FUNCTION_MODE_STACK guard entirely"""
     pass
 
 
 @contextmanager
-def _compilation_context():
+def _compilation_context() -> Generator[None, None, None]:
     """Context manager for compilation settings and patches.
 
     This manager:
@@ -88,13 +96,15 @@ class TorchCompileWithNoGuardsWrapper:
     since we drop all guards.
     """
 
-    def check_invariants_and_forward(self, *args, **kwargs):
+    def check_invariants_and_forward(self, *args: Any, **kwargs: Any) -> Any:
         assert hasattr(self, "_check_shape_invariants")
         self._check_shape_invariants(*args, **kwargs)
 
         return self.forward(*args, **kwargs)
 
-    def _call_with_optional_nvtx_range(self, callable_fn, *args, **kwargs):
+    def _call_with_optional_nvtx_range(
+        self, callable_fn: Callable[P, R], *args: P.args, **kwargs: P.kwargs
+    ) -> Any:
         if self.layerwise_nvtx_tracing_enabled:
             args_list = list(args)
             kwargs_dict = dict(kwargs)
@@ -108,7 +118,7 @@ class TorchCompileWithNoGuardsWrapper:
             return ctx.result
         return callable_fn(*args, **kwargs)
 
-    def __init__(self):
+    def __init__(self) -> None:
         self.compiled = False
 
         vllm_config = get_current_vllm_config()
@@ -140,14 +150,6 @@ class TorchCompileWithNoGuardsWrapper:
                     "compilation_config.dynamic_shapes_config.evaluate_guards "
                     "requires VLLM_USE_BYTECODE_HOOK=0. "
                 )
-
-                if envs.VLLM_USE_AOT_COMPILE:
-                    # disabled until https://github.com/pytorch/pytorch/pull/169239
-                    # is picked up.
-                    assert ds_type != DynamicShapesType.BACKED, (
-                        "evaluate_guards for backed shapes requires "
-                        "VLLM_USE_AOT_COMPILE=False. "
-                    )
 
                 options["guard_filter_fn"] = lambda x: [
                     entry.guard_type == "SHAPE_ENV" for entry in x
@@ -192,18 +194,18 @@ class TorchCompileWithNoGuardsWrapper:
 
         if envs.VLLM_USE_BYTECODE_HOOK and mode != CompilationMode.STOCK_TORCH_COMPILE:
             torch._dynamo.convert_frame.register_bytecode_hook(self.bytecode_hook)
-            self._compiled_bytecode = None
+            self._compiled_bytecode: CodeType | None = None
 
-    def aot_compile(self, *args, **kwargs):
+    def aot_compile(self, *args: Any, **kwargs: Any) -> Any:
         if not hasattr(self._compiled_callable, "aot_compile"):
             raise RuntimeError(
                 "aot_compile is not supported by the current configuration. "
-                + "Please make sure torch.compile is enabled with the latest "
-                + f"version of PyTorch (current using torch: {torch.__version__})"
+                "Please make sure torch.compile is enabled with the latest "
+                f"version of PyTorch (current using torch: {torch.__version__})"
             )
         return self._compiled_callable.aot_compile((args, kwargs))
 
-    def __call__(self, *args, **kwargs):
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
         if envs.VLLM_USE_BYTECODE_HOOK:
             if (
                 self.vllm_config.compilation_config.mode
@@ -236,13 +238,13 @@ class TorchCompileWithNoGuardsWrapper:
                 )
 
     @abstractmethod
-    def forward(self, *args, **kwargs): ...
+    def forward(self, *args: Any, **kwargs: Any) -> Any: ...
 
     def original_code_object(self) -> CodeType:
         """Return the original code object of the forward method."""
         return self.__class__.forward.__code__
 
-    def bytecode_hook(self, old_code: CodeType, new_code: CodeType):
+    def bytecode_hook(self, old_code: CodeType, new_code: CodeType) -> None:
         """Hook to save the compiled bytecode for direct execution."""
         if old_code is not self.original_code_object():
             return
@@ -299,7 +301,7 @@ class TorchCompileWithNoGuardsWrapper:
             raise RuntimeError(msg)
 
     @contextmanager
-    def _dispatch_to_compiled_code(self):
+    def _dispatch_to_compiled_code(self) -> Generator[None, None, None]:
         # noqa: E501
         """
         Context manager to dispatch to internally compiled code for torch<2.8.
@@ -317,3 +319,55 @@ class TorchCompileWithNoGuardsWrapper:
             yield
         finally:
             self.__class__.forward.__code__ = original
+
+
+def reset_compile_wrapper(model: torch.nn.Module) -> None:
+    """
+    Clean up compiled model and captured CUDA graphs for elastic EP.
+    """
+    if not isinstance(model, TorchCompileWithNoGuardsWrapper) and hasattr(
+        model, "model"
+    ):
+        model = model.model
+    if not isinstance(model, TorchCompileWithNoGuardsWrapper):
+        return
+    # model.do_not_compile is set by the @support_torch_compile decorator
+    if hasattr(model, "do_not_compile") and model.do_not_compile:
+        return
+    from vllm.compilation.counter import compilation_counter
+
+    # reset the compilation counter
+    compilation_counter.num_models_seen = 0
+    compilation_counter.num_graphs_seen = 0
+    compilation_counter.num_piecewise_graphs_seen = 0
+    compilation_counter.num_piecewise_capturable_graphs_seen = 0
+    compilation_counter.num_backend_compilations = 0
+    compilation_counter.num_gpu_runner_capture_triggers = 0
+    compilation_counter.num_cudagraph_captured = 0
+    compilation_counter.num_inductor_compiles = 0
+    compilation_counter.num_eager_compiles = 0
+    compilation_counter.num_cache_entries_updated = 0
+    compilation_counter.num_compiled_artifacts_saved = 0
+    compilation_counter.stock_torch_compile_count = 0
+    compilation_counter.num_aot_compiles = 0
+    compilation_counter.num_aot_artifacts_saved = 0
+    compilation_counter.num_aot_artifacts_loaded = 0
+
+    # Clear the AOT compiled function so the model is forced to
+    # recompile on the next call. Without this, decorators.py
+    # __call__ uses the stale aot_compiled_fn whose torchinductor
+    # kernels have old parameters (expert_map size for example)
+    # baked in as compile-time constants.
+    if hasattr(model, "aot_compiled_fn"):
+        model.aot_compiled_fn = None
+    if hasattr(model, "was_aot_compile_fn_loaded_from_disk"):
+        model.was_aot_compile_fn_loaded_from_disk = False
+
+    # Reset the cache_dir so VllmBackend recomputes the hash
+    # (data_parallel_size changed, so the config hash differs).
+    compilation_config = model.vllm_config.compilation_config
+    compilation_config.cache_dir = ""
+    compilation_config.local_cache_dir = ""
+
+    model.__class__.forward.__code__ = model.original_code_object()
+    TorchCompileWithNoGuardsWrapper.__init__(model)

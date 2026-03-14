@@ -4,7 +4,6 @@
 
 import torch
 
-from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.config import CacheConfig, ModelConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import ForwardContext, get_forward_context
@@ -24,11 +23,15 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_update,
 )
 from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.short_conv_attn import ShortConvAttentionMetadata
 
 
+# --8<-- [start:short_conv]
 @CustomOp.register("short_conv")
 class ShortConv(MambaBase, CustomOp):
+    # --8<-- [end:short_conv]
+
     def __init__(
         self,
         config,
@@ -116,7 +119,8 @@ class ShortConv(MambaBase, CustomOp):
             assert isinstance(attn_metadata, ShortConvAttentionMetadata)
             self_kv_cache = self.kv_cache[forward_context.virtual_engine]
             conv_state = self_kv_cache[0].transpose(-1, -2)
-            state_indices_tensor = attn_metadata.state_indices_tensor
+            state_indices_tensor_p = attn_metadata.state_indices_tensor_p
+            state_indices_tensor_d = attn_metadata.state_indices_tensor_d
             has_initial_states_p = attn_metadata.has_initial_states_p
             query_start_loc_p = attn_metadata.query_start_loc_p
 
@@ -160,13 +164,6 @@ class ShortConv(MambaBase, CustomOp):
             [num_decodes, num_prefill_tokens],
             dim=0,
         )
-        # Split along batch dimension
-        state_indices_tensor_d, state_indices_tensor_p = torch.split(
-            state_indices_tensor,
-            [num_decodes, num_prefills],
-            dim=0,
-        )
-
         conv_output_list = []
 
         if has_prefill:

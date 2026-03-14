@@ -12,8 +12,10 @@ import ijson
 import regex as re
 from pydantic import Field
 
-from vllm.entrypoints.openai.protocol import (
+from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
+)
+from vllm.entrypoints.openai.engine.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
     DeltaToolCall,
@@ -23,10 +25,10 @@ from vllm.entrypoints.openai.protocol import (
 )
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
-from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.tool_parsers.abstract_tool_parser import (
     ToolParser,
 )
+from vllm.utils.mistral import is_mistral_tokenizer
 
 logger = init_logger(__name__)
 
@@ -64,9 +66,7 @@ class MistralToolCall(ToolCall):
 
 
 def _is_pre_v11_tokeniser(model_tokenizer: TokenizerLike) -> bool:
-    return not (
-        isinstance(model_tokenizer, MistralTokenizer) and model_tokenizer.version >= 11
-    )
+    return not (is_mistral_tokenizer(model_tokenizer) and model_tokenizer.version >= 11)
 
 
 class MistralToolParser(ToolParser):
@@ -81,7 +81,7 @@ class MistralToolParser(ToolParser):
     def __init__(self, tokenizer: TokenizerLike):
         super().__init__(tokenizer)
 
-        if not isinstance(self.model_tokenizer, MistralTokenizer):
+        if not is_mistral_tokenizer(self.model_tokenizer):
             logger.info("Non-Mistral tokenizer detected when using a Mistral model...")
 
         # initialize properties used for state when parsing tool calls in
@@ -113,7 +113,7 @@ class MistralToolParser(ToolParser):
     def adjust_request(self, request: ChatCompletionRequest) -> ChatCompletionRequest:
         request = super().adjust_request(request)
         if (
-            not isinstance(self.model_tokenizer, MistralTokenizer)
+            not is_mistral_tokenizer(self.model_tokenizer)
             and request.tools
             and request.tool_choice != "none"
         ):

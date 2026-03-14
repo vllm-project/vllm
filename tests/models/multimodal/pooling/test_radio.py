@@ -40,15 +40,15 @@ def run_radio_test(
         for image in images
     ]
 
-    config = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
+    hf_config = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
 
     # RADIO model on HF does not properly handle torch_dtype argument
     # And relies on args["dtype"] which we have to patch manually:
-    config.args["dtype"] = torch_dtype
+    hf_config.args["dtype"] = torch_dtype
 
     hf_model = AutoModel.from_pretrained(
         model_id,
-        config=config,
+        config=hf_config,
         dtype=torch_dtype,
         trust_remote_code=True,
     ).to("cuda")
@@ -62,13 +62,14 @@ def run_radio_test(
     hf_model.make_preprocessor_external()
 
     hf_outputs_per_image = [
-        hf_model(pixel_value.to("cuda")).features for pixel_value in pixel_values
+        hf_model(pixel_value.to("cuda")) for pixel_value in pixel_values
     ]
 
-    radio_config = RadioConfig(
-        model_name=config.args["model"], reg_tokens=config.args["register_multiple"]
+    vllm_config = RadioConfig(
+        model_name=hf_config.args["model"],
+        **hf_config.args,
     )
-    vllm_model = RadioModel(radio_config)
+    vllm_model = RadioModel(vllm_config)
     vllm_model.load_weights(hf_model.state_dict())
     vllm_model = vllm_model.to("cuda", torch_dtype)
 
@@ -80,7 +81,8 @@ def run_radio_test(
 
     cos_similar = nn.CosineSimilarity(dim=-1)
     for vllm_output, hf_output in zip(vllm_outputs_per_image, hf_outputs_per_image):
-        assert cos_similar(vllm_output, hf_output).mean() > 0.99
+        assert cos_similar(vllm_output[0], hf_output[0]).mean() > 0.99
+        assert cos_similar(vllm_output[1], hf_output[1]).mean() > 0.99
 
 
 @pytest.mark.parametrize(
@@ -90,7 +92,9 @@ def run_radio_test(
     ],
 )
 @pytest.mark.parametrize("dtype", ["half", "bfloat16"])
-def test_radio(dist_init, image_assets, model_id, dtype: str) -> None:
+def test_radio(
+    default_vllm_config, dist_init, image_assets, model_id, dtype: str
+) -> None:
     run_radio_test(
         image_assets,
         model_id,

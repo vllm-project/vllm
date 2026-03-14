@@ -82,10 +82,6 @@ Internal data structures.
 
 - [vllm.multimodal.processing][]
 
-### Memory Profiling
-
-- [vllm.multimodal.profiling][]
-
 ### Registry
 
 - [vllm.multimodal.registry][]
