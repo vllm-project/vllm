@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from unittest.mock import patch
+
 import pytest
 from openai.types.chat import ChatCompletionMessageParam
 from openai.types.responses.response_function_tool_call import ResponseFunctionToolCall
@@ -16,7 +18,7 @@ from openai.types.responses.response_reasoning_item import (
 )
 
 from vllm.entrypoints.constants import MCP_PREFIX
-from vllm.entrypoints.responses_utils import (
+from vllm.entrypoints.openai.responses.utils import (
     _construct_single_message_from_response_item,
     _maybe_combine_reasoning_and_tool_call,
     construct_chat_messages_with_tool_call,
@@ -164,6 +166,184 @@ class TestResponsesUtils:
         formatted_item = _construct_single_message_from_response_item(output_item)
         assert formatted_item["role"] == "assistant"
         assert formatted_item["content"] == "dongyi"
+
+
+class TestReasoningItemContentPriority:
+    """Tests that content is prioritized over summary for reasoning items."""
+
+    def test_content_preferred_over_summary(self):
+        """When both content and summary are present, content should win."""
+        item = ResponseReasoningItem(
+            id="reasoning_1",
+            summary=[
+                Summary(
+                    text="This is a summary",
+                    type="summary_text",
+                )
+            ],
+            type="reasoning",
+            content=[
+                Content(
+                    text="This is the actual content",
+                    type="reasoning_text",
+                )
+            ],
+            encrypted_content=None,
+            status=None,
+        )
+        formatted = _construct_single_message_from_response_item(item)
+        assert formatted["reasoning"] == "This is the actual content"
+
+    def test_content_only(self):
+        """When only content is present (no summary), content is used."""
+        item = ResponseReasoningItem(
+            id="reasoning_2",
+            summary=[],
+            type="reasoning",
+            content=[
+                Content(
+                    text="Content without summary",
+                    type="reasoning_text",
+                )
+            ],
+            encrypted_content=None,
+            status=None,
+        )
+        formatted = _construct_single_message_from_response_item(item)
+        assert formatted["reasoning"] == "Content without summary"
+
+    @patch("vllm.entrypoints.openai.responses.utils.logger")
+    def test_summary_fallback_when_no_content(self, mock_logger):
+        """When content is absent, summary is used as fallback with warning."""
+        item = ResponseReasoningItem(
+            id="reasoning_3",
+            summary=[
+                Summary(
+                    text="Fallback summary text",
+                    type="summary_text",
+                )
+            ],
+            type="reasoning",
+            content=None,
+            encrypted_content=None,
+            status=None,
+        )
+        formatted = _construct_single_message_from_response_item(item)
+        assert formatted["reasoning"] == "Fallback summary text"
+        mock_logger.warning.assert_called_once()
+        assert (
+            "summary text as reasoning content" in mock_logger.warning.call_args[0][0]
+        )
+
+    @patch("vllm.entrypoints.openai.responses.utils.logger")
+    def test_summary_fallback_when_content_empty(self, mock_logger):
+        """When content is an empty list, summary is used as fallback."""
+        item = ResponseReasoningItem(
+            id="reasoning_4",
+            summary=[
+                Summary(
+                    text="Summary when content empty",
+                    type="summary_text",
+                )
+            ],
+            type="reasoning",
+            content=[],
+            encrypted_content=None,
+            status=None,
+        )
+        formatted = _construct_single_message_from_response_item(item)
+        assert formatted["reasoning"] == "Summary when content empty"
+        mock_logger.warning.assert_called_once()
+        assert (
+            "summary text as reasoning content" in mock_logger.warning.call_args[0][0]
+        )
+
+    def test_neither_content_nor_summary(self):
+        """When neither content nor summary is present, reasoning is empty."""
+        item = ResponseReasoningItem(
+            id="reasoning_5",
+            summary=[],
+            type="reasoning",
+            content=None,
+            encrypted_content=None,
+            status=None,
+        )
+        formatted = _construct_single_message_from_response_item(item)
+        assert formatted["reasoning"] == ""
+
+    def test_encrypted_content_raises(self):
+        """Encrypted content should still raise ValueError."""
+        item = ResponseReasoningItem(
+            id="reasoning_6",
+            summary=[
+                Summary(
+                    text="Some summary",
+                    type="summary_text",
+                )
+            ],
+            type="reasoning",
+            content=[
+                Content(
+                    text="Some content",
+                    type="reasoning_text",
+                )
+            ],
+            encrypted_content="ENCRYPTED",
+            status=None,
+        )
+        with pytest.raises(ValueError):
+            _construct_single_message_from_response_item(item)
+
+    @patch("vllm.entrypoints.openai.responses.utils.logger")
+    def test_summary_with_multiple_entries_uses_first(self, mock_logger):
+        """When multiple summary entries exist, the first one is used."""
+        item = ResponseReasoningItem(
+            id="reasoning_7",
+            summary=[
+                Summary(
+                    text="First summary",
+                    type="summary_text",
+                ),
+                Summary(
+                    text="Second summary",
+                    type="summary_text",
+                ),
+            ],
+            type="reasoning",
+            content=None,
+            encrypted_content=None,
+            status=None,
+        )
+        formatted = _construct_single_message_from_response_item(item)
+        assert formatted["reasoning"] == "First summary"
+        mock_logger.warning.assert_called_once()
+        assert (
+            "summary text as reasoning content" in mock_logger.warning.call_args[0][0]
+        )
+
+    @patch("vllm.entrypoints.openai.responses.utils.logger")
+    def test_no_warning_when_content_used(self, mock_logger):
+        """No warning should be emitted when content is available."""
+        item = ResponseReasoningItem(
+            id="reasoning_8",
+            summary=[
+                Summary(
+                    text="Summary text",
+                    type="summary_text",
+                )
+            ],
+            type="reasoning",
+            content=[
+                Content(
+                    text="Content text",
+                    type="reasoning_text",
+                )
+            ],
+            encrypted_content=None,
+            status=None,
+        )
+        _construct_single_message_from_response_item(item)
+        mock_logger.warning.assert_not_called()
 
 
 class TestShouldContinueFinalMessage:

@@ -4,7 +4,7 @@
 
 import functools
 import json
-from collections.abc import Collection, Set
+from collections.abc import Collection, Sequence, Set
 from pathlib import Path
 from typing import Any, Literal, overload
 
@@ -277,6 +277,8 @@ class Grok2Tokenizer(TokenizerLike):
         self._pad_token_id = self._special_tokens.get(PAD, self._eos_token_id)
         self._unk_token_id = self._pad_token_id
 
+        self._max_chars_per_token = max(len(tok) for tok in self._token_to_id)
+
     def num_special_tokens_to_add(self) -> int:
         return 0
 
@@ -313,6 +315,10 @@ class Grok2Tokenizer(TokenizerLike):
         return self._tokenizer.n_vocab - 1
 
     @property
+    def max_chars_per_token(self) -> int:
+        return self._max_chars_per_token
+
+    @property
     def truncation_side(self) -> str:
         return self._truncation_side
 
@@ -342,7 +348,9 @@ class Grok2Tokenizer(TokenizerLike):
             tokens = self._maybe_truncate(tokens, max_length)
         return tokens
 
-    def decode(self, ids: list[int] | int, skip_special_tokens: bool = False) -> str:
+    def decode(
+        self, ids: Sequence[int] | int, skip_special_tokens: bool = False
+    ) -> str:
         if isinstance(ids, int):
             ids = [ids]
         if skip_special_tokens:
@@ -365,7 +373,7 @@ class Grok2Tokenizer(TokenizerLike):
         return [self._token_to_id.get(token, self._unk_token_id) for token in tokens]
 
     def convert_ids_to_tokens(
-        self, ids: list[int], skip_special_tokens: bool = False
+        self, ids: Sequence[int], skip_special_tokens: bool = False
     ) -> list[str]:
         tokens = []
         for token_id in ids:
@@ -432,6 +440,7 @@ class Grok2Tokenizer(TokenizerLike):
             raise ValueError(
                 "No chat template available. Provide `chat_template` explicitly."
             )
+        kwargs["return_dict"] = False
         prompt = hf_chat_utils.apply_chat_template(
             conversation=messages,
             chat_template=template,

@@ -9,10 +9,10 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from typing_extensions import assert_never
 
-from vllm.entrypoints.openai.api_server import validate_json_request
 from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
 )
+from vllm.entrypoints.openai.utils import validate_json_request
 from vllm.entrypoints.serve.tokenize.protocol import (
     DetokenizeRequest,
     DetokenizeResponse,
@@ -49,10 +49,7 @@ router = APIRouter()
 async def tokenize(request: TokenizeRequest, raw_request: Request):
     handler = tokenization(raw_request)
 
-    try:
-        generator = await handler.create_tokenize(request, raw_request)
-    except Exception as e:
-        return handler.create_error_response(e)
+    generator = await handler.create_tokenize(request, raw_request)
 
     if isinstance(generator, ErrorResponse):
         return JSONResponse(

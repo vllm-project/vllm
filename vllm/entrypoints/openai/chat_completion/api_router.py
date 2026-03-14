@@ -39,6 +39,7 @@ def chat(request: Request) -> OpenAIServingChat | None:
         HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
         HTTPStatus.NOT_FOUND.value: {"model": ErrorResponse},
         HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
+        HTTPStatus.NOT_IMPLEMENTED.value: {"model": ErrorResponse},
     },
 )
 @with_cancellation
@@ -49,15 +50,9 @@ async def create_chat_completion(request: ChatCompletionRequest, raw_request: Re
     )
     handler = chat(raw_request)
     if handler is None:
-        base_server = raw_request.app.state.openai_serving_tokenization
-        return base_server.create_error_response(
-            message="The model does not support Chat Completions API"
-        )
+        raise NotImplementedError("The model does not support Chat Completions API")
 
-    try:
-        generator = await handler.create_chat_completion(request, raw_request)
-    except Exception as e:
-        return handler.create_error_response(e)
+    generator = await handler.create_chat_completion(request, raw_request)
 
     if isinstance(generator, ErrorResponse):
         return JSONResponse(

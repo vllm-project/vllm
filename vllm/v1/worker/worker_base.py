@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import os
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, TypeVar
 
@@ -12,11 +11,10 @@ from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.cache import worker_receiver_cache_from_config
+from vllm.tracing import instrument
 from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.utils.system_utils import update_environment_variables
 from vllm.v1.kv_cache_interface import KVCacheSpec
-from vllm.v1.serial_utils import run_method
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
@@ -88,8 +86,12 @@ class WorkerBase:
         """Get specifications for KV cache implementation."""
         raise NotImplementedError
 
-    def compile_or_warm_up_model(self) -> None:
-        """Prepare model for execution through compilation/warmup."""
+    def compile_or_warm_up_model(self) -> float:
+        """Prepare model for execution through compilation/warmup.
+
+        Returns:
+            The accumulated compilation time in seconds.
+        """
         raise NotImplementedError
 
     def check_health(self) -> None:
@@ -100,10 +102,6 @@ class WorkerBase:
         """Initialize device state, such as loading the model or other on-device
         memory allocations.
         """
-        raise NotImplementedError
-
-    def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int) -> None:
-        """Initialize the KV cache with the given size in blocks."""
         raise NotImplementedError
 
     def reset_mm_cache(self) -> None:
@@ -208,27 +206,14 @@ class WorkerWrapperBase:
         if self.worker is not None:
             self.worker.shutdown()
 
-    def adjust_rank(self, rank_mapping: dict[int, int]) -> None:
-        """
-        Adjust the rpc_rank based on the given mapping.
-        It is only used during the initialization of the executor,
-        to adjust the rpc_rank of workers after we create all workers.
-        """
-        if self.rpc_rank in rank_mapping:
-            self.rpc_rank = rank_mapping[self.rpc_rank]
-
     def update_environment_variables(
         self,
         envs_list: list[dict[str, str]],
     ) -> None:
         envs = envs_list[self.rpc_rank]
-        key = "CUDA_VISIBLE_DEVICES"
-        if key in envs and key in os.environ:
-            # overwriting CUDA_VISIBLE_DEVICES is desired behavior
-            # suppress the warning in `update_environment_variables`
-            del os.environ[key]
         update_environment_variables(envs)
 
+    @instrument(span_name="Worker init")
     def init_worker(self, all_kwargs: list[dict[str, Any]]) -> None:
         """
         Here we inject some common logic before initializing the worker.
@@ -303,10 +288,11 @@ class WorkerWrapperBase:
 
             self.mm_receiver_cache = None
         else:
-            self.mm_receiver_cache = worker_receiver_cache_from_config(
-                vllm_config,
-                MULTIMODAL_REGISTRY,
-                shared_worker_lock,
+            self.mm_receiver_cache = (
+                MULTIMODAL_REGISTRY.worker_receiver_cache_from_config(
+                    vllm_config,
+                    shared_worker_lock,
+                )
             )
 
         with set_current_vllm_config(self.vllm_config):
@@ -324,25 +310,6 @@ class WorkerWrapperBase:
         with set_current_vllm_config(self.vllm_config):
             # To make vLLM config available during device initialization
             self.worker.init_device()  # type: ignore
-
-    def execute_method(self, method: str | bytes, *args, **kwargs):
-        try:
-            # method resolution order:
-            # if a method is defined in this class, it will be called directly.
-            # otherwise, since we define `__getattr__` and redirect attribute
-            # query to `self.worker`, the method will be called on the worker.
-            return run_method(self, method, args, kwargs)
-        except Exception as e:
-            # if the driver worker also execute methods,
-            # exceptions in the rest worker may cause deadlock in rpc like ray
-            # see https://github.com/vllm-project/vllm/issues/3455
-            # print the error and inform the user to solve the error
-            msg = (
-                f"Error executing method {method!r}. "
-                "This might cause deadlock in distributed execution."
-            )
-            logger.exception(msg)
-            raise e
 
     def __getattr__(self, attr: str):
         return getattr(self.worker, attr)

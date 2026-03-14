@@ -9,10 +9,10 @@ from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.openai.api_server import validate_json_request
 from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
 )
+from vllm.entrypoints.openai.utils import validate_json_request
 from vllm.entrypoints.serve.elastic_ep.middleware import (
     get_scaling_elastic_ep,
     set_scaling_elastic_ep,

@@ -305,10 +305,10 @@ def create_text_model_weights(text_config: dict[str, Any]) -> dict[str, torch.Te
 
         # Self-attention weights (separate q, k, v projections)
         weights[f"{layer_prefix}.self_attn.q_proj.weight"] = torch.randn(
-            hidden_size, num_attention_heads * head_dim, dtype=torch.bfloat16
+            num_attention_heads * head_dim, hidden_size, dtype=torch.bfloat16
         )
         weights[f"{layer_prefix}.self_attn.k_proj.weight"] = torch.randn(
-            hidden_size, num_key_value_heads * head_dim, dtype=torch.bfloat16
+            num_key_value_heads * head_dim, hidden_size, dtype=torch.bfloat16
         )
         weights[f"{layer_prefix}.self_attn.v_proj.weight"] = torch.randn(
             num_key_value_heads * head_dim, hidden_size, dtype=torch.bfloat16

@@ -84,6 +84,18 @@ class KVCacheBlocks:
         assert len(self.blocks) == 1, "Only one group is supported"
         return [block.block_id for block in self.blocks[0] if block.block_hash is None]
 
+    def get_unhashed_block_ids_all_groups(self) -> list[list[int]]:
+        """Get block_ids of unhashed blocks from KVCacheBlocks instance."""
+        # Skip padding blocks.
+        return [
+            [
+                block.block_id
+                for block in group
+                if block.block_hash is None and not block.is_null
+            ]
+            for group in self.blocks
+        ]
+
     def new_empty(self) -> "KVCacheBlocks":
         """
         Creates a new KVCacheBlocks instance with no blocks.
@@ -307,8 +319,9 @@ class KVCacheManager:
             num_local_computed_tokens + num_external_computed_tokens,
             self.max_model_len,
         )
+        num_tokens_main_model = total_computed_tokens + num_new_tokens
         num_tokens_need_slot = min(
-            total_computed_tokens + num_new_tokens + num_lookahead_tokens,
+            num_tokens_main_model + num_lookahead_tokens,
             self.max_model_len,
         )
 
@@ -329,6 +342,7 @@ class KVCacheManager:
             num_encoder_tokens=num_encoder_tokens,
             total_computed_tokens=num_local_computed_tokens
             + num_external_computed_tokens,
+            num_tokens_main_model=num_tokens_main_model,
         )
 
         if num_blocks_to_allocate > self.block_pool.get_num_free_blocks():
@@ -349,7 +363,10 @@ class KVCacheManager:
             )
 
         new_blocks = self.coordinator.allocate_new_blocks(
-            request.request_id, num_tokens_need_slot, num_encoder_tokens
+            request.request_id,
+            num_tokens_need_slot,
+            num_tokens_main_model,
+            num_encoder_tokens,
         )
 
         # P/D: delay caching blocks if we have to recv from
@@ -483,3 +500,14 @@ class KVCacheManager:
     ) -> KVCacheBlocks:
         # Only create new KVCacheBlocks for non-empty blocks
         return KVCacheBlocks(blocks) if any(blocks) else self.empty_kv_cache_blocks
+
+    def take_new_block_ids(self) -> list[int]:
+        """Drain and return new attention block IDs for zeroing."""
+        ids: list[int] = []
+        for mgr in self.coordinator.single_type_managers:
+            ids.extend(mgr.take_new_block_ids())
+        return ids
+
+    def new_step_starts(self) -> None:
+        """Called when a new step is started."""
+        self.coordinator.new_step_starts()

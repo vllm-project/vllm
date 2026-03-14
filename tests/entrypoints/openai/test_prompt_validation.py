@@ -12,7 +12,7 @@ import regex as re
 import torch
 
 from vllm.config import ModelConfig
-from vllm.entrypoints.renderer import CompletionRenderer
+from vllm.renderers.embed_utils import safe_load_prompt_embeds
 
 from ...utils import RemoteOpenAIServer
 
@@ -30,7 +30,7 @@ async def test_empty_prompt():
         ):
             await client.completions.create(
                 model=model_name,
-                prompt="",
+                prompt=None,
                 max_tokens=5,
                 temperature=0.0,
                 extra_body={"prompt_embeds": []},
@@ -63,7 +63,6 @@ def test_load_prompt_embeds(
 ):
     model_config = Mock(spec=ModelConfig)
     model_config.enable_prompt_embeds = True
-    renderer = CompletionRenderer(model_config, tokenizer=None)
 
     # construct arbitrary tensors of various dtypes, layouts, and sizes.
     # We need to check against different layouts to make sure that if a user
@@ -89,9 +88,7 @@ def test_load_prompt_embeds(
     buffer.seek(0)
     encoded_tensor = pybase64.b64encode(buffer.getvalue())
 
-    loaded_prompt_embeds = renderer.load_prompt_embeds(encoded_tensor)
-    assert len(loaded_prompt_embeds) == 1
-    loaded_tensor = loaded_prompt_embeds[0]["prompt_embeds"]
+    loaded_tensor = safe_load_prompt_embeds(model_config, encoded_tensor)
     assert loaded_tensor.device.type == "cpu"
     assert loaded_tensor.layout == torch.strided
     torch.testing.assert_close(
@@ -105,7 +102,6 @@ def test_load_prompt_embeds(
 def test_disable_prompt_embeds(dtype: torch.dtype, seq_len: int, hidden_size: int):
     model_config = Mock(spec=ModelConfig)
     model_config.enable_prompt_embeds = False
-    renderer = CompletionRenderer(model_config, tokenizer=None)
 
     tensor = torch.randn((seq_len, hidden_size), dtype=dtype)
 
@@ -115,4 +111,4 @@ def test_disable_prompt_embeds(dtype: torch.dtype, seq_len: int, hidden_size: in
     encoded_tensor = pybase64.b64encode(buffer.getvalue())
 
     with pytest.raises(ValueError, match="--enable-prompt-embeds"):
-        renderer.load_prompt_embeds(encoded_tensor)
+        safe_load_prompt_embeds(model_config, encoded_tensor)

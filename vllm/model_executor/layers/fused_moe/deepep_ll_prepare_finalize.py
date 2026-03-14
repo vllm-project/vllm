@@ -49,7 +49,7 @@ def dequant_fp8(
     return (expert_x_fp32 * expert_x_scales).view(expert_x_fp8.size())
 
 
-class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
+class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
     """
     Prepare/Finalize using DeepEP low-latency kernels.
     """
@@ -119,7 +119,7 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         # time. This setting is handled by post_init_setup.
         self.use_ue8m0_dispatch = False
 
-    def post_init_setup(self, fused_experts: mk.FusedMoEPermuteExpertsUnpermute):
+    def post_init_setup(self, fused_experts: mk.FusedMoEExperts):
         if not fused_experts.supports_packed_ue8m0_act_scales():
             # Early exit.
             return
@@ -198,7 +198,6 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             x = x[0].permute(2, 0, 1)
             num_experts, max_tokens, hidden_dim_by_2 = x.shape
             hidden_dim = hidden_dim_by_2 * 2
-            assert envs.VLLM_FLASHINFER_MOE_BACKEND == "masked_gemm"
             logger.info_once(
                 "Quantization is fused with DeepEP nvfp4 dispatch for "
                 "FlashInfer CUTEDSL as VLLM_DEEPEPLL_NVFP4_DISPATCH==1"
@@ -242,7 +241,14 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         expert_map: torch.Tensor | None,
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
+        defer_input_quant: bool = False,
     ) -> tuple[Callable, mk.ReceiverType]:
+        if defer_input_quant:
+            raise NotImplementedError(
+                f"{self.__class__.__name__} does not support defer_input_quant=True. "
+                "Please select an MoE kernel that accepts quantized inputs."
+            )
+
         hidden_size = a1.size(1)
         assert hidden_size in self.SUPPORTED_HIDDEN_SIZES, (
             f"Hidden Size {hidden_size} not in supported list of hidden sizes"
@@ -344,7 +350,13 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         expert_map: torch.Tensor | None,
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
+        defer_input_quant: bool = False,
     ) -> mk.PrepareResultType:
+        if defer_input_quant:
+            raise NotImplementedError(
+                f"{self.__class__.__name__} does not support defer_input_quant=True. "
+                "Please select an MoE kernel that accepts quantized inputs."
+            )
         hook, receiver = self.prepare_async(
             a1,
             topk_weights,

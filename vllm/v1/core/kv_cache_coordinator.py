@@ -75,6 +75,7 @@ class KVCacheCoordinator(ABC):
         new_computed_blocks: tuple[Sequence[KVCacheBlock], ...],
         num_encoder_tokens: int,
         total_computed_tokens: int,
+        num_tokens_main_model: int,
     ) -> int:
         """
         Get the number of blocks needed to be allocated for the request.
@@ -88,6 +89,9 @@ class KVCacheCoordinator(ABC):
             num_encoder_tokens: The number of encoder tokens for allocating
                 blocks for cross-attention.
             total_computed_tokens: Include both local and external tokens.
+            num_tokens_main_model: The number of tokens for the main model (aka target
+                model in spec decode). w/o spec decode, it is num_tokens;
+                with spec decode, it is num_tokens - num_lookahead_tokens.
 
         Returns:
             The number of blocks to allocate.
@@ -98,7 +102,7 @@ class KVCacheCoordinator(ABC):
                 # For cross-attention, we issue a single static allocation
                 # of blocks based on the number of encoder input tokens.
                 num_blocks_to_allocate += manager.get_num_blocks_to_allocate(
-                    request_id, num_encoder_tokens, [], 0
+                    request_id, num_encoder_tokens, [], 0, num_encoder_tokens
                 )
             else:
                 num_blocks_to_allocate += manager.get_num_blocks_to_allocate(
@@ -106,6 +110,7 @@ class KVCacheCoordinator(ABC):
                     num_tokens,
                     new_computed_blocks[i],
                     total_computed_tokens,
+                    num_tokens_main_model,
                 )
         return num_blocks_to_allocate
 
@@ -139,6 +144,7 @@ class KVCacheCoordinator(ABC):
         self,
         request_id: str,
         num_tokens: int,
+        num_tokens_main_model: int,
         num_encoder_tokens: int = 0,
     ) -> tuple[list[KVCacheBlock], ...]:
         """
@@ -149,6 +155,9 @@ class KVCacheCoordinator(ABC):
             request_id: The request ID.
             num_tokens: The total number of tokens that need a slot (including
                 tokens that are already allocated).
+            num_tokens_main_model: The number of tokens for the main model (aka target
+                model in spec decode). w/o spec decode, it is num_tokens;
+                with spec decode, it is num_tokens - num_lookahead_tokens.
             num_encoder_tokens: The number of encoder tokens for allocating
                 blocks for cross-attention.
 
@@ -161,6 +170,7 @@ class KVCacheCoordinator(ABC):
                 num_encoder_tokens
                 if isinstance(manager, CrossAttentionManager)
                 else num_tokens,
+                num_tokens_main_model,
             )
             for manager in self.single_type_managers
         )
@@ -236,6 +246,11 @@ class KVCacheCoordinator(ABC):
         max_cache_hit_length: int,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
         pass
+
+    def new_step_starts(self) -> None:
+        """Called when a new step is started."""
+        for manager in self.single_type_managers:
+            manager.new_step_starts()
 
 
 class KVCacheCoordinatorNoPrefixCache(KVCacheCoordinator):
@@ -469,6 +484,16 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         hit_length = max_cache_hit_length
         hit_blocks_by_group: list[list[KVCacheBlock] | None] = [None] * num_groups
 
+        # Simple hybrid (1 full attn + 1 other): one iteration suffices.
+        # Full attn is always first if it exists. This avoids EAGLE drops
+        # being applied multiple times to non-full-attn groups.
+        # FIXME (yifan): However, for complex hybrid models with multiple attn
+        # groups, we still have the EAGLE spiral block dropping problem. See
+        # discussion in issue https://github.com/vllm-project/vllm/issues/32802.
+        is_simple_hybrid = len(self.attention_groups) == 2 and isinstance(
+            self.attention_groups[0][0], FullAttentionSpec
+        )
+
         while True:
             curr_hit_length = hit_length
 
@@ -485,10 +510,6 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                     # the last iteration.
                     num_blocks = curr_hit_length // spec.block_size
                     curr_hit_length = num_blocks * spec.block_size
-                    for group_id in group_ids:
-                        blocks = hit_blocks_by_group[group_id]
-                        assert blocks is not None
-                        del blocks[num_blocks:]
                 else:
                     hit_blocks = manager_cls.find_longest_cache_hit(
                         block_hashes=_get_block_hashes(spec),
@@ -503,10 +524,20 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                     for group_id, blocks in zip(group_ids, hit_blocks):
                         hit_blocks_by_group[group_id] = blocks
 
-            if curr_hit_length < hit_length:
-                hit_length = curr_hit_length
-            else:
+            if curr_hit_length >= hit_length:
                 break
+            hit_length = curr_hit_length
+            # Simple hybrid: exit after one iteration
+            if is_simple_hybrid:
+                break
+
+        # Truncate full attention blocks to final hit_length (if present)
+        spec, group_ids, _ = self.attention_groups[0]
+        if isinstance(spec, FullAttentionSpec):
+            num_blocks = hit_length // spec.block_size
+            for group_id in group_ids:
+                if (blks := hit_blocks_by_group[group_id]) is not None:
+                    del blks[num_blocks:]
 
         return tuple(
             blocks if blocks is not None else [] for blocks in hit_blocks_by_group

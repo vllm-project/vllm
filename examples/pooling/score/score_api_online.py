@@ -30,29 +30,35 @@ def main(args):
     api_url = f"http://{args.host}:{args.port}/score"
     model_name = args.model
 
-    text_1 = "What is the capital of Brazil?"
-    text_2 = "The capital of Brazil is Brasilia."
-    prompt = {"model": model_name, "text_1": text_1, "text_2": text_2}
+    queries = "What is the capital of Brazil?"
+    documents = "The capital of Brazil is Brasilia."
+    prompt = {"model": model_name, "queries": queries, "documents": documents}
     score_response = post_http_request(prompt=prompt, api_url=api_url)
-    print("\nPrompt when text_1 and text_2 are both strings:")
+    print("\nPrompt when queries and documents are both strings:")
     pprint.pprint(prompt)
     print("\nScore Response:")
     pprint.pprint(score_response.json())
 
-    text_1 = "What is the capital of France?"
-    text_2 = ["The capital of Brazil is Brasilia.", "The capital of France is Paris."]
-    prompt = {"model": model_name, "text_1": text_1, "text_2": text_2}
+    queries = "What is the capital of France?"
+    documents = [
+        "The capital of Brazil is Brasilia.",
+        "The capital of France is Paris.",
+    ]
+    prompt = {"model": model_name, "queries": queries, "documents": documents}
     score_response = post_http_request(prompt=prompt, api_url=api_url)
-    print("\nPrompt when text_1 is string and text_2 is a list:")
+    print("\nPrompt when queries is string and documents is a list:")
     pprint.pprint(prompt)
     print("\nScore Response:")
     pprint.pprint(score_response.json())
 
-    text_1 = ["What is the capital of Brazil?", "What is the capital of France?"]
-    text_2 = ["The capital of Brazil is Brasilia.", "The capital of France is Paris."]
-    prompt = {"model": model_name, "text_1": text_1, "text_2": text_2}
+    queries = ["What is the capital of Brazil?", "What is the capital of France?"]
+    documents = [
+        "The capital of Brazil is Brasilia.",
+        "The capital of France is Paris.",
+    ]
+    prompt = {"model": model_name, "queries": queries, "documents": documents}
     score_response = post_http_request(prompt=prompt, api_url=api_url)
-    print("\nPrompt when text_1 and text_2 are both lists:")
+    print("\nPrompt when queries and documents are both lists:")
     pprint.pprint(prompt)
     print("\nScore Response:")
     pprint.pprint(score_response.json())

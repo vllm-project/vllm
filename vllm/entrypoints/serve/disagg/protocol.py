@@ -2,18 +2,55 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
+from vllm.config import ModelConfig
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionLogProbs
-from vllm.entrypoints.openai.engine.protocol import (
-    Logprob,
-    SamplingParams,
-    StreamOptions,
-)
+from vllm.entrypoints.openai.engine.protocol import StreamOptions
+from vllm.logprobs import Logprob
+from vllm.renderers import TokenizeParams
+from vllm.sampling_params import SamplingParams
 from vllm.utils import random_uuid
 
-
 ####### Tokens IN <> Tokens OUT #######
+
+
+class PlaceholderRangeInfo(BaseModel):
+    """Serializable placeholder location for a single multi-modal item."""
+
+    offset: int
+    """Start index of the placeholder tokens in the prompt."""
+
+    length: int
+    """Number of placeholder tokens."""
+
+    # TODO: add ``is_embed: list[bool] | None`` once the /generate side
+    # consumes features — some models (e.g. Qwen-VL) use sparse
+    # placeholder masks that cannot be recomputed from offset+length alone.
+
+
+class MultiModalFeatures(BaseModel):
+    """Lightweight multimodal metadata produced by the render step.
+
+    Carries hashes (for cache lookup / identification) and placeholder
+    positions so the downstream ``/generate`` service knows *where* in
+    the token sequence each multimodal item lives.
+
+    .. note:: Phase 1 — metadata only.
+       Phase 2 should add ``mm_kwargs`` (processed tensor data) using a
+       binary transport so the ``/generate`` side can skip re-processing.
+       The ``/generate`` endpoint must also be updated to inject these
+       features into ``ProcessorInputs`` before passing to
+       ``InputProcessor.process_inputs``.
+    """
+
+    mm_hashes: dict[str, list[str]]
+    """Per-modality item hashes, e.g. ``{"image": ["abc", "def"]}``."""
+
+    mm_placeholders: dict[str, list[PlaceholderRangeInfo]]
+    """Per-modality placeholder ranges in the token sequence."""
+
+
 class GenerateRequest(BaseModel):
     request_id: str = Field(
         default_factory=lambda: f"{random_uuid()}",
@@ -26,10 +63,15 @@ class GenerateRequest(BaseModel):
     token_ids: list[int]
     """The token ids to generate text from."""
 
-    # features: MultiModalFeatureSpec
-    # TODO (NickLucche): implement once Renderer work is completed
-    features: str | None = None
-    """The processed MM inputs for the model."""
+    @field_validator("token_ids")
+    @classmethod
+    def validate_token_ids(cls, v: list[int]) -> list[int]:
+        if any(t < 0 for t in v):
+            raise ValueError("token_ids must not contain negative values")
+        return v
+
+    features: MultiModalFeatures | None = None
+    """Multimodal hashes and placeholder positions (populated for MM inputs)."""
 
     sampling_params: SamplingParams
     """The sampling parameters for the model."""
@@ -61,6 +103,12 @@ class GenerateRequest(BaseModel):
         default=None,
         description="KVTransfer parameters used for disaggregated serving.",
     )
+
+    def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
+        return TokenizeParams(
+            max_total_tokens=None,
+            max_output_tokens=0,
+        )
 
 
 class GenerateResponseChoice(BaseModel):

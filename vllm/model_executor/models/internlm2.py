@@ -10,7 +10,6 @@ import torch
 from torch import nn
 from transformers import PretrainedConfig
 
-from vllm.attention.layer import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (
@@ -21,6 +20,7 @@ from vllm.distributed import (
     tensor_model_parallel_all_gather,
 )
 from vllm.model_executor.layers.activation import SiluAndMul
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -41,10 +41,12 @@ from vllm.sequence import IntermediateTensors
 from .interfaces import SupportsLoRA, SupportsPP
 from .interfaces_base import default_pooling_type
 from .utils import (
+    StageMissingLayer,
     is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
+    no_init_weights,
 )
 
 
@@ -282,7 +284,7 @@ class InternLM2Model(nn.Module):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
@@ -348,7 +350,7 @@ class InternLM2ForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None,
         inputs_embeds: torch.Tensor | None = None,
@@ -413,10 +415,16 @@ class InternLM2ForRewardModel(InternLM2ForCausalLM):
         prefix: str = "",
         model_type: type[InternLM2Model] = InternLM2Model,
     ):
-        super().__init__(vllm_config=vllm_config, prefix=prefix, model_type=model_type)
-
-        for attr in ("output", "logits_processor"):
-            delattr(self, attr)
+        with no_init_weights(
+            self,
+            lambda mod: StageMissingLayer("output", mod),
+            targets=(LogitsProcessor, ParallelLMHead),
+        ):
+            super().__init__(
+                vllm_config=vllm_config,
+                prefix=prefix,
+                model_type=model_type,
+            )
 
         config = vllm_config.model_config.hf_config
         self.head_dtype = vllm_config.model_config.head_dtype
@@ -438,7 +446,7 @@ class InternLM2ForRewardModel(InternLM2ForCausalLM):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,

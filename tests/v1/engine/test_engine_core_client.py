@@ -8,6 +8,7 @@ import os
 import signal
 import time
 import uuid
+from concurrent.futures import Future
 from dataclasses import dataclass
 from threading import Thread
 from types import SimpleNamespace
@@ -23,17 +24,23 @@ from vllm import SamplingParams
 from vllm.distributed.kv_events import BlockStored, KVEventBatch, ZmqEventPublisher
 from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
+from vllm.pooling_params import LateInteractionParams, PoolingParams
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.torch_utils import set_default_torch_num_threads
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.core import EngineCore
 from vllm.v1.engine.core_client import (
     AsyncMPClient,
+    DPLBAsyncMPClient,
     EngineCoreClient,
     SyncMPClient,
 )
 from vllm.v1.engine.utils import CoreEngineProcManager
 from vllm.v1.executor.abstract import Executor
+from vllm.v1.pool.late_interaction import (
+    LATE_INTERACTION_MODE_CACHE_QUERY,
+    LATE_INTERACTION_MODE_SCORE_DOC,
+)
 
 from ...distributed.conftest import MockSubscriber
 from ...utils import create_new_process_for_each_test
@@ -69,7 +76,6 @@ def make_request(
         mm_features=None,
         sampling_params=params,
         pooling_params=None,
-        eos_token_id=None,
         arrival_time=time.time(),
         lora_request=None,
         cache_salt=None,
@@ -143,6 +149,8 @@ def test_mp_client_uses_env_timeout(monkeypatch: pytest.MonkeyPatch):
         data_parallel_rank_local=None,
         data_parallel_hybrid_lb=False,
         data_parallel_external_lb=False,
+        local_engines_only=False,
+        enable_elastic_ep=False,
     )
     vllm_config = SimpleNamespace(parallel_config=parallel_config)
 
@@ -161,6 +169,71 @@ def test_mp_client_uses_env_timeout(monkeypatch: pytest.MonkeyPatch):
         assert poll_timeouts == [timeout_value * 1000]
     finally:
         client.shutdown()
+
+
+def _make_pooling_request(
+    request_id: str, *, mode: str | None = None, query_key: str | None = None
+) -> EngineCoreRequest:
+    late_interaction_params = None
+    if mode is not None and query_key is not None:
+        late_interaction_params = LateInteractionParams(
+            mode=mode,
+            query_key=query_key,
+        )
+
+    return EngineCoreRequest(
+        request_id=request_id,
+        prompt_token_ids=[1, 2, 3],
+        mm_features=None,
+        sampling_params=None,
+        pooling_params=PoolingParams(
+            task="token_embed",
+            late_interaction_params=late_interaction_params,
+        ),
+        arrival_time=time.time(),
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+    )
+
+
+def test_dplb_late_interaction_sticky_routing():
+    client = object.__new__(DPLBAsyncMPClient)
+    client.client_count = 1
+    client.reqs_in_flight = {}
+    client.core_engines = [b"\x00\x00", b"\x01\x00", b"\x02\x00"]
+    client.lb_engines = [[0, 0], [0, 0], [0, 0]]
+    client.eng_start_index = 0
+
+    query_key = "rerank-abc-query-0"
+    query_request = _make_pooling_request(
+        "query-req", mode=LATE_INTERACTION_MODE_CACHE_QUERY, query_key=query_key
+    )
+    doc_request = _make_pooling_request(
+        "doc-req", mode=LATE_INTERACTION_MODE_SCORE_DOC, query_key=query_key
+    )
+
+    query_engine = client.get_core_engine_for_request(query_request)
+    doc_engine = client.get_core_engine_for_request(doc_request)
+
+    assert query_engine == doc_engine
+    assert client.reqs_in_flight["query-req"] == query_engine
+    assert client.reqs_in_flight["doc-req"] == doc_engine
+
+
+def test_dplb_non_late_interaction_still_uses_lb():
+    client = object.__new__(DPLBAsyncMPClient)
+    client.client_count = 1
+    client.reqs_in_flight = {}
+    client.core_engines = [b"\x00\x00", b"\x01\x00", b"\x02\x00"]
+    client.lb_engines = [[2, 1], [0, 0], [1, 0]]
+    client.eng_start_index = 0
+
+    request = make_request(SamplingParams(max_tokens=1))
+    chosen_engine = client.get_core_engine_for_request(request)
+
+    assert chosen_engine == client.core_engines[1]
+    assert client.lb_engines[1][0] == 1
 
 
 def loop_until_done(client: EngineCoreClient, outputs: dict):
@@ -278,6 +351,19 @@ def echo_dc_nested(
     return structures.get(structure_type, val)
 
 
+def future_echo(self, value: Any, num_wait_loops: int = 2) -> Future:
+    """Utility that returns a Future completed once the engine is idle
+    (tests deferred utility path).
+    """
+    future: Future = Future()
+
+    def idle(engine: EngineCore):
+        future.set_result(value)
+
+    self._idle_state_callbacks.append(idle)
+    return future
+
+
 # --- Fixtures for subprocess patching ---
 # These create sitecustomize.py files that patch EngineCore in spawned
 # subprocesses. This is necessary because ROCm requires 'spawn' multiprocessing
@@ -374,6 +460,28 @@ def subprocess_echo_dc_nested_patch(monkeypatch, tmp_path):
                 "from vllm.v1.engine.core import EngineCore",
                 inspect.getsource(echo_dc_nested),
                 "EngineCore.echo_dc_nested = echo_dc_nested",
+            ]
+        )
+    )
+    monkeypatch.setenv(
+        "PYTHONPATH",
+        os.pathsep.join(filter(None, [str(tmp_path), os.getenv("PYTHONPATH")])),
+    )
+
+
+@pytest.fixture
+def subprocess_future_echo_patch(monkeypatch, tmp_path):
+    """Create sitecustomize.py so spawned subprocesses have future_echo method."""
+    sc = tmp_path / "sitecustomize.py"
+    sc.write_text(
+        "\n".join(
+            [
+                "from concurrent.futures import Future",
+                "from typing import Any",
+                "",
+                "from vllm.v1.engine.core import EngineCore",
+                inspect.getsource(future_echo),
+                "EngineCore.future_echo = future_echo",
             ]
         )
     )
@@ -782,6 +890,48 @@ async def test_engine_core_client_util_method_nested_structures(
                 for val in item.values():
                     assert val is None
 
+        finally:
+            client.shutdown()
+
+
+@pytest.mark.asyncio(loop_scope="function")
+async def test_engine_core_client_future_utility_async(
+    monkeypatch: pytest.MonkeyPatch,
+    subprocess_future_echo_patch,
+):
+    """Test that a utility returning a Future completes when the future is done
+    (engine uses add_done_callback).
+    """
+    with monkeypatch.context() as m:
+        m.setattr(EngineCore, "future_echo", future_echo, raising=False)
+
+        engine_args = EngineArgs(model=MODEL_NAME, enforce_eager=True)
+        vllm_config = engine_args.create_engine_config(
+            usage_context=UsageContext.UNKNOWN_CONTEXT
+        )
+        executor_class = Executor.get_class(vllm_config)
+
+        with set_default_torch_num_threads(1):
+            client = EngineCoreClient.make_client(
+                multiprocess_mode=True,
+                asyncio_mode=True,
+                vllm_config=vllm_config,
+                executor_class=executor_class,
+                log_stats=True,
+            )
+
+        try:
+            core_client: AsyncMPClient = client
+
+            # Completes after 2 engine steps (num_wait_loops=2)
+            result = await core_client.call_utility_async(
+                "future_echo", "future_result", 2
+            )
+            assert result == "future_result"
+
+            # None is a valid result (num_wait_loops=0 → completes on first step)
+            result = await core_client.call_utility_async("future_echo", None, 0)
+            assert result is None
         finally:
             client.shutdown()
 

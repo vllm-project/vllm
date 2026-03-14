@@ -31,10 +31,8 @@ vllm serve Qwen/Qwen2.5-7B-Instruct --port 8020 --kv-transfer-config '{"kv_conne
 ### Proxy
 
 ```bash
-python tests/v1/kv_connector/nixl_integration/toy_proxy_server.py --prefiller-host 192.168.0.2 --prefiller-port 8010 --decoder-host 192.168.0.3 --decoder-port 8020
+python examples/online_serving/disaggregated_serving/mooncake_connector/mooncake_connector_proxy.py --prefill http://192.168.0.2:8010 --decode http://192.168.0.3:8020
 ```
-
-> NOTE: The Mooncake Connector currently uses the proxy from nixl_integration. This will be replaced with a self-developed proxy in the future.
 
 Now you can send requests to the proxy server through port 8000.
 
@@ -43,16 +41,29 @@ Now you can send requests to the proxy server through port 8000.
 - `VLLM_MOONCAKE_BOOTSTRAP_PORT`: Port for Mooncake bootstrap server
     - Default: 8998
     - Required only for prefiller instances
-    - Each vLLM worker needs a unique port on its host; using the same port number across different hosts is fine
-    - For TP/DP deployments, each worker's port on a node is computed as: base_port + dp_rank * tp_size + tp_rank
-    - Used for the decoder notifying the prefiller
+    - For headless instances, must be the same as the master instance
+    - Each instance needs a unique port on its host; using the same port number across different hosts is fine
 
 - `VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT`: Timeout (in seconds) for automatically releasing the prefiller’s KV cache for a particular request. (Optional)
     - Default: 480
     - If a request is aborted and the decoder has not yet notified the prefiller, the prefill instance will release its KV-cache blocks after this timeout to avoid holding them indefinitely.
 
-## KV Role Options
+## KV Transfer Config
+
+### KV Role Options
 
 - **kv_producer**: For prefiller instances that generate KV caches
 - **kv_consumer**: For decoder instances that consume KV caches from prefiller
 - **kv_both**: Enables symmetric functionality where the connector can act as both producer and consumer. This provides flexibility for experimental setups and scenarios where the role distinction is not predetermined.
+
+### kv_connector_extra_config
+
+- **num_workers**: Size of thread pool for one prefiller worker to transfer KV caches by mooncake. (default 10)
+- **mooncake_protocol**: Mooncake connector protocol. (default "rdma")
+
+## Example Scripts/Code
+
+Refer to these example scripts in the vLLM repository:
+
+- [run_mooncake_connector.sh](../../examples/online_serving/disaggregated_serving/mooncake_connector/run_mooncake_connector.sh)
+- [mooncake_connector_proxy.py](../../examples/online_serving/disaggregated_serving/mooncake_connector/mooncake_connector_proxy.py)

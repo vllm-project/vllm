@@ -2,23 +2,17 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import abstractmethod
-from collections.abc import Sequence
-from typing import TYPE_CHECKING, Any
+from collections.abc import Iterable, Sequence
+from itertools import islice
+from typing import TYPE_CHECKING
 
 from vllm.entrypoints.openai.engine.protocol import DeltaMessage
 from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
 from vllm.tokenizers import TokenizerLike
 
 if TYPE_CHECKING:
-    from vllm.entrypoints.openai.chat_completion.protocol import (
-        ChatCompletionRequest,
-    )
-    from vllm.entrypoints.openai.responses.protocol import (
-        ResponsesRequest,
-    )
-else:
-    ChatCompletionRequest = Any
-    ResponsesRequest = Any
+    from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+    from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 
 
 class BaseThinkingReasoningParser(ReasoningParser):
@@ -57,15 +51,17 @@ class BaseThinkingReasoningParser(ReasoningParser):
         if not self.start_token or not self.end_token:
             raise ValueError("start_token and end_token must be defined in subclasses")
 
-        self.start_token_id = self.vocab.get(self.start_token)
-        self.end_token_id = self.vocab.get(self.end_token)
-        if self.start_token_id is None or self.end_token_id is None:
+        start_token_id = self.vocab.get(self.start_token)
+        end_token_id = self.vocab.get(self.end_token)
+        if start_token_id is None or end_token_id is None:
             raise RuntimeError(
                 f"{self.__class__.__name__} reasoning parser could not locate "
                 "think start/end tokens in the tokenizer!"
             )
+        self.start_token_id: int = start_token_id
+        self.end_token_id: int = end_token_id
 
-    def is_reasoning_end(self, input_ids: list[int]) -> bool:
+    def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
         start_token_id = self.start_token_id
         end_token_id = self.end_token_id
 
@@ -77,7 +73,7 @@ class BaseThinkingReasoningParser(ReasoningParser):
         return False
 
     def is_reasoning_end_streaming(
-        self, input_ids: list[int], delta_ids: list[int]
+        self, input_ids: Sequence[int], delta_ids: Iterable[int]
     ) -> bool:
         end_token_id = self.end_token_id
         return end_token_id in delta_ids
@@ -86,7 +82,7 @@ class BaseThinkingReasoningParser(ReasoningParser):
         """
         Extract the content after the end tokens
         """
-        if self.end_token_id not in input_ids[:-1]:
+        if self.end_token_id not in islice(input_ids, 0, max(0, len(input_ids) - 1)):
             return []
         else:
             return input_ids[input_ids.index(self.end_token_id) + 1 :]
@@ -151,7 +147,7 @@ class BaseThinkingReasoningParser(ReasoningParser):
             return DeltaMessage(content=delta_text)
 
     def extract_reasoning(
-        self, model_output: str, request: ChatCompletionRequest | ResponsesRequest
+        self, model_output: str, request: "ChatCompletionRequest | ResponsesRequest"
     ) -> tuple[str | None, str | None]:
         """
         Extract reasoning content from the model output.
@@ -175,3 +171,23 @@ class BaseThinkingReasoningParser(ReasoningParser):
             # If generation stops right after end-of-think, return null content
             final_content = content or None
             return reasoning, final_content
+
+    def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
+        """Count tokens that fall within start/end thinking markers.
+
+        Uses a depth counter so nested spans are handled safely and stray end
+        tokens do not drive the counter negative.
+        """
+        count = 0
+        depth = 0
+        for token_id in token_ids:
+            if token_id == self.start_token_id:
+                depth += 1
+                continue
+            if token_id == self.end_token_id:
+                if depth > 0:
+                    depth -= 1
+                continue
+            if depth > 0:
+                count += 1
+        return count

@@ -20,9 +20,11 @@ from vllm.forward_context import (
     override_forward_context,
 )
 from vllm.logger import init_logger
+from vllm.model_executor.offloader.base import get_offloader
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.import_utils import has_deep_gemm
+from vllm.utils.platform_utils import num_compute_units
 from vllm.v1.worker.ubatching import UBatchContext, make_ubatch_contexts
 
 logger = init_logger(__name__)
@@ -71,9 +73,8 @@ class SMControlContextManager:
         assert current_platform.is_cuda(), (
             "SM control is currently only supported on CUDA"
         )
-
-        props = torch.cuda.get_device_properties(torch.cuda.current_device())
-        total_sms = props.multi_processor_count
+        device = torch.accelerator.current_device_index()
+        total_sms = num_compute_units(device)
 
         assert comm_sms < total_sms
         self.total_sms = total_sms
@@ -111,15 +112,24 @@ class UBatchWrapper:
         self.cudagraphs: dict[int, CUDAGraphMetaData] = {}
 
         self.cudagraph_wrapper = None
-        self.graph_pool = None
         if runtime_mode is not CUDAGraphMode.NONE:
             self.cudagraph_wrapper = CUDAGraphWrapper(
                 runnable, vllm_config, runtime_mode=runtime_mode
             )
-            self.graph_pool = current_platform.get_global_graph_pool()
 
         self.sm_control = self._create_sm_control_context(vllm_config)
         self.device = device
+
+    @property
+    def graph_pool(self):
+        if self.cudagraph_wrapper is not None:
+            return self.cudagraph_wrapper.graph_pool
+        return None
+
+    def clear_graphs(self) -> None:
+        self.cudagraphs.clear()
+        if self.cudagraph_wrapper is not None:
+            self.cudagraph_wrapper.clear_graphs()
 
     @staticmethod
     def _create_sm_control_context(vllm_config: VllmConfig):
@@ -194,7 +204,7 @@ class UBatchWrapper:
 
         @torch.inference_mode()
         def _capture_ubatch_thread(results, ubatch_metadata):
-            torch.cuda.set_device(self.device)
+            torch.accelerator.set_device_index(self.device)
             ubatch_context = ubatch_metadata.context
             with torch.cuda.stream(ubatch_context.compute_stream):
                 _ = torch.cuda.current_blas_handle()
@@ -239,6 +249,11 @@ class UBatchWrapper:
                 set_graph_pool_id(self.graph_pool)
             else:
                 set_graph_pool_id(current_platform.graph_pool_handle())
+
+            # Sync offloader's copy stream before capture.
+            # Ensure any pre-capture prefetches from offloader are complete.
+            get_offloader().sync_prev_onload()
+
             with torch.cuda.graph(
                 cudagraph_metadata.cudagraph,
                 stream=compute_stream,
@@ -250,6 +265,10 @@ class UBatchWrapper:
                 sorted_results = [value for position, value in sorted(results)]
                 result = torch.cat(sorted_results, dim=0)
                 cudagraph_metadata.outputs = result
+                # Join offloader's copy stream after forward to avoid unjoined
+                # stream error. The last layer's start_prefetch forks copy_stream,
+                # but wait_prefetch only happens in the next forward pass.
+                get_offloader().join_after_forward()
             self.cudagraphs[num_tokens] = cudagraph_metadata
         return cudagraph_metadata.outputs
 
@@ -295,6 +314,7 @@ class UBatchWrapper:
         self,
         ubatch_slices,
         attn_metadata,
+        slot_mapping,
         input_ids,
         positions,
         inputs_embeds,
@@ -306,6 +326,9 @@ class UBatchWrapper:
     ) -> list[UbatchMetadata]:
         # Create one forward context per ubatch
         forward_contexts = []
+        # slot_mapping can be None, an empty dict (from create_forward_context
+        # converting None to {}), or a list of dicts (one per ubatch)
+        has_slot_mapping = slot_mapping and isinstance(slot_mapping, list)
         for i, ubatch_slice in enumerate(ubatch_slices):
             forward_contexts.append(
                 create_forward_context(
@@ -314,6 +337,7 @@ class UBatchWrapper:
                     dp_metadata=dp_metadata[i],
                     batch_descriptor=batch_descriptor,
                     cudagraph_runtime_mode=cudagraph_runtime_mode,
+                    slot_mapping=slot_mapping[i] if has_slot_mapping else None,
                 )
             )
 
@@ -406,9 +430,8 @@ class UBatchWrapper:
                 return self.cudagraph_wrapper(*args, **kwargs)
 
         attn_metadata = forward_context.attn_metadata
-        num_tokens = (
-            ubatch_slices[0].token_slice.stop - ubatch_slices[0].token_slice.start
-        ) * 2
+        slot_mapping = forward_context.slot_mapping
+        num_tokens = sum(ubatch_slice.num_tokens for ubatch_slice in ubatch_slices)
         input_ids = kwargs["input_ids"]
         positions = kwargs["positions"]
         intermediate_tensors = kwargs["intermediate_tensors"]
@@ -440,6 +463,7 @@ class UBatchWrapper:
             ubatch_metadata = self._make_ubatch_metadata(
                 ubatch_slices=ubatch_slices,
                 attn_metadata=attn_metadata,
+                slot_mapping=slot_mapping,
                 input_ids=input_ids,
                 positions=positions,
                 intermediate_tensors=intermediate_tensors,
@@ -456,12 +480,16 @@ class UBatchWrapper:
             and cudagraph_runtime_mode is CUDAGraphMode.FULL
         ):
             cudagraph_metadata = self.cudagraphs[num_tokens]
+            # Sync offloader before replay - ensures any external dependencies
+            # from pre-capture prefetches are satisfied.
+            get_offloader().sync_prev_onload()
             cudagraph_metadata.cudagraph.replay()
             return cudagraph_metadata.outputs
         else:
             ubatch_metadata = self._make_ubatch_metadata(
                 ubatch_slices=ubatch_slices,
                 attn_metadata=attn_metadata,
+                slot_mapping=slot_mapping,
                 input_ids=input_ids,
                 positions=positions,
                 intermediate_tensors=intermediate_tensors,
