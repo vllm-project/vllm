@@ -163,26 +163,35 @@ def _is_amd_zen_cpu() -> bool:
 def cpu_platform_plugin() -> str | None:
     is_cpu = False
     logger.debug("Checking if CPU platform is available.")
+    # If the target device is explicitly set to CPU, honor it even when
+    # package metadata is unavailable (e.g. source checkout without install).
+    if envs.VLLM_TARGET_DEVICE == "cpu":
+        logger.debug(
+            "Confirmed CPU platform is available because VLLM_TARGET_DEVICE=cpu."
+        )
+        return "vllm.platforms.cpu.CpuPlatform"
+
     try:
         is_cpu = vllm_version_matches_substr("cpu")
         if is_cpu:
             logger.debug(
                 "Confirmed CPU platform is available because vLLM is built with CPU."
             )
-        if not is_cpu:
-            import sys
-
-            is_cpu = sys.platform.startswith("darwin")
-            if is_cpu:
-                logger.debug(
-                    "Confirmed CPU platform is available because the machine is MacOS."
-                )
-
     except Exception as e:
         logger.debug("CPU platform is not available because: %s", str(e))
 
+    # Fallback: on macOS, always use CPU (covers both the normal path where
+    # the version string didn't contain "cpu" and the exception path where
+    # package metadata is missing in source/editable checkouts).
     if not is_cpu:
-        return None
+        import sys
+
+        if sys.platform.startswith("darwin"):
+            logger.debug(
+                "Confirmed CPU platform is available because the machine is MacOS."
+            )
+        else:
+            return None
 
     if _is_amd_zen_cpu():
         try:
