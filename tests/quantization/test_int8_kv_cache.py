@@ -341,7 +341,14 @@ def test_int8_per_token_round_trip_accuracy(
     head_size: int,
     block_size: int,
 ):
-    """Verify that quantize→dequantize round-trip has bounded error."""
+    """Verify per-token INT8 round-trip: kernel dequant matches
+    a reference that replicates the kernel's truncation semantics.
+
+    The Triton kernel quantises via tl.clamp(x / scale, -128, 127)
+    then tl.store to int8, which **truncates** toward zero (not
+    rounds).  We replicate that here with torch.trunc() so the
+    reference is exact, then compare dequantised outputs.
+    """
     from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
         triton_reshape_and_cache_flash_int8_per_token,
     )
@@ -351,55 +358,95 @@ def test_int8_per_token_round_trip_accuracy(
 
     num_blocks = (num_tokens + block_size - 1) // block_size + 2
 
-    # Use realistic attention-scale values (small magnitudes)
-    key = torch.randn(num_tokens, num_heads, head_size, dtype=torch.bfloat16) * 0.5
-    value = torch.randn(num_tokens, num_heads, head_size, dtype=torch.bfloat16) * 0.5
+    # Realistic attention-scale values (small magnitudes)
+    key = (
+        torch.randn(
+            num_tokens, num_heads, head_size,
+            dtype=torch.bfloat16,
+        )
+        * 0.5
+    )
+    value = (
+        torch.randn(
+            num_tokens, num_heads, head_size,
+            dtype=torch.bfloat16,
+        )
+        * 0.5
+    )
 
     key_cache = torch.zeros(
-        num_blocks, block_size, num_heads, head_size, dtype=torch.int8
+        num_blocks, block_size, num_heads, head_size,
+        dtype=torch.int8,
     )
     value_cache = torch.zeros(
-        num_blocks, block_size, num_heads, head_size, dtype=torch.int8
+        num_blocks, block_size, num_heads, head_size,
+        dtype=torch.int8,
     )
-    k_scale_cache = torch.ones(num_blocks, block_size, num_heads, dtype=torch.float32)
-    v_scale_cache = torch.ones(num_blocks, block_size, num_heads, dtype=torch.float32)
+    k_scale_cache = torch.ones(
+        num_blocks, block_size, num_heads,
+        dtype=torch.float32,
+    )
+    v_scale_cache = torch.ones(
+        num_blocks, block_size, num_heads,
+        dtype=torch.float32,
+    )
 
-    # Sequential slot mapping for easy readback
     slot_mapping = torch.arange(num_tokens, dtype=torch.long)
 
     triton_reshape_and_cache_flash_int8_per_token(
-        key,
-        value,
-        key_cache,
-        value_cache,
-        k_scale_cache,
-        v_scale_cache,
-        slot_mapping,
+        key, value, key_cache, value_cache,
+        k_scale_cache, v_scale_cache, slot_mapping,
     )
 
-    # Dequantize
+    # Build a reference that exactly matches the kernel:
+    #   scale = max(absmax / 127, 1e-6)
+    #   q_int8 = trunc(clamp(x / scale, -128, 127))
+    #   dequant = q_int8 * scale
     for i in range(num_tokens):
         blk = i // block_size
         off = i % block_size
-        k_deq = key_cache[blk, off].float() * k_scale_cache[blk, off].unsqueeze(-1)
-        v_deq = value_cache[blk, off].float() * v_scale_cache[blk, off].unsqueeze(-1)
 
-        # INT8 quantization error should be at most scale/2 per element
-        # (rounding to nearest integer). Use a generous tolerance.
-        k_err = (k_deq - key[i].float()).abs()
-        v_err = (v_deq - value[i].float()).abs()
+        for label, data, cache, sc in [
+            ("key", key, key_cache, k_scale_cache),
+            ("val", value, value_cache, v_scale_cache),
+        ]:
+            orig = data[i].float()            # [num_heads, head_size]
+            absmax = orig.abs().amax(dim=-1)   # [num_heads]
+            ref_scale = (absmax / 127.0).clamp(min=1e-6)
 
-        k_max_expected_err = k_scale_cache[blk, off].unsqueeze(-1) * 0.6
-        v_max_expected_err = v_scale_cache[blk, off].unsqueeze(-1) * 0.6
+            # Triton truncates on float→int8 store
+            ref_q = (
+                (orig / ref_scale.unsqueeze(-1))
+                .clamp(-128.0, 127.0)
+                .trunc()
+                .to(torch.int8)
+            )
+            ref_deq = ref_q.float() * ref_scale.unsqueeze(-1)
 
-        assert (k_err <= k_max_expected_err).all(), (
-            f"Key round-trip error too large at token {i}: "
-            f"max_err={k_err.max():.6f}, max_expected={k_max_expected_err.max():.6f}"
-        )
-        assert (v_err <= v_max_expected_err).all(), (
-            f"Value round-trip error too large at token {i}: "
-            f"max_err={v_err.max():.6f}, max_expected={v_max_expected_err.max():.6f}"
-        )
+            actual_q = cache[blk, off]
+            actual_sc = sc[blk, off]
+            actual_deq = actual_q.float() * actual_sc.unsqueeze(-1)
+
+            # Scales must match exactly (both float32)
+            torch.testing.assert_close(
+                actual_sc, ref_scale,
+                atol=1e-5, rtol=1e-5,
+            )
+            # Quantised int8 values: allow +-1 for
+            # bf16→f32 representation differences
+            torch.testing.assert_close(
+                actual_q.float(), ref_q.float(),
+                atol=1.0, rtol=0.0,
+            )
+            # Dequantised values: error <= 1 * scale
+            # (from the +-1 int8 tolerance above)
+            err = (actual_deq - ref_deq).abs()
+            bound = actual_sc.unsqueeze(-1) * 1.01
+            assert (err <= bound).all(), (
+                f"{label} dequant error at token {i}: "
+                f"max={err.max():.6f}, "
+                f"bound={bound.max():.6f}"
+            )
 
 
 # ===========================================================================
