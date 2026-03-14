@@ -121,26 +121,27 @@ class MiniMaxText01RMSNormAR(CustomOp):
 
     def forward(
         self,
-        q_norm: "MiniMaxText01RMSNormTP",
-        k_norm: "MiniMaxText01RMSNormTP",
+        q_norm_weights:torch.Tensor,
+        k_norm_weights: torch.Tensor,
         q: torch.Tensor,
         k: torch.Tensor,
+        eps:float=1e-6
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        orig_dtype = q.dtype
-        q_1 = q.clone()
-        k_1 = k.clone()
-        q = q.to(torch.float32)
-        k = k.to(torch.float32)
-        q_var = q.pow(2).mean(dim=-1, keepdim=True)
-        k_var = k.pow(2).mean(dim=-1, keepdim=True)
-        if q_norm.tp_world > 1:
-            qk_var = torch.cat([q_var, k_var], dim=-1)
-            qk_var = tensor_model_parallel_all_reduce(qk_var) / q_norm.tp_world
-            q_var, k_var = qk_var.chunk(2, dim=-1)
-        q = q * torch.rsqrt(q_var + q_norm.variance_epsilon) * q_norm.weight
-        k = k * torch.rsqrt(k_var + k_norm.variance_epsilon) * k_norm.weight
-        q = q.to(orig_dtype)
-        k = k.to(orig_dtype)
+        # orig_dtype = q.dtype
+        # q_1 = q.clone()
+        # k_1 = k.clone()
+        # q = q.to(torch.float32)
+        # k = k.to(torch.float32)
+        # q_var = q.pow(2).mean(dim=-1, keepdim=True)
+        # k_var = k.pow(2).mean(dim=-1, keepdim=True)
+        # if q_norm.tp_world > 1:
+        #     qk_var = torch.cat([q_var, k_var], dim=-1)
+        #     qk_var = tensor_model_parallel_all_reduce(qk_var) / q_norm.tp_world
+        #     q_var, k_var = qk_var.chunk(2, dim=-1)
+        # q = q * torch.rsqrt(q_var + q_norm.variance_epsilon) * q_norm.weight
+        # k = k * torch.rsqrt(k_var + k_norm.variance_epsilon) * k_norm.weight
+        # q = q.to(orig_dtype)
+        # k = k.to(orig_dtype)
         # return q, k
         #     std::vector<torch::Tensor> minimax_allreduce_rms_qk(
         # torch::Tensor const& q, torch::Tensor const& k,
@@ -150,18 +151,18 @@ class MiniMaxText01RMSNormAR(CustomOp):
 
         """Fused Q+K RMS norm with allreduce. Returns (q_out, k_out)."""
         out_list = torch.ops._C.minimax_allreduce_rms_qk(
-            q_1,
-            k_1,
-            q_norm.weight,
-            k_norm.weight,
+            q,
+            k,
+            q_norm_weights,
+            k_norm_weights,
             self.workspace,
             self.tp_rank,
             self.tp_world,
-            q_norm.variance_epsilon,
+            eps,
             False,
         )
-        torch.testing.assert_close(q, out_list[0], rtol=1e-2, atol=1e-2)
-        torch.testing.assert_close(k, out_list[1], rtol=1e-2, atol=1e-2)
+        # torch.testing.assert_close(q, out_list[0], rtol=1e-2, atol=1e-2)
+        # torch.testing.assert_close(k, out_list[1], rtol=1e-2, atol=1e-2)
         return (out_list[0], out_list[1])
         # return (q,k)
 

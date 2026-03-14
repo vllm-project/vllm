@@ -240,7 +240,11 @@ class MiniMaxM2Attention(nn.Module):
         #     self.q_norm, self.k_norm, q.contiguous(), k.contiguous()
         # )
         q, k = self.fused_qk_rom(
-            self.q_norm, self.k_norm, q.contiguous(), k.contiguous()
+            self.q_norm.weight,
+            self.k_norm.weight,
+            q.contiguous(),
+            k.contiguous(),
+            self.q_norm.variance_epsilon,
         )
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v)
