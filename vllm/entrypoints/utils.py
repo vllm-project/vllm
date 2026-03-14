@@ -178,6 +178,11 @@ def get_max_tokens(
     default_sampling_params: dict,
     override_max_tokens: int | None = None,
 ) -> int:
+    if max_model_len < input_length:
+        raise ValueError(
+            f"Input length ({input_length}) exceeds model's maximum "
+            f"context length ({max_model_len})."
+        )
     model_max_tokens = max_model_len - input_length
     platform_max_tokens = current_platform.get_max_output_tokens(input_length)
     fallback_max_tokens = (
@@ -303,12 +308,16 @@ def create_error_response(
     if isinstance(message, Exception):
         exc = message
 
-        from vllm.exceptions import VLLMValidationError
+        from vllm.exceptions import VLLMNotFoundError, VLLMValidationError
 
         if isinstance(exc, VLLMValidationError):
             err_type = "BadRequestError"
             status_code = HTTPStatus.BAD_REQUEST
             param = exc.parameter
+        elif isinstance(exc, VLLMNotFoundError):
+            err_type = "NotFoundError"
+            status_code = HTTPStatus.NOT_FOUND
+            param = None
         elif isinstance(exc, (ValueError, TypeError, OverflowError)):
             # Common validation errors from user input
             err_type = "BadRequestError"

@@ -6,7 +6,7 @@ A Ray cluster can be declared in YAML, and the operator then handles pod schedul
 ## Why KubeRay instead of manual scripts?
 
 | Feature | Manual scripts | KubeRay |
-|---------|-----------------------------------------------------------|---------|
+| ------- | --------------------------------------------------------- | ------- |
 | Cluster bootstrap | Manually SSH into every node and run a script | One command to create or update the whole cluster: `kubectl apply -f cluster.yaml` |
 | Autoscaling | Manual | Automatically patches CRDs for adjusting cluster size |
 | Upgrades | Tear down & re-create manually | Blue/green deployment updates supported |

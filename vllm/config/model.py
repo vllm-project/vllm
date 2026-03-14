@@ -20,6 +20,7 @@ from vllm.config.scheduler import RunnerType
 from vllm.config.utils import config, getattr_iter
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.tasks import ScoreType
 from vllm.transformers_utils.config import (
     ConfigFormat,
     get_config,
@@ -216,12 +217,13 @@ class ModelConfig:
     """Whether to disable sliding window. If True, we will disable the sliding
     window functionality of the model, capping to sliding window size. If the
     model does not support sliding window, this argument is ignored."""
-    disable_cascade_attn: bool = False
+    disable_cascade_attn: bool = True
     """Disable cascade attention for V1. While cascade attention does not
     change the mathematical correctness, disabling it could be useful for
-    preventing potential numerical issues. Note that even if this is set to
-    False, cascade attention will be only used when the heuristic tells that
-    it's beneficial."""
+    preventing potential numerical issues. This defaults to True, so users
+    must opt in to cascade attention by setting this to False. Even when this
+    is set to False, cascade attention will only be used when the heuristic
+    tells that it's beneficial."""
     skip_tokenizer_init: bool = False
     """Skip initialization of tokenizer and detokenizer. Expects valid
     `prompt_token_ids` and `None` for prompt from the input. The generated
@@ -529,6 +531,24 @@ class ModelConfig:
         self._model_info = model_info
         self._architecture = arch
         logger.info("Resolved architecture: %s", arch)
+
+        # Set default tokenizer modes based on model architecture
+        if self.tokenizer_mode == "auto":
+            if arch == "Grok1ForCausalLM":
+                self.tokenizer_mode = "grok2"
+            elif arch == "MoonshotKimiaForCausalLM":
+                self.tokenizer_mode = "kimi_audio"
+            elif arch == "QwenVLForConditionalGeneration":
+                self.tokenizer_mode = "qwen_vl"
+            elif arch == "DeepseekV32ForCausalLM":
+                self.tokenizer_mode = "deepseek_v32"
+
+            if self.tokenizer_mode != "auto":
+                logger.info(
+                    "Defaulting to tokenizer_mode=%r for %s",
+                    self.tokenizer_mode,
+                    arch,
+                )
 
         # Init pooler config if needed
         if self.runner_type == "pooling":
@@ -1122,6 +1142,7 @@ class ModelConfig:
             return bool(self.hf_config.is_mm_prefix_lm)
         # fallback to list of known models
         MM_PREFIX_LM_MODELS = (
+            "bagel",
             "gemma3",
             "molmo2",
             "paligemma",
@@ -1412,15 +1433,22 @@ class ModelConfig:
         return self._model_info.requires_raw_input_tokens
 
     @property
-    def is_cross_encoder(self) -> bool:
+    def score_type(self) -> ScoreType:
+        """
+        Score API handles score/rerank for:
+        - "score" task (score_type: cross-encoder models)
+        - "embed" task (score_type: bi-encoder models)
+        - "token_embed" task (score_type: late interaction models)
+        """
+        # fixme: self._model_info.score_type is the score type before
+        #  as_seq_cls_model, which is "bi-encoder", rather than the
+        #  score type after as_seq_cls_model, which is "cross-encoder".
+        #  Therefore, the following logic is required.
         return (
-            self._model_info.supports_cross_encoding or self.convert_type == "classify"
+            "cross-encoder"
+            if self.convert_type == "classify"
+            else self._model_info.score_type
         )
-
-    @property
-    def is_late_interaction(self) -> bool:
-        """Check if model uses late interaction (ColBERT-style) scoring."""
-        return self._model_info.supports_late_interaction
 
     @property
     def is_pp_supported(self) -> bool:
