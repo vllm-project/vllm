@@ -6,12 +6,11 @@ import pytest
 
 from .utils import (
     MESSAGES_WITHOUT_TOOLS,
+    SEED,
     WEATHER_TOOL,
     ServerConfig,
     ensure_system_prompt,
 )
-
-SEED = 42
 
 
 # test: make sure chat completions without tools provided work even when tools
