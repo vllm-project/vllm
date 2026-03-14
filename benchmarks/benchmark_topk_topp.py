@@ -95,7 +95,10 @@ def create_logits(
 def measure_memory() -> tuple[int, int]:
     """Return (allocated, reserved) memory in bytes."""
     torch.accelerator.synchronize()
-    return torch.accelerator.memory_allocated(), torch.cuda.max_memory_allocated()
+    return (
+        torch.accelerator.memory_allocated(),
+        torch.accelerator.max_memory_allocated(),
+    )
 
 
 def reset_memory_stats():
