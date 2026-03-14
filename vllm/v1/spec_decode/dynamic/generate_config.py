@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import dataclasses
 import json
 import pprint
 import time
 from pathlib import Path
+from typing import Any
 
 from transformers import AutoTokenizer
 
@@ -187,7 +189,7 @@ def run_profiling_sweep(args):
         output_dir=Path(args.result_dir),
         num_runs=1,
         dry_run=False,
-        resume=None,
+        resume=False,
         link_vars=[],
         server_ready_timeout=600,
         experiment_name=f"{args.method}-{args.num_spec_tokens}",
@@ -202,6 +204,7 @@ def get_acceptance_rate_per_pos(args):
 
     tokenizer = AutoTokenizer.from_pretrained(args.model_dir)
     prompts = get_samples(args, tokenizer)
+    llm_prompts: list[Any]
     if args.enable_multimodal_chat:
         llm_prompts = [p.prompt for p in prompts]
     else:
@@ -410,7 +413,7 @@ def main():
 
     config_path = f"{args.result_dir}/dynamic_speculative_config.json"
     with open(config_path, "w") as f:
-        json.dump(dynamic_config.model_dump(), f, indent=4)
+        json.dump(dataclasses.asdict(dynamic_config), f, indent=4)
 
     print(f"✅ Step 4: config saved to {config_path}")
 
