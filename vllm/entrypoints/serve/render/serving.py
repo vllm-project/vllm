@@ -44,7 +44,6 @@ from vllm.renderers.inputs.preprocess import (
     parse_model_prompt,
     prompt_to_seq,
 )
-from vllm.sampling_params import SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers import ToolParser
 from vllm.utils import random_uuid
@@ -156,12 +155,6 @@ class OpenAIServingRender:
             self.override_max_tokens,
         )
         params = request.to_sampling_params(max_tokens, self.default_sampling_params)
-        if not isinstance(params, SamplingParams):
-            return self.create_error_response(
-                "Internal error: unexpected parameter type",
-                err_type="InternalServerError",
-                status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
-            )
 
         request_id = f"chatcmpl-{random_uuid()}"
 
@@ -388,11 +381,10 @@ class OpenAIServingRender:
         # if the model supports it. TODO: Support browsing.
         assert not self.supports_browsing
         assert not self.supports_code_interpreter
-        assert request.reasoning_effort != "none", (
-            "Harmony does not support reasoning_effort='none'"
-        )
+        if (reasoning_effort := request.reasoning_effort) == "none":
+            raise ValueError(f"Harmony does not support {reasoning_effort=}")
         sys_msg = get_system_message(
-            reasoning_effort=request.reasoning_effort,
+            reasoning_effort=reasoning_effort,
             browser_description=None,
             python_description=None,
             with_custom_tools=should_include_tools,
