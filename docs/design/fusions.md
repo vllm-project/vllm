@@ -22,7 +22,8 @@ or just on the low or high end.
 | ------------------------------------------------------------------------------ | ---------------------------- | ---------------------------------------------- | ------------------------------ | ------------------ | --------- | ------------ |
 | [AllReduce + RMSNorm](#allreduce--rmsnorm-fuse_allreduce_rms)                  | `fuse_allreduce_rms`         | All-reduce → RMSNorm (+residual_add) (→ quant) | O2 (Hopper/Blackwell + TP > 1) | 5-20%              | No        | Low          |
 | [Attention + Quant](#attention--quantization-fuse_attn_quant)                  | `fuse_attn_quant`            | Attention output → FP8/NVFP4 quant             | Off by default                 | 3-7%               | Yes       | Always       |
-| [RoPE + KV-Cache Update](#rope--kv-cache-update-fuse_rope_kvcache)             | `fuse_rope_kvcache`          | Rotary embedding → KV cache write              | O2 (ROCm/AITER only)           | 2-4%               | No        | Low          |
+| [MLA Attention + Quant](#attention--quantization-fuse_attn_quant)              | `fuse_attn_quant`            | Attention output → FP8/NVFP4 quant             | Off by default                 | TBD                | Yes       | Always       |
+| [RoPE + KV-Cache Update](#rope--kv-cache-update-fuse_rope_kvcache)             | `fuse_rope_kvcache`          | Rotary embedding → KV cache write              | O1 (ROCm/AITER only)           | TBD                | No        | Low          |
 | [QK Norm + RoPE](#qk-norm--rope-enable_qk_norm_rope_fusion)                    | `enable_qk_norm_rope_fusion` | Q/K RMSNorm → rotary embedding                 | Off by default                 | 2-3%               | No        | Low          |
 | [Sequence Parallelism](#sequence-parallelism-enable_sp)                        | `enable_sp`                  | AllReduce → ReduceScatter + AllGather          | Off by default                 | Prereq for AsyncTP | Yes       | High         |
 | [AsyncTP GEMM + collective](#asynctp-gemm--collective-overlap-fuse_gemm_comms) | `fuse_gemm_comms`            | GEMM → reduce-scatter / all-gather → GEMM      | Off by default                 | 7-10%              | Yes       | High         |
@@ -40,6 +41,7 @@ The table below lists the quantization schemes supported by each fusion on each 
 | ---------------------------- | ---------------------------------------- | ---------------------------------------- | ---------------------------------------- | ------------- | ---------------------------------------- |
 | `fuse_allreduce_rms`         | FP16/BF16, FP8 static, NVFP4             | FP16/BF16, FP8 static                    | —                                        | —             | —                                        |
 | `fuse_attn_quant`\*          | FP8 static\*, NVFP4\*                    | FP8 static\*                             | FP8 static\*                             | —             | FP8 static\*                             |
+| `fuse_attn_quant` (MLA)\*    | FP8 static\*, NVFP4\*                    | FP8 static\*                             | FP8 static\*                             | —             | FP8 static(untested)\*                   |
 | `fuse_rope_kvcache`          | —                                        | —                                        | —                                        | —             | FP16/BF16                                |
 | `enable_qk_norm_rope_fusion` | FP16/BF16                                | FP16/BF16                                | FP16/BF16†                               | FP16/BF16†    | —                                        |
 | `enable_sp`                  | FP16/BF16, FP8 static†                   | FP16/BF16, FP8 static                    | FP16/BF16†                               | FP16/BF16†    | —                                        |
@@ -129,7 +131,8 @@ on SM90/SM100) and configurable via `PassConfig.fi_allreduce_fusion_max_size_mb`
     explicitly. It requires the full model graph to be visible (Inductor partition or `splitting_ops=[]`).
 
 **What it fuses.** Fuses the attention output quantization directly after the attention computation,
-eliminating a full-precision memory round-trip of the attention output. Patterns covered:
+eliminating a full-precision memory round-trip of the attention output. This fusion supports both
+standard `Attention` and `MLAAttention` (used by DeepSeek-V2/V3/R1 models). Patterns covered:
 
 `Attention → FP8 static quant`:
 
@@ -142,11 +145,28 @@ eliminating a full-precision memory round-trip of the attention output. Patterns
 
 - `FLASHINFER`: CUDA sm100+ with FlashInfer installed
 
+`MLAAttention → FP8 static quant`:
+
+- All MLA backends (e.g. `TRITON_MLA`, `FLASHINFER_MLA`, `FLASHMLA`, `CUTLASS_MLA`): CUDA
+- ROCm MLA backends: untested
+
+`MLAAttention → NVFP4 dynamic quant`:
+
+- All MLA backends: CUDA sm100+
+- ROCm MLA backends: untested
+
+!!! info
+    The MLA attention fusion is not expected to yield a measurable speedup yet. The fused path
+    currently writes to an intermediate buffer and then quantizes separately, so the
+    memory round-trip is not yet eliminated. This will improve once attention kernels support
+    direct FP8/FP4 output.
+
 Other attention backends do not support fused output quantization yet.
 
 **Code locations.**
 
-- Pass: [`vllm/compilation/passes/fusion/attn_quant_fusion.py`](https://github.com/vllm-project/vllm/blob/main/vllm/compilation/passes/fusion/attn_quant_fusion.py)
+- Pass (Attention): [`vllm/compilation/passes/fusion/attn_quant_fusion.py`](https://github.com/vllm-project/vllm/blob/main/vllm/compilation/passes/fusion/attn_quant_fusion.py)
+- Pass (MLAAttention): [`vllm/compilation/passes/fusion/mla_attn_quant_fusion.py`](https://github.com/vllm-project/vllm/blob/main/vllm/compilation/passes/fusion/mla_attn_quant_fusion.py)
 - Attention backends: [`vllm/v1/attention/backends/`](https://github.com/vllm-project/vllm/blob/main/vllm/v1/attention/backends/)
 
 ### RoPE + KV-Cache Update (`fuse_rope_kvcache`)

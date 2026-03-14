@@ -170,9 +170,8 @@ class MLAAttentionFp8StaticQuantPattern(MLAAttentionQuantPattern):
             kv_cache_dummy_dep: torch.Tensor,
         ) -> torch.Tensor:
             # MLA output in quant_dtype
-            output_attn = torch.ops.aten.full.default(
+            output_attn = torch.empty(
                 [q.shape[0], self.output_dim],
-                0.0,
                 dtype=self.quant_dtype,
                 device=q.device,
             )
@@ -267,9 +266,8 @@ class MLAAttentionNvfp4QuantPattern(MLAAttentionQuantPattern):
             kv_cache_dummy_dep: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor]:
             # MLA output in quant_dtype (FP4 packed as uint8)
-            output_attn = torch.ops.aten.full.default(
+            output_attn = torch.empty(
                 [q.shape[0], self.output_dim // 2],
-                0.0,
                 dtype=self.quant_dtype,
                 device=q.device,
             )

@@ -448,16 +448,11 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             group_shape=GroupShape.PER_TENSOR,
             compile_native=True,
         )
-
-        # Preallocated BF16 buffer for fused output quantization.
-        # Sized to max_num_batched_tokens so we avoid per-forward allocation.
-        if self.quant_config is not None:
-            self._quant_bf16_buf = torch.empty(
-                self._vllm_config.scheduler_config.max_num_batched_tokens,
-                self.num_heads * self.v_head_dim,
-                dtype=dtype,
-                device=next(self.kv_b_proj.parameters()).device,
-            )
+        self._quant_fp8_op = QuantFP8(
+            static=True,
+            group_shape=GroupShape.PER_TENSOR,
+            compile_native=True,
+        )
 
     @property
     def chunked_prefill_workspace_size(self) -> int:
@@ -557,12 +552,17 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         use_quant = output_scale is not None or output_block_scale is not None
         if use_quant:
             # The fusion pass has allocated output with quantized dtype
-            # (FP8 or uint8 for FP4). We can't write BF16 into it directly,
-            # so we swap in a temp BF16 buffer for computation, then quantize
+            # (FP8 or uint8 for FP4). We can't write into it directly,
+            # so we swap in a temp buffer for computation, then quantize
             # into the real output at the end.
-            # NOTE(carl-you): this is temporary until kernels support fp8 output
+            # NOTE(carlyou): this is temporary until kernels support fp8 output
             quant_output = output
-            output = self._quant_bf16_buf[: output.shape[0]]
+            output = torch.empty(
+                output.shape[0],
+                self.num_heads * self.v_head_dim,
+                dtype=torch.get_default_dtype(),
+                device=output.device,
+            )
 
         if attn_metadata is None:
             # During the profile run try to simulate to worse case output size
@@ -733,8 +733,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 output_block_scale.copy_(fp4_scales)
             else:
                 # Static FP8 quantization
-                quant_actual = quant_output[:num_actual_toks]
-                torch.ops._C.static_scaled_fp8_quant(quant_actual, actual, output_scale)
+                fp8_data, _ = self._quant_fp8_op(actual, output_scale)
+                quant_output[:num_actual_toks].copy_(fp8_data)
             return quant_output
 
         return output_padded
@@ -2533,7 +2533,6 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             kv_c_normed = workspace[:toks][..., : self.kv_lora_rank]
             # When FP8 weights are used without FP8 prefill, kv_b_proj expects
             # model dtype input and will quantize internally.
-<<<<<<< HEAD
             # For quantized layers (AWQ/GPTQ) that lack a .weight attribute,
             # use params_dtype which is the expected input dtype.
             _kv_b_proj_w_dtype = (
@@ -2541,12 +2540,8 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
                 if hasattr(self.kv_b_proj, "weight")
                 else self.kv_b_proj.params_dtype
             )
-            # For NVFP4, weights are packed uint8 — keep input in bf16 since
-            # the NVFP4 linear layer quantizes internally via scaled_fp4_quant.
-=======
             # For NVFP4, weights are packed uint8 — keep input in model dtype
             # since the NVFP4 linear layer quantizes internally.
->>>>>>> c727ff2dd (chore: update comment)
             if (
                 use_fp8_prefill or _kv_b_proj_w_dtype != current_platform.fp8_dtype()
             ) and _kv_b_proj_w_dtype != torch.uint8:
