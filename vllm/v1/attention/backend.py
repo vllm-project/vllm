@@ -400,7 +400,7 @@ class CommonAttentionMetadata:
     @deprecated(
         """
     Prefer using device seq_lens directly to avoid implicit H<>D sync which breaks full
-    async scheduling. If a CPU copy is needed, it can be derived from 
+    async scheduling. If a CPU copy is needed, it can be derived from
     query_start_loc_cpu and seq_lens.
     Will be removed in a future release, please migrate as soon as possible.
     """
@@ -764,9 +764,9 @@ class AttentionImpl(AttentionImplBase[T], Generic[T]):
         """
         return False
 
-    def fused_rope_kvcache_supported(self):
+    def fused_rope_kvcache_supported(self, quant_key: "QuantKey | None" = None):
         """
-        Does this attention implementation support RoPE+KVCache fusion.
+        Does this attention implementation support RoPE(+Quant)+KVCache fusion.
         This is used by the RopeKVCacheFusionPass to only fuse the RoPE ops
         with the KV cache update for implementations that support it.
         """
@@ -783,6 +783,9 @@ class AttentionImpl(AttentionImplBase[T], Generic[T]):
         is_neox: bool,
         kv_cache: torch.Tensor,
         layer_slot_mapping: torch.Tensor,
+        attn_metadata: T,
+        query_quant_scale: torch.Tensor | None = None,
+        query_quant_out: torch.Tensor | None = None,
     ):
         """
         If `fused_rope_kvcache_supported` returns True, this method will be called

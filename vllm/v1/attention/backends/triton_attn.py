@@ -605,7 +605,7 @@ class TritonAttentionImpl(AttentionImpl):
             layer._v_scale,
         )
 
-    def fused_rope_kvcache_supported(self):
+    def fused_rope_kvcache_supported(self, quant_key: QuantKey | None = None):
         return rocm_aiter_ops.is_enabled()
 
     def do_rope_and_kv_cache_update(
@@ -619,7 +619,14 @@ class TritonAttentionImpl(AttentionImpl):
         is_neox: bool,
         kv_cache: torch.Tensor,
         layer_slot_mapping: torch.Tensor,
+        attn_metadata: TritonAttentionMetadata,
+        query_quant_scale: torch.Tensor | None = None,
+        query_quant_out: torch.Tensor | None = None,
     ):
+        if attn_metadata is None:
+            # Profiling run.
+            return
+
         key_cache, value_cache = kv_cache.unbind(1)
         flash_layout = True
 

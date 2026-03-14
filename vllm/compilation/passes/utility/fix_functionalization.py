@@ -44,6 +44,8 @@ class FixFunctionalizationPass(VllmInductorPass):
             rope_targets.append(
                 torch.ops.vllm.rocm_aiter_triton_rotary_embedding.default
             )
+        if hasattr(torch.ops.vllm, "flashinfer_rotary_embedding"):
+            rope_targets.append(torch.ops.vllm.flashinfer_rotary_embedding.default)
 
         for node in graph.nodes:
             if not is_func(node, auto_functionalized):
@@ -178,6 +180,7 @@ class FixFunctionalizationPass(VllmInductorPass):
                 mutated_args = {
                     1: "query",
                     2: "key",
+                    3: "query_quant_out",
                 }
                 self.defunctionalize(graph, node, mutated_args=mutated_args)
             # only used for test_functionalization::TestFunctionWithMutatedArgsAndReturn

@@ -63,6 +63,8 @@ class ScatterSplitReplacementPass(VllmInductorPass):
         target_ops = [torch.ops._C.rotary_embedding.default]
         if hasattr(torch.ops.vllm, "rocm_aiter_triton_rotary_embedding"):
             target_ops.append(torch.ops.vllm.rocm_aiter_triton_rotary_embedding.default)
+        if hasattr(torch.ops.vllm, "flashinfer_rotary_embedding"):
+            target_ops.append(torch.ops.vllm.flashinfer_rotary_embedding.default)
 
         for node in graph.nodes:
             if not is_func(node, auto_functionalized):

@@ -12,6 +12,7 @@ from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.utils.math_utils import cdiv
@@ -1379,7 +1380,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 layer._v_scale,
             )
 
-    def fused_rope_kvcache_supported(self):
+    def fused_rope_kvcache_supported(self, quant_key: QuantKey | None = None):
         # Only support fusion when shuffle KV cache layout is not used;
         # shuffle layout uses a different cache update path.
         return (
@@ -1398,7 +1399,14 @@ class AiterFlashAttentionImpl(AttentionImpl):
         is_neox: bool,
         kv_cache: torch.Tensor,
         layer_slot_mapping: torch.Tensor,
+        attn_metadata: AiterFlashAttentionMetadata,
+        query_quant_scale: torch.Tensor | None = None,
+        query_quant_out: torch.Tensor | None = None,
     ):
+        if attn_metadata is None:
+            # Profiling run.
+            return
+
         key_cache, value_cache = kv_cache.unbind(0)
         flash_layout = True
 

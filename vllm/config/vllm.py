@@ -140,9 +140,12 @@ def enable_rope_kvcache_fusion(cfg: "VllmConfig") -> bool:
     use_inductor_graph_partition is enabled.
     """
     from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.platforms import current_platform
+    from vllm.utils.flashinfer import has_flashinfer
 
     return (
-        rocm_aiter_ops.is_enabled()
+        current_platform.is_cuda_alike()
+        and (rocm_aiter_ops.is_enabled() or has_flashinfer())
         and cfg.compilation_config.is_custom_op_enabled("rotary_embedding")
         and (
             cfg.compilation_config.use_inductor_graph_partition
@@ -1559,7 +1562,12 @@ class VllmConfig:
                 # This creates ranges: [1, min-1] (no SP), [min, max] (SP applies)
                 computed_compile_ranges_endpoints.append(min_token_num - 1)
 
-        if compilation_config.pass_config.fuse_rope_kvcache:
+        from vllm.platforms import current_platform
+
+        if (
+            compilation_config.pass_config.fuse_rope_kvcache
+            and current_platform.is_cuda_alike()
+        ):
             max_token_num = (
                 compilation_config.pass_config.rope_kvcache_fusion_max_token_num
             )

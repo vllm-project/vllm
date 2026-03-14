@@ -134,15 +134,15 @@ class PassConfig:
     """Enable flashinfer allreduce fusion."""
     enable_qk_norm_rope_fusion: bool = False
     """Enable fused Q/K RMSNorm + RoPE pass."""
+    fuse_rope_kvcache: bool = None  # type: ignore[assignment]
+    """Fuse the QK rope (+ Q quant) + KV cache ops."""
 
     # ROCm/AITER specific fusions
     fuse_act_padding: bool = None  # type: ignore[assignment]
     """Fuse the custom RMSNorm + padding ops."""
-    fuse_rope_kvcache: bool = None  # type: ignore[assignment]
-    """Fuse the QK rope + KV cache ops."""
 
     rope_kvcache_fusion_max_token_num: int = 256
-    """The threshold for ROCm AITER RoPE+KVCache fusion e.g. for small batch decode.
+    """The threshold for RoPE(+Q quant)+KVCache fusion e.g. for small batch decode.
     Larger batch sizes e.g. during prefill will use the unfused kernels.
     """
 
@@ -266,10 +266,10 @@ class PassConfig:
                 "The fusion will be disabled."
             )
             self.fuse_act_padding = False
-        if self.fuse_rope_kvcache and not current_platform.is_rocm():
+        if self.fuse_rope_kvcache and not current_platform.is_cuda_alike():
             logger.warning_once(
-                "KV cache fusion currently only enabled on ROCm. "
-                "The fusion will be disabled."
+                "KV cache fusion enabled but the current platform is not "
+                "CUDA or ROCm. The fusion will be disabled."
             )
             self.fuse_rope_kvcache = False
 
@@ -1055,6 +1055,13 @@ class CompilationConfig:
                 # for details. Make a copy to avoid mutating the class-level
                 # list via reference.
                 self.splitting_ops = list(self._attention_ops)
+
+                # Like attn op, fuse_rope_kvcache op also needs to be a splitting op
+                # in piecewise cudagraph since it also needs to access attn_metadata.
+                if self.pass_config.fuse_rope_kvcache:
+                    self.splitting_ops.append(
+                        "vllm::fused_rope_and_unified_kv_cache_update"
+                    )
 
                 # unified_kv_cache_update has a string param that prevents Inductor
                 # from reusing piecewise graphs. Remove it from the compiled graph.

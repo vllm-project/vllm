@@ -277,7 +277,7 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
             layer._v_scale,
         )
 
-    def fused_rope_kvcache_supported(self):
+    def fused_rope_kvcache_supported(self, quant_key: QuantKey | None = None):
         return rocm_aiter_ops.is_enabled()
 
     def do_rope_and_kv_cache_update(
@@ -291,7 +291,14 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
         is_neox: bool,
         kv_cache: torch.Tensor,
         layer_slot_mapping: torch.Tensor,
+        attn_metadata: FlashAttentionMetadata,
+        query_quant_scale: torch.Tensor | None = None,
+        query_quant_out: torch.Tensor | None = None,
     ):
+        if attn_metadata is None:
+            # Profiling run.
+            return
+
         if self.attn_type in (AttentionType.ENCODER_ONLY, AttentionType.ENCODER):
             # For encoder attention,
             # we use direct Q, K, V tensors without caching
