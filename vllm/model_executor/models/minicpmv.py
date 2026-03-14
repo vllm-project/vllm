@@ -387,8 +387,8 @@ class Resampler4_5(Resampler2_5):
             pos_embed_2d, batch_first=True, padding_value=0.0
         ).permute(1, 0, 2)  # BLD => L * B * D
 
-        k = x
-        v = x + pos_embed_2d
+        k = x + pos_embed_2d
+        v = x
         if pos_embed_temporal:
             k += torch.stack(pos_embed_temporal, dim=0)
             bs = len(temporal_ids)
@@ -1336,6 +1336,7 @@ class MiniCPMV2_5(MiniCPMVBaseModel, SupportsLoRA):
         model = Idefics2VisionTransformer(
             config.vision_config,
             quant_config=quant_config,
+            apply_encoder_attention_mask=True,
             prefix=prefix,
         )
         if self.config.drop_vision_last_layer:
@@ -1428,6 +1429,7 @@ class MiniCPMV2_6(MiniCPMVBaseModel, SupportsLoRA):
         model = Idefics2VisionTransformer(
             config.vision_config,
             quant_config=quant_config,
+            apply_encoder_attention_mask=True,
             prefix=prefix,
         )
         if self.config.drop_vision_last_layer:
@@ -1451,10 +1453,11 @@ class MiniCPMV2_6(MiniCPMVBaseModel, SupportsLoRA):
                 quant_config=quant_config,
                 prefix=prefix,
             )
-
-        return resampler.to(
-            device=current_platform.device_type, dtype=torch.get_default_dtype()
-        )
+        target_device = current_platform.device_type
+        target_dtype = torch.get_default_dtype()
+        if any(p.is_meta for p in resampler.parameters()):
+            return resampler.to_empty(device=target_device).to(dtype=target_dtype)
+        return resampler.to(device=target_device, dtype=target_dtype)
 
     def get_vision_hidden_states(self, data: MiniCPMVImagePixelInputs) -> torch.Tensor:
         pixel_values = data["pixel_values"]
@@ -1525,6 +1528,7 @@ class MiniCPMV4_0(MiniCPMVBaseModel, SupportsLoRA):
         model = Idefics2VisionTransformer(
             config.vision_config,
             quant_config=quant_config,
+            apply_encoder_attention_mask=True,
             prefix=prefix,
         )
         if self.config.drop_vision_last_layer:
@@ -1622,6 +1626,7 @@ class MiniCPMV4_5(MiniCPMVBaseModel, SupportsLoRA):
         model = Idefics2VisionTransformer(
             config.vision_config,
             quant_config=quant_config,
+            apply_encoder_attention_mask=True,
             prefix=prefix,
         )
         if self.config.drop_vision_last_layer:
@@ -1645,10 +1650,11 @@ class MiniCPMV4_5(MiniCPMVBaseModel, SupportsLoRA):
                 quant_config=quant_config,
                 prefix=prefix,
             )
-
-        return resampler.to(
-            device=current_platform.device_type, dtype=torch.get_default_dtype()
-        )
+        target_device = current_platform.device_type
+        target_dtype = torch.get_default_dtype()
+        if any(p.is_meta for p in resampler.parameters()):
+            return resampler.to_empty(device=target_device).to(dtype=target_dtype)
+        return resampler.to(device=target_device, dtype=target_dtype)
 
     def get_vision_hidden_states(self, data: MiniCPMVImagePixelInputs) -> torch.Tensor:
         pixel_values = data["pixel_values"]

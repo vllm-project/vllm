@@ -48,6 +48,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
     prepare_moe_fp4_layer_for_marlin,
 )
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
+    CK_MXFP4_MOE_DIM_ALIGNMENT,
     _can_support_mxfp4,
     _swizzle_mxfp4,
     get_padding_alignment,
@@ -259,6 +260,31 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             get_current_vllm_config().compilation_config.max_cudagraph_capture_size
         )
 
+        # CK's pre-compiled MXFP4 MoE GEMM kernel instances have dimension
+        # alignment requirements. Fall back to Triton when not met.
+        if (
+            self.mxfp4_backend == Mxfp4Backend.CK
+            and moe.intermediate_size_per_partition % CK_MXFP4_MOE_DIM_ALIGNMENT != 0
+        ):
+            if has_triton_kernels():
+                logger.warning_once(
+                    "CK MXFP4 MoE GEMM does not support "
+                    "intermediate_size_per_partition=%d (not a multiple of "
+                    "%d). Falling back to Triton backend.",
+                    moe.intermediate_size_per_partition,
+                    CK_MXFP4_MOE_DIM_ALIGNMENT,
+                )
+                self.mxfp4_backend = Mxfp4Backend.TRITON
+            else:
+                raise ValueError(
+                    f"CK MXFP4 MoE GEMM does not support "
+                    f"intermediate_size_per_partition="
+                    f"{moe.intermediate_size_per_partition} (not a multiple "
+                    f"of {CK_MXFP4_MOE_DIM_ALIGNMENT}) and no Triton "
+                    f"fallback is available. Use a compatible "
+                    f"tensor_parallel_size."
+                )
+
         assert self.mxfp4_backend != Mxfp4Backend.NONE, (
             f"get_mxfp4_backend(with_lora_support={moe.is_lora_enabled}) found"
             "no compatible MXFP4 MoE backend (FlashInfer/Marlin/Triton)."
@@ -266,7 +292,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         )
         self._cache_permute_indices: dict[torch.Size, torch.Tensor] = {}
         # Initialized in process_weights_after_loading for CUTLASS/SM90 backends
-        self.moe_mk: mk.FusedMoEModularKernel | None = None
+        self.moe_kernel: mk.FusedMoEKernel | None = None
 
     def create_weights(
         self,
@@ -440,7 +466,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             )
             assert prepare_finalize is not None
 
-            self.moe_mk = mk.FusedMoEModularKernel(
+            self.moe_kernel = mk.FusedMoEKernel(
                 prepare_finalize,
                 MarlinExperts(
                     self.moe,
@@ -789,7 +815,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             )
             assert prepare_finalize is not None
 
-            self.moe_mk = mk.FusedMoEModularKernel(
+            self.moe_kernel = mk.FusedMoEKernel(
                 prepare_finalize,
                 FlashInferExperts(
                     moe_config=self.moe,
@@ -870,7 +896,9 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             # batched activation format. As self.fused_experts is not
             # initialized at this point, we resort to checking the MoE config
             # directly.
-            is_batched_moe = self.moe.use_deepep_ll_kernels
+            is_batched_moe = (
+                self.moe.use_deepep_ll_kernels or self.moe.use_nixl_ep_kernels
+            )
             if is_batched_moe:
                 num_warps = 4 if envs.VLLM_MOE_DP_CHUNK_SIZE <= 512 else 8
             else:
@@ -954,9 +982,9 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
 
     def select_gemm_impl(
         self,
-        prepare_finalize: mk.FusedMoEPrepareAndFinalize,
+        prepare_finalize: mk.FusedMoEPrepareAndFinalizeModular,
         layer: torch.nn.Module,
-    ) -> mk.FusedMoEPermuteExpertsUnpermute:
+    ) -> mk.FusedMoEExpertsModular:
         if (
             prepare_finalize.activation_format
             == mk.FusedMoEActivationFormat.BatchedExperts
@@ -1043,8 +1071,8 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             or self.mxfp4_backend == Mxfp4Backend.MARLIN
         )
 
-        assert self.moe_mk is not None
-        return self.moe_mk(
+        assert self.moe_kernel is not None
+        return self.moe_kernel.apply(
             hidden_states=x,
             w1=layer.w13_weight,
             w2=layer.w2_weight,
@@ -1082,6 +1110,12 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             layer.eplb_state.logical_to_physical_map,
             layer.eplb_state.logical_replica_count,
         ), "MXFP4 are not supported with this configuration."
+
+        # Apply routing simulation strategy if specified.
+        # This applies to all monolithic backends (SM100_FI and TRITON).
+        routing_strategy = envs.VLLM_MOE_ROUTING_SIMULATION_STRATEGY
+        if routing_strategy == "uniform_random":
+            router_logits = torch.rand_like(router_logits)
 
         if (
             self.mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_TRTLLM

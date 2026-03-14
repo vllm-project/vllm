@@ -12,6 +12,7 @@ import requests
 import torch
 from torch.multiprocessing.reductions import reduce_tensor
 
+from vllm import envs
 from vllm.config.parallel import ParallelConfig
 from vllm.config.weight_transfer import WeightTransferConfig
 from vllm.distributed.weight_transfer.base import (
@@ -74,6 +75,13 @@ class IPCWeightTransferUpdateInfo(WeightTransferUpdateInfo):
                 raise ValueError(
                     "Cannot specify both `ipc_handles` and `ipc_handles_pickled`"
                 )
+
+            if not envs.VLLM_ALLOW_INSECURE_SERIALIZATION:
+                raise ValueError(
+                    "Refusing to deserialize `ipc_handles_pickled` without "
+                    "VLLM_ALLOW_INSECURE_SERIALIZATION=1"
+                )
+
             self.ipc_handles = pickle.loads(base64.b64decode(self.ipc_handles_pickled))
             self.ipc_handles_pickled = None
 
@@ -161,7 +169,7 @@ class IPCWeightTransferEngine(
             update_info.shapes,
             update_info.ipc_handles,
         ):
-            device_index = torch.cuda.current_device()
+            device_index = torch.accelerator.current_device_index()
             props = torch.cuda.get_device_properties(device_index)
             physical_gpu_id = str(props.uuid)
 
@@ -234,7 +242,7 @@ class IPCWeightTransferEngine(
             args = trainer_args
 
         # Get physical GPU UUID
-        device_index = torch.cuda.current_device()
+        device_index = torch.accelerator.current_device_index()
         props = torch.cuda.get_device_properties(device_index)
         gpu_uuid = str(props.uuid)
 

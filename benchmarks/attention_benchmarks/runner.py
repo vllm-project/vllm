@@ -141,7 +141,6 @@ def _create_vllm_config(
     cache_config = CacheConfig(
         block_size=config.block_size,
         cache_dtype="auto",
-        swap_space=0,
     )
     cache_config.num_gpu_blocks = max_num_blocks
     cache_config.num_cpu_blocks = 0
@@ -391,7 +390,7 @@ def _run_single_benchmark(
                 attn_metadata,
                 output=out,
             )
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     # Benchmark
     times = []
@@ -412,7 +411,7 @@ def _run_single_benchmark(
             )
         end.record()
 
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         elapsed_ms = start.elapsed_time(end)
         times.append(elapsed_ms / 1000.0 / config.num_layers)  # seconds per layer
 
@@ -444,7 +443,7 @@ def run_attention_benchmark(config: BenchmarkConfig) -> BenchmarkResult:
         BenchmarkResult with timing and memory statistics
     """
     device = torch.device(config.device)
-    torch.cuda.set_device(device)
+    torch.accelerator.set_device_index(device)
 
     backend_cfg = _get_backend_config(config.backend)
 
