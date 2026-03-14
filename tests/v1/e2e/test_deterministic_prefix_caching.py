@@ -123,7 +123,7 @@ def get_hf_reference(
     }
 
     del model
-    torch.cuda.empty_cache()
+    torch.accelerator.empty_cache()
     return result
 
 
