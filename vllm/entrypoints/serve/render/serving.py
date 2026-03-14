@@ -45,10 +45,9 @@ from vllm.renderers.inputs.preprocess import (
     prompt_to_seq,
 )
 from vllm.tokenizers import TokenizerLike
-from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.tool_parsers import ToolParser
+from vllm.tool_parsers.mistral_tool_parser import should_apply_mistral_grammar
 from vllm.utils import random_uuid
-from vllm.tool_parsers.mistral_tool_parser import MistralToolParser
 from vllm.utils.mistral import is_mistral_tokenizer
 from vllm.utils.mistral import mt as _mt
 
@@ -547,10 +546,7 @@ class OpenAIServingRender:
         if tool_parser is not None:
             tool_choice = getattr(request, "tool_choice", "none")
             tokenizer = renderer.get_tokenizer()
-            is_mistral_grammar = issubclass(
-                tool_parser,  # type: ignore[arg-type]
-                MistralToolParser,
-            ) and isinstance(tokenizer, MistralTokenizer)
+            is_mistral_grammar = should_apply_mistral_grammar(tool_parser, tokenizer)  # type: ignore[arg-type]
             if tool_choice != "none" or is_mistral_grammar:
                 if not isinstance(request, ChatCompletionRequest):
                     msg = (

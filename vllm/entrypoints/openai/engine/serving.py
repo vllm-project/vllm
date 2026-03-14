@@ -105,11 +105,10 @@ from vllm.renderers.inputs.preprocess import (
 )
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import TokenizerLike
-from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.tool_parsers import ToolParser
 from vllm.tool_parsers.mistral_tool_parser import (
-    MistralToolParser,
     is_mistral_lark_grammar_active,
+    should_apply_mistral_grammar,
 )
 from vllm.tracing import (
     contains_trace_headers,
@@ -922,10 +921,7 @@ class OpenAIServing:
         if tool_parser is not None:
             tool_choice = getattr(request, "tool_choice", "none")
             tokenizer = renderer.get_tokenizer()
-            is_mistral_grammar = issubclass(
-                tool_parser,  # type: ignore[arg-type]
-                MistralToolParser,
-            ) and isinstance(tokenizer, MistralTokenizer)
+            is_mistral_grammar = should_apply_mistral_grammar(tool_parser, tokenizer)  # type: ignore[arg-type]
             if tool_choice != "none" or is_mistral_grammar:
                 if not isinstance(request, ChatCompletionRequest | ResponsesRequest):
                     msg = (

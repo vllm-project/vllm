@@ -26,7 +26,7 @@ from vllm.tool_parsers.mistral_tool_parser import (
     ChatCompletionToolsParam,
     MistralGrammarFactory,
     MistralToolParser,
-    ToolsLarkConverter,
+    PostV11ToolsLarkConverter,
 )
 
 
@@ -939,7 +939,7 @@ class TestToolsLarkConverter:
     def test_get_args_json(
         self, tool: ChatCompletionToolsParam, expected: dict[str, Any]
     ) -> None:
-        assert ToolsLarkConverter().get_args_json(tool=tool) == expected
+        assert PostV11ToolsLarkConverter().get_args_json(tool=tool) == expected
 
     @pytest.mark.parametrize(
         "tools,tokenizer_version,mode,parallel_tool_calls,expected",
@@ -1060,7 +1060,7 @@ class TestToolsLarkConverter:
         expected: str,
     ):
         assert (
-            ToolsLarkConverter().convert(
+            PostV11ToolsLarkConverter().convert(
                 tools=tools,
                 tokenizer_version=tokenizer_version,
                 mode=mode,

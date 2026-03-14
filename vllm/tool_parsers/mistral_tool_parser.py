@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
+from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from enum import Enum, auto
 from random import choices
@@ -41,16 +42,26 @@ logger = init_logger(__name__)
 ALPHANUMERIC = ascii_letters + digits
 
 
+def should_apply_mistral_grammar(
+    tool_parser_cls: type | None,
+    tokenizer: TokenizerLike,
+) -> bool:
+    """Check if the Mistral grammar path should be used."""
+    return (
+        tool_parser_cls is not None
+        and issubclass(tool_parser_cls, MistralToolParser)
+        and is_mistral_tokenizer(tokenizer)
+    )
+
+
 def is_mistral_lark_grammar_active(
     request: ChatCompletionRequest,
     tokenizer: TokenizerLike,
     tool_parser_cls: type | None,
 ) -> bool:
-    r"""Check if the Mistral lark grammar is active for the given request."""
+    """Check if the Mistral lark grammar is active for the given request."""
     return (
-        tool_parser_cls is not None
-        and issubclass(tool_parser_cls, MistralToolParser)
-        and is_mistral_tokenizer(tokenizer)
+        should_apply_mistral_grammar(tool_parser_cls, tokenizer)
         and getattr(request, "structured_outputs", None) is not None
         and request.structured_outputs.lark is not None
     )
@@ -126,16 +137,16 @@ def _is_strict_tool(tool: ChatCompletionToolsParam) -> bool:
     return getattr(tool.function, "strict", False)
 
 
-class ToolsLarkConverter:
-    """Converts tools to a lark grammar"""
+class ToolsLarkConverter(ABC):
+    """Converts tools to a lark grammar."""
 
+    @abstractmethod
     def _convert(
         self,
         tools: list[ChatCompletionToolsParam],
         any_strict_true: bool,
         parallel_tool_calls: bool,
-    ) -> str:
-        raise NotImplementedError
+    ) -> str: ...
 
     def get_args_json(self, tool: ChatCompletionToolsParam) -> dict[str, Any]:
         args = tool.function.parameters if _is_strict_tool(tool) else {"type": "object"}
@@ -397,12 +408,12 @@ class MistralToolParser(ToolParser):
         if isinstance(request.tool_choice, ChatCompletionNamedToolChoiceParam):
             selected_tools = [
                 tool
-                for tool in request.tools
+                for tool in (request.tools or [])
                 if tool.function.name == request.tool_choice.function.name
             ]
             mode: Literal["auto", "required", "none"] | None = "required"
         else:
-            selected_tools = request.tools
+            selected_tools = request.tools or []
             mode = request.tool_choice
         lark_grammar = self.grammar_factory.get_lark_from_jinja(
             mode=mode,
