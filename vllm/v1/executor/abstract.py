@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import contextlib
 import os
 import socket
 import tempfile
@@ -312,15 +313,8 @@ class Executor(ABC):
         """Reset the encoder cache in each worker to clear cached encoder outputs."""
         self.collective_rpc("reset_encoder_cache")
 
-    def _get_gpu_access_signal_path(self) -> Path:
-        """Get a node-local signal path to serialize VMM operations per GPU."""
-        device_id = 0
-        p_cfg = self.parallel_config
-        if hasattr(p_cfg, "device_ids") and p_cfg.device_ids:
-            device_id = p_cfg.device_ids[0]
-        else:
-            device_id = p_cfg.rank // p_cfg.tensor_parallel_size
-
+    def _get_gpu_access_signal_path(self, device_id: int) -> Path:
+        """Get a node-local signal path for a specific GPU device."""
         hostname = socket.gethostname()
         if os.path.exists("/dev/shm"):
             base_dir = Path("/dev/shm")
@@ -329,7 +323,6 @@ class Executor(ABC):
             base_dir = Path(tmp_dir)
 
         sig_dir = base_dir / "vllm_signals"
-
         try:
             # 0o1777 sets the sticky bit,
             # so only the owner can delete their signal files.
@@ -339,67 +332,72 @@ class Executor(ABC):
                 os.chmod(sig_dir, mode)
         except OSError as e:
             logger.warning(
-                "Failed to set permissions on signal directory %s. "
-                "GPU VMM serialization may be affected. Error: %s",
-                sig_dir,
-                e,
+                "Failed to set permissions on signal directory %s: %s", sig_dir, e
             )
+
         return sig_dir / f"vmm_{hostname}_gpu_{device_id}.signal"
 
-    def _wait_and_acquire_gpu_access(self, signal_path: Path):
-        """Atomic acquire with stale process detection and error handling."""
+    def _acquire_gpu_access(self):
+        """Acquire atomic signals for all GPUs managed by this executor."""
+        # Get all associated physical GPU IDs
+        p_cfg = self.parallel_config
+        device_ids = p_cfg.device_ids if hasattr(p_cfg, "device_ids") else []
+        if not device_ids:
+            # Fallback to single device from rank calculation
+            device_ids = [p_cfg.rank // p_cfg.tensor_parallel_size]
+
+        sorted_ids = sorted(list(set(device_ids)))
         my_pid = os.getpid()
-        while True:
-            try:
-                flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
-                fd = os.open(str(signal_path), flags)
-                with os.fdopen(fd, "w") as f:
-                    f.write(str(my_pid))
-                return
-            except FileExistsError:
+        acquired_paths: list[Path] = []
+
+        for d_id in sorted_ids:
+            sig_path = self._get_gpu_access_signal_path(d_id)
+            while True:
                 try:
-                    with open(signal_path) as f:
-                        content = f.read().strip()
-                        owner_pid = int(content) if content else -1
-
-                    if owner_pid == my_pid:
-                        return
-
-                    os.kill(owner_pid, 0)
-                except (ProcessLookupError, ValueError, OSError):
+                    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
+                    fd = os.open(str(sig_path), flags)
+                    with os.fdopen(fd, "w") as f:
+                        f.write(str(my_pid))
+                    acquired_paths.append(sig_path)
+                    break
+                except FileExistsError:
                     try:
-                        signal_path.unlink(missing_ok=True)
-                        continue
-                    except OSError as e:
-                        logger.error(
-                            "Failed to remove stale signal file %s: %s. "
-                            "This may lead to a deadlock.",
-                            signal_path,
-                            e,
-                        )
-                        time.sleep(1.0)
+                        with open(sig_path) as f:
+                            content = f.read().strip()
+                            owner_pid = int(content) if content else -1
+                        if owner_pid == my_pid:
+                            break
+                        os.kill(owner_pid, 0)
+                    except (ProcessLookupError, ValueError, OSError):
+                        with contextlib.suppress(Exception):
+                            sig_path.unlink(missing_ok=True)
                         continue
 
-                logger.info("GPU VMM busy (Owner: %d), retrying...", owner_pid)
-                time.sleep(0.5)
+                    logger.info(
+                        "GPU %d is busy (Owner: %d), retrying...", d_id, owner_pid
+                    )
+                    time.sleep(0.5)
+        return acquired_paths
 
-    def _release_gpu_access(self, signal_path: Path):
-        """Safely release the signal file after verifying ownership."""
-        try:
-            if signal_path.exists():
-                with open(signal_path) as f:
-                    content = f.read().strip()
-                if content and int(content) == os.getpid():
-                    signal_path.unlink(missing_ok=True)
-        except (OSError, ValueError) as e:
-            logger.warning("Error releasing GPU access signal %s: %s", signal_path, e)
+    def _release_gpu_access(self, acquired_paths: list[Path]):
+        """Release all held GPU signals."""
+        my_pid = os.getpid()
+        for sig_path in acquired_paths:
+            try:
+                if sig_path.exists():
+                    with open(sig_path) as f:
+                        content = f.read().strip()
+                    if content and int(content) == my_pid:
+                        sig_path.unlink(missing_ok=True)
+            except (OSError, ValueError):
+                pass
 
     def sleep(self, level: int = 1):
         if self.is_sleeping:
             logger.warning("Executor is already sleeping.")
             return
-        signal_path = self._get_gpu_access_signal_path()
-        self._wait_and_acquire_gpu_access(signal_path)
+
+        acquired = self._acquire_gpu_access()
         try:
             time_before_sleep = time.perf_counter()
             self.collective_rpc("sleep", kwargs=dict(level=level))
@@ -411,7 +409,7 @@ class Executor(ABC):
                 time_after_sleep - time_before_sleep,
             )
         finally:
-            self._release_gpu_access(signal_path)
+            self._release_gpu_access(acquired)
 
     def wake_up(self, tags: list[str] | None = None):
         if not self.is_sleeping:
@@ -424,8 +422,8 @@ class Executor(ABC):
                         "Tag %s is not in sleeping tags %s", tag, self.sleeping_tags
                     )
                     return
-        signal_path = self._get_gpu_access_signal_path()
-        self._wait_and_acquire_gpu_access(signal_path)
+
+        acquired = self._acquire_gpu_access()
         try:
             time_before_wakeup = time.perf_counter()
             self.collective_rpc("wake_up", kwargs=dict(tags=tags))
@@ -436,7 +434,8 @@ class Executor(ABC):
                 tags if tags is not None else self.sleeping_tags,
             )
         finally:
-            self._release_gpu_access(signal_path)
+            self._release_gpu_access(acquired)
+
         if tags:
             for tag in tags:
                 self.sleeping_tags.remove(tag)
