@@ -155,7 +155,7 @@ class MiniMaxM2Attention(nn.Module):
         qkv_bias: bool = False,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
-        max_model_len:int=111,
+        max_model_len: int = 0,
         prefix: str = "",
     ) -> None:
         super().__init__()

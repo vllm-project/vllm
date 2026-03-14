@@ -101,8 +101,11 @@ class MiniMaxText01RMSNormTP(CustomOp):
         q: torch.Tensor,
         k: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        if current_platform.is_cuda() and q_norm.tp_world > 1:
-            assert q_norm._ar_workspace is not None
+        if (
+            current_platform.is_cuda()
+            and q_norm.tp_world > 1
+            and q_norm._ar_workspace is not None
+        ):
             assert q_norm.variance_epsilon == k_norm.variance_epsilon
             return torch.ops._C.minimax_allreduce_rms_qk(
                 q,
@@ -115,7 +118,6 @@ class MiniMaxText01RMSNormTP(CustomOp):
                 q_norm.variance_epsilon,
                 False,
             )
-
         orig_dtype = q.dtype
         q = q.to(torch.float32)
         k = k.to(torch.float32)
