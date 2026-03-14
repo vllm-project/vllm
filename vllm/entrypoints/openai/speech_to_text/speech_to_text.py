@@ -222,7 +222,7 @@ class OpenAISpeechToText(OpenAIServing):
                 raise
             logger.debug(
                 "librosa/soundfile could not decode audio from BytesIO "
-                "(code=%s: %s); falling back to torchaudio in-process decode",
+                "(code=%s: %s); falling back to pyav in-process decode",
                 exc.code,
                 exc,
             )
