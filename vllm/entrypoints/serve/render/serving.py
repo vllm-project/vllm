@@ -243,23 +243,49 @@ class OpenAIServingRender:
         assert not self.supports_code_interpreter
         if (reasoning_effort := request.reasoning_effort) == "none":
             raise ValueError(f"Harmony does not support {reasoning_effort=}")
+
+        # Extract client-provided system message content so it can be
+        # passed as structured instructions rather than appended as a raw
+        # system message (which the Harmony parser cannot handle).
+        non_system_messages = []
+        system_instructions_parts: list[str] = []
+        for msg in request.messages:
+            msg_dict = (
+                msg if isinstance(msg, dict) else msg.model_dump(exclude_none=True)
+            )
+            if msg_dict.get("role") == "system":
+                content = msg_dict.get("content") or ""
+                if isinstance(content, list):
+                    content = "".join(
+                        c.get("text", "")
+                        for c in content
+                        if isinstance(c, dict) and c.get("type") == "text"
+                    )
+                if content:
+                    system_instructions_parts.append(content)
+            else:
+                non_system_messages.append(msg)
+        instructions = "\n".join(system_instructions_parts) or None
+
         sys_msg = get_system_message(
             reasoning_effort=reasoning_effort,
             browser_description=None,
             python_description=None,
             with_custom_tools=should_include_tools,
+            instructions=instructions,
         )
         messages.append(sys_msg)
 
         # Add developer message.
-        if request.tools:
+        if request.tools or instructions:
             dev_msg = get_developer_message(
-                tools=request.tools if should_include_tools else None  # type: ignore[arg-type]
+                instructions=instructions,
+                tools=request.tools if should_include_tools else None,  # type: ignore[arg-type]
             )
             messages.append(dev_msg)
 
-        # Add user message.
-        messages.extend(parse_chat_inputs_to_harmony_messages(request.messages))
+        # Add user message (system messages already extracted above).
+        messages.extend(parse_chat_inputs_to_harmony_messages(non_system_messages))
 
         # Render prompt token ids.
         prompt_token_ids = render_for_completion(messages)

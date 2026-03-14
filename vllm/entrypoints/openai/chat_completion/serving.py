@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any, Final
 import partial_json_parser
 import regex as re
 from fastapi import Request
+from openai_harmony import HarmonyError
 from partial_json_parser.core.options import Allow
 
 from vllm.engine.protocol import EngineClient
@@ -711,7 +712,15 @@ class OpenAIServingChat(OpenAIServing):
                         # Track accumulated content per token with their state
                         token_states: list[TokenState] = []
                         for token_id in output.token_ids:
-                            harmony_parser.process(token_id)
+                            try:
+                                harmony_parser.process(token_id)
+                            except HarmonyError as e:
+                                logger.warning(
+                                    "HarmonyError in stream generator, "
+                                    "returning partial result: %s",
+                                    e,
+                                )
+                                break
                             token_delta = harmony_parser.last_content_delta or ""
                             token_states.append(
                                 TokenState(
