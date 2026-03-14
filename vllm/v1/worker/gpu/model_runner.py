@@ -623,6 +623,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.model_state.apply_staged_writes()
         if self.sampler is not None:
             self.sampler.apply_staged_writes()
+        if self.prompt_logprobs_worker is not None:
+            self.prompt_logprobs_worker.apply_staged_writes()
 
     def update_requests(self, scheduler_output: SchedulerOutput) -> None:
         # Add new blocks for the existing requests.
