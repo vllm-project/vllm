@@ -9,7 +9,7 @@ import textwrap
 import time
 import uuid
 from collections import defaultdict
-from typing import Any
+from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 import msgspec
@@ -332,14 +332,22 @@ def test_kv_transfer_handshake(dist_init):
 
         # Prefill connector will register KV cache to populate proper handshake
         # metadata.
+        # TODO this must match with values used in kv cache config
+        kv_cache_config = make_kv_cache_config(block_size=16, num_blocks=2)
         prefill_connector = NixlConnector(
-            vllm_config, KVConnectorRole.WORKER, make_kv_cache_config(block_size=16)
+            vllm_config, KVConnectorRole.WORKER, kv_cache_config
+        )
+        kv_cache_spec = cast(
+            AttentionSpec, kv_cache_config.kv_cache_groups[0].kv_cache_spec
         )
         kv_cache_shape = FlashAttentionBackend.get_kv_cache_shape(
-            num_blocks=2, block_size=16, num_kv_heads=4, head_size=64
+            num_blocks=kv_cache_config.num_blocks,
+            block_size=kv_cache_spec.block_size,
+            num_kv_heads=kv_cache_spec.num_kv_heads,
+            head_size=kv_cache_spec.head_size,
         )
-        shared_tensor = torch.zeros(*kv_cache_shape, dtype=torch.float16)
-        unique_tensor = torch.zeros(*kv_cache_shape, dtype=torch.float16)
+        shared_tensor = torch.zeros(*kv_cache_shape, dtype=kv_cache_spec.dtype)
+        unique_tensor = torch.zeros(*kv_cache_shape, dtype=kv_cache_spec.dtype)
         kv_caches = {
             "layer0": shared_tensor,
             "layer1": unique_tensor,
@@ -383,7 +391,7 @@ def test_kv_transfer_handshake(dist_init):
 
         # Decode connector will be able to create handshake with the prefill connector.
         decode_connector = NixlConnector(
-            vllm_config, KVConnectorRole.WORKER, make_kv_cache_config(block_size=16)
+            vllm_config, KVConnectorRole.WORKER, kv_cache_config
         )
         decode_connector.register_kv_caches(kv_caches)
 
@@ -525,11 +533,13 @@ class TestNixlHandshake:
         request_id = "req_id"
 
         # Test worker role in decode server.
-        connector = NixlConnector(
-            vllm_config, KVConnectorRole.WORKER, make_kv_cache_config(block_size=16)
-        )
+        kv_cache_config = make_kv_cache_config(block_size=16, num_blocks=2)
+        connector = NixlConnector(vllm_config, KVConnectorRole.WORKER, kv_cache_config)
         connector.connector_worker = FakeNixlConnectorWorker(
-            vllm_config, connector.engine_id, hand_shake_latency=0
+            vllm_config,
+            connector.engine_id,
+            hand_shake_latency=0,
+            kv_cache_config=kv_cache_config,
         )
         assert isinstance(connector.connector_worker.nixl_wrapper, FakeNixlWrapper)
         worker = connector.connector_worker
@@ -1479,18 +1489,22 @@ def test_register_kv_caches(
         patch(f"{nixl_module}.threading.Event"),
         patch(f"{nixl_module}.threading.Thread") as mock_thread,
         patch(f"{nixl_module}.get_current_attn_backend") as mock_get_attn_backend,
+        patch(f"{nixl_module}.get_current_attn_backends") as mock_get_attn_backends,
     ):
         # Ensure get_attn_backend returns the correct value due to
         # _cached_get_attn_backend returning the backend from previous
         # test run if not mocking.
         mock_get_attn_backend.return_value = backend_cls
+        mock_get_attn_backends.return_value = [backend_cls]
 
         # Create connector
-        connector = NixlConnector(
-            vllm_config, KVConnectorRole.WORKER, make_kv_cache_config(block_size=16)
-        )
+        kv_cache_config = make_kv_cache_config(block_size=16, num_blocks=2)
+        connector = NixlConnector(vllm_config, KVConnectorRole.WORKER, kv_cache_config)
         connector.connector_worker = FakeNixlConnectorWorker(
-            vllm_config, connector.engine_id, hand_shake_latency=0
+            vllm_config,
+            connector.engine_id,
+            hand_shake_latency=0,
+            kv_cache_config=kv_cache_config,
         )
 
         # Get the mock instance
@@ -1515,6 +1529,13 @@ def test_register_kv_caches(
             num_layers = 32
             block_size = 16
             num_blocks = 8
+            # Keep the fake worker's expected num_blocks in sync with the
+            # cross-layer tensor we are about to register.
+            worker_kv_cache_config = make_kv_cache_config(
+                block_size=block_size, num_blocks=num_blocks
+            )
+            connector.connector_worker.kv_cache_config = worker_kv_cache_config
+            connector.connector_worker.num_blocks = worker_kv_cache_config.num_blocks
             kv_cache_spec = AttentionSpec(
                 block_size=block_size,
                 num_kv_heads=4,
@@ -1549,7 +1570,7 @@ def test_register_kv_caches(
                             ]
                         ],
                         cache_dtype=torch.bfloat16,
-                        device=torch.cuda.current_device(),
+                        device=torch.accelerator.current_device_index(),
                         kernel_block_sizes=[block_size],
                     )
                 )
@@ -1568,11 +1589,17 @@ def test_register_kv_caches(
 
         else:
             # Create test kv cache tensors using proper backend shape
-            kv_cache_shape = backend_cls.get_kv_cache_shape(
-                num_blocks=2, block_size=16, num_kv_heads=4, head_size=64
+            kv_cache_spec = cast(
+                AttentionSpec, kv_cache_config.kv_cache_groups[0].kv_cache_spec
             )
-            shared_tensor = torch.zeros(*kv_cache_shape, dtype=torch.float16)
-            unique_tensor = torch.zeros(*kv_cache_shape, dtype=torch.float16)
+            kv_cache_shape = backend_cls.get_kv_cache_shape(
+                num_blocks=kv_cache_config.num_blocks,
+                block_size=kv_cache_spec.block_size,
+                num_kv_heads=kv_cache_spec.num_kv_heads,
+                head_size=kv_cache_spec.head_size,
+            )
+            shared_tensor = torch.zeros(*kv_cache_shape, dtype=kv_cache_spec.dtype)
+            unique_tensor = torch.zeros(*kv_cache_shape, dtype=kv_cache_spec.dtype)
             kv_caches = {
                 "layer0": shared_tensor,
                 "layer1": unique_tensor,
@@ -1606,7 +1633,7 @@ def test_register_kv_caches(
                     unique_tensor[1].data_ptr(),
                 ]
                 expected_num_entries = 4
-            expected_blocks_count = 8
+            expected_blocks_count = kv_cache_config.num_blocks * 4
 
         # Execute register_kv_caches
         connector.register_kv_caches(kv_caches)
@@ -1639,7 +1666,7 @@ def test_register_kv_caches(
             num_blocks = 8
             expected_block_len = expected_tensor_size // num_blocks
         else:
-            num_blocks = 2
+            num_blocks = kv_cache_config.num_blocks
             if is_blocks_first:
                 expected_block_len = expected_tensor_size // num_blocks // 2
             else:
@@ -2226,15 +2253,22 @@ def test_compatibility_hash_validation(
             "enforce_handshake_compat": enforce_handshake_compat
         },
     )
+    kv_cache_config = make_kv_cache_config(block_size=16, num_blocks=2)
     decode_connector = NixlConnector(
-        local_vllm_config, KVConnectorRole.WORKER, make_kv_cache_config(block_size=16)
+        local_vllm_config, KVConnectorRole.WORKER, kv_cache_config
     )
     decode_worker = decode_connector.connector_worker
-    kv_cache_shape = decode_worker.attn_backend.get_kv_cache_shape(
-        num_blocks=2, block_size=16, num_kv_heads=4, head_size=64
+    kv_cache_spec = cast(
+        AttentionSpec, kv_cache_config.kv_cache_groups[0].kv_cache_spec
     )
-    shared_tensor = torch.zeros(*kv_cache_shape, dtype=torch.float16)
-    unique_tensor = torch.zeros(*kv_cache_shape, dtype=torch.float16)
+    kv_cache_shape = decode_worker.attn_backend.get_kv_cache_shape(
+        num_blocks=kv_cache_config.num_blocks,
+        block_size=kv_cache_spec.block_size,
+        num_kv_heads=kv_cache_spec.num_kv_heads,
+        head_size=kv_cache_spec.head_size,
+    )
+    shared_tensor = torch.zeros(*kv_cache_shape, dtype=kv_cache_spec.dtype)
+    unique_tensor = torch.zeros(*kv_cache_shape, dtype=kv_cache_spec.dtype)
     kv_caches = {
         "layer0": shared_tensor,
         "layer1": unique_tensor,

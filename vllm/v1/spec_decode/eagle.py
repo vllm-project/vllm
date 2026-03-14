@@ -20,6 +20,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models import supports_multimodal
+from vllm.model_executor.models.deepseek_eagle3 import Eagle3DeepseekV2ForCausalLM
 from vllm.model_executor.models.interfaces import SupportsMultiModal
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -214,11 +215,15 @@ class SpecDecodeBaseProposer:
         # Determine allowed attention backends once during initialization.
         self.allowed_attn_types: tuple | None = None
         if current_platform.is_rocm():
+            from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
+                ROCMAiterMLASparseMetadata,
+            )
             from vllm.v1.attention.backends.rocm_attn import RocmAttentionMetadata
 
             rocm_types = [
                 TritonAttentionMetadata,
                 RocmAttentionMetadata,
+                ROCMAiterMLASparseMetadata,
             ]
             # ROCM_AITER_FA is an optional backend
             # We check is_enabled() here to avoid importing the backend module during
@@ -399,7 +404,9 @@ class SpecDecodeBaseProposer:
         batch_size = common_attn_metadata.batch_size()
 
         if self.method == "eagle3":
-            assert isinstance(self.model, Eagle3LlamaForCausalLM)
+            assert isinstance(
+                self.model, (Eagle3LlamaForCausalLM, Eagle3DeepseekV2ForCausalLM)
+            )
             target_hidden_states = self.model.combine_hidden_states(
                 target_hidden_states
             )
@@ -1273,6 +1280,10 @@ class SpecDecodeBaseProposer:
             elif self.get_model_name(target_model) == "PixtralForConditionalGeneration":
                 self.model.config.image_token_index = (
                     target_model.config.vision_config.image_token_id
+                )
+            elif self.get_model_name(target_model) == "KimiK25ForConditionalGeneration":
+                self.model.config.image_token_index = (
+                    target_model.config.media_placeholder_token_id
                 )
             else:
                 self.model.config.image_token_index = (
