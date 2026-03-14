@@ -133,26 +133,18 @@ class Qwen3_5GatedDeltaNet(Qwen3NextGatedDeltaNet):
 
     def __init__(
         self,
-        config,
-        model_config=None,
-        cache_config=None,
-        quant_config=None,
-        speculative_config=None,
+        config: Qwen3_5Config,
+        vllm_config: VllmConfig,
         prefix: str = "",
-        *,
-        vllm_config: VllmConfig | None = None,
     ) -> None:
-        enable_lora = bool(vllm_config.lora_config) if vllm_config else False
+        create_in_proj_qkvz = vllm_config.lora_config is None
         super().__init__(
             config,
-            model_config=model_config,
-            cache_config=cache_config,
-            quant_config=quant_config,
-            speculative_config=speculative_config,
+            vllm_config=vllm_config,
             prefix=prefix,
-            create_in_proj_qkvz=not enable_lora,
+            create_in_proj_qkvz=create_in_proj_qkvz,
         )
-        if enable_lora:
+        if vllm_config.load_config is not None:
             # Separate in_proj_qkv (Q,K,V) and in_proj_z for LoRA compatibility.
             # Use MergedColumnParallelLinear for in_proj_qkv because GDN can have
             # linear_num_key_heads != linear_num_value_heads (e.g. 16 vs 32), so
@@ -162,14 +154,14 @@ class Qwen3_5GatedDeltaNet(Qwen3NextGatedDeltaNet):
                 input_size=self.hidden_size,
                 output_sizes=[self.key_dim, self.key_dim, self.value_dim],
                 bias=False,
-                quant_config=quant_config,
+                quant_config=vllm_config.quant_config,
                 prefix=f"{prefix}.in_proj_qkv",
             )
             self.in_proj_z = ColumnParallelLinear(
                 input_size=self.hidden_size,
                 output_size=self.value_dim,
                 bias=False,
-                quant_config=quant_config,
+                quant_config=vllm_config.quant_config,
                 prefix=f"{prefix}.in_proj_z",
             )
 
@@ -285,20 +277,15 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
         model_config = vllm_config.model_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
-        speculative_config = vllm_config.speculative_config
 
         self.layer_type = layer_type
         self.layer_idx = extract_layer_index(prefix)
 
         if self.layer_type == "linear_attention":
             self.linear_attn = Qwen3_5GatedDeltaNet(
-                config,
-                model_config=model_config,
-                cache_config=cache_config,
-                quant_config=quant_config,
-                speculative_config=speculative_config,
-                prefix=f"{prefix}.linear_attn",
+                config=config,
                 vllm_config=vllm_config,
+                prefix=f"{prefix}.linear_attn",
             )
         elif self.layer_type == "full_attention":
             self.self_attn = Qwen3NextAttention(
@@ -377,7 +364,7 @@ class Qwen3_5Model(Qwen3NextModel):
         self.num_redundant_experts = eplb_config.num_redundant_experts
 
         self.config = config
-        self.enable_lora = bool(vllm_config.lora_config)
+        self.enable_lora = vllm_config.lora_config is not None
 
         self.vocab_size = config.vocab_size
 
@@ -744,6 +731,7 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "model"):
         # protocols have not __init__ method, so we need to use nn.Module.__init__
         nn.Module.__init__(self)
+        self.update_packed_mapping(enable_lora=vllm_config.lora_config is not None)
         config: Qwen3_5Config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         multimodal_config = vllm_config.model_config.multimodal_config
@@ -767,19 +755,19 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
                 vllm_config=vllm_config, prefix=maybe_prefix(prefix, "language_model")
             )
 
+        self.make_empty_intermediate_tensors = (
+            self.language_model.make_empty_intermediate_tensors
+        )
+
+    def update_packed_mapping(self, enable_lora: bool):
         # When LoRA is enabled, GDN uses separate in_proj_qkv and in_proj_z
-        if vllm_config.lora_config:
+        if enable_lora:
             base = getattr(
                 Qwen3_5ForConditionalGeneration, "packed_modules_mapping", {}
             )
             self.packed_modules_mapping = {k: list(v) for k, v in base.items()}
             self.packed_modules_mapping.pop("in_proj_qkvz", None)
             self.packed_modules_mapping["in_proj_qkv"] = ["in_proj_qkv"]
-            self.packed_modules_mapping["in_proj_z"] = ["in_proj_z"]
-
-        self.make_empty_intermediate_tensors = (
-            self.language_model.make_empty_intermediate_tensors
-        )
 
     def embed_input_ids(
         self,
@@ -874,7 +862,6 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
             vllm_config.cache_config.mamba_cache_dtype,
             vllm_config.cache_config.mamba_ssm_cache_dtype,
         )
-
     @classmethod
     def get_mamba_state_shape_from_config(
         cls, vllm_config: "VllmConfig"
@@ -960,10 +947,14 @@ class Qwen3_5_MoeMixtureOfExperts(MixtureOfExperts):
 )
 class Qwen3_5MoeForConditionalGeneration(
     Qwen3_5ForConditionalGeneration, Qwen3_5_MoeMixtureOfExperts
-):
+):  
+    # For MoE LoRA weights loading
+    is_3d_moe_weight: bool = True
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "model"):
         # protocols have not __init__ method, so we need to use nn.Module.__init__
         nn.Module.__init__(self)
+        self.update_packed_mapping(enable_lora=vllm_config.lora_config is not None)
         config: Qwen3_5MoeConfig = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         multimodal_config = vllm_config.model_config.multimodal_config
