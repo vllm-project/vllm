@@ -96,11 +96,6 @@ class Sampler(nn.Module):
         sampled, processed_logprobs = self.sample(logits, sampling_metadata)
         if processed_logprobs is not None:
             raw_logprobs = processed_logprobs
-        # Convert sampled token ids to int64 (long) type to ensure compatibility
-        # with subsequent operations that may use these values as indices.
-        # This conversion is necessary because FlashInfer sampling operations
-        # return int32 (while PyTorch argmax and topk return int64).
-        sampled = sampled.long()
 
         if num_logprobs is None:
             logprobs_tensors = None
@@ -111,12 +106,18 @@ class Sampler(nn.Module):
             )
         else:
             # Gather the logprobs and ranks of the topk and sampled token.
+            # gather_logprobs requires int64 token_ids for torch.gather
+            # indexing. Convert only here since this is the only branch
+            # that needs it.
             logprobs_tensors = self.gather_logprobs(
-                raw_logprobs, num_logprobs, token_ids=sampled
+                raw_logprobs, num_logprobs, token_ids=sampled.long()
             )
 
-        # Use int32 to reduce the tensor size.
-        sampled = sampled.to(torch.int32)
+        # Ensure int32 output for downstream consumers.
+        # FlashInfer sampling returns int32; PyTorch argmax/topk return
+        # int64. When sampled is already int32, this is a no-op.
+        if sampled.dtype != torch.int32:
+            sampled = sampled.to(torch.int32)
 
         # These are GPU tensors.
         sampler_output = SamplerOutput(
