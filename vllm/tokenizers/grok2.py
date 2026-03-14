@@ -441,12 +441,13 @@ class Grok2Tokenizer(TokenizerLike):
                 "No chat template available. Provide `chat_template` explicitly."
             )
         kwargs["return_dict"] = False
-        prompt = hf_chat_utils.apply_chat_template(
-            conversation=messages,
+        rendered, _ = hf_chat_utils.render_jinja_template(
+            [messages],
             chat_template=template,
             tools=tools,
             **kwargs,
         )
+        prompt = rendered[0] if rendered else ""
         if tokenize:
             return self.encode(prompt, add_special_tokens=False)
         return prompt
