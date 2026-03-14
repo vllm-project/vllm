@@ -12,10 +12,9 @@ import torch
 from vllm.utils.import_utils import PlaceholderModule
 
 try:
-    import librosa
+    import av as av
 except ImportError:
-    librosa = PlaceholderModule("librosa")  # type: ignore[assignment]
-
+    av = PlaceholderModule("av")  # type: ignore[assignment]
 
 try:
     import scipy.signal as scipy_signal
@@ -153,13 +152,50 @@ def normalize_audio(
 # ============================================================
 
 
-def resample_audio_librosa(
+def resample_audio_pyav(
     audio: npt.NDArray[np.floating],
     *,
     orig_sr: float,
     target_sr: float,
 ) -> npt.NDArray[np.floating]:
-    return librosa.resample(audio, orig_sr=orig_sr, target_sr=target_sr)
+    """Resample audio using PyAV (libswresample via FFmpeg).
+
+    Args:
+        audio: Input audio as a float array. 1D ``(samples,)`` for mono,
+            or 2D ``(channels, samples)`` for multi-channel.
+        orig_sr: Original sample rate in Hz.
+        target_sr: Target sample rate in Hz.
+
+    Returns:
+        Resampled audio with the same number of dimensions as the input.
+    """
+    orig_sr_int = int(round(orig_sr))
+    target_sr_int = int(round(target_sr))
+
+    audio_f32 = np.asarray(audio, dtype=np.float32)
+    is_1d = audio_f32.ndim == 1
+    if is_1d:
+        audio_f32 = audio_f32[np.newaxis, :]  # (1, samples)
+
+    num_channels = audio_f32.shape[0]
+    if num_channels == 1:
+        layout = "mono"
+    elif num_channels == 2:
+        layout = "stereo"
+    else:
+        layout = f"{num_channels}c"
+
+    resampler = av.AudioResampler(format="fltp", layout=layout, rate=target_sr_int)
+
+    frame = av.AudioFrame.from_ndarray(audio_f32, format="fltp", layout=layout)
+    frame.sample_rate = orig_sr_int
+
+    out_frames = resampler.resample(frame) + resampler.resample(None)
+    if not out_frames:
+        return audio.astype(np.float32)
+
+    result = np.concatenate([f.to_ndarray() for f in out_frames], axis=-1)
+    return result[0] if is_1d else result
 
 
 def resample_audio_scipy(
@@ -167,7 +203,7 @@ def resample_audio_scipy(
     *,
     orig_sr: float,
     target_sr: float,
-):
+) -> npt.NDArray[np.floating]:
     if orig_sr > target_sr:
         return scipy_signal.resample_poly(audio, 1, orig_sr // target_sr)
     elif orig_sr < target_sr:
@@ -181,7 +217,7 @@ class AudioResampler:
     def __init__(
         self,
         target_sr: float | None = None,
-        method: Literal["librosa", "scipy"] = "librosa",
+        method: Literal["pyav", "scipy"] = "pyav",
     ):
         self.target_sr = target_sr
         self.method = method
@@ -203,10 +239,8 @@ class AudioResampler:
             abs_tol=1e-6,
         ):
             return audio
-        if self.method == "librosa":
-            return resample_audio_librosa(
-                audio, orig_sr=orig_sr, target_sr=self.target_sr
-            )
+        if self.method == "pyav":
+            return resample_audio_pyav(audio, orig_sr=orig_sr, target_sr=self.target_sr)
         elif self.method == "scipy":
             return resample_audio_scipy(
                 audio, orig_sr=orig_sr, target_sr=self.target_sr
@@ -214,7 +248,7 @@ class AudioResampler:
         else:
             raise ValueError(
                 f"Invalid resampling method: {self.method}. "
-                "Supported methods are 'librosa' and 'scipy'."
+                "Supported methods are 'pyav' and 'scipy'."
             )
 
 

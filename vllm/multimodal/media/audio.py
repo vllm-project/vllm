@@ -15,19 +15,56 @@ from vllm.utils.serial_utils import tensor2base64
 from .base import MediaIO
 
 try:
-    import librosa
+    import av
 except ImportError:
-    librosa = PlaceholderModule("librosa")  # type: ignore[assignment]
+    av = PlaceholderModule("av")  # type: ignore[assignment]
 
 try:
     import soundfile
 except ImportError:
     soundfile = PlaceholderModule("soundfile")  # type: ignore[assignment]
 
-try:
-    import av
-except ImportError:
-    av = PlaceholderModule("av")  # type: ignore[assignment]
+
+def load_audio_pyav(source: BytesIO | Path) -> tuple[npt.NDArray, float]:
+    """Load an audio file using PyAV (FFmpeg), returning float32 mono waveform.
+
+    Decodes the audio stream at its native sample rate. Channel reduction to
+    mono is performed by averaging across channels.  Resampling to a
+    model-specific rate is left to the downstream :class:`AudioResampler`.
+
+    Args:
+        source: A :class:`~io.BytesIO` buffer or a filesystem
+            :class:`~pathlib.Path`.
+
+    Returns:
+        ``(waveform, sample_rate)`` where *waveform* is a 1-D float32
+        NumPy array and *sample_rate* is the native sample rate in Hz.
+    """
+    with av.open(source) as container:
+        if not container.streams.audio:
+            raise ValueError("No audio stream found.")
+        stream = container.streams.audio[0]
+        native_sr = stream.rate
+
+        # Normalize to float32 planar at the native sample rate so that
+        # `to_ndarray()` always returns a consistent (channels, samples) array.
+        resampler = av.AudioResampler(format="fltp", rate=native_sr)
+
+        chunks: list[npt.NDArray] = []
+        for frame in container.decode(stream):
+            for out_frame in resampler.resample(frame):
+                chunks.append(out_frame.to_ndarray())
+        for out_frame in resampler.resample(None):
+            chunks.append(out_frame.to_ndarray())
+
+    if not chunks:
+        raise ValueError("No audio data found in the file.")
+
+    # (channels, samples) → average to mono → (samples,)
+    audio = np.concatenate(chunks, axis=-1)
+    if audio.ndim > 1:
+        audio = audio.mean(axis=0)
+    return audio.astype(np.float32), float(native_sr)
 
 
 def extract_audio_from_video_bytes(
@@ -131,7 +168,7 @@ class AudioMediaIO(MediaIO[tuple[npt.NDArray, float]]):
     def load_bytes(self, data: bytes) -> tuple[npt.NDArray, float]:
         if is_video(data):
             return extract_audio_from_video_bytes(data)
-        return librosa.load(BytesIO(data), sr=None)
+        return load_audio_pyav(BytesIO(data))
 
     def load_base64(
         self,
@@ -141,7 +178,7 @@ class AudioMediaIO(MediaIO[tuple[npt.NDArray, float]]):
         return self.load_bytes(base64.b64decode(data))
 
     def load_file(self, filepath: Path) -> tuple[npt.NDArray, float]:
-        return librosa.load(filepath, sr=None)
+        return load_audio_pyav(filepath)
 
     def encode_base64(
         self,
