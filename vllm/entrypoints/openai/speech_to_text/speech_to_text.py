@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
+import json
 import math
 import time
 import zlib
@@ -24,11 +25,16 @@ from vllm.entrypoints.openai.engine.protocol import (
 from vllm.entrypoints.openai.engine.serving import OpenAIServing, SpeechToTextRequest
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.openai.speech_to_text.protocol import (
+    TranscriptionDiarizedSegment,
     TranscriptionResponse,
+    TranscriptionResponseDiarized,
     TranscriptionResponseStreamChoice,
     TranscriptionResponseVerbose,
     TranscriptionSegment,
     TranscriptionStreamResponse,
+    TranscriptionTextDeltaEvent,
+    TranscriptionTextDoneEvent,
+    TranscriptionTextSegmentEvent,
     TranslationResponse,
     TranslationResponseStreamChoice,
     TranslationResponseVerbose,
@@ -59,19 +65,31 @@ SpeechToTextResponse: TypeAlias = TranscriptionResponse | TranslationResponse
 SpeechToTextResponseVerbose: TypeAlias = (
     TranscriptionResponseVerbose | TranslationResponseVerbose
 )
+TranscriptionResponseStructured: TypeAlias = (
+    TranscriptionResponseVerbose | TranscriptionResponseDiarized
+)
 SpeechToTextSegment: TypeAlias = TranscriptionSegment | TranslationSegment
 T = TypeVar("T", bound=SpeechToTextResponse)
 V = TypeVar("V", bound=SpeechToTextResponseVerbose)
+DV = TypeVar("DV", bound=TranscriptionResponseStructured)
 S = TypeVar("S", bound=SpeechToTextSegment)
 
 ResponseType: TypeAlias = (
     TranscriptionResponse
     | TranslationResponse
     | TranscriptionResponseVerbose
+    | TranscriptionResponseDiarized
     | TranslationResponseVerbose
 )
 
 logger = init_logger(__name__)
+
+
+DIARIZED_JSON_PROMPT_INSTRUCTION = (
+    "Return only valid JSON with keys 'text' and 'segments'. Each segment must "
+    "include: id (int), start (float, seconds), end (float, seconds), text "
+    "(string), and speaker (string)."
+)
 
 
 class OpenAISpeechToText(OpenAIServing):
@@ -230,6 +248,15 @@ class OpenAISpeechToText(OpenAIServing):
 
         parsed_prompts: list[DictPrompt] = []
         for chunk in chunks:
+            effective_request_prompt = request.prompt
+            if (
+                request.response_format == "diarized_json"
+                and self.model_cls.supports_diarization
+            ):
+                effective_request_prompt = self._build_diarized_request_prompt(
+                    request.prompt
+                )
+
             # The model has control over the construction, as long as it
             # returns a valid PromptType.
             prompt = self.model_cls.get_generation_prompt(
@@ -238,12 +265,16 @@ class OpenAISpeechToText(OpenAIServing):
                 model_config=self.model_config,
                 language=language,
                 task_type=self.task_type,
-                request_prompt=request.prompt,
+                request_prompt=effective_request_prompt,
                 to_language=to_language,
             )
 
             parsed_prompt: DictPrompt
-            if request.response_format == "verbose_json":
+            use_verbose_prompt = request.response_format == "verbose_json" or (
+                request.response_format == "diarized_json"
+                and self.model_cls.supports_segment_timestamp
+            )
+            if use_verbose_prompt:
                 parsed_prompt = parse_enc_dec_prompt(prompt)
                 parsed_prompt = self._preprocess_verbose_prompt(parsed_prompt)
             else:
@@ -359,6 +390,113 @@ class OpenAISpeechToText(OpenAIServing):
                 avg_logprob += log_probs[idx - 1][token].logprob
         return segments
 
+    @staticmethod
+    def _build_diarized_segments(
+        text: str,
+        duration_s: float,
+        segments: list[SpeechToTextSegment],
+    ) -> list[TranscriptionDiarizedSegment]:
+        if segments:
+            return [
+                TranscriptionDiarizedSegment(
+                    id=seg.id,
+                    start=seg.start,
+                    end=seg.end,
+                    text=seg.text,
+                    speaker="speaker_0",
+                )
+                for seg in segments
+            ]
+
+        if not text:
+            return []
+
+        return [
+            TranscriptionDiarizedSegment(
+                id=0,
+                start=0.0,
+                end=duration_s,
+                text=text,
+                speaker="speaker_0",
+            )
+        ]
+
+    @staticmethod
+    def _build_diarized_request_prompt(request_prompt: str) -> str:
+        request_prompt = request_prompt.strip()
+        if request_prompt:
+            return f"{request_prompt} {DIARIZED_JSON_PROMPT_INSTRUCTION}"
+        return DIARIZED_JSON_PROMPT_INSTRUCTION
+
+    @staticmethod
+    def _extract_json_payload(text: str) -> dict[str, object] | None:
+        text = text.strip()
+        if not text:
+            return None
+
+        candidates: list[str] = [text]
+
+        if text.startswith("```") and text.endswith("```"):
+            lines = text.splitlines()
+            if len(lines) >= 3:
+                candidates.append("\n".join(lines[1:-1]).strip())
+
+        first_obj = text.find("{")
+        last_obj = text.rfind("}")
+        if first_obj != -1 and last_obj > first_obj:
+            candidates.append(text[first_obj : last_obj + 1].strip())
+
+        for candidate in candidates:
+            try:
+                payload = json.loads(candidate)
+            except json.JSONDecodeError:
+                continue
+
+            if isinstance(payload, dict):
+                return cast(dict[str, object], payload)
+
+        return None
+
+    @classmethod
+    def _try_parse_diarized_response_payload(
+        cls,
+        text: str,
+    ) -> tuple[str, list[TranscriptionDiarizedSegment]] | None:
+        payload = cls._extract_json_payload(text)
+        if payload is None:
+            return None
+
+        raw_segments = payload.get("segments")
+        if not isinstance(raw_segments, list):
+            return None
+
+        parsed_segments: list[TranscriptionDiarizedSegment] = []
+        for idx, raw_segment in enumerate(raw_segments):
+            if not isinstance(raw_segment, dict):
+                return None
+
+            try:
+                parsed_segments.append(
+                    TranscriptionDiarizedSegment(
+                        id=int(raw_segment.get("id", idx)),
+                        start=float(raw_segment["start"]),
+                        end=float(raw_segment["end"]),
+                        text=str(raw_segment["text"]),
+                        speaker=str(raw_segment["speaker"]),
+                    )
+                )
+            except (KeyError, TypeError, ValueError):
+                return None
+
+        parsed_text = payload.get("text")
+        if isinstance(parsed_text, str):
+            return parsed_text, parsed_segments
+
+        synthesized_text = "".join(segment.text for segment in parsed_segments)
+        if synthesized_text:
+            return synthesized_text, parsed_segments
+        return None
+
     async def _create_speech_to_text(
         self,
         audio_data: bytes,
@@ -366,7 +504,7 @@ class OpenAISpeechToText(OpenAIServing):
         raw_request: Request,
         response_class: type[ResponseType],
         stream_generator_method: Callable[..., AsyncGenerator[str, None]],
-    ) -> T | V | AsyncGenerator[str, None] | ErrorResponse:
+    ) -> T | V | DV | AsyncGenerator[str, None] | ErrorResponse:
         """Base method for speech-to-text operations like transcription and
         translation."""
         if request.stream and request.use_beam_search:
@@ -384,10 +522,31 @@ class OpenAISpeechToText(OpenAIServing):
         if self.engine_client.errored:
             raise self.engine_client.dead_error
 
-        if request.response_format not in ["text", "json", "verbose_json"]:
+        if request.response_format not in [
+            "text",
+            "json",
+            "verbose_json",
+            "diarized_json",
+        ]:
             return self.create_error_response(
                 "Currently only support response_format: "
-                "`text`, `json` or `verbose_json`"
+                "`text`, `json`, `verbose_json` or `diarized_json`"
+            )
+
+        if (
+            request.response_format == "diarized_json"
+            and self.task_type != "transcribe"
+        ):
+            return self.create_error_response(
+                "diarized_json format is only supported for transcription"
+            )
+
+        if (
+            request.response_format == "diarized_json"
+            and not self.model_cls.supports_diarization
+        ):
+            return self.create_error_response(
+                f"Currently do not support diarized_json for {request.model}"
             )
 
         if (
@@ -447,7 +606,10 @@ class OpenAISpeechToText(OpenAIServing):
                 self.default_sampling_params,
             )
 
-        if request.response_format == "verbose_json":
+        if (
+            request.response_format in ["verbose_json", "diarized_json"]
+            and self.model_cls.supports_segment_timestamp
+        ):
             sampling_params.logprobs = 1
 
         list_result_generator = []
@@ -511,7 +673,11 @@ class OpenAISpeechToText(OpenAIServing):
                     float(idx * chunk_size_in_s) if chunk_size_in_s is not None else 0.0
                 )
                 async for op in result_generator:
-                    if request.response_format == "verbose_json":
+                    use_timestamps = (
+                        request.response_format in ["verbose_json", "diarized_json"]
+                        and self.model_cls.supports_segment_timestamp
+                    )
+                    if use_timestamps:
                         assert op.outputs[0].logprobs
                         segments: list[SpeechToTextSegment] = (
                             self._get_verbose_segments(
@@ -538,9 +704,36 @@ class OpenAISpeechToText(OpenAIServing):
                     "seconds": int(math.ceil(duration_s)),
                 }
                 if request.response_format != "verbose_json":
-                    final_response = cast(
-                        T, TranscriptionResponse(text=text, usage=usage)
-                    )
+                    if request.response_format != "diarized_json":
+                        final_response = cast(
+                            T, TranscriptionResponse(text=text, usage=usage)
+                        )
+                    else:
+                        parsed_diarized_payload = (
+                            self._try_parse_diarized_response_payload(text)
+                            if self.model_cls.supports_diarization
+                            else None
+                        )
+                        if parsed_diarized_payload is not None:
+                            diarized_text, diarized_segments = parsed_diarized_payload
+                        else:
+                            diarized_text = text
+                            diarized_segments = self._build_diarized_segments(
+                                text=text,
+                                duration_s=duration_s,
+                                segments=total_segments,
+                            )
+
+                        final_response = cast(
+                            DV,
+                            TranscriptionResponseDiarized(
+                                text=diarized_text,
+                                language=request.language,
+                                duration=str(duration_s),
+                                segments=diarized_segments,
+                                usage=usage,
+                            ),
+                        )
                 else:
                     final_response = cast(
                         V,
@@ -582,11 +775,27 @@ class OpenAISpeechToText(OpenAIServing):
         stream_response_class: type[TranscriptionStreamResponse]
         | type[TranslationStreamResponse],
     ) -> AsyncGenerator[str, None]:
+        if request.response_format == "diarized_json":
+            async for event in self._diarized_stream_event_generator(
+                request=request,
+                list_result_generator=list_result_generator,
+                request_metadata=request_metadata,
+                audio_duration_s=audio_duration_s,
+            ):
+                yield event
+            return
+
         created_time = int(time.time())
         model_name = request.model
 
         completion_tokens = 0
         num_prompt_tokens = 0
+
+        audio_tokens = self.model_cls.get_num_audio_tokens(
+            audio_duration_s, self.asr_config, self.model_config
+        )
+        if audio_tokens:
+            num_prompt_tokens += audio_tokens
 
         include_usage = self.enable_force_include_usage or request.stream_include_usage
         include_continuous_usage = (
@@ -600,11 +809,7 @@ class OpenAISpeechToText(OpenAIServing):
                 async for res in result_generator:
                     # On first result.
                     if res.prompt_token_ids is not None:
-                        num_prompt_tokens = len(res.prompt_token_ids)
-                        if audio_tokens := self.model_cls.get_num_audio_tokens(
-                            audio_duration_s, self.asr_config, self.model_config
-                        ):
-                            num_prompt_tokens += audio_tokens
+                        num_prompt_tokens += len(res.prompt_token_ids)
 
                     # We need to do it here, because if there are exceptions in
                     # the result_generator, it needs to be sent as the FIRST
@@ -685,4 +890,85 @@ class OpenAISpeechToText(OpenAIServing):
             data = self.create_streaming_error_response(e)
             yield f"data: {data}\n\n"
         # Send the final done message after all response.n are finished
+        yield "data: [DONE]\n\n"
+
+    async def _diarized_stream_event_generator(
+        self,
+        request: SpeechToTextRequest,
+        list_result_generator: list[AsyncGenerator[RequestOutput, None]],
+        request_metadata: RequestResponseMetadata,
+        audio_duration_s: float,
+    ) -> AsyncGenerator[str, None]:
+        completion_tokens = 0
+        num_prompt_tokens = 0
+        current_segment_id = 0
+        full_text_parts: list[str] = []
+        chunk_size_in_s = self.asr_config.max_audio_clip_s
+
+        audio_tokens = self.model_cls.get_num_audio_tokens(
+            audio_duration_s, self.asr_config, self.model_config
+        )
+        if audio_tokens:
+            num_prompt_tokens += audio_tokens
+
+        try:
+            for idx, result_generator in enumerate(list_result_generator):
+                segment_text_parts: list[str] = []
+                start_time = (
+                    float(idx * chunk_size_in_s) if chunk_size_in_s is not None else 0.0
+                )
+                end_time = (
+                    min(start_time + float(chunk_size_in_s), audio_duration_s)
+                    if chunk_size_in_s is not None
+                    else audio_duration_s
+                )
+
+                async for res in result_generator:
+                    if res.prompt_token_ids is not None:
+                        num_prompt_tokens += len(res.prompt_token_ids)
+
+                    assert len(res.outputs) == 1
+                    output = res.outputs[0]
+                    completion_tokens += len(output.token_ids)
+
+                    if output.text:
+                        segment_text_parts.append(output.text)
+                        full_text_parts.append(output.text)
+
+                        delta_event = TranscriptionTextDeltaEvent(
+                            delta=output.text,
+                            segment_id=current_segment_id,
+                        )
+                        delta_data = delta_event.model_dump_json(exclude_unset=True)
+                        yield f"data: {delta_data}\n\n"
+
+                    if output.finish_reason is not None:
+                        segment_text = "".join(segment_text_parts)
+                        if segment_text:
+                            segment_event = TranscriptionTextSegmentEvent(
+                                id=current_segment_id,
+                                text=segment_text,
+                                start=start_time,
+                                end=end_time,
+                                speaker="speaker_0",
+                            )
+                            segment_data = segment_event.model_dump_json(
+                                exclude_unset=True
+                            )
+                            yield f"data: {segment_data}\n\n"
+                            current_segment_id += 1
+
+            done_event = TranscriptionTextDoneEvent(text="".join(full_text_parts))
+            yield f"data: {done_event.model_dump_json(exclude_unset=True)}\n\n"
+
+            request_metadata.final_usage_info = UsageInfo(
+                prompt_tokens=num_prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=num_prompt_tokens + completion_tokens,
+            )
+        except Exception as e:
+            logger.exception("Error in %s diarized stream generator.", self.task_type)
+            data = self.create_streaming_error_response(e)
+            yield f"data: {data}\n\n"
+
         yield "data: [DONE]\n\n"

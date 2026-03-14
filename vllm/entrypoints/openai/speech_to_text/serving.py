@@ -14,6 +14,7 @@ from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.openai.speech_to_text.protocol import (
     TranscriptionRequest,
     TranscriptionResponse,
+    TranscriptionResponseDiarized,
     TranscriptionResponseStreamChoice,
     TranscriptionResponseVerbose,
     TranscriptionStreamResponse,
@@ -59,6 +60,7 @@ class OpenAIServingTranscription(OpenAISpeechToText):
     ) -> (
         TranscriptionResponse
         | TranscriptionResponseVerbose
+        | TranscriptionResponseDiarized
         | AsyncGenerator[str, None]
         | ErrorResponse
     ):
@@ -72,9 +74,13 @@ class OpenAIServingTranscription(OpenAISpeechToText):
             request=request,
             raw_request=raw_request,
             response_class=(
-                TranscriptionResponseVerbose
-                if request.response_format == "verbose_json"
-                else TranscriptionResponse
+                TranscriptionResponse
+                if request.response_format in ["json", "text"]
+                else (
+                    TranscriptionResponseVerbose
+                    if request.response_format == "verbose_json"
+                    else TranscriptionResponseDiarized
+                )
             ),
             stream_generator_method=self.transcription_stream_generator,
         )

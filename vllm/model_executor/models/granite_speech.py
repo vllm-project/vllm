@@ -570,6 +570,7 @@ class GraniteSpeechForConditionalGeneration(
     SupportsTranscription,
 ):
     supported_languages = ISO639_1_SUPPORTED_LANGS
+    supports_diarization = True
 
     packed_modules_mapping = {
         "qkv_proj": [
@@ -872,6 +873,9 @@ class GraniteSpeechForConditionalGeneration(
             )
         else:
             raise ValueError(f"Unsupported task type {task_type}")
+
+        if request_prompt:
+            user_prompt += f" {request_prompt}"
 
         tokenizer = cached_tokenizer_from_config(model_config)
         chat = [dict(role="user", content=user_prompt)]
