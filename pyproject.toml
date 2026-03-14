@@ -167,6 +167,7 @@ fo = "fo"
 nd = "nd"
 eles = "eles"
 datas = "datas"
+ser = "ser"
 ure = "ure"
 
 [tool.uv]

@@ -7,7 +7,7 @@ import httpx
 import pytest
 import pytest_asyncio
 
-from tests.utils import RemoteOpenAIServer
+from tests.utils import RemoteLaunchRenderServer
 
 MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
 
@@ -16,7 +16,7 @@ MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
 def server():
     args: list[str] = []
 
-    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
+    with RemoteLaunchRenderServer(MODEL_NAME, args) as remote_server:
         yield remote_server
 
 
@@ -43,23 +43,20 @@ async def test_completion_render_basic(client):
     assert response.status_code == 200
     data = response.json()
 
-    # Verify response structure
+    # Verify response structure - list of GenerateRequest
     assert isinstance(data, list)
     assert len(data) > 0
 
-    # Verify first prompt
+    # Verify first prompt is a GenerateRequest
     first_prompt = data[0]
-    assert "prompt_token_ids" in first_prompt
-    assert "prompt" in first_prompt
-    assert isinstance(first_prompt["prompt_token_ids"], list)
-    assert len(first_prompt["prompt_token_ids"]) > 0
-    assert isinstance(first_prompt["prompt"], str)
-
-    # Verify prompt text is preserved
-    assert (
-        "When should a chat-completions handler return an empty string?"
-        in first_prompt["prompt"]
-    )
+    assert "token_ids" in first_prompt
+    assert "sampling_params" in first_prompt
+    assert "model" in first_prompt
+    assert "request_id" in first_prompt
+    assert isinstance(first_prompt["token_ids"], list)
+    assert len(first_prompt["token_ids"]) > 0
+    assert first_prompt["model"] == MODEL_NAME
+    assert first_prompt["request_id"].startswith("cmpl-")
 
 
 @pytest.mark.asyncio
@@ -84,36 +81,15 @@ async def test_chat_completion_render_basic(client):
     assert response.status_code == 200
     data = response.json()
 
-    # Verify response structure - should be [conversation, engine_prompts]
-    assert isinstance(data, list)
-    assert len(data) == 2
+    # Verify response structure - should be a GenerateRequest
+    assert isinstance(data, dict)
+    assert "token_ids" in data
+    assert isinstance(data["token_ids"], list)
+    assert len(data["token_ids"]) > 0
 
-    conversation, engine_prompts = data
-
-    # Verify conversation
-    assert isinstance(conversation, list)
-    assert len(conversation) > 0
-    assert conversation[0]["role"] == "user"
-    assert "empty string" in conversation[0]["content"]
-
-    # Verify engine_prompts
-    assert isinstance(engine_prompts, list)
-    assert len(engine_prompts) > 0
-
-    first_prompt = engine_prompts[0]
-    assert "prompt_token_ids" in first_prompt
-    assert "prompt" in first_prompt
-    assert isinstance(first_prompt["prompt_token_ids"], list)
-    assert len(first_prompt["prompt_token_ids"]) > 0
-
-    # Verify chat template was applied (should have instruction markers)
-    assert "[INST]" in first_prompt["prompt"]
-    assert "[/INST]" in first_prompt["prompt"]
-
-    # Verify token IDs are correctly preserved as integers
-    token_ids = first_prompt["prompt_token_ids"]
+    # Verify token IDs are integers and BOS token is present
+    token_ids = data["token_ids"]
     assert all(isinstance(tid, int) for tid in token_ids)
-    # Verify BOS token (usually 1 for LLaMA models)
     assert token_ids[0] == 1
 
 
@@ -131,15 +107,18 @@ async def test_completion_render_multiple_prompts(client):
     assert response.status_code == 200
     data = response.json()
 
-    # Should return two prompts
+    # Should return two GenerateRequest items
     assert isinstance(data, list)
     assert len(data) == 2
 
-    # Verify both prompts have required fields
+    # Verify both prompts have GenerateRequest fields
     for prompt in data:
-        assert "prompt_token_ids" in prompt
-        assert "prompt" in prompt
-        assert len(prompt["prompt_token_ids"]) > 0
+        assert "token_ids" in prompt
+        assert "sampling_params" in prompt
+        assert "model" in prompt
+        assert "request_id" in prompt
+        assert len(prompt["token_ids"]) > 0
+        assert prompt["request_id"].startswith("cmpl-")
 
 
 @pytest.mark.asyncio
@@ -160,17 +139,49 @@ async def test_chat_completion_render_multi_turn(client):
     assert response.status_code == 200
     data = response.json()
 
-    conversation, engine_prompts = data
-
-    # Verify all messages preserved
-    assert len(conversation) == 3
-    assert conversation[0]["role"] == "user"
-    assert conversation[1]["role"] == "assistant"
-    assert conversation[2]["role"] == "user"
-
     # Verify tokenization occurred
-    assert len(engine_prompts) > 0
-    assert len(engine_prompts[0]["prompt_token_ids"]) > 0
+    assert isinstance(data, dict)
+    assert "token_ids" in data
+    assert isinstance(data["token_ids"], list)
+    assert len(data["token_ids"]) > 0
+
+
+@pytest.mark.asyncio
+async def test_chat_completion_render_with_stream_true(client):
+    """Render accepts stream params but still returns JSON (non-streamed)."""
+
+    response = await client.post(
+        "/v1/chat/completions/render",
+        json={
+            "model": MODEL_NAME,
+            "stream": True,
+            "stream_options": {
+                "include_usage": True,
+                "continuous_usage_stats": True,
+            },
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "Stream options should be accepted by /render.",
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.headers.get("content-type", "").startswith("application/json")
+
+    data = response.json()
+    assert isinstance(data, dict)
+    assert "token_ids" in data
+    assert isinstance(data["token_ids"], list)
+    assert len(data["token_ids"]) > 0
+
+    # /render should preserve stream fields on the returned token-in request.
+    assert data.get("stream") is True
+    assert isinstance(data.get("stream_options"), dict)
+    assert data["stream_options"].get("include_usage") is True
+    assert data["stream_options"].get("continuous_usage_stats") is True
 
 
 @pytest.mark.asyncio
@@ -224,3 +235,31 @@ async def test_completion_render_no_generation(client):
     assert response.status_code == 200
     # Render should be fast (< 1 second) since no generation
     assert elapsed < 1.0
+
+
+@pytest.mark.asyncio
+async def test_chat_completion_render_with_sampling_params(client):
+    """Verify sampling params are correctly returned by /render."""
+    response = await client.post(
+        "/v1/chat/completions/render",
+        json={
+            "model": MODEL_NAME,
+            "messages": [{"role": "user", "content": "Test sampling params"}],
+            "temperature": 0.123,
+            "top_p": 0.456,
+            "frequency_penalty": 1.1,
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+
+    assert "sampling_params" in data
+    sampling_params = data["sampling_params"]
+
+    assert sampling_params.get("temperature") == 0.123
+    assert sampling_params.get("top_p") == 0.456
+    assert sampling_params.get("frequency_penalty") == 1.1
+
+    # Check that internal fields are not present
+    assert "_all_stop_token_ids" not in sampling_params
