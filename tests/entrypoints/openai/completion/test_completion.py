@@ -46,6 +46,7 @@ async def client(server):
 
 @pytest.fixture(scope="module", params=[False, True])
 def prompt_logprobs_temperature_server(default_server_args, request):
+    """Server which enables testing prompt logprobs with both v1 and v2 model runners."""
     env_dict = {"VLLM_USE_V2_MODEL_RUNNER": "1"} if request.param else None
     server_args = default_server_args + ["--no-enable-prefix-caching"]
     with RemoteOpenAIServer(
@@ -63,6 +64,7 @@ async def prompt_logprobs_temperature_client(prompt_logprobs_temperature_server)
 
 
 def _get_prompt_logprob_probability(prompt_logprobs) -> float:
+    """Extract the probability of the last token."""
     assert prompt_logprobs is not None
     last_prompt_logprobs = prompt_logprobs[-1]
     assert last_prompt_logprobs is not None
@@ -254,6 +256,14 @@ async def test_prompt_logprobs_temperature_increases_argmax_prob_completion(
     prompt_logprobs_temperature_client: openai.AsyncOpenAI,
     model_name: str,
 ):
+    """Test to verify that decreasing prompt_logprobs_temperature increases the probability of the argmax token.
+    To test this, we need a sequence that is generated using argmax sampling. To do this, we first do argmax sampling 
+    given the seed prompt. We then concatenate the seed prompt with the argmax generation to form a new prompt and 
+    evaluate the logprobs of the prompt under different temperatures, analyzing how the probability of the argmax
+    tokens change.
+    """
+
+    # Generate using argmax sampling and concat generation with seed prompt to form new prompt
     seed_prompt_token_ids = [0, 0, 0, 0, 0]
     argmax_completion = await prompt_logprobs_temperature_client.completions.create(
         model=model_name,
@@ -267,6 +277,7 @@ async def test_prompt_logprobs_temperature_increases_argmax_prob_completion(
     assert len(argmax_token_ids) == 1
     argmax_prompt_token_ids = seed_prompt_token_ids + argmax_token_ids
 
+    # Get logprobs of new prompt under different temperatures
     low_temp_completion = await prompt_logprobs_temperature_client.completions.create(
         model=model_name,
         prompt=argmax_prompt_token_ids,
@@ -291,6 +302,7 @@ async def test_prompt_logprobs_temperature_increases_argmax_prob_completion(
         extra_body={"prompt_logprobs": 0, "prompt_logprobs_temperature": 5.0},
     )
 
+    # Evaluate the probability of the last argmax token
     low_temp_prob = _get_prompt_logprob_probability(
         low_temp_completion.choices[0].prompt_logprobs
     )
