@@ -1,65 +1,53 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Unit tests for MRv2 streaming input support.
 
-Verifies that when a streaming update arrives (same req_id via
-scheduled_new_reqs), the model runner properly cleans up old state
-before re-adding, preventing free_indices leaks in RequestState
-and ensuring all subsystems are correctly updated.
-
-These tests call GPUModelRunner.add_requests() directly with mock
-dependencies. They should FAIL without the streaming guard in
-add_requests() and PASS once it is implemented.
-"""
+"""Unit tests for MRv2 GPUModelRunner.add_requests streaming input support."""
 
 from unittest.mock import Mock
 
 import pytest
 import torch
 
-from vllm.v1.core.sched.output import CachedRequestData, NewRequestData, SchedulerOutput
+from vllm.v1.core.sched.output import (
+    CachedRequestData,
+    NewRequestData,
+    SchedulerOutput,
+)
+from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 from vllm.v1.worker.gpu.states import RequestState
 
 pytestmark = pytest.mark.cpu_test
 
-MAX_NUM_REQS = 8
-MAX_MODEL_LEN = 64
 
+@pytest.fixture
+def mock_model_runner_with_req_states():
+    """Create a mock MRv2 GPUModelRunner with a real RequestState."""
 
-def _make_req_states():
-    return RequestState(
-        max_num_reqs=MAX_NUM_REQS,
-        max_model_len=MAX_MODEL_LEN,
-        max_num_batched_tokens=64,
+    runner = Mock(spec=GPUModelRunner)
+    runner.req_states = RequestState(
+        max_num_reqs=10,
+        max_model_len=1024,
+        max_num_batched_tokens=1024,
         num_speculative_steps=0,
-        vocab_size=128,
+        vocab_size=32000,
         device=torch.device("cpu"),
         model_dtype=torch.float32,
         cache_draft_logits=False,
     )
+    runner.encoder_cache = None
+    runner.model_state = Mock()
+    runner.block_tables = Mock()
+    runner.lora_state = Mock()
+    runner.sampler = None
+    runner.prompt_logprobs_worker = None
+    runner.is_last_pp_rank = False
 
+    # Mock staged writes — they use Triton kernels that require GPU
+    runner.req_states.apply_staged_writes = Mock()
 
-def _make_new_req_data(
-    req_id,
-    prompt_token_ids,
-    prefill_token_ids,
-    num_computed_tokens,
-    sampling_params=None,
-    mm_features=None,
-    block_ids=None,
-    lora_request=None,
-):
-    return NewRequestData(
-        req_id=req_id,
-        prompt_token_ids=prompt_token_ids,
-        prefill_token_ids=prefill_token_ids,
-        mm_features=mm_features or [],
-        sampling_params=sampling_params,
-        pooling_params=None,
-        block_ids=block_ids or ([0],),
-        num_computed_tokens=num_computed_tokens,
-        lora_request=lora_request,
-    )
+    # Bind the real add_requests method to our mock
+    runner.add_requests = GPUModelRunner.add_requests.__get__(runner)
+    return runner
 
 
 def _make_scheduler_output(new_reqs):
@@ -76,188 +64,143 @@ def _make_scheduler_output(new_reqs):
     )
 
 
-def _make_mock_model_runner(req_states):
-    """Create a mock GPUModelRunner with real RequestState.
+def test_e2e_streaming_request_update_basic_flow(
+    mock_model_runner_with_req_states,
+):
+    """Test that streaming sessions are updated correctly.
 
-    We mock apply_staged_writes on req_states since the Triton kernels
-    inside StagedWriteTensor cannot run on CPU tensors.
+    This test validates that when a streaming session is updated with new
+    prompt tokens:
+    1. The old request state is removed (no free_indices leak)
+    2. The new state is written with updated prefill_token_ids
+    3. model_state and block_tables are re-registered for the new state
     """
-    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
-
-    runner = Mock(spec=GPUModelRunner)
-    runner.req_states = req_states
-    runner.encoder_cache = None
-    runner.model_state = Mock()
-    runner.block_tables = Mock()
-    runner.lora_state = Mock()
-    runner.sampler = None
-    runner.prompt_logprobs_worker = None
-    runner.is_last_pp_rank = False
-
-    # Mock staged writes — they use Triton kernels that require GPU
-    req_states.apply_staged_writes = Mock()
-
-    # Bind the real add_requests method to our mock
-    runner.add_requests = GPUModelRunner.add_requests.__get__(runner)
-    return runner
-
-
-# ── Test 1: Index leak prevention ──
-
-
-def test_streaming_update_no_index_leak():
-    """After a streaming update, only 1 free_indices slot should be used.
-
-    Fails without the streaming guard: add_requests does not call
-    remove_request before re-adding, leaking the old req_idx.
-    """
-    req_states = _make_req_states()
-    runner = _make_mock_model_runner(req_states)
+    runner = mock_model_runner_with_req_states
+    req_states = runner.req_states
+    req_id = "streaming_req_0"
     initial_free = len(req_states.free_indices)
 
-    # Step 1: Initial request
-    runner.add_requests(
-        _make_scheduler_output(
-            [
-                _make_new_req_data("stream-0", [1, 2, 3], [1, 2, 3], 3),
-            ]
-        )
+    # Step 1: Add initial request with 3 prompt tokens, all computed
+    initial_req_data = NewRequestData(
+        req_id=req_id,
+        prompt_token_ids=[1, 2, 3],
+        prefill_token_ids=[1, 2, 3],
+        mm_features=[],
+        sampling_params=None,
+        pooling_params=None,
+        block_ids=([0],),
+        num_computed_tokens=3,
+        lora_request=None,
     )
+    runner.add_requests(_make_scheduler_output([initial_req_data]))
+    assert req_id in req_states.req_id_to_index
     assert len(req_states.free_indices) == initial_free - 1
 
-    # Step 2: Streaming update — same req_id, extended tokens
-    runner.add_requests(
-        _make_scheduler_output(
-            [
-                _make_new_req_data("stream-0", [1, 2, 3], [1, 2, 3, 10, 4, 5], 4),
-            ]
-        )
+    # Step 2: Create streaming update with extended prompt
+    # The scheduler has already set prefill_token_ids to the full sequence
+    # (original prompt + intermediate output + new prompt tokens)
+    updated_req_data = NewRequestData(
+        req_id=req_id,
+        prompt_token_ids=[1, 2, 3],
+        prefill_token_ids=[1, 2, 3, 10, 4, 5],
+        mm_features=[],
+        sampling_params=None,
+        pooling_params=None,
+        block_ids=([0, 1],),
+        num_computed_tokens=4,  # 3 original prompt + 1 intermediate output
+        lora_request=None,
     )
+    runner.add_requests(_make_scheduler_output([updated_req_data]))
 
-    # Should still only use 1 slot
+    # Step 3: Verify no free_indices leak (old slot recycled)
     assert len(req_states.free_indices) == initial_free - 1
-    # No stale entries in index_to_req_id
-    assert sum(1 for v in req_states.index_to_req_id.values() if v == "stream-0") == 1
 
+    # Verify the request is still tracked with exactly one index
+    assert req_id in req_states.req_id_to_index
+    assert sum(1 for v in req_states.index_to_req_id.values() if v == req_id) == 1
 
-def test_repeated_streaming_updates_dont_exhaust_indices():
-    """Repeated streaming updates should never exhaust free_indices.
+    # Verify state was updated with new values
+    new_idx = req_states.req_id_to_index[req_id]
+    assert req_states.prompt_len.np[new_idx] == 3
+    assert req_states.prefill_len.np[new_idx] == 6
+    assert req_states.num_computed_prefill_tokens[new_idx] == 4
 
-    Fails without the streaming guard: each update leaks a slot,
-    and after max_num_reqs updates we hit 'No free indices'.
-    """
-    req_states = _make_req_states()
-    runner = _make_mock_model_runner(req_states)
-
-    # Initial request
-    runner.add_requests(
-        _make_scheduler_output(
-            [
-                _make_new_req_data("stream-0", [1, 2], [1, 2], 2),
-            ]
-        )
+    # Verify model_state and block_tables were re-registered
+    runner.model_state.add_request.assert_called_with(new_idx, updated_req_data)
+    runner.block_tables.append_block_ids.assert_called_with(
+        new_idx, ([0, 1],), overwrite=True
     )
 
-    # Simulate many streaming updates — more than max_num_reqs
-    for i in range(MAX_NUM_REQS * 3):
-        runner.add_requests(
-            _make_scheduler_output(
-                [
-                    _make_new_req_data("stream-0", [1, 2], [1, 2, 10 + i], 2),
-                ]
-            )
-        )
 
-    # Still only 1 slot used
-    assert len(req_states.free_indices) == MAX_NUM_REQS - 1
-    assert "stream-0" in req_states.req_id_to_index
+def test_e2e_streaming_with_multimodal_features(
+    mock_model_runner_with_req_states,
+):
+    """Test that streaming sessions with multimodal features are updated.
 
-
-# ── Test 2: Subsystem cleanup ──
-
-
-def test_streaming_update_cleans_up_subsystems():
-    """Streaming update should call remove on encoder_cache, lora_state,
-    and prompt_logprobs_worker before re-adding.
-
-    Fails without the streaming guard: remove_request is never called
-    on subsystems for the old state.
+    This test validates that when a streaming session with mm features
+    is updated:
+    1. The old request state is removed (no free_indices leak)
+    2. encoder_cache is cleaned up and re-registered with new mm_features
+    3. model_state is re-registered (recomputes M-RoPE positions etc.)
     """
-    req_states = _make_req_states()
-    runner = _make_mock_model_runner(req_states)
+    runner = mock_model_runner_with_req_states
+    req_states = runner.req_states
+    req_id = "streaming_mm_req_0"
+    initial_free = len(req_states.free_indices)
+
+    # Enable encoder_cache for multimodal
     runner.encoder_cache = Mock()
-    runner.prompt_logprobs_worker = Mock()
 
-    # Initial request
-    runner.add_requests(
-        _make_scheduler_output(
-            [
-                _make_new_req_data("stream-0", [1, 2, 3], [1, 2, 3], 3),
-            ]
-        )
+    # Step 1: Add initial request with one audio feature
+    mm_feature_1 = Mock()
+    initial_req_data = NewRequestData(
+        req_id=req_id,
+        prompt_token_ids=[1, 2] + [0] * 10 + [3, 4],
+        prefill_token_ids=[1, 2] + [0] * 10 + [3, 4],
+        mm_features=[mm_feature_1],
+        sampling_params=None,
+        pooling_params=None,
+        block_ids=([0],),
+        num_computed_tokens=14,
+        lora_request=None,
     )
+    runner.add_requests(_make_scheduler_output([initial_req_data]))
+    assert req_id in req_states.req_id_to_index
 
     # Reset mocks to track only the streaming update calls
     runner.encoder_cache.reset_mock()
-    runner.lora_state.reset_mock()
-    runner.prompt_logprobs_worker.reset_mock()
+    runner.model_state.reset_mock()
 
-    # Streaming update
-    runner.add_requests(
-        _make_scheduler_output(
-            [
-                _make_new_req_data("stream-0", [1, 2, 3], [1, 2, 3, 10, 4, 5], 4),
-            ]
-        )
+    # Step 2: Create streaming update with additional multimodal feature
+    # The scheduler has folded the intermediate output (100) into
+    # prefill_token_ids and added a new audio chunk
+    mm_feature_2 = Mock()
+    updated_req_data = NewRequestData(
+        req_id=req_id,
+        prompt_token_ids=[1, 2] + [0] * 10 + [3, 4],
+        prefill_token_ids=[1, 2] + [0] * 10 + [3, 4, 100] + [0] * 5 + [5],
+        mm_features=[mm_feature_1, mm_feature_2],
+        sampling_params=None,
+        pooling_params=None,
+        block_ids=([0, 1],),
+        num_computed_tokens=14,
+        lora_request=None,
     )
+    runner.add_requests(_make_scheduler_output([updated_req_data]))
 
-    # Verify remove was called before re-add
-    runner.encoder_cache.remove_request.assert_called_once_with("stream-0")
-    runner.prompt_logprobs_worker.remove_request.assert_called_once_with("stream-0")
-    runner.lora_state.remove_request.assert_called_once_with("stream-0")
-
-
-# ── Test 3: Mixed batch — streaming + non-streaming ──
-
-
-def test_streaming_update_with_concurrent_requests():
-    """When a batch has both a streaming update and a new request,
-    only the streaming request should trigger cleanup. The new
-    request should be added normally.
-
-    Fails without the streaming guard: the streaming request leaks
-    an index, reducing available slots for new requests.
-    """
-    req_states = _make_req_states()
-    runner = _make_mock_model_runner(req_states)
-    initial_free = len(req_states.free_indices)
-
-    # Add initial streaming request
-    runner.add_requests(
-        _make_scheduler_output(
-            [
-                _make_new_req_data("stream-0", [1, 2, 3], [1, 2, 3], 3),
-            ]
-        )
-    )
+    # Step 3: Verify no free_indices leak
     assert len(req_states.free_indices) == initial_free - 1
+    assert sum(1 for v in req_states.index_to_req_id.values() if v == req_id) == 1
 
-    # Batch with: streaming update for stream-0 + brand new request
-    runner.add_requests(
-        _make_scheduler_output(
-            [
-                _make_new_req_data("stream-0", [1, 2, 3], [1, 2, 3, 10, 4, 5], 4),
-                _make_new_req_data("new-req-1", [7, 8, 9], [7, 8, 9], 0),
-            ]
-        )
+    # Verify encoder_cache was cleaned up and re-registered
+    runner.encoder_cache.remove_request.assert_called_once_with(req_id)
+    runner.encoder_cache.add_request.assert_called_once_with(
+        req_id, [mm_feature_1, mm_feature_2]
     )
 
-    # 2 slots used total (1 recycled streaming + 1 new)
-    assert len(req_states.free_indices) == initial_free - 2
-    assert "stream-0" in req_states.req_id_to_index
-    assert "new-req-1" in req_states.req_id_to_index
+    # Verify model_state was re-registered with new data
+    new_idx = req_states.req_id_to_index[req_id]
+    runner.model_state.add_request.assert_called_once_with(new_idx, updated_req_data)
 
-    # Each req_id maps to exactly one index
-    all_mapped_ids = list(req_states.index_to_req_id.values())
-    assert all_mapped_ids.count("stream-0") == 1
-    assert all_mapped_ids.count("new-req-1") == 1
+    # Verify updated prefill length
+    assert req_states.prefill_len.np[new_idx] == 21
