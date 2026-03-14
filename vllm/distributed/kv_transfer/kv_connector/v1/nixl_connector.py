@@ -1561,6 +1561,11 @@ class NixlConnectorWorker:
             )
             # For when registering multiple tensors eg K/V in separate regions.
             physical_page_size = physical_page_size // len(cache_list)
+            if self.kv_topo._cross_layers_blocks:
+                # When cross-layers blocks are used, multiply by number of layers
+                physical_page_size = physical_page_size * len(
+                    self.kv_cache_config.kv_cache_tensors
+                )
             num_blocks = (
                 self._logical_num_blocks
                 if isinstance(layer_spec, MambaSpec)
