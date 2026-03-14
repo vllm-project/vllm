@@ -11,6 +11,8 @@ from .utils import (
     ensure_system_prompt,
 )
 
+SEED = 42
+
 
 # test: make sure chat completions without tools provided work even when tools
 # are enabled. This makes sure tool call chat templates work, AND that the tool
@@ -27,6 +29,7 @@ async def test_chat_completion_without_tools(
         max_completion_tokens=150,
         model=model_name,
         logprobs=False,
+        seed=SEED,
     )
     choice = chat_completion.choices[0]
     stop_reason = chat_completion.choices[0].finish_reason
@@ -47,6 +50,7 @@ async def test_chat_completion_without_tools(
         max_completion_tokens=150,
         model=model_name,
         logprobs=False,
+        seed=SEED,
         stream=True,
     )
     chunks: list[str] = []
@@ -97,6 +101,7 @@ async def test_chat_completion_with_tools(
         model=model_name,
         tools=[WEATHER_TOOL],
         logprobs=False,
+        seed=SEED,
     )
     choice = chat_completion.choices[0]
     stop_reason = chat_completion.choices[0].finish_reason
@@ -118,6 +123,7 @@ async def test_chat_completion_with_tools(
         model=model_name,
         logprobs=False,
         tools=[WEATHER_TOOL],
+        seed=SEED,
         stream=True,
     )
 
