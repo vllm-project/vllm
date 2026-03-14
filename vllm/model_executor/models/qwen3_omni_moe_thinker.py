@@ -983,13 +983,11 @@ class Qwen3Omni_VisionTransformer(nn.Module):
             grid_thw_np[:, 1] * grid_thw_np[:, 2], grid_thw_np[:, 0]
         ).cumsum(axis=0, dtype=np.int32)
         cu_seqlens_np = np.concatenate([np.zeros(1, dtype=np.int32), cu_seqlens_np])
-        sequence_lengths = MMEncoderAttention.maybe_compute_sequence_lengths(
-            self.attn_backend, cu_seqlens_np
+        sequence_lengths = MMEncoderAttention.maybe_compute_seq_lens(
+            self.attn_backend,
+            cu_seqlens_np,
+            self.device,
         )
-        if sequence_lengths is not None:
-            sequence_lengths = torch.from_numpy(sequence_lengths).to(
-                self.device, non_blocking=True
-            )
 
         hidden_states_list = []
         deepstack_visual_indexes = self.deepstack_visual_indexes
@@ -1328,6 +1326,17 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
                     use_audio_in_video = True
                 else:
                     use_audio_in_video = False
+            # for mutilmodality cache
+            if any(item is None for item in mm_kwargs["video"]):
+                video_token_id = self.info.get_hf_config().video_token_id
+                audio_token_id = self.info.get_hf_config().audio_token_id
+                video_audio_item_num = sum(
+                    id in (video_token_id, audio_token_id) for id in prompt_ids
+                )
+                audio_updates_num = len(mm_prompt_updates.get("audio", []))
+                video_updates_num = len(mm_prompt_updates.get("video", []))
+                if video_audio_item_num != video_updates_num + audio_updates_num:
+                    use_audio_in_video = True
 
         # normal case with `use_audio_in_video=False`
         if is_update_applied:

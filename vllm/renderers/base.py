@@ -176,6 +176,8 @@ class BaseRenderer(ABC, Generic[_T]):
         For multi-modal requests:
         - Importing libraries such as librosa triggers JIT compilation.
         """
+        from vllm.entrypoints.chat_utils import ChatTemplateResolutionError
+
         try:
             logger.info("Warming up chat template processing...")
             start_time = time.perf_counter()
@@ -184,6 +186,8 @@ class BaseRenderer(ABC, Generic[_T]):
 
             elapsed = time.perf_counter() - start_time
             logger.info("Chat template warmup completed in %.3fs", elapsed)
+        except ChatTemplateResolutionError:
+            logger.info("This model does not support chat template.")
         except Exception:
             logger.exception("Chat template warmup failed")
 

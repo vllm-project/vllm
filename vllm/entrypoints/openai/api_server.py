@@ -368,6 +368,7 @@ async def init_app_state(
         request_logger=request_logger,
         chat_template=resolved_chat_template,
         chat_template_content_format=args.chat_template_content_format,
+        default_chat_template_kwargs=args.default_chat_template_kwargs,
         trust_request_chat_template=args.trust_request_chat_template,
     )
 
@@ -414,11 +415,19 @@ async def init_render_app_state(
     directly from the :class:`~vllm.config.VllmConfig`.
     """
     from vllm.entrypoints.chat_utils import load_chat_template
+    from vllm.entrypoints.openai.models.serving import OpenAIModelRegistry
     from vllm.entrypoints.serve.render.serving import OpenAIServingRender
     from vllm.plugins.io_processors import get_io_processor
     from vllm.renderers import renderer_from_config
 
     served_model_names = args.served_model_name or [args.model]
+    model_registry = OpenAIModelRegistry(
+        model_config=vllm_config.model_config,
+        base_model_paths=[
+            BaseModelPath(name=name, model_path=args.model)
+            for name in served_model_names
+        ],
+    )
 
     if args.enable_log_requests:
         request_logger = RequestLogger(max_log_len=args.max_log_len)
@@ -435,7 +444,7 @@ async def init_render_app_state(
         model_config=vllm_config.model_config,
         renderer=renderer,
         io_processor=io_processor,
-        served_model_names=served_model_names,
+        model_registry=model_registry,
         request_logger=request_logger,
         chat_template=resolved_chat_template,
         chat_template_content_format=args.chat_template_content_format,
@@ -447,8 +456,10 @@ async def init_render_app_state(
         log_error_stack=args.log_error_stack,
     )
 
-    # Expose models endpoint via the render handler.
-    state.openai_serving_models = state.openai_serving_render
+    state.openai_serving_models = model_registry
+
+    # Expose tokenization via the render handler (no engine required).
+    state.openai_serving_tokenization = state.openai_serving_render
 
     state.vllm_config = vllm_config
     # Disable stats logging — there is no engine to poll.
