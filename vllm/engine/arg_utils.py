@@ -1525,7 +1525,13 @@ class EngineArgs:
                 quant_cfg = getattr(hf_cfg, "quantization_config", None)
                 if quant_cfg is not None:
                     checkpoint_kv_algo = get_kv_cache_quant_algo_string(quant_cfg)
-                    if checkpoint_kv_algo is not None:
+                    # Only error on true conflicts - when checkpoint has a concrete
+                    # dtype that differs from user-provided dtype
+                    if (
+                        checkpoint_kv_algo is not None
+                        and checkpoint_kv_algo != "auto"
+                        and checkpoint_kv_algo != self.kv_cache_dtype
+                    ):
                         raise ValueError(
                             f"Cannot override --kv-cache-dtype={self.kv_cache_dtype} "
                             f"when the checkpoint specifies kv_cache_quant_algo="

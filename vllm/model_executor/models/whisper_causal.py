@@ -249,13 +249,15 @@ def create_whisper_attention_backend_with_block_pooling(
             block_size,
             num_kv_heads,
             head_size,
-            cache_dtype_str: underlying_attn_backend.get_kv_cache_shape(
-                num_blocks,
-                # we stretch each block by `block_pool_size`
-                block_size * block_pool_size,
-                num_kv_heads // block_pool_size,
-                head_size,
-                cache_dtype_str,
+            cache_dtype_str: (
+                underlying_attn_backend.get_kv_cache_shape(
+                    num_blocks,
+                    # we stretch each block by `block_pool_size`
+                    block_size * block_pool_size,
+                    num_kv_heads // block_pool_size,
+                    head_size,
+                    cache_dtype_str,
+                )
             ),
             "forward_includes_kv_cache_update": True,
         },
