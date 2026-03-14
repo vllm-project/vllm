@@ -83,7 +83,7 @@ def create_lora_capture_hook(
 ) -> Callable[[int, int, int], None] | None:
     """Create a hook to set up LoRA state before each cudagraph capture."""
     if lora_config is None:
-        return
+        return None
 
     def hook(num_active_loras: int, num_reqs: int, num_tokens: int) -> None:
         num_scheduled = np.full(num_reqs, num_tokens // num_reqs, dtype=np.int32)
