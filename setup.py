@@ -920,6 +920,7 @@ if _is_cpu():
 
     if platform.machine() in ("x86_64", "AMD64"):
         ext_modules.append(CMakeExtension(name="vllm._C"))
+        ext_modules.append(CMakeExtension(name="vllm._C_AVX512"))
         ext_modules.append(CMakeExtension(name="vllm._C_AVX2"))
     else:
         ext_modules.append(CMakeExtension(name="vllm._C"))
@@ -981,9 +982,9 @@ setup(
         # Optional deps for AMD FP4 quantization support
         "petit-kernel": ["petit-kernel"],
         # Optional deps for Helion kernel development
-        "helion": ["helion"],
+        "helion": ["helion==0.3.2"],
         # Optional deps for gRPC server (vllm serve --grpc)
-        "grpc": ["smg-grpc-servicer >= 0.4.2"],
+        "grpc": ["smg-grpc-servicer[vllm] >= 0.5.0"],
         # Optional deps for OpenTelemetry tracing
         "otel": [
             "opentelemetry-sdk>=1.26.0",
