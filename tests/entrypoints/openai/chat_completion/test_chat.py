@@ -14,12 +14,11 @@ import requests
 import torch
 from openai import BadRequestError
 
+from tests.utils import RemoteOpenAIServer
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
 )
 from vllm.sampling_params import SamplingParams
-
-from ...utils import RemoteOpenAIServer
 
 # any model with a chat template should work here
 MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"

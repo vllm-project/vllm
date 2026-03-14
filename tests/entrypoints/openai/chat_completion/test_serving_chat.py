@@ -10,6 +10,12 @@ import pytest
 import pytest_asyncio
 from openai import OpenAI
 
+from tests.entrypoints.openai.utils import (
+    accumulate_streaming_response,
+    verify_chat_response,
+    verify_harmony_messages,
+)
+from tests.utils import RemoteOpenAIServer
 from vllm._aiter_ops import is_aiter_found_and_supported
 from vllm.config import MultiModalConfig
 from vllm.entrypoints.openai.chat_completion.protocol import (
@@ -38,13 +44,6 @@ from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.tokenizers.registry import tokenizer_args_from_config
 from vllm.tool_parsers import ToolParserManager
 from vllm.v1.engine.async_llm import AsyncLLM
-
-from ...utils import RemoteOpenAIServer
-from .utils import (
-    accumulate_streaming_response,
-    verify_chat_response,
-    verify_harmony_messages,
-)
 
 GPT_OSS_MODEL_NAME = "openai/gpt-oss-20b"
 GPT_OSS_SPECULATOR_NAME = "RedHatAI/gpt-oss-20b-speculator.eagle3"
