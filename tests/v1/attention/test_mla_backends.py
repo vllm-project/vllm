@@ -122,6 +122,8 @@ BATCH_SPECS = {
     ),
 }
 
+MOCK_KV_SCALE = 3.0
+
 
 def create_and_prepopulate_kv_cache(
     kv_c_contexts: list[torch.Tensor],
@@ -271,12 +273,12 @@ class MockAttentionLayer:
 
     def __init__(self, device: torch.device):
         self._q_scale = torch.tensor(2.0, device=device)
-        self._k_scale = torch.tensor(3.0, device=device)
-        self._v_scale = torch.tensor(4.0, device=device)
+        self._k_scale = torch.tensor(MOCK_KV_SCALE, device=device)
+        self._v_scale = torch.tensor(float("nan"), device=device)
         self._prob_scale = torch.tensor(1.0, device=device)
         self._q_scale_float = 2.0
-        self._k_scale_float = 3.0
-        self._v_scale_float = 4.0
+        self._k_scale_float = MOCK_KV_SCALE
+        self._v_scale_float = float("nan")
 
     def forward(self, *_args, **_kwargs):
         raise NotImplementedError
@@ -320,12 +322,12 @@ class MockSparseMLAAttentionLayer:
 
         # Scale attributes needed by attention backends
         self._q_scale = torch.tensor(2.0, device=device)
-        self._k_scale = torch.tensor(3.0, device=device)
-        self._v_scale = torch.tensor(4.0, device=device)
+        self._k_scale = torch.tensor(MOCK_KV_SCALE, device=device)
+        self._v_scale = torch.tensor(float("nan"), device=device)
         self._prob_scale = torch.tensor(1.0, device=device)
         self._q_scale_float = 2.0
-        self._k_scale_float = 3.0
-        self._v_scale_float = 4.0
+        self._k_scale_float = MOCK_KV_SCALE
+        self._v_scale_float = float("nan")
 
         self._decode_concat_quant_fp8_op = _DecodeConcatQuantFP8(
             static=True,
@@ -444,12 +446,12 @@ class MockMLAAttentionLayer(AttentionLayerBase):
 
         # Scale attributes needed by attention backends
         self._q_scale = torch.tensor(2.0, device=device)
-        self._k_scale = torch.tensor(3.0, device=device)
-        self._v_scale = torch.tensor(4.0, device=device)
+        self._k_scale = torch.tensor(MOCK_KV_SCALE, device=device)
+        self._v_scale = torch.tensor(float("nan"), device=device)
         self._prob_scale = torch.tensor(1.0, device=device)
         self._q_scale_float = 2.0
-        self._k_scale_float = 3.0
-        self._v_scale_float = 4.0
+        self._k_scale_float = MOCK_KV_SCALE
+        self._v_scale_float = float("nan")
 
         self._decode_concat_quant_fp8_op = _DecodeConcatQuantFP8(
             static=True,
@@ -1029,6 +1031,7 @@ def test_backend_correctness(
             common_attn_metadata=common_attn_metadata,
             randomize_blocks=True,
             kv_cache_dtype=kv_cache_dtype,
+            scale=3.0,
         )
         kv_cache_per_block_size[block_size] = kv_cache
 

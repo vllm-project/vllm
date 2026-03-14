@@ -183,7 +183,7 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
         if self.bmm2_scale is None:
             self.bmm2_scale = 1.0
             if self.kv_cache_dtype.startswith("fp8"):
-                self.bmm2_scale *= layer._v_scale_float
+                self.bmm2_scale *= layer._k_scale_float
 
         o = trtllm_batch_decode_with_kv_cache_mla(
             query=q,
