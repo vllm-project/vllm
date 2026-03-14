@@ -221,6 +221,32 @@ spec:
 !!! tip "Pre-download Hugging Face models"
     If you use Hugging Face models, downloading the model before starting vLLM is recommended. Download the model on every node to the same path, or store the model on a distributed file system accessible by all nodes. Then pass the path to the model in place of the repository ID. Otherwise, supply a Hugging Face token by appending `-e HF_TOKEN=<TOKEN>` to `run_cluster.sh`.
 
+## Troubleshooting multi-node pipeline parallelism
+
+When using pipeline parallelism across multiple nodes with Ray, you may encounter `Channel closed` errors or crashes during inference. This is typically caused by Ray's Compiled Graph buffer being too small for large intermediate tensors passed between pipeline stages.
+
+To resolve this issue, increase the buffer size by setting the `VLLM_RAY_CGRAPH_BUFFER_SIZE_BYTES` environment variable:
+
+```bash
+# Set buffer size to 512MB (536870912 bytes)
+export VLLM_RAY_CGRAPH_BUFFER_SIZE_BYTES=536870912
+
+vllm serve /path/to/the/model \
+    --tensor-parallel-size 8 \
+    --pipeline-parallel-size 2 \
+    --distributed-executor-backend ray
+```
+
+The default value is 0, which uses Ray's default buffer size. For large models or high batch sizes, you may need to increase this to 512MB (536870912 bytes) or even 1GB (1073741824 bytes).
+
+If you see a warning like:
+
+```text
+Multi-node pipeline parallelism detected without explicit buffer size configuration. If you encounter 'Channel closed' errors...
+```
+
+Consider proactively setting `VLLM_RAY_CGRAPH_BUFFER_SIZE_BYTES` to avoid potential crashes.
+
 ## Troubleshooting distributed deployments
 
 For information about distributed debugging, see [Troubleshooting distributed deployments](distributed_troubleshooting.md).
