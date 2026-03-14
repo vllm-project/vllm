@@ -179,17 +179,17 @@ class BaseRenderer(ABC, Generic[_T]):
         from vllm.entrypoints.chat_utils import ChatTemplateResolutionError
 
         try:
-            logger.info("Warming up chat template processing...")
+            logger.debug("Warming up chat template processing...")
             start_time = time.perf_counter()
 
             self.render_chat([[{"role": "user", "content": "warmup"}]], chat_params)
 
             elapsed = time.perf_counter() - start_time
-            logger.info("Chat template warmup completed in %.3fs", elapsed)
+            logger.debug("Chat template warmup completed in %.3fs", elapsed)
         except ChatTemplateResolutionError:
-            logger.info("This model does not support chat template.")
+            logger.debug("This model does not support chat template.")
         except Exception:
-            logger.exception("Chat template warmup failed")
+            logger.warning("Chat template warmup failed", exc_info=True)
 
         if self.mm_processor:
             from vllm.multimodal.processing import TimingContext
