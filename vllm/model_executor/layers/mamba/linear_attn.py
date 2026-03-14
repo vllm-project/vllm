@@ -30,6 +30,7 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateShapeCalculator,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.platforms import current_platform
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.linear_attn import LinearAttentionMetadata
@@ -38,7 +39,9 @@ from vllm.v1.attention.backends.linear_attn import LinearAttentionMetadata
 class MiniMaxText01RMSNormTP(CustomOp):
     name = "MiniMaxText01RMSNormTP"
 
-    def __init__(self, hidden_size: int, eps: float = 1e-6) -> None:
+    def __init__(
+        self, hidden_size: int, eps: float = 1e-6, max_tokens: int = 196608
+    ) -> None:
         super().__init__()
         self.tp_world = get_tensor_model_parallel_world_size()
         self.tp_rank = get_tensor_model_parallel_rank()
@@ -46,6 +49,17 @@ class MiniMaxText01RMSNormTP(CustomOp):
 
         self.weight.weight_loader = self.weight_loader
         self.variance_epsilon = eps
+
+        self._ar_workspace: torch.Tensor | None = None
+        if current_platform.is_cuda() and self.tp_world > 1:
+            from .ipc_minimax import get_allreduce_workspace
+
+            self._ar_workspace = get_allreduce_workspace(
+                self.tp_rank,
+                self.tp_world,
+                max_tokens=max_tokens,
+                process_group=get_tp_group().cpu_group,
+            )
 
     @staticmethod
     def weight_loader(
@@ -87,6 +101,21 @@ class MiniMaxText01RMSNormTP(CustomOp):
         q: torch.Tensor,
         k: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        if current_platform.is_cuda() and q_norm.tp_world > 1:
+            assert q_norm._ar_workspace is not None
+            assert q_norm.variance_epsilon == k_norm.variance_epsilon
+            return torch.ops._C.minimax_allreduce_rms_qk(
+                q,
+                k,
+                q_norm.weight,
+                k_norm.weight,
+                q_norm._ar_workspace,
+                q_norm.tp_rank,
+                q_norm.tp_world,
+                q_norm.variance_epsilon,
+                False,
+            )
+
         orig_dtype = q.dtype
         q = q.to(torch.float32)
         k = k.to(torch.float32)
@@ -101,83 +130,6 @@ class MiniMaxText01RMSNormTP(CustomOp):
         q = q.to(orig_dtype)
         k = k.to(orig_dtype)
         return q, k
-
-
-class MiniMaxText01RMSNormAR(nn.Module):
-    name = "MiniMaxText01RMSNormTP"
-
-    def __init__(self, max_token: int = 0) -> None:
-        super().__init__()
-        from .ipc_minimax import get_allreduce_workspace
-
-        self.tp_world = get_tensor_model_parallel_world_size()
-        self.tp_rank = get_tensor_model_parallel_rank()
-
-        self.workspace = get_allreduce_workspace(
-            self.tp_rank,
-            self.tp_world,
-            max_tokens=196608,
-            process_group=get_tp_group().cpu_group,
-        )
-
-    def forward(
-        self,
-        q_norm_weights: torch.Tensor,
-        k_norm_weights: torch.Tensor,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        eps: float = 1e-6,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        # orig_dtype = q.dtype
-        # q_1 = q.clone()
-        # k_1 = k.clone()
-        # q = q.to(torch.float32)
-        # k = k.to(torch.float32)
-        # q_var = q.pow(2).mean(dim=-1, keepdim=True)
-        # k_var = k.pow(2).mean(dim=-1, keepdim=True)
-        # if q_norm.tp_world > 1:
-        #     qk_var = torch.cat([q_var, k_var], dim=-1)
-        #     qk_var = tensor_model_parallel_all_reduce(qk_var) / q_norm.tp_world
-        #     q_var, k_var = qk_var.chunk(2, dim=-1)
-        # q = q * torch.rsqrt(q_var + q_norm.variance_epsilon) * q_norm.weight
-        # k = k * torch.rsqrt(k_var + k_norm.variance_epsilon) * k_norm.weight
-        # q = q.to(orig_dtype)
-        # k = k.to(orig_dtype)
-        # return q, k
-        #     std::vector<torch::Tensor> minimax_allreduce_rms_qk(
-        # torch::Tensor const& q, torch::Tensor const& k,
-        # torch::Tensor const& norm_weight_q, torch::Tensor const& norm_weight_k,
-        # torch::Tensor workspace, int64_t const rank, int64_t const nranks,
-        # double const eps, bool const trigger_completion_at_end_) {
-
-        """Fused Q+K RMS norm with allreduce. Returns (q_out, k_out)."""
-        out_list = torch.ops._C.minimax_allreduce_rms_qk(
-            q,
-            k,
-            q_norm_weights,
-            k_norm_weights,
-            self.workspace,
-            self.tp_rank,
-            self.tp_world,
-            eps,
-            False,
-        )
-        # torch.testing.assert_close(q, out_list[0], rtol=1e-2, atol=1e-2)
-        # torch.testing.assert_close(k, out_list[1], rtol=1e-2, atol=1e-2)
-        return (out_list[0], out_list[1])
-        # return (q,k)
-
-    # def forward(self,   q_norm: "MiniMaxText01RMSNormTP",
-    #     q: torch.Tensor)->torch.Tensor:
-    #     return torch.ops._C.minimax_allreduce_rms(
-    #         q,
-    #         q_norm.weight,
-    #         self.workspace,
-    #         self.tp_rank,
-    #         self.tp_world,
-    #         q_norm.variance_epsilon,
-    #         False,
-    #     )
 
 
 def clear_linear_attention_cache_for_new_sequences(
