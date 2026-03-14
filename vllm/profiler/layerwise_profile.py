@@ -252,7 +252,8 @@ class LayerwiseProfileResults(profile):
                 if cuda_time_us > 0:
                     logger.warning(
                         "cuda_time_us > 0 but total_cuda_time == 0, "
-                        "possible data inconsistency")
+                        "possible data inconsistency"
+                    )
                 return 0.0
             return (cuda_time_us / total_cuda_time) * 100
 
