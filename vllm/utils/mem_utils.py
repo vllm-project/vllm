@@ -97,7 +97,7 @@ class MemorySnapshot:
         # After `torch.accelerator.reset_peak_memory_stats()`,
         # `torch.accelerator.memory_reserved()` will keep growing, and only shrink
         # when we call `torch.accelerator.empty_cache()` or OOM happens.
-        self.torch_peak = current_platform.memory_stats(device).get(
+        self.torch_peak = torch.accelerator.memory_stats(device).get(
             "allocated_bytes.all.peak", 0
         )
 
@@ -243,7 +243,7 @@ def memory_profiling(
     The memory used for loading weights (a.) is directly given from the
     argument `weights_memory`.
 
-    The increase of `torch.cuda.memory_stats()["allocated_bytes.all.peak"]`
+    The increase of `torch.accelerator.memory_stats()["allocated_bytes.all.peak"]`
     during profiling gives (b.).
 
     The increase of `non_torch_memory` from creating the current vLLM instance
