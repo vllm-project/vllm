@@ -22,10 +22,10 @@ from typing import TYPE_CHECKING
 import torch
 from transformers import AutoModel
 
+from vllm.compilation.decorators import should_torch_compile_mm_encoder
 from vllm.config.utils import getattr_iter
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import SupportsMRoPE, SupportsMultiModal
-from vllm.model_executor.models.vision import should_torch_compile_mm_vit
 from vllm.multimodal import MultiModalKwargsItems
 from vllm.multimodal.inputs import (
     MultiModalDataDict,
@@ -270,7 +270,7 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
         # Skip SupportsMRoPE.__init__ and call the next class in MRO
         super(SupportsMRoPE, self).__init__(vllm_config=vllm_config, prefix=prefix)
         # Decorate the vision encoder model class to support torch compile if needed
-        if should_torch_compile_mm_vit(vllm_config):
+        if should_torch_compile_mm_encoder(vllm_config):
             encoder_cls = self._get_encoder_cls(
                 config=self.config,
                 dtype=self.model_config.dtype,
@@ -279,7 +279,7 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
             self._decorate_for_torch_compile(
                 cls=encoder_cls,
                 dynamic_arg_dims={"hidden_states": 1},
-                enable_if=should_torch_compile_mm_vit,
+                enable_if=should_torch_compile_mm_encoder,
             )
 
     def _get_encoder_cls(
