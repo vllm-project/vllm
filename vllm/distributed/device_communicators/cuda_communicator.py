@@ -6,7 +6,6 @@ import torch
 from torch.distributed import ProcessGroup
 
 import vllm.envs as envs
-from vllm.config import get_cached_compilation_config
 from vllm.distributed.device_communicators.all_reduce_utils import (
     should_nccl_symm_mem_allreduce,
 )
@@ -47,26 +46,16 @@ class CudaCommunicator(DeviceCommunicatorBase):
             use_custom_allreduce = False
             use_torch_symm_mem = False
             use_flashinfer_allreduce = False
-            use_aiter_allreduce = False
         else:
-            from vllm._aiter_ops import rocm_aiter_ops
             from vllm.distributed.parallel_state import _ENABLE_CUSTOM_ALL_REDUCE
-
-            fuse_allreduce_rms_enabled = (
-                get_cached_compilation_config().pass_config.fuse_allreduce_rms
-            )
 
             use_custom_allreduce = _ENABLE_CUSTOM_ALL_REDUCE
             use_torch_symm_mem = envs.VLLM_ALLREDUCE_USE_SYMM_MEM
             use_flashinfer_allreduce = envs.VLLM_ALLREDUCE_USE_FLASHINFER
-            use_aiter_allreduce = (
-                rocm_aiter_ops.is_enabled() and fuse_allreduce_rms_enabled
-            )
 
         self.use_custom_allreduce = use_custom_allreduce
         self.use_torch_symm_mem = use_torch_symm_mem
         self.use_flashinfer_allreduce = use_flashinfer_allreduce
-        self.use_aiter_allreduce = use_aiter_allreduce
         # lazy import to avoid documentation build error
         from vllm.distributed.device_communicators.custom_all_reduce import (
             CustomAllreduce,
@@ -103,16 +92,6 @@ class CudaCommunicator(DeviceCommunicatorBase):
 
         if self.use_flashinfer_allreduce and self.world_size > 1:
             self.fi_ar_comm = FlashInferAllReduce(
-                group=self.cpu_group,
-                device=self.device,
-            )
-
-        if self.use_aiter_allreduce and self.world_size > 1:
-            from aiter.dist.device_communicators.custom_all_reduce import (
-                CustomAllreduce as AiterCustomAllreduce,
-            )
-
-            self.aiter_ar_comm = AiterCustomAllreduce(
                 group=self.cpu_group,
                 device=self.device,
             )
@@ -208,17 +187,17 @@ class CudaCommunicator(DeviceCommunicatorBase):
             out = fi_ar_comm.all_reduce(input_)
             assert out is not None
             return out
-        aiter_ar_comm = self.aiter_ar_comm
-        if (
-            aiter_ar_comm is not None
-            and not aiter_ar_comm.disabled
-            and aiter_ar_comm.should_custom_ar(input_)
-        ):
-            out = aiter_ar_comm.custom_all_reduce(
-                input_, use_new=True, open_fp8_quant=False
-            )
-            assert out is not None
-            return out
+        # aiter_ar_comm = self.aiter_ar_comm
+        # if (
+        #     aiter_ar_comm is not None
+        #     and not aiter_ar_comm.disabled
+        #     and aiter_ar_comm.should_custom_ar(input_)
+        # ):
+        #     out = aiter_ar_comm.custom_all_reduce(
+        #         input_, use_new=True, open_fp8_quant=False
+        #     )
+        #     assert out is not None
+        #     return out
         ca_comm = self.ca_comm
         if (
             ca_comm is not None

@@ -635,80 +635,56 @@ def _rocm_aiter_rmsnorm_fused_dynamic_quant_fake(
 
 def _rocm_aiter_fused_allreduce_rmsnorm_impl(
     input_: torch.Tensor,
-    weight: torch.Tensor,
-    epsilon: float,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    from vllm.distributed import get_tp_group
-
-    group = get_tp_group()
-
-    device_comm = group.device_communicator
-    if device_comm is not None:
-        aiter_ar_comm = getattr(device_comm, "aiter_ar_comm", None)
-
-        if (
-            aiter_ar_comm is not None
-            and not aiter_ar_comm.disabled
-            and aiter_ar_comm.should_custom_ar(input_)
-            and hasattr(aiter_ar_comm, "custom_fused_ar_rms")
-        ):
-            total_bytes = input_.numel() * input_.element_size()
-            use_1stage = total_bytes <= 128 * 1024
-
-            out, res_out = aiter_ar_comm.custom_fused_ar_rms(
-                input_,
-                residual_inp=torch.zeros_like(input_),
-                weight=weight,
-                eps=epsilon,
-                use_1stage=use_1stage,
-            )
-            return out, res_out
-
-    # Fallback: launch all-reduce and rmsnorm separately
-    ar_out = group._all_reduce_out_place(input_)
-
-    out = _rocm_aiter_rms_norm_impl(ar_out, weight, epsilon)
-    return ar_out, out
-
-
-def _rocm_aiter_fused_allreduce_rmsnorm_fake(
-    input_: torch.Tensor,
-    weight: torch.Tensor,
-    epsilon: float,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    return torch.empty_like(input_), torch.empty_like(input_)
-
-
-def _rocm_aiter_fused_allreduce_add_rmsnorm_impl(
-    input_: torch.Tensor,
-    weight: torch.Tensor,
-    epsilon: float,
     residual: torch.Tensor,
+    weight: torch.Tensor,
+    epsilon: float,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    from aiter import fused_allreduce_rmsnorm
+
     from vllm.distributed import get_tp_group
+    from vllm.distributed.device_communicators.aiter_all_reduce import (
+        get_aiter_allreduce,
+    )
 
     group = get_tp_group()
 
-    device_comm = group.device_communicator
-    if device_comm is not None:
-        aiter_ar_comm = getattr(device_comm, "aiter_ar_comm", None)
+    out = torch.empty_like(input_)
+    residual_out = torch.empty_like(input_)
 
-        if (
-            aiter_ar_comm is not None
-            and not aiter_ar_comm.disabled
-            and aiter_ar_comm.should_custom_ar(input_)
-            and hasattr(aiter_ar_comm, "custom_fused_ar_rms")
-        ):
-            total_bytes = input_.numel() * input_.element_size()
-            use_1stage = total_bytes <= 128 * 1024
-            out, res_out = aiter_ar_comm.custom_fused_ar_rms(
-                input_,
-                residual_inp=residual,
-                weight=weight,
-                eps=epsilon,
-                use_1stage=use_1stage,
-            )
-            return out, res_out
+    aiter_ar = get_aiter_allreduce()
+    device_comm = group.device_communicator
+
+    if (
+        aiter_ar is not None
+        and device_comm is not None
+        and not aiter_ar.disabled
+        and aiter_ar.should_custom_ar(input_)
+    ):
+        if aiter_ar._IS_CAPTURING:
+            if torch.cuda.is_current_stream_capturing():
+                # Static CUDA graph buffer — already registered, pass directly
+                reg_buffer = None
+            else:
+                # Warmup run before graph capture — return dummy
+                return out, residual_out
+        else:
+            # Eager mode — use aiter's pre-registered staging buffer
+            reg_buffer = aiter_ar.input_buffer
+
+        total_bytes = input_.numel() * input_.element_size()
+        use_1stage = total_bytes <= 128 * 1024
+        fused_allreduce_rmsnorm(
+            aiter_ar._ptr,
+            input_,
+            residual,
+            residual_out,
+            out,
+            weight,
+            epsilon,
+            reg_buffer,
+            use_1stage,
+        )
+        return out, residual_out
 
     # Fallback: launch all-reduce and rmsnorm separately
     ar_out = group._all_reduce_out_place(input_)
@@ -720,11 +696,11 @@ def _rocm_aiter_fused_allreduce_add_rmsnorm_impl(
     return out, residual_out
 
 
-def _rocm_aiter_fused_allreduce_add_rmsnorm_fake(
+def _rocm_aiter_fused_allreduce_rmsnorm_fake(
     input_: torch.Tensor,
+    residual: torch.Tensor,
     weight: torch.Tensor,
     epsilon: float,
-    residual: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     return torch.empty_like(input_), torch.empty_like(residual)
 
@@ -1096,7 +1072,7 @@ class rocm_aiter_ops:
     # TODO: Consolidate under _LINEAR_ENABLED
     _TRITON_UNQUANT_GEMM = envs.VLLM_ROCM_USE_AITER_TRITON_GEMM
 
-    _AR_MAX_SIZE = 8192 * 1024 * 8
+    _AR_MAX_SIZE = 8192 * 1024 * 8 * 2
 
     @classmethod
     def refresh_env_variables(cls):
@@ -1459,12 +1435,6 @@ class rocm_aiter_ops:
                 fake_impl=_rocm_aiter_fused_allreduce_rmsnorm_fake,
             )
 
-            direct_register_custom_op(
-                op_name="rocm_aiter_fused_allreduce_add_rmsnorm",
-                op_func=_rocm_aiter_fused_allreduce_add_rmsnorm_impl,
-                fake_impl=_rocm_aiter_fused_allreduce_add_rmsnorm_fake,
-            )
-
             _OPS_REGISTERED = True
 
     @staticmethod
@@ -1514,10 +1484,6 @@ class rocm_aiter_ops:
     @staticmethod
     def get_fused_allreduce_rmsnorm_op() -> OpOverload:
         return torch.ops.vllm.rocm_aiter_fused_allreduce_rmsnorm.default
-
-    @staticmethod
-    def get_fused_allreduce_add_rmsnorm_op() -> OpOverload:
-        return torch.ops.vllm.rocm_aiter_fused_allreduce_add_rmsnorm.default
 
     @staticmethod
     def rms_norm(

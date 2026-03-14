@@ -14,6 +14,11 @@ from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig
 from vllm.config.utils import Range
 from vllm.distributed import get_tp_group, tensor_model_parallel_all_reduce
+from vllm.distributed.device_communicators.aiter_all_reduce import (
+    destroy_aiter_allreduce,
+    initialize_aiter_allreduce,
+)
+from vllm.distributed.device_communicators.custom_all_reduce import CustomAllreduce
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -893,8 +898,10 @@ class AiterAllreduceFusedRMSNormPattern:
         def replacement(
             input: torch.Tensor, weight: torch.Tensor
         ) -> tuple[torch.Tensor, torch.Tensor]:
+            residual = torch.empty_like(input)
             allreduce = self.FUSED_AR_RMSNORM_OP(
                 input_=input,
+                residual=residual,
                 weight=weight,
                 epsilon=self.epsilon,
             )
@@ -906,7 +913,7 @@ class AiterAllreduceFusedRMSNormPattern:
 
 
 class AiterAllreduceFusedAddRMSNormPattern:
-    FUSED_AR_RMSNORM_OP = rocm_aiter_ops.get_fused_allreduce_add_rmsnorm_op()
+    FUSED_AR_RMSNORM_OP = rocm_aiter_ops.get_fused_allreduce_rmsnorm_op()
 
     def __init__(
         self, epsilon: float, dtype: torch.dtype, use_aiter_rmsnorm: bool = True
@@ -937,9 +944,9 @@ class AiterAllreduceFusedAddRMSNormPattern:
         ) -> tuple[torch.Tensor, torch.Tensor]:
             allreduce = self.FUSED_AR_RMSNORM_OP(
                 input_=input,
+                residual=residual,
                 weight=weight,
                 epsilon=self.epsilon,
-                residual=residual,
             )
             return allreduce[0], allreduce[1]
 
@@ -963,20 +970,30 @@ class RocmAiterAllReduceFusionPass(VllmPatternMatcherPass):
             )
             return
 
+        device_comm = get_tp_group().device_communicator
+        if device_comm is None:
+            logger.warning_once("Device communicator is required.")
+            return
+
+        ca_comm = getattr(device_comm, "ca_comm", None)
+        if ca_comm is None:
+            logger.warning_once("Custom Allreduce is required.")
+            return
+        self.ca_comm = ca_comm
+
+        assert isinstance(ca_comm, CustomAllreduce)
         hidden_dim = config.model_config.get_hidden_size()
         max_size = rocm_aiter_ops.custom_allreduce_max_size(self.tp_size)
-
         if max_size is None:
-            # AITER doesn't support current world size
-            logger.warning(
-                "AITER allreduce fusion is not supported for world size %s"
-                " or max size is not provided",
-                self.tp_size,
-            )
+            logger.warning_once("max size is required.")
             return
+
         element_size = torch.tensor([], dtype=self.model_dtype).element_size()
         self.max_token_num = max_size // (hidden_dim * element_size)
 
+        rank = get_tensor_model_parallel_rank()
+        group = get_tp_group().cpu_group
+        initialize_aiter_allreduce(self.tp_size, rank, max_size, group, self.device)
         self.patterns: PatternMatcherPass = PatternMatcherPass(
             pass_name="rocm_aiter_allreduce_rmsnorm_fusion_pass"
         )
@@ -1021,6 +1038,8 @@ class RocmAiterAllReduceFusionPass(VllmPatternMatcherPass):
     def __del__(self) -> None:
         if getattr(self, "disabled", True):
             return
+        with contextlib.suppress(Exception):
+            destroy_aiter_allreduce()
 
     def uuid(self) -> str:
         return VllmInductorPass.hash_source(
