@@ -248,6 +248,7 @@ class XPUPlatform(Platform):
     def get_current_memory_usage(
         cls, device: torch.types.Device | None = None
     ) -> float:
+        torch.xpu.empty_cache()
         torch.xpu.reset_peak_memory_stats(device)
         return torch.xpu.max_memory_allocated(device)
 
