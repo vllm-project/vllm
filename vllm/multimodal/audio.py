@@ -171,17 +171,31 @@ def resample_audio_pyav(
     orig_sr_int = int(round(orig_sr))
     target_sr_int = int(round(target_sr))
 
+    if orig_sr_int == target_sr_int:
+        return audio
+
+    expected_len = int(math.ceil(len(audio) * target_sr_int / orig_sr_int))
+
+    # from_ndarray expects shape (channels, samples) for planar formats.
+    # libswresample requires a minimum number of input samples to produce
+    # output frames; pad short inputs with zeros so we always get output,
+    # then trim to the expected output length.
+    _MIN_SAMPLES = 1024
     audio_f32 = np.asarray(audio, dtype=np.float32)
+    if len(audio_f32) < _MIN_SAMPLES:
+        audio_f32 = np.pad(audio_f32, (0, _MIN_SAMPLES - len(audio_f32)))
+    audio_f32 = audio_f32.reshape(1, -1)
 
     resampler = av.AudioResampler(format="fltp", layout="mono", rate=target_sr_int)
 
     frame = av.AudioFrame.from_ndarray(audio_f32, format="fltp", layout="mono")
     frame.sample_rate = orig_sr_int
 
-    out_frames = resampler.resample(frame)
+    out_frames = list(resampler.resample(frame))
+    out_frames += list(resampler.resample(None))  # flush buffered samples
 
-    result = np.concatenate([f.to_ndarray() for f in out_frames])
-    return result
+    result = np.concatenate([f.to_ndarray() for f in out_frames], axis=1).squeeze(0)
+    return result[:expected_len]
 
 
 def resample_audio_scipy(

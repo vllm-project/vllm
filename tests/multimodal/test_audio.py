@@ -14,6 +14,7 @@ from vllm.multimodal.audio import (
     AudioSpec,
     ChannelReduction,
     normalize_audio,
+    resample_audio_pyav,
     resample_audio_scipy,
     split_audio,
 )
@@ -25,9 +26,9 @@ def dummy_audio():
 
 
 def test_resample_audio_pyav(dummy_audio):
-    out_down = resample_audio_scipy(dummy_audio, orig_sr=4, target_sr=2)
-    out_up = resample_audio_scipy(dummy_audio, orig_sr=2, target_sr=4)
-    out_same = resample_audio_scipy(dummy_audio, orig_sr=4, target_sr=4)
+    out_down = resample_audio_pyav(dummy_audio, orig_sr=4, target_sr=2)
+    out_up = resample_audio_pyav(dummy_audio, orig_sr=2, target_sr=4)
+    out_same = resample_audio_pyav(dummy_audio, orig_sr=4, target_sr=4)
 
     assert len(out_down) == 3
     assert len(out_up) == 10
@@ -39,6 +40,7 @@ def test_resample_audio_scipy(dummy_audio):
     out_up = resample_audio_scipy(dummy_audio, orig_sr=2, target_sr=4)
     out_same = resample_audio_scipy(dummy_audio, orig_sr=4, target_sr=4)
 
+    print(out_down)
     assert len(out_down) == 3
     assert len(out_up) == 10
     assert np.all(out_same == dummy_audio)
