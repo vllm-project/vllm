@@ -84,9 +84,15 @@ def create_common_attn_metadata(
         block_table_tensor = torch.arange(
             num_blocks, dtype=torch.int32, device=device
         ).view(batch_spec.batch_size, max_blocks)
-        slot_mapping = torch.arange(num_tokens, dtype=torch.int64, device=device).view(
-            num_tokens
-        )
+        # Compute slot_mapping consistent with block_table:
+        slots = []
+        for i in range(batch_spec.batch_size):
+            context_len = batch_spec.seq_lens[i] - batch_spec.query_lens[i]
+            for j in range(batch_spec.query_lens[i]):
+                global_pos = context_len + j
+                physical_block = block_table_tensor[i, global_pos // block_size].item()
+                slots.append(physical_block * block_size + global_pos % block_size)
+        slot_mapping = torch.tensor(slots, dtype=torch.int64, device=device)
     else:
         block_table_tensor = torch.randint(
             0,
