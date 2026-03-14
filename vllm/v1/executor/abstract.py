@@ -341,10 +341,14 @@ class Executor(ABC):
         """Acquire atomic signals for all GPUs managed by this executor."""
         # Get all associated physical GPU IDs
         p_cfg = self.parallel_config
-        device_ids = p_cfg.device_ids if hasattr(p_cfg, "device_ids") else []
+        device_ids = self.device_config.device_ids
         if not device_ids:
-            # Fallback to single device from rank calculation
-            device_ids = [p_cfg.rank // p_cfg.tensor_parallel_size]
+            logger.warning(
+                "Could not determine device IDs for GPU access lock. "
+                "This may cause issues in multi-instance or multi-GPU scenarios. "
+                "Falling back to locking GPU 0."
+            )
+            device_ids = [0]
 
         sorted_ids = sorted(list(set(device_ids)))
         my_pid = os.getpid()
