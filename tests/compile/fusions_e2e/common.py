@@ -92,7 +92,8 @@ FUSION_LOG_PATTERNS: dict[str, re.Pattern] = {
         r"qk_norm_rope_fusion.py:\d+] Fused QK Norm\+RoPE on (\d+) sites"
     ),
     "attn_quant_fusion": re.compile(
-        r"attn_quant_fusion.py:\d+] Fused quant onto (\d+) (?:MLA )?attention nodes"
+        r"(?:mla_)?attn_quant_fusion.py:\d+] "
+        r"Fused quant onto (\d+) (?:MLA )?attention nodes"
     ),
     "ar_rms_fusion": re.compile(
         r"allreduce_rms_fusion.py:\d+] Replaced (\d+) patterns"
