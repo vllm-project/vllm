@@ -8,7 +8,7 @@ import regex as re
 # Regex: match `torch.cuda.xxx` but allow `torch.accelerator.xxx`
 # --------------------------------------------------------------------------- #
 _TORCH_CUDA_PATTERNS = [
-    r"\btorch\.cuda\.(empty_cache|synchronize|device_count|current_device|memory_reserved|memory_allocated|max_memory_allocated|set_device|device\()\b",
+    r"\btorch\.cuda\.(empty_cache|synchronize|device_count|current_device|memory_reserved|memory_allocated|max_memory_allocated|max_memory_reserved|set_device|device\()\b",
     r"\bwith\storch\.cuda\.device\b",
 ]
 
