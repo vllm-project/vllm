@@ -25,7 +25,6 @@ from vllm.entrypoints.openai.engine.protocol import (
 )
 from vllm.entrypoints.openai.models.protocol import LoRAModulePath
 from vllm.logger import current_formatter_type, init_logger
-from vllm.platforms import current_platform
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 logger = init_logger(__name__)
@@ -178,6 +177,8 @@ def get_max_tokens(
     default_sampling_params: dict,
     override_max_tokens: int | None = None,
 ) -> int:
+    from vllm.platforms import current_platform
+
     if max_model_len < input_length:
         raise ValueError(
             f"Input length ({input_length}) exceeds model's maximum "
