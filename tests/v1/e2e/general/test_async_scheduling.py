@@ -14,8 +14,8 @@ from vllm.platforms import current_platform
 from vllm.sampling_params import StructuredOutputsParams
 from vllm.v1.metrics.reader import Metric
 
-from ...conftest import VllmRunner
-from ...models.utils import check_outputs_equal
+from ....conftest import VllmRunner
+from ....models.utils import check_outputs_equal
 
 MODEL = "Qwen/Qwen3-0.6B"
 MTP_MODEL = "meta-llama/Llama-3.2-1B-Instruct"
