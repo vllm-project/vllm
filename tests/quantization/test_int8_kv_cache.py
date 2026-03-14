@@ -46,7 +46,7 @@ SEEDS = [0]
 def _quantize_ref(
     data: torch.Tensor, scale: torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Reference per-tensor INT8 quantization: q = clamp(round(data/scale), -128, 127)."""
+    """Reference per-tensor INT8 quantization."""
     q = (data.float() / scale.float()).round().clamp(-128, 127).to(torch.int8)
     return q
 
@@ -144,8 +144,14 @@ def test_reshape_and_cache_int8_per_tensor(
 
     # Run kernel
     triton_reshape_and_cache_flash(
-        key, value, key_cache, value_cache, slot_mapping,
-        kv_cache_dtype="int8", k_scale=k_scale, v_scale=v_scale,
+        key,
+        value,
+        key_cache,
+        value_cache,
+        slot_mapping,
+        kv_cache_dtype="int8",
+        k_scale=k_scale,
+        v_scale=v_scale,
     )
 
     # Verify: read back from cache and compare to reference
@@ -211,15 +217,21 @@ def test_reshape_and_cache_int8_per_head(
 
     # Per-head scales: [num_heads]
     k_scales = (
-        key.float().abs().amax(dim=(0, 2)) / 127.0
-    ).clamp(min=1e-6).to(torch.float32)
+        (key.float().abs().amax(dim=(0, 2)) / 127.0).clamp(min=1e-6).to(torch.float32)
+    )
     v_scales = (
-        value.float().abs().amax(dim=(0, 2)) / 127.0
-    ).clamp(min=1e-6).to(torch.float32)
+        (value.float().abs().amax(dim=(0, 2)) / 127.0).clamp(min=1e-6).to(torch.float32)
+    )
 
     triton_reshape_and_cache_flash(
-        key, value, key_cache, value_cache, slot_mapping,
-        kv_cache_dtype="int8", k_scale=k_scales, v_scale=v_scales,
+        key,
+        value,
+        key_cache,
+        value_cache,
+        slot_mapping,
+        kv_cache_dtype="int8",
+        k_scale=k_scales,
+        v_scale=v_scales,
     )
 
     # Reference
@@ -272,12 +284,8 @@ def test_reshape_and_cache_int8_per_token(
     value_cache = torch.zeros(
         num_blocks, block_size, num_heads, head_size, dtype=torch.int8
     )
-    k_scale_cache = torch.ones(
-        num_blocks, block_size, num_heads, dtype=torch.float32
-    )
-    v_scale_cache = torch.ones(
-        num_blocks, block_size, num_heads, dtype=torch.float32
-    )
+    k_scale_cache = torch.ones(num_blocks, block_size, num_heads, dtype=torch.float32)
+    v_scale_cache = torch.ones(num_blocks, block_size, num_heads, dtype=torch.float32)
 
     num_slots = block_size * num_blocks
     slot_mapping = torch.tensor(
@@ -285,8 +293,13 @@ def test_reshape_and_cache_int8_per_token(
     )
 
     triton_reshape_and_cache_flash_int8_per_token(
-        key, value, key_cache, value_cache,
-        k_scale_cache, v_scale_cache, slot_mapping,
+        key,
+        value,
+        key_cache,
+        value_cache,
+        k_scale_cache,
+        v_scale_cache,
+        slot_mapping,
     )
 
     # Reference
@@ -355,8 +368,13 @@ def test_int8_per_token_round_trip_accuracy(
     slot_mapping = torch.arange(num_tokens, dtype=torch.long)
 
     triton_reshape_and_cache_flash_int8_per_token(
-        key, value, key_cache, value_cache,
-        k_scale_cache, v_scale_cache, slot_mapping,
+        key,
+        value,
+        key_cache,
+        value_cache,
+        k_scale_cache,
+        v_scale_cache,
+        slot_mapping,
     )
 
     # Dequantize
@@ -404,29 +422,58 @@ def test_int8_per_token_negative_slot_skipped():
     key = torch.randn(num_tokens, num_heads, head_size, dtype=torch.bfloat16)
     value = torch.randn(num_tokens, num_heads, head_size, dtype=torch.bfloat16)
 
-    key_cache = torch.zeros(num_blocks, block_size, num_heads, head_size, dtype=torch.int8)
-    value_cache = torch.zeros(num_blocks, block_size, num_heads, head_size, dtype=torch.int8)
-    k_scale_cache = torch.ones(num_blocks, block_size, num_heads, dtype=torch.float32)
-    v_scale_cache = torch.ones(num_blocks, block_size, num_heads, dtype=torch.float32)
+    key_cache = torch.zeros(
+        num_blocks,
+        block_size,
+        num_heads,
+        head_size,
+        dtype=torch.int8,
+    )
+    value_cache = torch.zeros(
+        num_blocks,
+        block_size,
+        num_heads,
+        head_size,
+        dtype=torch.int8,
+    )
+    k_scale_cache = torch.ones(
+        num_blocks,
+        block_size,
+        num_heads,
+        dtype=torch.float32,
+    )
+    v_scale_cache = torch.ones(
+        num_blocks,
+        block_size,
+        num_heads,
+        dtype=torch.float32,
+    )
 
     # Mix valid and negative slot mappings
     slot_mapping = torch.tensor([0, -1, 1, -1], dtype=torch.long)
 
     key_cache_before = key_cache.clone()
-    value_cache_before = value_cache.clone()
+    val_cache_before = value_cache.clone()
 
     triton_reshape_and_cache_flash_int8_per_token(
-        key, value, key_cache, value_cache,
-        k_scale_cache, v_scale_cache, slot_mapping,
+        key,
+        value,
+        key_cache,
+        value_cache,
+        k_scale_cache,
+        v_scale_cache,
+        slot_mapping,
     )
 
     # Slots 0 and 1 should have been written (tokens 0 and 2)
     assert not torch.equal(key_cache[0, 0], key_cache_before[0, 0])
     assert not torch.equal(key_cache[0, 1], key_cache_before[0, 1])
+    assert not torch.equal(value_cache[0, 0], val_cache_before[0, 0])
 
     # All other slots should be unchanged
     assert torch.equal(key_cache[0, 2:], key_cache_before[0, 2:])
     assert torch.equal(key_cache[1], key_cache_before[1])
+    assert torch.equal(value_cache[0, 2:], val_cache_before[0, 2:])
 
 
 # ===========================================================================
@@ -604,22 +651,35 @@ def test_triton_unified_attention_int8_per_tensor(
     scale = head_size**-0.5
     num_blocks = 2048
 
-    query = torch.randn(sum(query_lens), num_query_heads, head_size, dtype=torch.bfloat16)
+    query = torch.randn(
+        sum(query_lens),
+        num_query_heads,
+        head_size,
+        dtype=torch.bfloat16,
+    )
 
     # Create bf16 KV cache for reference
     key_cache_bf16 = torch.randn(
-        num_blocks, block_size, num_kv_heads, head_size, dtype=torch.bfloat16
+        num_blocks,
+        block_size,
+        num_kv_heads,
+        head_size,
+        dtype=torch.bfloat16,
     )
     value_cache_bf16 = torch.randn_like(key_cache_bf16)
 
     # Quantize KV cache to INT8 with per-tensor scale
     k_absmax = key_cache_bf16.float().abs().max()
     v_absmax = value_cache_bf16.float().abs().max()
-    k_scale = (k_absmax / 127.0).clamp(min=1e-6).to(torch.float32)
-    v_scale = (v_absmax / 127.0).clamp(min=1e-6).to(torch.float32)
+    k_scale = (k_absmax / 127.0).clamp(min=1e-6).float()
+    v_scale = (v_absmax / 127.0).clamp(min=1e-6).float()
 
-    key_cache_int8 = (key_cache_bf16.float() / k_scale).round().clamp(-128, 127).to(torch.int8)
-    value_cache_int8 = (value_cache_bf16.float() / v_scale).round().clamp(-128, 127).to(torch.int8)
+    key_cache_int8 = (
+        (key_cache_bf16.float() / k_scale).round().clamp(-128, 127).to(torch.int8)
+    )
+    value_cache_int8 = (
+        (value_cache_bf16.float() / v_scale).round().clamp(-128, 127).to(torch.int8)
+    )
 
     # Dequantized reference (what the kernel should effectively use)
     key_cache_deq = key_cache_int8.float() * k_scale
@@ -745,26 +805,41 @@ def test_triton_unified_attention_int8_per_token_scale(
     scale = head_size**-0.5
     num_blocks = 2048
 
-    query = torch.randn(sum(query_lens), num_query_heads, head_size, dtype=torch.bfloat16)
+    query = torch.randn(
+        sum(query_lens),
+        num_query_heads,
+        head_size,
+        dtype=torch.bfloat16,
+    )
 
     # Create bf16 KV cache
     key_cache_bf16 = torch.randn(
-        num_blocks, block_size, num_kv_heads, head_size, dtype=torch.bfloat16
+        num_blocks,
+        block_size,
+        num_kv_heads,
+        head_size,
+        dtype=torch.bfloat16,
     )
     value_cache_bf16 = torch.randn_like(key_cache_bf16)
 
-    # Per-(token, head) quantization: scale for each (block, slot, head)
-    k_absmax = key_cache_bf16.float().abs().amax(dim=-1)  # [num_blocks, block_size, num_kv_heads]
+    # Per-(token, head) quantization: scale per (block, slot, head)
+    k_absmax = key_cache_bf16.float().abs().amax(dim=-1)
     v_absmax = value_cache_bf16.float().abs().amax(dim=-1)
     k_scale_cache = (k_absmax / 127.0).clamp(min=1e-6).to(torch.float32)
     v_scale_cache = (v_absmax / 127.0).clamp(min=1e-6).to(torch.float32)
 
     key_cache_int8 = (
-        key_cache_bf16.float() / k_scale_cache.unsqueeze(-1)
-    ).round().clamp(-128, 127).to(torch.int8)
+        (key_cache_bf16.float() / k_scale_cache.unsqueeze(-1))
+        .round()
+        .clamp(-128, 127)
+        .to(torch.int8)
+    )
     value_cache_int8 = (
-        value_cache_bf16.float() / v_scale_cache.unsqueeze(-1)
-    ).round().clamp(-128, 127).to(torch.int8)
+        (value_cache_bf16.float() / v_scale_cache.unsqueeze(-1))
+        .round()
+        .clamp(-128, 127)
+        .to(torch.int8)
+    )
 
     # Dequantized reference
     key_cache_deq = key_cache_int8.float() * k_scale_cache.unsqueeze(-1)
