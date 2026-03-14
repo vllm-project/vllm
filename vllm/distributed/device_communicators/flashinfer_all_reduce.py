@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+import atexit
 import torch
 import torch.distributed as dist
 from torch.distributed import ProcessGroup
@@ -139,11 +140,20 @@ def destroy_fi_ar_workspace():
         _fi_ar_quant_workspace is not None
         and _fi_ar_quant_workspace is not _fi_ar_workspace
     ):
-        _fi_ar_quant_workspace.destroy()
+        try:
+            _fi_ar_quant_workspace.destroy()
+        except Exception:
+            pass
     _fi_ar_quant_workspace = None
     if _fi_ar_workspace is not None:
-        _fi_ar_workspace.destroy()
+        try:
+            _fi_ar_workspace.destroy()
+        except Exception:
+            pass
         _fi_ar_workspace = None
+
+
+atexit.register(destroy_fi_ar_workspace)
 
 
 class FlashInferAllReduce:
