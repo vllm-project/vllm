@@ -84,8 +84,8 @@ def create_lora_capture_hook(
     """Create a hook to set up LoRA state before each cudagraph capture."""
     if lora_config is None:
         return
+
     def hook(num_active_loras: int, num_reqs: int, num_tokens: int) -> None:
-   
         num_scheduled = np.full(num_reqs, num_tokens // num_reqs, dtype=np.int32)
         num_scheduled[-1] += num_tokens % num_reqs
         with runner.maybe_select_dummy_loras(
@@ -93,7 +93,7 @@ def create_lora_capture_hook(
         ):
             pass
 
-    return hook 
+    return hook
 
 
 def activate_loras_for_batch(
