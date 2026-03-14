@@ -14,7 +14,7 @@ from vllm.entrypoints.openai.speech_to_text.protocol import (
 )
 from vllm.entrypoints.openai.speech_to_text.speech_to_text import OpenAISpeechToText
 
-from ...utils import RemoteOpenAIServer
+from ...utils import ROCM_ENV_OVERRIDES, ROCM_EXTRA_ARGS, RemoteOpenAIServer
 from .conftest import add_attention_backend
 
 MISTRAL_FORMAT_ARGS = [
@@ -27,12 +27,55 @@ MISTRAL_FORMAT_ARGS = [
 ]
 
 
+async def transcribe_and_check(
+    client,
+    model_name: str,
+    file,
+    *,
+    language: str,
+    expected_text: str,
+    expected_seconds: int | None = None,
+    case_sensitive: bool = False,
+):
+    """Run a transcription request and assert the output contains
+    *expected_text* and optionally that usage reports *expected_seconds*.
+
+    Provides detailed failure messages with the actual transcription output.
+    """
+    transcription = await client.audio.transcriptions.create(
+        model=model_name,
+        file=file,
+        language=language,
+        response_format="text",
+        temperature=0.0,
+    )
+    out = json.loads(transcription)
+    out_text = out["text"]
+    out_usage = out["usage"]
+
+    if case_sensitive:
+        assert expected_text in out_text, (
+            f"Expected {expected_text!r} in transcription output, got: {out_text!r}"
+        )
+    else:
+        assert expected_text.lower() in out_text.lower(), (
+            f"Expected {expected_text!r} (case-insensitive) in transcription "
+            f"output, got: {out_text!r}"
+        )
+
+    if expected_seconds is not None:
+        assert out_usage["seconds"] == expected_seconds, (
+            f"Expected {expected_seconds}s of audio, "
+            f"got {out_usage['seconds']}s. Full usage: {out_usage!r}"
+        )
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "model_name", ["mistralai/Voxtral-Mini-3B-2507", "Qwen/Qwen3-ASR-0.6B"]
 )
 async def test_basic_audio(mary_had_lamb, model_name, rocm_aiter_fa_attention):
-    server_args = ["--enforce-eager"]
+    server_args = ["--enforce-eager", *ROCM_EXTRA_ARGS]
 
     if model_name.startswith("mistralai"):
         server_args += MISTRAL_FORMAT_ARGS
@@ -40,20 +83,18 @@ async def test_basic_audio(mary_had_lamb, model_name, rocm_aiter_fa_attention):
     add_attention_backend(server_args, rocm_aiter_fa_attention)
 
     # Based on https://github.com/openai/openai-cookbook/blob/main/examples/Whisper_prompting_guide.ipynb.
-    with RemoteOpenAIServer(model_name, server_args) as remote_server:
+    with RemoteOpenAIServer(
+        model_name, server_args, env_dict=ROCM_ENV_OVERRIDES
+    ) as remote_server:
         client = remote_server.get_async_client()
-        transcription = await client.audio.transcriptions.create(
-            model=model_name,
-            file=mary_had_lamb,
+        await transcribe_and_check(
+            client,
+            model_name,
+            mary_had_lamb,
             language="en",
-            response_format="text",
-            temperature=0.0,
+            expected_text="Mary had a little lamb",
+            expected_seconds=16,
         )
-        out = json.loads(transcription)
-        out_text = out["text"]
-        out_usage = out["usage"]
-        assert "Mary had a little lamb" in out_text
-        assert out_usage["seconds"] == 16, out_usage["seconds"]
 
 
 @pytest.mark.asyncio
@@ -82,20 +123,18 @@ async def test_basic_audio_with_lora(mary_had_lamb, rocm_aiter_fa_attention):
     add_attention_backend(server_args, rocm_aiter_fa_attention)
 
     # Based on https://github.com/openai/openai-cookbook/blob/main/examples/Whisper_prompting_guide.ipynb.
-    with RemoteOpenAIServer(model_name, server_args) as remote_server:
+    with RemoteOpenAIServer(
+        model_name, server_args, env_dict=ROCM_ENV_OVERRIDES
+    ) as remote_server:
         client = remote_server.get_async_client()
-        transcription = await client.audio.transcriptions.create(
-            model=lora_model_name,
-            file=mary_had_lamb,
+        await transcribe_and_check(
+            client,
+            lora_model_name,
+            mary_had_lamb,
             language="en",
-            response_format="text",
-            temperature=0.0,
+            expected_text="mary had a little lamb",
+            expected_seconds=16,
         )
-    out = json.loads(transcription)
-    out_text = out["text"]
-    out_usage = out["usage"]
-    assert "mary had a little lamb" in out_text
-    assert out_usage["seconds"] == 16, out_usage["seconds"]
 
 
 @pytest.mark.asyncio
@@ -105,23 +144,24 @@ async def test_basic_audio_with_lora(mary_had_lamb, rocm_aiter_fa_attention):
 async def test_basic_audio_foscolo(foscolo, rocm_aiter_fa_attention, model_name):
     # Gemma accuracy on some of the audio samples we use is particularly bad,
     # hence we use a different one here. WER is evaluated separately.
-    server_args = ["--enforce-eager"]
+    server_args = ["--enforce-eager", *ROCM_EXTRA_ARGS]
 
     add_attention_backend(server_args, rocm_aiter_fa_attention)
 
     with RemoteOpenAIServer(
-        model_name, server_args, max_wait_seconds=480
+        model_name,
+        server_args,
+        max_wait_seconds=480,
+        env_dict=ROCM_ENV_OVERRIDES,
     ) as remote_server:
         client = remote_server.get_async_client()
-        transcription = await client.audio.transcriptions.create(
-            model=model_name,
-            file=foscolo,
+        await transcribe_and_check(
+            client,
+            model_name,
+            foscolo,
             language="it",
-            response_format="text",
-            temperature=0.0,
+            expected_text="ove il mio corpo fanciulletto giacque",
         )
-        out = json.loads(transcription)["text"]
-        assert "ove il mio corpo fanciulletto giacque" in out
 
 
 def _build_mock_request_output(
