@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import contextlib
 import os
 import socket
 import tempfile
@@ -330,15 +329,25 @@ class Executor(ABC):
             base_dir = Path(tmp_dir)
 
         sig_dir = base_dir / "vllm_signals"
-        with contextlib.suppress(Exception):
-            sig_dir.mkdir(parents=True, exist_ok=True)
-            if os.name != "nt":
-                os.chmod(sig_dir, 0o777)
 
+        try:
+            # 0o1777 sets the sticky bit,
+            # so only the owner can delete their signal files.
+            mode = 0o1777
+            sig_dir.mkdir(mode=mode, parents=True, exist_ok=True)
+            if os.name != "nt":
+                os.chmod(sig_dir, mode)
+        except OSError as e:
+            logger.warning(
+                "Failed to set permissions on signal directory %s. "
+                "GPU VMM serialization may be affected. Error: %s",
+                sig_dir,
+                e,
+            )
         return sig_dir / f"vmm_{hostname}_gpu_{device_id}.signal"
 
     def _wait_and_acquire_gpu_access(self, signal_path: Path):
-        """Atomic acquire with stale process detection to prevent deadlocks."""
+        """Atomic acquire with stale process detection and error handling."""
         my_pid = os.getpid()
         while True:
             try:
@@ -350,26 +359,40 @@ class Executor(ABC):
             except FileExistsError:
                 try:
                     with open(signal_path) as f:
-                        owner_pid = int(f.read().strip())
+                        content = f.read().strip()
+                        owner_pid = int(content) if content else -1
+
                     if owner_pid == my_pid:
                         return
+
                     os.kill(owner_pid, 0)
                 except (ProcessLookupError, ValueError, OSError):
-                    with contextlib.suppress(Exception):
+                    try:
                         signal_path.unlink(missing_ok=True)
-                    continue
+                        continue
+                    except OSError as e:
+                        logger.error(
+                            "Failed to remove stale signal file %s: %s. "
+                            "This may lead to a deadlock.",
+                            signal_path,
+                            e,
+                        )
+                        time.sleep(1.0)
+                        continue
 
                 logger.info("GPU VMM busy (Owner: %d), retrying...", owner_pid)
                 time.sleep(0.5)
 
     def _release_gpu_access(self, signal_path: Path):
-        """Relinquish GPU access after verifying ownership."""
-        with contextlib.suppress(Exception):
+        """Safely release the signal file after verifying ownership."""
+        try:
             if signal_path.exists():
                 with open(signal_path) as f:
                     content = f.read().strip()
                 if content and int(content) == os.getpid():
                     signal_path.unlink(missing_ok=True)
+        except (OSError, ValueError) as e:
+            logger.warning("Error releasing GPU access signal %s: %s", signal_path, e)
 
     def sleep(self, level: int = 1):
         if self.is_sleeping:
