@@ -258,6 +258,7 @@ class MiniMaxM2DecoderLayer(nn.Module):
         super().__init__()
         self.hidden_size = config.hidden_size
         max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
+
         if hasattr(config, "max_model_len") and isinstance(config.max_model_len, int):
             max_position_embeddings = max(
                 config.max_position_embeddings, config.max_model_len
@@ -279,6 +280,7 @@ class MiniMaxM2DecoderLayer(nn.Module):
             head_dim=getattr(config, "head_dim", None),
             cache_config=cache_config,
             quant_config=quant_config,
+            max_model_len=config.max_model_len,
             prefix=f"{prefix}.self_attn",
         )
 
