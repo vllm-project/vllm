@@ -778,12 +778,16 @@ def get_model_params(config):
         "Qwen2MoeForCausalLM",
         "Qwen3MoeForCausalLM",
         "Qwen3NextForCausalLM",
+        "Qwen3_5MoeForCausalLM",
     ):
         E = config.num_experts
         topk = config.num_experts_per_tok
         intermediate_size = config.moe_intermediate_size
         hidden_size = config.hidden_size
-    elif config.architectures[0] == "Qwen3VLMoeForConditionalGeneration":
+    elif config.architectures[0] in (
+        "Qwen3VLMoeForConditionalGeneration",
+        "Qwen3_5MoeForConditionalGeneration",
+    ):
         text_config = config.get_text_config()
         E = text_config.num_experts
         topk = text_config.num_experts_per_tok

@@ -262,9 +262,17 @@ def main(args: argparse.Namespace):
     ):
         E = config.n_routed_experts
         topk = config.num_experts_per_tok
-    elif config.architectures[0] in ["Qwen2MoeForCausalLM", "Qwen3MoeForCausalLM"]:
+    elif config.architectures[0] in [
+        "Qwen2MoeForCausalLM",
+        "Qwen3MoeForCausalLM",
+        "Qwen3_5MoeForCausalLM",
+    ]:
         E = config.num_experts
         topk = config.num_experts_per_tok
+    elif config.architectures[0] == "Qwen3_5MoeForConditionalGeneration":
+        text_config = config.get_text_config()
+        E = text_config.num_experts
+        topk = text_config.num_experts_per_tok
 
     else:
         # Support for llama4
