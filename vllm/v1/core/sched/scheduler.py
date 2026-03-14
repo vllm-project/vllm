@@ -3,7 +3,7 @@
 import itertools
 import time
 from collections import defaultdict, deque
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import replace
 from typing import Any
 
@@ -363,7 +363,7 @@ class Scheduler(SchedulerInterface):
         scheduled_encoder_inputs: dict[str, list[int]] = {}
         encoder_compute_budget = self.max_num_encoder_input_tokens
         # Spec decode-related.
-        scheduled_spec_decode_tokens: dict[str, list[int]] = {}
+        scheduled_spec_decode_tokens: dict[str, Sequence[int]] = {}
 
         # For logging.
         scheduled_timestamp = time.monotonic()
@@ -523,7 +523,7 @@ class Scheduler(SchedulerInterface):
 
                 # New spec tokens will be set in `update_draft_token_ids` before the
                 # next step when applicable.
-                request.spec_token_ids = []
+                request.spec_token_ids.clear()
 
             # Encoder-related.
             if encoder_inputs_to_schedule:
@@ -940,7 +940,7 @@ class Scheduler(SchedulerInterface):
         request.status = RequestStatus.PREEMPTED
         request.num_computed_tokens = 0
         if request.spec_token_ids:
-            request.spec_token_ids = []
+            request.spec_token_ids.clear()
         request.num_preemptions += 1
         if self.log_stats:
             request.record_event(EngineCoreEventType.PREEMPTED, timestamp)
@@ -1030,13 +1030,13 @@ class Scheduler(SchedulerInterface):
         running_reqs: list[Request],
         resumed_reqs: list[Request],
         num_scheduled_tokens: dict[str, int],
-        spec_decode_tokens: dict[str, list[int]],
+        spec_decode_tokens: dict[str, Sequence[int]],
         req_to_new_blocks: dict[str, KVCacheBlocks],
     ) -> CachedRequestData:
         req_ids: list[str] = []
-        new_token_ids: list[list[int]] = []
+        new_token_ids: list[Sequence[int]] = []
         new_block_ids: list[tuple[list[int], ...] | None] = []
-        all_token_ids: dict[str, list[int]] = {}
+        all_token_ids: dict[str, Sequence[int]] = {}
         num_computed_tokens: list[int] = []
         num_output_tokens: list[int] = []
         resumed_req_ids = set()
@@ -1651,14 +1651,15 @@ class Scheduler(SchedulerInterface):
             if request.is_prefill_chunk:
                 # Ignore draft tokens for prefill chunks.
                 if request.spec_token_ids:
-                    request.spec_token_ids = []
+                    request.spec_token_ids.clear()
                 continue
 
             # Add newly generated spec token ids to the request.
             if self.structured_output_manager.should_advance(request):
                 metadata = request.structured_output_request
                 spec_token_ids = metadata.grammar.validate_tokens(spec_token_ids)  # type: ignore[union-attr]
-            request.spec_token_ids = spec_token_ids
+            request.spec_token_ids.clear()
+            request.spec_token_ids.extend(spec_token_ids)
 
     def update_draft_token_ids_in_output(
         self, draft_token_ids: DraftTokenIds, scheduler_output: SchedulerOutput

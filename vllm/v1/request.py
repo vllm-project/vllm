@@ -21,7 +21,7 @@ from vllm.v1.engine import (
     FinishReason,
 )
 from vllm.v1.structured_output.request import StructuredOutputRequest
-from vllm.v1.utils import ConstantList
+from vllm.v1.utils import ConstantList, TokenArray
 
 if TYPE_CHECKING:
     from vllm.lora.request import LoRARequest
@@ -119,19 +119,19 @@ class Request:
         self.num_prompt_tokens = length_from_prompt_token_ids_or_embeds(
             prompt_token_ids, prompt_embeds
         )
-        self._output_token_ids: list[int] = []
-        self._all_token_ids: list[int] = (
-            self.prompt_token_ids.copy()
-            if self.prompt_token_ids is not None
-            else [0] * self.num_prompt_tokens
-        )
+        self._output_token_ids: TokenArray = TokenArray()
+        self._all_token_ids: TokenArray = TokenArray()
+        if self.prompt_token_ids is not None:
+            self._all_token_ids.extend(self.prompt_token_ids)
+        else:
+            self._all_token_ids.extend([0] * self.num_prompt_tokens)
 
         # Used in async scheduling.
         self.num_output_placeholders = 0
         # Used in forced preemption (reset_prefix_cache) with async scheduling.
         self.discard_latest_async_tokens = False
 
-        self.spec_token_ids: list[int] = []
+        self.spec_token_ids: TokenArray = TokenArray()
         self.num_computed_tokens = 0
         self.cache_salt: str | None = cache_salt
 

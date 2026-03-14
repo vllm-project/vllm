@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from functools import cached_property
 from typing import TYPE_CHECKING
@@ -30,7 +31,7 @@ else:
 @dataclass
 class NewRequestData:
     req_id: str
-    prompt_token_ids: list[int] | None
+    prompt_token_ids: Sequence[int] | None
     mm_features: list[MultiModalFeatureSpec]
     sampling_params: SamplingParams | None
     pooling_params: PoolingParams | None
@@ -40,14 +41,14 @@ class NewRequestData:
     prompt_embeds: "torch.Tensor | None" = None
 
     # Only used for v2 model runner.
-    prefill_token_ids: list[int] | None = None
+    prefill_token_ids: Sequence[int] | None = None
 
     @classmethod
     def from_request(
         cls,
         request: Request,
         block_ids: tuple[list[int], ...],
-        prefill_token_ids: list[int] | None = None,
+        prefill_token_ids: Sequence[int] | None = None,
     ) -> "NewRequestData":
         return cls(
             req_id=request.request_id,
@@ -115,10 +116,10 @@ class CachedRequestData:
     resumed_req_ids: set[str]
     # NOTE(woosuk): new_token_ids is only used for pipeline parallelism.
     # When PP is not used, new_token_ids will be empty.
-    new_token_ids: list[list[int]]
+    new_token_ids: list[Sequence[int]]
     # For requests not scheduled in the last step, propagate the token ids to the
     # connector. Won't contain requests that were scheduled in the prior step.
-    all_token_ids: dict[str, list[int]]
+    all_token_ids: dict[str, Sequence[int]]
     new_block_ids: list[tuple[list[int], ...] | None]
     num_computed_tokens: list[int]
     num_output_tokens: list[int]
@@ -195,7 +196,7 @@ class SchedulerOutput:
     # req_id -> spec_token_ids
     # If a request does not have any spec decode tokens, it will not be
     # included in the dictionary.
-    scheduled_spec_decode_tokens: dict[str, list[int]]
+    scheduled_spec_decode_tokens: dict[str, Sequence[int]]
     # req_id -> encoder input indices that need processing.
     # E.g., if a request has [0, 1], it could mean the vision encoder needs
     # to process that the request's 0-th and 1-th images in the current step.

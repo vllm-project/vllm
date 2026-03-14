@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """A layer that samples the next tokens from the model's outputs."""
 
+from collections.abc import Sequence
+
 import torch
 import torch.nn as nn
 
@@ -252,9 +254,9 @@ class Sampler(nn.Module):
 
     @staticmethod
     def _combine_outputs_with_spec_tokens(
-        output_token_ids: list[list[int]],
+        output_token_ids: Sequence[Sequence[int]],
         spec_token_ids: list[list[int]] | None = None,
-    ) -> list[list[int]]:
+    ) -> Sequence[Sequence[int]]:
         if spec_token_ids is None:
             return output_token_ids
 
@@ -274,7 +276,7 @@ class Sampler(nn.Module):
             bool(bad_words_token_ids) or not sampling_metadata.no_penalties
         )
 
-        output_token_ids = sampling_metadata.output_token_ids
+        output_token_ids: Sequence[Sequence[int]] = sampling_metadata.output_token_ids
         if predict_bonus_token and any_penalties_or_bad_words:
             # Combine base outputs with spec tokens when speculative decoding
             # is enabled.
@@ -303,7 +305,7 @@ class Sampler(nn.Module):
     def apply_penalties(
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
-        output_token_ids: list[list[int]],
+        output_token_ids: Sequence[Sequence[int]],
     ) -> torch.Tensor:
         if sampling_metadata.no_penalties:
             return logits

@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Datastructures defining a TPU input batch
 
+from collections.abc import MutableSequence
 from typing import cast
 
 import numpy as np
@@ -162,7 +163,7 @@ class InputBatch:
         # req_index -> bad_words_token_ids
         self.bad_words_token_ids: dict[int, list[list[int]]] = {}
 
-        self.req_output_token_ids: list[list[int] | None] = []
+        self.req_output_token_ids: list[MutableSequence[int] | None] = []
 
     @property
     def req_ids(self) -> list[str]:

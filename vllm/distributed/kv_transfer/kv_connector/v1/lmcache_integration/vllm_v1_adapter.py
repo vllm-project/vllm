@@ -3,7 +3,7 @@
 # Standard
 import os
 import uuid
-from collections.abc import Generator
+from collections.abc import Generator, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -201,7 +201,7 @@ class RequestTracker:
         return RequestTracker(
             req_id=new_request.req_id,
             prompt_len=len(new_request.prompt_token_ids),
-            token_ids=new_request.prompt_token_ids[:num_tokens_to_compute].copy(),
+            token_ids=list(new_request.prompt_token_ids[:num_tokens_to_compute]),
             allocated_block_ids=unfolded_block_ids,
             num_saved_tokens=lmcache_cached_tokens,
             disagg_spec=disagg_spec,
@@ -213,7 +213,7 @@ class RequestTracker:
 
     def update(
         self,
-        new_token_ids: list[int],
+        new_token_ids: Sequence[int],
         new_block_ids: tuple[list[int], ...] | None | list[int],
     ) -> None:
         """Update the request tracker when a running request is

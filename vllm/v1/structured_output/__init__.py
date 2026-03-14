@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import itertools
 import multiprocessing
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import TYPE_CHECKING
 
@@ -186,7 +186,7 @@ class StructuredOutputManager:
         self,
         requests: dict[str, "Request"],
         structured_output_request_ids: list[str],
-        scheduled_spec_decode_tokens: dict[str, list[int]],
+        scheduled_spec_decode_tokens: dict[str, Sequence[int]],
     ) -> "npt.NDArray[np.int32] | None":
         # Prepare the structured output bitmask for this batch.
         if not structured_output_request_ids:

@@ -4,7 +4,7 @@ import importlib
 import inspect
 import itertools
 from abc import abstractmethod
-from collections.abc import Sequence
+from collections.abc import MutableSequence, Sequence
 from functools import lru_cache, partial
 from typing import TYPE_CHECKING
 
@@ -292,8 +292,8 @@ class AdapterLogitsProcessor(LogitsProcessor):
     def _new_state(
         self,
         params: SamplingParams,
-        prompt_ids: list[int] | None,
-        output_ids: list[int],
+        prompt_ids: Sequence[int] | None,
+        output_ids: MutableSequence[int],
     ) -> partial[torch.Tensor] | None:
         """Return state representation for new request
 
@@ -315,9 +315,9 @@ class AdapterLogitsProcessor(LogitsProcessor):
                         "Prompt token ids are required for this "
                         "logits processor but were not provided."
                     )
-                args = [prompt_ids, output_ids]
+                args = [list(prompt_ids), list(output_ids)]
             else:
-                args = [output_ids]
+                args = [list(output_ids)]
             return partial(req_lp, *args)
         return None
 

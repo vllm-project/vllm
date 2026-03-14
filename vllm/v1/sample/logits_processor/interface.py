@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
-from collections.abc import Sequence
+from collections.abc import MutableSequence, Sequence
 from dataclasses import dataclass
 from enum import Enum, auto
 from typing import TYPE_CHECKING
@@ -26,7 +26,7 @@ RemovedRequest = int
 
 # (index, params, prompt_tok_ids, output_tok_ids) tuples for new
 # requests added to the batch.
-AddedRequest = tuple[int, SamplingParams, list[int] | None, list[int]]
+AddedRequest = tuple[int, SamplingParams, Sequence[int] | None, MutableSequence[int]]
 
 # (index 1, index 2, directionality) tuples representing
 # one-way moves or two-way swaps of requests in batch

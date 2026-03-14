@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import MutableSequence
 from dataclasses import dataclass
 
 import torch
@@ -28,7 +29,7 @@ class SamplingMetadata:
     presence_penalties: torch.Tensor
     repetition_penalties: torch.Tensor
 
-    output_token_ids: list[list[int]]
+    output_token_ids: list[MutableSequence[int]]
 
     # `allowed_token_ids_mask` is a 2D bool tensor of shape (max batch size,
     # vocab size).

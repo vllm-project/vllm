@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Datastructures defining a GPU input batch
 
+from collections.abc import MutableSequence, Sequence
 from dataclasses import dataclass
 from typing import cast
 
@@ -29,14 +30,14 @@ from vllm.v1.worker.block_table import MultiGroupBlockTable
 @dataclass
 class CachedRequestState:
     req_id: str
-    prompt_token_ids: list[int] | None
+    prompt_token_ids: Sequence[int] | None
     mm_features: list[MultiModalFeatureSpec]
     sampling_params: SamplingParams | None
     generator: torch.Generator | None
 
     block_ids: tuple[list[int], ...]
     num_computed_tokens: int
-    output_token_ids: list[int]
+    output_token_ids: MutableSequence[int]
 
     mrope_positions: torch.Tensor | None = None
     mrope_position_delta: int | None = None
@@ -249,7 +250,7 @@ class InputBatch:
 
         self.logits_processing_needs_token_ids = np.zeros(max_num_reqs, dtype=bool)
 
-        self.req_output_token_ids: list[list[int] | None] = []
+        self.req_output_token_ids: list[MutableSequence[int] | None] = []
 
         # Store provided logitsprocs. If none are provided, initialize empty
         # data structure
@@ -447,7 +448,9 @@ class InputBatch:
         return req_index
 
     def update_req_spec_token_ids(
-        self, request: CachedRequestState, scheduled_spec_tokens: dict[str, list[int]]
+        self,
+        request: CachedRequestState,
+        scheduled_spec_tokens: dict[str, Sequence[int]],
     ) -> None:
         req_id = request.req_id
         req_index = self.req_id_to_index[req_id]
@@ -826,7 +829,7 @@ class InputBatch:
             or self.logitsprocs_need_output_token_ids
         )
         output_token_ids = (
-            cast(list[list[int]], self.req_output_token_ids)
+            cast(list[MutableSequence[int]], self.req_output_token_ids)
             if needs_output_token_ids
             else []
         )
