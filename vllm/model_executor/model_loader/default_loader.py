@@ -23,6 +23,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     filter_duplicate_safetensors_files,
     filter_files_not_needed_for_inference,
     get_quant_config,
+    instanttensor_weights_iterator,
     maybe_download_from_modelscope,
     multi_thread_pt_weights_iterator,
     multi_thread_safetensors_weights_iterator,
@@ -121,7 +122,11 @@ class DefaultModelLoader(BaseModelLoader):
         # Some quantized models use .pt files for storing the weights.
         if load_format == "hf":
             allow_patterns = ["*.safetensors", "*.bin"]
-        elif load_format == "safetensors" or load_format == "fastsafetensors":
+        elif (
+            load_format == "safetensors"
+            or load_format == "fastsafetensors"
+            or load_format == "instanttensor"
+        ):
             use_safetensors = True
             allow_patterns = ["*.safetensors"]
         elif load_format == "mistral":
@@ -216,6 +221,11 @@ class DefaultModelLoader(BaseModelLoader):
         elif use_safetensors:
             if self.load_config.load_format == "fastsafetensors":
                 weights_iterator = fastsafetensors_weights_iterator(
+                    hf_weights_files,
+                    self.load_config.use_tqdm_on_load,
+                )
+            elif self.load_config.load_format == "instanttensor":
+                weights_iterator = instanttensor_weights_iterator(
                     hf_weights_files,
                     self.load_config.use_tqdm_on_load,
                 )
