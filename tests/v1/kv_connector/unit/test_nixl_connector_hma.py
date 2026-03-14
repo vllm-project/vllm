@@ -219,8 +219,8 @@ def test_get_block_descs_ids_hybrid_ssm():
     engine_id = "test-engine"
     worker.num_regions = 2
     worker.dst_num_blocks = {engine_id: num_blocks}
-    worker._is_mamba = True
-    worker._is_mamba_layer = [False, True]
+    worker._has_mamba = True
+    worker._is_mamba_group = [False, True]
     worker._physical_blocks_per_logical_kv_block = 1
     # num_descs = num_regions * num_blocks (no blocks_first doubling)
     worker.num_descs = 2 * num_blocks
@@ -254,8 +254,8 @@ def test_get_block_descs_ids_kernel_block_mismatch():
     engine_id = "test-engine"
     worker.num_regions = 2
     worker.dst_num_blocks = {engine_id: num_blocks}
-    worker._is_mamba = True
-    worker._is_mamba_layer = [False, True]
+    worker._has_mamba = True
+    worker._is_mamba_group = [False, True]
     worker._physical_blocks_per_logical_kv_block = ratio
     worker.num_descs = 2 * num_blocks  # 800
 
