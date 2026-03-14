@@ -339,8 +339,7 @@ class Executor(ABC):
 
     def _acquire_gpu_access(self):
         """Acquire atomic signals for all GPUs managed by this executor."""
-        # Get all associated physical GPU IDs
-        p_cfg = self.parallel_config
+        # Get all associated physical GPU IDs from device_config
         device_ids = self.device_config.device_ids
         if not device_ids:
             logger.warning(
@@ -371,10 +370,11 @@ class Executor(ABC):
                             owner_pid = int(content) if content else -1
                         if owner_pid == my_pid:
                             break
+
+                        # Use safer check (Bot recommendation)
                         if owner_pid != -1:
                             os.kill(owner_pid, 0)
                         else:
-                            # Stale lock file with empty content, treat as dead process.
                             raise ProcessLookupError
                     except (ProcessLookupError, ValueError, OSError):
                         with contextlib.suppress(Exception):
