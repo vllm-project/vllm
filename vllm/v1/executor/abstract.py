@@ -371,7 +371,11 @@ class Executor(ABC):
                             owner_pid = int(content) if content else -1
                         if owner_pid == my_pid:
                             break
-                        os.kill(owner_pid, 0)
+                        if owner_pid != -1:
+                            os.kill(owner_pid, 0)
+                        else:
+                            # Stale lock file with empty content, treat as dead process.
+                            raise ProcessLookupError
                     except (ProcessLookupError, ValueError, OSError):
                         with contextlib.suppress(Exception):
                             sig_path.unlink(missing_ok=True)
