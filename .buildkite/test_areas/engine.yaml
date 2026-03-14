@@ -14,15 +14,28 @@ steps:
   commands:
   - pytest -v -s engine test_sequence.py test_config.py test_logger.py test_vllm_port.py
 
-- label: V1 e2e + engine (1 GPU)
-  timeout_in_minutes: 45
+- label: V1 e2e (1 GPU) %N
+  timeout_in_minutes: 25
   source_file_dependencies:
     - vllm/
-    - tests/v1
+    - tests/v1/e2e
   commands:
     # TODO: accuracy does not match, whether setting
     # VLLM_USE_FLASHINFER_SAMPLER or not on H100.
-    - pytest -v -s v1/e2e
+    - pytest -v -s v1/e2e --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  parallelism: 4
+  mirror:
+    amd:
+      device: mi325_1
+      depends_on:
+      - image-build-amd
+
+- label: V1 engine (1 GPU)
+  timeout_in_minutes: 25
+  source_file_dependencies:
+    - vllm/
+    - tests/v1/engine
+  commands:
     # Run this test standalone for now;
     # need to untangle use (implicit) use of spawn/fork across the tests.
     - pytest -v -s v1/engine/test_preprocess_error_handling.py
@@ -33,9 +46,6 @@ steps:
       device: mi325_1
       depends_on:
       - image-build-amd
-      commands:
-      - pytest -v -s v1/e2e
-      - pytest -v -s v1/engine
 
 - label: V1 e2e (2 GPUs)
   timeout_in_minutes: 60 # TODO: Fix timeout after we have more confidence in the test stability

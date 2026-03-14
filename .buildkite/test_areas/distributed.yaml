@@ -15,26 +15,16 @@ steps:
   - pytest -v -s distributed/test_shm_buffer.py
   - pytest -v -s distributed/test_shm_storage.py
 
-- label: Distributed (2 GPUs)
-  timeout_in_minutes: 60
+- label: Distributed DP Tests (2 GPUs)
+  timeout_in_minutes: 20
   working_dir: "/vllm-workspace/tests"
   num_devices: 2
   source_file_dependencies:
-  - vllm/compilation/
   - vllm/distributed/
-  - vllm/engine/
-  - vllm/executor/
-  - vllm/worker/worker_base.py
   - vllm/v1/engine/
   - vllm/v1/worker/
-  - tests/compile/fullgraph/test_basic_correctness.py
-  - tests/compile/test_wrapper.py
-  - tests/distributed/
-  - tests/entrypoints/llm/test_collective_rpc.py
   - tests/v1/distributed
   - tests/v1/entrypoints/openai/test_multi_api_servers.py
-  - tests/v1/shutdown
-  - tests/v1/worker/test_worker_memory_snapshot.py
   commands:
   # https://github.com/NVIDIA/nccl/issues/1838
   - export NCCL_CUMEM_HOST_ENABLE=0
@@ -42,32 +32,54 @@ steps:
   - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_eagle_dp.py
   - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_external_lb_dp.py
   - DP_SIZE=2 pytest -v -s v1/entrypoints/openai/test_multi_api_servers.py
+
+- label: Distributed Compile + RPC Tests (2 GPUs)
+  timeout_in_minutes: 20
+  working_dir: "/vllm-workspace/tests"
+  num_devices: 2
+  source_file_dependencies:
+  - vllm/compilation/
+  - vllm/distributed/
+  - tests/compile/fullgraph/test_basic_correctness.py
+  - tests/compile/test_wrapper.py
+  - tests/entrypoints/llm/test_collective_rpc.py
+  commands:
+  # https://github.com/NVIDIA/nccl/issues/1838
+  - export NCCL_CUMEM_HOST_ENABLE=0
   - pytest -v -s entrypoints/llm/test_collective_rpc.py
   - pytest -v -s ./compile/fullgraph/test_basic_correctness.py
   - pytest -v -s ./compile/test_wrapper.py
+
+- label: Distributed Torchrun + Shutdown Tests (2 GPUs)
+  timeout_in_minutes: 20
+  working_dir: "/vllm-workspace/tests"
+  num_devices: 2
+  source_file_dependencies:
+  - vllm/distributed/
+  - vllm/engine/
+  - vllm/executor/
+  - vllm/worker/worker_base.py
+  - vllm/v1/engine/
+  - vllm/v1/worker/
+  - tests/distributed/
+  - tests/v1/shutdown
+  - tests/v1/worker/test_worker_memory_snapshot.py
+  commands:
+  # https://github.com/NVIDIA/nccl/issues/1838
+  - export NCCL_CUMEM_HOST_ENABLE=0
   - VLLM_TEST_SAME_HOST=1 torchrun --nproc-per-node=4 distributed/test_same_node.py | grep 'Same node test passed'
   - VLLM_TEST_SAME_HOST=1 VLLM_TEST_WITH_DEFAULT_DEVICE_SET=1 torchrun --nproc-per-node=4 distributed/test_same_node.py | grep 'Same node test passed'
   - CUDA_VISIBLE_DEVICES=0,1 pytest -v -s v1/shutdown
   - pytest -v -s v1/worker/test_worker_memory_snapshot.py
 
-- label: Distributed Tests (4 GPUs)
-  timeout_in_minutes: 50
+- label: Distributed Torchrun Tests (4 GPUs)
+  timeout_in_minutes: 20
   working_dir: "/vllm-workspace/tests"
   num_devices: 4
   source_file_dependencies:
   - vllm/distributed/
-  - tests/distributed/test_utils
-  - tests/distributed/test_pynccl
-  - tests/distributed/test_events
-  - tests/compile/fullgraph/test_basic_correctness.py
-  - examples/offline_inference/rlhf.py
-  - examples/offline_inference/rlhf_colocate.py
-  - examples/offline_inference/new_weight_syncing/
+  - tests/distributed/
   - tests/examples/offline_inference/data_parallel.py
-  - tests/v1/distributed
-  - tests/v1/engine/test_engine_core_client.py
-  - tests/distributed/test_symm_mem_allreduce.py
-  - tests/distributed/test_multiproc_executor.py
   commands:
   # https://github.com/NVIDIA/nccl/issues/1838
   - export NCCL_CUMEM_HOST_ENABLE=0
@@ -83,6 +95,21 @@ steps:
   - DP_SIZE=4 ENABLE_EP=1 torchrun --nproc-per-node=4 distributed/test_torchrun_example_moe.py
   # test with torchrun tp=2 and dp=2 with ep
   - TP_SIZE=2 DP_SIZE=2 ENABLE_EP=1 torchrun --nproc-per-node=4 distributed/test_torchrun_example_moe.py
+
+- label: Distributed DP Tests (4 GPUs)
+  timeout_in_minutes: 20
+  working_dir: "/vllm-workspace/tests"
+  num_devices: 4
+  source_file_dependencies:
+  - vllm/distributed/
+  - vllm/v1/engine/
+  - vllm/v1/worker/
+  - tests/v1/distributed
+  - tests/v1/engine/test_engine_core_client.py
+  - tests/examples/offline_inference/data_parallel.py
+  commands:
+  # https://github.com/NVIDIA/nccl/issues/1838
+  - export NCCL_CUMEM_HOST_ENABLE=0
   # test with internal dp
   - python3 ../examples/offline_inference/data_parallel.py --enforce-eager
   - TP_SIZE=2 DP_SIZE=2 pytest -v -s v1/distributed/test_async_llm_dp.py
@@ -91,6 +118,22 @@ steps:
   - TP_SIZE=1 DP_SIZE=4 pytest -v -s v1/distributed/test_internal_lb_dp.py
   - TP_SIZE=1 DP_SIZE=4 pytest -v -s v1/distributed/test_hybrid_lb_dp.py
   - pytest -v -s v1/engine/test_engine_core_client.py::test_kv_cache_events_dp
+
+- label: Distributed Infra Tests (4 GPUs)
+  timeout_in_minutes: 20
+  working_dir: "/vllm-workspace/tests"
+  num_devices: 4
+  source_file_dependencies:
+  - vllm/distributed/
+  - tests/distributed/test_utils
+  - tests/distributed/test_pynccl
+  - tests/distributed/test_events
+  - tests/distributed/test_symm_mem_allreduce.py
+  - tests/distributed/test_multiproc_executor.py
+  - tests/compile/fullgraph/test_basic_correctness.py
+  commands:
+  # https://github.com/NVIDIA/nccl/issues/1838
+  - export NCCL_CUMEM_HOST_ENABLE=0
   - pytest -v -s distributed/test_utils.py
   - pytest -v -s compile/fullgraph/test_basic_correctness.py
   - pytest -v -s distributed/test_pynccl.py
@@ -98,10 +141,22 @@ steps:
   - pytest -v -s distributed/test_symm_mem_allreduce.py
   # test multi-node TP with multiproc executor (simulated on single node)
   - pytest -v -s distributed/test_multiproc_executor.py::test_multiproc_executor_multi_node
-  # TODO: create a dedicated test section for multi-GPU example tests
-  # when we have multiple distributed example tests
+
+- label: Distributed RLHF Examples (4 GPUs)
+  timeout_in_minutes: 20
+  working_dir: "/vllm-workspace/examples/offline_inference"
+  num_devices: 4
+  source_file_dependencies:
+  - vllm/distributed/
+  - vllm/engine/
+  - vllm/executor/
+  - examples/offline_inference/rlhf.py
+  - examples/offline_inference/rlhf_colocate.py
+  - examples/offline_inference/new_weight_syncing/
+  commands:
+  # https://github.com/NVIDIA/nccl/issues/1838
+  - export NCCL_CUMEM_HOST_ENABLE=0
   # OLD rlhf examples
-  - cd ../examples/offline_inference
   - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 rlhf.py
   - VLLM_ALLOW_INSECURE_SERIALIZATION=1 RAY_DEDUP_LOGS=0 python3 rlhf_colocate.py
   # NEW rlhf examples
