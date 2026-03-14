@@ -1074,7 +1074,20 @@ class AsyncMPClient(MPClient):
         )
         await self._send_input_message(message, engine, args)
         self._ensure_output_queue_task()
-        return await future
+
+        timeout = 300.0 if method in ("wake_up", "sleep") else 60.0
+        try:
+            return await asyncio.wait_for(future, timeout=timeout)
+        except asyncio.TimeoutError:
+            self.resources.engine_dead = True
+            logger.error(
+                "Engine utility call '%s' timed out after %.1fs. "
+                "This might be a GPU memory deadlock.",
+                method,
+                timeout,
+            )
+            self.shutdown()
+            raise EngineDeadError(f"EngineCore unresponsive during {method}") from None
 
     async def get_supported_tasks_async(self) -> tuple[SupportedTask, ...]:
         return await self.call_utility_async("get_supported_tasks")

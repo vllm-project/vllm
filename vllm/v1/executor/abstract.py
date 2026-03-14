@@ -1,10 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import contextlib
+import os
+import socket
+import tempfile
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from concurrent.futures import Future
 from functools import cached_property
+from pathlib import Path
 from typing import TYPE_CHECKING, Literal, TypeVar, overload
 
 from vllm.config import VllmConfig
@@ -308,18 +313,82 @@ class Executor(ABC):
         """Reset the encoder cache in each worker to clear cached encoder outputs."""
         self.collective_rpc("reset_encoder_cache")
 
+    def _get_gpu_access_signal_path(self) -> Path:
+        """Get a node-local signal path to serialize VMM operations per GPU."""
+        device_id = 0
+        p_cfg = self.parallel_config
+        if hasattr(p_cfg, "device_ids") and p_cfg.device_ids:
+            device_id = p_cfg.device_ids[0]
+        else:
+            device_id = p_cfg.rank // p_cfg.tensor_parallel_size
+
+        hostname = socket.gethostname()
+        if os.path.exists("/dev/shm"):
+            base_dir = Path("/dev/shm")
+        else:
+            tmp_dir = os.environ.get("VLLM_TEMP_DIR", tempfile.gettempdir())
+            base_dir = Path(tmp_dir)
+
+        sig_dir = base_dir / "vllm_signals"
+        with contextlib.suppress(Exception):
+            sig_dir.mkdir(parents=True, exist_ok=True)
+            if os.name != "nt":
+                os.chmod(sig_dir, 0o777)
+
+        return sig_dir / f"vmm_{hostname}_gpu_{device_id}.signal"
+
+    def _wait_and_acquire_gpu_access(self, signal_path: Path):
+        """Atomic acquire with stale process detection to prevent deadlocks."""
+        my_pid = os.getpid()
+        while True:
+            try:
+                flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
+                fd = os.open(str(signal_path), flags)
+                with os.fdopen(fd, "w") as f:
+                    f.write(str(my_pid))
+                return
+            except FileExistsError:
+                try:
+                    with open(signal_path) as f:
+                        owner_pid = int(f.read().strip())
+                    if owner_pid == my_pid:
+                        return
+                    os.kill(owner_pid, 0)
+                except (ProcessLookupError, ValueError, OSError):
+                    with contextlib.suppress(Exception):
+                        signal_path.unlink(missing_ok=True)
+                    continue
+
+                logger.info("GPU VMM busy (Owner: %d), retrying...", owner_pid)
+                time.sleep(0.5)
+
+    def _release_gpu_access(self, signal_path: Path):
+        """Relinquish GPU access after verifying ownership."""
+        with contextlib.suppress(Exception):
+            if signal_path.exists():
+                with open(signal_path) as f:
+                    content = f.read().strip()
+                if content and int(content) == os.getpid():
+                    signal_path.unlink(missing_ok=True)
+
     def sleep(self, level: int = 1):
         if self.is_sleeping:
             logger.warning("Executor is already sleeping.")
             return
-        time_before_sleep = time.perf_counter()
-        self.collective_rpc("sleep", kwargs=dict(level=level))
-        time_after_sleep = time.perf_counter()
-        self.sleeping_tags = {"weights", "kv_cache"}
-        self.is_sleeping = True
-        logger.info(
-            "It took %.6f seconds to fall asleep.", time_after_sleep - time_before_sleep
-        )
+        signal_path = self._get_gpu_access_signal_path()
+        self._wait_and_acquire_gpu_access(signal_path)
+        try:
+            time_before_sleep = time.perf_counter()
+            self.collective_rpc("sleep", kwargs=dict(level=level))
+            time_after_sleep = time.perf_counter()
+            self.sleeping_tags = {"weights", "kv_cache"}
+            self.is_sleeping = True
+            logger.info(
+                "It took %.6f seconds to fall asleep.",
+                time_after_sleep - time_before_sleep,
+            )
+        finally:
+            self._release_gpu_access(signal_path)
 
     def wake_up(self, tags: list[str] | None = None):
         if not self.is_sleeping:
@@ -332,14 +401,19 @@ class Executor(ABC):
                         "Tag %s is not in sleeping tags %s", tag, self.sleeping_tags
                     )
                     return
-        time_before_wakeup = time.perf_counter()
-        self.collective_rpc("wake_up", kwargs=dict(tags=tags))
-        time_after_wakeup = time.perf_counter()
-        logger.info(
-            "It took %.6f seconds to wake up tags %s.",
-            time_after_wakeup - time_before_wakeup,
-            tags if tags is not None else self.sleeping_tags,
-        )
+        signal_path = self._get_gpu_access_signal_path()
+        self._wait_and_acquire_gpu_access(signal_path)
+        try:
+            time_before_wakeup = time.perf_counter()
+            self.collective_rpc("wake_up", kwargs=dict(tags=tags))
+            time_after_wakeup = time.perf_counter()
+            logger.info(
+                "It took %.6f seconds to wake up tags %s.",
+                time_after_wakeup - time_before_wakeup,
+                tags if tags is not None else self.sleeping_tags,
+            )
+        finally:
+            self._release_gpu_access(signal_path)
         if tags:
             for tag in tags:
                 self.sleeping_tags.remove(tag)
