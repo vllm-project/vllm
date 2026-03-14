@@ -6,12 +6,11 @@ import json
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
-from typing import Any, Final
+from typing import TYPE_CHECKING, Any, Final
 
 import partial_json_parser
 import regex as re
 from fastapi import Request
-from openai_harmony import Message as OpenAIMessage
 from partial_json_parser.core.options import Allow
 
 from vllm.engine.protocol import EngineClient
@@ -56,17 +55,13 @@ from vllm.entrypoints.openai.engine.serving import (
 )
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.openai.parser.harmony_utils import (
-    get_developer_message,
     get_stop_tokens_for_assistant_actions,
     get_streamable_parser_for_assistant,
-    get_system_message,
-    parse_chat_inputs_to_harmony_messages,
     parse_chat_output,
-    render_for_completion,
 )
 from vllm.entrypoints.openai.utils import maybe_filter_parallel_tool_calls
 from vllm.entrypoints.utils import get_max_tokens, should_include_usage
-from vllm.inputs.data import ProcessorInputs, TokensPrompt
+from vllm.inputs.data import ProcessorInputs
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.outputs import CompletionOutput, RequestOutput
@@ -80,7 +75,9 @@ from vllm.tool_parsers.mistral_tool_parser import MistralToolCall
 from vllm.tool_parsers.utils import partial_json_loads
 from vllm.utils.collection_utils import as_list
 from vllm.utils.mistral import is_mistral_tokenizer
-from vllm.utils.mistral import mt as _mt
+
+if TYPE_CHECKING:
+    from vllm.entrypoints.serve.render.serving import OpenAIServingRender
 
 logger = init_logger(__name__)
 
@@ -92,6 +89,7 @@ class OpenAIServingChat(OpenAIServing):
         models: OpenAIServingModels,
         response_role: str,
         *,
+        openai_serving_render: "OpenAIServingRender",
         request_logger: RequestLogger | None,
         chat_template: str | None,
         chat_template_content_format: ChatTemplateContentFormatOption,
@@ -114,6 +112,7 @@ class OpenAIServingChat(OpenAIServing):
             return_tokens_as_token_ids=return_tokens_as_token_ids,
         )
 
+        self.openai_serving_render = openai_serving_render
         self.response_role = response_role
         self.chat_template = chat_template
         self.chat_template_content_format: Final = chat_template_content_format
@@ -186,7 +185,10 @@ class OpenAIServingChat(OpenAIServing):
         request: ChatCompletionRequest,
     ) -> tuple[list[ConversationMessage], list[ProcessorInputs]] | ErrorResponse:
         """
-        render chat request by validating and preprocessing inputs.
+        Validate the model and preprocess a chat completion request.
+
+        Delegates preprocessing logic to OpenAIServingRender, adding the
+        engine-aware checks (LoRA model validation, engine health).
 
         Returns:
             A tuple of (conversation, engine_prompts) on success,
@@ -203,78 +205,7 @@ class OpenAIServingChat(OpenAIServing):
         if self.engine_client.errored:
             raise self.engine_client.dead_error
 
-        tokenizer = self.renderer.tokenizer
-
-        tool_parser = self.tool_parser
-
-        if is_mistral_tokenizer(tokenizer):
-            # because of issues with pydantic we need to potentially
-            # re-serialize the tool_calls field of the request
-            # for more info: see comment in `maybe_serialize_tool_calls`
-            _mt.maybe_serialize_tool_calls(request)  # type: ignore[arg-type]
-            _mt.truncate_tool_call_ids(request)  # type: ignore[arg-type]
-            _mt.validate_request_params(request)
-
-        # Check if tool parsing is unavailable (common condition)
-        tool_parsing_unavailable = (
-            tool_parser is None
-            and not is_mistral_tokenizer(tokenizer)
-            and not self.use_harmony
-        )
-
-        # Validate tool_choice when tool parsing is required but unavailable
-        if tool_parsing_unavailable and request.tool_choice not in (
-            None,
-            "none",
-        ):
-            if request.tool_choice == "auto" and not self.enable_auto_tools:
-                # for hf tokenizers, "auto" tools requires
-                # --enable-auto-tool-choice and --tool-call-parser
-                return self.create_error_response(
-                    '"auto" tool choice requires '
-                    "--enable-auto-tool-choice and --tool-call-parser to be set"
-                )
-            elif request.tool_choice != "auto":
-                # "required" or named tool requires tool parser
-                return self.create_error_response(
-                    f'tool_choice="{request.tool_choice}" requires '
-                    "--tool-call-parser to be set"
-                )
-
-        if request.tools is None or (
-            request.tool_choice == "none" and self.exclude_tools_when_tool_choice_none
-        ):
-            tool_dicts = None
-        else:
-            tool_dicts = [tool.model_dump() for tool in request.tools]
-
-        if not self.use_harmony:
-            # Common case.
-            error_check_ret = self._validate_chat_template(
-                request_chat_template=request.chat_template,
-                chat_template_kwargs=request.chat_template_kwargs,
-                trust_request_chat_template=self.trust_request_chat_template,
-            )
-            if error_check_ret is not None:
-                return error_check_ret
-
-            conversation, engine_prompts = await self._preprocess_chat(
-                request,
-                request.messages,
-                default_template=self.chat_template,
-                default_template_content_format=self.chat_template_content_format,
-                default_template_kwargs=self.default_chat_template_kwargs,
-                tool_dicts=tool_dicts,
-                tool_parser=tool_parser,
-            )
-        else:
-            # For GPT-OSS.
-            should_include_tools = tool_dicts is not None
-            conversation, engine_prompts = self._make_request_with_harmony(
-                request, should_include_tools
-            )
-
-        return conversation, engine_prompts
+        return await self.openai_serving_render.render_chat(request)
 
     async def create_chat_completion(
         self,
@@ -1507,7 +1438,7 @@ class OpenAIServingChat(OpenAIServing):
 
             elif request.tool_choice and request.tool_choice == "required":
                 tool_call_class_items = []
-                assert tool_calls is not None and len(tool_calls) > 0
+                tool_calls = tool_calls or []
                 for idx, tool_call in enumerate(tool_calls):
                     # Use native ID if available,
                     # otherwise generate ID with correct id_type
@@ -1875,50 +1806,3 @@ class OpenAIServingChat(OpenAIServing):
                 )
             ]
         )
-
-    def _make_request_with_harmony(
-        self,
-        request: ChatCompletionRequest,
-        should_include_tools: bool = True,
-    ):
-        messages: list[OpenAIMessage] = []
-
-        # because of issues with pydantic we need to potentially
-        # re-serialize the tool_calls field of the request
-        # for more info: see comment in `maybe_serialize_tool_calls`
-        _mt.maybe_serialize_tool_calls(request)  # type: ignore[arg-type]
-
-        # Add system message.
-        # NOTE: In Chat Completion API, browsing is enabled by default
-        # if the model supports it. TODO: Support browsing.
-        assert not self.supports_browsing
-        assert not self.supports_code_interpreter
-        if (reasoning_effort := request.reasoning_effort) == "none":
-            raise ValueError(f"Harmony does not support {reasoning_effort=}")
-        sys_msg = get_system_message(
-            reasoning_effort=reasoning_effort,
-            browser_description=None,
-            python_description=None,
-            with_custom_tools=should_include_tools,
-        )
-        messages.append(sys_msg)
-
-        # Add developer message.
-        if request.tools:
-            dev_msg = get_developer_message(
-                tools=request.tools if should_include_tools else None  # type: ignore[arg-type]
-            )
-            messages.append(dev_msg)
-
-        # Add user message.
-        messages.extend(parse_chat_inputs_to_harmony_messages(request.messages))
-
-        # Render prompt token ids.
-        prompt_token_ids = render_for_completion(messages)
-        engine_prompt = TokensPrompt(prompt_token_ids=prompt_token_ids)
-
-        # Add cache_salt if provided in the request
-        if request.cache_salt is not None:
-            engine_prompt["cache_salt"] = request.cache_salt
-
-        return messages, [engine_prompt]
