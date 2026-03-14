@@ -1,0 +1,3 @@
+# Sliding-window model
+hf_model: microsoft/Phi-4-mini-instruct
+gpu_memory_utilization: 0.8

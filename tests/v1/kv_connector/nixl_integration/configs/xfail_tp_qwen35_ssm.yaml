@@ -1,0 +1,9 @@
+# Hybrid SSM — Qwen3.5-35B-A3B 1p1d
+# xfail bc SSMs hidden state can't be rolled back and
+# sees a phantom token after the prefill TP
+hf_model: Qwen/Qwen3.5-35B-A3B
+gpu_memory_utilization: 0.8
+use_hma: true
+vllm_serve_extra_args:
+  - --max-model-len
+  - "8192"

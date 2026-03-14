@@ -1,0 +1,6 @@
+# Sliding-window model
+hf_model: google/gemma-3-4b-it
+gpu_memory_utilization: 0.8
+vllm_serve_extra_args:
+  - --max-model-len
+  - "8192"

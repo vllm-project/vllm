@@ -1,0 +1,7 @@
+# Sliding-window model, 2 prefill TP + 1 decode TP
+hf_model: microsoft/Phi-4-mini-instruct
+gpu_memory_utilization: 0.8
+prefill_tp_size: 2
+decode_parallel_size: 1
+vllm_serve_extra_args:
+  - --no-async-scheduling

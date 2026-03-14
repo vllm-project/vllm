@@ -1,0 +1,6 @@
+hf_model: Qwen/Qwen3-0.6B
+gpu_memory_utilization: 0.6
+prefill_tp_size: 2
+decode_parallel_size: 2
+vllm_serve_extra_args:
+  - --no-async-scheduling

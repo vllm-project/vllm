@@ -1,0 +1,7 @@
+# MLA case with heterogeneous TP
+hf_model: deepseek-ai/DeepSeek-V2-Lite-Chat
+gpu_memory_utilization: 0.8
+prefill_tp_size: 2
+decode_parallel_size: 1
+vllm_serve_extra_args:
+  - --no-async-scheduling

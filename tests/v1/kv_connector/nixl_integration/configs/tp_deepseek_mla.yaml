@@ -1,0 +1,3 @@
+# MLA case
+hf_model: deepseek-ai/DeepSeek-V2-Lite-Chat
+gpu_memory_utilization: 0.8

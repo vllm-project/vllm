@@ -1,0 +1,10 @@
+# Sliding-window model
+hf_model: google/gemma-3-4b-it
+gpu_memory_utilization: 0.8
+use_hma: true
+prefill_tp_size: 2
+decode_parallel_size: 2
+vllm_serve_extra_args:
+  - --max-model-len
+  - "8192"
+  - --no-async-scheduling

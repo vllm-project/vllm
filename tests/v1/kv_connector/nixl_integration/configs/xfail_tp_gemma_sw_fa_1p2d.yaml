@@ -1,0 +1,10 @@
+# Sliding-window model, 1 prefill TP + 2 decode TP
+# xfail due to issue with gemma in heterogenous TP
+hf_model: google/gemma-3-4b-it
+gpu_memory_utilization: 0.8
+prefill_tp_size: 1
+decode_parallel_size: 2
+vllm_serve_extra_args:
+  - --max-model-len
+  - "8192"
+  - --no-async-scheduling

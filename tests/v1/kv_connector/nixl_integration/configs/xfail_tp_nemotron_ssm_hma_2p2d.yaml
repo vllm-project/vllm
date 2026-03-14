@@ -1,0 +1,13 @@
+# Hybrid SSM — Nemotron Nano 2p2d
+# xfail bc SSMs hidden state can't be rolled back and
+# sees a phantom token after the prefill TP
+hf_model: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-FP8
+gpu_memory_utilization: 0.8
+prefill_tp_size: 2
+decode_parallel_size: 2
+use_hma: true
+vllm_serve_extra_args:
+  - --max-model-len
+  - "8192"
+  - --trust-remote-code
+  - --no-async-scheduling
