@@ -1807,6 +1807,7 @@ class OpenAIServingResponses(OpenAIServing):
         ],
     ) -> AsyncGenerator[StreamingResponsesResponse, None]:
         state = StreamingState()
+        ctx = None
 
         async for ctx in result_generator:
             assert isinstance(ctx, StreamingHarmonyContext)
@@ -1827,6 +1828,15 @@ class OpenAIServingResponses(OpenAIServing):
 
             # Stream tool call outputs
             for event in emit_tool_action_events(ctx, state, self.tool_server):
+                yield _increment_sequence_number_and_return(event)
+
+        # After the loop ends, emit done events for the last message
+        # that was being streamed. During the loop, done events are only
+        # emitted when a *new* message starts (is_expecting_start), so
+        # the final message never gets its done events.
+        if ctx is not None and hasattr(ctx, "parser") and len(ctx.parser.messages) > 0:
+            last_item = ctx.parser.messages[-1]
+            for event in emit_previous_item_done_events(last_item, state):
                 yield _increment_sequence_number_and_return(event)
 
     async def responses_stream_generator(
@@ -1854,6 +1864,12 @@ class OpenAIServingResponses(OpenAIServing):
             # Set sequence_number if the event has this attribute
             if hasattr(event, "sequence_number"):
                 event.sequence_number = sequence_number
+            # Also fix sequence_number on nested items (e.g.
+            # ResponseFunctionToolCall inside ResponseOutputItemDoneEvent)
+            # which are created with placeholder sequence_number=-1.
+            item = getattr(event, "item", None)
+            if item is not None and hasattr(item, "sequence_number"):
+                item.sequence_number = sequence_number
             sequence_number += 1
             return event
 
