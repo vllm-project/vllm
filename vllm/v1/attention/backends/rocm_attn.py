@@ -9,6 +9,7 @@ import torch
 
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig
+from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
@@ -163,37 +164,37 @@ class RocmAttentionBackend(AttentionBackend):
         torch.bfloat16,
         torch.float32,
     ]
+    supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
+        "auto",
+        "bfloat16",
+        "fp8",
+        "fp8_e4m3",
+        "fp8_e5m2",
+    ]
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
-        # ROCM paged attention kernel only supports block sizes 16 and 32
+        # ROCM paged attention native C++ kernel only supports block sizes 16 and 32
         # due to shared memory (LDS) constraints on AMD GPUs.
         # See csrc/rocm/attention.cu CALL_CUSTOM_LAUNCHER_BLK macro.
-
-        # However, The limitations in [16, 32] are reasonable for a native C++ kernel,
-        # but vLLM should allow support for non-standard sizes via the Triton path,
-        # as addressed in this PR: https://github.com/vllm-project/vllm/pull/31380,
-        # where the Triton kernel under rocm_atten does not support inference
-        # for a non-standard qwen3-next model with a block_size of 544.
-        # We have fixed the Triton kernel so that the standard model uses the original
-        # bit-addressing logic, while the non-standard model
-        # uses our optimized kernel logic.
-        return [16, 32, 544]
+        # However, vLLM allows support for any multiple of 16 via the Triton path.
+        # As addressed in PR: https://github.com/vllm-project/vllm/pull/31380,
+        # non-standard models (like qwen3-next with block_size 544, or qwen3_5
+        # with 784 and 1056) are dynamically routed to our optimized Triton kernel
+        # in `do_kv_cache_update`.
+        return [MultipleOf(16)]
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
-        return [32, 64, 96, 128, 160, 192, 224, 256]
+        return [32, 64, 80, 96, 128, 160, 192, 224, 256]
 
     @classmethod
-    def validate_head_size(cls, head_size: int) -> None:
-        if not cls.supports_head_size(head_size):
-            attn_type = cls.__name__.removesuffix("Backend")
-            raise ValueError(
-                f"Head size {head_size} is not supported by {attn_type}. "
-                f"Supported head sizes are: {cls.get_supported_head_sizes()}. "
-                "Set --attention-backend=FLEX_ATTENTION to use "
-                "FlexAttention backend which supports all head sizes."
-            )
+    def supports_mm_prefix(cls) -> bool:
+        return True
+
+    @classmethod
+    def supports_sink(cls) -> bool:
+        return True
 
     forward_includes_kv_cache_update: bool = False
 
@@ -274,8 +275,6 @@ class RocmAttentionImpl(AttentionImpl):
         self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
 
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
-
-        RocmAttentionBackend.validate_head_size(head_size)
 
         self.fp8_dtype = current_platform.fp8_dtype()
 
@@ -454,11 +453,9 @@ class RocmAttentionImpl(AttentionImpl):
         # Get the actual block_size from value_cache
         # value_cache shape: [num_blocks, num_heads, head_size, block_size]
         block_size = value_cache.shape[3]
-        # Determine if it is a power of 2
-        is_pow2 = block_size > 0 and (block_size & (block_size - 1) == 0)
 
-        if is_pow2:
-            # Normal 16, 32, 64, etc., use vLLM native HIP C++ logic
+        if block_size in (16, 32):
+            # Normal 16, 32, use vLLM native HIP C++ logic
             PagedAttention.write_to_paged_cache(
                 key,
                 value,
@@ -470,7 +467,7 @@ class RocmAttentionImpl(AttentionImpl):
                 layer._v_scale,
             )
         else:
-            # Case B: Non-standard blocks (e.g., 544 in Qwen3),
+            # Case B: Non-standard blocks (e.g., 64, 128, 544 in Qwen3Next or Qwen3.5 ),
             # force using our modified Triton logic
             triton_reshape_and_cache_flash(
                 key,

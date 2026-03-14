@@ -13,12 +13,13 @@ IOProcessorInput = TypeVar("IOProcessorInput")
 IOProcessorOutput = TypeVar("IOProcessorOutput")
 
 class IOProcessor(ABC, Generic[IOProcessorInput, IOProcessorOutput]):
-    def __init__(self, vllm_config: VllmConfig):
+    """Abstract interface for pre/post-processing of engine I/O."""
+
+    def __init__(self, vllm_config: VllmConfig, renderer: BaseRenderer):
         super().__init__()
 
         self.vllm_config = vllm_config
 
-    @abstractmethod
     def parse_data(self, data: object) -> IOProcessorInput:
         raise NotImplementedError
 
@@ -32,7 +33,7 @@ class IOProcessor(ABC, Generic[IOProcessorInput, IOProcessorOutput]):
         self,
         params: PoolingParams | None = None,
     ) -> PoolingParams:
-        return params or PoolingParams()
+        return params or PoolingParams(task="plugin")
 
     @abstractmethod
     def pre_process(

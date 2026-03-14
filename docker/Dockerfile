@@ -262,7 +262,9 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 # Build the vLLM wheel
 # if USE_SCCACHE is set, use sccache to speed up compilation
+# AWS credentials mounted at ~/.aws/credentials for sccache S3 auth (optional)
 RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=secret,id=aws-credentials,target=/root/.aws/credentials,required=false \
     if [ "$USE_SCCACHE" = "1" ]; then \
         echo "Installing sccache..." \
         && case "${TARGETPLATFORM}" in \
@@ -584,7 +586,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # This is ~1.1GB and only changes when FlashInfer version bumps
 # https://docs.flashinfer.ai/installation.html
 # From versions.json: .flashinfer.version
-ARG FLASHINFER_VERSION=0.6.4
+ARG FLASHINFER_VERSION=0.6.6
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system flashinfer-cubin==${FLASHINFER_VERSION} \
     && uv pip install --system flashinfer-jit-cache==${FLASHINFER_VERSION} \
