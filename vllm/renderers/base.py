@@ -200,7 +200,7 @@ class BaseRenderer(ABC, Generic[_T]):
             mm_limits = processor.info.allowed_mm_limits
 
             try:
-                logger.info("Warming up multi-modal processing...")
+                logger.debug("Warming up multi-modal processing...")
                 start_time = time.perf_counter()
 
                 processor_inputs = processor.dummy_inputs.get_dummy_processor_inputs(
@@ -209,14 +209,13 @@ class BaseRenderer(ABC, Generic[_T]):
                     mm_options=mm_config.limit_per_prompt,
                 )
                 _ = processor.apply(
-                    processor_inputs,
-                    timing_ctx=TimingContext(enabled=False),
+                    processor_inputs, timing_ctx=TimingContext(enabled=False)
                 )
 
                 elapsed = time.perf_counter() - start_time
                 logger.info("Multi-modal warmup completed in %.3fs", elapsed)
             except Exception:
-                logger.exception("Multi-modal warmup failed")
+                logger.warning("Multi-modal warmup failed")
             finally:
                 self.clear_mm_cache()
 
