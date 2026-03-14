@@ -208,3 +208,26 @@ def test_flat_logprobs_access() -> None:
     assert logprobs_last2.logprobs == [0.4, 0.5, 0.6, 0.1]
     assert logprobs_last2.ranks == [40, 50, 60, 10]
     assert logprobs_last2.decoded_tokens == ["40", "50", "60", "10"]
+
+    # Test __getitem__ : empty slice (should return empty FlatLogprobs,
+    # not raise IndexError)
+    logprobs_empty = logprobs[0:0]
+    assert isinstance(logprobs_empty, FlatLogprobs)
+    assert len(logprobs_empty) == 0
+    assert logprobs_empty.start_indices == []
+    assert logprobs_empty.end_indices == []
+    assert logprobs_empty.token_ids == []
+    assert logprobs_empty.logprobs == []
+
+    # Test __getitem__ : empty slice at end
+    logprobs_empty_end = logprobs[3:3]
+    assert isinstance(logprobs_empty_end, FlatLogprobs)
+    assert len(logprobs_empty_end) == 0
+
+    # Test __getitem__ : negative zero slice (Python's -0 == 0)
+    # This exercises the same code path used by delta-mode logprobs
+    # slicing in the output processor: logprobs[-0:] should behave
+    # the same as logprobs[0:] (returning all elements), but when
+    # the intent is "last 0 elements", the caller must guard for it.
+    logprobs_neg0 = logprobs[-0:]
+    assert len(logprobs_neg0) == 3  # -0 == 0, so returns all
