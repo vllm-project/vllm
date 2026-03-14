@@ -94,7 +94,7 @@ class MemorySnapshot:
 
         # we measure the torch peak memory usage via allocated_bytes,
         # rather than `torch.accelerator.memory_reserved()` .
-        # After `torch.cuda.reset_peak_memory_stats()`,
+        # After `torch.accelerator.reset_peak_memory_stats()`,
         # `torch.accelerator.memory_reserved()` will keep growing, and only shrink
         # when we call `torch.accelerator.empty_cache()` or OOM happens.
         self.torch_peak = current_platform.memory_stats(device).get(
@@ -251,7 +251,7 @@ def memory_profiling(
     """
     gc.collect()
     torch.accelerator.empty_cache()
-    current_platform.reset_peak_memory_stats(baseline_snapshot.device_)
+    torch.accelerator.reset_peak_memory_stats(baseline_snapshot.device_)
 
     result = MemoryProfilingResult(
         before_create=baseline_snapshot,
