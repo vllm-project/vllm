@@ -426,6 +426,22 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       " Tensor problem_sizes, Tensor expert_offsets, Tensor sf_offsets) -> ()");
   // conditionally compiled so impl registration is in source file
 
+  // Expert-specialization mxfp8 blockscaled grouped quantization (SM100+).
+  ops.def(
+      "mxfp8_experts_quant("
+      " Tensor input, Tensor problem_sizes, Tensor expert_offsets,"
+      " Tensor blockscale_offsets, Tensor! quant_output, Tensor! scale_factor)"
+      " -> ()");
+  // conditionally compiled so impl registration is in source file
+
+  // Expert-specialization mxfp8 blockscaled grouped GEMM (SM100+).
+  ops.def(
+      "cutlass_mxfp8_grouped_mm("
+      " Tensor a, Tensor b, Tensor sfa, Tensor sfb, Tensor! out,"
+      " Tensor problem_sizes, Tensor expert_offsets, Tensor blockscale_offsets)"
+      " -> ()");
+  // conditionally compiled so impl registration is in source file
+
   // CUTLASS w8a8 GEMM, supporting symmetric per-tensor or per-row/column
   // quantization, as well as bias
   ops.def(
@@ -785,6 +801,10 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
       "int quant_block_size, str kv_cache_dtype) -> ()");
   cache_ops.impl("indexer_k_quant_and_cache", torch::kCUDA,
                  &indexer_k_quant_and_cache);
+
+  cache_ops.def(
+      "concat_mla_q(Tensor ql_nope, Tensor q_pe, Tensor! q_out) -> ()");
+  cache_ops.impl("concat_mla_q", torch::kCUDA, &concat_mla_q);
 
   cache_ops.def(
       "cp_gather_indexer_k_quant_cache(Tensor kv_cache, Tensor! dst_k, Tensor! "

@@ -292,7 +292,7 @@ def rocm_aiter_fused_experts(
         )
 
 
-class AiterExperts(mk.FusedMoEPermuteExpertsUnpermute):
+class AiterExperts(mk.FusedMoEExpertsModular):
     @property
     def expects_unquantized_inputs(self) -> bool:
         return True
@@ -336,9 +336,6 @@ class AiterExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     def supports_expert_map(self):
         return True
-
-    def supports_chunking(self):
-        return False
 
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         return TopKWeightAndReduceNoOP()

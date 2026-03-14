@@ -38,6 +38,7 @@ from vllm.logprobs import Logprob
 from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
 from vllm.sampling_params import (
     BeamSearchParams,
+    RepetitionDetectionParams,
     RequestOutputKind,
     SamplingParams,
     StructuredOutputsParams,
@@ -178,7 +179,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
         | ChatCompletionNamedToolChoiceParam
         | None
     ) = "none"
-    reasoning_effort: Literal["low", "medium", "high"] | None = None
+    reasoning_effort: Literal["none", "low", "medium", "high"] | None = None
     include_reasoning: bool = True
     parallel_tool_calls: bool | None = True
 
@@ -267,6 +268,13 @@ class ChatCompletionRequest(OpenAIBaseModel):
             "Will be accessible by the chat template."
         ),
     )
+    media_io_kwargs: dict[str, dict[str, Any]] | None = Field(
+        default=None,
+        description=(
+            "Additional kwargs to pass to the media IO connectors, "
+            "keyed by modality. Merged with engine-level media_io_kwargs."
+        ),
+    )
     mm_processor_kwargs: dict[str, Any] | None = Field(
         default=None,
         description=("Additional kwargs to pass to the HF processor."),
@@ -336,6 +344,16 @@ class ChatCompletionRequest(OpenAIBaseModel):
         ),
     )
 
+    repetition_detection: RepetitionDetectionParams | None = Field(
+        default=None,
+        description="Parameters for detecting repetitive N-gram patterns "
+        "in output tokens. If such repetition is detected, generation will "
+        "be ended early. LLMs can sometimes generate repetitive, unhelpful "
+        "token patterns, stopping only when they hit the maximum output length "
+        "(e.g. 'abcdabcdabcd...' or '\\emoji \\emoji \\emoji ...'). This feature "
+        "can detect such behavior and terminate early, saving time and tokens.",
+    )
+
     # --8<-- [end:chat-completion-extra-params]
 
     def build_chat_params(
@@ -355,6 +373,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
                     reasoning_effort=self.reasoning_effort,
                 ),
             ),
+            media_io_kwargs=self.media_io_kwargs,
         )
 
     def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
@@ -499,6 +518,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             allowed_token_ids=self.allowed_token_ids,
             extra_args=extra_args or None,
             skip_clone=True,  # Created fresh per request, safe to skip clone
+            repetition_detection=self.repetition_detection,
         )
 
     @model_validator(mode="before")
@@ -757,4 +777,11 @@ class ChatCompletionRequest(OpenAIBaseModel):
                                     part_type,
                                 )
 
+        return data
+
+    @model_validator(mode="before")
+    @classmethod
+    def set_include_reasoning_for_none_effort(cls, data: Any) -> Any:
+        if data.get("reasoning_effort") == "none":
+            data["include_reasoning"] = False
         return data

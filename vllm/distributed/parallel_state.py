@@ -385,10 +385,10 @@ class GroupCoordinator:
                 self.cpu_group, 1 << 22, 6
             )
 
-        from vllm.platforms import current_platform
-
+        # TODO(#35915): Remove is_tpu() check once tpu_inference
+        # overrides use_custom_op_collectives() to return True.
         self.use_custom_op_call = (
-            current_platform.is_cuda_alike() or current_platform.is_tpu()
+            current_platform.is_tpu() or current_platform.use_custom_op_collectives()
         )
 
         self.use_cpu_custom_send_recv = current_platform.is_cpu() and hasattr(
@@ -853,6 +853,10 @@ class GroupCoordinator:
         if self.world_size <= 1:
             return []
 
+        if dst is None:
+            dst = (self.rank_in_group + 1) % self.world_size
+        assert dst < self.world_size, f"Invalid dst rank ({dst})"
+
         if self.use_cpu_custom_send_recv:
             if self.device_communicator is None:
                 raise ValueError("No device communicator found")
@@ -869,10 +873,6 @@ class GroupCoordinator:
 
         group = self.device_group
         metadata_group = self.cpu_group
-
-        if dst is None:
-            dst = (self.rank_in_group + 1) % self.world_size
-        assert dst < self.world_size, f"Invalid dst rank ({dst})"
 
         metadata_list, tensor_list = _split_tensor_dict(tensor_dict)
         self.send_object(metadata_list, dst=dst)
@@ -950,6 +950,11 @@ class GroupCoordinator:
     ]:
         if not torch.distributed.is_initialized() or self.world_size == 1:
             return None, [], []
+
+        if src is None:
+            src = (self.rank_in_group - 1) % self.world_size
+        assert src < self.world_size, f"Invalid src rank ({src})"
+
         if self.use_cpu_custom_send_recv:
             if self.device_communicator is None:
                 raise ValueError("No device communicator found")
@@ -966,10 +971,6 @@ class GroupCoordinator:
 
         group = self.device_group
         metadata_group = self.cpu_group
-
-        if src is None:
-            src = (self.rank_in_group - 1) % self.world_size
-        assert src < self.world_size, f"Invalid src rank ({src})"
 
         recv_metadata_list = self.recv_object(src=src)
         tensor_dict: dict[str, Any] = {}
@@ -1917,14 +1918,14 @@ def cleanup_dist_env_and_memory(shutdown_ray: bool = False):
     gc.collect()
     from vllm.platforms import current_platform
 
-    empty_cache = current_platform.empty_cache
-    if empty_cache is not None:
-        empty_cache()
-    try:
-        if not current_platform.is_cpu():
+    if not current_platform.is_cpu():
+        torch.accelerator.empty_cache()
+        try:
             torch._C._host_emptyCache()
-    except AttributeError:
-        logger.warning("torch._C._host_emptyCache() only available in Pytorch >=2.5")
+        except AttributeError:
+            logger.warning(
+                "torch._C._host_emptyCache() only available in Pytorch >=2.5"
+            )
 
 
 def in_the_same_node_as(
@@ -1963,6 +1964,7 @@ def in_the_same_node_as(
             if rank == source_rank:
                 # create a shared memory segment
                 shm = shared_memory.SharedMemory(create=True, size=128)
+                assert shm.buf is not None, "Buffer was not created"
                 shm.buf[: len(magic_message)] = magic_message
                 if isinstance(pg, ProcessGroup):
                     torch.distributed.broadcast_object_list(
@@ -1989,6 +1991,7 @@ def in_the_same_node_as(
                     lambda *args, **kwargs: None,
                 ):
                     shm = shared_memory.SharedMemory(name=name)
+                assert shm.buf is not None, "Buffer was not opened"
                 if shm.buf[: len(magic_message)] == magic_message:
                     is_in_the_same_node[rank] = 1
     except Exception as e:

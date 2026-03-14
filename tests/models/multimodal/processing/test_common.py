@@ -6,9 +6,6 @@ from functools import partial
 
 import numpy as np
 import pytest
-from mistral_common.protocol.instruct.chunk import ImageChunk, TextChunk
-from mistral_common.protocol.instruct.messages import UserMessage
-from mistral_common.protocol.instruct.request import ChatCompletionRequest
 from PIL import Image
 
 from vllm.config import ModelConfig
@@ -21,7 +18,10 @@ from vllm.config.multimodal import (
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalDataDict
 from vllm.multimodal.cache import MultiModalProcessorOnlyCache
 from vllm.multimodal.inputs import MultiModalInputs, batched_tensors_equal
-from vllm.multimodal.processing import BaseMultiModalProcessor, InputProcessingContext
+from vllm.multimodal.processing import (
+    BaseMultiModalProcessor,
+    InputProcessingContext,
+)
 from vllm.tokenizers import TokenizerLike, cached_tokenizer_from_config
 from vllm.utils.mistral import is_mistral_tokenizer
 
@@ -33,32 +33,9 @@ from ...registry import (
 )
 
 
-def glm4_1v_patch_mm_data(mm_data: MultiModalDataDict) -> MultiModalDataDict:
+def add_video_metadata(mm_data: MultiModalDataDict) -> MultiModalDataDict:
     """
-    Patch the multimodal data for GLM4.1V model.
-    """
-    # Ensure video metadata is included
-    if "video" in mm_data:
-        # GLM4.1V doesn't support multiple videos
-        video = mm_data["video"]
-        num_frames = len(video)
-        mm_data["video"] = (
-            video,
-            {
-                "total_num_frames": num_frames,
-                "fps": num_frames,
-                "duration": 1,
-                "frames_indices": [i for i in range(num_frames)],
-                "video_backend": "opencv",
-                "do_sample_frames": True,
-            },
-        )
-    return mm_data
-
-
-def qwen3_vl_patch_mm_data(mm_data: MultiModalDataDict) -> MultiModalDataDict:
-    """
-    Patch the multimodal data for Qwen3-VL model.
+    Add metadata to video mm_data
     """
 
     def create_metadata(frames: np.ndarray):
@@ -97,20 +74,6 @@ def glmasr_patch_mm_data(mm_data: MultiModalDataDict) -> MultiModalDataDict:
     return mm_data
 
 
-# For some multimodal models, tokenizer will always add bos_token
-# at the beginning of prompt by default, causing hf_processor outputs
-# incorrect token ids. So we need use `add_special_tokens=False` here
-# to leave bos_token to be added by the processor.
-_ADD_SPECIAL_TOKENS_OVERRIDES = {
-    "lfm2_vl": False,
-    "nemotron_parse": False,
-    "ovis": False,
-    "ovis2_5": False,
-    "paligemma": False,
-    "ultravox": False,
-    "whisper": False,
-}
-
 _IGNORE_MM_KEYS = {
     # In Ultravox, the audio_features can be different depending on padding
     # The slight difference should not be a problem though, since
@@ -119,16 +82,7 @@ _IGNORE_MM_KEYS = {
 }
 
 MM_DATA_PATCHES = {
-    # Ernie4.5-VL, GLM4.1V and Qwen3-VL requires video metadata
-    "ernie4_5_moe_vl": qwen3_vl_patch_mm_data,
-    "glm4v": glm4_1v_patch_mm_data,
-    "glm4v_moe": glm4_1v_patch_mm_data,
-    "glm_ocr": glm4_1v_patch_mm_data,
     "glmasr": glmasr_patch_mm_data,
-    "interns1_pro": qwen3_vl_patch_mm_data,
-    "molmo2": qwen3_vl_patch_mm_data,
-    "qwen3_vl": qwen3_vl_patch_mm_data,
-    "qwen3_vl_moe": qwen3_vl_patch_mm_data,
 }
 
 
@@ -174,6 +128,9 @@ def get_text_token_prompts(
     tokenizer: TokenizerLike = processor.info.get_tokenizer()
     model_config = processor.info.ctx.model_config
 
+    if processor.info.data_parser.video_needs_metadata:
+        mm_data = add_video_metadata(mm_data)
+
     model_type = model_config.hf_config.model_type
     if model_type in MM_DATA_PATCHES:
         mm_data = MM_DATA_PATCHES[model_type](mm_data)
@@ -181,59 +138,34 @@ def get_text_token_prompts(
     parsed_data = processor.info.parse_mm_data(mm_data)
     mm_counts = {k: len(vs) for k, vs in parsed_data.items()}
 
-    text_prompt: str | None
-    token_prompt: list[int]
     if is_mistral_tokenizer(tokenizer):
-        # ChatCompletionRequest only supports ImageChunk natively;
-        # for other modalities (e.g. audio), fall back to the model's
-        # own dummy inputs builder which knows the right placeholders.
-        has_non_image = any(
-            k != "image" and count > 0 for k, count in mm_counts.items()
+        inputs = dummy_inputs.get_dummy_processor_inputs(
+            model_config.max_model_len,
+            mm_counts,
+            mm_options={},
+            # Assume all Mistral models define this extra argument
+            mm_data=mm_data,  # type: ignore[call-arg]
         )
-
-        if has_non_image:
-            inputs = dummy_inputs.get_dummy_processor_inputs(
-                model_config.max_model_len,
-                mm_counts,
-                mm_options={},
-            )
-            text_prompt = None
-            token_prompt = (
-                inputs.prompt
-                if isinstance(inputs.prompt, list)
-                else tokenizer.encode(inputs.prompt, add_special_tokens=False)
-            )
-        else:
-            images = parsed_data.get("image", [])
-            request = ChatCompletionRequest(
-                messages=[
-                    UserMessage(
-                        content=[
-                            TextChunk(text=""),
-                            *(ImageChunk(image=image) for image in images),
-                        ]
-                    ),
-                ]
-            )
-            res = tokenizer.mistral.encode_chat_completion(request)
-
-            # Mistral does not support decode_tokens with
-            # skip_special_tokens=False
-            text_prompt = None
-            token_prompt = res.tokens
     else:
         inputs = dummy_inputs.get_dummy_processor_inputs(
             model_config.max_model_len,
             mm_counts,
             mm_options={},
         )
-        assert isinstance(inputs.prompt, str)
 
+    text_prompt: str | None
+    token_prompt: list[int]
+    if isinstance(inputs.prompt, list):
+        text_prompt = None
+        token_prompt = inputs.prompt
+    elif isinstance(inputs.prompt, str):
         text_prompt = inputs.prompt
         token_prompt = tokenizer.encode(
             text_prompt,
-            add_special_tokens=_ADD_SPECIAL_TOKENS_OVERRIDES.get(model_type, True),
+            **processor.info.get_default_tok_params().get_encode_kwargs(),
         )
+    else:
+        raise TypeError(type(inputs.prompt))
 
     return text_prompt, token_prompt
 
@@ -473,7 +405,7 @@ def test_processing_correctness(
         )
     if model_id == "mistralai/Voxtral-Mini-4B-Realtime-2602":
         pytest.skip(
-            "Voxtral Realtime doesn't make use of any place-holder"
+            "Voxtral Realtime doesn't make use of any place-holder "
             "tokens and hence cannot pass the processing "
             "correctness test as is. Let's revisit adapting this "
             "test once more realtime models exist."
