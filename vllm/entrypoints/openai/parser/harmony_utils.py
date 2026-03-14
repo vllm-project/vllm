@@ -15,6 +15,7 @@ from openai_harmony import (
     ReasoningEffort,
     Role,
     StreamableParser,
+    StreamState,
     SystemContent,
     TextContent,
     ToolDescription,
@@ -32,6 +33,51 @@ REASONING_EFFORT = {
     "medium": ReasoningEffort.MEDIUM,
     "low": ReasoningEffort.LOW,
 }
+
+# Harmony terminal token IDs that signal end-of-generation
+_HARMONY_RETURN_TOKEN_ID = 200002  # <|return|>
+_HARMONY_CALL_TOKEN_ID = 200012  # <|call|>
+_HARMONY_TERMINAL_TOKEN_IDS = frozenset(
+    {
+        _HARMONY_RETURN_TOKEN_ID,
+        _HARMONY_CALL_TOKEN_ID,
+    }
+)
+
+
+class SafeStreamableParser:
+    """Wrapper around StreamableParser that handles terminal tokens gracefully.
+
+    Harmony models can emit <|return|> or <|call|> tokens after <|end|>,
+    which puts the parser in EXPECT_START state. These tokens are valid
+    stop signals but would cause "Unexpected token while expecting start
+    token" errors if passed directly to process(). This wrapper detects
+    that situation and calls process_eos() instead.
+    """
+
+    def __init__(self, inner: StreamableParser):
+        self._inner = inner
+
+    def process(self, token_id: int) -> None:
+        if (
+            self._inner.state == StreamState.EXPECT_START
+            and token_id in _HARMONY_TERMINAL_TOKEN_IDS
+        ):
+            logger.debug(
+                "Harmony parser received terminal token %d in "
+                "EXPECT_START state; treating as EOS",
+                token_id,
+            )
+            self._inner.process_eos()
+        else:
+            self._inner.process(token_id)
+
+    def process_eos(self) -> None:
+        self._inner.process_eos()
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
 
 _harmony_encoding = None
 
@@ -328,11 +374,11 @@ def get_stop_tokens_for_assistant_actions() -> list[int]:
     return get_encoding().stop_tokens_for_assistant_actions()
 
 
-def get_streamable_parser_for_assistant() -> StreamableParser:
-    return StreamableParser(get_encoding(), role=Role.ASSISTANT)
+def get_streamable_parser_for_assistant() -> SafeStreamableParser:
+    return SafeStreamableParser(StreamableParser(get_encoding(), role=Role.ASSISTANT))
 
 
-def parse_output_into_messages(token_ids: Iterable[int]) -> StreamableParser:
+def parse_output_into_messages(token_ids: Iterable[int]) -> SafeStreamableParser:
     parser = get_streamable_parser_for_assistant()
     for token_id in token_ids:
         parser.process(token_id)
