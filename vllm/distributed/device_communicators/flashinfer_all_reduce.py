@@ -3,6 +3,7 @@
 
 
 import atexit
+import gc
 import torch
 import torch.distributed as dist
 from torch.distributed import ProcessGroup
@@ -155,6 +156,7 @@ def destroy_fi_ar_workspace():
                 "Failed to destroy flashinfer workspace during shutdown: %s",
                 e)
         _fi_ar_workspace = None
+    gc.collect()
 
 
 atexit.register(destroy_fi_ar_workspace)
