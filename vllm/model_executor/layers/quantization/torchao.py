@@ -282,7 +282,17 @@ def torchao_quantize_param_data(
         )
 
     dummy_linear[0].weight = param
-    quantize_(dummy_linear, torchao_config)
+    try:
+        quantize_(dummy_linear, torchao_config)
+    except AssertionError as e:
+        if "CUDA>=8.9" in str(e):
+            raise AssertionError(
+                "Float8 dynamic activation quantization is only supported "
+                "on GPUs with compute capability >= 8.9 "
+                "(e.g., Ada Lovelace, Hopper) or AMD MI300+. "
+                "Your GPU does not meet this requirement."
+            ) from e
+        raise
     return dummy_linear[0].weight
 
 
