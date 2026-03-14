@@ -169,16 +169,18 @@ def cpu_platform_plugin() -> str | None:
         logger.debug(
             "Confirmed CPU platform is available because VLLM_TARGET_DEVICE=cpu."
         )
-        return "vllm.platforms.cpu.CpuPlatform"
+        is_cpu = True
 
-    try:
-        is_cpu = vllm_version_matches_substr("cpu")
-        if is_cpu:
-            logger.debug(
-                "Confirmed CPU platform is available because vLLM is built with CPU."
-            )
-    except Exception as e:
-        logger.debug("CPU platform is not available because: %s", str(e))
+    if not is_cpu:
+        try:
+            is_cpu = vllm_version_matches_substr("cpu")
+            if is_cpu:
+                logger.debug(
+                    "Confirmed CPU platform is available "
+                    "because vLLM is built with CPU."
+                )
+        except Exception as e:
+            logger.debug("CPU platform is not available because: %s", str(e))
 
     # Fallback: on macOS, always use CPU (covers both the normal path where
     # the version string didn't contain "cpu" and the exception path where
@@ -220,6 +222,13 @@ builtin_platform_plugins = {
 
 
 def resolve_current_platform_cls_qualname() -> str:
+    # Explicit user override should take precedence over auto-detection.
+    # Route through cpu_platform_plugin() so that ZenCpuPlatform is
+    # selected when appropriate instead of hardcoding CpuPlatform.
+    if envs.VLLM_TARGET_DEVICE == "cpu":
+        logger.debug("Platform is forced to CPU because VLLM_TARGET_DEVICE=cpu.")
+        return cpu_platform_plugin() or "vllm.platforms.cpu.CpuPlatform"
+
     platform_plugins = load_plugins_by_group(PLATFORM_PLUGINS_GROUP)
 
     activated_plugins = []
