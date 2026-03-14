@@ -226,17 +226,16 @@ class OpenAISpeechToText(OpenAIServing):
                 exc.code,
                 exc,
             )
-
-        try:
-            native_y, native_sr = extract_audio_from_video_bytes(audio_data)
-            sr = self.asr_config.sample_rate
-            y = librosa.resample(native_y, orig_sr=native_sr, target_sr=sr)
-        except Exception as ta_exc:
-            logger.debug(
-                "pyAV fallback also failed: %s",
-                ta_exc,
-            )
-            raise ValueError("Invalid or unsupported audio file.") from ta_exc
+            try:
+                native_y, native_sr = extract_audio_from_video_bytes(audio_data)
+                sr = self.asr_config.sample_rate
+                y = librosa.resample(native_y, orig_sr=native_sr, target_sr=sr)
+            except Exception as pyav_exc:
+                logger.debug(
+                    "pyAV fallback also failed: %s",
+                    pyav_exc,
+                )
+                raise ValueError("Invalid or unsupported audio file.") from pyav_exc
 
         duration = librosa.get_duration(y=y, sr=sr)
         do_split_audio = (
