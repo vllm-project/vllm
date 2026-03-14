@@ -142,14 +142,18 @@ def destroy_fi_ar_workspace():
     ):
         try:
             _fi_ar_quant_workspace.destroy()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(
+                "Failed to destroy flashinfer quant workspace during shutdown: %s",
+                e)
     _fi_ar_quant_workspace = None
     if _fi_ar_workspace is not None:
         try:
             _fi_ar_workspace.destroy()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(
+                "Failed to destroy flashinfer workspace during shutdown: %s",
+                e)
         _fi_ar_workspace = None
 
 
