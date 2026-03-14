@@ -377,6 +377,90 @@ def test_get_logprobs_and_prompt_logprobs(
         )
 
 
+def _get_argmax_prompt_token_ids(vllm_model: VllmRunner) -> list[int]:
+    seed_prompt_token_ids = [0, 0, 0, 0, 0]
+    result = vllm_model.llm.generate(
+        [seed_prompt_token_ids],
+        sampling_params=SamplingParams(
+            temperature=0.0,
+            max_tokens=1,
+            detokenize=False,
+        ),
+    )[0]
+
+    argmax_token_ids = result.outputs[0].token_ids
+    assert len(argmax_token_ids) == 1
+    return result.prompt_token_ids + argmax_token_ids
+
+
+def _get_last_prompt_token_prob(
+    vllm_model: VllmRunner,
+    prompt_token_ids: list[int],
+    prompt_logprobs_temperature: float,
+) -> float:
+    result = vllm_model.llm.generate(
+        [prompt_token_ids],
+        sampling_params=SamplingParams(
+            temperature=0.0,
+            max_tokens=1,
+            detokenize=False,
+            prompt_logprobs=0,
+            prompt_logprobs_temperature=prompt_logprobs_temperature,
+        ),
+    )[0]
+
+    prompt_logprobs = result.prompt_logprobs
+    assert prompt_logprobs is not None
+    last_prompt_logprobs = prompt_logprobs[-1]
+    assert last_prompt_logprobs is not None
+    assert len(last_prompt_logprobs) == 1
+    return math.exp(next(iter(last_prompt_logprobs.values())).logprob)
+
+
+@pytest.mark.parametrize("use_v2_model_runner", [False, True])
+def test_prompt_logprobs_temperature_increases_argmax_prob(
+    monkeypatch,
+    use_v2_model_runner: bool,
+) -> None:
+    """We test that decreasing prompt_logprobs_temperature increases the probability of the argmax token.
+    To do this, we first generate a sequence of argmax tokens given a seed prompt. 
+    We then pass seed prompt concatenated with argmax tokens as the prompt using various prompt_logprobs_temperatures
+    and examine the probabilities of the argmax tokens.
+    """
+
+    # test for v1 and v2
+    monkeypatch.setenv(
+        "VLLM_USE_V2_MODEL_RUNNER", "1" if use_v2_model_runner else "0"
+    )
+
+    with VllmRunner(
+        MODEL,
+        dtype=DTYPE,
+        max_num_batched_tokens=16,
+        max_num_seqs=16,
+        max_model_len=128,
+        enable_chunked_prefill=True,
+        enforce_eager=True,
+        enable_prefix_caching=False,
+        gpu_memory_utilization=0.4,
+    ) as vllm_model:
+
+        # Generate the argmax tokens and concat with seed prompt
+        argmax_prompt_token_ids = _get_argmax_prompt_token_ids(vllm_model)
+
+        # Evaluate logprobs of argmax tokens
+        low_temp_prob = _get_last_prompt_token_prob(
+            vllm_model, argmax_prompt_token_ids, 0.1
+        )
+        default_temp_prob = _get_last_prompt_token_prob(
+            vllm_model, argmax_prompt_token_ids, 1.0
+        )
+        high_temp_prob = _get_last_prompt_token_prob(
+            vllm_model, argmax_prompt_token_ids, 5.0
+        )
+        assert low_temp_prob > default_temp_prob > high_temp_prob
+
+
 def test_max_logprobs():
     """vLLM v1 engine should fail a request with `logprobs > max_logprobs`
     Should also fail for `prompt_logprobs > max_logprobs`
