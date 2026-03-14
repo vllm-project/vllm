@@ -51,6 +51,8 @@ class IncrementalDetokenizer:
         """Return token_ids consistent with the text from
         get_next_output_text. The default implementation just returns the
         input token_ids unchanged (no stop-string buffering)."""
+        if not delta:
+            return self.output_token_ids
         return token_ids
 
     @classmethod
@@ -206,7 +208,9 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
         This ensures ``delta_token_ids`` stays in sync with ``delta_text``.
         """
         if not self.stop_buffer_length:
-            # No stop-string buffering, token_ids are already correct.
+            if not delta:
+                return self.output_token_ids
+            # For delta mode, the input token_ids are correct.
             return token_ids
 
         if not delta:
