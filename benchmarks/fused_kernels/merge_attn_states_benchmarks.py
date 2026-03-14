@@ -36,7 +36,7 @@ NUM_TOKENS_LIST = [1, 16, 64, 256, 1024, 4096]
 
 # (label, num_heads, head_size)
 HEAD_CONFIGS = [
-    ("DeepSeek-V3 MLA", 128, 512),
+    ("DeepSeek-V3 MLA", 128, 128),
     ("Llama-70B", 64, 128),
     ("Llama-8B", 32, 128),
 ]
