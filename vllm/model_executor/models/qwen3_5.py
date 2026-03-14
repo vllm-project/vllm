@@ -496,7 +496,6 @@ class Qwen3_5Model(Qwen3NextModel):
                     continue
                 param = params_dict[name]
                 weight_loader = param.weight_loader
-                # ColumnParallelLinear.in_proj_z weight_loader takes (param, loaded_weight) only
                 if param_name == "in_proj_z" and self.enable_lora:
                     weight_loader(param, loaded_weight)
                 else:
@@ -862,6 +861,7 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
             vllm_config.cache_config.mamba_cache_dtype,
             vllm_config.cache_config.mamba_ssm_cache_dtype,
         )
+
     @classmethod
     def get_mamba_state_shape_from_config(
         cls, vllm_config: "VllmConfig"
@@ -947,7 +947,7 @@ class Qwen3_5_MoeMixtureOfExperts(MixtureOfExperts):
 )
 class Qwen3_5MoeForConditionalGeneration(
     Qwen3_5ForConditionalGeneration, Qwen3_5_MoeMixtureOfExperts
-):  
+):
     # For MoE LoRA weights loading
     is_3d_moe_weight: bool = True
 
