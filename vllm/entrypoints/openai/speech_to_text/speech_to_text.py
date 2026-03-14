@@ -229,9 +229,8 @@ class OpenAISpeechToText(OpenAIServing):
 
         try:
             native_y, native_sr = extract_audio_from_video_bytes(audio_data)
-            y = librosa.resample(
-                native_y, orig_sr=native_sr, target_sr=self.asr_config.sample_rate
-            )
+            sr = self.asr_config.sample_rate
+            y = librosa.resample(native_y, orig_sr=native_sr, target_sr=sr)
         except Exception as ta_exc:
             logger.debug(
                 "pyAV fallback also failed: %s",
