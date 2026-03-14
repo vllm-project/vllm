@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import TYPE_CHECKING, Any, Literal, TypeVar
 
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
@@ -153,6 +153,14 @@ class TokenizeParams:
     - `-1` maps to `max_input_tokens`.
     """
 
+    truncation_side: Literal["left", "right"] | None = None
+    """
+    Which side to truncate from when ``truncate_prompt_tokens`` is active:
+    - ``"right"`` keeps the first N tokens (truncate from the end).
+    - ``"left"``  keeps the last  N tokens (truncate from the start).
+    - ``None``    falls back to the tokenizer default.
+    """
+
     do_lower_case: bool = False
     """Whether to normalize text to lower case before tokenization."""
 
@@ -271,6 +279,7 @@ class TokenizeParams:
             ),
             pad_prompt_tokens=pad_prompt_tokens,
             truncate_prompt_tokens=truncate_prompt_tokens,
+            truncation_side=self.truncation_side,
             do_lower_case=do_lower_case,
             add_special_tokens=add_special_tokens,
             needs_detokenization=needs_detokenization,
@@ -285,6 +294,16 @@ class TokenizeParams:
             # This prevents tokenization from taking up more resources than necessary
             # while still failing `self._token_len_check` as expected by users
             max_length = self.max_input_tokens + 1
+
+        # Left-side truncation requires the full token sequence so we can
+        # slice from the end in _token_truncation.  Disable HF-level
+        # truncation (which would incorrectly truncate from the right for
+        # pooling models) and let _token_truncation handle it.
+        if self.truncation_side == "left":
+            return dict(
+                truncation=False,
+                add_special_tokens=self.add_special_tokens,
+            )
 
         return dict(
             truncation=max_length is not None,
@@ -375,7 +394,8 @@ class TokenizeParams:
         if max_length == 0:
             return tokens[:0]
 
-        if getattr(tokenizer, "truncation_side", "left") == "left":
+        side = self.truncation_side or getattr(tokenizer, "truncation_side", "left")
+        if side == "left":
             return tokens[-max_length:]
 
         return tokens[:max_length]

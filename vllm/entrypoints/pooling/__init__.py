@@ -34,8 +34,12 @@ def register_pooling_api_routers(
 
     if "embed" in supported_tasks:
         from vllm.entrypoints.pooling.embed.api_router import router as embed_router
+        from vllm.entrypoints.pooling.embed.cohere.api_router import (
+            router as cohere_embed_router,
+        )
 
         app.include_router(embed_router)
+        app.include_router(cohere_embed_router)
 
     # Score API handles score/rerank for:
     # - "score" task (score_type: cross-encoder models)
@@ -56,6 +60,9 @@ def init_pooling_state(
 ):
     from vllm.entrypoints.chat_utils import load_chat_template
     from vllm.entrypoints.pooling.classify.serving import ServingClassification
+    from vllm.entrypoints.pooling.embed.cohere.serving import (
+        CohereServingEmbedding,
+    )
     from vllm.entrypoints.pooling.embed.serving import ServingEmbedding
     from vllm.entrypoints.pooling.pooling.serving import OpenAIServingPooling
     from vllm.entrypoints.pooling.score.serving import ServingScores
@@ -77,7 +84,7 @@ def init_pooling_state(
         if any(t in supported_tasks for t in POOLING_TASKS)
         else None
     )
-    state.serving_embedding = (
+    serving_embedding = (
         ServingEmbedding(
             engine_client,
             state.openai_serving_models,
@@ -87,6 +94,12 @@ def init_pooling_state(
             trust_request_chat_template=args.trust_request_chat_template,
         )
         if "embed" in supported_tasks
+        else None
+    )
+    state.serving_embedding = serving_embedding
+    state.cohere_serving_embedding = (
+        CohereServingEmbedding(serving_embedding)
+        if serving_embedding is not None
         else None
     )
     state.serving_classification = (

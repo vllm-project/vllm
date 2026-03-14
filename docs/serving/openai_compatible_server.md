@@ -72,6 +72,9 @@ In addition, we have the following custom APIs:
     - Only applicable to [classification models](../models/pooling_models.md).
 - [Score API](#score-api) (`/score`)
     - Applicable to [embedding models and cross-encoder models](../models/pooling_models.md).
+- [Cohere Embed API](#cohere-embed-api) (`/v2/embed`)
+    - Compatible with [Cohere's Embed API](https://docs.cohere.com/reference/embed)
+    - Works with any [embedding model](../models/pooling_models.md), including multimodal models.
 - [Re-rank API](#re-rank-api) (`/rerank`, `/v1/rerank`, `/v2/rerank`)
     - Implements [Jina AI's v1 re-rank API](https://jina.ai/reranker/)
     - Also compatible with [Cohere's v1 & v2 re-rank APIs](https://docs.cohere.com/v2/reference/rerank)
@@ -428,6 +431,157 @@ these extra parameters are supported instead:
     --8<-- "vllm/entrypoints/pooling/base/protocol.py:encoding-extra-params"
     --8<-- "vllm/entrypoints/pooling/base/protocol.py:embed-extra-params"
     ```
+
+### Cohere Embed API
+
+Our API is also compatible with [Cohere's Embed v2 API](https://docs.cohere.com/reference/embed) which adds support for some modern embedding feature such as truncation, output dimensions, embedding types, and input types. This endpoint works with any embedding model (including multimodal models).
+
+#### Cohere Embed API request parameters
+
+| Parameter | Type | Required | Description |
+| --------- | ---- | -------- | ----------- |
+| `model` | string | Yes | Model name |
+| `input_type` | string | No | Prompt prefix key (model-dependent, see below) |
+| `texts` | list[string] | No | Text inputs (use one of `texts`, `images`, or `inputs`) |
+| `images` | list[string] | No | Base64 data URI images |
+| `inputs` | list[object] | No | Mixed text and image content objects |
+| `embedding_types` | list[string] | No | Output types (default: `["float"]`) |
+| `output_dimension` | int | No | Truncate embeddings to this dimension (Matryoshka) |
+| `truncate` | string | No | `END`, `START`, or `NONE` (default: `END`) |
+
+#### Text embedding
+
+```bash
+curl -X POST "http://localhost:8000/v2/embed" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "BAAI/bge-base-en-v1.5",
+    "input_type": "search_document",
+    "texts": ["Hello world", "How are you?"],
+    "embedding_types": ["float"]
+  }'
+```
+
+??? console "Response"
+
+    ```json
+    {
+      "id": "embd-...",
+      "embeddings": {
+        "float": [
+          [0.012, -0.034, ...],
+          [0.056, 0.078, ...]
+        ]
+      },
+      "texts": ["Hello world", "How are you?"],
+      "meta": {
+        "api_version": {"version": "2"},
+        "tokens": {"input_tokens": 12}
+      }
+    }
+    ```
+
+#### Image embedding
+
+For multimodal models, you can embed images by passing base64 data URIs:
+
+```bash
+vllm serve google/siglip-so400m-patch14-384 --runner pooling
+```
+
+```bash
+curl -X POST "http://localhost:8000/v2/embed" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "google/siglip-so400m-patch14-384",
+    "input_type": "image",
+    "images": ["data:image/png;base64,iVBOR..."],
+    "embedding_types": ["float"]
+  }'
+```
+
+#### Mixed text and image inputs
+
+The `inputs` field accepts a list of objects with mixed text and image content:
+
+```bash
+curl -X POST "http://localhost:8000/v2/embed" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "google/siglip-so400m-patch14-384",
+    "input_type": "search_document",
+    "inputs": [
+      {
+        "content": [
+          {"type": "text", "text": "A photo of a cat"},
+          {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBOR..."}}
+        ]
+      }
+    ],
+    "embedding_types": ["float"]
+  }'
+```
+
+#### Embedding types
+
+The `embedding_types` parameter controls the output format. Multiple types can be requested in a single call:
+
+| Type | Description |
+| ---- | ----------- |
+| `float` | Raw float32 embeddings (default) |
+| `binary` | Bit-packed signed binary |
+| `ubinary` | Bit-packed unsigned binary |
+| `base64` | Little-endian float32 encoded as base64 |
+
+```bash
+curl -X POST "http://localhost:8000/v2/embed" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "BAAI/bge-base-en-v1.5",
+    "input_type": "search_query",
+    "texts": ["What is machine learning?"],
+    "embedding_types": ["float", "binary"]
+  }'
+```
+
+??? console "Response"
+
+    ```json
+    {
+      "id": "embd-...",
+      "embeddings": {
+        "float": [[0.012, -0.034, ...]],
+        "binary": [[42, -117, ...]]
+      },
+      "texts": ["What is machine learning?"],
+      "meta": {
+        "api_version": {"version": "2"},
+        "tokens": {"input_tokens": 8}
+      }
+    }
+    ```
+
+#### Truncation
+
+The `truncate` parameter controls how inputs exceeding the model's maximum sequence length are handled:
+
+| Value | Behavior |
+| ----- | --------- |
+| `END` (default) | Keep the first tokens, drop the end |
+| `START` | Keep the last tokens, drop the beginning |
+| `NONE` | Return an error if the input is too long |
+
+#### Input type and prompt prefixes
+
+The `input_type` field selects a prompt prefix to prepend to each text input. The available values
+depend on the model:
+
+- **Models with `task_instructions` in `config.json`**: The keys from the `task_instructions` dict are
+  the valid `input_type` values and the corresponding value is prepended to each text.
+- **Models with `config_sentence_transformers.json` prompts**: The keys from the `prompts` dict are
+  the valid `input_type` values. For example, `Snowflake/snowflake-arctic-embed-xs` defines `"query"`,
+  so setting `input_type: "query"` prepends `"Represent this sentence for searching relevant passages: "`.
+- **Other models**: `input_type` is not accepted and will raise a validation error if passed.
 
 ### Transcriptions API
 
