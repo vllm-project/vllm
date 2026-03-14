@@ -602,29 +602,90 @@ __global__ void fusedQKNormRopeKernelNTokenHeads(
     __VA_ARGS__                                          \
   }
 
-// Internal helper: launch fusedQKNormRopeKernelNTokenHeads with given
-// token_heads_per_warp (must be 2, 4, or 8).
 template <typename scalar_t_in, typename scalar_t_cache>
-static void launchFusedQKNormRopeNTokenHeads(
+void launchFusedQKNormRope(void* qkv, int const num_tokens,
+                           int const num_heads_q, int const num_heads_k,
+                           int const num_heads_v, int const head_dim,
+                           int const rotary_dim, float const eps,
+                           void const* q_weight, void const* k_weight,
+                           void const* cos_sin_cache, bool const interleave,
+                           int64_t const* position_ids, cudaStream_t stream) {
+  constexpr int blockSize = 256;
+  int const warpsPerBlock = blockSize / 32;
+  int const totalQKHeads = num_heads_q + num_heads_k;
+  int const totalWarps = num_tokens * totalQKHeads;
+  int const gridSize = common::divUp(totalWarps, warpsPerBlock);
+  dim3 gridDim(gridSize);
+  dim3 blockDim(blockSize);
+  switch (head_dim) {
+    case 64:
+      DISPATCH_INTERLEAVE(interleave, INTERLEAVE, {
+        fusedQKNormRopeKernel<scalar_t_in, scalar_t_cache, 64, INTERLEAVE>
+            <<<gridDim, blockDim, 0, stream>>>(
+                qkv, num_heads_q, num_heads_k, num_heads_v, eps, q_weight,
+                k_weight, cos_sin_cache, position_ids, num_tokens, rotary_dim);
+      });
+      break;
+    case 128:
+      DISPATCH_INTERLEAVE(interleave, INTERLEAVE, {
+        fusedQKNormRopeKernel<scalar_t_in, scalar_t_cache, 128, INTERLEAVE>
+            <<<gridDim, blockDim, 0, stream>>>(
+                qkv, num_heads_q, num_heads_k, num_heads_v, eps, q_weight,
+                k_weight, cos_sin_cache, position_ids, num_tokens, rotary_dim);
+      });
+      break;
+    case 256:
+      DISPATCH_INTERLEAVE(interleave, INTERLEAVE, {
+        fusedQKNormRopeKernel<scalar_t_in, scalar_t_cache, 256, INTERLEAVE>
+            <<<gridDim, blockDim, 0, stream>>>(
+                qkv, num_heads_q, num_heads_k, num_heads_v, eps, q_weight,
+                k_weight, cos_sin_cache, position_ids, num_tokens, rotary_dim);
+      });
+      break;
+    default:
+      TORCH_CHECK(false,
+                  "Unsupported head dimension for fusedQKNormRope: ", head_dim);
+  }
+}
+
+// Launch: one warp processes token_heads_per_warp token-heads (1, 2, 4, or 8).
+// When token_heads_per_warp == 1, delegates to the 1-head baseline above.
+template <typename scalar_t_in, typename scalar_t_cache>
+void launchFusedQKNormRopeNTokenHeads(
     void* qkv, int const num_tokens, int const num_heads_q,
     int const num_heads_k, int const num_heads_v, int const head_dim,
     int const rotary_dim, float const eps, void const* q_weight,
     void const* k_weight, void const* cos_sin_cache, bool const interleave,
     int64_t const* position_ids, int const token_heads_per_warp,
     cudaStream_t stream) {
+  TORCH_CHECK(token_heads_per_warp == 1 || token_heads_per_warp == 2 ||
+                  token_heads_per_warp == 4 || token_heads_per_warp == 8,
+              "token_heads_per_warp must be 1, 2, 4, or 8, got ",
+              token_heads_per_warp);
+
+  // token_heads_per_warp == 1: delegate to the 1-head baseline kernel.
+  if (token_heads_per_warp == 1) {
+    launchFusedQKNormRope<scalar_t_in, scalar_t_cache>(
+        qkv, num_tokens, num_heads_q, num_heads_k, num_heads_v, head_dim,
+        rotary_dim, eps, q_weight, k_weight, cos_sin_cache, interleave,
+        position_ids, stream);
+    return;
+  }
+
   constexpr int blockSize = 256;
   int const warpsPerBlock = blockSize / 32;
   int const totalQKHeads = num_heads_q + num_heads_k;
+  // Grid: one warp per (token, head_chunk); same token → reuse cos/sin in smem.
   int const head_chunks_per_token =
       (totalQKHeads + token_heads_per_warp - 1) / token_heads_per_warp;
   int const total_warps = num_tokens * head_chunks_per_token;
   int const gridSize = common::divUp(total_warps, warpsPerBlock);
   dim3 gridDim(gridSize);
   dim3 blockDim(blockSize);
-
-  // Shared memory: cos/sin region + QKV tile region.
+  // Cache element size: float=4, bfloat16=2 (host-safe; kernel uses same layout).
   size_t const cache_elem_size =
       std::is_same_v<scalar_t_cache, float> ? sizeof(float) : 2u;
+  // QKV smem: token_heads_per_warp tiles per warp, each tile 32*(head_dim/32*2) = 2*head_dim bytes.
   size_t const qkv_smem_per_warp =
       static_cast<size_t>(token_heads_per_warp) * 2u *
       static_cast<size_t>(head_dim);
@@ -674,81 +735,10 @@ static void launchFusedQKNormRopeNTokenHeads(
     LAUNCH_N_TOKEN_HEADS(2);
   } else if (token_heads_per_warp == 4) {
     LAUNCH_N_TOKEN_HEADS(4);
-  } else {
+  } else if (token_heads_per_warp == 8) {
     LAUNCH_N_TOKEN_HEADS(8);
   }
 #undef LAUNCH_N_TOKEN_HEADS
-}
-
-template <typename scalar_t_in, typename scalar_t_cache>
-void launchFusedQKNormRope(void* qkv, int const num_tokens,
-                           int const num_heads_q, int const num_heads_k,
-                           int const num_heads_v, int const head_dim,
-                           int const rotary_dim, float const eps,
-                           void const* q_weight, void const* k_weight,
-                           void const* cos_sin_cache, bool const interleave,
-                           int64_t const* position_ids, cudaStream_t stream) {
-  // Auto-select kernel based on total QK work units.
-  // Thresholds calibrated on H100 (num_heads_q=32, num_heads_k=4):
-  //   < 10240  units: few warps, 1-head baseline avoids smem overhead
-  //   < 40960  units: mid-range, 4-head async kernel is optimal
-  //   >= 40960 units: large batch, 8-head async kernel maximizes reuse
-  int const total_qk_units = num_tokens * (num_heads_q + num_heads_k);
-  int token_heads_per_warp;
-  if (total_qk_units < 10240) {
-    token_heads_per_warp = 1;
-  } else if (total_qk_units < 40960) {
-    token_heads_per_warp = 4;
-  } else {
-    token_heads_per_warp = 8;
-  }
-
-  if (token_heads_per_warp > 1) {
-    launchFusedQKNormRopeNTokenHeads<scalar_t_in, scalar_t_cache>(
-        qkv, num_tokens, num_heads_q, num_heads_k, num_heads_v, head_dim,
-        rotary_dim, eps, q_weight, k_weight, cos_sin_cache, interleave,
-        position_ids, token_heads_per_warp, stream);
-    return;
-  }
-
-  // Fallback: original 1-head-per-warp kernel (no shared memory).
-  constexpr int blockSize = 256;
-  int const warpsPerBlock = blockSize / 32;
-  int const totalQKHeads = num_heads_q + num_heads_k;
-  int const totalWarps = num_tokens * totalQKHeads;
-  int const gridSize = common::divUp(totalWarps, warpsPerBlock);
-  dim3 gridDim(gridSize);
-  dim3 blockDim(blockSize);
-
-  switch (head_dim) {
-    case 64:
-      DISPATCH_INTERLEAVE(interleave, INTERLEAVE, {
-        fusedQKNormRopeKernel<scalar_t_in, scalar_t_cache, 64, INTERLEAVE>
-            <<<gridDim, blockDim, 0, stream>>>(
-                qkv, num_heads_q, num_heads_k, num_heads_v, eps, q_weight,
-                k_weight, cos_sin_cache, position_ids, num_tokens, rotary_dim);
-      });
-      break;
-    case 128:
-      DISPATCH_INTERLEAVE(interleave, INTERLEAVE, {
-        fusedQKNormRopeKernel<scalar_t_in, scalar_t_cache, 128, INTERLEAVE>
-            <<<gridDim, blockDim, 0, stream>>>(
-                qkv, num_heads_q, num_heads_k, num_heads_v, eps, q_weight,
-                k_weight, cos_sin_cache, position_ids, num_tokens, rotary_dim);
-      });
-      break;
-    case 256:
-      DISPATCH_INTERLEAVE(interleave, INTERLEAVE, {
-        fusedQKNormRopeKernel<scalar_t_in, scalar_t_cache, 256, INTERLEAVE>
-            <<<gridDim, blockDim, 0, stream>>>(
-                qkv, num_heads_q, num_heads_k, num_heads_v, eps, q_weight,
-                k_weight, cos_sin_cache, position_ids, num_tokens, rotary_dim);
-      });
-      break;
-    default:
-      TORCH_CHECK(false,
-                  "Unsupported head dimension for fusedQKNormRope: ", head_dim);
-  }
 }
 }  // namespace tensorrt_llm::kernels
 
@@ -806,13 +796,30 @@ void fused_qk_norm_rope(
 
   auto stream = at::cuda::getCurrentCUDAStream(qkv.get_device());
 
+  // Auto-select token_heads_per_warp based on total QK work units.
+  // Thresholds calibrated on H100 (num_heads_q=32, num_heads_k=4):
+  //   < 10240  units → 1-head baseline (small batch, avoid smem overhead)
+  //   < 40960  units → 4-head async kernel
+  //   >= 40960 units → 8-head async kernel
+  int token_heads_per_warp;
+  {
+    int64_t const total_qk_units = num_tokens * (num_heads_q + num_heads_k);
+    if (total_qk_units < 10240LL) {
+      token_heads_per_warp = 1;
+    } else if (total_qk_units < 40960LL) {
+      token_heads_per_warp = 4;
+    } else {
+      token_heads_per_warp = 8;
+    }
+  }
+
   VLLM_DISPATCH_HALF_TYPES(qkv.scalar_type(), "fused_qk_norm_rope_kernel", [&] {
     using qkv_scalar_t = scalar_t;
     VLLM_DISPATCH_FLOATING_TYPES(
         cos_sin_cache.scalar_type(), "fused_qk_norm_rope_kernel", [&] {
           using cache_scalar_t = scalar_t;
-          tensorrt_llm::kernels::launchFusedQKNormRope<qkv_scalar_t,
-                                                       cache_scalar_t>(
+          tensorrt_llm::kernels::launchFusedQKNormRopeNTokenHeads<
+              qkv_scalar_t, cache_scalar_t>(
               qkv.data_ptr(), static_cast<int>(num_tokens),
               static_cast<int>(num_heads_q), static_cast<int>(num_heads_k),
               static_cast<int>(num_heads_v), static_cast<int>(head_dim),
@@ -820,7 +827,7 @@ void fused_qk_norm_rope(
               q_weight.data_ptr(), k_weight.data_ptr(),
               cos_sin_cache.data_ptr(), !is_neox,
               reinterpret_cast<int64_t const*>(position_ids.data_ptr()),
-              stream);
+              token_heads_per_warp, stream);
         });
   });
 }
