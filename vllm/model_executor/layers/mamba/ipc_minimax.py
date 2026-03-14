@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2022-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -49,7 +50,6 @@ import array
 import struct
 import sys
 import threading
-from typing import List, Optional
 
 import torch
 
@@ -65,10 +65,10 @@ _ALIGN = 1 << 21  # 2 MiB — CUDA IPC allocation alignment
 # CUDA helpers
 # ---------------------------------------------------------------------------
 
+
 def _check(error):
     """Raise on CUDA runtime error."""
-    success = getattr(cudart.cudaError_t, "cudaSuccess",
-                      None) or cudart.cudaError_t(0)
+    success = getattr(cudart.cudaError_t, "cudaSuccess", None) or cudart.cudaError_t(0)
     if error != success:
         raise RuntimeError(f"CUDA runtime error: {error}")
 
@@ -91,13 +91,16 @@ def _cuda_memset_zero(ptr: int, size: int):
 
 def _cuda_memcpy_d2d(dst: int, src: int, size: int):
     _check(
-        cudart.cudaMemcpy(dst, src, size,
-                          cudart.cudaMemcpyKind.cudaMemcpyDeviceToDevice)[0])
+        cudart.cudaMemcpy(
+            dst, src, size, cudart.cudaMemcpyKind.cudaMemcpyDeviceToDevice
+        )[0]
+    )
 
 
 # ---------------------------------------------------------------------------
 # IPC buffer
 # ---------------------------------------------------------------------------
+
 
 class IpcBuffer:
     """
@@ -105,11 +108,10 @@ class IpcBuffer:
     so that every rank holds a valid device pointer to every other rank's buffer.
     """
 
-    def __init__(self, rank: int, world_size: int, size: int,
-                 process_group=None):
+    def __init__(self, rank: int, world_size: int, size: int, process_group=None):
         self.rank = rank
         self.world_size = world_size
-        self.peer_ptrs: List[int] = [0] * world_size
+        self.peer_ptrs: list[int] = [0] * world_size
         self.local_ptr: int = 0
         self._alive = False
 
@@ -124,9 +126,10 @@ class IpcBuffer:
         err, local_handle = cudart.cudaIpcGetMemHandle(self.local_ptr)
         _check(err)
 
-        all_handles: List[Optional[bytes]] = [None] * world_size
+        all_handles: list[bytes | None] = [None] * world_size
         torch.distributed.all_gather_object(
-            all_handles, bytes(local_handle.reserved), group=process_group)
+            all_handles, bytes(local_handle.reserved), group=process_group
+        )
 
         for r in range(world_size):
             if r == rank:
@@ -135,11 +138,12 @@ class IpcBuffer:
                 handle = cudart.cudaIpcMemHandle_t()
                 handle.reserved = all_handles[r]
                 err, ptr = cudart.cudaIpcOpenMemHandle(
-                    handle, cudart.cudaIpcMemLazyEnablePeerAccess)
+                    handle, cudart.cudaIpcMemLazyEnablePeerAccess
+                )
                 _check(err)
                 self.peer_ptrs[r] = ptr
 
-    def serialize(self) -> List[int]:
+    def serialize(self) -> list[int]:
         """Return peer pointers as a list of int64 values (one per rank)."""
         raw = b""
         for ptr in self.peer_ptrs:
@@ -172,6 +176,7 @@ class IpcBuffer:
 # Lamport negative-zero initialization
 # ---------------------------------------------------------------------------
 
+
 def _lamport_fill_neg_zero(device_ptr: int, size_bytes: int):
     """
     Fill device memory with IEEE-754 negative zero (-0.0f = 0x80000000).
@@ -190,6 +195,7 @@ def _lamport_fill_neg_zero(device_ptr: int, size_bytes: int):
 # ---------------------------------------------------------------------------
 # LamportWorkspace — the main class
 # ---------------------------------------------------------------------------
+
 
 class LamportWorkspace:
     """
@@ -211,8 +217,7 @@ class LamportWorkspace:
         ``None`` uses the default group.
     """
 
-    def __init__(self, rank: int, world_size: int, comm_size: int,
-                 process_group=None):
+    def __init__(self, rank: int, world_size: int, comm_size: int, process_group=None):
         assert world_size >= 2, "Lamport workspace requires at least 2 ranks"
         assert comm_size > 0, "comm_size must be positive"
 
@@ -222,8 +227,7 @@ class LamportWorkspace:
 
         # 1) Lamport triple-buffer (the only IPC memory the kernel reads/writes)
         lamport_total = 3 * comm_size
-        self._lamport = IpcBuffer(rank, world_size, lamport_total,
-                                  process_group)
+        self._lamport = IpcBuffer(rank, world_size, lamport_total, process_group)
         _lamport_fill_neg_zero(self._lamport.local_ptr, lamport_total)
 
         # 2) flag_buffer on device: int32[3] = {counter, unused, lamport_flag}
@@ -235,15 +239,16 @@ class LamportWorkspace:
         # 3) layout_buffer on device: int64[2] = {clear_size, comm_size}
         #    clear_size — bytes to clear from *previous* slot (set by kernel)
         #    comm_size  — size of one triple-buffer slot
-        self._layout_buf = torch.tensor([0, comm_size], dtype=torch.int64,
-                                        device="cuda")
+        self._layout_buf = torch.tensor(
+            [0, comm_size], dtype=torch.int64, device="cuda"
+        )
 
         # 4) Assemble device-side void* pointer array
         N = world_size
-        ptrs: List[int] = []
-        ptrs += [0] * N                         # [0   .. N-1]   ipc_buffers  (placeholder)
-        ptrs += [0] * N                         # [N   .. 2N-1]  ipc_barriers (placeholder)
-        ptrs += self._lamport.serialize()       # [2N  .. 3N-1]  lamport peer ptrs
+        ptrs: list[int] = []
+        ptrs += [0] * N  # [0   .. N-1]   ipc_buffers  (placeholder)
+        ptrs += [0] * N  # [N   .. 2N-1]  ipc_barriers (placeholder)
+        ptrs += self._lamport.serialize()  # [2N  .. 3N-1]  lamport peer ptrs
         ptrs.append(self._flag_buf.data_ptr())  # [3N]           flag_buffer
         ptrs.append(self._layout_buf.data_ptr())  # [3N+1]       layout_buffer
 
@@ -277,7 +282,7 @@ class LamportWorkspace:
             groups = (max_tokens + 3) // 4
             slot_bytes = world_size * 2 * groups * 16  # 16 = sizeof(float4)
         else:
-            slot_bytes = world_size * max_tokens * 4   # 4  = sizeof(float)
+            slot_bytes = world_size * max_tokens * 4  # 4  = sizeof(float)
         return ((slot_bytes + _ALIGN - 1) >> 21) << 21
 
     def cleanup(self):
@@ -289,8 +294,10 @@ class LamportWorkspace:
             self.cleanup()
 
     def __repr__(self):
-        return (f"LamportWorkspace(rank={self.rank}, world_size={self.world_size}, "
-                f"comm_size={self.comm_size})")
+        return (
+            f"LamportWorkspace(rank={self.rank}, world_size={self.world_size}, "
+            f"comm_size={self.comm_size})"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -304,7 +311,7 @@ _workspace_cache: dict = {}
 def get_allreduce_workspace(
     rank: int,
     world_size: int,
-    comm_size: Optional[int] = None,
+    comm_size: int | None = None,
     max_tokens: int = 16384,
     process_group=None,
 ) -> torch.Tensor:
@@ -331,7 +338,8 @@ def get_allreduce_workspace(
         if key not in _workspace_cache:
             if comm_size is None:
                 comm_size = LamportWorkspace.compute_comm_size_for_minimax(
-                    max_tokens, world_size, fused_qk=True)
+                    max_tokens, world_size, fused_qk=True
+                )
             ws = LamportWorkspace(rank, world_size, comm_size, process_group)
             _workspace_cache[key] = ws
         return _workspace_cache[key].workspace

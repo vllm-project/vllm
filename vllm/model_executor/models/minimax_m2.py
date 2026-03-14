@@ -46,7 +46,10 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.mamba.linear_attn import MiniMaxText01RMSNormTP,MiniMaxText01RMSNormAR
+from vllm.model_executor.layers.mamba.linear_attn import (
+    MiniMaxText01RMSNormAR,
+    MiniMaxText01RMSNormTP,
+)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -224,7 +227,7 @@ class MiniMaxM2Attention(nn.Module):
         self.k_norm = MiniMaxText01RMSNormTP(
             self.head_dim * self.total_num_kv_heads, eps=rms_norm_eps
         )
-        self.fused_qk_rom=MiniMaxText01RMSNormAR()
+        self.fused_qk_rom = MiniMaxText01RMSNormAR()
 
     def forward(
         self,

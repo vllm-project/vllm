@@ -94,51 +94,42 @@ __device__ __forceinline__ float ld_global_volatile(float* addr) {
   return val;
 }
 
-
 template <typename T, int NUM>
-__inline__ __device__ T warpReduceSumV2(T* val)
-{
+__inline__ __device__ T warpReduceSumV2(T* val) {
 #pragma unroll
-    for (int i = 0; i < NUM; i++)
-    {
+  for (int i = 0; i < NUM; i++) {
 #pragma unroll
-        for (int mask = 16; mask > 0; mask >>= 1)
-            val[i] += __shfl_xor_sync(FINAL_MASK, val[i], mask, 32);
-    }
-    return (T) (0.0f);
+    for (int mask = 16; mask > 0; mask >>= 1)
+      val[i] += __shfl_xor_sync(FINAL_MASK, val[i], mask, 32);
+  }
+  return (T)(0.0f);
 }
 
 template <typename T, int NUM>
-__inline__ __device__ T blockReduceSumV2(T* val)
-{
-    static __shared__ T shared[NUM][33];
-    int lane = threadIdx.x & 0x1f;
-    int wid = threadIdx.x >> 5;
+__inline__ __device__ T blockReduceSumV2(T* val) {
+  static __shared__ T shared[NUM][33];
+  int lane = threadIdx.x & 0x1f;
+  int wid = threadIdx.x >> 5;
 
-    warpReduceSumV2<T, NUM>(val);
+  warpReduceSumV2<T, NUM>(val);
 
-    if (lane == 0)
-    {
+  if (lane == 0) {
 #pragma unroll
-        for (int i = 0; i < NUM; i++)
-        {
-            shared[i][wid] = val[i];
-        }
+    for (int i = 0; i < NUM; i++) {
+      shared[i][wid] = val[i];
     }
+  }
 
-    __syncthreads();
+  __syncthreads();
 
-    bool is_mask = threadIdx.x < (blockDim.x / 32.f);
+  bool is_mask = threadIdx.x < (blockDim.x / 32.f);
 #pragma unroll
-    for (int i = 0; i < NUM; i++)
-    {
-        val[i] = is_mask ? shared[i][lane] : (T) (0.0f);
-    }
-    warpReduceSumV2<T, NUM>(val);
-    return (T) 0.0f;
+  for (int i = 0; i < NUM; i++) {
+    val[i] = is_mask ? shared[i][lane] : (T)(0.0f);
+  }
+  warpReduceSumV2<T, NUM>(val);
+  return (T)0.0f;
 }
-
-
 
 template <typename DType>
 class IndexHelper {
@@ -195,12 +186,12 @@ __global__ void __launch_bounds__(1024)
   float4 clear_vec = get_neg_zero();
   // FusedOp<Pattern, DType> fused_op(params, access_id, access_id_in_token);
 
-// #if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
-//   cudaGridDependencySynchronize();
-//   if constexpr (!TriggerCompletionAtEnd) {
-//     cudaTriggerProgrammaticLaunchCompletion();
-//   }
-// #endif
+  // #if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
+  //   cudaGridDependencySynchronize();
+  //   if constexpr (!TriggerCompletionAtEnd) {
+  //     cudaTriggerProgrammaticLaunchCompletion();
+  //   }
+  // #endif
   LamportComm<NRanks> comm(params.workspace, params.rank);
   int clear_access = comm.clear_size / kElemsPerAccess<DType>;
   for (int idx = access_id; idx < tot_access;
@@ -280,11 +271,11 @@ __global__ void __launch_bounds__(1024)
     reinterpret_cast<float4*>(comm.clear_buf)[idx] = clear_vec;
   }
   comm.update(params.size_q * NRanks);
-// #if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
-//   if constexpr (TriggerCompletionAtEnd) {
-//     cudaTriggerProgrammaticLaunchCompletion();
-//   }
-// #endif
+  // #if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
+  //   if constexpr (TriggerCompletionAtEnd) {
+  //     cudaTriggerProgrammaticLaunchCompletion();
+  //   }
+  // #endif
 }
 
 /**
@@ -328,12 +319,12 @@ __global__ void __launch_bounds__(1024)
                              : (k_thread_idx < access_per_row_k);
   float4 clear_vec = get_neg_zero();
 
-// #if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
-//   cudaGridDependencySynchronize();
-//   if constexpr (!TriggerCompletionAtEnd) {
-//     cudaTriggerProgrammaticLaunchCompletion();
-//   }
-// #endif
+  // #if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
+  //   cudaGridDependencySynchronize();
+  //   if constexpr (!TriggerCompletionAtEnd) {
+  //     cudaTriggerProgrammaticLaunchCompletion();
+  //   }
+  // #endif
   LamportComm<NRanks> comm(params.workspace, params.rank);
 
   for (int g = group_id; g < tot_groups; g += group_stride) {
@@ -401,10 +392,10 @@ __global__ void __launch_bounds__(1024)
       }
     }
 
-    // Allreduce: write float4(s) to comm (thread 0 has both after broadcast)
-    if (threadIdx.x == 0 ||
-        threadIdx.x == q_warps * MINIMAX_REDUCE_RMS_WARP_SIZE) {
-      if (is_q) {
+    // Allreduce: thread 0 (warp 0) has correct sums for both Q and K after
+    // blockReduceSumV2, so it writes both variance float4s to all ranks.
+    if (threadIdx.x == 0) {
+      {
         float4 sum4;
         sum4.x = sum_variance[0];
         sum4.y = sum_variance[1];
@@ -421,17 +412,18 @@ __global__ void __launch_bounds__(1024)
                 comm.data_bufs[r])[(params.rank * tot_groups) + g] = sum4;
           }
         }
-      } else if constexpr (IsQK) {
-        float4 sum4;
-        sum4.x = sum_variance_k[0];
-        sum4.y = sum_variance_k[1];
-        sum4.z = sum_variance_k[2];
-        sum4.w = sum_variance_k[3];
+      }
+      if constexpr (IsQK) {
+        float4 sum4k;
+        sum4k.x = sum_variance_k[0];
+        sum4k.y = sum_variance_k[1];
+        sum4k.z = sum_variance_k[2];
+        sum4k.w = sum_variance_k[3];
 #pragma unroll
         for (int r = 0; r < NRanks; ++r) {
           reinterpret_cast<float4*>(
               comm.data_bufs[r])[(params.rank * 2 * tot_groups) + 2 * g + 1] =
-              sum4;
+              sum4k;
         }
       }
     }
@@ -524,7 +516,7 @@ __global__ void __launch_bounds__(1024)
             continue;
           }
           float scale_k =
-              rsqrtf((sum_variance_k[r] /
+              rsqrtf((sum_variance[r] /
                       static_cast<float>(params.hidden_dim_k) / NRanks) +
                      params.rms_eps);
 #pragma unroll
@@ -551,11 +543,11 @@ __global__ void __launch_bounds__(1024)
   }
 
   comm.update(IsQK ? (2 * tot_groups * 8 * NRanks) : (tot_groups * 8 * NRanks));
-// #if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
-//   if constexpr (TriggerCompletionAtEnd) {
-//     cudaTriggerProgrammaticLaunchCompletion();
-//   }
-// #endif
+  // #if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
+  //   if constexpr (TriggerCompletionAtEnd) {
+  //     cudaTriggerProgrammaticLaunchCompletion();
+  //   }
+  // #endif
 }
 
 int get_sm_count() {
@@ -570,20 +562,20 @@ int get_sm_count() {
   return sm_count;
 }
 
-inline int getSMVersion(bool queryRealSmArch = false)
-{
-    int device{-1};
-    CUDA_CHECK(cudaGetDevice(&device));
-    int sm_major = 0;
-    int sm_minor = 0;
-    CUDA_CHECK(cudaDeviceGetAttribute(&sm_major, cudaDevAttrComputeCapabilityMajor, device));
-    CUDA_CHECK(cudaDeviceGetAttribute(&sm_minor, cudaDevAttrComputeCapabilityMinor, device));
-    int sm = sm_major * 10 + sm_minor;
-    if (sm == 121 && !queryRealSmArch)
-    {
-        return 120;
-    }
-    return sm;
+inline int getSMVersion(bool queryRealSmArch = false) {
+  int device{-1};
+  CUDA_CHECK(cudaGetDevice(&device));
+  int sm_major = 0;
+  int sm_minor = 0;
+  CUDA_CHECK(cudaDeviceGetAttribute(&sm_major,
+                                    cudaDevAttrComputeCapabilityMajor, device));
+  CUDA_CHECK(cudaDeviceGetAttribute(&sm_minor,
+                                    cudaDevAttrComputeCapabilityMinor, device));
+  int sm = sm_major * 10 + sm_minor;
+  if (sm == 121 && !queryRealSmArch) {
+    return 120;
+  }
+  return sm;
 }
 
 template <typename DType, int NRanks>
@@ -754,7 +746,7 @@ void minimax_reduce_rms_op(MiniMaxReduceRMSParams const& params) {
   }
 }
 
-}  // namespace kernels::minimax_ar
+}  // namespace minimax_ar
 
 }  // namespace vllm
 
