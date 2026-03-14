@@ -23,7 +23,7 @@ logger = init_logger(__name__)
 @dataclass
 class Transfer:
     job_id: int
-    stream: torch.cuda.Stream
+    stream: torch.Stream
     start_event: torch.Event
     end_event: torch.Event
     num_bytes: int
@@ -112,7 +112,7 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
         # queue of transfers (job_id, stream, event)
         self._transfers: deque[Transfer] = deque()
         # list of CUDA streams available for re-use
-        self._stream_pool: list[torch.cuda.Stream] = []
+        self._stream_pool: list[torch.Stream] = []
         # list of CUDA events available for re-use
         self._event_pool: list[torch.Event] = []
 
@@ -142,7 +142,7 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
         expand_block_ids(dst_blocks, self.dst_block_size_factor, src_to_dst[:, 1])
         src_to_dst_tensor = torch.from_numpy(src_to_dst)
 
-        stream = self._stream_pool.pop() if self._stream_pool else torch.cuda.Stream()
+        stream = self._stream_pool.pop() if self._stream_pool else torch.Stream()
         start_event = (
             self._event_pool.pop()
             if self._event_pool

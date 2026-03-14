@@ -60,10 +60,10 @@ def test_common_broadcastable_dtype(dtypes, expected_result):
     assert common_broadcastable_dtype(dtypes) == expected_result
 
 
-def _test_stream_thread(main_expected_stream: torch.cuda.Stream):
+def _test_stream_thread(main_expected_stream: torch.Stream):
     import threading
 
-    child_stream = torch.cuda.Stream()
+    child_stream = torch.Stream()
     thread_stream_ready = threading.Event()
     thread_can_exit = threading.Event()
 

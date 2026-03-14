@@ -296,7 +296,7 @@ def _test_async_transfer_layer_without_mtp_worker(
         new_indices_cpu = new_indices.cpu()
 
         expert_buffer = [torch.empty_like(w) for w in expert_weights[0]]
-        cuda_stream = torch.cuda.Stream(device=device)
+        cuda_stream = torch.Stream(device=device)
 
         for layer_idx in range(num_layers):
             is_unchanged, is_received_locally, recv_metadata = asyncio.run(

@@ -343,7 +343,7 @@ class CommunicatorBenchmark:
                 return None
 
             torch.accelerator.synchronize()
-            stream = torch.cuda.Stream()
+            stream = torch.Stream()
             with torch.cuda.stream(stream):
                 graph_input = tensor.clone()
 

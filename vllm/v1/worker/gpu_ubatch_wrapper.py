@@ -103,7 +103,7 @@ class UBatchWrapper:
         self.runnable = runnable
         self.vllm_config = vllm_config
         self.compilation_config = vllm_config.compilation_config
-        self.comm_stream = torch.cuda.Stream(device=device)
+        self.comm_stream = torch.Stream(device=device)
         # Ubatch threads plus the main thread
         self.ready_barrier = threading.Barrier(
             self.vllm_config.parallel_config.num_ubatches + 1

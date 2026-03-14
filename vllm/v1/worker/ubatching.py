@@ -25,8 +25,8 @@ class UBatchContext:
     def __init__(
         self,
         id: int,
-        comm_stream: torch.cuda.Stream,
-        compute_stream: torch.cuda.Stream,
+        comm_stream: torch.Stream,
+        compute_stream: torch.Stream,
         forward_context: ForwardContext,
         ready_barrier: threading.Barrier,
         cpu_wait_event: threading.Event,
@@ -201,8 +201,8 @@ def dbo_get_previous_event(func, *args, **kwargs):
 
 def make_ubatch_contexts(
     num_micro_batches: int,
-    compute_stream: torch.cuda.Stream,
-    comm_stream: torch.cuda.Stream,
+    compute_stream: torch.Stream,
+    comm_stream: torch.Stream,
     forward_contexts: list[ForwardContext],
     ready_barrier: threading.Barrier,
     schedule: str = "default",
