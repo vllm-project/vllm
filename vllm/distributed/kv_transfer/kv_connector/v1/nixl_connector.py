@@ -446,11 +446,7 @@ class NixlConnector(KVConnectorBase_V1, SupportsHMA):
         self, kv_cache: torch.Tensor, attn_backend: type[AttentionBackend]
     ):
         assert self.connector_worker is not None
-
-        cross_layer_name = "ALL_LAYERS"
-        kv_caches = {cross_layer_name: kv_cache}
-
-        self.connector_worker.register_kv_caches(kv_caches)
+        self.connector_worker.register_cross_layers_kv_caches(kv_cache)
 
     def set_host_xfer_buffer_ops(self, copy_operation: CopyBlocksOp):
         assert self.connector_worker is not None
@@ -1478,6 +1474,17 @@ class NixlConnectorWorker:
                 self._failed_recv_reqs.add(req_id)
 
         fut.add_done_callback(request_ready)
+
+    def register_cross_layers_kv_caches(self, kv_cache: torch.Tensor) -> None:
+        """Register a cross-layers KV cache tensor with NIXL.
+
+        `use_uniform_kv_cache()` guarantees a single KV cache group whose
+        layers all share the same `AttentionSpec`, so any layer name from
+        `_layer_specs` yields the correct per-layer spec for `page_size_bytes`.
+        """
+        first_layer = next(iter(self._layer_specs))
+        # Forwarding a real layer name rather than a synthetic key
+        self.register_kv_caches({first_layer: kv_cache})
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data in nixl."""
