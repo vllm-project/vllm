@@ -361,41 +361,60 @@ def test_int8_per_token_round_trip_accuracy(
     # Realistic attention-scale values (small magnitudes)
     key = (
         torch.randn(
-            num_tokens, num_heads, head_size,
+            num_tokens,
+            num_heads,
+            head_size,
             dtype=torch.bfloat16,
         )
         * 0.5
     )
     value = (
         torch.randn(
-            num_tokens, num_heads, head_size,
+            num_tokens,
+            num_heads,
+            head_size,
             dtype=torch.bfloat16,
         )
         * 0.5
     )
 
     key_cache = torch.zeros(
-        num_blocks, block_size, num_heads, head_size,
+        num_blocks,
+        block_size,
+        num_heads,
+        head_size,
         dtype=torch.int8,
     )
     value_cache = torch.zeros(
-        num_blocks, block_size, num_heads, head_size,
+        num_blocks,
+        block_size,
+        num_heads,
+        head_size,
         dtype=torch.int8,
     )
     k_scale_cache = torch.ones(
-        num_blocks, block_size, num_heads,
+        num_blocks,
+        block_size,
+        num_heads,
         dtype=torch.float32,
     )
     v_scale_cache = torch.ones(
-        num_blocks, block_size, num_heads,
+        num_blocks,
+        block_size,
+        num_heads,
         dtype=torch.float32,
     )
 
     slot_mapping = torch.arange(num_tokens, dtype=torch.long)
 
     triton_reshape_and_cache_flash_int8_per_token(
-        key, value, key_cache, value_cache,
-        k_scale_cache, v_scale_cache, slot_mapping,
+        key,
+        value,
+        key_cache,
+        value_cache,
+        k_scale_cache,
+        v_scale_cache,
+        slot_mapping,
     )
 
     # Build a reference that exactly matches the kernel:
@@ -410,8 +429,8 @@ def test_int8_per_token_round_trip_accuracy(
             ("key", key, key_cache, k_scale_cache),
             ("val", value, value_cache, v_scale_cache),
         ]:
-            orig = data[i].float()            # [num_heads, head_size]
-            absmax = orig.abs().amax(dim=-1)   # [num_heads]
+            orig = data[i].float()  # [num_heads, head_size]
+            absmax = orig.abs().amax(dim=-1)  # [num_heads]
             ref_scale = (absmax / 127.0).clamp(min=1e-6)
 
             # Triton truncates on float→int8 store
@@ -429,14 +448,18 @@ def test_int8_per_token_round_trip_accuracy(
 
             # Scales must match exactly (both float32)
             torch.testing.assert_close(
-                actual_sc, ref_scale,
-                atol=1e-5, rtol=1e-5,
+                actual_sc,
+                ref_scale,
+                atol=1e-5,
+                rtol=1e-5,
             )
             # Quantised int8 values: allow +-1 for
             # bf16→f32 representation differences
             torch.testing.assert_close(
-                actual_q.float(), ref_q.float(),
-                atol=1.0, rtol=0.0,
+                actual_q.float(),
+                ref_q.float(),
+                atol=1.0,
+                rtol=0.0,
             )
             # Dequantised values: error <= 1 * scale
             # (from the +-1 int8 tolerance above)
