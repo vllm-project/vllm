@@ -86,6 +86,19 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         if self.speculative_config:
             assert self.speculative_config.num_speculative_tokens is not None
             self.num_spec: int = self.speculative_config.num_speculative_tokens
+            
+            # Warn about FlashInfer GDN kernel limitation with >4 speculative tokens
+            if self.num_spec > 4:
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.warning(
+                    "GDN attention backend with FlashInfer kernel has known "
+                    "issues with >4 speculative tokens. You specified %d "
+                    "tokens, which may cause CUDA illegal memory access "
+                    "errors under load. Consider setting "
+                    "num_speculative_tokens to 4 or fewer for stability.",
+                    self.num_spec
+                )
         else:
             self.num_spec = 0
         self.use_spec_decode: bool = self.num_spec > 0
@@ -234,8 +247,24 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                     0, dtype=torch.int32, device=query_start_loc.device
                 )
                 # Filter by spec_sequence_masks to exclude padded sequences
+                # Add bounds checking to prevent CUDA illegal memory access
+                # when using >4 speculative tokens (FlashInfer GDN limitation)
+                max_allowed_spec_tokens = min(
+                    self.num_spec + 1, block_table_tensor.size(1)
+                )
+                if max_allowed_spec_tokens < self.num_spec + 1:
+                    import logging
+                    logger = logging.getLogger(__name__)
+                    logger.warning(
+                        "FlashInfer GDN kernel does not fully support "
+                        "%d speculative tokens (>4). Using %d tokens "
+                        "instead to prevent CUDA errors. Consider reducing "
+                        "num_speculative_tokens to 4 or fewer.",
+                        self.num_spec, max_allowed_spec_tokens - 1
+                    )
+                
                 spec_state_indices_tensor = block_table_tensor[
-                    spec_sequence_masks, : self.num_spec + 1
+                    spec_sequence_masks, :max_allowed_spec_tokens
                 ]
                 non_spec_state_indices_tensor = None
                 # Padded sequences are always at the back, so the first
@@ -253,8 +282,24 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 non_spec_token_indx = index[:num_non_spec_tokens]
                 spec_token_indx = index[num_non_spec_tokens:]
 
+                # Add bounds checking to prevent CUDA illegal memory access
+                # when using >4 speculative tokens (FlashInfer GDN limitation)
+                max_allowed_spec_tokens = min(
+                    self.num_spec + 1, block_table_tensor.size(1)
+                )
+                if max_allowed_spec_tokens < self.num_spec + 1:
+                    import logging
+                    logger = logging.getLogger(__name__)
+                    logger.warning(
+                        "FlashInfer GDN kernel does not fully support "
+                        "%d speculative tokens (>4). Using %d tokens "
+                        "instead to prevent CUDA errors. Consider reducing "
+                        "num_speculative_tokens to 4 or fewer.",
+                        self.num_spec, max_allowed_spec_tokens - 1
+                    )
+                
                 spec_state_indices_tensor = block_table_tensor[
-                    spec_sequence_masks, : self.num_spec + 1
+                    spec_sequence_masks, :max_allowed_spec_tokens
                 ]
                 non_spec_state_indices_tensor = block_table_tensor[
                     ~spec_sequence_masks, 0
