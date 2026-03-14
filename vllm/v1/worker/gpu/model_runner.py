@@ -129,7 +129,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.is_encoder_decoder = self.model_config.is_encoder_decoder
 
         self.use_async_scheduling = self.scheduler_config.async_scheduling
-        self.output_copy_stream = torch.cuda.Stream(self.device)
+        self.output_copy_stream = torch.Stream(self.device)
 
         # Pipeline parallelism.
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
@@ -326,7 +326,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         return self.model
 
     @functools.cached_property
-    def main_stream(self) -> torch.cuda.Stream:
+    def main_stream(self) -> torch.Stream:
         # Cache the default CUDA stream to avoid lookup overhead.
         return torch.cuda.current_stream(self.device)
 

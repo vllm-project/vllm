@@ -35,7 +35,7 @@ class RayPPCommunicator(Communicator):
         comm_id: Any,
         rank: int | None,
         actor_handles: list["ray.actor.ActorHandle"],
-        cuda_stream: torch.cuda.Stream | None,
+        cuda_stream: torch.Stream | None,
         use_communication_streams: bool = False,
     ):
         """
