@@ -2040,15 +2040,13 @@ def test_priority_scheduling_mixed_priority_and_arrival():
     assert scheduled_req_ids == ["3", "2", "1", "0"]
 
 
-# This test had previously been passing due to its use of duplicate
-# request ids which resulted in incorrect behavior.
-# Now that the duplicate req ids had been fixed it fails and
-# investigation is needed into whether the priority scheduling
-# preemption logic is working as designed or not.
-@pytest.mark.skip("needs investigation")
 def test_priority_scheduling_preemption():
-    """Test that priority scheduling preempts
-    lower priority requests when memory is constrained."""
+    """Test that a waiting high-priority request eventually causes
+    lower-priority running requests to be preempted under KV pressure.
+
+    This scenario requires multiple scheduler/model iterations to reach
+    the block boundary where preemption is needed.
+    """
     # Create scheduler with very limited memory to force preemption
     scheduler = create_scheduler_with_priority(
         max_num_seqs=3,  # Allow multiple requests
@@ -2101,30 +2099,29 @@ def test_priority_scheduling_preemption():
 
     scheduler.add_request(high_priority_request)
 
-    # Schedule again - this should trigger
-    # preemption when trying to allocate memory
-    output = scheduler.schedule()
+    preempted_seen = False
+    high_priority_scheduled = False
 
-    # Due to the scheduler's design, if preemption happens
-    # during running request scheduling,
-    # waiting requests won't be scheduled in the same step
-    # Let's check if preemption occurred by looking at the waiting queue
+    # Run several scheduler/model iterations. Preemption does not happen
+    # immediately because requests only need additional KV blocks when they
+    # cross a block boundary.
+    for _ in range(8):
+        output = scheduler.schedule()
 
-    # If preemption happened, we should see requests in the
-    # waiting queue
-    if len(scheduler.waiting) > 1:  # high priority + preempted request
-        # Preemption occurred - verify the high priority request
-        # gets scheduled next
-        output2 = scheduler.schedule()
-        assert len(output2.scheduled_new_reqs) == 1
-        # High priority request
-        assert output2.scheduled_new_reqs[0].req_id == "hi1"
-    else:
-        # No preemption needed - all requests fit
-        # This is also valid behavior if memory allows
-        assert len(output.scheduled_new_reqs) == 1
-        # High priority request
-        assert output.scheduled_new_reqs[0].req_id == "hi1"
+        if any(
+            req.status == RequestStatus.PREEMPTED for req in scheduler.requests.values()
+        ):
+            preempted_seen = True
+
+        if any(req.req_id == "hi1" for req in output.scheduled_new_reqs):
+            high_priority_scheduled = True
+            break
+
+        if scheduler.running:
+            scheduler.update_from_output(output, make_output(scheduler))
+
+    assert preempted_seen, "Expected at least one low-priority request to be preempted"
+    assert high_priority_scheduled, "Expected high-priority request to be scheduled"
 
 
 def test_priority_scheduling_no_preemption_when_space_available():
