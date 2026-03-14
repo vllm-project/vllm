@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
+import json
 import math
 import time
 import zlib
@@ -82,6 +83,13 @@ ResponseType: TypeAlias = (
 )
 
 logger = init_logger(__name__)
+
+
+DIARIZED_JSON_PROMPT_INSTRUCTION = (
+    "Return only valid JSON with keys 'text' and 'segments'. Each segment must "
+    "include: id (int), start (float, seconds), end (float, seconds), text "
+    "(string), and speaker (string)."
+)
 
 
 class OpenAISpeechToText(OpenAIServing):
@@ -240,6 +248,15 @@ class OpenAISpeechToText(OpenAIServing):
 
         parsed_prompts: list[DictPrompt] = []
         for chunk in chunks:
+            effective_request_prompt = request.prompt
+            if (
+                request.response_format == "diarized_json"
+                and self.model_cls.supports_diarization
+            ):
+                effective_request_prompt = self._build_diarized_request_prompt(
+                    request.prompt
+                )
+
             # The model has control over the construction, as long as it
             # returns a valid PromptType.
             prompt = self.model_cls.get_generation_prompt(
@@ -248,7 +265,7 @@ class OpenAISpeechToText(OpenAIServing):
                 model_config=self.model_config,
                 language=language,
                 task_type=self.task_type,
-                request_prompt=request.prompt,
+                request_prompt=effective_request_prompt,
                 to_language=to_language,
             )
 
@@ -403,6 +420,82 @@ class OpenAISpeechToText(OpenAIServing):
                 speaker="speaker_0",
             )
         ]
+
+    @staticmethod
+    def _build_diarized_request_prompt(request_prompt: str) -> str:
+        request_prompt = request_prompt.strip()
+        if request_prompt:
+            return f"{request_prompt} {DIARIZED_JSON_PROMPT_INSTRUCTION}"
+        return DIARIZED_JSON_PROMPT_INSTRUCTION
+
+    @staticmethod
+    def _extract_json_payload(text: str) -> dict[str, object] | None:
+        text = text.strip()
+        if not text:
+            return None
+
+        candidates: list[str] = [text]
+
+        if text.startswith("```") and text.endswith("```"):
+            lines = text.splitlines()
+            if len(lines) >= 3:
+                candidates.append("\n".join(lines[1:-1]).strip())
+
+        first_obj = text.find("{")
+        last_obj = text.rfind("}")
+        if first_obj != -1 and last_obj > first_obj:
+            candidates.append(text[first_obj : last_obj + 1].strip())
+
+        for candidate in candidates:
+            try:
+                payload = json.loads(candidate)
+            except json.JSONDecodeError:
+                continue
+
+            if isinstance(payload, dict):
+                return cast(dict[str, object], payload)
+
+        return None
+
+    @classmethod
+    def _try_parse_diarized_response_payload(
+        cls,
+        text: str,
+    ) -> tuple[str, list[TranscriptionDiarizedSegment]] | None:
+        payload = cls._extract_json_payload(text)
+        if payload is None:
+            return None
+
+        raw_segments = payload.get("segments")
+        if not isinstance(raw_segments, list):
+            return None
+
+        parsed_segments: list[TranscriptionDiarizedSegment] = []
+        for idx, raw_segment in enumerate(raw_segments):
+            if not isinstance(raw_segment, dict):
+                return None
+
+            try:
+                parsed_segments.append(
+                    TranscriptionDiarizedSegment(
+                        id=int(raw_segment.get("id", idx)),
+                        start=float(raw_segment["start"]),
+                        end=float(raw_segment["end"]),
+                        text=str(raw_segment["text"]),
+                        speaker=str(raw_segment["speaker"]),
+                    )
+                )
+            except (KeyError, TypeError, ValueError):
+                return None
+
+        parsed_text = payload.get("text")
+        if isinstance(parsed_text, str):
+            return parsed_text, parsed_segments
+
+        synthesized_text = "".join(segment.text for segment in parsed_segments)
+        if synthesized_text:
+            return synthesized_text, parsed_segments
+        return None
 
     async def _create_speech_to_text(
         self,
@@ -616,15 +709,25 @@ class OpenAISpeechToText(OpenAIServing):
                             T, TranscriptionResponse(text=text, usage=usage)
                         )
                     else:
-                        diarized_segments = self._build_diarized_segments(
-                            text=text,
-                            duration_s=duration_s,
-                            segments=total_segments,
+                        parsed_diarized_payload = (
+                            self._try_parse_diarized_response_payload(text)
+                            if self.model_cls.supports_diarization
+                            else None
                         )
+                        if parsed_diarized_payload is not None:
+                            diarized_text, diarized_segments = parsed_diarized_payload
+                        else:
+                            diarized_text = text
+                            diarized_segments = self._build_diarized_segments(
+                                text=text,
+                                duration_s=duration_s,
+                                segments=total_segments,
+                            )
+
                         final_response = cast(
                             DV,
                             TranscriptionResponseDiarized(
-                                text=text,
+                                text=diarized_text,
                                 language=request.language,
                                 duration=str(duration_s),
                                 segments=diarized_segments,

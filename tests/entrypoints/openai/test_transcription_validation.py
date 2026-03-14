@@ -199,6 +199,44 @@ def _make_mock_stt_serving() -> OpenAISpeechToText:
     return serving
 
 
+def test_parse_diarized_payload_unit():
+    payload = (
+        '{"text":"hi there",'
+        '"segments":[{"id":0,"start":0.0,"end":0.8,'
+        '"text":"hi there","speaker":"speaker_1"}]}'
+    )
+
+    parsed = OpenAISpeechToText._try_parse_diarized_response_payload(payload)
+    assert parsed is not None
+
+    parsed_text, segments = parsed
+    assert parsed_text == "hi there"
+    assert len(segments) == 1
+    assert segments[0].id == 0
+    assert segments[0].speaker == "speaker_1"
+
+
+def test_parse_diarized_payload_fenced_json_unit():
+    payload = (
+        "```json\n"
+        '{"segments":[{"start":0.0,"end":1.2,'
+        '"text":"hello","speaker":"speaker_0"}]}\n'
+        "```"
+    )
+
+    parsed = OpenAISpeechToText._try_parse_diarized_response_payload(payload)
+    assert parsed is not None
+
+    parsed_text, segments = parsed
+    assert parsed_text == "hello"
+    assert len(segments) == 1
+    assert segments[0].id == 0
+
+
+def test_parse_diarized_payload_invalid_unit():
+    assert OpenAISpeechToText._try_parse_diarized_response_payload("not-json") is None
+
+
 @pytest.mark.asyncio
 async def test_diarized_stream_event_contract_unit():
     serving = _make_mock_stt_serving()
