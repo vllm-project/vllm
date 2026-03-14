@@ -1233,7 +1233,7 @@ tqdm==4.67.3
     #   tacoreader
     #   terratorch
     #   transformers
-transformers @ git+https://github.com/huggingface/transformers.git@064f0e97c69ca2ac865be78ddff5ce73c54ab071
+transformers @ git+https://github.com/huggingface/transformers.git@c368e139aade3ee7cdfa29387f3249168a912e5c
     # via
     #   -r requirements/test.in
     #   genai-perf
