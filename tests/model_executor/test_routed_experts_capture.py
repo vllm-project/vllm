@@ -161,10 +161,10 @@ def test_gpu_model_runner_binding_stage(monkeypatch):
 
 
 def test_gpu_model_runner_binds_real_fused_moe_capture_callback(monkeypatch):
+    import vllm.model_executor.layers.fused_moe.routed_experts_capturer as rec
     from vllm.config import VllmConfig, set_current_vllm_config
     from vllm.forward_context import set_forward_context
     from vllm.model_executor.layers.fused_moe.layer import FusedMoE
-    import vllm.model_executor.layers.fused_moe.routed_experts_capturer as rec
     from vllm.v1.worker import gpu_model_runner as gmr
 
     monkeypatch.setattr(rec, "_global_experts_capturer", None)
@@ -201,7 +201,9 @@ def test_gpu_model_runner_binds_real_fused_moe_capture_callback(monkeypatch):
         )
 
         dummy_self = types.SimpleNamespace(
-            compilation_config=types.SimpleNamespace(static_forward_context={"dummy": moe})
+            compilation_config=types.SimpleNamespace(
+                static_forward_context={"dummy": moe}
+            )
         )
         gmr.GPUModelRunner._bind_routed_experts_capturer(dummy_self, capturer)
 

@@ -162,7 +162,9 @@ class RequestOutput:
                             completion.logprobs.extend(next_completion.logprobs)  # type: ignore[arg-type]
                         if next_completion.routed_experts is not None:
                             if completion.routed_experts is None:
-                                completion.routed_experts = next_completion.routed_experts
+                                completion.routed_experts = (
+                                    next_completion.routed_experts
+                                )
                             else:
                                 completion.routed_experts = np.concatenate(
                                     (
