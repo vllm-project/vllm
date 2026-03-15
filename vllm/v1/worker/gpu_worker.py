@@ -54,7 +54,13 @@ from vllm.v1.outputs import (
     DraftTokenIds,
     ModelRunnerOutput,
 )
-from vllm.v1.utils import compute_iteration_details, report_usage_stats
+from vllm.v1.utils import (
+    compute_iteration_details,
+    get_batch_stage_scope_name,
+    profiling_scopes_enabled,
+    record_function_or_nullcontext,
+    report_usage_stats,
+)
 from vllm.v1.worker.utils import is_residual_scattered_for_sp
 from vllm.v1.worker.worker_base import WorkerBase
 from vllm.v1.worker.workspace import init_workspace_manager
@@ -753,7 +759,11 @@ class Worker(WorkerBase):
     def sample_tokens(
         self, grammar_output: "GrammarOutput | None"
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput:
-        return self.model_runner.sample_tokens(grammar_output)
+        if not profiling_scopes_enabled():
+            return self.model_runner.sample_tokens(grammar_output)
+
+        with record_function_or_nullcontext("sampling"):
+            return self.model_runner.sample_tokens(grammar_output)
 
     @torch.inference_mode()
     def execute_model(
@@ -815,7 +825,14 @@ class Worker(WorkerBase):
                 comm_postprocess=comm_postprocess,
             )
 
-        with self.annotate_profile(scheduler_output):
+        batch_stage_scope_name = get_batch_stage_scope_name(scheduler_output)
+        batch_stage_scope = (
+            record_function_or_nullcontext(batch_stage_scope_name)
+            if batch_stage_scope_name is not None
+            else nullcontext()
+        )
+
+        with self.annotate_profile(scheduler_output), batch_stage_scope:
             output = self.model_runner.execute_model(
                 scheduler_output, intermediate_tensors
             )

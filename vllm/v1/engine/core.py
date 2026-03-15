@@ -8,7 +8,7 @@ import time
 from collections import defaultdict, deque
 from collections.abc import Callable, Generator
 from concurrent.futures import Future
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, contextmanager, nullcontext
 from enum import IntEnum
 from functools import partial
 from inspect import isclass, signature
@@ -72,7 +72,11 @@ from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 from vllm.v1.structured_output import StructuredOutputManager
-from vllm.v1.utils import compute_iteration_details
+from vllm.v1.utils import (
+    compute_iteration_details,
+    profiling_scopes_enabled,
+    record_function_or_nullcontext,
+)
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
@@ -386,7 +390,13 @@ class EngineCore:
         # or finished and not yet removed from the batch.
         if not self.scheduler.has_requests():
             return {}, False
-        scheduler_output = self.scheduler.schedule()
+        scheduler_ctx = (
+            record_function_or_nullcontext("scheduler_step")
+            if profiling_scopes_enabled()
+            else nullcontext()
+        )
+        with scheduler_ctx:
+            scheduler_output = self.scheduler.schedule()
         future = self.model_executor.execute_model(scheduler_output, non_block=True)
         grammar_output = self.scheduler.get_grammar_bitmask(scheduler_output)
         with (
@@ -444,7 +454,13 @@ class EngineCore:
         model_executed = False
         deferred_scheduler_output = None
         if self.scheduler.has_requests():
-            scheduler_output = self.scheduler.schedule()
+            scheduler_ctx = (
+                record_function_or_nullcontext("scheduler_step")
+                if profiling_scopes_enabled()
+                else nullcontext()
+            )
+            with scheduler_ctx:
+                scheduler_output = self.scheduler.schedule()
             with self.log_error_detail(scheduler_output):
                 exec_future = self.model_executor.execute_model(
                     scheduler_output, non_block=True
