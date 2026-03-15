@@ -4,7 +4,6 @@ from enum import Enum
 from typing import Union
 
 import torch
-from torch.nn.parameter import Parameter
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import envs
@@ -85,14 +84,12 @@ def backend_to_kernel_cls(
         Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8,
     ):
         from vllm.model_executor.layers.fused_moe.experts.trtllm_mxfp4_moe import (
+            TrtLlmMxfp4ExpertsModular,
             TrtLlmMxfp4ExpertsMonolithic,
-        )
-        from vllm.model_executor.layers.fused_moe.trtllm_moe import (
-            TrtLlmGenExperts,
         )
 
         # NOTE: prefer Monolithic > Modular, so return Monolithic first.
-        return [TrtLlmMxfp4ExpertsMonolithic, TrtLlmGenExperts]
+        return [TrtLlmMxfp4ExpertsMonolithic, TrtLlmMxfp4ExpertsModular]
 
     elif backend in (
         Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_BF16,
@@ -390,18 +387,8 @@ def convert_to_mxfp4_moe_kernel_format(
         from flashinfer.fp4_quantization import nvfp4_block_scale_interleave
         from flashinfer.fused_moe.core import get_w2_permute_indices_with_cache
 
-        layer.gemm1_alpha = Parameter(
-            torch.tensor([1.702] * num_experts, dtype=torch.float32).cuda(),
-            requires_grad=False,
-        )
-        layer.gemm1_beta = Parameter(
-            torch.tensor([1.0] * num_experts, dtype=torch.float32).cuda(),
-            requires_grad=False,
-        )
-        layer.gemm1_clamp_limit = Parameter(
-            torch.tensor([7.0] * num_experts, dtype=torch.float32).cuda(),
-            requires_grad=False,
-        )
+        # gemm1_alpha/beta/clamp_limit are created by the expert class
+        # (TrtLlmMxfp4ExpertsBase), not on the layer.
 
         w13_weight = w13_weight.data
         w2_weight = w2_weight.data
@@ -649,8 +636,7 @@ def convert_to_mxfp4_moe_kernel_format(
             f"should be one of: {list(Mxfp4MoeBackend)}."
         )
 
-    # Should not reach here
-    return (w13_weight, w2_weight, w13_weight_scale, w2_weight_scale, w13_bias, w2_bias)
+    raise AssertionError("unreachable")
 
 
 def make_mxfp4_moe_quant_config(

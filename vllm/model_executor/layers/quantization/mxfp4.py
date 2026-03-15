@@ -112,7 +112,10 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         self._cache_permute_indices: dict[torch.Size, torch.Tensor] = {}
         self.moe_mk: mk.FusedMoEKernel | None = None
 
-        # Round up dims once based on backend
+        # Round up dims once based on backend. This mutates the shared
+        # FusedMoEConfig in-place so that create_weights() and all
+        # downstream code see the padded dimensions. This must happen
+        # before create_weights() is called.
         self.moe.hidden_dim, self.moe.intermediate_size_per_partition = (
             mxfp4_round_up_hidden_size_and_intermediate_size(
                 self.mxfp4_backend,
