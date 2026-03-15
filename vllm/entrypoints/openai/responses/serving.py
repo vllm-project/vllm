@@ -95,7 +95,7 @@ from vllm.logger import init_logger
 from vllm.logprobs import Logprob as SampleLogprob
 from vllm.logprobs import SampleLogprobs
 from vllm.outputs import CompletionOutput
-from vllm.parser import ParserManager
+from vllm.parser import DelegatingParser, ParserManager
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.tokenizers import TokenizerLike
 from vllm.utils import random_uuid
@@ -1216,8 +1216,6 @@ class OpenAIServingResponses(OpenAIServing):
             [StreamingResponsesResponse], StreamingResponsesResponse
         ],
     ) -> AsyncGenerator[StreamingResponsesResponse, None]:
-        from vllm.parser import DelegatingParser
-
         raw_parser = self.parser(tokenizer) if self.parser else None
         parser = raw_parser if isinstance(raw_parser, DelegatingParser) else None
         if parser is not None:
