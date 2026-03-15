@@ -4147,14 +4147,6 @@ def test_eagle3_mm_encoder_cache_with_shift():
 # ---------------------------------------------------------------------------
 
 
-def _setup_jump_forward_request(scheduler, request):
-    """Helper: put a request into RUNNING state with prefill done."""
-    request.num_computed_tokens = request.num_tokens
-    request.status = RequestStatus.RUNNING
-    scheduler.requests[request.request_id] = request
-    scheduler.running.append(request)
-
-
 def _make_mock_grammar(ff_tokens: list[int]):
     """Create a mock grammar that returns the given ff_tokens."""
     grammar = Mock()
@@ -4164,29 +4156,22 @@ def _make_mock_grammar(ff_tokens: list[int]):
     return grammar
 
 
-def _make_structured_output_request(grammar):
-    """Create a mock StructuredOutputRequest with the given grammar."""
-    sor = Mock()
-    sor.grammar = grammar
-    sor.reasoning_ended = None
-    return sor
-
-
 def test_jump_forward_tokens_injected():
     """ff_tokens from grammar are appended to the request and stored in
     pending_ff_tokens."""
     scheduler = create_scheduler(enable_jump_decoding=True)
-    # Mock should_advance to return True for structured output requests.
     scheduler.structured_output_manager.should_advance = Mock(return_value=True)
 
     requests = create_requests(num_requests=1, max_tokens=20)
     req = requests[0]
-    _setup_jump_forward_request(scheduler, req)
+    req.num_computed_tokens = req.num_tokens
+    req.status = RequestStatus.RUNNING
+    scheduler.requests[req.request_id] = req
+    scheduler.running.append(req)
 
     # Attach mock grammar that produces ff_tokens [100, 101, 102].
-    ff = [100, 101, 102]
-    grammar = _make_mock_grammar(ff)
-    req.structured_output_request = _make_structured_output_request(grammar)
+    grammar = _make_mock_grammar([100, 101, 102])
+    req.structured_output_request = Mock(grammar=grammar, reasoning_ended=None)
 
     scheduler_output = SchedulerOutput(
         scheduled_new_reqs=[],
@@ -4227,12 +4212,14 @@ def test_jump_forward_tokens_stop_eos():
 
     requests = create_requests(num_requests=1, max_tokens=20)
     req = requests[0]
-    _setup_jump_forward_request(scheduler, req)
+    req.num_computed_tokens = req.num_tokens
+    req.status = RequestStatus.RUNNING
+    scheduler.requests[req.request_id] = req
+    scheduler.running.append(req)
 
     # ff_tokens: 100, EOS, 102 — should truncate after EOS.
-    ff = [100, EOS_TOKEN_ID, 102]
-    grammar = _make_mock_grammar(ff)
-    req.structured_output_request = _make_structured_output_request(grammar)
+    grammar = _make_mock_grammar([100, EOS_TOKEN_ID, 102])
+    req.structured_output_request = Mock(grammar=grammar, reasoning_ended=None)
 
     scheduler_output = SchedulerOutput(
         scheduled_new_reqs=[],
@@ -4272,11 +4259,13 @@ def test_jump_forward_tokens_stop_max_tokens():
     # max_tokens=3: sampled token (7) = 1, so 2 ff_tokens fit before cap.
     requests = create_requests(num_requests=1, max_tokens=3)
     req = requests[0]
-    _setup_jump_forward_request(scheduler, req)
+    req.num_computed_tokens = req.num_tokens
+    req.status = RequestStatus.RUNNING
+    scheduler.requests[req.request_id] = req
+    scheduler.running.append(req)
 
-    ff = [100, 101, 102, 103]
-    grammar = _make_mock_grammar(ff)
-    req.structured_output_request = _make_structured_output_request(grammar)
+    grammar = _make_mock_grammar([100, 101, 102, 103])
+    req.structured_output_request = Mock(grammar=grammar, reasoning_ended=None)
 
     scheduler_output = SchedulerOutput(
         scheduled_new_reqs=[],
