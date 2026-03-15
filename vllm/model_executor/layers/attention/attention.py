@@ -9,7 +9,8 @@ import torch.nn as nn
 import vllm.envs as envs
 from vllm.config import CacheConfig, get_current_vllm_config
 from vllm.config.vllm import VllmConfig
-from vllm.forward_context import ForwardContext, get_forward_context
+from vllm.forward_context import (ForwardContext, get_forward_context,
+                                  is_forward_context_available)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.kv_transfer_utils import (
     maybe_transfer_kv_layer,
@@ -436,8 +437,12 @@ class Attention(nn.Module, AttentionLayerBase):
                     and key is not None
                     and value is not None
                 ):
+                    # Use "from_forward_context" to avoid hard-coding layer name in graph
+                    # This improves cold start compilation time by allowing graph reuse
+                    # when fast_moe_cold_start is enabled
+                    layer_name_for_kv_update = self._get_layer_name_for_kv_update()
                     kv_cache_dummy_dep = unified_kv_cache_update(
-                        key, value, self.layer_name
+                        key, value, layer_name_for_kv_update
                     )
                 unified_attention_with_output(
                     query,
@@ -455,8 +460,12 @@ class Attention(nn.Module, AttentionLayerBase):
                     and key is not None
                     and value is not None
                 ):
+                    # Use "from_forward_context" to avoid hard-coding layer name in graph
+                    # This improves cold start compilation time by allowing graph reuse
+                    # when fast_moe_cold_start is enabled
+                    layer_name_for_kv_update = self._get_layer_name_for_kv_update()
                     kv_cache_dummy_dep = torch.ops.vllm.unified_kv_cache_update(
-                        key, value, self.layer_name
+                        key, value, layer_name_for_kv_update
                     )
                 torch.ops.vllm.unified_attention_with_output(
                     query,
@@ -537,6 +546,20 @@ class Attention(nn.Module, AttentionLayerBase):
                 head_size_v=self.head_size_v,
                 dtype=self.kv_cache_torch_dtype,
             )
+
+
+    def _get_layer_name_for_kv_update(self) -> str:
+        """Get the layer name to use for kv cache update.
+
+        Returns "from_forward_context" when fast_moe_cold_start is enabled,
+        which allows graph reuse across layers and reduces cold start compilation time.
+        """
+        if (
+            is_forward_context_available()
+            and get_forward_context().all_kv_cache_layers is not None
+        ):
+            return "from_forward_context"
+        return self.layer_name
 
 
 def maybe_calc_kv_scales(
@@ -647,6 +670,26 @@ def unified_kv_cache_update(
     Returns a dummy that is passed to unified_attention to signal a side effect and
     the data dependency between them to ensure torch.compile preserves ordering.
     """
+    forward_context: ForwardContext = get_forward_context()
+    # If layer_name is "from_forward_context", get the actual layer name from the
+    # forward context to avoid hard-coding the layer name in the compiled graph.
+    # This improves cold start compilation time by allowing graph reuse across layers.
+    if layer_name == "from_forward_context":
+        if forward_context.all_kv_cache_layers is None:
+            raise RuntimeError(
+                "layer_name is 'from_forward_context' but all_kv_cache_layers "
+                "is not set in forward context"
+            )
+        layer_idx = forward_context.kv_cache_layer_index
+        if layer_idx >= len(forward_context.all_kv_cache_layers):
+            raise AssertionError(
+                f"We expected the number of KV cache layers in `all_kv_cache_layers` "
+                f"to be equal to the number of unified_kv_cache_update calls. "
+                f"Got index {layer_idx} but only {len(forward_context.all_kv_cache_layers)} layers."
+            )
+        layer_name = forward_context.all_kv_cache_layers[layer_idx]
+        forward_context.kv_cache_layer_index += 1
+    
     _, attn_layer, kv_cache, layer_slot_mapping = get_attention_context(layer_name)
     if layer_slot_mapping is not None:
         assert hasattr(attn_layer.impl, "do_kv_cache_update"), (

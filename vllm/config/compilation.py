@@ -1005,14 +1005,10 @@ class CompilationConfig:
                 # list via reference.
                 self.splitting_ops = list(self._attention_ops)
 
-                # unified_kv_cache_update has a string param that prevents Inductor
-                # from reusing piecewise graphs. Remove it from the compiled graph.
-                # This has the side-effect of excluding cache from cudagraphs but
-                # that doesn't seem to affect performance.
+                # unified_kv_cache_update no longer has a string param that prevents Inductor
+                # from reusing piecewise graphs. We've implemented a solution similar to
+                # fast_moe_cold_start that uses a list of layer names in the forward context.
                 # https://github.com/vllm-project/vllm/issues/33267
-                if not self.use_inductor_graph_partition:
-                    self.splitting_ops.append("vllm::unified_kv_cache_update")
-                    self.splitting_ops.append("vllm::unified_mla_kv_cache_update")
 
             elif len(self.splitting_ops) == 0:
                 if (

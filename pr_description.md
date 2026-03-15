@@ -1,0 +1,25 @@
+## 标题
+fix(compilation): optimize kv cache update for faster cold start compilation
+
+## 描述
+This fix addresses [issue #33267](https://github.com/vllm-project/vllm/issues/33267) by applying the same approach used in `fast_moe_cold_start` to `unified_kv_cache_update`.
+
+### Problem
+- `unified_kv_cache_update` appears in piecewise cudagraph regions
+- Each layer has a different name, so each of these have to be compiled separately
+- This increases cold start compilation time with Dynamo partition because the graphs can no longer be reused
+
+### Solution
+- Add `all_kv_cache_layers` list and `kv_cache_layer_index` counter to `ForwardContext`
+- When `fast_moe_cold_start` is enabled, use `'from_forward_context'` as the `layer_name`
+- At runtime, `unified_kv_cache_update` retrieves the actual layer name from the forward context instead of using a hard-coded string
+- This allows torch.compile to better reuse compiled graphs across layers
+
+### Changes
+- `vllm/forward_context.py`: Added `all_kv_cache_layers` and `kv_cache_layer_index` fields to `ForwardContext` class
+- `vllm/model_executor/layers/attention/attention.py`: Added `_get_layer_name_for_kv_update()` method and modified `unified_kv_cache_update` to handle `'from_forward_context'`
+- `vllm/config/compilation.py`: Removed the temporary workaround that added `unified_kv_cache_update` to `splitting_ops`
+
+## 链接
+- Issue: https://github.com/vllm-project/vllm/issues/33267
+- Compare: https://github.com/vllm-project/vllm/compare/main...fourierr:fix/issue-33267-kv-cache-compilation

@@ -238,6 +238,11 @@ class ForwardContext:
     all_moe_layers: list[str] | None = None
     moe_layer_index: int = 0
 
+    # Similar workaround for unified_kv_cache_update to avoid hard-coding layer names
+    # into the graph, which increases cold start compilation time
+    all_kv_cache_layers: list[str] | None = None
+    kv_cache_layer_index: int = 0
+
     additional_kwargs: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
@@ -279,9 +284,20 @@ def create_forward_context(
     else:
         all_moe_layers = None
 
+    # Use the same fast_moe_cold_start flag for kv cache layers
+    all_kv_cache_layers: list[str] | None = None
+    if vllm_config.compilation_config.fast_moe_cold_start:
+        # Collect all attention layers from static_forward_context
+        all_kv_cache_layers = [
+            layer_name
+            for layer_name, layer in vllm_config.compilation_config.static_forward_context.items()
+            if hasattr(layer, 'impl') and hasattr(layer.impl, 'do_kv_cache_update')
+        ]
+
     return ForwardContext(
         no_compile_layers=vllm_config.compilation_config.static_forward_context,
         all_moe_layers=all_moe_layers,
+        all_kv_cache_layers=all_kv_cache_layers,
         virtual_engine=virtual_engine,
         attn_metadata=attn_metadata,
         slot_mapping=slot_mapping or {},
