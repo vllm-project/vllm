@@ -3,6 +3,9 @@
 
 import asyncio
 import atexit
+import hashlib
+import os
+import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, TypeVar
@@ -16,12 +19,15 @@ from urllib3.util import Url, parse_url
 
 import vllm.envs as envs
 from vllm.connections import HTTPConnection, global_http_connection
+from vllm.logger import init_logger
 from vllm.utils.registry import ExtensionManager
 
 from .audio import AudioEmbeddingMediaIO, AudioMediaIO
 from .base import MediaIO
 from .image import ImageEmbeddingMediaIO, ImageMediaIO
 from .video import VideoMediaIO
+
+logger = init_logger(__name__)
 
 _M = TypeVar("_M")
 
@@ -116,6 +122,45 @@ class MediaConnector:
             allowed_media_domains = []
         self.allowed_media_domains = allowed_media_domains
 
+        # Media download cache directory (opt-in via VLLM_MEDIA_CACHE)
+        self._media_cache_dir: str | None = None
+        media_cache = envs.VLLM_MEDIA_CACHE
+        if media_cache:
+            self._media_cache_dir = media_cache
+            os.makedirs(media_cache, exist_ok=True)
+
+    def _get_cached_bytes(self, url: str) -> bytes | None:
+        """Return cached bytes for a URL, or None if not cached."""
+        if not self._media_cache_dir:
+            return None
+        cache_path = self._media_cache_path(url)
+        if cache_path.exists():
+            return cache_path.read_bytes()
+        return None
+
+    def _put_cached_bytes(self, url: str, data: bytes) -> None:
+        """Store downloaded bytes in the cache."""
+        if not self._media_cache_dir:
+            return
+        cache_path = self._media_cache_path(url)
+        # Write to a temporary file and atomically rename to prevent
+        # race conditions when multiple processes cache the same URL.
+        with tempfile.NamedTemporaryFile(
+            mode="wb", dir=self._media_cache_dir, delete=False
+        ) as tmp_file:
+            tmp_file.write(data)
+            tmp_path = tmp_file.name
+        try:
+            os.rename(tmp_path, str(cache_path))
+        except OSError:
+            # Another process may have already written the file.
+            os.remove(tmp_path)
+
+    def _media_cache_path(self, url: str) -> Path:
+        url_hash = hashlib.sha256(url.encode()).hexdigest()[:20]
+        ext = Path(url.split("?")[0]).suffix or ""
+        return Path(self._media_cache_dir) / f"{url_hash}{ext}"  # type: ignore[arg-type]
+
     def _load_data_url(
         self,
         url_spec: Url,
@@ -178,6 +223,10 @@ class MediaConnector:
         if url_spec.scheme and url_spec.scheme.startswith("http"):
             self._assert_url_in_allowed_media_domains(url_spec)
 
+            cached = self._get_cached_bytes(url)
+            if cached is not None:
+                return media_io.load_bytes(cached)
+
             connection = self.connection
             data = connection.get_bytes(
                 url_spec.url,
@@ -185,6 +234,7 @@ class MediaConnector:
                 allow_redirects=envs.VLLM_MEDIA_URL_ALLOW_REDIRECTS,
             )
 
+            self._put_cached_bytes(url, data)
             return media_io.load_bytes(data)
 
         if url_spec.scheme == "data":
@@ -209,12 +259,21 @@ class MediaConnector:
         if url_spec.scheme and url_spec.scheme.startswith("http"):
             self._assert_url_in_allowed_media_domains(url_spec)
 
+            cached = self._get_cached_bytes(url)
+            if cached is not None:
+                future = loop.run_in_executor(
+                    global_thread_pool, media_io.load_bytes, cached
+                )
+                return await future
+
             connection = self.connection
             data = await connection.async_get_bytes(
                 url_spec.url,
                 timeout=fetch_timeout,
                 allow_redirects=envs.VLLM_MEDIA_URL_ALLOW_REDIRECTS,
             )
+
+            self._put_cached_bytes(url, data)
             future = loop.run_in_executor(global_thread_pool, media_io.load_bytes, data)
             return await future
 
