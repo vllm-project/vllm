@@ -256,11 +256,12 @@ async def test_prompt_logprobs_temperature_increases_argmax_prob_completion(
     prompt_logprobs_temperature_client: openai.AsyncOpenAI,
     model_name: str,
 ):
-    """Test to verify that decreasing prompt_logprobs_temperature increases the probability of the argmax token.
-    To test this, we need a sequence that is generated using argmax sampling. To do this, we first do argmax sampling
-    given the seed prompt. We then concatenate the seed prompt with the argmax generation to form a new prompt and
-    evaluate the logprobs of the prompt under different temperatures, analyzing how the probability of the argmax
-    tokens change.
+    """Test to verify that decreasing prompt_logprobs_temperature increases the probability 
+    of the argmax token. To test this, we need a sequence that is generated using argmax 
+    sampling. To do this, we first do argmax sampling given the seed prompt. We then 
+    concatenate the seed prompt with the argmax generation to form a new prompt and 
+    evaluate the logprobs of the prompt under different temperatures, analyzing how the 
+    probability of the argmax tokens change.
     """
 
     # Generate using argmax sampling and concat generation with seed prompt to form new prompt

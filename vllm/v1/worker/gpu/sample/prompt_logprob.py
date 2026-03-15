@@ -88,20 +88,17 @@ class PromptLogprobsWorker:
         needs_temp = needs_prompt_logprobs & ~((temp_np == 1.0) | (temp_np == 0.0))
         use_temp = np.any(needs_temp)
 
-        # Build a per-token temperature tensor for the Triton kernel.
+        # Build a per-token temperature tensor and token->req_state_idx mapping 
+        # for the Triton kernel.
         if use_temp:
-            # Build per-token→req_state_idx mapping from query_start_loc
-            # and idx_mapping so the temperature kernel knows which
-            # request each token belongs to.
             num_tokens = input_batch.num_tokens
-            per_token_idx = input_batch.idx_mapping.new_empty(num_tokens)
+            token_idx_mapping = input_batch.idx_mapping.new_empty(num_tokens)
             query_start_loc_np = input_batch.query_start_loc_np
             for i in range(len(input_batch.req_ids)):
                 start = query_start_loc_np[i]
                 end = query_start_loc_np[i + 1]
-                per_token_idx[start:end] = input_batch.idx_mapping[i]
+                token_idx_mapping[start:end] = input_batch.idx_mapping[i]
             temperature_gpu = self.prompt_logprob_temperature.gpu
-            token_idx_mapping = per_token_idx
         else:
             temperature_gpu = None
             token_idx_mapping = None
