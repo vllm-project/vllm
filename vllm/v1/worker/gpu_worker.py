@@ -823,9 +823,7 @@ class Worker(WorkerBase):
 
         with (
             self.annotate_profile(scheduler_output),
-            record_function_or_nullcontext(
-                classify_batch_stage(scheduler_output)
-            ),
+            record_function_or_nullcontext(classify_batch_stage(scheduler_output)),
         ):
             output = self.model_runner.execute_model(
                 scheduler_output, intermediate_tensors

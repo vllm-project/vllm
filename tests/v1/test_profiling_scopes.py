@@ -31,8 +31,8 @@ def _make_scheduler_output(
     cached_generation_req_ids = cached_generation_req_ids or []
 
     cached_req_ids = cached_context_req_ids + cached_generation_req_ids
-    cached_num_output_tokens = (
-        [0] * len(cached_context_req_ids) + [1] * len(cached_generation_req_ids)
+    cached_num_output_tokens = [0] * len(cached_context_req_ids) + [1] * len(
+        cached_generation_req_ids
     )
     cached_reqs = CachedRequestData(
         req_ids=cached_req_ids,
@@ -45,9 +45,7 @@ def _make_scheduler_output(
     )
 
     return SchedulerOutput(
-        scheduled_new_reqs=[
-            SimpleNamespace(req_id=req_id) for req_id in new_req_ids
-        ],
+        scheduled_new_reqs=[SimpleNamespace(req_id=req_id) for req_id in new_req_ids],
         scheduled_cached_reqs=cached_reqs,
         num_scheduled_tokens=num_scheduled_tokens,
         total_num_scheduled_tokens=sum(num_scheduled_tokens.values()),
@@ -74,9 +72,7 @@ def _import_gpu_worker(monkeypatch):
     )
     stub_module.kernel_warmup = lambda *args, **kwargs: None
     worker_utils_stub = cast(Any, types.ModuleType("vllm.v1.worker.utils"))
-    worker_utils_stub.is_residual_scattered_for_sp = (
-        lambda *args, **kwargs: False
-    )
+    worker_utils_stub.is_residual_scattered_for_sp = lambda *args, **kwargs: False
     worker_utils_stub.request_memory = lambda *args, **kwargs: None
     model_loader_stub = cast(Any, types.ModuleType("vllm.model_executor.model_loader"))
     model_loader_stub.TensorizerLoader = object
