@@ -103,6 +103,10 @@ AITER_MODEL_LIST = [
             marks=[pytest.mark.core_model, pytest.mark.cpu_model],
         ),
         pytest.param("swiss-ai/Apertus-8B-Instruct-2509"),  # apertus
+        pytest.param(
+            "naver-hyperclovax/HyperCLOVAX-SEED-Think-14B",  # hyperclovax
+            marks=[large_gpu_mark(min_gb=72)],
+        ),
     ],
 )
 @pytest.mark.parametrize("max_tokens", [32])

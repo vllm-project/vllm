@@ -320,6 +320,10 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         "tencent/Hunyuan-A13B-Instruct", trust_remote_code=True
     ),
     "HyperCLOVAXForCausalLM": _HfExamplesInfo(
+        "naver-hyperclovax/HyperCLOVAX-SEED-Think-14B",
+        trust_remote_code=True,
+    ),
+    "HyperCLOVAXVisionForCausalLM": _HfExamplesInfo(
         "naver-hyperclovax/HyperCLOVAX-SEED-Think-32B",
         trust_remote_code=True,
     ),
