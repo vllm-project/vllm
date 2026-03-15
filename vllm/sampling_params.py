@@ -563,7 +563,7 @@ class SamplingParams(
         if self.reasoning_budget is not None:
             message = (
                 self.reasoning_budget_message
-                or "Reasoning budget exceeded, need to answer."
+                or "\n\nReasoning budget exceeded, need to answer."
             )
             self._reasoning_budget_injection_ids = tokenizer.encode(
                 text=message, add_special_tokens=False
