@@ -99,6 +99,15 @@ is_multi_node() {
   return 1
 }
 
+handle_pytest_exit() {
+  local exit_code=$1
+  if [ "$exit_code" -eq 5 ]; then
+    echo "Pytest exit code 5 (no tests collected) - treating as success."
+    exit 0
+  fi
+  exit "$exit_code"
+}
+
 ###############################################################################
 # Pytest marker/keyword re-quoting
 #
@@ -135,8 +144,9 @@ re_quote_pytest_markers() {
   local collecting=false
   local marker_buf=""
 
-  # Flatten newlines for consistent tokenization
-  local flat="${input//$'\n'/ }"
+  # Strip backslash-newline continuations, then flatten remaining newlines
+  local flat="${input//$'\\\n'/ }"
+  flat="${flat//$'\n'/ }"
 
   # Disable globbing to prevent *.py etc. from expanding during read -ra
   local restore_glob
@@ -164,6 +174,9 @@ re_quote_pytest_markers() {
 
       local is_boundary=false
       case "$word" in
+        # Line-continuation artifact
+        "\\")
+          is_boundary=true ;;
         # Command separators
         "&&"|"||"|";"|"|")
           is_boundary=true ;;
@@ -192,6 +205,13 @@ re_quote_pytest_markers() {
       esac
 
       if $is_boundary; then
+        # Strip surrounding double quotes if present (from upstream
+        # single-to-double conversion); without this, wrapping below
+        # would produce '"expr"' with literal double-quote characters.
+        if [[ "$marker_buf" == '"'*'"' ]]; then
+          marker_buf="${marker_buf#\"}"
+          marker_buf="${marker_buf%\"}"
+        fi
         # Flush the collected marker expression
         if [[ "$marker_buf" == *" "* || "$marker_buf" == *"("* ]]; then
           output+="'${marker_buf}' "
@@ -204,6 +224,9 @@ re_quote_pytest_markers() {
         if [[ "$word" == "-m" || "$word" == "-k" ]]; then
           output+="${word} "
           collecting=true
+        # Drop stray backslash tokens silently
+        elif [[ "$word" == "\\" ]]; then
+          :
         else
           output+="${word} "
         fi
@@ -226,6 +249,11 @@ re_quote_pytest_markers() {
 
   # Flush any trailing marker expression (marker at end of command)
   if $collecting && [[ -n "$marker_buf" ]]; then
+    # Strip surrounding double quotes (see mid-stream flush comment)
+    if [[ "$marker_buf" == '"'*'"' ]]; then
+      marker_buf="${marker_buf#\"}"
+      marker_buf="${marker_buf%\"}"
+    fi
     if [[ "$marker_buf" == *" "* || "$marker_buf" == *"("* ]]; then
       output+="'${marker_buf}'"
     else
@@ -453,7 +481,9 @@ if is_multi_node "$commands"; then
     done
 
     /bin/bash -c "${composite_command}"
+    exit_code=$?
     cleanup_network
+    handle_pytest_exit "$exit_code"
   else
     echo "Multi-node job detected but failed to parse bracket command syntax."
     echo "Expected format: prefix ; [node0_cmd1, node0_cmd2] && [node1_cmd1, node1_cmd2]"
@@ -474,10 +504,15 @@ else
     -e HF_TOKEN \
     -e AWS_ACCESS_KEY_ID \
     -e AWS_SECRET_ACCESS_KEY \
+    -e BUILDKITE_PARALLEL_JOB \
+    -e BUILDKITE_PARALLEL_JOB_COUNT \
     -v "${HF_CACHE}:${HF_MOUNT}" \
     -e "HF_HOME=${HF_MOUNT}" \
     -e "PYTHONPATH=${MYPYTHONPATH}" \
     --name "${container_name}" \
     "${image_name}" \
     /bin/bash -c "${commands}"
+
+  exit_code=$?
+  handle_pytest_exit "$exit_code"
 fi

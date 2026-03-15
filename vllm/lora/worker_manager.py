@@ -7,6 +7,7 @@ from typing import Any, Literal
 import torch
 
 from vllm.config import VllmConfig
+from vllm.exceptions import LoRAAdapterNotFoundError
 from vllm.logger import init_logger
 from vllm.lora.lora_model import LoRAModel
 from vllm.lora.model_manager import (
@@ -53,7 +54,18 @@ class WorkerLoRAManager:
         # Use get_text_config() in case of multimodal models
         text_config = vllm_config.model_config.hf_config.get_text_config()
 
-        self.max_position_embeddings = text_config.max_position_embeddings
+        # For encoder-decoder models (e.g., Whisper), use max_target_positions
+        # instead of max_position_embeddings
+        # TODO: Generalize max_position_embeddings handling for
+        # out-of-tree (OOT) encoder-decoder models
+        if vllm_config.model_config.is_encoder_decoder:
+            self.max_position_embeddings = getattr(
+                text_config, "max_target_positions", None
+            )
+        else:
+            self.max_position_embeddings = getattr(
+                text_config, "max_position_embeddings", None
+            )
         self.device = device
         # Lazily initialized by create_lora_manager.
         self._adapter_manager: LoRAModelManager
@@ -163,12 +175,10 @@ class WorkerLoRAManager:
             #       offline mode)
             # - No local adapter files found at `lora_request.lora_path`
             # For NotFoundError
-            raise ValueError(
-                f"Loading lora {lora_request.lora_name} failed: No adapter "
-                f"found for {lora_request.lora_path}"
+            raise LoRAAdapterNotFoundError(
+                lora_request.lora_name, lora_request.lora_path
             ) from e
         except Exception as e:
-            # For BadRequestError
             raise e
 
         return lora
