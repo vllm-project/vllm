@@ -3420,7 +3420,6 @@ if hasattr(torch.ops._C, "minimax_allreduce_rms"):
         rank: int,
         nranks: int,
         eps: float,
-        trigger_completion_at_end: bool,
     ) -> torch.Tensor:
         return torch.empty_like(input)
 
@@ -3437,6 +3436,5 @@ if hasattr(torch.ops._C, "minimax_allreduce_rms_qk"):
         rank: int,
         nranks: int,
         eps: float,
-        trigger_completion_at_end: bool,
     ) -> list[torch.Tensor]:
         return [torch.empty_like(q), torch.empty_like(k)]

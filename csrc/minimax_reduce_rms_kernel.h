@@ -6,7 +6,7 @@
 #include <torch/types.h>
 
 namespace vllm {
-namespace minimax_ar {
+namespace tensorrt_llm {
 
 struct alignas(16) bf16x8 {
   __nv_bfloat16 array[8];
@@ -57,10 +57,9 @@ struct MiniMaxReduceRMSParams {
   void* rms_gamma_k{};
   float rms_eps{};
   cudaStream_t stream{};
-  bool trigger_completion_at_end = true;
 };
 
 void minimax_reduce_rms_op(MiniMaxReduceRMSParams const& params);
 
-}  // namespace minimax_ar
+}  // namespace tensorrt_llm
 }  // namespace vllm

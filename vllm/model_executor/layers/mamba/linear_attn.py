@@ -116,7 +116,6 @@ class MiniMaxText01RMSNormTP(CustomOp):
                 q_norm.tp_rank,
                 q_norm.tp_world,
                 q_norm.variance_epsilon,
-                False,
             )
         orig_dtype = q.dtype
         q = q.to(torch.float32)
