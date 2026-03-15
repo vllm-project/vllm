@@ -49,7 +49,7 @@ steps:
     - pytest -v -s v1/e2e/test_spec_decode.py -k "tensor_parallelism"
   mirror:
     amd:
-      device: mi325_2
+      device: mi250_2
       depends_on:
       - image-build-amd
 

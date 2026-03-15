@@ -51,7 +51,7 @@ steps:
   - pytest -v -s v1/worker/test_worker_memory_snapshot.py
   mirror:
   amd:
-    device: mi325_2
+    device: mi250_2
     depends_on:
     - image-build-amd
     commands:
@@ -128,7 +128,7 @@ steps:
   - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 rlhf_ipc.py
   mirror:
   amd:
-    device: mi325_4
+    device: mi250_4
     depends_on:
     - image-build-amd
     commands:
@@ -206,7 +206,7 @@ steps:
     - pytest -v -s tests/v1/distributed/test_dbo.py
   mirror:
     amd:
-      device: mi325_2
+      device: mi250_2
       depends_on:
       - image-build-amd
       commands:

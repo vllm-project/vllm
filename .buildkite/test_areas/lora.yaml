@@ -12,7 +12,7 @@ steps:
   parallelism: 4
   mirror:
     amd:
-      device: mi325_1
+      device: mi250_1
       depends_on:
       - image-build-amd
 

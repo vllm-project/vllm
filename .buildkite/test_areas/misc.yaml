@@ -89,7 +89,7 @@ steps:
     - python3 offline_inference/spec_decode.py --test --method eagle3 --num_spec_tokens 3 --dataset-name hf --dataset-path philschmid/mt-bench --num-prompts 80 --temp 0 --top-p 1.0 --top-k -1 --tp 1 --enable-chunked-prefill --max-model-len 1536
   mirror:
     amd:
-      device: mi325_1
+      device: mi250_1
       depends_on:
       - image-build-amd
 

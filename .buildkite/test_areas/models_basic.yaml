@@ -38,7 +38,7 @@ steps:
     - pytest -v -s models/test_terratorch.py models/test_transformers.py models/test_registry.py
   mirror:
     amd:
-      device: mi325_1
+      device: mi250_1
       depends_on:
       - image-build-amd
     

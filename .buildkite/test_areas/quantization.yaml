@@ -46,6 +46,6 @@ steps:
     - pytest -v -s models/quantization
   mirror:
     amd:
-      device: mi325_1
+      device: mi355_1
       depends_on:
       - image-build-amd
