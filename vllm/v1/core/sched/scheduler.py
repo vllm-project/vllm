@@ -461,10 +461,11 @@ class Scheduler(SchedulerInterface):
                         break
 
                     # The request cannot be scheduled.
-                    # Preempt the request with most remaining work (SRTF) to
-                    # minimise wasted computation. For the priority policy,
-                    # lower-priority requests are preferred; remaining tokens
-                    # break ties so that nearly-finished requests are spared.
+                    # For the priority policy, preempt the lowest-priority
+                    # request; remaining tokens break ties so that
+                    # nearly-finished requests are spared (SRTF tiebreaker).
+                    # For FCFS, preempt the most recently arrived request
+                    # (LIFO) to preserve first-come-first-served ordering.
                     if self.policy == SchedulingPolicy.PRIORITY:
                         preempted_req = max(
                             self.running,
@@ -477,17 +478,7 @@ class Scheduler(SchedulerInterface):
                             ),
                         )
                     else:
-                        # FCFS: among equal-priority requests preempt the one
-                        # with the most remaining tokens (SRTF tiebreaker).
-                        preempted_req = max(
-                            self.running,
-                            key=lambda r: (
-                                r.num_prompt_tokens
-                                + r.max_tokens
-                                - r.num_computed_tokens,
-                                r.arrival_time,
-                            ),
-                        )
+                        preempted_req = self.running[-1]
                     self.running.remove(preempted_req)
                     if preempted_req in scheduled_running_reqs:
                         preempted_req_id = preempted_req.request_id

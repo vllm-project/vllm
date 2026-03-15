@@ -4242,28 +4242,24 @@ def test_srtf_priority_tiebreaker_preemption():
     )
 
 
-def test_srtf_fcfs_preemption():
-    """SRTF victim selection for FCFS policy.
+def test_lifo_fcfs_preemption():
+    """LIFO victim selection for FCFS policy.
 
-    Under the old LIFO policy the most-recently-added request was always
-    preempted.  Under SRTF the request with the most remaining tokens is
-    preempted instead, even if it was added first.
+    FCFS scheduling preserves arrival order, so the most recently arrived
+    (last in self.running) request is preempted first.
 
     Scenario
     --------
     block_size=16, 2 usable blocks.
-    req_big  : 16 prompt tokens, max_tokens=200 → remaining≈184, added FIRST.
-    req_small: 16 prompt tokens, max_tokens=17  → remaining≈1,   added SECOND.
-
-    req_big sits at index 0 in self.running; req_small is at the end (LIFO
-    victim under old code).
+    req_first : 16 prompt tokens, max_tokens=200, added FIRST.
+    req_second: 16 prompt tokens, max_tokens=17,  added SECOND.
 
     After both are prefilled (KV cache full), one output token is produced.
-    Phase 1 of the next schedule() processes req_big first; it needs a 2nd
-    block for its 17th token but the cache is full → preemption fires.
+    Phase 1 tries to decode req_first; its 17th token needs a new block but
+    the cache is full → preemption fires.
 
-    LIFO:  self.running.pop() = req_small (last element) → req_small preempted.
-    SRTF:  max remaining = req_big (184 >> 1)            → req_big preempted.
+    LIFO: self.running[-1] = req_second (last element) → req_second preempted.
+    This preserves FCFS: the earlier-arrived req_first keeps running.
     """
     # 2 usable blocks (block 0 is the null block).
     scheduler = create_scheduler(
@@ -4274,17 +4270,15 @@ def test_srtf_fcfs_preemption():
         enable_prefix_caching=False,
     )
 
-    # req_big is added FIRST (= index 0 in self.running).
-    req_big = create_requests(
-        num_requests=1, num_tokens=16, max_tokens=200, req_ids=["big"]
+    req_first = create_requests(
+        num_requests=1, num_tokens=16, max_tokens=200, req_ids=["first"]
     )[0]
-    # req_small is added SECOND (= LIFO victim under old code).
-    req_small = create_requests(
-        num_requests=1, num_tokens=16, max_tokens=17, req_ids=["small"]
+    req_second = create_requests(
+        num_requests=1, num_tokens=16, max_tokens=17, req_ids=["second"]
     )[0]
 
-    scheduler.add_request(req_big)
-    scheduler.add_request(req_small)
+    scheduler.add_request(req_first)
+    scheduler.add_request(req_second)
 
     # First schedule: both requests become running (16 computed tokens each).
     # All 2 usable blocks are now occupied.
@@ -4294,8 +4288,8 @@ def test_srtf_fcfs_preemption():
     # Simulate one model step so each request has 1 output token.
     # Without this, num_new_tokens == 0 in Phase 1 and no preemption occurs.
     mro = ModelRunnerOutput(
-        req_ids=[req_big.request_id, req_small.request_id],
-        req_id_to_index={req_big.request_id: 0, req_small.request_id: 1},
+        req_ids=[req_first.request_id, req_second.request_id],
+        req_id_to_index={req_first.request_id: 0, req_second.request_id: 1},
         sampled_token_ids=[[1], [1]],
         logprobs=None,
         prompt_logprobs_dict={},
@@ -4303,17 +4297,17 @@ def test_srtf_fcfs_preemption():
     )
     scheduler.update_from_output(sched_out0, mro)
 
-    # Second schedule: Phase 1 tries to decode req_big (index 0).
+    # Second schedule: Phase 1 tries to decode req_first (index 0).
     # Its 17th token crosses the block boundary → needs a new block.
     # KV cache is full → preemption fires.
     _ = scheduler.schedule()
 
-    assert req_big.status == RequestStatus.PREEMPTED, (
-        "SRTF should preempt req_big which has far more remaining tokens "
-        "(≈184) to spare req_small which is nearly done (≈1 token left)"
+    assert req_second.status == RequestStatus.PREEMPTED, (
+        "FCFS LIFO should preempt req_second (most recently arrived) "
+        "to preserve first-come-first-served ordering"
     )
-    assert req_small.status == RequestStatus.RUNNING, (
-        "req_small has fewer remaining tokens (≈1) and should be spared"
+    assert req_first.status == RequestStatus.RUNNING, (
+        "req_first arrived earlier and should be spared under FCFS"
     )
 
 
@@ -4326,8 +4320,8 @@ def test_srtf_mixed_prompt_length_preemption():
     prefill, making it appear nearly-finished even if it has many decode
     tokens left.
 
-    Scenario (FCFS, block_size=16, 4 usable blocks)
-    -------------------------------------------------
+    Scenario (PRIORITY, equal priority, block_size=16, 4 usable blocks)
+    --------------------------------------------------------------------
     req_long_prompt : prompt=48 tokens (3 blocks), max_tokens=50
         correct remaining  = (48+50) - 48 = 50
         wrong   remaining  = 50     - 48 = 2   ← appears nearly done
@@ -4344,7 +4338,7 @@ def test_srtf_mixed_prompt_length_preemption():
     block for req_long_prompt → KV cache full → preemption fires.
     """
     # 4 usable blocks (block 0 is the null block, num_blocks=5).
-    scheduler = create_scheduler(
+    scheduler = create_scheduler_with_priority(
         max_num_seqs=4,
         max_num_batched_tokens=8192,
         num_blocks=5,
