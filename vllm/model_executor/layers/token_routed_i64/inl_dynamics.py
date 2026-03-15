@@ -7,19 +7,6 @@ INL Dynamics — Inertial Navigation Layer.
 PID-like control with velocity tracking for numerical stability.
 Core innovation of the Complexity / Pacific-Prime architecture.
 
-    mu(h) = mu_base + mu_proj(h)         # contextual equilibrium
-    error = h - mu(h)                     # deviation from equilibrium
-    v_next = alpha * v - beta * error     # velocity update (damped)
-    h_next = h + dt * gate * v_next       # position update (gated)
-
-Parameters alpha, beta, gate are learned via a small controller MLP
-and clamped to stable ranges via sigmoid / softplus.
-
-TP compatibility: INL Dynamics operates on full hidden_size tensors
-(attention output is all-reduced before reaching dynamics). Controller
-weights are replicated across TP ranks — they are intentionally small
-(hidden_size → 64 → hidden_size*3) so replication cost is negligible.
-
 GitHub: https://github.com/Complexity-ML/complexity-deep
 """
 
@@ -41,10 +28,12 @@ class INLDynamics(nn.Module):
         hidden_size: int,
         controller_hidden: int = 64,
         dt: float = 0.1,
+        use_contextual_error: bool = True,
     ):
         super().__init__()
         self.hidden_size = hidden_size
         self.dt = dt
+        self.use_contextual_error = use_contextual_error
 
         # Learnable equilibrium
         self.mu = nn.Parameter(torch.zeros(hidden_size))
@@ -68,18 +57,6 @@ class INLDynamics(nn.Module):
         h: torch.Tensor,
         v: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """
-        Forward pass.
-
-        Args:
-            h: (num_tokens, hidden_size) — hidden states
-            v: (num_tokens, hidden_size) — velocity states (None → zeros)
-
-        Returns:
-            h_next: updated hidden states
-            v_next: updated velocity states
-            mu_contextual: contextual equilibrium (for mu-guidance)
-        """
         if v is None:
             v = torch.zeros_like(h)
 
@@ -94,8 +71,13 @@ class INLDynamics(nn.Module):
         gate = torch.sigmoid(gate_raw)
 
         # PID update
-        mu_contextual = self.mu + self.mu_proj(h)
-        error = h - mu_contextual
+        if self.use_contextual_error:
+            mu_contextual = self.mu + self.mu_proj(h)
+            error = h - mu_contextual
+        else:
+            mu_clamped = torch.clamp(self.mu, 0.0, 2.0)
+            error = h - mu_clamped
+            mu_contextual = mu_clamped + self.mu_proj(h)
         v_next = alpha * v - beta * error
         v_next = torch.clamp(v_next, min=-10.0, max=10.0)
         h_next = h + self.dt * gate * v_next

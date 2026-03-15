@@ -28,9 +28,8 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_reduce,
 )
-from vllm.model_executor.layers.token_routed_i64.fused_experts import (
-    fused_token_routed_forward,
-)
+import vllm.model_executor.layers.token_routed_i64.fused_i64_moe  # noqa: F401 — registers custom op
+from vllm.model_executor.layers.token_routed_i64.fused_i64_moe import fused_i64_experts
 
 
 class TokenRoutedMLP(nn.Module):
@@ -112,58 +111,38 @@ class TokenRoutedMLP(nn.Module):
         nn.init.zeros_(self.mu_router.weight)
 
         # Deterministic I64 token -> expert mapping
-        self.register_buffer(
-            "token_to_expert",
-            torch.arange(vocab_size, dtype=torch.long) % num_experts,
-        )
+        # NOTE: NOT a buffer — computed on-the-fly via modulo to avoid
+        # vLLM's init_empty_weights() meta-device issue (buffer would be
+        # uninitialized garbage on GPU after weight loading).
 
         # Init weights
         nn.init.kaiming_uniform_(self.gate_up_proj, a=5**0.5)
         nn.init.kaiming_uniform_(self.down_proj, a=5**0.5)
 
-    def _route_tokens(
-        self,
-        x: torch.Tensor,
-        token_ids: torch.Tensor | None,
-        mu: torch.Tensor | None,
-    ) -> torch.Tensor:
-        """Compute expert IDs for each token (global expert IDs)."""
-        num_tokens = x.shape[0]
-
-        if token_ids is None:
-            return torch.zeros(num_tokens, dtype=torch.long, device=x.device)
-
-        token_ids_clamped = token_ids.clamp(0, self.vocab_size - 1)
-        base_expert_ids = self.token_to_expert[token_ids_clamped]
-
-        # Mu-guided bias (INL innovation)
-        if mu is not None:
-            mu_logits = self.mu_router(mu)
-            base_one_hot = F.one_hot(base_expert_ids, self.num_experts).float()
-            combined_logits = base_one_hot * self._BASE_ROUTING_SCALE + mu_logits
-            return combined_logits.argmax(dim=-1)
-
-        return base_expert_ids
-
     def _forward_local(
         self,
         x: torch.Tensor,
-        expert_ids: torch.Tensor,
+        token_ids: torch.Tensor,
+        mu: torch.Tensor,
     ) -> torch.Tensor:
         """
-        Process tokens through LOCAL experts only.
-        expert_ids are local (0..local_num_experts-1).
+        Process tokens through LOCAL experts.
 
-        Uses fused dispatch: BMM for small batches (decode),
-        chunked sort-and-matmul for large batches (prefill).
+        CRITICAL: Routing (token_ids % num_experts) happens INSIDE the
+        custom op (splitting_op = eager during CUDA graph replay).
+        If routing were computed here, it would be captured in the graph
+        with dummy token_ids (all zeros) → everything routes to expert 0.
         """
-        return fused_token_routed_forward(
+        return torch.ops.vllm.i64_token_routed_forward(
             x,
             self.gate_up_proj,
             self.down_proj,
-            expert_ids,
+            token_ids,
             self.local_num_experts,
             self.intermediate_per_tp,
+            self.vocab_size,
+            self.mu_router.weight,
+            mu,
         )
 
     def forward(
@@ -180,13 +159,28 @@ class TokenRoutedMLP(nn.Module):
             token_ids: [num_tokens] - I64 token IDs for routing
             mu: [num_tokens, hidden_size] - mu from INL Dynamics
         """
-        # === I64 Routing (global expert IDs) ===
-        expert_ids = self._route_tokens(x, token_ids, mu)
+        num_tokens = x.shape[0]
+
+        # Default token_ids to zeros if None (fallback → expert 0)
+        if token_ids is None:
+            token_ids = torch.zeros(num_tokens, dtype=torch.long, device=x.device)
+
+        # Default mu to zeros if None (no mu-guided bias)
+        if mu is None:
+            mu = torch.zeros(num_tokens, self.hidden_size, dtype=x.dtype, device=x.device)
 
         if self.use_ep:
+            # EP path: routing must happen here for all-to-all dispatch
+            token_ids_clamped = token_ids.clamp(0, self.vocab_size - 1)
+            expert_ids = (token_ids_clamped % self.num_experts).long()
+            mu_logits = self.mu_router(mu)
+            base_one_hot = F.one_hot(expert_ids, self.num_experts).float()
+            combined_logits = base_one_hot * self._BASE_ROUTING_SCALE + mu_logits
+            expert_ids = combined_logits.argmax(dim=-1)
             output = self._forward_ep(x, expert_ids)
         else:
-            output = self._forward_local(x, expert_ids)
+            # TP path: routing inside custom op (CUDA graph safe)
+            output = self._forward_local(x, token_ids, mu)
 
         # === TP all_reduce (RowParallel equivalent) ===
         if self.tp_size > 1:
@@ -256,8 +250,15 @@ class TokenRoutedMLP(nn.Module):
         # Convert global expert IDs to local
         local_expert_ids = recv_expert_ids - self.expert_offset
 
-        # Process local experts
-        local_output = self._forward_local(recv_x, local_expert_ids)
+        # Process local experts (direct call, routing already done)
+        local_output = fused_i64_experts(
+            recv_x,
+            self.gate_up_proj,
+            self.down_proj,
+            local_expert_ids,
+            self.local_num_experts,
+            self.intermediate_per_tp,
+        )
 
         # All-to-all: send results back
         # (reverse direction: recv_splits become send, send_splits become recv)

@@ -1008,6 +1008,11 @@ class CompilationConfig:
                 if not self.use_inductor_graph_partition:
                     self.splitting_ops.append("vllm::unified_kv_cache_update")
 
+                # I64 token-routed expert dispatch must run in eager
+                # so expert_ids reflect real token IDs, not dummy zeros
+                # from CUDA graph capture.
+                self.splitting_ops.append("vllm::i64_token_routed_forward")
+
             elif len(self.splitting_ops) == 0:
                 if (
                     self.cudagraph_mode == CUDAGraphMode.PIECEWISE

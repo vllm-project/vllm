@@ -22,8 +22,12 @@ import torch
 import torch.nn as nn
 from transformers import PretrainedConfig
 
+from vllm.compilation.decorators import support_torch_compile, ignore_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -257,7 +261,13 @@ class ComplexityDecoderLayer(nn.Module):
     ):
         super().__init__()
         self.hidden_size = config.hidden_size
-        self.use_token_routed_mlp = getattr(config, "use_token_routed_mlp", True)
+        # use_token_routed_mlp can be True, or config may have mlp_type="token_routed"
+        _use_tr = getattr(config, "use_token_routed_mlp", None)
+        _mlp_type = getattr(config, "mlp_type", None)
+        self.use_token_routed_mlp = (
+            _use_tr is True or _mlp_type == "token_routed" or
+            (_use_tr is None and _mlp_type is None)  # default: True
+        )
 
         rms_norm_eps = getattr(config, "rms_norm_eps", 1e-6)
         self.input_layernorm = RMSNorm(config.hidden_size, eps=rms_norm_eps)
@@ -276,10 +286,13 @@ class ComplexityDecoderLayer(nn.Module):
             prefix=f"{prefix}.self_attn",
         )
 
+        # Framework-trained models (mlp_type in config) use non-contextual error
+        use_contextual_error = getattr(config, "mlp_type", None) is None
         self.dynamics = INLDynamics(
             hidden_size=config.hidden_size,
             controller_hidden=getattr(config, "dynamics_controller_hidden", 64),
             dt=getattr(config, "dynamics_dt", 0.1),
+            use_contextual_error=use_contextual_error,
         )
 
         self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=rms_norm_eps)
@@ -340,6 +353,8 @@ class ComplexityDecoderLayer(nn.Module):
 # =============================================================================
 
 
+@ignore_torch_compile
+@support_torch_compile
 class ComplexityModel(nn.Module):
     """Complexity transformer model with INL dynamics threading."""
 
@@ -373,6 +388,11 @@ class ComplexityModel(nn.Module):
             ),
             prefix=maybe_prefix(prefix, "layers"),
         )
+        # Tag layers with index for debug
+        for i, layer in enumerate(self.layers):
+            if hasattr(layer, '_layer_idx'):
+                continue
+            layer._layer_idx = i
 
         rms_norm_eps = getattr(config, "rms_norm_eps", 1e-6)
         if get_pp_group().is_last_rank:
@@ -380,8 +400,11 @@ class ComplexityModel(nn.Module):
         else:
             self.norm = PPMissingLayer()
 
+        # Framework-trained models (mlp_type in config) do not cascade velocity
+        self.cascade_velocity = getattr(config, "mlp_type", None) is None
+
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
-            ["hidden_states", "velocity_states", "mu_prev", "mu_residual"],
+            ["hidden_states", "velocity_states", "mu_prev"],
             config.hidden_size,
         )
 
@@ -399,32 +422,35 @@ class ComplexityModel(nn.Module):
                 hidden_states = self.embed_tokens(input_ids)
             velocity_states = torch.zeros_like(hidden_states)
             mu_prev = None
-            mu_residual = None
         else:
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
             velocity_states = intermediate_tensors["velocity_states"]
             mu_prev = intermediate_tensors.get("mu_prev")
-            mu_residual = intermediate_tensors.get("mu_residual")
 
         for i in range(self.start_layer, self.end_layer):
             layer = self.layers[i]
             if isinstance(layer, PPMissingLayer):
                 continue
 
+            # Reset velocity each layer for framework-trained models
+            layer_v = velocity_states if self.cascade_velocity else torch.zeros_like(hidden_states)
+
             hidden_states, velocity_states, mu_current = layer(
                 positions=positions,
                 hidden_states=hidden_states,
-                velocity_states=velocity_states,
+                velocity_states=layer_v,
                 token_ids=input_ids,
                 mu_prev=mu_prev,
             )
 
-            if mu_residual is None:
-                mu_residual = mu_current.clone()
-            else:
-                mu_residual = mu_residual + mu_current
-            mu_prev = mu_current + 0.1 * mu_residual
+            if not self.cascade_velocity:
+                velocity_states = torch.zeros_like(hidden_states)
+
+            # Match i64 engine decode_step: simple mu pass-through
+            if mu_current is not None:
+                mu_prev = mu_current
+
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
@@ -432,7 +458,6 @@ class ComplexityModel(nn.Module):
                     "hidden_states": hidden_states,
                     "velocity_states": velocity_states,
                     "mu_prev": mu_prev,
-                    "mu_residual": mu_residual,
                 }
             )
 
@@ -537,86 +562,116 @@ class ComplexityForCausalLM(nn.Module, SupportsPP):
         self,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor | None:
-        logits = self.logits_processor(self.lm_head, hidden_states)
-        return logits
+        return self.logits_processor(self.lm_head, hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         """Load weights from checkpoint.
 
         Handles:
-        - Tied embeddings (lm_head.weight → embed_tokens.weight)
-        - TokenRoutedMLP expert weights with TP sharding
-        - token_to_expert buffer (non-parameter)
-        - Standard vLLM weight loading for all other parameters
+        - No "model." prefix in checkpoint (saved from inner module)
+        - Separate experts.E.{gate,up,down}_proj → merged gate_up_proj / down_proj
+        - dynamics.controller.0/2 → controller_in / controller_out
+        - Tied embeddings
+        - mu_router (zero-init, not in checkpoint)
         """
         params_dict = dict(self.named_parameters())
-        buffers_dict = dict(self.named_buffers())
         loaded_params: set[str] = set()
 
-        for name, loaded_weight in weights:
-            orig_name = name
+        # mu_router is zero-init and intentionally absent from checkpoint
+        for pname in params_dict:
+            if ".mlp.mu_router." in pname:
+                loaded_params.add(pname)
 
-            # Skip rotary_emb.inv_freq — vLLM computes this
+        # Buffer per-expert weights: {layer_idx: {expert_idx: {proj: tensor}}}
+        expert_buf: dict = {}
+
+        for ckpt_name, loaded_weight in weights:
+            # --- Normalize checkpoint key to model parameter name ---
+            name = ckpt_name
+            if not name.startswith("model.") and name != "lm_head.weight":
+                name = "model." + name
+            name = name.replace(".dynamics.controller.0.", ".dynamics.controller_in.")
+            name = name.replace(".dynamics.controller.2.", ".dynamics.controller_out.")
+
+            # Skip rotary_emb.inv_freq — vLLM recomputes it
             if "rotary_emb.inv_freq" in name:
-                loaded_params.add(orig_name)
                 continue
 
-            # Handle tied embeddings
-            if name == "lm_head.weight":
+            # Skip token_to_expert — buffer, not parameter
+            if "token_to_expert" in name:
+                continue
+
+            # Tied embeddings: lm_head.weight → embed_tokens
+            if ckpt_name == "lm_head.weight":
                 if getattr(self.config, "tie_word_embeddings", True):
                     embed_name = "model.embed_tokens.weight"
                     if embed_name in params_dict:
                         param = params_dict[embed_name]
-                        weight_loader = getattr(
-                            param, "weight_loader", default_weight_loader
-                        )
+                        weight_loader = getattr(param, "weight_loader", default_weight_loader)
                         weight_loader(param, loaded_weight)
-                        loaded_params.add(orig_name)
                         loaded_params.add(embed_name)
-                    continue
-                # Untied: load into lm_head directly
-                if name in params_dict:
-                    param = params_dict[name]
-                    weight_loader = getattr(
-                        param, "weight_loader", default_weight_loader
-                    )
-                    weight_loader(param, loaded_weight)
-                    loaded_params.add(orig_name)
+                else:
+                    if name in params_dict:
+                        param = params_dict[name]
+                        weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                        weight_loader(param, loaded_weight)
+                        loaded_params.add(name)
                 continue
 
-            # Skip embed_tokens if already loaded via tied lm_head
+            # Skip embed_tokens if already loaded via lm_head tie
             if name == "model.embed_tokens.weight" and name in loaded_params:
                 continue
 
-            # Handle token_to_expert buffer
-            if "token_to_expert" in name:
-                if name in buffers_dict:
-                    buffers_dict[name].copy_(loaded_weight)
-                    loaded_params.add(orig_name)
+            # Expert weights — buffer for merging
+            # Pattern: model.layers.X.mlp.experts.E.{gate_proj,up_proj,down_proj}.weight
+            if ".mlp.experts." in name:
+                layer_idx = int(name.split(".layers.")[1].split(".")[0])
+                after = name.split(".mlp.experts.")[1]   # "E.gate_proj.weight"
+                parts = after.split(".")
+                expert_idx = int(parts[0])
+                proj = parts[1]  # gate_proj | up_proj | down_proj
+                expert_buf.setdefault(layer_idx, {}).setdefault(expert_idx, {})[proj] = loaded_weight.clone()
                 continue
 
-            # Handle TokenRoutedMLP weights — TP-aware sharding
-            if ".mlp.gate_up_proj" in name or ".mlp.down_proj" in name:
-                if name in params_dict:
-                    param = params_dict[name]
-                    layer_idx = extract_layer_index(name)
-                    mlp = self.model.layers[layer_idx].mlp
-                    param_name = name.rsplit(".", 1)[-1]
-                    if isinstance(mlp, TokenRoutedMLP):
-                        mlp.load_tp_weight(param_name, param, loaded_weight)
-                    else:
-                        with torch.no_grad():
-                            param.copy_(loaded_weight)
-                    loaded_params.add(orig_name)
-                continue
-
-            # Standard parameter loading (Q/K/V/O projections, norms, etc.)
+            # Standard parameter loading
             if name not in params_dict:
                 continue
             param = params_dict[name]
             weight_loader = getattr(param, "weight_loader", default_weight_loader)
             weight_loader(param, loaded_weight)
-            loaded_params.add(orig_name)
+            loaded_params.add(name)
+
+        # --- Merge buffered expert weights into gate_up_proj / down_proj ---
+        for layer_idx, experts in expert_buf.items():
+            mlp = self.model.layers[layer_idx].mlp
+            if not isinstance(mlp, TokenRoutedMLP):
+                continue
+
+            num_e = mlp.local_num_experts
+            sample = next(iter(experts.values()))
+            full_inter = sample["gate_proj"].shape[0]  # [out_feat, in_feat]
+            hidden = sample["gate_proj"].shape[1]
+            dtype = sample["gate_proj"].dtype
+
+            # gate_up_proj: [E, hidden, 2*full_inter]
+            gate_up_full = torch.zeros(num_e, hidden, 2 * full_inter, dtype=dtype)
+            # down_proj:    [E, full_inter, hidden]
+            down_full = torch.zeros(num_e, full_inter, hidden, dtype=dtype)
+
+            for e_idx, e_w in experts.items():
+                # Linear stores [out, in] → transpose for BMM [in, out]
+                gate_up_full[e_idx, :, :full_inter] = e_w["gate_proj"].T
+                gate_up_full[e_idx, :, full_inter:] = e_w["up_proj"].T
+                down_full[e_idx] = e_w["down_proj"].T
+
+            gu_name = f"model.layers.{layer_idx}.mlp.gate_up_proj"
+            dn_name = f"model.layers.{layer_idx}.mlp.down_proj"
+            if gu_name in params_dict:
+                mlp.load_tp_weight("gate_up_proj", params_dict[gu_name], gate_up_full)
+                loaded_params.add(gu_name)
+            if dn_name in params_dict:
+                mlp.load_tp_weight("down_proj", params_dict[dn_name], down_full)
+                loaded_params.add(dn_name)
 
         return loaded_params
 
