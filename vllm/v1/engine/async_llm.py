@@ -351,6 +351,7 @@ class AsyncLLM(EngineClient):
         )
 
         if is_kv_consumer:
+            logger.info(f"request_id = {request_id},parent_params.n = {parent_params.n}")
             # D-side (KV consumer) in PD disaggregation: immediate split.
             # Each child request loads KV cache from P-side and decodes independently.
             parent_request = ParentRequest(request_id, parent_params)
