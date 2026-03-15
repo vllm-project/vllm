@@ -423,15 +423,13 @@ def test_prompt_logprobs_temperature_increases_argmax_prob(
     use_v2_model_runner: bool,
 ) -> None:
     """We test that decreasing prompt_logprobs_temperature increases the probability of the argmax token.
-    To do this, we first generate a sequence of argmax tokens given a seed prompt. 
+    To do this, we first generate a sequence of argmax tokens given a seed prompt.
     We then pass seed prompt concatenated with argmax tokens as the prompt using various prompt_logprobs_temperatures
     and examine the probabilities of the argmax tokens.
     """
 
     # test for v1 and v2
-    monkeypatch.setenv(
-        "VLLM_USE_V2_MODEL_RUNNER", "1" if use_v2_model_runner else "0"
-    )
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1" if use_v2_model_runner else "0")
 
     with VllmRunner(
         MODEL,
@@ -444,7 +442,6 @@ def test_prompt_logprobs_temperature_increases_argmax_prob(
         enable_prefix_caching=False,
         gpu_memory_utilization=0.4,
     ) as vllm_model:
-
         # Generate the argmax tokens and concat with seed prompt
         argmax_prompt_token_ids = _get_argmax_prompt_token_ids(vllm_model)
 

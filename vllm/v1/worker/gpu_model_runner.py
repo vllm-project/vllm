@@ -4831,7 +4831,9 @@ class GPUModelRunner(
 
             # Apply prompt logprobs temperature scaling if requested.
             if request.sampling_params:
-                prompt_logprobs_temp =  request.sampling_params.prompt_logprobs_temperature
+                prompt_logprobs_temp = (
+                    request.sampling_params.prompt_logprobs_temperature
+                )
                 if prompt_logprobs_temp not in [None, 0.0, 1.0]:
                     logits = logits.to(torch.float32).div(prompt_logprobs_temp)
 
