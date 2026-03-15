@@ -354,6 +354,19 @@ class ChatCompletionRequest(OpenAIBaseModel):
         "can detect such behavior and terminate early, saving time and tokens.",
     )
 
+    reasoning_budget: int | None = Field(
+        default=None,
+        description="Maximum number of reasoning tokens allowed inside "
+        "<think>...</think> markers. When exceeded, a message is injected "
+        "to force the model to transition to the answer phase. Requires a "
+        "reasoning parser to be configured.",
+    )
+    reasoning_budget_message: str | None = Field(
+        default=None,
+        description="Custom message to inject when reasoning_budget is "
+        "exceeded. Defaults to 'Reasoning budget exceeded, need to answer.'",
+    )
+
     # --8<-- [end:chat-completion-extra-params]
 
     def build_chat_params(
@@ -519,6 +532,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
             extra_args=extra_args or None,
             skip_clone=True,  # Created fresh per request, safe to skip clone
             repetition_detection=self.repetition_detection,
+            reasoning_budget=self.reasoning_budget,
+            reasoning_budget_message=self.reasoning_budget_message,
         )
 
     @model_validator(mode="before")

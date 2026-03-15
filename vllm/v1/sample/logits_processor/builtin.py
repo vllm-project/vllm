@@ -291,6 +291,180 @@ class MinTokensLogitsProcessor(LogitsProcessor):
         return logits
 
 
+class ReasoningBudgetLogitsProcessor(LogitsProcessor):
+    """Caps reasoning tokens inside <think>...</think> markers.
+
+    When the budget is exceeded, force-injects a message followed by the
+    end-of-thinking token so the model transitions to the answer phase.
+    """
+
+    # Per-request state list indices
+    _BUDGET = 0
+    _OUTPUT_IDS = 1
+    _INJECTION_IDS = 2
+    _INJECTION_POS = 3  # -1 = monitoring, >= 0 = forcing
+    _DEPTH = 4
+    _REASON_COUNT = 5
+    _LAST_LEN = 6
+
+    def __init__(
+        self,
+        vllm_config: "VllmConfig",
+        device: torch.device,
+        is_pin_memory: bool,
+    ):
+        self.device = device
+        self.start_token_id: int | None = None
+        self.end_token_id: int | None = None
+
+        so_config = vllm_config.structured_outputs_config
+        if so_config and so_config.reasoning_parser:
+            try:
+                from vllm.reasoning import ReasoningParserManager
+                from vllm.transformers_utils.tokenizer import get_tokenizer
+
+                parser_cls = ReasoningParserManager.get_reasoning_parser(
+                    so_config.reasoning_parser
+                )
+                model_config = vllm_config.model_config
+                tokenizer = get_tokenizer(
+                    model_config.tokenizer,
+                    tokenizer_mode=model_config.tokenizer_mode,
+                    trust_remote_code=model_config.trust_remote_code,
+                    revision=model_config.tokenizer_revision,
+                )
+                parser = parser_cls(tokenizer)
+                self.start_token_id = getattr(parser, "start_token_id", None)
+                self.end_token_id = getattr(parser, "end_token_id", None)
+            except Exception:
+                pass
+
+        # index -> mutable state list
+        self.reqs: dict[int, list] = {}
+
+    def is_argmax_invariant(self) -> bool:
+        return False
+
+    @staticmethod
+    def _compute_initial_depth(
+        token_ids: Sequence[int],
+        start_id: int,
+        end_id: int,
+    ) -> int:
+        depth = 0
+        for tid in token_ids:
+            if tid == start_id:
+                depth += 1
+            elif tid == end_id and depth > 0:
+                depth -= 1
+        return depth
+
+    def _new_state(
+        self,
+        params: SamplingParams,
+        prompt_tok_ids: list[int] | None,
+        output_tok_ids: list[int],
+    ) -> list | None:
+        if (
+            params.reasoning_budget is None
+            or self.start_token_id is None
+            or self.end_token_id is None
+        ):
+            return None
+
+        injection_ids = list(params._reasoning_budget_injection_ids or [])
+        injection_ids.append(self.end_token_id)
+
+        depth = 0
+        if prompt_tok_ids:
+            depth = self._compute_initial_depth(
+                prompt_tok_ids, self.start_token_id, self.end_token_id
+            )
+
+        # Process any existing output tokens
+        reasoning_count = 0
+        for tid in output_tok_ids:
+            if tid == self.start_token_id:
+                depth += 1
+            elif tid == self.end_token_id and depth > 0:
+                depth -= 1
+            if depth > 0:
+                reasoning_count += 1
+
+        if depth == 0 and len(output_tok_ids) > 0:
+            # Reasoning already ended naturally
+            return None
+
+        return [
+            params.reasoning_budget,  # _BUDGET
+            output_tok_ids,  # _OUTPUT_IDS (reference)
+            injection_ids,  # _INJECTION_IDS
+            -1,  # _INJECTION_POS (monitoring)
+            depth,  # _DEPTH
+            reasoning_count,  # _REASON_COUNT
+            len(output_tok_ids),  # _LAST_LEN
+        ]
+
+    def update_state(self, batch_update: BatchUpdate | None):
+        process_dict_updates(self.reqs, batch_update, self._new_state)
+
+        if not self.reqs:
+            return
+
+        to_remove: list[int] = []
+        for index, state in self.reqs.items():
+            injection_pos = state[self._INJECTION_POS]
+
+            if injection_pos >= 0:
+                # Currently injecting — check if done
+                if injection_pos >= len(state[self._INJECTION_IDS]):
+                    to_remove.append(index)
+                continue
+
+            # Monitoring mode: process new output tokens
+            output_ids = state[self._OUTPUT_IDS]
+            last_len = state[self._LAST_LEN]
+            cur_len = len(output_ids)
+            if cur_len > last_len:
+                for i in range(last_len, cur_len):
+                    tid = output_ids[i]
+                    if tid == self.start_token_id:
+                        state[self._DEPTH] += 1
+                    elif tid == self.end_token_id and state[self._DEPTH] > 0:
+                        state[self._DEPTH] -= 1
+                    if state[self._DEPTH] > 0:
+                        state[self._REASON_COUNT] += 1
+                state[self._LAST_LEN] = cur_len
+
+            if state[self._DEPTH] == 0 and cur_len > 0:
+                # Reasoning ended naturally
+                to_remove.append(index)
+            elif state[self._REASON_COUNT] >= state[self._BUDGET]:
+                # Budget exceeded — switch to injection mode
+                state[self._INJECTION_POS] = 0
+
+        for index in to_remove:
+            del self.reqs[index]
+
+    def apply(self, logits: torch.Tensor) -> torch.Tensor:
+        if not self.reqs:
+            return logits
+
+        for index, state in self.reqs.items():
+            injection_pos = state[self._INJECTION_POS]
+            if injection_pos < 0:
+                continue
+
+            injection_ids = state[self._INJECTION_IDS]
+            if injection_pos < len(injection_ids):
+                target_token = injection_ids[injection_pos]
+                logits[index].fill_(-float("inf"))
+                logits[index, target_token] = 0.0
+                state[self._INJECTION_POS] = injection_pos + 1
+
+        return logits
+
+
 def process_dict_updates(
     req_entries: dict[int, T],
     batch_update: BatchUpdate | None,

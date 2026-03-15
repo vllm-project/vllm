@@ -290,6 +290,16 @@ class SamplingParams(
     '\\emoji \\emoji \\emoji ...'). This feature can detect such behavior
     and terminate early, saving time and tokens."""
 
+    reasoning_budget: int | None = None
+    """Maximum number of reasoning tokens allowed inside <think>...</think>
+    markers. When exceeded, a message is injected to force the model to
+    transition to the answer phase. Requires a reasoning parser to be
+    configured."""
+    reasoning_budget_message: str | None = None
+    """Custom message to inject when reasoning_budget is exceeded. Defaults
+    to 'Reasoning budget exceeded, need to answer.' if not set."""
+    _reasoning_budget_injection_ids: list[int] | None = None
+
     @staticmethod
     def from_optional(
         n: int | None = 1,
@@ -320,6 +330,8 @@ class SamplingParams(
         extra_args: dict[str, Any] | None = None,
         skip_clone: bool = False,
         repetition_detection: RepetitionDetectionParams | None = None,
+        reasoning_budget: int | None = None,
+        reasoning_budget_message: str | None = None,
     ) -> "SamplingParams":
         if logit_bias is not None:
             # Convert token_id to integer
@@ -360,6 +372,8 @@ class SamplingParams(
             extra_args=extra_args,
             skip_clone=skip_clone,
             repetition_detection=repetition_detection,
+            reasoning_budget=reasoning_budget,
+            reasoning_budget_message=reasoning_budget_message,
         )
 
     def __post_init__(self) -> None:
@@ -502,6 +516,14 @@ class SamplingParams(
                 "stop strings are only supported when detokenize is True. "
                 "Set detokenize=True to use stop."
             )
+        if self.reasoning_budget is not None and self.reasoning_budget < 1:
+            raise ValueError(
+                f"reasoning_budget must be at least 1, got {self.reasoning_budget}."
+            )
+        if self.reasoning_budget_message is not None and self.reasoning_budget is None:
+            raise ValueError(
+                "reasoning_budget_message requires reasoning_budget to be set."
+            )
 
     def _verify_greedy_sampling(self) -> None:
         if self.n > 1:
@@ -538,6 +560,15 @@ class SamplingParams(
                     self.stop_token_ids = list(eos_ids)
 
     def update_from_tokenizer(self, tokenizer: TokenizerLike) -> None:
+        if self.reasoning_budget is not None:
+            message = (
+                self.reasoning_budget_message
+                or "Reasoning budget exceeded, need to answer."
+            )
+            self._reasoning_budget_injection_ids = tokenizer.encode(
+                text=message, add_special_tokens=False
+            )
+
         if not self.bad_words:
             return
         self._bad_words_token_ids = []
