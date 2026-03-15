@@ -428,7 +428,7 @@ class HfRunner:
             )
 
         # don't put this import at the top level
-        # it will call torch.cuda.device_count()
+        # it will call torch.accelerator.device_count()
         from transformers import AutoProcessor
 
         self.processor = AutoProcessor.from_pretrained(
@@ -794,7 +794,6 @@ class VllmRunner:
         tensor_parallel_size: int = 1,
         block_size: int = 16 if not torch.xpu.is_available() else 64,
         enable_chunked_prefill: bool | None = False,
-        swap_space: int = 4,
         enforce_eager: bool | None = False,
         # Set this to avoid hanging issue
         default_torch_num_threads: int | None = None,
@@ -831,7 +830,6 @@ class VllmRunner:
                 trust_remote_code=trust_remote_code,
                 dtype=dtype,
                 seed=seed,
-                swap_space=swap_space,
                 enforce_eager=enforce_eager,
                 disable_log_stats=disable_log_stats,
                 tensor_parallel_size=tensor_parallel_size,
@@ -843,7 +841,10 @@ class VllmRunner:
 
     def get_inputs(
         self,
-        prompts: list[str] | list[torch.Tensor] | list[list[int]],
+        prompts: list[str]
+        | list[torch.Tensor]
+        | list[list[int]]
+        | list[dict[str, Any]],
         images: PromptImageInput | None = None,
         videos: PromptVideoInput | None = None,
         audios: PromptAudioInput | None = None,
@@ -857,26 +858,32 @@ class VllmRunner:
 
         inputs = list[dict[str, Any]]()
         for i, prompt in enumerate(prompts):
-            prompt_dict = dict[str, Any]()
-            if isinstance(prompt, str):
-                prompt_dict["prompt"] = prompt
-            elif isinstance(prompt, list):
-                prompt_dict["prompt_token_ids"] = prompt
+            # If we're passing an encoder/decoder prompt, we assume it
+            # already contains the multimodal data in the prompt
+            if isinstance(prompt, dict):
+                assert images is None and audios is None and videos is None
+                inputs.append(prompt.copy())
             else:
-                prompt_dict["prompt_embeds"] = prompt
+                prompt_dict = dict[str, Any]()
+                if isinstance(prompt, str):
+                    prompt_dict["prompt"] = prompt
+                elif isinstance(prompt, list):
+                    prompt_dict["prompt_token_ids"] = prompt
+                else:
+                    prompt_dict["prompt_embeds"] = prompt
 
-            multi_modal_data = dict[str, Any]()
-            if images is not None and (image := images[i]) is not None:
-                multi_modal_data["image"] = image
-            if videos is not None and (video := videos[i]) is not None:
-                multi_modal_data["video"] = video
-            if audios is not None and (audio := audios[i]) is not None:
-                multi_modal_data["audio"] = audio
+                multi_modal_data = dict[str, Any]()
+                if images is not None and (image := images[i]) is not None:
+                    multi_modal_data["image"] = image
+                if videos is not None and (video := videos[i]) is not None:
+                    multi_modal_data["video"] = video
+                if audios is not None and (audio := audios[i]) is not None:
+                    multi_modal_data["audio"] = audio
 
-            if multi_modal_data:
-                prompt_dict["multi_modal_data"] = multi_modal_data
+                if multi_modal_data:
+                    prompt_dict["multi_modal_data"] = multi_modal_data
 
-            inputs.append(prompt_dict)
+                inputs.append(prompt_dict)
 
         return inputs
 
@@ -1528,7 +1535,7 @@ def clean_gpu_memory_between_tests():
 
     from tests.utils import wait_for_gpu_memory_to_clear
 
-    num_gpus = torch.cuda.device_count()
+    num_gpus = torch.accelerator.device_count()
     if num_gpus > 0:
         try:
             wait_for_gpu_memory_to_clear(

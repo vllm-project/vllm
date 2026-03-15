@@ -972,6 +972,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
         # Early-out for cascade attention
         if use_cascade:
+            assert num_blocks_np is not None
             # Grab the blocks of the shared prefix from the first request.
             num_common_kv_blocks = common_prefix_len // page_size
 
@@ -1109,7 +1110,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         if num_decodes > 0:
             if decode_use_trtllm:
                 assert num_decode_tokens % num_decodes == 0, (
-                    "TRTLLM decode requires uniform query lengths per request."
+                    "TRTLLM decode requires uniform query lengths per request. "
+                    f"Got {num_decode_tokens=} and {num_decodes=}."
                 )
                 attn_metadata.decode = TRTLLMDecode(
                     block_tables=block_table_tensor[:num_decodes],
@@ -1117,6 +1119,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     max_seq_len=max_seq_len,
                 )
             else:
+                assert seq_lens_cpu is not None
                 pure_decode = num_prefills == 0
                 use_cudagraph = (
                     self.enable_cuda_graph

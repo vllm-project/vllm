@@ -220,6 +220,37 @@ def get_model_path(model: str | Path, revision: str | None = None):
     return snapshot_download(repo_id=model, **common_kwargs)
 
 
+def _try_download_from_hf_hub(
+    model: str | Path, file_name: str, revision: str | None
+) -> Path | None:
+    """Try to download a file from HuggingFace Hub.
+
+    Returns the local path on success, None on failure.
+    Skips download if model is a local directory.
+    """
+    if Path(model).is_dir():
+        return None
+    try:
+        return Path(hf_hub_download(model, file_name, revision=revision))
+    except huggingface_hub.errors.OfflineModeIsEnabled:
+        return None
+    except (
+        RepositoryNotFoundError,
+        RevisionNotFoundError,
+        EntryNotFoundError,
+        LocalEntryNotFoundError,
+    ) as e:
+        logger.debug("File or repository not found in hf_hub_download:", exc_info=e)
+        return None
+    except HfHubHTTPError as e:
+        logger.warning(
+            "Cannot connect to Hugging Face Hub. Skipping file download for '%s':",
+            file_name,
+            exc_info=e,
+        )
+        return None
+
+
 def get_hf_file_bytes(
     file_name: str, model: str | Path, revision: str | None = "main"
 ) -> bytes | None:
@@ -227,8 +258,7 @@ def get_hf_file_bytes(
     file_path = try_get_local_file(model=model, file_name=file_name, revision=revision)
 
     if file_path is None:
-        hf_hub_file = hf_hub_download(model, file_name, revision=revision)
-        file_path = Path(hf_hub_file)
+        file_path = _try_download_from_hf_hub(model, file_name, revision)
 
     if file_path is not None and file_path.is_file():
         with open(file_path, "rb") as file:
@@ -275,26 +305,7 @@ def get_hf_file_to_dict(
     file_path = try_get_local_file(model=model, file_name=file_name, revision=revision)
 
     if file_path is None:
-        try:
-            hf_hub_file = hf_hub_download(model, file_name, revision=revision)
-        except huggingface_hub.errors.OfflineModeIsEnabled:
-            return None
-        except (
-            RepositoryNotFoundError,
-            RevisionNotFoundError,
-            EntryNotFoundError,
-            LocalEntryNotFoundError,
-        ) as e:
-            logger.debug("File or repository not found in hf_hub_download:", exc_info=e)
-            return None
-        except HfHubHTTPError as e:
-            logger.warning(
-                "Cannot connect to Hugging Face Hub. Skipping file download for '%s':",
-                file_name,
-                exc_info=e,
-            )
-            return None
-        file_path = Path(hf_hub_file)
+        file_path = _try_download_from_hf_hub(model, file_name, revision)
 
     if file_path is not None and file_path.is_file():
         with open(file_path) as file:
