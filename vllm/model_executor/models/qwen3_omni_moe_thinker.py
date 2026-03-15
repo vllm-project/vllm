@@ -49,6 +49,7 @@ from transformers import __version__ as TRANSFORMERS_VERSION
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
+from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.inputs.data import PromptType
 from vllm.logger import init_logger
@@ -72,6 +73,7 @@ from vllm.model_executor.models.qwen2_audio import Qwen2AudioProcessingInfo
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFeatureSpec, MultiModalKwargsItems
 from vllm.multimodal.parse import AudioProcessorItems, MultiModalDataItems
+from vllm.multimodal.processing.inputs import ProcessorInputs
 from vllm.multimodal.processing.processor import (
     MultiModalPromptUpdates,
     PlaceholderFeaturesInfo,
@@ -1195,7 +1197,58 @@ class Qwen3OmniMoeThinkerProcessingInfo(
         return mm_max_tokens
 
 
-Qwen3OmniMoeThinkerDummyInputsBuilder = Qwen2_5OmniThinkerDummyInputsBuilder
+class Qwen3OmniMoeThinkerDummyInputsBuilder(
+    Qwen2_5OmniThinkerDummyInputsBuilder,
+):
+    def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
+        mm_config = self.info.ctx.get_mm_config()
+        use_audio_in_video = (mm_config.mm_processor_kwargs or {}).get(
+            "use_audio_in_video", False
+        )
+        if use_audio_in_video:
+            num_images = mm_counts.get("image", 0)
+            num_videos = mm_counts.get("video", 0)
+            hf_processor = self.info.get_hf_processor()
+            return (
+                hf_processor.image_token * num_images
+                + hf_processor.video_token * num_videos
+            )
+        return super().get_dummy_text(mm_counts)
+
+    def get_dummy_processor_inputs(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+        mm_options: Mapping[str, BaseDummyOptions],
+    ) -> ProcessorInputs:
+        mm_config = self.info.ctx.get_mm_config()
+        use_audio_in_video = (mm_config.mm_processor_kwargs or {}).get(
+            "use_audio_in_video", False
+        )
+
+        if use_audio_in_video and mm_counts.get("video", 0) > 0:
+            mm_counts = dict(mm_counts)
+            mm_counts["audio"] = mm_counts["video"]
+
+            processor_inputs = super().get_dummy_processor_inputs(
+                seq_len,
+                mm_counts,
+                mm_options,
+            )
+
+            return ProcessorInputs(
+                prompt=processor_inputs.prompt,
+                mm_data_items=processor_inputs.mm_data_items,
+                mm_uuid_items=processor_inputs.mm_uuid_items,
+                hf_processor_mm_kwargs={"use_audio_in_video": True},
+                tokenization_kwargs=processor_inputs.tokenization_kwargs,
+            )
+
+        return super().get_dummy_processor_inputs(
+            seq_len,
+            mm_counts,
+            mm_options,
+        )
 
 
 class Qwen3OmniMoeThinkerMultiModalProcessor(
@@ -1210,6 +1263,10 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
     ) -> BatchFeature:
         mm_data = dict(mm_data)
         audios = mm_data.pop("audios", [])
+
+        if not audios and mm_data.get("videos"):
+            mm_kwargs = dict(mm_kwargs)
+            mm_kwargs["use_audio_in_video"] = False
 
         def pad_to_hop_length(x: np.ndarray, hop_length: int) -> np.ndarray:
             length = x.shape[-1]
