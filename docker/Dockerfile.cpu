@@ -9,7 +9,7 @@
 #
 # Build targets:
 #   vllm-openai (default): used for serving deployment
-#   vllm-openai-amd: vLLM from source + zentorch from PyPI via vllm[zen]
+#   vllm-openai-zen: vLLM from source + zentorch from PyPI via vllm[zen]
 #   vllm-test: used for CI tests
 #   vllm-dev: used for development
 #
@@ -225,8 +225,8 @@ LABEL ai.vllm.build.python-version="${PYTHON_VERSION:-3.12}"
 ENTRYPOINT ["vllm", "serve"]
 
 
-######################### AMD PYPI IMAGE #########################
-FROM vllm-openai AS vllm-openai-amd
+######################### ZEN CPU PYPI IMAGE #########################
+FROM vllm-openai AS vllm-openai-zen
 
 ARG TARGETARCH
 
