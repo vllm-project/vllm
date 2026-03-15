@@ -62,6 +62,8 @@ attrs==24.2.0
     #   referencing
 audioread==3.0.1
     # via librosa
+av==16.1.0
+    # via -r requirements/test.in
 backoff==2.2.1
     # via
     #   -r requirements/test.in
@@ -375,6 +377,8 @@ inflect==5.6.2
     # via datamodel-code-generator
 iniconfig==2.0.0
     # via pytest
+instanttensor==0.1.5
+    # via -r requirements/test.in
 isoduration==20.11.0
     # via jsonschema
 isort==5.13.2
@@ -1169,6 +1173,7 @@ torch==2.10.0+cu129
     #   accelerate
     #   bitsandbytes
     #   encodec
+    #   instanttensor
     #   kornia
     #   lightly
     #   lightning
