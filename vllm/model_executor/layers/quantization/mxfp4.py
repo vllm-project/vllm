@@ -17,7 +17,6 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
 )
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
-    MONOLITHIC_BACKENDS,
     TRITON_BACKENDS,
     Mxfp4MoeBackend,
     convert_to_mxfp4_moe_kernel_format,
@@ -364,7 +363,11 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
 
     @property
     def is_monolithic(self) -> bool:
-        return self.mxfp4_backend in MONOLITHIC_BACKENDS
+        if self.moe_mk is None:
+            if hasattr(self, "experts_cls") and self.experts_cls is not None:
+                return self.experts_cls.is_monolithic()
+            return False
+        return self.moe_mk.is_monolithic
 
     def apply(
         self,

@@ -49,21 +49,17 @@ if has_triton_kernels():
 
 class Mxfp4MoeBackend(Enum):
     NONE = "None"
-    # FlashInfer TRTLLM backends (modular = used with EP, monolithic = fused)
+    # FlashInfer TRTLLM backends
     FLASHINFER_TRTLLM_MXFP4_MXFP8 = "FLASHINFER_TRTLLM_MXFP4_MXFP8"
-    FLASHINFER_TRTLLM_MXFP4_MXFP8_MONOLITHIC = (
-        "FLASHINFER_TRTLLM_MXFP4_MXFP8_MONOLITHIC"
-    )
-    FLASHINFER_CUTLASS_MXFP4_MXFP8 = "FLASHINFER_CUTLASS_MXFP4_MXFP8"
     FLASHINFER_TRTLLM_MXFP4_BF16 = "FLASHINFER_TRTLLM_MXFP4_BF16"
-    FLASHINFER_TRTLLM_MXFP4_BF16_MONOLITHIC = "FLASHINFER_TRTLLM_MXFP4_BF16_MONOLITHIC"
+    # FlashInfer CUTLASS backends
+    FLASHINFER_CUTLASS_MXFP4_MXFP8 = "FLASHINFER_CUTLASS_MXFP4_MXFP8"
     FLASHINFER_CUTLASS_MXFP4_BF16 = "FLASHINFER_CUTLASS_MXFP4_BF16"
     # Marlin
     BATCHED_MARLIN = "BATCHED_MARLIN"
     MARLIN = "MARLIN"
     # Triton
     TRITON = "TRITON"
-    TRITON_MONOLITHIC = "TRITON_MONOLITHIC"
     TRITON_UNFUSED = "TRITON_UNFUSED"
     # XPU
     XPU = "XPU"
@@ -72,54 +68,32 @@ class Mxfp4MoeBackend(Enum):
 # Backends that share the same TRTLLM weight format
 TRTLLM_BACKENDS = (
     Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16,
-    Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16_MONOLITHIC,
     Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8,
-    Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8_MONOLITHIC,
 )
 
 TRITON_BACKENDS = (
     Mxfp4MoeBackend.TRITON,
-    Mxfp4MoeBackend.TRITON_MONOLITHIC,
     Mxfp4MoeBackend.TRITON_UNFUSED,
-)
-
-MONOLITHIC_BACKENDS = (
-    Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16_MONOLITHIC,
-    Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8_MONOLITHIC,
-    Mxfp4MoeBackend.TRITON_MONOLITHIC,
-    Mxfp4MoeBackend.XPU,
 )
 
 
 def backend_to_kernel_cls(
     backend: Mxfp4MoeBackend,
-) -> type[mk.FusedMoEExperts]:
+) -> list[type[mk.FusedMoEExperts]]:
     if backend in (
-        Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16_MONOLITHIC,
-        Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8_MONOLITHIC,
+        Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16,
+        Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8,
     ):
         from vllm.model_executor.layers.fused_moe.experts.trtllm_mxfp4_moe import (
             TrtLlmMxfp4ExpertsMonolithic,
         )
-
-        return TrtLlmMxfp4ExpertsMonolithic
-    elif backend == Mxfp4MoeBackend.TRITON_MONOLITHIC:
-        from vllm.model_executor.layers.fused_moe.gpt_oss_triton_kernels_moe import (
-            OAITritonMxfp4ExpertsMonolithic,
-        )
-
-        return OAITritonMxfp4ExpertsMonolithic
-    elif backend == Mxfp4MoeBackend.XPU:
-        raise NotImplementedError("XPU backend uses XpuMxfp4MoEMethod directly.")
-    elif backend in (
-        Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16,
-        Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8,
-    ):
         from vllm.model_executor.layers.fused_moe.trtllm_moe import (
             TrtLlmGenExperts,
         )
 
-        return TrtLlmGenExperts
+        # NOTE: prefer Monolithic > Modular, so return Monolithic first.
+        return [TrtLlmMxfp4ExpertsMonolithic, TrtLlmGenExperts]
+
     elif backend in (
         Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_BF16,
         Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_MXFP8,
@@ -128,31 +102,40 @@ def backend_to_kernel_cls(
             FlashInferExperts,
         )
 
-        return FlashInferExperts
+        return [FlashInferExperts]
+
     elif backend == Mxfp4MoeBackend.TRITON:
         from vllm.model_executor.layers.fused_moe.gpt_oss_triton_kernels_moe import (
             OAITritonExperts,
+            OAITritonMxfp4ExpertsMonolithic,
         )
 
-        return OAITritonExperts
+        # NOTE: prefer Monolithic > Modular, so return Monolithic first.
+        return [OAITritonMxfp4ExpertsMonolithic, OAITritonExperts]
+
     elif backend == Mxfp4MoeBackend.TRITON_UNFUSED:
         from vllm.model_executor.layers.fused_moe.gpt_oss_triton_kernels_moe import (
             UnfusedOAITritonExperts,
         )
 
-        return UnfusedOAITritonExperts
+        return [UnfusedOAITritonExperts]
+
     elif backend == Mxfp4MoeBackend.MARLIN:
         from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
             MarlinExperts,
         )
 
-        return MarlinExperts
+        return [MarlinExperts]
+
     elif backend == Mxfp4MoeBackend.BATCHED_MARLIN:
         from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
             BatchedMarlinExperts,
         )
 
-        return BatchedMarlinExperts
+        return [BatchedMarlinExperts]
+
+    elif backend == Mxfp4MoeBackend.XPU:
+        raise NotImplementedError("XPU backend uses XpuMxfp4MoEMethod directly.")
     else:
         raise ValueError(f"Unknown MXFP4 MoE backend: {backend.value}")
 
@@ -179,9 +162,9 @@ def select_mxfp4_moe_backend(
             logger.info_once("Using Triton backend for mxfp4 lora")
             return Mxfp4MoeBackend.TRITON_UNFUSED, backend_to_kernel_cls(
                 Mxfp4MoeBackend.TRITON_UNFUSED
-            )
+            )[0]
         logger.info_once("Using Marlin backend for mxfp4 lora")
-        return Mxfp4MoeBackend.MARLIN, backend_to_kernel_cls(Mxfp4MoeBackend.MARLIN)
+        return Mxfp4MoeBackend.MARLIN, backend_to_kernel_cls(Mxfp4MoeBackend.MARLIN)[0]
 
     activation_format = (
         mk.FusedMoEActivationFormat.BatchedExperts
@@ -210,16 +193,16 @@ def select_mxfp4_moe_backend(
         activation_key: QuantKey | None,
         activation_format: mk.FusedMoEActivationFormat,
     ) -> tuple[Mxfp4MoeBackend, type[mk.FusedMoEExperts]]:
-        k_cls = backend_to_kernel_cls(backend)
-        supported, reason = k_cls.is_supported_config(
-            k_cls, config, weight_key, activation_key, activation_format
-        )
-        if supported:
-            logger.info_once(_make_log_backend(backend), scope="local")
-            return backend, k_cls
+        for k_cls in backend_to_kernel_cls(backend):
+            supported, reason = k_cls.is_supported_config(
+                k_cls, config, weight_key, activation_key, activation_format
+            )
+            if supported:
+                logger.info_once(_make_log_backend(backend), scope="local")
+                return backend, k_cls
         raise ValueError(_make_log_unsupported(backend, reason))
 
-    # Track which backend families are disabled by env vars
+    # Track if FlashInfer BF16 is explicitly disabled
     fi_bf16_disabled = (
         envs.is_set("VLLM_USE_FLASHINFER_MOE_MXFP4_BF16")
         and not envs.VLLM_USE_FLASHINFER_MOE_MXFP4_BF16
@@ -239,44 +222,26 @@ def select_mxfp4_moe_backend(
                 activation_format,
             )
         if current_platform.is_device_capability_family(100):
-            if config.dp_size > 1 and config.use_ep:
-                return _return_or_raise(
-                    Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16,
-                    config,
-                    kMxfp4Static,
-                    None,
-                    activation_format,
-                )
-            else:
-                return _return_or_raise(
-                    Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16_MONOLITHIC,
-                    config,
-                    kMxfp4Static,
-                    None,
-                    activation_format,
-                )
+            return _return_or_raise(
+                Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16,
+                config,
+                kMxfp4Static,
+                None,
+                activation_format,
+            )
 
     # Handle explicit FlashInfer MXFP4 MXFP8 TRTLLM configuration.
     if (
         envs.is_set("VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8")
         and envs.VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8
     ):
-        if config.dp_size > 1 and config.use_ep:
-            return _return_or_raise(
-                Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8,
-                config,
-                kMxfp4Static,
-                kMxfp8Dynamic,
-                activation_format,
-            )
-        else:
-            return _return_or_raise(
-                Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8_MONOLITHIC,
-                config,
-                kMxfp4Static,
-                kMxfp8Dynamic,
-                activation_format,
-            )
+        return _return_or_raise(
+            Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8,
+            config,
+            kMxfp4Static,
+            kMxfp8Dynamic,
+            activation_format,
+        )
 
     # Handle explicit FlashInfer MXFP4 MXFP8 CUTLASS configuration.
     if (
@@ -302,41 +267,26 @@ def select_mxfp4_moe_backend(
         )
 
     # Default backend selection by platform
-    # Skip FlashInfer BF16 if explicitly disabled
     if (
         not fi_bf16_disabled
         and current_platform.is_device_capability_family(100)
         and has_flashinfer()
     ):
-        if config.dp_size > 1 and config.use_ep:
-            return _return_or_raise(
-                Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16,
-                config,
-                kMxfp4Static,
-                None,
-                activation_format,
-            )
-        else:
-            backend = Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16_MONOLITHIC
-            logger.info_once(_make_log_backend(backend))
-            return backend, None
+        return _return_or_raise(
+            Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16,
+            config,
+            kMxfp4Static,
+            None,
+            activation_format,
+        )
     elif current_platform.has_device_capability(90) and triton_kernels_supported:
-        if config.dp_size > 1 and config.use_ep:
-            return _return_or_raise(
-                Mxfp4MoeBackend.TRITON,
-                config,
-                kMxfp4Static,
-                None,
-                activation_format,
-            )
-        else:
-            return _return_or_raise(
-                Mxfp4MoeBackend.TRITON_MONOLITHIC,
-                config,
-                kMxfp4Static,
-                None,
-                activation_format,
-            )
+        return _return_or_raise(
+            Mxfp4MoeBackend.TRITON,
+            config,
+            kMxfp4Static,
+            None,
+            activation_format,
+        )
     elif current_platform.has_device_capability(70):
         backend = (
             Mxfp4MoeBackend.MARLIN
@@ -461,8 +411,7 @@ def convert_to_mxfp4_moe_kernel_format(
         w13_bias = w13_bias.data.to(torch.float32)
         w2_bias = w2_bias.data.to(torch.float32)
 
-        # Swap w1 and w3 as the definition of
-        # swiglu is different in the trtllm-gen
+        # Swap w1 and w3 as the definition of swiglu is different in trtllm-gen
         def swap_every_two_rows(x, axis=-1):
             shape = x.shape
             if axis < 0:
@@ -714,7 +663,6 @@ def make_mxfp4_moe_quant_config(
     """Create a FusedMoEQuantConfig for the given MXFP4 backend."""
     if mxfp4_backend in (
         Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8,
-        Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8_MONOLITHIC,
         Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_MXFP8,
     ):
         return mxfp4_mxfp8_moe_quant_config(
@@ -728,9 +676,7 @@ def make_mxfp4_moe_quant_config(
         Mxfp4MoeBackend.BATCHED_MARLIN,
         Mxfp4MoeBackend.TRITON,
         Mxfp4MoeBackend.TRITON_UNFUSED,
-        Mxfp4MoeBackend.TRITON_MONOLITHIC,
         Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16,
-        Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16_MONOLITHIC,
         Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_BF16,
     ):
         return mxfp4_w4a16_moe_quant_config(
