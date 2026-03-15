@@ -244,24 +244,6 @@ steps:
   - pytest -v -s entrypoints/offline_mode
 
 
-- label: Entrypoints Integration (API Server 1) # TBD
-  timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
-  agent_pool: mi250_1
-  optional: true
-  fast_check: true
-  torch_nightly: true
-  working_dir: "/vllm-workspace/tests"
-  source_file_dependencies:
-  - vllm/
-  - tests/entrypoints/openai
-  - tests/entrypoints/test_chat_utils
-  commands:
-  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/test_chat_with_tool_reasoning.py --ignore=entrypoints/openai/test_oot_registration.py --ignore=entrypoints/openai/test_tensorizer_entrypoint.py --ignore=entrypoints/openai/correctness/  --ignore=entrypoints/openai/tool_parsers/ --ignore=entrypoints/openai/responses
-  - pytest -v -s entrypoints/test_chat_utils.py
-
-
 - label: Entrypoints Integration (API Server 2) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
@@ -433,23 +415,6 @@ steps:
   - pytest -v -s v1/e2e/general --ignore v1/e2e/general/test_async_scheduling.py
 
 
-- label: Spec Decode Eagle # TBD
-  timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
-  agent_pool: mi250_1
-  working_dir: "/vllm-workspace/tests"
-  source_file_dependencies:
-  - vllm/v1/spec_decode/
-  - vllm/v1/worker/gpu/spec_decode/
-  - vllm/model_executor/model_loader/
-  - vllm/v1/sample/
-  - vllm/model_executor/layers/
-  - tests/v1/e2e/spec_decode/
-  - vllm/platforms/rocm.py
-  commands:
-  - pytest -v -s v1/e2e/spec_decode -k "eagle_correctness"
-
-
 - label: Spec Decode Speculators + MTP # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
@@ -518,19 +483,6 @@ steps:
     - pytest -v -s v1/e2e/spec_decode/test_spec_decode.py -k "tensor_parallelism"
 
 
-- label: V1 e2e (4 GPUs) # TBD
-  timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
-  agent_pool: mi250_4
-  optional: true
-  working_dir: "/vllm-workspace/tests"
-  source_file_dependencies:
-  - vllm/
-  - tests/v1/e2e
-  commands:
-    - pytest -v -s v1/e2e/spec_decode/test_spec_decode.py -k "eagle_correctness_heavy"
-
-
 - label: Entrypoints V1 # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
@@ -542,19 +494,6 @@ steps:
   - tests/v1
   commands:
   - pytest -v -s v1/entrypoints
-
-
-- label: V1 Spec Decode # TBD
-  timeout_in_minutes: 60
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
-  agent_pool: mi250_1
-  optional: true
-  working_dir: "/vllm-workspace/tests"
-  source_file_dependencies:
-  - vllm/
-  - tests/v1/spec_decode
-  commands:
-  - pytest -v -s -m 'not slow_test' v1/spec_decode
 
 
 - label: V1 Sample + Logits # TBD
@@ -594,7 +533,7 @@ steps:
   - tests/v1/metrics
   - tests/entrypoints/openai/correctness/test_lmeval.py
   commands:
-  - uv pip install --system -r /vllm-workspace/requirements/kv_connectors.txt
+  - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
   - pytest -v -s -m 'not cpu_test' v1/core
   - pytest -v -s v1/executor
   - pytest -v -s v1/kv_offload
@@ -763,23 +702,6 @@ steps:
   - vllm/platforms/rocm.py
   commands:
   - "find compile/ -maxdepth 1 -name 'test_*.py' -print0 | xargs -0 -n1 -I{} pytest -s -v '{}'"
-
-
-- label: PyTorch Compilation Passes Unit Tests # TBD
-  timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
-  agent_pool: mi250_1
-  optional: true
-  working_dir: "/vllm-workspace/tests"
-  source_file_dependencies:
-  - vllm/compilation/
-  - vllm/model_executor/layers/
-  - vllm/v1/attention/backends/
-  - vllm/v1/attention/selector.py
-  - tests/compile/passes
-  - vllm/platforms/rocm.py
-  commands:
-  - pytest -s -v compile/passes --ignore compile/passes/distributed
 
 
 - label: PyTorch Fullgraph Smoke Test # TBD
@@ -1151,8 +1073,9 @@ steps:
 - label: Distributed (2 GPUs) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
-  agent_pool: mi250_1
+  agent_pool: mi250_2
   num_gpus: 2
+  optional: true
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/compilation/
@@ -1190,7 +1113,7 @@ steps:
 - label: Distributed Model Tests (2 GPUs) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
-  agent_pool: mi250_1
+  agent_pool: mi250_2
   num_gpus: 2
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
@@ -1216,7 +1139,7 @@ steps:
 - label: Plugin Tests (2 GPUs) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
-  agent_pool: mi250_1
+  agent_pool: mi250_2
   num_gpus: 2
   optional: true
   working_dir: "/vllm-workspace/tests"
@@ -1277,26 +1200,6 @@ steps:
   - pytest -v -s distributed/test_pipeline_parallel.py
 
 
-- label: LoRA TP (Distributed) # TBD
-  timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
-  agent_pool: mi250_4
-  num_gpus: 4
-  working_dir: "/vllm-workspace/tests"
-  source_file_dependencies:
-  - vllm/lora
-  - tests/lora
-  - vllm/platforms/rocm.py
-  commands:
-  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-  - pytest -v -s -x lora/test_chatglm3_tp.py
-  - pytest -v -s -x lora/test_llama_tp.py
-  - pytest -v -s -x lora/test_llm_with_multi_loras.py
-  - pytest -v -s -x lora/test_olmoe_tp.py
-  - pytest -v -s -x lora/test_gptoss_tp.py
-
-
 - label: Ray Dependency Compatibility Check # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
@@ -1343,7 +1246,7 @@ steps:
 - label: NixlConnector PD + Spec Decode acceptance (2 GPUs) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
-  agent_pool: mi250_1
+  agent_pool: mi250_2
   num_gpus: 2
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
@@ -1374,7 +1277,7 @@ steps:
 - label: Distributed Tests (2 GPUs)(H100-MI250) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
-  agent_pool: mi250_1
+  agent_pool: mi250_2
   num_gpus: 2
   working_dir: "/vllm-workspace/"
   source_file_dependencies:
@@ -1425,7 +1328,6 @@ steps:
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
   agent_pool: mi325_1
-  optional: true
   fast_check: true
   torch_nightly: true
   working_dir: "/vllm-workspace/tests"
@@ -1656,7 +1558,6 @@ steps:
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
   agent_pool: mi325_1
-  optional: true
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/v1/spec_decode/
@@ -1735,7 +1636,6 @@ steps:
   - vllm/
   - tests/v1/e2e
   commands:
-    # Only run tests that need exactly 2 GPUs
     - pytest -v -s v1/e2e/spec_decode/test_spec_decode.py -k "tensor_parallelism"
 
 
@@ -1743,13 +1643,11 @@ steps:
   timeout_in_minutes: 106
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
   agent_pool: mi325_4
-  optional: true
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
   - tests/v1/e2e
   commands:
-    # Only run tests that need 4 GPUs
     - pytest -v -s v1/e2e/spec_decode/test_spec_decode.py -k "eagle_correctness_heavy"
 
 
@@ -1770,7 +1668,6 @@ steps:
   timeout_in_minutes: 40
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
   agent_pool: mi325_1
-  optional: true
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
@@ -1816,7 +1713,7 @@ steps:
   - tests/v1/metrics
   - tests/entrypoints/openai/correctness/test_lmeval.py
   commands:
-  - uv pip install --system -r /vllm-workspace/requirements/kv_connectors.txt
+  - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
   - pytest -v -s -m 'not cpu_test' v1/core
   - pytest -v -s v1/executor
   - pytest -v -s v1/kv_offload
@@ -1967,6 +1864,18 @@ steps:
   commands:
   - pytest -v -s cuda/test_cuda_context.py
   - pytest -v -s cuda/test_platform_no_cuda_init.py
+
+
+- label: PyTorch Compilation Passes Unit Tests # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
+  agent_pool: mi325_1
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/
+  - tests/compile/passes
+  commands:
+  - pytest -s -v compile/passes --ignore compile/passes/distributed
 
 
 - label: Kernels Core Operation Test # 26.8m
@@ -2167,8 +2076,8 @@ steps:
   - pytest -v -s models/multimodal/processing/test_tensor_schema.py
 
 
-- label: Multi-Modal Models (Standard) # 1h 18m
-  timeout_in_minutes: 118
+- label: "Multi-Modal Models (Standard) 1: qwen2" # TBD
+  timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
   agent_pool: mi325_1
   torch_nightly: true
@@ -2178,8 +2087,52 @@ steps:
   - tests/models/multimodal
   commands:
   - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
-  - pip freeze | grep -E 'torch'
-  - pytest -v -s models/multimodal -m core_model --ignore models/multimodal/generation/test_whisper.py --ignore models/multimodal/processing
+  - pytest -v -s models/multimodal/generation/test_common.py -m core_model -k "qwen2"
+  - pytest -v -s models/multimodal/generation/test_ultravox.py -m core_model
+
+
+- label: "Multi-Modal Models (Standard) 2: qwen3 + gemma" # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
+  agent_pool: mi325_1
+  torch_nightly: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/
+  - tests/models/multimodal
+  commands:
+  - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
+  - pytest -v -s models/multimodal/generation/test_common.py -m core_model -k "qwen3 or gemma"
+  - pytest -v -s models/multimodal/generation/test_qwen2_5_vl.py -m core_model
+
+
+- label: "Multi-Modal Models (Standard) 3: llava + qwen2_vl" # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
+  agent_pool: mi325_1
+  torch_nightly: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/
+  - tests/models/multimodal
+  commands:
+  - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
+  - pytest -v -s models/multimodal/generation/test_common.py -m core_model -k "not qwen2 and not qwen3 and not gemma"
+  - pytest -v -s models/multimodal/generation/test_qwen2_vl.py -m core_model
+
+
+- label: "Multi-Modal Models (Standard) 4: other + whisper" # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
+  agent_pool: mi325_1
+  torch_nightly: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/
+  - tests/models/multimodal
+  commands:
+  - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
+  - pytest -v -s models/multimodal -m core_model --ignore models/multimodal/generation/test_common.py --ignore models/multimodal/generation/test_ultravox.py --ignore models/multimodal/generation/test_qwen2_5_vl.py --ignore models/multimodal/generation/test_qwen2_vl.py --ignore models/multimodal/generation/test_whisper.py --ignore models/multimodal/processing
   - cd .. && VLLM_WORKER_MULTIPROC_METHOD=spawn pytest -v -s tests/models/multimodal/generation/test_whisper.py -m core_model
 
 
@@ -2330,6 +2283,26 @@ steps:
   - pytest models/language -v -s -m 'distributed(num_gpus=2)'
   - pytest models/multimodal -v -s -m 'distributed(num_gpus=2)' --ignore models/multimodal/generation/test_whisper.py
   - VLLM_WORKER_MULTIPROC_METHOD=spawn pytest models/multimodal/generation/test_whisper.py -v -s -m 'distributed(num_gpus=2)'
+
+
+- label: LoRA TP (Distributed) # 9.8m
+  timeout_in_minutes: 18
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
+  agent_pool: mi325_4
+  num_gpus: 4
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/lora
+  - tests/lora
+  - vllm/platforms/rocm.py
+  commands:
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+  - pytest -v -s -x lora/test_chatglm3_tp.py
+  - pytest -v -s -x lora/test_llama_tp.py
+  - pytest -v -s -x lora/test_llm_with_multi_loras.py
+  - pytest -v -s -x lora/test_olmoe_tp.py
+  - pytest -v -s -x lora/test_gptoss_tp.py
 
 
 - label: Weight Loading Multiple GPU # 7.5m
@@ -2905,7 +2878,7 @@ steps:
   - tests/v1/metrics
   - tests/entrypoints/openai/correctness/test_lmeval.py
   commands:
-  - uv pip install --system -r /vllm-workspace/requirements/kv_connectors.txt
+  - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
   - pytest -v -s -m 'not cpu_test' v1/core
   - pytest -v -s v1/executor
   - pytest -v -s v1/kv_offload
@@ -3120,7 +3093,7 @@ steps:
   - pytest -v -s models/language/pooling -m 'not core_model'
 
 
-- label: Multi-Modal Models (Standard) # TBD
+- label: "Multi-Modal Models (Standard) 1: qwen2" # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   agent_pool: mi355_1
@@ -3131,8 +3104,52 @@ steps:
   - tests/models/multimodal
   commands:
   - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
-  - pip freeze | grep -E 'torch'
-  - pytest -v -s models/multimodal -m core_model --ignore models/multimodal/generation/test_whisper.py --ignore models/multimodal/processing
+  - pytest -v -s models/multimodal/generation/test_common.py -m core_model -k "qwen2"
+  - pytest -v -s models/multimodal/generation/test_ultravox.py -m core_model
+
+
+- label: "Multi-Modal Models (Standard) 2: qwen3 + gemma" # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  agent_pool: mi355_1
+  torch_nightly: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/
+  - tests/models/multimodal
+  commands:
+  - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
+  - pytest -v -s models/multimodal/generation/test_common.py -m core_model -k "qwen3 or gemma"
+  - pytest -v -s models/multimodal/generation/test_qwen2_5_vl.py -m core_model
+
+
+- label: "Multi-Modal Models (Standard) 3: llava + qwen2_vl" # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  agent_pool: mi355_1
+  torch_nightly: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/
+  - tests/models/multimodal
+  commands:
+  - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
+  - pytest -v -s models/multimodal/generation/test_common.py -m core_model -k "not qwen2 and not qwen3 and not gemma"
+  - pytest -v -s models/multimodal/generation/test_qwen2_vl.py -m core_model
+
+
+- label: "Multi-Modal Models (Standard) 4: other + whisper" # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  agent_pool: mi355_1
+  torch_nightly: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/
+  - tests/models/multimodal
+  commands:
+  - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
+  - pytest -v -s models/multimodal -m core_model --ignore models/multimodal/generation/test_common.py --ignore models/multimodal/generation/test_ultravox.py --ignore models/multimodal/generation/test_qwen2_5_vl.py --ignore models/multimodal/generation/test_qwen2_vl.py --ignore models/multimodal/generation/test_whisper.py --ignore models/multimodal/processing
   - cd .. && VLLM_WORKER_MULTIPROC_METHOD=spawn pytest -v -s tests/models/multimodal/generation/test_whisper.py -m core_model
 
 
