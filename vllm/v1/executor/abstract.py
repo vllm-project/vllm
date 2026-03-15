@@ -339,8 +339,10 @@ class Executor(ABC):
 
     def _acquire_gpu_access(self):
         """Acquire atomic signals for all GPUs managed by this executor."""
-        # Get all associated physical GPU IDs from device_config
-        device_ids = self.device_config.device_ids
+        # Use getattr to satisfy mypy since device_ids may not be explicitly
+        # typed in DeviceConfig.
+        device_ids = getattr(self.device_config, "device_ids", None)
+
         if not device_ids:
             logger.warning(
                 "Could not determine device IDs for GPU access lock. "
@@ -371,7 +373,7 @@ class Executor(ABC):
                         if owner_pid == my_pid:
                             break
 
-                        # Use safer check (Bot recommendation)
+                        # Use safer check to avoid os.kill(-1, 0)
                         if owner_pid != -1:
                             os.kill(owner_pid, 0)
                         else:
