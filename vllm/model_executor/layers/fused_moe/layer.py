@@ -52,7 +52,6 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
 )
 from vllm.platforms import current_platform
-from vllm.utils.math_utils import round_up
 
 logger = init_logger(__name__)
 
@@ -246,27 +245,9 @@ def maybe_roundup_hidden_size(
         hidden_size, act_dtype, moe_parallel_config
     )
 
-    # we are padding globally so EP buffer allocation works
-    if model_type == "gpt_oss" and is_mxfp4_quant:
-        from vllm.model_executor.layers.quantization.mxfp4 import (
-            Mxfp4Backend,
-            get_mxfp4_backend,
-        )
-
-        current_mxfp4_backend = get_mxfp4_backend(is_lora_enabled)
-
-        if (
-            current_mxfp4_backend == Mxfp4Backend.SM90_FI_MXFP4_BF16
-            or current_mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_CUTLASS
-        ):
-            hidden_size = round_up(hidden_size, 128)
-        elif (
-            current_platform.is_rocm()
-            or current_mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_TRTLLM
-            or current_mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_BF16
-            or current_mxfp4_backend == Mxfp4Backend.MARLIN
-        ):
-            hidden_size = round_up(hidden_size, 256)
+    # MXFP4-specific rounding is now handled in the MXFP4 oracle
+    # (mxfp4_round_up_hidden_size_and_intermediate_size) called from
+    # Mxfp4MoEMethod.__init__().
 
     return hidden_size
 

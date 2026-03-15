@@ -22,7 +22,7 @@ logger = init_logger(__name__)
 CK_MXFP4_MOE_DIM_ALIGNMENT = 256
 
 
-def _swizzle_mxfp4(quant_tensor, scale, num_warps):
+def _swizzle_mxfp4(quant_tensor, scale, num_warps=8):
     """weight swizzle for mxfp4 moe, used for OAI mxfp4 kernel"""
     assert has_triton_kernels()
     import triton_kernels.matmul_ogs_details.opt_flags as opt_flags
