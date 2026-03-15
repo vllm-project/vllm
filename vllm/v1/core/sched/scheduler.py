@@ -1387,7 +1387,7 @@ class Scheduler(SchedulerInterface):
             ):
                 routed_experts = self._get_routed_experts(request)
             if stopped:
-                if routed_experts is None:
+                if routed_experts is None and request.sampling_params is not None:
                     routed_experts = self._get_routed_experts(request)
 
                 # Capture finish_reason BEFORE _handle_stopped_request, which may
