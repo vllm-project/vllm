@@ -142,6 +142,7 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
             kernel_block_alignment_size = 128 if use_cutlass_mla else 64
             attn_page_size_1_token = MLAAttentionSpec(
                 block_size=1,
+                group_size=cache_config.mamba_num_attn_pages,
                 num_kv_heads=model_config.get_num_kv_heads(parallel_config),
                 head_size=model_config.get_head_size(),
                 dtype=kv_cache_dtype,
@@ -161,6 +162,7 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
                 kernel_block_alignment_size = 32
             attn_page_size_1_token = FullAttentionSpec(
                 block_size=1,
+                group_size=cache_config.mamba_num_attn_pages,
                 num_kv_heads=model_config.get_num_kv_heads(parallel_config),
                 head_size=model_config.get_head_size(),
                 dtype=kv_cache_dtype,
