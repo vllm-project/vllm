@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Unit tests for Cohere embed protocol: build_typed_embeddings and its
-underlying packing helpers, plus _resolve_truncation logic."""
+underlying packing helpers, plus Cohere-specific serving helpers."""
 
 import base64
 import struct
@@ -9,13 +9,11 @@ import struct
 import numpy as np
 import pytest
 
-from vllm.entrypoints.pooling.embed.cohere.protocol import (
+from vllm.entrypoints.pooling.embed.cohere_protocol import (
     CohereEmbedRequest,
     build_typed_embeddings,
 )
-from vllm.entrypoints.pooling.embed.cohere.serving import (
-    CohereServingEmbedding,
-)
+from vllm.entrypoints.pooling.embed.serving import ServingEmbedding
 
 
 @pytest.fixture
@@ -134,7 +132,7 @@ class TestBuildTypedEmbeddingsMultiple:
 
 
 class TestResolveTruncation:
-    """Unit tests for CohereServingEmbedding._resolve_truncation."""
+    """Unit tests for ServingEmbedding._resolve_cohere_truncation."""
 
     @staticmethod
     def _make_request(**kwargs) -> CohereEmbedRequest:
@@ -147,25 +145,25 @@ class TestResolveTruncation:
 
     def test_truncate_end_default(self):
         req = self._make_request()
-        tokens, side = CohereServingEmbedding._resolve_truncation(req)
+        tokens, side = ServingEmbedding._resolve_cohere_truncation(req)
         assert tokens == -1
         assert side is None
 
     def test_truncate_end_explicit(self):
         req = self._make_request(truncate="END")
-        tokens, side = CohereServingEmbedding._resolve_truncation(req)
+        tokens, side = ServingEmbedding._resolve_cohere_truncation(req)
         assert tokens == -1
         assert side is None
 
     def test_truncate_end_with_max_tokens(self):
         req = self._make_request(truncate="END", max_tokens=128)
-        tokens, side = CohereServingEmbedding._resolve_truncation(req)
+        tokens, side = ServingEmbedding._resolve_cohere_truncation(req)
         assert tokens == 128
         assert side is None
 
     def test_truncate_none(self):
         req = self._make_request(truncate="NONE")
-        tokens, side = CohereServingEmbedding._resolve_truncation(req)
+        tokens, side = ServingEmbedding._resolve_cohere_truncation(req)
         assert tokens is None
         assert side is None
 
@@ -173,52 +171,52 @@ class TestResolveTruncation:
         """truncate=NONE should NOT set truncate_prompt_tokens; the
         max_tokens limit is enforced separately via _check_max_tokens."""
         req = self._make_request(truncate="NONE", max_tokens=10)
-        tokens, side = CohereServingEmbedding._resolve_truncation(req)
+        tokens, side = ServingEmbedding._resolve_cohere_truncation(req)
         assert tokens is None
         assert side is None
 
     def test_truncate_start(self):
         req = self._make_request(truncate="START")
-        tokens, side = CohereServingEmbedding._resolve_truncation(req)
+        tokens, side = ServingEmbedding._resolve_cohere_truncation(req)
         assert tokens == -1
         assert side == "left"
 
     def test_truncate_start_with_max_tokens(self):
         req = self._make_request(truncate="START", max_tokens=64)
-        tokens, side = CohereServingEmbedding._resolve_truncation(req)
+        tokens, side = ServingEmbedding._resolve_cohere_truncation(req)
         assert tokens == 64
         assert side == "left"
 
 
 class TestApplyStPrompt:
-    """Unit tests for CohereServingEmbedding._apply_st_prompt."""
+    """Unit tests for ServingEmbedding._apply_task_instruction."""
 
     @staticmethod
-    def _make_handler(st_prompts: dict[str, str] | None):
-        handler = object.__new__(CohereServingEmbedding)
-        handler.st_prompts = st_prompts
+    def _make_handler(task_instructions: dict[str, str] | None):
+        handler = object.__new__(ServingEmbedding)
+        handler.task_instructions = task_instructions
         return handler
 
     def test_no_prompts_configured(self):
         handler = self._make_handler(None)
         texts = ["hello", "world"]
-        assert handler._apply_st_prompt(texts, "query") is texts
+        assert handler._apply_task_instruction(texts, "query") is texts
 
     def test_matching_input_type(self):
         handler = self._make_handler({"query": "search_query: "})
-        result = handler._apply_st_prompt(["hello"], "query")
+        result = handler._apply_task_instruction(["hello"], "query")
         assert result == ["search_query: hello"]
 
     def test_non_matching_input_type(self):
         handler = self._make_handler({"query": "search_query: "})
         texts = ["hello"]
-        assert handler._apply_st_prompt(texts, "document") is texts
+        assert handler._apply_task_instruction(texts, "document") is texts
 
     def test_multiple_texts(self):
         handler = self._make_handler(
             {"query": "Represent this sentence for searching: "}
         )
-        result = handler._apply_st_prompt(["a", "b", "c"], "query")
+        result = handler._apply_task_instruction(["a", "b", "c"], "query")
         assert result == [
             "Represent this sentence for searching: a",
             "Represent this sentence for searching: b",
@@ -228,17 +226,17 @@ class TestApplyStPrompt:
     def test_empty_prefix_returns_unchanged(self):
         handler = self._make_handler({"passage": ""})
         texts = ["hello"]
-        assert handler._apply_st_prompt(texts, "passage") is texts
+        assert handler._apply_task_instruction(texts, "passage") is texts
 
 
 class TestLoadTaskInstructions:
-    """Unit tests for CohereServingEmbedding._load_task_instructions."""
+    """Unit tests for ServingEmbedding._load_task_instructions."""
 
     def test_no_attribute(self):
         class FakeConfig:
             pass
 
-        assert CohereServingEmbedding._load_task_instructions(FakeConfig()) is None
+        assert ServingEmbedding._load_task_instructions(FakeConfig()) is None
 
     def test_with_task_instructions(self):
         class FakeConfig:
@@ -247,7 +245,7 @@ class TestLoadTaskInstructions:
                 "retrieval.passage": "",
             }
 
-        result = CohereServingEmbedding._load_task_instructions(FakeConfig())
+        result = ServingEmbedding._load_task_instructions(FakeConfig())
         assert result == {
             "retrieval.query": "Represent the query: ",
             "retrieval.passage": "",
@@ -257,17 +255,17 @@ class TestLoadTaskInstructions:
         class FakeConfig:
             task_instructions = {}
 
-        assert CohereServingEmbedding._load_task_instructions(FakeConfig()) is None
+        assert ServingEmbedding._load_task_instructions(FakeConfig()) is None
 
     def test_non_dict(self):
         class FakeConfig:
             task_instructions = "not a dict"
 
-        assert CohereServingEmbedding._load_task_instructions(FakeConfig()) is None
+        assert ServingEmbedding._load_task_instructions(FakeConfig()) is None
 
 
 class TestCheckMaxTokens:
-    """Unit tests for CohereServingEmbedding._check_max_tokens."""
+    """Unit tests for ServingEmbedding._check_cohere_max_tokens."""
 
     @staticmethod
     def _fake_output(n_tokens: int):
@@ -279,29 +277,29 @@ class TestCheckMaxTokens:
 
     def test_none_check_is_noop(self):
         outs = [self._fake_output(100)]
-        CohereServingEmbedding._check_max_tokens(outs, None)
+        ServingEmbedding._check_cohere_max_tokens(outs, None)
 
     def test_within_limit(self):
         outs = [self._fake_output(5), self._fake_output(3)]
-        CohereServingEmbedding._check_max_tokens(outs, 5)
+        ServingEmbedding._check_cohere_max_tokens(outs, 5)
 
     def test_exceeds_limit(self):
         outs = [self._fake_output(3), self._fake_output(10)]
         with pytest.raises(ValueError, match="exceeds max_tokens=5"):
-            CohereServingEmbedding._check_max_tokens(outs, 5)
+            ServingEmbedding._check_cohere_max_tokens(outs, 5)
 
     def test_exact_limit(self):
         outs = [self._fake_output(5)]
-        CohereServingEmbedding._check_max_tokens(outs, 5)
+        ServingEmbedding._check_cohere_max_tokens(outs, 5)
 
 
 class TestValidateInputType:
-    """Unit tests for CohereServingEmbedding._validate_input_type."""
+    """Unit tests for ServingEmbedding._validate_input_type."""
 
     @staticmethod
-    def _make_handler(st_prompts: dict[str, str] | None):
-        handler = object.__new__(CohereServingEmbedding)
-        handler.st_prompts = st_prompts
+    def _make_handler(task_instructions: dict[str, str] | None):
+        handler = object.__new__(ServingEmbedding)
+        handler.task_instructions = task_instructions
         return handler
 
     def test_none_input_type_always_accepted(self):

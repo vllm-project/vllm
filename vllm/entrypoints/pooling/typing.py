@@ -14,7 +14,7 @@ from vllm.entrypoints.pooling.classify.protocol import (
     ClassificationCompletionRequest,
     ClassificationResponse,
 )
-from vllm.entrypoints.pooling.embed.protocol import (
+from vllm.entrypoints.pooling.embed.openai_protocol import (
     EmbeddingBytesResponse,
     EmbeddingChatRequest,
     EmbeddingCompletionRequest,

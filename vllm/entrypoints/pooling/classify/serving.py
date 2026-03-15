@@ -43,7 +43,7 @@ class ServingClassification(PoolingServing):
             chat_template_config=chat_template_config,
         )
 
-    async def _build_response(
+    async def _build_openai_response(
         self,
         ctx: ClassificationServeContext,
     ) -> JSONResponse:

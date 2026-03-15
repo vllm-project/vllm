@@ -114,7 +114,7 @@ class PoolingServing:
         raw_request: Request | None = None,
     ) -> Response:
         ctx = await self._process(request, raw_request)
-        return await self._build_response(ctx)
+        return await self._build_openai_response(ctx)
 
     async def _prepare_generators(
         self,
@@ -182,7 +182,7 @@ class PoolingServing:
 
         ctx.final_res_batch = [res for res in final_res_batch if res is not None]
 
-    async def _build_response(
+    async def _build_openai_response(
         self,
         ctx: PoolingServeContext,
     ) -> Response:

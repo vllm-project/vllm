@@ -43,7 +43,7 @@ from vllm.entrypoints.openai.speech_to_text.protocol import (
     TranslationResponse,
     TranslationResponseVerbose,
 )
-from vllm.entrypoints.pooling.embed.protocol import (
+from vllm.entrypoints.pooling.embed.openai_protocol import (
     EmbeddingRequest,
     EmbeddingResponse,
 )

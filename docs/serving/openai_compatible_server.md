@@ -455,8 +455,8 @@ Our API is also compatible with [Cohere's Embed v2 API](https://docs.cohere.com/
 curl -X POST "http://localhost:8000/v2/embed" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "BAAI/bge-base-en-v1.5",
-    "input_type": "search_document",
+    "model": "Snowflake/snowflake-arctic-embed-m-v1.5",
+    "input_type": "query",
     "texts": ["Hello world", "How are you?"],
     "embedding_types": ["float"]
   }'
@@ -509,7 +509,6 @@ curl -X POST "http://localhost:8000/v2/embed" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "google/siglip-so400m-patch14-384",
-    "input_type": "search_document",
     "inputs": [
       {
         "content": [
@@ -537,8 +536,8 @@ The `embedding_types` parameter controls the output format. Multiple types can b
 curl -X POST "http://localhost:8000/v2/embed" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "BAAI/bge-base-en-v1.5",
-    "input_type": "search_query",
+    "model": "Snowflake/snowflake-arctic-embed-m-v1.5",
+    "input_type": "query",
     "texts": ["What is machine learning?"],
     "embedding_types": ["float", "binary"]
   }'

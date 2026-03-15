@@ -8,6 +8,7 @@ See https://docs.cohere.com/reference/embed for the API specification.
 import base64
 import builtins
 import struct
+from collections.abc import Sequence
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -128,7 +129,7 @@ def _encode_base64_embeddings(
 
 def build_typed_embeddings(
     float_embeddings: list[list[float]],
-    embedding_types: list[str],
+    embedding_types: Sequence[str],
 ) -> CohereEmbedByTypeEmbeddings:
     """Convert float embeddings to all requested Cohere embedding types."""
     result = CohereEmbedByTypeEmbeddings()
