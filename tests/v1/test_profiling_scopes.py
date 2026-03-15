@@ -7,6 +7,7 @@ from collections.abc import Callable
 from concurrent.futures import Future
 from contextlib import contextmanager, nullcontext
 from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 
@@ -68,14 +69,18 @@ def _recorded_scope_factory(scope_names: list[str]) -> Callable[[str], object]:
 
 
 def _import_gpu_worker(monkeypatch):
-    stub_module = types.ModuleType("vllm.model_executor.warmup.kernel_warmup")
+    stub_module = cast(
+        Any, types.ModuleType("vllm.model_executor.warmup.kernel_warmup")
+    )
     stub_module.kernel_warmup = lambda *args, **kwargs: None
-    worker_utils_stub = types.ModuleType("vllm.v1.worker.utils")
-    worker_utils_stub.is_residual_scattered_for_sp = lambda *args, **kwargs: False
+    worker_utils_stub = cast(Any, types.ModuleType("vllm.v1.worker.utils"))
+    worker_utils_stub.is_residual_scattered_for_sp = (
+        lambda *args, **kwargs: False
+    )
     worker_utils_stub.request_memory = lambda *args, **kwargs: None
-    model_loader_stub = types.ModuleType("vllm.model_executor.model_loader")
+    model_loader_stub = cast(Any, types.ModuleType("vllm.model_executor.model_loader"))
     model_loader_stub.TensorizerLoader = object
-    gpu_warmup_stub = types.ModuleType("vllm.v1.worker.gpu.warmup")
+    gpu_warmup_stub = cast(Any, types.ModuleType("vllm.v1.worker.gpu.warmup"))
     gpu_warmup_stub.warmup_kernels = lambda *args, **kwargs: None
     monkeypatch.setitem(
         sys.modules,
