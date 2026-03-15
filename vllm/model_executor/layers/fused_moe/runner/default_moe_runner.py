@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from contextlib import nullcontext
+from typing import TYPE_CHECKING
 
 import torch
 import torch.nn.functional as F
@@ -30,6 +31,8 @@ from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import (
+    HAS_OPAQUE_TYPE,
+    ModuleName,
     aux_stream,
     current_stream,
     direct_register_custom_op,
@@ -56,13 +59,27 @@ def get_layer_from_name(layer_name: str) -> torch.nn.Module:
     return forward_context.no_compile_layers[layer_name]
 
 
+# On torch >= 2.11, layer_name is a hoisted ModuleName opaque object;
+# on older versions it remains a plain str.
+if TYPE_CHECKING:
+    from typing import TypeAlias
+
+    _layer_name_type: TypeAlias = str | ModuleName
+else:
+    _layer_name_type = ModuleName if HAS_OPAQUE_TYPE else str
+
+
+def _resolve_layer_name(layer_name: str | ModuleName) -> str:
+    return layer_name.value if isinstance(layer_name, ModuleName) else layer_name
+
+
 def _moe_forward(
     hidden_states: torch.Tensor,
     router_logits: torch.Tensor,
     shared_experts_input: torch.Tensor | None,
-    layer_name: str,
+    layer_name: _layer_name_type,
 ) -> torch.Tensor:
-    layer = get_layer_from_name(layer_name)
+    layer = get_layer_from_name(_resolve_layer_name(layer_name))
     # TODO(bnell): this can be removed after MK migration is complete.
     layer.ensure_moe_quant_config_init()
     return layer.runner.forward_impl(
@@ -74,7 +91,7 @@ def _moe_forward_fake(
     hidden_states: torch.Tensor,
     router_logits: torch.Tensor,
     shared_experts_input: torch.Tensor | None,
-    layer_name: str,
+    layer_name: _layer_name_type,
 ) -> torch.Tensor:
     return torch.empty_like(hidden_states)
 
@@ -83,9 +100,9 @@ def _moe_forward_shared(
     hidden_states: torch.Tensor,
     router_logits: torch.Tensor,
     shared_experts_input: torch.Tensor | None,
-    layer_name: str,
+    layer_name: _layer_name_type,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    layer = get_layer_from_name(layer_name)
+    layer = get_layer_from_name(_resolve_layer_name(layer_name))
     # TODO(bnell): this can be removed after MK migration is complete.
     layer.ensure_moe_quant_config_init()
     return layer.runner.forward_impl(
@@ -97,7 +114,7 @@ def _moe_forward_shared_fake(
     hidden_states: torch.Tensor,
     router_logits: torch.Tensor,
     shared_experts_input: torch.Tensor | None,
-    layer_name: str,
+    layer_name: _layer_name_type,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     # Output shapes:
     # - fused_out: same as hidden_states (routed experts use transformed size)
@@ -105,12 +122,10 @@ def _moe_forward_shared_fake(
     #               hidden_states
     # (For latent MoE: shared experts use original hidden_size, not latent size)
     fused_out = torch.empty_like(hidden_states)
-
     if shared_experts_input is not None:
         shared_out = torch.empty_like(shared_experts_input)
     else:
         shared_out = torch.empty_like(hidden_states)
-
     return shared_out, fused_out
 
 
@@ -219,6 +234,7 @@ class DefaultMoERunner(MoERunner):
             self.moe_config.moe_parallel_config.use_deepep_ll_kernels
             or self.moe_config.moe_parallel_config.use_mori_kernels
             or self.moe_config.moe_parallel_config.use_fi_all2allv_kernels
+            or self.moe_config.moe_parallel_config.use_nixl_ep_kernels
         ) and envs.VLLM_ENABLE_MOE_DP_CHUNK
 
     def _maybe_setup_shared_experts_stream(
@@ -249,7 +265,7 @@ class DefaultMoERunner(MoERunner):
             )
 
             # Record that the shared_experts_input will be used in the
-            # shared_experts_stream to to avoid gc issue from
+            # shared_experts_stream to avoid gc issue from
             # deallocation. For more details:
             # https://docs.pytorch.org/docs/stable/generated/torch.Tensor.record_stream.html # noqa: E501
             # NOTE: We don't need shared_output.record_stream(current_stream())
@@ -280,14 +296,17 @@ class DefaultMoERunner(MoERunner):
             states_shape = (moe.max_num_tokens, self.moe_config.hidden_dim)
             logits_shape = (moe.max_num_tokens, self.moe_config.num_logical_experts)
 
+        device = torch.accelerator.current_device_index()
         self.batched_hidden_states = torch.zeros(
-            states_shape, dtype=moe.in_dtype, device=torch.cuda.current_device()
+            states_shape,
+            dtype=moe.in_dtype,
+            device=device,
         )
 
         self.batched_router_logits = torch.zeros(
             logits_shape,
             dtype=moe.router_logits_dtype,
-            device=torch.cuda.current_device(),
+            device=device,
         )
 
     def must_reduce_shared_expert_outputs(self) -> bool:
@@ -305,8 +324,8 @@ class DefaultMoERunner(MoERunner):
         """
         assert self.quant_method is not None
         return (
-            self.quant_method.moe_mk is not None
-            and self.quant_method.moe_mk.output_is_reduced()
+            self.quant_method.moe_kernel is not None
+            and self.quant_method.moe_kernel.output_is_reduced()
         )
 
     def maybe_all_reduce_tensor_model_parallel(self, final_hidden_states: torch.Tensor):
@@ -367,7 +386,9 @@ class DefaultMoERunner(MoERunner):
             assert len(trunc_sizes) == 1
             return func(states, trunc_sizes[0])
 
-    def _encode_layer_name(self) -> str:
+    def _encode_layer_name(self) -> str | ModuleName:
+        if HAS_OPAQUE_TYPE:
+            return ModuleName(self.layer_name)
         # Can be unavailable or None in unittests
         if (
             is_forward_context_available()
@@ -623,45 +644,6 @@ class DefaultMoERunner(MoERunner):
         )
 
         with sp_ctx:
-            extra_tensors = None
-            if do_naive_dispatch_combine:
-                post_quant_allgather = (
-                    self.quant_method is not None
-                    and self.moe_config.dp_size > 1
-                    and self.moe_config.use_ep
-                    and getattr(self.quant_method, "do_post_quant_allgather", False)
-                )
-                if post_quant_allgather:
-                    hidden_states_to_dispatch, extra_tensors = (
-                        self.quant_method.prepare_dp_allgather_tensor(
-                            layer, hidden_states, router_logits
-                        )
-                    )
-                else:
-                    hidden_states_to_dispatch = hidden_states
-
-                dispatch_res = get_ep_group().dispatch_router_logits(
-                    hidden_states_to_dispatch,
-                    router_logits,
-                    self.moe_config.is_sequence_parallel,
-                    extra_tensors=extra_tensors,
-                )
-                if extra_tensors is not None:
-                    (
-                        orig_hidden_states,
-                        router_logits,
-                        extra_tensors_combined,
-                    ) = dispatch_res
-                    hidden_states_combined = (
-                        orig_hidden_states,
-                        extra_tensors_combined[0],
-                    )
-                else:
-                    hidden_states_combined, router_logits = dispatch_res
-                    orig_hidden_states = hidden_states_combined
-            else:
-                orig_hidden_states = hidden_states
-
             # Run shared experts before matrix multiply.
             # because matrix multiply maybe modify the hidden_states.
             if has_separate_shared_experts and not use_shared_experts_stream:
@@ -670,6 +652,17 @@ class DefaultMoERunner(MoERunner):
                     shared_input if shared_input is not None else hidden_states
                 )
                 shared_output = self.shared_experts(shared_input)
+
+            # For naive dispatch/combine Dp/Ep, dispatch the hidden states and
+            # router logits to all experts.
+            # NOTE: this will be removed once all kernels are migrated into the
+            # MoEKernel framework.
+            if do_naive_dispatch_combine:
+                hidden_states, router_logits = get_ep_group().dispatch_router_logits(
+                    hidden_states,
+                    router_logits,
+                    self.moe_config.is_sequence_parallel,
+                )
 
             # NOTE: Similar with DP, PCP also needs dispatch and combine. For
             # simplicity, AgRsAll2All was added separately for PCP here. Maybe
@@ -684,31 +677,22 @@ class DefaultMoERunner(MoERunner):
                     dim=0,
                 )
 
-            # TODO(bnell): deal with fp4 flashinfer tuple hidden states hack (#30014).
-            # Figure out nicer way to do this.
-            if do_naive_dispatch_combine:
-                x = hidden_states_combined
-                x_orig = orig_hidden_states
-            else:
-                x = hidden_states
-                x_orig = hidden_states
-
             # Matrix multiply.
             if self.quant_method.is_monolithic:
                 final_hidden_states = self.quant_method.apply_monolithic(
                     layer=layer,
-                    x=x,
+                    x=hidden_states,
                     router_logits=router_logits,
                 )
             else:
                 topk_weights, topk_ids = self.router.select_experts(
-                    hidden_states=x_orig,
+                    hidden_states=hidden_states,
                     router_logits=router_logits,
                 )
 
                 final_hidden_states = self.quant_method.apply(
                     layer=layer,
-                    x=x,  # The type signture of this is wrong due to the hack.
+                    x=hidden_states,
                     topk_weights=topk_weights,
                     topk_ids=topk_ids,
                     shared_experts_input=shared_input,

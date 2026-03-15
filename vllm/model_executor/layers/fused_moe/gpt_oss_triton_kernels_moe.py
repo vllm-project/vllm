@@ -511,7 +511,7 @@ def make_routing_data(
     return routing_data, gather_indx, scatter_indx
 
 
-class BaseOAITritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
+class BaseOAITritonExperts(mk.FusedMoEExpertsModular):
     @staticmethod
     def _supports_current_device() -> bool:
         raise NotImplementedError(
@@ -609,9 +609,6 @@ class OAITritonExperts(BaseOAITritonExperts):
     def activation_format() -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.Standard
 
-    def supports_chunking(self) -> bool:
-        return True
-
     def workspace_shapes(
         self,
         M: int,
@@ -695,9 +692,6 @@ class UnfusedOAITritonExperts(BaseOAITritonExperts):
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.Standard
-
-    def supports_chunking(self) -> bool:
-        return True
 
     def workspace_shapes(
         self,
