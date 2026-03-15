@@ -41,7 +41,7 @@ T = TypeVar("T")
 
 
 class ConstantList(Generic[T], Sequence):
-    def __init__(self, x: list[T]) -> None:
+    def __init__(self, x: Sequence[T]) -> None:
         self._x = x
 
     def append(self, item):
@@ -72,6 +72,8 @@ class ConstantList(Generic[T], Sequence):
     def __getitem__(self, s: slice, /) -> list[T]: ...
 
     def __getitem__(self, item: int | slice) -> T | list[T]:
+        if isinstance(item, slice):
+            return list(self._x[item])
         return self._x[item]
 
     @overload
@@ -99,7 +101,7 @@ class ConstantList(Generic[T], Sequence):
         return f"ConstantList({self._x})"
 
     def copy(self) -> list[T]:
-        return self._x.copy()
+        return list(self._x)
 
 
 class CpuGpuBuffer:

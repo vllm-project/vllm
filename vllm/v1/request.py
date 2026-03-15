@@ -3,6 +3,7 @@
 
 import enum
 import time
+from array import array
 from collections import deque
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -119,11 +120,15 @@ class Request:
         self.num_prompt_tokens = length_from_prompt_token_ids_or_embeds(
             prompt_token_ids, prompt_embeds
         )
-        self._output_token_ids: list[int] = []
-        self._all_token_ids: list[int] = (
+        # Request-local token histories grow with each generated token.
+        # Keep them in contiguous integer arrays to reduce Python object
+        # overhead while preserving list-like mutation semantics.
+        self._output_token_ids = array("i")
+        self._all_token_ids = array(
+            "i",
             self.prompt_token_ids.copy()
             if self.prompt_token_ids is not None
-            else [0] * self.num_prompt_tokens
+            else [0] * self.num_prompt_tokens,
         )
 
         # Used in async scheduling.
