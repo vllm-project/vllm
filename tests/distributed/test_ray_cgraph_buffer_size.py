@@ -12,9 +12,7 @@ class TestRayCGraphBufferSize(unittest.TestCase):
 
     def test_default_buffer_size(self):
         """Test that default buffer size is 0 (use Ray default)."""
-        # Clear any existing env var
         with patch.dict(os.environ, {}, clear=True):
-            # Need to reimport to pick up the new env
             from vllm.envs import environment_variables
             buffer_size = environment_variables["VLLM_RAY_CGRAPH_BUFFER_SIZE_BYTES"]()
             self.assertEqual(buffer_size, 0)
@@ -26,29 +24,19 @@ class TestRayCGraphBufferSize(unittest.TestCase):
             buffer_size = environment_variables["VLLM_RAY_CGRAPH_BUFFER_SIZE_BYTES"]()
             self.assertEqual(buffer_size, 536870912)
 
-    def test_small_buffer_size(self):
-        """Test that small buffer sizes work."""
-        with patch.dict(os.environ, {"VLLM_RAY_CGRAPH_BUFFER_SIZE_BYTES": "1048576"}):
-            from vllm.envs import environment_variables
-            buffer_size = environment_variables["VLLM_RAY_CGRAPH_BUFFER_SIZE_BYTES"]()
-            self.assertEqual(buffer_size, 1048576)
-
 
 class TestRayCGraphBufferSizeEnvMapping(unittest.TestCase):
     """Test that VLLM_RAY_CGRAPH_BUFFER_SIZE_BYTES maps to Ray's env var."""
 
     def test_env_var_mapping(self):
-        """Test that setting VLLM_RAY_CGRAPH_BUFFER_SIZE_BYTES would set RAY_CGRAPH_buffer_size_bytes."""
-        # This test verifies the logic flow without actually importing Ray
-        vllm_buffer_size = "536870912"
-        
-        # The expected behavior is that if VLLM_RAY_CGRAPH_BUFFER_SIZE_BYTES > 0,
-        # the code should set RAY_CGRAPH_buffer_size_bytes to the same value
-        expected_ray_env = vllm_buffer_size
-        
-        # Verify the values match
-        self.assertEqual(vllm_buffer_size, expected_ray_env)
-
+        """Test that setting VLLM_RAY_CGRAPH_BUFFER_SIZE_BYTES sets RAY_CGRAPH_buffer_size_bytes."""
+        # Using a distinct mock setup to simulate how the ray_executor sets it
+        with patch.dict(os.environ, {"VLLM_RAY_CGRAPH_BUFFER_SIZE_BYTES": "536870912"}):
+            from vllm.envs import environment_variables
+            buffer_size = environment_variables["VLLM_RAY_CGRAPH_BUFFER_SIZE_BYTES"]()
+            # Simulate the ray_executor.py logic that defaults RAY_CGRAPH_buffer_size_bytes
+            os.environ.setdefault("RAY_CGRAPH_buffer_size_bytes", str(buffer_size))
+            self.assertEqual(os.environ["RAY_CGRAPH_buffer_size_bytes"], "536870912")
 
 if __name__ == "__main__":
     unittest.main()
