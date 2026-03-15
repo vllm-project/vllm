@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # SPDX-FileCopyrightText: Copyright INL Dynamics / Complexity-ML
 """
 I64 Expert Runner — dispatches tokens to the fused I64 kernel.
