@@ -30,8 +30,11 @@ from vllm.config import (
 )
 from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape,
     QuantKey,
+    kFp8Dynamic128Sym,
     kFp8StaticTensorSym,
     kNvfp4Dynamic,
 )
@@ -217,12 +220,59 @@ class TestAttentionNvfp4QuantPatternModel(AttentionQuantPatternModel):
         )
 
 
+class TestAttentionFp8GroupQuantPatternModel(AttentionQuantPatternModel):
+    """Test model for AttentionFp8GroupQuantPattern fusion.
+
+    Uses per-group (group_size=128) dynamic FP8 quantization after attention,
+    followed by a simple dequant+matmul to produce a comparable output.
+    """
+
+    quant_key = kFp8Dynamic128Sym
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        hidden_size = self.num_qo_heads * self.head_size
+        self.group_size = self.quant_key.scale.group_shape[1]
+
+        self.quant_fp8 = QuantFP8(
+            static=False,
+            group_shape=GroupShape(1, self.group_size),
+            column_major_scales=False,
+            tma_aligned_scales=False,
+            compile_native=False,
+        )
+
+        # Simple weight for downstream matmul (dequant -> matmul)
+        self.weight = torch.randn(
+            hidden_size,
+            hidden_size,
+            dtype=torch.get_default_dtype(),
+            device=kwargs.get("device", torch.device("cuda:0")),
+        )
+
+    def forward(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor):
+        """Forward pass: attention -> per-group FP8 quant -> dequant -> matmul"""
+        attn_output = self.attn(q, k, v)
+        quant_output, scales = self.quant_fp8(attn_output)
+        # Dequantize for a fair comparison (the fusion changes quant numerics
+        # slightly, so we compare the dequantized result)
+        num_groups = quant_output.shape[-1] // self.group_size
+        dequant = quant_output.float().reshape(
+            -1, num_groups, self.group_size
+        ) * scales.float().unsqueeze(-1)
+        dequant = dequant.reshape(quant_output.shape).to(attn_output.dtype)
+        return torch.matmul(dequant, self.weight.t())
+
+
 PATTERN_TEST_MODELS_FP8: list[tuple[str, type]] = []
 PATTERN_TEST_MODELS_FP4: list[tuple[str, type]] = []
+PATTERN_TEST_MODELS_FP8_GROUP: list[tuple[str, type]] = []
 HEADS: list[tuple[int, int]] = []
 SPLIT_ATTENTION: list[bool] = []
 BACKENDS_FP8: list[AttentionBackendEnum] = []
 BACKENDS_FP4: list[AttentionBackendEnum] = []
+BACKENDS_FP8_GROUP: list[AttentionBackendEnum] = []
 
 if current_platform.is_cuda():
     HEADS = [(64, 8), (40, 8)]
@@ -240,6 +290,13 @@ if current_platform.is_cuda():
     ]
     BACKENDS_FP8 = [AttentionBackendEnum.TRITON_ATTN, AttentionBackendEnum.FLASHINFER]
     BACKENDS_FP4 = [AttentionBackendEnum.FLASHINFER]
+    PATTERN_TEST_MODELS_FP8_GROUP = [
+        (
+            "RedHatAI/Meta-Llama-3.1-8B-FP8",
+            TestAttentionFp8GroupQuantPatternModel,
+        )
+    ]
+    BACKENDS_FP8_GROUP = [AttentionBackendEnum.TRITON_ATTN]
 
 elif current_platform.is_rocm():
     HEADS = [(32, 8), (40, 8)]
@@ -480,3 +537,154 @@ def test_attention_quant_pattern(
 
     # Check that results are close
     torch.testing.assert_close(result_unfused, result_fused, atol=1e-2, rtol=1e-2)
+
+
+@pytest.mark.parametrize("num_qo_heads, num_kv_heads", HEADS)
+@pytest.mark.parametrize("head_size", [128])
+@pytest.mark.parametrize("batch_size", [7, 256] if current_platform.is_cuda() else [8])
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize(
+    "backend, model_name, model_class, custom_ops",
+    list(
+        flat_product(
+            BACKENDS_FP8_GROUP,
+            PATTERN_TEST_MODELS_FP8_GROUP,
+            ["+quant_fp8"],
+        )
+    ),
+)
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="Only test ROCm or CUDA"
+)
+@pytest.mark.skipif(not current_platform.supports_fp8(), reason="Need FP8")
+def test_attention_group_quant_pattern(
+    num_qo_heads: int,
+    num_kv_heads: int,
+    head_size: int,
+    batch_size: int,
+    dtype: torch.dtype,
+    custom_ops: str,
+    model_name: str,
+    model_class: type[AttentionQuantPatternModel],
+    backend: AttentionBackendEnum,
+    dist_init,
+    monkeypatch,
+    use_fresh_inductor_cache,
+):
+    """Test AttentionFp8GroupQuantPattern fusion pass (per-group FP8)."""
+    monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
+
+    custom_ops_list = custom_ops.split(",") if custom_ops else []
+
+    device = torch.device("cuda:0")
+    torch.set_default_dtype(dtype)
+    torch.manual_seed(42)
+
+    model_config = ModelConfig(
+        model=model_name,
+        max_model_len=2048,
+        dtype=dtype,
+    )
+    vllm_config = VllmConfig(
+        model_config=model_config,
+        scheduler_config=SchedulerConfig(
+            max_num_seqs=1024,
+            max_model_len=model_config.max_model_len,
+            is_encoder_decoder=model_config.is_encoder_decoder,
+        ),
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.VLLM_COMPILE,
+            custom_ops=custom_ops_list,
+        ),
+        cache_config=CacheConfig(cache_dtype="fp8"),
+        attention_config=AttentionConfig(backend=backend),
+    )
+
+    q = torch.randn(batch_size, num_qo_heads * head_size, dtype=dtype, device=device)
+    k = torch.randn(batch_size, num_kv_heads * head_size, dtype=dtype, device=device)
+    v = torch.randn(batch_size, num_kv_heads * head_size, dtype=dtype, device=device)
+
+    torch._dynamo.mark_dynamic(q, 0)
+    torch._dynamo.mark_dynamic(k, 0)
+    torch._dynamo.mark_dynamic(v, 0)
+
+    # Run unfused
+    vllm_config_unfused = copy.deepcopy(vllm_config)
+    with (
+        set_current_vllm_config(vllm_config_unfused),
+        set_forward_context(attn_metadata=None, vllm_config=vllm_config_unfused),
+    ):
+        model_unfused = model_class(
+            num_qo_heads=num_qo_heads,
+            num_kv_heads=num_kv_heads,
+            head_size=head_size,
+            kv_cache_dtype=FP8_DTYPE,
+            device=device,
+            vllm_config=vllm_config_unfused,
+        )
+        model_unfused = model_unfused.to(device)
+        result_unfused_0 = model_unfused(q, k, v)  # noqa: F841
+
+        forward_ctx = get_forward_context()
+        forward_ctx.attn_metadata = model_unfused.build_attn_metadata(batch_size)
+        compiled_unfused = torch.compile(model_unfused, fullgraph=True)
+        result_unfused = compiled_unfused(q, k, v)
+
+    # Run fused
+    vllm_config.compilation_config.pass_config = PassConfig(
+        fuse_attn_quant=True, eliminate_noops=True
+    )
+    with (
+        set_current_vllm_config(vllm_config),
+        set_forward_context(attn_metadata=None, vllm_config=vllm_config),
+    ):
+        model_fused = model_class(
+            num_qo_heads=num_qo_heads,
+            num_kv_heads=num_kv_heads,
+            head_size=head_size,
+            kv_cache_dtype=FP8_DTYPE,
+            device=device,
+            vllm_config=vllm_config,
+        )
+        # Use same weight for fair comparison
+        model_fused.weight = model_unfused.weight
+        model_fused = model_fused.to(device)
+
+        forward_ctx = get_forward_context()
+        forward_ctx.attn_metadata = model_fused.build_attn_metadata(batch_size)
+
+        noop_pass = NoOpEliminationPass(vllm_config)
+        attn_pass = LazyInitPass(AttnFusionPass, vllm_config)
+        cleanup_pass = PostCleanupPass(vllm_config)
+
+        test_backend = TestBackend(noop_pass, attn_pass, cleanup_pass)
+        result_fused_0 = model_fused(q, k, v)  # noqa: F841
+
+        compiled_fused = torch.compile(
+            model_fused, backend=test_backend, fullgraph=True
+        )
+        result_fused = compiled_fused(q, k, v)
+
+    # Verify fusion matched
+    quant_key: QuantKey = model_class.quant_key
+    attn_fusion_supported = [
+        layer.impl.fused_output_quant_supported(quant_key)
+        for key, layer in vllm_config.compilation_config.static_forward_context.items()
+    ]
+    assert sum(attn_fusion_supported) == len(attn_fusion_supported), (
+        "All layers should support per-group FP8 attention fusion"
+    )
+    assert attn_pass.pass_.matched_count == sum(attn_fusion_supported)
+
+    # Check graph: output_block_scale should be set after fusion
+    attn_nodes_pre = list(find_op_nodes(ATTN_OP, test_backend.graph_pre_pass))
+    attn_nodes_post = list(find_op_nodes(ATTN_OP, test_backend.graph_post_pass))
+
+    assert len(attn_nodes_pre) > 0
+    assert attn_nodes_pre[0].kwargs.get("output_block_scale") is None
+    assert attn_nodes_post[0].kwargs.get("output_block_scale") is not None, (
+        "Per-group FP8 fusion should set output_block_scale"
+    )
+
+    # Results should be close (FP8 quantization introduces some error)
+    torch.testing.assert_close(result_unfused, result_fused, atol=5e-2, rtol=5e-2)
