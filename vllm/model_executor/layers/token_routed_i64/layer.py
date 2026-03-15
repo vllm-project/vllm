@@ -23,12 +23,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+import vllm.model_executor.layers.token_routed_i64.fused_i64_moe  # noqa: F401 — registers custom op
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_reduce,
 )
-import vllm.model_executor.layers.token_routed_i64.fused_i64_moe  # noqa: F401 — registers custom op
 from vllm.model_executor.layers.token_routed_i64.fused_i64_moe import fused_i64_experts
 
 
@@ -167,7 +167,9 @@ class TokenRoutedMLP(nn.Module):
 
         # Default mu to zeros if None (no mu-guided bias)
         if mu is None:
-            mu = torch.zeros(num_tokens, self.hidden_size, dtype=x.dtype, device=x.device)
+            mu = torch.zeros(
+                num_tokens, self.hidden_size, dtype=x.dtype, device=x.device
+            )
 
         if self.use_ep:
             # EP path: routing must happen here for all-to-all dispatch

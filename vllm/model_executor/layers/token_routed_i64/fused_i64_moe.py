@@ -56,8 +56,8 @@ def fused_i64_experts(
         return x
 
     # Select each token's expert weights
-    sel_gu = gate_up_proj[expert_ids]    # (N, H, 2I)
-    sel_down = down_proj[expert_ids]     # (N, I, H)
+    sel_gu = gate_up_proj[expert_ids]  # (N, H, 2I)
+    sel_down = down_proj[expert_ids]  # (N, I, H)
 
     # Gate+Up: (N, 1, H) @ (N, H, 2I) → (N, 1, 2I) → (N, 2I)
     gu = torch.bmm(x.unsqueeze(1), sel_gu).squeeze(1)
@@ -73,6 +73,7 @@ def fused_i64_experts(
 
 # --- Custom op wrapper for splitting_ops integration ---
 # Routing happens HERE (inside the splitting op = eager during graph replay)
+
 
 def i64_token_routed_forward(
     x: torch.Tensor,
@@ -105,8 +106,12 @@ def i64_token_routed_forward(
     expert_ids = combined_logits.argmax(dim=-1)
 
     return fused_i64_experts(
-        x, gate_up_proj, down_proj, expert_ids,
-        num_experts, intermediate_per_tp,
+        x,
+        gate_up_proj,
+        down_proj,
+        expert_ids,
+        num_experts,
+        intermediate_per_tp,
     )
 
 

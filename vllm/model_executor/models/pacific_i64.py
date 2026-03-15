@@ -22,7 +22,7 @@ import torch
 import torch.nn as nn
 from transformers import PretrainedConfig
 
-from vllm.compilation.decorators import support_torch_compile, ignore_torch_compile
+from vllm.compilation.decorators import ignore_torch_compile, support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
@@ -53,7 +53,6 @@ from vllm.sequence import IntermediateTensors
 from .interfaces import SupportsPP
 from .utils import (
     PPMissingLayer,
-    extract_layer_index,
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
@@ -265,8 +264,9 @@ class ComplexityDecoderLayer(nn.Module):
         _use_tr = getattr(config, "use_token_routed_mlp", None)
         _mlp_type = getattr(config, "mlp_type", None)
         self.use_token_routed_mlp = (
-            _use_tr is True or _mlp_type == "token_routed" or
-            (_use_tr is None and _mlp_type is None)  # default: True
+            _use_tr is True
+            or _mlp_type == "token_routed"
+            or (_use_tr is None and _mlp_type is None)  # default: True
         )
 
         rms_norm_eps = getattr(config, "rms_norm_eps", 1e-6)
@@ -390,7 +390,7 @@ class ComplexityModel(nn.Module):
         )
         # Tag layers with index for debug
         for i, layer in enumerate(self.layers):
-            if hasattr(layer, '_layer_idx'):
+            if hasattr(layer, "_layer_idx"):
                 continue
             layer._layer_idx = i
 
@@ -434,7 +434,11 @@ class ComplexityModel(nn.Module):
                 continue
 
             # Reset velocity each layer for framework-trained models
-            layer_v = velocity_states if self.cascade_velocity else torch.zeros_like(hidden_states)
+            layer_v = (
+                velocity_states
+                if self.cascade_velocity
+                else torch.zeros_like(hidden_states)
+            )
 
             hidden_states, velocity_states, mu_current = layer(
                 positions=positions,
@@ -450,7 +454,6 @@ class ComplexityModel(nn.Module):
             # Match i64 engine decode_step: simple mu pass-through
             if mu_current is not None:
                 mu_prev = mu_current
-
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
@@ -607,13 +610,17 @@ class ComplexityForCausalLM(nn.Module, SupportsPP):
                     embed_name = "model.embed_tokens.weight"
                     if embed_name in params_dict:
                         param = params_dict[embed_name]
-                        weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                        weight_loader = getattr(
+                            param, "weight_loader", default_weight_loader
+                        )
                         weight_loader(param, loaded_weight)
                         loaded_params.add(embed_name)
                 else:
                     if name in params_dict:
                         param = params_dict[name]
-                        weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                        weight_loader = getattr(
+                            param, "weight_loader", default_weight_loader
+                        )
                         weight_loader(param, loaded_weight)
                         loaded_params.add(name)
                 continue
@@ -626,11 +633,13 @@ class ComplexityForCausalLM(nn.Module, SupportsPP):
             # Pattern: model.layers.X.mlp.experts.E.{gate_proj,up_proj,down_proj}.weight
             if ".mlp.experts." in name:
                 layer_idx = int(name.split(".layers.")[1].split(".")[0])
-                after = name.split(".mlp.experts.")[1]   # "E.gate_proj.weight"
+                after = name.split(".mlp.experts.")[1]  # "E.gate_proj.weight"
                 parts = after.split(".")
                 expert_idx = int(parts[0])
                 proj = parts[1]  # gate_proj | up_proj | down_proj
-                expert_buf.setdefault(layer_idx, {}).setdefault(expert_idx, {})[proj] = loaded_weight.clone()
+                expert_buf.setdefault(layer_idx, {}).setdefault(expert_idx, {})[
+                    proj
+                ] = loaded_weight.clone()
                 continue
 
             # Standard parameter loading

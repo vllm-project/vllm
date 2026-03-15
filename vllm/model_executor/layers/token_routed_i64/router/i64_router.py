@@ -60,12 +60,8 @@ class I64Router(nn.Module):
 
         if mu is not None:
             mu_logits = self.mu_router(mu)
-            base_one_hot = F.one_hot(
-                base_expert_ids, self.num_experts
-            ).float()
-            combined_logits = (
-                base_one_hot * self._BASE_ROUTING_SCALE + mu_logits
-            )
+            base_one_hot = F.one_hot(base_expert_ids, self.num_experts).float()
+            combined_logits = base_one_hot * self._BASE_ROUTING_SCALE + mu_logits
             return combined_logits.argmax(dim=-1)
 
         return base_expert_ids
