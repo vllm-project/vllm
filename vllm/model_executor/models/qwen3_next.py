@@ -183,7 +183,7 @@ class ChunkGatedDeltaRule(CustomOp):
 
         if use_flashinfer:
             logger.info_once("Using FlashInfer GDN prefill kernel")
-            logger.warning_once(
+            logger.info_once(
                 "FlashInfer GDN prefill kernel is JIT-compiled; first run may "
                 "take a while to compile. Set `--gdn-prefill-backend triton` to "
                 "avoid JIT compile time."
