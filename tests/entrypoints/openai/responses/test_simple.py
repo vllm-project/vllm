@@ -176,6 +176,14 @@ async def test_streaming_logprobs(client: OpenAI, model_name: str):
                 assert tl.token is not None
                 assert isinstance(tl.logprob, float)
 
+    # Verify that top_logprobs are actually populated, not always empty
+    all_top_logprobs = [
+        tl for e in text_delta_events for lp in e.logprobs for tl in lp.top_logprobs
+    ]
+    assert len(all_top_logprobs) > 0, (
+        "Expected at least one top_logprobs entry across all delta events"
+    )
+
     # Verify the completed event still has valid output
     completed = events[-1]
     assert completed.type == "response.completed"
