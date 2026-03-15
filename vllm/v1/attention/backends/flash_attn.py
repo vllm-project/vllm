@@ -636,15 +636,12 @@ class FlashAttentionImpl(AttentionImpl):
         - Running on Hopper GPUs (sm90+)
         - Using FP8 static tensor quantization
         - Model dtype is bfloat16
-        - NOT using FP8 KV cache
+        - Using FP8 KV cache (FP8 input kernels)
 
-        FA3 cannot write FP8 output directly when using FP8 KV cache.
-        FA3 requires:
-        - BF16/FP16 input → BF16/FP16 output (same dtype)
-        - FP8 input → BF16 output
-
-        Therefore, fused FP8 output quantization is only supported for FA3
-        with non-FP8 KV cache (BF16/FP16 inputs).
+        True FP8 output (Has_FP8_output template) is only instantiated for
+        FP8 input kernels to limit compile-time bloat. BF16 input kernels
+        apply o_scale scaling but still output BF16, so fused quantization
+        (which allocates an FP8 output buffer) is not supported for them.
 
         Note: For DCP and cascade attention, quantization is applied after
         the attention merge step rather than being fused into the kernel.
@@ -664,19 +661,15 @@ class FlashAttentionImpl(AttentionImpl):
         if quant_key != kFp8StaticTensorSym:
             return False
 
-        # FA3 with FP8 inputs requires bfloat16 output
         vllm_config = get_current_vllm_config_or_none()
         if vllm_config is None:
             return False
         if vllm_config.model_config.dtype != torch.bfloat16:
             return False
 
-        # FA3 cannot write FP8 output directly. FA3 requires:
-        # - BF16/FP16 input → BF16/FP16 output (same dtype)
-        # - FP8 input → BF16 output
-        # Therefore, fused FP8 output quantization is not supported for FA3
-        # when using FP8 KV cache.
-        return not self.kv_cache_dtype.startswith("fp8")
+        # FP8 output is only supported for FP8 input kernels
+        # (kv_cache_dtype=fp8). BF16 input kernels cannot write FP8 output.
+        return self.kv_cache_dtype.startswith("fp8")
 
     def forward(
         self,
