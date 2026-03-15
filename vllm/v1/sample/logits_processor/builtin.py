@@ -336,7 +336,12 @@ class ReasoningBudgetLogitsProcessor(LogitsProcessor):
                 parser = parser_cls(tokenizer)
                 self.start_token_id = getattr(parser, "start_token_id", None)
                 self.end_token_id = getattr(parser, "end_token_id", None)
-            except Exception:
+            except Exception as e:
+                import warnings
+                warnings.warn(
+                    "Failed to initialize ReasoningBudgetLogitsProcessor: "
+                    f"{e}. The reasoning_budget feature will be disabled."
+                )
                 pass
 
         # index -> mutable state list
