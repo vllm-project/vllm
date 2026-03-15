@@ -64,7 +64,6 @@ if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
-    from vllm.v1.worker.kv_connector_model_runner_mixin import CrossLayerGroup
 
 # s_tensor_list, d_tensor_list, s_indices, d_indices, direction
 CopyBlocksOp = Callable[
@@ -99,6 +98,51 @@ class KVCacheTopology:
     # None when tokens-per-block is folded into the page bytes
     # (e.g. MLA, Mamba, or the default cross-layer layout).
     block_size_dim: int | None = None
+
+
+@dataclass
+class Chunk:
+    """
+    Describes a contiguous byte region within one block of a KV cache tensor.
+    """
+
+    # Layer names whose data lives in this chunk.
+    # For Mamba states the state type is appended to the layer name,
+    # e.g. "mamba.0.conv", "mamba.0.ssm".
+    layer_names: list[str]
+    # Byte offset from the start of the block
+    tensor_start_offset: int
+    # Byte length of useful data in this chunk
+    tensor_length: int
+    # Stride in bytes between consecutive KV head groups.
+    # 0 when not applicable (e.g. Mamba, MLA).
+    num_heads_stride: int
+
+
+@dataclass
+class KVCacheTensorReference:
+    """
+    Reference to a KV cache tensor.
+    """
+
+    # The KV cache tensor
+    tensor: torch.Tensor
+    # The (possibly padded) page size per block in bytes
+    page_size_bytes: int
+
+
+@dataclass
+class KVCacheDataReference:
+    """
+    Describes how a KV cache group's data maps to a physical tensor.
+    """
+
+    # Index into the list of KVCacheTensorReference
+    tensor_idx: int
+    # The un-padded page size per block in bytes
+    unpadded_page_size_bytes: int
+    # Layout of the group's data within one block of the tensor
+    chunks: list[Chunk]
 
 
 class SupportsHMA(ABC):
@@ -282,18 +326,23 @@ class KVConnectorBase_V1(ABC):
 
     def register_hybrid_kv_caches(
         self,
-        cross_layer_groups: "list[CrossLayerGroup]",
+        kv_cache_tensors: list[KVCacheTensorReference],
+        kv_cache_groups_data_refs: list[list[KVCacheDataReference]],
     ) -> None:
-        """Register cross-layer KV cache tensors for models with multiple
-        KV cache groups (e.g. hybrid attention architectures).
+        """
+        Register KV cache tensors for models with multiple KV cache groups
+        (e.g. hybrid attention architectures).
 
         Called instead of register_kv_caches / register_cross_layers_kv_cache
         when the model runner allocates cross-layer tensors. Connectors
         that override this method opt in to the multi-group path.
 
         Args:
-            cross_layer_groups (list[CrossLayerGroup]): one entry per
-                group of layers sharing a contiguous buffer.
+            kv_cache_tensors: physical KV cache tensors with page size
+                metadata.
+            kv_cache_groups_data_refs: per-group data references
+                describing how each group's data maps to the physical
+                tensors.
         """
         raise NotImplementedError
 

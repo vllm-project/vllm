@@ -6485,9 +6485,16 @@ class GPUModelRunner(
             kv_transfer_group = get_kv_transfer_group()
 
             if self.cross_layer_groups is not None:
-                # Hybrid multi-group path
-                kv_transfer_group.register_hybrid_kv_caches(
+                # Hybrid multi-group path: convert CrossLayerGroups
+                # into explicit tensor/data references for the connector.
+                tensor_refs, groups_data_refs = self.build_kv_cache_references(
                     self.cross_layer_groups,
+                    kv_cache_config,
+                    kv_caches,
+                    self.attn_groups,
+                )
+                kv_transfer_group.register_hybrid_kv_caches(
+                    tensor_refs, groups_data_refs
                 )
             elif self.cross_layers_kv_cache is not None:
                 # Legacy single-group contiguous path

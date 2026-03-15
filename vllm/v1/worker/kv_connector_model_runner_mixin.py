@@ -22,14 +22,21 @@ from vllm.distributed.kv_transfer import (
     has_kv_transfer_group,
 )
 from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
+from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    Chunk,
+    KVCacheDataReference,
+    KVCacheTensorReference,
+)
 from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.logger import init_logger
+from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheConfig,
     KVCacheSpec,
     MambaSpec,
+    UniformTypeKVCacheSpecs,
 )
 from vllm.v1.outputs import (
     EMPTY_MODEL_RUNNER_OUTPUT,
@@ -767,3 +774,202 @@ class KVConnectorModelRunnerMixin:
             )
 
         return kv_caches, cross_layer_groups
+
+    @staticmethod
+    def build_kv_cache_references(
+        cross_layer_groups: list["CrossLayerGroup"],
+        kv_cache_config: KVCacheConfig,
+        kv_caches: dict[str, torch.Tensor | list[torch.Tensor]],
+        attn_groups: list[list[AttentionGroup]],
+    ) -> tuple[
+        list[KVCacheTensorReference],
+        list[list[KVCacheDataReference]],
+    ]:
+        """
+        Convert CrossLayerGroup list into the connector-facing
+        KVCacheTensorReference / KVCacheDataReference structures.
+
+        Args:
+            cross_layer_groups: cross-layer buffers from
+                ``allocate_hybrid_kv_caches``.
+            kv_cache_config: KV cache config from the scheduler.
+            kv_caches: per-layer KV cache views (used to compute head
+                strides).
+            attn_groups: two-level list of AttentionGroups.
+
+        Returns:
+            (kv_cache_tensors, kv_cache_groups_data_refs)
+        """
+        _SENTINEL_HEADS = 8
+
+        # layer_name → (spec, backend)
+        layer_info: dict[str, tuple[KVCacheSpec, type[AttentionBackend]]] = {}
+        for subgroups in attn_groups:
+            for attn_group in subgroups:
+                for layer_name in attn_group.layer_names:
+                    layer_info[layer_name] = (
+                        attn_group.kv_cache_spec,
+                        attn_group.backend,
+                    )
+
+        # layer_name → per-layer KV cache spec
+        # (handles UniformTypeKVCacheSpecs where layers in the same
+        # group may have different page sizes)
+        per_layer_spec: dict[str, KVCacheSpec] = {}
+        for kv_cache_group in kv_cache_config.kv_cache_groups:
+            group_kv_cache_spec = kv_cache_group.kv_cache_spec
+            if isinstance(group_kv_cache_spec, UniformTypeKVCacheSpecs):
+                per_layer_specs = group_kv_cache_spec.kv_cache_specs
+            else:
+                per_layer_specs = {}
+            for layer_name in kv_cache_group.layer_names:
+                per_layer_spec[layer_name] = per_layer_specs.get(
+                    layer_name, group_kv_cache_spec
+                )
+
+        # layer_name → head stride in bytes
+        heads_stride_bytes: dict[str, int] = {}
+        for layer_name, (_, backend) in layer_info.items():
+            spec = per_layer_spec.get(layer_name)
+            if isinstance(spec, AttentionSpec):
+                layer_kv_cache = kv_caches[layer_name]
+                assert isinstance(layer_kv_cache, torch.Tensor)
+                test_shape = backend.get_kv_cache_shape(
+                    num_blocks=1234,
+                    block_size=16,
+                    num_kv_heads=_SENTINEL_HEADS,
+                    head_size=256,
+                )
+                heads_dim_idx = test_shape.index(_SENTINEL_HEADS)
+                heads_stride_bytes[layer_name] = (
+                    layer_kv_cache.strides()[heads_dim_idx]
+                    * layer_kv_cache.element_size()
+                )
+
+        # Build tensor refs and collect per-layer chunks.
+        #
+        # A CrossLayerGroup's layer_names includes ALL layers sharing
+        # the buffer, but the buffer has one slot per KVCacheTensor
+        # (= per member in the grouped dict).  Multiple layers in the
+        # same KVCacheTensor.shared_by share one slot — they get the
+        # same chunks at the same offset.
+        kv_cache_tensors: list[KVCacheTensorReference] = []
+        # layer_name → (tensor_idx, chunks)
+        layer_chunks: dict[str, tuple[int, list[Chunk]]] = {}
+
+        for group in cross_layer_groups:
+            group_layer_set = set(group.layer_names)
+            per_layer_page_size = group.page_size_bytes
+
+            # Find the KVCacheTensors belonging to this group.
+            # Each KVCacheTensor maps to one slot in the buffer.
+            group_kv_cache_tensors = [
+                kv_cache_tensor
+                for kv_cache_tensor in kv_cache_config.kv_cache_tensors
+                if kv_cache_tensor.shared_by[0] in group_layer_set
+            ]
+
+            num_slots = len(group_kv_cache_tensors)
+            full_page_size_bytes = per_layer_page_size * num_slots
+            tensor_idx = len(kv_cache_tensors)
+            kv_cache_tensors.append(
+                KVCacheTensorReference(
+                    tensor=group.tensor,
+                    page_size_bytes=full_page_size_bytes,
+                )
+            )
+
+            # Each KVCacheTensor occupies one slot at a fixed offset.
+            for slot_idx, kv_cache_tensor in enumerate(group_kv_cache_tensors):
+                representative_name = kv_cache_tensor.shared_by[0]
+                layer_kv_cache_spec = per_layer_spec[representative_name]
+                base_offset = slot_idx * per_layer_page_size
+
+                if isinstance(layer_kv_cache_spec, MambaSpec):
+                    chunks = KVConnectorModelRunnerMixin._build_mamba_chunks(
+                        representative_name,
+                        layer_kv_cache_spec,
+                        base_offset,
+                    )
+                elif isinstance(layer_kv_cache_spec, AttentionSpec):
+                    real_page_size = layer_kv_cache_spec.real_page_size_bytes
+                    chunks = [
+                        Chunk(
+                            layer_names=list(kv_cache_tensor.shared_by),
+                            tensor_start_offset=base_offset,
+                            tensor_length=real_page_size,
+                            num_heads_stride=heads_stride_bytes.get(
+                                representative_name, 0
+                            ),
+                        )
+                    ]
+                else:
+                    raise NotImplementedError(
+                        f"Unsupported KV cache spec: "
+                        f"{type(layer_kv_cache_spec).__name__}"
+                    )
+
+                # All layers sharing this KVCacheTensor get the same
+                # chunks at the same offset.
+                for layer_name in kv_cache_tensor.shared_by:
+                    layer_chunks[layer_name] = (tensor_idx, chunks)
+
+        # Build one KVCacheDataReference per scheduler group.
+        kv_cache_groups_data_refs: list[list[KVCacheDataReference]] = []
+        for kv_cache_group in kv_cache_config.kv_cache_groups:
+            all_chunks: list[Chunk] = []
+            group_tensor_idx: int | None = None
+
+            for layer_name in kv_cache_group.layer_names:
+                layer_tensor_idx, chunks = layer_chunks[layer_name]
+                if group_tensor_idx is None:
+                    group_tensor_idx = layer_tensor_idx
+                all_chunks.extend(chunks)
+
+            if group_tensor_idx is not None:
+                unpadded_page_size_bytes = sum(
+                    chunk.tensor_length for chunk in all_chunks
+                )
+                kv_cache_groups_data_refs.append(
+                    [
+                        KVCacheDataReference(
+                            tensor_idx=group_tensor_idx,
+                            unpadded_page_size_bytes=unpadded_page_size_bytes,
+                            chunks=all_chunks,
+                        )
+                    ]
+                )
+            else:
+                kv_cache_groups_data_refs.append([])
+
+        return kv_cache_tensors, kv_cache_groups_data_refs
+
+    @staticmethod
+    def _build_mamba_chunks(
+        layer_name: str,
+        mamba_spec: MambaSpec,
+        base_offset: int,
+    ) -> list[Chunk]:
+        """Build one Chunk per Mamba state tensor (e.g. conv, ssm)."""
+        _MAMBA_STATE_NAMES = ("conv", "ssm")
+        chunks: list[Chunk] = []
+        offset = base_offset
+        for idx, (state_shape, state_dtype) in enumerate(
+            zip(mamba_spec.shapes, mamba_spec.dtypes)
+        ):
+            state_bytes = math.prod(state_shape) * get_dtype_size(state_dtype)
+            state_suffix = (
+                _MAMBA_STATE_NAMES[idx]
+                if idx < len(_MAMBA_STATE_NAMES)
+                else f"state_{idx}"
+            )
+            chunks.append(
+                Chunk(
+                    layer_names=[f"{layer_name}.{state_suffix}"],
+                    tensor_start_offset=offset,
+                    tensor_length=state_bytes,
+                    num_heads_stride=0,
+                )
+            )
+            offset += state_bytes
+        return chunks
