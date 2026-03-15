@@ -1386,16 +1386,13 @@ class Scheduler(SchedulerInterface):
             child_request.parallel_sampling_n = 1
             child_request.kv_load_request_id = request.kv_load_request_id
 
-            # Share parent's prefill state (KV cache sharing via block_hashes).
-            child_request.num_computed_tokens = request.num_computed_tokens
-            child_request.num_cached_tokens = request.num_cached_tokens
-            child_request.block_hashes = request.block_hashes.copy()
+            child_request.num_computed_tokens = 0
+            child_request.num_cached_tokens = -1
 
-            # Copy the first output token from parent.
             if request._output_token_ids:
                 from vllm.v1.utils import ConstantList
-                child_request._output_token_ids = request._output_token_ids.copy()
-                child_request._all_token_ids = request._all_token_ids.copy()
+                child_request._output_token_ids = []
+                child_request._all_token_ids = list(child_request.prompt_token_ids)
                 child_request.output_token_ids = ConstantList(
                     child_request._output_token_ids)
                 child_request.all_token_ids = ConstantList(

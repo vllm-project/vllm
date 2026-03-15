@@ -351,11 +351,6 @@ class OutputProcessor:
         self.stream_interval = stream_interval
         self.request_states: dict[str, RequestState] = {}
         self.parent_requests: dict[str, ParentRequest] = {}
-        # Parent request states for parallel sampling child requests.
-        # When a parent request finishes, its RequestState is moved here
-        # so that child requests (which complete later) can still access
-        # the queue and other parent state.
-        self.parent_states: dict[str, RequestState] = {}
         self.lora_states = LoRARequestStates(log_stats)
         self.tracer: Tracer | None = None
         self._requests_drained = asyncio.Event()
@@ -482,12 +477,9 @@ class OutputProcessor:
             if req_state is None:
                 if (engine_core_output.parent_request_id is not None
                         and engine_core_output.child_index > 0):
-                    # Child request from parallel sampling.
-                    # First try pending_parent_states (same iteration, PD disaggregation),
-                    # then try self.parent_states (later iterations, PD colocated).
+                    # Child request from parallel sampling (PD disaggregation scenario).
+                    # Child outputs come in same iteration as parent, use parent's state.
                     parent_req_state = pending_parent_states.get(
-                        engine_core_output.parent_request_id
-                    ) or self.parent_states.get(
                         engine_core_output.parent_request_id
                     )
                     if parent_req_state is not None:
@@ -502,7 +494,7 @@ class OutputProcessor:
                 continue
 
             # If this is a parent request (child_index == 0), save to pending cache
-            # before processing so child requests can access it later.
+            # before processing so child requests can access it later (PD disaggregation).
             if (engine_core_output.parent_request_id is not None
                     and engine_core_output.child_index == 0):
                 pending_parent_states[req_id] = req_state
@@ -518,7 +510,29 @@ class OutputProcessor:
             stop_reason = engine_core_output.stop_reason
             kv_transfer_params = engine_core_output.kv_transfer_params
             req_state.num_cached_tokens = engine_core_output.num_cached_tokens
+
+            # Save is_prefilling state before setting it to False.
+            # This is used to detect prefill completion for PD colocated scenario.
+            is_prefilling = req_state.is_prefilling
             req_state.is_prefilling = False
+
+            # For PD colocated scenario: create RequestState for child requests
+            # when prefill completes (is_prefilling transitions from True to False).
+            # This must happen BEFORE child requests are scheduled for decode,
+            # otherwise child outputs cannot be processed (no req_state exists).
+            parent_req = req_state.parent_req
+            if (is_prefilling
+                    and engine_core_output.child_index == 0
+                    and parent_req is not None
+                    and parent_req.child_requests):
+                # Check if this is PD colocated scenario (not PD disaggregation).
+                # PD disaggregation: kv_transfer_params is not None (P-side)
+                # PD colocated: kv_transfer_params is None
+                is_pd_disaggregation = kv_transfer_params is not None
+                if not is_pd_disaggregation:
+                    # PD colocated: prefill just completed, create RequestState
+                    # for each child request so they can process decode outputs.
+                    self._create_child_request_states(parent_req, req_state)
 
             if pooling_output is None:
                 assert req_state.detokenizer is not None
@@ -553,18 +567,12 @@ class OutputProcessor:
             # Free completed requests.
             if finish_reason is not None:
                 self.request_states.pop(req_id)
-                # pending_parent_states.pop(req_id, None)
                 # Remove parent request if applicable.
                 parent_req = req_state.parent_req
                 if parent_req:
-                    if parent_req.child_requests:
-                        # Parent request finished but children still running.
-                        # Save parent state so children can access it later.
-                        self.parent_states[parent_req.request_id] = req_state
-                    else:
+                    if not parent_req.child_requests:
                         # All children finished, clean up parent request.
                         self.parent_requests.pop(parent_req.request_id, None)
-                        self.parent_states.pop(parent_req.request_id, None)
                 if not self.request_states:
                     self._requests_drained.set()
                 if not engine_core_output.finished:
@@ -626,12 +634,7 @@ class OutputProcessor:
         else:
             text = ""
 
-        # logprobs: try engine_core_output first, fallback to parent_req_state
-        if engine_core_output.new_logprobs is not None:
-            # TODO: Implement logprobs conversion from LogprobsLists
-            logprobs = None
-            cumulative_logprob = None
-        elif parent_req_state.logprobs_processor is not None:
+        if parent_req_state.logprobs_processor is not None:
             logprobs = parent_req_state.logprobs_processor.logprobs
             cumulative_logprob = parent_req_state.logprobs_processor.cumulative_logprob
         else:
@@ -666,6 +669,62 @@ class OutputProcessor:
             kv_transfer_params=engine_core_output.kv_transfer_params,
             num_cached_tokens=engine_core_output.num_cached_tokens,
         )
+
+    def _create_child_request_states(
+        self,
+        parent_req: ParentRequest,
+        parent_req_state: RequestState,
+    ) -> None:
+        """Create RequestState for each child request in PD colocated scenario.
+
+        This is called when the parent request finishes prefill and splits.
+        Each child request gets its own RequestState with independent detokenizer
+        and logprobs_processor, so they can process outputs independently.
+
+        Args:
+            parent_req: The ParentRequest object tracking all children.
+            parent_req_state: The RequestState of the parent request.
+        """
+        for child_id in parent_req.child_requests:
+            # Skip if already exists in request_states
+            if child_id in self.request_states:
+                continue
+
+            # Extract child index from "idx_parent_id" format
+            child_index = int(child_id.split('_')[0])
+
+            # Create EngineCoreRequest for child request
+            arrival_time = (parent_req_state.stats.arrival_time
+                           if parent_req_state.stats else 0.0)
+
+            child_request = EngineCoreRequest(
+                request_id=child_id,
+                prompt_token_ids=parent_req_state.prompt_token_ids,
+                prompt_embeds=parent_req_state.prompt_embeds,
+                mm_features=None,
+                sampling_params=parent_req._get_child_sampling_params(child_index),
+                pooling_params=None,
+                eos_token_id=None,
+                arrival_time=arrival_time,
+                lora_request=None,
+                cache_salt=None,
+                data_parallel_rank=None,
+            )
+
+            # Use RequestState.from_new_request to create child state
+            child_state = RequestState.from_new_request(
+                tokenizer=self.tokenizer,
+                request=child_request,
+                prompt=parent_req_state.prompt,
+                parent_req=parent_req,
+                request_index=child_index,
+                queue=parent_req_state.queue,
+                log_stats=self.log_stats,
+                stream_interval=self.stream_interval,
+            )
+
+            # Add to request_states so child outputs can be processed normally
+            self.request_states[child_id] = child_state
 
     def update_scheduler_stats(self, scheduler_stats: SchedulerStats | None):
         self.lora_states.update_scheduler_stats(scheduler_stats)
