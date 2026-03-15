@@ -493,17 +493,20 @@ def kernel_unified_attention_2d(
     elif USE_FP8_GROUP:
         # Per-group dynamic FP8 quantization: compute scale per group
         # and quantize in the kernel epilogue to avoid HBM round-trip.
+        # Cache original values so each group's scale is computed from
+        # unquantized data (not from values modified by earlier iterations).
         valid_mask = query_mask_0 & query_mask_1  # [BLOCK_M]
+        original_acc = acc
         for g in tl.static_range(NUM_GROUPS_PER_HEAD):
             g_start = g * GROUP_SIZE
             group_mask = (offs_d >= g_start) & (offs_d < g_start + GROUP_SIZE)
             combined_mask = group_mask[None, :] & dim_mask[None, :]
-            group_abs = tl.where(combined_mask, tl.abs(acc), 0.0)
+            group_abs = tl.where(combined_mask, tl.abs(original_acc), 0.0)
             group_max = tl.max(group_abs, axis=1)  # [BLOCK_M]
             group_scale = group_max / FP8_MAX
             group_scale = tl.maximum(group_scale, 1e-12)
-            # Quantize this group
-            acc = tl.where(combined_mask, acc / group_scale[:, None], acc)
+            # Quantize this group from original values
+            acc = tl.where(combined_mask, original_acc / group_scale[:, None], acc)
             # Store per-group scale
             scale_offset = (
                 query_offset_0 * out_group_scale_stride_0
@@ -1010,16 +1013,17 @@ def reduce_segments(
         acc = acc * tl.load(out_scale_inv)
         acc = tl.clamp(acc, FP8_MIN, FP8_MAX)
     elif USE_FP8_GROUP:
+        original_acc = acc
         offs_d = tl.arange(0, HEAD_SIZE_PADDED)
         for g in tl.static_range(NUM_GROUPS_PER_HEAD):
             g_start = g * GROUP_SIZE
             group_mask = (offs_d >= g_start) & (offs_d < g_start + GROUP_SIZE)
             combined_mask = group_mask & dim_mask
-            group_abs = tl.where(combined_mask, tl.abs(acc), 0.0)
+            group_abs = tl.where(combined_mask, tl.abs(original_acc), 0.0)
             group_max = tl.max(group_abs)  # scalar (1D acc)
             group_scale = group_max / FP8_MAX
             group_scale = tl.maximum(group_scale, 1e-12)
-            acc = tl.where(combined_mask, acc / group_scale, acc)
+            acc = tl.where(combined_mask, original_acc / group_scale, acc)
             scale_offset = (
                 query_token_idx * out_group_scale_stride_0
                 + (query_head_idx * NUM_GROUPS_PER_HEAD + g) * out_group_scale_stride_1
