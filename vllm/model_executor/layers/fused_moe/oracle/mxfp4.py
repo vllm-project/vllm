@@ -137,6 +137,22 @@ def backend_to_kernel_cls(
         raise ValueError(f"Unknown MXFP4 MoE backend: {backend.value}")
 
 
+def map_mxfp4_backend(runner_backend: str) -> Mxfp4MoeBackend:
+    """Map user's moe_backend string to Mxfp4MoeBackend."""
+    mapping: dict[str, Mxfp4MoeBackend] = {
+        "flashinfer_trtllm": Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16,
+        "flashinfer_cutlass": Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_BF16,
+        "triton": Mxfp4MoeBackend.TRITON,
+        "marlin": Mxfp4MoeBackend.MARLIN,
+    }
+    if backend := mapping.get(runner_backend):
+        return backend
+    raise ValueError(
+        f"moe_backend='{runner_backend}' is not supported for MXFP4 MoE. "
+        f"Expected one of {list(mapping.keys())}."
+    )
+
+
 def select_mxfp4_moe_backend(
     config: FusedMoEConfig,
 ) -> tuple[Mxfp4MoeBackend, type[mk.FusedMoEExperts] | None]:
@@ -163,19 +179,21 @@ def select_mxfp4_moe_backend(
         logger.info_once("Using Marlin backend for mxfp4 lora")
         return Mxfp4MoeBackend.MARLIN, backend_to_kernel_cls(Mxfp4MoeBackend.MARLIN)[0]
 
+    # Issue 7 fix: use high-level property (consistent with FP8 oracle)
     activation_format = (
         mk.FusedMoEActivationFormat.BatchedExperts
-        if config.moe_parallel_config.use_deepep_ll_kernels
+        if config.moe_parallel_config.use_batched_activation_format
         else mk.FusedMoEActivationFormat.Standard
     )
 
     def _make_log_backend(backend: Mxfp4MoeBackend):
-        return f"Using {backend.value} Mxfp4 MoE backend."
+        return f"Using '{backend.value}' Mxfp4 MoE backend."
 
+    # Issue 8 fix: consistent quoting in log messages
     def _make_log_unsupported(backend: Mxfp4MoeBackend, reason: str | None) -> str:
         if reason:
             return (
-                f"Mxfp4 MoE backend {backend.value} does not support the "
+                f"Mxfp4 MoE backend '{backend.value}' does not support the "
                 f"deployment configuration since {reason}."
             )
         return (
@@ -198,6 +216,19 @@ def select_mxfp4_moe_backend(
                 logger.info_once(_make_log_backend(backend), scope="local")
                 return backend, k_cls
         raise ValueError(_make_log_unsupported(backend, reason))
+
+    # Issue 10 fix: handle explicit moe_backend from user (matches FP8/NvFP4)
+    runner_backend = config.moe_backend
+    if runner_backend != "auto":
+        requested_backend = map_mxfp4_backend(runner_backend)
+        if (
+            activation_format == mk.FusedMoEActivationFormat.BatchedExperts
+            and requested_backend == Mxfp4MoeBackend.MARLIN
+        ):
+            requested_backend = Mxfp4MoeBackend.BATCHED_MARLIN
+        return _return_or_raise(
+            requested_backend, config, kMxfp4Static, None, activation_format
+        )
 
     # Track if FlashInfer BF16 is explicitly disabled
     fi_bf16_disabled = (
