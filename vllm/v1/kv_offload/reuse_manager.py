@@ -10,11 +10,11 @@ FilterReusedOffloadingManager — OffloadingManager decorator that skips
 from collections import OrderedDict
 from collections.abc import Iterable
 
-from vllm.v1.core.kv_cache_utils import BlockHash
 from vllm.v1.kv_offload.abstract import (
     LoadStoreSpec,
     OffloadingEvent,
     OffloadingManager,
+    OffloadKey,
     PrepareStoreOutput,
 )
 
@@ -26,8 +26,8 @@ class FilterReusedOffloadingManager(OffloadingManager):
     All methods are delegated to the *backing* manager.  Two methods are
     intercepted:
 
-    * ``lookup`` — records each visited block hash in an internal LRU counter.
-    * ``prepare_store`` — filters out block hashes that have not yet
+    * ``lookup`` — records each visited key in an internal LRU counter.
+    * ``prepare_store`` — filters out keys that have not yet
       crossed the threshold *before* calling the backing
       ``prepare_store``.
 
@@ -59,40 +59,38 @@ class FilterReusedOffloadingManager(OffloadingManager):
         self.store_threshold = store_threshold
         self.max_tracker_size = max_tracker_size
         # Ordered so we can evict the LRU entry in O(1).
-        self.counts: OrderedDict[BlockHash, int] = OrderedDict()
+        self.counts: OrderedDict[OffloadKey, int] = OrderedDict()
 
     # ------------------------------------------------------------------
     # Intercepted methods
     # ------------------------------------------------------------------
 
-    def lookup(self, block_hashes: Iterable[BlockHash]) -> int | None:
-        """Record each hash, then delegate lookup to backing manager."""
-        block_hashes = list(block_hashes)
-        for block_hash in block_hashes:
-            if block_hash in self.counts:
-                self.counts.move_to_end(block_hash)
-                self.counts[block_hash] += 1
+    def lookup(self, keys: Iterable[OffloadKey]) -> int | None:
+        """Record each key, then delegate lookup to backing manager."""
+        keys = list(keys)
+        for key in keys:
+            if key in self.counts:
+                self.counts.move_to_end(key)
+                self.counts[key] += 1
             else:
                 if len(self.counts) >= self.max_tracker_size:
                     self.counts.popitem(last=False)  # evict LRU
-                self.counts[block_hash] = 1
-        return self._backing.lookup(block_hashes)
+                self.counts[key] = 1
+        return self._backing.lookup(keys)
 
-    def prepare_store(
-        self, block_hashes: Iterable[BlockHash]
-    ) -> PrepareStoreOutput | None:
+    def prepare_store(self, keys: Iterable[OffloadKey]) -> PrepareStoreOutput | None:
         """Filter out blocks below threshold, then delegate to backing.
 
         Filtering is evaluated *before* calling the backing manager's
         ``prepare_store`` so that blocks that would be skipped do not
         consume any CPU offload capacity.
         """
-        block_hashes = list(block_hashes)
+        keys = list(keys)
         eligible = [
-            bh for bh in block_hashes if self.counts.get(bh, 0) >= self.store_threshold
+            key for key in keys if self.counts.get(key, 0) >= self.store_threshold
         ]
 
-        # Delegate to the backing manager with only the eligible hashes.
+        # Delegate to the backing manager with only the eligible keys.
         # Passing an empty list is intentional and safe — both
         # LRUOffloadingManager and ARCOffloadingManager handle it correctly,
         # returning a PrepareStoreOutput with empty lists.
@@ -102,19 +100,17 @@ class FilterReusedOffloadingManager(OffloadingManager):
     # Delegated methods
     # ------------------------------------------------------------------
 
-    def prepare_load(self, block_hashes: Iterable[BlockHash]) -> LoadStoreSpec:
-        return self._backing.prepare_load(block_hashes)
+    def prepare_load(self, keys: Iterable[OffloadKey]) -> LoadStoreSpec:
+        return self._backing.prepare_load(keys)
 
-    def touch(self, block_hashes: Iterable[BlockHash]) -> None:
-        return self._backing.touch(block_hashes)
+    def touch(self, keys: Iterable[OffloadKey]) -> None:
+        return self._backing.touch(keys)
 
-    def complete_load(self, block_hashes: Iterable[BlockHash]) -> None:
-        return self._backing.complete_load(block_hashes)
+    def complete_load(self, keys: Iterable[OffloadKey]) -> None:
+        return self._backing.complete_load(keys)
 
-    def complete_store(
-        self, block_hashes: Iterable[BlockHash], success: bool = True
-    ) -> None:
-        return self._backing.complete_store(block_hashes, success)
+    def complete_store(self, keys: Iterable[OffloadKey], success: bool = True) -> None:
+        return self._backing.complete_store(keys, success)
 
     def take_events(self) -> Iterable[OffloadingEvent]:
         return self._backing.take_events()
