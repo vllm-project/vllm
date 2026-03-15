@@ -395,6 +395,39 @@ def test_hermes_parser_streaming(
     )
 
 
+def test_hermes_parser_streaming_parameterless_tool(
+    qwen_tokenizer: TokenizerLike,
+    hermes_parser: Hermes2ProToolParser,
+    any_chat_request: ChatCompletionRequest,
+) -> None:
+    text = '<tool_call>{"name": "switch_led_on", "arguments": {}}</tool_call>'
+
+    tokens = qwen_tokenizer.encode(text)
+    previous_text = ""
+    delta_messages = []
+    for token in tokens:
+        delta_text = qwen_tokenizer.decode([token])
+        current_text = previous_text + delta_text
+        delta = hermes_parser.extract_tool_calls_streaming(
+            previous_text=previous_text,
+            current_text=current_text,
+            delta_text=delta_text,
+            previous_token_ids=[],
+            current_token_ids=[],
+            delta_token_ids=[],
+            request=any_chat_request,
+        )
+        previous_text = current_text
+        if delta is not None:
+            delta_messages.append(delta)
+
+    assert delta_messages[0].tool_calls[0].function.name == "switch_led_on"
+    tool_call_args = "".join(
+        delta.tool_calls[0].function.arguments or "" for delta in delta_messages
+    )
+    assert tool_call_args == "{}"
+
+
 def test_hermes_parser_non_streaming_no_tool_call(
     hermes_parser: Hermes2ProToolParser,
     any_chat_request: ChatCompletionRequest,
