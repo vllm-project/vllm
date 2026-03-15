@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import json
 import dataclasses
+import json
 from unittest.mock import Mock
 
 import numpy as np
