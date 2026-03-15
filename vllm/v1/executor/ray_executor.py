@@ -317,7 +317,7 @@ class RayDistributedExecutor(Executor):
         # Warn users about buffer size configuration for multi-node pipeline parallelism
         pp_size = self.parallel_config.pipeline_parallel_size
         if n_nodes > 1 and pp_size > 1 and envs.VLLM_RAY_CGRAPH_BUFFER_SIZE_BYTES == 0:
-            logger.warning(
+            logger.info(
                 "Multi-node pipeline parallelism detected without explicit "
                 "buffer size configuration. If you encounter 'Channel closed' "
                 "errors, consider setting VLLM_RAY_CGRAPH_BUFFER_SIZE_BYTES "

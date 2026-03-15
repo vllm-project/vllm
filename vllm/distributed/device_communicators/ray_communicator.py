@@ -177,7 +177,7 @@ class RayPPCommunicator(Communicator):
         assert self._comm is not None
         try:
             self._comm.send(buf, peer_rank)
-        except Exception as e:
+        except RuntimeError as e:
             raise RayChannelError(
                 f"Failed to send tensor to rank {peer_rank}: {e}. "
                 "If you are using multi-node pipeline parallelism and see "
@@ -220,7 +220,7 @@ class RayPPCommunicator(Communicator):
             # open to ensure that the receive buffer is valid.
             # TODO(swang): Avoid CUDA synchronization.
             current_stream().synchronize()
-        except Exception as e:
+        except RuntimeError as e:
             raise RayChannelError(
                 f"Failed to receive tensor from rank {peer_rank}: {e}. "
                 "If you are using multi-node pipeline parallelism and see "
