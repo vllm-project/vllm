@@ -118,6 +118,7 @@ class WorkerLoRAManager:
                     lora_request.tensorizer_config_dict,
                 )
             else:
+                assert lora_request.peft_config is not None
                 peft_helper = PEFTHelper.from_dict(lora_request.peft_config)
 
             # Validates the LoRA configuration against requirements before
@@ -146,6 +147,7 @@ class WorkerLoRAManager:
                     skip_prefixes=lora_skip_prefixes,
                 )
             else:
+                assert lora_request.lora_tensors is not None
                 lora = self._lora_model_cls.from_lora_tensors(
                     lora_model_id=lora_request.lora_int_id,
                     tensors=lora_request.lora_tensors,
