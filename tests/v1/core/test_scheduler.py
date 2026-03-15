@@ -4347,15 +4347,17 @@ def test_srtf_mixed_prompt_length_preemption():
     )
 
     # req_long_prompt occupies 3 blocks after prefill; added first.
-    req_long_prompt = create_requests(
+    req_long_prompt = create_requests_with_priority(
         num_requests=1,
+        priorities=[0],
         num_tokens=48,
         max_tokens=50,
         req_ids=["long_prompt"],
     )[0]
     # req_short_prompt occupies 1 block after prefill; added second.
-    req_short_prompt = create_requests(
+    req_short_prompt = create_requests_with_priority(
         num_requests=1,
+        priorities=[0],
         num_tokens=16,
         max_tokens=30,
         req_ids=["short_prompt"],
