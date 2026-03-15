@@ -408,7 +408,11 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             "Try disabling DCP by setting "
             "decode_context_parallel_size=1."
         )
-        assert pcp_world_size == 1, "PCP not support hybrid attn now."
+        assert pcp_world_size == 1, (
+            "PCP does not support hybrid attention yet. "
+            "Try disabling PCP by setting "
+            "prefill_context_parallel_size=1."
+        )
         self.verify_and_split_kv_cache_groups()
 
     def verify_and_split_kv_cache_groups(self) -> None:

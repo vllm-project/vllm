@@ -503,7 +503,11 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
             "Try disabling DCP by setting "
             "decode_context_parallel_size=1."
         )
-        assert pcp_world_size == 1, "PCP not support sliding window attn now."
+        assert pcp_world_size == 1, (
+            "PCP does not support sliding window attention yet. "
+            "Try disabling PCP by setting "
+            "prefill_context_parallel_size=1."
+        )
 
         # The number of contiguous blocks needed for prefix cache hit.
         # -1 since the input token itself is also included in the window
@@ -679,7 +683,11 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
             "Try disabling DCP by setting "
             "decode_context_parallel_size=1."
         )
-        assert pcp_world_size == 1, "PCP not support chunked local attn now."
+        assert pcp_world_size == 1, (
+            "PCP does not support chunked local attention yet. "
+            "Try disabling PCP by setting "
+            "prefill_context_parallel_size=1."
+        )
         assert kv_cache_spec.block_size == alignment_tokens, (
             "KV cache groups with different block sizes are not compatible with "
             "chunked local attention now"
@@ -804,7 +812,11 @@ class MambaManager(SingleTypeKVCacheManager):
             "Try disabling DCP by setting "
             "decode_context_parallel_size=1."
         )
-        assert pcp_world_size == 1, "PCP not support mamba now."
+        assert pcp_world_size == 1, (
+            "PCP does not support Mamba yet. "
+            "Try disabling PCP by setting "
+            "prefill_context_parallel_size=1."
+        )
         computed_blocks: tuple[list[KVCacheBlock], ...] = tuple(
             [] for _ in range(len(kv_cache_group_ids))
         )
