@@ -2,6 +2,20 @@ group: Intel
 depends_on: 
   - image-build-xpu
 steps:
+  - label: ":docker: Build XPU image"
+    soft_fail: true
+    depends_on: []
+    key: image-build-xpu
+    commands:
+      - .buildkite/image_build/image_build_xpu.sh $REGISTRY $REPO $BUILDKITE_COMMIT
+    env:
+      DOCKER_BUILDKIT: "1"
+    retry:
+      automatic:
+        - exit_status: -1  # Agent was lost
+          limit: 2
+        - exit_status: -10  # Agent was lost
+          limit: 2
   - label: "Intel example Test"
     timeout_in_minutes: 30
     device: intel_gpu
