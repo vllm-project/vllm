@@ -2135,3 +2135,259 @@ def test_unify_hybrid_kv_cache_specs():
 
     with pytest.raises(ValueError):
         kv_cache_utils.unify_hybrid_kv_cache_specs(kv_cache_spec)
+
+
+def _make_qwen35_specs(
+    kv_dtype: torch.dtype = torch.bfloat16,
+    mamba_dtype: torch.dtype = torch.bfloat16,
+):
+    """Build KV cache specs matching real Qwen3.5 architecture.
+
+    Both Qwen3.5-4B and 9B share identical KV cache dimensions:
+      - Attention: 4 KV heads, 256 head_dim
+      - GatedDeltaNet: conv(3, 8192) + temporal(32, 128, 128)
+      - 32 layers: 24 GatedDeltaNet + 8 full attention (3:1 ratio)
+    The models differ only in hidden_size (2560 vs 4096) which does not
+    affect KV cache or recurrent state sizes.
+    """
+    attention_spec = FullAttentionSpec(
+        block_size=16,
+        num_kv_heads=4,
+        head_size=256,
+        dtype=kv_dtype,
+    )
+    mamba_spec = MambaSpec(
+        block_size=16,
+        shapes=((3, 8192), (32, 128, 128)),
+        dtypes=(mamba_dtype, mamba_dtype),
+    )
+    # Qwen3.5 layer pattern: every 4th layer is full attention
+    kv_cache_specs: dict[str, KVCacheSpec] = {}
+    for i in range(32):
+        if (i + 1) % 4 == 0:
+            kv_cache_specs[f"layer_{i}"] = attention_spec
+        else:
+            kv_cache_specs[f"layer_{i}"] = mamba_spec
+    return kv_cache_specs, attention_spec, mamba_spec
+
+
+# ---------------------------------------------------------------------------
+# Qwen3.5 hybrid Mamba+attention tests
+# ---------------------------------------------------------------------------
+
+
+def test_has_mixed_mamba_attention():
+    """_has_mixed_mamba_attention returns True only for mixed groups."""
+    kv_cache_specs, attn_spec, mamba_spec = _make_qwen35_specs()
+
+    # Pure attention -> False
+    assert not kv_cache_utils._has_mixed_mamba_attention(
+        [KVCacheGroupSpec([f"layer_{i}" for i in range(8)], attn_spec)]
+    )
+    # Pure Mamba -> False
+    assert not kv_cache_utils._has_mixed_mamba_attention(
+        [KVCacheGroupSpec([f"layer_{i}" for i in range(24)], mamba_spec)]
+    )
+    # Mixed (Qwen3.5 layout) -> True
+    assert kv_cache_utils._has_mixed_mamba_attention(
+        [
+            KVCacheGroupSpec([f"layer_{i}" for i in range(24)], mamba_spec),
+            KVCacheGroupSpec([f"layer_{i}" for i in range(24, 32)], attn_spec),
+        ]
+    )
+
+
+@pytest.mark.parametrize(
+    "kv_dtype, mamba_dtype, model_tag",
+    [
+        (torch.bfloat16, torch.bfloat16, "Qwen3.5-4B/9B bf16"),
+        (torch.float16, torch.float16, "Qwen3.5-4B/9B fp16"),
+        (torch.float8_e4m3fn, torch.bfloat16, "Qwen3.5-4B/9B fp8-kv"),
+    ],
+    ids=["bf16", "fp16", "fp8-kv"],
+)
+def test_qwen35_allocation_per_layer_tensors(kv_dtype, mamba_dtype, model_tag):
+    """Verify per-layer tensor allocation for real Qwen3.5 specs.
+
+    Each of the 32 layers should get its own tensor at its natural page size.
+    Attention and GatedDeltaNet tensors must have different sizes.
+    Total allocation must be efficient (>90% of available memory used).
+    """
+    model_config = ModelConfig(max_model_len=1024)
+    vllm_config = VllmConfig(model_config=model_config)
+
+    kv_cache_specs, attn_spec, mamba_spec = _make_qwen35_specs(
+        kv_dtype=kv_dtype, mamba_dtype=mamba_dtype
+    )
+    attn_page = attn_spec.page_size_bytes
+    mamba_page = mamba_spec.page_size_bytes
+
+    # Give enough memory for ~10 blocks
+    total_page_per_block = 8 * attn_page + 24 * mamba_page
+    available_memory = total_page_per_block * 10
+
+    kv_cache_config = kv_cache_utils.get_kv_cache_configs(
+        vllm_config, [kv_cache_specs], [available_memory]
+    )[0]
+
+    # 32 tensors, one per layer
+    assert len(kv_cache_config.kv_cache_tensors) == 32, (
+        f"{model_tag}: expected 32 per-layer tensors, "
+        f"got {len(kv_cache_config.kv_cache_tensors)}"
+    )
+
+    # Each tensor serves exactly one layer
+    for t in kv_cache_config.kv_cache_tensors:
+        assert len(t.shared_by) == 1
+
+    # Separate attention vs Mamba tensors
+    attn_tensors = [
+        t
+        for t in kv_cache_config.kv_cache_tensors
+        if kv_cache_specs[t.shared_by[0]] is attn_spec
+    ]
+    mamba_tensors = [
+        t
+        for t in kv_cache_config.kv_cache_tensors
+        if kv_cache_specs[t.shared_by[0]] is mamba_spec
+    ]
+    assert len(attn_tensors) == 8, f"{model_tag}: expected 8 attention tensors"
+    assert len(mamba_tensors) == 24, f"{model_tag}: expected 24 Mamba tensors"
+
+    # Tensor sizes match their spec's page_size * num_blocks
+    num_blocks = kv_cache_config.num_blocks
+    assert num_blocks > 0
+    for t in attn_tensors:
+        assert t.size == attn_page * num_blocks
+    for t in mamba_tensors:
+        assert t.size == mamba_page * num_blocks
+
+    # Attention and Mamba tensors have DIFFERENT sizes (not padded uniform)
+    assert attn_tensors[0].size != mamba_tensors[0].size, (
+        f"{model_tag}: tensors should differ — "
+        f"attn={attn_tensors[0].size}, mamba={mamba_tensors[0].size}"
+    )
+
+    # Allocation is efficient: >90% of available memory used
+    total_allocated = sum(t.size for t in kv_cache_config.kv_cache_tensors)
+    efficiency = total_allocated / available_memory
+    assert efficiency > 0.90, (
+        f"{model_tag}: allocation efficiency {efficiency:.1%} < 90%"
+    )
+
+
+@pytest.mark.parametrize(
+    "kv_dtype, mamba_dtype",
+    [
+        (torch.bfloat16, torch.bfloat16),
+        (torch.float16, torch.float16),
+        (torch.float8_e4m3fn, torch.bfloat16),
+    ],
+    ids=["bf16", "fp16", "fp8-kv"],
+)
+def test_qwen35_concurrency_estimate(kv_dtype, mamba_dtype):
+    """Verify concurrency estimate correctly weights Mamba vs attention cost.
+
+    For Qwen3.5, Mamba's 24 layers have O(1) state per request (~26 MiB total
+    at bf16) while attention's 8 layers have O(n) KV (~1 GiB at 32K context).
+    The concurrency estimate must reflect that attention dominates cost.
+    """
+    max_model_len = 32768
+    model_config = ModelConfig(max_model_len=max_model_len)
+    scheduler_config = SchedulerConfig(
+        max_num_batched_tokens=1024,
+        enable_chunked_prefill=True,
+        max_model_len=max_model_len,
+        is_encoder_decoder=model_config.is_encoder_decoder,
+    )
+    vllm_config = VllmConfig(
+        model_config=model_config,
+        scheduler_config=scheduler_config,
+    )
+
+    _, attn_spec, mamba_spec = _make_qwen35_specs(
+        kv_dtype=kv_dtype, mamba_dtype=mamba_dtype
+    )
+
+    # Compute expected values
+    attn_max_mem = attn_spec.max_memory_usage_bytes(vllm_config)  # O(n)
+    mamba_max_mem = mamba_spec.max_memory_usage_bytes(vllm_config)  # O(1)
+
+    # Mamba per-request cost should be a small fraction of attention
+    total_attn_cost = 8 * attn_max_mem
+    total_mamba_cost = 24 * mamba_max_mem
+    mamba_fraction = total_mamba_cost / (total_attn_cost + total_mamba_cost)
+    assert mamba_fraction < 0.10, (
+        f"Mamba should be <10% of per-request cost, got {mamba_fraction:.1%}"
+    )
+
+    # Compute blocks-per-request using same formula as our implementation:
+    # total_per_request = sum(layers_in_group * spec.max_memory)
+    # total_per_block = sum(layers_in_group * spec.page_size)
+    # blocks_per_request = ceil(total_per_request / total_per_block)
+    total_per_request = 8 * attn_max_mem + 24 * mamba_max_mem
+    total_per_block = 8 * attn_spec.page_size_bytes + 24 * mamba_spec.page_size_bytes
+    blocks_per_request = (total_per_request + total_per_block - 1) // total_per_block
+
+    # Give enough blocks for ~3 concurrent requests
+    num_blocks = blocks_per_request * 3
+
+    kv_cache_config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec([f"layer_{i}" for i in range(24)], mamba_spec),
+            KVCacheGroupSpec([f"layer_{i}" for i in range(24, 32)], attn_spec),
+        ],
+    )
+    concurrency = get_max_concurrency_for_kv_cache_config(vllm_config, kv_cache_config)
+
+    # Concurrency should be exactly 3 (we gave exactly 3x blocks_per_request)
+    assert concurrency == 3.0, f"Expected 3.0 concurrency, got {concurrency:.2f}"
+
+
+def test_qwen35_groups_skip_page_size_unification():
+    """Page size unification is skipped for Qwen3.5 mixed Mamba+attention.
+
+    Without this, unify_kv_cache_spec_page_size would pad one spec's page
+    size to match the other, wasting memory.
+    """
+    model_config = ModelConfig(max_model_len=1024)
+    vllm_config = VllmConfig(model_config=model_config)
+
+    kv_cache_specs, attn_spec, mamba_spec = _make_qwen35_specs()
+    attn_page = attn_spec.page_size_bytes
+    mamba_page = mamba_spec.page_size_bytes
+
+    groups = kv_cache_utils.get_kv_cache_groups(vllm_config, kv_cache_specs)
+
+    # Must have both Mamba and attention groups
+    attn_groups = [g for g in groups if not isinstance(g.kv_cache_spec, MambaSpec)]
+    mamba_groups = [g for g in groups if isinstance(g.kv_cache_spec, MambaSpec)]
+    assert len(attn_groups) >= 1
+    assert len(mamba_groups) >= 1
+
+    # Page sizes must be preserved (not padded to match each other)
+    for g in attn_groups:
+        assert g.kv_cache_spec.page_size_bytes == attn_page
+    for g in mamba_groups:
+        assert g.kv_cache_spec.page_size_bytes == mamba_page
+    assert attn_page != mamba_page
+
+
+def test_qwen35_pure_attention_and_pure_mamba_unaffected():
+    """Our changes must not affect pure-attention or pure-Mamba models."""
+    model_config = ModelConfig(max_model_len=1024)
+    vllm_config = VllmConfig(model_config=model_config)
+
+    _, attn_spec, mamba_spec = _make_qwen35_specs()
+
+    # Pure attention (e.g. Llama) — should NOT hit mixed path
+    attn_specs: dict[str, KVCacheSpec] = {f"layer_{i}": attn_spec for i in range(32)}
+    attn_groups = kv_cache_utils.get_kv_cache_groups(vllm_config, attn_specs)
+    assert not kv_cache_utils._has_mixed_mamba_attention(attn_groups)
+
+    # Pure Mamba (e.g. Mamba2) — should NOT hit mixed path
+    mamba_specs: dict[str, KVCacheSpec] = {f"layer_{i}": mamba_spec for i in range(32)}
+    mamba_groups = kv_cache_utils.get_kv_cache_groups(vllm_config, mamba_specs)
+    assert not kv_cache_utils._has_mixed_mamba_attention(mamba_groups)

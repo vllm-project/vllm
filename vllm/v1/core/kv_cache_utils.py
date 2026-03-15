@@ -24,6 +24,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     KVCacheSpec,
     KVCacheTensor,
+    MambaSpec,
     SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
 )
@@ -801,18 +802,33 @@ def get_max_concurrency_for_kv_cache_config(
 ) -> float:
     """
     Get the maximum concurrency for the given KV cache configuration.
+
+    For mixed Mamba+attention models (e.g. Qwen3.5), each group's cost is
+    summed independently so that constant-cost Mamba groups don't inflate
+    the per-request estimate via the uniform multiplier.
     """
-    num_layer_per_group = max(
-        len(group.layer_names) for group in kv_cache_config.kv_cache_groups
-    )
-    max_memory_usage_per_request = num_layer_per_group * max_memory_usage_bytes(
-        vllm_config, (group.kv_cache_spec for group in kv_cache_config.kv_cache_groups)
-    )
-    memory_per_block = (
-        kv_cache_config.kv_cache_groups[0].kv_cache_spec.page_size_bytes
-        * num_layer_per_group
-    )
-    num_block_per_request = cdiv(max_memory_usage_per_request, memory_per_block)
+    groups = kv_cache_config.kv_cache_groups
+    if _has_mixed_mamba_attention(groups):
+        max_memory_usage_per_request = sum(
+            len(group.layer_names)
+            * group.kv_cache_spec.max_memory_usage_bytes(vllm_config)
+            for group in groups
+        )
+        total_page_size_per_block = sum(
+            len(group.layer_names) * group.kv_cache_spec.page_size_bytes
+            for group in groups
+        )
+        num_block_per_request = cdiv(
+            max_memory_usage_per_request, total_page_size_per_block
+        )
+    else:
+        num_layer_per_group = max(len(group.layer_names) for group in groups)
+        max_memory_usage_per_request = num_layer_per_group * max_memory_usage_bytes(
+            vllm_config,
+            (group.kv_cache_spec for group in groups),
+        )
+        memory_per_block = groups[0].kv_cache_spec.page_size_bytes * num_layer_per_group
+        num_block_per_request = cdiv(max_memory_usage_per_request, memory_per_block)
     max_concurrency = kv_cache_config.num_blocks / num_block_per_request
     return max_concurrency
 
@@ -946,6 +962,17 @@ def unify_kv_cache_spec_page_size(
             assert new_spec.page_size_bytes == max_page_size
             new_kv_cache_spec[layer_name] = new_spec
     return new_kv_cache_spec
+
+
+def _has_mixed_mamba_attention(
+    kv_cache_groups: list[KVCacheGroupSpec],
+) -> bool:
+    """Check if groups contain both MambaSpec and non-MambaSpec layers."""
+    has_mamba = any(isinstance(g.kv_cache_spec, MambaSpec) for g in kv_cache_groups)
+    has_attention = any(
+        not isinstance(g.kv_cache_spec, MambaSpec) for g in kv_cache_groups
+    )
+    return has_mamba and has_attention
 
 
 def is_kv_cache_type_attention_free(kv_cache_spec: dict[str, KVCacheSpec]) -> bool:
@@ -1119,6 +1146,26 @@ def get_kv_cache_config_from_groups(
             )
             for layer_name in kv_cache_groups[0].layer_names
         ]
+    elif _has_mixed_mamba_attention(kv_cache_groups):
+        # Mixed Mamba+attention: give each layer its own tensor at its
+        # natural page size. Mamba layers keep their small page size
+        # instead of being padded to match attention. This avoids the ~7x
+        # memory overestimation seen in hybrid models like Qwen3.5.
+        all_layers: dict[str, KVCacheSpec] = {}
+        for group in kv_cache_groups:
+            for layer_name in group.layer_names:
+                all_layers[layer_name] = group.kv_cache_spec
+        total_page_size = sum(spec.page_size_bytes for spec in all_layers.values())
+        num_blocks = int(available_memory // total_page_size)
+        num_blocks = max(num_blocks, 0)
+        num_blocks = may_override_num_blocks(vllm_config, num_blocks)
+        kv_cache_tensors = [
+            KVCacheTensor(
+                size=spec.page_size_bytes * num_blocks,
+                shared_by=[layer_name],
+            )
+            for layer_name, spec in all_layers.items()
+        ]
     else:
         # General case:
         # We will have group_size memory pools, each is shared by one layer from
@@ -1248,6 +1295,16 @@ def get_kv_cache_groups(
         # same window size). Put all layers into one group.
         return _get_kv_cache_groups_uniform_type(uniform_spec)
 
+    # For mixed Mamba+attention, skip page size unification — the dedicated
+    # allocation path in get_kv_cache_config_from_groups handles non-uniform
+    # page sizes by giving each layer its own tensor.
+    has_mamba = any(isinstance(spec, MambaSpec) for spec in kv_cache_spec.values())
+    has_non_mamba = any(
+        not isinstance(spec, MambaSpec) for spec in kv_cache_spec.values()
+    )
+    if has_mamba and has_non_mamba:
+        return _get_kv_cache_groups_uniform_page_size(kv_cache_spec)
+
     # As KVCacheManager can only allocate memory of one size, we need to unify
     # the page size of the layers. For cases cannot be unified, this function
     # will raise an error.
@@ -1296,11 +1353,19 @@ def _report_kv_cache_config(
     )
 
     # Log the KV cache size and maximum concurrency.
-    num_tokens = (
-        kv_cache_config.num_blocks
-        // len(kv_cache_config.kv_cache_groups)
-        * min_block_size
+    # For hybrid models, only attention groups contribute token capacity;
+    # Mamba groups have constant-size state that doesn't scale with tokens.
+    attention_groups = [
+        g
+        for g in kv_cache_config.kv_cache_groups
+        if not isinstance(g.kv_cache_spec, MambaSpec)
+    ]
+    num_attention_groups = (
+        len(attention_groups)
+        if attention_groups
+        else len(kv_cache_config.kv_cache_groups)
     )
+    num_tokens = kv_cache_config.num_blocks // num_attention_groups * min_block_size
     dcp_size = vllm_config.parallel_config.decode_context_parallel_size
     pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
     if pcp_size * dcp_size > 1:
@@ -1350,18 +1415,13 @@ def _max_memory_usage_bytes_from_groups(
             for spec in per_layer_specs.values()
         )
 
-    # General case: group_size pools, each shared by one layer per group
-    # Memory = group_size * page_size * blocks_for_max_len
-    group_size = max(len(group.layer_names) for group in kv_cache_groups)
-    page_size = get_uniform_page_size(
-        [group.kv_cache_spec for group in kv_cache_groups]
-    )
-    blocks_needed = sum(
-        cdiv(group.kv_cache_spec.max_memory_usage_bytes(vllm_config), page_size)
+    # General case: sum each group's actual memory usage independently.
+    # This handles hybrid models (e.g. Mamba+attention) where groups have
+    # different scaling characteristics and potentially different page sizes.
+    return sum(
+        len(group.layer_names) * group.kv_cache_spec.max_memory_usage_bytes(vllm_config)
         for group in kv_cache_groups
     )
-
-    return group_size * page_size * blocks_needed
 
 
 def _estimate_max_model_len_from_groups(
