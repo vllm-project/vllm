@@ -495,8 +495,9 @@ class TestThinkingBlockConversion:
         asst = asst_msgs[0]
 
         assert asst.get("reasoning") == "I need to call the calculator."
-        assert len(asst.get("tool_calls", [])) == 1
-        assert asst["tool_calls"][0]["function"]["name"] == "calculator"
+        tool_calls = list(asst.get("tool_calls", []))
+        assert len(tool_calls) == 1
+        assert tool_calls[0]["function"]["name"] == "calculator"
         # No text content alongside reasoning + tool_use.
         assert asst.get("content") is None
 
