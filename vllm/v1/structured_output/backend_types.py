@@ -45,6 +45,14 @@ class StructuredOutputGrammar(ABC):
             bool: True if the tokens are accepted, False otherwise.
         """
 
+    def advance_ff_tokens(self) -> list[int]:
+        """Computes fast-forward (deterministic) tokens from the grammar.
+
+        Returns tokens that the grammar forces without needing model
+        inference. Default implementation returns empty list.
+        """
+        return []
+    
     @abstractmethod
     def validate_tokens(self, tokens: list[int]) -> list[int]:
         """

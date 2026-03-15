@@ -12,6 +12,7 @@ from vllm.config import (
     ParallelConfig,
     SchedulerConfig,
     SpeculativeConfig,
+    StructuredOutputsConfig,
     VllmConfig,
 )
 from vllm.multimodal.inputs import (
@@ -57,6 +58,7 @@ def create_scheduler(
     pipeline_parallel_size: int = 1,
     use_ec_connector: bool = False,
     ec_role: str | None = None,
+    enable_jump_decoding: bool = False,
 ) -> Scheduler | AsyncScheduler:
     """Create scheduler under test.
 
@@ -130,6 +132,12 @@ def create_scheduler(
         else None
     )
 
+    structured_outputs_config = StructuredOutputsConfig(
+        # Use guidance backend when jump decoding is enabled, as required.
+        backend="guidance" if enable_jump_decoding else "auto",
+        enable_jump_decoding=enable_jump_decoding,
+    )
+
     vllm_config = VllmConfig(
         scheduler_config=scheduler_config,
         model_config=model_config,
@@ -138,6 +146,7 @@ def create_scheduler(
         kv_transfer_config=kv_transfer_config,
         speculative_config=speculative_config,
         ec_transfer_config=ec_transfer_config,
+        structured_outputs_config=structured_outputs_config,
     )
     kv_cache_config = KVCacheConfig(
         num_blocks=num_blocks,  # A large number of blocks to hold all requests

@@ -4140,3 +4140,205 @@ def test_eagle3_mm_encoder_cache_with_shift():
         f"shifted_end={scheduled_end_with_shift}) overlapping MM at "
         f"{start_pos}. The fix must schedule encoder inputs."
     )
+
+
+# ---------------------------------------------------------------------------
+# Jump-forward decoding tests
+# ---------------------------------------------------------------------------
+
+
+def _setup_jump_forward_request(scheduler, request):
+    """Helper: put a request into RUNNING state with prefill done."""
+    request.num_computed_tokens = request.num_tokens
+    request.status = RequestStatus.RUNNING
+    scheduler.requests[request.request_id] = request
+    scheduler.running.append(request)
+
+
+def _make_mock_grammar(ff_tokens: list[int]):
+    """Create a mock grammar that returns the given ff_tokens."""
+    grammar = Mock()
+    grammar.accept_tokens = Mock(return_value=True)
+    grammar.is_terminated = Mock(return_value=False)
+    grammar.advance_ff_tokens = Mock(return_value=ff_tokens)
+    return grammar
+
+
+def _make_structured_output_request(grammar):
+    """Create a mock StructuredOutputRequest with the given grammar."""
+    sor = Mock()
+    sor.grammar = grammar
+    sor.reasoning_ended = None
+    return sor
+
+
+def test_jump_forward_tokens_injected():
+    """ff_tokens from grammar are appended to the request and stored in
+    pending_ff_tokens."""
+    scheduler = create_scheduler(enable_jump_decoding=True)
+    # Mock should_advance to return True for structured output requests.
+    scheduler.structured_output_manager.should_advance = Mock(return_value=True)
+
+    requests = create_requests(num_requests=1, max_tokens=20)
+    req = requests[0]
+    _setup_jump_forward_request(scheduler, req)
+
+    # Attach mock grammar that produces ff_tokens [100, 101, 102].
+    ff = [100, 101, 102]
+    grammar = _make_mock_grammar(ff)
+    req.structured_output_request = _make_structured_output_request(grammar)
+
+    scheduler_output = SchedulerOutput(
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=CachedRequestData.make_empty(),
+        num_scheduled_tokens={req.request_id: 1},
+        total_num_scheduled_tokens=1,
+        scheduled_encoder_inputs={},
+        scheduled_spec_decode_tokens={},
+        num_common_prefix_blocks=[],
+        finished_req_ids=set(),
+        free_encoder_mm_hashes=[],
+    )
+
+    model_output = ModelRunnerOutput(
+        req_ids=[req.request_id],
+        req_id_to_index={req.request_id: 0},
+        sampled_token_ids=[[7]],  # normal token from model
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+
+    scheduler.update_from_output(scheduler_output, model_output)
+
+    # The output should contain the sampled token + all ff_tokens.
+    assert list(req.output_token_ids) == [7, 100, 101, 102]
+    # ff_tokens should be stored for the next schedule step.
+    assert scheduler.pending_ff_tokens[req.request_id] == [100, 101, 102]
+    # Request should still be running.
+    assert not req.is_finished()
+
+
+def test_jump_forward_tokens_stop_eos():
+    """ff_tokens containing an EOS token should truncate the sequence and
+    stop the request."""
+    scheduler = create_scheduler(enable_jump_decoding=True)
+    scheduler.structured_output_manager.should_advance = Mock(return_value=True)
+
+    requests = create_requests(num_requests=1, max_tokens=20)
+    req = requests[0]
+    _setup_jump_forward_request(scheduler, req)
+
+    # ff_tokens: 100, EOS, 102 — should truncate after EOS.
+    ff = [100, EOS_TOKEN_ID, 102]
+    grammar = _make_mock_grammar(ff)
+    req.structured_output_request = _make_structured_output_request(grammar)
+
+    scheduler_output = SchedulerOutput(
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=CachedRequestData.make_empty(),
+        num_scheduled_tokens={req.request_id: 1},
+        total_num_scheduled_tokens=1,
+        scheduled_encoder_inputs={},
+        scheduled_spec_decode_tokens={},
+        num_common_prefix_blocks=[],
+        finished_req_ids=set(),
+        free_encoder_mm_hashes=[],
+    )
+
+    model_output = ModelRunnerOutput(
+        req_ids=[req.request_id],
+        req_id_to_index={req.request_id: 0},
+        sampled_token_ids=[[7]],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+
+    scheduler.update_from_output(scheduler_output, model_output)
+
+    # Should stop at EOS — token 102 must NOT appear.
+    assert list(req.output_token_ids) == [7, 100, EOS_TOKEN_ID]
+    assert req.status == RequestStatus.FINISHED_STOPPED
+    # Stored ff_tokens should be truncated to what was actually used.
+    assert scheduler.pending_ff_tokens[req.request_id] == [100, EOS_TOKEN_ID]
+
+
+def test_jump_forward_tokens_stop_max_tokens():
+    """ff_tokens that would exceed max_tokens should be truncated."""
+    scheduler = create_scheduler(enable_jump_decoding=True)
+    scheduler.structured_output_manager.should_advance = Mock(return_value=True)
+
+    # max_tokens=3: the sampled token (7) counts as 1, so only 2 ff_tokens
+    # should fit.
+    requests = create_requests(num_requests=1, max_tokens=3)
+    req = requests[0]
+    _setup_jump_forward_request(scheduler, req)
+
+    ff = [100, 101, 102, 103]
+    grammar = _make_mock_grammar(ff)
+    req.structured_output_request = _make_structured_output_request(grammar)
+
+    scheduler_output = SchedulerOutput(
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=CachedRequestData.make_empty(),
+        num_scheduled_tokens={req.request_id: 1},
+        total_num_scheduled_tokens=1,
+        scheduled_encoder_inputs={},
+        scheduled_spec_decode_tokens={},
+        num_common_prefix_blocks=[],
+        finished_req_ids=set(),
+        free_encoder_mm_hashes=[],
+    )
+
+    model_output = ModelRunnerOutput(
+        req_ids=[req.request_id],
+        req_id_to_index={req.request_id: 0},
+        sampled_token_ids=[[7]],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+
+    scheduler.update_from_output(scheduler_output, model_output)
+
+    # 1 sampled + 2 ff = 3 = max_tokens → length capped.
+    assert list(req.output_token_ids) == [7, 100, 101]
+    assert req.status == RequestStatus.FINISHED_LENGTH_CAPPED
+    assert scheduler.pending_ff_tokens[req.request_id] == [100, 101]
+
+
+def test_jump_forward_tokens_retained_for_unscheduled_requests():
+    """pending_ff_tokens for requests NOT scheduled in a step must be
+    preserved (Bug 1 fix).
+
+    Uses max_num_batched_tokens=1 so that only the first running request
+    gets scheduled, while the second is skipped due to budget exhaustion.
+    """
+    scheduler = create_scheduler(
+        max_num_batched_tokens=1,
+        max_model_len=100,
+        enable_jump_decoding=True,
+    )
+
+    requests = create_requests(num_requests=2, max_tokens=20)
+    for req in requests:
+        _setup_jump_forward_request(scheduler, req)
+
+    req_a, req_b = requests
+
+    # Simulate: both requests have pending ff_tokens from a previous step.
+    scheduler.pending_ff_tokens[req_a.request_id] = [10, 11]
+    scheduler.pending_ff_tokens[req_b.request_id] = [20, 21]
+
+    # Call the real schedule() — budget=1 means only req_a (first in
+    # running list) gets scheduled; req_b is skipped.
+    output = scheduler.schedule()
+
+    # req_a was scheduled, so its ff_tokens should appear in the output.
+    assert req_a.request_id in output.num_scheduled_tokens
+    assert output.jump_forward_tokens == {req_a.request_id: [10, 11]}
+
+    # req_b was NOT scheduled, so its ff_tokens must still be pending.
+    assert req_b.request_id not in output.num_scheduled_tokens
+    assert scheduler.pending_ff_tokens == {req_b.request_id: [20, 21]}
