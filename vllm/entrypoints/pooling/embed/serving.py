@@ -75,9 +75,9 @@ class ServingEmbedding(PoolingServing):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
 
-        hf_config = self.model_config.hf_config
+        # Load task instructions from HF config or sentence-transformers config
         self.task_instructions: dict[str, str] | None = self._load_task_instructions(
-            hf_config
+            self.model_config.hf_config
         ) or self._load_st_prompts(self.model_config.model, self.model_config.revision)
         if self.task_instructions:
             logger.info(
@@ -268,11 +268,11 @@ class ServingEmbedding(PoolingServing):
             )
 
         elif request.inputs is not None:
-            st_prefix = self._get_task_instruction_prefix(input_type)
+            task_prefix = self._get_task_instruction_prefix(input_type)
             all_floats, resp_id, total_tokens = await self._cohere_process_chat_batch(
                 request,
                 [
-                    self._mixed_input_to_messages(inp, st_prefix=st_prefix)
+                    self._mixed_input_to_messages(inp, task_prefix=task_prefix)
                     for inp in request.inputs
                 ],
                 raw_request,
@@ -402,16 +402,16 @@ class ServingEmbedding(PoolingServing):
     def _mixed_input_to_messages(
         inp: CohereEmbedInput,
         *,
-        st_prefix: str | None = None,
+        task_prefix: str | None = None,
     ) -> list[ChatCompletionMessageParam]:
         """Build chat messages from a mixed text+image input.
 
-        When *st_prefix* is given, it is prepended to each text part.
+        When *task_prefix* is given, it is prepended to each text part.
         """
         parts: list[ChatCompletionContentPartParam] = []
         for item in inp.content:
             if item.type == "text" and item.text is not None:
-                text = st_prefix + item.text if st_prefix else item.text
+                text = task_prefix + item.text if task_prefix else item.text
                 parts.append(ChatCompletionContentPartTextParam(type="text", text=text))
             elif item.type == "image_url" and item.image_url is not None:
                 parts.append(
@@ -450,7 +450,7 @@ class ServingEmbedding(PoolingServing):
         if self.task_instructions is None:
             raise ValueError(
                 f"Unsupported input_type {input_type!r}. "
-                "This model does not define any input_type prompt prefixes."
+                "This model does not define any input_type task instructions."
             )
         if input_type not in self.task_instructions:
             supported = ", ".join(sorted(self.task_instructions))

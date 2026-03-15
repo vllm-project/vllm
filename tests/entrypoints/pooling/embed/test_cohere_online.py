@@ -120,7 +120,7 @@ def test_unsupported_input_type_rejected(server: RemoteOpenAIServer, model_name:
     }
     resp = requests.post(server.url_for("/v2/embed"), json=body)
     assert resp.status_code == 400
-    assert "Unsupported input_type" in resp.json()["message"]
+    assert "Unsupported input_type" in resp.json()["error"]["message"]
 
 
 def test_omitted_input_type_accepted(server: RemoteOpenAIServer, model_name: str):
