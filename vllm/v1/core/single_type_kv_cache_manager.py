@@ -498,7 +498,11 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         assert isinstance(kv_cache_spec, SlidingWindowSpec), (
             "SlidingWindowManager can only be used for sliding window groups"
         )
-        assert dcp_world_size == 1, "DCP not support sliding window attn now."
+        assert dcp_world_size == 1, (
+            "DCP does not support sliding window attention yet. "
+            "Try disabling DCP by setting "
+            "decode_context_parallel_size=1."
+        )
         assert pcp_world_size == 1, "PCP not support sliding window attn now."
 
         # The number of contiguous blocks needed for prefix cache hit.
@@ -670,7 +674,11 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
         assert use_eagle is False, (
             "Hybrid KV cache is not supported for " + "eagle + chunked local attention."
         )
-        assert dcp_world_size == 1, "DCP not support chunked local attn now."
+        assert dcp_world_size == 1, (
+            "DCP does not support chunked local attention yet. "
+            "Try disabling DCP by setting "
+            "decode_context_parallel_size=1."
+        )
         assert pcp_world_size == 1, "PCP not support chunked local attn now."
         assert kv_cache_spec.block_size == alignment_tokens, (
             "KV cache groups with different block sizes are not compatible with "
@@ -791,7 +799,11 @@ class MambaManager(SingleTypeKVCacheManager):
         assert isinstance(kv_cache_spec, MambaSpec), (
             "MambaManager can only be used for mamba groups"
         )
-        assert dcp_world_size == 1, "DCP not support mamba now."
+        assert dcp_world_size == 1, (
+            "DCP does not support Mamba yet. "
+            "Try disabling DCP by setting "
+            "decode_context_parallel_size=1."
+        )
         assert pcp_world_size == 1, "PCP not support mamba now."
         computed_blocks: tuple[list[KVCacheBlock], ...] = tuple(
             [] for _ in range(len(kv_cache_group_ids))
