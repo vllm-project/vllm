@@ -187,9 +187,7 @@ class PoolingServing:
         return random_uuid() if default is None else default
 
     def _is_model_supported(self, model_name: str | None) -> bool:
-        if not model_name:
-            return True
-        return self.models.is_base_model(model_name)
+        return True
 
     async def _check_model(
         self,
