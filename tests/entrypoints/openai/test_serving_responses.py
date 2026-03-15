@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Sequence
 from contextlib import AsyncExitStack
 from unittest.mock import MagicMock
 
@@ -22,9 +23,13 @@ from openai.types.responses.tool import (
 
 import vllm.envs as envs
 from vllm.entrypoints.mcp.tool_server import ToolServer
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionRequest,
+)
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaMessage,
     ErrorResponse,
+    ExtractedToolCallInformation,
     RequestResponseMetadata,
 )
 from vllm.entrypoints.openai.responses.context import ConversationContext, SimpleContext
@@ -39,6 +44,7 @@ from vllm.entrypoints.openai.responses.streaming_events import (
 )
 from vllm.inputs.data import TokensPrompt
 from vllm.outputs import CompletionOutput, RequestOutput
+from vllm.parser import DelegatingParser, StreamingParseState
 from vllm.sampling_params import SamplingParams
 
 
@@ -589,6 +595,77 @@ def _make_simple_context_with_output(text, token_ids):
     return ctx
 
 
+class _ScriptedParser(DelegatingParser):
+    """A DelegatingParser that returns deltas from a pre-defined sequence.
+
+    Used in tests to exercise ``process_streaming_events`` without needing
+    a real reasoning/tool parser.  Each call to ``extract_streaming_delta``
+    pops the next DeltaMessage from the sequence.
+    """
+
+    def __init__(self, delta_sequence: list[DeltaMessage]):
+        # Provide a dummy tokenizer — tests don't need a real one.
+        super().__init__(MagicMock())
+        self._delta_sequence = list(delta_sequence)
+        self._call_count = 0
+
+    # -- Override abstract methods with minimal stubs --
+
+    def is_reasoning_end(self, input_ids: list[int]) -> bool:
+        return True
+
+    def extract_content_ids(self, input_ids: list[int]) -> list[int]:
+        return input_ids
+
+    def extract_reasoning(self, model_output, request):
+        return None, model_output
+
+    def extract_response_outputs(self, model_output, request, **kwargs):
+        return []
+
+    def extract_reasoning_streaming(
+        self,
+        previous_text: str,
+        current_text: str,
+        delta_text: str,
+        previous_token_ids: Sequence[int],
+        current_token_ids: Sequence[int],
+        delta_token_ids: Sequence[int],
+    ) -> DeltaMessage | None:
+        return DeltaMessage(content=delta_text)
+
+    def extract_tool_calls(self, model_output: str, request: ChatCompletionRequest):
+        return ExtractedToolCallInformation(
+            tools_called=False, tool_calls=[], content=model_output
+        )
+
+    def extract_tool_calls_streaming(
+        self,
+        previous_text,
+        current_text,
+        delta_text,
+        previous_token_ids,
+        current_token_ids,
+        delta_token_ids,
+        request,
+    ):
+        return None
+
+    def extract_streaming_delta(
+        self,
+        state: StreamingParseState,
+        delta_text: str,
+        delta_token_ids: list[int],
+        prompt_token_ids: list[int] | None,
+        request,
+    ) -> DeltaMessage | None:
+        if self._call_count >= len(self._delta_sequence):
+            return None
+        result = self._delta_sequence[self._call_count]
+        self._call_count += 1
+        return result
+
+
 def _make_serving_instance_with_reasoning():
     """Create an OpenAIServingResponses with a mocked reasoning parser."""
     engine_client = MagicMock()
@@ -624,14 +701,19 @@ def _identity_increment(event):
     return event
 
 
+def _noop_raise_if_error(finish_reason, request_id):
+    """No-op callback matching the raise_if_error signature."""
+    pass
+
+
 class TestStreamingReasoningToContentTransition:
-    """Tests for _process_simple_streaming_events reasoning-to-content
+    """Tests for process_streaming_events reasoning-to-content
     transition, specifically the fix for mixed deltas that carry both
     reasoning and content simultaneously."""
 
     @pytest.mark.asyncio
     async def test_mixed_delta_reasoning_and_content_emits_reasoning_delta(
-        self, monkeypatch
+        self,
     ):
         """When the reasoning parser produces a delta with both reasoning
         and content set (e.g. reasoning end and content start in the same
@@ -639,28 +721,13 @@ class TestStreamingReasoningToContentTransition:
         ResponseReasoningTextDeltaEvent and included in the
         ResponseReasoningTextDoneEvent text."""
 
-        monkeypatch.setattr(envs, "VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT", False)
-        serving = _make_serving_instance_with_reasoning()
-
-        # Sequence of DeltaMessages the mock parser will return
         delta_sequence = [
             DeltaMessage(reasoning="thinking..."),
             DeltaMessage(reasoning=" end", content="hello"),  # mixed delta
             DeltaMessage(content=" world"),
         ]
-        call_count = 0
+        parser = _ScriptedParser(delta_sequence)
 
-        def mock_extract_streaming_delta(**kwargs):
-            nonlocal call_count
-            result = delta_sequence[call_count]
-            call_count += 1
-            return result
-
-        # Mock the parser on the serving instance
-        mock_parser_instance = MagicMock()
-        mock_parser_instance.extract_streaming_delta = mock_extract_streaming_delta
-        serving.parser = MagicMock(return_value=mock_parser_instance)
-        # Create contexts for each streaming chunk
         contexts = [
             _make_simple_context_with_output("chunk1", [10]),
             _make_simple_context_with_output("chunk2", [20]),
@@ -672,21 +739,17 @@ class TestStreamingReasoningToContentTransition:
                 yield ctx
 
         request = ResponsesRequest(input="hi", tools=[], stream=True)
-        sampling_params = SamplingParams(max_tokens=64)
-        metadata = RequestResponseMetadata(request_id="req")
         _identity_increment._counter = 0  # type: ignore
 
         events = []
-        async for event in serving._process_simple_streaming_events(
+        async for event in parser.process_streaming_events(
             request=request,
-            sampling_params=sampling_params,
             result_generator=result_generator(),
-            context=SimpleContext(),
-            model_name="test-model",
-            tokenizer=MagicMock(),
-            request_metadata=metadata,
-            created_time=0,
-            _increment_sequence_number_and_return=_identity_increment,
+            request_id="req",
+            raise_if_error=_noop_raise_if_error,
+            create_logprobs=None,
+            top_logprobs=None,
+            increment_sequence_number=_identity_increment,
         ):
             events.append(event)
 
@@ -715,29 +778,16 @@ class TestStreamingReasoningToContentTransition:
 
     @pytest.mark.asyncio
     async def test_transition_without_mixed_delta_no_extra_reasoning_event(
-        self, monkeypatch
+        self,
     ):
         """When the transition from reasoning to content is clean (no mixed
         delta), no extra reasoning delta event should be emitted."""
-
-        monkeypatch.setattr(envs, "VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT", False)
-        serving = _make_serving_instance_with_reasoning()
 
         delta_sequence = [
             DeltaMessage(reasoning="thinking"),
             DeltaMessage(content="answer"),
         ]
-        call_count = 0
-
-        def mock_extract_streaming_delta(**kwargs):
-            nonlocal call_count
-            result = delta_sequence[call_count]
-            call_count += 1
-            return result
-
-        mock_parser_instance = MagicMock()
-        mock_parser_instance.extract_streaming_delta = mock_extract_streaming_delta
-        serving.parser = MagicMock(return_value=mock_parser_instance)
+        parser = _ScriptedParser(delta_sequence)
 
         contexts = [
             _make_simple_context_with_output("chunk1", [10]),
@@ -749,21 +799,17 @@ class TestStreamingReasoningToContentTransition:
                 yield ctx
 
         request = ResponsesRequest(input="hi", tools=[], stream=True)
-        sampling_params = SamplingParams(max_tokens=64)
-        metadata = RequestResponseMetadata(request_id="req")
         _identity_increment._counter = 0  # type: ignore
 
         events = []
-        async for event in serving._process_simple_streaming_events(
+        async for event in parser.process_streaming_events(
             request=request,
-            sampling_params=sampling_params,
             result_generator=result_generator(),
-            context=SimpleContext(),
-            model_name="test-model",
-            tokenizer=MagicMock(),
-            request_metadata=metadata,
-            created_time=0,
-            _increment_sequence_number_and_return=_identity_increment,
+            request_id="req",
+            raise_if_error=_noop_raise_if_error,
+            create_logprobs=None,
+            top_logprobs=None,
+            increment_sequence_number=_identity_increment,
         ):
             events.append(event)
 
@@ -787,29 +833,16 @@ class TestStreamingReasoningToContentTransition:
         assert text_deltas[0].delta == "answer"
 
     @pytest.mark.asyncio
-    async def test_reasoning_only_stream_no_content(self, monkeypatch):
+    async def test_reasoning_only_stream_no_content(self):
         """When the stream has only reasoning deltas and no content, the
         reasoning done event should be emitted at finalization with the
         full accumulated text, and no text delta events should appear."""
-
-        monkeypatch.setattr(envs, "VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT", False)
-        serving = _make_serving_instance_with_reasoning()
 
         delta_sequence = [
             DeltaMessage(reasoning="step 1"),
             DeltaMessage(reasoning=" step 2"),
         ]
-        call_count = 0
-
-        def mock_extract_streaming_delta(**kwargs):
-            nonlocal call_count
-            result = delta_sequence[call_count]
-            call_count += 1
-            return result
-
-        mock_parser_instance = MagicMock()
-        mock_parser_instance.extract_streaming_delta = mock_extract_streaming_delta
-        serving.parser = MagicMock(return_value=mock_parser_instance)
+        parser = _ScriptedParser(delta_sequence)
 
         contexts = [
             _make_simple_context_with_output("chunk1", [10]),
@@ -821,21 +854,17 @@ class TestStreamingReasoningToContentTransition:
                 yield ctx
 
         request = ResponsesRequest(input="hi", tools=[], stream=True)
-        sampling_params = SamplingParams(max_tokens=64)
-        metadata = RequestResponseMetadata(request_id="req")
         _identity_increment._counter = 0  # type: ignore
 
         events = []
-        async for event in serving._process_simple_streaming_events(
+        async for event in parser.process_streaming_events(
             request=request,
-            sampling_params=sampling_params,
             result_generator=result_generator(),
-            context=SimpleContext(),
-            model_name="test-model",
-            tokenizer=MagicMock(),
-            request_metadata=metadata,
-            created_time=0,
-            _increment_sequence_number_and_return=_identity_increment,
+            request_id="req",
+            raise_if_error=_noop_raise_if_error,
+            create_logprobs=None,
+            top_logprobs=None,
+            increment_sequence_number=_identity_increment,
         ):
             events.append(event)
 
