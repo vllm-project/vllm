@@ -338,9 +338,11 @@ class ReasoningBudgetLogitsProcessor(LogitsProcessor):
                 self.end_token_id = getattr(parser, "end_token_id", None)
             except Exception as e:
                 import warnings
+
                 warnings.warn(
                     "Failed to initialize ReasoningBudgetLogitsProcessor: "
-                    f"{e}. The reasoning_budget feature will be disabled."
+                    f"{e}. The reasoning_budget feature will be disabled.",
+                    stacklevel=2,
                 )
                 pass
 
