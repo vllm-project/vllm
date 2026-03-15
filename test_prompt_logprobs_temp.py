@@ -10,8 +10,12 @@ python -m vllm.entrypoints.openai.api_server --model Qwen/Qwen2.5-0.5B-Instruct 
 uv venv --python 3.12 --seed --managed-python
 source .venv/bin/activate
 VLLM_USE_PRECOMPILED=1 uv pip install --editable .
-uv pip install pdbpp
+uv pip install pdbpp pytest pytest_asyncio tblib
 
+# pytest
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest tests/v1/sample/test_logprobs.py -v -s -k prompt_logprobs_temperature_increases_argmax_prob
+
+python -m pytest tests/v1/entrypoints/openai/test_completion.py -v -s -k test_prompt_logprobs_temperature_increases_argmax_prob_completion
 
 
 Minimal test: compare prompt logprob probabilities at different temperatures.
