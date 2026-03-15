@@ -472,14 +472,6 @@ def compute_iteration_details(scheduler_output: SchedulerOutput) -> IterationDet
     )
 
 
-def profiling_scopes_enabled() -> bool:
-    """Return whether env-gated profiling scopes are enabled."""
-    return (
-        envs.VLLM_CUSTOM_SCOPES_FOR_PROFILING
-        or envs.VLLM_NVTX_SCOPES_FOR_PROFILING
-    )
-
-
 def classify_batch_stage(scheduler_output: SchedulerOutput) -> str:
     """Classify the current scheduler output into a serving-stage label."""
     if scheduler_output.total_num_scheduled_tokens == 0:
@@ -496,10 +488,3 @@ def classify_batch_stage(scheduler_output: SchedulerOutput) -> str:
     if has_generation:
         return "decode_batch"
     return "unknown_batch"
-
-
-def get_batch_stage_scope_name(scheduler_output: SchedulerOutput) -> str | None:
-    """Return a stage scope name when env-gated profiling scopes are enabled."""
-    if not profiling_scopes_enabled():
-        return None
-    return classify_batch_stage(scheduler_output)

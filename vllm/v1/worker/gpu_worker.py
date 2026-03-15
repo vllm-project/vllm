@@ -55,9 +55,8 @@ from vllm.v1.outputs import (
     ModelRunnerOutput,
 )
 from vllm.v1.utils import (
+    classify_batch_stage,
     compute_iteration_details,
-    get_batch_stage_scope_name,
-    profiling_scopes_enabled,
     record_function_or_nullcontext,
     report_usage_stats,
 )
@@ -759,9 +758,6 @@ class Worker(WorkerBase):
     def sample_tokens(
         self, grammar_output: "GrammarOutput | None"
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput:
-        if not profiling_scopes_enabled():
-            return self.model_runner.sample_tokens(grammar_output)
-
         with record_function_or_nullcontext("sampling"):
             return self.model_runner.sample_tokens(grammar_output)
 
@@ -825,14 +821,12 @@ class Worker(WorkerBase):
                 comm_postprocess=comm_postprocess,
             )
 
-        batch_stage_scope_name = get_batch_stage_scope_name(scheduler_output)
-        batch_stage_scope = (
-            record_function_or_nullcontext(batch_stage_scope_name)
-            if batch_stage_scope_name is not None
-            else nullcontext()
-        )
-
-        with self.annotate_profile(scheduler_output), batch_stage_scope:
+        with (
+            self.annotate_profile(scheduler_output),
+            record_function_or_nullcontext(
+                classify_batch_stage(scheduler_output)
+            ),
+        ):
             output = self.model_runner.execute_model(
                 scheduler_output, intermediate_tensors
             )
