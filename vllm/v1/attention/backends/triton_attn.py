@@ -9,10 +9,10 @@ import torch
 
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import CUDAGraphMode, VllmConfig
+from vllm.config.cache import CacheDType
 from vllm.distributed.kv_transfer.kv_transfer_state import (
     has_kv_transfer_group,
 )
-from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
