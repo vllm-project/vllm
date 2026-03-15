@@ -3,10 +3,9 @@
 
 from typing import TYPE_CHECKING
 
-import torch
-
 from vllm.logger import init_logger
 from vllm.platforms.cpu import CpuPlatform
+from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 logger = init_logger(__name__)
 
@@ -27,6 +26,7 @@ class ZenCpuPlatform(CpuPlatform):
     device_type: str = "cpu"
 
     def is_zen_cpu(self) -> bool:
+        # is_cpu() also returns True for this platform (inherited from CpuPlatform).
         return True
 
     @classmethod
@@ -42,11 +42,7 @@ class ZenCpuPlatform(CpuPlatform):
         catch ValueError, causing torch.compile cache misses. Remove this
         once we drop PyTorch 2.10 support. PT mainline already has this fix.
         """
-        from torch.torch_version import TorchVersion
-
-        if TorchVersion(torch.__version__) < (2, 10) or TorchVersion(
-            torch.__version__
-        ) >= (2, 11):
+        if not is_torch_equal_or_newer("2.10.0") or is_torch_equal_or_newer("2.11.0"):
             return
 
         cls._patch_fxgraphcache_pickle()
