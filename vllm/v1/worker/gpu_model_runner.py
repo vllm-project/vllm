@@ -1566,6 +1566,13 @@ class GPUModelRunner(
             if self.enable_prompt_embeds:
                 self.inputs_embeds.copy_to_gpu(total_num_scheduled_tokens)
                 self.is_token_ids.copy_to_gpu(total_num_scheduled_tokens)
+            # Sanitize -1 placeholder token IDs from async scheduling.
+            # Non-common requests (new, resumed, or transitioning from
+            # prefill) may have -1 spec token placeholders in token_ids_cpu
+            # that won't be overwritten by the scatter below (they aren't
+            # in prev_req_id_to_index). Clamp to 0 to prevent
+            # out-of-bounds F.embedding(). (See #36906)
+            self.input_ids.gpu[:total_num_scheduled_tokens].clamp_(min=0)
         if num_common_tokens == 0:
             # No requests in common with the previous iteration
             # So input_ids.cpu will have all the input ids.
