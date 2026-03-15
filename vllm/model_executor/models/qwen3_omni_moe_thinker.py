@@ -60,7 +60,6 @@ from vllm.model_executor.layers.conv import Conv3dLayer
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,
-    ReplicatedLinear,
     RowParallelLinear,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -326,7 +325,6 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
     def __init__(
         self,
         config: Qwen3OmniMoeAudioEncoderConfig,
-        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -363,10 +361,7 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
         conv_out_dim = config.downsample_hidden_size * (
             (((config.num_mel_bins + 1) // 2 + 1) // 2 + 1) // 2
         )
-        self.conv_out = ReplicatedLinear(
-            conv_out_dim, config.d_model, bias=False,
-            quant_config=quant_config,
-        )
+        self.conv_out = nn.Linear(conv_out_dim, config.d_model, bias=False)
 
         # Transformer encoder layers
         self.layers = nn.ModuleList(
@@ -381,15 +376,9 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
 
         # Output layers
         self.ln_post = nn.LayerNorm(config.d_model)
-        self.proj1 = ReplicatedLinear(
-            config.d_model, config.d_model, bias=True,
-            quant_config=quant_config,
-        )
+        self.proj1 = nn.Linear(config.d_model, config.d_model)
         self.act = _ACTIVATION_REGISTRY[config.activation_function]
-        self.proj2 = ReplicatedLinear(
-            config.d_model, config.output_dim, bias=True,
-            quant_config=quant_config,
-        )
+        self.proj2 = nn.Linear(config.d_model, config.output_dim)
 
         # Get attention backend
         self.attn_backend = get_vit_attn_backend(
@@ -470,7 +459,7 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
 
         # (batch, channels, freq, time) -> (batch, time, channels*freq)
         b, c, f, t = padded_embed.size()
-        padded_embed, _ = self.conv_out(
+        padded_embed = self.conv_out(
             padded_embed.permute(0, 3, 1, 2).contiguous().view(b, t, c * f)
         )
 
@@ -513,9 +502,9 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
 
         # Apply output layers
         hidden_states = self.ln_post(hidden_states)
-        hidden_states, _ = self.proj1(hidden_states)
+        hidden_states = self.proj1(hidden_states)
         hidden_states = self.act(hidden_states)
-        hidden_states, _ = self.proj2(hidden_states)
+        hidden_states = self.proj2(hidden_states)
 
         return hidden_states
 
@@ -1709,7 +1698,6 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
         with self._mark_tower_model(vllm_config, "audio"):
             self.audio_tower = Qwen3OmniMoeAudioEncoder(
                 thinker_config.audio_config,
-                quant_config=quant_config,
                 prefix=maybe_prefix(prefix, "audio_tower"),
             )
 
