@@ -438,6 +438,12 @@ class SpecDecodeBaseProposer:
             self._determine_batch_execution_and_padding(num_tokens)
         )
 
+        # Async scheduling can leave -1 placeholder token IDs in
+        # self.input_ids (via next_token_ids from get_token_id() when
+        # seq_lens exceeds known tokens). Clamp to 0 to prevent
+        # out-of-bounds F.embedding() crash. (See #36906)
+        self.input_ids[:num_tokens].clamp_(min=0)
+
         if self.supports_mm_inputs:
             mm_embeds, is_mm_embed = mm_embed_inputs or (None, None)
 
