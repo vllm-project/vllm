@@ -202,6 +202,8 @@ email-validator==2.2.0
     # via pydantic
 encodec==0.1.1
     # via vocos
+et-xmlfile==2.0.0
+    # via openpyxl
 evaluate==0.4.3
     # via lm-eval
 fastapi==0.128.0
@@ -289,12 +291,9 @@ grpcio==1.78.0
     # via
     #   -r requirements/test.in
     #   grpcio-reflection
-    #   grpcio-tools
     #   ray
     #   tensorboard
 grpcio-reflection==1.78.0
-    # via -r requirements/test.in
-grpcio-tools==1.78.0
     # via -r requirements/test.in
 h11==0.14.0
     # via
@@ -376,6 +375,8 @@ inflect==5.6.2
     # via datamodel-code-generator
 iniconfig==2.0.0
     # via pytest
+instanttensor==0.1.5
+    # via -r requirements/test.in
 isoduration==20.11.0
     # via jsonschema
 isort==5.13.2
@@ -483,7 +484,7 @@ mbstrdecoder==1.1.3
     #   typepy
 mdurl==0.1.2
     # via markdown-it-py
-mistral-common==1.9.1
+mistral-common==1.10.0
     # via -r requirements/test.in
 more-itertools==10.5.0
     # via lm-eval
@@ -637,6 +638,8 @@ opencv-python-headless==4.13.0.90
     #   albucore
     #   albumentations
     #   mistral-common
+openpyxl==3.1.5
+    # via -r requirements/test.in
 opentelemetry-api==1.35.0
     # via
     #   opentelemetry-exporter-prometheus
@@ -737,7 +740,9 @@ platformdirs==4.3.6
     #   virtualenv
     #   wandb
 plotly==5.24.1
-    # via genai-perf
+    # via
+    #   -r requirements/test.in
+    #   genai-perf
 pluggy==1.5.0
     # via
     #   pytest
@@ -765,7 +770,6 @@ protobuf==6.33.2
     #   google-api-core
     #   googleapis-common-protos
     #   grpcio-reflection
-    #   grpcio-tools
     #   opentelemetry-proto
     #   proto-plus
     #   ray
@@ -1045,7 +1049,6 @@ sentry-sdk==2.52.0
     # via wandb
 setuptools==77.0.3
     # via
-    #   grpcio-tools
     #   lightning-utilities
     #   pytablewriter
     #   tensorboard
@@ -1168,6 +1171,7 @@ torch==2.10.0+cu129
     #   accelerate
     #   bitsandbytes
     #   encodec
+    #   instanttensor
     #   kornia
     #   lightly
     #   lightning

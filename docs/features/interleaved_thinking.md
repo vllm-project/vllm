@@ -20,9 +20,9 @@ With interleaved thinking, the model can:
 vLLM currently supports the following interleaved thinking models:
 
 | Model Series | Reasoning Parser Name |
-|--------------|-----------------------|
-| moonshotai/Kimi-K2-Thinking    |  kimi_k2  |
-| MiniMaxAI/MiniMax-M2           |  minimax_m2  |
+| ------------ | --------------------- |
+| moonshotai/Kimi-K2-Thinking | kimi_k2 |
+| MiniMaxAI/MiniMax-M2 | minimax_m2 |
 
 ## Example Usage
 

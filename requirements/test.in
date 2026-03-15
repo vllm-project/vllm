@@ -51,13 +51,13 @@ tritonclient>=2.51.0
 # The version of gRPC libraries should be consistent with each other
 grpcio==1.78.0
 grpcio-reflection==1.78.0
-grpcio-tools==1.78.0
 
 arctic-inference == 0.1.1 # Required for suffix decoding test
 numba == 0.61.2 # Required for N-gram speculative decoding
 numpy
 runai-model-streamer[s3,gcs]==0.15.3
 fastsafetensors>=0.2.2 # 0.2.2 contains important fixes for multi-GPU mem usage
+instanttensor>=0.1.5
 pydantic>=2.12 # 2.11 leads to error on python 3.13
 decord==0.6.0
 terratorch >= 1.2.2 # Required for Prithvi tests
@@ -72,3 +72,6 @@ kaldi-native-fbank >= 1.18.7 # required for fireredasr2 test
 # Newer versions of datasets require torchcoded, that makes the tests fail in CI because of a missing library.
 # Older versions are in conflict with teerratorch requirements.
 datasets>=3.3.0,<=3.6.0
+
+openpyxl # required for perf comparison excel report
+plotly # required for perf comparison html report
