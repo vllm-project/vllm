@@ -8,7 +8,6 @@ import pytest
 import torch._dynamo.config as dynamo_config
 
 from tests.utils import (
-    ROCM_ENV_OVERRIDES,
     large_gpu_mark,
     single_gpu_only,
 )
@@ -207,11 +206,6 @@ def run_tests(
     with monkeypatch.context() as m:
         # lock matmul precision to full FP32 (IEEE)
         m.setenv("VLLM_FLOAT32_MATMUL_PRECISION", "highest")
-        # GFX950: On ROCm, disable skinny GEMM to avoid non-deterministic
-        # results from atomic reductions in wvSplitKrc kernel.
-        for key, value in ROCM_ENV_OVERRIDES.items():
-            m.setenv(key, value)
-
         outputs: list[tuple[str, list, list]] = []
         for n, (
             test_preemption,
