@@ -22,7 +22,7 @@ import torch
 import torch.nn as nn
 from transformers import PretrainedConfig
 
-from vllm.compilation.decorators import ignore_torch_compile, support_torch_compile
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
@@ -353,7 +353,6 @@ class ComplexityDecoderLayer(nn.Module):
 # =============================================================================
 
 
-@ignore_torch_compile
 @support_torch_compile
 class ComplexityModel(nn.Module):
     """Complexity transformer model with INL dynamics threading."""
