@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import logging
 from typing import Any
 
 from transformers import PretrainedConfig, WhisperConfig
@@ -113,12 +114,23 @@ def _remap_mistral_vision_args(config: dict) -> dict:
 
 def _remap_mistral_yarn_args(config: dict) -> dict:
     yarn_config_map = {
-        "factor": "factor",
-        "original_max_position_embeddings": "original_max_position_embeddings",
-        "beta": "beta_fast",
-        "alpha": "beta_slow",
-        "apply_scale": "apply_yarn_scaling",
+        "factor": ("factor", float),
+        "original_max_position_embeddings": ("original_max_position_embeddings", int),
+        "beta": ("beta_fast", float),
+        "alpha": ("beta_slow", float),
+        "apply_scale": ("apply_yarn_scaling", bool),
     }
+
+    # Silence warning from Transformers > v5
+    def _filter_rope_warning(record):
+        return record.getMessage() != (
+            r"Unrecognized keys in `rope_parameters` for 'rope_type'='yarn': "
+            r"{'apply_yarn_scaling'}"
+        )
+
+    logger = logging.getLogger("transformers.modeling_rope_utils")
+    logger.addFilter(_filter_rope_warning)
+
     yarn_config = config.get("yarn") or {}
     config["rope_parameters"] = {
         "rope_type": "yarn",
@@ -128,9 +140,10 @@ def _remap_mistral_yarn_args(config: dict) -> dict:
     if rope_theta := config.pop("rope_theta", None):
         config["rope_parameters"]["rope_theta"] = rope_theta
 
-    for old_name, new_name in yarn_config_map.items():
+    for old_name, (new_name, cast) in yarn_config_map.items():
         if old_name in yarn_config:
-            config["rope_parameters"][new_name] = yarn_config.pop(old_name)
+            # Cast to remove Transformers > v5 type warnings
+            config["rope_parameters"][new_name] = cast(yarn_config.pop(old_name))
 
     assert len(yarn_config) == 0, f"Unparsed yarn config: {yarn_config}"
 
@@ -154,6 +167,7 @@ def _remap_general_mistral_args(config: dict) -> dict:
         "tie_word_embeddings": ("tied_embeddings", False),
         "max_seq_len": ("max_seq_len", config.get("max_position_embeddings", 128_000)),
         "max_position_embeddings": ("max_position_embeddings", 128_000),
+        "dtype": ("dtype", config.get("dtype")),
     }
 
     for key, new_key in config_mapping.items():
