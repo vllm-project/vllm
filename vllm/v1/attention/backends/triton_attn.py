@@ -9,6 +9,9 @@ import torch
 
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import CUDAGraphMode, VllmConfig
+from vllm.distributed.kv_transfer.kv_transfer_state import (
+    has_kv_transfer_group,
+)
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -639,6 +642,13 @@ class TritonAttentionImpl(AttentionImpl):
             # Lazily allocate per-(token,head) scale caches on first call.
             # [num_blocks, block_size, num_kv_heads]
             if self._int8_k_scale_cache is None:
+                if has_kv_transfer_group():
+                    raise NotImplementedError(
+                        "INT8 per-token KV cache scales are stored in "
+                        "backend-local tensors and are not yet compatible "
+                        "with KV connector. This will be supported in a "
+                        "future release."
+                    )
                 num_blocks = key_cache.shape[0]
                 block_size = key_cache.shape[1]
                 num_kv_heads = key_cache.shape[2]
