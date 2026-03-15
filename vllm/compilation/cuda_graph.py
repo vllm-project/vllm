@@ -280,9 +280,7 @@ class CUDAGraphWrapper:
             # When a splitting_op between two pieces allocates new tensors,
             # the next piece's inputs will have different addresses. We need
             # to copy the new data into these saved buffers before replay.
-            entry.input_buffers = [
-                x for x in args if isinstance(x, torch.Tensor)
-            ]
+            entry.input_buffers = [x for x in args if isinstance(x, torch.Tensor)]
             cudagraph = torch.cuda.CUDAGraph()
 
             with ExitStack() as stack:
