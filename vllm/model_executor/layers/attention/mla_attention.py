@@ -365,6 +365,10 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             )
 
         # Initialize KV cache quantization attributes
+        # The C++ cache ops only accept "auto" or fp8 variants.
+        # Map non-quantized dtypes to "auto".
+        if kv_cache_dtype in ("bfloat16", "float16"):
+            kv_cache_dtype = "auto"
         self.kv_cache_dtype = kv_cache_dtype
         self.calculate_kv_scales = calculate_kv_scales
         _init_kv_cache_quant(self, quant_config, prefix)
