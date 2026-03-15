@@ -109,6 +109,20 @@ else:
 VLLM_PATH = Path(__file__).parent.parent
 """Path to root of the vLLM repository."""
 
+# ROCm: disable skinny GEMM to avoid non-deterministic results from
+# atomic reductions in wvSplitKrc kernel.
+# See: https://github.com/vllm-project/vllm/pull/33493#issuecomment-3906083975
+ROCM_ENV_OVERRIDES = (
+    {"VLLM_ROCM_USE_SKINNY_GEMM": "0"} if current_platform.is_rocm() else {}
+)
+# ROCm: disable prefix caching and eliminate batch variance to reduce
+# test flakiness.
+ROCM_EXTRA_ARGS = (
+    ["--no-enable-prefix-caching", "--max-num-seqs", "1"]
+    if current_platform.is_rocm()
+    else []
+)
+
 
 class RemoteVLLMServer:
     """Base class for launching vLLM server subprocesses for testing.
@@ -129,6 +143,17 @@ class RemoteVLLMServer:
     ) -> None:
         """Subclasses override this method to customize server process launch"""
         raise NotImplementedError
+
+    def _pre_download_model(self, model: str, args) -> None:
+        """Download model weights before starting the server to avoid timeout."""
+        is_local = os.path.isdir(model)
+        if not is_local:
+            engine_args = AsyncEngineArgs.from_cli_args(args)
+            model_config = engine_args.create_model_config()
+            load_config = engine_args.create_load_config()
+
+            model_loader = get_model_loader(load_config)
+            model_loader.download_model(model_config)
 
     def __init__(
         self,
@@ -181,15 +206,7 @@ class RemoteVLLMServer:
             getattr(args, "show_hidden_metrics_for_version", None) is not None
         )
 
-        # download the model before starting the server to avoid timeout
-        is_local = os.path.isdir(model)
-        if not is_local:
-            engine_args = AsyncEngineArgs.from_cli_args(args)
-            model_config = engine_args.create_model_config()
-            load_config = engine_args.create_load_config()
-
-            model_loader = get_model_loader(load_config)
-            model_loader.download_model(model_config)
+        self._pre_download_model(model, args)
 
         # Record GPU memory before server start so we know what
         # "released" looks like.
@@ -218,13 +235,10 @@ class RemoteVLLMServer:
         except (ProcessLookupError, OSError):
             pgid = None
 
-        # Phase 1: graceful SIGTERM to the entire process group
-        if pgid is not None:
-            with contextlib.suppress(ProcessLookupError, OSError):
-                os.killpg(pgid, signal.SIGTERM)
-                print(f"[RemoteOpenAIServer] Sent SIGTERM to process group {pgid}")
-        else:
+        # Phase 1: graceful SIGTERM to the root process
+        with contextlib.suppress(ProcessLookupError, OSError):
             self.proc.terminate()
+            print(f"[RemoteOpenAIServer] Sent SIGTERM to process {pid}")
 
         try:
             self.proc.wait(timeout=15)
@@ -500,6 +514,19 @@ class RemoteLaunchRenderServer(RemoteVLLMServer):
             stderr=sys.stderr,
             start_new_session=True,
         )
+
+    def _pre_download_model(self, model: str, args) -> None:
+        """Download only the tokenizer files (no model weights needed)."""
+        is_local = os.path.isdir(model)
+        if not is_local:
+            engine_args = AsyncEngineArgs.from_cli_args(args)
+            model_config = engine_args.create_model_config()
+            get_tokenizer(
+                model_config.tokenizer,
+                tokenizer_mode=model_config.tokenizer_mode,
+                trust_remote_code=model_config.trust_remote_code,
+                revision=model_config.tokenizer_revision,
+            )
 
     def _wait_for_gpu_memory_release(self, timeout: float = 30.0):
         pass  # No GPU used
@@ -1586,6 +1613,41 @@ def override_cutlass_fp8_supported(value: bool):
         return_value=value,
     ):
         yield
+
+
+def disable_aiter_plain_rmsnorm(monkeypatch) -> None:
+    """Patch dispatch_rocm_rmsnorm_func so the plain (non-fused) rms_norm path
+    always uses the native float32 kernel for the duration of a test.
+
+    The fused path (rms_norm2d_with_add, selected when with_fused_add=True) is
+    left on AITER -- only the plain path is redirected to native.
+
+    AITER's plain rms_norm accumulates variance in bfloat16 (~1 ULP/call),
+    which drifts the KV cache over many decode steps. This drift is irrelevant
+    for a trained model (rank-1/rank-2 gap ~1-3 nats >> 1 ULP), but breaks
+    logprob comparison tests with randomly-initialised models like
+    TitanML/tiny-mixtral whose rank-1/rank-2 gap is only O(1/sqrt(V)) ~0.006
+    nats -- smaller than the accumulated per-step error.
+    """
+    import torch
+
+    import vllm.model_executor.layers.layernorm as _ln_mod
+    from vllm.model_executor.layers.layernorm import rms_norm as _native
+
+    _orig = _ln_mod.dispatch_rocm_rmsnorm_func
+
+    def _native_plain(
+        with_fused_add: bool, dtype: torch.dtype, use_aiter: bool = False
+    ):
+        if (
+            use_aiter
+            and not with_fused_add
+            and dtype in (torch.float16, torch.bfloat16)
+        ):
+            return _native
+        return _orig(with_fused_add, dtype, use_aiter)
+
+    monkeypatch.setattr(_ln_mod, "dispatch_rocm_rmsnorm_func", _native_plain)
 
 
 def prep_prompts(batch_size: int, ln_range: tuple[int, int] = (800, 1100)):

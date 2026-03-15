@@ -45,6 +45,7 @@ from vllm.benchmarks.datasets import SampleRequest, add_dataset_parser, get_samp
 from vllm.benchmarks.lib.endpoint_request_func import (
     ASYNC_REQUEST_FUNCS,
     OPENAI_COMPATIBLE_BACKENDS,
+    POOLING_BACKENDS,
     RequestFuncInput,
     RequestFuncOutput,
 )
@@ -1730,11 +1731,7 @@ async def main_async(
     goodput_config_dict = check_goodput_args(args)
 
     backend = args.backend
-    task_type = (
-        TaskType.POOLING
-        if "embeddings" in backend or "rerank" in backend
-        else TaskType.GENERATION
-    )
+    task_type = TaskType.POOLING if backend in POOLING_BACKENDS else TaskType.GENERATION
 
     # Collect the sampling parameters.
     if task_type == TaskType.GENERATION:
