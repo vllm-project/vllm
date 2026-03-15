@@ -21,6 +21,9 @@ steps:
   num_devices: 2
   source_file_dependencies:
   - vllm/distributed/
+  - vllm/engine/
+  - vllm/executor/
+  - vllm/worker/worker_base.py
   - vllm/v1/engine/
   - vllm/v1/worker/
   - tests/v1/distributed
@@ -40,6 +43,11 @@ steps:
   source_file_dependencies:
   - vllm/compilation/
   - vllm/distributed/
+  - vllm/engine/
+  - vllm/executor/
+  - vllm/worker/worker_base.py
+  - vllm/v1/engine/
+  - vllm/v1/worker/
   - tests/compile/fullgraph/test_basic_correctness.py
   - tests/compile/test_wrapper.py
   - tests/entrypoints/llm/test_collective_rpc.py
