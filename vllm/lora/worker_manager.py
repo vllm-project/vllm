@@ -98,24 +98,27 @@ class WorkerLoRAManager:
 
     def _load_adapter(self, lora_request: LoRARequest) -> LoRAModel:
         try:
-            supported_lora_modules = self._adapter_manager.supported_lora_modules
-            packed_modules_mapping = self._adapter_manager.packed_modules_mapping
-            expected_lora_lst: list[str] = []
-            for module in supported_lora_modules:
-                if module in packed_modules_mapping:
-                    expected_lora_lst.extend(packed_modules_mapping[module])
-                else:
-                    expected_lora_lst.append(module)
-                if module == "experts":
-                    expected_lora_lst.append(module)
-            expected_lora_modules = set(expected_lora_lst)
-            lora_path = get_adapter_absolute_path(lora_request.lora_path)
+            if lora_request.source == "path":
+                supported_lora_modules = self._adapter_manager.supported_lora_modules
+                packed_modules_mapping = self._adapter_manager.packed_modules_mapping
+                expected_lora_lst: list[str] = []
+                for module in supported_lora_modules:
+                    if module in packed_modules_mapping:
+                        expected_lora_lst.extend(packed_modules_mapping[module])
+                    else:
+                        expected_lora_lst.append(module)
+                    if module == "experts":
+                        expected_lora_lst.append(module)
+                expected_lora_modules = set(expected_lora_lst)
+                lora_path = get_adapter_absolute_path(lora_request.lora_path)
 
-            peft_helper = PEFTHelper.from_local_dir(
-                lora_path,
-                self.max_position_embeddings,
-                lora_request.tensorizer_config_dict,
-            )
+                peft_helper = PEFTHelper.from_local_dir(
+                    lora_path,
+                    self.max_position_embeddings,
+                    lora_request.tensorizer_config_dict,
+                )
+            else:
+                peft_helper = PEFTHelper.from_dict(lora_request.peft_config)
 
             # Validates the LoRA configuration against requirements before
             # loading weights, throwing an exception if validation fails.
@@ -129,18 +132,30 @@ class WorkerLoRAManager:
             # Get model-defined prefixes to skip during LoRA loading.
             lora_skip_prefixes = getattr(model, "lora_skip_prefixes", None)
 
-            lora = self._lora_model_cls.from_local_checkpoint(
-                lora_path,
-                expected_lora_modules,
-                peft_helper=peft_helper,
-                lora_model_id=lora_request.lora_int_id,
-                device="cpu",
-                dtype=self.lora_config.lora_dtype,
-                model_vocab_size=self.vocab_size,
-                tensorizer_config_dict=lora_request.tensorizer_config_dict,
-                weights_mapper=hf_to_vllm_mapper,
-                skip_prefixes=lora_skip_prefixes,
-            )
+            if lora_request.source == "path":
+                lora = self._lora_model_cls.from_local_checkpoint(
+                    lora_path,
+                    expected_lora_modules,
+                    peft_helper=peft_helper,
+                    lora_model_id=lora_request.lora_int_id,
+                    device="cpu",
+                    dtype=self.lora_config.lora_dtype,
+                    model_vocab_size=self.vocab_size,
+                    tensorizer_config_dict=lora_request.tensorizer_config_dict,
+                    weights_mapper=hf_to_vllm_mapper,
+                    skip_prefixes=lora_skip_prefixes,
+                )
+            else:
+                lora = self._lora_model_cls.from_lora_tensors(
+                    lora_model_id=lora_request.lora_int_id,
+                    tensors=lora_request.lora_tensors,
+                    peft_helper=peft_helper,
+                    device="cpu",
+                    dtype=self.lora_config.lora_dtype,
+                    model_vocab_size=self.vocab_size,
+                    weights_mapper=hf_to_vllm_mapper,
+                    skip_prefixes=lora_skip_prefixes,
+                )
 
         except FileNotFoundError as e:
             # FileNotFoundError should be raised if both
