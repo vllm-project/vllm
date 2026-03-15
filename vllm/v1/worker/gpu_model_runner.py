@@ -1304,7 +1304,7 @@ class GPUModelRunner(
                 self.input_batch.token_ids_cpu[req_index, start_idx:end_idx] = ff_tokens
                 self.input_batch.num_tokens_no_spec[req_index] = end_idx
                 req_state.output_token_ids.extend(ff_tokens)
-                
+
         # Add the new or resumed requests to the persistent batch.
         # The smaller empty indices are filled first.
         for request in reqs_to_add:

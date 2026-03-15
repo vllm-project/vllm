@@ -241,7 +241,7 @@ class SchedulerOutput:
     # Jump-forward decoding: grammar-forced tokens to write to the buffer.
     # req_id -> list of deterministic token IDs
     jump_forward_tokens: dict[str, list[int]] = field(default_factory=dict)
-    
+
     @classmethod
     def make_empty(cls) -> "SchedulerOutput":
         return cls(

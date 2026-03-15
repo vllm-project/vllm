@@ -52,7 +52,7 @@ class StructuredOutputGrammar(ABC):
         inference. Default implementation returns empty list.
         """
         return []
-    
+
     @abstractmethod
     def validate_tokens(self, tokens: list[int]) -> list[int]:
         """

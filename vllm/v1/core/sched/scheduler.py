@@ -1447,10 +1447,9 @@ class Scheduler(SchedulerInterface):
                         for i, tok in enumerate(ff_tokens):
                             request.append_output_token_ids(tok)
                             new_token_ids.append(tok)
-                            stopped = check_stop(
-                                request, self.max_model_len)
+                            stopped = check_stop(request, self.max_model_len)
                             if stopped:
-                                ff_tokens = ff_tokens[:i + 1]
+                                ff_tokens = ff_tokens[: i + 1]
                                 break
                         self.pending_ff_tokens[req_id] = ff_tokens
 

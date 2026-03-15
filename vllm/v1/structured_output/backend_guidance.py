@@ -173,7 +173,7 @@ class GuidanceGrammar(StructuredOutputGrammar):
         self.check_error()
 
         return r
-    
+
     def advance_ff_tokens(self) -> list[int]:
         """Compute deterministic fast-forward tokens from the grammar.
 
@@ -189,7 +189,7 @@ class GuidanceGrammar(StructuredOutputGrammar):
             self.ll_matcher.consume_tokens(ff_tokens)
             self.check_error()
         return ff_tokens
-    
+
     def validate_tokens(self, tokens: list[int]) -> list[int]:
         """Checks if the list of tokens are accepted by the parser in sequence.
         Will not advance the parser.
