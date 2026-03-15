@@ -1,6 +1,4 @@
 group: Intel
-depends_on: 
-  - image-build-xpu
 steps:
   - label: ":docker: Build XPU image"
     soft_fail: true
@@ -17,6 +15,8 @@ steps:
         - exit_status: -10  # Agent was lost
           limit: 2
   - label: "Intel example Test"
+    depends_on:
+      - image-build-xpu
     timeout_in_minutes: 30
     device: intel_gpu
     no_plugin: true
@@ -36,6 +36,8 @@ steps:
       - python3 examples/offline_inference/basic/generate.py --model ibm-research/PowerMoE-3b --block-size 64 --enforce-eager -tp 2
       - python3 examples/offline_inference/basic/generate.py --model ibm-research/PowerMoE-3b --block-size 64 --enforce-eager -tp 2 --enable-expert-parallel
   - label: "Intel V1 Test"
+    depends_on:
+      - image-build-xpu
     timeout_in_minutes: 30
     device: intel_gpu
     no_plugin: true
