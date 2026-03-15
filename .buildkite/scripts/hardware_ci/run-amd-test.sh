@@ -526,6 +526,7 @@ else
     -e "MODELSCOPE_CACHE=${MODELSCOPE_MOUNT}" \
     -e "VLLM_TEST_CACHE=${VLLM_TEST_CACHE_MOUNT}" \
     -e "VLLM_CACHE_ROOT=${VLLM_CACHE_MOUNT}" \
+    -e "VLLM_MEDIA_CACHE=${VLLM_CACHE_MOUNT}/media_cache" \
     -e "PYTHONPATH=${MYPYTHONPATH}" \
     --name "${container_name}" \
     "${image_name}" \
