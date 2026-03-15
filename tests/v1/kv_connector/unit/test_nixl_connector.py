@@ -2422,7 +2422,7 @@ def test_handshake_decode_errors(default_vllm_config, dist_init, error_scenario)
         remote_block_size=decode_worker._block_size,  # shared state
         is_mla=decode_worker.use_mla,
         total_num_kv_heads=decode_worker.model_config.get_total_num_kv_heads(),
-        attn_backend=backend,
+        attn_backends=[backend],
         tensor_shape=test_shape,
     )
 
