@@ -1,0 +1,40 @@
+name: 🤗 Support request for a new model from huggingface
+description: Submit a proposal/request for a new model from huggingface
+title: "[New Model]: "
+labels: ["new model"]
+
+body:
+- type: markdown
+  attributes:
+    value: >
+      #### Before submitting an issue, please make sure the issue hasn't been already addressed by searching through [the existing and past issues](https://github.com/vllm-project/vllm/issues?q=is%3Aissue+sort%3Acreated-desc+).
+
+      #### We also highly recommend you read https://docs.vllm.ai/en/latest/contributing/model/index.html first to understand how to add a new model.
+- type: textarea
+  attributes:
+    label: The model to consider.
+    description: >
+      A huggingface url, pointing to the model, e.g. https://huggingface.co/openai-community/gpt2 .
+  validations:
+    required: true
+- type: textarea
+  attributes:
+    label: The closest model vllm already supports.
+    description: >
+      Here is the list of models already supported by vllm: https://github.com/vllm-project/vllm/tree/main/vllm/model_executor/models . Which model is the most similar to the model you want to add support for?
+- type: textarea
+  attributes:
+    label: What's your difficulty of supporting the model you want?
+    description: >
+      For example, any new operators or new architecture?
+- type: markdown
+  attributes:
+    value: >
+      Thanks for contributing 🎉!
+- type: checkboxes
+  id: askllm
+  attributes:
+    label: Before submitting a new issue...
+    options:
+      - label: Make sure you already searched for relevant issues, and asked the chatbot living at the bottom right corner of the [documentation page](https://docs.vllm.ai/en/latest/), which can answer lots of frequently asked questions.
+        required: true
