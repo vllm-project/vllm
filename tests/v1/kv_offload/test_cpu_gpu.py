@@ -212,3 +212,33 @@ def test_transfer(
             else:
                 expected_value = orig_dst_cache[dst_block]
             torch.testing.assert_close(dst_cache[dst_block].cpu(), expected_value.cpu())
+
+
+def test_mla_backend_rejects_cross_layer_kv_cache():
+    """MLA backends must not use cross-layer KV cache layout because
+    their kernels assume contiguous per-layer block layout."""
+    from vllm.model_executor.layers.attention.mla_attention import (
+        MLACommonBackend,
+    )
+
+    with pytest.raises(NotImplementedError):
+        MLACommonBackend.get_kv_cache_stride_order(include_num_layers_dimension=True)
+    # Normal (per-layer) path still works
+    assert MLACommonBackend.get_kv_cache_stride_order(
+        include_num_layers_dimension=False
+    ) == (0, 1, 2)
+
+
+def test_deepseek_v32_indexer_rejects_cross_layer_kv_cache():
+    """DeepseekV32Indexer backend must not use cross-layer KV cache layout."""
+    from vllm.v1.attention.backends.mla.indexer import (
+        DeepseekV32IndexerBackend,
+    )
+
+    with pytest.raises(NotImplementedError):
+        DeepseekV32IndexerBackend.get_kv_cache_stride_order(
+            include_num_layers_dimension=True
+        )
+    assert DeepseekV32IndexerBackend.get_kv_cache_stride_order(
+        include_num_layers_dimension=False
+    ) == (0, 1, 2)

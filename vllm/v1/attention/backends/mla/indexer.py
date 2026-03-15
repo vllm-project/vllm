@@ -63,7 +63,9 @@ class DeepseekV32IndexerBackend(AttentionBackend):
         include_num_layers_dimension: bool = False,
     ) -> tuple[int, ...]:
         if include_num_layers_dimension:
-            return (0, 1, 2, 3)
+            # DeepseekV32Indexer kernels do not support cross-layer
+            # KV cache layout.
+            raise NotImplementedError
         return (0, 1, 2)
 
 
