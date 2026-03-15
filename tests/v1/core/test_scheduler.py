@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import json
 import dataclasses
 from unittest.mock import Mock
 
+import numpy as np
 import pytest
 import torch
 
@@ -501,6 +503,65 @@ def test_stop_via_update_from_output():
     assert len(scheduler.running) == 1
     assert not requests[0].is_finished()
     assert list(requests[0].output_token_ids) == [EOS_TOKEN_ID, 10, 11]
+
+
+def test_update_from_output_emits_routed_experts_before_stop(monkeypatch, tmp_path):
+    model_dir = tmp_path / "tiny-opt"
+    model_dir.mkdir()
+    (model_dir / "config.json").write_text(
+        json.dumps(
+            {
+                "model_type": "opt",
+                "hidden_size": 16,
+                "num_hidden_layers": 2,
+                "ffn_dim": 32,
+                "num_attention_heads": 2,
+                "vocab_size": 128,
+                "max_position_embeddings": 128,
+                "word_embed_proj_dim": 16,
+            }
+        )
+    )
+
+    scheduler = create_scheduler(model=str(model_dir), skip_tokenizer_init=True)
+    scheduler.vllm_config.model_config.enable_return_routed_experts = True
+
+    (request,) = create_requests(num_requests=1, num_tokens=3, max_tokens=4)
+    request.num_computed_tokens = request.num_tokens
+    request.status = RequestStatus.RUNNING
+    scheduler.requests[request.request_id] = request
+    scheduler.running.append(request)
+
+    routed_experts = np.array([[[7, 8]]], dtype=np.int32)
+    get_routed_experts = Mock(return_value=routed_experts)
+    monkeypatch.setattr(scheduler, "_get_routed_experts", get_routed_experts)
+
+    scheduler_output = SchedulerOutput(
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=CachedRequestData.make_empty(),
+        num_scheduled_tokens={request.request_id: 1},
+        total_num_scheduled_tokens=1,
+        scheduled_encoder_inputs={},
+        scheduled_spec_decode_tokens={},
+        num_common_prefix_blocks=[],
+        finished_req_ids=set(),
+        free_encoder_mm_hashes=[],
+    )
+    model_output = ModelRunnerOutput(
+        req_ids=[request.request_id],
+        req_id_to_index={request.request_id: 0},
+        sampled_token_ids=[[123]],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+
+    engine_core_outputs = scheduler.update_from_output(scheduler_output, model_output)
+
+    assert get_routed_experts.call_count == 1
+    output = engine_core_outputs[0].outputs[0]
+    assert output.finish_reason is None
+    assert np.array_equal(output.routed_experts, routed_experts)
 
 
 def test_check_stop_min_tokens():

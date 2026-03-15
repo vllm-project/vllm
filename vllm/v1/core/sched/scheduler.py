@@ -1380,8 +1380,15 @@ class Scheduler(SchedulerInterface):
 
             routed_experts = None
             finish_reason = None
-            if stopped:
+            if (
+                new_token_ids
+                and request.sampling_params is not None
+                and self.vllm_config.model_config.enable_return_routed_experts
+            ):
                 routed_experts = self._get_routed_experts(request)
+            if stopped:
+                if routed_experts is None:
+                    routed_experts = self._get_routed_experts(request)
 
                 # Capture finish_reason BEFORE _handle_stopped_request, which may
                 # reset the status to WAITING for streaming requests that continue.
