@@ -33,7 +33,6 @@ from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
 from vllm.model_executor.layers.fused_moe.fused_moe_modular_method import (
     FusedMoEModularMethod,
 )
-from vllm.model_executor.layers.fused_moe.routed_experts_capturer import get_global_experts_capturer
 from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
     init_aiter_topK_meta_data,
 )
@@ -553,12 +552,8 @@ class FusedMoE(CustomOp):
         moe_layer_id = FusedMoE._next_moe_layer_id
         FusedMoE._next_moe_layer_id += 1
         self.moe_layer_id = moe_layer_id
-        self.router.set_capture_fn(
-            lambda topk_ids, _lid=moe_layer_id:
-                get_global_experts_capturer().capture(
-                    layer_id=_lid, topk_ids=topk_ids
-                )
-        )
+        # Routing capture buffer is bound later by
+        # bind_routing_capture_to_model() after capturer initialization.
 
         self.moe_config: FusedMoEConfig = FusedMoEConfig(
             num_experts=self.global_num_experts,

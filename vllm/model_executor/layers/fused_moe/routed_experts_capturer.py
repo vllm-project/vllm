@@ -10,6 +10,38 @@ from vllm.config.model import ModelConfig
 
 logger = logging.getLogger(__name__)
 
+
+# ---------------------------------------------------------------------------
+# Custom op for routing capture -- traceable by torch.compile / Dynamo.
+#
+# Registered as a formal custom op so that torch.compile traces through it
+# cleanly without graph breaks.  ALL TP ranks call this op with a real
+# device buffer to ensure identical CUDA graph structure (symmetry).
+# Non-rank-0 buffers are written but never read for D2H.
+# ---------------------------------------------------------------------------
+
+@torch.library.custom_op("vllm::capture_routing", mutates_args={"buffer"})
+def capture_routing_op(
+    buffer: torch.Tensor,
+    topk_ids: torch.Tensor,
+    layer_id: int,
+    batch_size: int,
+) -> None:
+    buffer[layer_id, :batch_size, :].copy_(
+        topk_ids[:batch_size].to(buffer.dtype), non_blocking=True
+    )
+
+
+@capture_routing_op.register_fake
+def _capture_routing_op_fake(
+    buffer: torch.Tensor,
+    topk_ids: torch.Tensor,
+    layer_id: int,
+    batch_size: int,
+) -> None:
+    pass
+
+
 _GB = 1024 * 1024 * 1024
 _MB = 1024 * 1024
 
@@ -250,26 +282,39 @@ class _RoutedExpertsCapturerReal(RoutedExpertsCapturer):
             device=device,
         )
 
-        # ---- Async D2H pipeline ----
-        # Same (L, N, K) layout as device_cache.buffer.
-        self._pinned_staging = torch.zeros(
-            (self.num_hidden_layers, num_batched_tokens, self.num_experts_per_tok),
-            dtype=_RoutedExpertsDeviceCache.DTYPE,
-            pin_memory=True,
-        )
-        self._copy_stream = torch.cuda.Stream(device=device)
-        self._copy_event = torch.cuda.Event()
+        # ---- Async D2H pipeline (rank-0 only) ----
+        # Non-rank-0 workers only need the device buffer for symmetric
+        # CUDA graph capture; they skip the D2H pipeline entirely.
         self._has_pending_copy = False
-
         self._pending_positions: np.ndarray | None = None
         self._pending_num_scheduled: dict[str, int] | None = None
         self._pending_total_tokens: int = 0
 
-        pinned_mb = get_tensor_size_bytes(self._pinned_staging) / _MB
-        logger.info(
-            f"Routing experts pinned staging buffer allocated. "
-            f"shape={tuple(self._pinned_staging.shape)}, size={pinned_mb:.2f} MB"
-        )
+        if not skip_host_cache:
+            # Same (L, N, K) layout as device_cache.buffer.
+            self._pinned_staging = torch.zeros(
+                (self.num_hidden_layers, num_batched_tokens,
+                 self.num_experts_per_tok),
+                dtype=_RoutedExpertsDeviceCache.DTYPE,
+                pin_memory=True,
+            )
+            self._copy_stream = torch.cuda.Stream(device=device)
+            self._copy_event = torch.cuda.Event()
+
+            pinned_mb = get_tensor_size_bytes(self._pinned_staging) / _MB
+            logger.info(
+                f"Routing experts pinned staging buffer allocated. "
+                f"shape={tuple(self._pinned_staging.shape)}, "
+                f"size={pinned_mb:.2f} MB"
+            )
+        else:
+            self._pinned_staging = None
+            self._copy_stream = None
+            self._copy_event = None
+            logger.info(
+                f"Routing experts device-only capturer (rank != 0). "
+                f"Device buffer shape={tuple(self.device_cache.buffer.shape)}"
+            )
 
     def capture(self, layer_id: int, topk_ids: torch.Tensor):
         self.device_cache.capture_fwd_routed_experts(layer_id, topk_ids)
@@ -474,8 +519,23 @@ def init_routed_experts_capturer_with_shared_cache(
         return capturer
 
     if world_size > 1 and rank != 0:
-        logger.info(f"Skipping routed experts capturer for rank {rank}")
-        capturer = _RoutedExpertsCapturerNoop()
+        # Non-rank-0 workers get a device-only capturer (no host cache,
+        # no D2H pipeline) so that ALL ranks have a real device buffer.
+        # This ensures the custom op call in every MoE layer produces
+        # identical CUDA graph structure across TP ranks.
+        logger.info(
+            f"Creating device-only routed experts capturer for rank {rank}"
+        )
+        capturer = RoutedExpertsCapturer.create(
+            enable=True,
+            model_config=model_config,
+            num_fused_shared_experts=num_fused_shared_experts,
+            num_batched_tokens=num_batched_tokens,
+            max_running_requests=max_running_requests,
+            max_model_len=max_model_len,
+            device=device,
+            skip_host_cache=True,
+        )
         set_global_experts_capturer(capturer)
         return capturer
 
@@ -491,3 +551,30 @@ def init_routed_experts_capturer_with_shared_cache(
     )
     set_global_experts_capturer(capturer)
     return capturer
+
+
+def bind_routing_capture_to_model(model) -> None:
+    """Bind routing capture buffers to all FusedMoE layers in the model.
+
+    Must be called AFTER init_routed_experts_capturer_with_shared_cache()
+    and BEFORE CUDA graph capture.  All TP ranks get a real buffer so
+    that the custom op call produces identical graph structure.
+    """
+    from vllm.model_executor.layers.fused_moe.layer import FusedMoE
+
+    capturer = get_global_experts_capturer()
+    device_cache = capturer.get_device_cache()
+    if device_cache is None:
+        return  # routing capture not enabled
+
+    buffer = device_cache.buffer
+    bound = 0
+    for module in model.modules():
+        if isinstance(module, FusedMoE):
+            module.router.set_capture_buffer(buffer, module.moe_layer_id)
+            bound += 1
+
+    logger.info(
+        f"Bound routing capture buffer to {bound} FusedMoE layers. "
+        f"Buffer shape={tuple(buffer.shape)}"
+    )

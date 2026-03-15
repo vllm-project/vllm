@@ -22,6 +22,7 @@ from tqdm import tqdm
 
 import vllm.envs as envs
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
+    bind_routing_capture_to_model,
     get_global_experts_capturer,
 )
 from vllm.compilation.counter import compilation_counter
@@ -891,11 +892,11 @@ class GPUModelRunner(
         else:
             num_fused_shared_experts = 0
 
-        # Use the rank-aware initializer: only rank 0 creates a real capturer
-        # (with GPU device cache + host cache).  Non-rank-0 workers get a Noop
-        # capturer so they don't allocate buffers, run D2H copies, or add
-        # capture_fn overhead to the forward pass.  All TP ranks see the same
-        # routing decisions, so only rank 0 needs to capture.
+        # Use the rank-aware initializer: rank 0 gets a full capturer (GPU
+        # device cache + host cache + D2H pipeline).  Non-rank-0 workers get
+        # a device-only capturer (GPU buffer but no host cache or D2H) so
+        # that ALL ranks call the custom op identically, ensuring symmetric
+        # CUDA graph structure across TP ranks.
         tp_group = get_tp_group()
         init_routed_experts_capturer_with_shared_cache(
             enable=self.vllm_config.cache_config.return_routed_experts,
@@ -5556,6 +5557,7 @@ class GPUModelRunner(
                 "ensure `cudagraph_mode` was not manually set to `NONE`"
             )
             self.init_routed_experts_capturer()
+            bind_routing_capture_to_model(self.model)
             return 0
 
         compilation_counter.num_gpu_runner_capture_triggers += 1
@@ -5589,6 +5591,7 @@ class GPUModelRunner(
         # first mode write to the old (dead) buffer while the active capturer
         # reads from the new one, causing prefill tokens to have stale data.
         self.init_routed_experts_capturer()
+        bind_routing_capture_to_model(self.model)
         with freeze_gc(), graph_capture(device=self.device):
             start_free_gpu_memory = torch.cuda.mem_get_info()[0]
 
