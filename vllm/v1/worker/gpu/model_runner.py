@@ -1018,6 +1018,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             "input_ids": input_batch.input_ids,
             "positions": input_batch.positions,
             "inputs_embeds": inputs_embeds,
+            "intermediate_tensors": intermediate_tensors,
             # NOTE: Values returned by `prepare_inputs` will override the default
             # values above.
             **self.model_state.prepare_inputs(input_batch, self.req_states),
@@ -1026,7 +1027,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Update for non-first PP ranks.
             model_inputs["input_ids"] = None
             model_inputs["inputs_embeds"] = None
-            model_inputs["intermediate_tensors"] = intermediate_tensors
+            assert intermediate_tensors is not None
 
         # Run model.
         if batch_desc.cg_mode == CUDAGraphMode.FULL:
