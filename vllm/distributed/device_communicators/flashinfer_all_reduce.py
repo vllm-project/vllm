@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+import atexit
+
 import torch
 import torch.distributed as dist
 from torch.distributed import ProcessGroup
@@ -144,6 +146,13 @@ def destroy_fi_ar_workspace():
     if _fi_ar_workspace is not None:
         _fi_ar_workspace.destroy()
         _fi_ar_workspace = None
+
+
+# Register atexit handler to destroy workspaces during interpreter shutdown,
+# before sys.meta_path is set to None. This prevents the
+# "ImportError: sys.meta_path is None" error in
+# AllReduceFusionWorkspace.__del__ when Python is shutting down (e.g. ctrl-c).
+atexit.register(destroy_fi_ar_workspace)
 
 
 class FlashInferAllReduce:
