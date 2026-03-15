@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 # start server:
 export VLLM_USE_V2_MODEL_RUNNER=1
@@ -28,13 +30,19 @@ Usage:
   2. Run this script:
      python test_prompt_logprobs_temp.py [--model <model-name>] [--port 8000]
 """
+
 import argparse
 import math
+
 import requests
 
 
-def get_prompt_logprobs(base_url: str, model: str, prompt: str,
-                        prompt_logprobs_temperature: float | None = None):
+def get_prompt_logprobs(
+    base_url: str,
+    model: str,
+    prompt: str,
+    prompt_logprobs_temperature: float | None = None,
+):
     """Send a completion request with prompt_logprobs and optional temperature."""
     payload = {
         "model": model,
@@ -84,35 +92,35 @@ def main():
     # Fetch probabilities at three temperature settings
     print("\nFetching prompt logprobs...")
 
-    resp_low = get_prompt_logprobs(base_url, args.model, prompt,
-                                   prompt_logprobs_temperature=0.1)
-    probs_low = extract_selected_probs(
-        resp_low["choices"][0]["prompt_logprobs"]
+    resp_low = get_prompt_logprobs(
+        base_url, args.model, prompt, prompt_logprobs_temperature=0.1
     )
+    probs_low = extract_selected_probs(resp_low["choices"][0]["prompt_logprobs"])
 
     resp_med = get_prompt_logprobs(base_url, args.model, prompt)
-    probs_med = extract_selected_probs(
-        resp_med["choices"][0]["prompt_logprobs"]
-    )
+    probs_med = extract_selected_probs(resp_med["choices"][0]["prompt_logprobs"])
 
-    resp_high = get_prompt_logprobs(base_url, args.model, prompt,
-                                    prompt_logprobs_temperature=5.0)
-    probs_high = extract_selected_probs(
-        resp_high["choices"][0]["prompt_logprobs"]
+    resp_high = get_prompt_logprobs(
+        base_url, args.model, prompt, prompt_logprobs_temperature=5.0
     )
+    probs_high = extract_selected_probs(resp_high["choices"][0]["prompt_logprobs"])
 
     n = min(len(probs_low), len(probs_med), len(probs_high))
 
     # Print per-token comparison
-    print(f"\n{'Pos':>4}  {'Low(0.1)':>10}  {'Med(1.0)':>10}  {'High(5.0)':>10}  "
-          f"{'Low>Med':>8}  {'Med>High':>9}")
+    print(
+        f"\n{'Pos':>4}  {'Low(0.1)':>10}  {'Med(1.0)':>10}  {'High(5.0)':>10}  "
+        f"{'Low>Med':>8}  {'Med>High':>9}"
+    )
     print("-" * 70)
     for i in range(n):
         pl, pm, ph = probs_low[i], probs_med[i], probs_high[i]
         low_gt_med = "✓" if pl > pm else ""
         med_gt_high = "✓" if pm > ph else ""
-        print(f"{i:4d}  {pl:10.6f}  {pm:10.6f}  {ph:10.6f}  "
-              f"{low_gt_med:>8}  {med_gt_high:>9}")
+        print(
+            f"{i:4d}  {pl:10.6f}  {pm:10.6f}  {ph:10.6f}  "
+            f"{low_gt_med:>8}  {med_gt_high:>9}"
+        )
 
     # Token-level statistics: low temp vs medium temp
     low_gt_med_count = sum(1 for i in range(n) if probs_low[i] > probs_med[i])
@@ -120,30 +128,42 @@ def main():
 
     avg_low_temp_prob_when_gt = (
         sum(probs_low[i] for i in range(n) if probs_low[i] > probs_med[i])
-        / low_gt_med_count if low_gt_med_count > 0 else 0
+        / low_gt_med_count
+        if low_gt_med_count > 0
+        else 0
     )
     avg_med_temp_prob_when_lt = (
         sum(probs_med[i] for i in range(n) if probs_low[i] > probs_med[i])
-        / low_gt_med_count if low_gt_med_count > 0 else 0
+        / low_gt_med_count
+        if low_gt_med_count > 0
+        else 0
     )
     avg_low_temp_prob_when_le = (
         sum(probs_low[i] for i in range(n) if probs_low[i] <= probs_med[i])
-        / low_le_med_count if low_le_med_count > 0 else 0
+        / low_le_med_count
+        if low_le_med_count > 0
+        else 0
     )
     avg_med_temp_prob_when_ge = (
         sum(probs_med[i] for i in range(n) if probs_low[i] <= probs_med[i])
-        / low_le_med_count if low_le_med_count > 0 else 0
+        / low_le_med_count
+        if low_le_med_count > 0
+        else 0
     )
 
     print(f"\n{'=' * 70}")
     print("Token-Level Statistics: Low Temp (0.1) vs Medium Temp (1.0)")
     print(f"{'=' * 70}")
-    print(f"  Tokens where low_temp_prob > med_temp_prob:  "
-          f"{low_gt_med_count}/{n} ({100*low_gt_med_count/n:.1f}%)")
+    print(
+        f"  Tokens where low_temp_prob > med_temp_prob:  "
+        f"{low_gt_med_count}/{n} ({100 * low_gt_med_count / n:.1f}%)"
+    )
     print(f"    Avg low_temp_prob in these cases: {avg_low_temp_prob_when_gt:.6f}")
     print(f"    Avg med_temp_prob in these cases: {avg_med_temp_prob_when_lt:.6f}")
-    print(f"  Tokens where low_temp_prob <= med_temp_prob: "
-          f"{low_le_med_count}/{n} ({100*low_le_med_count/n:.1f}%)")
+    print(
+        f"  Tokens where low_temp_prob <= med_temp_prob: "
+        f"{low_le_med_count}/{n} ({100 * low_le_med_count / n:.1f}%)"
+    )
     print(f"    Avg low_temp_prob in these cases: {avg_low_temp_prob_when_le:.6f}")
     print(f"    Avg med_temp_prob in these cases: {avg_med_temp_prob_when_ge:.6f}")
 
@@ -153,30 +173,42 @@ def main():
 
     avg_med_temp_prob_when_gt = (
         sum(probs_med[i] for i in range(n) if probs_med[i] > probs_high[i])
-        / med_gt_high_count if med_gt_high_count > 0 else 0
+        / med_gt_high_count
+        if med_gt_high_count > 0
+        else 0
     )
     avg_high_temp_prob_when_lt = (
         sum(probs_high[i] for i in range(n) if probs_med[i] > probs_high[i])
-        / med_gt_high_count if med_gt_high_count > 0 else 0
+        / med_gt_high_count
+        if med_gt_high_count > 0
+        else 0
     )
     avg_med_temp_prob_when_le = (
         sum(probs_med[i] for i in range(n) if probs_med[i] <= probs_high[i])
-        / med_le_high_count if med_le_high_count > 0 else 0
+        / med_le_high_count
+        if med_le_high_count > 0
+        else 0
     )
     avg_high_temp_prob_when_ge = (
         sum(probs_high[i] for i in range(n) if probs_med[i] <= probs_high[i])
-        / med_le_high_count if med_le_high_count > 0 else 0
+        / med_le_high_count
+        if med_le_high_count > 0
+        else 0
     )
 
     print(f"\n{'=' * 70}")
     print("Token-Level Statistics: Medium Temp (1.0) vs High Temp (5.0)")
     print(f"{'=' * 70}")
-    print(f"  Tokens where med_temp_prob > high_temp_prob:  "
-          f"{med_gt_high_count}/{n} ({100*med_gt_high_count/n:.1f}%)")
+    print(
+        f"  Tokens where med_temp_prob > high_temp_prob:  "
+        f"{med_gt_high_count}/{n} ({100 * med_gt_high_count / n:.1f}%)"
+    )
     print(f"    Avg med_temp_prob  in these cases: {avg_med_temp_prob_when_gt:.6f}")
     print(f"    Avg high_temp_prob in these cases: {avg_high_temp_prob_when_lt:.6f}")
-    print(f"  Tokens where med_temp_prob <= high_temp_prob: "
-          f"{med_le_high_count}/{n} ({100*med_le_high_count/n:.1f}%)")
+    print(
+        f"  Tokens where med_temp_prob <= high_temp_prob: "
+        f"{med_le_high_count}/{n} ({100 * med_le_high_count / n:.1f}%)"
+    )
     print(f"    Avg med_temp_prob  in these cases: {avg_med_temp_prob_when_le:.6f}")
     print(f"    Avg high_temp_prob in these cases: {avg_high_temp_prob_when_ge:.6f}")
 
@@ -201,10 +233,10 @@ def main():
     print("  - Low-prob tokens (unlikely) get LOWER probability")
     print("High temp flattens the distribution:")
     print("  - All tokens move toward uniform (1/vocab_size)")
-    print(f"\nKey check: Do all three settings produce DIFFERENT values?")
-    all_different = (avg_p_low != avg_p_med and
-                     avg_p_med != avg_p_high and
-                     avg_p_low != avg_p_high)
+    print("\nKey check: Do all three settings produce DIFFERENT values?")
+    all_different = (
+        avg_p_low != avg_p_med and avg_p_med != avg_p_high and avg_p_low != avg_p_high
+    )
     if all_different:
         print("  ✅ YES — temperature is being applied correctly")
     else:
