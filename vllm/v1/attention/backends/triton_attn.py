@@ -508,14 +508,12 @@ class TritonAttentionImpl(AttentionImpl):
         descale_shape = (cu_seqlens_q.shape[0] - 1, key_cache.shape[2])
         mm_prefix_range_tensor = attn_metadata.mm_prefix_range_tensor
 
-        int8_k_scale_cache = None
-        int8_v_scale_cache = None
+        int8_k_scale_cache = self._int8_k_scale_cache
+        int8_v_scale_cache = self._int8_v_scale_cache
         if self.kv_cache_dtype.startswith("int8"):
             # INT8: three sub-cases, all keep k_descale/v_descale separate from FP8.
             if self._int8_k_scale_cache is not None:
                 # Per-token path: dynamic per-(token,head) scales in cache buffers.
-                int8_k_scale_cache = self._int8_k_scale_cache
-                int8_v_scale_cache = self._int8_v_scale_cache
                 k_descale = None
                 v_descale = None
             elif layer._k_scale.ndim == 1 and layer._k_scale.numel() > 1:
@@ -649,9 +647,7 @@ class TritonAttentionImpl(AttentionImpl):
                         "with KV connector. This will be supported in a "
                         "future release."
                     )
-                num_blocks = key_cache.shape[0]
-                block_size = key_cache.shape[1]
-                num_kv_heads = key_cache.shape[2]
+                num_blocks, block_size, num_kv_heads = key_cache.shape
                 self._int8_k_scale_cache = torch.ones(
                     (num_blocks, block_size, num_kv_heads),
                     dtype=torch.float32,

@@ -263,9 +263,7 @@ def triton_reshape_and_cache_flash_int8_per_token(
     float32 scale in k_scale_cache/v_scale_cache (indexed by the same
     block_table used for the KV cache).
     """
-    num_tokens = key.shape[0]
-    num_kv_heads = key.shape[1]
-    head_size = key.shape[2]
+    num_tokens, num_kv_heads, head_size = key.shape
     head_size_v = value.shape[2]
     head_size_padded = triton.next_power_of_2(max(head_size, head_size_v))
 
