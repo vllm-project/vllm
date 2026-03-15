@@ -64,7 +64,7 @@ def is_mistral_lark_grammar_active(
     return (
         should_apply_mistral_grammar(tool_parser_cls, tokenizer)
         and structured_outputs is not None
-        and request.structured_outputs.lark is not None
+        and structured_outputs.lark is not None
     )
 
 
@@ -357,7 +357,11 @@ class MistralToolParser(ToolParser):
                 "Mistral Tool Parser could not locate the tool call token in "
                 "the tokenizer!"
             )
-        self.grammar_factory = MistralGrammarFactory(tokenizer)
+        self.grammar_factory = (
+            MistralGrammarFactory(tokenizer)  # type: ignore[arg-type]
+            if is_mistral_tokenizer(self.model_tokenizer)
+            else None
+        )
 
     def _should_reason(self, request: ChatCompletionRequest) -> bool:
         if not self.has_reasoning_parser:
@@ -416,6 +420,11 @@ class MistralToolParser(ToolParser):
         else:
             selected_tools = request.tools or []
             mode = request.tool_choice
+
+        assert self.grammar_factory is not None, (
+            "Grammar factory is only support for Mistral Tokenizer"
+        )
+
         lark_grammar = self.grammar_factory.get_lark_from_jinja(
             mode=mode,
             tools=selected_tools,
