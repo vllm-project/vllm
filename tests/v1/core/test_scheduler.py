@@ -4148,13 +4148,8 @@ def test_eagle3_mm_encoder_cache_with_shift():
 
 
 def _setup_jump_forward_request(scheduler, request):
-    """Helper: put a request into RUNNING state with prefill done and
-    one decode token already generated (so the scheduler sees
-    num_new_tokens=1 and schedules the request)."""
+    """Helper: put a request into RUNNING state with prefill done."""
     request.num_computed_tokens = request.num_tokens
-    # Append a dummy output token so that num_tokens_with_spec >
-    # num_computed_tokens, giving the scheduler 1 new token to schedule.
-    request.append_output_token_ids(0)
     request.status = RequestStatus.RUNNING
     scheduler.requests[request.request_id] = request
     scheduler.running.append(request)
@@ -4216,8 +4211,8 @@ def test_jump_forward_tokens_injected():
 
     scheduler.update_from_output(scheduler_output, model_output)
 
-    # The output should contain the setup token + sampled token + all ff_tokens.
-    assert list(req.output_token_ids) == [0, 7, 100, 101, 102]
+    # The output should contain the sampled token + all ff_tokens.
+    assert list(req.output_token_ids) == [7, 100, 101, 102]
     # ff_tokens should be stored for the next schedule step.
     assert scheduler.pending_ff_tokens[req.request_id] == [100, 101, 102]
     # Request should still be running.
@@ -4263,7 +4258,7 @@ def test_jump_forward_tokens_stop_eos():
     scheduler.update_from_output(scheduler_output, model_output)
 
     # Should stop at EOS — token 102 must NOT appear.
-    assert list(req.output_token_ids) == [0, 7, 100, EOS_TOKEN_ID]
+    assert list(req.output_token_ids) == [7, 100, EOS_TOKEN_ID]
     assert req.status == RequestStatus.FINISHED_STOPPED
     # Stored ff_tokens should be truncated to what was actually used.
     assert scheduler.pending_ff_tokens[req.request_id] == [100, EOS_TOKEN_ID]
@@ -4274,8 +4269,7 @@ def test_jump_forward_tokens_stop_max_tokens():
     scheduler = create_scheduler(enable_jump_decoding=True)
     scheduler.structured_output_manager.should_advance = Mock(return_value=True)
 
-    # max_tokens=3: the sampled token (7) counts as 1, so only 2 ff_tokens
-    # should fit.
+    # max_tokens=3: sampled token (7) = 1, so 2 ff_tokens fit before cap.
     requests = create_requests(num_requests=1, max_tokens=3)
     req = requests[0]
     _setup_jump_forward_request(scheduler, req)
@@ -4307,23 +4301,20 @@ def test_jump_forward_tokens_stop_max_tokens():
 
     scheduler.update_from_output(scheduler_output, model_output)
 
-    # 1 setup + 1 sampled + 2 ff = 4, but max_tokens=3 so only 2 ff fit.
-    # output_token_ids: [0 (setup), 7 (sampled), 100, 101] — but
-    # max_tokens counts only output tokens, and we have setup(0) + 7
-    # + 100 = 3 output tokens already at that point → length capped.
-    assert list(req.output_token_ids) == [0, 7, 100]
+    # 1 sampled + 2 ff = 3 = max_tokens → length capped.
+    assert list(req.output_token_ids) == [7, 100, 101]
     assert req.status == RequestStatus.FINISHED_LENGTH_CAPPED
-    assert scheduler.pending_ff_tokens[req.request_id] == [100]
+    assert scheduler.pending_ff_tokens[req.request_id] == [100, 101]
 
 
 def test_jump_forward_tokens_retained_for_unscheduled_requests():
     """pending_ff_tokens for requests NOT scheduled in a step must be
     preserved (Bug 1 fix).
 
-    req_a is in RUNNING and gets scheduled normally.  req_b is NOT in
-    the running list (e.g. it was preempted or is still waiting), but
-    it has pending ff_tokens from an earlier step.  After schedule(),
-    req_b's ff_tokens must still be in pending_ff_tokens.
+    req_a goes through the proper lifecycle (add → schedule → update)
+    so it ends up RUNNING with a decode token to schedule.  req_b is
+    NOT in the running list (e.g. preempted or waiting).  After
+    schedule(), req_b's ff_tokens must still be in pending_ff_tokens.
     """
     scheduler = create_scheduler(
         max_model_len=100,
@@ -4333,10 +4324,24 @@ def test_jump_forward_tokens_retained_for_unscheduled_requests():
     requests = create_requests(num_requests=2, max_tokens=20)
     req_a, req_b = requests
 
-    # Only req_a goes into RUNNING.
-    _setup_jump_forward_request(scheduler, req_a)
+    # Put req_a through the normal lifecycle: add → prefill → update.
+    scheduler.add_request(req_a)
+    prefill_output = scheduler.schedule()
 
-    # Both have pending ff_tokens from a previous step.
+    prefill_model_output = ModelRunnerOutput(
+        req_ids=[req_a.request_id],
+        req_id_to_index={req_a.request_id: 0},
+        sampled_token_ids=[[99]],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+    scheduler.update_from_output(prefill_output, prefill_model_output)
+
+    # req_a is now RUNNING with 1 decode token to schedule.
+    # req_b was never added — simulates a preempted/waiting request.
+
+    # Simulate pending ff_tokens from a previous step.
     scheduler.pending_ff_tokens[req_a.request_id] = [10, 11]
     scheduler.pending_ff_tokens[req_b.request_id] = [20, 21]
 
