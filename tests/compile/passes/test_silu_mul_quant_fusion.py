@@ -76,7 +76,7 @@ class TestSiluMulFp8QuantModel(torch.nn.Module):
 
     def ops_in_model_before(self):
         return [
-            SILU_MUL_OP if self.enable_silu_mul_custom_op else torch.ops.aten.mul,
+            SILU_MUL_OP if self.enable_silu_mul_custom_op else torch.ops.aten.mul.Tensor,
             (
                 QUANT_OPS[kFp8StaticTensorSym]
                 if self.enable_quant_fp8_custom_op
