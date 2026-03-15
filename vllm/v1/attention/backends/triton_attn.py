@@ -647,7 +647,7 @@ class TritonAttentionImpl(AttentionImpl):
                         "with KV connector. This will be supported in a "
                         "future release."
                     )
-                num_blocks, block_size, num_kv_heads = key_cache.shape
+                num_blocks, block_size, num_kv_heads = key_cache.shape[:3]
                 self._int8_k_scale_cache = torch.ones(
                     (num_blocks, block_size, num_kv_heads),
                     dtype=torch.float32,
