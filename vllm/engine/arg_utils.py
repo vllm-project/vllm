@@ -614,6 +614,7 @@ class EngineArgs:
     )
 
     fail_on_environ_validation: bool = False
+    gdn_prefill_backend: Literal["flashinfer", "triton"] | None = None
 
     def __post_init__(self):
         # support `EngineArgs(compilation_config={...})`
@@ -1318,6 +1319,13 @@ class EngineArgs:
             help="Shutdown timeout in seconds. 0 = abort, >0 = wait.",
         )
 
+        parser.add_argument(
+            "--gdn-prefill-backend",
+            dest="gdn_prefill_backend",
+            choices=["flashinfer", "triton"],
+            default=None,
+            help="Select GDN prefill backend.",
+        )
         return parser
 
     @classmethod
@@ -1902,6 +1910,9 @@ class EngineArgs:
                 offload_params=self.offload_params,
             ),
         )
+
+        if self.gdn_prefill_backend is not None:
+            self.additional_config["gdn_prefill_backend"] = self.gdn_prefill_backend
 
         config = VllmConfig(
             model_config=model_config,
