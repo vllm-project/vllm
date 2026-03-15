@@ -1119,10 +1119,14 @@ class OpenAIServing:
     ) -> tuple[list[FunctionCall] | None, str | None]:
         function_calls = list[FunctionCall]()
 
-        use_mistral_grammar = is_mistral_lark_grammar_active(
-            request,
-            tokenizer,
-            tool_parser_cls,  # type: ignore[arg-type]
+        use_mistral_grammar = (
+            isinstance(request, ChatCompletionRequest)
+            and tokenizer is not None
+            and is_mistral_lark_grammar_active(
+                request,
+                tokenizer,
+                tool_parser_cls,  # type: ignore[arg-type]
+            )
         )
         if use_mistral_grammar or (
             tool_parser_cls

@@ -850,7 +850,7 @@ class OpenAIServingChat(OpenAIServing):
                                 # reasoning and start tool parsing.
                                 elif (
                                     self._is_mistral_reasoning_parser
-                                    and tool_parser.bot_token_id in output_token_ids
+                                    and tool_parser.bot_token_id in output_token_ids  # type: ignore[attr-defined]
                                 ):
                                     reasoning_end_arr[i] = True
                                     current_token_ids = output_token_ids
@@ -1522,6 +1522,7 @@ class OpenAIServingChat(OpenAIServing):
             use_mistral_grammar = is_mistral_lark_grammar_active(
                 request, tokenizer, self.tool_parser
             )
+            tool_call_items: list[ToolCall]
             if use_mistral_grammar:
                 if tool_calls:
                     tool_call_items = [

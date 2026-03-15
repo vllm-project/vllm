@@ -60,9 +60,10 @@ def is_mistral_lark_grammar_active(
     tool_parser_cls: type | None,
 ) -> bool:
     """Check if the Mistral lark grammar is active for the given request."""
+    structured_outputs = getattr(request, "structured_outputs", None)
     return (
         should_apply_mistral_grammar(tool_parser_cls, tokenizer)
-        and getattr(request, "structured_outputs", None) is not None
+        and structured_outputs is not None
         and request.structured_outputs.lark is not None
     )
 
@@ -151,7 +152,7 @@ class ToolsLarkConverter(ABC):
     def get_args_json(self, tool: ChatCompletionToolsParam) -> dict[str, Any]:
         args = tool.function.parameters if _is_strict_tool(tool) else {"type": "object"}
         # Handle empty parameters case
-        if args == {}:
+        if not args:
             args = {"type": "object", "properties": {}, "additionalProperties": False}
         return args
 
