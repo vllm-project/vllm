@@ -64,19 +64,27 @@ class BgeM3SparseEmbeddingsProcessor(
         params.skip_reading_prefix_cache = True
 
         raw_embed_request = self.embed_request_queue.pop(0)
-        if raw_embed_request.task not in EMBED_TASKS:
+        if raw_embed_request.embed_task not in EMBED_TASKS:
             raise ValueError(
                 f"Unsupported task {raw_embed_request}, "
                 f"Supported tasks are {EMBED_TASKS}"
             )
-        if raw_embed_request.task == "dense":
+        has_dense_embed = True
+        if raw_embed_request.embed_task == "dense":
             params.task = "embed"
             params.skip_reading_prefix_cache = False
-        elif raw_embed_request.task == "sparse":
+        elif raw_embed_request.embed_task == "sparse":
             params.task = "token_classify"
+            has_dense_embed = False
         else:
             params.task = "embed&token_classify"
         params.use_activation = raw_embed_request.use_activation
+        if params.use_activation is None:
+            params.use_activation = True
+        if not has_dense_embed:
+            params.dimension = None
+            return params
+
         params.dimensions = raw_embed_request.dimensions
 
         model_config: ModelConfig = self.vllm_config.model_config
@@ -84,8 +92,6 @@ class BgeM3SparseEmbeddingsProcessor(
             if getattr(params, param, None) is None:
                 setattr(params, param, self.default_pooling_params[param])
 
-        if params.use_activation is None:
-            params.use_activation = True
         if params.dimensions is not None:
             if not model_config.is_matryoshka:
                 raise ValueError(
@@ -166,8 +172,8 @@ class BgeM3SparseEmbeddingsProcessor(
         num_prompt_tokens = 0
         response_data = []
         raw_request = self._get_sparse_embedding_request(request_id)
-        has_dense_embed = raw_request.task in ["dense", "dense&sparse"]
-        has_sparse_embed = raw_request.task in ["sparse", "dense&sparse"]
+        has_dense_embed = raw_request.embed_task in ["dense", "dense&sparse"]
+        has_sparse_embed = raw_request.embed_task in ["sparse", "dense&sparse"]
         embed_dimensions = 0
         if has_dense_embed:
             embed_dimensions = (
