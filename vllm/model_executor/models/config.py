@@ -394,6 +394,20 @@ class MambaModelConfig(VerifyAndUpdateConfig):
                     "for prefix caching with Mamba cache 'all' mode: "
                     "falling back to 'align' mode."
                 )
+            if (
+                cache_config.mamba_cache_mode == "all"
+                and cache_config.mamba_ssm_cache_dtype == "auto"
+            ):
+                # "all" mode stores intermediate SSM states at block
+                # boundaries.  These states are accumulated in float32 inside
+                # the kernel; storing them back in bfloat16/float16 causes
+                # unacceptable precision loss, so the SSM cache must be
+                # float32.
+                cache_config.mamba_ssm_cache_dtype = "float32"
+                logger.info(
+                    "Setting mamba_ssm_cache_dtype to 'float32' for "
+                    "mamba_cache_mode='all' to preserve precision."
+                )
             if cache_config.mamba_cache_mode == "align":
                 assert vllm_config.scheduler_config.enable_chunked_prefill, (
                     "Chunked prefill is required for mamba cache mode 'align'."

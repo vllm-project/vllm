@@ -76,6 +76,7 @@ from .interfaces import (
     MixtureOfExperts,
     MultiModalEmbeddings,
     SupportsLoRA,
+    SupportsMambaPrefixCaching,
     SupportsPP,
     _require_is_multimodal,
 )
@@ -519,6 +520,7 @@ class Qwen3_5ForCausalLMBase(
     nn.Module,
     HasInnerState,
     SupportsLoRA,
+    SupportsMambaPrefixCaching,
     SupportsPP,
 ):
     packed_modules_mapping = {
@@ -537,14 +539,7 @@ class Qwen3_5ForCausalLMBase(
         config = vllm_config.model_config.hf_text_config
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
-        cache_config = vllm_config.cache_config
-
         scheduler_config = vllm_config.scheduler_config
-        if cache_config.mamba_cache_mode == "all":
-            raise NotImplementedError(
-                "Qwen3.5 currently does not support 'all' prefix caching, "
-                "please use '--mamba-cache-mode=align' instead"
-            )
         self.quant_config = vllm_config.quant_config
 
         super().__init__()
@@ -627,7 +622,9 @@ class Qwen3_5MoeForCausalLM(Qwen3_5ForCausalLMBase, QwenNextMixtureOfExperts):
     info=Qwen3_5ProcessingInfo,
     dummy_inputs=Qwen3VLDummyInputsBuilder,
 )
-class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid):
+class Qwen3_5ForConditionalGeneration(
+    Qwen3VLForConditionalGeneration, IsHybrid, SupportsMambaPrefixCaching
+):
     # Qwen3.5 does not support multimodal pruning (EVS).
     supports_multimodal_pruning = False
 
