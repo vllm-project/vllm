@@ -224,6 +224,12 @@ class AnthropicServingMessages(OpenAIServingChat):
             content_parts.append({"type": "image_url", "image_url": {"url": image_url}})
         elif block.type == "thinking" and block.thinking is not None:
             reasoning_parts.append(block.thinking)
+        elif block.type == "redacted_thinking":
+            # Redacted thinking blocks contain safety-filtered reasoning.
+            # We skip them as the content is opaque (base64 'data' field),
+            # but accepting the block prevents a validation error when the
+            # client echoes back the full assistant message.
+            pass
         elif block.type == "tool_use":
             cls._convert_tool_use_block(block, tool_calls)
         elif block.type == "tool_result":
