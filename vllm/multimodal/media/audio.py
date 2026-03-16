@@ -51,11 +51,10 @@ def load_audio_pyav(
                 raise ValueError("No audio stream found.")
             stream = container.streams.audio[0]
             native_sr = stream.rate
+            sr = sr or native_sr
 
             # Enforce calling resampler to return mono audio in float32
-            resampler = av.AudioResampler(
-                format="fltp", layout="mono", rate=sr or native_sr
-            )
+            resampler = av.AudioResampler(format="fltp", layout="mono", rate=sr)
             chunks: list[npt.NDArray] = []
             for frame in container.decode(stream):
                 for out_frame in resampler.resample(frame):
@@ -72,7 +71,7 @@ def load_audio_pyav(
         raise ValueError("No audio found in the video.")
 
     audio = np.concatenate(chunks).astype(np.float32)
-    return audio, float(native_sr)
+    return audio, sr
 
 
 class AudioMediaIO(MediaIO[tuple[npt.NDArray, float]]):
