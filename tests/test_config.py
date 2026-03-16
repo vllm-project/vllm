@@ -424,8 +424,8 @@ def test_generation_config_loading():
 @pytest.mark.parametrize(
     "pt_load_map_location",
     [
-        "cuda",
-        {"": "cuda"},
+        current_platform.device_type,
+        {"": current_platform.device_type},
     ],
 )
 def test_load_config_pt_load_map_location(pt_load_map_location):

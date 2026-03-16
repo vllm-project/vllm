@@ -12,7 +12,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import scaled_deq
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
-COPYING_DIRECTION = [("cuda", "cpu"), ("cuda", "cuda"), ("cpu", "cuda")]
+DEVICE = current_platform.device_type
+COPYING_DIRECTION = [(DEVICE, "cpu"), (DEVICE, DEVICE), ("cpu", DEVICE)]
 DTYPES = [torch.bfloat16, torch.float]
 NUM_TOKENS = [42]  # Arbitrary values for testing
 NUM_LAYERS = [1]  # Arbitrary values for testing
@@ -36,7 +37,8 @@ NUM_BLOCKS = [1024, 10000]
 NUM_MAPPINGS = [256]  # Arbitrary values for testing
 SEEDS = [0]
 CUDA_DEVICES = [
-    f"cuda:{i}" for i in range(1 if torch.accelerator.device_count() == 1 else 2)
+    f"{current_platform.device_type}:{i}"
+    for i in range(min(current_platform.device_count(), 2))
 ]
 
 # We assume fp8 is always enabled for testing.
@@ -381,8 +383,8 @@ def test_swap_blocks(
 
     set_random_seed(seed)
 
-    src_device = device if direction[0] == "cuda" else "cpu"
-    dst_device = device if direction[1] == "cuda" else "cpu"
+    src_device = device if direction[0] == DEVICE else "cpu"
+    dst_device = device if direction[1] == DEVICE else "cpu"
 
     src_blocks = random.sample(range(num_blocks), num_mappings)
     # For the same device, mapping must not overlap

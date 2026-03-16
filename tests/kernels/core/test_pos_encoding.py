@@ -9,6 +9,7 @@ import torch
 
 from tests.kernels.allclose_default import get_default_atol, get_default_rtol
 from vllm.model_executor.layers.rotary_embedding import get_rope
+from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
 IS_NEOX_STYLE = [True, False]
@@ -20,7 +21,8 @@ BATCH_SIZES = [5]  # Arbitrary values for testing
 SEQ_LENS = [11, 8192]  # Arbitrary values for testing
 SEEDS = [0]
 CUDA_DEVICES = [
-    f"cuda:{i}" for i in range(1 if torch.accelerator.device_count() == 1 else 2)
+    f"{current_platform.device_type}:{i}"
+    for i in range(min(current_platform.device_count(), 2))
 ]
 USE_KEY = [True, False]
 

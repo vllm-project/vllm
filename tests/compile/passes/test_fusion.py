@@ -342,7 +342,7 @@ def test_fusion_rmsnorm_quant(
 
     with vllm.config.set_current_vllm_config(vllm_config):
         # Setup device before model creation
-        torch.set_default_device("cuda")
+        torch.set_default_device(current_platform.device_type)
         torch.set_default_dtype(dtype)
         torch.manual_seed(1)
 
@@ -413,7 +413,7 @@ def test_aiter_fusion_rmsnorm_quant(
 
         rocm_aiter_ops.refresh_env_variables()
 
-        torch.set_default_device("cuda")
+        torch.set_default_device(current_platform.device_type)
         torch.set_default_dtype(dtype)
         torch.manual_seed(1)
 

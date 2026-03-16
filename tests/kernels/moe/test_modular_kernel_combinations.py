@@ -79,7 +79,7 @@ def rank_worker(
     verbose: bool,
 ):
     # Initialize workspace manager in child process
-    device = torch.device(f"cuda:{pgi.local_rank}")
+    device = torch.device(f"{current_platform.device_type}:{pgi.local_rank}")
     init_workspace_manager(device)
 
     set_random_seed(pgi.rank)

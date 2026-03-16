@@ -29,7 +29,10 @@ from vllm.utils.torch_utils import set_random_seed
 @pytest.mark.parametrize("seed", [0])
 @pytest.mark.parametrize(
     "device",
-    [f"cuda:{i}" for i in range(1 if torch.accelerator.device_count() == 1 else 2)],
+    [
+        f"{current_platform.device_type}:{i}"
+        for i in range(min(current_platform.device_count(), 2))
+    ],
 )
 @torch.inference_mode()
 def test_concat_and_cache_mla_rope_fused(

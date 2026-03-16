@@ -227,7 +227,7 @@ def sequence_parallelism_pass_on_test_model(
 ):
     set_random_seed(0)
 
-    device = torch.device(f"cuda:{local_rank}")
+    device = torch.device(f"{current_platform.device_type}:{local_rank}")
     torch.accelerator.set_device_index(device)
     torch.set_default_device(device)
     torch.set_default_dtype(dtype)
@@ -257,7 +257,7 @@ def sequence_parallelism_pass_on_test_model(
             eliminate_noops=True,
         ),
     )  # NoOp needed for fusion
-    device_config = DeviceConfig(device=torch.device("cuda"))
+    device_config = DeviceConfig(device=torch.device(current_platform.device_type))
 
     # this is a fake model name to construct the model config
     # in the vllm_config, it's not really used.

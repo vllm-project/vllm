@@ -35,7 +35,7 @@ PAD_SHAPES = [
     (32, 14336),
 ]
 SEEDS = [42]
-CUDA_DEVICES = ["cuda:0"]
+CUDA_DEVICES = [f"{current_platform.device_type}:0"]
 
 FLOAT4_E2M1_MAX = scalar_types.float4_e2m1f.max()
 FLOAT8_E4M3_MAX = torch.finfo(torch.float8_e4m3fn).max
@@ -164,7 +164,7 @@ def test_quantize_to_fp4(
 def test_quantize_to_fp4_padded(pad_shape: tuple[int, int]) -> None:
     dtype = torch.float16
     set_random_seed(42)
-    torch.set_default_device("cuda:0")
+    torch.set_default_device(f"{current_platform.device_type}:0")
 
     m, n = pad_shape
 
@@ -186,7 +186,7 @@ def test_quantize_to_fp4_padded(pad_shape: tuple[int, int]) -> None:
 def test_quantize_to_fp4_padded_no_sf_swizzled(pad_shape: tuple[int, int]) -> None:
     dtype = torch.float16
     set_random_seed(42)
-    torch.set_default_device("cuda:0")
+    torch.set_default_device(f"{current_platform.device_type}:0")
 
     m, n = pad_shape
 

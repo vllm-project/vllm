@@ -504,29 +504,44 @@ def test_trtllm_gen_mxfp4_fused_moe(
     seed = 42
     torch.manual_seed(seed)
     hidden_states = torch.randn(
-        num_tokens, hidden_size, device="cuda:0", dtype=torch.bfloat16
+        num_tokens,
+        hidden_size,
+        device=f"{current_platform.device_type}:0",
+        dtype=torch.bfloat16,
     )
     w13 = torch.randn(
         num_experts,
         intermediate_size * 2,
         hidden_size,
-        device="cuda:0",
+        device=f"{current_platform.device_type}:0",
         dtype=torch.bfloat16,
     )
     w2 = torch.randn(
         num_experts,
         hidden_size,
         intermediate_size,
-        device="cuda:0",
+        device=f"{current_platform.device_type}:0",
         dtype=torch.bfloat16,
     )
-    bias13 = torch.randn(num_experts, intermediate_size * 2, device="cuda:0") * 10
-    bias2 = torch.randn(num_experts, hidden_size, device="cuda:0") * 10
+    bias13 = (
+        torch.randn(
+            num_experts,
+            intermediate_size * 2,
+            device=f"{current_platform.device_type}:0",
+        )
+        * 10
+    )
+    bias2 = (
+        torch.randn(
+            num_experts, hidden_size, device=f"{current_platform.device_type}:0"
+        )
+        * 10
+    )
     router_logits = torch.rand(num_tokens, num_experts, dtype=torch.float32).cuda()
 
     w13, w13_scale = fp4_quantize(
         w13,
-        torch.tensor(1.0, device="cuda:0"),
+        torch.tensor(1.0, device=f"{current_platform.device_type}:0"),
         32,
         sf_use_ue8m0=True,
         is_sf_swizzled_layout=False,
@@ -536,7 +551,7 @@ def test_trtllm_gen_mxfp4_fused_moe(
     )
     w2, w2_scale = fp4_quantize(
         w2,
-        torch.tensor(1.0, device="cuda:0"),
+        torch.tensor(1.0, device=f"{current_platform.device_type}:0"),
         32,
         sf_use_ue8m0=True,
         is_sf_swizzled_layout=False,
@@ -651,7 +666,7 @@ def test_flashinfer_cutlass_mxfp4_fused_moe(
     limit: float | None,
 ):
     torch.manual_seed(42)
-    device = "cuda:0"
+    device = f"{current_platform.device_type}:0"
 
     # Inputs
     hidden_states = torch.randn(
@@ -805,7 +820,7 @@ def test_flashinfer_cutlass_mxfp4_mxfp8_fused_moe(
     limit: float | None,
 ):
     torch.manual_seed(42)
-    device = "cuda:0"
+    device = f"{current_platform.device_type}:0"
 
     # Inputs
     hidden_states = torch.randn(
@@ -1002,7 +1017,7 @@ def test_trtllm_gen_mxfp8_block_scale_moe(
     is_gated: bool,
 ):
     torch.manual_seed(42)
-    device = "cuda:0"
+    device = f"{current_platform.device_type}:0"
 
     inter_size = intermediate_size * (2 if is_gated else 1)
 

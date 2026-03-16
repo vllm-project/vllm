@@ -3,6 +3,7 @@
 import torch
 from vllm_test_utils.monitor import monitor
 
+from vllm.platforms import current_platform
 from vllm.utils.mem_utils import MemorySnapshot, memory_profiling
 
 from ..utils import create_new_process_for_each_test
@@ -22,7 +23,9 @@ def test_memory_profiling():
 
     # load weights
 
-    weights = torch.randn(128, 1024, 1024, device="cuda", dtype=torch.float32)
+    weights = torch.randn(
+        128, 1024, 1024, device=current_platform.device_type, dtype=torch.float32
+    )
 
     weights_memory = 128 * 1024 * 1024 * 4  # 512 MiB
 
@@ -40,7 +43,9 @@ def test_memory_profiling():
         monitor(measure_current_non_torch) as monitored_values,
     ):
         # make a memory spike, 1 GiB
-        spike = torch.randn(256, 1024, 1024, device="cuda", dtype=torch.float32)
+        spike = torch.randn(
+            256, 1024, 1024, device=current_platform.device_type, dtype=torch.float32
+        )
         del spike
 
         # Add some extra non-torch memory 256 MiB (simulate NCCL)

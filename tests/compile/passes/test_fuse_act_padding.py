@@ -19,6 +19,7 @@ from vllm.config import (
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.utils import rocm_unquantized_gemm
+from vllm.platforms import current_platform
 
 
 class TestModel(torch.nn.Module):
@@ -98,7 +99,7 @@ def test_fuse_act_padding(
             RocmAiterTritonAddRMSNormPadFusionPass,
         )
 
-        torch.set_default_device("cuda")
+        torch.set_default_device(current_platform.device_type)
         torch.set_default_dtype(dtype)
         torch.manual_seed(1)
 

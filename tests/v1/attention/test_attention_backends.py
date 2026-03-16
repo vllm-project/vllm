@@ -366,7 +366,7 @@ def _test_backend_correctness(
         num_gpu_blocks=8192,
         hf_config_override=hf_config_override,
     )
-    device = torch.device("cuda:0")
+    device = torch.device(f"{current_platform.device_type}:0")
 
     kv_cache_spec = create_standard_kv_cache_spec(vllm_config)
 

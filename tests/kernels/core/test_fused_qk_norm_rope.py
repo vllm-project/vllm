@@ -15,7 +15,7 @@ IS_NEOX = [True, False]
 EPS_VALUES = [1e-5, 1e-6]
 SEEDS = [13]
 PARTIAL_ROPE = [True, False]
-CUDA_DEVICES = ["cuda:0"]
+CUDA_DEVICES = [f"{current_platform.device_type}:0"]
 
 
 def _apply_qk_norm_rope(

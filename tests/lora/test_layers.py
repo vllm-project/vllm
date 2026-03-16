@@ -61,7 +61,10 @@ pytestmark = pytest.mark.skipif(
 )
 
 DEVICES = (
-    [f"cuda:{i}" for i in range(1 if torch.accelerator.device_count() == 1 else 2)]
+    [
+        f"{current_platform.device_type}:{i}"
+        for i in range(1 if torch.accelerator.device_count() == 1 else 2)
+    ]
     if current_platform.is_cuda_alike()
     else ["cpu"]
 )
@@ -196,7 +199,7 @@ def create_random_inputs(
     input_size: tuple[int, ...],
     input_range: tuple[float, float],
     input_type: torch.dtype = torch.int,
-    device: torch.device = "cuda",
+    device: torch.device = current_platform.device_type,
 ) -> tuple[list[torch.Tensor], list[int], list[int]]:
     """Creates random inputs.
 

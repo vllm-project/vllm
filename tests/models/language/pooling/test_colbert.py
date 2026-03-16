@@ -10,6 +10,7 @@ import pytest
 import torch
 
 from vllm.entrypoints.pooling.score.utils import compute_maxsim_score
+from vllm.platforms import current_platform
 
 # -----------------------------------------------------------------------
 # Model definitions: (model_name, colbert_dim, extra vllm_runner kwargs)
@@ -354,7 +355,9 @@ def test_colbert_hf_comparison(vllm_runner, backend):
     ) as vllm_model:
         vllm_outputs = vllm_model.token_embed(test_texts)
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device(
+        current_platform.device_type if torch.cuda.is_available() else "cpu"
+    )
 
     hf_tokenizer = AutoTokenizer.from_pretrained(
         model_name,

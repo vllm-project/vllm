@@ -8,6 +8,7 @@ from transformers import AutoConfig, AutoModel, CLIPImageProcessor
 
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.model_executor.models.radio import RadioModel
+from vllm.platforms import current_platform
 from vllm.transformers_utils.configs.radio import RadioConfig
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 
@@ -51,7 +52,7 @@ def run_radio_test(
         config=hf_config,
         dtype=torch_dtype,
         trust_remote_code=True,
-    ).to("cuda")
+    ).to(current_platform.device_type)
     hf_model.eval()
 
     # A HF model has image normalization as a part of model's forward
@@ -62,7 +63,8 @@ def run_radio_test(
     hf_model.make_preprocessor_external()
 
     hf_outputs_per_image = [
-        hf_model(pixel_value.to("cuda")) for pixel_value in pixel_values
+        hf_model(pixel_value.to(current_platform.device_type))
+        for pixel_value in pixel_values
     ]
 
     vllm_config = RadioConfig(
@@ -71,10 +73,11 @@ def run_radio_test(
     )
     vllm_model = RadioModel(vllm_config)
     vllm_model.load_weights(hf_model.state_dict())
-    vllm_model = vllm_model.to("cuda", torch_dtype)
+    vllm_model = vllm_model.to(current_platform.device_type, torch_dtype)
 
     vllm_outputs_per_image = [
-        vllm_model(pixel_values=pixel_value.to("cuda")) for pixel_value in pixel_values
+        vllm_model(pixel_values=pixel_value.to(current_platform.device_type))
+        for pixel_value in pixel_values
     ]
     del vllm_model, hf_model
     cleanup_dist_env_and_memory()

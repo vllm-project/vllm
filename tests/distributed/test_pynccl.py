@@ -19,6 +19,7 @@ from vllm.distributed.parallel_state import (
     graph_capture,
     init_distributed_environment,
 )
+from vllm.platforms import current_platform
 from vllm.utils.system_utils import update_environment_variables
 
 mp.set_start_method("spawn", force=True)
@@ -53,7 +54,7 @@ def worker_fn_wrapper(fn):
     def wrapped_fn(env):
         update_environment_variables(env)
         local_rank = os.environ["LOCAL_RANK"]
-        device = torch.device(f"cuda:{local_rank}")
+        device = torch.device(f"{current_platform.device_type}:{local_rank}")
         torch.accelerator.set_device_index(device)
         init_distributed_environment()
         fn()
@@ -81,7 +82,9 @@ def test_pynccl():
 
 @worker_fn_wrapper
 def multiple_allreduce_worker_fn():
-    device = torch.device(f"cuda:{torch.distributed.get_rank()}")
+    device = torch.device(
+        f"{current_platform.device_type}:{torch.distributed.get_rank()}"
+    )
     groups = [
         torch.distributed.new_group(ranks=[0, 1], backend="gloo"),
         torch.distributed.new_group(ranks=[2, 3], backend="gloo"),
@@ -112,7 +115,9 @@ def test_pynccl_multiple_allreduce():
 
 @worker_fn_wrapper
 def multiple_allreduce_with_vllm_worker_fn():
-    device = torch.device(f"cuda:{torch.distributed.get_rank()}")
+    device = torch.device(
+        f"{current_platform.device_type}:{torch.distributed.get_rank()}"
+    )
     with ensure_current_vllm_config():
         ensure_model_parallel_initialized(2, 2)
     tensor = torch.ones(16, 1024, 1024, dtype=torch.float32, device=device)
@@ -146,7 +151,9 @@ def worker_fn_with_cudagraph():
             get_world_group().cpu_group, device=get_world_group().device
         )
         # run something in the default stream to initialize torch engine
-        a = torch.ones((4, 4), device=f"cuda:{pynccl_comm.rank}")
+        a = torch.ones(
+            (4, 4), device=f"{current_platform.device_type}:{pynccl_comm.rank}"
+        )
         torch.accelerator.synchronize()
         with torch.cuda.graph(graph):
             a_out = pynccl_comm.all_reduce(a)
@@ -164,7 +171,7 @@ def all_gather_worker_fn():
 
     rank = pynccl_comm.rank
     world_size = pynccl_comm.world_size
-    device = f"cuda:{pynccl_comm.rank}"
+    device = f"{current_platform.device_type}:{pynccl_comm.rank}"
 
     num_elems = 1000
     tensor = (
@@ -199,7 +206,7 @@ def all_gatherv_worker_fn():
 
     rank = pynccl_comm.rank
     world_size = pynccl_comm.world_size
-    device = f"cuda:{pynccl_comm.rank}"
+    device = f"{current_platform.device_type}:{pynccl_comm.rank}"
 
     assert world_size <= 8
     sizes = [81, 20, 57, 52, 81, 5, 49, 49][:world_size]
@@ -234,7 +241,7 @@ def reduce_scatter_worker_fn():
 
     rank = pynccl_comm.rank
     world_size = pynccl_comm.world_size
-    device = f"cuda:{pynccl_comm.rank}"
+    device = f"{current_platform.device_type}:{pynccl_comm.rank}"
 
     num_elems = 1000
     tensor = (
@@ -274,7 +281,7 @@ def reduce_scatterv_worker_fn():
 
     rank = pynccl_comm.rank
     world_size = pynccl_comm.world_size
-    device = f"cuda:{pynccl_comm.rank}"
+    device = f"{current_platform.device_type}:{pynccl_comm.rank}"
 
     assert world_size <= 8
     sizes = [81, 20, 57, 52, 81, 5, 49, 49][:world_size]
@@ -338,7 +345,9 @@ def test_pynccl_send_recv():
 
 @worker_fn_wrapper
 def multiple_send_recv_worker_fn():
-    device = torch.device(f"cuda:{torch.distributed.get_rank()}")
+    device = torch.device(
+        f"{current_platform.device_type}:{torch.distributed.get_rank()}"
+    )
     groups = [
         torch.distributed.new_group(ranks=[0, 2], backend="gloo"),
         torch.distributed.new_group(ranks=[1, 3], backend="gloo"),

@@ -20,6 +20,7 @@ from vllm.model_executor.layers.activation import (
     SwigluStepAndMul,
     swiglustep_and_mul_triton,
 )
+from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
 DTYPES = [torch.half, torch.bfloat16, torch.float]
@@ -27,7 +28,8 @@ NUM_TOKENS = [7, 83, 2048]  # Arbitrary values for testing
 D = [512, 13824]  # Arbitrary values for testing
 SEEDS = [0]
 CUDA_DEVICES = [
-    f"cuda:{i}" for i in range(1 if torch.accelerator.device_count() == 1 else 2)
+    f"{current_platform.device_type}:{i}"
+    for i in range(min(current_platform.device_count(), 2))
 ]
 
 

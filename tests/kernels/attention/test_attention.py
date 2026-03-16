@@ -37,7 +37,8 @@ USE_ALIBI = [False, True]
 KV_CACHE_DTYPE = ["auto", "fp8"]
 SEEDS = [0]
 CUDA_DEVICES = [
-    f"cuda:{i}" for i in range(1 if torch.accelerator.device_count() == 1 else 2)
+    f"{current_platform.device_type}:{i}"
+    for i in range(min(current_platform.device_count(), 2))
 ]
 
 

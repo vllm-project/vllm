@@ -7,6 +7,7 @@ import random
 import pytest
 import torch
 
+from vllm.platforms import current_platform
 from vllm.triton_utils import triton
 from vllm.v1.attention.ops.flashmla import (
     flash_mla_with_kvcache,
@@ -53,7 +54,7 @@ FLASH_MLA_UNSUPPORTED_REASON = (
 def test_flash_mla(
     b, s_q, mean_sk, h_q, h_kv, d, dv, block_size, causal, varlen, torch_dtype
 ):
-    device = torch.device("cuda:0")
+    device = torch.device(f"{current_platform.device_type}:0")
     init_dtype = torch.bfloat16 if torch_dtype == torch.float8_e4m3fn else torch_dtype
     torch.set_default_dtype(init_dtype)
     torch.set_default_device(device)

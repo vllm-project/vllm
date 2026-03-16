@@ -21,6 +21,7 @@ from vllm.model_executor.layers.quantization.modelopt import (
     ModelOptNvFp4Config,
     ModelOptNvFp4FusedMoE,
 )
+from vllm.platforms import current_platform
 
 from .eplb_utils import distributed_run, set_env_vars_and_device
 
@@ -43,7 +44,7 @@ def make_fused_moe_layer(
 ) -> FusedMoE:
     quant_config = None
 
-    device = torch.device(f"cuda:{rank}")
+    device = torch.device(f"{current_platform.device_type}:{rank}")
 
     quant_config = ModelOptNvFp4Config(
         is_checkpoint_nvfp4_serialized=True,
@@ -120,7 +121,7 @@ def _test_eplb_fml(env, world_size: int, test_config: TestConfig):
         ep_group = get_dp_group().cpu_group
         ep_rank = torch.distributed.get_rank()
 
-        device = torch.device(f"cuda:{ep_rank}")
+        device = torch.device(f"{current_platform.device_type}:{ep_rank}")
 
         fml_layers = [
             make_fused_moe_layer(ep_rank, layer_idx, test_config).to(device)

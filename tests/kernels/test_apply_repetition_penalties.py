@@ -40,7 +40,7 @@ def test_apply_repetition_penalties(
     against a reference implementation.
     """
     set_random_seed(seed)
-    torch.set_default_device("cuda:0")
+    torch.set_default_device(f"{current_platform.device_type}:0")
 
     # Create test data
     logits = torch.randn(num_seqs, vocab_size, dtype=dtype)
@@ -97,7 +97,7 @@ def test_apply_repetition_penalties_zero_seqs() -> None:
     seed = 0
 
     set_random_seed(seed)
-    torch.set_default_device("cuda:0")
+    torch.set_default_device(f"{current_platform.device_type}:0")
 
     # Create test data
     logits = torch.randn(num_seqs, vocab_size, dtype=dtype)

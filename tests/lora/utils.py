@@ -9,10 +9,11 @@ import torch
 from safetensors.torch import save_file
 
 from vllm.lora.lora_weights import LoRALayerWeights, PackedLoRALayerWeights
+from vllm.platforms import current_platform
 
 
 class DummyLoRAManager:
-    def __init__(self, device: torch.device = "cuda:0"):
+    def __init__(self, device: torch.device = f"{current_platform.device_type}:0"):
         super().__init__()
         self._loras: dict[str, LoRALayerWeights] = {}
         self._device = device
@@ -57,8 +58,10 @@ class DummyLoRAManager:
             module_name,
             rank=rank,
             lora_alpha=1,
-            lora_a=torch.rand([rank, input_dim], device="cuda"),
-            lora_b=torch.rand([output_dim, input_dim], device="cuda"),
+            lora_a=torch.rand([rank, input_dim], device=current_platform.device_type),
+            lora_b=torch.rand(
+                [output_dim, input_dim], device=current_platform.device_type
+            ),
             embeddings_tensor=embeddings_tensor,
         )
         self.set_module_lora(module_name, lora)

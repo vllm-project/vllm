@@ -28,6 +28,7 @@ from vllm.distributed.weight_transfer.nccl_engine import (
     NCCLWeightTransferInitInfo,
     NCCLWeightTransferUpdateInfo,
 )
+from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_open_port
 
 
@@ -249,7 +250,9 @@ def trainer_broadcast_tensor(
 
     # Create and broadcast the tensor
     dtype = getattr(torch, tensor_dtype)
-    tensor_to_send = torch.ones(tensor_shape, dtype=dtype, device="cuda:0")
+    tensor_to_send = torch.ones(
+        tensor_shape, dtype=dtype, device=f"{current_platform.device_type}:0"
+    )
     comm.broadcast(tensor_to_send, src=0, stream=torch.cuda.current_stream())
     torch.accelerator.synchronize()
 
@@ -386,7 +389,7 @@ class TestIPCWeightTransferUpdateInfoValidation:
             pytest.skip("Need at least 1 GPU for this test")
 
         # Create a dummy tensor and IPC handle
-        dummy_tensor = torch.ones(10, 10, device="cuda:0")
+        dummy_tensor = torch.ones(10, 10, device=f"{current_platform.device_type}:0")
         ipc_handle = reduce_tensor(dummy_tensor)
         gpu_uuid = str(torch.cuda.get_device_properties(0).uuid)
         ipc_handles = [{gpu_uuid: ipc_handle}]
@@ -407,7 +410,7 @@ class TestIPCWeightTransferUpdateInfoValidation:
         if torch.accelerator.device_count() < 1:
             pytest.skip("Need at least 1 GPU for this test")
 
-        dummy_tensor = torch.ones(10, 10, device="cuda:0")
+        dummy_tensor = torch.ones(10, 10, device=f"{current_platform.device_type}:0")
         ipc_handle = reduce_tensor(dummy_tensor)
         gpu_uuid = str(torch.cuda.get_device_properties(0).uuid)
         ipc_handles = [{gpu_uuid: ipc_handle}, {gpu_uuid: ipc_handle}]
@@ -425,7 +428,7 @@ class TestIPCWeightTransferUpdateInfoValidation:
         if torch.accelerator.device_count() < 1:
             pytest.skip("Need at least 1 GPU for this test")
 
-        dummy_tensor = torch.ones(10, 10, device="cuda:0")
+        dummy_tensor = torch.ones(10, 10, device=f"{current_platform.device_type}:0")
         ipc_handle = reduce_tensor(dummy_tensor)
         gpu_uuid = str(torch.cuda.get_device_properties(0).uuid)
         ipc_handles = [{gpu_uuid: ipc_handle}, {gpu_uuid: ipc_handle}]
@@ -443,7 +446,7 @@ class TestIPCWeightTransferUpdateInfoValidation:
         if torch.accelerator.device_count() < 1:
             pytest.skip("Need at least 1 GPU for this test")
 
-        dummy_tensor = torch.ones(10, 10, device="cuda:0")
+        dummy_tensor = torch.ones(10, 10, device=f"{current_platform.device_type}:0")
         ipc_handle = reduce_tensor(dummy_tensor)
         gpu_uuid = str(torch.cuda.get_device_properties(0).uuid)
         ipc_handles = [{gpu_uuid: ipc_handle}]  # Only one handle
@@ -463,7 +466,7 @@ class TestIPCWeightTransferUpdateInfoValidation:
 
         monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
 
-        dummy_tensor = torch.ones(10, 10, device="cuda:0")
+        dummy_tensor = torch.ones(10, 10, device=f"{current_platform.device_type}:0")
         ipc_handle = reduce_tensor(dummy_tensor)
         gpu_uuid = str(torch.cuda.get_device_properties(0).uuid)
         ipc_handles = [{gpu_uuid: ipc_handle}]
@@ -496,7 +499,7 @@ class TestIPCWeightTransferUpdateInfoValidation:
         if torch.accelerator.device_count() < 1:
             pytest.skip("Need at least 1 GPU for this test")
 
-        dummy_tensor = torch.ones(10, 10, device="cuda:0")
+        dummy_tensor = torch.ones(10, 10, device=f"{current_platform.device_type}:0")
         ipc_handle = reduce_tensor(dummy_tensor)
         gpu_uuid = str(torch.cuda.get_device_properties(0).uuid)
         ipc_handles = [{gpu_uuid: ipc_handle}]
@@ -548,8 +551,8 @@ class TestIPCEngineParsing:
         engine = IPCWeightTransferEngine(config, parallel_config)
 
         # Create dummy IPC handles
-        dummy_tensor1 = torch.ones(100, 100, device="cuda:0")
-        dummy_tensor2 = torch.ones(50, device="cuda:0")
+        dummy_tensor1 = torch.ones(100, 100, device=f"{current_platform.device_type}:0")
+        dummy_tensor2 = torch.ones(50, device=f"{current_platform.device_type}:0")
         ipc_handle1 = reduce_tensor(dummy_tensor1)
         ipc_handle2 = reduce_tensor(dummy_tensor2)
         gpu_uuid = str(torch.cuda.get_device_properties(0).uuid)
@@ -581,8 +584,8 @@ class TestIPCEngineParsing:
         parallel_config = create_mock_parallel_config()
         engine = IPCWeightTransferEngine(config, parallel_config)
 
-        dummy_tensor1 = torch.ones(100, 100, device="cuda:0")
-        dummy_tensor2 = torch.ones(50, device="cuda:0")
+        dummy_tensor1 = torch.ones(100, 100, device=f"{current_platform.device_type}:0")
+        dummy_tensor2 = torch.ones(50, device=f"{current_platform.device_type}:0")
         ipc_handle1 = reduce_tensor(dummy_tensor1)
         ipc_handle2 = reduce_tensor(dummy_tensor2)
         gpu_uuid = str(torch.cuda.get_device_properties(0).uuid)
@@ -623,7 +626,9 @@ class TrainerActor:
     def __init__(self, tensor_shape: list[int], tensor_dtype: str):
         # Create tensor on GPU and keep it alive
         dtype = getattr(torch, tensor_dtype)
-        self.tensor = torch.ones(tensor_shape, dtype=dtype, device="cuda:0")
+        self.tensor = torch.ones(
+            tensor_shape, dtype=dtype, device=f"{current_platform.device_type}:0"
+        )
         self.tensor.fill_(42.0)  # Fill with 42 to verify correct transfer
 
         # Create IPC handle (tensor must stay alive for IPC to work)
@@ -797,7 +802,7 @@ def test_ipc_receive_weights_missing_gpu_uuid_raises():
     engine = IPCWeightTransferEngine(config, parallel_config)
 
     # Create IPC handle with wrong GPU UUID
-    dummy_tensor = torch.ones(10, 10, device="cuda:0")
+    dummy_tensor = torch.ones(10, 10, device=f"{current_platform.device_type}:0")
     ipc_handle = reduce_tensor(dummy_tensor)
     wrong_uuid = "wrong-uuid-12345"
     ipc_handles = [{wrong_uuid: ipc_handle}]

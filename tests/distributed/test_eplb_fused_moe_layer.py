@@ -15,6 +15,7 @@ from vllm.distributed.parallel_state import (
     get_tp_group,
 )
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE
+from vllm.platforms import current_platform
 
 from .eplb_utils import distributed_run, set_env_vars_and_device
 
@@ -79,7 +80,7 @@ def make_fused_moe_layer(
         params_dtype=test_config.weight_dtype,
     )
 
-    device = torch.device(f"cuda:{rank}")
+    device = torch.device(f"{current_platform.device_type}:{rank}")
 
     from functools import partial
 

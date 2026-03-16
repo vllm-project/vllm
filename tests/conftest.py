@@ -66,6 +66,7 @@ from vllm.logprobs import Logprob
 from vllm.multimodal.media import MediaWithBytes
 from vllm.multimodal.utils import fetch_image
 from vllm.outputs import RequestOutput
+from vllm.platforms import current_platform
 from vllm.sampling_params import BeamSearchParams
 from vllm.transformers_utils.utils import maybe_model_redirect
 from vllm.utils.collection_utils import is_list_of
@@ -236,7 +237,7 @@ def workspace_init():
     )
 
     if torch.cuda.is_available():
-        device = torch.device("cuda:0")
+        device = torch.device(f"{current_platform.device_type}:0")
         init_workspace_manager(device)
     yield
     reset_workspace_manager()

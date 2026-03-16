@@ -10,6 +10,7 @@ import torch.distributed as dist
 
 from vllm.distributed.communication_op import tensor_model_parallel_all_reduce  # noqa
 from vllm.distributed.parallel_state import get_tp_group, graph_capture
+from vllm.platforms import current_platform
 
 from ..utils import (
     ensure_model_parallel_initialized,
@@ -34,7 +35,8 @@ def graph_allreduce(
     with monkeypatch.context() as m:
         m.delenv("CUDA_VISIBLE_DEVICES", raising=False)
         m.delenv("HIP_VISIBLE_DEVICES", raising=False)
-        device = torch.device(f"cuda:{rank}")
+        m.delenv("ZE_AFFINITY_MASK", raising=False)
+        device = torch.device(f"{current_platform.device_type}:{rank}")
         torch.accelerator.set_device_index(device)
         init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
         ensure_model_parallel_initialized(tp_size, pp_size)
@@ -92,7 +94,8 @@ def eager_allreduce(
     with monkeypatch.context() as m:
         m.delenv("CUDA_VISIBLE_DEVICES", raising=False)
         m.delenv("HIP_VISIBLE_DEVICES", raising=False)
-        device = torch.device(f"cuda:{rank}")
+        m.delenv("ZE_AFFINITY_MASK", raising=False)
+        device = torch.device(f"{current_platform.device_type}:{rank}")
         torch.accelerator.set_device_index(device)
         init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
 

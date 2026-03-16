@@ -14,6 +14,7 @@ from vllm.distributed.weight_transfer.packed_tensor import (
     packed_broadcast_consumer,
     packed_broadcast_producer,
 )
+from vllm.platforms import current_platform
 
 
 class MockCommunicationGroup:
@@ -22,7 +23,7 @@ class MockCommunicationGroup:
     def __init__(self):
         self.broadcasted_tensors: list[torch.Tensor] = []
         self.broadcast_count = 0
-        self.device = torch.device("cuda:0")
+        self.device = torch.device(f"{current_platform.device_type}:0")
 
     def broadcast(self, tensor, src):
         """Mock broadcast that stores the tensor for later verification."""
@@ -36,7 +37,7 @@ class MockConsumerCommunicationGroup:
     def __init__(self, tensors_to_return: list[torch.Tensor]):
         self.tensors_to_return = tensors_to_return
         self.current_index = 0
-        self.device = torch.device("cuda:0")
+        self.device = torch.device(f"{current_platform.device_type}:0")
 
     def broadcast(self, tensor, src):
         """Mock broadcast that fills the tensor with pre-stored data."""

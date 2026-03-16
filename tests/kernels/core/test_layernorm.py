@@ -7,6 +7,7 @@ import torch
 from tests.kernels.quant_utils import FP8_DTYPE
 from tests.kernels.utils import opcheck
 from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
 DTYPES = [torch.half, torch.bfloat16, torch.float]
@@ -15,7 +16,8 @@ HIDDEN_SIZES = [8, 768, 769, 5120, 5125, 8192]  # Arbitrary values for testing
 ADD_RESIDUAL = [False, True]
 SEEDS = [0]
 CUDA_DEVICES = [
-    f"cuda:{i}" for i in range(1 if torch.accelerator.device_count() == 1 else 2)
+    f"{current_platform.device_type}:{i}"
+    for i in range(min(current_platform.device_count(), 2))
 ]
 
 

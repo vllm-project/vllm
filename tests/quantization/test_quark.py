@@ -278,7 +278,12 @@ def test_mxfp4_fused_qdq_match_quark(float_dtype: torch.dtype, scalings: list[in
     torch.manual_seed(0)
 
     hidden_size = 64 * 32
-    inp = (torch.rand(1, hidden_size, dtype=float_dtype, device="cuda") - 0.5) * 2
+    inp = (
+        torch.rand(
+            1, hidden_size, dtype=float_dtype, device=current_platform.device_type
+        )
+        - 0.5
+    ) * 2
     for i in range(hidden_size // 32):
         inp[:, i * 32 : (i + 1) * 32] = (
             inp[:, i * 32 : (i + 1) * 32] * scalings[i % len(scalings)]
@@ -322,15 +327,17 @@ def test_mxfp4_dequant_kernel_match_quark(
         reorder=False,
         real_quantized=True,
         float_dtype=float_dtype,
-        device="cuda",
+        device=current_platform.device_type,
     )
 
-    observer = qspec.observer_cls(qspec, device="cuda")
+    observer = qspec.observer_cls(qspec, device=current_platform.device_type)
 
     hidden_size = 512
     shape = (11008, hidden_size)
 
-    w = (torch.rand(shape, device="cuda", dtype=float_dtype) - 0.5) * 2
+    w = (
+        torch.rand(shape, device=current_platform.device_type, dtype=float_dtype) - 0.5
+    ) * 2
 
     # Make it so that different groups have different scales.
     for i in range(hidden_size // 32):
@@ -342,7 +349,9 @@ def test_mxfp4_dequant_kernel_match_quark(
     scale, _ = observer._calculate_qparams()
     weight_quantizer.scale = scale
 
-    w_mxfp4 = weight_quantizer.to_real_quantize_params(w).to("cuda")
+    w_mxfp4 = weight_quantizer.to_real_quantize_params(w).to(
+        current_platform.device_type
+    )
     weight_quantizer.maybe_convert_and_transpose_scale()
 
     scale = weight_quantizer.scale

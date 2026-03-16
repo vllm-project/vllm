@@ -23,6 +23,7 @@ from vllm.model_executor.layers.fused_moe.config import (
 )
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts
 from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEKernel
+from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import (
     get_mk_alignment_for_contiguous_layout,
     is_deep_gemm_e8m0_used,
@@ -372,7 +373,7 @@ def _test_deepep_deepgemm_moe(
     w1_scale: torch.Tensor,
     w2_scale: torch.Tensor,
 ):
-    device = torch.device(f"cuda:{pgi.local_rank}")
+    device = torch.device(f"{current_platform.device_type}:{pgi.local_rank}")
     init_workspace_manager(device)
 
     set_random_seed(pgi.rank)

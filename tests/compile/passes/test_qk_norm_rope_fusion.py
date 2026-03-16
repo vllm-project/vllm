@@ -141,7 +141,7 @@ def test_qk_norm_rope_fusion(
     if not hasattr(torch.ops._C, "fused_qk_norm_rope"):
         pytest.skip("fused_qk_norm_rope custom op not available")
 
-    torch.set_default_device("cuda")
+    torch.set_default_device(current_platform.device_type)
     torch.set_default_dtype(dtype)
     torch.manual_seed(0)
 

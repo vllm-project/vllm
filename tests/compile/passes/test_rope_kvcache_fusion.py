@@ -225,7 +225,7 @@ def test_rope_kvcache_fusion(
     kv_cache_dtype: str,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    torch.set_default_device("cuda")
+    torch.set_default_device(current_platform.device_type)
     torch.set_default_dtype(dtype)
     torch.manual_seed(0)
 

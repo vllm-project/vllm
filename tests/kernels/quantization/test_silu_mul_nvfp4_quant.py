@@ -36,7 +36,7 @@ def test_silu_mul_nvfp4_quant(
     shape: tuple[int, int],
 ) -> None:
     set_random_seed(42)
-    device = "cuda:0"
+    device = f"{current_platform.device_type}:0"
     torch.set_default_device(device)
 
     x = torch.randn(shape, dtype=dtype)

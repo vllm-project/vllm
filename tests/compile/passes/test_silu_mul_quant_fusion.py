@@ -224,7 +224,7 @@ def test_fusion_silu_and_mul_quant(
     if model_class is TestSiluMulGroupFp8QuantModel and not IS_AITER_FOUND:
         pytest.skip("AITER is not supported on this GPU.")
 
-    torch.set_default_device("cuda")
+    torch.set_default_device(current_platform.device_type)
     torch.set_default_dtype(dtype)
 
     x = torch.rand(num_tokens, hidden_size * 2)

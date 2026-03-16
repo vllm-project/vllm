@@ -41,7 +41,8 @@ MNK_FACTORS = [
 ]
 
 CUDA_DEVICES = [
-    f"cuda:{i}" for i in range(1 if torch.accelerator.device_count() == 1 else 2)
+    f"{current_platform.device_type}:{i}"
+    for i in range(min(current_platform.device_count(), 2))
 ]
 
 # -1 means full extent in that dimension

@@ -269,9 +269,11 @@ class TestCudagraphDispatcher:
 class TestCUDAGraphWrapper:
     def setup_method(self):
         self.vllm_config = _create_vllm_config(CompilationConfig())
-        self.model = SimpleMLP().to("cuda")
-        self.persistent_input_buffer = torch.zeros(1, 10, device="cuda")
-        self.input_tensor = torch.randn(1, 10, device="cuda")
+        self.model = SimpleMLP().to(current_platform.device_type)
+        self.persistent_input_buffer = torch.zeros(
+            1, 10, device=current_platform.device_type
+        )
+        self.input_tensor = torch.randn(1, 10, device=current_platform.device_type)
 
     def test_capture_and_replay(self):
         wrapper = CUDAGraphWrapper(
@@ -428,10 +430,12 @@ class TestCudagraphIntegration:
 
     @create_new_process_for_each_test("spawn")
     def test_capture_replay_bypass_logic(self):
-        model = SimpleMLP().to("cuda")
+        model = SimpleMLP().to(current_platform.device_type)
         full_wrapper = CUDAGraphWrapper(model, self.vllm_config, CUDAGraphMode.FULL)
         max_bs = 16
-        persistent_input_buffer = torch.zeros(max_bs, 10, device="cuda")
+        persistent_input_buffer = torch.zeros(
+            max_bs, 10, device=current_platform.device_type
+        )
         input_1 = persistent_input_buffer[:1]
         input_2 = persistent_input_buffer[:2]
         input_3 = persistent_input_buffer[:3]
@@ -486,17 +490,17 @@ class TestCudagraphIntegration:
     @create_new_process_for_each_test("spawn")
     def test_nested_wrappers(self):
         """Tests a scenario with a PIECEWISE wrapper inside a FULL one."""
-        model = SimpleMLP().to("cuda")
+        model = SimpleMLP().to(current_platform.device_type)
         full_wrapper = CUDAGraphWrapper(model, self.vllm_config, CUDAGraphMode.FULL)
-        input_1 = torch.randn(1, 10, device="cuda")
+        input_1 = torch.randn(1, 10, device=current_platform.device_type)
 
         # Setup: Inner model is wrapped with PIECEWISE, outer with FULL
-        inner_model = SimpleMLP().to("cuda")
+        inner_model = SimpleMLP().to(current_platform.device_type)
         piecewise_wrapper = CUDAGraphWrapper(
             inner_model, self.vllm_config, CUDAGraphMode.PIECEWISE
         )
         inner_model.forward = MagicMock(wraps=inner_model.forward)
-        outer_model = SimpleMLP().to("cuda")
+        outer_model = SimpleMLP().to(current_platform.device_type)
         # When outer model is called, it calls the piecewise_wrapper
         outer_model.forward = MagicMock(
             wraps=outer_model.forward, side_effect=piecewise_wrapper

@@ -45,7 +45,7 @@ def test_rotary_embedding_torch_compile_with_custom_op(monkeypatch):
     monkeypatch.setenv("VLLM_USE_BYTECODE_HOOK", "1")
     monkeypatch.setenv("VLLM_USE_AOT_COMPILE", "0")
 
-    device = "cuda"
+    device = current_platform.device_type
     positions = torch.arange(16, device=device)
     query = torch.randn(16, 32, device=device, dtype=torch.bfloat16)
     key = torch.randn(16, 32, device=device, dtype=torch.bfloat16)

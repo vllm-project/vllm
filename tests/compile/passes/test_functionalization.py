@@ -273,7 +273,7 @@ MODELS_AND_DO_FUSION = {
 def test_fix_functionalization(
     model_class: torch.nn.Module, do_fusion: bool, dtype: torch.dtype
 ):
-    torch.set_default_device("cuda")
+    torch.set_default_device(current_platform.device_type)
     torch.set_default_dtype(dtype)
     torch.manual_seed(0)
 

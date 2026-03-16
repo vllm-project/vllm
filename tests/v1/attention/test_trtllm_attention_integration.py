@@ -172,7 +172,7 @@ def _run_trtllm_integration(batch_spec):
     """Run TRTLLM attention through the full FlashInfer pipeline
     and compare against an SDPA reference."""
     set_random_seed(42)
-    device = torch.device("cuda:0")
+    device = torch.device(f"{current_platform.device_type}:0")
 
     vllm_config = create_vllm_config(
         model_name=MODEL,

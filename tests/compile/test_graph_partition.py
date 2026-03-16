@@ -9,6 +9,7 @@ from torch.fx.experimental.proxy_tensor import make_fx
 
 from vllm.compilation.backends import _is_empty_allocation_node, split_graph
 from vllm.compilation.passes.fx_utils import find_op_nodes
+from vllm.platforms import current_platform
 
 # This import automatically registers `torch.ops.silly.attention`
 from . import silly_attention  # noqa: F401
@@ -145,7 +146,7 @@ def test_consecutive_ops_in_split():
         final_result = torch.sigmoid(attn_inout)
         return final_result
 
-    torch.set_default_device("cuda")
+    torch.set_default_device(current_platform.device_type)
 
     # Create the traced FX graph for the model
     x = torch.randn(8, 4)
@@ -323,7 +324,7 @@ def test_builtin_empty_only_partition_is_merged():
         "Expected two builtin empty_like nodes in merged non-splitting subgraph"
     )
 
-    x = torch.randn(2, 3, device="cuda")
+    x = torch.randn(2, 3, device=current_platform.device_type)
     output_original = gm(x)
     output_split = split_gm(x)
     assert torch.allclose(output_original, output_split), "Output mismatch after split"

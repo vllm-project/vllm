@@ -763,7 +763,7 @@ def test_backend_correctness(
             method="ngram", num_speculative_tokens=query_len - 1
         )
 
-    device = torch.device("cuda:0")
+    device = torch.device(f"{current_platform.device_type}:0")
 
     # 1. Setup
     batch_size = batch_spec.batch_size
