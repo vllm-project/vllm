@@ -240,7 +240,7 @@ if has_flashinfer_cutlass_fused_moe() and current_platform.has_device_capability
     from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
         FlashInferExperts,
     )
-    from vllm.model_executor.layers.fused_moe.flashinfer_nvlink_2s_prepare_finalize import (  # noqa: E501
+    from vllm.model_executor.layers.fused_moe.flashinfer_nvlink_two_sided_prepare_finalize import (  # noqa: E501
         FlashInferNVLinkTwoSidedPrepareAndFinalize,
     )
 
@@ -271,7 +271,7 @@ if (
     and has_flashinfer_cutlass_fused_moe()
     and current_platform.has_device_capability(100)
 ):
-    from vllm.model_executor.layers.fused_moe.prepare_finalize.flashinfer_nvlink_1s import (  # noqa: E501
+    from vllm.model_executor.layers.fused_moe.flashinfer_nvlink_one_sided_prepare_finalize import (  # noqa: E501
         FlashInferNVLinkOneSidedPrepareAndFinalize,
     )
 

@@ -15,7 +15,10 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
 )
-from vllm.model_executor.layers.fused_moe.flashinfer_nvlink_2s_prepare_finalize import (
+from vllm.model_executor.layers.fused_moe.flashinfer_nvlink_one_sided_prepare_finalize import (  # noqa: E501
+    FlashInferNVLinkOneSidedPrepareAndFinalize,
+)
+from vllm.model_executor.layers.fused_moe.flashinfer_nvlink_two_sided_prepare_finalize import (  # noqa: E501
     FlashInferNVLinkTwoSidedPrepareAndFinalize,
 )
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
@@ -24,9 +27,6 @@ from vllm.model_executor.layers.fused_moe.modular_kernel import (
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     make_moe_prepare_and_finalize_naive_dp_ep,
     make_moe_prepare_and_finalize_no_dp_ep,
-)
-from vllm.model_executor.layers.fused_moe.prepare_finalize.flashinfer_nvlink_1s import (
-    FlashInferNVLinkOneSidedPrepareAndFinalize,
 )
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_deep_ep, has_mori, has_nixl_ep
