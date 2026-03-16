@@ -288,14 +288,15 @@ def _create_input_tensors(
     total_q: int,
     device: torch.device,
     dtype: torch.dtype,
+    quantize_query: bool = False,
 ) -> tuple:
     """Create Q, K, V input tensors for all layers.
 
-    When kv_cache_dtype is fp8, queries are cast to fp8 to match backends
-    that require query/key/value dtype consistency (Triton, FlashInfer).
+    When quantize_query is True, queries are cast to fp8 to match backends
+    that require query/key/value dtype consistency.
     """
     q_dtype = dtype
-    if config.kv_cache_dtype == "fp8":
+    if quantize_query:
         from vllm.platforms import current_platform
 
         q_dtype = current_platform.fp8_dtype()
@@ -540,8 +541,12 @@ def run_attention_benchmark(config: BenchmarkConfig) -> BenchmarkResult:
                 common_attn_metadata=common_metadata,
             )
 
+            # Only quantize queries when the impl supports it
+            quantize_query = config.kv_cache_dtype.startswith("fp8") and getattr(
+                impl, "supports_quant_query_input", False
+            )
             q_list, k_list, v_list = _create_input_tensors(
-                config, total_q, device, dtype
+                config, total_q, device, dtype, quantize_query=quantize_query
             )
 
             cache_list = _create_kv_cache(
