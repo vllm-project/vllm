@@ -21,6 +21,20 @@ steps:
       pytest -x -v -s tests/kernels/moe/test_cpu_fused_moe.py
       pytest -x -v -s tests/kernels/test_onednn.py"
 
+- label: CPU-Compatibility Tests
+  depends_on: []
+  soft_fail: true
+  device: intel_cpu
+  no_plugin: true
+  source_file_dependencies:
+  - cmake/cpu_extension.cmake
+  - setup.py
+  - vllm/platforms/cpu.py
+  commands:
+    - |
+      bash .buildkite/scripts/hardware_ci/run-cpu-test.sh 20m "
+      bash .buildkite/scripts/hardware_ci/run-cpu-compatibility-test.sh"
+
 - label: CPU-Language Generation and Pooling Model Tests
   depends_on: []
   soft_fail: true
