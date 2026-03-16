@@ -20,7 +20,7 @@ is_batch_invariant = envs.VLLM_BATCH_INVARIANT
 float8_info = torch.finfo(current_platform.fp8_dtype())
 # Minimum scale to avoid division by zero in per-group FP8 quantization.
 # Matches the eps used by per_token_group_fp8_quant (fp8_utils.py).
-FP8_QUANT_EPS = 1e-10
+FP8_QUANT_EPS = tl.constexpr(1e-10)
 
 
 @triton.jit
