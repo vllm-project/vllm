@@ -735,8 +735,8 @@ class ModelConfig:
         """Pull model/tokenizer from Object Storage to cache directory when needed.
 
         Args:
-           model: Model name or path
-           tokenizer: Tokenizer name or path
+            model: Model name or path
+            tokenizer: Tokenizer name or path
         """
 
         # Skip if model_weights is already set (model already pulled)
