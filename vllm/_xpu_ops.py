@@ -107,6 +107,7 @@ _OPS_REGISTERED = False
 
 
 class xpu_ops:
+    @staticmethod
     @torch.compile
     def dynamic_per_token_quant_ref(
         input: torch.Tensor, use_sym_quant: bool, bits: int
@@ -115,23 +116,21 @@ class xpu_ops:
         input = input.view(
             -1, original_sizes[-1]
         )  # Flatten except for the last dimension
-        k = input.shape[-1]
         qmin = -(2 ** (bits - 1)) if use_sym_quant else 0
         qmax = 2 ** (bits - 1) - 1 if use_sym_quant else 2**bits - 1
         min_val = torch.min(input, dim=-1)[0].to(dtype=torch.float32).unsqueeze(-1)
         max_val = torch.max(input, dim=-1)[0].to(dtype=torch.float32).unsqueeze(-1)
         if use_sym_quant:
-            scale = torch.maximum(torch.abs(min_val), torch.abs(max_val)) / qmax
+            scale = (
+                torch.maximum(torch.abs(min_val), torch.abs(max_val)) / qmax
+            ).clamp(min=1e-5)
             zero_point = torch.zeros_like(scale).to(dtype=torch.int32)
         else:
-            scale = (max_val - min_val) / qmax
+            scale = ((max_val - min_val) / qmax).clamp(min=1e-5)
             zero_point = -1 * torch.round(min_val / scale).to(dtype=torch.int32)
         scale = scale.to(dtype=input.dtype)
         quantized = torch.clamp(
-            torch.round(
-                input / scale.repeat(1, k).to(dtype=torch.float32)
-                + zero_point.repeat(1, k)
-            ),
+            torch.round(input / scale.to(dtype=torch.float32) + zero_point),
             qmin,
             qmax,
         ).to(dtype=torch.int8 if use_sym_quant else torch.uint8)
