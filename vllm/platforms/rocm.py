@@ -227,7 +227,8 @@ class RocmPlatform(Platform):
     dispatch_key: str = "CUDA"
     ray_device_key: str = "GPU"
     dist_backend: str = "nccl"
-    device_control_env_var: str = "HIP_VISIBLE_DEVICES"
+    # rocm shares the same device control env var as CUDA
+    device_control_env_var: str = "CUDA_VISIBLE_DEVICES"
     ray_noset_device_env_vars: list[str] = [
         "RAY_EXPERIMENTAL_NOSET_HIP_VISIBLE_DEVICES",
         "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES",
