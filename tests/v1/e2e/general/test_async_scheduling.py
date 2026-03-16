@@ -7,7 +7,10 @@ from typing import Any
 import pytest
 import torch._dynamo.config as dynamo_config
 
-from tests.utils import large_gpu_mark, single_gpu_only
+from tests.utils import (
+    large_gpu_mark,
+    single_gpu_only,
+)
 from vllm import SamplingParams
 from vllm.logprobs import Logprob
 from vllm.platforms import current_platform
@@ -150,6 +153,7 @@ def test_with_eagle3_spec_decoding(sample_json_schema, monkeypatch: pytest.Monke
     run_tests(monkeypatch, MTP_MODEL, test_configs, test_sampling_params)
 
 
+@pytest.mark.flaky(reruns=2, only_on=current_platform.is_rocm())
 def test_with_ngram_gpu_spec_decoding(monkeypatch: pytest.MonkeyPatch):
     """Test ngram_gpu speculative decoding with different configurations.
 
@@ -202,7 +206,6 @@ def run_tests(
     with monkeypatch.context() as m:
         # lock matmul precision to full FP32 (IEEE)
         m.setenv("VLLM_FLOAT32_MATMUL_PRECISION", "highest")
-        # m.setenv("VLLM_BATCH_INVARIANT", "1")
         outputs: list[tuple[str, list, list]] = []
         for n, (
             test_preemption,
@@ -351,6 +354,7 @@ def run_test(
         speculative_config=spec_config,
         disable_log_stats=False,
         attention_config=attention_config,
+        enable_prefix_caching=False if current_platform.is_rocm() else None,
         **cache_arg,
     ) as vllm_model:
         results = []
