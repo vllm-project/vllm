@@ -15,6 +15,7 @@ from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.inputs.data import PromptType
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import SupportsRealtime
+from vllm.renderers.inputs.preprocess import parse_model_prompt
 
 logger = init_logger(__name__)
 
@@ -32,13 +33,11 @@ class OpenAIServingRealtime(OpenAIServing):
         models: OpenAIServingModels,
         *,
         request_logger: RequestLogger | None,
-        log_error_stack: bool = False,
     ):
         super().__init__(
             engine_client=engine_client,
             models=models,
             request_logger=request_logger,
-            log_error_stack=log_error_stack,
         )
 
         self.task_type: Literal["realtime"] = "realtime"
@@ -70,15 +69,20 @@ class OpenAIServingRealtime(OpenAIServing):
         Yields:
             StreamingInput objects containing audio prompts for the engine
         """
+        model_config = self.model_config
+        renderer = self.renderer
 
         # mypy is being stupid
         # TODO(Patrick) - fix this
         stream_input_iter = cast(
             AsyncGenerator[PromptType, None],
             self.model_cls.buffer_realtime_audio(
-                audio_stream, input_stream, self.model_config
+                audio_stream, input_stream, model_config
             ),
         )
 
         async for prompt in stream_input_iter:
-            yield StreamingInput(prompt=prompt)
+            parsed_prompt = parse_model_prompt(model_config, prompt)
+            (engine_prompt,) = await renderer.render_cmpl_async([parsed_prompt])
+
+            yield StreamingInput(prompt=engine_prompt)

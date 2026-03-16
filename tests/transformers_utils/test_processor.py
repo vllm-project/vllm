@@ -7,7 +7,8 @@ from transformers.processing_utils import ProcessingKwargs
 from typing_extensions import Unpack
 
 from vllm.transformers_utils.processor import (
-    get_processor_kwargs_from_processor,
+    get_processor_kwargs_keys,
+    get_processor_kwargs_type,
 )
 
 
@@ -35,7 +36,7 @@ def _assert_has_all_expected(keys: set[str]) -> None:
         assert k in keys
 
 
-# Path 1: __call__ method has kwargs: Unpack[*ProcessingKwargs]
+# Path 1: __call__ method has kwargs: Unpack[*ProcessorKwargs]
 class _ProcWithUnpack:
     def __call__(self, *args, **kwargs: Unpack[_FakeProcessorKwargs]):  # type: ignore
         return None
@@ -43,11 +44,11 @@ class _ProcWithUnpack:
 
 def test_get_processor_kwargs_from_processor_unpack_path_returns_full_union():
     proc = _ProcWithUnpack()
-    keys = get_processor_kwargs_from_processor(proc)
+    keys = get_processor_kwargs_keys(get_processor_kwargs_type(proc))
     _assert_has_all_expected(keys)
 
 
-# ---- Path 2: No Unpack, fallback to scanning *ProcessingKwargs in module ----
+# ---- Path 2: No Unpack, fallback to scanning *ProcessorKwargs in module ----
 
 
 class _ProcWithoutUnpack:
@@ -62,5 +63,5 @@ def test_get_processor_kwargs_from_processor_module_scan_returns_full_union():
     assert hasattr(mod, "_FakeProcessorKwargs")
 
     proc = _ProcWithoutUnpack()
-    keys = get_processor_kwargs_from_processor(proc)
+    keys = get_processor_kwargs_keys(get_processor_kwargs_type(proc))
     _assert_has_all_expected(keys)

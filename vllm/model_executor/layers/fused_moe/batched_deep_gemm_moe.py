@@ -261,7 +261,7 @@ def persistent_masked_m_silu_mul_quant(
     return y_q, y_s
 
 
-class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
+class BatchedDeepGemmExperts(mk.FusedMoEExpertsModular):
     def __init__(
         self,
         moe_config: FusedMoEConfig,
@@ -310,9 +310,6 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
         return True
-
-    def supports_chunking(self) -> bool:
-        return False
 
     def supports_expert_map(self) -> bool:
         return False

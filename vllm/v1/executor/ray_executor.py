@@ -100,7 +100,7 @@ class RayDistributedExecutor(Executor):
 
         self.uses_sampler = self.vllm_config.model_config.runner_type != "pooling" and (
             self.vllm_config.ec_transfer_config is None
-            or not self.vllm_config.ec_transfer_config.is_ec_producer
+            or self.vllm_config.ec_transfer_config.is_ec_consumer
         )
 
         self.scheduler_output: SchedulerOutput | None = None
@@ -282,8 +282,8 @@ class RayDistributedExecutor(Executor):
                 # driver_dummy_worker can be None when using ray spmd worker.
                 continue
             worker_node_and_gpu_ids.append(
-                ray.get(worker.get_node_and_gpu_ids.remote())
-            )  # type: ignore[attr-defined]
+                ray.get(worker.get_node_and_gpu_ids.remote())  # type: ignore[attr-defined]
+            )
 
         node_workers = defaultdict(list)  # node id -> list of worker ranks
         node_gpus = defaultdict(list)  # node id -> list of gpu ids
@@ -382,8 +382,15 @@ class RayDistributedExecutor(Executor):
             all_kwargs.append(kwargs)
         self.collective_rpc("init_worker", args=(all_kwargs,))
 
-        self.collective_rpc("init_device")
-        self.collective_rpc("load_model")
+        is_eep_new_worker = envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH
+        if not is_eep_new_worker:
+            self.collective_rpc("init_device")
+            self.collective_rpc("load_model")
+
+        def _update_block_size(worker):
+            current_platform.update_block_size_for_backend(worker.vllm_config)
+
+        self.collective_rpc(_update_block_size)
 
         for pp_rank in range(self.parallel_config.pipeline_parallel_size):
             self.pp_tp_workers.append([])
