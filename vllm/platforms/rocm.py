@@ -629,7 +629,7 @@ class RocmPlatform(Platform):
 
     @classmethod
     def get_current_memory_usage(
-        cls, device: torch.types.device | none = none
+        cls, device: torch.types.device | None = None
     ) -> float:
         torch.cuda.reset_peak_memory_stats(device)
         free_mem, total_mem = torch.cuda.mem_get_info(device)
