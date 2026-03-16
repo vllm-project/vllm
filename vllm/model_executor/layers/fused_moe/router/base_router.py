@@ -255,14 +255,13 @@ class BaseRouter(FusedMoERouter):
         )
 
         # Capture logical ids before EPLB mapping.
-        # Direct tensor copy — no custom op needed.  torch.compile traces
-        # through copy_() natively without graph breaks.  Using a custom op
-        # with mutates_args caused CUDA graph replay to stall under load.
+        # Uses registered custom op so torch.compile traces through cleanly.
         if self._capture_buffer is not None:
-            batch_size = topk_ids.shape[0]
-            self._capture_buffer[self._capture_layer_id, :batch_size, :].copy_(
-                topk_ids[:batch_size].to(self._capture_buffer.dtype),
-                non_blocking=True,
+            torch.ops.vllm.capture_routing(
+                self._capture_buffer,
+                topk_ids,
+                self._capture_layer_id,
+                topk_ids.shape[0],
             )
 
         # Step 4: Apply EPLB mapping
