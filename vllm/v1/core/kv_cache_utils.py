@@ -802,16 +802,12 @@ def get_max_concurrency_for_kv_cache_config(
     """
     Get the maximum concurrency for the given KV cache configuration.
     """
-    num_layer_per_group = max(
-        len(group.layer_names) for group in kv_cache_config.kv_cache_groups
-    )
-    max_memory_usage_per_request = num_layer_per_group * max_memory_usage_bytes(
+    # For hybrid models, each memory pool is shared by one layer from each group
+    # So we only need to calculate the memory usage for one layer per pool
+    max_memory_usage_per_request = max_memory_usage_bytes(
         vllm_config, (group.kv_cache_spec for group in kv_cache_config.kv_cache_groups)
     )
-    memory_per_block = (
-        kv_cache_config.kv_cache_groups[0].kv_cache_spec.page_size_bytes
-        * num_layer_per_group
-    )
+    memory_per_block = kv_cache_config.kv_cache_groups[0].kv_cache_spec.page_size_bytes
     num_block_per_request = cdiv(max_memory_usage_per_request, memory_per_block)
     max_concurrency = kv_cache_config.num_blocks / num_block_per_request
     return max_concurrency
@@ -845,7 +841,7 @@ def get_num_blocks(
         available_memory: Memory available for KV cache in bytes.
         page_size: The page size of the KV cache.
     """
-    num_blocks = int(available_memory // page_size // num_layers)
+    num_blocks = int(available_memory // page_size)
     num_blocks = max(num_blocks, 0)
     num_blocks = may_override_num_blocks(vllm_config, num_blocks)
     return num_blocks
@@ -1134,9 +1130,14 @@ def get_kv_cache_config_from_groups(
             [group.kv_cache_spec for group in kv_cache_groups]
         )
         assert group_size > 0, "group_size must be greater than 0"
-        num_blocks = get_num_blocks(
-            vllm_config, group_size, available_memory, page_size
+        # For hybrid models, each memory pool is shared by one layer from each group
+        # So we need to divide the available memory by group_size
+        memory_per_pool = available_memory // group_size
+        num_blocks_per_pool = get_num_blocks(
+            vllm_config, 1, memory_per_pool, page_size
         )
+        # num_blocks should represent the total number of blocks across all pools
+        num_blocks = num_blocks_per_pool
         kv_cache_tensors = []
         for i in range(group_size):
             shared_by = []
@@ -1144,7 +1145,7 @@ def get_kv_cache_config_from_groups(
                 if i < len(kv_cache_groups[j].layer_names):
                     shared_by.append(kv_cache_groups[j].layer_names[i])
             kv_cache_tensors.append(
-                KVCacheTensor(size=page_size * num_blocks, shared_by=shared_by)
+                KVCacheTensor(size=page_size * num_blocks_per_pool, shared_by=shared_by)
             )
 
     return KVCacheConfig(
@@ -1351,7 +1352,9 @@ def _max_memory_usage_bytes_from_groups(
         )
 
     # General case: group_size pools, each shared by one layer per group
-    # Memory = group_size * page_size * blocks_for_max_len
+    # Memory = page_size * blocks_for_max_len
+    # Each pool is shared by one layer from each group, so we only need
+    # to calculate the memory for one layer per pool
     group_size = max(len(group.layer_names) for group in kv_cache_groups)
     page_size = get_uniform_page_size(
         [group.kv_cache_spec for group in kv_cache_groups]
@@ -1359,7 +1362,7 @@ def _max_memory_usage_bytes_from_groups(
     any_spec = kv_cache_groups[0].kv_cache_spec
     blocks_needed = cdiv(any_spec.max_memory_usage_bytes(vllm_config), page_size)
 
-    return group_size * page_size * blocks_needed
+    return page_size * blocks_needed
 
 
 def _estimate_max_model_len_from_groups(
