@@ -506,7 +506,6 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
 
             if self.use_spec_decode and num_accepted_tokens is not None:
                 assert query_start_loc_d is not None
-                assert num_accepted_tokens is not None
                 query_start_loc_d = query_start_loc_d[: padded_bs + 1]
                 self.decode_num_accepted_tokens[: metadata.num_decodes].copy_(
                     num_accepted_tokens, non_blocking=True
