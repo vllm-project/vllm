@@ -179,6 +179,7 @@ class BlockPool:
         self.kv_event_queue: list[KVCacheEvent] = []
 
         self.metrics_collector = metrics_collector
+        self._blocks_registered_this_step: set[int] = set()
 
     def get_cached_block(
         self, block_hash: BlockHash, kv_cache_group_ids: list[int]
@@ -203,6 +204,8 @@ class BlockPool:
                 block_hash_with_group_id
             )
             if not block:
+                return None
+            if block.block_id in self._blocks_registered_this_step:
                 return None
             cached_blocks.append(block)
         return cached_blocks
@@ -269,6 +272,7 @@ class BlockPool:
             )
             blk.block_hash = block_hash_with_group_id
             self.cached_block_hash_to_block.insert(block_hash_with_group_id, blk)
+            self._blocks_registered_this_step.add(blk.block_id)
             if new_hashes is not None:
                 new_hashes.append(maybe_convert_block_hash(block_hash))
 
@@ -421,6 +425,12 @@ class BlockPool:
         self.free_block_queue.append_n(
             [block for block in blocks_list if block.ref_cnt == 0 and not block.is_null]
         )
+
+    def new_step_starts(self) -> None:
+        """Called at the beginning of each scheduling step.
+        to clear same-step cache-pollution guard
+        """
+        self._blocks_registered_this_step.clear()
 
     def evict_blocks(self, block_ids: set[int]) -> None:
         """evict blocks from the prefix cache by their block IDs.

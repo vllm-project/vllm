@@ -249,6 +249,7 @@ class KVCacheCoordinator(ABC):
 
     def new_step_starts(self) -> None:
         """Called when a new step is started."""
+        self.block_pool.new_step_starts()
         for manager in self.single_type_managers:
             manager.new_step_starts()
 
