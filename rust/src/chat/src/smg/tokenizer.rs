@@ -1,11 +1,10 @@
 use std::collections::HashMap;
 use std::fmt;
-use std::path::Path;
 use std::sync::Arc;
 
 use smg_tokenizer::TokenizerTrait as SmgTokenizerTrait;
 use smg_tokenizer::chat_template::ChatTemplateParams;
-use smg_tokenizer::factory::create_tokenizer_with_chat_template_blocking;
+use smg_tokenizer::factory::create_tokenizer_async;
 use thiserror_ext::AsReport as _;
 
 use crate::error::{Error, Result};
@@ -26,23 +25,11 @@ impl fmt::Debug for SmgTokenizer {
 
 impl SmgTokenizer {
     /// Load a tokenizer and any adjacent/default chat template for one model or local path.
-    pub fn from_model_or_path(model_name_or_path: &str) -> Result<Self> {
-        Self::from_model_or_path_with_chat_template(model_name_or_path, None::<&Path>)
-    }
+    pub async fn from_model_or_path(model_name_or_path: &str) -> Result<Self> {
+        let inner = create_tokenizer_async(model_name_or_path)
+            .await
+            .map_err(|error| Error::Tokenizer(error.to_report_string()))?;
 
-    /// Load a tokenizer and optionally override the chat template path.
-    pub fn from_model_or_path_with_chat_template(
-        model_name_or_path: &str,
-        chat_template_path: Option<impl AsRef<Path>>,
-    ) -> Result<Self> {
-        let chat_template_path = chat_template_path
-            .as_ref()
-            .map(|path| path.as_ref().to_string_lossy().into_owned());
-        let inner = create_tokenizer_with_chat_template_blocking(
-            model_name_or_path,
-            chat_template_path.as_deref(),
-        )
-        .map_err(|error| Error::Tokenizer(error.to_report_string()))?;
         Ok(Self { inner })
     }
 
@@ -55,8 +42,15 @@ impl SmgTokenizer {
         &self,
         messages: &[serde_json::Value],
         add_generation_prompt: bool,
+        continue_final_message: bool,
         template_kwargs: Option<&HashMap<String, serde_json::Value>>,
     ) -> Result<String> {
+        let mut merged_template_kwargs = template_kwargs.cloned().unwrap_or_default();
+        merged_template_kwargs.insert(
+            "continue_final_message".to_string(),
+            serde_json::Value::Bool(continue_final_message),
+        );
+
         self.inner
             .apply_chat_template(
                 messages,
@@ -64,7 +58,7 @@ impl SmgTokenizer {
                     add_generation_prompt,
                     tools: None,
                     documents: None,
-                    template_kwargs,
+                    template_kwargs: Some(&merged_template_kwargs),
                 },
             )
             .map_err(|error| Error::Tokenizer(error.to_report_string()))

@@ -31,6 +31,13 @@ pub struct GenerateOutput {
     pub raw: EngineCoreOutput,
 }
 
+impl GenerateOutput {
+    /// Returns whether this output is terminal for the request.
+    pub fn finished(&self) -> bool {
+        self.raw.finished()
+    }
+}
+
 /// Stream of token-only generate outputs for one request.
 ///
 /// - A normal termination of the stream represents a clean completion of the request.

@@ -243,10 +243,7 @@ fn sample_request(request_id: &str) -> ChatRequest {
             ..Default::default()
         },
         chat_options: ChatOptions::default(),
-        cache_salt: Some("salt".to_string()),
-        trace_headers: None,
-        priority: 2,
-        data_parallel_rank: Some(3),
+        // more fields here in the future
     }
 }
 
@@ -265,9 +262,7 @@ async fn chat_streams_text_events() {
             assert_eq!(add[0].as_ref(), &[0x00]);
             let request: EngineCoreRequest = rmp_serde::from_slice(&add[1]).unwrap();
             assert_eq!(request.request_id, "chat-1");
-            assert_eq!(request.cache_salt.as_deref(), Some("salt"));
-            assert_eq!(request.priority, 2);
-            assert_eq!(request.data_parallel_rank, Some(3));
+            // more fields here in the future
             assert_eq!(
                 String::from_utf8(
                     request

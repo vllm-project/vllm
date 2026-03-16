@@ -57,6 +57,8 @@ impl Stream for ChatEventStream {
     }
 }
 
+/// Convert the output token stream from the `vllm_llm` layer into a stream of higher-level chat
+/// events, by decoding tokens and diffing against previously emitted text.
 #[try_stream(boxed, ok = ChatEvent, error = Error)]
 async fn chat_event_stream(
     request_id: String,
@@ -82,7 +84,7 @@ async fn chat_event_stream(
             };
         }
 
-        if output.raw.finished() {
+        if output.finished() {
             yield ChatEvent::Done {
                 text: decoded,
                 finish_reason: output.raw.finish_reason,

@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -31,26 +31,13 @@ pub struct ChatMessage {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ChatOptions {
     /// If true, ask the chat template to append a generation prompt for the assistant.
-    ///
-    /// This mirrors the meaning of vLLM/OpenAI-server-side `add_generation_prompt`.
     pub add_generation_prompt: bool,
-    /// Reserved for vLLM parity, but not wired through the current SMG-backed renderer yet.
-    ///
-    /// The conflict with `add_generation_prompt` is still validated so the public API does not
-    /// drift from the intended upstream semantics.
+    /// If true, expose `continue_final_message` to the chat template so the final assistant
+    /// message can be left open-ended for continuation instead of starting a new assistant turn.
     pub continue_final_message: bool,
-    /// Additional keyword arguments exposed to the chat template.
-    pub template_kwargs: BTreeMap<String, Value>,
-}
 
-impl ChatOptions {
-    /// Create options with the recommended defaults for normal chat generation.
-    pub fn with_defaults() -> Self {
-        Self {
-            add_generation_prompt: true,
-            ..Self::default()
-        }
-    }
+    /// Additional keyword arguments exposed to the chat template.
+    pub template_kwargs: HashMap<String, Value>,
 }
 
 impl Default for ChatOptions {
@@ -58,7 +45,7 @@ impl Default for ChatOptions {
         Self {
             add_generation_prompt: true,
             continue_final_message: false,
-            template_kwargs: BTreeMap::new(),
+            template_kwargs: HashMap::new(),
         }
     }
 }
@@ -75,14 +62,6 @@ pub struct ChatRequest {
     pub sampling_params: SamplingParams,
     /// Chat-specific rendering options.
     pub chat_options: ChatOptions,
-    /// Optional cache salt forwarded to engine-core.
-    pub cache_salt: Option<String>,
-    /// Optional tracing headers forwarded to engine-core.
-    pub trace_headers: Option<BTreeMap<String, String>>,
-    /// Optional request priority forwarded to engine-core.
-    pub priority: i32,
-    /// Optional target data-parallel rank forwarded to engine-core.
-    pub data_parallel_rank: Option<u32>,
 }
 
 impl ChatRequest {

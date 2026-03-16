@@ -22,10 +22,6 @@ pub(crate) fn lower_chat_request(
         messages: _,
         mut sampling_params,
         chat_options: _,
-        cache_salt,
-        trace_headers,
-        priority,
-        data_parallel_rank,
     } = request;
 
     let (prompt_token_ids, _prompt_text) = match rendered {
@@ -38,17 +34,15 @@ pub(crate) fn lower_chat_request(
 
     sampling_params.output_kind = RequestOutputKind::Cumulative;
 
-    let prompt_token_ids: Vec<u32> = prompt_token_ids;
-
     let generate_request = GenerateRequest {
         request_id: request_id.clone(),
         prompt_token_ids,
         sampling_params,
         arrival_time: None,
-        cache_salt,
-        trace_headers,
-        priority,
-        data_parallel_rank,
+        cache_salt: None,
+        trace_headers: None,
+        priority: 0,
+        data_parallel_rank: None,
         reasoning_ended: None,
         lora_request: None,
     };

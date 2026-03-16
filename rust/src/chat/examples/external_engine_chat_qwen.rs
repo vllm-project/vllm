@@ -47,6 +47,7 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     let tokenizer = std::sync::Arc::new(
         SmgTokenizer::from_model_or_path(&args.model)
+            .await
             .with_context(|| format!("failed to load tokenizer for {}", args.model))?,
     );
 
@@ -87,10 +88,6 @@ async fn main() -> Result<()> {
             ..Default::default()
         },
         chat_options: ChatOptions::default(),
-        cache_salt: None,
-        trace_headers: None,
-        priority: 0,
-        data_parallel_rank: None,
     };
 
     println!("request_id={request_id}");

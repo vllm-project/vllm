@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use serde_json::json;
 
 use super::SmgTokenizer;
@@ -30,14 +28,8 @@ impl ChatRenderer for SmgTokenizerChatRenderer {
             .iter()
             .map(|message| json!({ "role": message.role.as_str(), "content": message.content }))
             .collect::<Vec<_>>();
-        let template_kwargs = (!request.chat_options.template_kwargs.is_empty()).then(|| {
-            request
-                .chat_options
-                .template_kwargs
-                .iter()
-                .map(|(key, value)| (key.clone(), value.clone()))
-                .collect::<HashMap<_, _>>()
-        });
+        let template_kwargs = (!request.chat_options.template_kwargs.is_empty())
+            .then_some(&request.chat_options.template_kwargs);
 
         if !self.tokenizer.supports_string_chat_template() {
             return Err(Error::UnsupportedChatTemplateFormat);
@@ -46,7 +38,8 @@ impl ChatRenderer for SmgTokenizerChatRenderer {
         let prompt = match self.tokenizer.apply_chat_template(
             &messages,
             request.chat_options.add_generation_prompt,
-            template_kwargs.as_ref(),
+            request.chat_options.continue_final_message,
+            template_kwargs,
         ) {
             Ok(prompt) => prompt,
             Err(Error::Tokenizer(message))
@@ -162,16 +155,49 @@ mod tests {
             }],
             sampling_params: Default::default(),
             chat_options: ChatOptions::default(),
-            cache_salt: None,
-            trace_headers: None,
-            priority: 0,
-            data_parallel_rank: None,
         };
 
         assert_eq!(
             renderer.render(&request).unwrap(),
             RenderedPrompt::Text {
                 prompt: "think".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn smg_tokenizer_renderer_passes_continue_final_message_to_template() {
+        let tokenizer = SmgTokenizer::from_arc(Arc::new(
+            FakeSmgTokenizer::new(
+                "{% if continue_final_message %}continue{% else %}new{% endif %}",
+            )
+            .unwrap(),
+        ));
+        let renderer = SmgTokenizerChatRenderer::new(tokenizer);
+        let mut request = ChatRequest {
+            request_id: "render-2".to_string(),
+            messages: vec![ChatMessage {
+                role: ChatRole::Assistant,
+                content: "The capital of".to_string(),
+            }],
+            sampling_params: Default::default(),
+            chat_options: ChatOptions::default(),
+        };
+
+        assert_eq!(
+            renderer.render(&request).unwrap(),
+            RenderedPrompt::Text {
+                prompt: "new".to_string(),
+            }
+        );
+
+        request.chat_options.continue_final_message = true;
+        request.chat_options.add_generation_prompt = false;
+
+        assert_eq!(
+            renderer.render(&request).unwrap(),
+            RenderedPrompt::Text {
+                prompt: "continue".to_string(),
             }
         );
     }
