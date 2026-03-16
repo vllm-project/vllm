@@ -172,6 +172,12 @@ class SingleTypeKVCacheManager(ABC):
         num_skipped_tokens = self.get_num_skipped_tokens(num_total_computed_tokens)
         num_skipped_blocks = num_skipped_tokens // self.block_size
         if num_skipped_blocks > 0:
+            # The blocks in the skipped prefix were pre-touched in
+            # get_computed_blocks(). Release them now since they won't be
+            # tracked in req_to_blocks and would otherwise leak.
+            if self.enable_caching:
+                num_to_release = min(num_skipped_blocks, len(new_computed_blocks))
+                self.block_pool.free_blocks(new_computed_blocks[:num_to_release])
             # It is possible that all new computed blocks are skipped when
             # num_skipped_blocks > len(new_computed_blocks).
             new_computed_blocks = new_computed_blocks[num_skipped_blocks:]
@@ -181,10 +187,12 @@ class SingleTypeKVCacheManager(ABC):
                 num_external_computed_tokens,
             )
 
-        # Touch the computed blocks to make sure they won't be evicted.
-        if self.enable_caching:
-            self.block_pool.touch(new_computed_blocks)
-        else:
+        # The computed blocks were already pinned (ref_cnt incremented) by
+        # KVCacheManager.get_computed_blocks() via touch_computed_blocks().
+        # Calling touch() again here would double-count the reference and leak
+        # blocks out of the free pool. When caching is disabled there are no
+        # computed blocks to touch, so we still assert that.
+        if not self.enable_caching:
             assert not any(new_computed_blocks), (
                 "Computed blocks should be empty when prefix caching is disabled"
             )

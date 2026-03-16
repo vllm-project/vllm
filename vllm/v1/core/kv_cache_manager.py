@@ -193,6 +193,18 @@ class KVCacheManager:
             )
         )
 
+        # Pre-touch the cached hit blocks immediately to pin them out of the
+        # eviction-candidate free queue.  Without this, a block with ref_cnt==0
+        # could be stolen by a subsequent request's allocate_new_blocks() call
+        # within the same scheduling step before allocate_new_computed_blocks()
+        # gets a chance to touch it, leading to KV data corruption (token bleed
+        # between requests).  allocate_new_computed_blocks() will detect that
+        # the blocks are already touched and skip the redundant touch.
+        # If allocation later fails (allocate_slots returns None), the caller
+        # must call release_computed_blocks() to undo this touch.
+        if num_new_computed_tokens > 0:
+            self.coordinator.touch_computed_blocks(computed_blocks)
+
         if self.log_stats:
             assert self.prefix_cache_stats is not None
             self.prefix_cache_stats.record(
@@ -334,7 +346,11 @@ class KVCacheManager:
         )
 
         if num_blocks_to_allocate > self.block_pool.get_num_free_blocks():
-            # Cannot allocate new blocks
+            # Cannot allocate new blocks. Release the pre-touch that was applied
+            # in get_computed_blocks() so these blocks return to the eviction
+            # candidate pool rather than being unnecessarily pinned.
+            if new_computed_block_list is not self.empty_kv_cache_blocks.blocks:
+                self.coordinator.release_computed_blocks(new_computed_block_list)
             return None
 
         if (
