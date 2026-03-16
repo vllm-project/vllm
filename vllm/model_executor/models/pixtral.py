@@ -401,10 +401,18 @@ class PixtralForConditionalGeneration(
 
     def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
         self._require_language_model_eagle3()
+        assert hasattr(self.language_model, "set_aux_hidden_state_layers"), (
+            f"Language model {type(self.language_model).__name__} does not "
+            "implement 'set_aux_hidden_state_layers'."
+        )
         self.language_model.set_aux_hidden_state_layers(layers)
 
     def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:
         self._require_language_model_eagle3()
+        assert hasattr(self.language_model, "get_eagle3_aux_hidden_state_layers"), (
+            f"Language model {type(self.language_model).__name__} does not "
+            "implement 'get_eagle3_aux_hidden_state_layers'."
+        )
         return self.language_model.get_eagle3_aux_hidden_state_layers()
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
