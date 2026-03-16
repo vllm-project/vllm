@@ -2,7 +2,7 @@ steps:
   - label: "Build Container"
     key: "build-container"
     agents:
-      queue: "intel-xpu-kubevirt"
+      queue: "docker-build"
     commands:
       - sh .buildkite/scripts/hardware_ci/build-container.sh
     secrets:
