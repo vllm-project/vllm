@@ -567,7 +567,6 @@ def stateless_init_torch_distributed_process_group(
     pre-bound socket.  This is useful for eliminating TOCTOU races
     between port allocation and binding.
     """
-    logger.info(f"[===] stateless_init_torch_distributed_process_group {port}")
     init_method = get_tcp_uri(host, port)
     backend = Backend(backend)  # it is basically string
     timeout = _get_default_timeout(backend)
