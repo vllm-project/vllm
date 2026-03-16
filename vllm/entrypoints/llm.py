@@ -212,6 +212,36 @@ class LLM:
     Note:
         This class is intended to be used for offline inference. For online
         serving, use the [AsyncLLMEngine][vllm.AsyncLLMEngine] class instead.
+
+    中文说明:
+        该类用于根据提示词和采样参数生成文本，适合离线推理场景。
+        类内部包含分词器、语言模型（可分布在多张 GPU 上）以及 KV 缓存显存管理，
+        并通过智能批处理与高效内存管理提升推理吞吐。
+
+        参数说明（对应上方英文参数）：
+        - model / tokenizer：HuggingFace 模型与分词器的名称或路径。
+        - tokenizer_mode：分词模式，`auto` 优先 fast tokenizer，`slow` 强制 slow tokenizer。
+        - skip_tokenizer_init：跳过 tokenizer/detokenizer 初始化，输入需直接提供 token ids。
+        - trust_remote_code：是否信任并执行远端模型代码。
+        - allowed_local_media_path / allowed_media_domains：多模态输入的本地路径与域名白名单限制。
+        - tensor_parallel_size：张量并行使用的 GPU 数量。
+        - dtype / quantization：权重与激活精度、量化方式（如 awq/gptq/fp8）。
+        - revision / tokenizer_revision：模型与分词器版本（分支/标签/提交）。
+        - chat_template：聊天模板。
+        - seed：采样随机种子。
+        - gpu_memory_utilization / kv_cache_memory_bytes：KV 缓存显存分配策略。
+        - cpu_offload_gb / offload_*：CPU 卸载与预取卸载策略。
+        - enforce_eager：是否强制 eager（禁用 CUDA graph）。
+        - enable_return_routed_experts：是否返回路由专家信息。
+        - disable_custom_all_reduce：关闭自定义 all-reduce（见 ParallelConfig）。
+        - hf_token / hf_overrides：HuggingFace 鉴权与配置覆盖项。
+        - mm_processor_kwargs：多模态处理器参数覆盖。
+        - pooler_config：pooling 模型配置。
+        - compilation_config / attention_config：编译优化与注意力后端配置。
+        - **kwargs：其他 EngineArgs 参数。
+
+        注意：该类主要用于离线推理；在线服务建议使用
+        [AsyncLLMEngine][vllm.AsyncLLMEngine]。
     """
 
     def __init__(
@@ -339,6 +369,7 @@ class LLM:
                 "'examples/offline_inference/data_parallel.py'."
             )
 
+        # 构建engine参数对象。
         engine_args = EngineArgs(
             model=model,
             runner=runner,
@@ -379,11 +410,13 @@ class LLM:
 
         log_non_default_args(engine_args)
 
+        # 从参数构建LLMEngine对象。
         self.llm_engine = LLMEngine.from_engine_args(
             engine_args=engine_args, usage_context=UsageContext.LLM_CLASS
         )
         self.engine_class = type(self.llm_engine)
 
+        # 从参数构建请求计数器。
         self.request_counter = Counter()
         self.default_sampling_params: dict[str, Any] | None = None
 
@@ -477,6 +510,32 @@ class LLM:
         Returns:
             A list of `RequestOutput` objects containing the
             generated completions in the same order as the input prompts.
+
+        中文说明：
+            为输入的提示词生成补全文本。
+
+            该类会在考虑显存约束的前提下自动对给定提示词进行批处理。
+            为获得最佳性能，建议将所有提示词放入同一个列表中后再调用本方法。
+
+            参数：
+                prompts: 传给 LLM 的提示词。你可以传入一个提示词序列用于批量推理。
+                    每个提示词的格式可参考 [PromptType][vllm.inputs.PromptType]。
+                sampling_params: 文本生成的采样参数。若为 None，则使用默认采样参数。
+                    当其为单个值时，会应用到所有提示词；当其为列表时，列表长度必须与
+                    `prompts` 一致，并按顺序一一对应。
+                use_tqdm: 若为 `True`，显示 tqdm 进度条。
+                    若为可调用对象（例如 `functools.partial(tqdm, leave=False)`），
+                    则使用该对象创建进度条。
+                    若为 `False`，则不创建进度条。
+                lora_request: 若有需要，生成时使用的 LoRA 请求。
+                priority: 若有需要，请求优先级。
+                    仅在启用优先级调度策略时生效。
+                    如果提供，必须是一个与 `prompts` 长度一致的整数列表，
+                    每个优先级值与相同索引位置的提示词对应。
+                tokenization_kwargs: 对 `tokenizer.encode` 的覆盖参数。
+
+            返回：
+                一个 `RequestOutput` 对象列表，按输入提示词的原始顺序返回生成结果。
         """
         runner_type = self.model_config.runner_type
         if runner_type != "generate":
@@ -1815,6 +1874,56 @@ class LLM:
         priority: list[int] | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
     ):
+        """Add completion requests to the engine and run them to completion.
+
+        This internal helper first enqueues requests through
+        [`_add_completion_requests`][vllm.entrypoints.llm.LLM._add_completion_requests],
+        then executes the engine loop through
+        [`_run_engine`][vllm.entrypoints.llm.LLM._run_engine]. It is shared by
+        completion-style public APIs that need to render prompts, add requests,
+        and collect final outputs in one step.
+
+        Args:
+            prompts: The prompt or sequence of prompts to process.
+            params: Sampling or pooling parameters to apply to the request(s).
+                A single value is broadcast to all prompts; a sequence must
+                align with the number of prompts.
+            output_type: The expected output type returned by the engine, such
+                as `RequestOutput` or `PoolingRequestOutput`.
+            use_tqdm: Whether to show a tqdm progress bar while the engine runs,
+                or a callable used to construct that progress bar.
+            lora_request: Optional LoRA request, or a sequence of LoRA requests,
+                to associate with the prompt(s).
+            priority: Optional request priorities. If provided, the list length
+                must match the number of prompts.
+            tokenization_kwargs: Optional overrides passed to
+                `tokenizer.encode` during prompt preprocessing.
+
+        Returns:
+            A list of outputs produced by the engine, in request-id-sorted
+            order, with the concrete type determined by `output_type`.
+
+        中文说明：
+            该内部辅助函数会先通过 `_add_completion_requests` 将请求加入引擎，
+            再通过 `_run_engine` 运行直到所有请求完成。
+
+            参数：
+                prompts: 要处理的单个提示词或提示词序列。
+                params: 请求使用的采样参数或 pooling 参数。
+                    单个参数会广播到所有提示词；若传入序列，则长度必须与提示词数量一致。
+                output_type: 引擎返回结果的期望类型，例如 `RequestOutput`
+                    或 `PoolingRequestOutput`。
+                use_tqdm: 是否在引擎运行时显示 tqdm 进度条，或传入一个用于构造
+                    进度条的可调用对象。
+                lora_request: 可选的 LoRA 请求，或与提示词一一对应的 LoRA 请求序列。
+                priority: 可选的请求优先级列表；如果提供，其长度必须与提示词数量一致。
+                tokenization_kwargs: 在提示词预处理阶段传给 `tokenizer.encode`
+                    的可选覆盖参数。
+
+            返回：
+                引擎产生的输出列表，按 request id 排序；具体输出类型由
+                `output_type` 决定。
+        """
         self._add_completion_requests(
             prompts=prompts,
             params=params,
