@@ -409,6 +409,9 @@ class MistralToolParser(ToolParser):
             # Default to "auto" when no explicit choice is specified.
             request.tool_choice = "auto"
 
+        if not request.tools:
+            return request
+
         if request.tool_choice != "auto":
             raise ValueError(
                 "For now only 'auto' tool choice is supported, we're in "

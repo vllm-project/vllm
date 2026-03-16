@@ -1348,9 +1348,9 @@ class TestAdjustRequestReasoningEffort:
 
         assert result.response_format is None
 
-    def test_adjust_request_no_tools_preserves_tool_choice(self):
-        """When no tools are provided, tool_choice should not be
-        overridden by adjust_request."""
+    def test_adjust_request_no_tools_skips_grammar(self):
+        """When no tools are provided, adjust_request should return
+        early without setting up any grammar."""
         parser = _create_mock_tool_parser(
             tokenizer_version=11, has_reasoning_parser=False
         )
@@ -1368,12 +1368,7 @@ class TestAdjustRequestReasoningEffort:
             result = parser.adjust_request(request)
 
         assert result.tool_choice == "none"
-
-        assert result.structured_outputs is not None
-        grammar = result.structured_outputs.lark
-        assert grammar is not None
-        assert "body: content" in grammar
-        assert "fcalls:" not in grammar
+        assert result.structured_outputs is None
 
     def test_adjust_request_none_tool_choice_defaults_to_auto(self):
         """When tools are provided but tool_choice is None, it should
@@ -1403,58 +1398,25 @@ class TestAdjustRequestReasoningEffort:
         assert grammar is not None
         assert "body: content | (content? fcalls)" in grammar
 
-    @pytest.mark.parametrize(
-        "tokenizer_version,has_reasoning_parser,reasoning_effort,"
-        "expected_body_rule,expect_think",
-        [
-            # No reasoning: BASE grammar, body: content
-            (11, False, None, "body: content", False),
-            # Pre-v15 with reasoning parser: OPTIONAL_THINK, think is optional
-            (13, True, None, "body: think? content", True),
-            # V15 with reasoning enabled: THINK, think is required
-            (15, True, "high", "body: think content", True),
-            # V15 with reasoning disabled: BASE, no think
-            (15, True, None, "body: content", False),
-        ],
-        ids=[
-            "v11_no_reasoning_base",
-            "v13_with_reasoning_optional_think",
-            "v15_reasoning_high_required_think",
-            "v15_reasoning_none_base",
-        ],
-    )
-    def test_adjust_request_none_mode_grammar_with_tools(
-        self,
-        tokenizer_version: int,
-        has_reasoning_parser: bool,
-        reasoning_effort: str | None,
-        expected_body_rule: str,
-        expect_think: bool,
-    ):
+    def test_adjust_request_none_mode_with_tools_raises(self):
+        """When tool_choice='none' is used with tools, it should raise
+        because only 'auto' tool_choice is currently supported."""
         tools = [_create_tool("func", {"param": "value"}, strict=False)]
         parser = _create_mock_tool_parser(
-            tokenizer_version, has_reasoning_parser=has_reasoning_parser
+            tokenizer_version=11, has_reasoning_parser=False
         )
 
         request = _create_request(
             tools=tools,
             tool_choice="none",
-            reasoning_effort=reasoning_effort,
+            reasoning_effort=None,
         )
 
-        with patch(
-            "vllm.tool_parsers.mistral_tool_parser.is_mistral_tokenizer",
-            return_value=True,
+        with (
+            patch(
+                "vllm.tool_parsers.mistral_tool_parser.is_mistral_tokenizer",
+                return_value=True,
+            ),
+            pytest.raises(ValueError, match="only 'auto' tool choice"),
         ):
-            result = parser.adjust_request(request)
-
-        assert result.structured_outputs is not None
-        grammar = result.structured_outputs.lark
-        assert grammar is not None
-        assert expected_body_rule in grammar
-        assert "fcalls:" not in grammar
-
-        if expect_think:
-            assert "think: <THINK> content </THINK>" in grammar
-        else:
-            assert "think:" not in grammar
+            parser.adjust_request(request)
