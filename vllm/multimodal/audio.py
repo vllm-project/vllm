@@ -175,12 +175,14 @@ def resample_audio_pyav(
     """Resample audio using PyAV (libswresample via FFmpeg).
 
     Args:
-        audio: Input audio as an 1D mono audio float array (samples,).
+        audio: Input audio. Can be:
+            - 1D array ``(samples,)``: mono audio
+            - 2D array ``(channels, samples)``: multi-channel audio
         orig_sr: Original sample rate in Hz.
         target_sr: Target sample rate in Hz.
 
     Returns:
-        Resampled audio with the same number of dimensions as the input.
+        Resampled audio with the same shape as the input (1D → 1D, 2D → 2D).
     """
     orig_sr_int = int(round(orig_sr))
     target_sr_int = int(round(target_sr))
@@ -188,7 +190,17 @@ def resample_audio_pyav(
     if orig_sr_int == target_sr_int:
         return audio
 
-    expected_len = int(math.ceil(len(audio) * target_sr_int / orig_sr_int))
+    if audio.ndim == 2:
+        # Resample each channel independently and re-stack.
+        return np.stack(
+            [
+                resample_audio_pyav(ch, orig_sr=orig_sr, target_sr=target_sr)
+                for ch in audio
+            ],
+            axis=0,
+        )
+
+    expected_len = int(math.ceil(audio.shape[-1] * target_sr_int / orig_sr_int))
 
     # from_ndarray expects shape (channels, samples) for planar formats.
     # libswresample requires a minimum number of input samples to produce
