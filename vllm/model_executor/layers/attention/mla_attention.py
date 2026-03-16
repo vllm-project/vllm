@@ -1142,11 +1142,10 @@ class MLACommonBackend(AttentionBackend):
         include_num_layers_dimension: bool = False,
     ) -> tuple[int, ...]:
         if include_num_layers_dimension:
-            # MLA attention kernels require contiguous per-layer KV cache
-            # views. Cross-layer block allocation produces non-contiguous
-            # views (stride(0) includes a num_layers factor) that cause
-            # incorrect memory access in paged decode kernels.
-            raise NotImplementedError
+            # MLA kernels require contiguous per-layer KV cache views.
+            # Identity permutation keeps num_layers first in physical
+            # layout, signaling cross-layer allocation is unsupported.
+            return (0, 1, 2, 3)
         return (0, 1, 2)
 
     @classmethod

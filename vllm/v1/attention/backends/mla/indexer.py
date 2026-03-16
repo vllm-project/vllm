@@ -64,8 +64,9 @@ class DeepseekV32IndexerBackend(AttentionBackend):
     ) -> tuple[int, ...]:
         if include_num_layers_dimension:
             # DeepseekV32Indexer kernels do not support cross-layer
-            # KV cache layout.
-            raise NotImplementedError
+            # KV cache layout. Identity permutation keeps num_layers
+            # first, signaling incompatibility.
+            return (0, 1, 2, 3)
         return (0, 1, 2)
 
 

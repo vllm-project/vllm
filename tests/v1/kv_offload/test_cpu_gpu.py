@@ -215,30 +215,34 @@ def test_transfer(
 
 
 def test_mla_backend_rejects_cross_layer_kv_cache():
-    """MLA backends must not use cross-layer KV cache layout because
-    their kernels assume contiguous per-layer block layout."""
+    """MLA backends return identity permutation (layers dim first)
+    to signal cross-layer KV cache is unsupported."""
     from vllm.model_executor.layers.attention.mla_attention import (
         MLACommonBackend,
     )
 
-    with pytest.raises(NotImplementedError):
-        MLACommonBackend.get_kv_cache_stride_order(include_num_layers_dimension=True)
-    # Normal (per-layer) path still works
+    stride_order = MLACommonBackend.get_kv_cache_stride_order(
+        include_num_layers_dimension=True
+    )
+    assert stride_order == (0, 1, 2, 3)
+    assert stride_order[0] == 0  # layers dim first => no cross-layer
     assert MLACommonBackend.get_kv_cache_stride_order(
         include_num_layers_dimension=False
     ) == (0, 1, 2)
 
 
 def test_deepseek_v32_indexer_rejects_cross_layer_kv_cache():
-    """DeepseekV32Indexer backend must not use cross-layer KV cache layout."""
+    """DeepseekV32Indexer returns identity permutation (layers dim first)
+    to signal cross-layer KV cache is unsupported."""
     from vllm.v1.attention.backends.mla.indexer import (
         DeepseekV32IndexerBackend,
     )
 
-    with pytest.raises(NotImplementedError):
-        DeepseekV32IndexerBackend.get_kv_cache_stride_order(
-            include_num_layers_dimension=True
-        )
+    stride_order = DeepseekV32IndexerBackend.get_kv_cache_stride_order(
+        include_num_layers_dimension=True
+    )
+    assert stride_order == (0, 1, 2, 3)
+    assert stride_order[0] == 0  # layers dim first => no cross-layer
     assert DeepseekV32IndexerBackend.get_kv_cache_stride_order(
         include_num_layers_dimension=False
     ) == (0, 1, 2)
