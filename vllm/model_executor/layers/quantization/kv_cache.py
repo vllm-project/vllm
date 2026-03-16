@@ -151,7 +151,9 @@ class BaseKVCacheMethod(QuantizeMethodBase):
                 "available in the fp8 checkpoint."
             )
 
-        del layer.k_scale
-        del layer.v_scale
-        del layer.q_scale
-        del layer.prob_scale
+        # Note: We intentionally do NOT delete k_scale, v_scale, q_scale, and
+        # prob_scale here. These are nn.Parameter objects that may be needed
+        # by weight offloading mechanisms. The values are copied to _k_scale,
+        # _v_scale, etc. for use in the forward pass, but the original
+        # parameters must be preserved for offloading compatibility.
+        # See: https://github.com/vllm-project/vllm/issues/37176
