@@ -628,6 +628,13 @@ class ModelConfig:
                 "repo name or path using the --tokenizer argument."
             )
 
+        if self.enable_prompt_embeds and self.is_multimodal_model:
+            raise ValueError(
+                "Cannot use --enable-prompt-embeds with multimodal models. "
+                "Multimodal models have their own embedding pipeline that "
+                "is incompatible with prompt_embeds input."
+            )
+
         if self.disable_sliding_window:
             # Set after get_and_verify_max_len to ensure that max_model_len
             # can be correctly capped to sliding window size
