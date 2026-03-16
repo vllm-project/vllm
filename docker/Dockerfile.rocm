@@ -24,9 +24,9 @@ RUN apt-get update -q -y && apt-get install -q -y \
 # Remove sccache only if not using sccache (it exists in base image from Dockerfile.rocm_base)
 ARG USE_SCCACHE
 RUN if [ "$USE_SCCACHE" != "1" ]; then \
-        apt-get purge -y sccache || true; \
-        python3 -m pip uninstall -y sccache || true; \
-        rm -f "$(which sccache)" || true; \
+    apt-get purge -y sccache || true; \
+    python3 -m pip uninstall -y sccache || true; \
+    rm -f "$(which sccache)" || true; \
     fi
 
 # Install sccache if USE_SCCACHE is enabled (for release builds)
@@ -37,21 +37,21 @@ ARG SCCACHE_BUCKET_NAME
 ARG SCCACHE_REGION_NAME
 ARG SCCACHE_S3_NO_CREDENTIALS
 RUN if [ "$USE_SCCACHE" = "1" ]; then \
-        if command -v sccache >/dev/null 2>&1; then \
-            echo "sccache already installed, skipping installation"; \
-            sccache --version; \
-        else \
-            echo "Installing sccache..." \
-            && SCCACHE_ARCH="x86_64" \
-            && SCCACHE_VERSION="v0.8.1" \
-            && SCCACHE_DL_URL="${SCCACHE_DOWNLOAD_URL:-https://github.com/mozilla/sccache/releases/download/${SCCACHE_VERSION}/sccache-${SCCACHE_VERSION}-${SCCACHE_ARCH}-unknown-linux-musl.tar.gz}" \
-            && curl -L -o /tmp/sccache.tar.gz ${SCCACHE_DL_URL} \
-            && tar -xzf /tmp/sccache.tar.gz -C /tmp \
-            && mv /tmp/sccache-${SCCACHE_VERSION}-${SCCACHE_ARCH}-unknown-linux-musl/sccache /usr/bin/sccache \
-            && chmod +x /usr/bin/sccache \
-            && rm -rf /tmp/sccache.tar.gz /tmp/sccache-${SCCACHE_VERSION}-${SCCACHE_ARCH}-unknown-linux-musl \
-            && sccache --version; \
-        fi; \
+    if command -v sccache >/dev/null 2>&1; then \
+    echo "sccache already installed, skipping installation"; \
+    sccache --version; \
+    else \
+    echo "Installing sccache..." \
+    && SCCACHE_ARCH="x86_64" \
+    && SCCACHE_VERSION="v0.8.1" \
+    && SCCACHE_DL_URL="${SCCACHE_DOWNLOAD_URL:-https://github.com/mozilla/sccache/releases/download/${SCCACHE_VERSION}/sccache-${SCCACHE_VERSION}-${SCCACHE_ARCH}-unknown-linux-musl.tar.gz}" \
+    && curl -L -o /tmp/sccache.tar.gz ${SCCACHE_DL_URL} \
+    && tar -xzf /tmp/sccache.tar.gz -C /tmp \
+    && mv /tmp/sccache-${SCCACHE_VERSION}-${SCCACHE_ARCH}-unknown-linux-musl/sccache /usr/bin/sccache \
+    && chmod +x /usr/bin/sccache \
+    && rm -rf /tmp/sccache.tar.gz /tmp/sccache-${SCCACHE_VERSION}-${SCCACHE_ARCH}-unknown-linux-musl \
+    && sccache --version; \
+    fi; \
     fi
 
 # Set sccache environment variables only when USE_SCCACHE=1
@@ -61,6 +61,10 @@ ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET_NAME}}
 ENV SCCACHE_REGION=${USE_SCCACHE:+${SCCACHE_REGION_NAME}}
 ENV SCCACHE_S3_NO_CREDENTIALS=${USE_SCCACHE:+${SCCACHE_S3_NO_CREDENTIALS}}
 ENV SCCACHE_IDLE_TIMEOUT=${USE_SCCACHE:+0}
+
+# Install uv for faster pip installs (required by build_rixl, test, and final stages)
+# Base images may not include uv; install here so all stages that use uv have it
+RUN python3 -m pip install uv
 
 ARG COMMON_WORKDIR
 WORKDIR ${COMMON_WORKDIR}
@@ -76,17 +80,19 @@ ARG VLLM_BRANCH="main"
 ENV VLLM_REPO=${VLLM_REPO}
 ENV VLLM_BRANCH=${VLLM_BRANCH}
 ONBUILD RUN git clone ${VLLM_REPO} \
-	    && cd vllm \
-	    && git fetch -v --prune -- origin ${VLLM_BRANCH} \
-	    && git checkout FETCH_HEAD \
-        && if [ ${VLLM_REPO} != "https://github.com/vllm-project/vllm.git" ] ; then \
-               git remote add upstream "https://github.com/vllm-project/vllm.git" \
-               && git fetch upstream ; fi
+    && cd vllm \
+    && git fetch -v --prune -- origin ${VLLM_BRANCH} \
+    && git checkout FETCH_HEAD \
+    && if [ ${VLLM_REPO} != "https://github.com/vllm-project/vllm.git" ] ; then \
+    git remote add upstream "https://github.com/vllm-project/vllm.git" \
+    && git fetch upstream ; fi
 FROM fetch_vllm_${REMOTE_VLLM} AS fetch_vllm
 
 # -----------------------
 # vLLM build stages
 FROM fetch_vllm AS build_vllm
+# CMake required by setup.py for building extensions
+RUN apt-get update -q -y && apt-get install -q -y cmake && rm -rf /var/lib/apt/lists/*
 # Build vLLM (setup.py auto-detects sccache in PATH)
 RUN cd vllm \
     && pip install -r requirements/rocm.txt \
@@ -140,16 +146,16 @@ RUN cd /usr/local/src && \
     ./autogen.sh && \
     mkdir build && cd build && \
     ../configure \
-        --prefix=/usr/local/ucx \
-        --enable-shared \
-        --disable-static \
-        --disable-doxygen-doc \
-        --enable-optimizations \
-        --enable-devel-headers \
-        --with-rocm=/opt/rocm \
-        --with-verbs \
-        --with-dm \
-        --enable-mt && \
+    --prefix=/usr/local/ucx \
+    --enable-shared \
+    --disable-static \
+    --disable-doxygen-doc \
+    --enable-optimizations \
+    --enable-devel-headers \
+    --with-rocm=/opt/rocm \
+    --with-verbs \
+    --with-dm \
+    --enable-mt && \
     make -j && \
     make install
 
@@ -160,8 +166,8 @@ RUN git clone ${RIXL_REPO} /opt/rixl && \
     cd /opt/rixl && \
     git checkout ${RIXL_BRANCH} && \
     meson setup build --prefix=${RIXL_HOME} \
-                     -Ducx_path=${UCX_HOME} \
-                     -Drocm_path=${ROCM_PATH} && \
+    -Ducx_path=${UCX_HOME} \
+    -Drocm_path=${ROCM_PATH} && \
     cd build && \
     ninja && \
     ninja install
@@ -169,10 +175,10 @@ RUN git clone ${RIXL_REPO} /opt/rixl && \
 # Generate RIXL wheel
 RUN cd /opt/rixl && mkdir -p /app/install && \
     ./contrib/build-wheel.sh \
-        --output-dir /app/install \
-        --rocm-dir ${ROCM_PATH} \
-        --ucx-plugins-dir ${UCX_HOME}/lib/ucx \
-        --nixl-plugins-dir ${RIXL_HOME}/lib/x86_64-linux-gnu/plugins
+    --output-dir /app/install \
+    --rocm-dir ${ROCM_PATH} \
+    --ucx-plugins-dir ${UCX_HOME}/lib/ucx \
+    --nixl-plugins-dir ${RIXL_HOME}/lib/x86_64-linux-gnu/plugins
 
 
 # -----------------------
@@ -193,22 +199,22 @@ COPY docker/context/base-wheels/ /tmp/base-wheels/
 # If there are not wheels found there, we are not building for a wheel release. 
 # So we exit with an error. To skip this stage.
 RUN if [ -n "$(ls /tmp/base-wheels/*.whl 2>/dev/null)" ]; then \
-        echo "Found custom wheels - copying to /install"; \
-        cp /tmp/base-wheels/*.whl /install/ && \
-        echo "Copied custom wheels:"; \
-        ls -lh /install/; \
+    echo "Found custom wheels - copying to /install"; \
+    cp /tmp/base-wheels/*.whl /install/ && \
+    echo "Copied custom wheels:"; \
+    ls -lh /install/; \
     else \
-        echo "ERROR: No custom wheels found in docker/context/base-wheels/"; \
-        echo "Wheel releases require pre-built ROCm wheels."; \
-        exit 1; \
+    echo "ERROR: No custom wheels found in docker/context/base-wheels/"; \
+    echo "Wheel releases require pre-built ROCm wheels."; \
+    exit 1; \
     fi
 
 # GIT_REPO_CHECK: Verify repo is clean and tags are available (for release builds)
 # This matches CUDA's Dockerfile behavior for proper version detection via setuptools_scm
 ARG GIT_REPO_CHECK=0
 RUN if [ "$GIT_REPO_CHECK" != "0" ]; then \
-        echo "Running repository checks..."; \
-        cd vllm && bash tools/check_repo.sh; \
+    echo "Running repository checks..."; \
+    cd vllm && bash tools/check_repo.sh; \
     fi
 
 # Extract version from git BEFORE any modifications (pin_rocm_dependencies.py modifies requirements/rocm.txt)
@@ -226,22 +232,22 @@ RUN --mount=type=bind,source=.git,target=vllm/.git \
 RUN echo "Checking for git-based packages in requirements files..." \
     && echo "Checking common.txt for git-based packages:" \
     && if grep -q 'git+' ${COMMON_WORKDIR}/vllm/requirements/common.txt; then \
-         echo "ERROR: Git-based packages found in common.txt:"; \
-         grep 'git+' ${COMMON_WORKDIR}/vllm/requirements/common.txt; \
-         echo "Please publish these packages to PyPI instead of using git dependencies."; \
-         exit 1; \
-       else \
-         echo "  ✓ No git-based packages found in common.txt"; \
-       fi \
+    echo "ERROR: Git-based packages found in common.txt:"; \
+    grep 'git+' ${COMMON_WORKDIR}/vllm/requirements/common.txt; \
+    echo "Please publish these packages to PyPI instead of using git dependencies."; \
+    exit 1; \
+    else \
+    echo "  ✓ No git-based packages found in common.txt"; \
+    fi \
     && echo "Checking rocm.txt for git-based packages:" \
     && if grep -q 'git+' ${COMMON_WORKDIR}/vllm/requirements/rocm.txt; then \
-         echo "ERROR: Git-based packages found in rocm.txt:"; \
-         grep 'git+' ${COMMON_WORKDIR}/vllm/requirements/rocm.txt; \
-         echo "Please publish these packages to PyPI instead of using git dependencies."; \
-         exit 1; \
-       else \
-         echo "  ✓ No git-based packages found in rocm.txt"; \
-       fi \
+    echo "ERROR: Git-based packages found in rocm.txt:"; \
+    grep 'git+' ${COMMON_WORKDIR}/vllm/requirements/rocm.txt; \
+    echo "Please publish these packages to PyPI instead of using git dependencies."; \
+    exit 1; \
+    else \
+    echo "  ✓ No git-based packages found in rocm.txt"; \
+    fi \
     && echo "All requirements files are clean - no git-based packages found"
 
 # Pin vLLM dependencies to exact versions of custom ROCm wheels
@@ -359,9 +365,9 @@ ENV SCCACHE_IDLE_TIMEOUT=
 # Error related to odd state for numpy 1.20.3 where there is no METADATA etc, but an extra LICENSES_bundled.txt.
 # Manually remove it so that later steps of numpy upgrade can continue
 RUN case "$(which python3)" in \
-        *"/opt/conda/envs/py_3.9"*) \
-            rm -rf /opt/conda/envs/py_3.9/lib/python3.9/site-packages/numpy-1.20.3.dist-info/;; \
-        *) ;; esac
+    *"/opt/conda/envs/py_3.9"*) \
+    rm -rf /opt/conda/envs/py_3.9/lib/python3.9/site-packages/numpy-1.20.3.dist-info/;; \
+    *) ;; esac
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --upgrade huggingface-hub[cli]
@@ -374,6 +380,20 @@ RUN --mount=type=bind,from=export_vllm,src=/,target=/install \
     && uv pip install -r requirements/rocm.txt \
     && pip uninstall -y vllm \
     && uv pip install *.whl
+
+RUN pip install amdsmi
+
+# Install amd-aiter and Triton from repo/branch (for gfx1250; base image may not include them)
+ARG AITER_REPO="https://github.com/ROCm/aiter"
+ARG AITER_BRANCH="shared/triton-gfx12"
+# TODO: Triton repo requires github.amd.com authentication; re-enable once credentials are configured
+# ARG TRITON_REPO="https://github.amd.com/GFX-IP-Arch/triton"
+# ARG TRITON_BRANCH="shared/gfx1250"
+RUN apt-get update -q -y && apt-get install -q -y git && rm -rf /var/lib/apt/lists/* \
+    && git clone --depth 1 --branch "$AITER_BRANCH" "$AITER_REPO" /tmp/aiter \
+    && pip install --no-build-isolation /tmp/aiter && rm -rf /tmp/aiter
+# && git clone --depth 1 --branch "$TRITON_BRANCH" "$TRITON_REPO" /tmp/triton \
+# && pip install --no-build-isolation /tmp/triton && rm -rf /tmp/triton
 
 ARG COMMON_WORKDIR
 ARG BASE_IMAGE
