@@ -21,8 +21,11 @@
 #   MODEL_NAME          - target model (default: meta-llama/Llama-3.1-8B-Instruct)
 #   NUM_SPEC_TOKENS     - number of speculative tokens (default: 3)
 #   GPU_MEMORY_UTILIZATION - (default: 0.7)
-#   ATTENTION_BACKEND   - attention backend to use (default: FLASH_ATTN)
-#                         Supported: FLASH_ATTN, ROCM_ATTN, FLASHINFER
+#   ATTENTION_BACKEND   - attention backend to use
+#                         Default: TRITON_ATTN on ROCm, FLASH_ATTN on NVIDIA
+#                         ROCm options: TRITON_ATTN, ROCM_ATTN, ROCM_AITER_FA,
+#                                       ROCM_AITER_UNIFIED_ATTN
+#                         NVIDIA options: FLASH_ATTN, FLASHINFER
 set -x
 
 # ── Model & spec decode config ──────────────────────────────────────────
@@ -68,6 +71,17 @@ else
   GPU_DEVICE_VAR="CUDA_VISIBLE_DEVICES"
 fi
 echo "Detected GPU platform: ${GPU_PLATFORM} (using ${GPU_DEVICE_VAR})"
+
+# ── Attention backend config ─────────────────────────────────────────────
+
+if [[ -z "${ATTENTION_BACKEND:-}" ]]; then
+  if [[ "$GPU_PLATFORM" == "rocm" ]]; then
+    ATTENTION_BACKEND="TRITON_ATTN"
+  else
+    ATTENTION_BACKEND="FLASH_ATTN"
+  fi
+fi
+echo "Using attention backend: ${ATTENTION_BACKEND}"
 
 cleanup_instances() {
   echo ""
