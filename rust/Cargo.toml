@@ -8,6 +8,7 @@ edition = "2024"
 
 [workspace.dependencies]
 anyhow = "1.0.100"
+async-openai = "0.33.1"
 axum = "0.8.8"
 bytes = "1.11.1"
 clap = { version = "4.5.38", features = ["derive"] }

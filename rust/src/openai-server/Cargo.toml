@@ -3,6 +3,10 @@ name = "vllm-openai-server"
 version.workspace = true
 edition.workspace = true
 
+[lib]
+name = "vllm_openai_server"
+path = "src/lib.rs"
+
 [dependencies]
 anyhow.workspace = true
 axum.workspace = true
@@ -20,6 +24,7 @@ vllm-llm.workspace = true
 
 [dev-dependencies]
 anyhow.workspace = true
+async-openai = { workspace = true, features = ["full"] }
 bytes.workspace = true
 rmp-serde.workspace = true
 tower.workspace = true
