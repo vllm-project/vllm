@@ -20,18 +20,18 @@ from vllm.v1.engine.async_llm import AsyncLLM
 from ....utils import ROCM_ENGINE_KWARGS
 
 MODEL_NAME = "mistralai/Voxtral-Mini-4B-Realtime-2602"
-ENGINE_CONFIG = dict(
-    model=MODEL_NAME,
-    max_model_len=8192,
-    max_num_seqs=4,
-    limit_mm_per_prompt={"audio": 1},
-    config_format="mistral",
-    load_format="mistral",
-    tokenizer_mode="mistral",
-    enforce_eager=True,
-    gpu_memory_utilization=0.9,
+ENGINE_CONFIG = {
+    "model": MODEL_NAME,
+    "max_model_len": 8192,
+    "max_num_seqs": 4,
+    "limit_mm_per_prompt": {"audio": 1},
+    "config_format": "mistral",
+    "load_format": "mistral",
+    "tokenizer_mode": "mistral",
+    "enforce_eager": True,
+    "gpu_memory_utilization": 0.9,
     **ROCM_ENGINE_KWARGS,
-)
+}
 
 
 EXPECTED_TEXT = [
