@@ -31,6 +31,9 @@ from vllm.model_executor.model_loader.weight_utils import (
     pt_weights_iterator,
     safetensors_weights_iterator,
 )
+from vllm.model_executor.model_loader.ep_weight_filter import (
+    compute_local_expert_ids,
+)
 from vllm.tracing import instrument
 from vllm.transformers_utils.repo_utils import list_filtered_repo_files
 
@@ -70,6 +73,7 @@ class DefaultModelLoader(BaseModelLoader):
 
     def __init__(self, load_config: LoadConfig):
         super().__init__(load_config)
+        self.local_expert_ids: set[int] | None = None
 
         extra_config = load_config.model_loader_extra_config
         allowed_keys = {"enable_multithread_load", "num_threads"}
@@ -243,6 +247,7 @@ class DefaultModelLoader(BaseModelLoader):
                         hf_weights_files,
                         self.load_config.use_tqdm_on_load,
                         self.load_config.safetensors_load_strategy,
+                        local_expert_ids=self.local_expert_ids,
                     )
         else:
             if extra_config.get("enable_multithread_load"):
@@ -296,6 +301,55 @@ class DefaultModelLoader(BaseModelLoader):
             allow_patterns_overrides=None,
         )
 
+    def _init_ep_weight_filter(self, model_config: ModelConfig) -> None:
+        """Compute local expert ids for EP weight filtering.
+
+        When expert parallelism is active, each rank only needs a subset of
+        expert weights.  By computing the set upfront we can skip non-local
+        expert tensors *before* reading them from disk.
+        """
+        from vllm.config import get_current_vllm_config
+
+        vllm_config = get_current_vllm_config()
+        parallel_config = vllm_config.parallel_config
+
+        if not (model_config.is_moe and parallel_config.enable_expert_parallel):
+            return
+
+        num_experts = model_config.get_num_experts()
+        if num_experts <= 0:
+            return
+
+        # EP size/rank computation mirrors FusedMoEParallelConfig.make():
+        #   ep_size = dp_size * pcp_size * tp_size (flattened)
+        #   ep_rank = dp_rank * pcp_size * tp_size + pcp_rank * tp_size + tp_rank
+        from vllm.distributed import (
+            get_dp_group,
+            get_tensor_model_parallel_rank,
+        )
+
+        dp_size = parallel_config.data_parallel_size
+        tp_size = parallel_config.tensor_parallel_size
+        dp_rank = get_dp_group().rank_in_group if dp_size > 1 else 0
+        tp_rank = (
+            get_tensor_model_parallel_rank() if tp_size > 1 else 0
+        )
+        ep_size = dp_size * tp_size
+        ep_rank = dp_rank * tp_size + tp_rank
+
+        self.local_expert_ids = compute_local_expert_ids(
+            num_experts, ep_size, ep_rank
+        )
+        if self.local_expert_ids is not None:
+            logger.info_once(
+                "EP weight filter: ep_size=%d, ep_rank=%d, "
+                "loading %d/%d experts",
+                ep_size,
+                ep_rank,
+                len(self.local_expert_ids),
+                num_experts,
+            )
+
     @instrument(span_name="Load weights")
     def load_weights(self, model: nn.Module, model_config: ModelConfig) -> None:
         if model_config.quantization == "torchao":
@@ -306,6 +360,8 @@ class DefaultModelLoader(BaseModelLoader):
                 and torchao_version_at_least("0.15.0")
             ):
                 self.load_config.safetensors_load_strategy = "torchao"
+
+        self._init_ep_weight_filter(model_config)
 
         weights_to_load = {name for name, _ in model.named_parameters()}
         loaded_weights = model.load_weights(self.get_all_weights(model_config, model))
