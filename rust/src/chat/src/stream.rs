@@ -8,6 +8,7 @@ use vllm_llm::GenerateOutputStream;
 use crate::backend::DynChatBackend;
 use crate::error::{Error, Result};
 use crate::event::ChatEvent;
+use crate::incremental::IncrementalTextDecoder;
 
 /// Per-request stream of chat events.
 pub struct ChatEventStream {
@@ -58,7 +59,8 @@ impl Stream for ChatEventStream {
 }
 
 /// Convert the output token stream from the `vllm_llm` layer into a stream of higher-level chat
-/// events, by decoding tokens and diffing against previously emitted text.
+/// events by incrementally decoding token deltas into text.
+// TODO: apply small-string-optimization
 #[try_stream(boxed, ok = ChatEvent, error = Error)]
 async fn chat_event_stream(
     request_id: String,
@@ -67,26 +69,40 @@ async fn chat_event_stream(
 ) {
     yield ChatEvent::Start;
 
-    let mut emitted_text = String::new();
+    let mut decoder: Option<IncrementalTextDecoder> = None;
+    let mut text = String::new();
 
     #[for_await]
     for next in raw_stream {
         let output: vllm_llm::GenerateOutput = next?;
-        let decoded = backend.decode(&output.token_ids, false)?;
+        let decoder = decoder.get_or_insert_with(|| {
+            IncrementalTextDecoder::new(backend.clone(), &output.prompt_token_ids)
+        });
 
-        let delta = suffix_after_lcp(&emitted_text, &decoded).to_string();
-        emitted_text = decoded.clone();
+        let mut delta = String::new();
+        for &token_id in &output.token_ids {
+            if let Some(chunk) = decoder.push_token(token_id)? {
+                delta.push_str(&chunk);
+            }
+        }
+        if output.finished() {
+            // Flush any remaining buffered text after the final token.
+            if let Some(chunk) = decoder.flush()? {
+                delta.push_str(&chunk);
+            }
+        }
 
         if !delta.is_empty() {
+            text.push_str(&delta);
             yield ChatEvent::TextDelta {
                 delta,
-                text: decoded.clone(),
+                text: text.clone(),
             };
         }
 
         if output.finished() {
             yield ChatEvent::Done {
-                text: decoded,
+                text,
                 finish_reason: output.raw.finish_reason,
                 stop_reason: output.raw.stop_reason,
             };
@@ -95,37 +111,4 @@ async fn chat_event_stream(
     }
 
     return Err(Error::StreamClosedBeforeTerminalOutput { request_id });
-}
-
-fn suffix_after_lcp<'a>(before: &str, after: &'a str) -> &'a str {
-    let mut prefix_end = 0;
-    for ((before_idx, before_ch), (after_idx, after_ch)) in
-        before.char_indices().zip(after.char_indices())
-    {
-        if before_ch != after_ch {
-            prefix_end = after_idx;
-            return &after[prefix_end..];
-        }
-        prefix_end = after_idx + before_ch.len_utf8();
-        let _ = before_idx;
-    }
-
-    if after.len() >= prefix_end {
-        &after[prefix_end..]
-    } else {
-        ""
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::suffix_after_lcp;
-
-    #[test]
-    fn suffix_after_lcp_returns_new_tail() {
-        assert_eq!(suffix_after_lcp("hel", "hello"), "lo");
-        assert_eq!(suffix_after_lcp("", "hello"), "hello");
-        assert_eq!(suffix_after_lcp("hello", "hello"), "");
-        assert_eq!(suffix_after_lcp("hello", "help"), "p");
-    }
 }

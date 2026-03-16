@@ -64,6 +64,10 @@ fn request_output(
     }
 }
 
+fn bytes_to_token_ids(bytes: &[u8]) -> Vec<u32> {
+    bytes.iter().map(|byte| u32::from(*byte)).collect()
+}
+
 async fn send_outputs(push: &mut PushSocket, outputs: EngineCoreOutputs) {
     push.send(ZmqMessage::from(rmp_serde::to_vec_named(&outputs).unwrap()))
         .await
@@ -266,7 +270,7 @@ impl ChatBackend for FakeChatBackend {
 
     fn decode(&self, token_ids: &[u32], _skip_special_tokens: bool) -> vllm_chat::Result<String> {
         let bytes = token_ids.iter().map(|id| *id as u8).collect::<Vec<_>>();
-        Ok(String::from_utf8(bytes).unwrap())
+        Ok(String::from_utf8_lossy(&bytes).into_owned())
     }
 }
 
@@ -336,7 +340,7 @@ async fn chat_streams_text_events() {
             );
             assert_eq!(
                 request.sampling_params.unwrap().output_kind,
-                vllm_engine_core_client::protocol::RequestOutputKind::Cumulative
+                vllm_engine_core_client::protocol::RequestOutputKind::Delta
             );
 
             send_outputs(
@@ -393,6 +397,120 @@ async fn chat_streams_text_events() {
         other => panic!("unexpected final event: {other:?}"),
     }
     assert!(stream.next().await.is_none());
+
+    chat.shutdown().await.unwrap();
+    engine_task.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn chat_stream_waits_for_complete_utf8_before_emitting() {
+    let handshake_address = unique_tcp_endpoint();
+    let engine_identity = b"engine-chat-utf8".to_vec();
+
+    let engine_task = tokio::spawn({
+        let engine_handshake = handshake_address.clone();
+        let engine_identity = engine_identity.clone();
+        async move {
+            let (mut dealer, mut push) = setup_mock_engine(engine_handshake, engine_identity).await;
+            let _ = recv_engine_message(&mut dealer).await;
+            send_outputs(
+                &mut push,
+                EngineCoreOutputs {
+                    outputs: vec![
+                        request_output("chat-utf8", bytes_to_token_ids(&[0xe4]), None),
+                        request_output(
+                            "chat-utf8",
+                            bytes_to_token_ids(&[0xbd, 0xa0]),
+                            Some(FinishReason::Stop),
+                        ),
+                    ],
+                    finished_requests: Some(BTreeSet::from(["chat-utf8".to_string()])),
+                    ..Default::default()
+                },
+            )
+            .await;
+        }
+    });
+
+    let backend: Arc<dyn ChatBackend> = Arc::new(FakeChatBackend::new(
+        "{% for message in messages %}{{ message.role }}: {{ message.content }}\n{% endfor %}{% if add_generation_prompt %}assistant:{% endif %}",
+    ));
+    let chat = connect_chat_llm(handshake_address, backend).await;
+
+    let mut stream = chat.chat(sample_request("chat-utf8")).await.unwrap();
+
+    assert!(matches!(stream.next().await, Some(Ok(ChatEvent::Start))));
+    assert_eq!(
+        stream.next().await.unwrap().unwrap(),
+        ChatEvent::TextDelta {
+            delta: "你".to_string(),
+            text: "你".to_string(),
+        }
+    );
+
+    match stream.next().await {
+        Some(Ok(ChatEvent::Done { text, .. })) => assert_eq!(text, "你"),
+        other => panic!("unexpected final event: {other:?}"),
+    }
+
+    chat.shutdown().await.unwrap();
+    engine_task.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn chat_stream_flushes_held_text_on_finish() {
+    let handshake_address = unique_tcp_endpoint();
+    let engine_identity = b"engine-chat-final-flush".to_vec();
+
+    let engine_task = tokio::spawn({
+        let engine_handshake = handshake_address.clone();
+        let engine_identity = engine_identity.clone();
+        async move {
+            let (mut dealer, mut push) = setup_mock_engine(engine_handshake, engine_identity).await;
+            let _ = recv_engine_message(&mut dealer).await;
+            send_outputs(
+                &mut push,
+                EngineCoreOutputs {
+                    outputs: vec![request_output(
+                        "chat-final-flush",
+                        bytes_to_token_ids(b"ok st"),
+                        Some(FinishReason::Length),
+                    )],
+                    finished_requests: Some(BTreeSet::from(["chat-final-flush".to_string()])),
+                    ..Default::default()
+                },
+            )
+            .await;
+        }
+    });
+
+    let backend: Arc<dyn ChatBackend> = Arc::new(FakeChatBackend::new(
+        "{% for message in messages %}{{ message.role }}: {{ message.content }}\n{% endfor %}{% if add_generation_prompt %}assistant:{% endif %}",
+    ));
+    let chat = connect_chat_llm(handshake_address, backend).await;
+
+    let mut stream = chat.chat(sample_request("chat-final-flush")).await.unwrap();
+
+    assert!(matches!(stream.next().await, Some(Ok(ChatEvent::Start))));
+    assert_eq!(
+        stream.next().await.unwrap().unwrap(),
+        ChatEvent::TextDelta {
+            delta: "ok st".to_string(),
+            text: "ok st".to_string(),
+        }
+    );
+
+    match stream.next().await {
+        Some(Ok(ChatEvent::Done {
+            text,
+            finish_reason,
+            ..
+        })) => {
+            assert_eq!(text, "ok st");
+            assert_eq!(finish_reason, Some(FinishReason::Length));
+        }
+        other => panic!("unexpected final event: {other:?}"),
+    }
 
     chat.shutdown().await.unwrap();
     engine_task.await.unwrap();

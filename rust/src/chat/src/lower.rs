@@ -22,7 +22,7 @@ pub(crate) fn lower_chat_request(
     } = request;
 
     // TODO: we should not expose `RequestOutputKind` at the chat layer
-    sampling_params.output_kind = RequestOutputKind::Cumulative;
+    sampling_params.output_kind = RequestOutputKind::Delta;
 
     let generate_request = GenerateRequest {
         request_id: request_id.clone(),

@@ -15,6 +15,7 @@ pub use stream::ChatEventStream;
 mod backend;
 mod error;
 mod event;
+mod incremental;
 mod lower;
 mod request;
 pub mod smg;
