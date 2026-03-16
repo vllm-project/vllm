@@ -393,7 +393,10 @@ class RequestState:
         # Prepare logprobs, based on delta mode
         logprobs = self.logprobs_processor.logprobs
         if delta and logprobs:
-            logprobs = logprobs[-len(token_ids) :]
+            if token_ids:
+                logprobs = logprobs[-len(token_ids) :]
+            else:
+                logprobs = []
 
         return CompletionOutput(
             index=self.request_index,
