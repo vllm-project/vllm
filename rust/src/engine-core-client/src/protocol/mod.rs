@@ -160,6 +160,19 @@ pub struct SamplingParams {
     /// Continue generation after EOS if set.
     #[serde(default)]
     pub ignore_eos: bool,
+    /// Primary EOS token ID used by engine-core's dedicated EOS stop path.
+    ///
+    /// This mirrors Python's internal `_eos_token_id` field and is derived by
+    /// the frontend from tokenizer/model metadata rather than supplied directly
+    /// by end users.
+    #[serde(default, rename = "_eos_token_id")]
+    pub _eos_token_id: Option<u32>,
+    /// Complete stop-token set used by engine-core for `min_tokens` masking.
+    ///
+    /// This mirrors Python's internal `_all_stop_token_ids` field and should
+    /// contain explicit `stop_token_ids` plus any frontend-derived EOS token IDs.
+    #[serde(default, rename = "_all_stop_token_ids")]
+    pub _all_stop_token_ids: BTreeSet<u32>,
     /// Whether higher-level frontend updates are cumulative, delta-based, or
     /// final-only.
     ///
@@ -184,6 +197,19 @@ pub struct SamplingParams {
     /// Repetition detection config carried through as an opaque msgpack value.
     #[serde(default)]
     pub repetition_detection: Option<OpaqueValue>,
+}
+
+impl SamplingParams {
+    /// Apply one tokenizer-derived primary EOS token ID using the same subset
+    /// of semantics as Python `SamplingParams.update_from_generation_config()`.
+    pub fn apply_primary_eos_token_id(&mut self, eos_token_id: Option<u32>) {
+        self._all_stop_token_ids = self.stop_token_ids.iter().copied().collect();
+        if let Some(eos_token_id) = eos_token_id {
+            self._all_stop_token_ids.insert(eos_token_id);
+        }
+
+        self._eos_token_id = if self.ignore_eos { None } else { eos_token_id };
+    }
 }
 
 /// Engine-core add-request payload sent from frontend to engine.
@@ -427,5 +453,32 @@ mod tests {
             decoded.finished_requests,
             Some(BTreeSet::from(["req-1".to_string()]))
         );
+    }
+
+    #[test]
+    fn sampling_params_apply_primary_eos_token_id_matches_python_subset() {
+        let mut params = SamplingParams {
+            stop_token_ids: vec![11, 22],
+            ..Default::default()
+        };
+
+        params.apply_primary_eos_token_id(Some(99));
+
+        assert_eq!(params._eos_token_id, Some(99));
+        assert_eq!(params._all_stop_token_ids, BTreeSet::from([11, 22, 99]));
+    }
+
+    #[test]
+    fn sampling_params_apply_primary_eos_token_id_respects_ignore_eos() {
+        let mut params = SamplingParams {
+            ignore_eos: true,
+            stop_token_ids: vec![11],
+            ..Default::default()
+        };
+
+        params.apply_primary_eos_token_id(Some(99));
+
+        assert_eq!(params._eos_token_id, None);
+        assert_eq!(params._all_stop_token_ids, BTreeSet::from([11, 99]));
     }
 }

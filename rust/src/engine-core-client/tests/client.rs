@@ -54,6 +54,7 @@ fn sample_request_with_id(request_id: &str) -> EngineCoreRequest {
             allowed_token_ids: Some(vec![1, 2, 3]),
             extra_args: None,
             repetition_detection: None,
+            ..Default::default()
         }),
         pooling_params: None,
         arrival_time: 42.5,

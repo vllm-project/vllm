@@ -3,6 +3,13 @@ use std::sync::Arc;
 use crate::error::Result;
 use crate::request::ChatRequest;
 
+/// Tokenizer/model-derived hints used to fill Python-aligned internal
+/// sampling metadata before requests are lowered into engine-core.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SamplingHints {
+    pub primary_eos_token_id: Option<u32>,
+}
+
 /// Minimal prompt-processing backend needed by `vllm-chat`.
 pub trait ChatBackend: Send + Sync {
     /// Apply the chat template and return the rendered text prompt.
@@ -13,6 +20,12 @@ pub trait ChatBackend: Send + Sync {
 
     /// Decode one cumulative token sequence into text.
     fn decode(&self, token_ids: &[u32], skip_special_tokens: bool) -> Result<String>;
+
+    /// Return tokenizer/model-derived hints used to enrich southbound
+    /// sampling parameters.
+    fn sampling_hints(&self) -> Result<SamplingHints> {
+        Ok(SamplingHints::default())
+    }
 }
 
 /// Shared trait-object form of [`ChatBackend`].

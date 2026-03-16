@@ -5,7 +5,7 @@
 //! `messages -> rendered prompt -> tokenized prompt -> engine request -> streamed text events`.
 //! It is closer to vLLM's internal chat-rendering flow than to a full OpenAI-compatible surface.
 
-pub use backend::{ChatBackend, DynChatBackend};
+pub use backend::{ChatBackend, DynChatBackend, SamplingHints};
 pub use error::{Error, Result};
 pub use event::ChatEvent;
 pub use request::{ChatContent, ChatContentPart, ChatMessage, ChatOptions, ChatRequest, ChatRole};
@@ -44,7 +44,8 @@ impl ChatLlm {
         request.validate()?;
         let prompt = self.backend.apply_chat_template(&request)?;
         let prompt_token_ids = self.backend.encode(&prompt, false)?;
-        let prepared = lower_chat_request(request, prompt_token_ids)?;
+        let sampling_hints = self.backend.sampling_hints()?;
+        let prepared = lower_chat_request(request, prompt_token_ids, sampling_hints)?;
         let raw_stream = self.llm.generate(prepared.generate_request).await?;
         Ok(ChatEventStream::new(
             prepared.request_id,

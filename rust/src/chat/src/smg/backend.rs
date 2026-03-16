@@ -8,7 +8,7 @@ use smg_tokenizer::chat_template::{ChatTemplateContentFormat, ChatTemplateParams
 use smg_tokenizer::factory::create_tokenizer_async;
 use thiserror_ext::AsReport as _;
 
-use crate::backend::ChatBackend;
+use crate::backend::{ChatBackend, SamplingHints};
 use crate::error::{Error, Result};
 use crate::request::{ChatContent, ChatMessage, ChatRequest};
 
@@ -112,6 +112,19 @@ impl ChatBackend for SmgChatBackend {
         self.inner
             .decode(token_ids, skip_special_tokens)
             .map_err(|error| Error::Tokenizer(error.to_report_string()))
+    }
+
+    fn sampling_hints(&self) -> Result<SamplingHints> {
+        let primary_eos_token_id = self
+            .inner
+            .get_special_tokens()
+            .eos_token
+            .as_deref()
+            .and_then(|token| self.inner.token_to_id(token));
+
+        Ok(SamplingHints {
+            primary_eos_token_id,
+        })
     }
 }
 
