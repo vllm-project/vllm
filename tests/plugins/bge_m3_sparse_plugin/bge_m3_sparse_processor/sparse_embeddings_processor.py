@@ -82,7 +82,7 @@ class BgeM3SparseEmbeddingsProcessor(
         if params.use_activation is None:
             params.use_activation = True
         if not has_dense_embed:
-            params.dimension = None
+            params.dimensions = None
             return params
 
         params.dimensions = raw_embed_request.dimensions
