@@ -292,7 +292,13 @@ __global__ void Marlin(
   #endif
 
   #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 750
-  constexpr bool use_fp16_accum = a_type_id == vllm::kFloat16.id();
+  // Disable FP16 accumulation for NVFP4 (float4_e2m1f weights): the raw FP32
+  // partial sums can exceed FP16 max (65504) before global_scale is applied
+  // in the epilogue, causing NaN overflow on Turing even if accumulation
+  // eventually produces a representable result.
+  constexpr bool use_fp16_accum =
+      a_type_id == vllm::kFloat16.id() &&
+      !(b_type_id == vllm::kFE2M1f.id() && s_type_id == vllm::kFE4M3fn.id());
   #else
   constexpr bool use_fp16_accum = false;
   #endif
@@ -342,11 +348,16 @@ __global__ void Marlin(
       has_zp && !is_zp_float && !std::is_same<scalar_t, nv_bfloat16>::value ||
       has_zp && !is_zp_float && !(b_type == vllm::kU8);
 
-  c_scalar_t2 global_scale;
+  // FP32 copy of global_scale used in the epilogue to scale FP32 accumulators
+  // *before* the float->half cast, preventing FP16 overflow. global_scale is
+  // typically 1e-3 – 1e-1, so raw FP32 sums can easily exceed the FP16 max
+  // (65504) before scaling would bring them back into range.
+  float global_scale_f32 = 0.0f;
 
   if constexpr (b_type == vllm::kFE2M1f && s_type == vllm::kFE4M3fn) {
     uint16_t val = global_scale_ptr[0];
-    global_scale = Cdtype::num2num2(*reinterpret_cast<c_scalar_t*>(&val));
+    c_scalar_t gs_half = *reinterpret_cast<c_scalar_t*>(&val);
+    global_scale_f32 = Cdtype::num2float(gs_half);
   }
 
   constexpr bool has_act_order = group_blocks == 0;
@@ -1644,6 +1655,14 @@ __global__ void Marlin(
     // We first reorder in shared memory to guarantee the most efficient final
     // global write patterns
     auto write = [&](int idx, float c0, float c1, FragS& s, FragS& b_bias) {
+      // For NVFP4 (float4_e2m1f + float8_e4m3fn scales): apply global_scale
+      // while still in FP32 to prevent FP16 overflow on the float2num cast.
+      // Without this, FP32 accumulators > 65504 NaN out before global_scale
+      // (typically 1e-3 – 1e-1) can scale them down.
+      if constexpr (b_type == vllm::kFE2M1f && s_type == vllm::kFE4M3fn) {
+        c0 *= global_scale_f32;
+        c1 *= global_scale_f32;
+      }
       c_scalar_t2 res =
           Cdtype::nums2num2(Cdtype::float2num(c0), Cdtype::float2num(c1));
 
@@ -1658,10 +1677,6 @@ __global__ void Marlin(
               reinterpret_cast<scalar_t*>(&s[0])[(threadIdx.x % 8) / 4]);
         }
         res = __hmul2(res, tmp_scale);
-      }
-
-      if constexpr (b_type == vllm::kFE2M1f && s_type == vllm::kFE4M3fn) {
-        res = __hmul2(res, global_scale);
       }
       if (has_bias && last) {
         c_scalar_t2 tmp_bias = b_bias[0];
