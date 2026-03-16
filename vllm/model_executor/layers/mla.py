@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# Debug flag - set to True to enable verbose debug output
+_DEBUG_MLA = False
+
 from dataclasses import dataclass
 
 import torch
 
 from vllm.config import CacheConfig
-from vllm.forward_context import get_forward_context
 from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -171,41 +173,56 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
         kv_c_normed = self.kv_a_layernorm(kv_c)
 
         q = q.view(-1, self.num_heads, self.qk_head_dim)
+
         # Add head dim of 1 to k_pe
         k_pe = k_pe.unsqueeze(1)
 
-        # Determine if we should skip RoPE (AITER fused kernel will apply it)
-        # IMPORTANT: Only skip RoPE when fused kernel is enabled AND it's
-        # a decode-only batch. The fused kernel applies RoPE internally
-        # for decode tokens. For mixed batches (prefill+decode), we must
-        # apply RoPE here because the fallback path in forward_impl
-        # expects RoPE to be pre-applied.
-        forward_context = get_forward_context()
-        attn_metadata = forward_context.attn_metadata
-        if isinstance(attn_metadata, dict):
-            # In unified model runner, attn_metadata is a dict.
-            attn_metadata = attn_metadata.get(self.mla_attn.layer_name)
+        # DEBUG: Print k_pe BEFORE any RoPE
+        if _DEBUG_MLA:
+            print("\n[mla.py DEBUG] k_pe BEFORE RoPE (raw from projection):")
+        if _DEBUG_MLA:
+            print(f"  k_pe[0,0,:5]: {k_pe[0, 0, :5].cpu().float().numpy()}")
 
-        is_decode_only = (
-            attn_metadata is not None
-            and hasattr(attn_metadata, "num_prefills")
-            and attn_metadata.num_prefills == 0
+        # STEP 3: Apply RoPE (conditional based on fused kernel usage)
+        # Skip RoPE only when AITER fused kernels will handle it
+        # Fused kernels apply RoPE internally (decode) or in forward_impl (prefill)
+        use_aiter_fused = (
+            hasattr(self.mla_attn, "use_aiter_fused_decode")
+            and self.mla_attn.use_aiter_fused_decode
         )
 
-        skip_rope_for_fused_kernel = (
-            self.rotary_emb is not None
-            and hasattr(self.mla_attn, "use_atom_fused_decode")
-            and self.mla_attn.use_atom_fused_decode
-            and is_decode_only
-        )
+        if self.rotary_emb is not None and not use_aiter_fused:
+            # UNFUSED PATH: Apply RoPE to ALL tokens here
+            # This is the original behavior - handles prefill, decode, and mixed batches
+            print("[mla.py] Path: UNFUSED - Applying RoPE here")
+            if _DEBUG_MLA:
+                print("\n[mla.py DEBUG] k_pe BEFORE RoPE (raw from projection):")
+            if _DEBUG_MLA:
+                print(f"  k_pe[0,0,:5]: {k_pe[0, 0, :5].cpu().float().numpy()}")
+            if _DEBUG_MLA:
+                print(f"  positions[0:5]: {positions[0:5].cpu().numpy()}")
 
-        if self.rotary_emb is not None and not skip_rope_for_fused_kernel:
-            # Normal path: Apply RoPE here
-            # (prefill, mixed batches, or fused kernel disabled)
             q[..., self.qk_nope_head_dim :], k_pe = self.rotary_emb(
-                positions, q[..., self.qk_nope_head_dim :], k_pe
+                positions,
+                q[..., self.qk_nope_head_dim :],  # Q PE part gets RoPE
+                k_pe,  # K PE gets RoPE
             )
-        # else: AITER fused kernel will apply RoPE internally for decode tokens
+            # After this: Q and k_pe have RoPE applied for unfused path
+            if _DEBUG_MLA:
+                print("\n[mla.py] RoPE applied to Q_PE and K_PE (unfused path)")
+            if _DEBUG_MLA:
+                print("[mla.py DEBUG] k_pe AFTER RoPE:")
+            if _DEBUG_MLA:
+                print(f"  k_pe[0,0,:5]: {k_pe[0, 0, :5].cpu().float().numpy()}")
+            if _DEBUG_MLA:
+                print(
+                    f"  q (RoPE part) [0,0,{self.qk_nope_head_dim}:{self.qk_nope_head_dim + 5}]: {q[0, 0, self.qk_nope_head_dim : self.qk_nope_head_dim + 5].cpu().float().numpy()}"
+                )
+        else:
+            # FUSED PATH: Skip RoPE here, will be applied later
+            print("[mla.py] Path: FUSED - RoPE will be applied in mla_attention.py")
+            if _DEBUG_MLA:
+                print("\n[mla.py] RoPE skipped (will be applied in mla_attention.py)")
 
         if self.indexer and self.is_sparse:
             _topk_indices = self.indexer(
@@ -215,15 +232,16 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
         if llama_4_scaling is not None:
             q *= llama_4_scaling
 
+        # STEP 4: Pass to mla_attention
         attn_out = self.mla_attn(
-            q,
+            q,  # Has RoPE if unfused, NO RoPE if fused
             kv_c_normed,
-            k_pe,
+            k_pe,  # Has RoPE if unfused, NO RoPE if fused
             output_shape=(hidden_states.shape[0], self.num_heads * self.v_head_dim),
-            positions=positions,  # Pass positions for AITER fused kernel
-            rope_applied=(
-                not skip_rope_for_fused_kernel
-            ),  # Indicate if RoPE was pre-applied
+            positions=positions,
+            use_aiter_fused=use_aiter_fused,
+            rotary_emb=self.rotary_emb,
         )
 
-        return self.o_proj(attn_out)[0]
+        final_out = self.o_proj(attn_out)[0]
+        return final_out

@@ -187,6 +187,9 @@ for chunk_idx in range(cdiv(C, MCC)):
 return curr_o @ W_O
 """
 
+# Debug flag - set to True to enable verbose debug output
+_DEBUG_MLA = False
+
 import functools
 from abc import abstractmethod
 from dataclasses import dataclass, field
@@ -462,7 +465,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 self.is_aiter_triton_fp4_bmm_enabled
                 or self.is_aiter_triton_fp8_bmm_enabled
             )  # FP4 or FP8 BMM available
-            and envs.VLLM_USE_ATOM_FUSED_DECODE  # Feature flag enabled
+            and envs.VLLM_USE_AITER_FUSED  # Feature flag enabled
             and cos_cache is not None  # RoPE caches available
             and sin_cache is not None
         )
@@ -536,7 +539,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         k_pe: torch.Tensor,
         output_shape: torch.Size | None = None,
         positions: torch.Tensor | None = None,  # For AITER fused kernel
-        rope_applied: bool = True,  # Whether RoPE was pre-applied in mla.py
+        use_aiter_fused: bool = False,  # Whether to use AITER fused kernels
+        rotary_emb: torch.nn.Module | None = None,  # RoPE module for fused path
     ) -> torch.Tensor:
         if self.calculate_kv_scales:
             torch.ops.vllm.maybe_calc_kv_scales(q, kv_c_normed, k_pe, self.layer_name)
@@ -553,30 +557,120 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 f"Expected slot_mapping to be a dict, got {type(slot_mapping)}. "
             )
 
-            # Check if we should skip KV cache update (AITER fused kernel handles it)
-            # Only skip for decode-only batches when fused kernel is enabled
+            # Determine rope_applied based on use_aiter_fused flag
+            # Unfused path: RoPE applied in mla.py (rope_applied=True)
+            # Fused path: RoPE NOT applied in mla.py (rope_applied=False)
+            rope_applied = not use_aiter_fused
+
+            # Check if we should skip KV cache update here
+            # Skip when:
+            # 1. Fused decode path: kernel handles KV cache write internally
+            # 2. Fused prefill path: need to apply RoPE first, then write in forward_impl
             is_decode_only = (
                 hasattr(attn_metadata, "num_prefills")
                 and attn_metadata.num_prefills == 0
             )
+            has_prefill = (
+                hasattr(attn_metadata, "num_prefills")
+                and attn_metadata.num_prefills > 0
+            )
+
+            # Skip KV cache update if using fused path (either prefill or decode)
             skip_kv_cache_update = (
-                self.use_atom_fused_decode
-                and is_decode_only
-                and positions is not None
-                and slot_mapping.get(self.layer_name) is not None
+                use_aiter_fused  # Fused path
+                and (
+                    # Decode: fused kernel handles it
+                    (
+                        self.use_atom_fused_decode
+                        and is_decode_only
+                        and positions is not None
+                        and slot_mapping.get(self.layer_name) is not None
+                    )
+                    or
+                    # Prefill: need to apply RoPE first in forward_impl
+                    (has_prefill and rotary_emb is not None)
+                )
             )
 
             if not skip_kv_cache_update:
-                # Normal path: update KV cache before attention
+                # Unfused path: update KV cache before attention
+                # (RoPE already applied in mla.py)
+                print("[mla_attention.py] Path: UNFUSED - KV cache update in forward()")
+                if _DEBUG_MLA:
+                    print(
+                        "\n[DEBUG forward()] KV cache update: EXECUTING (unfused path)"
+                    )
+                if _DEBUG_MLA:
+                    print(f"  use_aiter_fused={use_aiter_fused}")
+                if _DEBUG_MLA:
+                    print(f"  kv_c_normed shape: {kv_c_normed.shape}")
+                if _DEBUG_MLA:
+                    print(f"  k_pe shape: {k_pe.shape}")
+                if _DEBUG_MLA:
+                    print(
+                        f"  k_pe[0,0,:5] being written: {k_pe[0, 0, :5].cpu().float().numpy()}"
+                    )
+
+                current_slot_mapping = slot_mapping.get(self.layer_name)
+                if current_slot_mapping is not None:
+                    if _DEBUG_MLA:
+                        print(f"  slot_mapping: {current_slot_mapping.cpu().numpy()}")
+                    if _DEBUG_MLA:
+                        print(
+                            f"  Writing to slots: [{current_slot_mapping[0].item()}:{current_slot_mapping[-1].item() + 1}]"
+                        )
+                else:
+                    if _DEBUG_MLA:
+                        print("  slot_mapping: None")
+
                 self.impl.do_kv_cache_update(
                     kv_c_normed,
                     k_pe,
                     self_kv_cache,
-                    slot_mapping.get(self.layer_name),
+                    current_slot_mapping,
                     self.kv_cache_dtype,
                     self._k_scale,
                 )
-            # else: Fused kernel will handle KV cache write internally
+                if _DEBUG_MLA:
+                    print("  ✓ KV cache written (unfused path)")
+
+                # DEBUG: Print actual k_pe values stored in KV cache (FP8 format)
+                if current_slot_mapping is not None and len(current_slot_mapping) > 0:
+                    kv_cache_cpu = self_kv_cache.cpu().view(torch.uint8).numpy()
+                    if _DEBUG_MLA:
+                        print(
+                            "  [DEBUG] K_PE values in KV cache after write (FP8 uint8 format):"
+                        )
+                    slots_to_check = current_slot_mapping.cpu().numpy()
+                    for slot_idx in slots_to_check[:5]:  # Show first 5 slots
+                        slot_data = kv_cache_cpu[slot_idx, 0, :]
+                        k_pe_fp8 = slot_data[
+                            self.kv_lora_rank : self.kv_lora_rank
+                            + self.qk_rope_head_dim
+                        ]
+                        if _DEBUG_MLA:
+                            print(f"    Slot {slot_idx} k_pe (FP8): {k_pe_fp8[:10]}")
+                if _DEBUG_MLA:
+                    print()
+            else:
+                # Fused path will handle KV cache write in forward_impl (prefill) or kernel (decode)
+                print(
+                    "[mla_attention.py] Path: FUSED - KV cache update skipped in forward()"
+                )
+                if _DEBUG_MLA:
+                    print("\n[DEBUG forward()] KV cache update: SKIPPED (fused path)")
+                if _DEBUG_MLA:
+                    print(f"  use_aiter_fused={use_aiter_fused}")
+                if _DEBUG_MLA:
+                    print(
+                        f"  has_prefill={has_prefill if 'has_prefill' in locals() else 'N/A'}"
+                    )
+                if _DEBUG_MLA:
+                    print(f"  is_decode_only={is_decode_only}")
+                if _DEBUG_MLA:
+                    print(
+                        "  → Will write in forward_impl (prefill) or kernel (decode)\n"
+                    )
             if self.attn_backend.accept_output_buffer:
                 output = torch.empty(output_shape, dtype=q.dtype, device=q.device)
                 self.forward_impl(
@@ -592,6 +686,10 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     slot_mapping=slot_mapping.get(self.layer_name),
                     # Pass RoPE status
                     rope_applied=rope_applied,
+                    # Pass use_aiter_fused flag
+                    use_aiter_fused=use_aiter_fused,
+                    # Pass rotary_emb module
+                    rotary_emb=rotary_emb,
                 )
                 return output
             else:
@@ -607,6 +705,10 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     slot_mapping=slot_mapping.get(self.layer_name),
                     # Pass RoPE status
                     rope_applied=rope_applied,
+                    # Pass use_aiter_fused flag
+                    use_aiter_fused=use_aiter_fused,
+                    # Pass rotary_emb module
+                    rotary_emb=rotary_emb,
                 )
         else:
             kv_cache_dummy_dep = torch.ops.vllm.unified_mla_kv_cache_update(
@@ -636,6 +738,254 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     kv_cache_dummy_dep=kv_cache_dummy_dep,
                 )
 
+    def _debug_print_prefill_flash_inputs(
+        self,
+        q: torch.Tensor,
+        k_c_normed: torch.Tensor,
+        k_pe: torch.Tensor,
+        kv_cache: torch.Tensor,
+        attn_metadata: "MLACommonMetadata",
+        k_scale: torch.Tensor,
+        output: torch.Tensor,
+        use_aiter_fused: bool,
+        num_mqa_tokens: int,
+    ):
+        """Debug function to print all Flash Attention inputs for comparison.
+
+        This function can be easily removed after debugging by deleting it
+        and removing the call sites.
+        """
+        if _DEBUG_MLA:
+            print(f"\n{'=' * 80}")
+        if _DEBUG_MLA:
+            print(
+                f"[DEBUG] PREFILL FLASH ATTENTION INPUTS (use_aiter_fused={use_aiter_fused})"
+            )
+        if _DEBUG_MLA:
+            print(f"{'=' * 80}")
+
+        # Extract prefill slices
+        prefill_q = q[num_mqa_tokens:]
+        prefill_k_c_normed = k_c_normed[num_mqa_tokens:]
+        prefill_k_pe = k_pe[num_mqa_tokens:]
+        prefill_output = output[num_mqa_tokens:]
+
+        if _DEBUG_MLA:
+            print("\n1. Q (query) tensor:")
+        if _DEBUG_MLA:
+            print(f"   Shape: {prefill_q.shape}")
+        if _DEBUG_MLA:
+            print(f"   Dtype: {prefill_q.dtype}")
+        if _DEBUG_MLA:
+            print(f"   Device: {prefill_q.device}")
+        if _DEBUG_MLA:
+            print(f"   data_ptr: {prefill_q.data_ptr()}")
+        if _DEBUG_MLA:
+            print(
+                f"   First token [0, 0, :10]: {prefill_q[0, 0, :10].cpu().float().numpy()}"
+            )
+        if _DEBUG_MLA:
+            print(
+                f"   Q NOPE part [0, 0, :5]: {prefill_q[0, 0, :5].cpu().float().numpy()}"
+            )
+        if _DEBUG_MLA:
+            print(
+                f"   Q PE part [0, 0, {self.qk_nope_head_dim}:{self.qk_nope_head_dim + 5}]: {prefill_q[0, 0, self.qk_nope_head_dim : self.qk_nope_head_dim + 5].cpu().float().numpy()}"
+            )
+
+        if _DEBUG_MLA:
+            print("\n2. k_c_normed (key compressed normalized):")
+        if _DEBUG_MLA:
+            print(f"   Shape: {prefill_k_c_normed.shape}")
+        if _DEBUG_MLA:
+            print(f"   Dtype: {prefill_k_c_normed.dtype}")
+        if _DEBUG_MLA:
+            print(f"   Device: {prefill_k_c_normed.device}")
+        if _DEBUG_MLA:
+            print(f"   data_ptr: {prefill_k_c_normed.data_ptr()}")
+        if _DEBUG_MLA:
+            print(
+                f"   First token [0, :10]: {prefill_k_c_normed[0, :10].cpu().float().numpy()}"
+            )
+
+        if _DEBUG_MLA:
+            print("\n3. k_pe (key position encoding - WITH RoPE):")
+        if _DEBUG_MLA:
+            print(f"   Shape: {prefill_k_pe.shape}")
+        if _DEBUG_MLA:
+            print(f"   Dtype: {prefill_k_pe.dtype}")
+        if _DEBUG_MLA:
+            print(f"   Device: {prefill_k_pe.device}")
+        if _DEBUG_MLA:
+            print(f"   data_ptr: {prefill_k_pe.data_ptr()}")
+        if _DEBUG_MLA:
+            print(
+                f"   First token [0, 0, :10]: {prefill_k_pe[0, 0, :10].cpu().float().numpy()}"
+            )
+
+        if _DEBUG_MLA:
+            print("\n4. kv_cache:")
+        if _DEBUG_MLA:
+            print(f"   Shape: {kv_cache.shape}")
+        if _DEBUG_MLA:
+            print(f"   Dtype: {kv_cache.dtype}")
+        if _DEBUG_MLA:
+            print(f"   Device: {kv_cache.device}")
+        if _DEBUG_MLA:
+            print(
+                f"   First block [0, 0, :10]: {kv_cache[0, 0, :10].cpu().view(torch.uint8).numpy()}"
+            )
+
+        if _DEBUG_MLA:
+            print("\n5. attn_metadata:")
+        if _DEBUG_MLA:
+            print(f"   Type: {type(attn_metadata).__name__}")
+        if _DEBUG_MLA:
+            print(
+                f"   num_prefills: {attn_metadata.num_prefills if hasattr(attn_metadata, 'num_prefills') else 'N/A'}"
+            )
+        if _DEBUG_MLA:
+            print(
+                f"   num_decodes: {attn_metadata.num_decodes if hasattr(attn_metadata, 'num_decodes') else 'N/A'}"
+            )
+        if _DEBUG_MLA:
+            print(
+                f"   num_decode_tokens: {attn_metadata.num_decode_tokens if hasattr(attn_metadata, 'num_decode_tokens') else 'N/A'}"
+            )
+
+        if _DEBUG_MLA:
+            print(f"\n6. k_scale: {k_scale}")
+
+        if _DEBUG_MLA:
+            print("\n7. output (slice):")
+        if _DEBUG_MLA:
+            print(f"   Shape: {prefill_output.shape}")
+        if _DEBUG_MLA:
+            print(f"   Dtype: {prefill_output.dtype}")
+        if _DEBUG_MLA:
+            print(f"   Device: {prefill_output.device}")
+        if _DEBUG_MLA:
+            print(f"   data_ptr: {prefill_output.data_ptr()}")
+
+        if _DEBUG_MLA:
+            print(f"\n{'=' * 80}")
+        if _DEBUG_MLA:
+            print("[DEBUG] About to call forward_mha...")
+        if _DEBUG_MLA:
+            print(f"{'=' * 80}\n")
+
+    def _debug_print_kv_cache_state(
+        self,
+        kv_cache: torch.Tensor,
+        label: str,
+        use_aiter_fused: bool,
+        num_tokens: int,
+        slot_start: int = 0,
+    ):
+        """Debug function to print KV cache state and analyze which slots are modified.
+
+        Args:
+            kv_cache: KV cache tensor
+            label: Label for this debug output (e.g., "BEFORE", "AFTER")
+            use_aiter_fused: Whether fused path is used
+            num_tokens: Number of tokens being processed
+            slot_start: Starting slot index for these tokens
+
+        This function can be easily removed after debugging.
+        """
+        if _DEBUG_MLA:
+            print(f"\n{'=' * 80}")
+        if _DEBUG_MLA:
+            print(f"[DEBUG KV CACHE {label}] (use_aiter_fused={use_aiter_fused})")
+        if _DEBUG_MLA:
+            print(f"{'=' * 80}")
+
+        # KV cache info
+        if _DEBUG_MLA:
+            print("\nKV Cache Info:")
+        if _DEBUG_MLA:
+            print(f"  Shape: {kv_cache.shape}")
+        if _DEBUG_MLA:
+            print(f"  Dtype: {kv_cache.dtype}")
+        if _DEBUG_MLA:
+            print(f"  Expected tokens: {num_tokens}")
+        if _DEBUG_MLA:
+            print(f"  Expected slot range: [{slot_start}:{slot_start + num_tokens}]")
+
+        # Convert to uint8 for analysis
+        kv_cache_uint8 = kv_cache.cpu().view(torch.uint8).numpy()
+
+        # Analyze non-zero slots
+        num_slots = kv_cache.shape[0]
+        slot_dim = kv_cache.shape[-1]
+
+        if _DEBUG_MLA:
+            print("\nSlot Analysis:")
+        if _DEBUG_MLA:
+            print(f"  Total slots: {num_slots}")
+        if _DEBUG_MLA:
+            print(
+                f"  Slot dimension: {slot_dim} (kv_lora_rank={self.kv_lora_rank} + qk_rope_head_dim={self.qk_rope_head_dim})"
+            )
+
+        non_zero_slots = []
+        for slot_idx in range(num_slots):
+            slot_data = kv_cache_uint8[slot_idx, 0, :]
+            non_zero_count = (slot_data != 0).sum()
+            if non_zero_count > 0:
+                non_zero_slots.append((slot_idx, non_zero_count))
+
+        if _DEBUG_MLA:
+            print(f"  Non-zero slots: {len(non_zero_slots)}/{num_slots}")
+
+        if len(non_zero_slots) > 0:
+            if _DEBUG_MLA:
+                print("\n  Details of non-zero slots:")
+            for slot_idx, count in non_zero_slots[:20]:  # Show first 20
+                slot_data = kv_cache_uint8[slot_idx, 0, :]
+                kv_c_part = slot_data[: self.kv_lora_rank]
+                k_pe_part = slot_data[
+                    self.kv_lora_rank : self.kv_lora_rank + self.qk_rope_head_dim
+                ]
+
+                if _DEBUG_MLA:
+                    print(f"    Slot {slot_idx}: {count}/{slot_dim} bytes non-zero")
+                if _DEBUG_MLA:
+                    print(f"      kv_c part (first 10): {kv_c_part[:10]}")
+                if _DEBUG_MLA:
+                    print(f"      k_pe part (first 10): {k_pe_part[:10]}")
+
+            if len(non_zero_slots) > 20:
+                if _DEBUG_MLA:
+                    print(f"    ... ({len(non_zero_slots) - 20} more non-zero slots)")
+
+        # Expected vs actual slot range
+        expected_slots = set(range(slot_start, slot_start + num_tokens))
+        actual_slots = set([idx for idx, _ in non_zero_slots])
+
+        if _DEBUG_MLA:
+            print("\nSlot Range Verification:")
+        if _DEBUG_MLA:
+            print(f"  Expected slots: {expected_slots}")
+        if _DEBUG_MLA:
+            print(f"  Actual non-zero slots: {actual_slots}")
+
+        missing_slots = expected_slots - actual_slots
+        extra_slots = actual_slots - expected_slots
+
+        if missing_slots:
+            if _DEBUG_MLA:
+                print(f"  ⚠ Missing slots (expected but zero): {missing_slots}")
+        if extra_slots:
+            if _DEBUG_MLA:
+                print(f"  ⚠ Extra slots (unexpected non-zero): {extra_slots}")
+        if not missing_slots and not extra_slots and len(expected_slots) > 0:
+            if _DEBUG_MLA:
+                print("  ✓ All expected slots written, no extra slots")
+
+        if _DEBUG_MLA:
+            print(f"\n{'=' * 80}\n")
+
     def forward_impl(
         self,
         q: torch.Tensor,
@@ -649,6 +999,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         positions: torch.Tensor | None = None,  # For AITER fused kernel
         slot_mapping: torch.Tensor | None = None,  # For AITER fused kernel
         rope_applied: bool = True,  # Whether RoPE was pre-applied in mla.py
+        use_aiter_fused: bool = False,  # Whether to use AITER fused kernels
+        rotary_emb: torch.nn.Module | None = None,  # RoPE module for fused path
     ) -> torch.Tensor:
         assert output is not None, "Output tensor must be provided."
 
@@ -709,6 +1061,145 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             num_mha_tokens = q.size(0) - num_mqa_tokens
 
         if num_mha_tokens > 0:
+            # Prefill path: handle prefill tokens using unfused Flash Attention
+            # STEP 3: Apply RoPE here for prefill tokens (FUSED PATH ONLY)
+
+            if _DEBUG_MLA:
+                print("\n[DEBUG mla_attention.py line 711] Prefill path")
+            if _DEBUG_MLA:
+                print(f"  num_mha_tokens (prefill): {num_mha_tokens}")
+            if _DEBUG_MLA:
+                print(f"  use_aiter_fused: {use_aiter_fused}")
+
+            # Apply RoPE to prefill tokens ONLY if using fused kernels
+            # (unfused path already has RoPE from mla.py)
+            if use_aiter_fused and rotary_emb is not None and positions is not None:
+                # FUSED PATH: Apply RoPE to prefill tokens here
+                # (mla.py skipped RoPE because use_aiter_fused=True)
+                prefill_q = q[num_mqa_tokens:]
+                prefill_k_pe = k_pe[num_mqa_tokens:]
+                prefill_positions = positions[num_mqa_tokens:]
+
+                qk_nope_dim = self.qk_nope_head_dim
+                if _DEBUG_MLA:
+                    print(
+                        f"  [FUSED] Q PE part BEFORE RoPE: {prefill_q[0, 0, qk_nope_dim : qk_nope_dim + 5].cpu().float().numpy()}"
+                    )
+                if _DEBUG_MLA:
+                    print("  → Applying RoPE to prefill tokens (fused path)")
+
+                # Apply RoPE to Q PE part and K PE
+                prefill_q[..., qk_nope_dim:], prefill_k_pe = rotary_emb(
+                    prefill_positions,
+                    prefill_q[..., qk_nope_dim:],
+                    prefill_k_pe,
+                )
+
+                # Write back the modified k_pe (CRITICAL: Post-March-12th fix #1)
+                k_pe[num_mqa_tokens:] = prefill_k_pe
+
+                if _DEBUG_MLA:
+                    print(
+                        f"  [FUSED] Q PE part AFTER RoPE: {prefill_q[0, 0, qk_nope_dim : qk_nope_dim + 5].cpu().float().numpy()}"
+                    )
+
+                # CRITICAL FIX: Write to KV cache AFTER RoPE is applied
+                # For fused prefill path, we skipped KV cache update in forward()
+                # Now that RoPE is applied, we can write the correct values
+                print(
+                    "[mla_attention.py] Path: FUSED PREFILL - Writing KV cache after RoPE"
+                )
+                if _DEBUG_MLA:
+                    print("\n[DEBUG forward_impl()] KV cache update for FUSED PREFILL")
+                if _DEBUG_MLA:
+                    print("  Writing prefill tokens to KV cache (AFTER RoPE)")
+                if _DEBUG_MLA:
+                    print(f"  num_mha_tokens (prefill): {num_mha_tokens}")
+                if _DEBUG_MLA:
+                    print(
+                        f"  k_pe[{num_mqa_tokens}:] with RoPE [0,0,:5]: {k_pe[num_mqa_tokens:][0, 0, :5].cpu().float().numpy()}"
+                    )
+
+                # Extract prefill slices for KV cache write
+                prefill_k_c_normed = k_c_normed[num_mqa_tokens:]
+                prefill_k_pe = k_pe[num_mqa_tokens:]
+
+                # Need to extract prefill slot_mapping
+                if slot_mapping is not None:
+                    prefill_slot_mapping = slot_mapping[num_mqa_tokens:]
+                    if _DEBUG_MLA:
+                        print(
+                            f"  prefill_slot_mapping: {prefill_slot_mapping[:5].cpu().numpy() if len(prefill_slot_mapping) >= 5 else prefill_slot_mapping.cpu().numpy()}"
+                        )
+
+                    # Write prefill KV to cache
+                    self.impl.do_kv_cache_update(
+                        prefill_k_c_normed,
+                        prefill_k_pe,
+                        kv_cache,
+                        prefill_slot_mapping,
+                        self.kv_cache_dtype,
+                        self._k_scale,
+                    )
+                    if _DEBUG_MLA:
+                        print("  ✓ Prefill KV cache written (fused path, AFTER RoPE)\n")
+                else:
+                    if _DEBUG_MLA:
+                        print(
+                            "  ⚠ WARNING: slot_mapping is None, cannot write to KV cache!\n"
+                        )
+            else:
+                # UNFUSED PATH: RoPE already applied in mla.py
+                if _DEBUG_MLA:
+                    print(
+                        f"  [UNFUSED] Q PE part (already has RoPE from mla.py): {q[num_mqa_tokens:][0, 0, self.qk_nope_head_dim : self.qk_nope_head_dim + 5].cpu().float().numpy() if num_mha_tokens > 0 else 'N/A'}"
+                    )
+                if _DEBUG_MLA:
+                    print("  → Skipping RoPE (already applied in mla.py)\n")
+
+            # DEBUG: Print all Flash Attention inputs for comparison
+            self._debug_print_prefill_flash_inputs(
+                q,
+                k_c_normed,
+                k_pe,
+                kv_cache,
+                attn_metadata,
+                self._k_scale,
+                output,
+                use_aiter_fused,
+                num_mqa_tokens,
+            )
+
+            # DEBUG: Print KV cache state BEFORE forward_mha
+            # For unfused: ALL tokens already written in forward()
+            # For fused: Only prefill tokens written in forward_impl (if any)
+            expected_tokens_written = (
+                num_mha_tokens + num_mqa_tokens if not use_aiter_fused else 0
+            )
+            if _DEBUG_MLA:
+                print("\n[DEBUG] KV cache check before prefill (forward_mha):")
+            if _DEBUG_MLA:
+                print(f"  Path: {'FUSED' if use_aiter_fused else 'UNFUSED'}")
+            if _DEBUG_MLA:
+                print(
+                    f"  Expected tokens written at this point: {expected_tokens_written}"
+                )
+            if not use_aiter_fused:
+                if _DEBUG_MLA:
+                    print("    (Unfused: ALL tokens already written in forward())")
+            else:
+                if _DEBUG_MLA:
+                    print(
+                        "    (Fused: No tokens written yet - will write prefill after RoPE)"
+                    )
+            self._debug_print_kv_cache_state(
+                kv_cache,
+                "BEFORE forward_mha",
+                use_aiter_fused,
+                expected_tokens_written,
+                slot_start=0,
+            )
+
             self.impl.forward_mha(
                 q[num_mqa_tokens:],
                 k_c_normed[num_mqa_tokens:],
@@ -719,7 +1210,51 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 output=output[num_mqa_tokens:],
             )
 
+            # DEBUG: Print KV cache state AFTER forward_mha
+            # For unfused: Still ALL tokens (no change during forward_mha)
+            # For fused: Now prefill tokens should be written (after RoPE in forward_impl)
+            expected_tokens_after = (
+                num_mha_tokens + num_mqa_tokens
+                if not use_aiter_fused
+                else num_mha_tokens
+            )
+            if _DEBUG_MLA:
+                print("\n[DEBUG] KV cache check after prefill (forward_mha):")
+            if _DEBUG_MLA:
+                print(f"  Path: {'FUSED' if use_aiter_fused else 'UNFUSED'}")
+            if _DEBUG_MLA:
+                print(
+                    f"  Expected tokens written at this point: {expected_tokens_after}"
+                )
+            if not use_aiter_fused:
+                if _DEBUG_MLA:
+                    print(
+                        "    (Unfused: Still ALL tokens - no change during forward_mha)"
+                    )
+            else:
+                if _DEBUG_MLA:
+                    print(
+                        f"    (Fused: Prefill {num_mha_tokens} tokens written after RoPE)"
+                    )
+            self._debug_print_kv_cache_state(
+                kv_cache,
+                "AFTER forward_mha",
+                use_aiter_fused,
+                expected_tokens_after,
+                slot_start=0,
+            )
+
         if num_mqa_tokens > 0:
+            if _DEBUG_MLA:
+                print(f"\n{'=' * 80}")
+            if _DEBUG_MLA:
+                print(f"[DEBUG] DECODE PATH (num_mqa_tokens={num_mqa_tokens})")
+            if _DEBUG_MLA:
+                print(f"{'=' * 80}")
+
+            # DEBUG: Capture KV cache state BEFORE decode operations
+            kv_cache_before_decode = kv_cache.clone().cpu().view(torch.uint8).numpy()
+
             mqa_q = q[:num_mqa_tokens]
             mqa_output_slice = output[:num_mqa_tokens]
 
@@ -741,21 +1276,36 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             # Requirements:
             # 1. Fused kernel enabled (use_atom_fused_decode)
             # 2. RoPE NOT pre-applied (fused kernel applies it internally)
-            # 3. Decode-only batch (no prefill tokens, i.e., num_mha_tokens == 0)
+            # 3. Has decode tokens (num_mqa_tokens > 0) - works for mixed batches too!
             # 4. Required inputs available (positions, slot_mapping)
-            is_decode_only = num_mha_tokens == 0
+            has_decode_tokens = num_mqa_tokens > 0
             use_fused_decode = (
                 self.use_atom_fused_decode
                 and not rope_applied  # RoPE must NOT be pre-applied
-                and is_decode_only  # Only decode tokens, no prefill
+                and has_decode_tokens  # Has decode tokens (allows mixed batches!)
                 and positions is not None
                 and slot_mapping is not None
             )
 
+            # DEBUG: Print decode slot mapping
+            if slot_mapping is not None:
+                decode_slot_mapping = slot_mapping[:num_mqa_tokens]
+                if _DEBUG_MLA:
+                    print("\n[DEBUG] Decode slot mapping:")
+                if _DEBUG_MLA:
+                    print(f"  num_mqa_tokens: {num_mqa_tokens}")
+                if _DEBUG_MLA:
+                    print(f"  decode_slot_mapping: {decode_slot_mapping.cpu().numpy()}")
+                if _DEBUG_MLA:
+                    print(
+                        f"  Expected decode slots: [{decode_slot_mapping[0].item()}:{decode_slot_mapping[-1].item() + 1}]"
+                    )
+                if _DEBUG_MLA:
+                    print(f"  use_fused_decode: {use_fused_decode}")
+
             if use_fused_decode:
-                # Use AITER fused kernel: BMM + RoPE + concat + KV cache
-                # write in ONE kernel
-                # Get decode slices
+                # FUSED PATH: Kernel applies RoPE internally
+                # Get decode slices (NO RoPE yet)
                 mqa_k_c_normed = k_c_normed[:num_mqa_tokens]
                 mqa_k_pe = k_pe[:num_mqa_tokens]
                 # Type assertion for mypy
@@ -764,7 +1314,27 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 mqa_positions = positions[:num_mqa_tokens]
                 mqa_slot_mapping = slot_mapping[:num_mqa_tokens]
 
-                # Call fused kernel
+                print("[mla_attention.py] Path: FUSED DECODE - Using fused kernel")
+                if _DEBUG_MLA:
+                    print("\n[DEBUG mla_attention.py line 807] FUSED DECODE PATH")
+                if _DEBUG_MLA:
+                    print(f"  num_mqa_tokens: {num_mqa_tokens}")
+                if _DEBUG_MLA:
+                    print(
+                        f"  mqa_q_nope shape: {mqa_q_nope.shape}, [0,0,:5]: {mqa_q_nope[0, 0, :5].cpu().float().numpy()}"
+                    )
+                if _DEBUG_MLA:
+                    print(
+                        f"  mqa_q_pe BEFORE kernel (NO RoPE): {mqa_q_pe[0, 0, :5].cpu().float().numpy()}"
+                    )
+                if _DEBUG_MLA:
+                    print(
+                        f"  mqa_k_pe BEFORE kernel (NO RoPE): {mqa_k_pe[0, 0, :5].cpu().float().numpy()}"
+                    )
+                if _DEBUG_MLA:
+                    print(f"  positions[0:5]: {mqa_positions[0:5].cpu().numpy()}")
+
+                # Call fused kernel (applies RoPE internally)
                 mqa_ql_nope, mqa_q_pe_rotated = self._run_atom_fused_decode(
                     mqa_q_nope,  # [num_heads, batch, qk_nope_head_dim]
                     mqa_q_pe,  # [batch, num_heads, qk_rope_head_dim] - NO RoPE yet!
@@ -779,7 +1349,34 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 # Assign to mqa_q_pe for subsequent concat/quant code
                 mqa_q_pe = mqa_q_pe_rotated
 
+                if _DEBUG_MLA:
+                    print(
+                        f"  mqa_ql_nope AFTER kernel (BMM result) [0,0,:5]: {mqa_ql_nope[0, 0, :5].cpu().float().numpy()}"
+                    )
+                if _DEBUG_MLA:
+                    print(
+                        f"  mqa_q_pe AFTER kernel (WITH RoPE): {mqa_q_pe[0, 0, :5].cpu().float().numpy()}"
+                    )
+                if _DEBUG_MLA:
+                    print("  → Fused kernel did: RoPE + BMM\n")
+
             elif self.is_aiter_triton_fp4_bmm_enabled:
+                # UNFUSED PATH: RoPE already applied in mla.py
+                # mqa_q_pe already has RoPE!
+                # Just do FP4 BMM (K = W_K @ kv_c_normed)
+                if _DEBUG_MLA:
+                    print(
+                        "\n[DEBUG mla_attention.py line 834] UNFUSED DECODE - FP4 BMM"
+                    )
+                if _DEBUG_MLA:
+                    print(f"  num_mqa_tokens: {num_mqa_tokens}")
+                if _DEBUG_MLA:
+                    print(
+                        f"  mqa_q_pe (already has RoPE from mla.py): {mqa_q_pe[0, 0, :5].cpu().float().numpy()}"
+                    )
+                if _DEBUG_MLA:
+                    print("  → Skipping RoPE (already applied in mla.py)\n")
+
                 from aiter.ops.triton.batched_gemm_a16wfp4 import batched_gemm_a16wfp4
 
                 mqa_ql_nope = batched_gemm_a16wfp4(
@@ -791,6 +1388,27 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     y_scale=self._q_scale if fp8_attention else None,
                 )
             elif self.is_aiter_triton_fp8_bmm_enabled:
+                # UNFUSED PATH: RoPE already applied in mla.py
+                # mqa_q_pe already has RoPE!
+                # Just do FP8 BMM (K = W_K @ kv_c_normed)
+                print("[mla_attention.py] Path: UNFUSED DECODE - FP8 BMM")
+                if _DEBUG_MLA:
+                    print(
+                        "\n[DEBUG mla_attention.py line 845] UNFUSED DECODE - FP8 BMM"
+                    )
+                if _DEBUG_MLA:
+                    print(f"  num_mqa_tokens: {num_mqa_tokens}")
+                if _DEBUG_MLA:
+                    print(
+                        f"  mqa_q_nope shape: {mqa_q_nope.shape}, [0,0,:5]: {mqa_q_nope[0, 0, :5].cpu().float().numpy()}"
+                    )
+                if _DEBUG_MLA:
+                    print(
+                        f"  mqa_q_pe (already has RoPE from mla.py): {mqa_q_pe[0, 0, :5].cpu().float().numpy()}"
+                    )
+                if _DEBUG_MLA:
+                    print("  → Doing BMM only (RoPE already applied in mla.py)\n")
+
                 # Multiply+Transpose (N, B, P)x(N, P, L)->(N, B, L)->(B, N, L)
                 mqa_ql_nope = rocm_aiter_ops.triton_fp8_bmm(
                     mqa_q_nope,
@@ -799,7 +1417,30 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     group_size=128,
                     transpose_bm=True,
                 )
+
+                if _DEBUG_MLA:
+                    print(
+                        f"  mqa_ql_nope AFTER BMM [0,0,:5]: {mqa_ql_nope[0, 0, :5].cpu().float().numpy()}"
+                    )
+                if _DEBUG_MLA:
+                    print("  → BMM complete\n")
             else:
+                # UNFUSED PATH: RoPE already applied in mla.py
+                # mqa_q_pe already has RoPE!
+                # Standard PyTorch BMM (K = W_K @ kv_c_normed)
+                if _DEBUG_MLA:
+                    print(
+                        "\n[DEBUG mla_attention.py line 854] UNFUSED DECODE - Standard BMM"
+                    )
+                if _DEBUG_MLA:
+                    print(f"  num_mqa_tokens: {num_mqa_tokens}")
+                if _DEBUG_MLA:
+                    print(
+                        f"  mqa_q_pe (already has RoPE from mla.py): {mqa_q_pe[0, 0, :5].cpu().float().numpy()}"
+                    )
+                if _DEBUG_MLA:
+                    print("  → Skipping RoPE (already applied in mla.py)\n")
+
                 # Pads the head_dim if necessary (for the underlying kernel)
                 N, B, P = mqa_q_nope.shape
                 _, _, L = self.W_UK_T.shape
@@ -816,14 +1457,48 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 # Convert from (N, B, L) to (B, N, L)
                 mqa_ql_nope = mqa_ql_nope.transpose(0, 1)
 
+            # DEBUG: Show intermediate values before concat
+            if _DEBUG_MLA:
+                print("\n[DEBUG BEFORE concat] Intermediate values:")
+            if _DEBUG_MLA:
+                print(f"  use_fused_decode: {use_fused_decode}")
+            if _DEBUG_MLA:
+                print(
+                    f"  mqa_ql_nope shape: {mqa_ql_nope.shape}, dtype: {mqa_ql_nope.dtype}"
+                )
+            if _DEBUG_MLA:
+                print(
+                    f"  mqa_ql_nope[0,0,:5]: {mqa_ql_nope[0, 0, :5].cpu().float().numpy()}"
+                )
+            if _DEBUG_MLA:
+                print(f"  mqa_q_pe shape: {mqa_q_pe.shape}, dtype: {mqa_q_pe.dtype}")
+            if _DEBUG_MLA:
+                print(f"  mqa_q_pe[0,0,:5]: {mqa_q_pe[0, 0, :5].cpu().float().numpy()}")
+
             if fp8_attention and self.impl.supports_quant_query_input:
                 assert mqa_ql_nope.shape[0] == mqa_q_pe.shape[0]
                 assert mqa_ql_nope.shape[1] == mqa_q_pe.shape[1]
                 mqa_q = self._decode_concat_quant_fp8_op(
                     mqa_ql_nope, mqa_q_pe, self._q_scale
                 )
+                if _DEBUG_MLA:
+                    print("\n[DEBUG AFTER concat+quant]:")
+                if _DEBUG_MLA:
+                    print(f"  mqa_q shape: {mqa_q.shape}, dtype: {mqa_q.dtype}")
+                if mqa_q.dtype == torch.float8_e4m3fnuz:
+                    if _DEBUG_MLA:
+                        print(
+                            f"  mqa_q[0,0,:10] (FP8): {mqa_q[0, 0, :10].cpu().view(torch.uint8).numpy()}"
+                        )
+                else:
+                    if _DEBUG_MLA:
+                        print(
+                            f"  mqa_q[0,0,:10]: {mqa_q[0, 0, :10].cpu().float().numpy()}"
+                        )
             else:
                 mqa_q = (mqa_ql_nope, mqa_q_pe)
+                if _DEBUG_MLA:
+                    print("\n[DEBUG] mqa_q is tuple (no FP8 quant)")
             if self.impl.dcp_world_size > 1:
                 assert not fp8_attention, "DCP not support fp8 kvcache now."
                 # concatenate mqa_ql_nope and mqa_q_pe -> (B, N, L + P)
@@ -831,10 +1506,122 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 # mqa_q do allgather in head dim.
                 mqa_q = get_dcp_group().all_gather(mqa_q, dim=1)
 
+            # DEBUG: Print Q tensor before attention
+            if _DEBUG_MLA:
+                print("\n[DEBUG BEFORE forward_mqa] Decode attention inputs:")
+            if _DEBUG_MLA:
+                print(f"  use_fused_decode: {use_fused_decode}")
+            if isinstance(mqa_q, tuple):
+                mqa_ql_nope_debug, mqa_q_pe_debug = mqa_q
+                if _DEBUG_MLA:
+                    print("  mqa_q is tuple: (mqa_ql_nope, mqa_q_pe)")
+                if _DEBUG_MLA:
+                    print(
+                        f"  mqa_ql_nope shape: {mqa_ql_nope_debug.shape}, dtype: {mqa_ql_nope_debug.dtype}"
+                    )
+                if _DEBUG_MLA:
+                    print(
+                        f"  mqa_ql_nope[0,0,:5]: {mqa_ql_nope_debug[0, 0, :5].cpu().float().numpy()}"
+                    )
+                if _DEBUG_MLA:
+                    print(
+                        f"  mqa_q_pe shape: {mqa_q_pe_debug.shape}, dtype: {mqa_q_pe_debug.dtype}"
+                    )
+                if _DEBUG_MLA:
+                    print(
+                        f"  mqa_q_pe[0,0,:5]: {mqa_q_pe_debug[0, 0, :5].cpu().float().numpy()}"
+                    )
+            else:
+                if _DEBUG_MLA:
+                    print(f"  mqa_q shape: {mqa_q.shape}, dtype: {mqa_q.dtype}")
+                if mqa_q.dtype == torch.float8_e4m3fnuz:
+                    if _DEBUG_MLA:
+                        print(
+                            f"  mqa_q (FP8) first token [0,0,:10]: {mqa_q[0, 0, :10].cpu().view(torch.uint8).numpy()}"
+                        )
+                else:
+                    if _DEBUG_MLA:
+                        print(
+                            f"  mqa_q first token [0,0,:10]: {mqa_q[0, 0, :10].cpu().float().numpy()}"
+                        )
+
+            # DEBUG: Show K values from KV cache
+            if slot_mapping is not None and num_mqa_tokens > 0:
+                decode_slot_mapping = slot_mapping[:num_mqa_tokens]
+                # Sample first decode slot to show K values
+                first_slot = decode_slot_mapping[0].item()
+                kv_cache_cpu = kv_cache.cpu().view(torch.uint8).numpy()
+                slot_data = kv_cache_cpu[first_slot, 0, :]
+                kv_c_part = slot_data[: self.kv_lora_rank]
+                k_pe_part = slot_data[
+                    self.kv_lora_rank : self.kv_lora_rank + self.qk_rope_head_dim
+                ]
+                if _DEBUG_MLA:
+                    print(f"\n  K values from KV cache (slot {first_slot}):")
+                if _DEBUG_MLA:
+                    print(f"    kv_c (FP8 first 10): {kv_c_part[:10]}")
+                if _DEBUG_MLA:
+                    print(f"    k_pe (FP8 first 10): {k_pe_part[:10]}")
+                if _DEBUG_MLA:
+                    print(
+                        "    Note: These will be dequantized and used as K in attention"
+                    )
+            if _DEBUG_MLA:
+                print()
+
+            # DEBUG: Show attention implementation being used
+            if _DEBUG_MLA:
+                print("[DEBUG] Calling attention kernel:")
+            if _DEBUG_MLA:
+                print(f"  self.impl type: {type(self.impl).__name__}")
+            if _DEBUG_MLA:
+                print(f"  self.impl module: {type(self.impl).__module__}")
+            if _DEBUG_MLA:
+                print(f"  Attention backend: {self.attn_backend.__class__.__name__}")
+            if _DEBUG_MLA:
+                print(f"  KV cache dtype: {kv_cache.dtype}")
+            if _DEBUG_MLA:
+                print(
+                    f"  Q dtype: {mqa_q.dtype if not isinstance(mqa_q, tuple) else 'tuple'}"
+                )
+            if _DEBUG_MLA:
+                print(f"  attn_metadata.decode: {attn_metadata.decode is not None}")
+            if attn_metadata.decode is not None:
+                if _DEBUG_MLA:
+                    print(
+                        f"  attn_metadata.decode.max_qo_len: {attn_metadata.decode.max_qo_len}"
+                    )
+                if _DEBUG_MLA:
+                    print(
+                        f"  attn_metadata.decode.qo_indptr shape: {attn_metadata.decode.qo_indptr.shape}"
+                    )
+                if _DEBUG_MLA:
+                    print(
+                        f"  attn_metadata.decode.qo_indptr: {attn_metadata.decode.qo_indptr.cpu().numpy()}"
+                    )
+                if _DEBUG_MLA:
+                    print(f"  q_scale: {self._q_scale}")
+                if _DEBUG_MLA:
+                    print(f"  kv_scale: {self._k_scale}")
+            if _DEBUG_MLA:
+                print()
+
             # call decode attn
             if not is_sparse_impl:
                 assert attn_metadata.decode is not None
             attn_out, lse = self.impl.forward_mqa(mqa_q, kv_cache, attn_metadata, self)
+
+            # DEBUG: Show attention output
+            if _DEBUG_MLA:
+                print("[DEBUG] Attention output:")
+            if _DEBUG_MLA:
+                print(f"  attn_out shape: {attn_out.shape}, dtype: {attn_out.dtype}")
+            if _DEBUG_MLA:
+                print(
+                    f"  attn_out[0,0,:10]: {attn_out[0, 0, :10].cpu().float().numpy()}"
+                )
+            if _DEBUG_MLA:
+                print()
 
             # correct dcp attn_out with lse.
             if self.impl.dcp_world_size > 1:
@@ -855,6 +1642,130 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
             # v_up projection
             self._v_up_proj(attn_out, out=mqa_output_slice)
+
+            # DEBUG: Show final output after v_up projection
+            if _DEBUG_MLA:
+                print("[DEBUG] After v_up projection:")
+            if _DEBUG_MLA:
+                print(
+                    f"  mqa_output_slice shape: {mqa_output_slice.shape}, dtype: {mqa_output_slice.dtype}"
+                )
+            if _DEBUG_MLA:
+                print(
+                    f"  mqa_output_slice[0,:10]: {mqa_output_slice[0, :10].cpu().float().numpy()}"
+                )
+            if _DEBUG_MLA:
+                print()
+
+            # DEBUG: Compare KV cache AFTER decode operations
+            kv_cache_after_decode = kv_cache.cpu().view(torch.uint8).numpy()
+            kv_diff = kv_cache_after_decode != kv_cache_before_decode
+
+            if _DEBUG_MLA:
+                print("\n[DEBUG] KV Cache Changes During Decode:")
+            if _DEBUG_MLA:
+                print(
+                    f"  Total bytes changed: {kv_diff.sum()}/{kv_cache_after_decode.size}"
+                )
+
+            # Analyze which slots were modified
+            num_slots = kv_cache.shape[0]
+            slot_dim = kv_cache.shape[-1]
+            modified_slots = []
+            for slot_idx in range(num_slots):
+                slot_diff = kv_diff[slot_idx, 0, :]
+                if slot_diff.any():
+                    num_changed = slot_diff.sum()
+                    modified_slots.append((slot_idx, num_changed))
+
+            if _DEBUG_MLA:
+                print(f"  Modified slots: {len(modified_slots)}/{num_slots}")
+            if modified_slots:
+                if _DEBUG_MLA:
+                    print("\n  Details of modified slots:")
+                for slot_idx, num_changed in modified_slots[:20]:  # Show first 20
+                    slot_before = kv_cache_before_decode[slot_idx, 0, :]
+                    slot_after = kv_cache_after_decode[slot_idx, 0, :]
+
+                    kv_c_before = slot_before[: self.kv_lora_rank]
+                    k_pe_before = slot_before[
+                        self.kv_lora_rank : self.kv_lora_rank + self.qk_rope_head_dim
+                    ]
+                    kv_c_after = slot_after[: self.kv_lora_rank]
+                    k_pe_after = slot_after[
+                        self.kv_lora_rank : self.kv_lora_rank + self.qk_rope_head_dim
+                    ]
+
+                    if _DEBUG_MLA:
+                        print(
+                            f"    Slot {slot_idx}: {num_changed}/{slot_dim} bytes changed"
+                        )
+                    if _DEBUG_MLA:
+                        print(f"      kv_c BEFORE (first 5): {kv_c_before[:5]}")
+                    if _DEBUG_MLA:
+                        print(f"      kv_c AFTER  (first 5): {kv_c_after[:5]}")
+                    if _DEBUG_MLA:
+                        print(f"      k_pe BEFORE (first 5): {k_pe_before[:5]}")
+                    if _DEBUG_MLA:
+                        print(f"      k_pe AFTER  (first 5): {k_pe_after[:5]}")
+
+                if len(modified_slots) > 20:
+                    if _DEBUG_MLA:
+                        print(
+                            f"    ... ({len(modified_slots) - 20} more modified slots)"
+                        )
+
+            # Verify expected slots were written
+            if slot_mapping is not None:
+                expected_slots = set(decode_slot_mapping.cpu().numpy())
+                actual_modified = set([idx for idx, _ in modified_slots])
+                if _DEBUG_MLA:
+                    print("\n  Slot Write Verification:")
+                if _DEBUG_MLA:
+                    print(
+                        f"    Expected slots (from slot_mapping): {sorted(expected_slots)}"
+                    )
+                if _DEBUG_MLA:
+                    print(f"    Actually modified slots: {sorted(actual_modified)}")
+
+                missing = expected_slots - actual_modified
+                extra = actual_modified - expected_slots
+
+                if missing:
+                    if _DEBUG_MLA:
+                        print(
+                            f"    ⚠ Missing writes (expected but not modified): {sorted(missing)}"
+                        )
+                if extra:
+                    if _DEBUG_MLA:
+                        print(
+                            f"    ⚠ Extra writes (modified but not expected): {sorted(extra)}"
+                        )
+                if not missing and not extra:
+                    if _DEBUG_MLA:
+                        print("    ✓ All expected slots written, no unexpected writes")
+
+                # DEBUG: Print actual k_pe values stored in KV cache for decode slots
+                if actual_modified or expected_slots:
+                    if _DEBUG_MLA:
+                        print("\n  [DEBUG] K_PE values in KV cache (FP8 uint8 format):")
+                    slots_to_check = (
+                        sorted(expected_slots)
+                        if expected_slots
+                        else sorted(actual_modified)
+                    )
+                    for slot_idx in slots_to_check[:5]:  # Show first 5 decode slots
+                        slot_data = kv_cache_after_decode[slot_idx, 0, :]
+                        k_pe_fp8 = slot_data[
+                            self.kv_lora_rank : self.kv_lora_rank
+                            + self.qk_rope_head_dim
+                        ]
+                        if _DEBUG_MLA:
+                            print(f"    Slot {slot_idx} k_pe (FP8): {k_pe_fp8[:10]}")
+
+            if _DEBUG_MLA:
+                print(f"\n{'=' * 80}\n")
+
         return output_padded
 
     def _run_atom_fused_decode(
