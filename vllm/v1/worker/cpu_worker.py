@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
 import platform
+import sys
 from collections.abc import Callable
 from typing import Any
 
@@ -63,9 +64,10 @@ class CPUWorker(Worker):
                     "to setup required pre-loaded libraries."
                 )
 
-        check_preloaded_libs("libtcmalloc")
-        if current_platform.get_cpu_architecture() == CpuArchEnum.X86:
-            check_preloaded_libs("libiomp")
+        if sys.platform.startswith("linux"):
+            check_preloaded_libs("libtcmalloc")
+            if current_platform.get_cpu_architecture() == CpuArchEnum.X86:
+                check_preloaded_libs("libiomp")
 
         # Setup OpenMP threads affinity.
         omp_cpuids = envs.VLLM_CPU_OMP_THREADS_BIND
