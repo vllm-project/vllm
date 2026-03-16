@@ -18,6 +18,7 @@ EXPECTED_VALUES = {
     "deepseek-ai/deepseek-vl2-tiny": 0.19,
     "deepseek-ai/DeepSeek-V2-Lite-Chat": 0.65,
     "google/gemma-3-4b-it": 0.74,
+    "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-FP8": 0.84,
 }
 
 SIMPLE_PROMPT = (
