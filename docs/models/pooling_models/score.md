@@ -328,16 +328,13 @@ Full example:
 - [examples/pooling/score/vision_score_api_online.py](../../../examples/pooling/score/vision_score_api_online.py)
 - [examples/pooling/score/vision_rerank_api_online.py](../../../examples/pooling/score/vision_rerank_api_online.py)
 
-
-
-
 ### Re-rank API
 
 `/rerank`, `/v1/rerank`, and `/v2/rerank` APIs are compatible with both [Jina AI's re-rank API interface](https://jina.ai/reranker/) and
 [Cohere's re-rank API interface](https://docs.cohere.com/v2/reference/rerank) to ensure compatibility with
 popular open-source tools.
 
-Code example: [examples/pooling/score/rerank_api_online.py](../../examples/pooling/score/rerank_api_online.py)
+Code example: [examples/pooling/score/rerank_api_online.py](../../../examples/pooling/score/rerank_api_online.py)
 
 #### Parameters
 

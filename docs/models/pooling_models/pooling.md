@@ -33,7 +33,7 @@ print(f"Data: {data!r}")
 
 ## Online Serving
 
-### Pooling API 
+### Pooling API
 
 Our Pooling API (`/pooling`) is similar to `LLM.encode`, being applicable to all types of pooling models.
 
