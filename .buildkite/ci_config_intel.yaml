@@ -19,5 +19,5 @@ run_all_exclude_patterns:
   - "cmake/cpu_extension.cmake"
 registries: public.ecr.aws/q9t5s3a7
 repositories:
-  main: "vllm-ci-postmerge-repo"
+  main: "vllm-ci-test-repo"
   premerge: "vllm-ci-test-repo"
