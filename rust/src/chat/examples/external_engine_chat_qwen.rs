@@ -5,9 +5,8 @@ use clap::Parser;
 use futures::StreamExt as _;
 use serde_json::Value;
 use tracing_subscriber::EnvFilter;
-use vllm_chat::{
-    ChatEvent, ChatLlm, ChatMessage, ChatOptions, ChatRequest, ChatRole, HfChatBackend,
-};
+use vllm_chat::backends::hf::HfChatBackend;
+use vllm_chat::{ChatEvent, ChatLlm, ChatMessage, ChatOptions, ChatRequest, ChatRole};
 use vllm_engine_core_client::protocol::SamplingParams;
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig};
 use vllm_llm::Llm;

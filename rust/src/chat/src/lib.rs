@@ -8,19 +8,16 @@
 pub use backend::{ChatBackend, DynChatBackend, SamplingHints};
 pub use error::{Error, Result};
 pub use event::ChatEvent;
-pub use hf::HfChatBackend;
 pub use request::{ChatContent, ChatContentPart, ChatMessage, ChatOptions, ChatRequest, ChatRole};
-pub use smg::SmgChatBackend;
 pub use stream::ChatEventStream;
 
 mod backend;
+pub mod backends;
 mod error;
 mod event;
-pub mod hf;
 mod incremental;
 mod lower;
 mod request;
-pub mod smg;
 mod stream;
 mod template;
 

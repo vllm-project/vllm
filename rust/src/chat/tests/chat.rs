@@ -6,13 +6,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::StreamExt as _;
-use smg_tokenizer::{ChatTemplateState, Decoder, Encoder, Encoding, SpecialTokens, TokenizerTrait};
-use thiserror_ext::AsReport as _;
 use tokio::time::timeout;
-use vllm_chat::{
-    ChatBackend, ChatEvent, ChatLlm, ChatMessage, ChatOptions, ChatRequest, ChatRole,
-    SmgChatBackend,
-};
+use vllm_chat::{ChatBackend, ChatEvent, ChatLlm, ChatMessage, ChatOptions, ChatRequest, ChatRole};
 use vllm_engine_core_client::protocol::handshake::{HandshakeInitMessage, ReadyMessage};
 use vllm_engine_core_client::protocol::{
     EngineCoreOutput, EngineCoreOutputs, EngineCoreRequest, FinishReason, SamplingParams,
@@ -136,86 +131,9 @@ async fn connect_chat_llm(handshake_address: String, backend: Arc<dyn ChatBacken
     ChatLlm::new(Llm::new(client), backend)
 }
 
-struct FakeTemplateTokenizer {
-    chat_template: ChatTemplateState,
-    special_tokens: SpecialTokens,
-}
-
-impl FakeTemplateTokenizer {
-    fn new(template: &str) -> anyhow::Result<Self> {
-        Ok(Self {
-            chat_template: ChatTemplateState::new(Some(template.to_string()))?,
-            special_tokens: SpecialTokens::default(),
-        })
-    }
-
-    fn empty() -> Self {
-        Self {
-            chat_template: ChatTemplateState::empty(),
-            special_tokens: SpecialTokens::default(),
-        }
-    }
-}
-
-impl Encoder for FakeTemplateTokenizer {
-    fn encode(&self, _input: &str, _add_special_tokens: bool) -> anyhow::Result<Encoding> {
-        Ok(Encoding::Plain(Vec::new()))
-    }
-
-    fn encode_batch(
-        &self,
-        inputs: &[&str],
-        _add_special_tokens: bool,
-    ) -> anyhow::Result<Vec<Encoding>> {
-        Ok(inputs.iter().map(|_| Encoding::Plain(Vec::new())).collect())
-    }
-}
-
-impl Decoder for FakeTemplateTokenizer {
-    fn decode(&self, _token_ids: &[u32], _skip_special_tokens: bool) -> anyhow::Result<String> {
-        Ok(String::new())
-    }
-}
-
-impl TokenizerTrait for FakeTemplateTokenizer {
-    fn vocab_size(&self) -> usize {
-        0
-    }
-
-    fn get_special_tokens(&self) -> &SpecialTokens {
-        &self.special_tokens
-    }
-
-    fn token_to_id(&self, _token: &str) -> Option<u32> {
-        None
-    }
-
-    fn id_to_token(&self, _id: u32) -> Option<String> {
-        None
-    }
-
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
-    fn apply_chat_template(
-        &self,
-        messages: &[serde_json::Value],
-        params: smg_tokenizer::chat_template::ChatTemplateParams,
-    ) -> anyhow::Result<String> {
-        self.chat_template.apply(messages, params)
-    }
-
-    fn chat_template_content_format(
-        &self,
-    ) -> smg_tokenizer::chat_template::ChatTemplateContentFormat {
-        self.chat_template.content_format()
-    }
-}
-
 #[derive(Clone)]
 struct FakeChatBackend {
-    template: String,
+    has_template: bool,
 }
 
 impl fmt::Debug for FakeChatBackend {
@@ -225,43 +143,35 @@ impl fmt::Debug for FakeChatBackend {
 }
 
 impl FakeChatBackend {
-    fn new(template: &str) -> Self {
+    fn new() -> Self {
+        Self { has_template: true }
+    }
+
+    fn without_template() -> Self {
         Self {
-            template: template.to_string(),
+            has_template: false,
         }
     }
 }
 
 impl ChatBackend for FakeChatBackend {
     fn apply_chat_template(&self, request: &ChatRequest) -> vllm_chat::Result<String> {
-        let tokenizer = FakeTemplateTokenizer::new(&self.template)
-            .map_err(|error| vllm_chat::Error::Tokenizer(error.to_report_string()))?;
-        let messages = request
-            .messages
-            .iter()
-            .map(|message| {
-                serde_json::json!({
-                    "role": message.role.as_str(),
-                    "content": serde_json::to_value(&message.content).unwrap(),
-                })
-            })
-            .collect::<Vec<_>>();
-        let mut template_kwargs = request.chat_options.template_kwargs.clone();
-        template_kwargs.insert(
-            "continue_final_message".to_string(),
-            serde_json::Value::Bool(request.chat_options.continue_final_message),
-        );
-        tokenizer
-            .apply_chat_template(
-                &messages,
-                smg_tokenizer::chat_template::ChatTemplateParams {
-                    add_generation_prompt: request.chat_options.add_generation_prompt,
-                    tools: None,
-                    documents: None,
-                    template_kwargs: Some(&template_kwargs),
-                },
-            )
-            .map_err(|error| vllm_chat::Error::Tokenizer(error.to_report_string()))
+        if !self.has_template {
+            return Err(vllm_chat::Error::MissingChatTemplate);
+        }
+
+        let mut prompt = String::new();
+        for message in &request.messages {
+            prompt.push_str(message.role.as_str());
+            prompt.push_str(": ");
+            prompt.push_str(&message.content.try_flatten_to_text()?);
+            prompt.push('\n');
+        }
+        if request.chat_options.add_generation_prompt {
+            prompt.push_str("assistant:");
+        }
+
+        Ok(prompt)
     }
 
     fn encode(&self, text: &str) -> vllm_chat::Result<Vec<u32>> {
@@ -362,9 +272,7 @@ async fn chat_streams_text_events() {
         }
     });
 
-    let backend: Arc<dyn ChatBackend> = Arc::new(FakeChatBackend::new(
-        "{% for message in messages %}{{ message.role }}: {{ message.content }}\n{% endfor %}{% if add_generation_prompt %}assistant:{% endif %}",
-    ));
+    let backend: Arc<dyn ChatBackend> = Arc::new(FakeChatBackend::new());
     let chat = connect_chat_llm(handshake_address, backend).await;
 
     let mut stream = chat.chat(sample_request("chat-1")).await.unwrap();
@@ -432,9 +340,7 @@ async fn chat_stream_waits_for_complete_utf8_before_emitting() {
         }
     });
 
-    let backend: Arc<dyn ChatBackend> = Arc::new(FakeChatBackend::new(
-        "{% for message in messages %}{{ message.role }}: {{ message.content }}\n{% endfor %}{% if add_generation_prompt %}assistant:{% endif %}",
-    ));
+    let backend: Arc<dyn ChatBackend> = Arc::new(FakeChatBackend::new());
     let chat = connect_chat_llm(handshake_address, backend).await;
 
     let mut stream = chat.chat(sample_request("chat-utf8")).await.unwrap();
@@ -484,9 +390,7 @@ async fn chat_stream_flushes_held_text_on_finish() {
         }
     });
 
-    let backend: Arc<dyn ChatBackend> = Arc::new(FakeChatBackend::new(
-        "{% for message in messages %}{{ message.role }}: {{ message.content }}\n{% endfor %}{% if add_generation_prompt %}assistant:{% endif %}",
-    ));
+    let backend: Arc<dyn ChatBackend> = Arc::new(FakeChatBackend::new());
     let chat = connect_chat_llm(handshake_address, backend).await;
 
     let mut stream = chat.chat(sample_request("chat-final-flush")).await.unwrap();
@@ -531,7 +435,7 @@ fn chat_request_rejects_conflicting_generation_modes() {
 #[test]
 fn backend_requires_a_template() {
     let request = sample_request("chat-3");
-    let backend = SmgChatBackend::from_inner(Arc::new(FakeTemplateTokenizer::empty()));
+    let backend = FakeChatBackend::without_template();
     let error = backend.apply_chat_template(&request).unwrap_err();
     assert!(matches!(error, vllm_chat::Error::MissingChatTemplate));
 }
@@ -559,7 +463,7 @@ async fn chat_stream_reports_decode_failure_as_error_event() {
     });
 
     let backend: Arc<dyn ChatBackend> = Arc::new(FailingDecodeBackend {
-        inner: FakeChatBackend::new("{{ messages[0].role }}: {{ messages[0].content }}"),
+        inner: FakeChatBackend::new(),
     });
     let chat = connect_chat_llm(handshake_address, backend).await;
 

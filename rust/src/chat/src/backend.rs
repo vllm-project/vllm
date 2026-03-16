@@ -4,8 +4,8 @@ use std::sync::Arc;
 use crate::error::Result;
 use crate::request::ChatRequest;
 
-/// Tokenizer/model-derived hints used to fill Python-aligned internal
-/// sampling metadata before requests are lowered into engine-core.
+/// Tokenizer/model-derived hints used to fill Python-aligned internal sampling metadata before
+/// requests are lowered into engine-core.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SamplingHints {
     pub primary_eos_token_id: Option<u32>,
@@ -18,18 +18,14 @@ pub trait ChatBackend: Send + Sync {
     fn apply_chat_template(&self, request: &ChatRequest) -> Result<String>;
 
     /// Encode one rendered chat prompt into token IDs.
-    ///
-    /// Chat prompt tokenization always skips tokenizer-added special tokens
-    /// because the chat template already renders the model-specific markers.
-    // TODO: Add a separate text-completion/backend boundary if we later need
-    // configurable `add_special_tokens` behavior outside chat templating.
+    // TODO: currently, `add_special_tokens` is always false because chat templates are expected to
+    // render the model-specific markers directly.
     fn encode(&self, text: &str) -> Result<Vec<u32>>;
 
     /// Decode one cumulative token sequence into text.
     fn decode(&self, token_ids: &[u32], skip_special_tokens: bool) -> Result<String>;
 
-    /// Return tokenizer/model-derived hints used to enrich southbound
-    /// sampling parameters.
+    /// Return tokenizer/model-derived hints used to enrich southbound sampling parameters.
     fn sampling_hints(&self) -> Result<SamplingHints> {
         Ok(SamplingHints::default())
     }

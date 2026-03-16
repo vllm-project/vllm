@@ -1,13 +1,96 @@
-use std::collections::HashMap;
+use std::path::Path;
 
 use serde_json::{Value, json};
-use smg_tokenizer::chat_template::ChatTemplateContentFormat;
+use smg_tokenizer::ChatTemplateState;
+use smg_tokenizer::chat_template::{
+    ChatTemplateContentFormat, ChatTemplateParams, load_chat_template_from_config,
+    load_chat_template_from_file,
+};
+use thiserror_ext::AsReport as _;
 
+use crate::Error;
 use crate::error::Result;
 use crate::request::{ChatContent, ChatMessage, ChatRequest};
 
+/// Chat template handling for Hugging Face models.
+///
+/// Currently it's a simple wrapper around smg's [`ChatTemplateState`].
+pub struct ChatTemplate {
+    inner: ChatTemplateState,
+}
+
+impl ChatTemplate {
+    /// Load a chat template from the given tokenizer config and/or adjacent template file.
+    pub fn load(
+        tokenizer_config_path: Option<&Path>,
+        chat_template_path: Option<&Path>,
+    ) -> Result<Self> {
+        // Match the usual HF precedence: tokenizer_config first, then any
+        // adjacent dedicated chat template file.
+        let mut chat_template = tokenizer_config_path
+            .and_then(|path| path.to_str())
+            .map(load_chat_template_from_config)
+            .transpose()
+            .map_err(|error| Error::Tokenizer(error.to_report_string()))?
+            .flatten();
+
+        if let Some(chat_template_path) = chat_template_path {
+            chat_template = load_chat_template_from_file(
+                chat_template_path
+                    .to_str()
+                    .expect("chat template path should be valid UTF-8"),
+            )
+            .map_err(|error| Error::Tokenizer(error.to_report_string()))?;
+        }
+
+        Self::new(chat_template)
+    }
+
+    /// Create a chat template from the given template string.
+    pub fn new(template: Option<String>) -> Result<Self> {
+        Ok(Self {
+            inner: ChatTemplateState::new(template)
+                .map_err(|error| Error::Tokenizer(error.to_report_string()))?,
+        })
+    }
+
+    /// Apply the chat template to one chat request, rendering the prompt string to be tokenized and
+    /// submitted to the model.
+    pub fn apply_chat_template(&self, request: &ChatRequest) -> Result<String> {
+        let messages = template_messages_to_json(&request.messages, self.inner.content_format())?;
+
+        let merged_template_kwargs = {
+            let mut kwargs = request.chat_options.template_kwargs.clone();
+            kwargs.insert(
+                "continue_final_message".to_string(),
+                Value::Bool(request.chat_options.continue_final_message),
+            );
+            kwargs
+        };
+
+        self.inner
+            .apply(
+                &messages,
+                ChatTemplateParams {
+                    add_generation_prompt: request.chat_options.add_generation_prompt,
+                    tools: None,
+                    documents: None,
+                    template_kwargs: Some(&merged_template_kwargs),
+                },
+            )
+            .map_err(|error| {
+                let message = error.to_report_string();
+                if message.contains("tokenizer.chat_template is not set") {
+                    Error::MissingChatTemplate
+                } else {
+                    Error::Tokenizer(message)
+                }
+            })
+    }
+}
+
 /// Convert chat messages into the JSON shape expected by Jinja chat templates.
-pub(crate) fn template_messages_to_json(
+fn template_messages_to_json(
     messages: &[ChatMessage],
     content_format: ChatTemplateContentFormat,
 ) -> Result<Vec<Value>> {
@@ -15,19 +98,6 @@ pub(crate) fn template_messages_to_json(
         .iter()
         .map(|message| template_message_to_json(message, content_format))
         .collect()
-}
-
-/// Merge request-scoped chat template kwargs with chat-layer defaults.
-pub(crate) fn merged_template_kwargs(
-    request: &ChatRequest,
-    template_kwargs: Option<&HashMap<String, Value>>,
-) -> HashMap<String, Value> {
-    let mut merged_template_kwargs = template_kwargs.cloned().unwrap_or_default();
-    merged_template_kwargs.insert(
-        "continue_final_message".to_string(),
-        Value::Bool(request.chat_options.continue_final_message),
-    );
-    merged_template_kwargs
 }
 
 fn template_message_to_json(
@@ -49,4 +119,127 @@ fn template_content_to_json(
         ChatTemplateContentFormat::OpenAI => serde_json::to_value(content)
             .expect("text-only chat content should serialize to valid JSON"),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ChatTemplate;
+    use crate::request::{ChatContentPart, ChatMessage, ChatOptions, ChatRequest, ChatRole};
+    use crate::{Error, Result};
+
+    fn sample_request(messages: Vec<ChatMessage>) -> ChatRequest {
+        ChatRequest {
+            request_id: "render-test".to_string(),
+            messages,
+            sampling_params: Default::default(),
+            chat_options: ChatOptions::default(),
+        }
+    }
+
+    fn render(template: Option<&str>, request: &ChatRequest) -> Result<String> {
+        ChatTemplate::new(template.map(str::to_owned))?.apply_chat_template(request)
+    }
+
+    #[test]
+    fn chat_template_supports_pycompat_templates() {
+        let request = sample_request(vec![ChatMessage::text(ChatRole::User, "<think>hello")]);
+
+        let rendered = render(
+            Some(
+                "{% for message in messages %}{% if message.content.startswith('<think>') %}think{% else %}plain{% endif %}{% endfor %}",
+            ),
+            &request,
+        )
+        .unwrap();
+
+        assert_eq!(rendered, "think");
+    }
+
+    #[test]
+    fn chat_template_passes_continue_final_message_to_template() {
+        let mut request = sample_request(vec![ChatMessage::text(
+            ChatRole::Assistant,
+            "The capital of",
+        )]);
+
+        assert_eq!(
+            render(
+                Some("{% if continue_final_message %}continue{% else %}new{% endif %}"),
+                &request,
+            )
+            .unwrap(),
+            "new"
+        );
+
+        request.chat_options.continue_final_message = true;
+        request.chat_options.add_generation_prompt = false;
+
+        assert_eq!(
+            render(
+                Some("{% if continue_final_message %}continue{% else %}new{% endif %}"),
+                &request,
+            )
+            .unwrap(),
+            "continue"
+        );
+    }
+
+    #[test]
+    fn chat_template_flattens_text_parts_for_string_templates() {
+        let request = sample_request(vec![ChatMessage::new(
+            ChatRole::User,
+            vec![
+                ChatContentPart::text("hello"),
+                ChatContentPart::text(" world"),
+            ],
+        )]);
+
+        let rendered = render(Some("{{ messages[0].content }}"), &request).unwrap();
+
+        assert_eq!(rendered, "hello world");
+    }
+
+    #[test]
+    fn chat_template_keeps_string_text_for_openai_detected_templates() {
+        let request = sample_request(vec![ChatMessage::text(ChatRole::User, "hello")]);
+
+        let rendered = render(
+            Some(
+                "{%- for message in messages %}{%- if message.content is string %}{%- set content = message.content %}{{ content }}{%- endif %}{%- endfor %}",
+            ),
+            &request,
+        )
+        .unwrap();
+
+        assert_eq!(rendered, "hello");
+    }
+
+    #[test]
+    fn chat_template_emits_openai_text_blocks_for_structured_templates() {
+        let request = sample_request(vec![ChatMessage::new(
+            ChatRole::User,
+            vec![
+                ChatContentPart::text("hello"),
+                ChatContentPart::text("world"),
+            ],
+        )]);
+
+        let rendered = render(
+            Some(
+                "{%- for message in messages %}{%- for item in message.content %}{{ item.text }}|{%- endfor %}{%- endfor %}",
+            ),
+            &request,
+        )
+        .unwrap();
+
+        assert_eq!(rendered, "hello|world|");
+    }
+
+    #[test]
+    fn chat_template_requires_a_template() {
+        let request = sample_request(vec![ChatMessage::text(ChatRole::User, "hello")]);
+        let error = render(None, &request).unwrap_err();
+
+        assert!(matches!(error, Error::MissingChatTemplate));
+    }
 }
