@@ -25,6 +25,7 @@ import torch.nn as nn
 from einops import rearrange
 from transformers import BaseImageProcessor, BatchFeature, PretrainedConfig
 from transformers.activations import GELUActivation
+from transformers.image_utils import ChannelDimension
 from transformers.modeling_outputs import (
     BaseModelOutputWithPooling,
 )
@@ -249,8 +250,12 @@ class PaddleOCRVLMultiModalProcessor(
         tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         if mm_data:
+            final_mm_kwargs = dict(mm_kwargs or {})
+            final_mm_kwargs.setdefault("images_kwargs", {})
+            # vLLM use PIL.Image, always set channel_last
+            final_mm_kwargs["input_data_format"] = ChannelDimension.LAST
             processed_outputs = self.info.ctx.call_hf_processor(
-                self.info.get_hf_processor(**mm_kwargs),
+                self.info.get_hf_processor(**final_mm_kwargs),
                 dict(text=prompt, **mm_data),
                 dict(**mm_kwargs, **tok_kwargs),
             )
@@ -486,7 +491,7 @@ class SiglipVisionEmbeddings(nn.Module):
                 )
             (
                 batch_size,
-                squence_len,
+                sequence_len,
                 channel,
                 height,
                 width,

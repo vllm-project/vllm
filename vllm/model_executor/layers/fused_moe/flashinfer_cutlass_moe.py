@@ -195,10 +195,6 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
     def supports_expert_map(self) -> bool:
         return False
 
-    def supports_chunking(self) -> bool:
-        # This refers to TP chunking; DP chunking is handled separately.
-        return True
-
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         return TopKWeightAndReduceNoOP()
 
@@ -394,5 +390,5 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
 
     def moe_sum(self, input: torch.Tensor, output: torch.Tensor) -> None:
         # No support for LoRA in flashinfer_cutlass_fused_moe.
-        # See TODOs in flashinfer functions runMoe and runMoeMinLantency.
+        # See TODOs in flashinfer functions runMoe and runMoeMinLatency.
         raise NotImplementedError("LoRA is not supported for flashinfer_cutlass_moe")

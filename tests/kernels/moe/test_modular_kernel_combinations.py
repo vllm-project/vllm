@@ -84,12 +84,6 @@ def rank_worker(
 
     set_random_seed(pgi.rank)
 
-    # sanity check
-    from vllm import envs
-
-    if base_config.fused_moe_chunk_size is not None:
-        assert base_config.fused_moe_chunk_size == envs.VLLM_FUSED_MOE_CHUNK_SIZE
-
     # get weights to this device
     weights.to_current_device()
 
@@ -162,7 +156,6 @@ Ns = [1024]
 TOPKs = [4, 1]
 Es = [32]
 DTYPEs = [torch.bfloat16]
-FUSED_MOE_CHUNK_SIZEs = [None, 16]
 
 
 def is_nyi_config(config: Config) -> bool:
@@ -185,14 +178,13 @@ def generate_valid_test_cases(
     cases = []
     total = 0
 
-    for k, n, e, dtype, quant_config, combination, chunk_size in product(
+    for k, n, e, dtype, quant_config, combination in product(
         Ks,
         Ns,
         Es,
         DTYPEs,
         MK_QUANT_CONFIGS,
         product(prepare_finalize_types, MK_FUSED_EXPERT_TYPES),
-        FUSED_MOE_CHUNK_SIZEs,
     ):
         total = total + 1
 
@@ -206,7 +198,6 @@ def generate_valid_test_cases(
             quant_config=quant_config,
             prepare_finalize_type=combination[0],
             fused_experts_type=combination[1],
-            fused_moe_chunk_size=chunk_size,
             world_size=world_size,
         )
 
@@ -234,7 +225,6 @@ def generate_valid_test_cases(
                 quant_config,
                 combination[0],
                 combination[1],
-                chunk_size,
                 world_size,
             )
         )
@@ -245,7 +235,7 @@ def generate_valid_test_cases(
 
 
 @pytest.mark.parametrize(
-    "k,n,e,dtype,quant_config,prepare_finalize_type,fused_experts_type,chunk_size,world_size",
+    "k,n,e,dtype,quant_config,prepare_finalize_type,fused_experts_type,world_size",
     generate_valid_test_cases(
         world_size=2, prepare_finalize_types=MK_MULTI_GPU_PREPARE_FINALIZE_TYPES
     ),
@@ -259,14 +249,13 @@ def test_modular_kernel_combinations_multigpu(
     quant_config: TestMoEQuantConfig | None,
     prepare_finalize_type: mk.FusedMoEPrepareAndFinalize,
     fused_experts_type: mk.FusedMoEExperts,
-    chunk_size: int | None,
     world_size: int,
     pytestconfig,
 ):
     if cuda_device_count_stateless() < world_size:
         pytest.skip(
             f"Not enough GPUs available to run, got "
-            f"{cuda_device_count_stateless()} exepected "
+            f"{cuda_device_count_stateless()} expected "
             f"{world_size}."
         )
 
@@ -280,7 +269,6 @@ def test_modular_kernel_combinations_multigpu(
         quant_config=quant_config,
         prepare_finalize_type=prepare_finalize_type,
         fused_experts_type=fused_experts_type,
-        fused_moe_chunk_size=chunk_size,
         world_size=world_size,
     )
     verbosity = pytestconfig.getoption("verbose")
@@ -288,7 +276,7 @@ def test_modular_kernel_combinations_multigpu(
 
 
 @pytest.mark.parametrize(
-    "k,n,e,dtype,quant_config,prepare_finalize_type,fused_experts_type,chunk_size,world_size",
+    "k,n,e,dtype,quant_config,prepare_finalize_type,fused_experts_type,world_size",
     generate_valid_test_cases(
         world_size=1, prepare_finalize_types=MK_SINGLE_GPU_PREPARE_FINALIZE_TYPES
     ),
@@ -301,7 +289,6 @@ def test_modular_kernel_combinations_singlegpu(
     quant_config: TestMoEQuantConfig | None,
     prepare_finalize_type: mk.FusedMoEPrepareAndFinalize,
     fused_experts_type: mk.FusedMoEExperts,
-    chunk_size: int | None,
     world_size: int,
     pytestconfig,
     workspace_init,
@@ -318,7 +305,6 @@ def test_modular_kernel_combinations_singlegpu(
         quant_config=quant_config,
         prepare_finalize_type=prepare_finalize_type,
         fused_experts_type=fused_experts_type,
-        fused_moe_chunk_size=chunk_size,
         world_size=world_size,
     )
 
