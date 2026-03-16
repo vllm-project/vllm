@@ -3,6 +3,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 use futures::StreamExt as _;
+use serde_json::Value;
 use tracing_subscriber::EnvFilter;
 use vllm_chat::{
     ChatEvent, ChatLlm, ChatMessage, ChatOptions, ChatRequest, ChatRole, SmgChatBackend,
@@ -29,6 +30,7 @@ struct Args {
 const CLIENT_INDEX: u32 = 0;
 const OUTPUT_TIMEOUT_SECS: u64 = 120;
 const MAX_TOKENS: u32 = 16;
+const ENABLE_THINKING_KEY: &str = "enable_thinking";
 
 fn unique_request_id() -> String {
     format!("rust-chat-smoke-{}", uuid::Uuid::new_v4())
@@ -73,6 +75,10 @@ async fn main() -> Result<()> {
 
     let llm = Llm::new(client);
     let chat = ChatLlm::new(llm, backend);
+    let mut chat_options = ChatOptions::default();
+    chat_options
+        .template_kwargs
+        .insert(ENABLE_THINKING_KEY.to_string(), Value::Bool(false));
 
     let request = ChatRequest {
         request_id: request_id.clone(),
@@ -82,11 +88,12 @@ async fn main() -> Result<()> {
             temperature: 0.0,
             ..Default::default()
         },
-        chat_options: ChatOptions::default(),
+        chat_options,
     };
 
     println!("request_id={request_id}");
     println!("prompt={}", args.prompt);
+    println!("{ENABLE_THINKING_KEY}=false");
 
     let mut stream = chat
         .chat(request)

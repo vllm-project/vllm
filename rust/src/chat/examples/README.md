@@ -30,7 +30,9 @@ cargo run -p vllm-chat --example external_engine_chat_qwen -- \
 The example now defaults to `Qwen/Qwen3-0.6B`. The current `vllm-chat`
 request model stays text-only, but it now supports either plain string content
 or OpenAI-style text blocks. Tool use, reasoning fields, and multimodal parts
-are still out of scope. The example continues to rely entirely on the
+are still out of scope. The example also sets
+`chat_options.template_kwargs["enable_thinking"] = false` so Qwen3 runs in
+non-thinking mode by default. It continues to rely entirely on the
 crates.io `llm-tokenizer` package, imported in Rust as `smg_tokenizer`, to
 download or reuse the tokenizer and to auto-discover the chat template from
 model metadata or adjacent template files.
