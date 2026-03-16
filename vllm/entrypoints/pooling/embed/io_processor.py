@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import logging
 from typing import Any, cast
 
 import torch
@@ -9,6 +10,8 @@ from vllm.entrypoints.pooling.typing import PoolingServeContext
 from vllm.inputs.data import ProcessorInputs, token_inputs
 from vllm.outputs import PoolingOutput, PoolingRequestOutput
 from vllm.utils.collection_utils import chunk_list
+
+logger = logging.getLogger(__name__)
 
 
 class EmbedIOProcessor(PoolingIOProcessor):
@@ -20,6 +23,46 @@ class EmbedIOProcessor(PoolingIOProcessor):
 
         self.pooler_config = self.model_config.pooler_config
         self.enable_chunked_processing = self.pooler_config.enable_chunked_processing
+
+        # Load task instructions from HF config or sentence-transformers config
+        self.task_instructions: dict[str, str] | None = self._load_task_instructions(
+            self.model_config.hf_config
+        ) or self._load_st_prompts(self.model_config.model, self.model_config.revision)
+        if self.task_instructions:
+            logger.info(
+                "Loaded prompt prefixes for input_type: %s",
+                list(self.task_instructions.keys()),
+            )
+
+    @staticmethod
+    def _load_task_instructions(hf_config: Any) -> dict[str, str] | None:
+        """Extract ``task_instructions`` from the HF model config."""
+        ti = getattr(hf_config, "task_instructions", None)
+        if not isinstance(ti, dict) or not ti:
+            return None
+        return {k: v for k, v in ti.items() if isinstance(v, str)}
+
+    @staticmethod
+    def _load_st_prompts(
+        model: str | Any,
+        revision: str | None,
+    ) -> dict[str, str] | None:
+        """Load ``prompts`` from ``config_sentence_transformers.json``."""
+        from vllm.transformers_utils.repo_utils import get_hf_file_to_dict
+
+        try:
+            cfg = get_hf_file_to_dict(
+                "config_sentence_transformers.json", str(model), revision
+            )
+        except (ValueError, OSError):
+            return None
+
+        if cfg is None:
+            return None
+        prompts = cfg.get("prompts")
+        if not isinstance(prompts, dict) or not prompts:
+            return None
+        return {k: v for k, v in prompts.items() if isinstance(v, str)}
 
     #################################################################
     # Long Text Embedding with Chunked Processing

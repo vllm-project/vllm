@@ -3,7 +3,7 @@
 """Parity test between Cohere /v2/embed and OpenAI /v1/embeddings.
 
 Verifies that both endpoints produce identical float embeddings when
-no prompt prefix is applied (input_type omitted).
+no prompt prefix is applied (input_type omitted for Cohere /v2/embed).
 """
 
 import numpy as np

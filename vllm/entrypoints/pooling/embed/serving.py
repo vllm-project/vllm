@@ -5,10 +5,10 @@ import json
 import logging
 from collections.abc import Callable
 from functools import partial
-from typing import Any, Literal, TypeAlias, cast
+from typing import Literal, TypeAlias, cast
 
 from fastapi import Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from openai.types.chat import (
     ChatCompletionContentPartImageParam,
     ChatCompletionContentPartTextParam,
@@ -25,24 +25,22 @@ from vllm.entrypoints.chat_utils import (
 )
 from vllm.entrypoints.openai.engine.protocol import UsageInfo
 from vllm.entrypoints.pooling.base.serving import PoolingServing
-from vllm.entrypoints.pooling.embed.cohere_protocol import (
+from vllm.entrypoints.pooling.embed.io_processor import EmbedIOProcessor
+from vllm.entrypoints.pooling.embed.protocol import (
     CohereBilledUnits,
     CohereEmbedInput,
     CohereEmbedRequest,
     CohereEmbedResponse,
     CohereMeta,
-    build_typed_embeddings,
-)
-from vllm.entrypoints.pooling.embed.io_processor import EmbedIOProcessor
-from vllm.entrypoints.pooling.embed.openai_protocol import (
     EmbeddingBytesResponse,
     EmbeddingChatRequest,
     EmbeddingCompletionRequest,
     EmbeddingRequest,
     EmbeddingResponse,
     EmbeddingResponseData,
+    build_typed_embeddings,
 )
-from vllm.entrypoints.pooling.typing import PoolingServeContext
+from vllm.entrypoints.pooling.typing import AnyPoolingRequest, PoolingServeContext
 from vllm.entrypoints.pooling.utils import (
     encode_pooling_bytes,
     encode_pooling_output_base64,
@@ -61,29 +59,10 @@ EmbeddingServeContext: TypeAlias = PoolingServeContext[EmbeddingRequest]
 
 
 class ServingEmbedding(PoolingServing):
-    """Embedding API supporting both OpenAI and Cohere formats.
-
-    The OpenAI ``/v1/embeddings`` path goes through ``__call__`` and
-    ``_build_openai_response``.  The Cohere ``/v2/embed`` path goes
-    through ``create_cohere_embedding``, which validates / transforms
-    the request, runs the same ``_process`` pipeline, and builds a
-    Cohere-style response.
-    """
+    """Embedding API supporting both OpenAI and Cohere formats."""
 
     request_id_prefix = "embd"
-
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        super().__init__(*args, **kwargs)
-
-        # Load task instructions from HF config or sentence-transformers config
-        self.task_instructions: dict[str, str] | None = self._load_task_instructions(
-            self.model_config.hf_config
-        ) or self._load_st_prompts(self.model_config.model, self.model_config.revision)
-        if self.task_instructions:
-            logger.info(
-                "Loaded prompt prefixes for input_type: %s",
-                list(self.task_instructions.keys()),
-            )
+    io_processor: EmbedIOProcessor
 
     def init_io_processor(
         self,
@@ -97,9 +76,176 @@ class ServingEmbedding(PoolingServing):
             chat_template_config=chat_template_config,
         )
 
-    # -----------------------------------------------------------------
-    # OpenAI /v1/embeddings
-    # -----------------------------------------------------------------
+    @property
+    def task_instructions(self) -> dict[str, str] | None:
+        return self.io_processor.task_instructions
+
+    async def _process(
+        self,
+        request: AnyPoolingRequest,
+        raw_request: Request | None = None,
+    ) -> PoolingServeContext:
+        if isinstance(request, CohereEmbedRequest):
+            return await self._process_cohere(request, raw_request)
+        return await super()._process(request, raw_request)
+
+    async def _build_response(
+        self,
+        ctx: PoolingServeContext,
+    ) -> Response:
+        if isinstance(ctx.request, CohereEmbedRequest):
+            return self._build_cohere_response_from_ctx(ctx)
+        return await self._build_openai_response(ctx)
+
+    async def _process_cohere(
+        self,
+        request: CohereEmbedRequest,
+        raw_request: Request | None = None,
+    ) -> PoolingServeContext:
+        if request.texts is None and request.images is None and request.inputs is None:
+            raise ValueError("One of texts, images, or inputs must be provided")
+
+        truncate_prompt_tokens, truncation_side = self._resolve_cohere_truncation(
+            request
+        )
+        input_type = request.input_type
+        self._validate_input_type(input_type)
+
+        max_tokens_check = (
+            request.max_tokens
+            if request.truncate == "NONE" and request.max_tokens is not None
+            else None
+        )
+
+        image_tokens = 0
+        texts_echo: list[str] | None = None
+
+        if request.images is not None:
+            all_floats, resp_id, total_tokens = await self._cohere_process_chat_batch(
+                request,
+                [
+                    [
+                        CustomChatCompletionMessageParam(
+                            role="user",
+                            content=[{"type": "image_url", "image_url": {"url": uri}}],
+                        )
+                    ]
+                    for uri in request.images
+                ],
+                raw_request,
+                truncate_prompt_tokens,
+                truncation_side,
+                max_tokens_check=max_tokens_check,
+            )
+            image_tokens = total_tokens
+
+        elif request.inputs is not None:
+            task_prefix = self._get_task_instruction_prefix(input_type)
+            all_floats, resp_id, total_tokens = await self._cohere_process_chat_batch(
+                request,
+                [
+                    self._mixed_input_to_messages(inp, task_prefix=task_prefix)
+                    for inp in request.inputs
+                ],
+                raw_request,
+                truncate_prompt_tokens,
+                truncation_side,
+                max_tokens_check=max_tokens_check,
+            )
+
+        else:
+            texts_echo = request.texts
+            prefixed = self._apply_task_instruction(request.texts or [], input_type)
+            all_floats, resp_id, total_tokens = await self._cohere_process_completion(
+                request,
+                prefixed,
+                raw_request,
+                truncate_prompt_tokens,
+                truncation_side,
+                max_tokens_check=max_tokens_check,
+            )
+
+        model_name = self.models.model_name()
+        ctx = PoolingServeContext(
+            request=request,
+            raw_request=raw_request,
+            model_name=model_name,
+            request_id=resp_id,
+        )
+        ctx.intermediates = {
+            "all_floats": all_floats,
+            "total_tokens": total_tokens,
+            "image_tokens": image_tokens,
+            "texts_echo": texts_echo,
+        }
+        return ctx
+
+    async def _cohere_process_completion(
+        self,
+        request: CohereEmbedRequest,
+        texts: list[str],
+        raw_request: Request | None,
+        truncate_prompt_tokens: int | None,
+        truncation_side: Literal["left", "right"] | None,
+        max_tokens_check: int | None = None,
+    ) -> tuple[list[list[float]], str, int]:
+        """Process raw texts via a single batched completion request."""
+        comp_req = EmbeddingCompletionRequest(
+            model=request.model,
+            input=texts,
+            dimensions=request.output_dimension,
+            encoding_format="float",
+            truncate_prompt_tokens=truncate_prompt_tokens,
+            truncation_side=truncation_side,
+        )
+        ctx = await super()._process(comp_req, raw_request)
+        self._check_cohere_max_tokens(ctx.final_res_batch, max_tokens_check)
+        all_floats = [encode_pooling_output_float(out) for out in ctx.final_res_batch]
+        total_tokens = sum(len(out.prompt_token_ids) for out in ctx.final_res_batch)
+        return all_floats, ctx.request_id, total_tokens
+
+    async def _cohere_process_chat_batch(
+        self,
+        request: CohereEmbedRequest,
+        all_messages: list[list[ChatCompletionMessageParam]],
+        raw_request: Request | None,
+        truncate_prompt_tokens: int | None,
+        truncation_side: Literal["left", "right"] | None,
+        max_tokens_check: int | None = None,
+    ) -> tuple[list[list[float]], str, int]:
+        """Process a batch of chat requests in parallel."""
+        if not all_messages:
+            return [], "", 0
+
+        chat_reqs = [
+            EmbeddingChatRequest(
+                model=request.model,
+                messages=msgs,
+                dimensions=request.output_dimension,
+                encoding_format="float",
+                truncate_prompt_tokens=truncate_prompt_tokens,
+                truncation_side=truncation_side,
+            )
+            for msgs in all_messages
+        ]
+        # Each _process call derives a request ID from raw_request. When
+        # X-Request-Id is set, passing the same raw_request to every call
+        # would produce duplicate IDs and crash the engine scheduler.
+        # Pass raw_request only to the first call; the rest get None so
+        # they each generate a unique ID.
+        contexts = await asyncio.gather(
+            super()._process(chat_reqs[0], raw_request),
+            *[super()._process(req, None) for req in chat_reqs[1:]],
+        )
+
+        all_floats: list[list[float]] = []
+        total_tokens = 0
+        for ctx in contexts:
+            self._check_cohere_max_tokens(ctx.final_res_batch, max_tokens_check)
+            for output in ctx.final_res_batch:
+                all_floats.append(encode_pooling_output_float(output))
+                total_tokens += len(output.prompt_token_ids)
+        return all_floats, contexts[0].request_id, total_tokens
 
     async def _build_openai_response(
         self,
@@ -222,188 +368,36 @@ class ServingEmbedding(PoolingServing):
             media_type=response.media_type,
         )
 
-    # -----------------------------------------------------------------
-    # Cohere /v2/embed
-    # -----------------------------------------------------------------
-
-    async def create_cohere_embedding(
-        self,
-        request: CohereEmbedRequest,
-        raw_request: Request | None = None,
+    @staticmethod
+    def _build_cohere_response_from_ctx(
+        ctx: PoolingServeContext,
     ) -> JSONResponse:
-        if request.texts is None and request.images is None and request.inputs is None:
-            raise ValueError("One of texts, images, or inputs must be provided")
+        request = ctx.request
+        assert isinstance(request, CohereEmbedRequest)
+        intermediates = ctx.intermediates
+        assert isinstance(intermediates, dict)
 
-        truncate_prompt_tokens, truncation_side = self._resolve_cohere_truncation(
-            request
+        all_floats: list[list[float]] = intermediates["all_floats"]
+        total_tokens: int = intermediates["total_tokens"]
+        image_tokens: int = intermediates["image_tokens"]
+        texts_echo: list[str] | None = intermediates["texts_echo"]
+
+        embedding_types = request.embedding_types or ["float"]
+        embeddings_obj = build_typed_embeddings(all_floats, embedding_types)
+
+        input_tokens = total_tokens - image_tokens
+        response = CohereEmbedResponse(
+            id=ctx.request_id,
+            embeddings=embeddings_obj,
+            texts=texts_echo,
+            meta=CohereMeta(
+                billed_units=CohereBilledUnits(
+                    input_tokens=input_tokens,
+                    image_tokens=image_tokens,
+                ),
+            ),
         )
-        input_type = request.input_type
-        self._validate_input_type(input_type)
-        texts_echo: list[str] | None = None
-
-        # When truncate="NONE" with an explicit max_tokens, the pipeline
-        # should NOT truncate but must reject inputs that exceed the limit.
-        max_tokens_check = (
-            request.max_tokens
-            if request.truncate == "NONE" and request.max_tokens is not None
-            else None
-        )
-
-        image_tokens = 0
-
-        if request.images is not None:
-            all_floats, resp_id, total_tokens = await self._cohere_process_chat_batch(
-                request,
-                [
-                    [
-                        CustomChatCompletionMessageParam(
-                            role="user",
-                            content=[{"type": "image_url", "image_url": {"url": uri}}],
-                        )
-                    ]
-                    for uri in request.images
-                ],
-                raw_request,
-                truncate_prompt_tokens,
-                truncation_side,
-                max_tokens_check=max_tokens_check,
-            )
-            image_tokens = total_tokens
-
-        elif request.inputs is not None:
-            task_prefix = self._get_task_instruction_prefix(input_type)
-            all_floats, resp_id, total_tokens = await self._cohere_process_chat_batch(
-                request,
-                [
-                    self._mixed_input_to_messages(inp, task_prefix=task_prefix)
-                    for inp in request.inputs
-                ],
-                raw_request,
-                truncate_prompt_tokens,
-                truncation_side,
-                max_tokens_check=max_tokens_check,
-            )
-
-        else:
-            texts_echo = request.texts
-            prefixed = self._apply_task_instruction(request.texts or [], input_type)
-            all_floats, resp_id, total_tokens = await self._cohere_process_completion(
-                request,
-                prefixed,
-                raw_request,
-                truncate_prompt_tokens,
-                truncation_side,
-                max_tokens_check=max_tokens_check,
-            )
-
-        return self._build_cohere_response(
-            request,
-            all_floats,
-            resp_id=resp_id,
-            total_tokens=total_tokens,
-            image_tokens=image_tokens,
-            texts_echo=texts_echo,
-        )
-
-    async def _cohere_process_completion(
-        self,
-        request: CohereEmbedRequest,
-        texts: list[str],
-        raw_request: Request | None,
-        truncate_prompt_tokens: int | None,
-        truncation_side: Literal["left", "right"] | None,
-        max_tokens_check: int | None = None,
-    ) -> tuple[list[list[float]], str, int]:
-        """Process raw texts via a single batched completion request."""
-        comp_req = EmbeddingCompletionRequest(
-            model=request.model,
-            input=texts,
-            dimensions=request.output_dimension,
-            encoding_format="float",
-            truncate_prompt_tokens=truncate_prompt_tokens,
-            truncation_side=truncation_side,
-        )
-        ctx = await self._process(comp_req, raw_request)
-        self._check_cohere_max_tokens(ctx.final_res_batch, max_tokens_check)
-        all_floats = [encode_pooling_output_float(out) for out in ctx.final_res_batch]
-        total_tokens = sum(len(out.prompt_token_ids) for out in ctx.final_res_batch)
-        return all_floats, ctx.request_id, total_tokens
-
-    async def _cohere_process_chat_batch(
-        self,
-        request: CohereEmbedRequest,
-        all_messages: list[list[ChatCompletionMessageParam]],
-        raw_request: Request | None,
-        truncate_prompt_tokens: int | None,
-        truncation_side: Literal["left", "right"] | None,
-        max_tokens_check: int | None = None,
-    ) -> tuple[list[list[float]], str, int]:
-        """Process a batch of chat requests in parallel."""
-        if not all_messages:
-            return [], "", 0
-
-        chat_reqs = [
-            EmbeddingChatRequest(
-                model=request.model,
-                messages=msgs,
-                dimensions=request.output_dimension,
-                encoding_format="float",
-                truncate_prompt_tokens=truncate_prompt_tokens,
-                truncation_side=truncation_side,
-            )
-            for msgs in all_messages
-        ]
-        # Each _process call derives a request ID from raw_request. When
-        # X-Request-Id is set, passing the same raw_request to every call
-        # would produce duplicate IDs and crash the engine scheduler.
-        # Pass raw_request only to the first call; the rest get None so
-        # they each generate a unique ID.
-        contexts = await asyncio.gather(
-            self._process(chat_reqs[0], raw_request),
-            *[self._process(req, None) for req in chat_reqs[1:]],
-        )
-
-        all_floats: list[list[float]] = []
-        total_tokens = 0
-        for ctx in contexts:
-            self._check_cohere_max_tokens(ctx.final_res_batch, max_tokens_check)
-            for output in ctx.final_res_batch:
-                all_floats.append(encode_pooling_output_float(output))
-                total_tokens += len(output.prompt_token_ids)
-        return all_floats, contexts[0].request_id, total_tokens
-
-    @staticmethod
-    def _load_task_instructions(hf_config: Any) -> dict[str, str] | None:
-        """Extract ``task_instructions`` from the HF model config."""
-        ti = getattr(hf_config, "task_instructions", None)
-        if not isinstance(ti, dict) or not ti:
-            return None
-        return {k: v for k, v in ti.items() if isinstance(v, str)}
-
-    @staticmethod
-    def _load_st_prompts(
-        model: str | Any,
-        revision: str | None,
-    ) -> dict[str, str] | None:
-        """Load ``prompts`` from ``config_sentence_transformers.json``.
-
-        Returns ``None`` when the file doesn't exist or has no
-        ``prompts`` key.
-        """
-        from vllm.transformers_utils.repo_utils import get_hf_file_to_dict
-
-        try:
-            cfg = get_hf_file_to_dict(
-                "config_sentence_transformers.json", str(model), revision
-            )
-        except (ValueError, OSError):
-            return None
-        if cfg is None:
-            return None
-        prompts = cfg.get("prompts")
-        if not isinstance(prompts, dict) or not prompts:
-            return None
-        return {k: v for k, v in prompts.items() if isinstance(v, str)}
+        return JSONResponse(content=response.model_dump(exclude_none=True))
 
     @staticmethod
     def _mixed_input_to_messages(
@@ -470,7 +464,7 @@ class ServingEmbedding(PoolingServing):
         texts: list[str],
         input_type: str | None,
     ) -> list[str]:
-        """Prepend the sentence-transformer prompt prefix for *input_type*.
+        """Prepend the task instruction prompt prefix for *input_type*.
 
         Returns *texts* unchanged when no matching prefix is configured.
         """
@@ -480,7 +474,7 @@ class ServingEmbedding(PoolingServing):
         return [prefix + t for t in texts]
 
     def _get_task_instruction_prefix(self, input_type: str | None) -> str | None:
-        """Return the ST prompt prefix for *input_type*, or ``None``."""
+        """Return the task instruction prompt prefix for *input_type*."""
         if not self.task_instructions or input_type is None:
             return None
         return self.task_instructions.get(input_type) or None
@@ -498,33 +492,3 @@ class ServingEmbedding(PoolingServing):
         if request.max_tokens is not None:
             return request.max_tokens, None
         return -1, None
-
-    @staticmethod
-    def _build_cohere_response(
-        request: CohereEmbedRequest,
-        all_floats: list[list[float]],
-        resp_id: str,
-        total_tokens: int,
-        image_tokens: int,
-        texts_echo: list[str] | None,
-    ) -> JSONResponse:
-        embedding_types = request.embedding_types or ["float"]
-
-        embeddings_obj = build_typed_embeddings(
-            all_floats,
-            embedding_types,
-        )
-
-        input_tokens = total_tokens - image_tokens
-        response = CohereEmbedResponse(
-            id=resp_id,
-            embeddings=embeddings_obj,
-            texts=texts_echo,
-            meta=CohereMeta(
-                billed_units=CohereBilledUnits(
-                    input_tokens=input_tokens,
-                    image_tokens=image_tokens,
-                ),
-            ),
-        )
-        return JSONResponse(content=response.model_dump(exclude_none=True))

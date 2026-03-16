@@ -9,7 +9,8 @@ import struct
 import numpy as np
 import pytest
 
-from vllm.entrypoints.pooling.embed.cohere_protocol import (
+from vllm.entrypoints.pooling.embed.io_processor import EmbedIOProcessor
+from vllm.entrypoints.pooling.embed.protocol import (
     CohereEmbedRequest,
     build_typed_embeddings,
 )
@@ -194,7 +195,9 @@ class TestApplyStPrompt:
     @staticmethod
     def _make_handler(task_instructions: dict[str, str] | None):
         handler = object.__new__(ServingEmbedding)
-        handler.task_instructions = task_instructions
+        io = object.__new__(EmbedIOProcessor)
+        io.task_instructions = task_instructions
+        handler.io_processor = io
         return handler
 
     def test_no_prompts_configured(self):
@@ -230,13 +233,13 @@ class TestApplyStPrompt:
 
 
 class TestLoadTaskInstructions:
-    """Unit tests for ServingEmbedding._load_task_instructions."""
+    """Unit tests for EmbedIOProcessor._load_task_instructions."""
 
     def test_no_attribute(self):
         class FakeConfig:
             pass
 
-        assert ServingEmbedding._load_task_instructions(FakeConfig()) is None
+        assert EmbedIOProcessor._load_task_instructions(FakeConfig()) is None
 
     def test_with_task_instructions(self):
         class FakeConfig:
@@ -245,7 +248,7 @@ class TestLoadTaskInstructions:
                 "retrieval.passage": "",
             }
 
-        result = ServingEmbedding._load_task_instructions(FakeConfig())
+        result = EmbedIOProcessor._load_task_instructions(FakeConfig())
         assert result == {
             "retrieval.query": "Represent the query: ",
             "retrieval.passage": "",
@@ -255,13 +258,13 @@ class TestLoadTaskInstructions:
         class FakeConfig:
             task_instructions = {}
 
-        assert ServingEmbedding._load_task_instructions(FakeConfig()) is None
+        assert EmbedIOProcessor._load_task_instructions(FakeConfig()) is None
 
     def test_non_dict(self):
         class FakeConfig:
             task_instructions = "not a dict"
 
-        assert ServingEmbedding._load_task_instructions(FakeConfig()) is None
+        assert EmbedIOProcessor._load_task_instructions(FakeConfig()) is None
 
 
 class TestCheckMaxTokens:
@@ -299,7 +302,9 @@ class TestValidateInputType:
     @staticmethod
     def _make_handler(task_instructions: dict[str, str] | None):
         handler = object.__new__(ServingEmbedding)
-        handler.task_instructions = task_instructions
+        io = object.__new__(EmbedIOProcessor)
+        io.task_instructions = task_instructions
+        handler.io_processor = io
         return handler
 
     def test_none_input_type_always_accepted(self):

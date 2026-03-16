@@ -7,8 +7,10 @@ from fastapi import APIRouter, Depends, Request
 
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.openai.utils import validate_json_request
-from vllm.entrypoints.pooling.embed.cohere_protocol import CohereEmbedRequest
-from vllm.entrypoints.pooling.embed.openai_protocol import EmbeddingRequest
+from vllm.entrypoints.pooling.embed.protocol import (
+    CohereEmbedRequest,
+    EmbeddingRequest,
+)
 from vllm.entrypoints.pooling.embed.serving import ServingEmbedding
 from vllm.entrypoints.utils import load_aware_call, with_cancellation
 
@@ -58,4 +60,4 @@ async def create_cohere_embedding(
     if handler is None:
         raise NotImplementedError("The model does not support Embeddings API")
 
-    return await handler.create_cohere_embedding(request, raw_request)
+    return await handler(request, raw_request)

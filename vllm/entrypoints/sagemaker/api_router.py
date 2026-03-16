@@ -53,7 +53,7 @@ def get_invocation_types(supported_tasks: tuple["SupportedTask", ...]):
             create_embedding,
             embedding,
         )
-        from vllm.entrypoints.pooling.embed.openai_protocol import EmbeddingRequest
+        from vllm.entrypoints.pooling.embed.protocol import EmbeddingRequest
 
         INVOCATION_TYPES += [
             (EmbeddingRequest, (embedding, create_embedding)),
