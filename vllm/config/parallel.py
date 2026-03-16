@@ -354,7 +354,7 @@ class ParallelConfig:
                 f"but found: {self._api_process_rank}"
             )
 
-        if self.all2all_backend == "pplx" or self.all2all_backend == "naive":
+        if self.all2all_backend in ["pplx", "naive"]:
             logger.warning(
                 "The '%s' all2all backend has been removed. "
                 "Falling back to 'allgather_reducescatter'.",
