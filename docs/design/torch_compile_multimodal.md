@@ -33,9 +33,6 @@ To compile a multimodal component such as an encoder, we follow the same mechani
 (see Compile Range Integration). The decorator automatically uses the class name as the cache directory prefix, avoiding collisions between
 independently compiled sub-modules (e.g. vision encoder components vs the text backbone).
 
-3. `with set_forward_context` context manager should be used around the nn.Module's forward call. This will properly forward the vllm_config which is needed
-for torch.compile integration.
-
 ### CompilationConfig
 
 With the exception of `compile_mm_encoder: true`, the multimodal encoder will inherit from the same compilation config as the text LLM. We may extend
