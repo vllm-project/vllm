@@ -8,7 +8,7 @@ majority of storage I/O for MoE models (experts typically account for
 ~85-90 % of total weight bytes).
 """
 
-import re
+import regex as re
 
 # Matches per-expert weight names like ".experts.42.gate_proj.weight".
 # Does NOT match 3D fused-expert names like ".experts.gate_proj.weight"
