@@ -433,7 +433,14 @@ class _ModuleOffloader:
         contains the final processed weights, not stale pre-loading data.
         """
         for param_offloader in self._param_offloaders.values():
-            param_offloader.sync_cpu_storage()
+            try:
+                param_offloader.sync_cpu_storage()
+            except AttributeError as e:
+                logger.warning(
+                    f"Failed to sync CPU storage for parameter, skipping. "
+                    f"This may happen if the parameter was removed or replaced "
+                    f"during weight loading. Error: {e}"
+                )
 
     def get_param_infos(self) -> list[ParamInfo]:
         """Get parameter metadata for buffer pool allocation.
@@ -553,7 +560,24 @@ class _BaseParamOffloader(ABC):
         """
         obj: Any = self._module
         for attr in self._param_name.split("."):
-            obj = getattr(obj, attr)
+            try:
+                obj = getattr(obj, attr)
+            except AttributeError as e:
+                raise AttributeError(
+                    f"Failed to get attribute {attr!r} from {type(obj).__name__} "
+                    f"while traversing {self._param_name!r}. "
+                    f"The parameter may have been removed or renamed during "
+                    f"weight loading. Original error: {e}"
+                ) from None
+
+        if not isinstance(obj, nn.Parameter):
+            raise AttributeError(
+                f"Expected {self._param_name!r} to be an nn.Parameter, "
+                f"but got {type(obj).__name__}. "
+                f"This may happen if the attribute is a buffer (e.g., '_k_scale') "
+                f"rather than a parameter, or if the parameter was replaced "
+                f"during weight loading."
+            )
         return obj
 
     def post_init(self):
@@ -668,25 +692,32 @@ class _CpuParamOffloader(_BaseParamOffloader):
           so that prefetch copies the processed weights, not stale data
         - Then point param.data to the GPU buffer for torch.compile
         """
-        assert self._cpu_storage is not None, (
-            "_offload_to_cpu_internal() must be called before assign_static_buffer()"
-        )
+        try:
+            assert self._cpu_storage is not None, (
+                "_offload_to_cpu_internal() must be called before assign_static_buffer()"
+            )
 
-        # Get current parameter (may have been replaced by
-        # process_weights_after_loading)
-        param = self._param
+            # Get current parameter (may have been replaced by
+            # process_weights_after_loading)
+            param = self._param
 
-        # Update _cpu_storage to current param.data. This is critical because:
-        # 1. process_weights_after_loading may transform weights (quantization)
-        # 2. device_loading_context creates NEW CPU tensors when moving back
-        # 3. Our old _cpu_storage would have pre-processed or stale data
-        self._update_cpu_storage_from_param()
+            # Update _cpu_storage to current param.data. This is critical because:
+            # 1. process_weights_after_loading may transform weights (quantization)
+            # 2. device_loading_context creates NEW CPU tensors when moving back
+            # 3. Our old _cpu_storage would have pre-processed or stale data
+            self._update_cpu_storage_from_param()
 
-        # Store reference to GPU buffer for use in start_onload
-        self._gpu_buffer = gpu_buffer
+            # Store reference to GPU buffer for use in start_onload
+            self._gpu_buffer = gpu_buffer
 
-        # Point parameter to static GPU buffer - this is what torch.compile sees
-        param.data = gpu_buffer
+            # Point parameter to static GPU buffer - this is what torch.compile sees
+            param.data = gpu_buffer
+        except AttributeError as e:
+            logger.warning(
+                f"Failed to assign static buffer for parameter {self._param_name!r}, "
+                f"skipping. This may happen if the parameter was removed or replaced "
+                f"during weight loading. Error: {e}"
+            )
 
     def sync_cpu_storage(self) -> None:
         """Sync CPU storage with current param.data.
