@@ -3,21 +3,23 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use openai_protocol::common::{ErrorDetail, ErrorResponse};
 
+/// Small OpenAI-style error family used by the minimal HTTP layer.
 #[derive(Debug)]
 pub enum ApiError {
+    /// The request is syntactically valid OpenAI JSON but asks for unsupported behavior.
     InvalidRequest {
         message: String,
         param: Option<String>,
     },
-    ModelNotFound {
-        model: String,
-    },
-    ServerError {
-        message: String,
-    },
+    /// The requested model name does not match the single configured model.
+    ModelNotFound { model: String },
+    /// An unexpected internal failure happened before streaming started.
+    ServerError { message: String },
 }
 
+// TODO: use `thiserror-ext`.
 impl ApiError {
+    /// Build a generic invalid-request error without a parameter name.
     pub fn invalid_request(message: impl Into<String>) -> Self {
         Self::InvalidRequest {
             message: message.into(),
@@ -25,6 +27,7 @@ impl ApiError {
         }
     }
 
+    /// Build an invalid-request error tied to one request parameter.
     pub fn invalid_request_param(message: impl Into<String>, param: impl Into<String>) -> Self {
         Self::InvalidRequest {
             message: message.into(),
@@ -32,12 +35,14 @@ impl ApiError {
         }
     }
 
+    /// Build the standard model-not-found error used by OpenAI-compatible APIs.
     pub fn model_not_found(model: impl Into<String>) -> Self {
         Self::ModelNotFound {
             model: model.into(),
         }
     }
 
+    /// Build an internal server error.
     pub fn server_error(message: impl Into<String>) -> Self {
         Self::ServerError {
             message: message.into(),

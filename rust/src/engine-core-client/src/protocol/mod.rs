@@ -38,7 +38,8 @@ mod defaults {
     }
 
     pub fn max_tokens() -> u32 {
-        16
+        // TODO: make it reasonable
+        65536
     }
 }
 

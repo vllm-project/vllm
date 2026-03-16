@@ -1,5 +1,5 @@
-use std::future::pending;
-
+use futures::FutureExt as _;
+use tokio::signal::ctrl_c;
 use tracing_subscriber::EnvFilter;
 use vllm_openai_server::{Config, serve};
 
@@ -12,5 +12,6 @@ fn init_tracing() {
 async fn main() -> anyhow::Result<()> {
     init_tracing();
     let config = Config::parse();
-    serve(config, pending()).await
+    let shutdown = ctrl_c().map(|_| ());
+    serve(config, shutdown).await
 }

@@ -1,3 +1,9 @@
+//! Minimal OpenAI-compatible HTTP server above [`vllm_chat`].
+//!
+//! This crate keeps the northbound surface intentionally narrow:
+//! one configured model, `GET /v1/models`, and streaming
+//! `POST /v1/chat/completions`.
+
 mod config;
 mod convert;
 mod error;
@@ -6,7 +12,7 @@ mod state;
 
 use std::sync::Arc;
 
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 pub use config::Config;
 use tokio::net::TcpListener;
 use tracing::info;
@@ -18,6 +24,7 @@ use vllm_llm::Llm;
 use crate::routes::build_router;
 use crate::state::AppState;
 
+/// Build the shared application state for one configured model and one engine client.
 async fn build_state(config: &Config) -> Result<Arc<AppState>> {
     let backend = Arc::new(HfChatBackend::from_model(&config.model).await?);
     let client = EngineCoreClient::connect(EngineCoreClientConfig {
@@ -32,6 +39,9 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
     Ok(Arc::new(AppState::new(config.model.clone(), chat)))
 }
 
+/// Run the OpenAI-compatible HTTP server until the supplied shutdown future resolves.
+///
+/// The server owns one `vllm-chat` stack and shuts it down before returning.
 pub async fn serve<F>(config: Config, shutdown: F) -> Result<()>
 where
     F: std::future::Future<Output = ()> + Send + 'static,
@@ -48,11 +58,5 @@ where
         .with_graceful_shutdown(shutdown)
         .await?;
 
-    let state = Arc::try_unwrap(state)
-        .map_err(|_| anyhow!("openai server state still has outstanding references"))?;
-    let chat = Arc::try_unwrap(state.chat)
-        .map_err(|_| anyhow!("openai server chat still has outstanding references"))?;
-    chat.shutdown().await?;
-
-    Ok(())
+    state.shutdown().await
 }

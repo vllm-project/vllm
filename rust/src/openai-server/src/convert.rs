@@ -4,7 +4,7 @@ use openai_protocol::chat::{
     ChatCompletionRequest, ChatCompletionStreamResponse, ChatMessage, ChatMessageDelta,
     ChatStreamChoice, MessageContent,
 };
-use openai_protocol::common::{ContentPart, StringOrArray, ToolChoice, ToolChoiceValue};
+use openai_protocol::common::ContentPart;
 use serde_json::Value;
 use uuid::Uuid;
 use vllm_chat::{
@@ -15,18 +15,25 @@ use vllm_engine_core_client::protocol::{FinishReason, StopReason};
 
 use crate::error::ApiError;
 
+mod validate;
+
+/// Lowered chat request plus the public response metadata carried by every SSE chunk.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PreparedRequest {
+    /// Stable OpenAI-style response ID, also reused as the internal chat request ID.
     pub response_id: String,
+    /// Public model ID echoed back to the client.
     pub response_model: String,
+    /// Lowered text-only chat request for `vllm-chat`.
     pub chat_request: ChatRequest,
 }
 
+/// Validate and lower one OpenAI chat completion request into the internal chat format.
 pub fn prepare_chat_request(
     request: &ChatCompletionRequest,
     configured_model: &str,
 ) -> Result<PreparedRequest, ApiError> {
-    validate_request_compat(request, configured_model)?;
+    validate::validate_request_compat(request, configured_model)?;
 
     let response_id = format!("chatcmpl-{}", Uuid::new_v4());
     let messages = request
@@ -44,10 +51,11 @@ pub fn prepare_chat_request(
         request_id: response_id.clone(),
         messages,
         sampling_params: UserSamplingParams {
+            // TODO: single source of truth for default sampling parameters
             temperature: request.temperature.unwrap_or(1.0),
             top_p: request.top_p.unwrap_or(1.0),
             top_k: request.top_k.unwrap_or(0),
-            max_tokens: request.max_completion_tokens.unwrap_or(16),
+            max_tokens: request.max_completion_tokens.unwrap_or(65536),
             min_tokens: request.min_tokens.unwrap_or(0),
             include_stop_str_in_output: false,
             stop_token_ids: request.stop_token_ids.clone().unwrap_or_default(),
@@ -68,6 +76,7 @@ pub fn prepare_chat_request(
     })
 }
 
+/// Build the initial assistant-role SSE chunk required by the OpenAI streaming protocol.
 pub fn start_chunk(
     response_id: &str,
     response_model: &str,
@@ -95,6 +104,7 @@ pub fn start_chunk(
     }
 }
 
+/// Build one content-delta SSE chunk from one internal text delta.
 pub fn text_chunk(
     response_id: &str,
     response_model: &str,
@@ -123,6 +133,7 @@ pub fn text_chunk(
     }
 }
 
+/// Build the terminal SSE chunk carrying the OpenAI finish reason.
 pub fn final_chunk(
     response_id: &str,
     response_model: &str,
@@ -151,207 +162,8 @@ pub fn final_chunk(
     )
 }
 
-fn validate_request_compat(
-    request: &ChatCompletionRequest,
-    configured_model: &str,
-) -> Result<(), ApiError> {
-    if request.model != configured_model {
-        return Err(ApiError::model_not_found(request.model.clone()));
-    }
-
-    if !request.stream {
-        return Err(ApiError::invalid_request_param(
-            "Only stream=true is supported.",
-            "stream",
-        ));
-    }
-
-    if request.n.unwrap_or(1) > 1 {
-        return Err(ApiError::invalid_request_param(
-            "Only n=1 is supported.",
-            "n",
-        ));
-    }
-
-    if has_non_empty_stop(request.stop.as_ref()) {
-        return Err(ApiError::invalid_request_param(
-            "Stop strings are not supported by the minimal Rust frontend.",
-            "stop",
-        ));
-    }
-
-    reject_non_zero(
-        request.frequency_penalty,
-        "frequency_penalty",
-        "Only frequency_penalty=0 is supported.",
-    )?;
-    reject_non_zero(
-        request.presence_penalty,
-        "presence_penalty",
-        "Only presence_penalty=0 is supported.",
-    )?;
-    reject_non_zero(
-        request.verbosity.map(|value| value as f32),
-        "verbosity",
-        "Verbosity control is not supported.",
-    )?;
-
-    if request.logprobs {
-        return Err(ApiError::invalid_request_param(
-            "logprobs are not supported.",
-            "logprobs",
-        ));
-    }
-
-    if request.top_logprobs.unwrap_or(0) > 0 {
-        return Err(ApiError::invalid_request_param(
-            "top_logprobs are not supported.",
-            "top_logprobs",
-        ));
-    }
-
-    if request.stream_options.is_some() {
-        return Err(ApiError::invalid_request_param(
-            "stream_options are not supported.",
-            "stream_options",
-        ));
-    }
-
-    if request.response_format.is_some() {
-        return Err(ApiError::invalid_request_param(
-            "response_format is not supported.",
-            "response_format",
-        ));
-    }
-
-    if request
-        .tools
-        .as_ref()
-        .is_some_and(|tools| !tools.is_empty())
-    {
-        return Err(ApiError::invalid_request_param(
-            "Tool calling is not supported.",
-            "tools",
-        ));
-    }
-
-    if let Some(tool_choice) = &request.tool_choice
-        && !matches!(tool_choice, ToolChoice::Value(ToolChoiceValue::None))
-    {
-        return Err(ApiError::invalid_request_param(
-            "tool_choice is not supported.",
-            "tool_choice",
-        ));
-    }
-
-    reject_non_default(
-        request.logit_bias.as_ref(),
-        "logit_bias",
-        "logit_bias is not supported.",
-    )?;
-    reject_non_default(
-        request.metadata.as_ref(),
-        "metadata",
-        "metadata is not supported.",
-    )?;
-    reject_non_default(
-        request.modalities.as_ref(),
-        "modalities",
-        "modalities are not supported.",
-    )?;
-    reject_non_default(
-        request.prompt_cache_key.as_ref(),
-        "prompt_cache_key",
-        "prompt_cache_key is not supported.",
-    )?;
-    reject_non_default(
-        request.reasoning_effort.as_ref(),
-        "reasoning_effort",
-        "reasoning controls are not supported.",
-    )?;
-    reject_non_default(
-        request.safety_identifier.as_ref(),
-        "safety_identifier",
-        "safety_identifier is not supported.",
-    )?;
-    reject_non_default(
-        request.service_tier.as_ref(),
-        "service_tier",
-        "service_tier is not supported.",
-    )?;
-    #[expect(deprecated, reason = "OpenAI protocol still exposes legacy seed")]
-    reject_non_default(request.seed.as_ref(), "seed", "seed is not supported.")?;
-    reject_non_default(request.min_p.as_ref(), "min_p", "min_p is not supported.")?;
-    reject_non_default(
-        request.repetition_penalty.as_ref(),
-        "repetition_penalty",
-        "repetition_penalty is not supported.",
-    )?;
-    reject_non_default(
-        request.regex.as_ref(),
-        "regex",
-        "regex constraints are not supported.",
-    )?;
-    reject_non_default(
-        request.ebnf.as_ref(),
-        "ebnf",
-        "ebnf constraints are not supported.",
-    )?;
-    reject_non_default(
-        request.lora_path.as_ref(),
-        "lora_path",
-        "lora_path is not supported.",
-    )?;
-    reject_non_default(
-        request.session_params.as_ref(),
-        "session_params",
-        "session_params are not supported.",
-    )?;
-    reject_non_default(
-        request
-            .chat_template_kwargs
-            .as_ref()
-            .and_then(|kwargs| kwargs.get("reasoning_effort")),
-        "chat_template_kwargs",
-        "reasoning controls are not supported.",
-    )?;
-
-    if request.parallel_tool_calls.is_some_and(|value| value)
-        && request
-            .tools
-            .as_ref()
-            .is_some_and(|tools| !tools.is_empty())
-    {
-        return Err(ApiError::invalid_request_param(
-            "parallel_tool_calls is not supported.",
-            "parallel_tool_calls",
-        ));
-    }
-
-    if request.no_stop_trim {
-        return Err(ApiError::invalid_request_param(
-            "no_stop_trim is not supported.",
-            "no_stop_trim",
-        ));
-    }
-
-    if request.return_hidden_states {
-        return Err(ApiError::invalid_request_param(
-            "return_hidden_states is not supported.",
-            "return_hidden_states",
-        ));
-    }
-
-    if request.sampling_seed.is_some() {
-        return Err(ApiError::invalid_request_param(
-            "sampling_seed is not supported.",
-            "sampling_seed",
-        ));
-    }
-
-    Ok(())
-}
-
+/// Lower one OpenAI chat message into the text-only `vllm-chat` message shape.
+// TODO: use `TryFrom`?
 fn convert_message(message: &ChatMessage) -> Result<VllmChatMessage, ApiError> {
     match message {
         ChatMessage::System { content, .. } => Ok(VllmChatMessage::new(
@@ -402,6 +214,7 @@ fn convert_message(message: &ChatMessage) -> Result<VllmChatMessage, ApiError> {
     }
 }
 
+/// Convert one OpenAI message content value into the supported text-only internal format.
 fn convert_content(content: &MessageContent) -> Result<ChatContent, ApiError> {
     match content {
         MessageContent::Text(text) => Ok(ChatContent::Text(text.clone())),
@@ -418,33 +231,9 @@ fn convert_content(content: &MessageContent) -> Result<ChatContent, ApiError> {
     }
 }
 
-fn has_non_empty_stop(stop: Option<&StringOrArray>) -> bool {
-    match stop {
-        None => false,
-        Some(StringOrArray::String(value)) => !value.is_empty(),
-        Some(StringOrArray::Array(values)) => values.iter().any(|value| !value.is_empty()),
-    }
-}
-
-fn reject_non_zero(value: Option<f32>, param: &str, message: &str) -> Result<(), ApiError> {
-    if value.unwrap_or(0.0) != 0.0 {
-        return Err(ApiError::invalid_request_param(message, param));
-    }
-    Ok(())
-}
-
-fn reject_non_default<T>(value: Option<&T>, param: &str, message: &str) -> Result<(), ApiError> {
-    if value.is_some() {
-        return Err(ApiError::invalid_request_param(message, param));
-    }
-    Ok(())
-}
-
+/// Convert one internal stop reason into the OpenAI-compatible `matched_stop` JSON shape.
 fn stop_reason_to_json(stop_reason: StopReason) -> Value {
-    match stop_reason {
-        StopReason::Text(text) => Value::String(text),
-        StopReason::TokenId(token_id) => Value::Number(serde_json::Number::from(token_id)),
-    }
+    serde_json::to_value(stop_reason).expect("StopReason must serialize to JSON")
 }
 
 #[cfg(test)]
@@ -452,7 +241,7 @@ mod tests {
     use std::collections::HashMap;
 
     use openai_protocol::chat::{ChatCompletionRequest, ChatMessage, MessageContent};
-    use openai_protocol::common::{ContentPart, ResponseFormat, StreamOptions, Tool, ToolChoice};
+    use openai_protocol::common::ContentPart;
     use serde_json::json;
     use vllm_engine_core_client::protocol::{FinishReason, StopReason};
 
@@ -486,7 +275,7 @@ mod tests {
         let prepared =
             prepare_chat_request(&request, "Qwen/Qwen1.5-0.5B-Chat").expect("request is valid");
 
-        assert_eq!(prepared.response_id.starts_with("chatcmpl-"), true);
+        assert!(prepared.response_id.starts_with("chatcmpl-"));
         assert!(!prepared.chat_request.chat_options.add_generation_prompt);
         assert!(prepared.chat_request.chat_options.continue_final_message);
         assert!(!prepared.chat_request.sampling_params.skip_special_tokens);
@@ -526,70 +315,6 @@ mod tests {
         };
 
         assert!(prepare_chat_request(&request, "Qwen/Qwen1.5-0.5B-Chat").is_err());
-    }
-
-    #[test]
-    fn prepare_chat_request_rejects_non_empty_stop() {
-        let request = ChatCompletionRequest {
-            stop: Some(openai_protocol::common::StringOrArray::String(
-                "stop".to_string(),
-            )),
-            ..base_request()
-        };
-
-        assert!(prepare_chat_request(&request, "Qwen/Qwen1.5-0.5B-Chat").is_err());
-    }
-
-    #[test]
-    fn prepare_chat_request_rejects_non_zero_penalties_and_tools() {
-        let request = ChatCompletionRequest {
-            frequency_penalty: Some(0.5),
-            ..base_request()
-        };
-        assert!(prepare_chat_request(&request, "Qwen/Qwen1.5-0.5B-Chat").is_err());
-
-        let request = ChatCompletionRequest {
-            tools: Some(vec![Tool {
-                tool_type: "function".to_string(),
-                function: openai_protocol::common::Function {
-                    name: "tool".to_string(),
-                    description: None,
-                    parameters: json!({}),
-                    strict: None,
-                },
-            }]),
-            ..base_request()
-        };
-        assert!(prepare_chat_request(&request, "Qwen/Qwen1.5-0.5B-Chat").is_err());
-    }
-
-    #[test]
-    fn prepare_chat_request_rejects_response_format_and_stream_options() {
-        let request = ChatCompletionRequest {
-            response_format: Some(ResponseFormat::Text),
-            ..base_request()
-        };
-        assert!(prepare_chat_request(&request, "Qwen/Qwen1.5-0.5B-Chat").is_err());
-
-        let request = ChatCompletionRequest {
-            stream_options: Some(StreamOptions {
-                include_usage: Some(true),
-            }),
-            ..base_request()
-        };
-        assert!(prepare_chat_request(&request, "Qwen/Qwen1.5-0.5B-Chat").is_err());
-    }
-
-    #[test]
-    fn prepare_chat_request_accepts_noop_tool_choice_none() {
-        let request = ChatCompletionRequest {
-            tool_choice: Some(ToolChoice::Value(
-                openai_protocol::common::ToolChoiceValue::None,
-            )),
-            ..base_request()
-        };
-
-        prepare_chat_request(&request, "Qwen/Qwen1.5-0.5B-Chat").expect("tool_choice=none is ok");
     }
 
     #[test]

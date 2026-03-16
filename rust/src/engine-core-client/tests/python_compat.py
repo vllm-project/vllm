@@ -29,7 +29,7 @@ class EngineCoreSamplingParams(msgspec.Struct, omit_defaults=True, dict=True):
     temperature: float = 1.0
     top_p: float = 1.0
     top_k: int = 0
-    max_tokens: int = 16
+    max_tokens: int = 65536
     min_tokens: int = 0
     stop_token_ids: list[int] = []
     _eos_token_id: int | None = None
