@@ -38,7 +38,7 @@ def packed_broadcast_producer(
     """
     target_packed_tensor_size = buffer_size_bytes
 
-    streams = [torch.cuda.Stream() for _ in range(num_buffers)]
+    streams = [torch.Stream() for _ in range(num_buffers)]
     buffer_idx = 0
 
     packing_tensor_list: list[list[torch.Tensor]] = [[] for _ in range(num_buffers)]
@@ -141,7 +141,7 @@ def packed_broadcast_consumer(
 
     target_packed_tensor_size = buffer_size_bytes
 
-    streams = [torch.cuda.Stream() for _ in range(num_buffers)]
+    streams = [torch.Stream() for _ in range(num_buffers)]
     buffer_idx = 0
 
     packing_tensor_meta_data: list[list[tuple[str, list[int], torch.dtype, int]]] = [

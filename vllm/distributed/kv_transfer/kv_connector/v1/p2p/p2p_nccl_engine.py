@@ -133,8 +133,8 @@ class P2pNcclEngine:
         self.send_queue_cv = threading.Condition()
         self.recv_store_cv = threading.Condition()
 
-        self.send_stream = torch.cuda.Stream()
-        self.recv_stream = torch.cuda.Stream()
+        self.send_stream = torch.Stream()
+        self.recv_stream = torch.Stream()
 
         mem_pool_size_gb = float(
             self.config.get_from_extra_config(
