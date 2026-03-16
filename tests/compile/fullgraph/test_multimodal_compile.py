@@ -17,7 +17,8 @@ def test_compile():
 # forked needed to workaround https://github.com/vllm-project/vllm/issues/21073
 @pytest.mark.forked
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Skip if not cuda")
-def test_qwen2_5_vl_compilation(vllm_runner, monkeypatch):
+@pytest.mark.parametrize("model_impl", ["vllm", "transformers"])
+def test_qwen2_5_vl_compilation(vllm_runner, monkeypatch, model_impl):
     """Test that Qwen2.5-VL vision submodules are compiled.
 
     This test verifies that the 3 vision submodules (Qwen2_5_VisionPatchEmbed,
@@ -43,6 +44,7 @@ def test_qwen2_5_vl_compilation(vllm_runner, monkeypatch):
                 "mode": CompilationMode.VLLM_COMPILE,
                 "compile_mm_encoder": True,
             },
+            model_impl=model_impl,
         ) as _,
     ):
         pass
@@ -51,7 +53,8 @@ def test_qwen2_5_vl_compilation(vllm_runner, monkeypatch):
 # forked needed to workaround https://github.com/vllm-project/vllm/issues/21073
 @pytest.mark.forked
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Skip if not cuda")
-def test_qwen2_5_vl_no_vit_compilation(vllm_runner, monkeypatch):
+@pytest.mark.parametrize("model_impl", ["vllm", "transformers"])
+def test_qwen2_5_vl_no_vit_compilation(vllm_runner, monkeypatch, model_impl):
     """Test that Qwen2.5-VL vision submodules are not compiled when the
     config is passed off
     """
@@ -68,6 +71,7 @@ def test_qwen2_5_vl_no_vit_compilation(vllm_runner, monkeypatch):
                 "mode": CompilationMode.VLLM_COMPILE,
                 "compile_mm_encoder": False,
             },
+            model_impl=model_impl,
         ) as _,
     ):
         pass
