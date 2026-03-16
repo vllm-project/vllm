@@ -17,6 +17,7 @@ from vllm.renderers import BaseRenderer
 from vllm.tokenizers.detokenizer_utils import convert_ids_list_to_tokens
 
 from .types import (
+    EMBED_TASKS,
     SparseEmbeddingCompletionRequestMixin,
     SparseEmbeddingResponse,
     SparseEmbeddingResponseData,
@@ -59,11 +60,22 @@ class BgeM3SparseEmbeddingsProcessor(
         if params is None:
             params = PoolingParams()
         # refer to PoolingCompletionRequest.to_pooling_params
-        params.task = "embed&token_classify"
         # set and verify pooling params
         params.skip_reading_prefix_cache = True
 
         raw_embed_request = self.embed_request_queue.pop(0)
+        if raw_embed_request.task not in EMBED_TASKS:
+            raise ValueError(
+                f"Unsupported task {raw_embed_request}, "
+                f"Supported tasks are {EMBED_TASKS}"
+            )
+        if raw_embed_request.task == "dense":
+            params.task = "embed"
+            params.skip_reading_prefix_cache = False
+        elif raw_embed_request.task == "sparse":
+            params.task = "token_classify"
+        else:
+            params.task = "embed&token_classify"
         params.use_activation = raw_embed_request.use_activation
         params.dimensions = raw_embed_request.dimensions
 
@@ -154,32 +166,42 @@ class BgeM3SparseEmbeddingsProcessor(
         num_prompt_tokens = 0
         response_data = []
         raw_request = self._get_sparse_embedding_request(request_id)
-        embed_dimensions = (
-            self.embed_dimensions
-            if raw_request.dimensions is None
-            else raw_request.dimensions
-        )
+        has_dense_embed = raw_request.task in ["dense", "dense&sparse"]
+        has_sparse_embed = raw_request.task in ["sparse", "dense&sparse"]
+        embed_dimensions = 0
+        if has_dense_embed:
+            embed_dimensions = (
+                self.embed_dimensions
+                if raw_request.dimensions is None
+                else raw_request.dimensions
+            )
         for idx in range(len(model_output)):
             mo = model_output[idx]
-            sparse_embedding: dict[int, float] = {}
+            sparse_embedding_dict: dict[int, float] = {}
             num_prompt_tokens += len(mo.prompt_token_ids)
-            dense_embedding = mo.outputs.data[:embed_dimensions].tolist()
-            sparse_weights = mo.outputs.data[embed_dimensions:].tolist()
-            if len(mo.prompt_token_ids) != len(sparse_weights):
-                # this is the case that add_special_tokens is True,
-                # which means first token and last token are special tokens
-                mo.prompt_token_ids = mo.prompt_token_ids[1:]
-            for token_id, weight in zip(mo.prompt_token_ids, sparse_weights):
-                sparse_embedding[token_id] = max(
-                    weight, sparse_embedding.get(token_id, 0.0)
+            dense_embedding: list[float] | None = None
+            sparse_embedding: list[SparseEmbeddingTokenWeight] | None = None
+            if has_dense_embed:
+                dense_embedding = mo.outputs.data[:embed_dimensions].tolist()
+            if has_sparse_embed:
+                sparse_weights = mo.outputs.data[embed_dimensions:].tolist()
+                if len(mo.prompt_token_ids) != len(sparse_weights):
+                    # this is the case that add_special_tokens is True,
+                    # which means first token and last token are special tokens
+                    mo.prompt_token_ids = mo.prompt_token_ids[1:]
+                for token_id, weight in zip(mo.prompt_token_ids, sparse_weights):
+                    sparse_embedding_dict[token_id] = max(
+                        weight, sparse_embedding_dict.get(token_id, 0.0)
+                    )
+                sparse_embedding = self._build_sparse_embedding_token_weights(
+                    sparse_embedding_dict,
+                    raw_request.return_tokens,
                 )
+
             response_data.append(
                 SparseEmbeddingResponseData(
                     index=idx,
-                    sparse_embedding=self._build_sparse_embedding_token_weights(
-                        sparse_embedding,
-                        raw_request.return_tokens,
-                    ),
+                    sparse_embedding=sparse_embedding,
                     dense_embedding=dense_embedding,
                 )
             )
