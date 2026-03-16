@@ -608,12 +608,15 @@ class EngineArgs:
     kv_offloading_backend: KVOffloadingBackend = CacheConfig.kv_offloading_backend
     tokens_only: bool = False
 
+    shutdown_timeout: int = 0
+
     weight_transfer_config: WeightTransferConfig | None = get_field(
         VllmConfig,
         "weight_transfer_config",
     )
 
     fail_on_environ_validation: bool = False
+    gdn_prefill_backend: Literal["flashinfer", "triton"] | None = None
 
     def __post_init__(self):
         # support `EngineArgs(compilation_config={...})`
@@ -1311,6 +1314,21 @@ class EngineArgs:
             default=False,
             action=argparse.BooleanOptionalAction,
         )
+
+        parser.add_argument(
+            "--shutdown-timeout",
+            type=int,
+            default=0,
+            help="Shutdown timeout in seconds. 0 = abort, >0 = wait.",
+        )
+
+        parser.add_argument(
+            "--gdn-prefill-backend",
+            dest="gdn_prefill_backend",
+            choices=["flashinfer", "triton"],
+            default=None,
+            help="Select GDN prefill backend.",
+        )
         return parser
 
     @classmethod
@@ -1896,6 +1914,9 @@ class EngineArgs:
             ),
         )
 
+        if self.gdn_prefill_backend is not None:
+            self.additional_config["gdn_prefill_backend"] = self.gdn_prefill_backend
+
         config = VllmConfig(
             model_config=model_config,
             cache_config=cache_config,
@@ -1920,6 +1941,7 @@ class EngineArgs:
             optimization_level=self.optimization_level,
             performance_mode=self.performance_mode,
             weight_transfer_config=self.weight_transfer_config,
+            shutdown_timeout=self.shutdown_timeout,
         )
 
         return config
