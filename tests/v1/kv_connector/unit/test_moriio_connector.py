@@ -88,6 +88,7 @@ def _setup_kv_transfer_request(request, remote_host="127.0.0.1", fake_port=4789)
     """Setup KV transfer parameters for a request."""
     request.kv_transfer_params.update(
         {
+            "transfer_id": 0,
             "remote_notify_port": fake_port,
             "remote_block_ids": None,
             "remote_host": remote_host,
