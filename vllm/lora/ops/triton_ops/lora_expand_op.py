@@ -7,6 +7,7 @@ Punica: Multi-Tenant LoRA Serving.
 https://arxiv.org/abs/2310.18547
 """
 
+
 import torch
 
 from vllm.lora.ops.triton_ops.kernel_utils import do_expand_kernel
@@ -145,7 +146,7 @@ def _lora_expand(
     """
     Args:
         inputs (torch.Tensor): input tensor
-        lora_b_weights (list[torch.Tensor]): lora'b weight
+        lora_b_weights (List[torch.Tensor]): lora'b weight
         output_tensor (torch.Tensor): output tensor
         token_lora_mapping (torch.Tensor): A tensor mapping each input token
             to the lora-id related to that token. A value of -1 indicates that
