@@ -424,26 +424,26 @@ def _fp4_e2m1_quantize(val):
 
     # Round to nearest representable value using midpoint thresholds
     code = (abs_val * 0).to(tl.int32)  # zeros with same shape
-    code = tl.where(abs_val >= 0.25, 1, code)   # 0.5
-    code = tl.where(abs_val >= 0.75, 2, code)   # 1.0
-    code = tl.where(abs_val >= 1.25, 3, code)   # 1.5
-    code = tl.where(abs_val >= 1.75, 4, code)   # 2.0
-    code = tl.where(abs_val >= 2.5, 5, code)    # 3.0
-    code = tl.where(abs_val >= 3.5, 6, code)    # 4.0
-    code = tl.where(abs_val >= 5.0, 7, code)    # 6.0
+    code = tl.where(abs_val >= 0.25, 1, code)  # 0.5
+    code = tl.where(abs_val >= 0.75, 2, code)  # 1.0
+    code = tl.where(abs_val >= 1.25, 3, code)  # 1.5
+    code = tl.where(abs_val >= 1.75, 4, code)  # 2.0
+    code = tl.where(abs_val >= 2.5, 5, code)  # 3.0
+    code = tl.where(abs_val >= 3.5, 6, code)  # 4.0
+    code = tl.where(abs_val >= 5.0, 7, code)  # 6.0
 
     return sign | code
 
 
 @triton.jit
 def reshape_and_cache_nvfp4_kernel(
-    key_ptr,             # [num_tokens, num_heads, head_size] in bf16/fp16
-    value_ptr,           # [num_tokens, num_heads, head_size] in bf16/fp16
-    key_cache_ptr,       # [num_blocks, block_size, num_heads, eff_head_size] uint8
-    value_cache_ptr,     # [num_blocks, block_size, num_heads, eff_head_size] uint8
-    slot_mapping_ptr,    # [num_tokens]
-    k_scale_ptr,         # global K scale (float32 tensor, scalar)
-    v_scale_ptr,         # global V scale (float32 tensor, scalar)
+    key_ptr,  # [num_tokens, num_heads, head_size] in bf16/fp16
+    value_ptr,  # [num_tokens, num_heads, head_size] in bf16/fp16
+    key_cache_ptr,  # [num_blocks, block_size, num_heads, eff_head_size] uint8
+    value_cache_ptr,  # [num_blocks, block_size, num_heads, eff_head_size] uint8
+    slot_mapping_ptr,  # [num_tokens]
+    k_scale_ptr,  # global K scale (float32 tensor, scalar)
+    v_scale_ptr,  # global V scale (float32 tensor, scalar)
     # strides (for source tensors, in elements)
     key_stride: tl.int64,
     value_stride: tl.int64,
@@ -456,8 +456,8 @@ def reshape_and_cache_nvfp4_kernel(
     head_size: tl.constexpr,
     block_size: tl.constexpr,
     QUANT_GROUP_SIZE: tl.constexpr,
-    packed_head_size: tl.constexpr,    # head_size // 2
-    scale_head_size: tl.constexpr,     # head_size // QUANT_GROUP_SIZE
+    packed_head_size: tl.constexpr,  # head_size // 2
+    scale_head_size: tl.constexpr,  # head_size // QUANT_GROUP_SIZE
 ):
     """Reshape, quantize to NVFP4, and cache K/V vectors.
 
@@ -480,20 +480,24 @@ def reshape_and_cache_nvfp4_kernel(
     block_offset = slot_idx % block_size
 
     # Source offset for this head's group
-    src_key_base = (token_idx * key_stride
-                    + head_idx * head_size
-                    + group_idx * QUANT_GROUP_SIZE)
-    src_val_base = (token_idx * value_stride
-                    + head_idx * head_size
-                    + group_idx * QUANT_GROUP_SIZE)
+    src_key_base = (
+        token_idx * key_stride + head_idx * head_size + group_idx * QUANT_GROUP_SIZE
+    )
+    src_val_base = (
+        token_idx * value_stride + head_idx * head_size + group_idx * QUANT_GROUP_SIZE
+    )
 
     # Cache base offset for this token's head
-    cache_base_k = (block_idx * cache_block_stride
-                    + block_offset * cache_page_stride
-                    + head_idx * cache_head_stride)
-    cache_base_v = (block_idx * cache_block_stride
-                    + block_offset * cache_page_stride
-                    + head_idx * cache_head_stride)
+    cache_base_k = (
+        block_idx * cache_block_stride
+        + block_offset * cache_page_stride
+        + head_idx * cache_head_stride
+    )
+    cache_base_v = (
+        block_idx * cache_block_stride
+        + block_offset * cache_page_stride
+        + head_idx * cache_head_stride
+    )
 
     # Load global scale factors
     global_k_sf = tl.load(k_scale_ptr)
@@ -534,29 +538,31 @@ def reshape_and_cache_nvfp4_kernel(
 
     # Store packed FP4 data
     packed_offset = group_idx * (QUANT_GROUP_SIZE // 2)
-    tl.store(key_cache_ptr + cache_base_k + packed_offset + pair_offs,
-             k_packed)
-    tl.store(value_cache_ptr + cache_base_v + packed_offset + pair_offs,
-             v_packed)
+    tl.store(key_cache_ptr + cache_base_k + packed_offset + pair_offs, k_packed)
+    tl.store(value_cache_ptr + cache_base_v + packed_offset + pair_offs, v_packed)
 
     # Store block scales as FP8 E4M3 (bitcast to uint8)
     scale_offset = packed_head_size + group_idx
     k_scale_fp8 = k_block_scale.to(tl.float8e4nv)
     v_scale_fp8 = v_block_scale.to(tl.float8e4nv)
-    tl.store(key_cache_ptr + cache_base_k + scale_offset,
-             k_scale_fp8.to(tl.uint8, bitcast=True))
-    tl.store(value_cache_ptr + cache_base_v + scale_offset,
-             v_scale_fp8.to(tl.uint8, bitcast=True))
+    tl.store(
+        key_cache_ptr + cache_base_k + scale_offset,
+        k_scale_fp8.to(tl.uint8, bitcast=True),
+    )
+    tl.store(
+        value_cache_ptr + cache_base_v + scale_offset,
+        v_scale_fp8.to(tl.uint8, bitcast=True),
+    )
 
 
 def triton_reshape_and_cache_nvfp4(
-    key: torch.Tensor,         # [num_tokens, num_heads, head_size]
-    value: torch.Tensor,       # [num_tokens, num_heads, head_size]
-    key_cache: torch.Tensor,   # [num_blocks, block_size, num_heads, eff_head_size]
-    value_cache: torch.Tensor, # [num_blocks, block_size, num_heads, eff_head_size]
+    key: torch.Tensor,  # [num_tokens, num_heads, head_size]
+    value: torch.Tensor,  # [num_tokens, num_heads, head_size]
+    key_cache: torch.Tensor,  # [num_blocks, block_size, num_heads, eff_head_size]
+    value_cache: torch.Tensor,  # [num_blocks, block_size, num_heads, eff_head_size]
     slot_mapping: torch.Tensor,  # [num_tokens]
-    k_scale: torch.Tensor,    # global K scale (float32)
-    v_scale: torch.Tensor,    # global V scale (float32)
+    k_scale: torch.Tensor,  # global K scale (float32)
+    v_scale: torch.Tensor,  # global V scale (float32)
 ):
     """Quantize K/V to NVFP4 and store in paged KV cache.
 

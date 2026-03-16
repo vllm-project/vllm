@@ -306,9 +306,7 @@ class TritonAttentionBackend(AttentionBackend):
 
             assert head_size % NVFP4_QUANT_BLOCK_SIZE == 0
             # Packed FP4 data + FP8 block scales per head
-            effective_head_size = (
-                head_size // 2 + head_size // NVFP4_QUANT_BLOCK_SIZE
-            )
+            effective_head_size = head_size // 2 + head_size // NVFP4_QUANT_BLOCK_SIZE
             return (num_blocks, 2, block_size, num_kv_heads, effective_head_size)
         return (num_blocks, 2, block_size, num_kv_heads, head_size)
 

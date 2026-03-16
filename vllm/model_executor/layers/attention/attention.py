@@ -32,7 +32,6 @@ from vllm.utils.torch_utils import (
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionType,
-    is_quantized_kv_cache,
 )
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.selector import get_attn_backend
@@ -490,12 +489,16 @@ class Attention(nn.Module, AttentionLayerBase):
             FP8_E4M3_MAX = 448.0
             k_absmax = torch.abs(key).max()
             v_absmax = torch.abs(value).max()
-            k_sf = torch.where(k_absmax > 0,
-                               k_absmax / (FP4_MAX * FP8_E4M3_MAX),
-                               torch.ones_like(k_absmax))
-            v_sf = torch.where(v_absmax > 0,
-                               v_absmax / (FP4_MAX * FP8_E4M3_MAX),
-                               torch.ones_like(v_absmax))
+            k_sf = torch.where(
+                k_absmax > 0,
+                k_absmax / (FP4_MAX * FP8_E4M3_MAX),
+                torch.ones_like(k_absmax),
+            )
+            v_sf = torch.where(
+                v_absmax > 0,
+                v_absmax / (FP4_MAX * FP8_E4M3_MAX),
+                torch.ones_like(v_absmax),
+            )
             self._k_scale.copy_(k_sf)
             self._v_scale.copy_(v_sf)
             self._k_scale_float = self._k_scale.item()

@@ -75,14 +75,31 @@ def _nvfp4_dequant_ref(
     """
     # FP4 E2M1 LUT
     lut = torch.tensor(
-        [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0,
-         -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0],
-        dtype=torch.float32, device=packed.device,
+        [
+            0.0,
+            0.5,
+            1.0,
+            1.5,
+            2.0,
+            3.0,
+            4.0,
+            6.0,
+            -0.0,
+            -0.5,
+            -1.0,
+            -1.5,
+            -2.0,
+            -3.0,
+            -4.0,
+            -6.0,
+        ],
+        dtype=torch.float32,
+        device=packed.device,
     )
 
     # Unpack nibbles
-    lo = (packed.to(torch.int32) & 0xF)
-    hi = ((packed.to(torch.int32) >> 4) & 0xF)
+    lo = packed.to(torch.int32) & 0xF
+    hi = (packed.to(torch.int32) >> 4) & 0xF
 
     # Decode via LUT
     lo_val = lut[lo]
@@ -98,20 +115,22 @@ def _nvfp4_dequant_ref(
 
     # Expand scales to match packed data
     batch_shape = packed.shape[:-1]
-    result_even = torch.zeros(*batch_shape, head_size // 2,
-                              dtype=torch.float32, device=packed.device)
+    result_even = torch.zeros(
+        *batch_shape, head_size // 2, dtype=torch.float32, device=packed.device
+    )
     result_odd = torch.zeros_like(result_even)
 
     for g in range(num_groups):
         start = g * packed_per_group
         end = start + packed_per_group
-        s = scales_f32[..., g:g+1] * global_scale
+        s = scales_f32[..., g : g + 1] * global_scale
         result_even[..., start:end] = lo_val[..., start:end] * s
         result_odd[..., start:end] = hi_val[..., start:end] * s
 
     # Interleave even/odd
-    result = torch.zeros(*batch_shape, head_size,
-                         dtype=torch.float32, device=packed.device)
+    result = torch.zeros(
+        *batch_shape, head_size, dtype=torch.float32, device=packed.device
+    )
     result[..., 0::2] = result_even
     result[..., 1::2] = result_odd
     return result
@@ -142,21 +161,30 @@ class TestNvfp4CacheSpec:
         from vllm.v1.kv_cache_interface import AttentionSpec
 
         spec = AttentionSpec(
-            block_size=16, num_kv_heads=8, head_size=128,
-            dtype=torch.uint8, cache_dtype_str="nvfp4",
+            block_size=16,
+            num_kv_heads=8,
+            head_size=128,
+            dtype=torch.uint8,
+            cache_dtype_str="nvfp4",
         )
         assert spec.is_nvfp4
         assert not AttentionSpec(
-            block_size=16, num_kv_heads=8, head_size=128,
-            dtype=torch.uint8, cache_dtype_str="fp8",
+            block_size=16,
+            num_kv_heads=8,
+            head_size=128,
+            dtype=torch.uint8,
+            cache_dtype_str="fp8",
         ).is_nvfp4
 
     def test_nvfp4_head_size_bytes(self):
         from vllm.v1.kv_cache_interface import AttentionSpec
 
         spec = AttentionSpec(
-            block_size=16, num_kv_heads=8, head_size=128,
-            dtype=torch.uint8, cache_dtype_str="nvfp4",
+            block_size=16,
+            num_kv_heads=8,
+            head_size=128,
+            dtype=torch.uint8,
+            cache_dtype_str="nvfp4",
         )
         # 128 // 2 + 128 // 16 = 64 + 8 = 72
         assert spec.nvfp4_head_size_bytes == 72
@@ -165,8 +193,11 @@ class TestNvfp4CacheSpec:
         from vllm.v1.kv_cache_interface import AttentionSpec
 
         spec = AttentionSpec(
-            block_size=16, num_kv_heads=8, head_size=128,
-            dtype=torch.uint8, cache_dtype_str="nvfp4",
+            block_size=16,
+            num_kv_heads=8,
+            head_size=128,
+            dtype=torch.uint8,
+            cache_dtype_str="nvfp4",
         )
         # 2 * 16 * 8 * 72 = 18432
         assert spec.page_size_bytes == 2 * 16 * 8 * 72
@@ -175,8 +206,11 @@ class TestNvfp4CacheSpec:
         from vllm.v1.kv_cache_interface import FullAttentionSpec
 
         spec = FullAttentionSpec(
-            block_size=16, num_kv_heads=8, head_size=128,
-            dtype=torch.uint8, cache_dtype_str="nvfp4",
+            block_size=16,
+            num_kv_heads=8,
+            head_size=128,
+            dtype=torch.uint8,
+            cache_dtype_str="nvfp4",
         )
         assert spec.is_nvfp4
         # FullAttentionSpec should also compute NVFP4 page size correctly
@@ -186,11 +220,16 @@ class TestNvfp4CacheSpec:
         from vllm.v1.kv_cache_interface import AttentionSpec
 
         nvfp4 = AttentionSpec(
-            block_size=16, num_kv_heads=8, head_size=128,
-            dtype=torch.uint8, cache_dtype_str="nvfp4",
+            block_size=16,
+            num_kv_heads=8,
+            head_size=128,
+            dtype=torch.uint8,
+            cache_dtype_str="nvfp4",
         )
         bf16 = AttentionSpec(
-            block_size=16, num_kv_heads=8, head_size=128,
+            block_size=16,
+            num_kv_heads=8,
+            head_size=128,
             dtype=torch.bfloat16,
         )
         ratio = bf16.page_size_bytes / nvfp4.page_size_bytes
@@ -202,8 +241,10 @@ class TestNvfp4CacheSpec:
         from vllm.v1.attention.backends.triton_attn import TritonAttentionBackend
 
         shape = TritonAttentionBackend.get_kv_cache_shape(
-            num_blocks=100, block_size=16,
-            num_kv_heads=8, head_size=128,
+            num_blocks=100,
+            block_size=16,
+            num_kv_heads=8,
+            head_size=128,
             cache_dtype_str="nvfp4",
         )
         assert shape == (100, 2, 16, 8, 72)
@@ -256,8 +297,13 @@ def test_reshape_and_cache_nvfp4(
     v_scale = torch.tensor(1.0, dtype=torch.float32, device="cuda")
 
     triton_reshape_and_cache_nvfp4(
-        key, value, key_cache, value_cache,
-        slot_mapping, k_scale, v_scale,
+        key,
+        value,
+        key_cache,
+        value_cache,
+        slot_mapping,
+        k_scale,
+        v_scale,
     )
 
     # Verify non-zero data was written for valid slots
@@ -271,17 +317,15 @@ def test_reshape_and_cache_nvfp4(
 
         # At least some packed bytes should be non-zero (unless input was zero)
         if key[i].abs().max() > 0:
-            assert k_data[:packed_head].any(), (
-                f"Key packed data all zeros at token {i}"
-            )
+            assert k_data[:packed_head].any(), f"Key packed data all zeros at token {i}"
         if value[i].abs().max() > 0:
             assert v_data[:packed_head].any(), (
                 f"Value packed data all zeros at token {i}"
             )
 
         # Block scales should be non-zero for non-zero inputs
-        k_scales = k_data[packed_head:packed_head + scale_head]
-        v_scales = v_data[packed_head:packed_head + scale_head]
+        k_scales = k_data[packed_head : packed_head + scale_head]
+        v_scales = v_data[packed_head : packed_head + scale_head]
         if key[i].abs().max() > 0:
             assert k_scales.any(), f"Key scales all zeros at token {i}"
         if value[i].abs().max() > 0:
@@ -328,8 +372,13 @@ def test_nvfp4_round_trip_accuracy(head_size: int, num_heads: int):
 
     # Quantize
     triton_reshape_and_cache_nvfp4(
-        key, value, key_cache, value_cache,
-        slot_mapping, k_scale, v_scale,
+        key,
+        value,
+        key_cache,
+        value_cache,
+        slot_mapping,
+        k_scale,
+        v_scale,
     )
 
     # Dequantize
@@ -401,8 +450,13 @@ def test_nvfp4_negative_slot_skipped():
     v_scale = torch.tensor(1.0, dtype=torch.float32, device="cuda")
 
     triton_reshape_and_cache_nvfp4(
-        key, value, key_cache, value_cache,
-        slot_mapping, k_scale, v_scale,
+        key,
+        value,
+        key_cache,
+        value_cache,
+        slot_mapping,
+        k_scale,
+        v_scale,
     )
 
     # Slots 0 and 1 should have been written
@@ -429,12 +483,8 @@ class TestProcessWeightsAfterLoadingNvfp4:
         layer.v_scale = torch.nn.Parameter(
             torch.tensor(v_scale_val, dtype=torch.float32), requires_grad=False
         )
-        layer.q_scale = torch.nn.Parameter(
-            torch.tensor(-1.0), requires_grad=False
-        )
-        layer.prob_scale = torch.nn.Parameter(
-            torch.tensor(-1.0), requires_grad=False
-        )
+        layer.q_scale = torch.nn.Parameter(torch.tensor(-1.0), requires_grad=False)
+        layer.prob_scale = torch.nn.Parameter(torch.tensor(-1.0), requires_grad=False)
         layer._k_scale = torch.tensor(0.0)
         layer._v_scale = torch.tensor(0.0)
         layer._q_scale = torch.tensor(0.0)
@@ -511,12 +561,8 @@ def test_calc_kv_scales_nvfp4():
     expected_k = k_absmax / (6.0 * 448.0)
     expected_v = v_absmax / (6.0 * 448.0)
 
-    torch.testing.assert_close(
-        layer._k_scale, expected_k, atol=1e-6, rtol=1e-5
-    )
-    torch.testing.assert_close(
-        layer._v_scale, expected_v, atol=1e-6, rtol=1e-5
-    )
+    torch.testing.assert_close(layer._k_scale, expected_k, atol=1e-6, rtol=1e-5)
+    torch.testing.assert_close(layer._v_scale, expected_v, atol=1e-6, rtol=1e-5)
     assert layer.calculate_kv_scales is False
 
 
@@ -534,7 +580,6 @@ def test_nvfp4_unified_attention_integration(
 ):
     """End-to-end: quantize KV to NVFP4, run attention with fused dequant,
     compare to BF16 reference."""
-    from vllm.utils.math_utils import next_power_of_2
     from vllm.utils.torch_utils import set_random_seed
     from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
         triton_reshape_and_cache_nvfp4,
@@ -558,12 +603,18 @@ def test_nvfp4_unified_attention_integration(
     query = torch.randn(total_q, num_query_heads, head_size, dtype=torch.bfloat16)
 
     # Create BF16 KV data and quantize to NVFP4
-    key_bf16 = torch.randn(
-        num_blocks * block_size, num_kv_heads, head_size, dtype=torch.bfloat16
-    ) * 0.3
-    value_bf16 = torch.randn(
-        num_blocks * block_size, num_kv_heads, head_size, dtype=torch.bfloat16
-    ) * 0.3
+    key_bf16 = (
+        torch.randn(
+            num_blocks * block_size, num_kv_heads, head_size, dtype=torch.bfloat16
+        )
+        * 0.3
+    )
+    value_bf16 = (
+        torch.randn(
+            num_blocks * block_size, num_kv_heads, head_size, dtype=torch.bfloat16
+        )
+        * 0.3
+    )
 
     # NVFP4 cache
     key_cache_nvfp4 = torch.zeros(
@@ -578,15 +629,18 @@ def test_nvfp4_unified_attention_integration(
     value_cache_bf16 = torch.zeros_like(key_cache_bf16)
 
     # Fill both caches with the same data
-    all_slots = torch.arange(
-        num_blocks * block_size, dtype=torch.long, device="cuda"
-    )
+    all_slots = torch.arange(num_blocks * block_size, dtype=torch.long, device="cuda")
     k_scale = torch.tensor(1.0, dtype=torch.float32, device="cuda")
     v_scale = torch.tensor(1.0, dtype=torch.float32, device="cuda")
 
     triton_reshape_and_cache_nvfp4(
-        key_bf16, value_bf16, key_cache_nvfp4, value_cache_nvfp4,
-        all_slots, k_scale, v_scale,
+        key_bf16,
+        value_bf16,
+        key_cache_nvfp4,
+        value_cache_nvfp4,
+        all_slots,
+        k_scale,
+        v_scale,
     )
 
     # Fill BF16 cache directly
@@ -623,7 +677,7 @@ def test_nvfp4_unified_attention_integration(
         seqused_k=kv_lens,
         max_seqlen_q=query_len,
         max_seqlen_k=seq_len,
-        softmax_scale=head_size ** -0.5,
+        softmax_scale=head_size**-0.5,
         causal=True,
         window_size=(-1, -1),
         block_table=block_tables,
@@ -645,7 +699,7 @@ def test_nvfp4_unified_attention_integration(
         seqused_k=kv_lens,
         max_seqlen_q=query_len,
         max_seqlen_k=seq_len,
-        softmax_scale=head_size ** -0.5,
+        softmax_scale=head_size**-0.5,
         causal=True,
         window_size=(-1, -1),
         block_table=block_tables,

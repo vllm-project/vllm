@@ -117,7 +117,9 @@ def _reshape_kv_cache(
             num_blocks = raw_tensor.numel() // kv_cache_spec.page_size_bytes
 
             attn_backend = attn_backends[layer_name]
-            cache_dtype_str = getattr(kv_cache_spec, "cache_dtype_str", "auto") or "auto"
+            cache_dtype_str = (
+                getattr(kv_cache_spec, "cache_dtype_str", "auto") or "auto"
+            )
             kv_cache_shape = attn_backend.get_kv_cache_shape(
                 num_blocks,
                 kv_cache_spec.block_size,
