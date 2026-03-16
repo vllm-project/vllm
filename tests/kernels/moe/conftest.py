@@ -5,10 +5,10 @@ import pytest
 
 def pytest_addoption(parser):
     parser.addoption(
-        "--subtest", action="store", type=str, default=None, help="subtest id"
+        "--subtests", action="store", type=str, default=None, help="subtest ids"
     )
 
 
 @pytest.fixture
-def subtest(request):
-    return request.config.getoption("--subtest")
+def subtests(request):
+    return request.config.getoption("--subtests")

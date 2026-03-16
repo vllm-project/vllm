@@ -28,6 +28,8 @@ from vllm.config import (
     VllmConfig,
     set_current_vllm_config,
 )
+
+# from vllm.distributed import get_ep_group
 from vllm.distributed.eplb.rebalance_execute import rearrange_expert_weights_inplace
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.fused_moe import FusedMoE, SharedFusedMoE, fused_experts
@@ -46,7 +48,10 @@ from vllm.utils.flashinfer import has_flashinfer_all2all
 from vllm.utils.import_utils import has_deep_ep, has_mori
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import cuda_device_count_stateless, set_random_seed
-from vllm.v1.worker.workspace import init_workspace_manager
+from vllm.v1.worker.workspace import (
+    init_workspace_manager,
+    is_workspace_manager_initialized,
+)
 
 fp8_dtype = torch.float8_e4m3fn  # current_platform.fp8_dtype
 
@@ -1108,7 +1113,7 @@ def _test_body_eplb(
     routed_output_transform: torch.nn.Module | None,
     **kwargs,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    device = torch.cuda.current_device()
+    device = torch.accelerator.current_accelerator()
 
     """EPLB test body: compare output before and after expert weight rearrangement."""
     # Get "before" output with original weight arrangement
@@ -1241,8 +1246,10 @@ def _run_one_config(
     assert vllm_config.parallel_config.enable_expert_parallel == use_ep
 
     in_dtype = torch.bfloat16
-    device = torch.cuda.current_device()
-    init_workspace_manager(device)
+    device = torch.accelerator.current_accelerator()
+
+    if not is_workspace_manager_initialized():
+        init_workspace_manager(device)
 
     # Create test data and transforms
     test_data = setup_moe_test_data(
@@ -1255,7 +1262,7 @@ def _run_one_config(
         use_gate=use_gate,
         use_routed_input_transform=use_routed_input_transform,
         backend=backend,
-        device="cuda",
+        device=device,
     )
 
     # Extract data from test_data
@@ -1282,7 +1289,7 @@ def _run_one_config(
             top_k=top_k,
             global_num_experts=num_experts,
             in_dtype=in_dtype,
-            quant_dtype=None,  # quantization_to_quant_dtype(quantization),
+            quant_dtype=quantization_to_quant_dtype(quantization),
             renormalize=False,
             shared_experts_config=shared_experts_config,
             gate=gate,
@@ -1393,12 +1400,7 @@ def _run_one_config(
     else:
         atol, rtol = 6e-2, 6e-2
 
-    try:
-        torch.testing.assert_close(expected, actual, atol=atol, rtol=rtol)
-    finally:
-        # Cleanup GPU memory
-        torch.cuda.synchronize()
-        torch.accelerator.empty_cache()
+    torch.testing.assert_close(expected, actual, atol=atol, rtol=rtol)
 
 
 # Test for non-parallel cases (world_size == 1) - backend doesn't matter
@@ -1419,8 +1421,14 @@ def test_moe_layer_no_parallel(
     use_shared_experts: bool,
     use_gate: bool,
     use_routed_input_transform: bool,
+    monkeypatch,
 ):
     """Test MoE layer without parallelism (dp_size=1, tp_size=1, use_ep=False)."""
+
+    if os.environ.get("VLLM_LOGGING_LEVEL") is None:
+        monkeypatch.setenv("VLLM_LOGGING_LEVEL", "ERROR")
+        # envs.VLLM_LOGGING_LEVEL = "ERROR"
+
     test_config = MoETestConfig(
         m,
         n,
@@ -1451,8 +1459,6 @@ def test_moe_layer_no_parallel(
     # Initialize distributed environment for single GPU
     _set_vllm_config(vllm_config, 1, rank=0, local_rank=0)
 
-    init_workspace_manager("cuda")
-
     _run_one_config(
         vllm_config,
         test_config.ep_size,
@@ -1480,22 +1486,6 @@ def _test_body_config(test_config: MoETestConfig, cpu_group, **kwargs):
         return _test_body_regular(**kwargs)
     else:
         return _test_body_eplb(**kwargs, cpu_group=cpu_group)
-
-
-# def format_result(verbosity: int, msg: str, ex=None):
-#     if ex is not None:
-#         x = str(ex)
-#         newx = x.strip(" \n\t")[:16]
-#         if len(newx) < len(x):
-#             newx = newx + " ..."
-
-#         prefix = "E\t"
-#         print(f"{textwrap.indent(traceback.format_exc(), prefix)}")
-#         print(f"FAILED {msg} - {newx}\n")
-#     elif verbosity > 0:
-#         print(f"PASSED {msg}")
-#     else:
-#         print(".", end="")
 
 
 def _parallel_worker(
@@ -1596,7 +1586,7 @@ def test_moe_layer(
     backend: str,
     monkeypatch,
     pytestconfig,
-    subtest,
+    subtests,
 ):
     """Test MoE layer with parallelism (multi-GPU or TP/EP enabled).
 
@@ -1646,23 +1636,26 @@ def test_moe_layer(
         backend, ep_size, dp_size, tp_size, verbosity
     )
 
-    if subtest is not None:
-        sub_test_config = MoETestConfig.from_id(subtest)
-        if sub_test_config in test_configs:
-            test_configs = [sub_test_config]
-        else:
-            pytest.skip("subtest config does not match any valid test configuation")
+    if subtests is not None:
+        new_test_configs = []
+        for subtest in subtests.split(","):
+            sub_test_config = MoETestConfig.from_id(subtest)
+            if sub_test_config in test_configs:
+                new_test_configs.append(sub_test_config)
+            else:
+                pytest.skip("subtest config does not match any valid test configuation")
+        test_configs = new_test_configs
 
-    try:
-        parallel_launch_with_config(
-            world_size,
-            _parallel_worker,
-            vllm_config,
-            test_env,
-            test_configs,
-            verbosity,
-        )
-    finally:
-        # Cleanup GPU memory after spawned processes complete
-        torch.cuda.synchronize()
-        torch.accelerator.empty_cache()
+    parallel_launch_with_config(
+        world_size,
+        _parallel_worker,
+        vllm_config,
+        test_env,
+        test_configs,
+        verbosity,
+    )
+
+    print("GOT HERE")
+    # all2all_manager = get_ep_group().device_communicator.all2all_manager
+    # all2all_manager.destroy()
+    torch.accelerator.empty_cache()
