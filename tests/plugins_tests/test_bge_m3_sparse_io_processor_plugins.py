@@ -121,7 +121,7 @@ async def test_bge_m3_sparse_plugin_online(
     assert len(_get_attr_or_val(parsed_response, "data")) > 0
 
     data_entry = _get_attr_or_val(parsed_response, "data")[0]
-    assert _get_attr_or_val(data_entry, "object") == "sparse&dense"
+    assert _get_attr_or_val(data_entry, "object") == "dense&sparse"
     assert _get_attr_or_val(data_entry, "sparse_embedding")
 
     # Verify sparse embedding format
