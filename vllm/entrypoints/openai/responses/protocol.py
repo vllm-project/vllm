@@ -330,13 +330,13 @@ class ResponsesRequest(OpenAIBaseModel):
         structured_outputs = self.structured_outputs
 
         # Also check text.format for OpenAI-style json_schema
-        if self.text is not None and self.text.format is not None:
+        if self.text is not None:
             if structured_outputs is not None:
                 raise VLLMValidationError(
-                    "Cannot specify both structured_outputs and text.format",
+                    "Cannot specify both structured_outputs and text with json_schema",
                     parameter="structured_outputs",
                 )
-            response_format = self.text.format
+            response_format = self.text
             if (
                 response_format.type == "json_schema"
                 and response_format.schema_ is not None
