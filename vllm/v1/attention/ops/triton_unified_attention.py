@@ -281,9 +281,9 @@ def kernel_unified_attention_2d(
                 # dequantize K to Q's dtype using the per-tensor fp8 scale.
                 K = (K_load.to(tl.float32) * tl.load(k_scale)).to(Q.dtype)
         elif USE_INT8_KV:
-            # INT8 KV cache — three sub-cases by scale granularity:
+            # INT8: cast to Q.dtype only; scale is applied after dot product.
+            K = K_load.to(Q.dtype)
             if INT8_PER_TOKEN_SCALE:
-                # Per-(token, head) dynamic scale stored in scale cache.
                 k_scale_idx = (
                     physical_block_idx * stride_ks_blk
                     + (seq_offset % BLOCK_SIZE) * stride_ks_slot
@@ -292,13 +292,6 @@ def kernel_unified_attention_2d(
                 k_token_scales = tl.load(
                     k_scale_cache_ptr + k_scale_idx, mask=tile_mask, other=1.0
                 )
-                K = (K_load.to(tl.float32) * k_token_scales[None, :]).to(Q.dtype)
-            elif INT8_PER_HEAD_SCALE:
-                k_scale_val = tl.load(k_scale + kv_head_idx)
-                K = (K_load.to(tl.float32) * k_scale_val).to(Q.dtype)
-            else:
-                k_scale_val = tl.load(k_scale)
-                K = (K_load.to(tl.float32) * k_scale_val).to(Q.dtype)
         else:
             # FP16 / auto: no quantization, pass through directly.
             K = K_load
@@ -319,7 +312,8 @@ def kernel_unified_attention_2d(
                 # Q is bf16/fp16: dequantize V using the per-tensor fp8 scale.
                 V = (V_load.to(tl.float32) * tl.load(v_scale)).to(Q.dtype)
         elif USE_INT8_KV:
-            # INT8 KV cache — three sub-cases by scale granularity:
+            # INT8: cast to Q.dtype only; scale is applied to P before dot.
+            V = V_load.to(Q.dtype)
             if INT8_PER_TOKEN_SCALE:
                 v_scale_idx = (
                     physical_block_idx * stride_vs_blk
@@ -329,13 +323,6 @@ def kernel_unified_attention_2d(
                 v_token_scales = tl.load(
                     v_scale_cache_ptr + v_scale_idx, mask=tile_mask, other=1.0
                 )
-                V = (V_load.to(tl.float32) * v_token_scales[:, None]).to(Q.dtype)
-            elif INT8_PER_HEAD_SCALE:
-                v_scale_val = tl.load(v_scale + kv_head_idx)
-                V = (V_load.to(tl.float32) * v_scale_val).to(Q.dtype)
-            else:
-                v_scale_val = tl.load(v_scale)
-                V = (V_load.to(tl.float32) * v_scale_val).to(Q.dtype)
         else:
             # FP16 / auto: no quantization, pass through directly.
             V = V_load
@@ -377,6 +364,16 @@ def kernel_unified_attention_2d(
         S = tl.zeros(shape=(BLOCK_M, TILE_SIZE), dtype=tl.float32)
 
         S += scale * tl.dot(Q, K)
+
+        # INT8 KV: apply k_scale after dot product to avoid multiply on K tensor.
+        # dot(Q, K_int8 * scale) == dot(Q, K_int8) * scale  (column-wise)
+        if USE_INT8_KV:
+            if INT8_PER_TOKEN_SCALE:
+                S *= k_token_scales[None, :]
+            elif INT8_PER_HEAD_SCALE:
+                S *= tl.load(k_scale + kv_head_idx)
+            else:
+                S *= tl.load(k_scale)
 
         if USE_SOFTCAP:
             S = apply_softcap(S, softcap)
@@ -439,8 +436,19 @@ def kernel_unified_attention_2d(
                 (context_len + qpos_lo - seq_offset[:, None]) < SLIDING_WINDOW, V, 0.0
             )
 
-        # acc : (BLOCK_M, HEAD_SIZE_PADDED)
-        acc += tl.dot(P.to(V.dtype), V)
+        # INT8 KV: apply v_scale to P instead of V to avoid multiply on V tensor.
+        # dot(P, V_int8 * scale) == dot(P * scale, V_int8)  (row-wise)
+        if USE_INT8_KV:
+            if INT8_PER_TOKEN_SCALE:
+                P_v = (P * v_token_scales[None, :]).to(V.dtype)
+            elif INT8_PER_HEAD_SCALE:
+                P_v = (P * tl.load(v_scale + kv_head_idx)).to(V.dtype)
+            else:
+                P_v = (P * tl.load(v_scale)).to(V.dtype)
+            acc += tl.dot(P_v, V)
+        else:
+            # acc : (BLOCK_M, HEAD_SIZE_PADDED)
+            acc += tl.dot(P.to(V.dtype), V)
 
     # epilogue
     acc = acc / L[:, None]
@@ -694,9 +702,9 @@ def kernel_unified_attention_3d(
                 # dequantize K to Q's dtype using the per-tensor fp8 scale.
                 K = (K_load.to(tl.float32) * tl.load(k_scale)).to(Q.dtype)
         elif USE_INT8_KV:
-            # INT8 KV cache — three sub-cases by scale granularity:
+            # INT8: cast to Q.dtype only; scale is applied after dot product.
+            K = K_load.to(Q.dtype)
             if INT8_PER_TOKEN_SCALE:
-                # Per-(token, head) dynamic scale stored in scale cache.
                 k_scale_idx = (
                     physical_block_idx * stride_ks_blk
                     + (seq_offset % BLOCK_SIZE) * stride_ks_slot
@@ -705,13 +713,6 @@ def kernel_unified_attention_3d(
                 k_token_scales = tl.load(
                     k_scale_cache_ptr + k_scale_idx, mask=tile_mask, other=1.0
                 )
-                K = (K_load.to(tl.float32) * k_token_scales[None, :]).to(Q.dtype)
-            elif INT8_PER_HEAD_SCALE:
-                k_scale_val = tl.load(k_scale + kv_head_idx)
-                K = (K_load.to(tl.float32) * k_scale_val).to(Q.dtype)
-            else:
-                k_scale_val = tl.load(k_scale)
-                K = (K_load.to(tl.float32) * k_scale_val).to(Q.dtype)
         else:
             # FP16 / auto: no quantization, pass through directly.
             K = K_load
@@ -732,7 +733,8 @@ def kernel_unified_attention_3d(
                 # Q is bf16/fp16: dequantize V using the per-tensor fp8 scale.
                 V = (V_load.to(tl.float32) * tl.load(v_scale)).to(Q.dtype)
         elif USE_INT8_KV:
-            # INT8 KV cache — three sub-cases by scale granularity:
+            # INT8: cast to Q.dtype only; scale is applied to P before dot.
+            V = V_load.to(Q.dtype)
             if INT8_PER_TOKEN_SCALE:
                 v_scale_idx = (
                     physical_block_idx * stride_vs_blk
@@ -742,13 +744,6 @@ def kernel_unified_attention_3d(
                 v_token_scales = tl.load(
                     v_scale_cache_ptr + v_scale_idx, mask=tile_mask, other=1.0
                 )
-                V = (V_load.to(tl.float32) * v_token_scales[:, None]).to(Q.dtype)
-            elif INT8_PER_HEAD_SCALE:
-                v_scale_val = tl.load(v_scale + kv_head_idx)
-                V = (V_load.to(tl.float32) * v_scale_val).to(Q.dtype)
-            else:
-                v_scale_val = tl.load(v_scale)
-                V = (V_load.to(tl.float32) * v_scale_val).to(Q.dtype)
         else:
             # FP16 / auto: no quantization, pass through directly.
             V = V_load
@@ -789,6 +784,15 @@ def kernel_unified_attention_3d(
         # S : (BLOCK_M, TILE_SIZE)
         S = tl.zeros(shape=(BLOCK_M, TILE_SIZE), dtype=tl.float32)
         S += scale * tl.dot(Q, K)
+
+        # INT8 KV: apply k_scale after dot product to avoid multiply on K tensor.
+        if USE_INT8_KV:
+            if INT8_PER_TOKEN_SCALE:
+                S *= k_token_scales[None, :]
+            elif INT8_PER_HEAD_SCALE:
+                S *= tl.load(k_scale + kv_head_idx)
+            else:
+                S *= tl.load(k_scale)
 
         if USE_SOFTCAP:
             S = apply_softcap(S, softcap)
@@ -851,8 +855,18 @@ def kernel_unified_attention_3d(
                 (context_len + qpos_lo - seq_offset[:, None]) < SLIDING_WINDOW, V, 0.0
             )
 
-        # acc : (BLOCK_M, HEAD_SIZE_PADDED)
-        acc += tl.dot(P.to(V.dtype), V)
+        # INT8 KV: apply v_scale to P instead of V to avoid multiply on V tensor.
+        if USE_INT8_KV:
+            if INT8_PER_TOKEN_SCALE:
+                P_v = (P * v_token_scales[None, :]).to(V.dtype)
+            elif INT8_PER_HEAD_SCALE:
+                P_v = (P * tl.load(v_scale + kv_head_idx)).to(V.dtype)
+            else:
+                P_v = (P * tl.load(v_scale)).to(V.dtype)
+            acc += tl.dot(P_v, V)
+        else:
+            # acc : (BLOCK_M, HEAD_SIZE_PADDED)
+            acc += tl.dot(P.to(V.dtype), V)
 
     segm_output_offset = (
         query_offset_0[:, None].to(tl.int64)
