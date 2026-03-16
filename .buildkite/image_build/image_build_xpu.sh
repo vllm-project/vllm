@@ -27,7 +27,6 @@ docker build \
   --build-arg max_jobs=16 \
   --build-arg buildkite_commit="$BUILDKITE_COMMIT" \
   --tag "$REGISTRY"/"$REPO":"$BUILDKITE_COMMIT"-xpu \
-  --target vllm-test \
   --progress plain .
 
 # push

@@ -14,7 +14,7 @@ steps:
             REPO="vllm-ci-postmerge-repo"
           fi
         fi
-        .buildkite/image_build/image_build_xpu.sh "$$REGISTRY" "$$REPO" "$BUILDKITE_COMMIT"
+        .buildkite/image_build/image_build_xpu.sh "$REGISTRY" "$REPO" "$BUILDKITE_COMMIT"
     env:
       DOCKER_BUILDKIT: "1"
     retry:
