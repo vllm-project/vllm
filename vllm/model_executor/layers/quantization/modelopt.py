@@ -25,13 +25,13 @@ from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoeWeightScaleSupported,
 )
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
+    Fp8MoeBackend,
     convert_to_fp8_moe_kernel_format,
     make_fp8_moe_kernel,
     make_fp8_moe_quant_config,
     select_fp8_moe_backend,
 )
 from vllm.model_executor.layers.fused_moe.oracle.mxfp8 import (
-    MxFp8MoeBackend,
     select_mxfp8_moe_backend,
 )
 from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
@@ -1712,8 +1712,7 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
         self.quant_config = quant_config
         assert self.quant_config.is_checkpoint_mxfp8_serialized
 
-        # Select MXFP8 MoE backend
-        self.mxfp8_backend = select_mxfp8_moe_backend(self.moe)
+        self.mxfp8_backend, _ = select_mxfp8_moe_backend(self.moe)
 
     def create_weights(
         self,
@@ -1943,7 +1942,7 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
 
     @property
     def is_monolithic(self) -> bool:
-        return self.mxfp8_backend == MxFp8MoeBackend.FLASHINFER_TRTLLM
+        return self.mxfp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM
 
     def apply_monolithic(
         self,
@@ -1956,7 +1955,7 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
             Fp8QuantizationType,
         )
 
-        assert self.mxfp8_backend == MxFp8MoeBackend.FLASHINFER_TRTLLM
+        assert self.mxfp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM
 
         if layer.enable_eplb:
             raise NotImplementedError(
