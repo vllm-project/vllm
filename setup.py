@@ -662,7 +662,7 @@ class precompiled_wheel_utils:
                 "-s",
                 "https://api.github.com/repos/vllm-project/vllm/commits/main",
             ]
-            github_token = os.environ.get("GITHUB_TOKEN")
+            github_token = os.getenv("GH_TOKEN", os.getenv("GITHUB_TOKEN"))
             if github_token:
                 curl_cmd += [
                     "-H",
