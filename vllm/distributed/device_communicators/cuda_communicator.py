@@ -82,7 +82,6 @@ class CudaCommunicator(DeviceCommunicatorBase):
         self.qr_comm: QuickAllReduce | None = None
         self.symm_mem_comm: SymmMemCommunicator | None = None
         self.fi_ar_comm: FlashInferAllReduce | None = None
-        self.aiter_ar_comm = None
 
         if use_torch_symm_mem and current_platform.is_cuda():
             self.symm_mem_comm = SymmMemCommunicator(
@@ -187,17 +186,6 @@ class CudaCommunicator(DeviceCommunicatorBase):
             out = fi_ar_comm.all_reduce(input_)
             assert out is not None
             return out
-        # aiter_ar_comm = self.aiter_ar_comm
-        # if (
-        #     aiter_ar_comm is not None
-        #     and not aiter_ar_comm.disabled
-        #     and aiter_ar_comm.should_custom_ar(input_)
-        # ):
-        #     out = aiter_ar_comm.custom_all_reduce(
-        #         input_, use_new=True, open_fp8_quant=False
-        #     )
-        #     assert out is not None
-        #     return out
         ca_comm = self.ca_comm
         if (
             ca_comm is not None

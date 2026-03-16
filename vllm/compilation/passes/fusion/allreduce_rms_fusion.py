@@ -989,7 +989,9 @@ class RocmAiterAllReduceFusionPass(VllmPatternMatcherPass):
             return
 
         element_size = torch.tensor([], dtype=self.model_dtype).element_size()
-        self.max_token_num = max_size // (hidden_dim * element_size)
+        self.max_token_num = (max_size / 2) // (hidden_dim * element_size)
+        print(" max token num")
+        print(self.max_token_num)
 
         rank = get_tensor_model_parallel_rank()
         group = get_tp_group().cpu_group
