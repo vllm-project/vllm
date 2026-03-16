@@ -208,6 +208,14 @@ class FullAttentionSpec(AttentionSpec):
 
     @property
     def real_page_size_bytes(self) -> int:
+        if self.is_nvfp4:
+            # NVFP4: packed FP4 data + FP8 block scales for K and V
+            return (
+                2
+                * self.block_size
+                * self.num_kv_heads
+                * self.nvfp4_head_size_bytes
+            )
         return (
             self.block_size
             * self.num_kv_heads

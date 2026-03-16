@@ -480,12 +480,32 @@ class Attention(nn.Module, AttentionLayerBase):
                 )
 
     def calc_kv_scales(self, query, key, value):
+        if self.kv_cache_dtype == "nvfp4":
+            # NVFP4 global scale: maps data range so block scales (FP8 E4M3,
+            # max ~448) can handle the remaining dynamic range.
+            # global_sf = absmax / (FP4_MAX * FP8_E4M3_MAX)
+            FP4_MAX = 6.0
+            FP8_E4M3_MAX = 448.0
+            k_absmax = torch.abs(key).max()
+            v_absmax = torch.abs(value).max()
+            k_sf = torch.where(k_absmax > 0,
+                               k_absmax / (FP4_MAX * FP8_E4M3_MAX),
+                               torch.ones_like(k_absmax))
+            v_sf = torch.where(v_absmax > 0,
+                               v_absmax / (FP4_MAX * FP8_E4M3_MAX),
+                               torch.ones_like(v_absmax))
+            self._k_scale.copy_(k_sf)
+            self._v_scale.copy_(v_sf)
+            self._k_scale_float = self._k_scale.item()
+            self._v_scale_float = self._v_scale.item()
+        else:
+            # FP8 / INT8: original per-tensor scale behaviour
+            self._k_scale.copy_(torch.abs(key).max() / self.k_range)
+            self._v_scale.copy_(torch.abs(value).max() / self.v_range)
+            self._k_scale_float = self._k_scale.item()
+            self._v_scale_float = self._v_scale.item()
         self._q_scale.copy_(torch.abs(query).max() / self.q_range)
-        self._k_scale.copy_(torch.abs(key).max() / self.k_range)
-        self._v_scale.copy_(torch.abs(value).max() / self.v_range)
         self._q_scale_float = self._q_scale.item()
-        self._k_scale_float = self._k_scale.item()
-        self._v_scale_float = self._v_scale.item()
         # We only calculate the scales once
         self.calculate_kv_scales = False
 

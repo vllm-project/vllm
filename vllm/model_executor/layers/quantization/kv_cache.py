@@ -61,33 +61,50 @@ class BaseKVCacheMethod(QuantizeMethodBase):
             is_quantized_kv_cache(layer.kv_cache_dtype)
             and not layer.calculate_kv_scales
         ):
-            if layer.k_scale > 0.0 and layer.v_scale > 0.0:
+            is_nvfp4 = layer.kv_cache_dtype == "nvfp4"
+            is_fp8 = layer.kv_cache_dtype.startswith("fp8")
+
+            # Use .all() so comparisons work for both scalar and per-head tensors
+            k_all_pos = bool((layer.k_scale > 0.0).all())
+            v_all_pos = bool((layer.v_scale > 0.0).all())
+            k_all_neg = bool((layer.k_scale < 0.0).all())
+            v_all_neg = bool((layer.v_scale < 0.0).all())
+
+            if k_all_pos and v_all_pos:
                 # We prefer to use separate k_scale and v_scale if present
                 k_scale = layer.k_scale.to("cpu").tolist()
                 v_scale = layer.v_scale.to("cpu").tolist()
-                if current_platform.is_fp8_fnuz():
+                if current_platform.is_fp8_fnuz() and is_fp8:
                     k_scale *= 2
                     v_scale *= 2
-            elif layer.k_scale < 0.0 and layer.v_scale < 0.0:
-                # If no scales were loaded (both scales are invalid negative
-                # values), use the default value of 1.0
+            elif k_all_neg and v_all_neg:
+                # No scales in checkpoint
+                if is_nvfp4:
+                    # NVFP4 with scale=1.0 is acceptable: block-level FP8
+                    # scales handle the primary quantization. The global scale
+                    # just provides a second-level range adjustment.
+                    logger.warning_once(
+                        "NVFP4 KV cache: no calibrated k/v_scale found in "
+                        "checkpoint. Using default global scale 1.0. "
+                        "Block-level FP8 scales will still be computed "
+                        "dynamically per quantization group."
+                    )
                 k_scale = 1.0
                 v_scale = 1.0
             else:
-                # If we find a single kv_scale in the checkpoint, we remap
-                # kv_scale to k_scale during weight loading, and duplicate
-                # k_scale to v_scale here
-                assert layer.k_scale > 0.0
+                # Single shared kv_scale — duplicate to k and v
+                assert k_all_pos
                 scale_to_duplicate = max(layer.k_scale, layer.v_scale)
                 k_scale = scale_to_duplicate.to("cpu").tolist()
                 v_scale = scale_to_duplicate.to("cpu").tolist()
-                if current_platform.is_fp8_fnuz():
+                if current_platform.is_fp8_fnuz() and is_fp8:
                     k_scale *= 2
                     v_scale *= 2
 
             if not isinstance(k_scale, float) or not isinstance(v_scale, float):
                 raise ValueError(
-                    "Only support per-tensor scaling factor for fp8 KV cache"
+                    "Only support per-tensor scaling factor "
+                    "for fp8/nvfp4 KV cache"
                 )
 
             if layer.q_scale < 0.0:
@@ -105,11 +122,19 @@ class BaseKVCacheMethod(QuantizeMethodBase):
             layer._k_scale_float = k_scale
             layer._v_scale_float = v_scale
             if k_scale == 1.0 and v_scale == 1.0 and "e5m2" not in layer.kv_cache_dtype:
-                logger.warning_once(
-                    "Using KV cache scaling factor 1.0 for fp8_e4m3. "
-                    "If this is unintended, verify that k/v_scale "
-                    "scaling factors are properly set in the checkpoint."
-                )
+                if is_nvfp4:
+                    logger.warning_once(
+                        "Using KV cache global scaling factor 1.0 for nvfp4. "
+                        "Block-level FP8 scales will handle primary "
+                        "quantization. If a global scale was expected, verify "
+                        "k/v_scale in the checkpoint."
+                    )
+                else:
+                    logger.warning_once(
+                        "Using KV cache scaling factor 1.0 for fp8_e4m3. "
+                        "If this is unintended, verify that k/v_scale "
+                        "scaling factors are properly set in the checkpoint."
+                    )
 
         if layer.q_scale > 0.0:
             q_scale = layer.q_scale
