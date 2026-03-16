@@ -7,6 +7,7 @@
 # the following copyright notice:
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 # ruff: noqa: E501
+import os
 import warnings
 
 import torch
@@ -17,6 +18,9 @@ from .index import prepare_chunk_indices
 from .utils import check_shared_mem, input_guard
 
 BS_LIST = [32, 64] if check_shared_mem() else [16, 32]
+FLA_CUMSUM_SCALAR_VECTORIZATION = (
+    os.getenv("FLA_CUMSUM_SCALAR_VECTORIZATION", "1") == "1"
+)
 
 
 @triton.heuristics({"IS_VARLEN": lambda args: args["cu_seqlens"] is not None})
@@ -49,20 +53,33 @@ def chunk_local_cumsum_scalar_kernel(
             tl.load(cu_seqlens + i_n).to(tl.int32),
             tl.load(cu_seqlens + i_n + 1).to(tl.int32),
         )
-        T = eos - bos
+        T_seq = eos - bos
     else:
         bos, eos = i_b * T, i_b * T + T
+        T_seq = T
 
     if HEAD_FIRST:
+        if IS_VARLEN:
+            p_s = tl.make_block_ptr(
+                s + i_h * T + bos, (T_seq,), (1,), (i_t * BT,), (BT,), (0,)
+            )
+            p_o = tl.make_block_ptr(
+                o + i_h * T + bos, (T_seq,), (1,), (i_t * BT,), (BT,), (0,)
+            )
+        else:
+            p_s = tl.make_block_ptr(
+                s + bos * H + i_h * T, (T_seq,), (1,), (i_t * BT,), (BT,), (0,)
+            )
+            p_o = tl.make_block_ptr(
+                o + bos * H + i_h * T, (T_seq,), (1,), (i_t * BT,), (BT,), (0,)
+            )
+    else:
         p_s = tl.make_block_ptr(
-            s + bos * H + i_h * T, (T,), (1,), (i_t * BT,), (BT,), (0,)
+            s + bos * H + i_h, (T_seq,), (H,), (i_t * BT,), (BT,), (0,)
         )
         p_o = tl.make_block_ptr(
-            o + bos * H + i_h * T, (T,), (1,), (i_t * BT,), (BT,), (0,)
+            o + bos * H + i_h, (T_seq,), (H,), (i_t * BT,), (BT,), (0,)
         )
-    else:
-        p_s = tl.make_block_ptr(s + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
-        p_o = tl.make_block_ptr(o + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
     # [BT]
     b_s = tl.load(p_s, boundary_check=(0,)).to(tl.float32)
     b_o = tl.cumsum(b_s, axis=0)
@@ -70,6 +87,105 @@ def chunk_local_cumsum_scalar_kernel(
         b_z = tl.sum(b_s, axis=0)
         b_o = -b_o + b_z[None] + b_s
     tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0,))
+
+
+@triton.heuristics({"IS_VARLEN": lambda args: args["cu_seqlens"] is not None})
+@triton.jit(do_not_specialize=["T"])
+def chunk_local_cumsum_scalar_vectorized_kernel(
+    s,
+    o,
+    cu_seqlens,
+    chunk_indices,
+    T,
+    B: tl.constexpr,
+    H: tl.constexpr,
+    BT: tl.constexpr,
+    BH: tl.constexpr,
+    REVERSE: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
+    HEAD_FIRST: tl.constexpr,
+):
+    i_t, i_bh = tl.program_id(0), tl.program_id(1)
+    n_head_groups = (H + BH - 1) // BH
+    i_b, i_hg = i_bh // n_head_groups, i_bh % n_head_groups
+    if IS_VARLEN:
+        i_n, i_t = (
+            tl.load(chunk_indices + i_t * 2).to(tl.int32),
+            tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32),
+        )
+        bos, eos = (
+            tl.load(cu_seqlens + i_n).to(tl.int32),
+            tl.load(cu_seqlens + i_n + 1).to(tl.int32),
+        )
+        T_seq = eos - bos
+    else:
+        bos, eos = i_b * T, i_b * T + T
+        T_seq = T
+
+    if HEAD_FIRST:
+        if IS_VARLEN:
+            p_s = tl.make_block_ptr(
+                s + bos,
+                (H, T_seq),
+                (T, 1),
+                (i_hg * BH, i_t * BT),
+                (BH, BT),
+                (1, 0),
+            )
+            p_o = tl.make_block_ptr(
+                o + bos,
+                (H, T_seq),
+                (T, 1),
+                (i_hg * BH, i_t * BT),
+                (BH, BT),
+                (1, 0),
+            )
+        else:
+            p_s = tl.make_block_ptr(
+                s + bos * H,
+                (H, T_seq),
+                (T, 1),
+                (i_hg * BH, i_t * BT),
+                (BH, BT),
+                (1, 0),
+            )
+            p_o = tl.make_block_ptr(
+                o + bos * H,
+                (H, T_seq),
+                (T, 1),
+                (i_hg * BH, i_t * BT),
+                (BH, BT),
+                (1, 0),
+            )
+        b_s = tl.load(p_s, boundary_check=(0, 1)).to(tl.float32)
+        b_o = tl.cumsum(b_s, axis=1)
+        if REVERSE:
+            b_z = tl.sum(b_s, axis=1)
+            b_o = -b_o + b_z[:, None] + b_s
+    else:
+        p_s = tl.make_block_ptr(
+            s + bos * H,
+            (T_seq, H),
+            (H, 1),
+            (i_t * BT, i_hg * BH),
+            (BT, BH),
+            (1, 0),
+        )
+        p_o = tl.make_block_ptr(
+            o + bos * H,
+            (T_seq, H),
+            (H, 1),
+            (i_t * BT, i_hg * BH),
+            (BT, BH),
+            (1, 0),
+        )
+        b_s = tl.load(p_s, boundary_check=(0, 1)).to(tl.float32)
+        b_o = tl.cumsum(b_s, axis=0)
+        if REVERSE:
+            b_z = tl.sum(b_s, axis=0)
+            b_o = -b_o + b_z[None, :] + b_s
+
+    tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0, 1))
 
 
 @triton.heuristics({"IS_VARLEN": lambda args: args["cu_seqlens"] is not None})
@@ -108,9 +224,10 @@ def chunk_local_cumsum_vector_kernel(
             tl.load(cu_seqlens + i_n).to(tl.int32),
             tl.load(cu_seqlens + i_n + 1).to(tl.int32),
         )
-        T = eos - bos
+        T_seq = eos - bos
     else:
         bos, eos = i_b * T, i_b * T + T
+        T_seq = T
 
     o_i = tl.arange(0, BT)
     if REVERSE:
@@ -119,26 +236,44 @@ def chunk_local_cumsum_vector_kernel(
         m_s = tl.where(o_i[:, None] >= o_i[None, :], 1.0, 0.0)
 
     if HEAD_FIRST:
-        p_s = tl.make_block_ptr(
-            s + (bos * H + i_h * T) * S,
-            (T, S),
-            (S, 1),
-            (i_t * BT, i_s * BS),
-            (BT, BS),
-            (1, 0),
-        )
-        p_o = tl.make_block_ptr(
-            o + (bos * H + i_h * T) * S,
-            (T, S),
-            (S, 1),
-            (i_t * BT, i_s * BS),
-            (BT, BS),
-            (1, 0),
-        )
+        if IS_VARLEN:
+            p_s = tl.make_block_ptr(
+                s + (i_h * T + bos) * S,
+                (T_seq, S),
+                (S, 1),
+                (i_t * BT, i_s * BS),
+                (BT, BS),
+                (1, 0),
+            )
+            p_o = tl.make_block_ptr(
+                o + (i_h * T + bos) * S,
+                (T_seq, S),
+                (S, 1),
+                (i_t * BT, i_s * BS),
+                (BT, BS),
+                (1, 0),
+            )
+        else:
+            p_s = tl.make_block_ptr(
+                s + (bos * H + i_h * T) * S,
+                (T_seq, S),
+                (S, 1),
+                (i_t * BT, i_s * BS),
+                (BT, BS),
+                (1, 0),
+            )
+            p_o = tl.make_block_ptr(
+                o + (bos * H + i_h * T) * S,
+                (T_seq, S),
+                (S, 1),
+                (i_t * BT, i_s * BS),
+                (BT, BS),
+                (1, 0),
+            )
     else:
         p_s = tl.make_block_ptr(
             s + (bos * H + i_h) * S,
-            (T, S),
+            (T_seq, S),
             (H * S, 1),
             (i_t * BT, i_s * BS),
             (BT, BS),
@@ -146,7 +281,7 @@ def chunk_local_cumsum_vector_kernel(
         )
         p_o = tl.make_block_ptr(
             o + (bos * H + i_h) * S,
-            (T, S),
+            (T_seq, S),
             (H * S, 1),
             (i_t * BT, i_s * BS),
             (BT, BS),
@@ -179,19 +314,39 @@ def chunk_local_cumsum_scalar(
     )
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     g_org, g = g, torch.empty_like(g, dtype=output_dtype or g.dtype)
-    grid = (NT, B * H)
-    chunk_local_cumsum_scalar_kernel[grid](
-        g_org,
-        g,
-        cu_seqlens,
-        chunk_indices,
-        T=T,
-        B=B,
-        H=H,
-        BT=BT,
-        HEAD_FIRST=head_first,
-        REVERSE=reverse,
-    )
+    use_vectorized_scalar = FLA_CUMSUM_SCALAR_VECTORIZATION and not head_first and H > 1
+    if use_vectorized_scalar:
+        BH = min(8, triton.next_power_of_2(H))
+        grid = (NT, B * triton.cdiv(H, BH))
+        chunk_local_cumsum_scalar_vectorized_kernel[grid](
+            g_org,
+            g,
+            cu_seqlens,
+            chunk_indices,
+            T=T,
+            B=B,
+            H=H,
+            BT=BT,
+            BH=BH,
+            HEAD_FIRST=head_first,
+            REVERSE=reverse,
+            num_warps=1,
+            num_stages=3,
+        )
+    else:
+        grid = (NT, B * H)
+        chunk_local_cumsum_scalar_kernel[grid](
+            g_org,
+            g,
+            cu_seqlens,
+            chunk_indices,
+            T=T,
+            B=B,
+            H=H,
+            BT=BT,
+            HEAD_FIRST=head_first,
+            REVERSE=reverse,
+        )
     return g
 
 
