@@ -6329,8 +6329,45 @@ class GPUModelRunner(
                         kv_cache_stride_order.index(i)
                         for i in range(len(kv_cache_stride_order))
                     ]
+                    raw = kv_cache_raw_tensors[layer_name]
+                    # For INT8, carve out per-token scale caches from the
+                    # end of the raw tensor before reshaping KV data.
+                    if dtype == torch.int8:
+                        kv_data_bytes = (
+                            kv_cache_spec.real_page_size_bytes * num_blocks
+                        )
+                        scale_raw = raw[kv_data_bytes:]
+                        raw = raw[:kv_data_bytes]
+
+                        # Scale caches use the kernel block layout to match
+                        # the KV cache indexing via slot_mapping.
+                        scale_f32 = scale_raw.view(torch.float32)
+                        n_scale = (
+                            kernel_num_blocks
+                            * kernel_block_size
+                            * kv_cache_spec.num_kv_heads
+                        )
+                        k_sc = scale_f32[:n_scale].view(
+                            kernel_num_blocks, kernel_block_size,
+                            kv_cache_spec.num_kv_heads,
+                        )
+                        v_sc = scale_f32[n_scale:2 * n_scale].view(
+                            kernel_num_blocks, kernel_block_size,
+                            kv_cache_spec.num_kv_heads,
+                        )
+                        k_sc.fill_(1.0)
+                        v_sc.fill_(1.0)
+                        # Store on the Attention layer via forward context.
+                        fwd_ctx = (
+                            self.compilation_config
+                            .static_forward_context
+                        )
+                        if layer_name in fwd_ctx:
+                            fwd_ctx[layer_name].int8_k_scale_cache = k_sc
+                            fwd_ctx[layer_name].int8_v_scale_cache = v_sc
+
                     kv_caches[layer_name] = (
-                        kv_cache_raw_tensors[layer_name]
+                        raw
                         .view(dtype)
                         .view(kv_cache_shape)
                         .permute(*inv_order)

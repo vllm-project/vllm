@@ -409,10 +409,9 @@ class TritonAttentionImpl(AttentionImpl):
             )
         self.use_alibi_sqrt = use_alibi_sqrt
         self.supports_quant_query_input = current_platform.is_cuda()
-        # Lazy-allocated per-(token,head) scale caches for INT8 KV cache.
-        # Shape: [num_blocks, block_size, num_kv_heads], dtype=float32.
-        self._int8_k_scale_cache: torch.Tensor | None = None
-        self._int8_v_scale_cache: torch.Tensor | None = None
+        # INT8 per-token scale caches are pre-allocated alongside the KV cache
+        # and stored on the Attention layer as int8_k_scale_cache /
+        # int8_v_scale_cache.  No lazy allocation needed here.
 
     def forward(
         self,
@@ -505,28 +504,22 @@ class TritonAttentionImpl(AttentionImpl):
         descale_shape = (cu_seqlens_q.shape[0] - 1, key_cache.shape[2])
         mm_prefix_range_tensor = attn_metadata.mm_prefix_range_tensor
 
-        int8_k_scale_cache = self._int8_k_scale_cache
-        int8_v_scale_cache = self._int8_v_scale_cache
         if self.kv_cache_dtype.startswith("int8"):
-            # INT8: three sub-cases, all keep k_descale/v_descale separate from FP8.
-            if self._int8_k_scale_cache is not None:
-                # Per-token path: dynamic per-(token,head) scales in cache buffers.
-                k_descale = None
-                v_descale = None
-            elif layer._k_scale.ndim == 1 and layer._k_scale.numel() > 1:
-                # Per-head path: 1-D [num_kv_heads] tensor from checkpoint.
-                k_descale = layer._k_scale
-                v_descale = layer._v_scale
-            else:
-                # Per-tensor path: scalar from checkpoint, expand for kernel.
-                k_descale = layer._k_scale.expand(descale_shape)
-                v_descale = layer._v_scale.expand(descale_shape)
+            # INT8 always uses dynamic per-token scales stored in scale caches.
+            int8_k_scale_cache = layer.int8_k_scale_cache
+            int8_v_scale_cache = layer.int8_v_scale_cache
+            k_descale = None
+            v_descale = None
         elif self.kv_cache_dtype.startswith("fp8"):
             # FP8: always per-tensor scalar scale, expanded to (num_seqs, num_kv_heads).
+            int8_k_scale_cache = None
+            int8_v_scale_cache = None
             k_descale = layer._k_scale.expand(descale_shape)
             v_descale = layer._v_scale.expand(descale_shape)
         else:
             # FP16 / auto: no KV quantization, no scales needed.
+            int8_k_scale_cache = None
+            int8_v_scale_cache = None
             k_descale = None
             v_descale = None
 
@@ -634,27 +627,15 @@ class TritonAttentionImpl(AttentionImpl):
         elif self.kv_cache_dtype.startswith("int8"):
             key_cache = key_cache.view(self.int8_dtype)
             value_cache = value_cache.view(self.int8_dtype)
-            # Lazily allocate per-(token,head) scale caches on first call.
-            # [num_blocks, block_size, num_kv_heads]
-            if self._int8_k_scale_cache is None:
-                num_blocks, block_size, num_kv_heads = key_cache.shape[:3]
-                self._int8_k_scale_cache = torch.ones(
-                    (num_blocks, block_size, num_kv_heads),
-                    dtype=torch.float32,
-                    device=key_cache.device,
-                )
-                self._int8_v_scale_cache = torch.ones(
-                    (num_blocks, block_size, num_kv_heads),
-                    dtype=torch.float32,
-                    device=value_cache.device,
-                )
+            # Per-token scale caches are pre-allocated alongside the KV cache
+            # and bound to the Attention layer during init_kv_cache().
             triton_reshape_and_cache_flash_int8_per_token(
                 key,
                 value,
                 key_cache,
                 value_cache,
-                self._int8_k_scale_cache,
-                self._int8_v_scale_cache,
+                layer.int8_k_scale_cache,
+                layer.int8_v_scale_cache,
                 slot_mapping,
             )
             return

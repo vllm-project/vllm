@@ -479,37 +479,12 @@ class Attention(nn.Module, AttentionLayerBase):
                 )
 
     def calc_kv_scales(self, query, key, value):
-        if self.kv_cache_dtype.startswith("int8"):
-            # Per-head INT8 scales: critical for MoE models where different
-            # attention heads can have wildly different magnitude ranges due to
-            # expert routing. A single per-tensor scale causes heads with small
-            # values to all quantize to 0, destroying information.
-            #
-            # key/value may be 2D [num_tokens, num_kv_heads*head_size] or
-            # 3D [num_tokens, num_kv_heads, head_size] — reshape to 3D.
-            k_3d = key.reshape(key.shape[0], self.num_kv_heads, -1)
-            v_3d = value.reshape(value.shape[0], self.num_kv_heads, -1)
-            # Per-head absmax: max over (tokens, head_dim) → [num_kv_heads]
-            k_absmax = k_3d.abs().amax(dim=(0, 2))
-            v_absmax = v_3d.abs().amax(dim=(0, 2))
-            # scale = absmax / 127 uses the full INT8 range [-127, 127]
-            # Clamp away from zero to avoid division by zero during quantize
-            k_scale = (k_absmax / 127.0).clamp(min=1e-6)
-            v_scale = (v_absmax / 127.0).clamp(min=1e-6)
-            # Replace the scalar buffer with a per-head [num_kv_heads] tensor.
-            # The Triton backend detects ndim==1 && numel>1 as per-head INT8.
-            self._k_scale = k_scale.to(dtype=torch.float32, device=key.device)
-            self._v_scale = v_scale.to(dtype=torch.float32, device=value.device)
-            # _k_scale_float is a scalar placeholder; Triton uses _k_scale
-            # (tensor) directly and is the only backend supporting INT8.
-            self._k_scale_float = 1.0
-            self._v_scale_float = 1.0
-        else:
-            # FP8: original per-tensor scale behaviour
-            self._k_scale.copy_(torch.abs(key).max() / self.k_range)
-            self._v_scale.copy_(torch.abs(value).max() / self.v_range)
-            self._k_scale_float = self._k_scale.item()
-            self._v_scale_float = self._v_scale.item()
+        # INT8 KV cache uses dynamic per-token scales computed in the Triton
+        # kernel — calc_kv_scales is only used for FP8.
+        self._k_scale.copy_(torch.abs(key).max() / self.k_range)
+        self._v_scale.copy_(torch.abs(value).max() / self.v_range)
+        self._k_scale_float = self._k_scale.item()
+        self._v_scale_float = self._v_scale.item()
         self._q_scale.copy_(torch.abs(query).max() / self.q_range)
         self._q_scale_float = self._q_scale.item()
         # We only calculate the scales once

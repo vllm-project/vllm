@@ -106,8 +106,17 @@ def _reshape_kv_cache(
     kv_cache_config: KVCacheConfig,
     kv_cache_raw_tensors: dict[str, torch.Tensor],
     attn_backends: dict[str, AttentionBackend],
-) -> dict[str, torch.Tensor]:
+) -> tuple[dict[str, torch.Tensor],
+           dict[str, tuple[torch.Tensor, torch.Tensor]]]:
+    """Reshape raw KV cache tensors and extract INT8 scale caches.
+
+    Returns:
+        kv_caches: layer_name -> reshaped KV cache tensor
+        int8_scale_caches: layer_name -> (k_scale_cache, v_scale_cache)
+            Only populated for INT8 KV cache layers.
+    """
     kv_caches: dict[str, torch.Tensor] = {}
+    int8_scale_caches: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
     for kv_cache_group_spec in kv_cache_config.kv_cache_groups:
         kv_cache_spec = kv_cache_group_spec.kv_cache_spec
         assert isinstance(kv_cache_spec, AttentionSpec)
@@ -115,6 +124,40 @@ def _reshape_kv_cache(
             raw_tensor = kv_cache_raw_tensors[layer_name]
             assert raw_tensor.numel() % kv_cache_spec.page_size_bytes == 0
             num_blocks = raw_tensor.numel() // kv_cache_spec.page_size_bytes
+
+            dtype = kv_cache_spec.dtype
+
+            # For INT8, the raw tensor includes space for per-token scale
+            # caches.  Carve them out before reshaping the KV data.
+            if dtype == torch.int8:
+                kv_data_bytes = (
+                    kv_cache_spec.real_page_size_bytes * num_blocks
+                )
+                scale_raw = raw_tensor[kv_data_bytes:]
+                raw_tensor = raw_tensor[:kv_data_bytes]
+
+                # Reshape scale data into k and v scale caches.
+                # Each is [num_blocks, block_size, num_kv_heads], float32.
+                scale_f32 = scale_raw.view(torch.float32)
+                n_scale = (
+                    num_blocks
+                    * kv_cache_spec.block_size
+                    * kv_cache_spec.num_kv_heads
+                )
+                k_scale_cache = scale_f32[:n_scale].view(
+                    num_blocks, kv_cache_spec.block_size,
+                    kv_cache_spec.num_kv_heads,
+                )
+                v_scale_cache = scale_f32[n_scale:2 * n_scale].view(
+                    num_blocks, kv_cache_spec.block_size,
+                    kv_cache_spec.num_kv_heads,
+                )
+                # Initialize to 1.0 (safe default before first cache write).
+                k_scale_cache.fill_(1.0)
+                v_scale_cache.fill_(1.0)
+                int8_scale_caches[layer_name] = (
+                    k_scale_cache, v_scale_cache,
+                )
 
             attn_backend = attn_backends[layer_name]
             kv_cache_shape = attn_backend.get_kv_cache_shape(
@@ -137,11 +180,10 @@ def _reshape_kv_cache(
                 for i in range(len(kv_cache_stride_order))
             ]
 
-            dtype = kv_cache_spec.dtype
             raw_tensor = raw_tensor.view(dtype)
             raw_tensor = raw_tensor.view(kv_cache_shape)
             kv_caches[layer_name] = raw_tensor.permute(*inv_order)
-    return kv_caches
+    return kv_caches, int8_scale_caches
 
 
 def init_kv_cache(
@@ -152,8 +194,15 @@ def init_kv_cache(
     device: torch.device,
 ) -> dict[str, torch.Tensor]:
     kv_cache_raw_tensors = _allocate_kv_cache(kv_cache_config, device)
-    kv_caches = _reshape_kv_cache(kv_cache_config, kv_cache_raw_tensors, attn_backends)
+    kv_caches, int8_scale_caches = _reshape_kv_cache(
+        kv_cache_config, kv_cache_raw_tensors, attn_backends,
+    )
     bind_kv_cache(kv_caches, forward_context, runner_kv_caches)
+    # Bind pre-allocated INT8 per-token scale caches to attention layers.
+    for layer_name, (k_sc, v_sc) in int8_scale_caches.items():
+        attn_layer = forward_context[layer_name]
+        attn_layer.int8_k_scale_cache = k_sc
+        attn_layer.int8_v_scale_cache = v_sc
     return kv_caches
 
 

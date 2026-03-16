@@ -73,7 +73,12 @@ class AttentionSpec(KVCacheSpec):
         real_page_size = self.real_page_size_bytes
         if self.page_size_padded is not None:
             assert self.page_size_padded >= real_page_size
-            return self.page_size_padded
+            real_page_size = self.page_size_padded
+        # INT8 KV cache uses dynamic per-token scales stored alongside the
+        # cache data.  Each token slot needs a float32 k_scale and v_scale
+        # per KV head: 2 * block_size * num_kv_heads * sizeof(float32).
+        if self.dtype == torch.int8:
+            real_page_size += self.int8_scale_page_size_bytes
         return real_page_size
 
     @property
@@ -84,6 +89,16 @@ class AttentionSpec(KVCacheSpec):
             * self.num_kv_heads
             * self.head_size
             * get_dtype_size(self.dtype)
+        )
+
+    @property
+    def int8_scale_page_size_bytes(self) -> int:
+        """Extra bytes per block for INT8 per-token dynamic scales.
+
+        Shape: 2 (k + v) * block_size * num_kv_heads * sizeof(float32).
+        """
+        return 2 * self.block_size * self.num_kv_heads * get_dtype_size(
+            torch.float32
         )
 
 
