@@ -8,7 +8,6 @@ import torch.distributed as dist
 from torch import nn
 from transformers import GptOssConfig
 
-import vllm._custom_ops as ops
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (
@@ -21,12 +20,11 @@ from vllm.distributed import (
     tensor_model_parallel_all_gather,
 )
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import FusedMoE, GateLinear
 from vllm.model_executor.layers.fused_moe.config import FusedMoEParallelConfig
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     QKVParallelLinear,
-    ReplicatedLinear,
     RowParallelLinear,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -46,7 +44,6 @@ from vllm.model_executor.models.utils import sequence_parallel_chunk
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.math_utils import cdiv
-from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backend import AttentionType
 
 from .interfaces import (
@@ -157,77 +154,6 @@ class OAIAttention(nn.Module):
         return output
 
 
-def gpt_oss_router_gemm_impl(
-    x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor
-) -> torch.Tensor:
-    """
-    Dynamically run min-latency gemm if num_tokens <= 128.
-    This must be wrapped in a custom op because our torch.compile integration
-    does not support runtime dispatching on num_tokens.
-    """
-    if x.shape[0] <= 128:
-        return ops.gpt_oss_router_gemm(x, weight, bias)
-    else:
-        return torch.nn.functional.linear(x, weight, bias)
-
-
-def gpt_oss_router_gemm_fake(
-    x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor
-) -> torch.Tensor:
-    return x.new_empty((x.shape[0], weight.shape[0]))
-
-
-direct_register_custom_op(
-    op_name="gpt_oss_router_gemm",
-    op_func=gpt_oss_router_gemm_impl,
-    fake_impl=gpt_oss_router_gemm_fake,
-)
-
-
-class GptOssRouter(ReplicatedLinear):
-    def __init__(
-        self,
-        input_size: int,
-        output_size: int,
-        bias: bool = True,
-        quant_config: QuantizationConfig | None = None,
-        prefix: str = "",
-        return_bias: bool = True,
-    ):
-        assert quant_config is None
-        super().__init__(
-            input_size,
-            output_size,
-            bias=bias,
-            quant_config=quant_config,
-            prefix=f"{prefix}.router",
-            return_bias=return_bias,
-        )
-
-        assert hasattr(self, "weight")
-        assert hasattr(self, "bias")
-
-        # Check if gpt_oss_router_gemm kernel can be used.
-        # This kernel supports PDL and is optimized for low batch size.
-        self.use_gpt_oss_router_gemm = (
-            self.weight.dtype == torch.bfloat16
-            and current_platform.is_cuda()
-            and (
-                current_platform.is_device_capability(90)
-                or current_platform.is_device_capability_family(100)
-            )
-        )
-
-    def forward(
-        self,
-        x: torch.Tensor,
-    ) -> torch.Tensor:
-        if self.use_gpt_oss_router_gemm:
-            return torch.ops.vllm.gpt_oss_router_gemm(x, self.weight, self.bias)
-        else:
-            return super().forward(x)
-
-
 class MLPBlock(torch.nn.Module):
     def __init__(
         self,
@@ -248,13 +174,11 @@ class MLPBlock(torch.nn.Module):
         self.hidden_size = config.hidden_size
         self.experts_per_token = config.num_experts_per_tok
         self.world_size = dist.get_world_size() if dist.is_initialized() else 1
-        self.router = GptOssRouter(
+        self.router = GateLinear(
             config.hidden_size,
             config.num_local_experts,
             bias=True,
-            quant_config=None,
             prefix=f"{prefix}.router",
-            return_bias=False,
         )
         assert config.intermediate_size % self.world_size == 0
         self.experts = FusedMoE(
@@ -282,7 +206,7 @@ class MLPBlock(torch.nn.Module):
                 self, x[:, : self.hidden_size], self.router.weight, self.router.bias
             )
         else:
-            g = self.router(x)
+            g, _ = self.router(x)
         x = self.experts(hidden_states=x, router_logits=g)[:, : self.hidden_size]
 
         if self.is_sequence_parallel:
