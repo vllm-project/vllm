@@ -174,6 +174,8 @@ async def transfer_run_periodically(
                             is_profile=is_profile,
                             cuda_stream=cuda_stream,
                         )
+                        # block the async thread until the transfer to
+                        # the intermediate buffer is complete.
                         cuda_stream.synchronize()
                         model_state.ep_buffer_ready = 1
                     finally:
