@@ -294,9 +294,24 @@ class EmbedIOProcessor(PoolingIOProcessor):
         else:
             super().pre_process_online(ctx)
 
-        if not self.enable_chunked_processing:
-            return None
+        if self.enable_chunked_processing:
+            self._pre_process_chunked(ctx)
 
+    def post_process_online(
+        self,
+        ctx: PoolingServeContext,
+    ):
+        if ctx.final_res_batch is None:
+            raise ValueError("Final response batch not available")
+
+        if not self.enable_chunked_processing:
+            self._enforce_cohere_max_tokens(ctx)
+            return super().post_process_online(ctx)
+
+        self._post_process_chunked(ctx)
+        self._enforce_cohere_max_tokens(ctx)
+
+    def _pre_process_chunked(self, ctx: PoolingServeContext) -> None:
         if ctx.engine_prompts is None:
             raise ValueError("Engine prompts not available")
 
@@ -327,19 +342,10 @@ class EmbedIOProcessor(PoolingIOProcessor):
 
         ctx.engine_prompts = chunked_engine_prompts
         ctx.prompt_request_ids = prompt_request_ids
+
         return None
 
-    def post_process_online(
-        self,
-        ctx: PoolingServeContext,
-    ):
-        if ctx.final_res_batch is None:
-            raise ValueError("Final response batch not available")
-
-        if not self.enable_chunked_processing:
-            self._enforce_cohere_max_tokens(ctx)
-            return super().post_process_online(ctx)
-
+    def _post_process_chunked(self, ctx: PoolingServeContext) -> None:
         # Online aggregation for chunked requests to
         # minimize memory usage
         # Track aggregation state for each prompt
@@ -462,7 +468,7 @@ class EmbedIOProcessor(PoolingIOProcessor):
                 raise ValueError(f"Result not found for prompt {prompt_idx}")
 
         ctx.final_res_batch = final_res_batch
-        self._enforce_cohere_max_tokens(ctx)
+
         return None
 
     def _enforce_cohere_max_tokens(self, ctx: PoolingServeContext) -> None:

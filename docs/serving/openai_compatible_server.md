@@ -481,28 +481,9 @@ curl -X POST "http://localhost:8000/v2/embed" \
     }
     ```
 
-#### Image embedding
-
-For multimodal models, you can embed images by passing base64 data URIs:
-
-```bash
-vllm serve google/siglip-so400m-patch14-384 --runner pooling
-```
-
-```bash
-curl -X POST "http://localhost:8000/v2/embed" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "google/siglip-so400m-patch14-384",
-    "input_type": "image",
-    "images": ["data:image/png;base64,iVBOR..."],
-    "embedding_types": ["float"]
-  }'
-```
-
 #### Mixed text and image inputs
 
-The `inputs` field accepts a list of objects with mixed text and image content:
+For multimodal models, you can embed images by passing base64 data URIs. The `inputs` field accepts a list of objects with mixed text and image content:
 
 ```bash
 curl -X POST "http://localhost:8000/v2/embed" \
