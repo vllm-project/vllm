@@ -188,7 +188,7 @@ def _topk_topp_kernel(
                         min_larger_1 = float("inf")
                         num_min_larger_1 = tl.zeros((), dtype=tl.uint32)
 
-                        # First pass: Calculate k_pivots_num and min_larger
+                        # Single pass: k_pivots_num, min_larger, num_min_larger
                         for i in range(0, search_iters):
                             offs_n = i * BLOCK_SIZE_TRUNC + tl.arange(
                                 0, BLOCK_SIZE_TRUNC
@@ -198,28 +198,42 @@ def _topk_topp_kernel(
                                 BUFFER_ROW + offs_n, mask=mask_n_2, other=-float("inf")
                             )
 
-                            k_pivots_num_0 += tl.sum(logits_blk2 > k_pivot_0)
-                            k_pivots_num_1 += tl.sum(logits_blk2 > k_pivot_1)
+                            above_0 = logits_blk2 > k_pivot_0
+                            above_1 = logits_blk2 > k_pivot_1
+                            k_pivots_num_0 += tl.sum(above_0)
+                            k_pivots_num_1 += tl.sum(above_1)
 
-                            min_larger_0 = tl.minimum(min_larger_0, tl.min(logits_blk2))
-                            min_larger_1 = tl.minimum(min_larger_1, tl.min(logits_blk2))
+                            tile_min_0 = tl.min(
+                                tl.where(above_0, logits_blk2, float("inf"))
+                            )
+                            tile_eq_0 = above_0 & (
+                                tl.abs(logits_blk2 - tile_min_0) < 1e-9
+                            )
+                            tile_cnt_0 = tl.sum(tile_eq_0)
+                            new_0 = tile_min_0 < min_larger_0
+                            same_0 = tl.abs(tile_min_0 - min_larger_0) < 1e-9
+                            num_min_larger_0 = tl.where(
+                                new_0,
+                                tile_cnt_0,
+                                num_min_larger_0 + tile_cnt_0 * same_0,
+                            )
+                            min_larger_0 = tl.minimum(min_larger_0, tile_min_0)
 
-                        # Second pass: Calculate num_min_larger
-                        for i in range(0, search_iters):
-                            offs_n = i * BLOCK_SIZE_TRUNC + tl.arange(
-                                0, BLOCK_SIZE_TRUNC
+                            tile_min_1 = tl.min(
+                                tl.where(above_1, logits_blk2, float("inf"))
                             )
-                            mask_n_2 = offs_n < search_range
-                            logits_blk2 = tl.load(
-                                BUFFER_ROW + offs_n, mask=mask_n_2, other=-float("inf")
+                            tile_eq_1 = above_1 & (
+                                tl.abs(logits_blk2 - tile_min_1) < 1e-9
                             )
-
-                            num_min_larger_0 += tl.sum(
-                                tl.abs(logits_blk2 - min_larger_0) < 1e-9
+                            tile_cnt_1 = tl.sum(tile_eq_1)
+                            new_1 = tile_min_1 < min_larger_1
+                            same_1 = tl.abs(tile_min_1 - min_larger_1) < 1e-9
+                            num_min_larger_1 = tl.where(
+                                new_1,
+                                tile_cnt_1,
+                                num_min_larger_1 + tile_cnt_1 * same_1,
                             )
-                            num_min_larger_1 += tl.sum(
-                                tl.abs(logits_blk2 - min_larger_1) < 1e-9
-                            )
+                            min_larger_1 = tl.minimum(min_larger_1, tile_min_1)
 
                         # Check if any of the pivots satisfy termination condition
                         if (
@@ -272,7 +286,7 @@ def _topk_topp_kernel(
                         min_larger_1 = float("inf")
                         num_min_larger_1 = tl.zeros((), dtype=tl.uint32)
 
-                        # First pass: Calculate k_pivots_num and min_larger
+                        # Single pass: k_pivots_num, min_larger, num_min_larger
                         for i in range(0, NUM_TILES):
                             offs_n = i * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
                             mask_n = offs_n < VOCAB_SIZE
@@ -280,31 +294,42 @@ def _topk_topp_kernel(
                                 LOGITS_ROW + offs_n, mask=mask_n, other=-float("inf")
                             )
 
-                            k_pivots_num_0 += tl.sum(logits_blk2 > k_pivot_0)
-                            k_pivots_num_1 += tl.sum(logits_blk2 > k_pivot_1)
+                            above_0 = logits_blk2 > k_pivot_0
+                            above_1 = logits_blk2 > k_pivot_1
+                            k_pivots_num_0 += tl.sum(above_0)
+                            k_pivots_num_1 += tl.sum(above_1)
 
-                            # Exclude -inf from min_larger to avoid
-                            # poisoning the convergence check.
-                            finite_blk2 = tl.where(
-                                logits_blk2 > -float("inf"), logits_blk2, float("inf")
+                            tile_min_0 = tl.min(
+                                tl.where(above_0, logits_blk2, float("inf"))
                             )
-                            min_larger_0 = tl.minimum(min_larger_0, tl.min(finite_blk2))
-                            min_larger_1 = tl.minimum(min_larger_1, tl.min(finite_blk2))
+                            tile_eq_0 = above_0 & (
+                                tl.abs(logits_blk2 - tile_min_0) < 1e-9
+                            )
+                            tile_cnt_0 = tl.sum(tile_eq_0)
+                            new_0 = tile_min_0 < min_larger_0
+                            same_0 = tl.abs(tile_min_0 - min_larger_0) < 1e-9
+                            num_min_larger_0 = tl.where(
+                                new_0,
+                                tile_cnt_0,
+                                num_min_larger_0 + tile_cnt_0 * same_0,
+                            )
+                            min_larger_0 = tl.minimum(min_larger_0, tile_min_0)
 
-                        # Second pass: Calculate num_min_larger
-                        for i in range(0, NUM_TILES):
-                            offs_n = i * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-                            mask_n = offs_n < VOCAB_SIZE
-                            logits_blk2 = tl.load(
-                                LOGITS_ROW + offs_n, mask=mask_n, other=-float("inf")
+                            tile_min_1 = tl.min(
+                                tl.where(above_1, logits_blk2, float("inf"))
                             )
-
-                            num_min_larger_0 += tl.sum(
-                                tl.abs(logits_blk2 - min_larger_0) < 1e-9
+                            tile_eq_1 = above_1 & (
+                                tl.abs(logits_blk2 - tile_min_1) < 1e-9
                             )
-                            num_min_larger_1 += tl.sum(
-                                tl.abs(logits_blk2 - min_larger_1) < 1e-9
+                            tile_cnt_1 = tl.sum(tile_eq_1)
+                            new_1 = tile_min_1 < min_larger_1
+                            same_1 = tl.abs(tile_min_1 - min_larger_1) < 1e-9
+                            num_min_larger_1 = tl.where(
+                                new_1,
+                                tile_cnt_1,
+                                num_min_larger_1 + tile_cnt_1 * same_1,
                             )
+                            min_larger_1 = tl.minimum(min_larger_1, tile_min_1)
 
                         # Check if any of the pivots satisfy termination condition
                         if (
