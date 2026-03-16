@@ -56,10 +56,7 @@ class TrtLlmNvFp4ExpertsBase:
             # g1_scale_c = a13_scale * w13_scale_2 / a2_scale
             self.g1_scale_c = self.quant_config.g1_alphas * self.quant_config.a2_gscale
         else:
-            self.g1_scale_c = (
-                torch.ones_like(self.quant_config.a1_gscale)
-                * self.quant_config.a2_gscale
-            )
+            self.g1_scale_c = self.quant_config.a2_gscale.clone()
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         layer.w13_weight_scale_2.data.mul_(layer.w13_input_scale)
@@ -72,10 +69,7 @@ class TrtLlmNvFp4ExpertsBase:
         if self.moe_config.is_act_and_mul:
             g1_scale_c = self.quant_config.g1_alphas * self.quant_config.a2_gscale
         else:
-            g1_scale_c = (
-                torch.ones_like(self.quant_config.a1_gscale)
-                * self.quant_config.a2_gscale
-            )
+            g1_scale_c = self.quant_config.a2_gscale.clone()
         layer.register_parameter(
             "g1_scale_c",
             torch.nn.Parameter(g1_scale_c, requires_grad=False),

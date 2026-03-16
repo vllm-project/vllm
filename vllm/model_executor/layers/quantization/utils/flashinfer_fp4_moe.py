@@ -267,10 +267,6 @@ def prepare_nvfp4_moe_layer_for_fi_or_cutlass(
             num_experts=w13.size(0),
             is_gated_activation=is_gated,
         )
-
-        # g1_scale_c and a1_gscale are now computed and registered as
-        # layer parameters in TrtLlmNvFp4ExpertsBase.process_weights_after_loading
-        # so that EPLB can rearrange them alongside other expert weights.
     else:
         # Swizzle the block scales for other FI NVFP4 MoE kernels.
         w13_scale = swizzle_blockscale(w13_scale)
