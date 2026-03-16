@@ -1276,6 +1276,12 @@ def get_pcp_group() -> GroupCoordinator:
     assert _PCP is not None, "prefill context parallel group is not initialized"
     return _PCP
 
+_DYCP: GroupCoordinator | None = None
+
+
+def get_dycp_group()  -> GroupCoordinator:
+    assert _DYCP is not None, "Dynamic context parallel group is not initialized"
+    return _DYCP
 
 @contextmanager
 def graph_capture(device: torch.device):
@@ -1551,6 +1557,19 @@ def initialize_model_parallel(
         prefill_context_model_parallel_size,
         tensor_model_parallel_size,
     )  # noqa
+
+    # Build the dycp model-parallel groups.
+    global _DYCP
+    assert _DYCP is None, "Dynamic CP model parallel group is already initialized"
+    group_ranks = all_ranks.transpose(1, 4)
+    domain_ranks = group_ranks.reshape(-1, config.parallel_config.dp_per_domain).unbind(0)
+    domain_groups = [x.tolist() for x in domain_ranks]
+    _DYCP = init_model_parallel_group(
+        domain_groups,
+        get_world_group().local_rank,
+        backend,
+        group_name="dycp",
+    )
 
     # Build the tensor model-parallel groups.
     global _TP

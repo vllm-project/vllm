@@ -684,6 +684,7 @@ class VllmConfig:
 
         executor_backend = self.parallel_config.distributed_executor_backend
         executor_supports_async_sched = executor_backend in (
+            "dmp",
             "mp",
             "uni",
             "external_launcher",

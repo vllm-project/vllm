@@ -213,3 +213,9 @@ KVConnectorFactory.register_connector(
     "vllm.distributed.kv_transfer.kv_connector.v1.flexkv_connector",
     "FlexKVConnectorV1",
 )
+
+KVConnectorFactory.register_connector(
+    "CrossDPExampleConnector",
+    "vllm.distributed.kv_transfer.kv_connector.v1.cross_dp_example_connector",
+    "CrossDPExampleConnector",
+)

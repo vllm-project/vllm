@@ -694,6 +694,12 @@ class CompilationConfig:
         "vllm::rocm_aiter_sparse_attn_indexer",
     ]
 
+    cudagraph_capture_sizes_for_cp: int = field(default=0)
+    """
+    For cp tokens
+    The number of cp tokens in each cudagraph
+    """
+
     def compute_hash(self) -> str:
         """
         Provide a hash that uniquely identifies all the configs

@@ -335,6 +335,18 @@ class ParallelConfig:
         should only be set by API server scale-out.
     """
 
+    dp_per_domain: int = Field(default=1, ge=-1)
+    """Number of data parallel groups per domain."""
+
+    domain_parallel_rank: int = Field(default=0, ge=-1)
+    """Domain parallel rank."""
+    domain_parallel_rank_local: int = Field(default=0, ge=-1)
+    """Domain parallel rank local."""
+    domain_parallel_start_rank: int = Field(default=0, ge=-1)
+    """Domain parallel start rank."""
+    domain_parallel_start_rank_local: int = Field(default=0, ge=-1)
+    """Domain parallel start rank local."""
+
     _api_process_rank: int = Field(default=0, ge=-1)
     """
     The rank of this API process, or `-1` for engine core processes
@@ -526,6 +538,39 @@ class ParallelConfig:
     def stateless_init_dp_group(
         self, return_store: Literal[True] = ...
     ) -> tuple[ProcessGroup, Store]: ...
+
+    def stateless_init_domain_group(self) -> ProcessGroup:
+        from torch.distributed import DistNetworkError
+
+        from vllm.distributed.utils import (
+            stateless_init_torch_distributed_process_group,
+        )
+
+        max_retries = 5
+        last_exc: Exception | None = None
+        for _ in range(max_retries):
+            try:
+                # use gloo since the engine process might not have cuda device
+                logger.info(f"Initializing domain group for rank {self.domain_parallel_rank} with size {self.data_parallel_size // self.dp_per_domain}")
+                return stateless_init_torch_distributed_process_group(
+                    self.data_parallel_master_ip,
+                    self.get_next_dp_init_port(),
+                    self.domain_parallel_rank,
+                    self.data_parallel_size // self.dp_per_domain,
+                    backend=current_platform.dist_backend,
+                )
+            except DistNetworkError as e:
+                # We only want to retry when the root cause is EADDRINUSE.
+                if "EADDRINUSE" in str(e):
+                    logger.warning("Address already in use. Retrying with a new port.")
+                    last_exc = e
+                    continue  # try again with a new port
+                raise e
+
+        # If we get here all retries have failed.
+        assert last_exc is not None
+        raise last_exc
+
     def stateless_init_dp_group(
         self, return_store: bool = False
     ) -> ProcessGroup | tuple[ProcessGroup, Store]:
@@ -606,6 +651,17 @@ class ParallelConfig:
         return self.nnodes // data_parallel_node_size
 
     @property
+    def node_rank_within_domain(self) -> int:
+        return self.node_rank % self.nnodes_within_domain
+    
+    @property
+    def nnodes_within_domain(self) -> int:
+        """
+        Note that domain parallelism does not support cross multi-node,
+        """
+        return 1
+
+    @property
     def local_world_size(self) -> int:
         return self.world_size // self.nnodes_within_dp
 
@@ -670,6 +726,8 @@ class ParallelConfig:
             "worker_extension_cls",
             "_api_process_count",
             "_api_process_rank",
+            "domain_parallel_rank",
+            "domain_parallel_rank_local",
         }
 
         from vllm.config.utils import get_hash_factors, hash_factors
