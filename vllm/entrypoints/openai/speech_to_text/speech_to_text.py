@@ -56,18 +56,6 @@ try:
 except ImportError:
     librosa = PlaceholderModule("librosa")  # type: ignore[assignment]
 
-try:
-    import soundfile as sf
-except ImportError:
-    sf = PlaceholderModule("soundfile")  # type: ignore[assignment]
-
-# Public libsndfile error codes exposed via `soundfile.LibsndfileError.code`, soundfile
-# being librosa's main backend. Used to validate if an audio loading error is due to a
-# server error vs a client error (invalid audio file).
-# 1 = unrecognised format      (file is not a supported audio container)
-# 3 = malformed file           (corrupt or structurally invalid audio)
-# 4 = unsupported encoding     (codec not supported by this libsndfile build)
-_BAD_SF_CODES = {1, 3, 4}
 
 SpeechToTextResponse: TypeAlias = TranscriptionResponse | TranslationResponse
 SpeechToTextResponseVerbose: TypeAlias = (
@@ -214,26 +202,9 @@ class OpenAISpeechToText(OpenAIServing):
         # pre-requisite for chunking, as it assumes Whisper SR.
         try:
             with io.BytesIO(audio_data) as buf:
-                y, sr = librosa.load(buf, sr=self.asr_config.sample_rate)  # type: ignore[return-value]
-        except sf.LibsndfileError as exc:
-            # Only fall back for known format-detection failures.
-            # Re-raise anything else (e.g. corrupt but recognised format).
-            if exc.code not in _BAD_SF_CODES:
-                raise
-            logger.debug(
-                "librosa/soundfile could not decode audio from BytesIO "
-                "(code=%s: %s); falling back to pyav in-process decode",
-                exc.code,
-                exc,
-            )
-            try:
-                y, sr = load_audio_pyav(audio_data, sr=self.asr_config.sample_rate)
-            except Exception as pyav_exc:
-                logger.debug(
-                    "pyAV fallback also failed: %s",
-                    pyav_exc,
-                )
-                raise ValueError("Invalid or unsupported audio file.") from pyav_exc
+                y, sr = load_audio_pyav(buf, sr=self.asr_config.sample_rate)
+        except Exception as exc:
+            raise ValueError("Invalid or unsupported audio file.") from exc
 
         duration = librosa.get_duration(y=y, sr=sr)
         do_split_audio = (
