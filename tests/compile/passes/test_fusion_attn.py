@@ -244,12 +244,17 @@ class TestAttentionFp8GroupQuantPatternModel(AttentionQuantPatternModel):
         )
 
         # Simple weight for downstream matmul (dequant -> matmul)
-        self.weight = torch.randn(
-            hidden_size,
-            hidden_size,
-            dtype=torch.get_default_dtype(),
-            device=kwargs.get("device", torch.device("cuda:0")),
-        )
+        w = kwargs.get("w")
+        if w is not None:
+            self.proj_weight = w["weight"]
+        else:
+            self.proj_weight = torch.randn(
+                hidden_size,
+                hidden_size,
+                dtype=torch.get_default_dtype(),
+                device=kwargs.get("device", torch.device("cuda:0")),
+            )
+        self.w = {"weight": self.proj_weight}
 
     def forward(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor):
         """Forward pass: attention -> per-group FP8 quant -> dequant -> matmul"""
@@ -262,7 +267,7 @@ class TestAttentionFp8GroupQuantPatternModel(AttentionQuantPatternModel):
             -1, num_groups, self.group_size
         ) * scales.float().unsqueeze(-1)
         dequant = dequant.reshape(quant_output.shape).to(attn_output.dtype)
-        return torch.matmul(dequant, self.weight.t())
+        return torch.matmul(dequant, self.proj_weight.t())
 
 
 PATTERN_TEST_MODELS_FP8: list[tuple[str, type]] = []
@@ -292,7 +297,7 @@ if current_platform.is_cuda():
     BACKENDS_FP4 = [AttentionBackendEnum.FLASHINFER]
     PATTERN_TEST_MODELS_FP8_GROUP = [
         (
-            "RedHatAI/Meta-Llama-3.1-8B-FP8",
+            "Qwen/Qwen2.5-7B-Instruct-FP8",
             TestAttentionFp8GroupQuantPatternModel,
         )
     ]
@@ -325,7 +330,11 @@ elif current_platform.is_rocm():
         )
     )
     # quant_fp4 only has the custom impl
-    + list(flat_product(BACKENDS_FP4, PATTERN_TEST_MODELS_FP4, [""])),
+    + list(flat_product(BACKENDS_FP4, PATTERN_TEST_MODELS_FP4, [""]))
+    # per-group fp8 quant
+    + list(
+        flat_product(BACKENDS_FP8_GROUP, PATTERN_TEST_MODELS_FP8_GROUP, ["+quant_fp8"])
+    ),
 )
 @pytest.mark.skipif(
     not current_platform.is_cuda_alike(), reason="Only test ROCm or CUDA"
@@ -508,13 +517,20 @@ def test_attention_quant_pattern(
     assert attn_nodes_pre[0].kwargs.get("output_scale") is None, (
         "Attention should not have output_scale before fusion"
     )
-    assert attn_nodes_post[0].kwargs.get("output_scale") is not None, (
-        "Attention should have output_scale after fusion"
-    )
-
     assert attn_nodes_pre[0].kwargs.get("output_block_scale") is None, (
         "Attention should not have output_block_scale before fusion"
     )
+
+    is_per_group = quant_key.scale.group_shape.is_per_group()
+    if is_per_group:
+        # Per-group FP8: output_block_scale is set, output_scale is not
+        assert attn_nodes_post[0].kwargs.get("output_block_scale") is not None, (
+            "Per-group FP8 fusion should set output_block_scale"
+        )
+    else:
+        assert attn_nodes_post[0].kwargs.get("output_scale") is not None, (
+            "Attention should have output_scale after fusion"
+        )
 
     kv_cache_dummy_dep_pre_is_none = (
         attn_nodes_pre[0].kwargs.get("kv_cache_dummy_dep") is None
@@ -526,7 +542,7 @@ def test_attention_quant_pattern(
         "The kv_cache_dummy_dep should be consistent before and after fusion"
     )
 
-    if quant_key.dtype == FP8_DTYPE:
+    if quant_key.dtype == FP8_DTYPE and not is_per_group:
         assert attn_nodes_post[0].kwargs.get("output_block_scale") is None, (
             "Attention should not have output_block_scale after FP8 fusion"
         )
@@ -535,156 +551,7 @@ def test_attention_quant_pattern(
             "Attention should have output_block_scale after FP4 fusion"
         )
 
-    # Check that results are close
-    torch.testing.assert_close(result_unfused, result_fused, atol=1e-2, rtol=1e-2)
-
-
-@pytest.mark.parametrize("num_qo_heads, num_kv_heads", HEADS)
-@pytest.mark.parametrize("head_size", [128])
-@pytest.mark.parametrize("batch_size", [7, 256] if current_platform.is_cuda() else [8])
-@pytest.mark.parametrize("dtype", [torch.bfloat16])
-@pytest.mark.parametrize(
-    "backend, model_name, model_class, custom_ops",
-    list(
-        flat_product(
-            BACKENDS_FP8_GROUP,
-            PATTERN_TEST_MODELS_FP8_GROUP,
-            ["+quant_fp8"],
-        )
-    ),
-)
-@pytest.mark.skipif(
-    not current_platform.is_cuda_alike(), reason="Only test ROCm or CUDA"
-)
-@pytest.mark.skipif(not current_platform.supports_fp8(), reason="Need FP8")
-def test_attention_group_quant_pattern(
-    num_qo_heads: int,
-    num_kv_heads: int,
-    head_size: int,
-    batch_size: int,
-    dtype: torch.dtype,
-    custom_ops: str,
-    model_name: str,
-    model_class: type[AttentionQuantPatternModel],
-    backend: AttentionBackendEnum,
-    dist_init,
-    monkeypatch,
-    use_fresh_inductor_cache,
-):
-    """Test AttentionFp8GroupQuantPattern fusion pass (per-group FP8)."""
-    monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
-
-    custom_ops_list = custom_ops.split(",") if custom_ops else []
-
-    device = torch.device("cuda:0")
-    torch.set_default_dtype(dtype)
-    torch.manual_seed(42)
-
-    model_config = ModelConfig(
-        model=model_name,
-        max_model_len=2048,
-        dtype=dtype,
-    )
-    vllm_config = VllmConfig(
-        model_config=model_config,
-        scheduler_config=SchedulerConfig(
-            max_num_seqs=1024,
-            max_model_len=model_config.max_model_len,
-            is_encoder_decoder=model_config.is_encoder_decoder,
-        ),
-        compilation_config=CompilationConfig(
-            mode=CompilationMode.VLLM_COMPILE,
-            custom_ops=custom_ops_list,
-        ),
-        cache_config=CacheConfig(cache_dtype="fp8"),
-        attention_config=AttentionConfig(backend=backend),
-    )
-
-    q = torch.randn(batch_size, num_qo_heads * head_size, dtype=dtype, device=device)
-    k = torch.randn(batch_size, num_kv_heads * head_size, dtype=dtype, device=device)
-    v = torch.randn(batch_size, num_kv_heads * head_size, dtype=dtype, device=device)
-
-    torch._dynamo.mark_dynamic(q, 0)
-    torch._dynamo.mark_dynamic(k, 0)
-    torch._dynamo.mark_dynamic(v, 0)
-
-    # Run unfused
-    vllm_config_unfused = copy.deepcopy(vllm_config)
-    with (
-        set_current_vllm_config(vllm_config_unfused),
-        set_forward_context(attn_metadata=None, vllm_config=vllm_config_unfused),
-    ):
-        model_unfused = model_class(
-            num_qo_heads=num_qo_heads,
-            num_kv_heads=num_kv_heads,
-            head_size=head_size,
-            kv_cache_dtype=FP8_DTYPE,
-            device=device,
-            vllm_config=vllm_config_unfused,
-        )
-        model_unfused = model_unfused.to(device)
-        result_unfused_0 = model_unfused(q, k, v)  # noqa: F841
-
-        forward_ctx = get_forward_context()
-        forward_ctx.attn_metadata = model_unfused.build_attn_metadata(batch_size)
-        compiled_unfused = torch.compile(model_unfused, fullgraph=True)
-        result_unfused = compiled_unfused(q, k, v)
-
-    # Run fused
-    vllm_config.compilation_config.pass_config = PassConfig(
-        fuse_attn_quant=True, eliminate_noops=True
-    )
-    with (
-        set_current_vllm_config(vllm_config),
-        set_forward_context(attn_metadata=None, vllm_config=vllm_config),
-    ):
-        model_fused = model_class(
-            num_qo_heads=num_qo_heads,
-            num_kv_heads=num_kv_heads,
-            head_size=head_size,
-            kv_cache_dtype=FP8_DTYPE,
-            device=device,
-            vllm_config=vllm_config,
-        )
-        # Use same weight for fair comparison
-        model_fused.weight = model_unfused.weight
-        model_fused = model_fused.to(device)
-
-        forward_ctx = get_forward_context()
-        forward_ctx.attn_metadata = model_fused.build_attn_metadata(batch_size)
-
-        noop_pass = NoOpEliminationPass(vllm_config)
-        attn_pass = LazyInitPass(AttnFusionPass, vllm_config)
-        cleanup_pass = PostCleanupPass(vllm_config)
-
-        test_backend = TestBackend(noop_pass, attn_pass, cleanup_pass)
-        result_fused_0 = model_fused(q, k, v)  # noqa: F841
-
-        compiled_fused = torch.compile(
-            model_fused, backend=test_backend, fullgraph=True
-        )
-        result_fused = compiled_fused(q, k, v)
-
-    # Verify fusion matched
-    quant_key: QuantKey = model_class.quant_key
-    attn_fusion_supported = [
-        layer.impl.fused_output_quant_supported(quant_key)
-        for key, layer in vllm_config.compilation_config.static_forward_context.items()
-    ]
-    assert sum(attn_fusion_supported) == len(attn_fusion_supported), (
-        "All layers should support per-group FP8 attention fusion"
-    )
-    assert attn_pass.pass_.matched_count == sum(attn_fusion_supported)
-
-    # Check graph: output_block_scale should be set after fusion
-    attn_nodes_pre = list(find_op_nodes(ATTN_OP, test_backend.graph_pre_pass))
-    attn_nodes_post = list(find_op_nodes(ATTN_OP, test_backend.graph_post_pass))
-
-    assert len(attn_nodes_pre) > 0
-    assert attn_nodes_pre[0].kwargs.get("output_block_scale") is None
-    assert attn_nodes_post[0].kwargs.get("output_block_scale") is not None, (
-        "Per-group FP8 fusion should set output_block_scale"
-    )
-
-    # Results should be close (FP8 quantization introduces some error)
-    torch.testing.assert_close(result_unfused, result_fused, atol=5e-2, rtol=5e-2)
+    # Per-group FP8 has slightly higher quant error due to dynamic scale
+    atol = 5e-2 if is_per_group else 1e-2
+    rtol = 5e-2 if is_per_group else 1e-2
+    torch.testing.assert_close(result_unfused, result_fused, atol=atol, rtol=rtol)

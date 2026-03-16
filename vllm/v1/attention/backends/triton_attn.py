@@ -13,8 +13,6 @@ from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
-    kFp8Dynamic64Sym,
-    kFp8Dynamic128Sym,
     kFp8StaticTensorSym,
 )
 from vllm.platforms import current_platform
@@ -445,9 +443,15 @@ class TritonAttentionImpl(AttentionImpl):
     def fused_output_quant_supported(self, quant_key: QuantKey):
         if quant_key == kFp8StaticTensorSym:
             return True
-        # Per-group FP8 dynamic quant is supported when group_size
-        # evenly divides head_size (groups must align with head boundaries).
-        if quant_key in (kFp8Dynamic128Sym, kFp8Dynamic64Sym):
+        # Per-group FP8 dynamic quant is supported when the dtype is FP8,
+        # the scale is per-group, and group_size evenly divides head_size
+        # (groups must align with head boundaries).
+        if (
+            quant_key.dtype == self.fp8_dtype
+            and quant_key.scale.group_shape.is_per_group()
+            and not quant_key.scale.static
+            and quant_key.symmetric
+        ):
             group_size = quant_key.scale.group_shape[1]
             return self.head_size % group_size == 0
         return False

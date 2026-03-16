@@ -18,6 +18,9 @@ from vllm.v1.kv_cache_interface import KVQuantMode
 logger = init_logger(__name__)
 is_batch_invariant = envs.VLLM_BATCH_INVARIANT
 float8_info = torch.finfo(current_platform.fp8_dtype())
+# Minimum scale to avoid division by zero in per-group FP8 quantization.
+# Matches the eps used by per_token_group_fp8_quant (fp8_utils.py).
+FP8_QUANT_EPS = 1e-10
 
 
 @triton.jit
@@ -504,7 +507,7 @@ def kernel_unified_attention_2d(
             group_abs = tl.where(combined_mask, tl.abs(original_acc), 0.0)
             group_max = tl.max(group_abs, axis=1)  # [BLOCK_M]
             group_scale = group_max / FP8_MAX
-            group_scale = tl.maximum(group_scale, 1e-12)
+            group_scale = tl.maximum(group_scale, FP8_QUANT_EPS)
             # Quantize this group from original values
             acc = tl.where(combined_mask, original_acc / group_scale[:, None], acc)
             # Store per-group scale
@@ -1022,7 +1025,7 @@ def reduce_segments(
             group_abs = tl.where(combined_mask, tl.abs(original_acc), 0.0)
             group_max = tl.max(group_abs)  # scalar (1D acc)
             group_scale = group_max / FP8_MAX
-            group_scale = tl.maximum(group_scale, 1e-12)
+            group_scale = tl.maximum(group_scale, FP8_QUANT_EPS)
             acc = tl.where(combined_mask, original_acc / group_scale, acc)
             scale_offset = (
                 query_token_idx * out_group_scale_stride_0
@@ -1265,7 +1268,7 @@ def unified_attention(
             stride_vs_slot=v_scale_cache.stride(1) if v_scale_cache is not None else 0,
             stride_vs_head=v_scale_cache.stride(2) if v_scale_cache is not None else 0,
             USE_FP8_GROUP=use_fp8_group,
-            GROUP_SIZE=group_size if use_fp8_group else 0,
+            GROUP_SIZE=group_size,
             out_group_scale_ptr=output_group_scale,
             out_group_scale_stride_0=(
                 output_group_scale.stride(0) if use_fp8_group else 0
@@ -1356,7 +1359,7 @@ def unified_attention(
             NUM_SEGMENTS_PER_SEQ=num_par_softmax_segments,
             USE_FP8=output_scale is not None,
             USE_FP8_GROUP=use_fp8_group,
-            GROUP_SIZE=group_size if use_fp8_group else 0,
+            GROUP_SIZE=group_size,
             out_group_scale_ptr=output_group_scale,
             out_group_scale_stride_0=(
                 output_group_scale.stride(0) if use_fp8_group else 0
