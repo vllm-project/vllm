@@ -394,7 +394,9 @@ class TokenizeParams:
         if max_length == 0:
             return tokens[:0]
 
-        side = self.truncation_side or getattr(tokenizer, "truncation_side", "left")
+        side = self.truncation_side or (
+            tokenizer.truncation_side if tokenizer is not None else None
+        )
         if side == "left":
             return tokens[-max_length:]
 

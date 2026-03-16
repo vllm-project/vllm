@@ -77,17 +77,11 @@ class PoolingServing:
     ) -> PoolingIOProcessor:
         raise NotImplementedError
 
-    async def _process(
+    async def __call__(
         self,
         request: AnyPoolingRequest,
         raw_request: Request | None = None,
-    ) -> PoolingServeContext:
-        """Run the full pipeline and return the populated context.
-
-        Adapter layers can call this to obtain raw
-        :class:`PoolingRequestOutput` objects without building an HTTP
-        response.
-        """
+    ) -> Response:
         model_name = self.models.model_name()
         request_id = f"{self.request_id_prefix}-{self._base_request_id(raw_request)}"
 
@@ -106,14 +100,6 @@ class PoolingServing:
         await self._prepare_generators(ctx)
         await self._collect_batch(ctx)
         await self.io_processor.post_process_online_async(ctx)
-        return ctx
-
-    async def __call__(
-        self,
-        request: AnyPoolingRequest,
-        raw_request: Request | None = None,
-    ) -> Response:
-        ctx = await self._process(request, raw_request)
         return await self._build_response(ctx)
 
     async def _prepare_generators(
