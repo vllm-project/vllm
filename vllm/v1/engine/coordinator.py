@@ -59,6 +59,9 @@ class DPCoordinator:
         self, parallel_config: ParallelConfig, enable_wave_coordination: bool = True
     ):
         dp_size = parallel_config.data_parallel_size
+        engine_count = dp_size // parallel_config.dp_per_domain
+        local_engine_count = parallel_config.data_parallel_size_local // parallel_config.dp_per_domain
+
         assert dp_size > 1, "Coordinator only used for data parallel"
 
         host = parallel_config.data_parallel_master_ip
@@ -82,7 +85,7 @@ class DPCoordinator:
             target=DPCoordinatorProc.run_coordinator,
             name="VLLM_DP_Coordinator",
             kwargs={
-                "engine_count": parallel_config.data_parallel_size,
+                "engine_count": engine_count,
                 "front_publish_address": front_publish_address,
                 "back_output_address": back_output_address,
                 "back_publish_address": back_publish_address,

@@ -176,6 +176,8 @@ class Request:
         # None entry in the queue means finished.
         self.streaming_queue: deque[StreamingUpdate | None] | None = None
 
+        self.cp_ranks: list[int] = []
+
     @classmethod
     def from_engine_core_request(
         cls,

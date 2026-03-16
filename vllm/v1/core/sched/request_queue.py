@@ -198,6 +198,176 @@ class PriorityRequestQueue(RequestQueue):
             yield heapq.heappop(heap_copy)
 
 
+class LongShortRequestQueue(RequestQueue):
+    """
+    A FCFS queue that supports skipping long requests when the limit is reached.
+    
+    This queue maintains FCFS order but allows skipping long requests when
+    the global limit of running long requests is reached. Short requests can
+    still be scheduled even if long requests are blocked.
+    
+    Args:
+        long_request_threshold: Token threshold to classify a request as long.
+            Requests with prefill_tokens >= threshold are considered long.
+        max_long_requests: Maximum number of long requests that can run
+            simultaneously.
+        get_running_long_count: Callable that returns the current count of
+            running long requests. This is called during pop_request() to
+            check if more long requests can be scheduled.
+    """
+
+    def __init__(
+        self,
+        long_request_threshold: int,
+        max_long_requests: int,
+    ) -> None:
+        if long_request_threshold <= 0:
+            raise ValueError("long_request_threshold must be positive")
+        if max_long_requests < 0:
+            raise ValueError("max_long_requests must be non-negative")
+
+        self._queue: deque[Request] = deque()
+        self.long_request_threshold = long_request_threshold
+        self.max_long_requests = max_long_requests
+        self.running_long_count = 0
+        self.has_slot_for_long_request = True
+
+    def is_long_request(self, request: Request) -> bool:
+        """Check if a request is a long request based on token threshold."""
+        num_prefill_tokens = request.num_tokens - request.num_output_tokens
+        return num_prefill_tokens >= self.long_request_threshold
+
+    def add_request(self, request: Request) -> None:
+        """Add a request to the queue according to FCFS policy."""
+        self._queue.append(request)
+
+    def pop_request(self) -> Request:
+        """
+        Pop a request from the queue, skipping long requests if limit is reached.
+        
+        Searches from _search_index to find the first schedulable request.
+        Long requests are skipped if max_long_requests limit is reached.
+        """
+        if not self._queue:
+            raise IndexError("pop from empty queue")
+
+        queue_len = len(self._queue)
+        # Search from _search_index, wrapping around if needed
+        for i in range(queue_len):
+            idx = i % queue_len
+            request = self._queue[idx]
+
+            if self.is_long_request(request):
+                # Check if we can schedule more long requests
+                print(f"running_long_count: {self.running_long_count}, max_long_requests: {self.max_long_requests}, has_slot_for_long_request: {self.has_slot_for_long_request}", flush=True)
+                if self.running_long_count >= self.max_long_requests or not self.has_slot_for_long_request:
+                    # Skip this long request, continue searching
+                    continue
+                # Can schedule this long request
+                return self._pop_at_index(idx)
+            else:
+                # Short request, can always schedule
+                return self._pop_at_index(idx)
+
+        # No schedulable request found (all are long requests and limit reached)
+        raise IndexError("no schedulable request (all long requests blocked), and it is not reachable")
+
+    def _pop_at_index(self, index: int) -> Request:
+        """
+        Pop request at the given index using rotate for efficiency.
+        
+        This is more efficient than remove() which is O(n).
+        """
+        if index == 0:
+            # Already at front, just pop
+            request = self._queue.popleft()
+            return request
+
+        # Rotate to bring target to front
+        self._queue.rotate(-index)
+        request = self._queue.popleft()
+        # Rotate back to restore relative order
+        self._queue.rotate(index - 1)
+        return request
+
+    def peek_request(self) -> Request:
+        """
+        Peek at the next schedulable request without removing it.
+        
+        Returns the first request that can be scheduled (respecting long
+        request limits), without modifying the queue.
+        """
+        if not self._queue:
+            raise IndexError("peek from empty queue")
+
+        queue_len = len(self._queue)
+        # Search from _search_index
+        for i in range(queue_len):
+            idx = i % queue_len
+            request = self._queue[idx]
+
+            if self.is_long_request(request):
+                # Check if we can schedule more long requests
+                if self.running_long_count >= self.max_long_requests or not self.has_slot_for_long_request:
+                    # Skip this long request, continue searching
+                    continue
+                # Can schedule this long request
+                return request
+            else:
+                # Short request, can always schedule
+                return request
+
+        # No schedulable request found
+        return None
+
+    def prepend_request(self, request: Request) -> None:
+        """Prepend a request to the front of the queue."""
+        self._queue.appendleft(request)
+
+    def prepend_requests(self, requests: RequestQueue) -> None:
+        """Prepend all requests from another queue to the front of this queue."""
+        # Convert to list in reverse order for prepending
+        requests_list = list(requests)
+        for request in reversed(requests_list):
+            self._queue.appendleft(request)
+
+    def remove_request(self, request: Request) -> None:
+        """Remove a specific request from the queue."""
+        try:
+            self._queue.remove(request)
+        except ValueError:
+            raise ValueError(f"Request {request.request_id} not found in queue")
+
+    def remove_requests(self, requests: Iterable[Request]) -> None:
+        """Remove multiple specific requests from the queue."""
+        requests_to_remove = set(requests)
+        filtered_requests = [req for req in self._queue if req not in requests_to_remove]
+        self._queue.clear()
+        self._queue.extend(filtered_requests)
+
+    def __bool__(self) -> bool:
+        """Check if queue has any requests."""
+        return len(self._queue) > 0
+
+    def __len__(self) -> int:
+        """Get number of requests in queue."""
+        return len(self._queue)
+
+    def __iter__(self) -> Iterator[Request]:
+        """Iterate over the queue in FCFS order."""
+        return iter(self._queue)
+
+    def __reversed__(self) -> Iterator[Request]:
+        """Iterate over the queue in reverse FCFS order."""
+        return reversed(self._queue)
+
+    def __repr__(self) -> str:
+        return (f"LongShortRequestQueue(long_request_threshold={self.long_request_threshold}, "
+                + f"max_long_requests={self.max_long_requests}, "
+                + f"running_long_count={self.running_long_count}, "
+                + f"has_slot_for_long_request={self.has_slot_for_long_request})")
+
+
 def create_request_queue(policy: SchedulingPolicy) -> RequestQueue:
     """Create request queue based on scheduling policy."""
     if policy == SchedulingPolicy.PRIORITY:

@@ -39,6 +39,7 @@ from vllm.distributed.parallel_state import (
     get_pp_group,
     get_tp_group,
     model_parallel_is_initialized,
+    get_dycp_group,
 )
 from vllm.envs import enable_envs_cache
 from vllm.logger import init_logger
@@ -60,6 +61,8 @@ from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.executor.abstract import Executor, FailureCallback
 from vllm.v1.outputs import AsyncModelRunnerOutput, DraftTokenIds, ModelRunnerOutput
 from vllm.v1.worker.worker_base import WorkerWrapperBase
+from vllm.v1.engine.utils import set_device_control_env_var
+from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
@@ -488,6 +491,263 @@ class MultiprocExecutor(Executor):
         )
 
 
+class DomainMultiprocExecutor(MultiprocExecutor):
+    def __init__(self, vllm_config: VllmConfig, monitor_workers: bool = True):
+        super().__init__(vllm_config, monitor_workers)
+
+    def _init_executor(self) -> None:
+        """
+        Create dp_per_domain * tp_per_dp workers as MultiprocExecutor
+        """
+        self._finalizer = weakref.finalize(self, self.shutdown)
+        self.is_failed = False
+        self.shutdown_event = threading.Event()
+        self.failure_callback: FailureCallback | None = None
+        """
+        AOCHEN: world_size and local_world_size is used to be per_dp_size, now is per_domain_size
+        """
+        self.world_size = self.parallel_config.world_size * self.parallel_config.dp_per_domain
+        self.local_world_size = self.parallel_config.local_world_size * self.parallel_config.dp_per_domain
+        per_dp_size = self.parallel_config.local_world_size
+
+        tp_size = self.parallel_config.tensor_parallel_size
+        pp_size = self.parallel_config.pipeline_parallel_size
+        dp_per_domain = self.parallel_config.dp_per_domain
+
+        self.output_ranks: list[int] = [i * tp_size * pp_size for i in range(dp_per_domain)]
+
+        # Set multiprocessing envs
+        set_multiprocessing_worker_envs()
+
+        # use the loopback address get_loopback_ip() for communication.
+        distributed_init_method = get_distributed_init_method(
+            get_loopback_ip(), get_open_port()
+        )
+
+        self.rpc_broadcast_mq: MessageQueue | None = None
+        scheduler_output_handle: Handle | None = None
+        # Initialize worker and set up message queues for SchedulerOutputs
+        # and ModelRunnerOutputs
+        if self.parallel_config.node_rank_within_dp == 0:
+            # For leader node within each dp rank,
+            # each dp will have its own leader multiproc executor.
+            max_chunk_bytes = envs.VLLM_MQ_MAX_CHUNK_BYTES_MB * 1024 * 1024
+            self.rpc_broadcast_mq = MessageQueue(
+                self.world_size,
+                self.local_world_size,
+                max_chunk_bytes=max_chunk_bytes,
+                connect_ip=self.parallel_config.master_addr,
+            )
+            scheduler_output_handle = self.rpc_broadcast_mq.export_handle()
+
+        # Create workers
+        context = get_mp_context()
+        shared_worker_lock = context.Lock()
+        unready_workers: list[UnreadyWorkerProcHandle] = []
+        success = False
+
+        try:
+            dp_start_rank = self.parallel_config.domain_parallel_rank * dp_per_domain
+            local_dp_start_rank = self.parallel_config.domain_parallel_rank_local * dp_per_domain
+            """
+            AOCHEN: global_start_rank = self.local_world_size * node_rank_within_domain
+            but now, doamin can't support cross multi-node, so node_rank_within_domain is always 0
+            """
+            global_start_rank = (
+                # dp_start_rank * per_dp_size
+                self.local_world_size * self.parallel_config.node_rank_within_domain
+            )
+            assert self.parallel_config.node_rank_within_domain == 0, "Note that DomainMultiprocExecutor can't support cross multi-node now"
+            # local_world_size is dp_per_domain * gpu per DP represents the number of workers per domain(EngineCore)
+            for local_rank in range(self.local_world_size):
+                global_rank = global_start_rank + local_rank
+                dp_rank = dp_start_rank + local_rank // per_dp_size
+                self.vllm_config.parallel_config.data_parallel_rank = dp_rank
+                self.vllm_config.parallel_config.data_parallel_rank_local = (
+                    local_dp_start_rank + local_rank // per_dp_size
+                )
+
+                with set_device_control_env_var(
+                    self.vllm_config, self.vllm_config.parallel_config.data_parallel_rank_local
+                ):
+                    logger.info(
+                        "Woker Rank Info: local_rank=%d, rank=%d, global_dp_rank=%d, local_dp_rank=%d, visabel device=%s",
+                        local_rank, global_rank, 
+                        self.vllm_config.parallel_config.data_parallel_rank, 
+                        self.vllm_config.parallel_config.data_parallel_rank_local,
+                        os.environ.get(current_platform.device_control_env_var, "Not Set Yet")
+                    )
+                    is_driver_worker = self._is_driver_worker(global_rank)
+                    worker_proc = WorkerProc.make_worker_process(
+                        vllm_config=self.vllm_config,
+                        local_rank=local_rank,
+                        rank=global_rank,
+                        distributed_init_method=distributed_init_method,
+                        input_shm_handle=scheduler_output_handle,
+                        shared_worker_lock=shared_worker_lock,
+                        is_driver_worker=is_driver_worker,
+                    )
+                unready_workers.append(worker_proc)
+
+            # Workers must be created before wait_for_ready to avoid
+            # deadlock, since worker.init_device() does a device sync.
+
+            # Wait for all local workers to be ready.
+            self.workers = WorkerProc.wait_for_ready(unready_workers)
+
+            # Start background thread to monitor worker health if not in headless mode.
+            if self.monitor_workers:
+                self.start_worker_monitor()
+
+            self.response_mqs = []
+            # Only leader node have remote response mqs
+            if self.parallel_config.node_rank_within_dp == 0:
+                for rank in range(self.world_size):
+                    if rank < self.local_world_size:
+                        local_message_queue = self.workers[rank].worker_response_mq
+                        assert local_message_queue is not None
+                        self.response_mqs.append(local_message_queue)
+                    else:
+                        remote_message_queue = self.workers[0].peer_worker_response_mqs[
+                            rank
+                        ]
+                        assert remote_message_queue is not None
+                        self.response_mqs.append(remote_message_queue)
+
+            # Ensure message queues are ready. Will deadlock if re-ordered
+            # Must be kept consistent with the WorkerProc.
+
+            # Wait for all input mqs to be ready.
+            if self.rpc_broadcast_mq is not None:
+                self.rpc_broadcast_mq.wait_until_ready()
+            # Wait for all remote response mqs to be ready.
+            for response_mq in self.response_mqs:
+                response_mq.wait_until_ready()
+
+            self.futures_queue = deque[tuple[FutureWrapper, Callable]]()
+
+            self._post_init_executor()
+
+            success = True
+        finally:
+            if not success:
+                # Clean up the worker procs if there was a failure.
+                # Close death_writers first to signal workers to exit
+                for uw in unready_workers:
+                    if uw.death_writer is not None:
+                        uw.death_writer.close()
+                self._ensure_worker_termination([uw.proc for uw in unready_workers])
+
+        self.output_rank = self._get_output_rank()
+
+    def collective_rpc(  # type: ignore[override]
+        self,
+        method: str | Callable,
+        timeout: float | None = None,
+        args: tuple = (),
+        kwargs: dict | None = None,
+        non_block: bool = False,
+        unique_reply_rank: int | None = None,
+        kv_output_aggregator: KVOutputAggregator | None = None,
+    ) -> Any:
+        """Returns single result if unique_reply_rank and/or kv_output_aggregator
+        is provided, otherwise list."""
+        assert self.rpc_broadcast_mq is not None, (
+            "collective_rpc should not be called on follower node"
+        )
+        if self.is_failed:
+            raise RuntimeError("Executor failed.")
+
+        deadline = None if timeout is None else time.monotonic() + timeout
+        kwargs = kwargs or {}
+
+        if kv_output_aggregator is not None:
+            output_rank = None
+            if method in ("execute_model", "sample_tokens"):
+                aggregate: Callable[[Any], Any] = partial(
+                    kv_output_aggregator.aggregate_domain, output_rank=unique_reply_rank or 0
+                )
+            else:
+                aggregate: Callable[[Any], Any] = partial(
+                    kv_output_aggregator.aggregate, output_rank=unique_reply_rank or 0
+                )
+        else:
+            output_rank = unique_reply_rank
+            aggregate = lambda x: x
+
+        if isinstance(method, str):
+            send_method = method
+        else:
+            send_method = cloudpickle.dumps(method, protocol=pickle.HIGHEST_PROTOCOL)
+        self.rpc_broadcast_mq.enqueue((send_method, args, kwargs, output_rank))
+
+        response_mqs: Sequence[MessageQueue] = self.response_mqs
+        if output_rank is not None:
+            response_mqs = (response_mqs[output_rank],)
+
+        shutdown_event = self.shutdown_event
+
+        def get_response():
+            responses = []
+            for mq in response_mqs:
+                dequeue_timeout = (
+                    None if deadline is None else (deadline - time.monotonic())
+                )
+                try:
+                    status, result = mq.dequeue(
+                        timeout=dequeue_timeout, cancel=shutdown_event
+                    )
+                except TimeoutError as e:
+                    raise TimeoutError(f"RPC call to {method} timed out.") from e
+                if status != WorkerProc.ResponseStatus.SUCCESS:
+                    raise RuntimeError(
+                        f"Worker failed with error '{result}', please check the"
+                        " stack trace above for the root cause"
+                    )
+                responses.append(result)
+
+            if method in ("execute_model", "sample_tokens"):
+                return [responses[idx] for idx in self.output_ranks]
+            return responses[0] if output_rank is not None else responses
+
+        if non_block:
+            future = FutureWrapper(self.futures_queue, aggregate=aggregate)
+            self.futures_queue.appendleft((future, get_response))
+            return future
+
+        # First drain any pending futures in the queue.
+        while self.futures_queue:
+            future, get_fut_response = self.futures_queue.pop()
+            future.wait_for_response(get_fut_response)
+
+        return aggregate(get_response())
+
+    def execute_model(  # type: ignore[override]
+        self, scheduler_outputs: list[SchedulerOutput], non_block: bool = False
+    ) -> Future[list[ModelRunnerOutput | None]]:
+        return self.collective_rpc(
+            "execute_model",
+            args=(scheduler_outputs,),
+            # unique_reply_rank=self.output_rank,
+            non_block=non_block,
+            timeout=envs.VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS,
+            kv_output_aggregator=self.kv_output_aggregator,
+        )
+
+    def sample_tokens(  # type: ignore[override]
+        self, grammar_output: GrammarOutput | None, non_block: bool = False
+    ) -> list[ModelRunnerOutput] | Future[list[ModelRunnerOutput]]:
+
+        return self.collective_rpc(
+            "sample_tokens",
+            args=(grammar_output,),
+            # unique_reply_rank=self.output_rank,
+            non_block=non_block,
+            timeout=envs.VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS,
+            kv_output_aggregator=self.kv_output_aggregator,
+        )
+
+
 @dataclass
 class UnreadyWorkerProcHandle:
     """WorkerProcess handle before READY."""
@@ -538,8 +798,12 @@ class WorkerProc:
     ) -> None:
         if vllm_config.parallel_config.nnodes_within_dp == 1:
             # Initialize MessageQueue for receiving SchedulerOutput
+            """
+            (AOCHEN): Use self.worker.rank is unreasonable.
+            """
             self.rpc_broadcast_mq = MessageQueue.create_from_handle(
-                input_shm_handle, self.worker.rank
+                # input_shm_handle, self.worker.rank
+                input_shm_handle, self.rank
             )
 
             # Initializes a message queue for sending the model output
@@ -580,7 +844,9 @@ class WorkerProc:
         wrapper = WorkerWrapperBase(rpc_rank=local_rank, global_rank=rank)
         # TODO: move `init_worker` to executor level as a collective rpc call
         all_kwargs: list[dict] = [
-            {} for _ in range(vllm_config.parallel_config.world_size)
+            {} for _ in range(
+                vllm_config.parallel_config.world_size * vllm_config.parallel_config.dp_per_domain
+            )
         ]
         all_kwargs[local_rank] = {
             "vllm_config": vllm_config,
@@ -958,7 +1224,11 @@ class WorkerProc:
         tp_rank = get_tp_group().rank_in_group
         dcp_size = get_dcp_group().world_size
         dcp_rank = get_dcp_group().rank_in_group
+        dp_per_domain = get_dycp_group().world_size
+        domain_rank = dp_rank // dp_per_domain
         process_name = "Worker"
+        if dp_per_domain > 1:
+            process_name += f"_Domain{domain_rank}"
         if dp_size > 1:
             process_name += f"_DP{dp_rank}"
         if pp_size > 1:
