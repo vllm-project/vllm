@@ -53,3 +53,49 @@ Models of any architecture can be converted into embedding models using `--conve
 \* Feature support is the same as that of the original model.
 
 If your model is not in the above list, we will try to automatically convert the model using [as_embedding_model][vllm.model_executor.models.adapters.as_embedding_model].
+
+## Offline Inference
+
+### Pooling Parameters
+
+The following [pooling parameters][vllm.PoolingParams] are supported.
+
+```python
+--8<-- "vllm/pooling_params.py:common-pooling-params"
+--8<-- "vllm/pooling_params.py:embed-pooling-params"
+```
+
+### `LLM.encode`
+
+The [encode][vllm.LLM.encode] method is available to all pooling models in vLLM.
+
+Set `pooling_task="token_embed"` when using `LLM.encode` for token embedding Models:
+
+```python
+from vllm import LLM
+
+llm = LLM(model="answerdotai/answerai-colbert-small-v1", runner="pooling")
+(output,) = llm.encode("Hello, my name is", pooling_task="token_embed")
+
+data = output.outputs.data
+print(f"Data: {data!r}")
+```
+
+### `LLM.score`
+
+The [score][vllm.LLM.score] method outputs similarity scores between sentence pairs.
+
+All models that support token embedding task also support using the score API to compute similarity scores by calculating the late interaction of two input prompts.
+
+```python
+from vllm import LLM
+
+llm = LLM(model="answerdotai/answerai-colbert-small-v1", runner="pooling")
+(output,) = llm.score(
+    "What is the capital of France?",
+    "The capital of Brazil is Brasilia.",
+)
+
+score = output.outputs.score
+print(f"Score: {score}")
+```

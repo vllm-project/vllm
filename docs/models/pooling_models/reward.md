@@ -49,3 +49,60 @@ The process reward models used for evaluating intermediate steps are crucial to 
 !!! important
     For process-supervised reward models such as `peiyi9979/math-shepherd-mistral-7b-prm`, the pooling config should be set explicitly,
     e.g.: `--pooler-config '{"pooling_type": "STEP", "step_tag_id": 123, "returned_token_ids": [456, 789]}'`.
+
+## Offline Inference
+
+### Pooling Parameters
+
+The following [pooling parameters][vllm.PoolingParams] are supported.
+
+```python
+--8<-- "vllm/pooling_params.py:common-pooling-params"
+--8<-- "vllm/pooling_params.py:classify-pooling-params"
+```
+
+### `LLM.encode`
+
+The [encode][vllm.LLM.encode] method is available to all pooling models in vLLM.
+
+- (Sequence) (Outcome) Reward Models
+
+Set `pooling_task="classify"` when using `LLM.encode` for (sequence) (outcome) reward models:
+
+```python
+from vllm import LLM
+
+llm = LLM(model="Skywork/Skywork-Reward-V2-Qwen3-0.6B", runner="pooling")
+(output,) = llm.encode("Hello, my name is", pooling_task="classify")
+
+data = output.outputs.data
+print(f"Data: {data!r}")
+```
+
+- Token (Outcome) Reward Models
+
+Set `pooling_task="token_classify"` when using `LLM.encode` for token (outcome) reward models:
+
+```python
+from vllm import LLM
+
+llm = LLM(model="internlm/internlm2-1_8b-reward", runner="pooling", trust_remote_code=True)
+(output,) = llm.encode("Hello, my name is", pooling_task="token_classify")
+
+data = output.outputs.data
+print(f"Data: {data!r}")
+```
+
+- Process Reward Model
+
+Set `pooling_task="token_classify"` when using `LLM.encode` for token (outcome) reward models:
+
+```python
+from vllm import LLM
+
+llm = LLM(model="Qwen/Qwen2.5-Math-PRM-7B", runner="pooling")
+(output,) = llm.encode("Hello, my name is<extra_0><extra_0><extra_0>", pooling_task="token_classify")
+
+data = output.outputs.data
+print(f"Data: {data!r}")
+```

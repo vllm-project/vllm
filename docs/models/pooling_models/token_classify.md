@@ -39,3 +39,30 @@ For details on reward models, see [Reward Models](reward.md).
 
 If your model is not in the above list, we will try to automatically convert the model using
 [as_seq_cls_model][vllm.model_executor.models.adapters.as_seq_cls_model]. By default, the class probabilities are extracted from the softmaxed hidden state corresponding to the last token.
+
+## Offline Inference
+
+### Pooling Parameters
+
+The following [pooling parameters][vllm.PoolingParams] are supported.
+
+```python
+--8<-- "vllm/pooling_params.py:common-pooling-params"
+--8<-- "vllm/pooling_params.py:classify-pooling-params"
+```
+
+### `LLM.encode`
+
+The [encode][vllm.LLM.encode] method is available to all pooling models in vLLM.
+
+Set `pooling_task="token_classify"` when using `LLM.encode` for token classification Models:
+
+```python
+from vllm import LLM
+
+llm = LLM(model="boltuix/NeuroBERT-NER", runner="pooling")
+(output,) = llm.encode("Hello, my name is", pooling_task="token_classify")
+
+data = output.outputs.data
+print(f"Data: {data!r}")
+```

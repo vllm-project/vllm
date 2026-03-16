@@ -4,7 +4,7 @@ The Pooling API includes the offline `LLM.encode` API and the online `/pooling` 
 
 ## Offline Inference
 
-The [encode][vllm.LLM.encode] method is available to all pooling models in vLLM.
+The [LLM.encode][vllm.LLM.encode] method is available to all pooling models in vLLM.
 
 !!! note
     Please use one of the more specific methods or set the task directly when using `LLM.encode`:

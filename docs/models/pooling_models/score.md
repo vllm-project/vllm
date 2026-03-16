@@ -89,3 +89,33 @@ All models that support token embedding task also support using the score API to
 ### bi-encoder
 
 All models that support embedding task also support using the score API to compute similarity scores by calculating the cosine similarity of two input prompt's embeddings. See [this page](embed.md) for more information about embedding models.
+
+## Offline Inference
+
+### Pooling Parameters
+
+The following [pooling parameters][vllm.PoolingParams] are only supported by cross-encoder models and do not work for late-interaction and bi-encoder models.
+
+```python
+--8<-- "vllm/pooling_params.py:common-pooling-params"
+--8<-- "vllm/pooling_params.py:classify-pooling-params"
+```
+
+### `LLM.score`
+
+The [score][vllm.LLM.score] method outputs similarity scores between sentence pairs.
+
+```python
+from vllm import LLM
+
+llm = LLM(model="BAAI/bge-reranker-v2-m3", runner="pooling")
+(output,) = llm.score(
+    "What is the capital of France?",
+    "The capital of Brazil is Brasilia.",
+)
+
+score = output.outputs.score
+print(f"Score: {score}")
+```
+
+A code example can be found here: [examples/basic/offline_inference/score.py](../../../examples/basic/offline_inference/score.py)

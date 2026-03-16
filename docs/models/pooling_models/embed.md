@@ -84,3 +84,64 @@ of the whole prompt are extracted from the normalized hidden state corresponding
 
 !!! note
     Although vLLM supports automatically converting models of any architecture into embedding models via --convert embed, to get the best results, you should use pooling models that are specifically trained as such.
+
+## Offline Inference
+
+### Pooling Parameters
+
+The following [pooling parameters][vllm.PoolingParams] are supported.
+
+```python
+--8<-- "vllm/pooling_params.py:common-pooling-params"
+--8<-- "vllm/pooling_params.py:embed-pooling-params"
+```
+
+### `LLM.embed`
+
+The [embed][vllm.LLM.embed] method outputs an embedding vector for each prompt.
+
+```python
+from vllm import LLM
+
+llm = LLM(model="intfloat/e5-small", runner="pooling")
+(output,) = llm.embed("Hello, my name is")
+
+embeds = output.outputs.embedding
+print(f"Embeddings: {embeds!r} (size={len(embeds)})")
+```
+
+A code example can be found here: [examples/offline_inference/basic/embed.py](../../examples/offline_inference/basic/embed.py)
+
+### `LLM.encode`
+
+The [encode][vllm.LLM.encode] method is available to all pooling models in vLLM.
+
+Set `pooling_task="embed"` when using `LLM.encode` for embedding Models:
+
+```python
+from vllm import LLM
+
+llm = LLM(model="intfloat/e5-small", runner="pooling")
+(output,) = llm.encode("Hello, my name is", pooling_task="embed")
+
+data = output.outputs.data
+print(f"Data: {data!r}")
+```
+
+### `LLM.score`
+
+The [score][vllm.LLM.score] method outputs similarity scores between sentence pairs.
+
+All models that support embedding task also support using the score API to compute similarity scores by calculating the cosine similarity of two input prompt's embeddings.
+```python
+from vllm import LLM
+
+llm = LLM(model="intfloat/e5-small", runner="pooling")
+(output,) = llm.score(
+    "What is the capital of France?",
+    "The capital of Brazil is Brasilia.",
+)
+
+score = output.outputs.score
+print(f"Score: {score}")
+```

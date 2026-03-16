@@ -16,7 +16,7 @@ The most fundamental application of classification models is to categorize input
 
 ### cross-encoder models
 
-Cross-encoder and reranker models are a subset of classification models that accept two prompts as input and output num_labels equal to 1. For more information on cross-encoder models, see [cross-encoder models](score.md#cross-encoder-models).
+Cross-encoder and reranker models are a subset of classification models that accept two prompts as input and output num_labels equal to 1. For more information on cross-encoder models, , please refer to [this page](score.md#cross-encoder-models).
 
 ### Reward Models
 
@@ -51,3 +51,47 @@ For more information, see [Reward Models](reward.md).
 
 If your model is not in the above list, we will try to automatically convert the model using
 [as_seq_cls_model][vllm.model_executor.models.adapters.as_seq_cls_model]. By default, the class probabilities are extracted from the softmaxed hidden state corresponding to the last token.
+
+
+## Offline Inference
+
+### Pooling Parameters
+
+The following [pooling parameters][vllm.PoolingParams] are supported.
+
+```python
+--8<-- "vllm/pooling_params.py:common-pooling-params"
+--8<-- "vllm/pooling_params.py:classify-pooling-params"
+```
+
+### `LLM.classify`
+
+The [classify][vllm.LLM.classify] method outputs a probability vector for each prompt.
+
+```python
+from vllm import LLM
+
+llm = LLM(model="jason9693/Qwen2.5-1.5B-apeach", runner="pooling")
+(output,) = llm.classify("Hello, my name is")
+
+probs = output.outputs.probs
+print(f"Class Probabilities: {probs!r} (size={len(probs)})")
+```
+
+A code example can be found here: [examples/offline_inference/basic/classify.py](../../../examples/offline_inference/basic/classify.py)
+
+### `LLM.encode`
+
+The [encode][vllm.LLM.encode] method is available to all pooling models in vLLM.
+
+Set `pooling_task="classify"` when using `LLM.encode` for classification Models:
+
+```python
+from vllm import LLM
+
+llm = LLM(model="jason9693/Qwen2.5-1.5B-apeach", runner="pooling")
+(output,) = llm.encode("Hello, my name is", pooling_task="classify")
+
+data = output.outputs.data
+print(f"Data: {data!r}")
+```
