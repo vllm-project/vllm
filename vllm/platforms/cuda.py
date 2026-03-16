@@ -22,6 +22,7 @@ from vllm.utils.import_utils import import_pynvml
 from vllm.utils.torch_utils import cuda_device_count_stateless
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
+from .. import envs
 from .interface import DeviceCapability, Platform, PlatformEnum
 
 if TYPE_CHECKING:
@@ -515,8 +516,12 @@ class CudaPlatformBase(Platform):
         using_inductor = cc.backend == "inductor" and cc.mode != CompilationMode.NONE
         default = ["native"] if using_inductor else ["vllm_c", "native"]
 
-        # Use oink if available for rms_norm
-        rms_norm = ["oink"] + default
+        # Use oink if enabled for rms_norm
+        # TODO(Laurawly/luka): remove this env var,
+        #  users can just use IR op priority directly
+        rms_norm = default
+        if envs.VLLM_USE_OINK_OPS:
+            rms_norm = ["oink"] + default
 
         return IrOpPriorityConfig.with_default(default, rms_norm=rms_norm)
 

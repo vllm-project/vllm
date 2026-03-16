@@ -92,9 +92,11 @@ def enable_norm_fusion(cfg: "VllmConfig") -> bool:
     """Enable if either RMS norm or quant FP8 custom op is active;
     otherwise Inductor handles fusion."""
 
-    return cfg.compilation_config.is_custom_op_enabled(
-        "rms_norm"
-    ) or cfg.compilation_config.is_custom_op_enabled("quant_fp8")
+    return (
+        cfg.compilation_config.is_custom_op_enabled("rms_norm")
+        or cfg.compilation_config.is_custom_op_enabled("quant_fp8")
+        or cfg.kernel_config.ir_op_priority.rms_norm[0] != "native"
+    )
 
 
 def enable_act_fusion(cfg: "VllmConfig") -> bool:
@@ -830,6 +832,11 @@ class VllmConfig:
             else:
                 self.compilation_config.custom_ops.append("all")
 
+        # This populates IR op priorities,
+        # must happen after compilation mode and backend are decided,
+        # but before fusion defaults are applied as those may depend on op priority.
+        self.kernel_config.set_platform_defaults(self)
+
         default_config = OPTIMIZATION_LEVEL_TO_CONFIG[self.optimization_level]
         self._apply_optimization_level_defaults(default_config)
         if self.kernel_config.enable_flashinfer_autotune is None:
@@ -883,12 +890,6 @@ class VllmConfig:
                     )
                     self.compilation_config.pass_config.enable_sp = False
                     self.compilation_config.pass_config.fuse_gemm_comms = False
-
-        # This populates IR op priorities,
-        # needs to happen after compilation mode and backend are decided.
-        # TODO(luka): it's hard to figure out where to put this because it shouldn't
-        #  affect any of the passes or anything else - a great problem to have :)
-        self.kernel_config.set_platform_defaults(self)
 
         from vllm.utils.torch_utils import HAS_OPAQUE_TYPE
 
