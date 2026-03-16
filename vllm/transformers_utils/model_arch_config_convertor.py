@@ -1,12 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Iterator
-from contextlib import contextmanager
 from typing import final
 
 import torch
-from huggingface_hub import constants
 from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
 from transformers import PretrainedConfig
 
@@ -23,22 +20,6 @@ from vllm.transformers_utils.config import (
 from vllm.utils.torch_utils import common_broadcastable_dtype
 
 logger = init_logger(__name__)
-
-
-@contextmanager
-def _maybe_patch_hf_hub_constants(config_format: ConfigFormat) -> Iterator[None]:
-    if config_format == "mistral":
-        hf_safetensors_single_file = constants.SAFETENSORS_SINGLE_FILE
-        hf_safetensors_index_file = constants.SAFETENSORS_INDEX_FILE
-        constants.SAFETENSORS_SINGLE_FILE = "consolidated.safetensors"
-        constants.SAFETENSORS_INDEX_FILE = "consolidated.safetensors.index.json"
-        try:
-            yield
-        finally:
-            constants.SAFETENSORS_SINGLE_FILE = hf_safetensors_single_file
-            constants.SAFETENSORS_INDEX_FILE = hf_safetensors_index_file
-    else:
-        yield
 
 
 class ModelArchConfigConvertorBase:
@@ -164,8 +145,7 @@ class ModelArchConfigConvertorBase:
 
         # Try to read the dtype of the weights if they are in safetensors format
         if config_dtype is None:
-            with _maybe_patch_hf_hub_constants(config_format):
-                param_mt = get_safetensors_params_metadata(model_id, revision=revision)
+            param_mt = get_safetensors_params_metadata(model_id, revision=revision)
 
             if param_mt:
                 param_dtypes: set[torch.dtype] = {
