@@ -1237,6 +1237,7 @@ class EngineArgs:
             title="KernelConfig",
             description=KernelConfig.__doc__,
         )
+        kernel_group.add_argument("--ir-op-priority", **kernel_kwargs["ir_op_priority"])
         kernel_group.add_argument(
             "--enable-flashinfer-autotune",
             **kernel_kwargs["enable_flashinfer_autotune"],

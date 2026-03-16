@@ -1624,7 +1624,8 @@ class VllmConfig:
             f"enable_prefix_caching={self.cache_config.enable_prefix_caching}, "
             f"enable_chunked_prefill={self.scheduler_config.enable_chunked_prefill}, "  # noqa
             f"pooler_config={self.model_config.pooler_config!r}, "
-            f"compilation_config={self.compilation_config!r}"
+            f"compilation_config={self.compilation_config!r}, "
+            f"kernel_config={self.kernel_config!r}"
         )
 
     def validate_block_size(self) -> None:

@@ -6,6 +6,7 @@ import os
 from dataclasses import MISSING, Field, asdict, dataclass, field
 from unittest.mock import patch
 
+import pydantic
 import pytest
 from pydantic import ValidationError
 
@@ -1163,3 +1164,21 @@ def test_ir_op_priority_default():
     assert IrOpPriorityConfig.with_default(
         ["vllm_c", "native"], rms_norm=["oink", "native"]
     ) == IrOpPriorityConfig(rms_norm=["oink", "native"])
+
+
+def test_ir_op_priority_str():
+    """Test that passing a comma-delimited string works"""
+    from vllm.config.kernel import IrOpPriorityConfig
+
+    priority_config = IrOpPriorityConfig(rms_norm="vllm_c")
+    assert priority_config.rms_norm == ["vllm_c"]
+
+    priority_config = IrOpPriorityConfig(rms_norm="vllm_c,native")
+    assert priority_config.rms_norm == ["vllm_c", "native"]
+
+    priority_config = IrOpPriorityConfig(rms_norm=" native, vllm_c ")
+    assert priority_config.rms_norm == ["native", "vllm_c"]
+
+    with pytest.raises(pydantic.ValidationError):
+        # must be list of only strings
+        priority_config = IrOpPriorityConfig(rms_norm=["vllm_c", 4, "native"])
