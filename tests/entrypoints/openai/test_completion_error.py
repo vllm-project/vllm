@@ -13,6 +13,7 @@ from vllm.entrypoints.openai.completion.serving import OpenAIServingCompletion
 from vllm.entrypoints.openai.engine.protocol import GenerationError
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+from vllm.entrypoints.serve.render.serving import OpenAIServingRender
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.renderers.hf import HfRenderer
 from vllm.tokenizers.registry import tokenizer_args_from_config
@@ -59,8 +60,14 @@ class MockModelConfig:
 
 
 @dataclass
+class MockParallelConfig:
+    _api_process_rank: int = 0
+
+
+@dataclass
 class MockVllmConfig:
     model_config: MockModelConfig
+    parallel_config: MockParallelConfig
 
 
 def _build_serving_completion(engine: AsyncLLM) -> OpenAIServingCompletion:
@@ -68,9 +75,19 @@ def _build_serving_completion(engine: AsyncLLM) -> OpenAIServingCompletion:
         engine_client=engine,
         base_model_paths=BASE_MODEL_PATHS,
     )
+    serving_render = OpenAIServingRender(
+        model_config=engine.model_config,
+        renderer=engine.renderer,
+        io_processor=engine.io_processor,
+        model_registry=models.registry,
+        request_logger=None,
+        chat_template=None,
+        chat_template_content_format="auto",
+    )
     return OpenAIServingCompletion(
         engine,
         models,
+        openai_serving_render=serving_render,
         request_logger=None,
     )
 
@@ -79,7 +96,7 @@ def _build_renderer(model_config: MockModelConfig):
     _, tokenizer_name, _, kwargs = tokenizer_args_from_config(model_config)
 
     return HfRenderer.from_config(
-        MockVllmConfig(model_config),
+        MockVllmConfig(model_config, parallel_config=MockParallelConfig()),
         tokenizer_kwargs={**kwargs, "tokenizer_name": tokenizer_name},
     )
 

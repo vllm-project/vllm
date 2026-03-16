@@ -12,6 +12,7 @@ tp_configs=(
   "GPU_MEMORY_UTILIZATION=0.8 MODEL_NAMES=deepseek-ai/deepseek-vl2-tiny" # MLA case
   "GPU_MEMORY_UTILIZATION=0.8 PREFILLER_TP_SIZE=1 DECODER_TP_SIZE=2 MODEL_NAMES=deepseek-ai/deepseek-vl2-tiny"
   "GPU_MEMORY_UTILIZATION=0.8 PREFILLER_TP_SIZE=2 DECODER_TP_SIZE=1 MODEL_NAMES=deepseek-ai/deepseek-vl2-tiny"
+  "GPU_MEMORY_UTILIZATION=0.8 MODEL_NAMES=google/gemma-3-4b-it VLLM_SERVE_EXTRA_ARGS=--max-model-len,8192" # SW model
 )
 dp_ep_configs=(
 "DP_EP=1 GPU_MEMORY_UTILIZATION=0.8 PREFILLER_TP_SIZE=1 DECODER_TP_SIZE=2 MODEL_NAMES=deepseek-ai/deepseek-vl2-tiny" # MLA+P-TP1, D-DPEP=2 (TP=1)
@@ -24,6 +25,14 @@ if [[ -n "${DP_EP:-}" ]]; then
   echo "DP_EP is set, using dp_ep_configs"
 else
   configs=("${tp_configs[@]}")
+fi
+
+if [[ -n "${ENABLE_HMA_FLAG:-}" ]]; then
+  # Append ENABLE_HMA_FLAG=1 to each config in the selected array
+  echo "ENABLE_HMA_FLAG is set, appending ENABLE_HMA_FLAG=1 to each config"
+  for i in "${!configs[@]}"; do
+    configs[$i]="ENABLE_HMA_FLAG=1 ${configs[$i]}"
+  done
 fi
 
 run_tests() {
@@ -47,24 +56,27 @@ run_tests() {
   echo "✅ All ${label} tests passed!"
 }
 
-# Run tests
+# Set backend
+label="default backend"
+cmdline_args=""
 if [[ -n "${ROCM_ATTN:-}" ]]; then
   echo "ROCM_ATTN is set, running with --attention-backend ROCM_ATTN"
-  run_tests "ROCM_ATTN backend" "--attention-backend ROCM_ATTN"
+  label="ROCM_ATTN backend"
+  cmdline_args=" --attention-backend ROCM_ATTN "
+elif [[ -n "${FLASHINFER:-}" ]]; then
+  echo "FLASHINFER is set, running with --attention-backend FLASHINFER"
+  label="FLASHINFER backend"
+  cmdline_args=" --attention-backend FLASHINFER "
 else
-  run_tests "default backend" ""
-fi
-
-# Check if FLASHINFER is set (non-empty)
-if [[ -n "${FLASHINFER:-}" ]]; then
-  echo "FLASHINFER is set, rerunning with --attention-backend FLASHINFER"
-  run_tests "FLASHINFER backend" "--attention-backend FLASHINFER"
-else
-  echo "FLASHINFER not set, skipping FLASHINFER runs."
+  echo "running with default attention backend"
 fi
 
 # Check if cross-layers is enabled (non-empty)
 if [[ -n "${CROSS_LAYERS_BLOCKS:-}" ]]; then
-  echo "CROSS_LAYERS_BLOCKS is set, rerunning with --enable-cross-layers"
-  run_tests "default backend" "--enable-cross-layers"
+  echo "CROSS_LAYERS_BLOCKS is set, running with --enable-cross-layers"
+  label+=" - CROSS_LAYERS_BLOCKS enabled"
+  cmdline_args+=" --enable-cross-layers "
 fi
+
+# Run tests
+run_tests "${label}" "${cmdline_args}"
