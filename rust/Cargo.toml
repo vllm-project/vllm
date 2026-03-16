@@ -1,5 +1,5 @@
 [workspace]
-members = ["src/chat", "src/engine-core-client", "src/llm"]
+members = ["src/chat", "src/engine-core-client", "src/llm", "src/openai-server"]
 resolver = "3"
 
 [workspace.package]
@@ -8,6 +8,7 @@ edition = "2024"
 
 [workspace.dependencies]
 anyhow = "1.0.100"
+axum = "0.8.8"
 bytes = "1.11.1"
 clap = { version = "4.5.38", features = ["derive"] }
 enum-as-inner = "0.7.0"
@@ -15,6 +16,7 @@ futures = "0.3.31"
 futures-async-stream = "0.2.13"
 hf-hub = { version = "0.5.0", features = ["tokio"] }
 hex = "0.4.3"
+openai-protocol = { version = "1.4.0", features = ["axum"] }
 smg-tokenizer = { package = "llm-tokenizer", version = "1.3.0" }
 parking_lot = "0.12.5"
 rmp-serde = "1.3.1"
@@ -27,8 +29,10 @@ serde_tuple = "1.1.3"
 tempfile = "3.23.0"
 thiserror = "2.0.16"
 thiserror-ext = "0.3.0"
+tower = { version = "0.5.3", features = ["util"] }
 tokio = { version = "1.47.1", features = [
     "macros",
+    "net",
     "rt-multi-thread",
     "sync",
     "time",
