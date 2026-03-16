@@ -579,8 +579,11 @@ class NvmlCudaPlatform(CudaPlatformBase):
 
     @classmethod
     def _get_physical_device_name(cls, device_id: int = 0) -> str:
-        handle = pynvml.nvmlDeviceGetHandleByIndex(device_id)
-        return pynvml.nvmlDeviceGetName(handle)
+        try:
+            handle = pynvml.nvmlDeviceGetHandleByIndex(device_id)
+            return pynvml.nvmlDeviceGetName(handle)
+        except pynvml.NVMLError:
+            return f"GPU{device_id}(unavailable)"
 
     @classmethod
     @with_nvml_context
