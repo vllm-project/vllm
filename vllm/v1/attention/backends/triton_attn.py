@@ -350,7 +350,11 @@ class TritonAttentionBackend(AttentionBackend):
 
     @classmethod
     def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
-        return True
+        # Triton 3.3+ dropped official support for SM < 80 (Volta/Turing).
+        # On these GPUs, Triton attention kernels may hang or run extremely
+        # slowly (see https://github.com/vllm-project/vllm/issues/36357).
+        # Fall back to TORCH_SDPA on SM < 80 GPUs (e.g. V100, RTX 2080Ti).
+        return capability >= DeviceCapability(8, 0)
 
 
 class TritonAttentionImpl(AttentionImpl):
