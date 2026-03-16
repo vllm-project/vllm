@@ -81,12 +81,10 @@ class Hermes2ProToolParser(ToolParser):
         # get their own entries.
         cls = Hermes2ProToolParser
         tok_key = id(self.model_tokenizer)
-        if not hasattr(cls, "_token_cache"):
+        if not hasattr(cls, "_token_cache") or tok_key not in cls._token_cache:
             with _hermes_cache_lock:
                 if not hasattr(cls, "_token_cache"):
                     cls._token_cache = {}  # dict[int, dict]
-        if tok_key not in cls._token_cache:
-            with _hermes_cache_lock:
                 if tok_key not in cls._token_cache:
                     # Use a private copy so encode() never touches the
                     # shared tokenizer's Rust RefCell state.
