@@ -27,6 +27,7 @@ from vllm.model_executor.layers.quantization.quark.schemes import (
     QuarkOCP_MX,
     QuarkScheme,
     QuarkW4A8_MXFP4_FP8,
+    QuarkW4A16_MXFP4_A16,
     QuarkW8A8Fp8,
     QuarkW8A8Int8,
 )
@@ -376,6 +377,38 @@ class QuarkConfig(QuantizationConfig):
 
         return is_weight_mxfp4 and is_input_fp8
 
+    def _is_w4a16_mxfp4_a16(
+        self,
+        weight_quant: dict[str, Any] | None,
+        input_quant: dict[str, Any] | None,
+    ) -> bool:
+        """W4A16: MXFP4 weights, FP16/BF16 activations (no activation quant)."""
+        if weight_quant is None:
+            return False
+
+        is_weight_mxfp4 = (
+            weight_quant.get("dtype") == "fp4"
+            and weight_quant.get("qscheme") == "per_group"
+            and weight_quant.get("group_size") == 32
+            and weight_quant.get("scale_format") == "e8m0"
+            and not weight_quant.get("is_dynamic")
+        )
+
+        # A16: no input quantization, or input is fp16/bf16 (no quant)
+        if input_quant is None or not input_quant:
+            is_a16 = True
+        else:
+            dtype = input_quant.get("dtype")
+            is_a16 = dtype in (
+                "fp16",
+                "bfloat16",
+                "bf16",
+                "float16",
+                None,
+            )
+
+        return is_weight_mxfp4 and is_a16
+
     def _is_w_ocp_mx_a_x(
         self, weight_quant: dict[str, Any] | None, input_quant: dict[str, Any] | None
     ) -> bool:
@@ -536,6 +569,12 @@ class QuarkConfig(QuantizationConfig):
             )
             if is_w4a8_supported:
                 return QuarkW4A8_MXFP4_FP8(weight_config, input_config)
+        elif self._is_w4a16_mxfp4_a16(weight_config, input_config):
+            is_w4a16_supported = self._check_scheme_supported(
+                QuarkW4A16_MXFP4_A16.get_min_capability(), error=False
+            )
+            if is_w4a16_supported:
+                return QuarkW4A16_MXFP4_A16(weight_config, input_config)
         elif self._is_w_ocp_mx_a_x(weight_config, input_config):
             return QuarkOCP_MX(
                 weight_config, input_config, dynamic_mxfp4_quant=dynamic_mxfp4_quant

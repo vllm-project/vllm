@@ -4,6 +4,7 @@
 from .quark_ocp_mx import QuarkOCP_MX
 from .quark_scheme import QuarkScheme
 from .quark_w4a8_mxfp4_fp8 import QuarkW4A8_MXFP4_FP8
+from .quark_w4a16_mxfp4_a16 import QuarkW4A16_MXFP4_A16
 from .quark_w8a8_fp8 import QuarkW8A8Fp8
 from .quark_w8a8_int8 import QuarkW8A8Int8
 
@@ -13,4 +14,5 @@ __all__ = [
     "QuarkW8A8Int8",
     "QuarkOCP_MX",
     "QuarkW4A8_MXFP4_FP8",
+    "QuarkW4A16_MXFP4_A16",
 ]
