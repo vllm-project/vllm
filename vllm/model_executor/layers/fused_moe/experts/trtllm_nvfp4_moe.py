@@ -65,10 +65,20 @@ class TrtLlmNvFp4ExpertsBase:
         layer.w13_weight_scale_2.data.mul_(layer.w13_input_scale)
         layer.w2_weight_scale_2.data.mul_(layer.w2_input_scale)
         # Recompute g1_scale_c since g1_alphas was just fused in-place.
+        # Register as a layer parameter so EPLB rearranges it alongside
+        # other expert weights.
         if self.moe_config.is_act_and_mul:
-            self.g1_scale_c = (
-                self.quant_config.g1_alphas * self.quant_config.a2_gscale
+            g1_scale_c = self.quant_config.g1_alphas * self.quant_config.a2_gscale
+        else:
+            g1_scale_c = (
+                torch.ones_like(self.quant_config.a1_gscale)
+                * self.quant_config.a2_gscale
             )
+        layer.register_parameter(
+            "g1_scale_c",
+            torch.nn.Parameter(g1_scale_c, requires_grad=False),
+        )
+        self.g1_scale_c = layer.g1_scale_c
 
     @staticmethod
     def _supports_current_device() -> bool:
