@@ -403,6 +403,45 @@ class NemotronNasModelArchConfigConvertor(ModelArchConfigConvertorBase):
         )
 
 
+class AnyModelArchConfigConvertor(ModelArchConfigConvertorBase):
+    """Convertor for NAS-optimized models with heterogeneous block_configs."""
+
+    def get_total_num_kv_heads(self) -> int:
+        # Return the max KV head count across non-no-op layers so the KV
+        # cache is allocated large enough for every layer.
+        block_configs = getattr(self.hf_text_config, "block_configs", None)
+        if block_configs:
+            max_kv = 0
+            for bc in block_configs:
+                attn_section = getattr(bc, "attention", None)
+                if attn_section is None:
+                    continue
+                if getattr(attn_section, "no_op", False):
+                    continue
+                kv = getattr(attn_section, "num_key_value_heads", None)
+                if kv is not None:
+                    max_kv = max(max_kv, kv)
+            if max_kv > 0:
+                return max_kv
+        return super().get_total_num_kv_heads()
+
+    def get_num_experts(self) -> int:
+        block_configs = getattr(self.hf_text_config, "block_configs", None)
+        if block_configs:
+            max_experts = 0
+            for bc in block_configs:
+                ffn = getattr(bc, "ffn", None)
+                if ffn is None:
+                    continue
+                moe = getattr(ffn, "moe", None)
+                if moe is None:
+                    continue
+                max_experts = max(max_experts, getattr(moe, "num_local_experts", 0))
+            if max_experts > 0:
+                return max_experts
+        return super().get_num_experts()
+
+
 class DeepSeekMTPModelArchConfigConvertor(ModelArchConfigConvertorBase):
     def get_num_hidden_layers(self) -> int:
         return getattr(self.hf_text_config, "num_nextn_predict_layers", 0)
@@ -445,6 +484,7 @@ class LongCatFlashMTPModelArchConfigConvertor(ModelArchConfigConvertorBase):
 
 # hf_config.model_type -> convertor class
 MODEL_ARCH_CONFIG_CONVERTORS = {
+    "anymodel": AnyModelArchConfigConvertor,
     "mamba": MambaModelArchConfigConvertor,
     "falcon_mamba": MambaModelArchConfigConvertor,
     "timm_wrapper": TerratorchModelArchConfigConvertor,

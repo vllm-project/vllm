@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import dataclasses
 import glob
+import json
 import os
 import time
 from collections.abc import Generator, Iterable
@@ -189,12 +190,44 @@ class DefaultModelLoader(BaseModelLoader):
         else:
             hf_weights_files = filter_files_not_needed_for_inference(hf_weights_files)
 
+        if len(hf_weights_files) == 0 and is_local:
+            hf_weights_files, use_safetensors = self._weights_from_index(
+                hf_folder, index_file
+            )
+
         if len(hf_weights_files) == 0:
             raise RuntimeError(
                 f"Cannot find any model weights with `{model_name_or_path}`"
             )
 
         return hf_folder, hf_weights_files, use_safetensors
+
+    @staticmethod
+    def _weights_from_index(hf_folder: str, index_file: str) -> tuple[list[str], bool]:
+        """Discover weight files via the safetensors index file."""
+        index_path = os.path.join(hf_folder, index_file)
+        if not os.path.isfile(index_path):
+            return [], False
+        with open(index_path) as f:
+            weight_map = json.load(f)["weight_map"]
+        files: set[str] = set()
+        hf_folder_real = os.path.realpath(hf_folder)
+        for rel_path in weight_map.values():
+            if os.path.isabs(rel_path):
+                logger.warning("Skipping absolute path in weight map: %r", rel_path)
+                continue
+            full = os.path.realpath(os.path.join(hf_folder, rel_path))
+            if not full.startswith(hf_folder_real + os.sep):
+                logger.warning(
+                    "Skipping path traversal attempt in weight map: %r", rel_path
+                )
+                continue
+            if os.path.isfile(full):
+                files.add(full)
+        if not files:
+            return [], False
+        use_safetensors = all(f.endswith(".safetensors") for f in files)
+        return sorted(files), use_safetensors
 
     def _get_weights_iterator(
         self, source: "Source"

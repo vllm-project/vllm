@@ -5,7 +5,6 @@ from math import lcm
 from typing import TYPE_CHECKING
 
 from vllm.logger import init_logger
-from vllm.model_executor.models import ModelRegistry
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
@@ -26,6 +25,51 @@ class VerifyAndUpdateConfig:
     @staticmethod
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
         return
+
+
+class AnyModelConfig(VerifyAndUpdateConfig):
+    @staticmethod
+    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
+        """Normalize block_configs to _AttrDict and patch _model_info from base arch."""
+        from dataclasses import replace
+
+        from vllm.model_executor.models.anymodel import _AttrDict
+
+        hf_config = model_config.hf_config
+        # For VL models block_configs lives on text_config, not hf_config.
+        text_config = hf_config.get_text_config()
+
+        block_configs = getattr(text_config, "block_configs", None)
+        if block_configs:
+            assert len(block_configs) == text_config.num_hidden_layers, (
+                f"block_configs length ({len(block_configs)}) must match "
+                f"num_hidden_layers ({text_config.num_hidden_layers})"
+            )
+
+            def _to_attrdict(obj):
+                if isinstance(obj, dict):
+                    return _AttrDict({k: _to_attrdict(v) for k, v in obj.items()})
+                if isinstance(obj, list):
+                    return [_to_attrdict(item) for item in obj]
+                return obj
+
+            text_config.block_configs = [_to_attrdict(bc) for bc in block_configs]
+
+        base_arch = getattr(hf_config, "base_architecture", None)
+        if base_arch:
+            base_info = model_config.registry._try_inspect_model_cls(base_arch)
+            if base_info is not None:
+                model_config._model_info = replace(base_info, has_noops=True)
+
+                # "AnyModel" suffix auto-resolves to pooling/embed; fix that
+                # when the base arch is a text-generation model.
+                if (
+                    model_config.runner == "auto"
+                    and base_info.is_text_generation_model
+                    and model_config.runner_type != "generate"
+                ):
+                    model_config.runner_type = "generate"
+                    model_config.convert_type = "none"
 
 
 class DeepseekV32ForCausalLM(VerifyAndUpdateConfig):
@@ -166,10 +210,9 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
                 dtype=kv_cache_dtype,
             ).page_size_bytes
 
-        model_cls, _ = ModelRegistry.resolve_model_cls(
-            model_config.architecture,
-            model_config=model_config,
-        )
+        from vllm.model_executor.model_loader import get_model_architecture
+
+        model_cls, _ = get_model_architecture(model_config)
 
         # get mamba page size
         mamba_page_size = MambaSpec(
@@ -658,6 +701,7 @@ class VoyageQwen3BidirectionalEmbedModelConfig(VerifyAndUpdateConfig):
 
 
 MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
+    "AnyModel": AnyModelConfig,
     "ColBERTJinaRobertaModel": JinaRobertaModelConfig,
     "DeepseekV32ForCausalLM": DeepseekV32ForCausalLM,
     "Ernie4_5_VLMoeForConditionalGeneration": Ernie4_5_VLMoeForConditionalGenerationConfig,  # noqa: E501
