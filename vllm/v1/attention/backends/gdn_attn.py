@@ -7,6 +7,7 @@ from dataclasses import dataclass
 import torch
 
 from vllm.config import VllmConfig
+from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -67,6 +68,17 @@ class GDNAttentionMetadata:
     chunk_indices: torch.Tensor | None = None
     chunk_offsets: torch.Tensor | None = None
 
+    # The following fields are used for prefix caching in "all" mode.
+    # When mamba_cache_mode == "all", non_spec_state_indices_tensor is 2D
+    # [num_non_spec, max_num_blocks] instead of 1D [num_non_spec].
+    # All block_idx_* tensors are for ALL non-spec requests (decodes + prefills).
+    is_cache_all: bool = False
+    context_lens_tensor: torch.Tensor | None = None
+    block_idx_first_scheduled_token: torch.Tensor | None = None
+    block_idx_last_scheduled_token: torch.Tensor | None = None
+    block_idx_last_computed_token: torch.Tensor | None = None
+    mamba_block_size: int = 0
+
     # The following attributes are for triton implementation of causal_conv1d
     nums_dict: dict | None = None
     batch_ptr: torch.Tensor | None = None
@@ -99,6 +111,8 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         self.use_spec_decode: bool = self.num_spec > 0
         self._init_reorder_batch_threshold(1, self.use_spec_decode)
 
+        self.is_cache_all = self.vllm_config.cache_config.mamba_cache_mode == "all"
+
         self.use_full_cuda_graph: bool = (
             self.compilation_config.cudagraph_mode.has_full_cudagraphs()
         )
@@ -110,6 +124,27 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             self.decode_cudagraph_max_bs = min(
                 self.decode_cudagraph_max_bs,
                 self.compilation_config.max_cudagraph_capture_size,
+            )
+
+        if self.is_cache_all:
+            max_num_blocks = cdiv(
+                self.vllm_config.model_config.max_model_len,
+                self.kv_cache_spec.block_size,
+            )
+            self.non_spec_state_indices_tensor_2d = torch.empty(
+                (self.decode_cudagraph_max_bs, max_num_blocks),
+                dtype=torch.int32,
+                device=device,
+            )
+            self.block_idx_last_scheduled_token_buf = torch.empty(
+                (self.decode_cudagraph_max_bs,),
+                dtype=torch.int32,
+                device=device,
+            )
+            self.block_idx_last_computed_token_buf = torch.empty(
+                (self.decode_cudagraph_max_bs,),
+                dtype=torch.int32,
+                device=device,
             )
 
         self.spec_state_indices_tensor: torch.Tensor = torch.empty(
@@ -204,7 +239,10 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             spec_token_indx = None
             non_spec_token_indx = None
             spec_state_indices_tensor = None
-            non_spec_state_indices_tensor = block_table_tensor[:, 0]
+            if self.is_cache_all:
+                non_spec_state_indices_tensor = block_table_tensor
+            else:
+                non_spec_state_indices_tensor = block_table_tensor[:, 0]
             spec_query_start_loc = None
             non_spec_query_start_loc = query_start_loc
             non_spec_query_start_loc_cpu = query_start_loc_cpu
@@ -353,6 +391,25 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             f"num_decodes: {num_decodes}, num_spec_decodes: {num_spec_decodes}"
         )
 
+        # Compute block indices for prefix caching in "all" mode.
+        # All block_idx_* tensors cover ALL non-spec requests.
+        mamba_block_size = 0
+        block_idx_first_scheduled_token = None
+        block_idx_last_scheduled_token = None
+        block_idx_last_computed_token = None
+
+        if self.is_cache_all and spec_sequence_masks is None:
+            mamba_block_size = self.kv_cache_spec.block_size
+            block_idx_last_computed_token = torch.clamp(
+                cdiv(context_lens_tensor, mamba_block_size) - 1, min=0
+            )
+            block_idx_first_scheduled_token = (
+                cdiv(context_lens_tensor + 1, mamba_block_size) - 1
+            )
+            block_idx_last_scheduled_token = torch.clamp(
+                cdiv(m.seq_lens, mamba_block_size) - 1, min=0
+            )
+
         # Prepare tensors for cudagraph
         # Note: m.num_actual_tokens is already padded by the model runner for CUDAGraph
         batch_size = m.num_actual_tokens
@@ -409,13 +466,43 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             and num_spec_decodes == 0
             and num_decodes <= self.decode_cudagraph_max_bs
         ):
-            self.non_spec_state_indices_tensor[:num_decodes].copy_(
-                non_spec_state_indices_tensor, non_blocking=True
-            )
-            non_spec_state_indices_tensor = self.non_spec_state_indices_tensor[
-                :batch_size
-            ]
-            non_spec_state_indices_tensor[num_decodes:].fill_(NULL_BLOCK_ID)
+            if self.is_cache_all:
+                self.non_spec_state_indices_tensor_2d[:num_decodes].copy_(
+                    non_spec_state_indices_tensor[:num_decodes],
+                    non_blocking=True,
+                )
+                non_spec_state_indices_tensor = self.non_spec_state_indices_tensor_2d[
+                    :batch_size
+                ]
+                non_spec_state_indices_tensor[num_decodes:].fill_(NULL_BLOCK_ID)
+
+                assert block_idx_last_scheduled_token is not None
+                assert block_idx_last_computed_token is not None
+                self.block_idx_last_scheduled_token_buf[:num_decodes].copy_(
+                    block_idx_last_scheduled_token[:num_decodes],
+                    non_blocking=True,
+                )
+                block_idx_last_scheduled_token = (
+                    self.block_idx_last_scheduled_token_buf[:batch_size]
+                )
+                block_idx_last_scheduled_token[num_decodes:].fill_(0)
+
+                self.block_idx_last_computed_token_buf[:num_decodes].copy_(
+                    block_idx_last_computed_token[:num_decodes],
+                    non_blocking=True,
+                )
+                block_idx_last_computed_token = self.block_idx_last_computed_token_buf[
+                    :batch_size
+                ]
+                block_idx_last_computed_token[num_decodes:].fill_(0)
+            else:
+                self.non_spec_state_indices_tensor[:num_decodes].copy_(
+                    non_spec_state_indices_tensor, non_blocking=True
+                )
+                non_spec_state_indices_tensor = self.non_spec_state_indices_tensor[
+                    :batch_size
+                ]
+                non_spec_state_indices_tensor[num_decodes:].fill_(NULL_BLOCK_ID)
 
             self.non_spec_query_start_loc[: num_decodes + 1].copy_(
                 non_spec_query_start_loc, non_blocking=True
@@ -443,6 +530,12 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             spec_token_indx=spec_token_indx,
             non_spec_token_indx=non_spec_token_indx,
             num_accepted_tokens=num_accepted_tokens,
+            is_cache_all=self.is_cache_all,
+            context_lens_tensor=context_lens_tensor if self.is_cache_all else None,
+            block_idx_first_scheduled_token=block_idx_first_scheduled_token,
+            block_idx_last_scheduled_token=block_idx_last_scheduled_token,
+            block_idx_last_computed_token=block_idx_last_computed_token,
+            mamba_block_size=mamba_block_size,
             nums_dict=nums_dict,
             batch_ptr=batch_ptr,
             token_chunk_offset_ptr=token_chunk_offset_ptr,
