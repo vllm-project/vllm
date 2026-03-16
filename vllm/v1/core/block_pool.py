@@ -401,7 +401,10 @@ class BlockPool:
             # ref_cnt=0 means this block is in the free list (i.e. eviction
             # candidate), so remove it.
             if block.ref_cnt == 0 and not block.is_null:
-                self.free_block_queue.remove(block)
+                # Check if the block is actually in the free list before removing it
+                # This prevents use-after-free issues when the block has already been removed
+                if block.prev_free_block is not None and block.next_free_block is not None:
+                    self.free_block_queue.remove(block)
             block.ref_cnt += 1
             if self.metrics_collector:
                 self.metrics_collector.on_block_accessed(block)

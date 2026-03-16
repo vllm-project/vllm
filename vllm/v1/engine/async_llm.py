@@ -542,6 +542,7 @@ class AsyncLLM(EngineClient):
         priority: int = 0,
         data_parallel_rank: int | None = None,
         reasoning_ended: bool | None = None,
+        on_finish: callable[[RequestOutput], None] | None = None,
     ) -> AsyncGenerator[RequestOutput, None]:
         """
         Main function called by the API server to kick off a request
@@ -556,6 +557,10 @@ class AsyncLLM(EngineClient):
 
         The caller of generate() iterates the returned AsyncGenerator,
         returning the RequestOutput back to the caller.
+        
+        Args:
+            on_finish: A callback function to be called when the request is finished.
+                The function takes the final RequestOutput as argument.
         """
 
         q: RequestOutputCollector | None = None
@@ -572,6 +577,10 @@ class AsyncLLM(EngineClient):
                 prompt_text=prompt_text,
                 reasoning_ended=reasoning_ended,
             )
+            
+            # Set the on_finish callback if provided
+            if on_finish is not None:
+                q.set_on_finish(on_finish)
 
             # The output_handler task pushes items into the queue.
             # This task pulls from the queue and yields to caller.
@@ -784,6 +793,7 @@ class AsyncLLM(EngineClient):
         priority: int = 0,
         tokenization_kwargs: dict[str, Any] | None = None,
         reasoning_ended: bool | None = None,
+        on_finish: callable[[PoolingRequestOutput], None] | None = None,
     ) -> AsyncGenerator[PoolingRequestOutput, None]:
         """
         Main function called by the API server to kick off a request
@@ -797,6 +807,10 @@ class AsyncLLM(EngineClient):
 
         The caller of generate() iterates the returned AsyncGenerator,
         returning the RequestOutput back to the caller.
+        
+        Args:
+            on_finish: A callback function to be called when the request is finished.
+                The function takes the final PoolingRequestOutput as argument.
         """
 
         q: RequestOutputCollector | None = None
@@ -811,6 +825,10 @@ class AsyncLLM(EngineClient):
                 priority=priority,
                 reasoning_ended=reasoning_ended,
             )
+            
+            # Set the on_finish callback if provided
+            if on_finish is not None:
+                q.set_on_finish(on_finish)
 
             # The output_handler task pushes items into the queue.
             # This task pulls from the queue and yields to caller.

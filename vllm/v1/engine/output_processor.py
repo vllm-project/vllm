@@ -58,6 +58,8 @@ class RequestOutputCollector:
         self.ready = asyncio.Event()
 
         self._input_stream_task: asyncio.Task | None = None
+        self._on_finish: callable[[RequestOutput | PoolingRequestOutput], None] | None = None
+        self._finished = False
 
     def put(self, output: RequestOutput | PoolingRequestOutput | Exception) -> None:
         """Non-blocking put operation."""
@@ -74,6 +76,12 @@ class RequestOutputCollector:
             output, PoolingRequestOutput
         ):
             self.output = output
+        
+        # Trigger on_finish callback when request is finished
+        if not isinstance(output, Exception) and getattr(output, "finished", False) and not self._finished:
+            self._finished = True
+            if self._on_finish is not None:
+                self._on_finish(output)
 
     async def get(self) -> RequestOutput | PoolingRequestOutput:
         """Get operation blocks on put event."""
@@ -104,6 +112,15 @@ class RequestOutputCollector:
         if (task := self._input_stream_task) is not None:
             task.get_loop().call_soon_threadsafe(task.cancel)
             self._input_stream_task = None
+    
+    def set_on_finish(self, callback: callable[[RequestOutput | PoolingRequestOutput], None]) -> None:
+        """
+        Set a callback function to be called when the request is finished.
+        
+        Args:
+            callback: A function that takes the final RequestOutput or PoolingRequestOutput as argument.
+        """
+        self._on_finish = callback
 
 
 @dataclass

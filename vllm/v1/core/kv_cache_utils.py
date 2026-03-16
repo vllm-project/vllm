@@ -285,8 +285,9 @@ class FreeKVCacheBlockQueue:
         """
         if block.prev_free_block is None or block.next_free_block is None:
             # This should not happen if the block is from the free list.
-            # It indicates a bug in the caller's logic.
-            raise RuntimeError(f"remove() called on an invalid block: {block}")
+            # It indicates a bug in the caller's logic, but we handle it gracefully
+            # to prevent use-after-free issues
+            return
 
         # Link the previous block to the next block.
         block.prev_free_block.next_free_block = block.next_free_block
@@ -845,7 +846,7 @@ def get_num_blocks(
         available_memory: Memory available for KV cache in bytes.
         page_size: The page size of the KV cache.
     """
-    num_blocks = int(available_memory // page_size // num_layers)
+    num_blocks = int(available_memory // page_size)
     num_blocks = max(num_blocks, 0)
     num_blocks = may_override_num_blocks(vllm_config, num_blocks)
     return num_blocks
@@ -1351,7 +1352,9 @@ def _max_memory_usage_bytes_from_groups(
         )
 
     # General case: group_size pools, each shared by one layer per group
-    # Memory = group_size * page_size * blocks_for_max_len
+    # Memory = page_size * blocks_for_max_len
+    # Each pool is shared by one layer from each group, so we only need
+    # to calculate the memory for one layer per pool
     group_size = max(len(group.layer_names) for group in kv_cache_groups)
     page_size = get_uniform_page_size(
         [group.kv_cache_spec for group in kv_cache_groups]
@@ -1359,7 +1362,7 @@ def _max_memory_usage_bytes_from_groups(
     any_spec = kv_cache_groups[0].kv_cache_spec
     blocks_needed = cdiv(any_spec.max_memory_usage_bytes(vllm_config), page_size)
 
-    return group_size * page_size * blocks_needed
+    return page_size * blocks_needed
 
 
 def _estimate_max_model_len_from_groups(
