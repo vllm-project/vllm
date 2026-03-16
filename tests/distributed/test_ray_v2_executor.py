@@ -58,6 +58,7 @@ def _cleanup_ray_resources():
         return
 
     # Ray actor shutdown is async -- wait until all actors are dead
+    dangling_actors = []
     for _ in range(10):
         dangling_actors = [
             actor
@@ -67,14 +68,18 @@ def _cleanup_ray_resources():
         if not dangling_actors:
             break
         time.sleep(1)
+
+    # Always clean up PGs and shut down Ray, even if actors are dangling,
+    # to avoid leaking GPU resources and blocking subsequent tests.
+    try:
+        for pg_id, pg_info in ray.util.placement_group_table().items():
+            if pg_info["state"] == "CREATED":
+                pg = PlacementGroup(ray.PlacementGroupID(bytes.fromhex(pg_id)))
+                ray.util.remove_placement_group(pg)
+    finally:
+        ray.shutdown()
+
     assert not dangling_actors
-
-    for pg_id, pg_info in ray.util.placement_group_table().items():
-        if pg_info["state"] == "CREATED":
-            pg = PlacementGroup(ray.PlacementGroupID(bytes.fromhex(pg_id)))
-            ray.util.remove_placement_group(pg)
-
-    ray.shutdown()
 
 
 def create_vllm_config(

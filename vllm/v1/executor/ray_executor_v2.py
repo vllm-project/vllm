@@ -372,18 +372,31 @@ class RayExecutorV2(MultiprocExecutor):
         t.start()
         self._monitor_thread = t
 
+    def _join_monitor_thread(self) -> None:
+        """Wait for the monitor thread to exit.
+
+        Must be called before tearing down Ray resources — the monitor
+        may be inside ray.wait() which would segfault if Ray is shut
+        down underneath it.  When the monitor itself calls shutdown()
+        (on worker death), we skip the join because the thread is
+        about to return anyway.
+        """
+        monitor = getattr(self, "_monitor_thread", None)
+        if (
+            monitor is not None
+            and monitor.is_alive()
+            and threading.current_thread() is not monitor
+        ):
+            monitor.join(timeout=10)
+
     def shutdown(self) -> None:
         """Properly shut down the executor and its workers"""
         if getattr(self, "shutting_down", False):
+            self._join_monitor_thread()
             return
         self.shutting_down = True
 
-        # Wait for the monitor thread to exit before tearing down Ray
-        # resources — it may be inside ray.wait() which would segfault
-        # if Ray is shut down underneath it.
-        monitor = getattr(self, "_monitor_thread", None)
-        if monitor is not None and monitor.is_alive():
-            monitor.join(timeout=10)
+        self._join_monitor_thread()
 
         for handle in getattr(self, "ray_worker_handles", []):
             try:
