@@ -144,8 +144,7 @@ class HTTPConnection:
     def get_bytes(
         self, url: str, *, timeout: float | None = None, allow_redirects: bool = True
     ) -> bytes:
-        max_retries = envs.VLLM_MEDIA_FETCH_MAX_RETRIES
-        last_exception: Exception | None = None
+        max_retries = max(envs.VLLM_MEDIA_FETCH_MAX_RETRIES, 1)
 
         for attempt in range(max_retries):
             # 4x the timeout on each retry so transient slowness on
@@ -160,7 +159,6 @@ class HTTPConnection:
                     r.raise_for_status()
                     return r.content
             except Exception as e:
-                last_exception = e
                 if not _is_retryable(e) or attempt + 1 >= max_retries:
                     raise
                 backoff = 4**attempt
@@ -178,7 +176,7 @@ class HTTPConnection:
                 )
                 time.sleep(backoff)
 
-        raise last_exception  # type: ignore[misc]
+        raise AssertionError("unreachable")
 
     async def async_get_bytes(
         self,
@@ -187,8 +185,7 @@ class HTTPConnection:
         timeout: float | None = None,
         allow_redirects: bool = True,
     ) -> bytes:
-        max_retries = envs.VLLM_MEDIA_FETCH_MAX_RETRIES
-        last_exception: Exception | None = None
+        max_retries = max(envs.VLLM_MEDIA_FETCH_MAX_RETRIES, 1)
 
         for attempt in range(max_retries):
             attempt_timeout = timeout * (4**attempt) if timeout is not None else None
@@ -201,7 +198,6 @@ class HTTPConnection:
                     r.raise_for_status()
                     return await r.read()
             except Exception as e:
-                last_exception = e
                 if not _is_retryable(e) or attempt + 1 >= max_retries:
                     raise
                 backoff = 4**attempt
@@ -219,7 +215,7 @@ class HTTPConnection:
                 )
                 await asyncio.sleep(backoff)
 
-        raise last_exception  # type: ignore[misc]
+        raise AssertionError("unreachable")
 
     def get_text(self, url: str, *, timeout: float | None = None) -> str:
         with self.get_response(url, timeout=timeout) as r:
@@ -263,8 +259,7 @@ class HTTPConnection:
         timeout: float | None = None,
         chunk_size: int = 128,
     ) -> Path:
-        max_retries = envs.VLLM_MEDIA_FETCH_MAX_RETRIES
-        last_exception: Exception | None = None
+        max_retries = max(envs.VLLM_MEDIA_FETCH_MAX_RETRIES, 1)
 
         for attempt in range(max_retries):
             attempt_timeout = timeout * (4**attempt) if timeout is not None else None
@@ -278,7 +273,6 @@ class HTTPConnection:
 
                 return save_path
             except Exception as e:
-                last_exception = e
                 # Clean up partial downloads before retrying
                 if save_path.exists():
                     save_path.unlink()
@@ -299,7 +293,7 @@ class HTTPConnection:
                 )
                 time.sleep(backoff)
 
-        raise last_exception  # type: ignore[misc]
+        raise AssertionError("unreachable")
 
     async def async_download_file(
         self,
@@ -309,8 +303,7 @@ class HTTPConnection:
         timeout: float | None = None,
         chunk_size: int = 128,
     ) -> Path:
-        max_retries = envs.VLLM_MEDIA_FETCH_MAX_RETRIES
-        last_exception: Exception | None = None
+        max_retries = max(envs.VLLM_MEDIA_FETCH_MAX_RETRIES, 1)
 
         for attempt in range(max_retries):
             attempt_timeout = timeout * (4**attempt) if timeout is not None else None
@@ -326,7 +319,6 @@ class HTTPConnection:
 
                 return save_path
             except Exception as e:
-                last_exception = e
                 if save_path.exists():
                     save_path.unlink()
                 if not _is_retryable(e) or attempt + 1 >= max_retries:
@@ -346,7 +338,7 @@ class HTTPConnection:
                 )
                 await asyncio.sleep(backoff)
 
-        raise last_exception  # type: ignore[misc]
+        raise AssertionError("unreachable")
 
 
 global_http_connection = HTTPConnection()
