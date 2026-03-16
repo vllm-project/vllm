@@ -31,11 +31,14 @@ from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 from vllm import envs
 from vllm.config import ModelConfig
 from vllm.config.load import LoadConfig
-from vllm.distributed import get_tensor_model_parallel_rank
+from vllm.distributed import get_tensor_model_parallel_rank, get_world_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import (
     QuantizationConfig,
     get_quantization_config,
+)
+from vllm.model_executor.model_loader.ep_weight_filter import (
+    should_skip_weight,
 )
 from vllm.platforms import current_platform
 from vllm.tracing import instrument
@@ -474,6 +477,7 @@ def download_weights_from_hf(
     cache_dir: str | None,
     allow_patterns: list[str],
     revision: str | None = None,
+    subfolder: str | None = None,
     ignore_patterns: str | list[str] | None = None,
 ) -> str:
     """Download model weights from Hugging Face Hub.
@@ -486,6 +490,8 @@ def download_weights_from_hf(
             weight files. Files matched by any of the patterns will be
             downloaded.
         revision (Optional[str]): The revision of the model.
+        subfolder (Optional[str]): The subfolder within the model repository
+            to download weights from.
         ignore_patterns (Optional[Union[str, list[str]]]): The patterns to
             filter out the weight files. Files matched by any of the patterns
             will be ignored.
@@ -500,7 +506,11 @@ def download_weights_from_hf(
         # so we only have to call snapshot_download once.
         try:
             fs = HfFileSystem()
-            file_list = fs.ls(model_name_or_path, detail=False, revision=revision)
+            file_list = fs.ls(
+                os.path.join(model_name_or_path, subfolder or ""),
+                detail=False,
+                revision=revision,
+            )
 
             # If downloading safetensors and an index file exists, use the
             # specific file names from the index to avoid downloading
@@ -512,6 +522,7 @@ def download_weights_from_hf(
                     filename=SAFE_WEIGHTS_INDEX_NAME,
                     cache_dir=cache_dir,
                     revision=revision,
+                    subfolder=subfolder,
                 )
                 with open(index_path) as f:
                     weight_map = json.load(f)["weight_map"]
@@ -572,6 +583,7 @@ def download_safetensors_index_file_from_hf(
     model_name_or_path: str,
     index_file: str,
     cache_dir: str | None,
+    subfolder: str | None = None,
     revision: str | None = None,
 ) -> None:
     """Download hf safetensors index file from Hugging Face Hub.
@@ -581,6 +593,8 @@ def download_safetensors_index_file_from_hf(
         index_file (str): The safetensors index file name
         cache_dir (Optional[str]): The cache directory to store the model
             weights. If None, will use HF defaults.
+        subfolder (Optional[str]): The subfolder within the model repository
+            to download weights from.
         revision (Optional[str]): The revision of the model.
     """
     # Use file lock to prevent multiple processes from
@@ -593,6 +607,7 @@ def download_safetensors_index_file_from_hf(
                 filename=index_file,
                 cache_dir=cache_dir,
                 revision=revision,
+                subfolder=subfolder,
                 local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
             )
         # If file not found on remote or locally, we should not fail since
@@ -776,8 +791,14 @@ def safetensors_weights_iterator(
     hf_weights_files: list[str],
     use_tqdm_on_load: bool,
     safetensors_load_strategy: str = "lazy",
+    local_expert_ids: set[int] | None = None,
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
-    """Iterate over the weights in the model safetensor files."""
+    """Iterate over the weights in the model safetensor files.
+
+    When *local_expert_ids* is provided, expert weights not belonging to
+    this rank are skipped **before** reading from disk, which drastically
+    reduces storage I/O for MoE models under EP.
+    """
     loading_desc = "Loading safetensors checkpoint shards"
     if safetensors_load_strategy == "eager":
         loading_desc += " (eager)"
@@ -797,7 +818,9 @@ def safetensors_weights_iterator(
         if safetensors_load_strategy == "eager":
             with open(st_file, "rb") as f:
                 state_dict = load(f.read())
-            yield from state_dict.items()
+            for name, param in state_dict.items():
+                if not should_skip_weight(name, local_expert_ids):
+                    yield name, param
         elif safetensors_load_strategy == "torchao":
             # we can't load flattened torchao tensor subclasses directly into the model
             # instead we reconstruct the subclasses here before returning
@@ -813,6 +836,8 @@ def safetensors_weights_iterator(
             with safe_open(st_file, framework="pt") as f:
                 state_dict = {}
                 for name in f.keys():  # noqa: SIM118
+                    if should_skip_weight(name, local_expert_ids):
+                        continue
                     state_dict[name] = f.get_tensor(name)
 
                 # update with leftover tensor data from previous iteration, if any
@@ -829,6 +854,8 @@ def safetensors_weights_iterator(
         else:
             with safe_open(st_file, framework="pt") as f:
                 for name in f.keys():  # noqa: SIM118
+                    if should_skip_weight(name, local_expert_ids):
+                        continue
                     param = f.get_tensor(name)
                     yield name, param
 
@@ -967,6 +994,46 @@ def fastsafetensors_weights_iterator(
                 fb.close()
         finally:
             loader.close()
+
+
+def instanttensor_weights_iterator(
+    hf_weights_files: list[str],
+    use_tqdm_on_load: bool,
+) -> Generator[tuple[str, torch.Tensor], None, None]:
+    """Iterate over the weights in the model safetensor files
+    using instanttensor library."""
+    try:
+        import instanttensor
+    except ImportError as e:
+        raise ImportError(
+            "Please install instanttensor via `pip install instanttensor`"
+        ) from e
+
+    if not current_platform.is_cuda():
+        raise ValueError("InstantTensor requires NVIDIA GPUs")
+
+    try:
+        world_group = get_world_group()
+    except AssertionError:
+        # Entering here only in unit tests where the world group is not initialized.
+        process_group = None
+    else:
+        process_group = world_group.device_group if world_group.world_size > 1 else None
+
+    device = current_platform.current_device()
+
+    with instanttensor.safe_open(
+        hf_weights_files, framework="pt", device=device, process_group=process_group
+    ) as f:
+        yield from tqdm(
+            f.tensors(),
+            desc="Loading safetensors using InstantTensor loader",
+            disable=not enable_tqdm(use_tqdm_on_load),
+            bar_format=_BAR_FORMAT,
+            position=tqdm._get_free_pos(),
+            total=len(f.keys()),
+            mininterval=1.0,
+        )
 
 
 def pt_weights_iterator(
