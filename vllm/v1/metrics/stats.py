@@ -274,14 +274,6 @@ class PromptTokenStats:
         prompt_len: int,
     ) -> None:
         """Update stats from a prefill output."""
-        assert num_cached_tokens >= 0 and num_external_computed_tokens >= 0, (
-            "num_cached_tokens and num_external_computed_tokens should be non-negative"
-        )
-        num_cached_tokens = min(num_cached_tokens, prompt_len)
-        num_external_computed_tokens = min(
-            num_external_computed_tokens, num_cached_tokens
-        )
-
         # When all tokens are cached, the scheduler reduces num_cached_tokens
         # by 1 to force the model to recompute the last token, since the model
         # needs at least one input token to run a forward pass.
