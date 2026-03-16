@@ -1670,6 +1670,10 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
 
     embedding_modules = {}
 
+    # Skip audio/vision tower modules during LoRA loading -- tower LoRA
+    # requires enable_tower_connector_lora which is not yet supported.
+    lora_skip_prefixes = ["audio_tower.", "visual."]
+
     supported_languages = ISO639_1_SUPPORTED_LANGS
 
     @classmethod
