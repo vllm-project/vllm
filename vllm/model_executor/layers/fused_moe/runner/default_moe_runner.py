@@ -228,6 +228,12 @@ class DefaultMoERunner(MoERunner):
         self.batched_hidden_states: torch.Tensor | None = None
         self.batched_router_logits: torch.Tensor | None = None
 
+        # The padding in the forward pass can be skipped
+        self.skip_forward_padding = (
+            hasattr(self.quant_method, "support_skip_forward_padding")
+            and self.quant_method.support_skip_forward_padding
+        )
+
     @property
     def use_dp_chunking(self) -> bool:
         return (
@@ -415,7 +421,10 @@ class DefaultMoERunner(MoERunner):
 
         # This is the dimension after transform (for routed expert output slicing)
         transformed_hidden_dim = hidden_states.shape[-1]
-        if self.moe_config.hidden_dim != transformed_hidden_dim:
+        if (
+            not self.skip_forward_padding
+            and self.moe_config.hidden_dim != transformed_hidden_dim
+        ):
             hidden_states = F.pad(
                 hidden_states,
                 (0, self.moe_config.hidden_dim - transformed_hidden_dim),
