@@ -76,20 +76,24 @@ def tokenizer() -> MistralTokenizer:
 def engine():
     engine_args = EngineArgs(**ENGINE_CONFIG)
     llm = LLM(**asdict(engine_args))
-    yield llm
-    with contextlib.suppress(Exception):
-        llm.llm_engine.engine_core.shutdown()
-    import torch
+    try:
+        yield llm
+    finally:
+        with contextlib.suppress(Exception):
+            llm.llm_engine.engine_core.shutdown()
+        import torch
 
-    torch.accelerator.empty_cache()
+        torch.accelerator.empty_cache()
 
 
 @pytest_asyncio.fixture
 async def async_engine():
     engine_args = AsyncEngineArgs(**ENGINE_CONFIG)
     llm = AsyncLLM.from_engine_args(engine_args)
-    yield llm
-    llm.shutdown()
+    try:
+        yield llm
+    finally:
+        llm.shutdown()
 
 
 def test_voxtral_realtime_forward(audio_assets, tokenizer, engine):
