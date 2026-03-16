@@ -933,20 +933,7 @@ def _get_tile_size(
     element_size: int,
     is_prefill: bool,
 ) -> int:
-    """Select tile size with Gemma3-specific optimization.
-
-    For Gemma3, use 32 for both prefill and decode to better utilize
-    the larger head dimension (128/256). For other models, use
-    the default vLLM behavior.
-    """
-    if _is_gemma3_attention(head_size, sliding_window):
-        # Gemma3: use 32 for decode (default is 16)
-        return 32
-
-    # Default behavior
-    if is_prefill:
-        return 32
-    return 16 if element_size >= 2 else 32
+    return 16
 
 
 def unified_attention_td(
