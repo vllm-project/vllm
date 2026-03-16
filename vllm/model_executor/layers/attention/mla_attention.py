@@ -560,7 +560,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             output = torch.empty(
                 output.shape[0],
                 self.num_heads * self.v_head_dim,
-                dtype=torch.get_default_dtype(),
+                dtype=q.dtype,
                 device=output.device,
             )
 
