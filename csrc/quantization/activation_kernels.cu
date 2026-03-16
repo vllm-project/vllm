@@ -4,6 +4,7 @@
 
 #include <cmath>
 #include "core/math.hpp"
+#include "../activation_utils.cuh"
 #include "../cuda_compat.h"
 #include "dispatch_utils.h"
 
@@ -36,11 +37,8 @@ typedef __hip_fp8x4_e4m3_fnuz __nv_fp8x4_e4m3;
 #include "core/registration.h"
 namespace vllm {
 
-template <typename T>
-__device__ __forceinline__ T silu_kernel(const T& x) {
-  // x * sigmoid(x)
-  return (T)(((float)x) / (1.0f + expf((float)-x)));
-}
+// silu_kernel is now in ../activation_utils.cuh (shared with
+// csrc/activation_kernels.cu to avoid duplication).
 
 // Activation and gating kernel template.
 template <typename scalar_t, scalar_t (*ACT_FN)(const scalar_t&),
