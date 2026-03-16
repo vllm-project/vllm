@@ -5,7 +5,7 @@ steps:
     depends_on: []
     key: image-build-xpu
     commands:
-      - bash -lc '.buildkite/image_build/image_build_xpu.sh "public.ecr.aws/q9t5s3a7" "vllm-ci-postmerge-repo" "$BUILDKITE_COMMIT"'
+      - bash -lc 'if [ "${BUILDKITE_PULL_REQUEST:-false}" != "false" ]; then .buildkite/image_build/image_build_xpu.sh "public.ecr.aws/q9t5s3a7" "vllm-ci-test-repo" "$BUILDKITE_COMMIT"; else .buildkite/image_build/image_build_xpu.sh "public.ecr.aws/q9t5s3a7" "vllm-ci-postmerge-repo" "$BUILDKITE_COMMIT"; fi'
     env:
       DOCKER_BUILDKIT: "1"
     retry:
