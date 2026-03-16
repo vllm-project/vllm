@@ -106,9 +106,7 @@ class KimiK2ToolParser(ToolParser):
                 "tokens in the tokenizer!"
             )
 
-    def adjust_request(
-        self, request: ChatCompletionRequest
-    ) -> ChatCompletionRequest:
+    def adjust_request(self, request: ChatCompletionRequest) -> ChatCompletionRequest:
         request = super().adjust_request(request)
 
         if request.structured_outputs is not None:
@@ -135,22 +133,24 @@ class KimiK2ToolParser(ToolParser):
                 "type": "object",
                 "properties": {},
             }
-            tags.append({
-                "type": "tag",
-                "begin": f"<|tool_call_begin|>functions.{name}",
-                "content": {
-                    "type": "sequence",
-                    "elements": [
-                        {"type": "regex", "pattern": r":\d+"},
-                        {
-                            "type": "const_string",
-                            "value": "<|tool_call_argument_begin|>",
-                        },
-                        {"type": "json_schema", "json_schema": params},
-                    ],
-                },
-                "end": "<|tool_call_end|>",
-            })
+            tags.append(
+                {
+                    "type": "tag",
+                    "begin": f"<|tool_call_begin|>functions.{name}",
+                    "content": {
+                        "type": "sequence",
+                        "elements": [
+                            {"type": "regex", "pattern": r":\d+"},
+                            {
+                                "type": "const_string",
+                                "value": "<|tool_call_argument_begin|>",
+                            },
+                            {"type": "json_schema", "json_schema": params},
+                        ],
+                    },
+                    "end": "<|tool_call_end|>",
+                }
+            )
 
         if not tags:
             return None
