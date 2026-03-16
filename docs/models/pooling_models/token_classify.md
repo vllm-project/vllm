@@ -14,7 +14,7 @@ Please refer to [examples/pooling/token_classify/ner_offline.py](../../../exampl
 
 ### Sparse retrieval (lexical matching)
 
-The `BAAI/bge-m3` model uses Token Classification to achieve sparse retrieval. See [this page](specific_models.md#baaibge-m3) for more information.
+The `BAAI/bge-m3` model uses token classification to achieve sparse retrieval. See [this page](specific_models.md#baaibge-m3) for more information.
 
 ### Reward Models
 

@@ -82,7 +82,7 @@ which takes priority over both the model's and Sentence Transformers' defaults.
 ## Offline Inference
 
 The [LLM][vllm.LLM] class provides various methods for offline inference.
-See [configuration](../api/README.md#configuration) for a list of options when initializing the model.
+See [configuration](../../api/README.md#configuration) for a list of options when initializing the model.
 
 ### `LLM.embed`
 
@@ -185,19 +185,19 @@ print(f"Data: {data!r}")
 
 ## Online Serving
 
-Our [OpenAI-Compatible Server](../serving/openai_compatible_server.md) provides endpoints that correspond to the offline APIs:
+Our [OpenAI-Compatible Server](../../serving/openai_compatible_server.md) provides endpoints that correspond to the offline APIs:
 
-- [Embeddings API](../serving/openai_compatible_server.md#embeddings-api) is similar to `LLM.embed`, accepting both text and [multi-modal inputs](../features/multimodal_inputs.md) for embedding models.
-- [Classification API](../serving/openai_compatible_server.md#classification-api) is similar to `LLM.classify` and is applicable to sequence classification models.
-- [Score API](../serving/openai_compatible_server.md#score-api) is similar to `LLM.score` for cross-encoder models.
-- [Pooling API](../serving/openai_compatible_server.md#pooling-api) is similar to `LLM.encode`, being applicable to all types of pooling models.
+- [Embeddings API](../../serving/openai_compatible_server.md#embeddings-api) is similar to `LLM.embed`, accepting both text and [multi-modal inputs](../../features/multimodal_inputs.md) for embedding models.
+- [Classification API](../../serving/openai_compatible_server.md#classification-api) is similar to `LLM.classify` and is applicable to sequence classification models.
+- [Score API](../../serving/openai_compatible_server.md#score-api) is similar to `LLM.score` for cross-encoder models.
+- [Pooling API](../../serving/openai_compatible_server.md#pooling-api) is similar to `LLM.encode`, being applicable to all types of pooling models.
 
 !!! note
-    Please use one of the more specific endpoints or set the task directly when using the [Pooling API](../serving/openai_compatible_server.md#pooling-api):
+    Please use one of the more specific endpoints or set the task directly when using the [Pooling API](../../serving/openai_compatible_server.md#pooling-api):
 
-    - For embeddings, use [Embeddings API](../serving/openai_compatible_server.md#embeddings-api) or `"task":"embed"`.
-    - For classification logits, use [Classification API](../serving/openai_compatible_server.md#classification-api) or `"task":"classify"`.
-    - For similarity scores, use [Score API](../serving/openai_compatible_server.md#score-api).
+    - For embeddings, use [Embeddings API](../../serving/openai_compatible_server.md#embeddings-api) or `"task":"embed"`.
+    - For classification logits, use [Classification API](../../serving/openai_compatible_server.md#classification-api) or `"task":"classify"`.
+    - For similarity scores, use [Score API](../../serving/openai_compatible_server.md#score-api).
     - For rewards, use `"task":"token_classify"`.
     - For token classification, use `"task":"token_classify"`.
     - For multi-vector retrieval, use `"task":"token_embed"`.
