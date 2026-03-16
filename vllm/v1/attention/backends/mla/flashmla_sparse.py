@@ -156,6 +156,9 @@ class FlashMLASparseMetadata(AttentionMetadata):
     num_prefills: int = 0
     num_decode_tokens: int = 0
 
+    # Sequence lengths for all requests (context + query)
+    seq_lens: torch.Tensor | None = None
+
     # MHA prefill metadata (used by SparseMLACommonImpl.forward_mha)
     prefill_query_start_loc: torch.Tensor | None = None
     prefill_max_query_len: int = 0
@@ -572,6 +575,7 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
             num_decodes=num_decodes,
             num_prefills=num_prefills,
             num_decode_tokens=num_decode_tokens,
+            seq_lens=cm.seq_lens,
             prefill_query_start_loc=prefill_query_start_loc,
             prefill_max_query_len=prefill_max_query_len,
             has_context=has_context,

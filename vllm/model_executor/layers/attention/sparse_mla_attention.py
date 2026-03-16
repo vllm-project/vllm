@@ -7,15 +7,6 @@ Parallel to MLACommonImpl (in mla_attention.py) which provides forward_mha for
 non-sparse MLA backends, this module provides SparseMLACommonImpl which gives
 all sparse MLA backends a shared forward_mha implementation.
 
-Sparse MLA prefill uses a two-phase approach:
-  Phase 1: Dense causal self-attention on new prefill tokens (FA4).
-  Phase 2: Sparse cross-attention on topk cached entries — gather compressed
-           KV from the paged cache, decompress via kv_b_proj, attend with FA4.
-  Phase 3: Merge the two outputs using LSE-based merging.
-
-TODO: Replace the two-phase approach with a single-pass FA4 masked MHA kernel
-once the upstream FlashAttention PR lands.
-
 Decode (forward_mqa) is left abstract for each sparse backend to implement
 with its own sparse decode kernel.
 """
@@ -34,7 +25,6 @@ from vllm.v1.attention.backend import (
     is_quantized_kv_cache,
 )
 from vllm.v1.attention.backends.fa_utils import get_flash_attn_version
-from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 from vllm.vllm_flash_attn import (  # type: ignore[attr-defined]
     flash_attn_varlen_func,
 )
@@ -45,6 +35,57 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 T = TypeVar("T", bound=AttentionMetadata)
+
+# Kernel MMA tile size (fixed by hardware).
+_M_BLOCK_SIZE = 128
+_N_BLOCK_SIZE = 128
+
+
+def _build_sparse_causal_mask(
+    topk_indices_per_req: list[torch.Tensor],
+    ctx_lens: list[int],
+    q_lens: list[int],
+    max_q_len: int,
+    max_seq_len: int,
+    device: torch.device,
+) -> torch.Tensor:
+    """Build a dense (B, max_Q, max_S) int32 mask combining topk + causal.
+
+    For each request i, query token j (0-indexed within the request):
+      - Context positions (kv_idx < ctx_len_i):
+            1 if kv_idx is in topk_indices for that query token, else 0
+      - New-token positions (kv_idx >= ctx_len_i):
+            1 if (kv_idx - ctx_len_i) <= j (causal self-attention), else 0
+    """
+    B = len(ctx_lens)
+    mask = torch.zeros(B, max_q_len, max_seq_len, dtype=torch.int32, device=device)
+
+    for i in range(B):
+        q_len = q_lens[i]
+        ctx_len = ctx_lens[i]
+        if q_len == 0:
+            continue
+
+        # Topk context bits
+        if ctx_len > 0:
+            req_topk = topk_indices_per_req[i]  # (q_len, topk)
+            # Clamp to valid context range; invalid indices become sentinel
+            valid = (req_topk >= 0) & (req_topk < ctx_len)
+            safe_idx = torch.where(valid, req_topk, torch.zeros_like(req_topk))
+            # scatter 1s at valid positions
+            mask[i, :q_len].scatter_(
+                1,
+                safe_idx.long(),
+                valid.to(torch.int32),
+            )
+
+        # Causal self-attention bits for new tokens
+        # New token kv positions are [ctx_len, ctx_len + q_len)
+        # Query j attends to kv positions ctx_len..ctx_len+j (inclusive)
+        causal = torch.tril(torch.ones(q_len, q_len, dtype=torch.int32, device=device))
+        mask[i, :q_len, ctx_len : ctx_len + q_len] = causal
+
+    return mask
 
 
 class SparseMLACommonImpl(SparseMLAAttentionImpl[T], Generic[T]):
@@ -103,6 +144,20 @@ class SparseMLACommonImpl(SparseMLAAttentionImpl[T], Generic[T]):
         else:
             self._flash_attn = flash_attn_varlen_func
 
+        # Check if FA4 is available (required for mask_mod in forward_mha
+        # with cached context).
+        fa4_version = get_flash_attn_version(head_size=qk_head_dim)
+        self._fa4_available = fa4_version is not None and fa4_version >= 4
+
+        # Block-sparse tile sizes.  SM100 (Blackwell) has q_stage=2, so the
+        # block-sparse tile_m must be >= 2 * m_block_size = 256.
+        from vllm.platforms import current_platform
+
+        cap = current_platform.get_device_capability()
+        q_stage = 2 if (cap is not None and cap.major >= 10) else 1
+        self._bs_tile_m = q_stage * _M_BLOCK_SIZE
+        self._bs_tile_n = _N_BLOCK_SIZE
+
         # DCP (context parallelism) — lazily initialized by the caller.
         self.dcp_world_size: int = -1
         self.cp_kv_cache_interleave_size: int = (
@@ -151,6 +206,98 @@ class SparseMLACommonImpl(SparseMLAAttentionImpl[T], Generic[T]):
             return attn_out, lse
         return attn_out
 
+    # ------------------------------------------------------------------
+    # Context gathering helpers
+    # ------------------------------------------------------------------
+
+    def _gather_and_decompress_context(
+        self,
+        kv_c_and_k_pe_cache: torch.Tensor,
+        block_table: torch.Tensor,
+        ctx_lens: list[int],
+        block_size: int,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Gather all context from paged cache, decompress via kv_b_proj.
+
+        Returns (k_ctx, v_ctx, cu_ctx_lens) packed in varlen format.
+          k_ctx: (total_ctx, num_heads, qk_head_dim)
+          v_ctx: (total_ctx, num_heads, v_head_dim)
+          cu_ctx_lens: (B+1,) int32
+        """
+        device = kv_c_and_k_pe_cache.device
+        B = len(ctx_lens)
+
+        # Build cumulative context lengths
+        cu_ctx = torch.zeros(B + 1, dtype=torch.int32, device=device)
+        ctx_lens_t = torch.tensor(ctx_lens, dtype=torch.int32, device=device)
+        torch.cumsum(ctx_lens_t, dim=0, out=cu_ctx[1:])
+        total_ctx = cu_ctx[-1].item()
+
+        if total_ctx == 0:
+            empty_k = torch.empty(
+                0,
+                self.num_heads,
+                self.qk_head_dim,
+                dtype=kv_c_and_k_pe_cache.dtype,
+                device=device,
+            )
+            empty_v = torch.empty(
+                0,
+                self.num_heads,
+                self.v_head_dim,
+                dtype=kv_c_and_k_pe_cache.dtype,
+                device=device,
+            )
+            return empty_k, empty_v, cu_ctx
+
+        # Compute physical slot addresses for all context tokens.
+        # cache layout: (num_blocks, block_size, head_size)
+        head_size = kv_c_and_k_pe_cache.shape[-1]
+        cache_flat = kv_c_and_k_pe_cache.reshape(-1, head_size)
+
+        # Build (total_ctx,) tensors of req_idx and logical position
+        req_indices = torch.repeat_interleave(
+            torch.arange(B, device=device, dtype=torch.int32), ctx_lens_t
+        )
+        # Logical positions within each request's context
+        offsets_within_req = torch.cat(
+            [
+                torch.arange(cl, device=device, dtype=torch.int32)
+                for cl in ctx_lens
+                if cl > 0
+            ]
+        )
+
+        block_ids = offsets_within_req // block_size
+        in_block_offsets = offsets_within_req % block_size
+        physical_blocks = block_table[req_indices.long(), block_ids.long()]
+        physical_slots = physical_blocks.long() * block_size + in_block_offsets.long()
+
+        # Gather from cache
+        context_packed = cache_flat[physical_slots]  # (total_ctx, head_size)
+
+        # Split into kv_c and k_pe
+        kv_c_ctx = context_packed[..., : self.kv_lora_rank]
+        k_pe_ctx = context_packed[..., self.kv_lora_rank :]
+
+        # Decompress via kv_b_proj
+        kv_nope_ctx = self.kv_b_proj(kv_c_ctx)[0].view(
+            -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim
+        )
+        k_nope_ctx, v_ctx = kv_nope_ctx.split(
+            [self.qk_nope_head_dim, self.v_head_dim], dim=-1
+        )
+
+        # Broadcast k_pe to all heads and concat with k_nope
+        k_pe_ctx = k_pe_ctx.unsqueeze(1).expand(-1, self.num_heads, -1)
+        k_ctx = self._concat_k_nope_k_pe(k_nope_ctx, k_pe_ctx)
+
+        return k_ctx, v_ctx, cu_ctx
+
+    # ------------------------------------------------------------------
+    # forward_mha — single-pass FA4 masked MHA
+    # ------------------------------------------------------------------
+
     def forward_mha(
         self,
         q: torch.Tensor,
@@ -166,284 +313,177 @@ class SparseMLACommonImpl(SparseMLAAttentionImpl[T], Generic[T]):
                 "Sparse MLA forward_mha with FP8 KV cache not yet supported"
             )
 
-        # --- Decompress new tokens' KV ---
+        # Decompress new tokens' KV
         kv_nope = self.kv_b_proj(kv_c_normed)[0].view(
             -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim
         )
-        k_nope, v = kv_nope.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
-        k = self._concat_k_nope_k_pe(k_nope, k_pe)
+        k_nope_new, v_new = kv_nope.split(
+            [self.qk_nope_head_dim, self.v_head_dim], dim=-1
+        )
+        k_new = self._concat_k_nope_k_pe(k_nope_new, k_pe)
 
-        has_context: bool = getattr(attn_metadata, "has_context", False)
         prefill_qsl = getattr(attn_metadata, "prefill_query_start_loc", None)
         prefill_max_ql: int = getattr(attn_metadata, "prefill_max_query_len", 0)
+        has_context: bool = getattr(attn_metadata, "has_context", False)
 
         assert prefill_qsl is not None, (
             "Metadata must provide prefill_query_start_loc for forward_mha"
         )
 
-        # --- Phase 1: Self-attention on new tokens (causal) ---
-        suffix_result = self._flash_attn_diff_headdims(
-            q=q,
-            k=k,
-            v=v,
-            cu_seqlens_q=prefill_qsl,
-            cu_seqlens_k=prefill_qsl,
-            max_seqlen_q=prefill_max_ql,
-            max_seqlen_k=prefill_max_ql,
-            causal=True,
-            return_softmax_lse=has_context,
-        )
-
-        if has_context:
-            suffix_output, suffix_lse = suffix_result
-
-            # --- Phase 2: Sparse context attention on topk cached entries ---
-            if self.dcp_world_size > 1:
-                context_output, context_lse = self._dcp_compute_sparse_context(
-                    q, kv_c_and_k_pe_cache, attn_metadata
-                )
-            else:
-                context_output, context_lse = self._compute_sparse_context(
-                    q, kv_c_and_k_pe_cache, attn_metadata
-                )
-
-            # Trim to v_head_dim if FA padded the output
-            suffix_output = suffix_output[..., : self.v_head_dim]
-            context_output = context_output[..., : self.v_head_dim]
-
-            # --- Phase 3: Merge ---
-            output_view = output.view(-1, self.num_heads, self.v_head_dim)
-            merge_attn_states(
-                output=output_view,
-                prefix_output=context_output,
-                prefix_lse=context_lse,
-                suffix_output=suffix_output,
-                suffix_lse=suffix_lse,
+        if not has_context:
+            # No cached context — causal self-attention on new tokens only.
+            suffix_result = self._flash_attn_diff_headdims(
+                q=q,
+                k=k_new,
+                v=v_new,
+                cu_seqlens_q=prefill_qsl,
+                cu_seqlens_k=prefill_qsl,
+                max_seqlen_q=prefill_max_ql,
+                max_seqlen_k=prefill_max_ql,
+                causal=True,
             )
-        else:
-            if isinstance(suffix_result, tuple):
-                suffix_result = suffix_result[0]
             suffix_result = suffix_result[..., : self.v_head_dim]
             output.copy_(suffix_result.flatten(start_dim=-2))
+            return
 
-    def _compute_sparse_context(
-        self,
-        q: torch.Tensor,
-        kv_c_and_k_pe_cache: torch.Tensor,
-        attn_metadata: T,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Sparse context attention: gather topk entries, decompress, attend.
+        # ----- Has cached context: single-pass FA4 masked MHA -----
+        if not self._fa4_available:
+            raise NotImplementedError(
+                "Sparse MLA forward_mha with cached context requires FA4 "
+                "(SM100+). On SM90, all tokens are routed through forward_mqa."
+            )
 
-        Each prefill token attends to its topk cached KV entries. Indices come
-        from topk_indices_buffer (populated by the Indexer).
+        device = q.device
+        num_decodes: int = getattr(attn_metadata, "num_decodes", 0)
+        num_prefills: int = getattr(attn_metadata, "num_prefills", 0)
+        block_size: int = getattr(attn_metadata, "block_size", 64)
+        num_decode_tokens: int = getattr(attn_metadata, "num_decode_tokens", 0)
 
-        TODO: Replace with single-pass FA4 masked MHA kernel when available.
-        """
-        from vllm.v1.attention.backends.mla.sparse_utils import (
-            triton_convert_req_index_to_global_index,
+        # seq_lens for ALL requests; prefill requests start at num_decodes.
+        all_seq_lens = getattr(attn_metadata, "seq_lens", None)
+        assert all_seq_lens is not None, (
+            "Metadata must provide seq_lens for forward_mha with context"
+        )
+        prefill_seq_lens = all_seq_lens[num_decodes : num_decodes + num_prefills]
+
+        # Compute per-request query and context lengths
+        prefill_qsl_cpu = prefill_qsl.cpu()
+        q_lens = [
+            (prefill_qsl_cpu[i + 1] - prefill_qsl_cpu[i]).item()
+            for i in range(num_prefills)
+        ]
+        prefill_seq_lens_cpu = prefill_seq_lens.cpu()
+        ctx_lens = [
+            prefill_seq_lens_cpu[i].item() - q_lens[i] for i in range(num_prefills)
+        ]
+        seq_lens_full = [ctx_lens[i] + q_lens[i] for i in range(num_prefills)]
+
+        max_seq_len = max(seq_lens_full)
+        max_q_len = max(q_lens) if q_lens else 0
+
+        # --- Step 2: Gather + decompress ALL cached context ---
+        block_table = getattr(attn_metadata, "block_table", None)
+        assert block_table is not None
+        prefill_block_table = block_table[num_decodes : num_decodes + num_prefills]
+
+        k_ctx, v_ctx, cu_ctx = self._gather_and_decompress_context(
+            kv_c_and_k_pe_cache,
+            prefill_block_table,
+            ctx_lens,
+            block_size,
         )
 
-        num_decode_tokens: int = getattr(attn_metadata, "num_decode_tokens", 0)
-        topk: int = getattr(attn_metadata, "topk_tokens", 2048)
-        num_prefill_tokens = q.shape[0]
+        # --- Step 3: Build varlen K, V = [k_ctx; k_new] per request ---
+        # Pack K and V: for each request, context tokens first, new tokens after.
+        total_kv = sum(seq_lens_full)
+        k_packed = torch.empty(
+            total_kv, self.num_heads, self.qk_head_dim, dtype=q.dtype, device=device
+        )
+        v_packed = torch.empty(
+            total_kv, self.num_heads, self.v_head_dim, dtype=q.dtype, device=device
+        )
 
+        cu_seqlens_k = torch.zeros(num_prefills + 1, dtype=torch.int32, device=device)
+        kv_offset = 0
+        q_offset = 0
+        ctx_offset = 0
+        for i in range(num_prefills):
+            cl = ctx_lens[i]
+            ql = q_lens[i]
+            sl = cl + ql
+            # Context portion
+            if cl > 0:
+                k_packed[kv_offset : kv_offset + cl] = k_ctx[
+                    ctx_offset : ctx_offset + cl
+                ]
+                v_packed[kv_offset : kv_offset + cl] = v_ctx[
+                    ctx_offset : ctx_offset + cl
+                ]
+                ctx_offset += cl
+            # New-token portion
+            k_packed[kv_offset + cl : kv_offset + sl] = k_new[q_offset : q_offset + ql]
+            v_packed[kv_offset + cl : kv_offset + sl] = v_new[q_offset : q_offset + ql]
+            q_offset += ql
+            kv_offset += sl
+            cu_seqlens_k[i + 1] = kv_offset
+
+        # --- Step 4: Build combined causal+topk mask ---
         # Get topk indices for prefill tokens
         assert self.topk_indices_buffer is not None
-        topk_indices = self.topk_indices_buffer[
-            num_decode_tokens : num_decode_tokens + num_prefill_tokens
-        ]
-
-        # Convert per-request logical indices to global cache slot addresses
-        req_id_per_token = attn_metadata.req_id_per_token[num_decode_tokens:]  # type: ignore[attr-defined]
-        global_indices = triton_convert_req_index_to_global_index(
-            req_id_per_token,
-            attn_metadata.block_table,  # type: ignore[attr-defined]
-            topk_indices,
-            BLOCK_SIZE=attn_metadata.block_size,  # type: ignore[attr-defined]
-            NUM_TOPK_TOKENS=topk,
-        )
-
-        # Gather compressed KV from paged cache
-        # kv_c_and_k_pe_cache: [num_blocks, block_size, kv_lora_rank + qk_rope_head_dim]
-        cache_flat = kv_c_and_k_pe_cache.view(-1, kv_c_and_k_pe_cache.shape[-1])
-        # global_indices: [num_prefill_tokens, topk]
-        valid_mask = global_indices >= 0
-        safe_indices = global_indices.clamp(min=0)
-        # [num_prefill_tokens, topk, kv_lora_rank + qk_rope_head_dim]
-        gathered_kv = cache_flat[safe_indices.long()]
-        gathered_kv[~valid_mask] = 0
-
-        # Split into kv_c and k_pe
-        kv_c = gathered_kv[..., : self.kv_lora_rank]
-        k_pe_ctx = gathered_kv[..., self.kv_lora_rank :]
-
-        # Decompress via kv_b_proj: kv_c -> k_nope, v
-        kv_c_flat = kv_c.reshape(-1, self.kv_lora_rank)
-        kv_nope_flat = self.kv_b_proj(kv_c_flat)[0]
-        kv_nope = kv_nope_flat.view(
-            num_prefill_tokens,
-            topk,
-            self.num_heads,
-            self.qk_nope_head_dim + self.v_head_dim,
-        )
-        k_nope_ctx, v_ctx = kv_nope.split(
-            [self.qk_nope_head_dim, self.v_head_dim], dim=-1
-        )
-
-        # Build full K: concat k_nope with k_pe (broadcast over heads)
-        # k_pe_ctx: [num_prefill_tokens, topk, qk_rope_head_dim]
-        k_pe_ctx_expanded = k_pe_ctx.unsqueeze(2).expand(-1, -1, self.num_heads, -1)
-        k_ctx = torch.cat([k_nope_ctx, k_pe_ctx_expanded], dim=-1)
-
-        # Flatten for varlen: each prefill token is a separate "batch"
-        # with seqlen_q=1 and seqlen_k=topk
-        k_flat = k_ctx.reshape(
-            num_prefill_tokens * topk, self.num_heads, self.qk_head_dim
-        )
-        v_flat = v_ctx.reshape(
-            num_prefill_tokens * topk, self.num_heads, self.v_head_dim
-        )
-
-        cu_seqlens_q = torch.arange(
-            0,
-            num_prefill_tokens + 1,
-            device=q.device,
-            dtype=torch.int32,
-        )
-        cu_seqlens_k = torch.arange(
-            0,
-            num_prefill_tokens * topk + 1,
-            step=topk,
-            device=q.device,
-            dtype=torch.int32,
-        )
-
-        context_output, context_lse = self._flash_attn_diff_headdims(
-            q=q,
-            k=k_flat,
-            v=v_flat,
-            cu_seqlens_q=cu_seqlens_q,
-            cu_seqlens_k=cu_seqlens_k,
-            max_seqlen_q=1,
-            max_seqlen_k=topk,
-            causal=False,
-            return_softmax_lse=True,
-        )
-
-        return context_output, context_lse
-
-    def _dcp_compute_sparse_context(
-        self,
-        q: torch.Tensor,
-        kv_c_and_k_pe_cache: torch.Tensor,
-        attn_metadata: T,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Sparse context attention with DCP (context parallelism).
-
-        With DCP, the KV cache is distributed across ranks via interleaving.
-        Each rank gathers its local subset of topk entries from its local
-        cache, then all-reduces the gathered compressed KV to reconstruct
-        the complete topk set. Since each cache entry lives on exactly one
-        rank (non-zero there, zero on others), the sum yields the correct
-        values. After reconstruction, decompression and attention proceed
-        as in the non-DCP path.
-        """
-        from vllm.distributed.parallel_state import get_dcp_group
-        from vllm.v1.attention.backends.mla.sparse_utils import (
-            triton_convert_req_index_to_global_index,
-        )
-
-        dcp_group = get_dcp_group()
-        dcp_rank = dcp_group.rank_in_group
-
-        num_decode_tokens: int = getattr(attn_metadata, "num_decode_tokens", 0)
-        topk: int = getattr(attn_metadata, "topk_tokens", 2048)
         num_prefill_tokens = q.shape[0]
-
-        assert self.topk_indices_buffer is not None
-        topk_indices = self.topk_indices_buffer[
+        topk_all = self.topk_indices_buffer[
             num_decode_tokens : num_decode_tokens + num_prefill_tokens
         ]
+        # Split per-request
+        topk_per_req = []
+        ti_offset = 0
+        for i in range(num_prefills):
+            ql = q_lens[i]
+            topk_per_req.append(topk_all[ti_offset : ti_offset + ql])
+            ti_offset += ql
 
-        # Convert per-request logical indices to global cache slot addresses
-        req_id_per_token = attn_metadata.req_id_per_token[num_decode_tokens:]  # type: ignore[attr-defined]
-        global_indices = triton_convert_req_index_to_global_index(
-            req_id_per_token,
-            attn_metadata.block_table,  # type: ignore[attr-defined]
-            topk_indices,
-            BLOCK_SIZE=attn_metadata.block_size,  # type: ignore[attr-defined]
-            NUM_TOPK_TOKENS=topk,
+        dense_mask = _build_sparse_causal_mask(
+            topk_per_req,
+            ctx_lens,
+            q_lens,
+            max_q_len,
+            max_seq_len,
+            device,
         )
 
-        # Mask out entries not on this DCP rank.
-        # With interleaving, position p is on rank
-        # (p // interleave_size) % world_size.
-        owning_rank = (
-            topk_indices // self.cp_kv_cache_interleave_size
-        ) % self.dcp_world_size
-        global_indices[owning_rank != dcp_rank] = -1
-
-        # Gather from local cache (invalid entries → 0)
-        cache_flat = kv_c_and_k_pe_cache.view(-1, kv_c_and_k_pe_cache.shape[-1])
-        valid_mask = global_indices >= 0
-        safe_indices = global_indices.clamp(min=0)
-        gathered_kv = cache_flat[safe_indices.long()]
-        gathered_kv[~valid_mask] = 0
-
-        # All-reduce to reconstruct complete topk entries across DCP ranks.
-        # Each entry is non-zero on exactly one rank, so sum is correct.
-        gathered_kv = dcp_group.all_reduce(gathered_kv)
-
-        # From here, identical to the non-DCP path: decompress and attend.
-        kv_c = gathered_kv[..., : self.kv_lora_rank]
-        k_pe_ctx = gathered_kv[..., self.kv_lora_rank :]
-
-        kv_c_flat = kv_c.reshape(-1, self.kv_lora_rank)
-        kv_nope_flat = self.kv_b_proj(kv_c_flat)[0]
-        kv_nope = kv_nope_flat.view(
-            num_prefill_tokens,
-            topk,
-            self.num_heads,
-            self.qk_nope_head_dim + self.v_head_dim,
-        )
-        k_nope_ctx, v_ctx = kv_nope.split(
-            [self.qk_nope_head_dim, self.v_head_dim], dim=-1
+        # Block sparsity for tile skipping
+        from vllm.vllm_flash_attn.cute.topk_mask import (
+            dense_mask_to_block_sparse,
+            topk_mask_mod,
         )
 
-        k_pe_ctx_expanded = k_pe_ctx.unsqueeze(2).expand(-1, -1, self.num_heads, -1)
-        k_ctx = torch.cat([k_nope_ctx, k_pe_ctx_expanded], dim=-1)
-
-        k_flat = k_ctx.reshape(
-            num_prefill_tokens * topk, self.num_heads, self.qk_head_dim
-        )
-        v_flat = v_ctx.reshape(
-            num_prefill_tokens * topk, self.num_heads, self.v_head_dim
+        block_sparse = dense_mask_to_block_sparse(
+            dense_mask,
+            max_q_len,
+            max_seq_len,
+            self._bs_tile_m,
+            self._bs_tile_n,
         )
 
-        cu_seqlens_q = torch.arange(
-            0,
-            num_prefill_tokens + 1,
-            device=q.device,
-            dtype=torch.int32,
-        )
-        cu_seqlens_k = torch.arange(
-            0,
-            num_prefill_tokens * topk + 1,
-            step=topk,
-            device=q.device,
-            dtype=torch.int32,
-        )
-
-        context_output, context_lse = self._flash_attn_diff_headdims(
+        attn_out, _ = flash_attn_varlen_func(
             q=q,
-            k=k_flat,
-            v=v_flat,
-            cu_seqlens_q=cu_seqlens_q,
+            k=k_packed,
+            v=v_packed,
+            cu_seqlens_q=prefill_qsl,
             cu_seqlens_k=cu_seqlens_k,
-            max_seqlen_q=1,
-            max_seqlen_k=topk,
-            causal=False,
+            max_seqlen_q=max_q_len,
+            max_seqlen_k=max_seq_len,
+            softmax_scale=self.scale,
+            causal=False,  # mask_mod handles both causal + topk
             return_softmax_lse=True,
+            fa_version=4,
+            mask_mod=topk_mask_mod,
+            aux_tensors=[dense_mask],
+            block_sparse_tensors=block_sparse,
+            m_block_size=_M_BLOCK_SIZE,
+            n_block_size=_N_BLOCK_SIZE,
         )
 
-        return context_output, context_lse
+        # --- Step 6: Trim output ---
+        attn_out = attn_out[..., : self.v_head_dim]
+        output.copy_(attn_out.flatten(start_dim=-2))

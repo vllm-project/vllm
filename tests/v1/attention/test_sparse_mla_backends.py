@@ -716,6 +716,262 @@ def test_split_prefill_chunks(seq_lens, max_buf, expected):
     assert out == expected
 
 
+PREFILL_BATCH_SPECS = {
+    "prefill_with_context": BatchSpec(seq_lens=[128, 256], query_lens=[32, 64]),
+    "pure_prefill": BatchSpec(seq_lens=[64, 128], query_lens=[64, 128]),
+}
+
+
+@pytest.mark.skipif(
+    torch.cuda.get_device_capability()[0] < 10,
+    reason="Sparse MLA forward_mha with context requires FA4 (SM100+)",
+)
+@pytest.mark.parametrize("batch_name", list(PREFILL_BATCH_SPECS.keys()))
+@pytest.mark.parametrize("kv_cache_dtype", ["auto"])
+def test_sparse_backend_prefill_correctness(
+    default_vllm_config,
+    dist_init,
+    batch_name,
+    kv_cache_dtype,
+    workspace_init,
+):
+    """Test single-pass FA4 masked forward_mha for sparse MLA prefill.
+
+    The reference is computed per query token as SDPA over
+    (topk context entries union causal new tokens).
+    """
+    backend_cls = FlashMLASparseBackend
+    batch_spec = PREFILL_BATCH_SPECS[batch_name]
+
+    device = torch.device("cuda")
+    dtype = torch.bfloat16
+    block_size = 64
+
+    num_heads = 128
+    kv_lora_rank = 512
+    qk_nope_head_dim = 128
+    qk_rope_head_dim = 64
+    v_head_dim = 128
+    head_size = kv_lora_rank + qk_rope_head_dim
+    topk_tokens = 32
+
+    max_seqlen = max(batch_spec.seq_lens)
+    total_cache_tokens = sum(batch_spec.seq_lens)
+
+    vllm_config = create_vllm_config(
+        model_name="deepseek-ai/DeepSeek-V2-Lite-Chat",
+        tensor_parallel_size=1,
+        max_model_len=max_seqlen,
+        num_gpu_blocks=max(2048, cdiv(total_cache_tokens, block_size) + 1),
+        block_size=block_size,
+        hf_config_override={
+            "index_topk": topk_tokens,
+            "attn_module_list_cfg": [{"topk_tokens": topk_tokens}],
+        },
+    )
+    model_config = vllm_config.model_config
+    model_config.hf_text_config = SimpleNamespace(
+        q_lora_rank=None,
+        kv_lora_rank=kv_lora_rank,
+        qk_nope_head_dim=qk_nope_head_dim,
+        qk_rope_head_dim=qk_rope_head_dim,
+        v_head_dim=v_head_dim,
+        model_type="deepseek_v2",
+    )
+    model_config.dtype = dtype
+    model_config.get_num_attention_heads = MethodType(
+        lambda self, parallel_config: num_heads, model_config
+    )
+    model_config.get_num_kv_heads = MethodType(
+        lambda self, parallel_config: 1, model_config
+    )
+    model_config.get_head_size = MethodType(lambda self: head_size, model_config)
+    model_config.get_sliding_window = MethodType(lambda self: None, model_config)
+
+    kv_cache_spec = create_standard_kv_cache_spec(vllm_config)
+    scale = 1.0 / math.sqrt(qk_nope_head_dim + qk_rope_head_dim)
+
+    torch.manual_seed(42)
+
+    W_UK = torch.rand(
+        kv_lora_rank, num_heads, qk_nope_head_dim, dtype=dtype, device=device
+    )
+    W_UV = torch.rand(kv_lora_rank, num_heads, v_head_dim, dtype=dtype, device=device)
+
+    seq_lens = batch_spec.seq_lens
+    query_lens = batch_spec.query_lens
+
+    # Generate per-token topk indices and compute reference outputs
+    total_query_tokens = sum(query_lens)
+    sparse_indices = torch.full(
+        (total_query_tokens, topk_tokens), -1, dtype=torch.int32, device=device
+    )
+
+    all_q, all_kv_c_new, all_k_pe_new = [], [], []
+    kv_c_contexts, k_pe_contexts = [], []
+    reference_outputs = []
+
+    global_tok_idx = 0
+    for i in range(batch_spec.batch_size):
+        s_len = seq_lens[i]
+        q_len = query_lens[i]
+        ctx_len = s_len - q_len
+
+        q_mha = torch.rand(
+            q_len,
+            num_heads,
+            qk_nope_head_dim + qk_rope_head_dim,
+            dtype=dtype,
+            device=device,
+        )
+        kv_c_full = torch.rand(s_len, kv_lora_rank, dtype=dtype, device=device)
+        k_pe_full = torch.rand(s_len, 1, qk_rope_head_dim, dtype=dtype, device=device)
+
+        # Decompress all KV for reference
+        kv_b_weight = torch.cat([W_UK, W_UV], dim=-1).view(
+            kv_lora_rank, num_heads * (qk_nope_head_dim + v_head_dim)
+        )
+        kv_decompressed = (kv_c_full @ kv_b_weight).view(
+            s_len, num_heads, qk_nope_head_dim + v_head_dim
+        )
+        k_nope_all, v_all = kv_decompressed.split(
+            [qk_nope_head_dim, v_head_dim], dim=-1
+        )
+        k_pe_expanded = k_pe_full.expand(-1, num_heads, -1)
+        k_all = torch.cat([k_nope_all, k_pe_expanded], dim=-1)
+
+        # Build topk indices for each query token
+        for j in range(q_len):
+            # Generate topk indices into the context
+            actual_topk = min(topk_tokens, ctx_len) if ctx_len > 0 else 0
+            if actual_topk > 0:
+                perm = torch.randperm(ctx_len, device=device)[:actual_topk]
+                sparse_indices[global_tok_idx, :actual_topk] = perm.to(torch.int32)
+
+            # Compute reference: SDPA over (topk context + causal new tokens)
+            # Gather the KV entries this query should attend to
+            attend_indices = []
+            # Topk context entries
+            if actual_topk > 0:
+                attend_indices.append(perm.long())
+            # Causal new tokens: positions ctx_len..ctx_len+j (inclusive)
+            new_tok_range = torch.arange(ctx_len, ctx_len + j + 1, device=device)
+            attend_indices.append(new_tok_range)
+            attend_indices = torch.cat(attend_indices)
+
+            q_tok = q_mha[j : j + 1]  # (1, H, D_qk)
+            k_attend = k_all[attend_indices]  # (N, H, D_qk)
+            v_attend = v_all[attend_indices]  # (N, H, D_v)
+
+            q_sdpa = q_tok.unsqueeze(0).transpose(1, 2).float()
+            k_sdpa = k_attend.unsqueeze(0).transpose(1, 2).float()
+            v_sdpa = v_attend.unsqueeze(0).transpose(1, 2).float()
+
+            out = torch.nn.functional.scaled_dot_product_attention(
+                q_sdpa, k_sdpa, v_sdpa, scale=scale
+            )
+            out = out.transpose(1, 2).squeeze(0)  # (1, H, D_v)
+            reference_outputs.append(out.to(dtype).flatten(start_dim=-2))
+
+            global_tok_idx += 1
+
+        all_q.append(q_mha)
+        all_kv_c_new.append(kv_c_full[ctx_len:])
+        all_k_pe_new.append(k_pe_full[ctx_len:])
+        kv_c_contexts.append(kv_c_full[: ctx_len + 1])
+        k_pe_contexts.append(k_pe_full[: ctx_len + 1])
+
+    query_cat = torch.cat(all_q, dim=0)
+    kv_c_cat = torch.cat(all_kv_c_new, dim=0)
+    k_pe_cat = torch.cat(all_k_pe_new, dim=0)
+    ref_output = torch.cat(reference_outputs, dim=0)
+
+    vllm_config.cache_config.cache_dtype = kv_cache_dtype
+    vllm_config.model_config.hf_config.index_topk = topk_tokens
+
+    common_attn_metadata = create_common_attn_metadata(
+        batch_spec,
+        vllm_config.cache_config.block_size,
+        device,
+        arange_block_indices=True,
+    )
+
+    kv_cache = create_and_prepopulate_kv_cache(
+        kv_c_contexts=kv_c_contexts,
+        k_pe_contexts=k_pe_contexts,
+        block_size=block_size,
+        head_size=head_size,
+        dtype=dtype,
+        device=device,
+        num_blocks=vllm_config.cache_config.num_gpu_blocks,
+        common_attn_metadata=common_attn_metadata,
+        randomize_blocks=False,
+        kv_cache_dtype=kv_cache_dtype,
+    )
+
+    builder_cls = backend_cls.get_builder_cls()
+    builder = builder_cls(kv_cache_spec, ["placeholder"], vllm_config, device)
+    metadata = builder.build(
+        common_prefix_len=0, common_attn_metadata=common_attn_metadata
+    )
+
+    mock_indexer = SimpleNamespace(topk_indices_buffer=sparse_indices)
+
+    kv_b_proj_weight = torch.cat([W_UK, W_UV], dim=-1).view(
+        kv_lora_rank, num_heads * (qk_nope_head_dim + v_head_dim)
+    )
+
+    mock_kv_b_proj = ColumnParallelLinear(
+        input_size=kv_lora_rank,
+        output_size=num_heads * (qk_nope_head_dim + v_head_dim),
+        bias=False,
+    ).to(device=device, dtype=dtype)
+    mock_kv_b_proj.weight = torch.nn.Parameter(kv_b_proj_weight.T.contiguous())
+
+    impl_cls = backend_cls.get_impl_cls()
+    with set_current_vllm_config(vllm_config):
+        impl = impl_cls(
+            num_heads=num_heads,
+            head_size=head_size,
+            scale=scale,
+            num_kv_heads=1,
+            alibi_slopes=None,
+            sliding_window=None,
+            kv_cache_dtype=kv_cache_dtype,
+            logits_soft_cap=None,
+            attn_type="decoder",
+            kv_sharing_target_layer_name=None,
+            q_lora_rank=None,
+            kv_lora_rank=kv_lora_rank,
+            qk_nope_head_dim=qk_nope_head_dim,
+            qk_rope_head_dim=qk_rope_head_dim,
+            qk_head_dim=qk_nope_head_dim + qk_rope_head_dim,
+            v_head_dim=v_head_dim,
+            kv_b_proj=mock_kv_b_proj,
+            indexer=mock_indexer,
+        )
+        impl.process_weights_after_loading(dtype)
+
+    out_buffer = torch.empty(
+        total_query_tokens, num_heads * v_head_dim, dtype=dtype, device=device
+    )
+
+    with torch.inference_mode():
+        impl.forward_mha(
+            q=query_cat,
+            kv_c_normed=kv_c_cat,
+            k_pe=k_pe_cat,
+            kv_c_and_k_pe_cache=kv_cache,
+            attn_metadata=metadata,
+            k_scale=torch.tensor(1.0, device=device),
+            output=out_buffer,
+        )
+
+    assert out_buffer.shape == ref_output.shape
+    assert torch.isfinite(out_buffer).all(), "Non-finite values in output"
+    torch.testing.assert_close(out_buffer, ref_output, rtol=0.05, atol=0.05)
+
+
 def test_triton_convert_returns_valid_counts():
     """Test that return_valid_counts correctly counts non-negative indices."""
     device = torch.device("cuda")
