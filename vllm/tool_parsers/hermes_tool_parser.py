@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import copy
 import json
+import threading
 from collections.abc import Sequence
 
 import partial_json_parser
@@ -28,6 +30,11 @@ from vllm.tool_parsers.abstract_tool_parser import (
 from vllm.utils.mistral import is_mistral_tokenizer
 
 logger = init_logger(__name__)
+
+# Module-level lock for thread-safe token ID caching in Hermes2ProToolParser.
+# Prevents "Already borrowed" errors from concurrent tokenizer.encode() calls.
+# See: huggingface/tokenizers#537
+_hermes_cache_lock = threading.Lock()
 
 
 class Hermes2ProToolParser(ToolParser):
@@ -60,22 +67,50 @@ class Hermes2ProToolParser(ToolParser):
                 "The model tokenizer must be passed to the ToolParser "
                 "constructor during construction."
             )
-        self.tool_call_start_token_ids = self.model_tokenizer.encode(
-            self.tool_call_start_token, add_special_tokens=False
-        )
-        self.tool_call_end_token_ids = self.model_tokenizer.encode(
-            self.tool_call_end_token, add_special_tokens=False
-        )
-
-        self.tool_call_start_token_array = [
-            self.model_tokenizer.decode([token_id])
-            for token_id in self.tool_call_start_token_ids
-        ]
-
-        self.tool_call_end_token_array = [
-            self.model_tokenizer.decode([token_id])
-            for token_id in self.tool_call_end_token_ids
-        ]
+        # Cache token IDs per tokenizer so tokenizer.encode() is never
+        # called on the shared instance. A new Hermes2ProToolParser is
+        # created per tool-call request (_preprocess_chat →
+        # tool_parser(tokenizer)), and under high concurrency the
+        # repeated encode() calls race on the HF fast tokenizer's
+        # internal Rust RefCell (set_truncation_and_padding →
+        # no_truncation), causing "RuntimeError: Already borrowed".
+        # Even a single encode() on the shared tokenizer can race with
+        # the renderer's tokenization pipeline on another thread, so we
+        # use a deep copy for the one-time cache computation.
+        # The cache is keyed by tokenizer identity so different models
+        # get their own entries.
+        cls = Hermes2ProToolParser
+        tok_key = id(self.model_tokenizer)
+        if not hasattr(cls, "_token_cache"):
+            with _hermes_cache_lock:
+                if not hasattr(cls, "_token_cache"):
+                    cls._token_cache = {}  # dict[int, dict]
+        if tok_key not in cls._token_cache:
+            with _hermes_cache_lock:
+                if tok_key not in cls._token_cache:
+                    # Use a private copy so encode() never touches the
+                    # shared tokenizer's Rust RefCell state.
+                    tok_copy = copy.deepcopy(self.model_tokenizer)
+                    start_ids = tok_copy.encode(
+                        self.tool_call_start_token,
+                        add_special_tokens=False,
+                    )
+                    end_ids = tok_copy.encode(
+                        self.tool_call_end_token,
+                        add_special_tokens=False,
+                    )
+                    cls._token_cache[tok_key] = {
+                        "start_ids": start_ids,
+                        "end_ids": end_ids,
+                        "start_array": [tok_copy.decode([tid]) for tid in start_ids],
+                        "end_array": [tok_copy.decode([tid]) for tid in end_ids],
+                    }
+                    del tok_copy
+        cached = cls._token_cache[tok_key]
+        self.tool_call_start_token_ids = cached["start_ids"]
+        self.tool_call_end_token_ids = cached["end_ids"]
+        self.tool_call_start_token_array = list(cached["start_array"])
+        self.tool_call_end_token_array = list(cached["end_array"])
 
         self.buffered_delta_text = ""
 
