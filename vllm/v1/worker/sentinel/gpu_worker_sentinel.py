@@ -47,7 +47,7 @@ class WorkerSentinel(BaseSentinel):
 
         self.pause_event = pause_event
         self.communicator_aborted = False
-        torch.cuda.set_device(self.device)
+        torch.accelerator.set_device_index(self.device)
 
         assert vllm_config.fault_tolerance_config.worker_cmd_addr is not None
         self.engine_core_cmd_socket = make_zmq_socket(
@@ -98,7 +98,7 @@ class WorkerSentinel(BaseSentinel):
             return True
         self.pause_event.set()
         self._set_device_communicator_status(False)
-        torch.cuda.set_device(self.device)
+        torch.accelerator.set_device_index(self.device)
         model_groups = get_all_model_groups()
         futures = []
 
@@ -159,7 +159,7 @@ class WorkerSentinel(BaseSentinel):
 
     def retry(self, timeout: int = 1, **kwargs) -> bool:
         if self.communicator_aborted:
-            torch.cuda.set_device(self.device)
+            torch.accelerator.set_device_index(self.device)
             with set_current_vllm_config(self.vllm_config):
                 self.init_distributed_env_callback()
                 self.communicator_aborted = False

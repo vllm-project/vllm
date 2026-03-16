@@ -231,7 +231,6 @@ class EngineCoreRequestType(enum.Enum):
     PAUSE = b"\x06"
 
 
-
 class ReconfigureDistributedRequest(msgspec.Struct):
     new_data_parallel_size: int
     new_data_parallel_rank: int
