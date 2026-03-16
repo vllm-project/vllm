@@ -489,12 +489,9 @@ class FusedMoEExperts(ABC):
         self.max_num_tokens = max_num_tokens
         self.num_dispatchers = num_dispatchers
 
+    @abstractmethod
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        """Hook for expert kernels to do weight transformations after loading.
-
-        Called once by the quantization method after the kernel is created.
-        Expert kernels may override this to fuse scales, reorder weights, etc.
-        """
+        pass
 
     @staticmethod
     def is_monolithic() -> bool:
