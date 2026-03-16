@@ -2362,7 +2362,7 @@ def dsv3_router_gemm(
     return output
 
 
-def tinygemm2(
+def gpt_oss_router_gemm(
     hidden_states: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor
 ) -> torch.Tensor:
     output = torch.empty(
@@ -2371,7 +2371,7 @@ def tinygemm2(
         device=hidden_states.device,
         dtype=hidden_states.dtype,
     )
-    torch.ops._moe_C.tinygemm2(output, hidden_states, weight, bias)
+    torch.ops._moe_C.gpt_oss_router_gemm(output, hidden_states, weight, bias)
     return output
 
 

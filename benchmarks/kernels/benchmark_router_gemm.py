@@ -18,8 +18,20 @@ num_tokens_range = [2**x for x in range(14)]
         x_vals=num_tokens_range,
         x_log=False,
         line_arg="impl",
-        line_vals=["torch-32", "tinygemm2-32", "torch-128", "tinygemm2-128"],
-        line_names=(["torch-32", "tinygemm2-32", "torch-128", "tinygemm2-128"]),
+        line_vals=[
+            "torch-32",
+            "gpt_oss_router_gemm-32",
+            "torch-128",
+            "gpt_oss_router_gemm-128",
+        ],
+        line_names=(
+            [
+                "torch-32",
+                "gpt_oss_router_gemm-32",
+                "torch-128",
+                "gpt_oss_router_gemm-128",
+            ]
+        ),
         styles=([("blue", "-"), ("orange", "-"), ("green", "-"), ("red", "-")]),
         ylabel="TFLOPs",
         plot_name="router gemm throughput",
@@ -30,9 +42,9 @@ def benchmark(num_tokens, impl):
     # M: num_tokens, K: hidden_dim, N: num_experts
     M, K = num_tokens, 2880
 
-    if impl == "torch-32" or impl == "tinygemm2-32":
+    if impl == "torch-32" or impl == "gpt_oss_router_gemm-32":
         N = 32
-    elif impl == "torch-128" or impl == "tinygemm2-128":
+    elif impl == "torch-128" or impl == "gpt_oss_router_gemm-128":
         N = 128
     else:
         raise ValueError(f"Unknown impl: {impl}")
@@ -47,10 +59,10 @@ def benchmark(num_tokens, impl):
 
         def runner():
             F.linear(mat_a, mat_b, bias)
-    elif impl == "tinygemm2-32" or impl == "tinygemm2-128":
+    elif impl == "gpt_oss_router_gemm-32" or impl == "gpt_oss_router_gemm-128":
 
         def runner():
-            ops.tinygemm2(mat_a, mat_b, bias)
+            ops.gpt_oss_router_gemm(mat_a, mat_b, bias)
 
     ms, min_ms, max_ms = triton.testing.do_bench_cudagraph(runner, quantiles=quantiles)
 

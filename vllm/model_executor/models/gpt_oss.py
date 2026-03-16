@@ -157,7 +157,7 @@ class OAIAttention(nn.Module):
         return output
 
 
-def tinygemm2_impl(
+def gpt_oss_router_gemm_impl(
     x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor
 ) -> torch.Tensor:
     """
@@ -166,21 +166,21 @@ def tinygemm2_impl(
     does not support runtime dispatching on num_tokens.
     """
     if x.shape[0] <= 128:
-        return ops.tinygemm2(x, weight, bias)
+        return ops.gpt_oss_router_gemm(x, weight, bias)
     else:
         return torch.nn.functional.linear(x, weight, bias)
 
 
-def tinygemm2_fake(
+def gpt_oss_router_gemm_fake(
     x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor
 ) -> torch.Tensor:
     return x.new_empty((x.shape[0], weight.shape[0]))
 
 
 direct_register_custom_op(
-    op_name="tinygemm2",
-    op_func=tinygemm2_impl,
-    fake_impl=tinygemm2_fake,
+    op_name="gpt_oss_router_gemm",
+    op_func=gpt_oss_router_gemm_impl,
+    fake_impl=gpt_oss_router_gemm_fake,
 )
 
 
@@ -207,9 +207,9 @@ class GptOssRouter(ReplicatedLinear):
         assert hasattr(self, "weight")
         assert hasattr(self, "bias")
 
-        # Check if tinygemm2 kernel can be used.
+        # Check if gpt_oss_router_gemm kernel can be used.
         # This kernel supports PDL and is optimized for low batch size.
-        self.use_tinygemm = (
+        self.use_gpt_oss_router_gemm = (
             self.weight.dtype == torch.bfloat16
             and current_platform.is_cuda()
             and (
@@ -222,8 +222,8 @@ class GptOssRouter(ReplicatedLinear):
         self,
         x: torch.Tensor,
     ) -> torch.Tensor:
-        if self.use_tinygemm:
-            return torch.ops.vllm.tinygemm2(x, self.weight, self.bias)
+        if self.use_gpt_oss_router_gemm:
+            return torch.ops.vllm.gpt_oss_router_gemm(x, self.weight, self.bias)
         else:
             return super().forward(x)
 

@@ -135,9 +135,9 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
 
   // gpt-oss optimized router GEMM kernel for SM90+
   m.def(
-      "tinygemm2(Tensor! output, Tensor input, Tensor weights, Tensor bias) -> "
-      "()");
-  m.impl("tinygemm2", torch::kCUDA, &tinygemm2);
+      "gpt_oss_router_gemm(Tensor! output, Tensor input, Tensor weights, "
+      "Tensor bias) -> ()");
+  m.impl("gpt_oss_router_gemm", torch::kCUDA, &gpt_oss_router_gemm);
 #endif
 }
 

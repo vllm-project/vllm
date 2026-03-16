@@ -23,11 +23,12 @@
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include <torch/all.h>
-#include "tinygemm2.cuh"
+#include "gpt_oss_router_gemm.cuh"
 
-void launch_tinygemm2(__nv_bfloat16* gA, __nv_bfloat16* gB, __nv_bfloat16* gC,
-                      __nv_bfloat16* bias, int batch_size, int output_features,
-                      int input_features, cudaStream_t stream) {
+void launch_gpt_oss_router_gemm(__nv_bfloat16* gA, __nv_bfloat16* gB,
+                                __nv_bfloat16* gC, __nv_bfloat16* bias,
+                                int batch_size, int output_features,
+                                int input_features, cudaStream_t stream) {
   static int const WARP_TILE_M = 16;
   static int const TILE_M = WARP_TILE_M;
   static int const TILE_N = 8;
@@ -75,8 +76,8 @@ void launch_tinygemm2(__nv_bfloat16* gA, __nv_bfloat16* gB, __nv_bfloat16* gC,
                    TILE_N * TILE_K * sizeof(__nv_bfloat16));
 
   gpuErrChk(cudaFuncSetAttribute(
-      tinygemm_kernel<WARP_TILE_M, TILE_M, TILE_N, TILE_K, STAGES, STAGE_UNROLL,
-                      PROFILE>,
+      gpt_oss_router_gemm_kernel<WARP_TILE_M, TILE_M, TILE_N, TILE_K, STAGES,
+                                 STAGE_UNROLL, PROFILE>,
       cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
 
   int tiles_m = (output_features + TILE_M - 1) / TILE_M;
@@ -96,15 +97,17 @@ void launch_tinygemm2(__nv_bfloat16* gA, __nv_bfloat16* gB, __nv_bfloat16* gC,
   attrs[0].val.programmaticStreamSerializationAllowed = 1;
   config.numAttrs = 1;
 
-  cudaLaunchKernelEx(&config,
-                     &tinygemm_kernel<WARP_TILE_M, TILE_M, TILE_N, TILE_K,
-                                      STAGES, STAGE_UNROLL, PROFILE>,
-                     gC, gA, gB, bias, output_features, batch_size,
-                     input_features, weight_map, activation_map, nullptr);
+  cudaLaunchKernelEx(
+      &config,
+      &gpt_oss_router_gemm_kernel<WARP_TILE_M, TILE_M, TILE_N, TILE_K, STAGES,
+                                  STAGE_UNROLL, PROFILE>,
+      gC, gA, gB, bias, output_features, batch_size, input_features, weight_map,
+      activation_map, nullptr);
 }
 
-void tinygemm2_cuda_forward(torch::Tensor& output, torch::Tensor input,
-                            torch::Tensor weight, torch::Tensor bias) {
+void gpt_oss_router_gemm_cuda_forward(torch::Tensor& output,
+                                      torch::Tensor input, torch::Tensor weight,
+                                      torch::Tensor bias) {
   auto const batch_size = input.size(0);
   auto const input_dim = input.size(1);
   auto const output_dim = weight.size(0);
@@ -112,18 +115,18 @@ void tinygemm2_cuda_forward(torch::Tensor& output, torch::Tensor input,
   auto stream = at::cuda::getCurrentCUDAStream();
 
   if (input.scalar_type() == at::ScalarType::BFloat16) {
-    launch_tinygemm2((__nv_bfloat16*)input.data_ptr(),
-                     (__nv_bfloat16*)weight.data_ptr(),
-                     (__nv_bfloat16*)output.mutable_data_ptr(),
-                     (__nv_bfloat16*)bias.data_ptr(), batch_size, output_dim,
-                     input_dim, stream);
+    launch_gpt_oss_router_gemm((__nv_bfloat16*)input.data_ptr(),
+                               (__nv_bfloat16*)weight.data_ptr(),
+                               (__nv_bfloat16*)output.mutable_data_ptr(),
+                               (__nv_bfloat16*)bias.data_ptr(), batch_size,
+                               output_dim, input_dim, stream);
   } else {
     throw std::invalid_argument("Unsupported dtype, only supports bfloat16");
   }
 }
 
-void tinygemm2(torch::Tensor& output, torch::Tensor input, torch::Tensor weight,
-               torch::Tensor bias) {
+void gpt_oss_router_gemm(torch::Tensor& output, torch::Tensor input,
+                         torch::Tensor weight, torch::Tensor bias) {
   TORCH_CHECK(input.dim() == 2, "input must be 2D");
   TORCH_CHECK(weight.dim() == 2, "weight must be 2D");
   TORCH_CHECK(bias.dim() == 1, "bias must be 1D");
@@ -137,5 +140,5 @@ void tinygemm2(torch::Tensor& output, torch::Tensor input, torch::Tensor weight,
               "weight tensor must be bfloat16");
   TORCH_CHECK(bias.scalar_type() == at::ScalarType::BFloat16,
               "bias tensor must be bfloat16");
-  tinygemm2_cuda_forward(output, input, weight, bias);
+  gpt_oss_router_gemm_cuda_forward(output, input, weight, bias);
 }
