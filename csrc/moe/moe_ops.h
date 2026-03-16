@@ -70,4 +70,8 @@ torch::Tensor router_gemm_bf16_fp32(torch::Tensor const& input,
 // Supports num_tokens in [1, 16], num_experts in {256, 384}, hidden_dim = 7168
 void dsv3_router_gemm(torch::Tensor& output, const torch::Tensor& mat_a,
                       const torch::Tensor& mat_b);
+
+// gpt-oss optimized router GEMM kernel for SM90+
+void tinygemm2(torch::Tensor& output, torch::Tensor input, torch::Tensor weight,
+               torch::Tensor bias);
 #endif

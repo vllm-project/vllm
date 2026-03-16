@@ -999,6 +999,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   list(APPEND VLLM_MOE_EXT_SRC
     "csrc/moe/moe_wna16.cu"
     "csrc/moe/grouped_topk_kernels.cu"
+    "csrc/moe/tinygemm2.cu"
     "csrc/moe/router_gemm.cu")
 endif()
 

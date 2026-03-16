@@ -2362,6 +2362,19 @@ def dsv3_router_gemm(
     return output
 
 
+def tinygemm2(
+    hidden_states: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor
+) -> torch.Tensor:
+    output = torch.empty(
+        hidden_states.shape[0],
+        weight.shape[0],
+        device=hidden_states.device,
+        dtype=hidden_states.dtype,
+    )
+    torch.ops._moe_C.tinygemm2(output, hidden_states, weight, bias)
+    return output
+
+
 def topk_softmax(
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
