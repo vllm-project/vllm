@@ -28,6 +28,8 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
     CompressedTensorsConfig,
 )
 from vllm.model_executor.models.interfaces import (
+    SupportsEagle,
+    SupportsEagle3,
     SupportsMultiModal,
     SupportsPP,
     SupportsQuant,
@@ -174,7 +176,8 @@ class KimiK25ProcessingInfo(BaseProcessingInfo):
         self.hf_config = self.get_hf_config()
         self.media_token_id = self.hf_config.media_placeholder_token_id
         media_processor = cached_get_image_processor(
-            self.ctx.model_config.model, trust_remote_code=True
+            self.ctx.model_config.model,
+            trust_remote_code=self.ctx.model_config.trust_remote_code,
         )
         self.media_processor = media_processor
         self.hf_processor = MoonshotKimiVAutoProcessor(
@@ -310,7 +313,12 @@ class KimiK25MultiModalProcessor(BaseMultiModalProcessor[KimiK25ProcessingInfo])
     dummy_inputs=KimiK25DummyInputsBuilder,
 )
 class KimiK25ForConditionalGeneration(
-    nn.Module, SupportsMultiModal, SupportsPP, SupportsQuant
+    nn.Module,
+    SupportsMultiModal,
+    SupportsPP,
+    SupportsQuant,
+    SupportsEagle,
+    SupportsEagle3,
 ):
     """Kimi-K2.5 model for conditional generation.
 
@@ -478,6 +486,12 @@ class KimiK25ForConditionalGeneration(
     def compute_logits(self, hidden_states: torch.Tensor, **kwargs) -> torch.Tensor:
         logits = self.language_model.compute_logits(hidden_states)
         return logits
+
+    def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
+        self.language_model.set_aux_hidden_state_layers(layers)
+
+    def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:
+        return self.language_model.get_eagle3_aux_hidden_state_layers()
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         loader = AutoWeightsLoader(self)

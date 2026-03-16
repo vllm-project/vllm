@@ -62,7 +62,6 @@ from vllm.config import (
     get_attr_docs,
 )
 from vllm.config.cache import (
-    BlockSize,
     CacheDType,
     KVOffloadingBackend,
     MambaCacheMode,
@@ -85,6 +84,7 @@ from vllm.config.observability import DetailedTraceModules
 from vllm.config.parallel import (
     All2AllBackend,
     DataParallelBackend,
+    DCPCommBackend,
     DistributedExecutorBackend,
     ExpertPlacementStrategy,
 )
@@ -402,9 +402,11 @@ class EngineArgs:
     master_port: int = ParallelConfig.master_port
     nnodes: int = ParallelConfig.nnodes
     node_rank: int = ParallelConfig.node_rank
+    distributed_timeout_seconds: int | None = ParallelConfig.distributed_timeout_seconds
     tensor_parallel_size: int = ParallelConfig.tensor_parallel_size
     prefill_context_parallel_size: int = ParallelConfig.prefill_context_parallel_size
     decode_context_parallel_size: int = ParallelConfig.decode_context_parallel_size
+    dcp_comm_backend: DCPCommBackend = ParallelConfig.dcp_comm_backend
     dcp_kv_cache_interleave_size: int = ParallelConfig.dcp_kv_cache_interleave_size
     cp_kv_cache_interleave_size: int = ParallelConfig.cp_kv_cache_interleave_size
     data_parallel_size: int = ParallelConfig.data_parallel_size
@@ -419,6 +421,7 @@ class EngineArgs:
     enable_expert_parallel: bool = ParallelConfig.enable_expert_parallel
     moe_backend: MoEBackend = KernelConfig.moe_backend
     all2all_backend: All2AllBackend = ParallelConfig.all2all_backend
+    enable_elastic_ep: bool = ParallelConfig.enable_elastic_ep
     enable_dbo: bool = ParallelConfig.enable_dbo
     ubatch_size: int = ParallelConfig.ubatch_size
     dbo_decode_token_threshold: int = ParallelConfig.dbo_decode_token_threshold
@@ -436,14 +439,13 @@ class EngineArgs:
     max_parallel_loading_workers: int | None = (
         ParallelConfig.max_parallel_loading_workers
     )
-    block_size: BlockSize = CacheConfig.block_size
+    block_size: int | None = None
     enable_prefix_caching: bool | None = None
     prefix_caching_hash_algo: PrefixCachingHashAlgo = (
         CacheConfig.prefix_caching_hash_algo
     )
     disable_sliding_window: bool = ModelConfig.disable_sliding_window
     disable_cascade_attn: bool = ModelConfig.disable_cascade_attn
-    swap_space: float = CacheConfig.swap_space
     offload_backend: str = OffloadConfig.offload_backend
     cpu_offload_gb: float = UVAOffloadConfig.cpu_offload_gb
     cpu_offload_params: set[str] = get_field(UVAOffloadConfig, "cpu_offload_params")
@@ -604,12 +606,15 @@ class EngineArgs:
     kv_offloading_backend: KVOffloadingBackend = CacheConfig.kv_offloading_backend
     tokens_only: bool = False
 
+    shutdown_timeout: int = 0
+
     weight_transfer_config: WeightTransferConfig | None = get_field(
         VllmConfig,
         "weight_transfer_config",
     )
 
     fail_on_environ_validation: bool = False
+    gdn_prefill_backend: Literal["flashinfer", "triton"] | None = None
 
     def __post_init__(self):
         # support `EngineArgs(compilation_config={...})`
@@ -812,12 +817,20 @@ class EngineArgs:
         parallel_group.add_argument("--nnodes", "-n", **parallel_kwargs["nnodes"])
         parallel_group.add_argument("--node-rank", "-r", **parallel_kwargs["node_rank"])
         parallel_group.add_argument(
+            "--distributed-timeout-seconds",
+            **parallel_kwargs["distributed_timeout_seconds"],
+        )
+        parallel_group.add_argument(
             "--tensor-parallel-size", "-tp", **parallel_kwargs["tensor_parallel_size"]
         )
         parallel_group.add_argument(
             "--decode-context-parallel-size",
             "-dcp",
             **parallel_kwargs["decode_context_parallel_size"],
+        )
+        parallel_group.add_argument(
+            "--dcp-comm-backend",
+            **parallel_kwargs["dcp_comm_backend"],
         )
         parallel_group.add_argument(
             "--dcp-kv-cache-interleave-size",
@@ -897,6 +910,9 @@ class EngineArgs:
             **parallel_kwargs["ubatch_size"],
         )
         parallel_group.add_argument(
+            "--enable-elastic-ep", **parallel_kwargs["enable_elastic_ep"]
+        )
+        parallel_group.add_argument(
             "--dbo-decode-token-threshold",
             **parallel_kwargs["dbo_decode_token_threshold"],
         )
@@ -944,7 +960,6 @@ class EngineArgs:
         cache_group.add_argument(
             "--kv-cache-memory-bytes", **cache_kwargs["kv_cache_memory_bytes"]
         )
-        cache_group.add_argument("--swap-space", **cache_kwargs["swap_space"])
         cache_group.add_argument("--kv-cache-dtype", **cache_kwargs["cache_dtype"])
         cache_group.add_argument(
             "--num-gpu-blocks-override", **cache_kwargs["num_gpu_blocks_override"]
@@ -1296,6 +1311,21 @@ class EngineArgs:
             default=False,
             action=argparse.BooleanOptionalAction,
         )
+
+        parser.add_argument(
+            "--shutdown-timeout",
+            type=int,
+            default=0,
+            help="Shutdown timeout in seconds. 0 = abort, >0 = wait.",
+        )
+
+        parser.add_argument(
+            "--gdn-prefill-backend",
+            dest="gdn_prefill_backend",
+            choices=["flashinfer", "triton"],
+            default=None,
+            help="Select GDN prefill backend.",
+        )
         return parser
 
     @classmethod
@@ -1498,10 +1528,9 @@ class EngineArgs:
         )
 
         cache_config = CacheConfig(
-            block_size=self.block_size,
+            block_size=self.block_size,  # type: ignore[arg-type]
             gpu_memory_utilization=self.gpu_memory_utilization,
             kv_cache_memory_bytes=self.kv_cache_memory_bytes,
-            swap_space=self.swap_space,
             cache_dtype=resolved_cache_dtype,  # type: ignore[arg-type]
             is_attention_free=model_config.is_attention_free,
             num_gpu_blocks_override=self.num_gpu_blocks_override,
@@ -1691,6 +1720,7 @@ class EngineArgs:
             master_port=self.master_port,
             nnodes=self.nnodes,
             node_rank=self.node_rank,
+            distributed_timeout_seconds=self.distributed_timeout_seconds,
             data_parallel_master_ip=data_parallel_address,
             data_parallel_rpc_port=data_parallel_rpc_port,
             data_parallel_backend=self.data_parallel_backend,
@@ -1698,6 +1728,7 @@ class EngineArgs:
             is_moe_model=model_config.is_moe,
             enable_expert_parallel=self.enable_expert_parallel,
             all2all_backend=self.all2all_backend,
+            enable_elastic_ep=self.enable_elastic_ep,
             enable_dbo=self.enable_dbo,
             ubatch_size=self.ubatch_size,
             dbo_decode_token_threshold=self.dbo_decode_token_threshold,
@@ -1715,6 +1746,7 @@ class EngineArgs:
             worker_cls=self.worker_cls,
             worker_extension_cls=self.worker_extension_cls,
             decode_context_parallel_size=self.decode_context_parallel_size,
+            dcp_comm_backend=self.dcp_comm_backend,
             dcp_kv_cache_interleave_size=self.dcp_kv_cache_interleave_size,
             cp_kv_cache_interleave_size=self.cp_kv_cache_interleave_size,
             _api_process_count=self._api_process_count,
@@ -1804,13 +1836,10 @@ class EngineArgs:
                     "attention_backend and attention_config.backend "
                     "are mutually exclusive"
                 )
-            # Convert string to enum if needed (CLI parsing returns a string)
-            if isinstance(self.attention_backend, str):
-                attention_config.backend = AttentionBackendEnum[
-                    self.attention_backend.upper()
-                ]
-            else:
-                attention_config.backend = self.attention_backend
+            # Reuse the validator to handle "auto" and string-to-enum conversion
+            attention_config.backend = AttentionConfig.validate_backend_before(
+                self.attention_backend
+            )
 
         # Kernel config overrides
         kernel_config = copy.deepcopy(self.kernel_config)
@@ -1882,6 +1911,9 @@ class EngineArgs:
             ),
         )
 
+        if self.gdn_prefill_backend is not None:
+            self.additional_config["gdn_prefill_backend"] = self.gdn_prefill_backend
+
         config = VllmConfig(
             model_config=model_config,
             cache_config=cache_config,
@@ -1905,6 +1937,7 @@ class EngineArgs:
             optimization_level=self.optimization_level,
             performance_mode=self.performance_mode,
             weight_transfer_config=self.weight_transfer_config,
+            shutdown_timeout=self.shutdown_timeout,
         )
 
         return config
@@ -2182,14 +2215,10 @@ class AsyncEngineArgs(EngineArgs):
             "--enable-log-requests",
             action=argparse.BooleanOptionalAction,
             default=AsyncEngineArgs.enable_log_requests,
-            help="Enable logging requests.",
-        )
-        parser.add_argument(
-            "--disable-log-requests",
-            action=argparse.BooleanOptionalAction,
-            default=not AsyncEngineArgs.enable_log_requests,
-            help="[DEPRECATED] Disable logging requests.",
-            deprecated=True,
+            help="Enable logging request information, dependent on log level:\n"
+            "- INFO: Request ID, parameters and LoRA request.\n"
+            "- DEBUG: Prompt inputs (e.g: text, token IDs).\n"
+            "You can set the minimum log level via `VLLM_LOGGING_LEVEL`.",
         )
         current_platform.pre_register_and_update(parser)
         return parser

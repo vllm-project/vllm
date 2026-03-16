@@ -11,7 +11,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8StaticTensorSym,
 )
-from vllm.v1.attention.backend import AttentionLayer, AttentionType
+from vllm.v1.attention.backend import AttentionLayer, AttentionType, MultipleOf
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.attention.backends.rocm_attn import (
     RocmAttentionBackend,
@@ -24,6 +24,28 @@ logger = init_logger(__name__)
 
 class RocmAiterUnifiedAttentionBackend(RocmAttentionBackend):
     accept_output_buffer: bool = True
+
+    @staticmethod
+    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+        return [MultipleOf(16)]
+
+    @classmethod
+    def supports_block_size(cls, block_size: int | None) -> bool:
+        if block_size is None:
+            return True
+        return block_size % 16 == 0
+
+    @classmethod
+    def supports_head_size(cls, head_size: int) -> bool:
+        return head_size >= 32
+
+    @classmethod
+    def supports_mm_prefix(cls) -> bool:
+        return True
+
+    @classmethod
+    def supports_sink(cls) -> bool:
+        return True
 
     forward_includes_kv_cache_update: bool = False
 
@@ -54,6 +76,16 @@ class RocmAiterUnifiedAttentionBackend(RocmAttentionBackend):
     @staticmethod
     def get_builder_cls() -> type["RocmAttentionMetadataBuilder"]:
         return RocmAttentionMetadataBuilder
+
+    @classmethod
+    def supports_attn_type(cls, attn_type: str) -> bool:
+        """RocmAiterUnifiedAttention supports all attention types."""
+        return attn_type in (
+            AttentionType.DECODER,
+            AttentionType.ENCODER,
+            AttentionType.ENCODER_ONLY,
+            AttentionType.ENCODER_DECODER,
+        )
 
 
 class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
@@ -143,6 +175,19 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
 
         num_actual_tokens = attn_metadata.num_actual_tokens
 
+        # Handle encoder attention differently - no KV cache needed
+        if self.attn_type in (AttentionType.ENCODER_ONLY, AttentionType.ENCODER):
+            # For encoder attention,
+            # we use direct Q, K, V tensors without caching
+            return self._forward_encoder_attention(
+                query[:num_actual_tokens],
+                key[:num_actual_tokens],
+                value[:num_actual_tokens],
+                output[:num_actual_tokens],
+                attn_metadata,
+                layer,
+            )
+
         key_cache, value_cache = kv_cache.unbind(0)
 
         if self.kv_cache_dtype.startswith("fp8"):
@@ -195,6 +240,10 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
         kv_cache: torch.Tensor,
         slot_mapping: torch.Tensor,
     ):
+        if self.attn_type in (AttentionType.ENCODER_ONLY, AttentionType.ENCODER):
+            # For encoder attention,
+            # we use direct Q, K, V tensors without caching
+            return
         key_cache, value_cache = kv_cache.unbind(0)
 
         # Reshape the input keys and values and store them in the cache.
@@ -224,6 +273,10 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
         kv_cache: torch.Tensor,
         layer_slot_mapping: torch.Tensor,
     ):
+        if self.attn_type in (AttentionType.ENCODER_ONLY, AttentionType.ENCODER):
+            # For encoder attention,
+            # we use direct Q, K, V tensors without caching
+            return
         key_cache, value_cache = kv_cache.unbind(0)
         flash_layout = True
 

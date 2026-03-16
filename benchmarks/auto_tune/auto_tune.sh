@@ -85,7 +85,6 @@ start_server() {
     # Each argument and its value are separate elements.
     local common_args_array=(
         "$MODEL"
-        "--disable-log-requests"
         "--port" "8004"
         "--host" "$HOSTNAME"
         "--gpu-memory-utilization" "$gpu_memory_utilization"

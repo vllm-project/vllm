@@ -14,10 +14,10 @@ class AttentionConfig:
     """Configuration for attention mechanisms in vLLM."""
 
     backend: AttentionBackendEnum | None = None
-    """Attention backend to use. If None, will be selected automatically."""
+    """Attention backend to use. Use "auto" or None for automatic selection."""
 
-    flash_attn_version: Literal[2, 3] | None = None
-    """Force vllm to use a specific flash-attention version (2 or 3).
+    flash_attn_version: Literal[2, 3, 4] | None = None
+    """Force vllm to use a specific flash-attention version (2, 3, or 4).
     Only valid when using the flash-attention backend."""
 
     use_prefill_decode_attention: bool = False
@@ -30,14 +30,14 @@ class AttentionConfig:
     use_cudnn_prefill: bool = False
     """Whether to use cudnn prefill."""
 
-    use_trtllm_ragged_deepseek_prefill: bool = True
+    use_trtllm_ragged_deepseek_prefill: bool = False
     """Whether to use TRTLLM ragged deepseek prefill."""
 
     use_trtllm_attention: bool | None = None
     """If set to True/False, use or don't use the TRTLLM attention backend
     in flashinfer. If None, auto-detect the attention backend in flashinfer."""
 
-    disable_flashinfer_prefill: bool = False
+    disable_flashinfer_prefill: bool = True
     """Whether to disable flashinfer prefill."""
 
     disable_flashinfer_q_quantization: bool = False
@@ -63,7 +63,13 @@ class AttentionConfig:
     @field_validator("backend", mode="before")
     @classmethod
     def validate_backend_before(cls, value: Any) -> Any:
-        """Enable parsing of the `backend` enum type from string."""
+        """Enable parsing of the `backend` enum type from string.
+
+        The special value "auto" is treated as None, which triggers
+        automatic backend selection.
+        """
         if isinstance(value, str):
+            if value.lower() == "auto":
+                return None
             return AttentionBackendEnum[value.upper()]
         return value

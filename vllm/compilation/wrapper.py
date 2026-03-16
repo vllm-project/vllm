@@ -10,7 +10,6 @@ from types import CodeType
 from typing import Any, ParamSpec, TypeVar
 
 import torch
-import torch._C._dynamo.guards
 
 import vllm.envs as envs
 from vllm.config import CompilationMode, CUDAGraphMode, get_current_vllm_config
@@ -24,65 +23,23 @@ R = TypeVar("R")
 P = ParamSpec("P")
 
 
-def _noop_add_global_state_guard(
-    self: torch._C._dynamo.guards.GuardManager, *args: Any, **kwargs: Any
-) -> None:
-    """No-op to skip the GLOBAL_STATE guard entirely"""
-    pass
-
-
-def _noop_add_torch_function_mode_stack_guard(
-    self: torch._C._dynamo.guards.GuardManager, *args: Any, **kwargs: Any
-) -> None:
-    """No-op to skip the TORCH_FUNCTION_MODE_STACK guard entirely"""
-    pass
-
-
 @contextmanager
 def _compilation_context() -> Generator[None, None, None]:
-    """Context manager for compilation settings and patches.
+    """Context manager for compilation settings.
 
-    This manager:
-    1. Sets higher dynamo cache limits for compilation. (Needed for
-        qwen2_5_vl see test_qwen2_5_vl_evs_functionality).
-        Generally a recompilation can happen whenever we use a new
-        backend instance in torch.compile.
-    2. Patches out add_global_state_guard to skip GLOBAL_STATE guards
-    3. Patches out add_torch_function_mode_stack_guard to skip
-        TORCH_FUNCTION_MODE_STACK guards.
-    4. Restores everything when compilation completes
+    This manager sets higher dynamo cache limits for compilation.
+    (Needed for qwen2_5_vl see test_qwen2_5_vl_evs_functionality).
+    Generally a recompilation can happen whenever we use a new
+    backend instance in torch.compile.
     """
-    # Save original values
-    original_global_state_guard = (
-        torch._C._dynamo.guards.GuardManager.add_global_state_guard
-    )
-    original_torch_function_mode_stack_guard = (
-        torch._C._dynamo.guards.GuardManager.add_torch_function_mode_stack_guard
-    )
     original_cache_size = torch._dynamo.config.cache_size_limit
     original_accumulated_cache = torch._dynamo.config.accumulated_cache_size_limit
 
     try:
-        # Set higher cache limits for compilation
         torch._dynamo.config.cache_size_limit = 2048
         torch._dynamo.config.accumulated_cache_size_limit = 8192
-
-        # Patch guard manager
-        torch._C._dynamo.guards.GuardManager.add_global_state_guard = (
-            _noop_add_global_state_guard
-        )
-        torch._C._dynamo.guards.GuardManager.add_torch_function_mode_stack_guard = (
-            _noop_add_torch_function_mode_stack_guard
-        )
         yield
     finally:
-        # Restore original values
-        torch._C._dynamo.guards.GuardManager.add_global_state_guard = (
-            original_global_state_guard
-        )
-        torch._C._dynamo.guards.GuardManager.add_torch_function_mode_stack_guard = (
-            original_torch_function_mode_stack_guard
-        )
         torch._dynamo.config.cache_size_limit = original_cache_size
         torch._dynamo.config.accumulated_cache_size_limit = original_accumulated_cache
 
@@ -155,7 +112,7 @@ class TorchCompileWithNoGuardsWrapper:
                     entry.guard_type == "SHAPE_ENV" for entry in x
                 ]
             else:
-                options["guard_filter_fn"] = lambda x: [False for _ in x]
+                options["guard_filter_fn"] = torch.compiler.skip_all_guards_unsafe
 
         compiled_ptr: Any = self.forward
         # Validate that unbacked dynamic shapes require VLLM_USE_BYTECODE_HOOK=False
@@ -319,3 +276,55 @@ class TorchCompileWithNoGuardsWrapper:
             yield
         finally:
             self.__class__.forward.__code__ = original
+
+
+def reset_compile_wrapper(model: torch.nn.Module) -> None:
+    """
+    Clean up compiled model and captured CUDA graphs for elastic EP.
+    """
+    if not isinstance(model, TorchCompileWithNoGuardsWrapper) and hasattr(
+        model, "model"
+    ):
+        model = model.model
+    if not isinstance(model, TorchCompileWithNoGuardsWrapper):
+        return
+    # model.do_not_compile is set by the @support_torch_compile decorator
+    if hasattr(model, "do_not_compile") and model.do_not_compile:
+        return
+    from vllm.compilation.counter import compilation_counter
+
+    # reset the compilation counter
+    compilation_counter.num_models_seen = 0
+    compilation_counter.num_graphs_seen = 0
+    compilation_counter.num_piecewise_graphs_seen = 0
+    compilation_counter.num_piecewise_capturable_graphs_seen = 0
+    compilation_counter.num_backend_compilations = 0
+    compilation_counter.num_gpu_runner_capture_triggers = 0
+    compilation_counter.num_cudagraph_captured = 0
+    compilation_counter.num_inductor_compiles = 0
+    compilation_counter.num_eager_compiles = 0
+    compilation_counter.num_cache_entries_updated = 0
+    compilation_counter.num_compiled_artifacts_saved = 0
+    compilation_counter.stock_torch_compile_count = 0
+    compilation_counter.num_aot_compiles = 0
+    compilation_counter.num_aot_artifacts_saved = 0
+    compilation_counter.num_aot_artifacts_loaded = 0
+
+    # Clear the AOT compiled function so the model is forced to
+    # recompile on the next call. Without this, decorators.py
+    # __call__ uses the stale aot_compiled_fn whose torchinductor
+    # kernels have old parameters (expert_map size for example)
+    # baked in as compile-time constants.
+    if hasattr(model, "aot_compiled_fn"):
+        model.aot_compiled_fn = None
+    if hasattr(model, "was_aot_compile_fn_loaded_from_disk"):
+        model.was_aot_compile_fn_loaded_from_disk = False
+
+    # Reset the cache_dir so VllmBackend recomputes the hash
+    # (data_parallel_size changed, so the config hash differs).
+    compilation_config = model.vllm_config.compilation_config
+    compilation_config.cache_dir = ""
+    compilation_config.local_cache_dir = ""
+
+    model.__class__.forward.__code__ = model.original_code_object()
+    TorchCompileWithNoGuardsWrapper.__init__(model)

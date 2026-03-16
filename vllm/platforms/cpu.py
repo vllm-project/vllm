@@ -93,30 +93,7 @@ class CpuPlatform(Platform):
                 return [torch.bfloat16, torch.float16, torch.float32]
             return [torch.float16, torch.float32]
         elif self.get_cpu_architecture() == CpuArchEnum.RISCV:
-            # Workaround for Issue #25655: RISC-V scheduler bug with float16
-            #
-            # Background:
-            # - RISC-V currently uses scalar code path
-            # - There is a latent bug in the vLLM scheduler that provides
-            # invalid
-            #   physical_block_idx values under certain conditions
-            # - This bug causes segmentation faults when using float16
-            # dtype on RISC-V
-            # - Testing shows that forcing float32 successfully bypasses
-            # this issue
-            #
-            # Technical details:
-            # - The bug manifests as out-of-bounds physical_block_idx in
-            # block_tables
-            # - Only occurs on RISC-V hardware
-            # tested on Sophgo SG2044
-            # - Does not reproduce on x86 or other architectures
-            # - Root cause is in Python-level scheduling logic,
-            # not C++ kernels
-            #
-            # This is a temporary workaround until the scheduler bug is fixed.
-            # See: https://github.com/vllm-project/vllm/issues/25655
-            return [torch.float32]
+            return [torch.bfloat16, torch.float16, torch.float32]
         # x86/aarch64 CPU has supported both bf16 and fp16 natively.
         return [torch.bfloat16, torch.float16, torch.float32]
 
@@ -185,7 +162,7 @@ class CpuPlatform(Platform):
 
         cache_config = vllm_config.cache_config
 
-        if cache_config.block_size is None:
+        if not cache_config.user_specified_block_size:
             cache_config.block_size = 128
 
         if cache_config.block_size % 32 != 0:
@@ -275,6 +252,8 @@ class CpuPlatform(Platform):
         if vllm_config.lora_config is not None:
             compilation_config.mode = CompilationMode.NONE
 
+        vllm_config.profiler_config.torch_profiler_dump_cuda_time_total = False
+
         assert vllm_config.device_config.device_type == "cpu"
 
         #
@@ -360,6 +339,12 @@ class CpuPlatform(Platform):
                 vllm_config.model_config.max_model_len,
                 vllm_config.scheduler_config.DEFAULT_MAX_NUM_BATCHED_TOKENS,
             )
+
+    @classmethod
+    def update_block_size_for_backend(cls, vllm_config: "VllmConfig") -> None:
+        # TODO: CPU still sets block_size in check_and_update_config.
+        # Move that logic here so block_size is chosen by the backend.
+        pass
 
     @classmethod
     def get_allowed_cpu_core_node_list(cls) -> tuple[list[int], list[LogicalCPUInfo]]:
@@ -483,3 +468,38 @@ class CpuPlatform(Platform):
     @classmethod
     def support_hybrid_kv_cache(cls) -> bool:
         return True
+
+    @classmethod
+    def import_kernels(cls) -> None:
+        if Platform.get_cpu_architecture() in (CpuArchEnum.X86,):
+            # Note: The lib name is _C_AVX2/AVX512, but the module name is _C.
+            # This will cause a exception "dynamic module does define
+            # module export function". But the library is imported
+            # successfully. So ignore the exception for now, until we find
+            # a solution.
+            ignored_msg = "dynamic module does not define module export function"
+            if torch.cpu._is_avx512_supported():
+                if torch.cpu._is_avx512_bf16_supported():
+                    try:
+                        import vllm._C  # noqa: F401
+                    except ImportError as e:
+                        logger.warning("Failed to import from vllm._C: %r", e)
+                else:
+                    try:
+                        import vllm._C_AVX512  # noqa: F401
+                    except ImportError as e:
+                        if ignored_msg not in e.msg:
+                            logger.warning(
+                                "Failed to import from vllm._C_AVX512: %r", e
+                            )
+            else:
+                try:
+                    import vllm._C_AVX2  # noqa: F401
+                except ImportError as e:
+                    if ignored_msg not in e.msg:
+                        logger.warning("Failed to import from vllm._C_AVX2: %r", e)
+        else:
+            try:
+                import vllm._C  # noqa: F401
+            except ImportError as e:
+                logger.warning("Failed to import from vllm._C: %r", e)
