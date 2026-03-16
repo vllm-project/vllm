@@ -2,9 +2,9 @@
 
 Token classification is supported through the `token_classify` pooling task, the offline `LLM.encode(..., pooling_task="token_classify")` API, and the online `/pooling` endpoint.
 
-The key distinction between sequence classification and token classification lies in their output granularity: sequence classification produces a single result for an entire input sequence, whereas token classification yields a result for each individual token within the sequence.
+The key distinction between (sequence) classification and token classification lies in their output granularity: (sequence) classification produces a single result for an entire input sequence, whereas token classification yields a result for each individual token within the sequence.
 
-Many classification models support both sequence classification and token classification. For further details on sequence classification, please refer to [this page](classify.md).
+Many classification models support both (sequence) classification and token classification. For further details on (sequence) classification, please refer to [this page](classify.md).
 
 ## Typical Use Cases
 
@@ -23,3 +23,19 @@ The BAAI/bge-m3 model leverages token classification for sparse retrieval. For m
 ### Reward Models
 
 For details on reward models, see [Reward Models](reward.md).
+
+## Supported Models
+
+| Architecture | Models | Example HF Models | [LoRA](../../features/lora.md) | [PP](../../serving/parallelism_scaling.md) |
+| ------------ | ------ | ----------------- | --------------------------- | --------------------------------------- |
+| `BertForTokenClassification` | bert-based | `boltuix/NeuroBERT-NER` (see note), etc. | | |
+| `ErnieForTokenClassification` | BERT-like Chinese ERNIE | `gyr66/Ernie-3.0-base-chinese-finetuned-ner` | | |
+| `ModernBertForTokenClassification` | ModernBERT-based | `disham993/electrical-ner-ModernBERT-base` | | |
+| `Qwen3ForTokenClassification`<sup>C</sup> | Qwen3-based | `bd2lcco/Qwen3-0.6B-finetuned` | | |
+| `*Model`<sup>C</sup>, `*ForCausalLM`<sup>C</sup>, etc. | Generative models | N/A | \* | \* |
+
+<sup>C</sup> Automatically converted into a classification model via `--convert classify`. ([details](./README.md#model-conversion))  
+\* Feature support is the same as that of the original model.
+
+If your model is not in the above list, we will try to automatically convert the model using
+[as_seq_cls_model][vllm.model_executor.models.adapters.as_seq_cls_model]. By default, the class probabilities are extracted from the softmaxed hidden state corresponding to the last token.
