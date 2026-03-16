@@ -35,6 +35,7 @@ class OpenAIServingTokenization(OpenAIServing):
         request_logger: RequestLogger | None,
         chat_template: str | None,
         chat_template_content_format: ChatTemplateContentFormatOption,
+        default_chat_template_kwargs: dict[str, Any] | None = None,
         trust_request_chat_template: bool = False,
     ) -> None:
         super().__init__(
@@ -45,6 +46,7 @@ class OpenAIServingTokenization(OpenAIServing):
 
         self.chat_template = chat_template
         self.chat_template_content_format: Final = chat_template_content_format
+        self.default_chat_template_kwargs = default_chat_template_kwargs or {}
         self.trust_request_chat_template = trust_request_chat_template
 
     async def create_tokenize(
@@ -79,7 +81,7 @@ class OpenAIServingTokenization(OpenAIServing):
                 request.messages,
                 default_template=self.chat_template,
                 default_template_content_format=self.chat_template_content_format,
-                default_template_kwargs=None,
+                default_template_kwargs=self.default_chat_template_kwargs,
                 tool_dicts=tool_dicts,
             )
         else:
@@ -98,8 +100,9 @@ class OpenAIServingTokenization(OpenAIServing):
                 lora_request=lora_request,
             )
 
-            if "prompt_token_ids" in engine_prompt:
-                input_ids.extend(engine_prompt["prompt_token_ids"])  # type: ignore[typeddict-item]
+            prompt_components = self._extract_prompt_components(engine_prompt)
+            if prompt_components.token_ids is not None:
+                input_ids.extend(prompt_components.token_ids)
 
         token_strs = None
         if request.return_token_strs:
