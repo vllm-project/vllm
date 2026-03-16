@@ -1424,7 +1424,12 @@ class FusedMoE(CustomOp):
         assert all(
             weight.is_contiguous()
             for name, weight in weights
-            if not (name.startswith("_shared_experts.") or name.startswith("_gate."))
+            if not (
+                name.startswith("_shared_experts.")
+                or name.startswith("_gate.")
+                or name.startswith("_routed_input_transform.")
+                or name.startswith("_routed_output_transform.")
+            )
         )
 
         # Filter out the non-expert weights.
@@ -1440,8 +1445,11 @@ class FusedMoE(CustomOp):
             if name not in NON_EXPERT_WEIGHTS
             and weight.shape != torch.Size([])
             and not name.startswith("_shared_experts.")
-            # exclude parameters from non-expert submodules (e.g. gate/shared)
+            # exclude parameters from non-expert submodules,
+            # e.g. gate/shared/transforms.
             and not name.startswith("_gate.")
+            and not name.startswith("_routed_input_transform.")
+            and not name.startswith("_routed_output_transform.")
         ]
 
     def set_eplb_state(
