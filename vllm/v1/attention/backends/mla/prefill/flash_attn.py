@@ -61,7 +61,9 @@ class FlashAttnPrefillBackend(MLAPrefillBackend):
             # Check for ROCm flash attention
             if current_platform.is_rocm():
                 try:
-                    from flash_attn import flash_attn_varlen_func  # noqa: F401,F811
+                    from flash_attn import (
+                        flash_attn_varlen_func,  # type: ignore[no-redef]  # noqa: F401,F811
+                    )
 
                     return True
                 except ImportError:
