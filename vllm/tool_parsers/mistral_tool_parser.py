@@ -405,9 +405,16 @@ class MistralToolParser(ToolParser):
         ):
             return request
 
-        if not request.tools:
-            # Sanitize tool_choice.
-            request.tool_choice = "none"
+        if request.tool_choice is None:
+            # Default to "auto" when no explicit choice is specified.
+            request.tool_choice = "auto"
+
+        if request.tool_choice != "auto":
+            raise ValueError(
+                "For now only 'auto' tool choice is supported, we're in "
+                "the processing of improving the design of lark grammar "
+                "to properly supported all kind of tool choices."
+            )
 
         # Set structured output params for tool calling
         if isinstance(request.tool_choice, ChatCompletionNamedToolChoiceParam):

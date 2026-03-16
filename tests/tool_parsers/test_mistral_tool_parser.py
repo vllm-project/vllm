@@ -1187,12 +1187,15 @@ class TestMistralGrammarFactory:
         assert grammar_none == grammar_auto
 
 
+_UNSET = object()
+
+
 def _create_request(
     tools: list[ChatCompletionToolsParam] | None = None,
-    tool_choice: str | None = None,
+    tool_choice: str | None | object = _UNSET,
     reasoning_effort: str | None = None,
 ) -> ChatCompletionRequest:
-    if tool_choice is None:
+    if tool_choice is _UNSET:
         tool_choice = "auto" if tools else "none"
     return ChatCompletionRequest(
         messages=[{"role": "user", "content": "test"}],
@@ -1345,9 +1348,9 @@ class TestAdjustRequestReasoningEffort:
 
         assert result.response_format is None
 
-    def test_adjust_request_no_tools_sanitizes_tool_choice(self):
-        """When no tools are provided, tool_choice should be set to 'none'
-        by adjust_request, and the grammar should only allow content."""
+    def test_adjust_request_no_tools_preserves_tool_choice(self):
+        """When no tools are provided, tool_choice should not be
+        overridden by adjust_request."""
         parser = _create_mock_tool_parser(
             tokenizer_version=11, has_reasoning_parser=False
         )
@@ -1371,6 +1374,34 @@ class TestAdjustRequestReasoningEffort:
         assert grammar is not None
         assert "body: content" in grammar
         assert "fcalls:" not in grammar
+
+    def test_adjust_request_none_tool_choice_defaults_to_auto(self):
+        """When tools are provided but tool_choice is None, it should
+        default to 'auto'."""
+        tools = [_create_tool("func", {"param": "value"}, strict=False)]
+        parser = _create_mock_tool_parser(
+            tokenizer_version=11, has_reasoning_parser=False
+        )
+
+        request = _create_request(
+            tools=tools,
+            tool_choice=None,
+            reasoning_effort=None,
+        )
+        assert request.tool_choice is None
+
+        with patch(
+            "vllm.tool_parsers.mistral_tool_parser.is_mistral_tokenizer",
+            return_value=True,
+        ):
+            result = parser.adjust_request(request)
+
+        assert result.tool_choice == "auto"
+
+        assert result.structured_outputs is not None
+        grammar = result.structured_outputs.lark
+        assert grammar is not None
+        assert "body: content | (content? fcalls)" in grammar
 
     @pytest.mark.parametrize(
         "tokenizer_version,has_reasoning_parser,reasoning_effort,"
