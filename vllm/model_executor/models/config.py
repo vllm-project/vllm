@@ -6,7 +6,6 @@ from typing import TYPE_CHECKING
 
 from vllm.logger import init_logger
 from vllm.model_executor.models import ModelRegistry
-from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -148,17 +147,6 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
             ).page_size_bytes
         else:
             kernel_block_alignment_size = 16
-            if (
-                current_platform.is_device_capability_family(100)
-                and model_config.get_head_size() == 256
-                and (
-                    attention_config.backend is None
-                    or attention_config.backend == AttentionBackendEnum.FLASHINFER
-                )
-            ):
-                # https://github.com/flashinfer-ai/flashinfer/issues/1993 reports that`
-                # head size 256 and block size 16 is not supported on blackwell.
-                kernel_block_alignment_size = 32
             attn_page_size_1_token = FullAttentionSpec(
                 block_size=1,
                 num_kv_heads=model_config.get_num_kv_heads(parallel_config),
