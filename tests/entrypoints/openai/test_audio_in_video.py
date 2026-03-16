@@ -18,7 +18,7 @@ MODEL_NAME = "Qwen/Qwen2.5-Omni-3B"
 def server():
     args = [
         "--max-model-len",
-        "18432",
+        "16384",
         "--enforce-eager",
         "--limit-mm-per-prompt",
         json.dumps({"audio": 3, "video": 3}),
