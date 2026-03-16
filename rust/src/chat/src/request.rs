@@ -18,6 +18,10 @@ mod defaults {
     pub fn max_tokens() -> u32 {
         16
     }
+
+    pub fn skip_special_tokens() -> bool {
+        true
+    }
 }
 
 /// Role label for one text-only chat message.
@@ -181,6 +185,9 @@ pub struct UserSamplingParams {
     /// If true, do not stop on the model's primary EOS token.
     #[serde(default)]
     pub ignore_eos: bool,
+    /// If true, special tokens are skipped during incremental detokenization.
+    #[serde(default = "defaults::skip_special_tokens")]
+    pub skip_special_tokens: bool,
 }
 
 /// One text-only chat request ready to be rendered into a prompt and lowered into a generate

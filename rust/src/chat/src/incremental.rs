@@ -8,6 +8,8 @@ const INITIAL_INCREMENTAL_DETOKENIZATION_OFFSET: usize = 5;
 pub(crate) struct IncrementalTextDecoder {
     /// Backend used for full-slice detokenization.
     backend: DynChatBackend,
+    /// Whether special tokens should be suppressed while decoding.
+    skip_special_tokens: bool,
 
     /// Prompt tokens followed by every generated token observed so far.
     all_token_ids: Vec<u32>,
@@ -22,9 +24,14 @@ impl IncrementalTextDecoder {
     ///
     /// The decoder retains only a small suffix of the prompt as left context for the first
     /// generated token; it does not attempt to re-emit prompt text.
-    pub(crate) fn new(backend: DynChatBackend, prompt_token_ids: &[u32]) -> Self {
+    pub(crate) fn new(
+        backend: DynChatBackend,
+        prompt_token_ids: &[u32],
+        skip_special_tokens: bool,
+    ) -> Self {
         Self {
             backend,
+            skip_special_tokens,
             all_token_ids: prompt_token_ids.to_vec(),
             prefix_offset: prompt_token_ids
                 .len()
@@ -45,11 +52,12 @@ impl IncrementalTextDecoder {
         // the new token. The difference between them is the newly available text.
         let prefix_text = self.backend.decode(
             &self.all_token_ids[self.prefix_offset..self.read_offset],
-            false,
+            self.skip_special_tokens,
         )?;
-        let new_text = self
-            .backend
-            .decode(&self.all_token_ids[self.prefix_offset..], false)?;
+        let new_text = self.backend.decode(
+            &self.all_token_ids[self.prefix_offset..],
+            self.skip_special_tokens,
+        )?;
 
         if new_text.len() > prefix_text.len() && !new_text.ends_with('\u{fffd}') {
             let mut split_at = prefix_text.len();
@@ -78,9 +86,10 @@ impl IncrementalTextDecoder {
             return Ok(None);
         }
 
-        let remaining = self
-            .backend
-            .decode(&self.all_token_ids[self.read_offset..], false)?;
+        let remaining = self.backend.decode(
+            &self.all_token_ids[self.read_offset..],
+            self.skip_special_tokens,
+        )?;
         self.read_offset = self.all_token_ids.len();
 
         if remaining.is_empty() {
@@ -120,7 +129,7 @@ mod tests {
     #[test]
     fn incremental_decoder_holds_utf8_until_complete() {
         let backend: Arc<dyn ChatBackend> = Arc::new(Utf8Backend);
-        let mut decoder = IncrementalTextDecoder::new(backend, &[]);
+        let mut decoder = IncrementalTextDecoder::new(backend, &[], false);
 
         assert_eq!(decoder.push_token(0xe4).unwrap(), None);
         assert_eq!(decoder.push_token(0xbd).unwrap(), None);
@@ -130,7 +139,7 @@ mod tests {
     #[test]
     fn incremental_decoder_flushes_remaining_text() {
         let backend: Arc<dyn ChatBackend> = Arc::new(Utf8Backend);
-        let mut decoder = IncrementalTextDecoder::new(backend, &[]);
+        let mut decoder = IncrementalTextDecoder::new(backend, &[], false);
 
         assert_eq!(
             decoder.push_token(b'o' as u32).unwrap().as_deref(),
@@ -141,5 +150,44 @@ mod tests {
             Some("k")
         );
         assert_eq!(decoder.flush().unwrap(), None);
+    }
+
+    #[derive(Debug)]
+    struct SpecialTokenBackend;
+
+    impl ChatBackend for SpecialTokenBackend {
+        fn apply_chat_template(&self, _request: &ChatRequest) -> crate::Result<String> {
+            unreachable!()
+        }
+
+        fn encode(&self, _text: &str) -> crate::Result<Vec<u32>> {
+            unreachable!()
+        }
+
+        fn decode(&self, token_ids: &[u32], skip_special_tokens: bool) -> crate::Result<String> {
+            let mut text = String::new();
+            for &token_id in token_ids {
+                match token_id {
+                    0 if !skip_special_tokens => text.push_str("<special>"),
+                    0 => {}
+                    1 => text.push('a'),
+                    _ => {}
+                }
+            }
+            Ok(text)
+        }
+    }
+
+    #[test]
+    fn incremental_decoder_respects_skip_special_tokens() {
+        let backend: Arc<dyn ChatBackend> = Arc::new(SpecialTokenBackend);
+        let mut skip_decoder = IncrementalTextDecoder::new(backend.clone(), &[], true);
+        let mut keep_decoder = IncrementalTextDecoder::new(backend, &[], false);
+
+        assert_eq!(skip_decoder.push_token(0).unwrap(), None);
+        assert_eq!(
+            keep_decoder.push_token(0).unwrap().as_deref(),
+            Some("<special>")
+        );
     }
 }

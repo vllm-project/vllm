@@ -62,6 +62,7 @@ fn lower_sampling_params(
         include_stop_str_in_output: _,
         mut stop_token_ids,
         ignore_eos,
+        skip_special_tokens: _,
     } = sampling_params;
 
     let mut all_stop_token_ids = BTreeSet::from_iter(stop_token_ids.iter().copied());

@@ -80,7 +80,11 @@ async fn chat_event_stream(
         let output: vllm_llm::GenerateOutput = next?;
         token_ids.extend_from_slice(&output.token_ids);
         let decoder = decoder.get_or_insert_with(|| {
-            IncrementalTextDecoder::new(backend.clone(), &output.prompt_token_ids)
+            IncrementalTextDecoder::new(
+                backend.clone(),
+                &output.prompt_token_ids,
+                request.sampling_params.skip_special_tokens,
+            )
         });
 
         let suppress_terminal_stop_token = output.finished()
