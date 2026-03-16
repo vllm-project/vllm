@@ -75,7 +75,7 @@ For an optimized workflow when iterating on C++/CUDA kernels, see the [Increment
 vLLM uses `pre-commit` to lint and format the codebase. See <https://pre-commit.com/#usage> if `pre-commit` is new to you. Setting up `pre-commit` is as easy as:
 
 ```bash
-uv pip install pre-commit
+uv pip install pre-commit>=4.5.1
 pre-commit install
 ```
 
@@ -188,6 +188,11 @@ Using `-s` with `git commit` will automatically add this header.
       and enable the `Git: Always Sign Off` (`git.alwaysSignOff`) field.
 
 ### AI Assisted Contributions
+
+Before making an AI assisted contribution, you must:
+
+1. **Be involved**: Do not submit "pure agent" PRs. The human submitter is responsible for reviewing all changed lines, validating behavior end-to-end, and running relevant tests.
+2. **Ensure significance**: Avoid one-off "busywork" PRs (single typo, isolated style cleanup, one mutable default fix, etc.). Bundle mechanical cleanups into a clear, systematic scope.
 
 When AI tools provide non-trivial assistance in generating or modifying code, you must:
 

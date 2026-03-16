@@ -10,7 +10,7 @@ from vllm.model_executor.layers.fla.ops import (
 )
 
 
-@pytest.mark.skipif(torch.cuda.device_count() < 1, reason="Need CUDA device")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Need CUDA device")
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
 @pytest.mark.parametrize("strided_mixed_qkv", [False, True])
 def test_fused_recurrent_packed_decode_matches_reference(
