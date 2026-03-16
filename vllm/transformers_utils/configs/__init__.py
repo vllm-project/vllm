@@ -20,6 +20,7 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "BagelConfig": "vllm.transformers_utils.configs.bagel",
     "ChatGLMConfig": "vllm.transformers_utils.configs.chatglm",
     "ColModernVBertConfig": "vllm.transformers_utils.configs.colmodernvbert",
+    "ColPaliConfig": "vllm.transformers_utils.configs.colpali",
     "ColQwen3Config": "vllm.transformers_utils.configs.colqwen3",
     "OpsColQwen3Config": "vllm.transformers_utils.configs.colqwen3",
     "Qwen3VLNemotronEmbedConfig": "vllm.transformers_utils.configs.colqwen3",
@@ -32,6 +33,7 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "HunYuanVLConfig": "vllm.transformers_utils.configs.hunyuan_vl",
     "HunYuanVLTextConfig": "vllm.transformers_utils.configs.hunyuan_vl",
     "HunYuanVLVisionConfig": "vllm.transformers_utils.configs.hunyuan_vl",
+    "HyperCLOVAXConfig": "vllm.transformers_utils.configs.hyperclovax",
     "IsaacConfig": "vllm.transformers_utils.configs.isaac",
     # RWConfig is for the original tiiuae/falcon-40b(-instruct) and
     # tiiuae/falcon-7b(-instruct) models. Newer Falcon models will use the
@@ -76,6 +78,7 @@ __all__ = [
     "BagelConfig",
     "ChatGLMConfig",
     "ColModernVBertConfig",
+    "ColPaliConfig",
     "ColQwen3Config",
     "OpsColQwen3Config",
     "Qwen3VLNemotronEmbedConfig",
@@ -89,6 +92,7 @@ __all__ = [
     "HunYuanVLConfig",
     "HunYuanVLTextConfig",
     "HunYuanVLVisionConfig",
+    "HyperCLOVAXConfig",
     "IsaacConfig",
     "RWConfig",
     "JAISConfig",
