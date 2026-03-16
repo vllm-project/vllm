@@ -257,7 +257,6 @@ class RequestRunner:
         self._dummy_ctx: ForwardContext = ForwardContext(
             no_compile_layers={},
             attn_metadata={},
-            virtual_engine=0,
             slot_mapping={},
         )
 
