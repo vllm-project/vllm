@@ -25,9 +25,7 @@ fi
 docker build --file docker/Dockerfile.cpu \
   --build-arg max_jobs=16 \
   --build-arg buildkite_commit="$BUILDKITE_COMMIT" \
-  --build-arg VLLM_CPU_AVX512BF16=true \
-  --build-arg VLLM_CPU_AVX512VNNI=true \
-  --build-arg VLLM_CPU_AMXBF16=true \
+  --build-arg VLLM_CPU_X86=true \
   --tag "$REGISTRY"/"$REPO":"$BUILDKITE_COMMIT"-cpu \
   --target vllm-test \
   --progress plain .
