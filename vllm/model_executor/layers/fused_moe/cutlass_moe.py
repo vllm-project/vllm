@@ -664,6 +664,13 @@ def run_cutlass_moe_fp4(
 class CutlassExpertsFp4(mk.FusedMoEExpertsModular):
     """CUTLASS FP4 fused MoE expert implementation."""
 
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        # Fuse activation scales into w_scale_2 in-place so that
+        # g1/g2_alphas (which reference the same tensor) stay in sync
+        # when EPLB rearranges the parameter.
+        layer.w13_weight_scale_2.data.mul_(layer.w13_input_scale)
+        layer.w2_weight_scale_2.data.mul_(layer.w2_input_scale)
+
     @property
     def expects_unquantized_inputs(self) -> bool:
         return True
