@@ -29,7 +29,7 @@ from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import GeluAndMul
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.layernorm import GemmaRMSNorm
+from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
     QKVParallelLinear,
@@ -214,16 +214,15 @@ class Gemma2DecoderLayer(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.mlp",
         )
-        self.input_layernorm = GemmaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.post_attention_layernorm = GemmaRMSNorm(
-            config.hidden_size, eps=config.rms_norm_eps
-        )
-        self.pre_feedforward_layernorm = GemmaRMSNorm(
-            config.hidden_size, eps=config.rms_norm_eps
-        )
-        self.post_feedforward_layernorm = GemmaRMSNorm(
-            config.hidden_size, eps=config.rms_norm_eps
-        )
+        # GGUF stores RMSNorm weights with +1 baked in (llama.cpp convention).
+        # GemmaRMSNorm adds 1 in its forward pass, so use plain RMSNorm for GGUF.
+        quant_name = quant_config.get_name() if quant_config else None
+        rms_norm_cls = RMSNorm if quant_name == "gguf" else GemmaRMSNorm
+        rms_norm_kwargs = dict(hidden_size=config.hidden_size, eps=config.rms_norm_eps)
+        self.input_layernorm = rms_norm_cls(**rms_norm_kwargs)
+        self.post_attention_layernorm = rms_norm_cls(**rms_norm_kwargs)
+        self.pre_feedforward_layernorm = rms_norm_cls(**rms_norm_kwargs)
+        self.post_feedforward_layernorm = rms_norm_cls(**rms_norm_kwargs)
 
     def forward(
         self,
@@ -263,6 +262,8 @@ class Gemma2Model(nn.Module):
         self.embed_tokens = VocabParallelEmbedding(
             config.vocab_size,
             config.hidden_size,
+            quant_config=quant_config,
+            prefix=f"{prefix}.embed_tokens",
         )
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
@@ -271,7 +272,9 @@ class Gemma2Model(nn.Module):
             ),
             prefix=f"{prefix}.layers",
         )
-        self.norm = GemmaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        quant_name = quant_config.get_name() if quant_config else None
+        rms_norm_cls = RMSNorm if quant_name == "gguf" else GemmaRMSNorm
+        self.norm = rms_norm_cls(config.hidden_size, eps=config.rms_norm_eps)
 
         # Normalize the embedding by sqrt(hidden_size)
         # The normalizer's data type should be downcasted to the model's
@@ -360,6 +363,10 @@ class Gemma2Model(nn.Module):
                 if name is None:
                     continue
                 if is_pp_missing_parameter(name, self):
+                    continue
+                # Skip parameters not in the model (e.g., GGUF quantization
+                # metadata like qweight_type for embeddings)
+                if name not in params_dict:
                     continue
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)

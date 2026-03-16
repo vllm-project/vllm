@@ -31,7 +31,7 @@ from vllm.model_executor.layers.attention import (
     Attention,
     EncoderOnlyAttention,
 )
-from vllm.model_executor.layers.layernorm import GemmaRMSNorm
+from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
     QKVParallelLinear,
@@ -156,8 +156,12 @@ class Gemma3Attention(nn.Module):
             prefix=f"{prefix}.o_proj",
         )
 
-        self.q_norm = GemmaRMSNorm(self.head_dim, eps=config.rms_norm_eps)
-        self.k_norm = GemmaRMSNorm(self.head_dim, eps=config.rms_norm_eps)
+        # GGUF stores RMSNorm weights with +1 baked in (llama.cpp convention).
+        # GemmaRMSNorm adds 1 in its forward pass, so use plain RMSNorm for GGUF.
+        quant_name = quant_config.get_name() if quant_config else None
+        rms_norm_cls = RMSNorm if quant_name == "gguf" else GemmaRMSNorm
+        self.q_norm = rms_norm_cls(self.head_dim, eps=config.rms_norm_eps)
+        self.k_norm = rms_norm_cls(self.head_dim, eps=config.rms_norm_eps)
 
         layer_idx = extract_layer_index(prefix)
         layer_type = config.layer_types[layer_idx]
@@ -261,16 +265,13 @@ class Gemma3DecoderLayer(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.mlp",
         )
-        self.input_layernorm = GemmaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.post_attention_layernorm = GemmaRMSNorm(
-            config.hidden_size, eps=config.rms_norm_eps
-        )
-        self.pre_feedforward_layernorm = GemmaRMSNorm(
-            config.hidden_size, eps=config.rms_norm_eps
-        )
-        self.post_feedforward_layernorm = GemmaRMSNorm(
-            config.hidden_size, eps=config.rms_norm_eps
-        )
+        quant_name = quant_config.get_name() if quant_config else None
+        rms_norm_cls = RMSNorm if quant_name == "gguf" else GemmaRMSNorm
+        rms_norm_kwargs = dict(hidden_size=config.hidden_size, eps=config.rms_norm_eps)
+        self.input_layernorm = rms_norm_cls(**rms_norm_kwargs)
+        self.post_attention_layernorm = rms_norm_cls(**rms_norm_kwargs)
+        self.pre_feedforward_layernorm = rms_norm_cls(**rms_norm_kwargs)
+        self.post_feedforward_layernorm = rms_norm_cls(**rms_norm_kwargs)
 
     def forward(
         self,
@@ -322,7 +323,9 @@ class Gemma3Model(nn.Module):
             ),
             prefix=f"{prefix}.layers",
         )
-        self.norm = GemmaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        quant_name = quant_config.get_name() if quant_config else None
+        rms_norm_cls = RMSNorm if quant_name == "gguf" else GemmaRMSNorm
+        self.norm = rms_norm_cls(config.hidden_size, eps=config.rms_norm_eps)
 
         # Normalize the embedding by sqrt(hidden_size)
         # The normalizer's data type should be downcasted to the model's
@@ -383,15 +386,6 @@ class Gemma3Model(nn.Module):
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
-            # Revert +1 during llama.cpp conversion
-            # see: https://github.com/ggml-org/llama.cpp/blob/be7c3034108473beda214fd1d7c98fd6a7a3bdf5/convert_hf_to_gguf.py#L3397-L3400
-            if (
-                self.quant_config
-                and self.quant_config.get_name() == "gguf"
-                and name.endswith("norm.weight")
-            ):
-                loaded_weight -= 1
-
             if self.quant_config is not None and (
                 scale_name := self.quant_config.get_cache_scale(name)
             ):
