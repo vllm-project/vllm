@@ -1394,7 +1394,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             shared_experts=layer.shared_experts,
             routing_tables=layer._maybe_init_expert_routing_tables(),
         )
-        self.moe_kernel.experts.process_weights_after_loading(layer)
+        self.moe_kernel.fused_experts.process_weights_after_loading(layer)
 
     def get_fused_moe_quant_config(self, layer: torch.nn.Module) -> FusedMoEQuantConfig:
         return make_nvfp4_moe_quant_config(
