@@ -101,6 +101,7 @@ from vllm.utils.math_utils import round_up
 
 from .interfaces import (
     MultiModalEmbeddings,
+    SupportsEagle,
     SupportsEagle3,
     SupportsLoRA,
     SupportsMRoPE,
@@ -550,25 +551,20 @@ class Qwen3_VisionTransformer(nn.Module):
             axis=0, dtype=np.int32
         )
         cu_seqlens = np.concatenate([np.zeros(1, dtype=np.int32), cu_seqlens])
-        sequence_lengths = MMEncoderAttention.maybe_compute_sequence_lengths(
-            self.attn_backend, cu_seqlens
+        sequence_lengths = MMEncoderAttention.maybe_compute_seq_lens(
+            self.attn_backend, cu_seqlens, self.device
         )
-        if sequence_lengths is not None:
-            sequence_lengths = torch.from_numpy(sequence_lengths).to(
-                self.device, non_blocking=True
-            )
         max_seqlen = torch.tensor(
             MMEncoderAttention.compute_max_seqlen(self.attn_backend, cu_seqlens),
             dtype=torch.int32,
-            device=self.device,
         )
         cu_seqlens = MMEncoderAttention.maybe_recompute_cu_seqlens(
             self.attn_backend,
             cu_seqlens,
             self.hidden_size,
             self.tp_size,
+            self.device,
         )
-        cu_seqlens = torch.from_numpy(cu_seqlens).to(self.device, non_blocking=True)
         hidden_states = hidden_states.unsqueeze(1)
 
         deepstack_feature_lists = []
@@ -1279,13 +1275,10 @@ class Qwen3LLMModel(Qwen3Model):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        aux_hidden_states = []
+        aux_hidden_states = self._maybe_add_hidden_state([], 0, hidden_states, residual)
         for layer_idx, layer in islice(
             enumerate(self.layers), self.start_layer, self.end_layer
         ):
-            if layer_idx in self.aux_hidden_state_layers:
-                aux_hidden_states.append(hidden_states + residual)
-
             hidden_states, residual = layer(
                 positions,
                 hidden_states,
@@ -1299,6 +1292,9 @@ class Qwen3LLMModel(Qwen3Model):
                     hidden_states
                     + deepstack_input_embeds[f"deepstack_input_embeds_{layer_idx}"]
                 )
+            self._maybe_add_hidden_state(
+                aux_hidden_states, layer_idx + 1, hidden_states, residual
+            )
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
@@ -1355,6 +1351,7 @@ class Qwen3VLForConditionalGeneration(
     SupportsLoRA,
     SupportsPP,
     SupportsMRoPE,
+    SupportsEagle,
     SupportsEagle3,
     SupportsMultiModalPruning,
 ):
@@ -1452,13 +1449,6 @@ class Qwen3VLForConditionalGeneration(
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
         )
-
-    def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
-        self.language_model.model.aux_hidden_state_layers = layers
-
-    def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:
-        num_layers = len(self.language_model.model.layers)
-        return (2, num_layers // 2, num_layers - 3)
 
     def _get_deepstack_input_embeds(
         self,

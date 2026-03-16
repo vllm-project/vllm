@@ -540,6 +540,8 @@ class ModelConfig:
                 self.tokenizer_mode = "kimi_audio"
             elif arch == "QwenVLForConditionalGeneration":
                 self.tokenizer_mode = "qwen_vl"
+            elif arch == "DeepseekV32ForCausalLM":
+                self.tokenizer_mode = "deepseek_v32"
 
             if self.tokenizer_mode != "auto":
                 logger.info(
@@ -1140,6 +1142,7 @@ class ModelConfig:
             return bool(self.hf_config.is_mm_prefix_lm)
         # fallback to list of known models
         MM_PREFIX_LM_MODELS = (
+            "bagel",
             "gemma3",
             "molmo2",
             "paligemma",
