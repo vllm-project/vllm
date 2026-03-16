@@ -105,7 +105,7 @@ AITER_MODEL_LIST = [
         pytest.param("swiss-ai/Apertus-8B-Instruct-2509"),  # apertus
         pytest.param(
             "naver-hyperclovax/HyperCLOVAX-SEED-Think-14B",  # hyperclovax
-            marks=[large_gpu_mark(min_gb=72)],
+            marks=[large_gpu_mark(min_gb=32)],
         ),
     ],
 )
