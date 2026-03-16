@@ -268,13 +268,9 @@ def prepare_nvfp4_moe_layer_for_fi_or_cutlass(
             is_gated_activation=is_gated,
         )
 
-        # We do not need to make this a parameter, because
-        # it is not used during the weight (re)-loading process.
-        if is_gated:
-            layer.g1_scale_c = a13_scale * w13_scale_2 / a2_scale
-        else:
-            layer.g1_scale_c = torch.ones_like(a13_scale) / a2_scale
-        layer.a1_gscale = 1.0 / a13_scale
+        # g1_scale_c and a1_gscale are now computed and registered as
+        # layer parameters in TrtLlmNvFp4ExpertsBase.process_weights_after_loading
+        # so that EPLB can rearrange them alongside other expert weights.
     else:
         # Swizzle the block scales for other FI NVFP4 MoE kernels.
         w13_scale = swizzle_blockscale(w13_scale)
