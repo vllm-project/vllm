@@ -276,7 +276,7 @@ class OffloadingConnectorScheduler:
     ) -> Iterable[BlockHash]:
         return islice(
             req.block_hashes,
-            self.block_size_factor * start_idx + self.block_size_factor - 1,
+            self.block_size_factor * start_idx,
             self.block_size_factor * end_idx if end_idx else None,
             self.block_size_factor,
         )
