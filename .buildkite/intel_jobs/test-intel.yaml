@@ -1,4 +1,7 @@
 group: Intel
+env:
+  REGISTRY: "public.ecr.aws/q9t5s3a7"
+  REPO: "vllm-ci-test-repo"
 steps:
   - label: ":docker: Build XPU image"
     soft_fail: true
