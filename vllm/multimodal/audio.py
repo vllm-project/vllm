@@ -21,7 +21,20 @@ try:
 except ImportError:
     scipy_signal = PlaceholderModule("scipy").placeholder_attr("signal")  # type: ignore[assignment]
 
+
 # ============================================================
+def get_audio_duration(*, y: npt.NDArray[np.floating], sr: float = 22050) -> float:
+    """Get the duration of an audio array in seconds.
+
+    Args:
+        y: Audio time series. Can be 1D (samples,) or 2D (channels, samples).
+        sr: Sample rate of the audio in Hz.
+
+    Returns:
+        Duration of the audio in seconds.
+    """
+    n_samples = y.shape[-1]
+    return float(n_samples) / sr
 
 
 class ChannelReduction(str, Enum):

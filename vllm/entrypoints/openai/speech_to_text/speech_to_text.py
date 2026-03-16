@@ -42,20 +42,13 @@ from vllm.inputs import EncoderDecoderInputs, ProcessorInputs
 from vllm.logger import init_logger
 from vllm.logprobs import FlatLogprobs, Logprob
 from vllm.model_executor.models import SupportsTranscription
-from vllm.multimodal.audio import split_audio
+from vllm.multimodal.audio import get_audio_duration, split_audio
 from vllm.multimodal.media.audio import load_audio_pyav
 from vllm.outputs import RequestOutput
 from vllm.renderers.inputs import DictPrompt, EncoderDecoderDictPrompt
 from vllm.renderers.inputs.preprocess import parse_enc_dec_prompt, parse_model_prompt
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import get_tokenizer
-from vllm.utils.import_utils import PlaceholderModule
-
-try:
-    import librosa
-except ImportError:
-    librosa = PlaceholderModule("librosa")  # type: ignore[assignment]
-
 
 SpeechToTextResponse: TypeAlias = TranscriptionResponse | TranslationResponse
 SpeechToTextResponseVerbose: TypeAlias = (
@@ -206,9 +199,9 @@ class OpenAISpeechToText(OpenAIServing):
         except Exception as exc:
             raise ValueError("Invalid or unsupported audio file.") from exc
 
-        duration = librosa.get_duration(y=y, sr=sr)
-        do_split_audio = (
-            self.asr_config.allow_audio_chunking
+        duration = get_audio_duration(y=y, sr=sr)
+        do_split_audio = self.asr_config.allow_audio_chunking and (
+            self.asr_config.max_audio_clip_s is not None
             and duration > self.asr_config.max_audio_clip_s
         )
 
