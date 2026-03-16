@@ -52,7 +52,9 @@ void launch_tinygemm2(__nv_bfloat16* gA, __nv_bfloat16* gB, __nv_bfloat16* gC,
       CUtensorMapSwizzle::CU_TENSOR_MAP_SWIZZLE_128B,
       CUtensorMapL2promotion::CU_TENSOR_MAP_L2_PROMOTION_NONE,
       CUtensorMapFloatOOBfill::CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
-  assert(res == 0);
+  TORCH_CHECK(res == CUDA_SUCCESS,
+              "cuTensorMapEncodeTiled failed for weight_map, error code=",
+              static_cast<int>(res));
 
   size[1] = batch_size;
   box_size[1] = TILE_N;
@@ -64,7 +66,9 @@ void launch_tinygemm2(__nv_bfloat16* gA, __nv_bfloat16* gB, __nv_bfloat16* gC,
       CUtensorMapSwizzle::CU_TENSOR_MAP_SWIZZLE_128B,
       CUtensorMapL2promotion::CU_TENSOR_MAP_L2_PROMOTION_NONE,
       CUtensorMapFloatOOBfill::CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
-  assert(res == 0);
+  TORCH_CHECK(res == CUDA_SUCCESS,
+              "cuTensorMapEncodeTiled failed for activation_map, error code=",
+              static_cast<int>(res));
 
   int smem_size = STAGES * STAGE_UNROLL *
                   (TILE_M * TILE_K * sizeof(__nv_bfloat16) +
@@ -114,7 +118,7 @@ void tinygemm2_cuda_forward(torch::Tensor& output, torch::Tensor input,
                      (__nv_bfloat16*)bias.data_ptr(), batch_size, output_dim,
                      input_dim, stream);
   } else {
-    assert(false);
+    throw std::invalid_argument("Unsupported dtype, only supports bfloat16");
   }
 }
 
