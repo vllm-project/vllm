@@ -24,7 +24,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
 )
 from vllm.forward_context import ForwardContext
 from vllm.logger import init_logger
-from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.kv_cache_utils import BlockHash
@@ -601,7 +601,9 @@ class OffloadingConnectorWorker:
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         layer_names = list(kv_caches.keys())
         layers = get_layers_from_vllm_config(
-            self.spec.vllm_config, Attention, layer_names
+            self.spec.vllm_config,
+            AttentionLayerBase,  # type: ignore[type-abstract]
+            layer_names,
         )
         attn_backends = {
             layer_name: layers[layer_name].get_attn_backend()

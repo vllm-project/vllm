@@ -1142,10 +1142,12 @@ class MLACommonBackend(AttentionBackend):
     def get_kv_cache_stride_order(
         include_num_layers_dimension: bool = False,
     ) -> tuple[int, ...]:
-        # `stride_order` indicates the permutation that gets
-        # us from `get_kv_cache_shape` to the actual memory layout we want.
-        # (num_blocks, num_layers, block_size, head_size)
-        return (1, 0, 2, 3) if include_num_layers_dimension else (0, 1, 2)
+        if include_num_layers_dimension:
+            # MLA kernels require contiguous per-layer KV cache views.
+            # Identity permutation keeps num_layers first in physical
+            # layout, signaling cross-layer allocation is unsupported.
+            return (0, 1, 2, 3)
+        return (0, 1, 2)
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:

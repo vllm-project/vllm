@@ -191,8 +191,13 @@ class KVConnectorModelRunnerMixin:
         except (AttributeError, NotImplementedError):
             return False
 
-        # check that attention backend include a layers dimension
-        return len(kv_cache_stride_order) == len(kv_cache_shape) + 1
+        # check that attention backend includes a layers dimension
+        if len(kv_cache_stride_order) != len(kv_cache_shape) + 1:
+            return False
+
+        # stride_order[0] == 0 means num_layers stays first in physical
+        # layout (identity permutation), so cross-layer is unsupported.
+        return kv_cache_stride_order[0] != 0
 
     @staticmethod
     def allocate_uniform_kv_caches(
