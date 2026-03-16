@@ -631,15 +631,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self.paged_kv_indices = self._make_buffer(max_num_pages)
         self.paged_kv_last_page_len = self._make_buffer(max_num_reqs)
 
-        if self.head_dim == 256 and current_platform.is_device_capability_family(100):
-            # https://github.com/flashinfer-ai/flashinfer/issues/1993 reports that
-            # head size 256 and block size 16 is not supported on blackwell.
-            assert kv_cache_spec.block_size != 16, (
-                "There is a bug in FlashInfer "
-                "block_size 16 head size 256 support. Please avoid this combination by "
-                "passing --block-size 32 or --block-size 64."
-            )
-
     def _make_buffer(
         self, *size: int | torch.SymInt, dtype: torch.dtype = torch.int32
     ) -> CpuGpuBuffer:
