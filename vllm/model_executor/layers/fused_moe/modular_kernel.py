@@ -489,8 +489,7 @@ class FusedMoEExperts(ABC):
         self.max_num_tokens = max_num_tokens
         self.num_dispatchers = num_dispatchers
 
-    @abstractmethod
-    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:  # noqa: B027
         pass
 
     @staticmethod
