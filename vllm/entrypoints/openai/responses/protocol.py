@@ -77,6 +77,9 @@ from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
 
+_INT64_MIN = -(2**63)
+_INT64_MAX = 2**63 - 1
+
 
 class InputTokensDetails(OpenAIBaseModel):
     cached_tokens: int
@@ -194,12 +197,21 @@ class ResponsesRequest(OpenAIBaseModel):
             "through out the inference process and return in response."
         ),
     )
+    media_io_kwargs: dict[str, dict[str, Any]] | None = Field(
+        default=None,
+        description=(
+            "Additional kwargs to pass to the media IO connectors, "
+            "keyed by modality. Merged with engine-level media_io_kwargs."
+        ),
+    )
     mm_processor_kwargs: dict[str, Any] | None = Field(
         default=None,
         description=("Additional kwargs to pass to the HF processor."),
     )
     priority: int = Field(
         default=0,
+        ge=_INT64_MIN,
+        le=_INT64_MAX,
         description=(
             "The priority of the request (lower means earlier handling; "
             "default: 0). Any priority other than 0 will raise an error "
@@ -230,6 +242,22 @@ class ResponsesRequest(OpenAIBaseModel):
     # this cannot be used in conjunction with previous_response_id
     # TODO: consider supporting non harmony messages as well
     previous_input_messages: list[OpenAIHarmonyMessage | dict] | None = None
+    structured_outputs: StructuredOutputsParams | None = Field(
+        default=None,
+        description="Additional kwargs for structured outputs",
+    )
+
+    repetition_penalty: float | None = None
+    seed: int | None = Field(None, ge=_INT64_MIN, le=_INT64_MAX)
+    stop: str | list[str] | None = []
+    ignore_eos: bool = False
+    vllm_xargs: dict[str, str | int | float | list[str | int | float]] | None = Field(
+        default=None,
+        description=(
+            "Additional request parameters with (list of) string or "
+            "numeric values, used by custom extensions."
+        ),
+    )
     # --8<-- [end:responses-extra-params]
 
     def build_chat_params(
@@ -257,6 +285,7 @@ class ResponsesRequest(OpenAIBaseModel):
                     reasoning_effort=None if reasoning is None else reasoning.effort,
                 ),
             ),
+            media_io_kwargs=self.media_io_kwargs,
         )
 
     def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
@@ -297,23 +326,37 @@ class ResponsesRequest(OpenAIBaseModel):
             top_k = default_sampling_params.get(
                 "top_k", self._DEFAULT_SAMPLING_PARAMS["top_k"]
             )
+
+        if (repetition_penalty := self.repetition_penalty) is None:
+            repetition_penalty = default_sampling_params.get("repetition_penalty", 1.0)
+
         stop_token_ids = default_sampling_params.get("stop_token_ids")
 
         # Structured output
-        structured_outputs = None
+        structured_outputs = self.structured_outputs
+
+        # Also check text.format for OpenAI-style json_schema
         if self.text is not None and self.text.format is not None:
+            if structured_outputs is not None:
+                raise VLLMValidationError(
+                    "Cannot specify both structured_outputs and text.format",
+                    parameter="structured_outputs",
+                )
             response_format = self.text.format
             if (
                 response_format.type == "json_schema"
                 and response_format.schema_ is not None
             ):
                 structured_outputs = StructuredOutputsParams(
-                    json=response_format.schema_
+                    json=response_format.schema_  # type: ignore[call-arg]
+                    # --follow-imports skip hides the class definition but also hides
+                    # multiple third party conflicts, so best of both evils
                 )
-            elif response_format.type == "json_object":
-                raise NotImplementedError("json_object is not supported")
 
-        # TODO: add more parameters
+        stop = self.stop if self.stop else []
+        if isinstance(stop, str):
+            stop = [stop]
+
         return SamplingParams.from_optional(
             temperature=temperature,
             top_p=top_p,
@@ -321,11 +364,16 @@ class ResponsesRequest(OpenAIBaseModel):
             max_tokens=max_tokens,
             logprobs=self.top_logprobs if self.is_include_output_logprobs() else None,
             stop_token_ids=stop_token_ids,
+            stop=stop,
+            repetition_penalty=repetition_penalty,
+            seed=self.seed,
+            ignore_eos=self.ignore_eos,
             output_kind=(
                 RequestOutputKind.DELTA if self.stream else RequestOutputKind.FINAL_ONLY
             ),
             structured_outputs=structured_outputs,
             logit_bias=self.logit_bias,
+            extra_args=self.vllm_xargs or {},
             skip_clone=True,  # Created fresh per request, safe to skip clone
             skip_special_tokens=self.skip_special_tokens,
             include_stop_str_in_output=self.include_stop_str_in_output,
@@ -341,14 +389,19 @@ class ResponsesRequest(OpenAIBaseModel):
         )
 
     @model_validator(mode="before")
+    @classmethod
     def validate_background(cls, data):
         if not data.get("background"):
             return data
         if not data.get("store", True):
-            raise ValueError("background can only be used when `store` is true")
+            raise VLLMValidationError(
+                "background can only be used when `store` is true",
+                parameter="background",
+            )
         return data
 
     @model_validator(mode="before")
+    @classmethod
     def validate_prompt(cls, data):
         if data.get("prompt") is not None:
             raise VLLMValidationError(
@@ -357,16 +410,19 @@ class ResponsesRequest(OpenAIBaseModel):
         return data
 
     @model_validator(mode="before")
+    @classmethod
     def check_cache_salt_support(cls, data):
         if data.get("cache_salt") is not None and (
             not isinstance(data["cache_salt"], str) or not data["cache_salt"]
         ):
-            raise ValueError(
-                "Parameter 'cache_salt' must be a non-empty string if provided."
+            raise VLLMValidationError(
+                "Parameter 'cache_salt' must be a non-empty string if provided.",
+                parameter="cache_salt",
             )
         return data
 
     @model_validator(mode="before")
+    @classmethod
     def function_call_parsing(cls, data):
         """Parse function_call dictionaries into ResponseFunctionToolCall objects.
         This ensures Pydantic can properly resolve union types in the input field.

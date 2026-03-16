@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import logging
+import os
 import traceback
 from itertools import chain
 from typing import TYPE_CHECKING
@@ -132,8 +133,6 @@ def xpu_platform_plugin() -> str | None:
     is_xpu = False
     logger.debug("Checking if XPU platform is available.")
     try:
-        # installed IPEX if the machine has XPUs.
-        import intel_extension_for_pytorch  # noqa: F401
         import torch
 
         if supports_xccl():
@@ -142,11 +141,6 @@ def xpu_platform_plugin() -> str | None:
 
             XPUPlatform.dist_backend = dist_backend
             logger.debug("Confirmed %s backend is available.", XPUPlatform.dist_backend)
-        else:
-            logger.warning(
-                "xccl is not enabled in this torch build, "
-                "communication is not available."
-            )
 
         if hasattr(torch, "xpu") and torch.xpu.is_available():
             is_xpu = True
@@ -155,6 +149,15 @@ def xpu_platform_plugin() -> str | None:
         logger.debug("XPU platform is not available because: %s", str(e))
 
     return "vllm.platforms.xpu.XPUPlatform" if is_xpu else None
+
+
+def _is_amd_zen_cpu() -> bool:
+    """Detect AMD CPU with AVX-512 via /proc/cpuinfo."""
+    if not os.path.exists("/proc/cpuinfo"):
+        return False
+    with open("/proc/cpuinfo") as f:
+        cpuinfo = f.read()
+    return "AuthenticAMD" in cpuinfo and "avx512" in cpuinfo
 
 
 def cpu_platform_plugin() -> str | None:
@@ -178,7 +181,24 @@ def cpu_platform_plugin() -> str | None:
     except Exception as e:
         logger.debug("CPU platform is not available because: %s", str(e))
 
-    return "vllm.platforms.cpu.CpuPlatform" if is_cpu else None
+    if not is_cpu:
+        return None
+
+    if _is_amd_zen_cpu():
+        try:
+            import zentorch  # noqa: F401
+
+            logger.debug(
+                "AMD Zen CPU detected with zentorch installed, using ZenCpuPlatform."
+            )
+            return "vllm.platforms.zen_cpu.ZenCpuPlatform"
+        except ImportError:
+            logger.debug(
+                "AMD Zen CPU detected but zentorch not installed, "
+                "falling back to CpuPlatform."
+            )
+
+    return "vllm.platforms.cpu.CpuPlatform"
 
 
 builtin_platform_plugins = {
@@ -276,4 +296,11 @@ def __setattr__(name: str, value):
         raise AttributeError(f"No attribute named '{name}' exists in {__name__}.")
 
 
-__all__ = ["Platform", "PlatformEnum", "current_platform", "CpuArchEnum", "_init_trace"]
+__all__ = [
+    "Platform",
+    "PlatformEnum",
+    "current_platform",
+    "CpuArchEnum",
+    "_init_trace",
+    "_is_amd_zen_cpu",
+]

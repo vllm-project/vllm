@@ -128,6 +128,14 @@ class TrtllmRaggedPrefillImpl(MLAPrefillImpl):
 
         assert prefill_metadata.query_seq_lens is not None
         assert prefill_metadata.workspace_buffer is not None
+        # allocate BF16 / FP16 output tensor for TRT-LLM ragged attention
+        out = torch.empty(
+            q.shape[0],
+            q.shape[1],
+            v.shape[2],
+            device=q.device,
+            dtype=prefill_metadata.output_dtype,
+        )
 
         ret = trtllm_ragged_attention_deepseek(
             query=q,
@@ -147,6 +155,7 @@ class TrtllmRaggedPrefillImpl(MLAPrefillImpl):
             enable_pdl=False,
             is_causal=True,
             return_lse=return_softmax_lse,
+            out=out,
         )
 
         if isinstance(ret, tuple):
@@ -174,7 +183,7 @@ class TrtllmRaggedPrefillImpl(MLAPrefillImpl):
             q.shape[1],
             v.shape[2],
             device=q.device,
-            dtype=q.dtype,
+            dtype=prefill_metadata.output_dtype,
         )
         prefill_metadata.workspace_buffer.fill_(0)
 

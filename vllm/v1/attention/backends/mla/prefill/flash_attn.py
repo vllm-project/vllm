@@ -96,8 +96,9 @@ class FlashAttnPrefillImpl(MLAPrefillImpl):
 
         # Handle the differences between the flash_attn_varlen from
         # flash_attn and the one from vllm_flash_attn
+        qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
         self.flash_attn_varlen_func = flash_attn_varlen_func
-        self.vllm_flash_attn_version = get_flash_attn_version()
+        self.vllm_flash_attn_version = get_flash_attn_version(head_size=qk_head_dim)
         if self.vllm_flash_attn_version is not None:
             self.flash_attn_varlen_func = functools.partial(
                 flash_attn_varlen_func, fa_version=self.vllm_flash_attn_version
@@ -106,13 +107,16 @@ class FlashAttnPrefillImpl(MLAPrefillImpl):
         # Determine if we need to pad V
         # For MLA the v head dim is smaller than qk head dim so we pad out
         # v with 0s to match the qk head dim for attention backends that do
-        # not support different headdims
-        # We don't need to pad V if we are on a hopper system with FA3
+        # not support different headdims.
+        # FA3 on Hopper (SM90) and FA4 natively handle diff headdims.
         device_capability = current_platform.get_device_capability()
         self.requires_v_padding = self.vllm_flash_attn_version is None or not (
-            self.vllm_flash_attn_version == 3
-            and device_capability is not None
-            and device_capability[0] == 9
+            (
+                self.vllm_flash_attn_version == 3
+                and device_capability is not None
+                and device_capability[0] == 9
+            )
+            or self.vllm_flash_attn_version == 4
         )
 
     def _flash_attn_varlen_diff_headdims(

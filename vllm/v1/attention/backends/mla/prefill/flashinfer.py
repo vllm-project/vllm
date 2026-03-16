@@ -185,7 +185,8 @@ class FlashInferPrefillBackend(MLAPrefillBackend):
             sm_scale=global_hyperparameters.sm_scale,
             window_left=global_hyperparameters.window_left,
             logits_soft_cap=global_hyperparameters.logits_soft_cap,
-            q_data_type=model_config.dtype,
+            q_data_type=prefill.q_data_type,
+            o_data_type=prefill.output_dtype,
         )
 
         if has_context:
@@ -203,7 +204,8 @@ class FlashInferPrefillBackend(MLAPrefillBackend):
                     sm_scale=global_hyperparameters.sm_scale,
                     window_left=global_hyperparameters.window_left,
                     logits_soft_cap=global_hyperparameters.logits_soft_cap,
-                    q_data_type=model_config.dtype,
+                    q_data_type=prefill.q_data_type,
+                    o_data_type=prefill.output_dtype,
                 )
 
         prefill.prefill_main = prefill_main

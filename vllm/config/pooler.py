@@ -3,8 +3,6 @@
 
 from typing import Any, Literal, get_args
 
-from pydantic.dataclasses import dataclass
-
 from vllm.config.utils import config
 from vllm.logger import init_logger
 from vllm.utils.hashing import safe_hash
@@ -19,7 +17,6 @@ TOK_POOLING_TYPES: tuple[TokenPoolingType, ...] = get_args(TokenPoolingType)
 
 
 @config
-@dataclass
 class PoolerConfig:
     """Controls the behavior of output pooling in pooling models."""
 
@@ -57,7 +54,7 @@ class PoolerConfig:
     Reduce the dimensions of embeddings if model
     support matryoshka representation. Defaults to None.
     """
-    enable_chunked_processing: bool | None = None
+    enable_chunked_processing: bool = False
     """
     Whether to enable chunked processing for long inputs that exceed the model's
     maximum position embeddings. When enabled, long inputs will be split into

@@ -44,6 +44,8 @@ from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (
     MultiModalEmbeddings,
+    SupportsEagle,
+    SupportsEagle3,
     SupportsLoRA,
     SupportsMultiModal,
     SupportsPP,
@@ -235,13 +237,13 @@ class Mistral3DummyInputsBuilder(BaseDummyInputsBuilder[_I]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
 
         target_width, target_height = self.info.get_image_size_with_most_features()
 
-        image_overrides = mm_options.get("image") if mm_options else None
+        image_overrides = mm_options.get("image")
 
         return {
             "image": self._get_dummy_images(
@@ -408,7 +410,12 @@ def init_vision_tower_for_llava(
     dummy_inputs=Mistral3DummyInputsBuilder,
 )
 class Mistral3ForConditionalGeneration(
-    nn.Module, SupportsLoRA, SupportsMultiModal, SupportsPP
+    nn.Module,
+    SupportsLoRA,
+    SupportsMultiModal,
+    SupportsPP,
+    SupportsEagle,
+    SupportsEagle3,
 ):
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],

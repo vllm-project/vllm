@@ -16,12 +16,13 @@ from typing_extensions import ParamSpec
 
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.forward_context import set_forward_context
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     fp8_w8a8_moe_quant_config,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts
-from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEModularKernel
+from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEKernel
 from vllm.utils.deep_gemm import (
     get_mk_alignment_for_contiguous_layout,
     is_deep_gemm_e8m0_used,
@@ -133,10 +134,8 @@ class TestTensors:
 
         fp8_info = torch.finfo(torch.float8_e4m3fn)
         fp8_max, fp8_min = fp8_info.max, fp8_info.min
-
-        rank_tokens = (
-            torch.randn((m, k), device=torch.cuda.current_device(), dtype=dtype) / 10.0
-        )
+        device = torch.accelerator.current_device_index()
+        rank_tokens = torch.randn((m, k), device=device, dtype=dtype) / 10.0
         rank_tokens = rank_tokens.clamp(min=fp8_min, max=fp8_max)
         rank_token_scales = None
 
@@ -144,11 +143,13 @@ class TestTensors:
             low=0,
             high=config.num_experts,
             size=(m, topk),
-            device=torch.cuda.current_device(),
+            device=device,
         ).to(dtype=torch.int64)
 
         topk_weights = torch.randn(
-            topk_ids.shape, dtype=torch.float32, device=torch.cuda.current_device()
+            topk_ids.shape,
+            dtype=torch.float32,
+            device=device,
         )
 
         return TestTensors(
@@ -169,7 +170,7 @@ def make_ll_modular_kernel(
     q_dtype: torch.dtype | None,
     test_config: TestConfig,
     quant_config: FusedMoEQuantConfig,
-) -> FusedMoEModularKernel:
+) -> FusedMoEKernel:
     assert test_config.low_latency
     assert test_config.use_fp8_dispatch is not None
 
@@ -194,8 +195,11 @@ def make_ll_modular_kernel(
         quant_config=quant_config,
         moe_config=make_dummy_moe_config(),
     )
-    mk = FusedMoEModularKernel(prepare_finalize=a2a, fused_experts=fused_experts)
-    return mk
+    return FusedMoEKernel(
+        prepare_finalize=a2a,
+        fused_experts=fused_experts,
+        inplace=False,
+    )
 
 
 def make_ht_modular_kernel(
@@ -206,7 +210,7 @@ def make_ht_modular_kernel(
     q_dtype: torch.dtype | None,
     test_config: TestConfig,
     quant_config: FusedMoEQuantConfig,
-) -> FusedMoEModularKernel:
+) -> FusedMoEKernel:
     assert not test_config.low_latency
     assert test_config.use_fp8_dispatch is None
 
@@ -224,8 +228,11 @@ def make_ht_modular_kernel(
         moe_config=make_dummy_moe_config(),
         quant_config=quant_config,
     )
-    mk = FusedMoEModularKernel(prepare_finalize=a2a, fused_experts=fused_experts)
-    return mk
+    return FusedMoEKernel(
+        prepare_finalize=a2a,
+        fused_experts=fused_experts,
+        inplace=False,
+    )
 
 
 def make_modular_kernel(
@@ -235,11 +242,11 @@ def make_modular_kernel(
     num_local_experts: int,
     test_tensors: TestTensors,
     quant_config: FusedMoEQuantConfig,
-) -> FusedMoEModularKernel:
+) -> FusedMoEKernel:
     q_dtype = torch.float8_e4m3fn
     test_config = test_tensors.config
 
-    mk: FusedMoEModularKernel
+    mk: FusedMoEKernel
     # Make modular kernel
     if test_config.low_latency:
         max_tokens_per_rank = max(64, next_power_of_2(test_tensors.rank_tokens.size(0)))
@@ -289,7 +296,8 @@ def deepep_deepgemm_moe_impl(
         s = pgi.rank * num_local_experts
         e = s + num_local_experts
         expert_map[s:e] = torch.tensor(list(range(num_local_experts)))
-        return expert_map.to(device=torch.cuda.current_device(), dtype=torch.int32)
+        device = torch.accelerator.current_device_index()
+        return expert_map.to(device=device, dtype=torch.int32)
 
     quant_config = fp8_w8a8_moe_quant_config(
         w1_scale=w1_scale,
@@ -300,7 +308,7 @@ def deepep_deepgemm_moe_impl(
     )
 
     # Make modular kernel
-    mk: FusedMoEModularKernel = make_modular_kernel(
+    mk: FusedMoEKernel = make_modular_kernel(
         pg=pg,
         pgi=pgi,
         dp_size=dp_size,
@@ -312,14 +320,13 @@ def deepep_deepgemm_moe_impl(
     with with_dp_metadata(
         M=test_tensors.rank_tokens.size(0), world_size=pgi.world_size
     ):
-        out = mk.forward(
+        out = mk.apply(
             hidden_states=test_tensors.rank_tokens,
             w1=w1,
             w2=w2,
             topk_weights=test_tensors.topk_weights,
             topk_ids=test_tensors.topk,
-            inplace=False,
-            activation="silu",
+            activation=MoEActivation.SILU,
             global_num_experts=num_experts,
             expert_map=build_expert_map(),
             apply_router_weight_on_input=False,
@@ -370,10 +377,11 @@ def _test_deepep_deepgemm_moe(
 
     set_random_seed(pgi.rank)
 
-    w1 = w1.to(device=torch.cuda.current_device())
-    w2 = w2.to(device=torch.cuda.current_device())
-    w1_scale = w1_scale.to(device=torch.cuda.current_device())
-    w2_scale = w2_scale.to(device=torch.cuda.current_device())
+    device = torch.accelerator.current_device_index()
+    w1 = w1.to(device=device)
+    w2 = w2.to(device=device)
+    w1_scale = w1_scale.to(device=device)
+    w2_scale = w2_scale.to(device=device)
 
     pg = torch.distributed.new_group(list(range(pgi.world_size)))
     test_tensors = TestTensors.make(config, pgi.rank)
