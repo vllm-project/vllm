@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # SPDX-FileCopyrightText: Copyright INL Dynamics / Complexity-ML
 """
-Pacific-Prime / Complexity model for vLLM inference.
+Pacific-I64 / Complexity model for vLLM inference.
 
 A decoder-only transformer with INL (Inertial Navigation Layer) dynamics
 for numerical stability and smooth token generation.
@@ -13,7 +13,7 @@ Key innovations:
 - Mu-Guided Attention: Top-down influence from previous layer's equilibrium
 
 GitHub: https://github.com/Complexity-ML/complexity-deep
-HuggingFace: https://huggingface.co/Pacific-Prime/pacific-prime
+HuggingFace: https://huggingface.co/Pacific-Prime/pacific-tiny-chat
 """
 
 from collections.abc import Iterable
