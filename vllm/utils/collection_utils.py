@@ -87,11 +87,10 @@ def common_prefix(items: Sequence[Sequence[T] | str]) -> Sequence[T] | str:
     if not shortest:
         return shortest[:0]
 
-    for match_len in range(1, len(shortest) + 1):
-        match = shortest[:match_len]
+    for i, ch in enumerate(shortest):
         for item in items:
-            if item[:match_len] != match:
-                return shortest[: match_len - 1]
+            if item[i] != ch:
+                return shortest[:i]
 
     return shortest
 
