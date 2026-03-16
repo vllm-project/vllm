@@ -14,11 +14,10 @@ Reference: https://arxiv.org/abs/2407.01449 (ColPali)
 Based on: Qwen3.5 backbone with custom text projection
 
 Target models:
-- athrael-soju/colqwen3.5-4.5B
+- athrael-soju/colqwen3.5-4.5B-v3
 """
 
 from collections.abc import Iterable, Mapping
-from typing import ClassVar, Literal
 
 import torch
 import torch.nn as nn
@@ -29,6 +28,7 @@ from vllm.model_executor.layers.pooler.tokwise import pooler_for_token_embed
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
+from .interfaces import SupportsLateInteraction
 from .interfaces_base import default_pooling_type
 from .qwen2_vl import Qwen2VLMultiModalDataParser
 from .qwen3_5 import (
@@ -111,6 +111,7 @@ class ColQwen3_5ProcessingInfo(Qwen3_5ProcessingInfo):
 )
 class ColQwen3_5Model(
     Qwen3_5ForConditionalGeneration,
+    SupportsLateInteraction,
 ):
     """ColQwen3.5 late interaction model for multi-modal retrieval/reranking.
 
@@ -125,15 +126,10 @@ class ColQwen3_5Model(
 
     Attributes:
         custom_text_proj: Linear projection from hidden_size to embed_dim
-        supports_late_interaction: Flag indicating this model uses late
-            interaction scoring
     """
 
     # Mark this as a pooling model so vLLM routes to pooler path
     is_pooling_model = True
-
-    # Mark this model as supporting late interaction scoring
-    supports_late_interaction: ClassVar[Literal[True]] = True
 
     # Override hf_to_vllm_mapper to handle ColQwen3.5 weight naming.
     # ColPali saves weights as "language_model.*" but vLLM's
