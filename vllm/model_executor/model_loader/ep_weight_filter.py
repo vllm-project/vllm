@@ -32,6 +32,7 @@ def compute_local_expert_ids(
     num_experts: int,
     ep_size: int,
     ep_rank: int,
+    placement: str = "linear",
 ) -> set[int] | None:
     """Compute the set of global expert ids owned by *ep_rank*.
 
@@ -40,15 +41,24 @@ def compute_local_expert_ids(
 
     The distribution logic mirrors
     :func:`vllm.model_executor.layers.fused_moe.layer.determine_expert_map`.
+
+    Args:
+        placement: ``"linear"`` for contiguous assignment,
+            ``"round_robin"`` for interleaved assignment.
     """
     if ep_size <= 1:
         return None
 
-    base = num_experts // ep_size
-    remainder = num_experts % ep_size
-    start = ep_rank * base + min(ep_rank, remainder)
-    local_count = base + (1 if ep_rank < remainder else 0)
-    return set(range(start, start + local_count))
+    if placement == "linear":
+        base = num_experts // ep_size
+        remainder = num_experts % ep_size
+        start = ep_rank * base + min(ep_rank, remainder)
+        local_count = base + (1 if ep_rank < remainder else 0)
+        return set(range(start, start + local_count))
+    elif placement == "round_robin":
+        return set(range(ep_rank, num_experts, ep_size))
+    else:
+        raise ValueError(f"Unknown expert placement strategy: {placement}")
 
 
 def should_skip_weight(

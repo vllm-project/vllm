@@ -124,6 +124,38 @@ class TestComputeLocalExpertIds:
             ids = compute_local_expert_ids(384, ep_size=24, ep_rank=rank)
             assert len(ids) == 16
 
+    # round_robin placement tests
+
+    def test_round_robin_basic(self):
+        # 8 experts, EP=2: rank 0 → {0,2,4,6}, rank 1 → {1,3,5,7}
+        rr = "round_robin"
+        ids_0 = compute_local_expert_ids(8, 2, 0, placement=rr)
+        ids_1 = compute_local_expert_ids(8, 2, 1, placement=rr)
+        assert ids_0 == {0, 2, 4, 6}
+        assert ids_1 == {1, 3, 5, 7}
+
+    def test_round_robin_full_coverage(self):
+        # 384 experts, EP=8: all experts covered, no overlap
+        rr = "round_robin"
+        all_ids: set[int] = set()
+        for rank in range(8):
+            ids = compute_local_expert_ids(384, 8, rank, placement=rr)
+            assert ids is not None and len(ids) == 48
+            assert all_ids.isdisjoint(ids)
+            all_ids |= ids
+        assert all_ids == set(range(384))
+
+    def test_round_robin_uneven(self):
+        # 10 experts, EP=3: rank 0→{0,3,6,9}, rank 1→{1,4,7}, rank 2→{2,5,8}
+        rr = "round_robin"
+        ids_0 = compute_local_expert_ids(10, 3, 0, placement=rr)
+        ids_1 = compute_local_expert_ids(10, 3, 1, placement=rr)
+        ids_2 = compute_local_expert_ids(10, 3, 2, placement=rr)
+        assert ids_0 == {0, 3, 6, 9}
+        assert ids_1 == {1, 4, 7}
+        assert ids_2 == {2, 5, 8}
+        assert ids_0 | ids_1 | ids_2 == set(range(10))
+
 
 # ---------------------------------------------------------------------------
 # Unit tests for should_skip_weight
