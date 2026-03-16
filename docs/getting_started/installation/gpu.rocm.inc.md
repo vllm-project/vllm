@@ -271,6 +271,7 @@ To build vllm on ROCm 7.0 for MI200 and MI300 series, you can use the default (w
 DOCKER_BUILDKIT=1 docker build -f docker/Dockerfile.rocm -t vllm/vllm-openai-rocm .
 ```
 
+
 To run vLLM with the custom-built Docker image:
 
 ```bash
