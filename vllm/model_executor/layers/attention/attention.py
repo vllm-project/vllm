@@ -360,9 +360,11 @@ class Attention(nn.Module, AttentionLayerBase):
         _init_kv_cache_quant(self, quant_config, prefix)
 
         # for attn backends supporting query quantization
+        # Only FP8 KV cache benefits from FP8 query quantization.
+        # NVFP4 dequantizes to BF16 inline, so queries stay in BF16.
         self.query_quant = None
-        if self.impl.supports_quant_query_input and is_quantized_kv_cache(
-            self.kv_cache_dtype
+        if self.impl.supports_quant_query_input and self.kv_cache_dtype.startswith(
+            "fp8"
         ):
             is_per_head = (
                 hasattr(self, "q_scale") and self.q_scale.numel() == self.num_kv_heads
