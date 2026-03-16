@@ -13,7 +13,7 @@ use vllm_chat::{
 };
 use vllm_engine_core_client::protocol::handshake::{HandshakeInitMessage, ReadyMessage};
 use vllm_engine_core_client::protocol::{
-    EngineCoreOutput, EngineCoreOutputs, EngineCoreRequest, FinishReason,
+    EngineCoreOutput, EngineCoreOutputs, EngineCoreRequest, FinishReason, StopReason,
 };
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig};
 use vllm_llm::Llm;
@@ -43,6 +43,7 @@ fn request_output(
     request_id: &str,
     new_token_ids: Vec<u32>,
     finish_reason: Option<FinishReason>,
+    stop_reason: Option<StopReason>,
 ) -> EngineCoreOutput {
     EngineCoreOutput {
         request_id: request_id.to_string(),
@@ -51,7 +52,7 @@ fn request_output(
         new_prompt_logprobs_tensors: None,
         pooling_output: None,
         finish_reason,
-        stop_reason: None,
+        stop_reason,
         events: None,
         kv_transfer_params: None,
         trace_headers: None,
@@ -260,11 +261,12 @@ async fn chat_streams_text_events() {
                 &mut push,
                 EngineCoreOutputs {
                     outputs: vec![
-                        request_output("chat-1", vec![b'H' as u32], None),
+                        request_output("chat-1", vec![b'H' as u32], None, None),
                         request_output(
                             "chat-1",
                             vec![b'i' as u32, b'!' as u32],
                             Some(FinishReason::Stop),
+                            Some(StopReason::TokenId(b'!' as u32)),
                         ),
                     ],
                     finished_requests: Some(BTreeSet::from(["chat-1".to_string()])),
@@ -291,8 +293,8 @@ async fn chat_streams_text_events() {
     assert_eq!(
         stream.next().await.unwrap().unwrap(),
         ChatEvent::TextDelta {
-            delta: "i!".to_string(),
-            text: "Hi!".to_string(),
+            delta: "i".to_string(),
+            text: "Hi".to_string(),
         }
     );
 
@@ -302,7 +304,7 @@ async fn chat_streams_text_events() {
             finish_reason,
             ..
         })) => {
-            assert_eq!(text, "Hi!");
+            assert_eq!(text, "Hi");
             assert_eq!(finish_reason, Some(FinishReason::Stop));
         }
         other => panic!("unexpected final event: {other:?}"),
@@ -328,11 +330,12 @@ async fn chat_stream_waits_for_complete_utf8_before_emitting() {
                 &mut push,
                 EngineCoreOutputs {
                     outputs: vec![
-                        request_output("chat-utf8", bytes_to_token_ids(&[0xe4]), None),
+                        request_output("chat-utf8", bytes_to_token_ids(&[0xe4]), None, None),
                         request_output(
                             "chat-utf8",
-                            bytes_to_token_ids(&[0xbd, 0xa0]),
+                            bytes_to_token_ids(&[0xbd, 0xa0, b'!']),
                             Some(FinishReason::Stop),
+                            Some(StopReason::TokenId(b'!' as u32)),
                         ),
                     ],
                     finished_requests: Some(BTreeSet::from(["chat-utf8".to_string()])),
@@ -384,6 +387,7 @@ async fn chat_stream_flushes_held_text_on_finish() {
                         "chat-final-flush",
                         bytes_to_token_ids(b"ok st"),
                         Some(FinishReason::Length),
+                        None,
                     )],
                     finished_requests: Some(BTreeSet::from(["chat-final-flush".to_string()])),
                     ..Default::default()
@@ -457,7 +461,7 @@ async fn chat_stream_reports_decode_failure_as_error_event() {
             send_outputs(
                 &mut push,
                 EngineCoreOutputs {
-                    outputs: vec![request_output("chat-4", vec![b'X' as u32], None)],
+                    outputs: vec![request_output("chat-4", vec![b'X' as u32], None, None)],
                     ..Default::default()
                 },
             )
@@ -482,6 +486,59 @@ async fn chat_stream_reports_decode_failure_as_error_event() {
             assert_eq!(message, "decode failed");
         }
         other => panic!("unexpected event after close: {other:?}"),
+    }
+
+    chat.shutdown().await.unwrap();
+    engine_task.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn chat_stream_preserves_terminal_stop_token_when_requested() {
+    let handshake_address = unique_tcp_endpoint();
+    let engine_identity = b"engine-chat-include-stop".to_vec();
+
+    let engine_task = tokio::spawn({
+        let engine_handshake = handshake_address.clone();
+        let engine_identity = engine_identity.clone();
+        async move {
+            let (mut dealer, mut push) = setup_mock_engine(engine_handshake, engine_identity).await;
+            let _ = recv_engine_message(&mut dealer).await;
+            send_outputs(
+                &mut push,
+                EngineCoreOutputs {
+                    outputs: vec![request_output(
+                        "chat-include-stop",
+                        vec![b'H' as u32, b'i' as u32, b'!' as u32],
+                        Some(FinishReason::Stop),
+                        Some(StopReason::TokenId(b'!' as u32)),
+                    )],
+                    finished_requests: Some(BTreeSet::from(["chat-include-stop".to_string()])),
+                    ..Default::default()
+                },
+            )
+            .await;
+        }
+    });
+
+    let backend: Arc<dyn ChatBackend> = Arc::new(FakeChatBackend::new());
+    let chat = connect_chat_llm(handshake_address, backend).await;
+
+    let mut request = sample_request("chat-include-stop");
+    request.sampling_params.include_stop_str_in_output = true;
+    let mut stream = chat.chat(request).await.unwrap();
+
+    assert!(matches!(stream.next().await, Some(Ok(ChatEvent::Start))));
+    assert_eq!(
+        stream.next().await.unwrap().unwrap(),
+        ChatEvent::TextDelta {
+            delta: "Hi!".to_string(),
+            text: "Hi!".to_string(),
+        }
+    );
+
+    match stream.next().await {
+        Some(Ok(ChatEvent::Done { text, .. })) => assert_eq!(text, "Hi!"),
+        other => panic!("unexpected final event: {other:?}"),
     }
 
     chat.shutdown().await.unwrap();

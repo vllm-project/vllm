@@ -148,6 +148,9 @@ impl Default for ChatOptions {
 /// This intentionally keeps only the subset that the current Rust chat layer
 /// supports as northbound request semantics. Engine-core-specific normalized
 /// fields are derived later during lowering.
+///
+/// Original Python definition:
+/// <https://github.com/vllm-project/vllm/blob/f22d6e026798a74e6542a52ef776c054f2de572a/vllm/sampling_params.py#L155-L291>
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, DefaultFromSerde)]
 pub struct UserSamplingParams {
     /// Controls randomness. Lower values are more deterministic; zero means
@@ -166,6 +169,12 @@ pub struct UserSamplingParams {
     /// Minimum number of tokens to generate before EOS or stop-token handling.
     #[serde(default)]
     pub min_tokens: u32,
+    /// If true, keep the terminal stop token in the decoded output text.
+    ///
+    /// This currently affects token-based stop handling only; string stop
+    /// sequences are still out of scope for the minimal Rust chat layer.
+    #[serde(default)]
+    pub include_stop_str_in_output: bool,
     /// Explicit stop token IDs provided by the caller.
     #[serde(default)]
     pub stop_token_ids: Vec<u32>,

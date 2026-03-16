@@ -45,13 +45,16 @@ impl ChatLlm {
     /// Render, tokenize, and submit one chat request.
     pub async fn chat(&self, request: ChatRequest) -> Result<ChatEventStream> {
         request.validate()?;
+
         let prompt = self.backend.apply_chat_template(&request)?;
         let prompt_token_ids = self.backend.encode(&prompt)?;
         let sampling_hints = self.backend.sampling_hints()?;
         let prepared = lower_chat_request(request, prompt_token_ids, sampling_hints)?;
+
         let raw_stream = self.llm.generate(prepared.generate_request).await?;
+
         Ok(ChatEventStream::new(
-            prepared.request_id,
+            prepared.chat_request,
             self.backend.clone(),
             raw_stream,
         ))

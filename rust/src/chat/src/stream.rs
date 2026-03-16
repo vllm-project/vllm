@@ -3,8 +3,10 @@ use std::task::{Context, Poll};
 
 use futures::Stream;
 use futures_async_stream::try_stream;
+use vllm_engine_core_client::protocol::FinishReason;
 use vllm_llm::GenerateOutputStream;
 
+use crate::ChatRequest;
 use crate::backend::DynChatBackend;
 use crate::error::{Error, Result};
 use crate::event::ChatEvent;
@@ -18,13 +20,13 @@ pub struct ChatEventStream {
 
 impl ChatEventStream {
     pub(crate) fn new(
-        request_id: String,
+        request: ChatRequest,
         backend: DynChatBackend,
         raw_stream: GenerateOutputStream,
     ) -> Self {
         Self {
-            inner: chat_event_stream(request_id.clone(), backend, raw_stream),
-            request_id,
+            request_id: request.request_id.clone(),
+            inner: chat_event_stream(request.clone(), backend, raw_stream),
         }
     }
 
@@ -63,7 +65,7 @@ impl Stream for ChatEventStream {
 // TODO: apply small-string-optimization
 #[try_stream(boxed, ok = ChatEvent, error = Error)]
 async fn chat_event_stream(
-    request_id: String,
+    request: ChatRequest,
     backend: DynChatBackend,
     raw_stream: GenerateOutputStream,
 ) {
@@ -79,17 +81,34 @@ async fn chat_event_stream(
             IncrementalTextDecoder::new(backend.clone(), &output.prompt_token_ids)
         });
 
+        let suppress_terminal_stop_token = output.finished()
+            && output.raw.finish_reason == Some(FinishReason::Stop)
+            && !request.sampling_params.include_stop_str_in_output;
+        let decodable_token_ids = if suppress_terminal_stop_token {
+            // Match Python V1 token-stop detokenization by keeping the stop token
+            // in metadata while excluding it from user-visible text.
+            // TODO: when northbound stop strings are supported, mirror Python's
+            // richer stop-string trimming behavior here as well.
+            output
+                .token_ids
+                .split_last()
+                .map(|(_, rest)| rest)
+                .unwrap_or(&[])
+        } else {
+            &output.token_ids
+        };
+
         let mut delta = String::new();
-        for &token_id in &output.token_ids {
+        for &token_id in decodable_token_ids {
             if let Some(chunk) = decoder.push_token(token_id)? {
                 delta.push_str(&chunk);
             }
         }
-        if output.finished() {
+        if output.finished()
+            && let Some(chunk) = decoder.flush()?
+        {
             // Flush any remaining buffered text after the final token.
-            if let Some(chunk) = decoder.flush()? {
-                delta.push_str(&chunk);
-            }
+            delta.push_str(&chunk);
         }
 
         if !delta.is_empty() {
@@ -110,5 +129,7 @@ async fn chat_event_stream(
         }
     }
 
-    return Err(Error::StreamClosedBeforeTerminalOutput { request_id });
+    return Err(Error::StreamClosedBeforeTerminalOutput {
+        request_id: request.request_id,
+    });
 }

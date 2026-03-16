@@ -9,7 +9,7 @@ use crate::request::{ChatRequest, UserSamplingParams};
 
 #[derive(Debug)]
 pub(crate) struct PreparedChatRequest {
-    pub request_id: String,
+    pub chat_request: ChatRequest,
     pub generate_request: GenerateRequest,
 }
 
@@ -23,12 +23,12 @@ pub(crate) fn lower_chat_request(
         messages: _,
         sampling_params,
         chat_options: _,
-    } = request;
+    } = &request;
 
     let generate_request = GenerateRequest {
         request_id: request_id.clone(),
         prompt_token_ids,
-        sampling_params: lower_sampling_params(sampling_params, sampling_hints),
+        sampling_params: lower_sampling_params(sampling_params.clone(), sampling_hints),
         arrival_time: None,
         cache_salt: None,
         trace_headers: None,
@@ -39,7 +39,7 @@ pub(crate) fn lower_chat_request(
     };
 
     Ok(PreparedChatRequest {
-        request_id,
+        chat_request: request.clone(),
         generate_request,
     })
 }
@@ -59,6 +59,7 @@ fn lower_sampling_params(
         top_k,
         max_tokens,
         min_tokens,
+        include_stop_str_in_output: _,
         mut stop_token_ids,
         ignore_eos,
     } = sampling_params;
