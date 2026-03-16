@@ -14,6 +14,10 @@ Many classification models support both (sequence) classification and token clas
 
 The most fundamental application of classification models is to categorize input data into predefined classes.
 
+### cross-encoder models
+
+Cross-encoder and reranker models are a subset of classification models that accept two prompts as input and output num_labels equal to 1. For more information on cross-encoder models, see [cross-encoder models](score.md#cross-encoder-models).
+
 ### Reward Models
 
 For more information, see [Reward Models](reward.md).

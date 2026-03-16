@@ -54,7 +54,7 @@ We currently support the following OpenAI APIs:
     - *Note: `user` parameter is ignored.*
     - *Note:* Setting the `parallel_tool_calls` parameter to `false` ensures vLLM only returns zero or one tool call per request. Setting it to `true` (the default) allows returning more than one tool call per request. There is no guarantee more than one tool call will be returned if this is set to `true`, as that behavior is model dependent and not all models are designed to support parallel tool calls.
 - [Embeddings API](#embeddings-api) (`/v1/embeddings`)
-    - Only applicable to [embedding models](../models/pooling_models/README.md).
+    - Only applicable to [embedding models](../models/pooling_models/embed.md).
 - [Transcriptions API](#transcriptions-api) (`/v1/audio/transcriptions`)
     - Only applicable to [Automatic Speech Recognition (ASR) models](../models/supported_models.md#transcription).
 - [Translation API](#translations-api) (`/v1/audio/translations`)
@@ -67,16 +67,15 @@ In addition, we have the following custom APIs:
 - [Tokenizer API](#tokenizer-api) (`/tokenize`, `/detokenize`)
     - Applicable to any model with a tokenizer.
 - [Pooling API](#pooling-api) (`/pooling`)
-    - Applicable to all [pooling models](../models/pooling_models/README.md).
+    - Applicable to all [pooling models](../models/pooling_models/encode.md).
 - [Classification API](#classification-api) (`/classify`)
-    - Only applicable to [classification models](../models/pooling_models/README.md).
+    - Only applicable to [classification models](../models/pooling_models/classify.md).
 - [Score API](#score-api) (`/score`)
-    - Applicable to [embedding models and cross-encoder models](../models/pooling_models/README.md).
+    - Applicable to [score models](../models/pooling_models/score.md).
 - [Re-rank API](#re-rank-api) (`/rerank`, `/v1/rerank`, `/v2/rerank`)
     - Implements [Jina AI's v1 re-rank API](https://jina.ai/reranker/)
     - Also compatible with [Cohere's v1 & v2 re-rank APIs](https://docs.cohere.com/v2/reference/rerank)
     - Jina and Cohere's APIs are very similar; Jina's includes extra information in the rerank endpoint's response.
-    - Only applicable to [cross-encoder models](../models/pooling_models/README.md).
 
 ## Chat Template
 
@@ -624,14 +623,6 @@ It consists of two endpoints:
 
 - `/tokenize` corresponds to calling `tokenizer.encode()`.
 - `/detokenize` corresponds to calling `tokenizer.decode()`.
-
-### Pooling API
-
-Our Pooling API encodes input prompts using a [pooling model](../models/pooling_models/README.md) and returns the corresponding hidden states.
-
-The input format is the same as [Embeddings API](#embeddings-api), but the output data can contain an arbitrary nested list, not just a 1-D list of floats.
-
-Code example: [examples/pooling/pooling/pooling_online.py](../../examples/pooling/pooling/pooling_online.py)
 
 ### Classification API
 

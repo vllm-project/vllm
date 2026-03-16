@@ -11,7 +11,7 @@ This functionality is supported through the offline `LLM.score(...)` API, along 
 
 ### [cross-encoder models](https://www.sbert.net/examples/applications/cross-encoder/README.html)
 
-Cross-encoder and reranker models are a subset of classification models that accept two prompts as input.
+Cross-encoder and reranker models are a subset of classification models that accept two prompts as input and output num_labels equal to 1.
 
 - Text only models
 
