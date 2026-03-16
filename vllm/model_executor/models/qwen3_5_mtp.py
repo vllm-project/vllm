@@ -198,9 +198,12 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         is_fused_expert = False
+        base_layer = (
+            "base_layer." if any(".base_layer." in name for name in params_dict) else ""
+        )
         fused_expert_params_mapping = [
-            ("experts.w13_weight", "experts.gate_up_proj", 0, "w1"),
-            ("experts.w2_weight", "experts.down_proj", 0, "w2"),
+            (f"experts.{base_layer}w13_weight", "experts.gate_up_proj", 0, "w1"),
+            (f"experts.{base_layer}w2_weight", "experts.down_proj", 0, "w2"),
         ]
         num_experts = (
             self.config.num_experts if hasattr(self.config, "num_experts") else 0
