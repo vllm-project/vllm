@@ -84,7 +84,7 @@ def test_audio_in_video_cache_correctness(model_id: str, num_videos: int) -> Non
 
     def run(processor):
         return processor(
-            [video_token_id],
+            [video_token_id] * num_videos,
             mm_items=baseline_processor.info.parse_mm_data(mm_data),
             hf_processor_mm_kwargs=hf_processor_mm_kwargs,
         )["prompt_token_ids"]

@@ -88,13 +88,9 @@ async def test_online_audio_in_video_multi_videos(
     """Test video input with `audio_in_video=True`"""
 
     # we don't use video_urls above because they missed audio stream.
-    video_0_path = video_assets[0].video_path
-    with open(video_0_path, "rb") as f:
-        video_0_base64 = base64.b64encode(f.read()).decode("utf-8")
-
-    video_1_path = "/home/mozf/develop-projects/vllm/draw.mp4"
-    with open(video_1_path, "rb") as f:
-        video_1_base64 = base64.b64encode(f.read()).decode("utf-8")
+    video_path = video_assets[0].video_path
+    with open(video_path, "rb") as f:
+        video_base64 = base64.b64encode(f.read()).decode("utf-8")
 
     messages = [
         {
@@ -103,11 +99,11 @@ async def test_online_audio_in_video_multi_videos(
                 {"type": "text", "text": "What's in these two videos?"},
                 {
                     "type": "video_url",
-                    "video_url": {"url": f"data:video/mp4;base64,{video_0_base64}"},
+                    "video_url": {"url": f"data:video/mp4;base64,{video_base64}"},
                 },
                 {
                     "type": "video_url",
-                    "video_url": {"url": f"data:video/mp4;base64,{video_1_base64}"},
+                    "video_url": {"url": f"data:video/mp4;base64,{video_base64}"},
                 },
             ],
         }
