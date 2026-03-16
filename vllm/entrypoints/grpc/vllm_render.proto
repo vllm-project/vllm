@@ -102,8 +102,7 @@ message RenderChatRequest {
 }
 
 message RenderChatResponse {
-  repeated google.protobuf.Struct conversation = 1;
-  repeated TokPromptEntry prompts = 2;
+  GenerateRequestProto generate_request = 1;
 }
 
 // =====================
@@ -144,12 +143,20 @@ message RenderCompletionRequest {
   optional string cache_salt = 7;
 }
 
-// A single tokenized prompt in the response
-message TokPromptEntry {
-  repeated uint32 prompt_token_ids = 1;
-  optional string prompt = 2;
+message RenderCompletionResponse {
+  repeated GenerateRequestProto generate_requests = 1;
 }
 
-message RenderCompletionResponse {
-  repeated TokPromptEntry prompts = 1;
+// Mirrors vllm.entrypoints.serve.disagg.protocol.GenerateRequest
+message GenerateRequestProto {
+  string request_id = 1;
+  repeated int32 token_ids = 2;
+  google.protobuf.Struct sampling_params = 3;
+  optional string model = 4;
+  optional bool stream = 5;
+  optional google.protobuf.Struct stream_options = 6;
+  optional string cache_salt = 7;
+  optional int64 priority = 8;
+  optional google.protobuf.Struct features = 9;
+  optional google.protobuf.Struct kv_transfer_params = 10;
 }

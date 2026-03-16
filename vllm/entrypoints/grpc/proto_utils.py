@@ -44,15 +44,9 @@ def from_proto(
     return request_class(**proto_to_dict(message, transforms))
 
 
-def to_proto(data: dict | tuple | list, message_class: type[Message]) -> Message:
-    """Convert a dict/tuple/list to a protobuf message.
-
-    Uses ParseDict for recursive conversion. If data is a tuple or
-    non-dict list, elements are mapped to proto fields by definition order.
-    """
-    if not isinstance(data, dict):
-        fields = message_class.DESCRIPTOR.fields
-        data = {fields[i].name: v for i, v in enumerate(data)}
+def pydantic_to_proto(model: Any, message_class: type[Message]) -> Message:
+    """Convert a Pydantic model to a protobuf message via model_dump."""
+    data = model.model_dump(mode="json", exclude_none=True)
     return ParseDict(data, message_class(), ignore_unknown_fields=True)
 
 
