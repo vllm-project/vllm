@@ -1,19 +1,19 @@
 # Classification Models
 
-Classification is the task of predicting which of predefined categories or classes or labels the input data belongs to.
+Classification involves predicting which predefined category, class, or label best corresponds to a given input.
 
-Classification corresponds to `classify` pooling task, offline `LLM.classify(...)`, `LLM.encode(..., pooling_task="classify")` API, and online `/classify` API.
+This functionality is supported through the `classify` pooling task, the offline `LLM.classify(...)` and `LLM.encode(..., pooling_task="classify")` APIs, as well as the online `/classify` endpoint.
 
-The difference between the (sequence) classification task and the token classification task is that (sequence) classification outputs one result for each sequence, while token classification outputs a result for each token.
+The key distinction between sequence classification and token classification lies in their output granularity: sequence classification produces a single result for an entire input sequence, whereas token classification yields a result for each individual token within the sequence.
 
-Most classification models support the token classification task. See [this page](token_classify.md) for more information about token classification.
+Many classification models support both sequence classification and token classification. For further details, please refer to [this page](token_classify.md).
 
 ## Typical Use Cases
 
 ### Classification
 
-The most basic use case of Classification is to classify.
+The most fundamental application of classification models is to categorize input data into predefined classes.
 
 ### Reward Models
 
-See [Reward Models](reward.md) for more information.
+For more information, see [Reward Models](reward.md).

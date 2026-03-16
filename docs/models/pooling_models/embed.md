@@ -1,12 +1,12 @@
 # Embedding Models
 
-Embedding model is a type of machine learning model designed to convert unstructured data—like text, images, or audio—into a structured, numerical format called an embedding.
+Embedding models are a class of machine learning models designed to transform unstructured data—such as text, images, or audio—into a structured numerical representation known as an embedding.
 
-Embedding corresponds to `embed` pooling task, offline `LLM.embed(...)`, `LLM.encode(..., pooling_task="embed")` API, and online `/v1/embeddings` API.
+This functionality is supported through the `embed` pooling task, the `offline LLM.embed(...)` and `LLM.encode(..., pooling_task="embed")` APIs, as well as the online `/v1/embeddings` endpoint.
 
-The difference between the (sequence) embedding task and the token embedding task is that (sequence) embedding outputs one embedding for each sequence, while token embedding outputs a embedding for each token.
+The primary distinction between sequence embedding and token embedding lies in their output granularity: sequence embedding produces a single embedding vector for an entire input sequence, whereas token embedding generates an embedding for each individual token within the sequence.
 
-Most embedding models support the token embedding task. See [this page](token_embed.md) for more information about token embedding.
+Many embedding models support both sequence embedding and token embedding. For further details, please refer to [this page](token_embed.md).
 
 ## Typical Use Cases
 
