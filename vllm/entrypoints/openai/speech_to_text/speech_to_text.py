@@ -43,7 +43,7 @@ from vllm.logger import init_logger
 from vllm.logprobs import FlatLogprobs, Logprob
 from vllm.model_executor.models import SupportsTranscription
 from vllm.multimodal.audio import split_audio
-from vllm.multimodal.media.audio import extract_audio_from_video_bytes
+from vllm.multimodal.media.audio import load_audio_pyav
 from vllm.outputs import RequestOutput
 from vllm.renderers.inputs import DictPrompt, EncoderDecoderDictPrompt
 from vllm.renderers.inputs.preprocess import parse_enc_dec_prompt, parse_model_prompt
@@ -227,9 +227,7 @@ class OpenAISpeechToText(OpenAIServing):
                 exc,
             )
             try:
-                native_y, native_sr = extract_audio_from_video_bytes(audio_data)
-                sr = self.asr_config.sample_rate
-                y = librosa.resample(native_y, orig_sr=native_sr, target_sr=sr)
+                y, sr = load_audio_pyav(audio_data, sr=self.asr_config.sample_rate)
             except Exception as pyav_exc:
                 logger.debug(
                     "pyAV fallback also failed: %s",
