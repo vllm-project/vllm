@@ -2,7 +2,7 @@
 
 Embedding models are a class of machine learning models designed to transform unstructured data—such as text, images, or audio—into a structured numerical representation known as an embedding.
 
-This functionality is supported through the `embed` pooling task, the `offline LLM.embed(...)` and `LLM.encode(..., pooling_task="embed")` APIs, as well as the online `/v1/embeddings` endpoint.
+This functionality is supported through the `embed` pooling task, the `offline LLM.embed(...)` and `LLM.encode(..., pooling_task="embed")` APIs, as well as the online `/v1/embeddings` API.
 
 The primary distinction between (sequence) embedding and token embedding lies in their output granularity: (sequence) embedding produces a single embedding vector for an entire input sequence, whereas token embedding generates an embedding for each individual token within the sequence.
 
@@ -110,7 +110,7 @@ embeds = output.outputs.embedding
 print(f"Embeddings: {embeds!r} (size={len(embeds)})")
 ```
 
-A code example can be found here: [examples/offline_inference/basic/embed.py](../../examples/offline_inference/basic/embed.py)
+A code example can be found here: [examples/offline_inference/basic/embed.py](../../../examples/basic/offline_inference/embed.py)
 
 ### `LLM.encode`
 
@@ -145,3 +145,163 @@ llm = LLM(model="intfloat/e5-small", runner="pooling")
 score = output.outputs.score
 print(f"Score: {score}")
 ```
+
+## Online Serving
+
+### OpenAI-Compatible Embeddings API
+
+Our Embeddings API is compatible with [OpenAI's Embeddings API](https://platform.openai.com/docs/api-reference/embeddings);
+you can use the [official OpenAI Python client](https://github.com/openai/openai-python) to interact with it.
+
+Code example: [examples/pooling/embed/openai_embedding_client.py](../../examples/pooling/embed/openai_embedding_client.py)
+
+#### Completion Parameters
+
+The following Classification API parameters are supported:
+
+??? code
+
+    ```python
+    --8<-- "vllm/entrypoints/pooling/base/protocol.py:pooling-common-params"
+    --8<-- "vllm/entrypoints/pooling/base/protocol.py:completion-params"
+    --8<-- "vllm/entrypoints/pooling/base/protocol.py:encoding-params"
+    --8<-- "vllm/entrypoints/pooling/base/protocol.py:embed-params"
+    ```
+
+The following extra parameters are supported:
+
+??? code
+
+    ```python
+    --8<-- "vllm/entrypoints/pooling/base/protocol.py:pooling-common-extra-params"
+    --8<-- "vllm/entrypoints/pooling/base/protocol.py:completion-extra-params"
+    --8<-- "vllm/entrypoints/pooling/base/protocol.py:encoding-extra-params"
+    --8<-- "vllm/entrypoints/pooling/base/protocol.py:embed-extra-params"
+    ```
+
+#### Chat Parameters
+
+For chat-like input (i.e. if `messages` is passed), the following parameters are supported:
+
+??? code
+
+    ```python
+    --8<-- "vllm/entrypoints/pooling/base/protocol.py:pooling-common-params"
+    --8<-- "vllm/entrypoints/pooling/base/protocol.py:chat-params"
+    --8<-- "vllm/entrypoints/pooling/base/protocol.py:encoding-params"
+    --8<-- "vllm/entrypoints/pooling/base/protocol.py:embed-params"
+    ```
+
+these extra parameters are supported instead:
+
+??? code
+
+    ```python
+    --8<-- "vllm/entrypoints/pooling/base/protocol.py:pooling-common-extra-params"
+    --8<-- "vllm/entrypoints/pooling/base/protocol.py:chat-extra-params"
+    --8<-- "vllm/entrypoints/pooling/base/protocol.py:encoding-extra-params"
+    --8<-- "vllm/entrypoints/pooling/base/protocol.py:embed-extra-params"
+    ```
+
+#### Examples
+
+If the model has a [chat template](../serving/openai_compatible_server.md#chat-template), you can replace `inputs` with a list of `messages` (same schema as [Chat API](#chat-api))
+which will be treated as a single prompt to the model. Here is a convenience function for calling the API while retaining OpenAI's type annotations:
+
+??? code
+
+    ```python
+    from openai import OpenAI
+    from openai._types import NOT_GIVEN, NotGiven
+    from openai.types.chat import ChatCompletionMessageParam
+    from openai.types.create_embedding_response import CreateEmbeddingResponse
+
+    def create_chat_embeddings(
+        client: OpenAI,
+        *,
+        messages: list[ChatCompletionMessageParam],
+        model: str,
+        encoding_format: Union[Literal["base64", "float"], NotGiven] = NOT_GIVEN,
+    ) -> CreateEmbeddingResponse:
+        return client.post(
+            "/embeddings",
+            cast_to=CreateEmbeddingResponse,
+            body={"messages": messages, "model": model, "encoding_format": encoding_format},
+        )
+    ```
+
+##### Multi-modal inputs
+
+You can pass multi-modal inputs to embedding models by defining a custom chat template for the server
+and passing a list of `messages` in the request. Refer to the examples below for illustration.
+
+=== "VLM2Vec"
+
+    To serve the model:
+
+    ```bash
+    vllm serve TIGER-Lab/VLM2Vec-Full --runner pooling \
+      --trust-remote-code \
+      --max-model-len 4096 \
+      --chat-template examples/pooling/embed/template/vlm2vec_phi3v.jinja
+    ```
+
+    !!! important
+        Since VLM2Vec has the same model architecture as Phi-3.5-Vision, we have to explicitly pass `--runner pooling`
+        to run this model in embedding mode instead of text generation mode.
+
+        The custom chat template is completely different from the original one for this model,
+        and can be found here: [examples/pooling/embed/template/vlm2vec_phi3v.jinja](../../examples/pooling/embed/template/vlm2vec_phi3v.jinja)
+
+    Since the request schema is not defined by OpenAI client, we post a request to the server using the lower-level `requests` library:
+
+    ??? code
+
+        ```python
+        from openai import OpenAI
+        client = OpenAI(
+            base_url="http://localhost:8000/v1",
+            api_key="EMPTY",
+        )
+        image_url = "https://vllm-public-assets.s3.us-west-2.amazonaws.com/vision_model_images/2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg"
+
+        response = create_chat_embeddings(
+            client,
+            model="TIGER-Lab/VLM2Vec-Full",
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image_url", "image_url": {"url": image_url}},
+                        {"type": "text", "text": "Represent the given image."},
+                    ],
+                }
+            ],
+            encoding_format="float",
+        )
+
+        print("Image embedding output:", response.data[0].embedding)
+        ```
+
+=== "DSE-Qwen2-MRL"
+
+    To serve the model:
+
+    ```bash
+    vllm serve MrLight/dse-qwen2-2b-mrl-v1 --runner pooling \
+      --trust-remote-code \
+      --max-model-len 8192 \
+      --chat-template examples/pooling/embed/template/dse_qwen2_vl.jinja
+    ```
+
+    !!! important
+        Like with VLM2Vec, we have to explicitly pass `--runner pooling`.
+
+        Additionally, `MrLight/dse-qwen2-2b-mrl-v1` requires an EOS token for embeddings, which is handled
+        by a custom chat template: [examples/pooling/embed/template/dse_qwen2_vl.jinja](../../examples/pooling/embed/template/dse_qwen2_vl.jinja)
+
+    !!! important
+        `MrLight/dse-qwen2-2b-mrl-v1` requires a placeholder image of the minimum image size for text query embeddings. See the full code
+        example below for details.
+
+Full example: [examples/pooling/embed/vision_embedding_online.py](../../examples/pooling/embed/vision_embedding_online.py)

@@ -79,17 +79,6 @@ its Sentence Transformers configuration file (`modules.json`) takes priority ove
 You can further customize this via the `--pooler-config` option,
 which takes priority over both the model's and Sentence Transformers' defaults.
 
-## Offline Inference
-
-## Online Serving
-
-Our [OpenAI-Compatible Server](../../serving/openai_compatible_server.md) provides endpoints that correspond to the offline APIs:
-
-- [Embeddings API](../../serving/openai_compatible_server.md#embeddings-api) is similar to `LLM.embed`, accepting both text and [multi-modal inputs](../../features/multimodal_inputs.md) for embedding models.
-- [Classification API](../../serving/openai_compatible_server.md#classification-api) is similar to `LLM.classify` and is applicable to sequence classification models.
-- [Score API](../../serving/openai_compatible_server.md#score-api) is similar to `LLM.score` for cross-encoder models.
-- [Pooling API](../../serving/openai_compatible_server.md#pooling-api) is similar to `LLM.encode`, being applicable to all types of pooling models.
-
 ## Matryoshka Embeddings
 
 [Matryoshka Embeddings](https://sbert.net/examples/sentence_transformer/training/matryoshka/README.html#matryoshka-embeddings) or [Matryoshka Representation Learning (MRL)](https://arxiv.org/abs/2205.13147) is a technique used in training embedding models. It allows users to trade off between performance and cost.

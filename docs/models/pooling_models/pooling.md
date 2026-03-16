@@ -1,8 +1,10 @@
 # Pooling API
 
-The Pooling API includes the offline `LLM.encode` API and the online `/pooling` endpoint.
+The Pooling API includes the offline `LLM.encode` API and the online `/pooling` API.
 
 ## Offline Inference
+
+### `LLM.encode`
 
 The [LLM.encode][vllm.LLM.encode] method is available to all pooling models in vLLM.
 
@@ -31,21 +33,23 @@ print(f"Data: {data!r}")
 
 ## Online Serving
 
-Our Pooling endpoint (`/pooling`) is similar to `LLM.encode`, being applicable to all types of pooling models.
+### Pooling API 
 
-The input format is the same as [Embeddings API](#embeddings-api), but the output data can contain an arbitrary nested list, not just a 1-D list of floats.
+Our Pooling API (`/pooling`) is similar to `LLM.encode`, being applicable to all types of pooling models.
+
+The input format is the same as [Embeddings API](embed.md#openai-compatible-embeddings-api), but the output data can contain an arbitrary nested list, not just a 1-D list of floats.
 
 Code example: [examples/pooling/pooling/pooling_online.py](../../../examples/pooling/pooling/pooling_online.py)
 
 !!! note
-    Please use one of the more specific endpoints or set the task directly when using the [Pooling API](../../serving/openai_compatible_server.md#pooling-api):
+    Please use one of the more specific APIs or set the task directly when using the Pooling API:
 
     - For embeddings, use [Embeddings API](embed.md) or `"task":"embed"`.
     - For classification logits, use [Classification API](classify.md) or `"task":"classify"`.
     - For similarity scores, use [Score API](score.md).
     - For rewards, use `"task":"token_classify"`.
     - For token classification, use `"task":"token_classify"`.
-    - For multi-vector retrieval, use `"task":"token_embed"`.
+    - For multi-vector retrieval and token embeddings, use `"task":"token_embed"`.
     - For IO Processor Plugins, use `"task":"plugin"`.
 
 ### Examples

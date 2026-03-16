@@ -1,6 +1,6 @@
 # Token Classification Models
 
-Token classification is supported through the `token_classify` pooling task, the offline `LLM.encode(..., pooling_task="token_classify")` API, and the online `/pooling` endpoint.
+Token classification is supported through the `token_classify` pooling task, the offline `LLM.encode(..., pooling_task="token_classify")` API, and the online `/pooling` API.
 
 The key distinction between (sequence) classification and token classification lies in their output granularity: (sequence) classification produces a single result for an entire input sequence, whereas token classification yields a result for each individual token within the sequence.
 
@@ -66,3 +66,7 @@ llm = LLM(model="boltuix/NeuroBERT-NER", runner="pooling")
 data = output.outputs.data
 print(f"Data: {data!r}")
 ```
+
+## Online Serving
+
+Please refer to the [pooling API](pooling.md#online-serving) and use `"task":"token_classify"`.

@@ -1,6 +1,6 @@
 # Token Embedding Models
 
-Token embedding is supported through the `token_embed` pooling task, the offline `LLM.encode(..., pooling_task="embed")` API, and the online `/pooling` endpoint.
+Token embedding is supported through the `token_embed` pooling task, the offline `LLM.encode(..., pooling_task="embed")` API, and the online `/pooling` API.
 
 The difference between the (sequence) embedding task and the token embedding task is that (sequence) embedding outputs one embedding for each sequence, while token embedding outputs a embedding for each token.
 
@@ -99,3 +99,7 @@ llm = LLM(model="answerdotai/answerai-colbert-small-v1", runner="pooling")
 score = output.outputs.score
 print(f"Score: {score}")
 ```
+
+## Online Serving
+
+Please refer to the [pooling API](pooling.md#online-serving) and use `"task":"token_embed"`.

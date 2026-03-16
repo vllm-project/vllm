@@ -1,8 +1,8 @@
-# Score API
+# Score Models
 
-The Score API is designed to compute similarity scores between two input prompts. It supports three model architectures: `cross-encoder`, `late-interaction`, and `bi-encoder` models.
+The Score models is designed to compute similarity scores between two input prompts. It supports three model architectures: `cross-encoder`, `late-interaction`, and `bi-encoder` models.
 
-This functionality is supported through the offline `LLM.score(...)` API, along with several online endpoints: the `/score` endpoint and the Re-rank endpoints available at `/rerank`, `/v1/rerank`, and `/v2/rerank`.
+This functionality is supported through the offline `LLM.score(...)` API, along with several online APIs: the `/score` API and the Re-rank APIs available at `/rerank`, `/v1/rerank`, and `/v2/rerank`.
 
 !!! note
     vLLM handles only the model inference component of RAG pipelines (such as embedding generation and reranking). For higher-level RAG orchestration, you should leverage integration frameworks like [LangChain](https://github.com/langchain-ai/langchain).
@@ -119,3 +119,283 @@ print(f"Score: {score}")
 ```
 
 A code example can be found here: [examples/basic/offline_inference/score.py](../../../examples/basic/offline_inference/score.py)
+
+## Online Serving
+
+### Score API
+
+Our Score API (`/score`) is similar to `LLM.score`, compute similarity scores between two input prompts.
+
+#### Parameters
+
+The following Score API parameters are supported:
+
+```python
+--8<-- "vllm/entrypoints/pooling/base/protocol.py:pooling-common-params"
+--8<-- "vllm/entrypoints/pooling/base/protocol.py:pooling-common-extra-params"
+--8<-- "vllm/entrypoints/pooling/base/protocol.py:classify-extra-params"
+```
+
+#### Examples
+
+##### Single inference
+
+You can pass a string to both `queries` and `documents`, forming a single sentence pair.
+
+```bash
+curl -X 'POST' \
+  'http://127.0.0.1:8000/score' \
+  -H 'accept: application/json' \
+  -H 'Content-Type: application/json' \
+  -d '{
+  "model": "BAAI/bge-reranker-v2-m3",
+  "encoding_format": "float",
+  "queries": "What is the capital of France?",
+  "documents": "The capital of France is Paris."
+}'
+```
+
+??? console "Response"
+
+    ```json
+    {
+      "id": "score-request-id",
+      "object": "list",
+      "created": 693447,
+      "model": "BAAI/bge-reranker-v2-m3",
+      "data": [
+        {
+          "index": 0,
+          "object": "score",
+          "score": 1
+        }
+      ],
+      "usage": {}
+    }
+    ```
+
+##### Batch inference
+
+You can pass a string to `queries` and a list to `documents`, forming multiple sentence pairs
+where each pair is built from `queries` and a string in `documents`.
+The total number of pairs is `len(documents)`.
+
+??? console "Request"
+
+    ```bash
+    curl -X 'POST' \
+      'http://127.0.0.1:8000/score' \
+      -H 'accept: application/json' \
+      -H 'Content-Type: application/json' \
+      -d '{
+      "model": "BAAI/bge-reranker-v2-m3",
+      "queries": "What is the capital of France?",
+      "documents": [
+        "The capital of Brazil is Brasilia.",
+        "The capital of France is Paris."
+      ]
+    }'
+    ```
+
+??? console "Response"
+
+    ```json
+    {
+      "id": "score-request-id",
+      "object": "list",
+      "created": 693570,
+      "model": "BAAI/bge-reranker-v2-m3",
+      "data": [
+        {
+          "index": 0,
+          "object": "score",
+          "score": 0.001094818115234375
+        },
+        {
+          "index": 1,
+          "object": "score",
+          "score": 1
+        }
+      ],
+      "usage": {}
+    }
+    ```
+
+You can pass a list to both `queries` and `documents`, forming multiple sentence pairs
+where each pair is built from a string in `queries` and the corresponding string in `documents` (similar to `zip()`).
+The total number of pairs is `len(documents)`.
+
+??? console "Request"
+
+    ```bash
+    curl -X 'POST' \
+      'http://127.0.0.1:8000/score' \
+      -H 'accept: application/json' \
+      -H 'Content-Type: application/json' \
+      -d '{
+      "model": "BAAI/bge-reranker-v2-m3",
+      "encoding_format": "float",
+      "queries": [
+        "What is the capital of Brazil?",
+        "What is the capital of France?"
+      ],
+      "documents": [
+        "The capital of Brazil is Brasilia.",
+        "The capital of France is Paris."
+      ]
+    }'
+    ```
+
+??? console "Response"
+
+    ```json
+    {
+      "id": "score-request-id",
+      "object": "list",
+      "created": 693447,
+      "model": "BAAI/bge-reranker-v2-m3",
+      "data": [
+        {
+          "index": 0,
+          "object": "score",
+          "score": 1
+        },
+        {
+          "index": 1,
+          "object": "score",
+          "score": 1
+        }
+      ],
+      "usage": {}
+    }
+    ```
+
+##### Multi-modal inputs
+
+You can pass multi-modal inputs to scoring models by passing `content` including a list of multi-modal input (image, etc.) in the request. Refer to the examples below for illustration.
+
+=== "JinaVL-Reranker"
+
+    To serve the model:
+
+    ```bash
+    vllm serve jinaai/jina-reranker-m0
+    ```
+
+    Since the request schema is not defined by OpenAI client, we post a request to the server using the lower-level `requests` library:
+
+    ??? Code
+
+        ```python
+        import requests
+        
+        response = requests.post(
+            "http://localhost:8000/v1/score",
+            json={
+                "model": "jinaai/jina-reranker-m0",
+                "queries": "slm markdown",
+                "documents": [
+                    {
+                        "content": [
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": "https://raw.githubusercontent.com/jina-ai/multimodal-reranker-test/main/handelsblatt-preview.png"
+                                },
+                            }
+                        ],
+                    },
+                    {
+                        "content": [
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": "https://raw.githubusercontent.com/jina-ai/multimodal-reranker-test/main/handelsblatt-preview.png"
+                                },
+                            }
+                        ]
+                    },
+                ],
+            },
+        )
+        response.raise_for_status()
+        response_json = response.json()
+        print("Scoring output:", response_json["data"][0]["score"])
+        print("Scoring output:", response_json["data"][1]["score"])
+        ```
+Full example:
+
+- [examples/pooling/score/vision_score_api_online.py](../../../examples/pooling/score/vision_score_api_online.py)
+- [examples/pooling/score/vision_rerank_api_online.py](../../../examples/pooling/score/vision_rerank_api_online.py)
+
+
+
+
+### Re-rank API
+
+`/rerank`, `/v1/rerank`, and `/v2/rerank` APIs are compatible with both [Jina AI's re-rank API interface](https://jina.ai/reranker/) and
+[Cohere's re-rank API interface](https://docs.cohere.com/v2/reference/rerank) to ensure compatibility with
+popular open-source tools.
+
+Code example: [examples/pooling/score/rerank_api_online.py](../../examples/pooling/score/rerank_api_online.py)
+
+#### Parameters
+
+The following Re-rank API parameters are supported:
+
+```python
+--8<-- "vllm/entrypoints/pooling/base/protocol.py:pooling-common-params"
+--8<-- "vllm/entrypoints/pooling/base/protocol.py:pooling-common-extra-params"
+--8<-- "vllm/entrypoints/pooling/base/protocol.py:classify-extra-params"
+```
+
+#### Examples
+
+Note that the `top_n` request parameter is optional and will default to the length of the `documents` field.
+Result documents will be sorted by relevance, and the `index` property can be used to determine original order.
+
+??? console "Request"
+
+    ```bash
+    curl -X 'POST' \
+      'http://127.0.0.1:8000/v1/rerank' \
+      -H 'accept: application/json' \
+      -H 'Content-Type: application/json' \
+      -d '{
+      "model": "BAAI/bge-reranker-base",
+      "query": "What is the capital of France?",
+      "documents": [
+        "The capital of Brazil is Brasilia.",
+        "The capital of France is Paris.",
+        "Horses and cows are both animals"
+      ]
+    }'
+    ```
+
+??? console "Response"
+
+    ```json
+    {
+      "id": "rerank-fae51b2b664d4ed38f5969b612edff77",
+      "model": "BAAI/bge-reranker-base",
+      "usage": {
+        "total_tokens": 56
+      },
+      "results": [
+        {
+          "index": 1,
+          "document": {
+            "text": "The capital of France is Paris."
+          },
+          "relevance_score": 0.99853515625
+        },
+        {
+          "index": 0,
+          "document": {
+            "text": "The capital of Brazil is Brasilia."
+          },
+          "relevance_score": 0.0005860328674316406
+        }
+      ]
+    }
+    ```

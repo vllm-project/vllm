@@ -31,7 +31,7 @@ vllm serve jinaai/jina-colbert-v2 \
     --trust-remote-code
 ```
 
-Then you can use the rerank endpoint:
+Then you can use the rerank API:
 
 ```shell
 curl -s http://localhost:8000/rerank -H "Content-Type: application/json" -d '{
@@ -45,7 +45,7 @@ curl -s http://localhost:8000/rerank -H "Content-Type: application/json" -d '{
 }'
 ```
 
-Or the score endpoint:
+Or the score API:
 
 ```shell
 curl -s http://localhost:8000/score -H "Content-Type: application/json" -d '{
@@ -55,7 +55,7 @@ curl -s http://localhost:8000/score -H "Content-Type: application/json" -d '{
 }'
 ```
 
-You can also get the raw token embeddings using the pooling endpoint with `token_embed` task:
+You can also get the raw token embeddings using the pooling API with `token_embed` task:
 
 ```shell
 curl -s http://localhost:8000/pooling -H "Content-Type: application/json" -d '{
@@ -85,7 +85,7 @@ vllm serve TomoroAI/tomoro-colqwen3-embed-4b --max-model-len 4096
 
 ## Text-only scoring and reranking
 
-Use the `/rerank` endpoint:
+Use the `/rerank` API:
 
 ```shell
 curl -s http://localhost:8000/rerank -H "Content-Type: application/json" -d '{
@@ -99,7 +99,7 @@ curl -s http://localhost:8000/rerank -H "Content-Type: application/json" -d '{
 }'
 ```
 
-Or the `/score` endpoint:
+Or the `/score` API:
 
 ```shell
 curl -s http://localhost:8000/score -H "Content-Type: application/json" -d '{
@@ -111,7 +111,7 @@ curl -s http://localhost:8000/score -H "Content-Type: application/json" -d '{
 
 ## Multi-modal scoring and reranking (text query × image documents)
 
-The `/score` and `/rerank` endpoints also accept multi-modal inputs directly.
+The `/score` and `/rerank` APIs also accept multi-modal inputs directly.
 Pass image documents using the `data_1`/`data_2` (for `/score`) or `documents` (for `/rerank`) fields
 with a `content` list containing `image_url` and `text` parts — the same format used by the
 OpenAI chat completion API:
@@ -159,7 +159,7 @@ curl -s http://localhost:8000/rerank -H "Content-Type: application/json" -d '{
 
 ## Raw token embeddings
 
-You can also get the raw token embeddings using the `/pooling` endpoint with `token_embed` task:
+You can also get the raw token embeddings using the `/pooling` API with `token_embed` task:
 
 ```shell
 curl -s http://localhost:8000/pooling -H "Content-Type: application/json" -d '{
@@ -169,7 +169,7 @@ curl -s http://localhost:8000/pooling -H "Content-Type: application/json" -d '{
 }'
 ```
 
-For **image inputs** via the pooling endpoint, use the chat-style `messages` field:
+For **image inputs** via the pooling API, use the chat-style `messages` field:
 
 ```shell
 curl -s http://localhost:8000/pooling -H "Content-Type: application/json" -d '{
@@ -214,7 +214,7 @@ vllm serve nvidia/llama-nemotron-embed-vl-1b-v2 \
 !!! note
     The chat template bundled with this model's tokenizer is not suitable for
     the embeddings API. Use the provided override template above when serving
-    with the `messages`-based (chat-style) embeddings endpoint.
+    with the `messages`-based (chat-style) embeddings API.
 
     The override template uses the message `role` to automatically prepend the
     appropriate prefix: set `role` to `"query"` for queries (prepends `query: `)
