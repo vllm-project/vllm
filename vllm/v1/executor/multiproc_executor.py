@@ -616,14 +616,15 @@ class WorkerProc:
             self.setup_proc_title_and_log_prefix(
                 enable_ep=vllm_config.parallel_config.enable_expert_parallel
             )
+        # Message queue init must come after init_device() so that
+        # _INNER_DP_WORLD is initialized for multi-node setups
+        # (nnodes_within_dp > 1).
+        self._init_message_queues(input_shm_handle, vllm_config)
+        if not is_eep_new_worker:
             self.worker.load_model()
 
         # Set block size based on the attention backends
         current_platform.update_block_size_for_backend(vllm_config)
-
-        # Initialize message queues after init_device() since multi-node setups
-        # (nnodes_within_dp > 1) require distributed groups to be initialized
-        self._init_message_queues(input_shm_handle, vllm_config)
 
         # Enable environment variable cache (e.g. assume no more
         # environment variable overrides after this point)
