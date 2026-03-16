@@ -105,7 +105,7 @@ class RayWorkerProc(WorkerProc):
         self.worker_response_mq = MessageQueue(
             n_reader=1, n_local_reader=n_local, connect_ip=get_ip()
         )
-        self.peer_response_handles = []
+        self.peer_response_handles: list[dict] = []
 
     def wait_for_init(self) -> dict:
         """Respond to the driver's wait_until_ready() barrier."""
@@ -175,7 +175,9 @@ class RayExecutorV2(MultiprocExecutor):
 
         # Prefer driver node; group by node for TP locality
         bundle_to_node_id = []
-        for i, bundle in enumerate(placement_group.bundle_specs):
+        bundle_specs = placement_group.bundle_specs
+        assert bundle_specs is not None
+        for i, bundle in enumerate(bundle_specs):
             ray_device_key = current_platform.ray_device_key
             if not ray_device_key:
                 raise ValueError(
