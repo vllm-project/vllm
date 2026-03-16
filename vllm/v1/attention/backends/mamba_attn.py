@@ -383,7 +383,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
 
             # Return a tensor of shape (#requests, #max blocks)
             state_indices_tensor = common_attn_metadata.block_table_tensor
-            # Additional cache-related varaiables:
+            # Additional cache-related variables:
             mamba_block_size = self.kv_cache_spec.block_size
             (
                 block_idx_last_computed_token,

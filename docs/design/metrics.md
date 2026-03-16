@@ -507,10 +507,10 @@ longer relevant in v1:
 - `vllm:num_requests_swapped`
 - `vllm:cpu_cache_usage_perc`
 
-In this mode, when a request is preempted (e.g. to make room in KV
-cache to complete other requests), we swap kv cache blocks out to CPU
-memory. This is also known as "KV cache offloading" and is configured
-with `--swap-space` and `--preemption-mode`.
+In this mode, when a request was preempted (e.g. to make room in KV
+cache to complete other requests), kv cache blocks were swapped out to
+CPU memory. The `--swap-space` flag has been removed as this feature
+is no longer used in V1.
 
 Historically, [vLLM has long supported beam search](https://github.com/vllm-project/vllm/issues/6226). The
 SequenceGroup encapsulated the idea of N Sequences which
