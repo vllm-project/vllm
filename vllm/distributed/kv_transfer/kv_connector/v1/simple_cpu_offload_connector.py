@@ -15,18 +15,18 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorRole,
     SupportsHMA,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.simple_cpu_offload.manager import (
-    SimpleCPUOffloadScheduler,
-)
-from vllm.distributed.kv_transfer.kv_connector.v1.simple_cpu_offload.metadata import (
-    SimpleCPUOffloadMetadata,
-)
-from vllm.distributed.kv_transfer.kv_connector.v1.simple_cpu_offload.worker import (
-    SimpleCPUOffloadWorker,
-)
 from vllm.logger import init_logger
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import KVConnectorOutput
+from vllm.v1.simple_kv_offload.manager import (
+    SimpleCPUOffloadScheduler,
+)
+from vllm.v1.simple_kv_offload.metadata import (
+    SimpleCPUOffloadMetadata,
+)
+from vllm.v1.simple_kv_offload.worker import (
+    SimpleCPUOffloadWorker,
+)
 
 if TYPE_CHECKING:
     from vllm.forward_context import ForwardContext

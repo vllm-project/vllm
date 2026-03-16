@@ -7,20 +7,20 @@ from typing import TYPE_CHECKING
 import torch
 
 from vllm.config import VllmConfig
-from vllm.distributed.kv_transfer.kv_connector.v1.simple_cpu_offload import (
-    copy_ops,
-)
-from vllm.distributed.kv_transfer.kv_connector.v1.simple_cpu_offload.metadata import (
-    SimpleCPUOffloadMetadata,
-)
 from vllm.logger import init_logger
 from vllm.utils.platform_utils import is_pin_memory_available
+from vllm.v1.simple_kv_offload import (
+    copy_ops,
+)
+from vllm.v1.simple_kv_offload.metadata import (
+    SimpleCPUOffloadMetadata,
+)
 
 if TYPE_CHECKING:
-    from vllm.distributed.kv_transfer.kv_connector.v1.simple_cpu_offload.copy_ops import (  # noqa: E501
+    from vllm.v1.kv_cache_interface import KVCacheConfig
+    from vllm.v1.simple_kv_offload.copy_ops import (  # noqa: E501
         LaunchParams,
     )
-    from vllm.v1.kv_cache_interface import KVCacheConfig
 
 logger = init_logger(__name__)
 

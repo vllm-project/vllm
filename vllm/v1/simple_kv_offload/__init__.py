@@ -10,7 +10,7 @@ This module provides a minimal, efficient CPU offloading connector that:
 - Supports lazy offloading (offload only when blocks are evicted from GPU cache)
 """
 
-from vllm.distributed.kv_transfer.kv_connector.v1.simple_cpu_offload.metadata import (
+from vllm.v1.simple_kv_offload.metadata import (
     SimpleCPUOffloadMetadata,
 )
 
