@@ -12,12 +12,12 @@ These tests do NOT require a GPU; they verify at the Python/numpy level that:
   1. Cast-then-scale produces NaN/inf when accumulators overflow FP16 range.
   2. Scale-then-cast (the fix) produces finite, accurate results.
   3. The FP16 MMA accumulation path (SM75) makes things worse, and forcing
+
      FP32 accumulation restores accuracy.
 """
-import numpy as np
+
 import pytest
 import torch
-
 
 FP16_MAX = 65504.0
 
@@ -32,9 +32,7 @@ def scale_then_cast(fp32_accum: torch.Tensor, gs: float) -> torch.Tensor:
     return (fp32_accum * gs).to(torch.float16)
 
 
-def simulate_fp16_mma_accum(
-    a: torch.Tensor, b: torch.Tensor
-) -> torch.Tensor:
+def simulate_fp16_mma_accum(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     """
     Simulate SM75 FP16-accumulation MMA by accumulating tiles in FP16.
     Represents use_fp16_accum=true behaviour.
@@ -52,9 +50,7 @@ def simulate_fp16_mma_accum(
     return accum
 
 
-def simulate_fp32_mma_accum(
-    a: torch.Tensor, b: torch.Tensor
-) -> torch.Tensor:
+def simulate_fp32_mma_accum(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     """
     Simulate FP32-accumulation MMA (use_fp16_accum=false, the fix for SM75).
     Represents the corrected path.
@@ -82,9 +78,7 @@ class TestEpilogueOrderOverflow:
         raw = torch.tensor([FP16_MAX * 5.0], dtype=torch.float32)
 
         new_result = scale_then_cast(raw, gs)
-        assert torch.isfinite(new_result).all(), (
-            "Fix should produce finite output"
-        )
+        assert torch.isfinite(new_result).all(), "Fix should produce finite output"
         # Check value is close to expected
         expected = torch.tensor([FP16_MAX * 5.0 * gs], dtype=torch.float32)
         assert torch.allclose(new_result.float(), expected, rtol=1e-2), (
@@ -153,10 +147,15 @@ class TestEpilogueOrderOverflow:
             assert new_finite, "New (fixed) path must be finite when old is not"
         else:
             # Both finite: relative error of new path should be lower or equal
-            rel_err_old = (old_out.float() - reference).abs().mean() / reference.abs().mean()
-            rel_err_new = (new_out.float() - reference).abs().mean() / reference.abs().mean()
+            rel_err_old = (
+                old_out.float() - reference
+            ).abs().mean() / reference.abs().mean()
+            rel_err_new = (
+                new_out.float() - reference
+            ).abs().mean() / reference.abs().mean()
             assert rel_err_new <= rel_err_old + 1e-4, (
-                f"New path should not be less accurate: old={rel_err_old:.4f}, new={rel_err_new:.4f}"
+                f"New path should not be less accurate: old={rel_err_old:.4f}, "
+                f"new={rel_err_new:.4f}"
             )
 
 
@@ -225,5 +224,67 @@ class TestSM75FP16Accumulation:
         reference = (a.float().matmul(b.float()) * gs).to(torch.float16)
 
         assert torch.isfinite(output).all(), "Combined fix must produce finite output"
-        rel_err = (output.float() - reference.float()).abs().mean() / reference.float().abs().mean()
+        rel_err = (
+            output.float() - reference.float()
+        ).abs().mean() / reference.float().abs().mean()
         assert rel_err < 0.02, f"Relative error too high: {rel_err:.4f}"
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="Requires GPU. Tests SM75 fix but passes on all architectures.",
+)
+@torch.inference_mode()
+def test_marlin_kernel_does_not_overflow_on_large_inputs():
+    """
+    GPU test to verify the actual Marlin kernel does not overflow (NaN/inf)
+    when intermediate FP32 accumulators exceed 65504 but the scaled result
+    is within FP16 range.
+    """
+    from vllm.model_executor.layers.quantization.utils.marlin_utils import (
+        marlin_make_workspace_new,
+    )
+    from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
+        apply_fp4_marlin_linear,
+        rand_marlin_weight_nvfp4_like,
+    )
+
+    torch.manual_seed(42)
+
+    dtype = torch.float16
+    size_m, size_k, size_n = 64, 4096, 4096
+
+    # Choose a small global scale (typical for NVFP4 models)
+    global_scale_val = 0.01
+
+    # Choose input magnitude such that K sums easily exceed FP16_MAX (65504)
+    # If inputs are ~15.0 and weights are ~1.0:
+    # 4096 * (15.0 * 1.0) = 61440. Variance will push sums > 65504
+    x = torch.randn((size_m, size_k), device="cuda", dtype=dtype) * 15.0
+    dense_weight = torch.randn((size_k, size_n), device="cuda", dtype=dtype)
+
+    weight_ref, marlin_q_weight, marlin_scales, _ = rand_marlin_weight_nvfp4_like(
+        dense_weight.T, group_size=16
+    )
+
+    # Use the small global scale
+    marlin_global_scale = torch.tensor(global_scale_val, device="cuda", dtype=dtype)
+    input_global_scale = torch.tensor(0.5, device="cuda", dtype=dtype)
+
+    workspace = marlin_make_workspace_new("cuda")
+
+    output = apply_fp4_marlin_linear(
+        input=x,
+        weight=marlin_q_weight,
+        weight_scale=marlin_scales,
+        weight_global_scale=marlin_global_scale,
+        workspace=workspace,
+        size_n=size_n,
+        size_k=size_k,
+        input_global_scale=input_global_scale,
+    )
+
+    # Output must be finite
+    assert torch.isfinite(output).all(), (
+        "Marlin kernel returned NaN/inf. This indicates internal FP16 overflow."
+    )

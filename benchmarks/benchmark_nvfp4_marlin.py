@@ -13,13 +13,13 @@ Usage:
     python benchmarks/benchmark_nvfp4_marlin.py --sizes large   # LLM-scale shapes
     python benchmarks/benchmark_nvfp4_marlin.py --iters 200     # more iterations
 """
+
 import argparse
 import time
 from dataclasses import dataclass
 
 import torch
 
-from tests.quantization.utils import is_quant_method_supported
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_make_workspace_new,
 )
@@ -51,13 +51,13 @@ class BenchResult:
 def bench(fn, iters: int, warmup: int) -> tuple[float, float]:
     for _ in range(warmup):
         fn()
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     times = []
     for _ in range(iters):
         t0 = time.perf_counter()
         fn()
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         times.append((time.perf_counter() - t0) * 1000)
 
     t = torch.tensor(times)
@@ -123,11 +123,12 @@ def main():
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA not available")
 
-    if not is_quant_method_supported("gptq_marlin"):
-        raise RuntimeError("Marlin not supported on this GPU (need SM >= 7.5)")
-
-    dev = torch.cuda.get_device_name(0)
     cap = torch.cuda.get_device_capability(0)
+    if cap < (7, 5):
+        raise RuntimeError(
+            f"Marlin not supported on this GPU (need SM >= 7.5, got SM{cap[0]}{cap[1]})"
+        )
+    dev = torch.cuda.get_device_name(0)
     print(f"\nDevice : {dev}  (SM {cap[0]}{cap[1]})")
     dtype = torch.float16 if args.dtype == "fp16" else torch.bfloat16
     print(f"dtype  : {dtype}")
@@ -136,18 +137,18 @@ def main():
     # Representative shapes:
     # small = decode (small m), large = prefill / LLM linear layers
     small_shapes = [
-        (1,   4096, 4096),
-        (4,   4096, 4096),
-        (16,  4096, 4096),
-        (32,  4096, 4096),
+        (1, 4096, 4096),
+        (4, 4096, 4096),
+        (16, 4096, 4096),
+        (32, 4096, 4096),
     ]
     large_shapes = [
-        (64,  4096, 4096),
+        (64, 4096, 4096),
         (128, 4096, 4096),
         (256, 4096, 4096),
         (512, 4096, 4096),
-        (64,  4096, 14336),   # Qwen3 MLP gate
-        (64,  14336, 4096),   # Qwen3 MLP down
+        (64, 4096, 14336),  # Qwen3 MLP gate
+        (64, 14336, 4096),  # Qwen3 MLP down
     ]
 
     if args.sizes == "small":
@@ -162,12 +163,22 @@ def main():
         # Bug 1: no input_global_scale (old, broken)
         r_no_scale = run_benchmark(
             "NVFP4-Marlin  no-input-scale  (OLD/broken)",
-            m, k, n, dtype, input_global_scale=False, iters=args.iters,
+            m,
+            k,
+            n,
+            dtype,
+            input_global_scale=False,
+            iters=args.iters,
         )
         # Bug 1 fix: with input_global_scale (correct, Python multiply)
         r_with_scale = run_benchmark(
             "NVFP4-Marlin  with-input-scale (FIXED)",
-            m, k, n, dtype, input_global_scale=True, iters=args.iters,
+            m,
+            k,
+            n,
+            dtype,
+            input_global_scale=True,
+            iters=args.iters,
         )
         results.append((r_no_scale, r_with_scale))
 
@@ -178,11 +189,6 @@ def main():
         print(with_s)
         overhead_pct = (with_s.ms_mean - no_s.ms_mean) / no_s.ms_mean * 100
         print(f"  → overhead of input-scale multiply: {overhead_pct:+.2f}%\n")
-
-    print("\nNote: Bug 2 (kernel epilogue ordering / SM75 FP16 accum) requires")
-    print("      recompiling from source (VLLM_USE_PRECOMPILED=0 pip install -e .)")
-    print("      to measure. The kernel change adds 2 FP32 muls per output element")
-    print("      in the epilogue — expected < 1% overhead vs full GEMM compute.")
 
 
 if __name__ == "__main__":
