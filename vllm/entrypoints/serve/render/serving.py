@@ -16,24 +16,37 @@ from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionReque
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
-    ModelCard,
-    ModelList,
-    ModelPermission,
 )
+from vllm.entrypoints.openai.models.serving import OpenAIModelRegistry
 from vllm.entrypoints.openai.parser.harmony_utils import (
     get_developer_message,
     get_system_message,
     parse_chat_inputs_to_harmony_messages,
     render_for_completion,
 )
-from vllm.entrypoints.utils import create_error_response
+from vllm.entrypoints.serve.disagg.protocol import (
+    GenerateRequest,
+    MultiModalFeatures,
+    PlaceholderRangeInfo,
+)
+from vllm.entrypoints.utils import (
+    create_error_response,
+    get_max_tokens,
+)
 from vllm.inputs.data import ProcessorInputs, PromptType, SingletonPrompt, TokensPrompt
 from vllm.logger import init_logger
+from vllm.multimodal.inputs import MultiModalHashes, MultiModalPlaceholderDict
 from vllm.parser import ParserManager
 from vllm.renderers import BaseRenderer, merge_kwargs
-from vllm.renderers.inputs.preprocess import parse_model_prompt, prompt_to_seq
+from vllm.renderers.inputs.preprocess import (
+    extract_prompt_components,
+    extract_prompt_len,
+    parse_model_prompt,
+    prompt_to_seq,
+)
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers import ToolParser
+from vllm.utils import random_uuid
 from vllm.utils.mistral import is_mistral_tokenizer
 from vllm.utils.mistral import mt as _mt
 
@@ -46,7 +59,7 @@ class OpenAIServingRender:
         model_config: ModelConfig,
         renderer: BaseRenderer,
         io_processor: Any,
-        served_model_names: list[str],
+        model_registry: OpenAIModelRegistry,
         *,
         request_logger: RequestLogger | None,
         chat_template: str | None,
@@ -61,7 +74,7 @@ class OpenAIServingRender:
         self.model_config = model_config
         self.renderer = renderer
         self.io_processor = io_processor
-        self.served_model_names = served_model_names
+        self.model_registry = model_registry
         self.request_logger = request_logger
         self.chat_template = chat_template
         self.chat_template_content_format: ChatTemplateContentFormatOption = (
@@ -85,19 +98,87 @@ class OpenAIServingRender:
         self.supports_browsing = False
         self.supports_code_interpreter = False
 
+        self.default_sampling_params = model_config.get_diff_sampling_param()
+        mc = model_config
+        self.override_max_tokens = (
+            self.default_sampling_params.get("max_tokens")
+            if mc.generation_config not in ("auto", "vllm")
+            else getattr(mc, "override_generation_config", {}).get("max_new_tokens")
+        )
+
     async def render_chat_request(
         self,
         request: ChatCompletionRequest,
-    ) -> tuple[list[ConversationMessage], list[ProcessorInputs]] | ErrorResponse:
-        """Copied from OpenAIServingChat.render_chat_request.
+    ) -> GenerateRequest | ErrorResponse:
+        """Validate the model and preprocess a chat completion request.
 
-        Differences: engine_client.errored check removed (no engine client).
+        This is the authoritative implementation used directly by the
+        GPU-less render server and delegated to by OpenAIServingChat.
         """
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             logger.error("Error with model %s", error_check_ret)
             return error_check_ret
 
+        if request.use_beam_search:
+            return self.create_error_response(
+                "Beam search is not supported by the render endpoint"
+            )
+
+        result = await self.render_chat(request)
+        if isinstance(result, ErrorResponse):
+            return result
+
+        _, engine_prompts = result
+
+        if len(engine_prompts) != 1:
+            return self.create_error_response(
+                f"Expected exactly 1 engine prompt, got {len(engine_prompts)}"
+            )
+
+        engine_prompt = engine_prompts[0]
+
+        prompt_components = extract_prompt_components(self.model_config, engine_prompt)
+        token_ids = prompt_components.token_ids
+        if not token_ids:
+            return self.create_error_response("No token_ids rendered")
+        token_ids = list(token_ids)
+
+        input_length = extract_prompt_len(self.model_config, engine_prompt)
+        max_tokens = get_max_tokens(
+            self.model_config.max_model_len,
+            request.max_completion_tokens
+            if request.max_completion_tokens is not None
+            else request.max_tokens,
+            input_length,
+            self.default_sampling_params,
+            self.override_max_tokens,
+        )
+        params = request.to_sampling_params(max_tokens, self.default_sampling_params)
+
+        request_id = f"chatcmpl-{random_uuid()}"
+
+        return GenerateRequest(
+            request_id=request_id,
+            token_ids=token_ids,
+            features=self._extract_mm_features(engine_prompt),
+            sampling_params=params,
+            model=request.model,
+            stream=bool(request.stream),
+            stream_options=(request.stream_options if request.stream else None),
+            cache_salt=request.cache_salt,
+            priority=request.priority,
+        )
+
+    async def render_chat(
+        self,
+        request: ChatCompletionRequest,
+    ) -> tuple[list[ConversationMessage], list[ProcessorInputs]] | ErrorResponse:
+        """Core preprocessing logic for chat requests (no model/engine check).
+
+        Called directly by render_chat_request and delegated to by
+        OpenAIServingChat.render_chat_request after its engine-aware checks.
+        """
         tokenizer = self.renderer.tokenizer
 
         tool_parser = self.tool_parser
@@ -174,15 +255,67 @@ class OpenAIServingRender:
     async def render_completion_request(
         self,
         request: CompletionRequest,
-    ) -> list[ProcessorInputs] | ErrorResponse:
-        """Copied from OpenAIServingCompletion.render_completion_request.
+    ) -> list[GenerateRequest] | ErrorResponse:
+        """Validate the model and preprocess a completion request.
 
-        Differences: engine_client.errored check removed (no engine client).
+        This is the authoritative implementation used directly by the
+        GPU-less render server and delegated to by OpenAIServingCompletion.
         """
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             return error_check_ret
+        result = await self.render_completion(request)
+        if isinstance(result, ErrorResponse):
+            return result
+        generate_requests: list[GenerateRequest] = []
+        for engine_prompt in result:
+            prompt_components = extract_prompt_components(
+                self.model_config, engine_prompt
+            )
+            token_ids = prompt_components.token_ids
+            if not token_ids:
+                return self.create_error_response("No token_ids rendered")
+            token_ids = list(token_ids)
 
+            input_length = extract_prompt_len(self.model_config, engine_prompt)
+            max_tokens = get_max_tokens(
+                self.model_config.max_model_len,
+                request.max_tokens,
+                input_length,
+                self.default_sampling_params,
+                self.override_max_tokens,
+            )
+            params = request.to_sampling_params(
+                max_tokens, self.default_sampling_params
+            )
+
+            request_id = f"cmpl-{random_uuid()}"
+
+            generate_requests.append(
+                GenerateRequest(
+                    request_id=request_id,
+                    token_ids=token_ids,
+                    features=self._extract_mm_features(engine_prompt),
+                    sampling_params=params,
+                    model=request.model,
+                    stream=bool(request.stream),
+                    stream_options=(request.stream_options if request.stream else None),
+                    cache_salt=request.cache_salt,
+                    priority=request.priority,
+                )
+            )
+
+        return generate_requests
+
+    async def render_completion(
+        self,
+        request: CompletionRequest,
+    ) -> list[ProcessorInputs] | ErrorResponse:
+        """Core preprocessing logic for completion requests (no model/engine check).
+
+        Called directly by render_completion_request and delegated to by
+        OpenAIServingCompletion.render_completion_request after its engine-aware checks.
+        """
         # Return error for unsupported features.
         if request.suffix is not None:
             return self.create_error_response("suffix is not currently supported")
@@ -203,12 +336,39 @@ class OpenAIServingRender:
 
         return engine_prompts
 
+    @staticmethod
+    def _extract_mm_features(
+        engine_prompt: ProcessorInputs,
+    ) -> MultiModalFeatures | None:
+        """Extract multimodal metadata from a rendered engine prompt.
+
+        Returns ``None`` for text-only prompts.
+        """
+        if engine_prompt.get("type") != "multimodal":
+            return None
+
+        # At this point engine_prompt is a MultiModalInputs TypedDict.
+        mm_hashes: MultiModalHashes = engine_prompt["mm_hashes"]  # type: ignore[typeddict-item]
+        raw_placeholders: MultiModalPlaceholderDict = engine_prompt["mm_placeholders"]  # type: ignore[typeddict-item]
+
+        mm_placeholders = {
+            modality: [
+                PlaceholderRangeInfo(offset=p.offset, length=p.length) for p in ranges
+            ]
+            for modality, ranges in raw_placeholders.items()
+        }
+
+        return MultiModalFeatures(
+            mm_hashes=mm_hashes,
+            mm_placeholders=mm_placeholders,
+        )
+
     def _make_request_with_harmony(
         self,
         request: ChatCompletionRequest,
         should_include_tools: bool = True,
     ):
-        """Copied from OpenAIServingChat._make_request_with_harmony."""
+        """Build Harmony (GPT-OSS) messages and engine prompt from a chat request."""
         messages: list[OpenAIMessage] = []
 
         # because of issues with pydantic we need to potentially
@@ -221,11 +381,10 @@ class OpenAIServingRender:
         # if the model supports it. TODO: Support browsing.
         assert not self.supports_browsing
         assert not self.supports_code_interpreter
-        assert request.reasoning_effort != "none", (
-            "Harmony does not support reasoning_effort='none'"
-        )
+        if (reasoning_effort := request.reasoning_effort) == "none":
+            raise ValueError(f"Harmony does not support {reasoning_effort=}")
         sys_msg = get_system_message(
-            reasoning_effort=request.reasoning_effort,
+            reasoning_effort=reasoning_effort,
             browser_description=None,
             python_description=None,
             with_custom_tools=should_include_tools,
@@ -252,21 +411,6 @@ class OpenAIServingRender:
 
         return messages, [engine_prompt]
 
-    async def show_available_models(self) -> ModelList:
-        """Returns the models served by this render server."""
-        max_model_len = self.model_config.max_model_len
-        return ModelList(
-            data=[
-                ModelCard(
-                    id=name,
-                    max_model_len=max_model_len,
-                    root=self.model_config.model,
-                    permission=[ModelPermission()],
-                )
-                for name in self.served_model_names
-            ]
-        )
-
     def create_error_response(
         self,
         message: str | Exception,
@@ -276,23 +420,11 @@ class OpenAIServingRender:
     ) -> ErrorResponse:
         return create_error_response(message, err_type, status_code, param)
 
-    def _is_model_supported(self, model_name: str) -> bool:
-        """Simplified from OpenAIServing._is_model_supported (no LoRA support)."""
-        return model_name in self.served_model_names
-
     async def _check_model(
         self,
         request: Any,
     ) -> ErrorResponse | None:
-        """Simplified from OpenAIServing._check_model (no LoRA support)."""
-        if self._is_model_supported(request.model):
-            return None
-        return self.create_error_response(
-            message=f"The model `{request.model}` does not exist.",
-            err_type="NotFoundError",
-            status_code=HTTPStatus.NOT_FOUND,
-            param="model",
-        )
+        return await self.model_registry.check_model(request.model)
 
     def _validate_chat_template(
         self,
@@ -374,6 +506,7 @@ class OpenAIServingRender:
         (ResponsesRequest not supported here); TODO comment dropped accordingly.
         """
         renderer = self.renderer
+        mm_config = self.model_config.multimodal_config
 
         default_template_kwargs = merge_kwargs(
             default_template_kwargs,
@@ -386,7 +519,11 @@ class OpenAIServingRender:
         tok_params = request.build_tok_params(self.model_config)
         chat_params = request.build_chat_params(
             default_template, default_template_content_format
-        ).with_defaults(default_template_kwargs)
+        ).with_defaults(
+            default_template_kwargs,
+            default_media_io_kwargs=(mm_config.media_io_kwargs if mm_config else None),
+            default_mm_processor_kwargs=getattr(request, "mm_processor_kwargs", None),
+        )
 
         (conversation,), (engine_prompt,) = await renderer.render_chat_async(
             [messages],
