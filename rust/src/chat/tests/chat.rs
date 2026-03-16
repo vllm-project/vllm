@@ -301,10 +301,12 @@ async fn chat_streams_text_events() {
     match stream.next().await {
         Some(Ok(ChatEvent::Done {
             text,
+            token_ids,
             finish_reason,
             ..
         })) => {
             assert_eq!(text, "Hi");
+            assert_eq!(token_ids, vec![b'H' as u32, b'i' as u32, b'!' as u32]);
             assert_eq!(finish_reason, Some(FinishReason::Stop));
         }
         other => panic!("unexpected final event: {other:?}"),
@@ -361,7 +363,12 @@ async fn chat_stream_waits_for_complete_utf8_before_emitting() {
     );
 
     match stream.next().await {
-        Some(Ok(ChatEvent::Done { text, .. })) => assert_eq!(text, "你"),
+        Some(Ok(ChatEvent::Done {
+            text, token_ids, ..
+        })) => {
+            assert_eq!(text, "你");
+            assert_eq!(token_ids, bytes_to_token_ids(&[0xe4, 0xbd, 0xa0, b'!']));
+        }
         other => panic!("unexpected final event: {other:?}"),
     }
 
@@ -414,10 +421,12 @@ async fn chat_stream_flushes_held_text_on_finish() {
     match stream.next().await {
         Some(Ok(ChatEvent::Done {
             text,
+            token_ids,
             finish_reason,
             ..
         })) => {
             assert_eq!(text, "ok st");
+            assert_eq!(token_ids, bytes_to_token_ids(b"ok st"));
             assert_eq!(finish_reason, Some(FinishReason::Length));
         }
         other => panic!("unexpected final event: {other:?}"),
@@ -537,7 +546,12 @@ async fn chat_stream_preserves_terminal_stop_token_when_requested() {
     );
 
     match stream.next().await {
-        Some(Ok(ChatEvent::Done { text, .. })) => assert_eq!(text, "Hi!"),
+        Some(Ok(ChatEvent::Done {
+            text, token_ids, ..
+        })) => {
+            assert_eq!(text, "Hi!");
+            assert_eq!(token_ids, vec![b'H' as u32, b'i' as u32, b'!' as u32]);
+        }
         other => panic!("unexpected final event: {other:?}"),
     }
 

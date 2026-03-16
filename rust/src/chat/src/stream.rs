@@ -73,10 +73,12 @@ async fn chat_event_stream(
 
     let mut decoder: Option<IncrementalTextDecoder> = None;
     let mut text = String::new();
+    let mut token_ids = Vec::new();
 
     #[for_await]
     for next in raw_stream {
         let output: vllm_llm::GenerateOutput = next?;
+        token_ids.extend_from_slice(&output.token_ids);
         let decoder = decoder.get_or_insert_with(|| {
             IncrementalTextDecoder::new(backend.clone(), &output.prompt_token_ids)
         });
@@ -122,6 +124,7 @@ async fn chat_event_stream(
         if output.finished() {
             yield ChatEvent::Done {
                 text,
+                token_ids,
                 finish_reason: output.raw.finish_reason,
                 stop_reason: output.raw.stop_reason,
             };

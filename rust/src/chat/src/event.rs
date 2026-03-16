@@ -10,6 +10,9 @@ pub enum ChatEvent {
     /// Terminal event carrying the final cumulative text and finish metadata.
     Done {
         text: String,
+        /// Raw cumulative output token IDs, including a terminal stop token when
+        /// the engine emitted one.
+        token_ids: Vec<u32>,
         finish_reason: Option<FinishReason>,
         stop_reason: Option<StopReason>,
     },

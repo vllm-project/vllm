@@ -101,6 +101,7 @@ async fn main() -> Result<()> {
         .context("failed to submit chat request")?;
     let output = tokio::time::timeout(output_timeout, async {
         let mut final_text = String::new();
+        let mut final_token_ids = Vec::new();
         let mut finish_reason = None;
         let mut saw_start = false;
 
@@ -114,10 +115,12 @@ async fn main() -> Result<()> {
                 }
                 ChatEvent::Done {
                     text,
+                    token_ids,
                     finish_reason: reason,
                     ..
                 } => {
                     final_text = text;
+                    final_token_ids = token_ids;
                     finish_reason = reason;
                     break;
                 }
@@ -129,7 +132,7 @@ async fn main() -> Result<()> {
         if !saw_start {
             bail!("chat stream ended without a start event");
         }
-        Ok::<_, anyhow::Error>((final_text, finish_reason))
+        Ok::<_, anyhow::Error>((final_text, final_token_ids, finish_reason))
     })
     .await
     .context("timed out waiting for chat output")??;
@@ -139,7 +142,8 @@ async fn main() -> Result<()> {
         .context("failed to shut down chat client")?;
 
     println!("final_text={:?}", output.0);
-    println!("finish_reason={:?}", output.1);
+    println!("final_token_ids={:?}", output.1);
+    println!("finish_reason={:?}", output.2);
 
     Ok(())
 }
