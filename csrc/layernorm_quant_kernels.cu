@@ -28,22 +28,25 @@ void rms_norm_static_fp8_quant(torch::Tensor& out,     // [..., hidden_size]
                                torch::Tensor& scale,   // [1]
                                double epsilon) {
   TORCH_CHECK(out.is_contiguous());
-  if (input.stride(-1) != 1) {
-    input = input.contiguous();
+  // Use a local handle so the caller's tensor reference is never reassigned.
+  torch::Tensor contiguous_input = input;
+  if (contiguous_input.stride(-1) != 1) {
+    contiguous_input = input.contiguous();
   }
-  TORCH_CHECK(input.stride(-1) == 1);
-  int hidden_size = input.size(-1);
-  int64_t input_stride = input.stride(-2);
-  int num_tokens = input.numel() / hidden_size;
+  TORCH_CHECK(contiguous_input.stride(-1) == 1);
+  int hidden_size = contiguous_input.size(-1);
+  int64_t input_stride = contiguous_input.stride(-2);
+  int num_tokens = contiguous_input.numel() / hidden_size;
 
   // For large num_tokens, use smaller blocks to increase SM concurrency.
   const int max_block_size = (num_tokens < 256) ? 1024 : 256;
   dim3 grid(num_tokens);
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(contiguous_input));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
   VLLM_DISPATCH_FLOATING_TYPES(
-      input.scalar_type(), "rms_norm_static_fp8_quant_kernel_scalar", [&] {
+      contiguous_input.scalar_type(), "rms_norm_static_fp8_quant_kernel_scalar",
+      [&] {
         VLLM_DISPATCH_FP8_TYPES(
             out.scalar_type(), "rms_norm_static_fp8_quant_kernel_fp8", [&] {
               // VEC_SIZE based on input scalar type (not fp8 output type).
@@ -58,7 +61,8 @@ void rms_norm_static_fp8_quant(torch::Tensor& out,     // [..., hidden_size]
                 // specialisation.
                 vllm::rms_norm_kernel<scalar_t, fp8_t, vec_size, 2>
                     <<<grid, block, 0, stream>>>(
-                        out.data_ptr<fp8_t>(), input.data_ptr<scalar_t>(),
+                        out.data_ptr<fp8_t>(),
+                        contiguous_input.data_ptr<scalar_t>(),
                         /*input_stride_d2=*/input_stride,
                         /*input_stride_d3=*/0, /*input_stride_d4=*/0,
                         /*input_shape_d2=*/0, /*input_shape_d3=*/0,
