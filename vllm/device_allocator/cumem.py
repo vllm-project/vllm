@@ -186,7 +186,7 @@ class CuMemAllocator:
         total_bytes = 0
         backup_bytes = 0
 
-        for ptr, data in self.pointer_to_data.items():
+        for ptr, data in list(self.pointer_to_data.items()):
             handle = data.handle
             total_bytes += handle[1]
             if data.tag in offload_tags:
