@@ -25,7 +25,7 @@ nav:
     - Models:
       - models/supported_models.md
       - models/generative_models.md
-      - models/pooling_models.md
+      - models/pooling_models
       - models/extensions
       - Hardware Supported Models:
         - models/hardware_supported_models/*

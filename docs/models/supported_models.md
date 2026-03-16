@@ -1,6 +1,6 @@
 # Supported Models
 
-vLLM supports [generative](./generative_models.md) and [pooling](./pooling_models.md) models across various tasks.
+vLLM supports [generative](./generative_models.md) and [pooling](./pooling_models/README.md) models across various tasks.
 
 For each task, we list the model architectures that have been implemented in vLLM.
 Alongside each architecture, we include some popular models that use it.
@@ -500,7 +500,7 @@ Some models are supported only via the [Transformers modeling backend](#transfor
 
 ### Pooling Models
 
-See [this page](./pooling_models.md) for more information on how to use pooling models.
+See [this page](./pooling_models/README.md) for more information on how to use pooling models.
 
 !!! important
     Since some model architectures support both generative and pooling tasks,
@@ -508,7 +508,7 @@ See [this page](./pooling_models.md) for more information on how to use pooling 
 
 #### Embedding
 
-These models primarily support the [`LLM.embed`](./pooling_models.md#llmembed) API.
+These models primarily support the [`LLM.embed`](./pooling_models/README.md#llmembed) API.
 
 | Architecture | Models | Example HF Models | [LoRA](../features/lora.md) | [PP](../serving/parallelism_scaling.md) |
 | ------------ | ------ | ----------------- | -------------------- | ------------------------- |
@@ -529,7 +529,7 @@ These models primarily support the [`LLM.embed`](./pooling_models.md#llmembed) A
 | `RobertaModel`, `RobertaForMaskedLM` | RoBERTa-based | `sentence-transformers/all-roberta-large-v1`, etc. | | |
 | `*Model`<sup>C</sup>, `*ForCausalLM`<sup>C</sup>, etc. | Generative models | N/A | \* | \* |
 
-<sup>C</sup> Automatically converted into an embedding model via `--convert embed`. ([details](./pooling_models.md#model-conversion))  
+<sup>C</sup> Automatically converted into an embedding model via `--convert embed`. ([details](./pooling_models/README.md#model-conversion))  
 \* Feature support is the same as that of the original model.
 
 !!! note
@@ -552,7 +552,7 @@ of the whole prompt are extracted from the normalized hidden state corresponding
 
 #### Classification
 
-These models primarily support the [`LLM.classify`](./pooling_models.md#llmclassify) API.
+These models primarily support the [`LLM.classify`](./pooling_models/README.md#llmclassify) API.
 
 | Architecture | Models | Example HF Models | [LoRA](../features/lora.md) | [PP](../serving/parallelism_scaling.md) |
 | ------------ | ------ | ----------------- | -------------------- | ------------------------- |
@@ -560,7 +560,7 @@ These models primarily support the [`LLM.classify`](./pooling_models.md#llmclass
 | `GPT2ForSequenceClassification` | GPT2 | `nie3e/sentiment-polish-gpt2-small` | | |
 | `*Model`<sup>C</sup>, `*ForCausalLM`<sup>C</sup>, etc. | Generative models | N/A | \* | \* |
 
-<sup>C</sup> Automatically converted into a classification model via `--convert classify`. ([details](./pooling_models.md#model-conversion))  
+<sup>C</sup> Automatically converted into a classification model via `--convert classify`. ([details](./pooling_models/README.md#model-conversion))  
 \* Feature support is the same as that of the original model.
 
 If your model is not in the above list, we will try to automatically convert the model using
@@ -569,7 +569,7 @@ If your model is not in the above list, we will try to automatically convert the
 #### Cross-encoder / Reranker
 
 Cross-encoder and reranker models are a subset of classification models that accept two prompts as input.
-These models primarily support the [`LLM.score`](./pooling_models.md#llmscore) API.
+These models primarily support the [`LLM.score`](./pooling_models/README.md#llmscore) API.
 
 | Architecture | Models | Example HF Models | Score template (see note) | [LoRA](../features/lora.md) | [PP](../serving/parallelism_scaling.md) |
 | ------------ | ------ | ----------------- | ------------------------- | --------------------------- | --------------------------------------- |
@@ -583,7 +583,7 @@ These models primarily support the [`LLM.score`](./pooling_models.md#llmscore) A
 | `XLMRobertaForSequenceClassification` | XLM-RoBERTa-based | `BAAI/bge-reranker-v2-m3`, etc. | N/A | | |
 | `*Model`<sup>C</sup>, `*ForCausalLM`<sup>C</sup>, etc. | Generative models | N/A | N/A | \* | \* |
 
-<sup>C</sup> Automatically converted into a classification model via `--convert classify`. ([details](./pooling_models.md#model-conversion))  
+<sup>C</sup> Automatically converted into a classification model via `--convert classify`. ([details](./pooling_models/README.md#model-conversion))  
 \* Feature support is the same as that of the original model.
 
 !!! note
@@ -619,7 +619,7 @@ These models primarily support the [`LLM.score`](./pooling_models.md#llmscore) A
 
 #### Reward Modeling
 
-These models primarily support the [`LLM.reward`](./pooling_models.md#llmreward) API.
+These models primarily support the [`LLM.reward`](./pooling_models/README.md#llmreward) API.
 
 | Architecture | Models | Example HF Models | [LoRA](../features/lora.md) | [PP](../serving/parallelism_scaling.md) |
 | ------------ | ------ | ----------------- | -------------------- | ------------------------- |
@@ -634,7 +634,7 @@ These models primarily support the [`LLM.reward`](./pooling_models.md#llmreward)
 
 #### Token Classification
 
-These models primarily support the [`LLM.encode`](./pooling_models.md#llmencode) API.
+These models primarily support the [`LLM.encode`](./pooling_models/README.md#llmencode) API.
 
 | Architecture | Models | Example HF Models | [LoRA](../features/lora.md) | [PP](../serving/parallelism_scaling.md) |
 | ------------ | ------ | ----------------- | --------------------------- | --------------------------------------- |
@@ -813,11 +813,11 @@ Speech2Text models trained specifically for Automatic Speech Recognition.
 
 ### Pooling Models
 
-See [this page](./pooling_models.md) for more information on how to use pooling models.
+See [this page](./pooling_models/README.md) for more information on how to use pooling models.
 
 #### Embedding
 
-These models primarily support the [`LLM.embed`](./pooling_models.md#llmembed) API.
+These models primarily support the [`LLM.embed`](./pooling_models/README.md#llmembed) API.
 
 !!! note
     To get the best results, you should use pooling models that are specifically trained as such.
@@ -835,7 +835,7 @@ The following table lists those that are tested in vLLM.
 | `SiglipModel` | SigLIP, SigLIP2 | T / I | `google/siglip-base-patch16-224`, `google/siglip2-base-patch16-224` | | |
 | `*ForConditionalGeneration`<sup>C</sup>, `*ForCausalLM`<sup>C</sup>, etc. | Generative models | \* | N/A | \* | \* |
 
-<sup>C</sup> Automatically converted into an embedding model via `--convert embed`. ([details](./pooling_models.md#model-conversion))  
+<sup>C</sup> Automatically converted into an embedding model via `--convert embed`. ([details](./pooling_models/README.md#model-conversion))  
 \* Feature support is the same as that of the original model.
 
 ---
@@ -843,7 +843,7 @@ The following table lists those that are tested in vLLM.
 #### Cross-encoder / Reranker
 
 Cross-encoder and reranker models are a subset of classification models that accept two prompts as input.
-These models primarily support the [`LLM.score`](./pooling_models.md#llmscore) API.
+These models primarily support the [`LLM.score`](./pooling_models/README.md#llmscore) API.
 
 | Architecture | Models | Inputs | Example HF Models | [LoRA](../features/lora.md) | [PP](../serving/parallelism_scaling.md) |
 | ------------ | ------ | ------ | ----------------- | -------------------- | ------------------------- |
@@ -851,7 +851,7 @@ These models primarily support the [`LLM.score`](./pooling_models.md#llmscore) A
 | `LlamaNemotronVLForSequenceClassification` | Llama Nemotron Reranker + SigLIP | T + I<sup>E+</sup> | `nvidia/llama-nemotron-rerank-vl-1b-v2` | | |
 | `Qwen3VLForSequenceClassification` | Qwen3-VL-Reranker | T + I<sup>E+</sup> + V<sup>E+</sup> | `Qwen/Qwen3-VL-Reranker-2B`(see note), etc. | ✅︎ | ✅︎ |
 
-<sup>C</sup> Automatically converted into a classification model via `--convert classify`. ([details](./pooling_models.md#model-conversion))  
+<sup>C</sup> Automatically converted into a classification model via `--convert classify`. ([details](./pooling_models/README.md#model-conversion))  
 \* Feature support is the same as that of the original model.
 
 !!! note
