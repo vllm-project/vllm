@@ -365,8 +365,6 @@ def make_nvfp4_moe_quant_config(
     w2_scale_2: torch.Tensor,
     a13_scale: torch.Tensor,
     a2_scale: torch.Tensor,
-    g1_alphas: torch.Tensor | None = None,
-    g2_alphas: torch.Tensor | None = None,
 ) -> FusedMoEQuantConfig:
     if backend == NvFp4MoeBackend.MARLIN:
         return nvfp4_w4a16_moe_quant_config(
@@ -376,13 +374,13 @@ def make_nvfp4_moe_quant_config(
             w2_scale=w2_scale,
         )
 
-    if g1_alphas is None:
-        g1_alphas = a13_scale * w13_scale_2
-    if g2_alphas is None:
-        g2_alphas = a2_scale * w2_scale_2
+    # Pass w13_scale_2 / w2_scale_2 directly as g1/g2_alphas.
+    # The expert's process_weights_after_loading will fuse activation
+    # scales in-place. Since the quant config references the same tensor
+    # as the registered parameter, EPLB rearrangement stays in sync.
     return nvfp4_moe_quant_config(
-        g1_alphas=g1_alphas,
-        g2_alphas=g2_alphas,
+        g1_alphas=w13_scale_2,
+        g2_alphas=w2_scale_2,
         a1_gscale=(1.0 / a13_scale),
         a2_gscale=(1.0 / a2_scale),
         w1_scale=w13_scale,
