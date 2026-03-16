@@ -557,7 +557,6 @@ class Qwen3_VisionTransformer(nn.Module):
         max_seqlen = torch.tensor(
             MMEncoderAttention.compute_max_seqlen(self.attn_backend, cu_seqlens),
             dtype=torch.int32,
-            device=self.device,
         )
         cu_seqlens = MMEncoderAttention.maybe_recompute_cu_seqlens(
             self.attn_backend,
