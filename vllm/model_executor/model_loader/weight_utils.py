@@ -35,6 +35,9 @@ from vllm.model_executor.layers.quantization import (
     QuantizationConfig,
     get_quantization_config,
 )
+from vllm.model_executor.model_loader.ep_weight_filter import (
+    should_skip_weight,
+)
 from vllm.platforms import current_platform
 from vllm.tracing import instrument
 from vllm.utils.import_utils import PlaceholderModule
@@ -721,8 +724,14 @@ def safetensors_weights_iterator(
     hf_weights_files: list[str],
     use_tqdm_on_load: bool,
     safetensors_load_strategy: str = "lazy",
+    local_expert_ids: set[int] | None = None,
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
-    """Iterate over the weights in the model safetensor files."""
+    """Iterate over the weights in the model safetensor files.
+
+    When *local_expert_ids* is provided, expert weights not belonging to
+    this rank are skipped **before** reading from disk, which drastically
+    reduces storage I/O for MoE models under EP.
+    """
     loading_desc = "Loading safetensors checkpoint shards"
     if safetensors_load_strategy == "eager":
         loading_desc += " (eager)"
@@ -737,7 +746,9 @@ def safetensors_weights_iterator(
         if safetensors_load_strategy == "eager":
             with open(st_file, "rb") as f:
                 state_dict = load(f.read())
-            yield from state_dict.items()
+            for name, param in state_dict.items():
+                if not should_skip_weight(name, local_expert_ids):
+                    yield name, param
         elif safetensors_load_strategy == "torchao":
             # we can't load flattened torchao tensor subclasses directly into the model
             # instead we reconstruct the subclasses here before returning
@@ -753,6 +764,8 @@ def safetensors_weights_iterator(
             with safe_open(st_file, framework="pt") as f:
                 state_dict = {}
                 for name in f.keys():  # noqa: SIM118
+                    if should_skip_weight(name, local_expert_ids):
+                        continue
                     state_dict[name] = f.get_tensor(name)
 
                 # update with leftover tensor data from previous iteration, if any
@@ -769,6 +782,8 @@ def safetensors_weights_iterator(
         else:
             with safe_open(st_file, framework="pt") as f:
                 for name in f.keys():  # noqa: SIM118
+                    if should_skip_weight(name, local_expert_ids):
+                        continue
                     param = f.get_tensor(name)
                     yield name, param
 
