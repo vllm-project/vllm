@@ -75,8 +75,10 @@ def get_flash_attn_version(
         if device_capability.major == 9 and is_fa_version_supported(3):
             # Hopper (SM90): prefer FA3
             fa_version = 3
-        elif device_capability.major == 10 and is_fa_version_supported(4):
-            # Blackwell (SM100+, restrict to SM100 for now): prefer FA4
+        elif current_platform.is_blackwell_capability(
+            device_capability
+        ) and is_fa_version_supported(4):
+            # Blackwell (SM100-SM121): prefer FA4
             fa_version = 4
         else:
             # Fallback to FA2
@@ -93,7 +95,10 @@ def get_flash_attn_version(
             fa_version = vllm_config.attention_config.flash_attn_version
 
         # 3. fallback for unsupported combinations
-        if device_capability.major >= 10 and fa_version == 3:
+        if (
+            current_platform.is_blackwell_capability(device_capability)
+            and fa_version == 3
+        ):
             logger.warning_once(
                 "Cannot use FA version 3 on Blackwell platform, "
                 "defaulting to FA version 4 if supported, otherwise FA2."
@@ -129,7 +134,7 @@ def get_flash_attn_version(
         # (qk=192, v=128), added upstream in commits 1a15733e/1b36ab19.
         if (
             fa_version == 4
-            and device_capability.major >= 10
+            and current_platform.is_blackwell_capability(device_capability)
             and head_size is not None
             and head_size > 128
             and head_size != 192

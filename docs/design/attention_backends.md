@@ -102,8 +102,8 @@ Priority is **1 = highest** (tried first).
 
 | Priority | Backend |
 | -------- | ------- |
-| 1 | `FLASHINFER` |
-| 2 | `FLASH_ATTN` |
+| 1 | `FLASH_ATTN` |
+| 2 | `FLASHINFER` |
 | 3 | `TRITON_ATTN` |
 | 4 | `FLEX_ATTENTION` |
 
@@ -111,14 +111,24 @@ Priority is **1 = highest** (tried first).
 
 | Priority | Backend |
 | -------- | ------- |
-| 1 | `FLASH_ATTN` |
-| 2 | `FLASHINFER` |
+| 1 | `FLASHINFER` |
+| 2 | `FLASH_ATTN` |
 | 3 | `TRITON_ATTN` |
 | 4 | `FLEX_ATTENTION` |
 
 ### MLA Attention (DeepSeek-style)
 
 **Blackwell (SM 10.x):**
+
+| Priority | Backend |
+| -------- | ------- |
+| 1 | `FLASH_ATTN_MLA` |
+| 2 | `FLASHMLA` |
+| 3 | `FLASHINFER_MLA` |
+| 4 | `TRITON_MLA` |
+| 5 | `FLASHMLA_SPARSE` |
+
+**Ampere/Hopper (SM 8.x-9.x):**
 
 | Priority | Backend |
 | -------- | ------- |
@@ -129,16 +139,6 @@ Priority is **1 = highest** (tried first).
 | 5 | `TRITON_MLA` |
 | 6 | `FLASHMLA_SPARSE` |
 | 7 | `FLASHINFER_MLA_SPARSE` |
-
-**Ampere/Hopper (SM 8.x-9.x):**
-
-| Priority | Backend |
-| -------- | ------- |
-| 1 | `FLASH_ATTN_MLA` |
-| 2 | `FLASHMLA` |
-| 3 | `FLASHINFER_MLA` |
-| 4 | `TRITON_MLA` |
-| 5 | `FLASHMLA_SPARSE` |
 
 > **Note:** ROCm and CPU platforms have their own selection logic. See the platform-specific documentation for details.
 
@@ -168,7 +168,7 @@ Priority is **1 = highest** (tried first).
 | `FLASHINFER` | TRTLLM† | fp16, bf16 | `auto`, `bfloat16`, `fp8`, `fp8_e4m3`, `fp8_e5m2` | 16, 32, 64 | 64, 128, 256 | ✅ | ❌ | ✅ | Decoder | 10.x |
 | `FLASH_ATTN` | FA2* | fp16, bf16 | `auto`, `bfloat16` | %16 | Any | ❌ | ❌ | ✅ | All | ≥8.0 |
 | `FLASH_ATTN` | FA3* | fp16, bf16 | `auto`, `bfloat16`, `fp8`, `fp8_e4m3`, `fp8_e5m2` | %16 | Any | ✅ | ❌ | ✅ | All | 9.x |
-| `FLASH_ATTN` | FA4* | fp16, bf16 | `auto`, `bfloat16` | %16 | Any | ❌ | ❌ | ✅ | All | ≥10.0 |
+| `FLASH_ATTN` | FA4* | fp16, bf16 | `auto`, `bfloat16` | %16 | Any | ❌ | ❌ | ✅ | All | ≥8.0 |
 | `FLASH_ATTN_DIFFKV` | | fp16, bf16 | `auto` | Any | Any | ❌ | ❌ | ✅ | Decoder | Any |
 | `FLEX_ATTENTION` | | fp16, bf16, fp32 | `auto`, `bfloat16` | Any | Any | ❌ | ✅ | ❌ | Decoder, Encoder Only | Any |
 | `ROCM_AITER_FA` | | fp16, bf16 | `auto`, `bfloat16`, `fp8`, `fp8_e4m3`, `fp8_e5m2` | 16, 32 | 64, 128, 256 | ❌ | ❌ | ❌ | Decoder, Enc-Dec | N/A |
