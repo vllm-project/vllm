@@ -45,6 +45,8 @@ pystemmer==3.0.0
     # via mteb
 
 # Multi-modal processing
+av==16.1.0
+    # required for audio_in_video tests
 blobfile==3.0.0
     # Multi-Modal Models Test
 decord==0.6.0
