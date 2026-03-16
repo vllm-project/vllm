@@ -13,15 +13,197 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.v1.kv_cache_interface import NVFP4_QUANT_BLOCK_SIZE
 
 logger = init_logger(__name__)
 is_batch_invariant = vllm_is_batch_invariant()
 float8_info = torch.finfo(current_platform.fp8_dtype())
 
+# FP4 E2M1 dequantization lookup table (16 entries, indexed by 4-bit code)
+# Format: [sign(1) | exp(2) | mantissa(1)]
+# Magnitudes: 0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0
+FP4_E2M1_DEQUANT_TABLE = [
+    0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0,       # positive
+    0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0,  # negative
+]
+
 
 @triton.jit
 def cdiv_fn(x, y):
     return (x + y - 1) // y
+
+
+@triton.jit
+def _nvfp4_decode_magnitude(mag_idx):
+    """Decode FP4 E2M1 magnitude from 3-bit index to float.
+
+    Magnitude LUT: [0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0]
+    """
+    mag = tl.zeros_like(mag_idx, dtype=tl.float32)
+    mag = tl.where(mag_idx == 1, 0.5, mag)
+    mag = tl.where(mag_idx == 2, 1.0, mag)
+    mag = tl.where(mag_idx == 3, 1.5, mag)
+    mag = tl.where(mag_idx == 4, 2.0, mag)
+    mag = tl.where(mag_idx == 5, 3.0, mag)
+    mag = tl.where(mag_idx == 6, 4.0, mag)
+    mag = tl.where(mag_idx == 7, 6.0, mag)
+    return mag
+
+
+@triton.jit
+def _nvfp4_dequant_page_kernel(
+    # NVFP4 packed cache: [num_blocks, block_size, num_kv_heads, eff_head_size]
+    src_cache_ptr,
+    # Output dequantized cache: [num_blocks, block_size, num_kv_heads, head_size]
+    dst_cache_ptr,
+    global_scale_ptr,      # float32 scalar
+    src_stride_0: tl.int64,  # block stride
+    src_stride_1: tl.int64,  # page (token-in-block) stride
+    src_stride_2: tl.int64,  # head stride (= effective_head_size)
+    dst_stride_0: tl.int64,
+    dst_stride_1: tl.int64,
+    dst_stride_2: tl.int64,
+    num_kv_heads: tl.constexpr,
+    HEAD_SIZE: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+    QUANT_GROUP_SIZE: tl.constexpr,
+    PACKED_HEAD_SIZE: tl.constexpr,   # HEAD_SIZE // 2
+    SCALE_HEAD_SIZE: tl.constexpr,    # HEAD_SIZE // QUANT_GROUP_SIZE
+    PAIRS_PER_GROUP: tl.constexpr,    # QUANT_GROUP_SIZE // 2
+):
+    """Dequantize one token-slot of one head in the NVFP4 paged KV cache.
+
+    Grid: (num_used_blocks * BLOCK_SIZE, num_kv_heads)
+    """
+    slot_idx = tl.program_id(0)
+    head_idx = tl.program_id(1)
+
+    block_idx = slot_idx // BLOCK_SIZE
+    token_in_block = slot_idx % BLOCK_SIZE
+
+    # Source offset: beginning of this token's head data
+    src_base = (block_idx * src_stride_0
+                + token_in_block * src_stride_1
+                + head_idx * src_stride_2)
+
+    # Destination offset
+    dst_base = (block_idx * dst_stride_0
+                + token_in_block * dst_stride_1
+                + head_idx * dst_stride_2)
+
+    global_scale = tl.load(global_scale_ptr)
+
+    # Load block scales (SCALE_HEAD_SIZE uint8 values, FP8 E4M3 bitcast)
+    scale_offs = tl.arange(0, SCALE_HEAD_SIZE)
+    raw_scales = tl.load(src_cache_ptr + src_base + PACKED_HEAD_SIZE + scale_offs)
+    scales_fp8 = raw_scales.to(tl.float8e4nv, bitcast=True)
+    scales_f32 = scales_fp8.to(tl.float32)
+
+    # Load packed FP4 data and dequantize
+    pair_offs = tl.arange(0, PACKED_HEAD_SIZE)
+    packed = tl.load(src_cache_ptr + src_base + pair_offs)
+
+    # Extract low and high nibbles
+    lo_codes = (packed.to(tl.int32)) & 0xF   # even elements
+    hi_codes = (packed.to(tl.int32) >> 4) & 0xF  # odd elements
+
+    # Decode sign and magnitude
+    lo_sign = tl.where(lo_codes & 8, -1.0, 1.0)
+    hi_sign = tl.where(hi_codes & 8, -1.0, 1.0)
+    lo_mag = _nvfp4_decode_magnitude(lo_codes & 0x7)
+    hi_mag = _nvfp4_decode_magnitude(hi_codes & 0x7)
+
+    lo_val = lo_sign * lo_mag
+    hi_val = hi_sign * hi_mag
+
+    # Apply per-group scales: each group of PAIRS_PER_GROUP packed bytes
+    # shares one scale factor
+    group_idx = pair_offs // PAIRS_PER_GROUP
+
+    # Gather scale for each pair position
+    # Since we can't dynamically index a register tensor, we use
+    # static unrolling over groups
+    lo_result = tl.zeros([PACKED_HEAD_SIZE], dtype=tl.float32)
+    hi_result = tl.zeros([PACKED_HEAD_SIZE], dtype=tl.float32)
+
+    for g in tl.static_range(0, SCALE_HEAD_SIZE):
+        g_mask = group_idx == g
+        g_scale = scales_f32[g] * global_scale
+        lo_result = tl.where(g_mask, lo_val * g_scale, lo_result)
+        hi_result = tl.where(g_mask, hi_val * g_scale, hi_result)
+
+    # Interleave even/odd back to original element order:
+    # element[2i] = lo_result[i], element[2i+1] = hi_result[i]
+    # Store interleaved
+    even_dst_offs = pair_offs * 2
+    odd_dst_offs = pair_offs * 2 + 1
+    tl.store(dst_cache_ptr + dst_base + even_dst_offs, lo_result.to(tl.bfloat16))
+    tl.store(dst_cache_ptr + dst_base + odd_dst_offs, hi_result.to(tl.bfloat16))
+
+
+def nvfp4_dequant_kv_cache(
+    nvfp4_cache: torch.Tensor,
+    global_scale: torch.Tensor,
+    head_size: int,
+    num_blocks_used: int | None = None,
+) -> torch.Tensor:
+    """Dequantize an NVFP4 paged KV cache to BF16.
+
+    Args:
+        nvfp4_cache: Paged cache tensor of shape
+            [num_blocks, block_size, num_kv_heads, effective_head_size] as uint8.
+        global_scale: Scalar float32 tensor (second-level scale factor).
+        head_size: Original (unpacked) head dimension.
+        num_blocks_used: If given, only dequantize this many blocks.
+
+    Returns:
+        BF16 tensor of shape [num_blocks, block_size, num_kv_heads, head_size].
+    """
+    num_blocks = nvfp4_cache.shape[0]
+    block_size = nvfp4_cache.shape[1]
+    num_kv_heads = nvfp4_cache.shape[2]
+
+    if num_blocks_used is None:
+        num_blocks_used = num_blocks
+
+    packed_head_size = head_size // 2
+    scale_head_size = head_size // NVFP4_QUANT_BLOCK_SIZE
+    pairs_per_group = NVFP4_QUANT_BLOCK_SIZE // 2
+
+    # Allocate output
+    out = torch.empty(
+        (num_blocks, block_size, num_kv_heads, head_size),
+        dtype=torch.bfloat16,
+        device=nvfp4_cache.device,
+    )
+
+    total_slots = num_blocks_used * block_size
+    if total_slots == 0:
+        return out
+
+    grid = (total_slots, num_kv_heads)
+
+    _nvfp4_dequant_page_kernel[grid](
+        src_cache_ptr=nvfp4_cache,
+        dst_cache_ptr=out,
+        global_scale_ptr=global_scale,
+        src_stride_0=nvfp4_cache.stride(0),
+        src_stride_1=nvfp4_cache.stride(1),
+        src_stride_2=nvfp4_cache.stride(2),
+        dst_stride_0=out.stride(0),
+        dst_stride_1=out.stride(1),
+        dst_stride_2=out.stride(2),
+        num_kv_heads=num_kv_heads,
+        HEAD_SIZE=head_size,
+        BLOCK_SIZE=block_size,
+        QUANT_GROUP_SIZE=NVFP4_QUANT_BLOCK_SIZE,
+        PACKED_HEAD_SIZE=packed_head_size,
+        SCALE_HEAD_SIZE=scale_head_size,
+        PAIRS_PER_GROUP=pairs_per_group,
+        num_warps=4,
+        num_stages=2,
+    )
+    return out
 
 
 @triton.jit
@@ -105,6 +287,9 @@ def kernel_unified_attention_2d(
     num_seqs: tl.int32,
     BLOCK_M: tl.constexpr,  # int
     USE_FP8: tl.constexpr,  # bool
+    USE_NVFP4: tl.constexpr = False,  # bool
+    PACKED_HEAD_SIZE: tl.constexpr = 0,  # HEAD_SIZE // 2
+    QUANT_GROUP_SIZE: tl.constexpr = 16,  # elements per block scale
     FP8_MIN: tl.constexpr = float8_info.min,
     FP8_MAX: tl.constexpr = float8_info.max,
 ):
@@ -229,6 +414,12 @@ def kernel_unified_attention_2d(
         tile_start = tl.maximum(0, first_allowed_key // TILE_SIZE)
         tile_end = tl.minimum((last_allowed_key // TILE_SIZE) + 1, num_tiles)
 
+    # Pre-compute NVFP4 index helpers (outside tile loop, constant across tiles)
+    if USE_NVFP4:
+        packed_byte_pos = offs_d // 2
+        is_high = ((offs_d % 2) == 1)
+        scale_group_idx = offs_d // QUANT_GROUP_SIZE
+
     # iterate through tiles (now limited to the sliding window range)
     for j in range(tile_start, tile_end):
         seq_offset = j * TILE_SIZE + offs_t
@@ -238,49 +429,102 @@ def kernel_unified_attention_2d(
             block_tables_ptr + block_table_offset + seq_offset // BLOCK_SIZE
         ).to(tl.int64)
 
-        v_offset = (
-            physical_block_idx[:, None] * stride_v_cache_0
-            + kv_head_idx * stride_v_cache_2
-            + offs_d[None, :] * stride_v_cache_3
-            + (seq_offset % BLOCK_SIZE)[:, None] * stride_v_cache_1
-        )
+        if USE_NVFP4:
+            # --- NVFP4 fused dequant: load packed bytes + scales, decode inline ---
+            # K: (HEAD_SIZE_PADDED, TILE_SIZE)
+            k_packed_off = (
+                physical_block_idx[None, :] * stride_k_cache_0
+                + kv_head_idx * stride_k_cache_2
+                + packed_byte_pos[:, None] * stride_k_cache_3
+                + (seq_offset % BLOCK_SIZE)[None, :] * stride_k_cache_1
+            )
+            k_packed = tl.load(key_cache_ptr + k_packed_off,
+                               mask=dim_mask[:, None] & tile_mask[None, :],
+                               other=0).to(tl.int32)
+            k_codes = tl.where(is_high[:, None],
+                               (k_packed >> 4) & 0xF, k_packed & 0xF)
+            k_sign = tl.where(k_codes & 8, -1.0, 1.0)
+            k_mag = _nvfp4_decode_magnitude(k_codes & 0x7)
 
-        k_offset = (
-            physical_block_idx[None, :] * stride_k_cache_0
-            + kv_head_idx * stride_k_cache_2
-            + offs_d[:, None] * stride_k_cache_3
-            + (seq_offset % BLOCK_SIZE)[None, :] * stride_k_cache_1
-        )
+            k_sf_off = (
+                physical_block_idx[None, :] * stride_k_cache_0
+                + kv_head_idx * stride_k_cache_2
+                + (PACKED_HEAD_SIZE + scale_group_idx)[:, None] * stride_k_cache_3
+                + (seq_offset % BLOCK_SIZE)[None, :] * stride_k_cache_1
+            )
+            k_sf = tl.load(key_cache_ptr + k_sf_off,
+                           mask=dim_mask[:, None] & tile_mask[None, :],
+                           other=0)
+            k_sf = k_sf.to(tl.float8e4nv, bitcast=True).to(tl.float32)
+            K = (k_sign * k_mag * k_sf * tl.load(k_scale)).to(Q.dtype)
 
-        # K : (HEAD_SIZE, TILE_SIZE)
-        K_load = tl.load(
-            key_cache_ptr + k_offset,
-            mask=dim_mask[:, None] & tile_mask[None, :],
-            other=0.0,
-        )
+            # V: (TILE_SIZE, HEAD_SIZE_PADDED)
+            v_packed_off = (
+                physical_block_idx[:, None] * stride_v_cache_0
+                + kv_head_idx * stride_v_cache_2
+                + packed_byte_pos[None, :] * stride_v_cache_3
+                + (seq_offset % BLOCK_SIZE)[:, None] * stride_v_cache_1
+            )
+            v_packed = tl.load(value_cache_ptr + v_packed_off,
+                               mask=dim_mask[None, :] & tile_mask[:, None],
+                               other=0).to(tl.int32)
+            v_codes = tl.where(is_high[None, :],
+                               (v_packed >> 4) & 0xF, v_packed & 0xF)
+            v_sign = tl.where(v_codes & 8, -1.0, 1.0)
+            v_mag = _nvfp4_decode_magnitude(v_codes & 0x7)
 
-        if K_load.dtype.is_fp8():
-            if Q.dtype.is_fp8():
+            v_sf_off = (
+                physical_block_idx[:, None] * stride_v_cache_0
+                + kv_head_idx * stride_v_cache_2
+                + (PACKED_HEAD_SIZE + scale_group_idx)[None, :] * stride_v_cache_3
+                + (seq_offset % BLOCK_SIZE)[:, None] * stride_v_cache_1
+            )
+            v_sf = tl.load(value_cache_ptr + v_sf_off,
+                           mask=dim_mask[None, :] & tile_mask[:, None],
+                           other=0)
+            v_sf = v_sf.to(tl.float8e4nv, bitcast=True).to(tl.float32)
+            V = (v_sign * v_mag * v_sf * tl.load(v_scale)).to(Q.dtype)
+        else:
+            # --- Standard BF16/FP16/FP8 load ---
+            v_offset = (
+                physical_block_idx[:, None] * stride_v_cache_0
+                + kv_head_idx * stride_v_cache_2
+                + offs_d[None, :] * stride_v_cache_3
+                + (seq_offset % BLOCK_SIZE)[:, None] * stride_v_cache_1
+            )
+
+            k_offset = (
+                physical_block_idx[None, :] * stride_k_cache_0
+                + kv_head_idx * stride_k_cache_2
+                + offs_d[:, None] * stride_k_cache_3
+                + (seq_offset % BLOCK_SIZE)[None, :] * stride_k_cache_1
+            )
+
+            K_load = tl.load(
+                key_cache_ptr + k_offset,
+                mask=dim_mask[:, None] & tile_mask[None, :],
+                other=0.0,
+            )
+            if K_load.dtype.is_fp8():
+                if Q.dtype.is_fp8():
+                    K = K_load
+                else:
+                    K = (K_load.to(tl.float32) * tl.load(k_scale)).to(Q.dtype)
+            else:
                 K = K_load
+
+            V_load = tl.load(
+                value_cache_ptr + v_offset,
+                mask=dim_mask[None, :] & tile_mask[:, None],
+                other=0.0,
+            )
+            if V_load.dtype.is_fp8():
+                if Q.dtype.is_fp8():
+                    V = V_load
+                else:
+                    V = (V_load.to(tl.float32) * tl.load(v_scale)).to(Q.dtype)
             else:
-                K = (K_load.to(tl.float32) * tl.load(k_scale)).to(Q.dtype)
-        else:
-            K = K_load
-
-        # V : (TILE_SIZE, HEAD_SIZE)
-        V_load = tl.load(
-            value_cache_ptr + v_offset,
-            mask=dim_mask[None, :] & tile_mask[:, None],
-            other=0.0,
-        )
-
-        if V_load.dtype.is_fp8():
-            if Q.dtype.is_fp8():
                 V = V_load
-            else:
-                V = (V_load.to(tl.float32) * tl.load(v_scale)).to(Q.dtype)
-        else:
-            V = V_load
 
         # Compute attention mask: causal by default (key <= query)
         query_abs_pos = context_len + query_pos[:, None]
@@ -453,6 +697,9 @@ def kernel_unified_attention_3d(
     USE_MM_PREFIX: tl.constexpr,  # bool
     MAX_MM_RANGES: tl.constexpr,  # int
     mm_prefix_range_ptr,  # [num_seqs] - prefix length for each sequence
+    USE_NVFP4: tl.constexpr = False,  # bool
+    PACKED_HEAD_SIZE: tl.constexpr = 0,  # HEAD_SIZE // 2
+    QUANT_GROUP_SIZE: tl.constexpr = 16,  # elements per block scale
 ):
     q_block_global_idx = tl.program_id(0)
     kv_head_idx = tl.program_id(1)
@@ -581,6 +828,12 @@ def kernel_unified_attention_3d(
         tile_start = tl.maximum(0, first_allowed_key // TILE_SIZE)
         tile_end = tl.minimum((last_allowed_key // TILE_SIZE) + 1, num_tiles)
 
+    # Pre-compute NVFP4 index helpers (3D kernel)
+    if USE_NVFP4:
+        packed_byte_pos = offs_d // 2
+        is_high = ((offs_d % 2) == 1)
+        scale_group_idx = offs_d // QUANT_GROUP_SIZE
+
     # iterate through tiles (now limited to the sliding window range)
     for j in range(
         max(segm_idx * tiles_per_segment, tile_start),
@@ -593,49 +846,93 @@ def kernel_unified_attention_3d(
             block_tables_ptr + block_table_offset + seq_offset // BLOCK_SIZE
         ).to(tl.int64)
 
-        v_offset = (
-            physical_block_idx[:, None] * stride_v_cache_0
-            + kv_head_idx * stride_v_cache_2
-            + offs_d[None, :] * stride_v_cache_3
-            + (seq_offset % BLOCK_SIZE)[:, None] * stride_v_cache_1
-        )
+        if USE_NVFP4:
+            # K: fused NVFP4 dequant
+            k_packed_off = (
+                physical_block_idx[None, :] * stride_k_cache_0
+                + kv_head_idx * stride_k_cache_2
+                + packed_byte_pos[:, None] * stride_k_cache_3
+                + (seq_offset % BLOCK_SIZE)[None, :] * stride_k_cache_1
+            )
+            k_packed = tl.load(key_cache_ptr + k_packed_off,
+                               mask=dim_mask[:, None] & tile_mask[None, :],
+                               other=0).to(tl.int32)
+            k_codes = tl.where(is_high[:, None],
+                               (k_packed >> 4) & 0xF, k_packed & 0xF)
+            k_sign = tl.where(k_codes & 8, -1.0, 1.0)
+            k_mag = _nvfp4_decode_magnitude(k_codes & 0x7)
+            k_sf_off = (
+                physical_block_idx[None, :] * stride_k_cache_0
+                + kv_head_idx * stride_k_cache_2
+                + (PACKED_HEAD_SIZE + scale_group_idx)[:, None] * stride_k_cache_3
+                + (seq_offset % BLOCK_SIZE)[None, :] * stride_k_cache_1
+            )
+            k_sf = tl.load(key_cache_ptr + k_sf_off,
+                           mask=dim_mask[:, None] & tile_mask[None, :],
+                           other=0)
+            k_sf = k_sf.to(tl.float8e4nv, bitcast=True).to(tl.float32)
+            K = (k_sign * k_mag * k_sf * tl.load(k_scale)).to(Q.dtype)
 
-        k_offset = (
-            physical_block_idx[None, :] * stride_k_cache_0
-            + kv_head_idx * stride_k_cache_2
-            + offs_d[:, None] * stride_k_cache_3
-            + (seq_offset % BLOCK_SIZE)[None, :] * stride_k_cache_1
-        )
+            # V: fused NVFP4 dequant
+            v_packed_off = (
+                physical_block_idx[:, None] * stride_v_cache_0
+                + kv_head_idx * stride_v_cache_2
+                + packed_byte_pos[None, :] * stride_v_cache_3
+                + (seq_offset % BLOCK_SIZE)[:, None] * stride_v_cache_1
+            )
+            v_packed = tl.load(value_cache_ptr + v_packed_off,
+                               mask=dim_mask[None, :] & tile_mask[:, None],
+                               other=0).to(tl.int32)
+            v_codes = tl.where(is_high[None, :],
+                               (v_packed >> 4) & 0xF, v_packed & 0xF)
+            v_sign = tl.where(v_codes & 8, -1.0, 1.0)
+            v_mag = _nvfp4_decode_magnitude(v_codes & 0x7)
+            v_sf_off = (
+                physical_block_idx[:, None] * stride_v_cache_0
+                + kv_head_idx * stride_v_cache_2
+                + (PACKED_HEAD_SIZE + scale_group_idx)[None, :] * stride_v_cache_3
+                + (seq_offset % BLOCK_SIZE)[:, None] * stride_v_cache_1
+            )
+            v_sf = tl.load(value_cache_ptr + v_sf_off,
+                           mask=dim_mask[None, :] & tile_mask[:, None],
+                           other=0)
+            v_sf = v_sf.to(tl.float8e4nv, bitcast=True).to(tl.float32)
+            V = (v_sign * v_mag * v_sf * tl.load(v_scale)).to(Q.dtype)
+        else:
+            v_offset = (
+                physical_block_idx[:, None] * stride_v_cache_0
+                + kv_head_idx * stride_v_cache_2
+                + offs_d[None, :] * stride_v_cache_3
+                + (seq_offset % BLOCK_SIZE)[:, None] * stride_v_cache_1
+            )
+            k_offset = (
+                physical_block_idx[None, :] * stride_k_cache_0
+                + kv_head_idx * stride_k_cache_2
+                + offs_d[:, None] * stride_k_cache_3
+                + (seq_offset % BLOCK_SIZE)[None, :] * stride_k_cache_1
+            )
 
-        # K : (HEAD_SIZE, TILE_SIZE)
-        K_load = tl.load(
-            key_cache_ptr + k_offset,
-            mask=dim_mask[:, None] & tile_mask[None, :],
-            other=0.0,
-        )
-
-        if K_load.dtype.is_fp8():
-            if Q.dtype.is_fp8():
+            K_load = tl.load(key_cache_ptr + k_offset,
+                             mask=dim_mask[:, None] & tile_mask[None, :],
+                             other=0.0)
+            if K_load.dtype.is_fp8():
+                if Q.dtype.is_fp8():
+                    K = K_load
+                else:
+                    K = (K_load.to(tl.float32) * tl.load(k_scale)).to(Q.dtype)
+            else:
                 K = K_load
+
+            V_load = tl.load(value_cache_ptr + v_offset,
+                             mask=dim_mask[None, :] & tile_mask[:, None],
+                             other=0.0)
+            if V_load.dtype.is_fp8():
+                if Q.dtype.is_fp8():
+                    V = V_load
+                else:
+                    V = (V_load.to(tl.float32) * tl.load(v_scale)).to(Q.dtype)
             else:
-                K = (K_load.to(tl.float32) * tl.load(k_scale)).to(Q.dtype)
-        else:
-            K = K_load
-
-        # V : (TILE_SIZE, HEAD_SIZE)
-        V_load = tl.load(
-            value_cache_ptr + v_offset,
-            mask=dim_mask[None, :] & tile_mask[:, None],
-            other=0.0,
-        )
-
-        if V_load.dtype.is_fp8():
-            if Q.dtype.is_fp8():
                 V = V_load
-            else:
-                V = (V_load.to(tl.float32) * tl.load(v_scale)).to(Q.dtype)
-        else:
-            V = V_load
 
         # Compute attention mask: causal by default (key <= query)
         query_abs_pos = context_len + query_pos[:, None]
@@ -911,9 +1208,13 @@ def unified_attention(
     # Optional tensor for prefix lengths (PrefixLM support)
     mm_prefix_range=None,
     use_alibi_sqrt=False,
+    # NVFP4 KV cache mode
+    nvfp4_head_size=0,
 ):
     assert causal, "Only causal attention is supported"
     assert q_descale is None, "Q scales not supported"
+
+    use_nvfp4 = nvfp4_head_size > 0
 
     if sinks is not None:
         assert sinks.shape[0] == q.shape[1], "Sinks must be num_query_heads size"
@@ -1040,6 +1341,9 @@ def unified_attention(
             num_seqs=num_seqs,
             BLOCK_M=BLOCK_M,
             USE_FP8=output_scale is not None,
+            USE_NVFP4=use_nvfp4,
+            PACKED_HEAD_SIZE=nvfp4_head_size // 2 if use_nvfp4 else 0,
+            QUANT_GROUP_SIZE=NVFP4_QUANT_BLOCK_SIZE,
         )
     else:
         kernel_unified_attention_3d[
@@ -1092,6 +1396,9 @@ def unified_attention(
             num_seqs=num_seqs,
             BLOCK_M=BLOCK_M,
             NUM_SEGMENTS_PER_SEQ=num_par_softmax_segments,
+            USE_NVFP4=use_nvfp4,
+            PACKED_HEAD_SIZE=nvfp4_head_size // 2 if use_nvfp4 else 0,
+            QUANT_GROUP_SIZE=NVFP4_QUANT_BLOCK_SIZE,
         )
         reduce_segments[(q.shape[0], num_query_heads)](
             output_ptr=out,

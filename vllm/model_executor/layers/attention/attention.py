@@ -32,6 +32,7 @@ from vllm.utils.torch_utils import (
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionType,
+    is_quantized_kv_cache,
 )
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.selector import get_attn_backend
@@ -360,8 +361,8 @@ class Attention(nn.Module, AttentionLayerBase):
 
         # for attn backends supporting query quantization
         self.query_quant = None
-        if self.impl.supports_quant_query_input and self.kv_cache_dtype.startswith(
-            "fp8"
+        if self.impl.supports_quant_query_input and is_quantized_kv_cache(
+            self.kv_cache_dtype
         ):
             is_per_head = (
                 hasattr(self, "q_scale") and self.q_scale.numel() == self.num_kv_heads
@@ -528,6 +529,7 @@ class Attention(nn.Module, AttentionLayerBase):
                 head_size=self.head_size,
                 dtype=self.kv_cache_torch_dtype,
                 sliding_window=self.sliding_window,
+                cache_dtype_str=self.kv_cache_dtype,
             )
         else:
             return FullAttentionSpec(
@@ -536,6 +538,7 @@ class Attention(nn.Module, AttentionLayerBase):
                 head_size=self.head_size,
                 head_size_v=self.head_size_v,
                 dtype=self.kv_cache_torch_dtype,
+                cache_dtype_str=self.kv_cache_dtype,
             )
 
 

@@ -61,12 +61,33 @@ class KVCacheSpec:
         return copy.deepcopy(specs[0])
 
 
+# NVFP4 quantization block size (number of FP4 elements per scale factor)
+NVFP4_QUANT_BLOCK_SIZE = 16
+
+
 @dataclass(frozen=True, kw_only=True)
 class AttentionSpec(KVCacheSpec):
     num_kv_heads: int
     head_size: int
     dtype: torch.dtype
     page_size_padded: int | None = None
+    # The KV cache dtype string (e.g., "auto", "fp8", "nvfp4").
+    # Needed to distinguish NVFP4 from FP8 since both use torch.uint8.
+    cache_dtype_str: str | None = None
+
+    @property
+    def is_nvfp4(self) -> bool:
+        return self.cache_dtype_str == "nvfp4"
+
+    @property
+    def nvfp4_head_size_bytes(self) -> int:
+        """Number of bytes per head per token for NVFP4 cache.
+
+        Includes packed FP4 data (head_size // 2 bytes) and
+        FP8 block scales (head_size // NVFP4_QUANT_BLOCK_SIZE bytes).
+        """
+        assert self.head_size % NVFP4_QUANT_BLOCK_SIZE == 0
+        return self.head_size // 2 + self.head_size // NVFP4_QUANT_BLOCK_SIZE
 
     @property
     def page_size_bytes(self) -> int:
@@ -78,6 +99,14 @@ class AttentionSpec(KVCacheSpec):
 
     @property
     def real_page_size_bytes(self) -> int:
+        if self.is_nvfp4:
+            # NVFP4: packed FP4 data + FP8 block scales
+            return (
+                2
+                * self.block_size
+                * self.num_kv_heads
+                * self.nvfp4_head_size_bytes
+            )
         return (
             2
             * self.block_size

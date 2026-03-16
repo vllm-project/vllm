@@ -118,12 +118,28 @@ QUANT_ALGOS = [
     # MIXED_PRECISION,
     "MIXED_PRECISION",
 ]
-KV_CACHE_QUANT_ALGOS = ["FP8"]
+KV_CACHE_QUANT_ALGOS = ["FP8", "NVFP4"]
 
 
 class ModelOptFp8KVCacheMethod(BaseKVCacheMethod):
     """
     Supports loading kv-cache scaling factors from FP8 checkpoints.
+    """
+
+    def __init__(self, quant_config: "ModelOptQuantConfigBase"):
+        super().__init__(quant_config)
+
+
+class ModelOptNvFp4KVCacheMethod(BaseKVCacheMethod):
+    """
+    Supports loading kv-cache scaling factors for NVFP4 KV cache.
+
+    NVFP4 uses a two-level quantization scheme:
+      - Level 1 (block scale): FP8 E4M3, one per group of 16 FP4 elements
+      - Level 2 (global scale): per-tensor K and V scales from checkpoint
+
+    The k_scale and v_scale loaded from checkpoint serve as the global
+    (second-level) scale factors used during quantization and dequantization.
     """
 
     def __init__(self, quant_config: "ModelOptQuantConfigBase"):
@@ -1459,7 +1475,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
 
 ModelOptNvFp4Config.LinearMethodCls = ModelOptNvFp4LinearMethod
 ModelOptNvFp4Config.FusedMoEMethodCls = ModelOptNvFp4FusedMoE
-ModelOptNvFp4Config.KVCacheMethodCls = ModelOptFp8KVCacheMethod
+ModelOptNvFp4Config.KVCacheMethodCls = ModelOptNvFp4KVCacheMethod
 
 
 class ModelOptMxFp8Config(ModelOptQuantConfigBase):

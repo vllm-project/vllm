@@ -118,6 +118,7 @@ from vllm.v1.attention.backend import (
     AttentionMetadataBuilder,
     AttentionType,
     CommonAttentionMetadata,
+    is_quantized_kv_cache,
 )
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadataBuilder
@@ -857,7 +858,7 @@ class GPUModelRunner(
           If these are left at 0.0 (default after wake_up), all KV cache values
           become effectively zero, causing gibberish output.
         """
-        if not self.cache_config.cache_dtype.startswith("fp8"):
+        if not is_quantized_kv_cache(self.cache_config.cache_dtype):
             return
 
         kv_caches = getattr(self, "kv_caches", [])

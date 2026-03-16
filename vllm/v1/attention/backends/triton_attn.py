@@ -31,6 +31,7 @@ from vllm.v1.attention.backend import (
 from vllm.v1.attention.ops.triton_prefill_attention import context_attention_fwd
 from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
     triton_reshape_and_cache_flash,
+    triton_reshape_and_cache_nvfp4,
 )
 from vllm.v1.attention.ops.triton_unified_attention import unified_attention
 from vllm.v1.kv_cache_interface import AttentionSpec
@@ -267,6 +268,7 @@ class TritonAttentionBackend(AttentionBackend):
         "fp8",
         "fp8_e4m3",
         "fp8_e5m2",
+        "nvfp4",
     ]
 
     @staticmethod
@@ -299,6 +301,15 @@ class TritonAttentionBackend(AttentionBackend):
     ) -> tuple[int, ...]:
         if block_size % 16 != 0:
             raise ValueError("Block size must be a multiple of 16.")
+        if cache_dtype_str == "nvfp4":
+            from vllm.v1.kv_cache_interface import NVFP4_QUANT_BLOCK_SIZE
+
+            assert head_size % NVFP4_QUANT_BLOCK_SIZE == 0
+            # Packed FP4 data + FP8 block scales per head
+            effective_head_size = (
+                head_size // 2 + head_size // NVFP4_QUANT_BLOCK_SIZE
+            )
+            return (num_blocks, 2, block_size, num_kv_heads, effective_head_size)
         return (num_blocks, 2, block_size, num_kv_heads, head_size)
 
     @staticmethod
@@ -471,7 +482,10 @@ class TritonAttentionImpl(AttentionImpl):
 
         # For decoder and cross-attention, use KV cache as before
         key_cache, value_cache = kv_cache.unbind(1)
-        if self.kv_cache_dtype.startswith("fp8"):
+
+        nvfp4_mode = self.kv_cache_dtype == "nvfp4"
+
+        if not nvfp4_mode and self.kv_cache_dtype.startswith("fp8"):
             if key_cache.dtype != self.fp8_dtype:
                 key_cache = key_cache.view(self.fp8_dtype)
                 value_cache = value_cache.view(self.fp8_dtype)
@@ -521,6 +535,8 @@ class TritonAttentionImpl(AttentionImpl):
             sinks=self.sinks,
             output_scale=output_scale,
             mm_prefix_range=mm_prefix_range_tensor,
+            # NVFP4: kernel does inline dequant using packed cache + scales
+            nvfp4_head_size=self.head_size if nvfp4_mode else 0,
         )
 
         return output
@@ -585,6 +601,19 @@ class TritonAttentionImpl(AttentionImpl):
             return
         # For decoder and cross-attention, use KV cache as before
         key_cache, value_cache = kv_cache.unbind(1)
+
+        if self.kv_cache_dtype == "nvfp4":
+            # NVFP4 quantization: pack FP4 data + block scales into cache
+            triton_reshape_and_cache_nvfp4(
+                key,
+                value,
+                key_cache,
+                value_cache,
+                slot_mapping,
+                layer._k_scale,
+                layer._v_scale,
+            )
+            return
 
         # Reshape the input keys and values and store them in the cache.
         if self.kv_cache_dtype.startswith("fp8"):

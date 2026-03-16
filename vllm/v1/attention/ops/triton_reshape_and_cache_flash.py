@@ -5,6 +5,7 @@ import torch
 
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.v1.kv_cache_interface import NVFP4_QUANT_BLOCK_SIZE
 
 
 @triton.jit
@@ -392,4 +393,219 @@ def triton_reshape_and_cache_flash_diffkv(
         TILE_SIZE=TILE_SIZE,
         num_warps=num_warps,
         num_stages=num_stages,
+    )
+
+
+# ===================== NVFP4 KV Cache Support =====================
+# NVFP4 (E2M1) uses 4 bits per element, packed 2 per byte as uint8.
+# Block scales are FP8 (E4M3), one per NVFP4_QUANT_BLOCK_SIZE elements.
+#
+# Cache layout per head per token (contiguous in the last dim):
+#   [packed_fp4_data (head_size // 2 bytes)] [block_scales (head_size // 16 bytes)]
+#
+# FP4 E2M1 encoding (4 bits): [sign(1) | exponent(2) | mantissa(1)]
+#   Representable magnitudes: 0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0
+
+FP4_E2M1_MAX = 6.0
+
+
+@triton.jit
+def _fp4_e2m1_quantize(val):
+    """Quantize a float value to FP4 E2M1 (4-bit), returning 4-bit codes.
+
+    E2M1 format: [sign | exp(2) | mantissa(1)]
+    Representable magnitudes: 0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0
+    """
+    sign = tl.where(val < 0, 8, 0).to(tl.int32)
+    abs_val = tl.abs(val)
+
+    # Clamp to representable range
+    abs_val = tl.minimum(abs_val, 6.0)
+
+    # Round to nearest representable value using midpoint thresholds
+    code = tl.zeros_like(abs_val, dtype=tl.int32)
+    code = tl.where(abs_val >= 0.25, 1, code)   # 0.5
+    code = tl.where(abs_val >= 0.75, 2, code)   # 1.0
+    code = tl.where(abs_val >= 1.25, 3, code)   # 1.5
+    code = tl.where(abs_val >= 1.75, 4, code)   # 2.0
+    code = tl.where(abs_val >= 2.5, 5, code)    # 3.0
+    code = tl.where(abs_val >= 3.5, 6, code)    # 4.0
+    code = tl.where(abs_val >= 5.0, 7, code)    # 6.0
+
+    return sign | code
+
+
+@triton.jit
+def reshape_and_cache_nvfp4_kernel(
+    key_ptr,             # [num_tokens, num_heads, head_size] in bf16/fp16
+    value_ptr,           # [num_tokens, num_heads, head_size] in bf16/fp16
+    key_cache_ptr,       # [num_blocks, block_size, num_heads, eff_head_size] uint8
+    value_cache_ptr,     # [num_blocks, block_size, num_heads, eff_head_size] uint8
+    slot_mapping_ptr,    # [num_tokens]
+    k_scale_ptr,         # global K scale (float32 tensor, scalar)
+    v_scale_ptr,         # global V scale (float32 tensor, scalar)
+    # strides (for source tensors, in elements)
+    key_stride: tl.int64,
+    value_stride: tl.int64,
+    # strides (for cache tensors, in bytes since uint8)
+    cache_block_stride: tl.int64,
+    cache_page_stride: tl.int64,
+    cache_head_stride: tl.int64,
+    # constexpr
+    num_heads: tl.constexpr,
+    head_size: tl.constexpr,
+    block_size: tl.constexpr,
+    QUANT_GROUP_SIZE: tl.constexpr,
+    packed_head_size: tl.constexpr,    # head_size // 2
+    scale_head_size: tl.constexpr,     # head_size // QUANT_GROUP_SIZE
+):
+    """Reshape, quantize to NVFP4, and cache K/V vectors.
+
+    For each head, the cache stores (contiguously):
+      - packed FP4 data: head_size // 2 bytes (2 elements per byte)
+      - block scales: head_size // QUANT_GROUP_SIZE bytes (FP8 E4M3)
+
+    Each program instance handles one token and one quantization group
+    (QUANT_GROUP_SIZE elements) across all heads.
+    """
+    token_idx = tl.program_id(axis=0)
+    head_idx = tl.program_id(axis=1)
+    group_idx = tl.program_id(axis=2)
+
+    slot_idx = tl.load(slot_mapping_ptr + token_idx).to(tl.int64)
+    if slot_idx < 0:
+        return
+
+    block_idx = slot_idx // block_size
+    block_offset = slot_idx % block_size
+
+    # Source offset for this head's group
+    src_key_base = (token_idx * key_stride
+                    + head_idx * head_size
+                    + group_idx * QUANT_GROUP_SIZE)
+    src_val_base = (token_idx * value_stride
+                    + head_idx * head_size
+                    + group_idx * QUANT_GROUP_SIZE)
+
+    # Cache base offset for this token's head
+    cache_base_k = (block_idx * cache_block_stride
+                    + block_offset * cache_page_stride
+                    + head_idx * cache_head_stride)
+    cache_base_v = (block_idx * cache_block_stride
+                    + block_offset * cache_page_stride
+                    + head_idx * cache_head_stride)
+
+    # Load global scale factors
+    global_k_sf = tl.load(k_scale_ptr)
+    global_v_sf = tl.load(v_scale_ptr)
+
+    # Load the group of elements
+    group_offs = tl.arange(0, QUANT_GROUP_SIZE)
+    k_vals = tl.load(key_ptr + src_key_base + group_offs).to(tl.float32)
+    v_vals = tl.load(value_ptr + src_val_base + group_offs).to(tl.float32)
+
+    # Compute per-group absmax
+    k_absmax = tl.max(tl.abs(k_vals))
+    v_absmax = tl.max(tl.abs(v_vals))
+
+    # Compute block scales: scale = absmax / (FP4_MAX * global_sf)
+    # Dequant formula: value = fp4_code * block_scale * global_sf
+    k_block_scale = k_absmax / (6.0 * global_k_sf + 1e-12)
+    v_block_scale = v_absmax / (6.0 * global_v_sf + 1e-12)
+
+    # Scale values to FP4 range
+    k_scaled = k_vals / (k_block_scale * global_k_sf + 1e-12)
+    v_scaled = v_vals / (v_block_scale * global_v_sf + 1e-12)
+
+    # Quantize to FP4 E2M1
+    k_codes = _fp4_e2m1_quantize(k_scaled)
+    v_codes = _fp4_e2m1_quantize(v_scaled)
+
+    # Pack pairs of FP4 values into uint8: byte[i] = code[2i] | (code[2i+1] << 4)
+    pair_offs = tl.arange(0, QUANT_GROUP_SIZE // 2)
+    k_lo = k_codes[pair_offs * 2] & 0xF
+    k_hi = (k_codes[pair_offs * 2 + 1] & 0xF) << 4
+    k_packed = (k_lo | k_hi).to(tl.uint8)
+
+    v_lo = v_codes[pair_offs * 2] & 0xF
+    v_hi = (v_codes[pair_offs * 2 + 1] & 0xF) << 4
+    v_packed = (v_lo | v_hi).to(tl.uint8)
+
+    # Store packed FP4 data
+    packed_offset = group_idx * (QUANT_GROUP_SIZE // 2)
+    tl.store(key_cache_ptr + cache_base_k + packed_offset + pair_offs,
+             k_packed)
+    tl.store(value_cache_ptr + cache_base_v + packed_offset + pair_offs,
+             v_packed)
+
+    # Store block scales as FP8 E4M3 (bitcast to uint8)
+    scale_offset = packed_head_size + group_idx
+    k_scale_fp8 = k_block_scale.to(tl.float8e4nv)
+    v_scale_fp8 = v_block_scale.to(tl.float8e4nv)
+    tl.store(key_cache_ptr + cache_base_k + scale_offset,
+             k_scale_fp8.to(tl.uint8, bitcast=True))
+    tl.store(value_cache_ptr + cache_base_v + scale_offset,
+             v_scale_fp8.to(tl.uint8, bitcast=True))
+
+
+def triton_reshape_and_cache_nvfp4(
+    key: torch.Tensor,         # [num_tokens, num_heads, head_size]
+    value: torch.Tensor,       # [num_tokens, num_heads, head_size]
+    key_cache: torch.Tensor,   # [num_blocks, block_size, num_heads, eff_head_size]
+    value_cache: torch.Tensor, # [num_blocks, block_size, num_heads, eff_head_size]
+    slot_mapping: torch.Tensor,  # [num_tokens]
+    k_scale: torch.Tensor,    # global K scale (float32)
+    v_scale: torch.Tensor,    # global V scale (float32)
+):
+    """Quantize K/V to NVFP4 and store in paged KV cache.
+
+    The cache layout per head per token is:
+      [packed_fp4_data (head_size//2 bytes)] [block_scales (head_size//16 bytes)]
+
+    Args:
+        key: Input key tensor in BF16/FP16.
+        value: Input value tensor in BF16/FP16.
+        key_cache: Pre-allocated key cache (uint8).
+        value_cache: Pre-allocated value cache (uint8).
+        slot_mapping: Maps token index to cache slot.
+        k_scale: Global key scale factor (second-level SF).
+        v_scale: Global value scale factor (second-level SF).
+    """
+    num_tokens = key.shape[0]
+    num_heads = key.shape[1]
+    head_size = key.shape[2]
+
+    assert head_size % NVFP4_QUANT_BLOCK_SIZE == 0
+    packed_head_size = head_size // 2
+    scale_head_size = head_size // NVFP4_QUANT_BLOCK_SIZE
+    num_groups = head_size // NVFP4_QUANT_BLOCK_SIZE
+
+    block_size = key_cache.shape[1]
+    cache_block_stride = key_cache.stride(0)
+    cache_page_stride = key_cache.stride(1)
+    cache_head_stride = key_cache.stride(2)
+
+    grid = (num_tokens, num_heads, num_groups)
+
+    reshape_and_cache_nvfp4_kernel[grid](
+        key_ptr=key,
+        value_ptr=value,
+        key_cache_ptr=key_cache,
+        value_cache_ptr=value_cache,
+        slot_mapping_ptr=slot_mapping,
+        k_scale_ptr=k_scale,
+        v_scale_ptr=v_scale,
+        key_stride=key.stride(0),
+        value_stride=value.stride(0),
+        cache_block_stride=cache_block_stride,
+        cache_page_stride=cache_page_stride,
+        cache_head_stride=cache_head_stride,
+        num_heads=num_heads,
+        head_size=head_size,
+        block_size=block_size,
+        QUANT_GROUP_SIZE=NVFP4_QUANT_BLOCK_SIZE,
+        packed_head_size=packed_head_size,
+        scale_head_size=scale_head_size,
+        num_warps=4,
+        num_stages=2,
     )

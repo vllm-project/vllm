@@ -19,6 +19,7 @@ CacheDType = Literal[
     "fp8_e5m2",
     "fp8_inc",
     "fp8_ds_mla",
+    "nvfp4",
 ]
 MambaDType = Literal["auto", "float32", "float16"]
 MambaCacheMode = Literal["all", "align", "none"]
@@ -213,5 +214,11 @@ class CacheConfig:
                 "memory footprint and boosts the performance. "
                 "Meanwhile, it may cause accuracy drop without a proper "
                 "scaling factor."
+            )
+        elif cache_dtype == "nvfp4":
+            logger.info(
+                "Using nvfp4 data type to store kv cache. It reduces the GPU "
+                "memory footprint significantly. Meanwhile, it may cause "
+                "accuracy drop without proper scaling factors."
             )
         return cache_dtype
