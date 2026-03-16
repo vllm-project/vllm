@@ -31,13 +31,23 @@ def chunk_gated_delta_rule_fwd(
     initial_state: torch.Tensor,
     output_final_state: bool,
     cu_seqlens: torch.Tensor | None = None,
+    cu_seqlens_cpu: torch.Tensor | None = None,
 ):
-    g = chunk_local_cumsum(g, chunk_size=64, cu_seqlens=cu_seqlens)
+    g = chunk_local_cumsum(
+        g, chunk_size=64, cu_seqlens=cu_seqlens, cu_seqlens_cpu=cu_seqlens_cpu
+    )
     # obtain WY representation. u is actually the new v.
     A = chunk_scaled_dot_kkt_fwd(
-        k=k, beta=beta, g=g, cu_seqlens=cu_seqlens, output_dtype=torch.float32
+        k=k,
+        beta=beta,
+        g=g,
+        cu_seqlens=cu_seqlens,
+        output_dtype=torch.float32,
+        cu_seqlens_cpu=cu_seqlens_cpu,
     )
-    A = solve_tril(A=A, cu_seqlens=cu_seqlens, output_dtype=k.dtype)
+    A = solve_tril(
+        A=A, cu_seqlens=cu_seqlens, output_dtype=k.dtype, cu_seqlens_cpu=cu_seqlens_cpu
+    )
     w, u = recompute_w_u_fwd(
         k=k,
         v=v,
@@ -45,6 +55,7 @@ def chunk_gated_delta_rule_fwd(
         A=A,
         g_cumsum=g,
         cu_seqlens=cu_seqlens,
+        cu_seqlens_cpu=cu_seqlens_cpu,
     )
     h, v_new, final_state = chunk_gated_delta_rule_fwd_h(
         k=k,
@@ -54,6 +65,7 @@ def chunk_gated_delta_rule_fwd(
         initial_state=initial_state,
         output_final_state=output_final_state,
         cu_seqlens=cu_seqlens,
+        cu_seqlens_cpu=cu_seqlens_cpu,
     )
     o = chunk_fwd_o(
         q=q,
@@ -63,6 +75,7 @@ def chunk_gated_delta_rule_fwd(
         g=g,
         scale=scale,
         cu_seqlens=cu_seqlens,
+        cu_seqlens_cpu=cu_seqlens_cpu,
     )
     if SUPPRESS_LEVEL < 3:
         return g, o, A, final_state, None, None, None
@@ -86,6 +99,7 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
         output_final_state: bool,
         cu_seqlens: torch.Tensor | None = None,
         use_qk_l2norm_in_kernel: bool = False,
+        cu_seqlens_cpu: torch.Tensor | None = None,
     ):
         if use_qk_l2norm_in_kernel:
             q = l2norm_fwd(q)
@@ -101,6 +115,7 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
             initial_state=initial_state,
             output_final_state=output_final_state,
             cu_seqlens=cu_seqlens,
+            cu_seqlens_cpu=cu_seqlens_cpu,
         )
         ctx.scale = scale
         ctx.use_qk_l2norm_in_kernel = use_qk_l2norm_in_kernel
@@ -119,6 +134,7 @@ def chunk_gated_delta_rule(
     output_final_state: bool = False,
     cu_seqlens: torch.Tensor | None = None,
     use_qk_l2norm_in_kernel: bool = False,
+    cu_seqlens_cpu: torch.Tensor | None = None,
 ):
     r"""
     Args:
@@ -215,5 +231,6 @@ def chunk_gated_delta_rule(
         output_final_state,
         cu_seqlens,
         use_qk_l2norm_in_kernel,
+        cu_seqlens_cpu,
     )
     return o, final_state

@@ -216,6 +216,7 @@ class ChunkGatedDeltaRule(CustomOp):
         output_final_state: bool,
         cu_seqlens: torch.Tensor | None = None,
         use_qk_l2norm_in_kernel: bool = True,
+        cu_seqlens_cpu: torch.Tensor | None = None,
     ):
         return fi_chunk_gated_delta_rule(
             q=q,
@@ -240,6 +241,7 @@ class ChunkGatedDeltaRule(CustomOp):
         output_final_state: bool,
         cu_seqlens: torch.Tensor | None = None,
         use_qk_l2norm_in_kernel: bool = True,
+        cu_seqlens_cpu: torch.Tensor | None = None,
     ):
         return fla_chunk_gated_delta_rule(
             q=q,
@@ -251,6 +253,7 @@ class ChunkGatedDeltaRule(CustomOp):
             output_final_state=output_final_state,
             cu_seqlens=cu_seqlens,
             use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+            cu_seqlens_cpu=cu_seqlens_cpu,
         )
 
 
@@ -770,7 +773,8 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                 device=device,
                 dtype=state_dtype,
             )
-            cu_seqlens = torch.tensor([0, T], device=device, dtype=torch.int32)
+            cu_seqlens_cpu = torch.tensor([0, T], dtype=torch.int32)
+            cu_seqlens = cu_seqlens_cpu.to(device=device, non_blocking=True)
 
             try:
                 self.chunk_gated_delta_rule(
@@ -783,6 +787,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                     output_final_state=True,
                     cu_seqlens=cu_seqlens,
                     use_qk_l2norm_in_kernel=True,
+                    cu_seqlens_cpu=cu_seqlens_cpu,
                 )
             except Exception:
                 logger.warning(
@@ -992,6 +997,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                 output_final_state=True,
                 cu_seqlens=non_spec_query_start_loc,
                 use_qk_l2norm_in_kernel=True,
+                cu_seqlens_cpu=attn_metadata.non_spec_query_start_loc_cpu,
             )
             # Init cache
             ssm_state[non_spec_state_indices_tensor] = last_recurrent_state.to(

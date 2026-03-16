@@ -165,6 +165,7 @@ def chunk_local_cumsum_scalar(
     cu_seqlens: torch.Tensor | None = None,
     head_first: bool = False,
     output_dtype: torch.dtype | None = torch.float,
+    cu_seqlens_cpu: torch.Tensor | None = None,
 ) -> torch.Tensor:
     if head_first:
         B, H, T = g.shape
@@ -175,7 +176,9 @@ def chunk_local_cumsum_scalar(
     )
     BT = chunk_size
     chunk_indices = (
-        prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+        prepare_chunk_indices(cu_seqlens, BT, cu_seqlens_cpu)
+        if cu_seqlens is not None
+        else None
     )
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     g_org, g = g, torch.empty_like(g, dtype=output_dtype or g.dtype)
@@ -202,6 +205,7 @@ def chunk_local_cumsum_vector(
     cu_seqlens: torch.Tensor | None = None,
     head_first: bool = False,
     output_dtype: torch.dtype | None = torch.float,
+    cu_seqlens_cpu: torch.Tensor | None = None,
 ) -> torch.Tensor:
     if head_first:
         B, H, T, S = g.shape
@@ -209,7 +213,7 @@ def chunk_local_cumsum_vector(
         B, T, H, S = g.shape
     BT = chunk_size
     chunk_indices = (
-        prepare_chunk_indices(cu_seqlens, chunk_size)
+        prepare_chunk_indices(cu_seqlens, chunk_size, cu_seqlens_cpu)
         if cu_seqlens is not None
         else None
     )
@@ -250,6 +254,7 @@ def chunk_local_cumsum(
     cu_seqlens: torch.Tensor | None = None,
     head_first: bool = False,
     output_dtype: torch.dtype | None = torch.float,
+    cu_seqlens_cpu: torch.Tensor | None = None,
     **kwargs,
 ) -> torch.Tensor:
     if not head_first and g.shape[1] < g.shape[2]:
@@ -266,11 +271,11 @@ def chunk_local_cumsum(
         )
     if len(g.shape) == 3:
         return chunk_local_cumsum_scalar(
-            g, chunk_size, reverse, cu_seqlens, head_first, output_dtype
+            g, chunk_size, reverse, cu_seqlens, head_first, output_dtype, cu_seqlens_cpu
         )
     elif len(g.shape) == 4:
         return chunk_local_cumsum_vector(
-            g, chunk_size, reverse, cu_seqlens, head_first, output_dtype
+            g, chunk_size, reverse, cu_seqlens, head_first, output_dtype, cu_seqlens_cpu
         )
     else:
         raise ValueError(
