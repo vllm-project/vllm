@@ -239,6 +239,50 @@ class KVCacheCoordinator(ABC):
             for manager in self.single_type_managers
         )
 
+    def touch_computed_blocks(
+        self, computed_blocks: tuple[Sequence[KVCacheBlock], ...]
+    ) -> None:
+        """Immediately pin the cached blocks returned by find_longest_cache_hit
+        so that they cannot be evicted or re-allocated to another request
+        before allocate_new_computed_blocks() is called.
+
+        This closes the TOCTOU window that exists between get_computed_blocks()
+        and allocate_slots(): without this pre-touch, a block with ref_cnt==0
+        (an eviction candidate) could be stolen by a concurrent request's
+        allocate_new_blocks() call in the same scheduling step, causing the
+        original request to read stale KV data (token bleed).
+
+        Must be paired with either allocate_new_computed_blocks() (which will
+        see the blocks are already touched) or release_computed_blocks() if
+        the allocation cannot proceed.
+
+        Args:
+            computed_blocks: The cached hit blocks returned by
+                find_longest_cache_hit, grouped by kv cache group.
+        """
+        if not self.enable_caching:
+            return
+        for group_blocks in computed_blocks:
+            self.block_pool.touch(group_blocks)
+
+    def release_computed_blocks(
+        self, computed_blocks: tuple[Sequence[KVCacheBlock], ...]
+    ) -> None:
+        """Undo the pre-touch performed by touch_computed_blocks().
+
+        Called when allocate_slots() cannot schedule a request (returns None)
+        so that the blocks pinned by touch_computed_blocks() are released back
+        to the eviction-candidate pool instead of being held unnecessarily.
+
+        Args:
+            computed_blocks: The same block tuple that was passed to
+                touch_computed_blocks().
+        """
+        if not self.enable_caching:
+            return
+        for group_blocks in computed_blocks:
+            self.block_pool.free_blocks(group_blocks)
+
     @abstractmethod
     def find_longest_cache_hit(
         self,
