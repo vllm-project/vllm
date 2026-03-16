@@ -400,7 +400,14 @@ class SpecDecodeBaseProposer:
         slot_mappings: dict[str, torch.Tensor]
         | list[dict[str, torch.Tensor]]
         | None = None,
+        num_speculative_tokens: int | None = None,
     ) -> torch.Tensor:
+        # Use provided K or fall back to configured value
+        effective_k = (
+            num_speculative_tokens
+            if num_speculative_tokens is not None
+            else self.num_speculative_tokens
+        )
         batch_size = common_attn_metadata.batch_size()
 
         if self.method == "eagle3":
@@ -480,10 +487,18 @@ class SpecDecodeBaseProposer:
 
         sample_hidden_states = last_hidden_states[token_indices_to_sample]
 
+        # No draft tokens requested (e.g., dynamic SD decided K=0).
+        # The prefill forward pass above already ran to keep the drafter
+        # KV cache in sync, so just return an empty tensor.
+        if effective_k == 0:
+            return torch.empty(
+                batch_size, 0, device=sample_hidden_states.device, dtype=torch.int64
+            )
+
         # Early exit if there is only one draft token to be generated.
-        if self.num_speculative_tokens == 1 or self.parallel_drafting:
+        if effective_k == 1 or self.parallel_drafting:
             draft_token_ids = self._greedy_sample(sample_hidden_states)
-            return draft_token_ids.view(-1, self.num_speculative_tokens)
+            return draft_token_ids.view(-1, effective_k)
 
         if self.uses_mrope:
             positions = self.mrope_positions[:, token_indices_to_sample]
@@ -535,7 +550,7 @@ class SpecDecodeBaseProposer:
         # to remove the "padding" (i.e. rejected tokens).
         # Only apply this adjustment when we have rejected tokens
         # (i.e., not the first proposal).
-        if self.num_speculative_tokens > 1 and num_rejected_tokens_gpu is not None:
+        if effective_k > 1 and num_rejected_tokens_gpu is not None:
             common_attn_metadata.seq_lens -= num_rejected_tokens_gpu
             # Invalidate the CPU-side shadows to avoid H<>D sync.
             common_attn_metadata._seq_lens_cpu = None
@@ -543,7 +558,7 @@ class SpecDecodeBaseProposer:
 
         block_size = self.block_size
         assert block_size > 0, "block_size has not been initialized."
-        for token_index in range(self.num_speculative_tokens - 1):
+        for token_index in range(effective_k - 1):
             # Update the inputs.
             # cast to int32 is crucial when eagle model is compiled.
             # tensor.argmax() returns int64 by default.
