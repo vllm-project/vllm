@@ -1570,8 +1570,9 @@ class Scheduler(SchedulerInterface):
             events=request.take_events(),
             trace_headers=request.trace_headers,
             stop_reason=request.stop_reason,
-            num_cached_tokens=request.num_cached_tokens,
         )
+        if request.num_cached_tokens > 0:
+            output.num_cached_tokens = request.num_cached_tokens
         outputs[request.client_index].append(output)
 
     def _handle_stopped_request(self, request: Request) -> bool:
