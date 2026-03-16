@@ -243,7 +243,7 @@ Supported models:
 
 * `ibm-granite/granite-4.0-h-small` and other Granite 4.0 models
 
-    Recommended flags: `--tool-call-parser hermes`
+    Recommended flags: `--tool-call-parser granite4`
 
 * `ibm-granite/granite-3.0-8b-instruct`
 
