@@ -67,6 +67,8 @@ class TrtLlmNvFp4ExpertsBase:
         # Recompute g1_scale_c since g1_alphas was just fused in-place.
         # Register as a layer parameter so EPLB rearranges it alongside
         # other expert weights.
+        assert self.quant_config.g1_alphas is not None
+        assert self.quant_config.a2_gscale is not None
         if self.moe_config.is_act_and_mul:
             g1_scale_c = self.quant_config.g1_alphas * self.quant_config.a2_gscale
         else:
