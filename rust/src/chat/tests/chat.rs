@@ -1,15 +1,17 @@
 use std::collections::BTreeSet;
 use std::convert::TryFrom;
+use std::fmt;
 use std::net::TcpListener;
 use std::sync::Arc;
 use std::time::Duration;
 
 use futures::StreamExt as _;
 use smg_tokenizer::{ChatTemplateState, Decoder, Encoder, Encoding, SpecialTokens, TokenizerTrait};
+use thiserror_ext::AsReport as _;
 use tokio::time::timeout;
 use vllm_chat::{
-    ChatEvent, ChatLlm, ChatMessage, ChatOptions, ChatRenderer, ChatRequest, ChatRole,
-    SmgTokenizer, SmgTokenizerChatRenderer, Tokenizer,
+    ChatBackend, ChatEvent, ChatLlm, ChatMessage, ChatOptions, ChatRequest, ChatRole,
+    SmgChatBackend,
 };
 use vllm_engine_core_client::protocol::handshake::{HandshakeInitMessage, ReadyMessage};
 use vllm_engine_core_client::protocol::{
@@ -118,11 +120,7 @@ async fn setup_mock_engine(
     (dealer, push)
 }
 
-async fn connect_chat_llm(
-    handshake_address: String,
-    renderer: Arc<dyn ChatRenderer>,
-    tokenizer: Arc<dyn Tokenizer>,
-) -> ChatLlm {
+async fn connect_chat_llm(handshake_address: String, backend: Arc<dyn ChatBackend>) -> ChatLlm {
     let client = EngineCoreClient::connect(EngineCoreClientConfig {
         handshake_address,
         local_host: "127.0.0.1".to_string(),
@@ -131,7 +129,7 @@ async fn connect_chat_llm(
     })
     .await
     .unwrap();
-    ChatLlm::new(Llm::new(client), renderer, tokenizer)
+    ChatLlm::new(Llm::new(client), backend)
 }
 
 struct FakeTemplateTokenizer {
@@ -211,10 +209,54 @@ impl TokenizerTrait for FakeTemplateTokenizer {
     }
 }
 
-#[derive(Debug)]
-struct ByteTokenizer;
+#[derive(Clone)]
+struct FakeChatBackend {
+    template: String,
+}
 
-impl Tokenizer for ByteTokenizer {
+impl fmt::Debug for FakeChatBackend {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FakeChatBackend").finish_non_exhaustive()
+    }
+}
+
+impl FakeChatBackend {
+    fn new(template: &str) -> Self {
+        Self {
+            template: template.to_string(),
+        }
+    }
+}
+
+impl ChatBackend for FakeChatBackend {
+    fn apply_chat_template(&self, request: &ChatRequest) -> vllm_chat::Result<String> {
+        let tokenizer = FakeTemplateTokenizer::new(&self.template)
+            .map_err(|error| vllm_chat::Error::Tokenizer(error.to_report_string()))?;
+        let messages = request
+            .messages
+            .iter()
+            .map(|message| {
+                serde_json::json!({ "role": message.role.as_str(), "content": message.content })
+            })
+            .collect::<Vec<_>>();
+        let mut template_kwargs = request.chat_options.template_kwargs.clone();
+        template_kwargs.insert(
+            "continue_final_message".to_string(),
+            serde_json::Value::Bool(request.chat_options.continue_final_message),
+        );
+        tokenizer
+            .apply_chat_template(
+                &messages,
+                smg_tokenizer::chat_template::ChatTemplateParams {
+                    add_generation_prompt: request.chat_options.add_generation_prompt,
+                    tools: None,
+                    documents: None,
+                    template_kwargs: Some(&template_kwargs),
+                },
+            )
+            .map_err(|error| vllm_chat::Error::Tokenizer(error.to_report_string()))
+    }
+
     fn encode(&self, text: &str, _add_special_tokens: bool) -> vllm_chat::Result<Vec<u32>> {
         Ok(text.bytes().map(u32::from).collect())
     }
@@ -222,6 +264,25 @@ impl Tokenizer for ByteTokenizer {
     fn decode(&self, token_ids: &[u32], _skip_special_tokens: bool) -> vllm_chat::Result<String> {
         let bytes = token_ids.iter().map(|id| *id as u8).collect::<Vec<_>>();
         Ok(String::from_utf8(bytes).unwrap())
+    }
+}
+
+#[derive(Debug)]
+struct FailingDecodeBackend {
+    inner: FakeChatBackend,
+}
+
+impl ChatBackend for FailingDecodeBackend {
+    fn apply_chat_template(&self, request: &ChatRequest) -> vllm_chat::Result<String> {
+        self.inner.apply_chat_template(request)
+    }
+
+    fn encode(&self, text: &str, add_special_tokens: bool) -> vllm_chat::Result<Vec<u32>> {
+        self.inner.encode(text, add_special_tokens)
+    }
+
+    fn decode(&self, _token_ids: &[u32], _skip_special_tokens: bool) -> vllm_chat::Result<String> {
+        Err(vllm_chat::Error::Tokenizer("decode failed".to_string()))
     }
 }
 
@@ -300,16 +361,10 @@ async fn chat_streams_text_events() {
         }
     });
 
-    let renderer: Arc<dyn ChatRenderer> = Arc::new(SmgTokenizerChatRenderer::new(
-        SmgTokenizer::from_arc(Arc::new(
-            FakeTemplateTokenizer::new(
-                "{% for message in messages %}{{ message.role }}: {{ message.content }}\n{% endfor %}{% if add_generation_prompt %}assistant:{% endif %}",
-            )
-            .unwrap(),
-        )),
+    let backend: Arc<dyn ChatBackend> = Arc::new(FakeChatBackend::new(
+        "{% for message in messages %}{{ message.role }}: {{ message.content }}\n{% endfor %}{% if add_generation_prompt %}assistant:{% endif %}",
     ));
-    let tokenizer: Arc<dyn Tokenizer> = Arc::new(ByteTokenizer);
-    let chat = connect_chat_llm(handshake_address, renderer, tokenizer).await;
+    let chat = connect_chat_llm(handshake_address, backend).await;
 
     let mut stream = chat.chat(sample_request("chat-1")).await.unwrap();
 
@@ -359,26 +414,11 @@ fn chat_request_rejects_conflicting_generation_modes() {
 }
 
 #[test]
-fn renderer_requires_a_template() {
+fn backend_requires_a_template() {
     let request = sample_request("chat-3");
-    let renderer = SmgTokenizerChatRenderer::new(SmgTokenizer::from_arc(Arc::new(
-        FakeTemplateTokenizer::empty(),
-    )));
-    let error = renderer.render(&request).unwrap_err();
+    let backend = SmgChatBackend::from_inner(Arc::new(FakeTemplateTokenizer::empty()));
+    let error = backend.apply_chat_template(&request).unwrap_err();
     assert!(matches!(error, vllm_chat::Error::MissingChatTemplate));
-}
-
-#[derive(Debug)]
-struct FailingDecodeTokenizer;
-
-impl Tokenizer for FailingDecodeTokenizer {
-    fn encode(&self, text: &str, _add_special_tokens: bool) -> vllm_chat::Result<Vec<u32>> {
-        Ok(text.bytes().map(u32::from).collect())
-    }
-
-    fn decode(&self, _token_ids: &[u32], _skip_special_tokens: bool) -> vllm_chat::Result<String> {
-        Err(vllm_chat::Error::Tokenizer("decode failed".to_string()))
-    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -403,14 +443,10 @@ async fn chat_stream_reports_decode_failure_as_error_event() {
         }
     });
 
-    let renderer: Arc<dyn ChatRenderer> = Arc::new(SmgTokenizerChatRenderer::new(
-        SmgTokenizer::from_arc(Arc::new(
-            FakeTemplateTokenizer::new("{{ messages[0].role }}: {{ messages[0].content }}")
-                .unwrap(),
-        )),
-    ));
-    let tokenizer: Arc<dyn Tokenizer> = Arc::new(FailingDecodeTokenizer);
-    let chat = connect_chat_llm(handshake_address, renderer, tokenizer).await;
+    let backend: Arc<dyn ChatBackend> = Arc::new(FailingDecodeBackend {
+        inner: FakeChatBackend::new("{{ messages[0].role }}: {{ messages[0].content }}"),
+    });
+    let chat = connect_chat_llm(handshake_address, backend).await;
 
     let mut stream = chat.chat(sample_request("chat-4")).await.unwrap();
     assert_eq!(stream.request_id(), "chat-4");

@@ -1,56 +1,107 @@
-use serde_json::json;
+use std::collections::HashMap;
+use std::fmt;
+use std::sync::Arc;
 
-use super::SmgTokenizer;
+use serde_json::json;
+use smg_tokenizer::TokenizerTrait as SmgTokenizerTrait;
+use smg_tokenizer::chat_template::ChatTemplateParams;
+use smg_tokenizer::factory::create_tokenizer_async;
+use thiserror_ext::AsReport as _;
+
+use crate::backend::ChatBackend;
 use crate::error::{Error, Result};
-use crate::renderer::{ChatRenderer, RenderedPrompt};
 use crate::request::ChatRequest;
 
-/// [`ChatRenderer`] implementation backed by [`SmgTokenizer`]'s chat-template support.
-///
-/// This currently supports only string-style chat templates, matching `ChatMessage { content:
-/// String }`.
-#[derive(Debug, Clone)]
-pub struct SmgTokenizerChatRenderer {
-    tokenizer: SmgTokenizer,
+/// [`ChatBackend`] implementation backed by the crates.io `llm-tokenizer` package, imported here
+/// as `smg_tokenizer`.
+#[derive(Clone)]
+pub struct SmgChatBackend {
+    inner: Arc<dyn SmgTokenizerTrait>,
 }
 
-impl SmgTokenizerChatRenderer {
-    /// Create a renderer from an SMG-backed tokenizer.
-    pub fn new(tokenizer: SmgTokenizer) -> Self {
-        Self { tokenizer }
+impl fmt::Debug for SmgChatBackend {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SmgChatBackend").finish_non_exhaustive()
     }
 }
 
-impl ChatRenderer for SmgTokenizerChatRenderer {
-    fn render(&self, request: &ChatRequest) -> Result<RenderedPrompt> {
+impl SmgChatBackend {
+    /// Load a tokenizer and any adjacent/default chat template for one model or local path.
+    pub async fn from_model_or_path(model_name_or_path: &str) -> Result<Self> {
+        let inner = create_tokenizer_async(model_name_or_path)
+            .await
+            .map_err(|error| Error::Tokenizer(error.to_report_string()))?;
+
+        Ok(Self { inner })
+    }
+
+    /// Wrap an existing smg-tokenizer trait object.
+    pub fn from_inner(inner: Arc<dyn SmgTokenizerTrait>) -> Self {
+        Self { inner }
+    }
+
+    fn apply_chat_template_inner(
+        &self,
+        request: &ChatRequest,
+        template_kwargs: Option<&HashMap<String, serde_json::Value>>,
+    ) -> Result<String> {
+        if !matches!(
+            self.inner.chat_template_content_format(),
+            smg_tokenizer::chat_template::ChatTemplateContentFormat::String
+        ) {
+            return Err(Error::UnsupportedChatTemplateFormat);
+        }
+
         let messages = request
             .messages
             .iter()
             .map(|message| json!({ "role": message.role.as_str(), "content": message.content }))
             .collect::<Vec<_>>();
-        let template_kwargs = (!request.chat_options.template_kwargs.is_empty())
-            .then_some(&request.chat_options.template_kwargs);
+        let mut merged_template_kwargs = template_kwargs.cloned().unwrap_or_default();
+        merged_template_kwargs.insert(
+            "continue_final_message".to_string(),
+            serde_json::Value::Bool(request.chat_options.continue_final_message),
+        );
 
-        if !self.tokenizer.supports_string_chat_template() {
-            return Err(Error::UnsupportedChatTemplateFormat);
-        }
+        self.inner
+            .apply_chat_template(
+                &messages,
+                ChatTemplateParams {
+                    add_generation_prompt: request.chat_options.add_generation_prompt,
+                    tools: None,
+                    documents: None,
+                    template_kwargs: Some(&merged_template_kwargs),
+                },
+            )
+            .map_err(|error| Error::Tokenizer(error.to_report_string()))
+    }
+}
 
-        let prompt = match self.tokenizer.apply_chat_template(
-            &messages,
-            request.chat_options.add_generation_prompt,
-            request.chat_options.continue_final_message,
-            template_kwargs,
-        ) {
-            Ok(prompt) => prompt,
+impl ChatBackend for SmgChatBackend {
+    fn apply_chat_template(&self, request: &ChatRequest) -> Result<String> {
+        match self.apply_chat_template_inner(request, Some(&request.chat_options.template_kwargs)) {
+            Ok(prompt) => Ok(prompt),
             Err(Error::Tokenizer(message))
                 if message.contains("tokenizer.chat_template is not set") =>
             {
-                return Err(Error::MissingChatTemplate);
+                Err(Error::MissingChatTemplate)
             }
-            Err(error) => return Err(error),
-        };
+            Err(error) => Err(error),
+        }
+    }
 
-        Ok(RenderedPrompt::Text { prompt })
+    fn encode(&self, text: &str, add_special_tokens: bool) -> Result<Vec<u32>> {
+        let encoding = self
+            .inner
+            .encode(text, add_special_tokens)
+            .map_err(|error| Error::Tokenizer(error.to_report_string()))?;
+        Ok(encoding.token_ids().to_vec())
+    }
+
+    fn decode(&self, token_ids: &[u32], skip_special_tokens: bool) -> Result<String> {
+        self.inner
+            .decode(token_ids, skip_special_tokens)
+            .map_err(|error| Error::Tokenizer(error.to_report_string()))
     }
 }
 
@@ -63,10 +114,9 @@ mod tests {
         ChatTemplateState, Decoder, Encoder, Encoding, SpecialTokens, TokenizerTrait,
     };
 
-    use super::SmgTokenizerChatRenderer;
-    use crate::renderer::{ChatRenderer, RenderedPrompt};
+    use super::SmgChatBackend;
+    use crate::backend::ChatBackend;
     use crate::request::{ChatMessage, ChatOptions, ChatRequest, ChatRole};
-    use crate::smg::SmgTokenizer;
 
     struct FakeSmgTokenizer {
         chat_template: ChatTemplateState,
@@ -139,14 +189,13 @@ mod tests {
     }
 
     #[test]
-    fn smg_tokenizer_renderer_supports_pycompat_templates() {
-        let tokenizer = SmgTokenizer::from_arc(Arc::new(
+    fn smg_chat_backend_supports_pycompat_templates() {
+        let backend = SmgChatBackend::from_inner(Arc::new(
             FakeSmgTokenizer::new(
                 "{% for message in messages %}{% if message.content.startswith('<think>') %}think{% else %}plain{% endif %}{% endfor %}",
             )
             .unwrap(),
         ));
-        let renderer = SmgTokenizerChatRenderer::new(tokenizer);
         let request = ChatRequest {
             request_id: "render-1".to_string(),
             messages: vec![ChatMessage {
@@ -157,23 +206,17 @@ mod tests {
             chat_options: ChatOptions::default(),
         };
 
-        assert_eq!(
-            renderer.render(&request).unwrap(),
-            RenderedPrompt::Text {
-                prompt: "think".to_string(),
-            }
-        );
+        assert_eq!(backend.apply_chat_template(&request).unwrap(), "think");
     }
 
     #[test]
-    fn smg_tokenizer_renderer_passes_continue_final_message_to_template() {
-        let tokenizer = SmgTokenizer::from_arc(Arc::new(
+    fn smg_chat_backend_passes_continue_final_message_to_template() {
+        let backend = SmgChatBackend::from_inner(Arc::new(
             FakeSmgTokenizer::new(
                 "{% if continue_final_message %}continue{% else %}new{% endif %}",
             )
             .unwrap(),
         ));
-        let renderer = SmgTokenizerChatRenderer::new(tokenizer);
         let mut request = ChatRequest {
             request_id: "render-2".to_string(),
             messages: vec![ChatMessage {
@@ -184,21 +227,11 @@ mod tests {
             chat_options: ChatOptions::default(),
         };
 
-        assert_eq!(
-            renderer.render(&request).unwrap(),
-            RenderedPrompt::Text {
-                prompt: "new".to_string(),
-            }
-        );
+        assert_eq!(backend.apply_chat_template(&request).unwrap(), "new");
 
         request.chat_options.continue_final_message = true;
         request.chat_options.add_generation_prompt = false;
 
-        assert_eq!(
-            renderer.render(&request).unwrap(),
-            RenderedPrompt::Text {
-                prompt: "continue".to_string(),
-            }
-        );
+        assert_eq!(backend.apply_chat_template(&request).unwrap(), "continue");
     }
 }

@@ -5,8 +5,7 @@ use clap::Parser;
 use futures::StreamExt as _;
 use tracing_subscriber::EnvFilter;
 use vllm_chat::{
-    ChatEvent, ChatLlm, ChatMessage, ChatOptions, ChatRequest, ChatRole, SmgTokenizer,
-    SmgTokenizerChatRenderer,
+    ChatEvent, ChatLlm, ChatMessage, ChatOptions, ChatRequest, ChatRole, SmgChatBackend,
 };
 use vllm_engine_core_client::protocol::SamplingParams;
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig};
@@ -45,10 +44,10 @@ fn init_tracing() {
 async fn main() -> Result<()> {
     init_tracing();
     let args = Args::parse();
-    let tokenizer = std::sync::Arc::new(
-        SmgTokenizer::from_model_or_path(&args.model)
+    let backend = std::sync::Arc::new(
+        SmgChatBackend::from_model_or_path(&args.model)
             .await
-            .with_context(|| format!("failed to load tokenizer for {}", args.model))?,
+            .with_context(|| format!("failed to load chat backend for {}", args.model))?,
     );
 
     let ready_timeout = Duration::from_secs(args.ready_timeout_secs);
@@ -73,8 +72,7 @@ async fn main() -> Result<()> {
     println!("ready_message={:?}", client.ready_message);
 
     let llm = Llm::new(client);
-    let renderer = std::sync::Arc::new(SmgTokenizerChatRenderer::new((*tokenizer).clone()));
-    let chat = ChatLlm::new(llm, renderer, tokenizer);
+    let chat = ChatLlm::new(llm, backend);
 
     let request = ChatRequest {
         request_id: request_id.clone(),

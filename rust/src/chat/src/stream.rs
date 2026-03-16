@@ -5,9 +5,9 @@ use futures::Stream;
 use futures_async_stream::try_stream;
 use vllm_llm::GenerateOutputStream;
 
+use crate::backend::DynChatBackend;
 use crate::error::{Error, Result};
 use crate::event::ChatEvent;
-use crate::tokenizer::DynTokenizer;
 
 /// Per-request stream of chat events.
 pub struct ChatEventStream {
@@ -18,11 +18,11 @@ pub struct ChatEventStream {
 impl ChatEventStream {
     pub(crate) fn new(
         request_id: String,
-        tokenizer: DynTokenizer,
+        backend: DynChatBackend,
         raw_stream: GenerateOutputStream,
     ) -> Self {
         Self {
-            inner: chat_event_stream(request_id.clone(), tokenizer, raw_stream),
+            inner: chat_event_stream(request_id.clone(), backend, raw_stream),
             request_id,
         }
     }
@@ -62,7 +62,7 @@ impl Stream for ChatEventStream {
 #[try_stream(boxed, ok = ChatEvent, error = Error)]
 async fn chat_event_stream(
     request_id: String,
-    tokenizer: DynTokenizer,
+    backend: DynChatBackend,
     raw_stream: GenerateOutputStream,
 ) {
     yield ChatEvent::Start;
@@ -72,7 +72,7 @@ async fn chat_event_stream(
     #[for_await]
     for next in raw_stream {
         let output: vllm_llm::GenerateOutput = next?;
-        let decoded = tokenizer.decode(&output.token_ids, false)?;
+        let decoded = backend.decode(&output.token_ids, false)?;
 
         let delta = suffix_after_lcp(&emitted_text, &decoded).to_string();
         emitted_text = decoded.clone();

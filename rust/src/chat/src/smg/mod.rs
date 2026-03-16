@@ -1,7 +1,5 @@
-//! SMG-backed chat rendering and tokenizer implementations.
+//! SMG-backed chat backend implementation.
 
-mod renderer;
-mod tokenizer;
+mod backend;
 
-pub use renderer::SmgTokenizerChatRenderer;
-pub use tokenizer::SmgTokenizer;
+pub use backend::SmgChatBackend;

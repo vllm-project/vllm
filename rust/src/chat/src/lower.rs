@@ -2,9 +2,7 @@ use vllm_engine_core_client::protocol::RequestOutputKind;
 use vllm_llm::GenerateRequest;
 
 use crate::error::Result;
-use crate::renderer::RenderedPrompt;
 use crate::request::ChatRequest;
-use crate::tokenizer::Tokenizer;
 
 #[derive(Debug)]
 pub(crate) struct PreparedChatRequest {
@@ -14,8 +12,7 @@ pub(crate) struct PreparedChatRequest {
 
 pub(crate) fn lower_chat_request(
     request: ChatRequest,
-    rendered: RenderedPrompt,
-    tokenizer: &dyn Tokenizer,
+    prompt_token_ids: Vec<u32>,
 ) -> Result<PreparedChatRequest> {
     let ChatRequest {
         request_id,
@@ -23,14 +20,6 @@ pub(crate) fn lower_chat_request(
         mut sampling_params,
         chat_options: _,
     } = request;
-
-    let (prompt_token_ids, _prompt_text) = match rendered {
-        RenderedPrompt::Text { prompt } => (tokenizer.encode(&prompt, false)?, Some(prompt)),
-        RenderedPrompt::Tokens {
-            prompt_token_ids,
-            prompt_text,
-        } => (prompt_token_ids, prompt_text),
-    };
 
     sampling_params.output_kind = RequestOutputKind::Cumulative;
 

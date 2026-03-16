@@ -11,8 +11,6 @@ pub enum Error {
     ConflictingGenerationPromptMode,
     #[error("chat template is required but none was configured")]
     MissingChatTemplate,
-    #[error("rendered token prompts are not supported by this chat renderer yet")]
-    UnsupportedRenderedTokens,
     #[error("only string-format chat templates are supported")]
     UnsupportedChatTemplateFormat,
     #[error("tokenizer error: {0}")]

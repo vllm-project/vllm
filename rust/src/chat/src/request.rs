@@ -16,6 +16,9 @@ pub enum ChatRole {
 }
 
 /// One text-only chat message.
+///
+/// Original Python API reference:
+/// <https://github.com/vllm-project/vllm/blob/bc2c0c86efb28e77677a3cfb8687e976914a313a/vllm/entrypoints/chat_utils.py#L309-L333>
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChatMessage {
     /// Semantic role used by the chat template.
@@ -78,7 +81,7 @@ impl ChatRequest {
 }
 
 impl ChatRole {
-    /// Return the chat-template role string used by the current text-only renderer.
+    /// Return the chat-template role string used by the current text-only chat backend.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::System => "system",
