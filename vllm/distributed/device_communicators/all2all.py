@@ -398,7 +398,8 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
         )
 
         assert num_rdma_bytes is not None
-        # TODO: remove platform-specific logic once ROCm DeepEP is updated with latest APIs.
+        # TODO: remove platform-specific logic
+        # once ROCm DeepEP is updated with the latest APIs.
         kwargs = dict(
             group=self.cpu_group,
             num_nvl_bytes=num_nvl_bytes,

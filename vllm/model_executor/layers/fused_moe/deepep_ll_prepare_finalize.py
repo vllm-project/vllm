@@ -297,7 +297,13 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         # Dispatch
         dispatch_topk_ids = self._map_global_to_physical_ids(topk_ids)
         if current_platform.is_rocm():
-            expert_x, expert_num_tokens, handle, _, hook = self.buffer.low_latency_dispatch(
+            (
+                expert_x,
+                expert_num_tokens,
+                handle,
+                _,
+                hook,
+            ) = self.buffer.low_latency_dispatch(
                 a1,
                 dispatch_topk_ids,
                 self.max_tokens_per_rank,
@@ -307,7 +313,13 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
                 return_recv_hook=True,
             )
         else:
-            expert_x, expert_num_tokens, handle, _, hook = self.buffer.low_latency_dispatch(
+            (
+                expert_x,
+                expert_num_tokens,
+                handle,
+                _,
+                hook,
+            ) = self.buffer.low_latency_dispatch(
                 a1,
                 dispatch_topk_ids,
                 self.max_tokens_per_rank,
