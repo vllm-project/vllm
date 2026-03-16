@@ -4,7 +4,6 @@
 from typing import TYPE_CHECKING, Any
 
 from pydantic import Field, field_validator
-from pydantic.dataclasses import dataclass
 
 from vllm.config.utils import config
 from vllm.logger import init_logger
@@ -21,7 +20,6 @@ logger = init_logger(__name__)
 
 
 @config
-@dataclass
 class LoadConfig:
     """Configuration for loading the model weights."""
 
@@ -31,6 +29,9 @@ class LoadConfig:
     back to the pytorch bin format if safetensors format is not available.\n
     - "pt" will load the weights in the pytorch bin format.\n
     - "safetensors" will load the weights in the safetensors format.\n
+    - "instanttensor" will load the Safetensors weights on CUDA devices using
+    InstantTensor, which enables distributed loading with pipelined prefetching
+    and fast direct I/O.\n
     - "npcache" will load the weights in pytorch format and store a numpy cache
     to speed up the loading.\n
     - "dummy" will initialize the weights with random values, which is mainly
@@ -48,7 +49,7 @@ class LoadConfig:
     - "gguf" will load weights from GGUF format files (details specified in
     https://github.com/ggml-org/ggml/blob/master/docs/gguf.md).\n
     - "mistral" will load weights from consolidated safetensors files used by
-    Mistral models.
+    Mistral models.\n
     - Other custom values can be supported via plugins."""
     download_dir: str | None = None
     """Directory to download and load the weights, default to the default

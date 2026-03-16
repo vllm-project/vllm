@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import dataclasses
 import itertools
+from collections.abc import Callable
 from typing import Any
 
 import torch
@@ -10,8 +12,10 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateCopyFunc,
 )
 from vllm.triton_utils import tl, triton
+from vllm.utils.math_utils import cdiv
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
+from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.gpu_input_batch import CachedRequestState
 from vllm.v1.worker.lora_model_runner_mixin import GPUInputBatch
 
@@ -58,10 +62,36 @@ def get_mamba_groups(kv_cache_config: KVCacheConfig) -> tuple[list[int], MambaSp
     return mamba_group_ids, mamba_specs[0]
 
 
+@dataclasses.dataclass
+class MambaCopyBuffers:
+    src_ptrs: CpuGpuBuffer
+    dst_ptrs: CpuGpuBuffer
+    sizes: CpuGpuBuffer
+    offset: int = 0
+
+    @classmethod
+    def create(
+        cls,
+        max_num_reqs: int,
+        kv_cache_config: KVCacheConfig,
+        copy_funcs: tuple[MambaStateCopyFunc, ...],
+        make_buffer: Callable[..., CpuGpuBuffer],
+    ) -> "MambaCopyBuffers":
+        mamba_group_ids, _ = get_mamba_groups(kv_cache_config)
+        entries_per_req = sum(
+            len(kv_cache_config.kv_cache_groups[gid].layer_names)
+            for gid in mamba_group_ids
+        ) * len(copy_funcs)
+        n = max_num_reqs * entries_per_req
+        return cls(
+            src_ptrs=make_buffer(n, dtype=torch.int64),
+            dst_ptrs=make_buffer(n, dtype=torch.int64),
+            sizes=make_buffer(n, dtype=torch.int32),
+        )
+
+
 def collect_mamba_copy_meta(
-    src_state_list: list[int],
-    dest_state_list: list[int],
-    num_elements_list: list[int],
+    copy_bufs: MambaCopyBuffers,
     kv_cache_config: KVCacheConfig,
     mamba_state_copy_funcs: tuple[MambaStateCopyFunc, ...],
     mamba_group_ids: list[int],
@@ -70,9 +100,14 @@ def collect_mamba_copy_meta(
     accept_token_bias: int,
     req_state: CachedRequestState,
     forward_context: dict[str, Any],
-):
+) -> None:
     if src_block_idx == dest_block_idx and accept_token_bias == 0:
         return
+
+    src_ptrs_np = copy_bufs.src_ptrs.np
+    dst_ptrs_np = copy_bufs.dst_ptrs.np
+    sizes_np = copy_bufs.sizes.np
+    offset = copy_bufs.offset
 
     for mamba_group_id in mamba_group_ids:
         block_ids = req_state.block_ids[mamba_group_id]
@@ -86,25 +121,23 @@ def collect_mamba_copy_meta(
                     state, block_ids, src_block_idx, accept_token_bias + 1
                 )
 
-                src_state_list.append(copy_spec.start_addr)
-                dest_state_list.append(state[dest_block_id].data_ptr())
-                num_elements_list.append(copy_spec.num_elements * state.element_size())
+                src_ptrs_np[offset] = copy_spec.start_addr
+                dst_ptrs_np[offset] = state[dest_block_id].data_ptr()
+                sizes_np[offset] = copy_spec.num_elements * state.element_size()
+                offset += 1
+
+    copy_bufs.offset = offset
 
 
-def do_mamba_copy_block(
-    src_state_list: list[int],
-    dest_state_list: list[int],
-    num_elements_list: list[int],
-):
-    if len(src_state_list) == 0:
+def do_mamba_copy_block(copy_bufs: MambaCopyBuffers):
+    n = copy_bufs.offset
+    if n == 0:
         return
-    assert len(src_state_list) == len(dest_state_list)
-    assert len(src_state_list) == len(num_elements_list)
-    src_state_ptrs = torch.tensor(src_state_list, device="cuda", dtype=torch.int64)
-    dst_state_ptrs = torch.tensor(dest_state_list, device="cuda", dtype=torch.int64)
-    num_elements = torch.tensor(num_elements_list, device="cuda", dtype=torch.int32)
-
-    batch_memcpy(src_state_ptrs, dst_state_ptrs, num_elements)
+    batch_memcpy(
+        copy_bufs.src_ptrs.copy_to_gpu(n),
+        copy_bufs.dst_ptrs.copy_to_gpu(n),
+        copy_bufs.sizes.copy_to_gpu(n),
+    )
 
 
 def preprocess_mamba(
@@ -116,6 +149,7 @@ def preprocess_mamba(
     requests: dict[str, CachedRequestState],
     forward_context: dict[str, Any],
     mamba_state_copy_funcs: tuple[MambaStateCopyFunc, ...],
+    copy_bufs: MambaCopyBuffers,
 ):
     """
     Copy the mamba state of previous step to the last
@@ -128,12 +162,16 @@ def preprocess_mamba(
     block_size = mamba_spec.block_size
     finished_req_ids = scheduler_output.finished_req_ids
     preempted_req_ids = scheduler_output.preempted_req_ids or set()
-    for req_id in itertools.chain(finished_req_ids, preempted_req_ids):
+    # We need to clear mamba_state_idx for resumed requests. When requests are
+    # force-preempted (e.g., during reset_prefix_cache / KV cache flush),
+    # they appear in resumed_req_ids without a corresponding entry in
+    # preempted_req_ids, leaving stale mamba_state_idx entries that can
+    # point to block indices beyond the new (smaller) block allocation.
+    resumed_req_ids = scheduler_output.scheduled_cached_reqs.resumed_req_ids
+    for req_id in itertools.chain(finished_req_ids, preempted_req_ids, resumed_req_ids):
         mamba_state_idx.pop(req_id, None)
 
-    src_state_list: list[int] = []
-    dest_state_list: list[int] = []
-    num_elements_list: list[int] = []
+    copy_bufs.offset = 0
     for i, req_id in enumerate(input_batch.req_ids):
         req_state = requests[req_id]
         prev_state_idx = mamba_state_idx.get(req_id)
@@ -142,7 +180,11 @@ def preprocess_mamba(
             # if num_computed_tokens is 0, prev_state_idx will be -1
             prev_state_idx = (req_state.num_computed_tokens - 1) // block_size
 
-        num_blocks = len(req_state.block_ids[mamba_group_ids[0]])
+        num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
+        num_blocks: int = (
+            cdiv(req_state.num_computed_tokens + num_scheduled_tokens, block_size)
+            + num_speculative_blocks
+        )
 
         # We always save the current running state at the last
         # (1 + num_speculative_blocks) block.
@@ -158,9 +200,7 @@ def preprocess_mamba(
         mamba_state_idx[req_id] = curr_state_idx
         if prev_state_idx != -1 and prev_state_idx != curr_state_idx:
             collect_mamba_copy_meta(
-                src_state_list,
-                dest_state_list,
-                num_elements_list,
+                copy_bufs,
                 kv_cache_config,
                 mamba_state_copy_funcs,
                 mamba_group_ids,
@@ -171,7 +211,7 @@ def preprocess_mamba(
                 forward_context,
             )
             input_batch.num_accepted_tokens_cpu[i] = 1
-    do_mamba_copy_block(src_state_list, dest_state_list, num_elements_list)
+    do_mamba_copy_block(copy_bufs)
 
 
 def postprocess_mamba(
@@ -182,6 +222,7 @@ def postprocess_mamba(
     mamba_state_idx: dict[str, int],
     forward_context: dict[str, Any],
     mamba_state_copy_funcs: tuple[MambaStateCopyFunc, ...],
+    copy_bufs: MambaCopyBuffers,
 ):
     """
     If a blocks is converted from partial block to full block in this step, copy the
@@ -192,9 +233,7 @@ def postprocess_mamba(
     num_accepted_tokens_cpu = input_batch.num_accepted_tokens_cpu
     # NOTE: can be optimized as this function always returns the same result
     mamba_group_ids, mamba_spec = get_mamba_groups(kv_cache_config)
-    src_state_list: list[int] = []
-    dest_state_list: list[int] = []
-    num_elements_list: list[int] = []
+    copy_bufs.offset = 0
     for i, req_id in enumerate(input_batch.req_ids):
         req_state = requests[req_id]
         num_computed_tokens = req_state.num_computed_tokens
@@ -214,9 +253,7 @@ def postprocess_mamba(
             src_block_idx = mamba_state_idx[req_id]
             dest_block_idx = aligned_new_computed_tokens // mamba_spec.block_size - 1
             collect_mamba_copy_meta(
-                src_state_list,
-                dest_state_list,
-                num_elements_list,
+                copy_bufs,
                 kv_cache_config,
                 mamba_state_copy_funcs,
                 mamba_group_ids,
@@ -228,4 +265,4 @@ def postprocess_mamba(
             )
             if src_block_idx == dest_block_idx:
                 num_accepted_tokens_cpu[i] = 1
-    do_mamba_copy_block(src_state_list, dest_state_list, num_elements_list)
+    do_mamba_copy_block(copy_bufs)

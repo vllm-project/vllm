@@ -3,17 +3,21 @@
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, TypeVar
 
-from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
 from vllm.logger import init_logger
+from vllm.multimodal.media.connector import merge_media_io_kwargs
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.import_utils import LazyLoader
 
 if TYPE_CHECKING:
     import torch
+
+    from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 else:
     torch = LazyLoader("torch", globals(), "torch")
+
+    ChatTemplateContentFormatOption = object
 
 logger = init_logger(__name__)
 
@@ -36,6 +40,34 @@ def merge_kwargs(
     return defaults | {k: v for k, v in overrides.items() if v not in unset_values}
 
 
+def recursively_merge_kwargs(
+    defaults: dict[str, Any] | None,
+    overrides: dict[str, Any] | None,
+    /,
+    *,
+    unset_values: tuple[object, ...] = (None, "auto"),
+) -> dict[str, Any]:
+    if defaults is None:
+        defaults = {}
+    if overrides is None:
+        overrides = {}
+
+    merged = dict(defaults)
+
+    for k, v in overrides.items():
+        if v in unset_values:
+            continue
+
+        if k in merged and isinstance(merged[k], dict) and isinstance(v, dict):
+            merged[k] = recursively_merge_kwargs(
+                merged[k], v, unset_values=unset_values
+            )
+        else:
+            merged[k] = v
+
+    return merged
+
+
 @dataclass(frozen=True)
 class ChatParams:
     """Configuration to control how to parse chat messages."""
@@ -43,14 +75,29 @@ class ChatParams:
     chat_template: str | None = None
     """The chat template to apply."""
 
-    chat_template_content_format: ChatTemplateContentFormatOption = "auto"
+    chat_template_content_format: "ChatTemplateContentFormatOption" = "auto"
     """The format of the chat template."""
 
     chat_template_kwargs: dict[str, Any] = field(default_factory=dict)
     """The kwargs to pass to the chat template."""
 
-    def with_defaults(self, default_chat_template_kwargs: dict[str, Any] | None):
-        if not default_chat_template_kwargs:
+    media_io_kwargs: dict[str, dict[str, Any]] | None = None
+    """Per-modality kwargs for media I/O (loading/decoding images, videos, etc.)."""
+
+    mm_processor_kwargs: dict[str, Any] | None = None
+    """The kwargs to pass to the multi-modal processor."""
+
+    def with_defaults(
+        self,
+        default_chat_template_kwargs: dict[str, Any] | None = None,
+        default_media_io_kwargs: dict[str, dict[str, Any]] | None = None,
+        default_mm_processor_kwargs: dict[str, Any] | None = None,
+    ):
+        if (
+            not default_chat_template_kwargs
+            and not default_media_io_kwargs
+            and not default_mm_processor_kwargs
+        ):
             return self
 
         return ChatParams(
@@ -59,6 +106,14 @@ class ChatParams:
             chat_template_kwargs=merge_kwargs(
                 default_chat_template_kwargs,
                 self.chat_template_kwargs,
+            ),
+            media_io_kwargs=merge_media_io_kwargs(
+                default_media_io_kwargs,
+                self.media_io_kwargs,
+            ),
+            mm_processor_kwargs=recursively_merge_kwargs(
+                default_mm_processor_kwargs,
+                self.mm_processor_kwargs,
             ),
         )
 
@@ -163,10 +218,7 @@ class TokenizeParams:
                 value=truncate_prompt_tokens,
             )
 
-    def with_kwargs(self, tokenization_kwargs: dict[str, Any] | None):
-        if tokenization_kwargs is None:
-            tokenization_kwargs = {}
-
+    def with_kwargs(self, **tokenization_kwargs: Any):
         max_length = tokenization_kwargs.pop("max_length", self.max_input_tokens)
         pad_prompt_tokens = tokenization_kwargs.pop(
             "pad_prompt_tokens", self.pad_prompt_tokens
@@ -229,23 +281,54 @@ class TokenizeParams:
         max_length = self.truncate_prompt_tokens
         if max_length is not None and max_length < 0:
             max_length = self.max_input_tokens
+        elif max_length is None and self.max_input_tokens is not None:
+            # This prevents tokenization from taking up more resources than necessary
+            # while still failing `self._token_len_check` as expected by users
+            max_length = self.max_input_tokens + 1
 
         return dict(
-            truncation=self.truncate_prompt_tokens is not None,
+            truncation=max_length is not None,
             max_length=max_length,
             add_special_tokens=self.add_special_tokens,
         )
 
-    def _apply_lowercase(self, tokenizer: TokenizerLike | None, text: str) -> str:
-        if self.do_lower_case:
-            text = text.lower()
+    def _text_len_check(self, tokenizer: TokenizerLike | None, text: str) -> str:
+        """Apply length checks to prompt text if necessary."""
+        max_input_tokens = self.max_input_tokens
+        if max_input_tokens is None:
+            return text
+
+        if self.truncate_prompt_tokens is None and tokenizer is not None:
+            max_input_chars = max_input_tokens * tokenizer.max_chars_per_token
+
+            if len(text) > max_input_chars:
+                # To save resources, fail the request outright without even
+                # attempting tokenization
+                raise VLLMValidationError(
+                    f"This model's maximum context length is "
+                    f"{self.max_total_tokens} tokens. However, you requested "
+                    f"{self.max_output_tokens} output tokens and your prompt "
+                    f"contains {len(text)} characters (more than "
+                    f"{max_input_chars} characters, which is the upper bound "
+                    f"for {max_input_tokens} input tokens). "
+                    f"Please reduce the length of the input prompt or the "
+                    f"number of requested output tokens.",
+                    parameter="input_text",
+                    value=len(text),
+                )
 
         return text
 
+    def _text_lowercase(self, tokenizer: TokenizerLike | None, text: str) -> str:
+        """Apply lowercase to prompt text if necessary."""
+        return text.lower() if self.do_lower_case else text
+
     def _validate_text(self, tokenizer: TokenizerLike | None, text: str) -> str:
         """Apply all validators to prompt text."""
-        # TODO: Implement https://github.com/vllm-project/vllm/pull/31366
-        for validator in (self._apply_lowercase,):
+        for validator in (
+            self._text_len_check,
+            self._text_lowercase,
+        ):
             text = validator(tokenizer, text)
 
         return text
@@ -265,8 +348,8 @@ class TokenizeParams:
 
         return prompt
 
-    def _apply_padding(self, tokenizer: TokenizerLike | None, tokens: _S) -> _S:
-        """Apply padding to a token sequence."""
+    def _token_padding(self, tokenizer: TokenizerLike | None, tokens: _S) -> _S:
+        """Apply padding to prompt tokens if necessary."""
         pad_length = self.pad_prompt_tokens
         if pad_length is not None and pad_length < 0:
             pad_length = self.max_input_tokens
@@ -281,8 +364,8 @@ class TokenizeParams:
 
         return tokens + [tokenizer.pad_token_id] * (pad_length - len(tokens))
 
-    def _apply_truncation(self, tokenizer: TokenizerLike | None, tokens: _S) -> _S:
-        """Apply truncation to a token sequence."""
+    def _token_truncation(self, tokenizer: TokenizerLike | None, tokens: _S) -> _S:
+        """Apply truncation to prompt tokens if necessary."""
         max_length = self.truncate_prompt_tokens
         if max_length is not None and max_length < 0:
             max_length = self.max_input_tokens
@@ -297,20 +380,29 @@ class TokenizeParams:
 
         return tokens[:max_length]
 
-    def _apply_length_check(self, tokenizer: TokenizerLike | None, tokens: _S) -> _S:
-        """Apply length checks to a token sequence."""
+    def _token_len_check(self, tokenizer: TokenizerLike | None, tokens: _S) -> _S:
+        """Apply length checks to prompt tokens if necessary."""
         max_input_tokens = self.max_input_tokens
+        if max_input_tokens is None:
+            return tokens
 
-        if max_input_tokens is not None and len(tokens) > max_input_tokens:
+        if len(tokens) > max_input_tokens:
+            token_count = len(tokens)
+            # The tokenizer may have truncated the prompt to
+            # max_input_tokens + 1 (see get_encode_kwargs), so the
+            # actual prompt length could be larger.
+            qualifier = "at least " if token_count == max_input_tokens + 1 else ""
+            total = token_count + self.max_output_tokens
             raise VLLMValidationError(
-                f"You passed {len(tokens)} input tokens and "
-                f"requested {self.max_output_tokens} output tokens. "
-                f"However, the model's context length is only "
-                f"{self.max_total_tokens}, resulting in a maximum "
-                f"input length of {max_input_tokens}. "
-                f"Please reduce the length of the input messages.",
+                f"This model's maximum context length is "
+                f"{self.max_total_tokens} tokens. However, you requested "
+                f"{self.max_output_tokens} output tokens and your prompt "
+                f"contains {qualifier}{token_count} input tokens, "
+                f"for a total of {qualifier}{total} tokens. "
+                f"Please reduce the length of the input prompt or the "
+                f"number of requested output tokens.",
                 parameter="input_tokens",
-                value=len(tokens),
+                value=token_count,
             )
 
         return tokens
@@ -318,9 +410,9 @@ class TokenizeParams:
     def _validate_tokens(self, tokenizer: TokenizerLike | None, tokens: _S) -> _S:
         """Apply all validators to a token sequence."""
         for validator in (
-            self._apply_padding,
-            self._apply_truncation,
-            self._apply_length_check,
+            self._token_padding,
+            self._token_truncation,
+            self._token_len_check,
         ):
             tokens = validator(tokenizer, tokens)
 

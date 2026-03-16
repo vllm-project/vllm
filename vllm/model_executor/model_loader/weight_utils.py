@@ -19,6 +19,7 @@ from typing import IO, Any
 import filelock
 import huggingface_hub.constants
 import numpy as np
+import regex as re
 import torch
 from huggingface_hub import HfFileSystem, hf_hub_download, snapshot_download
 from safetensors.torch import load, load_file, safe_open, save_file
@@ -28,13 +29,17 @@ from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 from vllm import envs
 from vllm.config import ModelConfig
 from vllm.config.load import LoadConfig
-from vllm.distributed import get_tensor_model_parallel_rank
+from vllm.distributed import get_tensor_model_parallel_rank, get_world_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import (
     QuantizationConfig,
     get_quantization_config,
 )
+from vllm.model_executor.model_loader.ep_weight_filter import (
+    should_skip_weight,
+)
 from vllm.platforms import current_platform
+from vllm.tracing import instrument
 from vllm.utils.import_utils import PlaceholderModule
 
 try:
@@ -78,7 +83,18 @@ def enable_hf_transfer():
             pass
 
 
-enable_hf_transfer()
+def enable_xet_high_performance():
+    """automatically activates xet high performance mode"""
+    if "HF_XET_HIGH_PERFORMANCE" not in os.environ:
+        huggingface_hub.constants.HF_XET_HIGH_PERFORMANCE = True
+
+
+if hasattr(huggingface_hub.constants, "HF_XET_HIGH_PERFORMANCE"):
+    # Transformers v5
+    enable_xet_high_performance()
+else:
+    # Transformers v4
+    enable_hf_transfer()
 
 
 class DisabledTqdm(tqdm):
@@ -141,6 +157,15 @@ def atomic_writer(
         # Clean up the temporary file if it still exists.
         if os.path.exists(temp_path):
             os.remove(temp_path)
+
+
+def _natural_sort_key(filepath: str) -> list:
+    """Natural sort key for filenames with numeric components, such as
+    model-00001-of-00005.safetensors -> ['model-', 1, '-of-', 5, '.safetensors']"""
+    return [
+        int(s) if s.isdigit() else s
+        for s in re.split(r"(\d+)", os.path.basename(filepath))
+    ]
 
 
 def maybe_download_from_modelscope(
@@ -250,6 +275,7 @@ def get_quant_config(
     if (
         hf_quant_config is not None
         and hf_quant_config.get("quant_method") == "compressed-tensors"
+        and "config_groups" in hf_quant_config
     ):
         if hf_text_config is not None:
             n_heads = getattr(hf_text_config, "num_attention_heads", None)
@@ -264,7 +290,17 @@ def get_quant_config(
         )
 
     if hf_quant_config is not None:
-        return quant_cls.from_config(hf_quant_config)
+        # For modelopt_mixed, config.json's quantization_config may or may
+        # not contain the per-layer quantized_layers map.  Newer checkpoints
+        # embed it directly; older ones keep it only in hf_quant_config.json.
+        # If it is missing, fall through to the file-based loading path.
+        if (
+            model_config.quantization == "modelopt_mixed"
+            and "quantized_layers" not in hf_quant_config
+        ):
+            pass  # fall through to file-based loading below
+        else:
+            return quant_cls.from_config(hf_quant_config)
 
     # if hf_quant_config is None, we will try to get config from
     # hf_overrides
@@ -342,8 +378,8 @@ def get_quant_config(
 
         if model_config.quantization == "bitsandbytes":
             config["adapter_name_or_path"] = model_config.model
-        elif model_config.quantization == "modelopt":
-            if config["producer"]["name"] == "modelopt":
+        elif model_config.quantization in ("modelopt", "modelopt_mixed"):
+            if config.get("producer", {}).get("name") == "modelopt":
                 return quant_cls.from_config(config)
             else:
                 raise ValueError(
@@ -433,11 +469,13 @@ def download_gguf(
     return local_files[0]
 
 
+@instrument(span_name="Download weights - HF")
 def download_weights_from_hf(
     model_name_or_path: str,
     cache_dir: str | None,
     allow_patterns: list[str],
     revision: str | None = None,
+    subfolder: str | None = None,
     ignore_patterns: str | list[str] | None = None,
 ) -> str:
     """Download model weights from Hugging Face Hub.
@@ -450,6 +488,8 @@ def download_weights_from_hf(
             weight files. Files matched by any of the patterns will be
             downloaded.
         revision (Optional[str]): The revision of the model.
+        subfolder (Optional[str]): The subfolder within the model repository
+            to download weights from.
         ignore_patterns (Optional[Union[str, list[str]]]): The patterns to
             filter out the weight files. Files matched by any of the patterns
             will be ignored.
@@ -464,7 +504,11 @@ def download_weights_from_hf(
         # so we only have to call snapshot_download once.
         try:
             fs = HfFileSystem()
-            file_list = fs.ls(model_name_or_path, detail=False, revision=revision)
+            file_list = fs.ls(
+                os.path.join(model_name_or_path, subfolder or ""),
+                detail=False,
+                revision=revision,
+            )
 
             # If downloading safetensors and an index file exists, use the
             # specific file names from the index to avoid downloading
@@ -476,6 +520,7 @@ def download_weights_from_hf(
                     filename=SAFE_WEIGHTS_INDEX_NAME,
                     cache_dir=cache_dir,
                     revision=revision,
+                    subfolder=subfolder,
                 )
                 with open(index_path) as f:
                     weight_map = json.load(f)["weight_map"]
@@ -536,6 +581,7 @@ def download_safetensors_index_file_from_hf(
     model_name_or_path: str,
     index_file: str,
     cache_dir: str | None,
+    subfolder: str | None = None,
     revision: str | None = None,
 ) -> None:
     """Download hf safetensors index file from Hugging Face Hub.
@@ -545,6 +591,8 @@ def download_safetensors_index_file_from_hf(
         index_file (str): The safetensors index file name
         cache_dir (Optional[str]): The cache directory to store the model
             weights. If None, will use HF defaults.
+        subfolder (Optional[str]): The subfolder within the model repository
+            to download weights from.
         revision (Optional[str]): The revision of the model.
     """
     # Use file lock to prevent multiple processes from
@@ -557,6 +605,7 @@ def download_safetensors_index_file_from_hf(
                 filename=index_file,
                 cache_dir=cache_dir,
                 revision=revision,
+                subfolder=subfolder,
                 local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
             )
         # If file not found on remote or locally, we should not fail since
@@ -675,16 +724,21 @@ def safetensors_weights_iterator(
     hf_weights_files: list[str],
     use_tqdm_on_load: bool,
     safetensors_load_strategy: str = "lazy",
+    local_expert_ids: set[int] | None = None,
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
-    """Iterate over the weights in the model safetensor files."""
+    """Iterate over the weights in the model safetensor files.
+
+    When *local_expert_ids* is provided, expert weights not belonging to
+    this rank are skipped **before** reading from disk, which drastically
+    reduces storage I/O for MoE models under EP.
+    """
     loading_desc = "Loading safetensors checkpoint shards"
     if safetensors_load_strategy == "eager":
         loading_desc += " (eager)"
 
     leftover_state_dict: dict[str, torch.Tensor] = {}
-
     for st_file in tqdm(
-        hf_weights_files,
+        sorted(hf_weights_files, key=_natural_sort_key),
         desc=loading_desc,
         disable=not enable_tqdm(use_tqdm_on_load),
         bar_format=_BAR_FORMAT,
@@ -692,7 +746,9 @@ def safetensors_weights_iterator(
         if safetensors_load_strategy == "eager":
             with open(st_file, "rb") as f:
                 state_dict = load(f.read())
-            yield from state_dict.items()
+            for name, param in state_dict.items():
+                if not should_skip_weight(name, local_expert_ids):
+                    yield name, param
         elif safetensors_load_strategy == "torchao":
             # we can't load flattened torchao tensor subclasses directly into the model
             # instead we reconstruct the subclasses here before returning
@@ -708,6 +764,8 @@ def safetensors_weights_iterator(
             with safe_open(st_file, framework="pt") as f:
                 state_dict = {}
                 for name in f.keys():  # noqa: SIM118
+                    if should_skip_weight(name, local_expert_ids):
+                        continue
                     state_dict[name] = f.get_tensor(name)
 
                 # update with leftover tensor data from previous iteration, if any
@@ -724,6 +782,8 @@ def safetensors_weights_iterator(
         else:
             with safe_open(st_file, framework="pt") as f:
                 for name in f.keys():  # noqa: SIM118
+                    if should_skip_weight(name, local_expert_ids):
+                        continue
                     param = f.get_tensor(name)
                     yield name, param
 
@@ -740,7 +800,9 @@ def multi_thread_safetensors_weights_iterator(
         return result
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = [executor.submit(_load_file, st_file) for st_file in hf_weights_files]
+        # Note to use generator here so we do not store all the loaded files in memory
+        # at the same time, which can cause OOM for large models.
+        futures = (executor.submit(_load_file, st_file) for st_file in hf_weights_files)
         futures_iter = tqdm(
             concurrent.futures.as_completed(futures),
             total=len(hf_weights_files),
@@ -751,7 +813,9 @@ def multi_thread_safetensors_weights_iterator(
 
         for future in futures_iter:
             state_dict = future.result()
-            yield from state_dict.items()
+            del future
+            for key in list(state_dict):
+                yield key, state_dict.pop(key)
 
 
 def runai_safetensors_weights_iterator(
@@ -790,8 +854,8 @@ def runai_safetensors_weights_iterator(
         yield from tensor_iter
 
 
-def _init_loader(
-    pg: torch.distributed.ProcessGroup,
+def _init_fastsafetensors_loader(
+    pg: "torch.distributed.ProcessGroup",
     device: torch.device,
     f_list: list[str],
     *,
@@ -814,13 +878,17 @@ def fastsafetensors_weights_iterator(
     else:
         pg = SingleGroup()
 
-    device = torch.device(f"cuda:{pg.rank()}")
+    device = torch.device(f"cuda:{current_platform.current_device()}")
+    hf_weights_files = sorted(hf_weights_files, key=_natural_sort_key)
     weight_files_sub_lists = [
         hf_weights_files[i : i + pg.size()]
         for i in range(0, len(hf_weights_files), pg.size())
     ]
 
-    nogds = False
+    # Use nogds=True for TP > 1 to avoid cuFileDriverOpen() which
+    # initializes the GDS DMA subsystem for all visible GPUs, creating
+    # unwanted CUDA contexts on every device.
+    nogds = pg.size() > 1
 
     for f_list in tqdm(
         weight_files_sub_lists,
@@ -828,7 +896,7 @@ def fastsafetensors_weights_iterator(
         disable=not enable_tqdm(use_tqdm_on_load),
         bar_format=_BAR_FORMAT,
     ):
-        loader = _init_loader(pg, device, f_list, nogds=nogds)
+        loader = _init_fastsafetensors_loader(pg, device, f_list, nogds=nogds)
         try:
             try:
                 fb = loader.copy_files_to_device()
@@ -842,7 +910,7 @@ def fastsafetensors_weights_iterator(
                     "GDS not enabled, setting `nogds=True`.\n"
                     "For more information, see: https://github.com/foundation-model-stack/fastsafetensors?tab=readme-ov-file#basic-api-usages"
                 )
-                loader = _init_loader(pg, device, f_list, nogds=nogds)
+                loader = _init_fastsafetensors_loader(pg, device, f_list, nogds=nogds)
                 fb = loader.copy_files_to_device()
 
             try:
@@ -854,6 +922,46 @@ def fastsafetensors_weights_iterator(
                 fb.close()
         finally:
             loader.close()
+
+
+def instanttensor_weights_iterator(
+    hf_weights_files: list[str],
+    use_tqdm_on_load: bool,
+) -> Generator[tuple[str, torch.Tensor], None, None]:
+    """Iterate over the weights in the model safetensor files
+    using instanttensor library."""
+    try:
+        import instanttensor
+    except ImportError as e:
+        raise ImportError(
+            "Please install instanttensor via `pip install instanttensor`"
+        ) from e
+
+    if not current_platform.is_cuda():
+        raise ValueError("InstantTensor requires NVIDIA GPUs")
+
+    try:
+        world_group = get_world_group()
+    except AssertionError:
+        # Entering here only in unit tests where the world group is not initialized.
+        process_group = None
+    else:
+        process_group = world_group.device_group if world_group.world_size > 1 else None
+
+    device = current_platform.current_device()
+
+    with instanttensor.safe_open(
+        hf_weights_files, framework="pt", device=device, process_group=process_group
+    ) as f:
+        yield from tqdm(
+            f.tensors(),
+            desc="Loading safetensors using InstantTensor loader",
+            disable=not enable_tqdm(use_tqdm_on_load),
+            bar_format=_BAR_FORMAT,
+            position=tqdm._get_free_pos(),
+            total=len(f.keys()),
+            mininterval=1.0,
+        )
 
 
 def pt_weights_iterator(
@@ -1059,6 +1167,7 @@ def composed_weight_loader(
 
 def initialize_dummy_weights(
     model: torch.nn.Module,
+    model_config: ModelConfig,
     low: float = -1e-3,
     high: float = 1e-3,
     seed: int = 1234,
@@ -1075,41 +1184,65 @@ def initialize_dummy_weights(
     is fixed, the random values generated by this function only depends on
     the parameter's number of elements and its data type.
     """
-    for param in model.state_dict().values():
-        if torch.is_floating_point(param):
-            if current_platform.is_tpu():
-                generator = torch.Generator(device="cpu")
-                generator.manual_seed(seed)
-                # Note: The param.uniform_ function cannot be used in this
-                # context because it demands more TPU HBM than directly copying
-                # from a CPU tensor.
-                # Note: We avoid using torch.rank_like as it doesn't currently
-                # support the generator argument.
-                param.copy_(
-                    (high - low)
-                    * torch.rand(
-                        param.shape,
-                        generator=generator,
-                        dtype=param.dtype,
-                        layout=param.layout,
-                        requires_grad=param.requires_grad,
-                        device="cpu",
-                    )
-                    + low
-                )
-                torch._sync(param)
-                continue
 
-            generator = torch.Generator(device=param.data.device)
+    # Check if any module uses online quantization with meta device weights.
+    # If so, we'll skip initializing params on meta device since they'll be
+    # handled in `process_weights_after_loading`.
+    def uses_meta_device(module: torch.nn.Module) -> bool:
+        quant_method = getattr(module, "quant_method", None)
+        return getattr(quant_method, "uses_meta_device", False)
+
+    has_online_quant = any(uses_meta_device(m) for m in model.modules())
+
+    for param in model.state_dict().values():
+        if has_online_quant and param.device == torch.device("meta"):
+            # For online quantization, weights are created on meta device and
+            # dummy weight init will happen in `process_weights_after_loading`.
+            continue
+
+        initialize_single_dummy_weight(param, low, high, seed)
+
+
+def initialize_single_dummy_weight(
+    param: torch.Tensor,
+    low: float = -1e-3,
+    high: float = 1e-3,
+    seed: int = 1234,
+) -> None:
+    if torch.is_floating_point(param):
+        if current_platform.is_tpu():
+            generator = torch.Generator(device="cpu")
             generator.manual_seed(seed)
-            if torch.finfo(param.data.dtype).bits < 16:
-                # uniform_ doesn't support < 16-bit datatypes (FP8)
-                dtype = param.data.dtype
-                tmp_param = param.data.to(torch.float16)
-                tmp_param = tmp_param.uniform_(low, high, generator=generator).to(dtype)
-                param.data.copy_(tmp_param)
-            else:
-                param.uniform_(low, high, generator=generator)
+            # Note: The param.uniform_ function cannot be used in this
+            # context because it demands more TPU HBM than directly copying
+            # from a CPU tensor.
+            # Note: We avoid using torch.rank_like as it doesn't currently
+            # support the generator argument.
+            param.copy_(
+                (high - low)
+                * torch.rand(
+                    param.shape,
+                    generator=generator,
+                    dtype=param.dtype,
+                    layout=param.layout,
+                    requires_grad=param.requires_grad,
+                    device="cpu",
+                )
+                + low
+            )
+            torch._sync(param)
+            return
+
+        generator = torch.Generator(device=param.data.device)
+        generator.manual_seed(seed)
+        if torch.finfo(param.data.dtype).bits < 16:
+            # uniform_ doesn't support < 16-bit datatypes (FP8)
+            dtype = param.data.dtype
+            tmp_param = param.data.to(torch.float16)
+            tmp_param = tmp_param.uniform_(low, high, generator=generator).to(dtype)
+            param.data.copy_(tmp_param)
+        else:
+            param.uniform_(low, high, generator=generator)
 
 
 def maybe_remap_kv_scale_name(name: str, params_dict: dict) -> str | None:

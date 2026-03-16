@@ -4,8 +4,7 @@
 Unit tests for Helion kernel registration.
 
 Tests ConfiguredHelionKernel, HelionKernelWrapper, and PresetConfigSearch
-including config picker registration, custom autotuner integration, and
-PyTorch op registration.
+including config picker registration and custom autotuner integration.
 """
 
 from unittest.mock import Mock, patch
@@ -25,6 +24,7 @@ import helion
 
 from vllm.kernels.helion.config_manager import ConfigManager
 from vllm.kernels.helion.register import (
+    _HOP_AVAILABLE,
     ConfiguredHelionKernel,
     HelionKernelWrapper,
     get_kernel_by_name,
@@ -134,14 +134,14 @@ class TestValidateHelionSettings:
             validate_helion_settings(settings, "test_kernel")
 
     def test_warns_on_static_shapes_true(self):
-        """Test that static_shapes=True emits a warning."""
+        """Test that static_shapes=True emits a warning about being overridden."""
         settings = helion.Settings()
         settings.static_shapes = True
 
         with patch("vllm.kernels.helion.register.logger") as mock_logger:
             validate_helion_settings(settings, "test_kernel")
             mock_logger.warning.assert_called_once()
-            assert "static_shapes=True" in mock_logger.warning.call_args[0][0]
+            assert "overridden to False" in mock_logger.warning.call_args[0][0]
 
 
 def create_configured_kernel_with_configs(
@@ -259,7 +259,6 @@ class TestConfiguredHelionKernel:
 
         settings = helion.Settings()
         settings.print_output_code = True
-        # Note: helion.Settings() defaults static_shapes to True
 
         mock_config_manager = Mock(spec=ConfigManager)
         mock_config_manager.get_platform_configs = Mock(return_value=sample_configs)
@@ -288,46 +287,8 @@ class TestConfiguredHelionKernel:
             call_kwargs = mock_kernel.call_args[1]
             assert "print_output_code" in call_kwargs
             assert call_kwargs["print_output_code"] is True
-            # helion.Settings() defaults to static_shapes=True, so it should remain True
-            assert call_kwargs["static_shapes"] is True
-
-    def test_create_decorated_kernel_preserves_static_shapes_true(
-        self, sample_kernel, sample_configs
-    ):
-        """Test that explicit static_shapes=True is preserved."""
-
-        def default_picker(args, config_keys):
-            return "default"
-
-        settings = helion.Settings()
-        settings.static_shapes = True
-
-        mock_config_manager = Mock(spec=ConfigManager)
-        mock_config_manager.get_platform_configs = Mock(return_value=sample_configs)
-
-        with (
-            patch("vllm.kernels.helion.register.helion.kernel") as mock_kernel,
-            patch(
-                "vllm.kernels.helion.config_manager.ConfigManager.get_instance",
-                return_value=mock_config_manager,
-            ),
-            patch(
-                "vllm.kernels.helion.utils.get_canonical_gpu_name",
-                return_value="nvidia_h200",
-            ),
-        ):
-            mock_decorated = Mock()
-            mock_kernel.return_value = Mock(return_value=mock_decorated)
-
-            ConfiguredHelionKernel(
-                op_name="test_kernel",
-                config_picker=default_picker,
-                raw_kernel_func=sample_kernel,
-                helion_settings=settings,
-            )
-
-            call_kwargs = mock_kernel.call_args[1]
-            assert call_kwargs["static_shapes"] is True
+            # static_shapes is always forced to False by vLLM
+            assert call_kwargs["static_shapes"] is False
 
     def test_key_and_config_selector_use_same_logic(
         self, sample_kernel, sample_configs
@@ -451,9 +412,51 @@ class TestHelionKernelWrapper:
         ):
             wrapper.get_configured_op()
 
-    def test_get_configured_op_returns_cached_op(self, sample_kernel, sample_configs):
-        """Test get_configured_op returns cached op when already registered."""
+    def test_get_configured_op_returns_cached_kernel(
+        self, sample_kernel, sample_configs
+    ):
+        """Test get_configured_op returns cached ConfiguredHelionKernel."""
 
+        def fake_impl(*args, **kwargs):
+            return torch.zeros_like(args[0])
+
+        def default_picker(args, config_keys):
+            return "default"
+
+        wrapper = HelionKernelWrapper(
+            raw_kernel_func=sample_kernel,
+            op_name="test_kernel",
+            fake_impl=fake_impl,
+        )
+        wrapper._config_picker = default_picker
+
+        mock_config_manager = Mock(spec=ConfigManager)
+        mock_config_manager.get_platform_configs = Mock(return_value=sample_configs)
+
+        with (
+            patch(
+                "vllm.kernels.helion.config_manager.ConfigManager.get_instance",
+                return_value=mock_config_manager,
+            ),
+            patch(
+                "vllm.kernels.helion.utils.get_canonical_gpu_name",
+                return_value="nvidia_h200",
+            ),
+            patch("vllm.kernels.helion.register.helion.kernel") as mock_kernel,
+        ):
+            mock_decorated = Mock()
+            mock_kernel.return_value = Mock(return_value=mock_decorated)
+
+            result1 = wrapper.get_configured_op()
+            result2 = wrapper.get_configured_op()
+            assert result1 is result2
+
+    @pytest.mark.skipif(
+        _HOP_AVAILABLE, reason="CustomOp path not used when HOP available"
+    )
+    def test_get_or_register_custom_op_returns_cached_op(
+        self, sample_kernel, sample_configs
+    ):
         def fake_impl(*args, **kwargs):
             return torch.zeros_like(args[0])
 
@@ -488,12 +491,15 @@ class TestHelionKernelWrapper:
         ):
             mock_decorated = Mock()
             mock_kernel.return_value = Mock(return_value=mock_decorated)
-            result = wrapper.get_configured_op()
+            result = wrapper._get_or_register_custom_op()
             assert result is existing_op
 
-    def test_get_configured_op_registers_new_op(self, sample_kernel, sample_configs):
-        """Test get_configured_op creates and registers new op."""
-
+    @pytest.mark.skipif(
+        _HOP_AVAILABLE, reason="CustomOp path not used when HOP available"
+    )
+    def test_get_or_register_custom_op_registers_new_op(
+        self, sample_kernel, sample_configs
+    ):
         def fake_impl(*args, **kwargs):
             return torch.zeros_like(args[0])
 
@@ -542,11 +548,10 @@ class TestHelionKernelWrapper:
         ):
             mock_decorated = Mock()
             mock_kernel.return_value = Mock(return_value=mock_decorated)
-            result = wrapper.get_configured_op()
+            result = wrapper._get_or_register_custom_op()
 
             mock_register.assert_called_once()
             assert result is new_op
-            # Check that op_func is the decorated kernel, not ConfiguredHelionKernel
             assert mock_register.call_args[1]["op_func"] is mock_decorated
 
 
@@ -554,10 +559,18 @@ class TestKernelRegistry:
     """Test suite for kernel registry functionality."""
 
     def setup_method(self):
-        """Clear the registry before each test."""
+        """Save and clear the registry before each test."""
+        from vllm.kernels.helion.register import _REGISTERED_KERNELS
+
+        self._saved_registry = dict(_REGISTERED_KERNELS)
+        _REGISTERED_KERNELS.clear()
+
+    def teardown_method(self):
+        """Restore the registry after each test."""
         from vllm.kernels.helion.register import _REGISTERED_KERNELS
 
         _REGISTERED_KERNELS.clear()
+        _REGISTERED_KERNELS.update(self._saved_registry)
 
     def test_get_registered_kernels_returns_copy(self):
         """Test get_registered_kernels returns copy of registry."""
@@ -708,20 +721,6 @@ class TestKernelRegistry:
             @register_kernel("test", helion_settings=mock_settings)
             def test_kernel(x):
                 return x
-
-    def test_register_kernel_warns_with_static_shapes_true(self):
-        """Test register_kernel warns when static_shapes=True."""
-        mock_settings = Mock()
-        mock_settings.to_dict.return_value = {"static_shapes": True}
-
-        with patch("vllm.kernels.helion.register.logger") as mock_logger:
-
-            @register_kernel("test", helion_settings=mock_settings)
-            def test_kernel(x):
-                return x
-
-            mock_logger.warning.assert_called_once()
-            assert "static_shapes=True" in mock_logger.warning.call_args[0][0]
 
     def test_register_kernel_no_warning_with_static_shapes_false(self):
         """Test register_kernel doesn't warn with static_shapes=False."""

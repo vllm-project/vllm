@@ -14,6 +14,7 @@ from vllm.config import VllmConfig, get_current_vllm_config, get_layers_from_vll
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+from vllm.platforms import current_platform
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 
@@ -23,6 +24,9 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 EngineId = str
+# block ids as returned by the hybrid KV cache manager. list[list[int]] are allow
+# mutability and are for connector internal use only.
+BlockIds = tuple[list[int], ...] | list[list[int]]
 
 
 def get_kv_connector_cache_layout():
@@ -81,6 +85,7 @@ class KVOutputAggregator:
         finished_sending = set[str]()
         finished_recving = set[str]()
         aggregated_kv_connector_stats = None
+        aggregated_kv_connector_worker_meta = None
         combined_kv_cache_events = None
         invalid_block_ids = set[int]()
         for model_runner_output in outputs:
@@ -123,6 +128,17 @@ class KVOutputAggregator:
                         aggregated_kv_connector_stats.aggregate(kv_connector_stats)
                     )
 
+            # Aggregate kv_connector_worker_meta from all workers.
+            if aggregated_kv_connector_worker_meta is None:
+                # Use the first worker's kv_connector_worker_meta as accumulator.
+                aggregated_kv_connector_worker_meta = kv_output.kv_connector_worker_meta
+            elif kv_connector_worker_meta := kv_output.kv_connector_worker_meta:
+                aggregated_kv_connector_worker_meta = (
+                    aggregated_kv_connector_worker_meta.aggregate(
+                        kv_connector_worker_meta
+                    )
+                )
+
             # Combine kv_cache_events from all workers.
             if combined_kv_cache_events is None:
                 # Use the first worker's kv_cache events as start event list.
@@ -147,6 +163,7 @@ class KVOutputAggregator:
             finished_recving=finished_recving or None,
             kv_connector_stats=aggregated_kv_connector_stats or None,
             kv_cache_events=combined_kv_cache_events or None,
+            kv_connector_worker_meta=aggregated_kv_connector_worker_meta or None,
             invalid_block_ids=invalid_block_ids,
             expected_finished_count=self._expected_finished_count,
         )
@@ -191,8 +208,6 @@ def copy_kv_blocks(
         src_device=src_device,
         dst_device=dst_device,
     )
-
-    from vllm.platforms import current_platform
 
     if direction == "h2d":
         copy_fn = current_platform.insert_blocks_to_device
@@ -316,18 +331,45 @@ class TpKVTopology:
     attn_backend: type[AttentionBackend]
     engine_id: EngineId
     remote_block_size: dict[EngineId, int]
+    tensor_shape: torch.Size | None = None
 
     def __post_init__(self):
         # Figure out whether the first dimension of the cache is K/V
         # or num_blocks. This is used to register the memory regions correctly.
+        _MOCK_BLOCK_SIZE = 16
         kv_cache_shape = self.attn_backend.get_kv_cache_shape(
-            num_blocks=1, block_size=16, num_kv_heads=1, head_size=1
+            num_blocks=1, block_size=_MOCK_BLOCK_SIZE, num_kv_heads=1, head_size=1
         )
+        logger.debug("Test kv_cache_shape: %s", kv_cache_shape)
         # Non-MLA backends caches have 5 dims [2, num_blocks, H,N,D],
         # we just mock num_blocks to 1 for the dimension check below.
         self._is_kv_layout_blocks_first = (
             len(kv_cache_shape) == 5 and kv_cache_shape[0] == 1
         )
+
+        self._cross_layers_blocks = False
+        if self.tensor_shape is not None:
+            self._cross_layers_blocks = (
+                len(self.tensor_shape) == len(kv_cache_shape) + 1
+            )
+            self.tensor_shape: torch.Size
+
+        if self._cross_layers_blocks:
+            logger.debug("Using cross-layer KV cache")
+            # prepend layers dimension
+            _MOCK_NUM_LAYERS = 80
+            kv_cache_shape = (_MOCK_NUM_LAYERS,) + kv_cache_shape
+            try:
+                kv_cache_stride_order = self.attn_backend.get_kv_cache_stride_order(
+                    include_num_layers_dimension=self._cross_layers_blocks
+                )
+            except (AttributeError, NotImplementedError):
+                assert self.tensor_shape is not None
+                kv_cache_stride_order = tuple(range(len(self.tensor_shape)))
+
+            # In case of cross layers permute kv_cache_shape according to
+            # stride_order to retrieve physical position of block_size
+            kv_cache_shape = tuple(kv_cache_shape[i] for i in kv_cache_stride_order)
 
     @property
     def is_kv_layout_blocks_first(self) -> bool:
@@ -336,7 +378,9 @@ class TpKVTopology:
     @property
     def split_k_and_v(self) -> bool:
         # Whether to register regions for K and V separately (when present).
-        return not (self.is_mla or self.is_kv_layout_blocks_first)
+        return not (
+            self._cross_layers_blocks or self.is_mla or self.is_kv_layout_blocks_first
+        )
 
     @property
     def tp_size(self) -> int:
@@ -345,6 +389,10 @@ class TpKVTopology:
     @property
     def block_size(self) -> int:
         return self.remote_block_size[self.engine_id]
+
+    @property
+    def cross_layers_blocks(self) -> bool:
+        return self._cross_layers_blocks
 
     def tp_ratio(
         self,
@@ -436,24 +484,46 @@ class TpKVTopology:
         return self.get_target_remote_ranks(remote_tp_size)
 
 
-def get_current_attn_backend(vllm_config: VllmConfig):
-    layer_type = cast(type[Any], AttentionLayerBase)
-    layers = get_layers_from_vllm_config(vllm_config, layer_type, None)
-    if layers:
-        backend = next(iter(layers.values())).get_attn_backend()
-    else:
-        # Fallback for tests, when static_forward_context is empty.
-        logger.debug(
-            "No layers found in the vLLM config. "
-            "Falling back to default attention backend."
-        )
-        from vllm.v1.attention.selector import get_attn_backend
+def get_current_attn_backends(
+    vllm_config: VllmConfig, layer_names: list[str] | None = None
+) -> list[type[AttentionBackend]]:
+    """Get all distinct attention backends for the given layers.
 
-        backend = get_attn_backend(
+    Args:
+        vllm_config: The current vLLM configuration.
+        layer_names: Optional list of layer names to scope the lookup.
+            When None, all attention layers are considered.
+
+    Returns:
+        Deduplicated list of attention backend classes.
+    """
+    layer_type = cast(type[Any], AttentionLayerBase)
+    layers = get_layers_from_vllm_config(vllm_config, layer_type, layer_names)
+    if layers:
+        seen: dict[str, type[AttentionBackend]] = {}
+        for layer in layers.values():
+            backend = layer.get_attn_backend()
+            seen[backend.full_cls_name()] = backend
+        return list(seen.values())
+
+    # Fallback for tests, when static_forward_context is empty.
+    logger.debug(
+        "No layers found in the vLLM config. Falling back to default attention backend."
+    )
+    from vllm.v1.attention.selector import get_attn_backend
+
+    return [
+        get_attn_backend(
             head_size=vllm_config.model_config.get_head_size(),
             dtype=vllm_config.model_config.dtype,
             kv_cache_dtype=vllm_config.cache_config.cache_dtype,
-            block_size=vllm_config.cache_config.block_size,
             use_mla=vllm_config.model_config.use_mla,
         )
-    return backend
+    ]
+
+
+def get_current_attn_backend(
+    vllm_config: VllmConfig, layer_names: list[str] | None = None
+) -> type[AttentionBackend]:
+    """Get the first attention backend for the given layers."""
+    return get_current_attn_backends(vllm_config, layer_names)[0]

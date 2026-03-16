@@ -69,22 +69,22 @@ class FlashInferMLABackend(MLACommonBackend):
         head_size: int,
         dtype: torch.dtype,
         kv_cache_dtype: CacheDType | None,
-        block_size: int,
+        block_size: int | None,
         use_mla: bool,
         has_sink: bool,
         use_sparse: bool,
         device_capability: DeviceCapability,
     ) -> str | None:
-        # FlashInfer MLA kernel requires qk_nope_head_dim == 128
+        # FlashInfer MLA kernel requires qk_nope_head_dim in [64, 128]
         from vllm.config import get_current_vllm_config
 
         vllm_config = get_current_vllm_config()
         if vllm_config.model_config is not None:
             hf_text_config = vllm_config.model_config.hf_text_config
             qk_nope_head_dim = getattr(hf_text_config, "qk_nope_head_dim", 1)
-            if qk_nope_head_dim != 128:
+            if qk_nope_head_dim not in [64, 128]:
                 return (
-                    f"FlashInfer MLA kernel requires qk_nope_head_dim == 128, "
+                    f"FlashInfer MLA kernel requires qk_nope_head_dim in [64, 128], "
                     f"but got {qk_nope_head_dim}"
                 )
         return None

@@ -842,6 +842,40 @@ def run_interns1(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
+# Intern-S1-Pro
+def run_interns1_pro(questions: list[str], modality: str) -> ModelRequestData:
+    model_name = "internlm/Intern-S1-Pro"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        trust_remote_code=True,
+        max_model_len=8192,
+        max_num_seqs=2,
+        limit_mm_per_prompt={modality: 1},
+        enforce_eager=True,
+        tensor_parallel_size=4,
+    )
+
+    if modality == "image":
+        placeholder = "<|vision_start|><|image_pad|><|vision_end|>"
+    elif modality == "video":
+        placeholder = "<|vision_start|><|video_pad|><|vision_end|>"
+
+    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    messages = [
+        [{"role": "user", "content": f"{placeholder}\n{question}"}]
+        for question in questions
+    ]
+    prompts = tokenizer.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
 # InternVL
 def run_internvl(questions: list[str], modality: str) -> ModelRequestData:
     model_name = "OpenGVLab/InternVL3-2B"
@@ -987,6 +1021,31 @@ def run_kimi_vl(questions: list[str], modality: str) -> ModelRequestData:
         trust_remote_code=True,
         max_model_len=4096,
         limit_mm_per_prompt={modality: 1},
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
+# Kimi-VL
+def run_kimi_k25(questions: list[str], modality: str) -> ModelRequestData:
+    assert modality == "vision_chunk"
+
+    prompts = [
+        "<|im_user|>user<|media_begin|>image<|media_content|>"
+        f"<|media_pad|><|media_end|>{question}<|im_end|>"
+        "<|im_assistant|>assistant<|im_middle|>"
+        for question in questions
+    ]
+
+    engine_args = EngineArgs(
+        model="moonshotai/Kimi-K2.5",
+        trust_remote_code=True,
+        max_model_len=4096,
+        limit_mm_per_prompt={modality: 1},
+        tensor_parallel_size=4,
     )
 
     return ModelRequestData(
@@ -2105,11 +2164,13 @@ model_example_map = {
     "hyperclovax_seed_vision": run_hyperclovax_seed_vision,
     "idefics3": run_idefics3,
     "interns1": run_interns1,
+    "interns1_pro": run_interns1_pro,
     "internvl_chat": run_internvl,
     "kanana_v": run_kanana_v,
     "keye_vl": run_keye_vl,
     "keye_vl1_5": run_keye_vl1_5,
     "kimi_vl": run_kimi_vl,
+    "kimi_k25": run_kimi_k25,
     "lightonocr": run_lightonocr,
     "lfm2_vl": run_lfm2_vl,
     "llama4": run_llama4,
@@ -2196,6 +2257,19 @@ def get_multi_modal_input(args):
             "questions": vid_questions,
         }
 
+    if args.modality == "vision_chunk":
+        # Input vision chunks and question
+        image = convert_image_mode(ImageAsset("cherry_blossom").pil_image, "RGB")
+        vision_chunk_questions = [
+            "What is the content of this image chunk?",
+            "Describe the content of this image chunk in detail.",
+        ]
+
+        return {
+            "data": {"type": "image", "image": image},
+            "questions": vision_chunk_questions,
+        }
+
     msg = f"Modality {args.modality} is not supported."
     raise ValueError(msg)
 
@@ -2278,7 +2352,7 @@ def parse_args():
         "--modality",
         type=str,
         default="image",
-        choices=["image", "video"],
+        choices=["image", "video", "vision_chunk"],
         help="Modality of the input.",
     )
     parser.add_argument(
@@ -2355,7 +2429,7 @@ def main(args):
     req_data = model_example_map[model](questions, modality)
 
     # Disable other modalities to save memory
-    default_limits = {"image": 0, "video": 0, "audio": 0}
+    default_limits = {"image": 0, "video": 0, "audio": 0, "vision_chunk": 0}
     req_data.engine_args.limit_mm_per_prompt = default_limits | dict(
         req_data.engine_args.limit_mm_per_prompt or {}
     )

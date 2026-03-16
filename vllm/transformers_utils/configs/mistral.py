@@ -19,6 +19,10 @@ def adapt_config_dict(
     if bool(config_dict.get("quantization")):
         config_dict = _remap_mistral_quantization_args(config_dict)
 
+    is_mla = bool(config_dict.get("qk_nope_head_dim"))
+    if is_mla:
+        config_dict = _remap_mistral_mla_args(config_dict)
+
     is_moe = bool(config_dict.get("moe"))
     is_mistral_large_3 = (
         is_moe and (config_dict["moe"].get("num_shared_experts") or 0) > 0
@@ -198,6 +202,14 @@ def _remap_mistral_quantization_args(config: dict) -> dict:
                 "quant_method": "fp8",
                 "activation_scheme": "dynamic" if is_dynamic else "static",
             }
+        elif (
+            str(quantization.get("quant_method", "")).lower().replace("_", "-")
+            == "compressed-tensors"
+        ):
+            # Pass through compressed-tensors config, while normalizing
+            # quant_method to the canonical community spelling.
+            quantization["quant_method"] = "compressed-tensors"
+            config["quantization_config"] = quantization
         else:
             raise ValueError(f"Found unknown quantization='{quantization}' in config")
 
@@ -248,6 +260,9 @@ def _remap_mistral_audio_args(config: dict) -> dict:
             sliding_window=encoder_args.get("sliding_window", None),
             block_pool_size=block_pool_size,
             pos_embed=encoder_args.get("pos_embed", "sinusoidal"),
+            global_log_mel_max=encoder_args["audio_encoding_args"].get(
+                "global_log_mel_max"
+            ),
             # only needed for RoPE
             max_position_embeddings=block_pool_size * config["max_position_embeddings"],
         ),
@@ -279,4 +294,23 @@ def _remap_moe_args(config: dict) -> dict:
     config["norm_topk_prob"] = True
     config["scoring_func"] = "softmax"
 
+    return config
+
+
+def _remap_mistral_mla_args(config: dict) -> dict:
+    if not config.get("moe"):
+        moe = {
+            "num_experts": 1,
+            "first_k_dense_replace": config.get("num_hidden_layers"),
+            "route_every_n": 1,
+            "num_shared_experts": 1,
+            "expert_hidden_dim": config.get("intermediate_size"),
+            "num_experts_per_tok": 1,
+            "routed_scale": 1.0,
+            "renorm_strategy": "WEIGHTS",
+            "use_load_balancing_bias": False,
+            "num_expert_groups": 1,
+            "num_expert_groups_per_tok": 1,
+        }
+        config["moe"] = moe
     return config

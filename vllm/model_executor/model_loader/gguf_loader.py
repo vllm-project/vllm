@@ -49,11 +49,6 @@ class GGUFModelLoader(BaseModelLoader):
         model_name_or_path = model_config.model
         if os.path.isfile(model_name_or_path):
             return model_name_or_path
-        # for raw HTTPS link
-        if model_name_or_path.startswith(
-            ("http://", "https://")
-        ) and model_name_or_path.endswith(".gguf"):
-            return hf_hub_download(url=model_name_or_path)
         # repo id/filename.gguf
         if "/" in model_name_or_path and model_name_or_path.endswith(".gguf"):
             repo_id, filename = model_name_or_path.rsplit("/", 1)
@@ -71,7 +66,7 @@ class GGUFModelLoader(BaseModelLoader):
 
         raise ValueError(
             f"Unrecognised GGUF reference: {model_name_or_path} "
-            "(expected local file, raw URL, <repo_id>/<filename>.gguf, "
+            "(expected local file, <repo_id>/<filename>.gguf, "
             "or <repo_id>:<quant_type>)"
         )
 
