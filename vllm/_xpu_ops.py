@@ -8,6 +8,7 @@ from vllm_xpu_kernels.flash_attn_interface import flash_attn_varlen_func
 
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import direct_register_custom_op
 
 logger = init_logger(__name__)
 
@@ -72,6 +73,37 @@ if hasattr(torch.ops._xpu_C, "int4_gemm_w4a16"):
         M = input_2d.size(0)
         N = q_weight.size(1)
         return torch.empty((M, N), dtype=input.dtype, device=input.device)
+
+
+def _xpu_ops_deepseek_scaling_rope_impl(
+    positions: torch.Tensor,
+    query: torch.Tensor,
+    key: torch.Tensor | None,
+    offsets: torch.Tensor | None,
+    cos_sin_cache: torch.Tensor | None,
+    rotary_dim: int,
+    is_neox_style: bool,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    assert key is not None
+    return torch.ops._xpu_C.deepseek_scaling_rope(
+        positions, query, key, offsets, cos_sin_cache, rotary_dim, is_neox_style
+    )
+
+
+def _xpu_ops_deepseek_scaling_rope_fake(
+    positions: torch.Tensor,
+    query: torch.Tensor,
+    key: torch.Tensor | None,
+    offsets: torch.Tensor | None,
+    cos_sin_cache: torch.Tensor | None,
+    rotary_dim: int,
+    is_neox_style: bool,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return query, key
+
+
+# Global flag to ensure ops are registered only once
+_OPS_REGISTERED = False
 
 
 class xpu_ops:
@@ -456,3 +488,21 @@ class xpu_ops:
         raw_topk_indices[: topk_indices.shape[0], : topk_indices.shape[1]] = (
             topk_indices
         )
+
+    @staticmethod
+    def register_ops_once() -> None:
+        global _OPS_REGISTERED
+        if not _OPS_REGISTERED:
+            # register all the custom ops here
+            direct_register_custom_op(
+                op_name="xpu_ops_deepseek_scaling_rope",
+                op_func=_xpu_ops_deepseek_scaling_rope_impl,
+                mutates_args=[],
+                fake_impl=_xpu_ops_deepseek_scaling_rope_fake,
+                dispatch_key=current_platform.dispatch_key,
+            )
+
+            _OPS_REGISTERED = True
+
+
+xpu_ops.register_ops_once()
