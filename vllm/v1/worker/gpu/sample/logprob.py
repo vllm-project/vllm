@@ -120,7 +120,7 @@ def compute_topk_logprobs(
         # Collect kept entries in order using a stable sort on the mask:
         # kept entries get key 0, removed entries get key 1, so kept
         # entries stay in their original relative order at the front.
-        sort_keys = remove_mask.to(torch.int32)
+        sort_keys = remove_mask.to(torch.int8)
         _, perm = sort_keys.sort(dim=-1, stable=True)
         topk_indices = topk_indices.gather(1, perm)[:, :num_logprobs]
         logprob_token_ids = torch.cat((logprob_token_ids, topk_indices), dim=1)
