@@ -122,16 +122,6 @@ def _get_gcn_arch_via_amdsmi() -> str:
     return torch.cuda.get_device_properties("cuda").gcnArchName
 
 
-@with_amdsmi_context
-def _get_gcn_arch_name(cls, device_id: int = 0) -> str:
-    if torch.cuda.is_available():
-        return torch.cuda.get_device_properties(device_id).gcnArchName
-
-    device = amdsmi_get_processor_handles()[device_id]
-    asic_info = amdsmi_get_gpu_asic_info(device)
-    return asic_info["target_graphics_version"]
-
-
 @cache
 def on_gfx1x() -> bool:
     GPU_ARCH = _get_gcn_arch_via_amdsmi()
@@ -634,11 +624,11 @@ class RocmPlatform(Platform):
 
     @classmethod
     def get_punica_wrapper(cls) -> str:
-        return "vllm.lora.punica_wrapper.punica_gpu.PunicaWrapperGPU"
+        return "vllm.lora.punica_wrapper.punica_gpu.punicawrappergpu"
 
     @classmethod
     def get_current_memory_usage(
-        cls, device: torch.types.Device | None = None
+        cls, device: torch.types.device | none = none
     ) -> float:
         torch.cuda.reset_peak_memory_stats(device)
         free_mem, total_mem = torch.cuda.mem_get_info(device)
@@ -647,23 +637,23 @@ class RocmPlatform(Platform):
     @classmethod
     def get_device_communicator_cls(cls) -> str:
         return (
-            "vllm.distributed.device_communicators.cuda_communicator.CudaCommunicator"  # noqa
+            "vllm.distributed.device_communicators.cuda_communicator.cudacommunicator"  # noqa
         )
 
     @classmethod
     def supports_mx(cls) -> bool:
-        gcn_arch = _get_gcn_arch_name(cls, 0)
+        gcn_arch = _get_gcn_arch_via_amdsmi()
         return any(gfx in gcn_arch for gfx in ["gfx95"])
 
     @classmethod
     def supports_fp8(cls) -> bool:
-        gcn_arch = _get_gcn_arch_name(cls, 0)
+        gcn_arch = _get_gcn_arch_via_amdsmi()
         return any(gfx in gcn_arch for gfx in ["gfx94", "gfx95", "gfx12"])
 
     @classmethod
     def is_fp8_fnuz(cls) -> bool:
         # only device 0 is checked, this assumes MI300 platforms are homogeneous
-        return "gfx94" in _get_gcn_arch_name(cls, 0)
+        return "gfx94" in _get_gcn_arch_via_amdsmi()
 
     @classmethod
     def fp8_dtype(cls) -> torch.dtype:
@@ -675,7 +665,7 @@ class RocmPlatform(Platform):
     @classmethod
     def use_custom_allreduce(cls) -> bool:
         # We only enable custom allreduce for MI300 series
-        gcn_arch = _get_gcn_arch_name(cls, 0)
+        gcn_arch = _get_gcn_arch_via_amdsmi()
         supported_archs = ["gfx94", "gfx95"]
         return any(gfx in gcn_arch for gfx in supported_archs)
 
@@ -685,7 +675,7 @@ class RocmPlatform(Platform):
 
     @classmethod
     def is_navi(cls) -> bool:
-        return "gfx1" in _get_gcn_arch_name(cls, 0)
+        return "gfx1" in _get_gcn_arch_via_amdsmi()
 
     @classmethod
     def get_static_graph_wrapper_cls(cls) -> str:
