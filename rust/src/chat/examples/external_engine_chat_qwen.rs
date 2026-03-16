@@ -6,7 +6,7 @@ use futures::StreamExt as _;
 use serde_json::Value;
 use tracing_subscriber::EnvFilter;
 use vllm_chat::{
-    ChatEvent, ChatLlm, ChatMessage, ChatOptions, ChatRequest, ChatRole, SmgChatBackend,
+    ChatEvent, ChatLlm, ChatMessage, ChatOptions, ChatRequest, ChatRole, HfChatBackend,
 };
 use vllm_engine_core_client::protocol::SamplingParams;
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig};
@@ -47,7 +47,7 @@ async fn main() -> Result<()> {
     init_tracing();
     let args = Args::parse();
     let backend = std::sync::Arc::new(
-        SmgChatBackend::from_model_or_path(&args.model)
+        HfChatBackend::from_model(&args.model)
             .await
             .with_context(|| format!("failed to load chat backend for {}", args.model))?,
     );
@@ -65,8 +65,8 @@ async fn main() -> Result<()> {
     .context("failed to connect to external vLLM engine")?;
 
     println!("model={}", args.model);
-    println!("tokenizer_source=smg_tokenizer (crates.io llm-tokenizer) auto");
-    println!("chat_template_source=smg_tokenizer (crates.io llm-tokenizer) auto");
+    println!("tokenizer_source=tokenizers + hf-hub");
+    println!("chat_template_source=tokenizer_config.json or adjacent chat template file");
     println!("handshake_address={}", args.handshake_address);
     println!("input_address={}", client.input_address());
     println!("output_address={}", client.output_address());

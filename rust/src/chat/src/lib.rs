@@ -8,6 +8,7 @@
 pub use backend::{ChatBackend, DynChatBackend, SamplingHints};
 pub use error::{Error, Result};
 pub use event::ChatEvent;
+pub use hf::HfChatBackend;
 pub use request::{ChatContent, ChatContentPart, ChatMessage, ChatOptions, ChatRequest, ChatRole};
 pub use smg::SmgChatBackend;
 pub use stream::ChatEventStream;
@@ -15,11 +16,13 @@ pub use stream::ChatEventStream;
 mod backend;
 mod error;
 mod event;
+pub mod hf;
 mod incremental;
 mod lower;
 mod request;
 pub mod smg;
 mod stream;
+mod template;
 
 use lower::lower_chat_request;
 use vllm_llm::Llm;
@@ -43,7 +46,7 @@ impl ChatLlm {
     pub async fn chat(&self, request: ChatRequest) -> Result<ChatEventStream> {
         request.validate()?;
         let prompt = self.backend.apply_chat_template(&request)?;
-        let prompt_token_ids = self.backend.encode(&prompt, false)?;
+        let prompt_token_ids = self.backend.encode(&prompt)?;
         let sampling_hints = self.backend.sampling_hints()?;
         let prepared = lower_chat_request(request, prompt_token_ids, sampling_hints)?;
         let raw_stream = self.llm.generate(prepared.generate_request).await?;

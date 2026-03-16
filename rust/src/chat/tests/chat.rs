@@ -264,7 +264,7 @@ impl ChatBackend for FakeChatBackend {
             .map_err(|error| vllm_chat::Error::Tokenizer(error.to_report_string()))
     }
 
-    fn encode(&self, text: &str, _add_special_tokens: bool) -> vllm_chat::Result<Vec<u32>> {
+    fn encode(&self, text: &str) -> vllm_chat::Result<Vec<u32>> {
         Ok(text.bytes().map(u32::from).collect())
     }
 
@@ -284,8 +284,8 @@ impl ChatBackend for FailingDecodeBackend {
         self.inner.apply_chat_template(request)
     }
 
-    fn encode(&self, text: &str, add_special_tokens: bool) -> vllm_chat::Result<Vec<u32>> {
-        self.inner.encode(text, add_special_tokens)
+    fn encode(&self, text: &str) -> vllm_chat::Result<Vec<u32>> {
+        self.inner.encode(text)
     }
 
     fn decode(&self, _token_ids: &[u32], _skip_special_tokens: bool) -> vllm_chat::Result<String> {

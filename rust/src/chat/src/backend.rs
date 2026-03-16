@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use crate::error::Result;
@@ -8,6 +9,7 @@ use crate::request::ChatRequest;
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SamplingHints {
     pub primary_eos_token_id: Option<u32>,
+    pub extra_eos_token_ids: BTreeSet<u32>,
 }
 
 /// Minimal prompt-processing backend needed by `vllm-chat`.
@@ -15,8 +17,13 @@ pub trait ChatBackend: Send + Sync {
     /// Apply the chat template and return the rendered text prompt.
     fn apply_chat_template(&self, request: &ChatRequest) -> Result<String>;
 
-    /// Encode one prompt string into token IDs.
-    fn encode(&self, text: &str, add_special_tokens: bool) -> Result<Vec<u32>>;
+    /// Encode one rendered chat prompt into token IDs.
+    ///
+    /// Chat prompt tokenization always skips tokenizer-added special tokens
+    /// because the chat template already renders the model-specific markers.
+    // TODO: Add a separate text-completion/backend boundary if we later need
+    // configurable `add_special_tokens` behavior outside chat templating.
+    fn encode(&self, text: &str) -> Result<Vec<u32>>;
 
     /// Decode one cumulative token sequence into text.
     fn decode(&self, token_ids: &[u32], skip_special_tokens: bool) -> Result<String>;

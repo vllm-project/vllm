@@ -200,15 +200,33 @@ pub struct SamplingParams {
 }
 
 impl SamplingParams {
-    /// Apply one tokenizer-derived primary EOS token ID using the same subset
-    /// of semantics as Python `SamplingParams.update_from_generation_config()`.
-    pub fn apply_primary_eos_token_id(&mut self, eos_token_id: Option<u32>) {
+    /// Apply tokenizer/model-derived EOS token IDs using the same subset of
+    /// semantics as Python `SamplingParams.update_from_generation_config()`.
+    pub fn apply_model_eos_token_ids(
+        &mut self,
+        eos_token_id: Option<u32>,
+        extra_eos_token_ids: &BTreeSet<u32>,
+    ) {
         self._all_stop_token_ids = self.stop_token_ids.iter().copied().collect();
         if let Some(eos_token_id) = eos_token_id {
             self._all_stop_token_ids.insert(eos_token_id);
         }
+        self._all_stop_token_ids
+            .extend(extra_eos_token_ids.iter().copied());
 
         self._eos_token_id = if self.ignore_eos { None } else { eos_token_id };
+        if !self.ignore_eos {
+            self.stop_token_ids
+                .extend(extra_eos_token_ids.iter().copied());
+            self.stop_token_ids.sort_unstable();
+            self.stop_token_ids.dedup();
+        }
+    }
+
+    /// Apply one tokenizer-derived primary EOS token ID using the same subset
+    /// of semantics as Python `SamplingParams.update_from_generation_config()`.
+    pub fn apply_primary_eos_token_id(&mut self, eos_token_id: Option<u32>) {
+        self.apply_model_eos_token_ids(eos_token_id, &BTreeSet::new());
     }
 }
 
@@ -456,29 +474,31 @@ mod tests {
     }
 
     #[test]
-    fn sampling_params_apply_primary_eos_token_id_matches_python_subset() {
+    fn sampling_params_apply_model_eos_token_ids_matches_python_subset() {
         let mut params = SamplingParams {
             stop_token_ids: vec![11, 22],
             ..Default::default()
         };
 
-        params.apply_primary_eos_token_id(Some(99));
+        params.apply_model_eos_token_ids(Some(99), &BTreeSet::from([55]));
 
         assert_eq!(params._eos_token_id, Some(99));
-        assert_eq!(params._all_stop_token_ids, BTreeSet::from([11, 22, 99]));
+        assert_eq!(params.stop_token_ids, vec![11, 22, 55]);
+        assert_eq!(params._all_stop_token_ids, BTreeSet::from([11, 22, 55, 99]));
     }
 
     #[test]
-    fn sampling_params_apply_primary_eos_token_id_respects_ignore_eos() {
+    fn sampling_params_apply_model_eos_token_ids_respects_ignore_eos() {
         let mut params = SamplingParams {
             ignore_eos: true,
             stop_token_ids: vec![11],
             ..Default::default()
         };
 
-        params.apply_primary_eos_token_id(Some(99));
+        params.apply_model_eos_token_ids(Some(99), &BTreeSet::from([55]));
 
         assert_eq!(params._eos_token_id, None);
-        assert_eq!(params._all_stop_token_ids, BTreeSet::from([11, 99]));
+        assert_eq!(params.stop_token_ids, vec![11]);
+        assert_eq!(params._all_stop_token_ids, BTreeSet::from([11, 55, 99]));
     }
 }

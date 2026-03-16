@@ -1,16 +1,15 @@
-use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
 
-use serde_json::json;
 use smg_tokenizer::TokenizerTrait as SmgTokenizerTrait;
-use smg_tokenizer::chat_template::{ChatTemplateContentFormat, ChatTemplateParams};
+use smg_tokenizer::chat_template::ChatTemplateParams;
 use smg_tokenizer::factory::create_tokenizer_async;
 use thiserror_ext::AsReport as _;
 
 use crate::backend::{ChatBackend, SamplingHints};
 use crate::error::{Error, Result};
-use crate::request::{ChatContent, ChatMessage, ChatRequest};
+use crate::request::ChatRequest;
+use crate::template::{merged_template_kwargs, template_messages_to_json};
 
 /// [`ChatBackend`] implementation backed by the crates.io `llm-tokenizer` package, imported here
 /// as `smg_tokenizer`.
@@ -43,18 +42,13 @@ impl SmgChatBackend {
     fn apply_chat_template_inner(
         &self,
         request: &ChatRequest,
-        template_kwargs: Option<&HashMap<String, serde_json::Value>>,
+        template_kwargs: Option<&std::collections::HashMap<String, serde_json::Value>>,
     ) -> Result<String> {
-        let messages = request
-            .messages
-            .iter()
-            .map(|message| self.template_message_to_json(message))
-            .collect::<Result<Vec<_>>>()?;
-        let mut merged_template_kwargs = template_kwargs.cloned().unwrap_or_default();
-        merged_template_kwargs.insert(
-            "continue_final_message".to_string(),
-            serde_json::Value::Bool(request.chat_options.continue_final_message),
-        );
+        let messages = template_messages_to_json(
+            &request.messages,
+            self.inner.chat_template_content_format(),
+        )?;
+        let merged_template_kwargs = merged_template_kwargs(request, template_kwargs);
 
         self.inner
             .apply_chat_template(
@@ -67,23 +61,6 @@ impl SmgChatBackend {
                 },
             )
             .map_err(|error| Error::Tokenizer(error.to_report_string()))
-    }
-
-    fn template_message_to_json(&self, message: &ChatMessage) -> Result<serde_json::Value> {
-        Ok(json!({
-            "role": message.role.as_str(),
-            "content": self.template_content_to_json(&message.content)?,
-        }))
-    }
-
-    fn template_content_to_json(&self, content: &ChatContent) -> Result<serde_json::Value> {
-        Ok(match self.inner.chat_template_content_format() {
-            ChatTemplateContentFormat::String => {
-                serde_json::Value::String(content.try_flatten_to_text()?)
-            }
-            ChatTemplateContentFormat::OpenAI => serde_json::to_value(content)
-                .expect("text-only chat content should serialize to valid JSON"),
-        })
     }
 }
 
@@ -100,10 +77,10 @@ impl ChatBackend for SmgChatBackend {
         }
     }
 
-    fn encode(&self, text: &str, add_special_tokens: bool) -> Result<Vec<u32>> {
+    fn encode(&self, text: &str) -> Result<Vec<u32>> {
         let encoding = self
             .inner
-            .encode(text, add_special_tokens)
+            .encode(text, false)
             .map_err(|error| Error::Tokenizer(error.to_report_string()))?;
         Ok(encoding.token_ids().to_vec())
     }
@@ -124,6 +101,7 @@ impl ChatBackend for SmgChatBackend {
 
         Ok(SamplingHints {
             primary_eos_token_id,
+            extra_eos_token_ids: Default::default(),
         })
     }
 }

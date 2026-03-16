@@ -4,13 +4,16 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+anyhow.workspace = true
 futures.workspace = true
 futures-async-stream.workspace = true
+hf-hub.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 smg-tokenizer.workspace = true
 thiserror.workspace = true
 thiserror-ext.workspace = true
+tokenizers.workspace = true
 vllm-engine-core-client.workspace = true
 vllm-llm.workspace = true
 
@@ -19,6 +22,7 @@ anyhow.workspace = true
 bytes.workspace = true
 clap.workspace = true
 rmp-serde.workspace = true
+tempfile.workspace = true
 tokio.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true

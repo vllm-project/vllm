@@ -25,7 +25,10 @@ pub(crate) fn lower_chat_request(
 
     // TODO: we should not expose `RequestOutputKind` at the chat layer
     sampling_params.output_kind = RequestOutputKind::Delta;
-    sampling_params.apply_primary_eos_token_id(sampling_hints.primary_eos_token_id);
+    sampling_params.apply_model_eos_token_ids(
+        sampling_hints.primary_eos_token_id,
+        &sampling_hints.extra_eos_token_ids,
+    );
 
     let generate_request = GenerateRequest {
         request_id: request_id.clone(),
@@ -66,19 +69,43 @@ mod tests {
     }
 
     #[test]
-    fn lower_chat_request_applies_primary_eos_token_id() {
+    fn lower_chat_request_applies_python_style_eos_hints() {
         let prepared = lower_chat_request(
             sample_request(),
             vec![1, 2, 3],
             SamplingHints {
                 primary_eos_token_id: Some(99),
+                extra_eos_token_ids: BTreeSet::from([77]),
             },
         )
         .unwrap();
 
         let params = prepared.generate_request.sampling_params;
         assert_eq!(params._eos_token_id, Some(99));
-        assert_eq!(params._all_stop_token_ids, BTreeSet::from([99]));
+        assert_eq!(params.stop_token_ids, vec![77]);
+        assert_eq!(params._all_stop_token_ids, BTreeSet::from([77, 99]));
+        assert_eq!(params.output_kind, RequestOutputKind::Delta);
+    }
+
+    #[test]
+    fn lower_chat_request_respects_ignore_eos_for_stop_token_ids() {
+        let mut request = sample_request();
+        request.sampling_params.ignore_eos = true;
+
+        let prepared = lower_chat_request(
+            request,
+            vec![1, 2, 3],
+            SamplingHints {
+                primary_eos_token_id: Some(99),
+                extra_eos_token_ids: BTreeSet::from([77]),
+            },
+        )
+        .unwrap();
+
+        let params = prepared.generate_request.sampling_params;
+        assert_eq!(params._eos_token_id, None);
+        assert_eq!(params.stop_token_ids, Vec::<u32>::new());
+        assert_eq!(params._all_stop_token_ids, BTreeSet::from([77, 99]));
         assert_eq!(params.output_kind, RequestOutputKind::Delta);
     }
 }
