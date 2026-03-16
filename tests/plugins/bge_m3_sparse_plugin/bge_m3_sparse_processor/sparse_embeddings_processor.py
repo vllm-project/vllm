@@ -207,6 +207,7 @@ class BgeM3SparseEmbeddingsProcessor(
             response_data.append(
                 SparseEmbeddingResponseData(
                     index=idx,
+                    object=raw_request.embed_task,
                     sparse_embedding=sparse_embedding,
                     dense_embedding=dense_embedding,
                 )
