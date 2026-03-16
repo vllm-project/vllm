@@ -426,7 +426,6 @@ class ElasticEPScalingState:
             self.engine_core._eep_send_engine_core_notification(
                 EEPNotificationType.SHUTDOWN_COMPLETE
             )
-            self.engine_core.shutdown()
             return True
 
         else:
