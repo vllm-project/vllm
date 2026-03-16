@@ -4272,15 +4272,6 @@ class GPUModelRunner(
                 self.input_batch.token_ids_cpu,
                 slot_mappings=slot_mappings,
             )
-            if isinstance(self.drafter, NgramProposer):
-                assert isinstance(sampled_token_ids, list), (
-                    "sampled_token_ids should be a python list when ngram is used."
-                )
-                draft_token_ids = self.drafter.propose(
-                    sampled_token_ids,
-                    self.input_batch.num_tokens_no_spec,
-                    self.input_batch.token_ids_cpu,
-                )
         elif spec_config.use_ngram_gpu():
             assert isinstance(self.drafter, NgramProposerGPU)
             (
@@ -4362,23 +4353,12 @@ class GPUModelRunner(
                 )
             target_hidden_states = [h[:num_scheduled_tokens] for h in aux_hidden_states]
 
-            draft_token_ids, drafter_kv_connector_output = self.drafter.propose(
+            draft_token_ids = self.drafter.propose(
                 sampled_token_ids=sampled_token_ids,
                 target_hidden_states=target_hidden_states,
                 common_attn_metadata=common_attn_metadata,
-                scheduler_output=scheduler_output,
                 slot_mappings=slot_mappings,
             )
-            # Combine KVConnectorOutputs or select the non-empty one
-            if self.kv_connector_output and drafter_kv_connector_output:
-                self.kv_connector_output = KVConnectorOutput.merge(
-                    self.kv_connector_output, drafter_kv_connector_output
-                )
-            else:
-                self.kv_connector_output = (
-                    self.kv_connector_output or drafter_kv_connector_output
-                )
-
             next_token_ids, valid_sampled_tokens_count = (
                 self.drafter.prepare_next_token_ids_padded(
                     common_attn_metadata,
@@ -4590,7 +4570,9 @@ class GPUModelRunner(
                             aux_layers,
                         )
                     else:
-                        aux_layers = self.model.get_eagle3_aux_hidden_state_layers()
+                        aux_layers = (
+                            self.model.get_eagle3_default_aux_hidden_state_layers()
+                        )
 
                     self.model.set_aux_hidden_state_layers(aux_layers)
                 time_after_load = time.perf_counter()
