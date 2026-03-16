@@ -34,8 +34,22 @@ MODELS = [
 ]
 
 
+def create_mm_data(num_videos: int) -> dict[str, list]:
+    # Small video (8 frames, 64×64) and ~0.5 s of audio at 16 kHz so the test
+    # stays fast even without a GPU.
+    mm_data = dict[str, list](video=[], audio=[])
+    for i in range(num_videos):
+        rng = np.random.RandomState(i)
+        video = random_video(rng, min_frames=8, max_frames=9, min_wh=64, max_wh=65)
+        audio, sr = random_audio(rng, min_len=8000, max_len=8001, sr=16000)
+        mm_data["video"].append(video)
+        mm_data["audio"].append((audio, sr))
+    return mm_data
+
+
 @pytest.mark.parametrize("model_id", MODELS)
-def test_audio_in_video_cache_correctness(model_id: str) -> None:
+@pytest.mark.parametrize("num_videos", [1, 2])
+def test_audio_in_video_cache_correctness(model_id: str, num_videos: int) -> None:
     """
     Regression test for https://github.com/vllm-project/vllm/pull/36800
 
@@ -47,7 +61,7 @@ def test_audio_in_video_cache_correctness(model_id: str) -> None:
     """
     ctx = build_model_context(
         model_id,
-        limit_mm_per_prompt={"audio": 1, "image": 0, "video": 1},
+        limit_mm_per_prompt={"audio": num_videos, "image": 0, "video": num_videos},
         mm_processor_cache_gb=1,
     )
 
@@ -65,17 +79,12 @@ def test_audio_in_video_cache_correctness(model_id: str) -> None:
 
     video_token_id = baseline_processor.info.get_hf_config().video_token_id
 
-    rng = np.random.RandomState(0)
-    # Small video (8 frames, 64×64) and ~0.5 s of audio at 16 kHz so the test
-    # stays fast even without a GPU.
-    video = random_video(rng, min_frames=8, max_frames=9, min_wh=64, max_wh=65)
-    audio, sr = random_audio(rng, min_len=8000, max_len=8001, sr=16000)
-    mm_data = {"video": [video], "audio": [(audio, sr)]}
+    mm_data = create_mm_data(num_videos)
     hf_processor_mm_kwargs = {"use_audio_in_video": True}
 
     def run(processor):
         return processor(
-            [video_token_id],
+            [video_token_id] * num_videos,
             mm_items=baseline_processor.info.parse_mm_data(mm_data),
             hf_processor_mm_kwargs=hf_processor_mm_kwargs,
         )["prompt_token_ids"]
