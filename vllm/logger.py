@@ -8,7 +8,7 @@ import logging
 import os
 import sys
 from collections import defaultdict
-from collections.abc import Generator, Hashable
+from collections.abc import Callable, Generator, Hashable
 from contextlib import contextmanager
 from functools import lru_cache, partial
 from logging import Logger
@@ -181,7 +181,7 @@ class _VllmLogger(Logger):
 
 
 # Pre-defined methods mapping to avoid repeated dictionary creation
-_METHODS_TO_PATCH = {
+_METHODS_TO_PATCH: dict[str, Callable[..., Any]] = {
     "debug_once": _VllmLogger.debug_once,
     "info_once": _VllmLogger.info_once,
     "warning_once": _VllmLogger.warning_once,

@@ -586,7 +586,7 @@ class OpenAIServing:
         if finish_reason == "rejected":
             logger.warning_every_n(
                 "Request %s was rejected due to "
-                "a full waiting queue (log every %d requests)",
+                "a full waiting queue (log every 100 requests)",
                 request_id,
             )
             raise RequestRejectedError()
