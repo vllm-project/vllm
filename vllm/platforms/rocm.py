@@ -438,18 +438,6 @@ class RocmPlatform(Platform):
         device_capability = cls.get_device_capability()
         assert device_capability is not None
 
-        if selected_backend is not None and attn_selector_config.block_size is not None:
-            backend_class = selected_backend.get_class()
-            if not backend_class.supports_block_size(attn_selector_config.block_size):
-                raise ValueError(
-                    f"Selected backend {selected_backend} does not support "
-                    f"block_size={attn_selector_config.block_size}. "
-                    f"Supported block sizes: "
-                    f"{backend_class.get_supported_kernel_block_sizes()}."
-                )
-
-        attn_selector_config = attn_selector_config._replace(block_size=None)
-
         # First try checking just the selected backend, if there is one.
         if selected_backend is not None:
             try:
