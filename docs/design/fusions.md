@@ -22,7 +22,7 @@ or just on the low or high end.
 | ------------------------------------------------------------------------------ | ---------------------------- | ---------------------------------------------- | ------------------------------ | ------------------ | --------- | ------------ |
 | [AllReduce + RMSNorm](#allreduce--rmsnorm-fuse_allreduce_rms)                  | `fuse_allreduce_rms`         | All-reduce → RMSNorm (+residual_add) (→ quant) | O2 (Hopper/Blackwell + TP > 1) | 5-20%              | No        | Low          |
 | [Attention + Quant](#attention--quantization-fuse_attn_quant)                  | `fuse_attn_quant`            | Attention output → FP8/NVFP4 quant             | Off by default                 | 3-7%               | Yes       | Always       |
-| [MLA Attention + Quant](#attention--quantization-fuse_attn_quant)              | `fuse_attn_quant`            | Attention output → FP8/NVFP4 quant             | Off by default                 | TBD                | Yes       | Always       |
+| [MLA Attention + Quant](#attention--quantization-fuse_attn_quant)              | `fuse_attn_quant`            | MLA Attention output → FP8/NVFP4 quant         | Off by default                 | TBD                | Yes       | Always       |
 | [RoPE + KV-Cache Update](#rope--kv-cache-update-fuse_rope_kvcache)             | `fuse_rope_kvcache`          | Rotary embedding → KV cache write              | O1 (ROCm/AITER only)           | TBD                | No        | Low          |
 | [QK Norm + RoPE](#qk-norm--rope-enable_qk_norm_rope_fusion)                    | `enable_qk_norm_rope_fusion` | Q/K RMSNorm → rotary embedding                 | Off by default                 | 2-3%               | No        | Low          |
 | [Sequence Parallelism](#sequence-parallelism-enable_sp)                        | `enable_sp`                  | AllReduce → ReduceScatter + AllGather          | Off by default                 | Prereq for AsyncTP | Yes       | High         |
@@ -145,21 +145,17 @@ standard `Attention` and `MLAAttention` (used by DeepSeek-V2/V3/R1 models). Patt
 
 - `FLASHINFER`: CUDA sm100+ with FlashInfer installed
 
-`MLAAttention → FP8 static quant`:
+`MLAAttention → FP8 static quant` / `MLAAttention → NVFP4 dynamic quant`:
 
-- All MLA backends (e.g. `TRITON_MLA`, `FLASHINFER_MLA`, `FLASHMLA`, `CUTLASS_MLA`): CUDA
-- ROCm MLA backends: untested
-
-`MLAAttention → NVFP4 dynamic quant`:
-
-- All MLA backends: CUDA sm100+
-- ROCm MLA backends: untested
+The MLA fusion operates at the graph level on the `unified_mla_attention_with_output` op and works
+with all MLA decode and prefill backend combinations. Unlike standard `Attention` backends (where
+the kernel writes FP8 output directly), no MLA prefill or decode backend currently supports direct
+FP8/FP4 output. The fusion writes to an intermediate buffer and quantizes in a separate step, so
+there is no memory round-trip elimination yet.
 
 !!! info
-    The MLA attention fusion is not expected to yield a measurable speedup yet. The fused path
-    currently writes to an intermediate buffer and then quantizes separately, so the
-    memory round-trip is not yet eliminated. This will improve once attention kernels support
-    direct FP8/FP4 output.
+    The MLA attention fusion is not expected to yield a measurable speedup yet.
+    This will improve once MLA prefill/decode kernels support direct FP8/FP4 output.
 
 Other attention backends do not support fused output quantization yet.
 
