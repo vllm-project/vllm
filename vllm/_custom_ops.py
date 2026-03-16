@@ -427,7 +427,7 @@ def rms_norm_dynamic_per_token_quant(
     scale_ub: torch.Tensor | None = None,
     residual: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    output = torch.empty_like(input, dtype=quant_dtype)
+    output = torch.empty(input.shape, dtype=quant_dtype, device=input.device)
     scales = torch.empty(
         (input.numel() // input.shape[-1], 1), device=input.device, dtype=torch.float32
     )
@@ -451,7 +451,7 @@ def rms_norm_per_block_quant(
     tma_alignment: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     assert len(group_size) == 2
-    output = torch.empty_like(input, dtype=quant_dtype)
+    output = torch.empty(input.shape, dtype=quant_dtype, device=input.device)
     if is_scale_transposed:
         if tma_alignment == 0:
             scales = torch.empty(
@@ -2670,6 +2670,21 @@ def cp_gather_and_upconvert_fp8_kv_cache(
     torch.ops._C_cache_ops.cp_gather_and_upconvert_fp8_kv_cache(
         src_cache, dst, block_table, seq_lens, workspace_starts, batch_size
     )
+
+
+def concat_mla_q(
+    ql_nope: torch.Tensor,
+    q_pe: torch.Tensor,
+    q_out: torch.Tensor,
+) -> None:
+    """Concatenate query nope and rope for MLA/DSA attention.
+
+    Args:
+        ql_nope: Query nope component [num_tokens, num_heads, nope_dim]
+        q_pe: Query rope component [num_tokens, num_heads, rope_dim]
+        q_out: Output tensor [num_tokens, num_heads, nope_dim + rope_dim]
+    """
+    torch.ops._C_cache_ops.concat_mla_q(ql_nope, q_pe, q_out)
 
 
 def indexer_k_quant_and_cache(
