@@ -45,11 +45,15 @@ from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     make_fp8_moe_quant_config,
     select_fp8_moe_backend,
 )
+from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
+    Mxfp4MoeBackend,
+    make_mxfp4_moe_kernel,
+    make_mxfp4_moe_quant_config,
+)
 from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
     NvFp4MoeBackend,
     convert_to_nvfp4_moe_kernel_format,
     is_global_sf_supported_for_nvfp4_backend,
-    make_mxfp4_moe_quant_config,
     make_nvfp4_moe_kernel,
     make_nvfp4_moe_quant_config,
     select_nvfp4_moe_backend,
@@ -235,7 +239,7 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
     def __init__(self, moe):
         super().__init__(moe)
         self.group_size = 32
-        self.mxfp4_backend = NvFp4MoeBackend.MARLIN
+        self.mxfp4_backend = Mxfp4MoeBackend.MARLIN
         self.experts_cls = MarlinExperts
 
     def create_weights(
@@ -310,7 +314,9 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
         self, layer: torch.nn.Module
     ) -> FusedMoEQuantConfig | None:
         return make_mxfp4_moe_quant_config(
-            w13_scale=layer.w13_weight_scale, w2_scale=layer.w2_weight_scale
+            mxfp4_backend=self.mxfp4_backend,
+            w1_scale=layer.w13_weight_scale,
+            w2_scale=layer.w2_weight_scale,
         )
 
     def process_weights_after_loading(self, layer: FusedMoE) -> None:
@@ -334,10 +340,11 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
 
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         if self.moe_quant_config is not None:
-            self.moe_kernel = make_nvfp4_moe_kernel(
+            self.moe_kernel = make_mxfp4_moe_kernel(
                 moe_quant_config=self.moe_quant_config,
                 moe_config=self.moe,
                 experts_cls=self.experts_cls,
+                mxfp4_backend=self.mxfp4_backend,
                 shared_experts=layer.shared_experts,
                 routing_tables=layer._maybe_init_expert_routing_tables(),
             )

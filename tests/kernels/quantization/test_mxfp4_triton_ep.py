@@ -17,8 +17,10 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 
+from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
+    Mxfp4MoeBackend,
+)
 from vllm.model_executor.layers.quantization.mxfp4 import (
-    Mxfp4Backend,
     Mxfp4MoEMethod,
 )
 
@@ -32,44 +34,49 @@ def _make_mock_moe_config(ep_size: int = 1) -> MagicMock:
     moe_config.ep_size = ep_size
     moe_config.is_lora_enabled = False
     moe_config.moe_parallel_config = parallel_config
+    moe_config.hidden_dim = 1024
+    moe_config.intermediate_size_per_partition = 2048
     return moe_config
 
 
+def _make_mock_experts_cls(monolithic: bool) -> MagicMock:
+    """Create a mock experts class with the given monolithic property."""
+    cls = MagicMock()
+    cls.is_monolithic.return_value = monolithic
+    return cls
+
+
 class TestMxfp4TritonIsMonolithic:
-    """Verify that is_monolithic is always True for the TRITON backend,
-    regardless of EP size, since triton_kernel_moe_forward now handles
-    expert_map remapping internally."""
+    """Verify that is_monolithic is determined by the experts_cls returned
+    by select_mxfp4_moe_backend for each backend type."""
 
     @pytest.mark.parametrize(
-        "backend,ep_size,expected_monolithic",
+        "backend,expected_monolithic",
         [
-            # TRITON is always monolithic (handles EP via expert_map remapping)
-            (Mxfp4Backend.TRITON, 1, True),
-            (Mxfp4Backend.TRITON, 2, True),
-            (Mxfp4Backend.TRITON, 4, True),
-            # SM100 backends are always monolithic
-            (Mxfp4Backend.SM100_FI_MXFP4_MXFP8_TRTLLM, 1, True),
-            (Mxfp4Backend.SM100_FI_MXFP4_MXFP8_TRTLLM, 2, True),
-            (Mxfp4Backend.SM100_FI_MXFP4_BF16, 1, True),
-            (Mxfp4Backend.SM100_FI_MXFP4_BF16, 2, True),
-            # MARLIN is never monolithic
-            (Mxfp4Backend.MARLIN, 1, False),
-            (Mxfp4Backend.MARLIN, 2, False),
+            # TRITON monolithic experts are preferred
+            (Mxfp4MoeBackend.TRITON, True),
+            # TRTLLM monolithic experts are preferred
+            (Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16, True),
+            (Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8, True),
+            # MARLIN is modular only
+            (Mxfp4MoeBackend.MARLIN, False),
+            (Mxfp4MoeBackend.BATCHED_MARLIN, False),
         ],
         ids=[
-            "triton-no-ep",
-            "triton-ep2",
-            "triton-ep4",
-            "sm100-trtllm-no-ep",
-            "sm100-trtllm-ep2",
-            "sm100-bf16-no-ep",
-            "sm100-bf16-ep2",
-            "marlin-no-ep",
-            "marlin-ep2",
+            "triton",
+            "trtllm-bf16",
+            "trtllm-mxfp8",
+            "marlin",
+            "batched-marlin",
         ],
     )
     @patch(
-        "vllm.model_executor.layers.quantization.mxfp4.get_mxfp4_backend",
+        "vllm.model_executor.layers.quantization.mxfp4."
+        "mxfp4_round_up_hidden_size_and_intermediate_size",
+    )
+    @patch(
+        "vllm.model_executor.layers.quantization.mxfp4."
+        "select_mxfp4_moe_backend",
     )
     @patch(
         "vllm.model_executor.layers.quantization.mxfp4.get_current_vllm_config",
@@ -77,13 +84,16 @@ class TestMxfp4TritonIsMonolithic:
     def test_is_monolithic(
         self,
         mock_get_config,
-        mock_get_backend,
+        mock_select_backend,
+        mock_round_up,
         backend,
-        ep_size,
         expected_monolithic,
     ):
-        """is_monolithic should be True for TRITON regardless of EP size."""
-        mock_get_backend.return_value = backend
+        """is_monolithic should reflect the experts_cls returned by the
+        oracle's backend selection."""
+        mock_experts_cls = _make_mock_experts_cls(expected_monolithic)
+        mock_select_backend.return_value = (backend, mock_experts_cls)
+        mock_round_up.return_value = (1024, 2048)
 
         mock_compilation_config = MagicMock()
         mock_compilation_config.max_cudagraph_capture_size = 1024
@@ -91,12 +101,12 @@ class TestMxfp4TritonIsMonolithic:
         mock_vllm_config.compilation_config = mock_compilation_config
         mock_get_config.return_value = mock_vllm_config
 
-        moe_config = _make_mock_moe_config(ep_size=ep_size)
+        moe_config = _make_mock_moe_config()
         method = Mxfp4MoEMethod(moe_config)
 
         assert method.is_monolithic == expected_monolithic, (
             f"Expected is_monolithic={expected_monolithic} for "
-            f"backend={backend.name}, ep_size={ep_size}, "
+            f"backend={backend.value}, "
             f"but got {method.is_monolithic}."
         )
 

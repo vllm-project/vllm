@@ -110,7 +110,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         )
 
         self._cache_permute_indices: dict[torch.Size, torch.Tensor] = {}
-        self.moe_mk: mk.FusedMoEKernel | None = None
+        self.moe_kernel: mk.FusedMoEKernel | None = None
 
         # Round up dims once based on backend. This mutates the shared
         # FusedMoEConfig in-place so that create_weights() and all
@@ -310,7 +310,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
 
         # Build kernel (modular or monolithic)
         if self.moe_quant_config is not None and self.experts_cls is not None:
-            self.moe_mk = make_mxfp4_moe_kernel(
+            self.moe_kernel = make_mxfp4_moe_kernel(
                 moe_quant_config=self.moe_quant_config,
                 moe_config=self.moe,
                 mxfp4_backend=self.mxfp4_backend,
@@ -366,11 +366,11 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
 
     @property
     def is_monolithic(self) -> bool:
-        if self.moe_mk is None:
+        if self.moe_kernel is None:
             if hasattr(self, "experts_cls") and self.experts_cls is not None:
                 return self.experts_cls.is_monolithic()
             return False
-        return self.moe_mk.is_monolithic
+        return self.moe_kernel.is_monolithic
 
     def apply(
         self,
@@ -381,8 +381,8 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         assert not self.is_monolithic
-        assert self.moe_mk is not None
-        return self.moe_mk.apply(
+        assert self.moe_kernel is not None
+        return self.moe_kernel.apply(
             hidden_states=x,
             w1=layer.w13_weight,
             w2=layer.w2_weight,
@@ -402,8 +402,8 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         assert self.is_monolithic
-        assert self.moe_mk is not None
-        return self.moe_mk.apply_monolithic(
+        assert self.moe_kernel is not None
+        return self.moe_kernel.apply_monolithic(
             hidden_states=x,
             w1=layer.w13_weight,
             w2=layer.w2_weight,
