@@ -10,12 +10,12 @@ import vllm.envs as envs
 from vllm.distributed import get_dp_group, get_ep_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.utils.flashinfer import (
     has_flashinfer_nvlink_one_sided,
     has_flashinfer_nvlink_two_sided,
 )
 from vllm.utils.import_utils import has_deep_ep, has_mori
-from vllm.platforms import current_platform
 
 from .base_device_communicator import All2AllManagerBase, Cache
 
