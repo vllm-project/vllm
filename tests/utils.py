@@ -122,6 +122,12 @@ ROCM_EXTRA_ARGS = (
     if current_platform.is_rocm()
     else []
 )
+# Python-API equivalent of ROCM_EXTRA_ARGS for use with EngineArgs kwargs.
+ROCM_ENGINE_KWARGS: dict = (
+    {"enable_prefix_caching": False, "max_num_seqs": 1}
+    if current_platform.is_rocm()
+    else {}
+)
 
 
 class RemoteVLLMServer:
