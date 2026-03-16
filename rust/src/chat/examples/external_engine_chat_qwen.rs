@@ -16,7 +16,7 @@ use vllm_llm::Llm;
 struct Args {
     #[arg(long)]
     handshake_address: String,
-    #[arg(long, default_value = "Qwen/Qwen1.5-0.5B-Chat")]
+    #[arg(long, default_value = "Qwen/Qwen3-0.6B")]
     model: String,
     #[arg(long, default_value = "127.0.0.1")]
     host: String,
@@ -76,10 +76,7 @@ async fn main() -> Result<()> {
 
     let request = ChatRequest {
         request_id: request_id.clone(),
-        messages: vec![ChatMessage {
-            role: ChatRole::User,
-            content: args.prompt.clone(),
-        }],
+        messages: vec![ChatMessage::text(ChatRole::User, args.prompt.clone())],
         sampling_params: SamplingParams {
             max_tokens: Some(MAX_TOKENS),
             temperature: 0.0,

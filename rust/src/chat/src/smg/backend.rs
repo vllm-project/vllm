@@ -4,13 +4,13 @@ use std::sync::Arc;
 
 use serde_json::json;
 use smg_tokenizer::TokenizerTrait as SmgTokenizerTrait;
-use smg_tokenizer::chat_template::ChatTemplateParams;
+use smg_tokenizer::chat_template::{ChatTemplateContentFormat, ChatTemplateParams};
 use smg_tokenizer::factory::create_tokenizer_async;
 use thiserror_ext::AsReport as _;
 
 use crate::backend::ChatBackend;
 use crate::error::{Error, Result};
-use crate::request::ChatRequest;
+use crate::request::{ChatContent, ChatMessage, ChatRequest};
 
 /// [`ChatBackend`] implementation backed by the crates.io `llm-tokenizer` package, imported here
 /// as `smg_tokenizer`.
@@ -45,18 +45,11 @@ impl SmgChatBackend {
         request: &ChatRequest,
         template_kwargs: Option<&HashMap<String, serde_json::Value>>,
     ) -> Result<String> {
-        if !matches!(
-            self.inner.chat_template_content_format(),
-            smg_tokenizer::chat_template::ChatTemplateContentFormat::String
-        ) {
-            return Err(Error::UnsupportedChatTemplateFormat);
-        }
-
         let messages = request
             .messages
             .iter()
-            .map(|message| json!({ "role": message.role.as_str(), "content": message.content }))
-            .collect::<Vec<_>>();
+            .map(|message| self.template_message_to_json(message))
+            .collect::<Result<Vec<_>>>()?;
         let mut merged_template_kwargs = template_kwargs.cloned().unwrap_or_default();
         merged_template_kwargs.insert(
             "continue_final_message".to_string(),
@@ -74,6 +67,23 @@ impl SmgChatBackend {
                 },
             )
             .map_err(|error| Error::Tokenizer(error.to_report_string()))
+    }
+
+    fn template_message_to_json(&self, message: &ChatMessage) -> Result<serde_json::Value> {
+        Ok(json!({
+            "role": message.role.as_str(),
+            "content": self.template_content_to_json(&message.content)?,
+        }))
+    }
+
+    fn template_content_to_json(&self, content: &ChatContent) -> Result<serde_json::Value> {
+        Ok(match self.inner.chat_template_content_format() {
+            ChatTemplateContentFormat::String => {
+                serde_json::Value::String(content.try_flatten_to_text()?)
+            }
+            ChatTemplateContentFormat::OpenAI => serde_json::to_value(content)
+                .expect("text-only chat content should serialize to valid JSON"),
+        })
     }
 }
 
@@ -109,14 +119,14 @@ impl ChatBackend for SmgChatBackend {
 mod tests {
     use std::sync::Arc;
 
-    use smg_tokenizer::chat_template::ChatTemplateParams;
+    use smg_tokenizer::chat_template::{ChatTemplateContentFormat, ChatTemplateParams};
     use smg_tokenizer::{
         ChatTemplateState, Decoder, Encoder, Encoding, SpecialTokens, TokenizerTrait,
     };
 
     use super::SmgChatBackend;
     use crate::backend::ChatBackend;
-    use crate::request::{ChatMessage, ChatOptions, ChatRequest, ChatRole};
+    use crate::request::{ChatContentPart, ChatMessage, ChatOptions, ChatRequest, ChatRole};
 
     struct FakeSmgTokenizer {
         chat_template: ChatTemplateState,
@@ -198,10 +208,7 @@ mod tests {
         ));
         let request = ChatRequest {
             request_id: "render-1".to_string(),
-            messages: vec![ChatMessage {
-                role: ChatRole::User,
-                content: "<think>hello".to_string(),
-            }],
+            messages: vec![ChatMessage::text(ChatRole::User, "<think>hello")],
             sampling_params: Default::default(),
             chat_options: ChatOptions::default(),
         };
@@ -219,10 +226,7 @@ mod tests {
         ));
         let mut request = ChatRequest {
             request_id: "render-2".to_string(),
-            messages: vec![ChatMessage {
-                role: ChatRole::Assistant,
-                content: "The capital of".to_string(),
-            }],
+            messages: vec![ChatMessage::text(ChatRole::Assistant, "The capital of")],
             sampling_params: Default::default(),
             chat_options: ChatOptions::default(),
         };
@@ -233,5 +237,80 @@ mod tests {
         request.chat_options.add_generation_prompt = false;
 
         assert_eq!(backend.apply_chat_template(&request).unwrap(), "continue");
+    }
+
+    #[test]
+    fn smg_chat_backend_flattens_text_parts_for_string_templates() {
+        let backend = SmgChatBackend::from_inner(Arc::new(
+            FakeSmgTokenizer::new("{{ messages[0].content }}").unwrap(),
+        ));
+        let request = ChatRequest {
+            request_id: "render-3".to_string(),
+            messages: vec![ChatMessage::new(
+                ChatRole::User,
+                vec![
+                    ChatContentPart::text("hello"),
+                    ChatContentPart::text(" world"),
+                ],
+            )],
+            sampling_params: Default::default(),
+            chat_options: ChatOptions::default(),
+        };
+
+        assert_eq!(
+            backend.apply_chat_template(&request).unwrap(),
+            "hello world"
+        );
+    }
+
+    #[test]
+    fn smg_chat_backend_keeps_string_text_for_openai_detected_templates() {
+        let tokenizer = FakeSmgTokenizer::new(
+            "{%- for message in messages %}{%- if message.content is string %}{%- set content = message.content %}{{ content }}{%- endif %}{%- endfor %}",
+        )
+        .unwrap();
+        assert_eq!(
+            tokenizer.chat_template.content_format(),
+            ChatTemplateContentFormat::OpenAI
+        );
+        let backend = SmgChatBackend::from_inner(Arc::new(tokenizer));
+        let request = ChatRequest {
+            request_id: "render-4".to_string(),
+            messages: vec![ChatMessage::text(ChatRole::User, "hello")],
+            sampling_params: Default::default(),
+            chat_options: ChatOptions::default(),
+        };
+
+        assert_eq!(backend.apply_chat_template(&request).unwrap(), "hello");
+    }
+
+    #[test]
+    fn smg_chat_backend_emits_openai_text_blocks_for_structured_templates() {
+        let tokenizer = FakeSmgTokenizer::new(
+            "{%- for message in messages %}{%- for item in message.content %}{{ item.text }}|{%- endfor %}{%- endfor %}",
+        )
+        .unwrap();
+        assert_eq!(
+            tokenizer.chat_template.content_format(),
+            ChatTemplateContentFormat::OpenAI
+        );
+        let backend = SmgChatBackend::from_inner(Arc::new(tokenizer));
+        let request = ChatRequest {
+            request_id: "render-5".to_string(),
+            messages: vec![ChatMessage::new(
+                ChatRole::User,
+                vec![
+                    ChatContentPart::text("hello"),
+                    ChatContentPart::text("world"),
+                ],
+            )],
+            sampling_params: Default::default(),
+            chat_options: ChatOptions::default(),
+        };
+
+        assert_eq!(
+            backend.apply_chat_template(&request).unwrap(),
+            "hello|world|"
+        );
     }
 }

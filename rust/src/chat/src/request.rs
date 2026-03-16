@@ -15,6 +15,67 @@ pub enum ChatRole {
     Assistant,
 }
 
+/// One text-only chat content part in OpenAI-style block format.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ChatContentPart {
+    /// One plain-text content block.
+    Text { text: String },
+}
+
+impl ChatContentPart {
+    pub fn text(text: impl Into<String>) -> Self {
+        Self::Text { text: text.into() }
+    }
+
+    pub(crate) fn as_text(&self) -> &str {
+        match self {
+            Self::Text { text } => text,
+        }
+    }
+}
+
+/// Text-only chat content.
+///
+/// This supports either a simple string or an OpenAI-style list of text blocks.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ChatContent {
+    /// Simple text content.
+    Text(String),
+    /// OpenAI-style text blocks.
+    Parts(Vec<ChatContentPart>),
+}
+
+impl ChatContent {
+    /// Flatten the text content into one plain string without adding separators.
+    // TODO: this method will be truly fallible once we add non-text content parts.
+    pub fn try_flatten_to_text(&self) -> Result<String> {
+        Ok(match self {
+            Self::Text(text) => text.clone(),
+            Self::Parts(parts) => parts.iter().map(ChatContentPart::as_text).collect(),
+        })
+    }
+}
+
+impl From<String> for ChatContent {
+    fn from(value: String) -> Self {
+        Self::Text(value)
+    }
+}
+
+impl From<&str> for ChatContent {
+    fn from(value: &str) -> Self {
+        Self::Text(value.to_string())
+    }
+}
+
+impl From<Vec<ChatContentPart>> for ChatContent {
+    fn from(value: Vec<ChatContentPart>) -> Self {
+        Self::Parts(value)
+    }
+}
+
 /// One text-only chat message.
 ///
 /// Original Python API reference:
@@ -23,8 +84,23 @@ pub enum ChatRole {
 pub struct ChatMessage {
     /// Semantic role used by the chat template.
     pub role: ChatRole,
-    /// Plain-text message content.
-    pub content: String,
+    /// Plain-text message content, either as a raw string or OpenAI-style text blocks.
+    pub content: ChatContent,
+}
+
+impl ChatMessage {
+    /// Construct one chat message from any supported text-only content shape.
+    pub fn new(role: ChatRole, content: impl Into<ChatContent>) -> Self {
+        Self {
+            role,
+            content: content.into(),
+        }
+    }
+
+    /// Construct one chat message with plain string content.
+    pub fn text(role: ChatRole, text: impl Into<String>) -> Self {
+        Self::new(role, text.into())
+    }
 }
 
 /// Chat-template-related request options.
@@ -88,5 +164,49 @@ impl ChatRole {
             Self::User => "user",
             Self::Assistant => "assistant",
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::{ChatContent, ChatContentPart};
+
+    #[test]
+    fn chat_content_deserializes_from_raw_string() {
+        let content: ChatContent = serde_json::from_value(json!("hello")).unwrap();
+        assert_eq!(content, ChatContent::Text("hello".to_string()));
+    }
+
+    #[test]
+    fn chat_content_deserializes_from_openai_text_blocks() {
+        let content: ChatContent =
+            serde_json::from_value(json!([{ "type": "text", "text": "hello" }])).unwrap();
+        assert_eq!(
+            content,
+            ChatContent::Parts(vec![ChatContentPart::text("hello")])
+        );
+    }
+
+    #[test]
+    fn chat_content_from_string_like_values_builds_text() {
+        assert_eq!(
+            ChatContent::from("hello"),
+            ChatContent::Text("hello".to_string())
+        );
+        assert_eq!(
+            ChatContent::from("hello".to_string()),
+            ChatContent::Text("hello".to_string())
+        );
+    }
+
+    #[test]
+    fn chat_content_try_flattens_text_parts_without_separators() {
+        let content = ChatContent::Parts(vec![
+            ChatContentPart::text("hello"),
+            ChatContentPart::text(" world"),
+        ]);
+        assert_eq!(content.try_flatten_to_text().unwrap(), "hello world");
     }
 }

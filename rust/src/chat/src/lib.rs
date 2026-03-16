@@ -8,7 +8,7 @@
 pub use backend::{ChatBackend, DynChatBackend};
 pub use error::{Error, Result};
 pub use event::ChatEvent;
-pub use request::{ChatMessage, ChatOptions, ChatRequest, ChatRole};
+pub use request::{ChatContent, ChatContentPart, ChatMessage, ChatOptions, ChatRequest, ChatRole};
 pub use smg::SmgChatBackend;
 pub use stream::ChatEventStream;
 

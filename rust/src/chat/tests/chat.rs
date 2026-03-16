@@ -236,7 +236,10 @@ impl ChatBackend for FakeChatBackend {
             .messages
             .iter()
             .map(|message| {
-                serde_json::json!({ "role": message.role.as_str(), "content": message.content })
+                serde_json::json!({
+                    "role": message.role.as_str(),
+                    "content": serde_json::to_value(&message.content).unwrap(),
+                })
             })
             .collect::<Vec<_>>();
         let mut template_kwargs = request.chat_options.template_kwargs.clone();
@@ -290,14 +293,8 @@ fn sample_request(request_id: &str) -> ChatRequest {
     ChatRequest {
         request_id: request_id.to_string(),
         messages: vec![
-            ChatMessage {
-                role: ChatRole::System,
-                content: "You are terse.".to_string(),
-            },
-            ChatMessage {
-                role: ChatRole::User,
-                content: "Say hi".to_string(),
-            },
+            ChatMessage::text(ChatRole::System, "You are terse."),
+            ChatMessage::text(ChatRole::User, "Say hi"),
         ],
         sampling_params: SamplingParams {
             max_tokens: Some(8),

@@ -21,6 +21,7 @@ pub(crate) fn lower_chat_request(
         chat_options: _,
     } = request;
 
+    // TODO: we should not expose `RequestOutputKind` at the chat layer
     sampling_params.output_kind = RequestOutputKind::Cumulative;
 
     let generate_request = GenerateRequest {

@@ -11,8 +11,6 @@ pub enum Error {
     ConflictingGenerationPromptMode,
     #[error("chat template is required but none was configured")]
     MissingChatTemplate,
-    #[error("only string-format chat templates are supported")]
-    UnsupportedChatTemplateFormat,
     #[error("tokenizer error: {0}")]
     Tokenizer(String),
     #[error("chat request stream `{request_id}` closed before terminal output")]
