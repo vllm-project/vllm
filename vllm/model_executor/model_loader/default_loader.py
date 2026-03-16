@@ -16,6 +16,9 @@ from vllm.config.load import LoadConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.torchao import torchao_version_at_least
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
+from vllm.model_executor.model_loader.ep_weight_filter import (
+    compute_local_expert_ids,
+)
 from vllm.model_executor.model_loader.weight_utils import (
     download_safetensors_index_file_from_hf,
     download_weights_from_hf,
@@ -30,9 +33,6 @@ from vllm.model_executor.model_loader.weight_utils import (
     np_cache_weights_iterator,
     pt_weights_iterator,
     safetensors_weights_iterator,
-)
-from vllm.model_executor.model_loader.ep_weight_filter import (
-    compute_local_expert_ids,
 )
 from vllm.tracing import instrument
 from vllm.transformers_utils.repo_utils import list_filtered_repo_files
@@ -331,19 +331,14 @@ class DefaultModelLoader(BaseModelLoader):
         dp_size = parallel_config.data_parallel_size
         tp_size = parallel_config.tensor_parallel_size
         dp_rank = get_dp_group().rank_in_group if dp_size > 1 else 0
-        tp_rank = (
-            get_tensor_model_parallel_rank() if tp_size > 1 else 0
-        )
+        tp_rank = get_tensor_model_parallel_rank() if tp_size > 1 else 0
         ep_size = dp_size * tp_size
         ep_rank = dp_rank * tp_size + tp_rank
 
-        self.local_expert_ids = compute_local_expert_ids(
-            num_experts, ep_size, ep_rank
-        )
+        self.local_expert_ids = compute_local_expert_ids(num_experts, ep_size, ep_rank)
         if self.local_expert_ids is not None:
             logger.info_once(
-                "EP weight filter: ep_size=%d, ep_rank=%d, "
-                "loading %d/%d experts",
+                "EP weight filter: ep_size=%d, ep_rank=%d, loading %d/%d experts",
                 ep_size,
                 ep_rank,
                 len(self.local_expert_ids),

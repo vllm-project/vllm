@@ -10,13 +10,20 @@ majority of storage I/O for MoE models (experts typically account for
 
 import re
 
-
+# Matches per-expert weight names like ".experts.42.gate_proj.weight".
+# Does NOT match 3D fused-expert names like ".experts.gate_proj.weight"
+# (no numeric id) — those are intentionally left unfiltered so the full
+# tensor is loaded and sliced later by FusedMoE.weight_loader.
 _EXPERT_ID_RE = re.compile(r"\.experts\.(\d+)\.")
 
 
 def parse_expert_id(weight_name: str) -> int | None:
     """Return the expert id embedded in *weight_name*, or ``None`` if it is
-    not an expert weight (e.g. attention, layernorm, embedding)."""
+    not an per-expert weight.
+
+    Returns ``None`` for dense weights (attention, layernorm, embedding),
+    shared experts, and 3D fused-expert tensors where all experts are stored
+    in a single tensor without a numeric expert id in the name."""
     m = _EXPERT_ID_RE.search(weight_name)
     return int(m.group(1)) if m else None
 

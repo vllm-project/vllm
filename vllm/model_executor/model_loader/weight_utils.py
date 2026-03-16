@@ -30,14 +30,13 @@ from vllm import envs
 from vllm.config import ModelConfig
 from vllm.config.load import LoadConfig
 from vllm.distributed import get_tensor_model_parallel_rank, get_world_group
-from vllm.model_executor.model_loader.ep_weight_filter import (
-    compute_local_expert_ids,
-    should_skip_weight,
-)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import (
     QuantizationConfig,
     get_quantization_config,
+)
+from vllm.model_executor.model_loader.ep_weight_filter import (
+    should_skip_weight,
 )
 from vllm.platforms import current_platform
 from vllm.tracing import instrument
