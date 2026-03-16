@@ -396,8 +396,9 @@ class CutlassExpertsFp8(CutlassExpertsFp8Base):
         # Note that the BATCHED activation format does not use
         # the expert map for identifying experts.
         return not (
-            moe_parallel_config.use_fi_all2allv_kernels
+            moe_parallel_config.use_fi_nvl_two_sided_kernels
             or moe_parallel_config.use_deepep_ht_kernels
+            or moe_parallel_config.use_fi_nvl_one_sided_kernels
         )
 
     def supports_expert_map(self) -> bool:
