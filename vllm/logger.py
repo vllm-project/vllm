@@ -94,16 +94,14 @@ def _print_warning_once(logger: Logger, msg: str, *args: Hashable) -> None:
 
 LogScope = Literal["process", "global", "local"]
 
-_warning_every_n_counters = defaultdict(int)
-_warning_every_n_lock = Lock()
+_warning_every_n_counters: defaultdict[tuple[LogScope, int, str], int] = defaultdict(
+    int
+)
+_warning_every_n_lock: Lock = Lock()
 
 
 def _print_warning_every_n(
-    logger: Logger,
-    msg: str,
-    *args: Hashable,
-    n: int = 100,
-    scope: LogScope = "process",
+    logger: Logger, msg: str, *args: Hashable, n: int = 100, scope: LogScope = "process"
 ) -> None:
     key = (scope, id(logger), msg)
 
@@ -170,11 +168,7 @@ class _VllmLogger(Logger):
         _print_warning_once(self, msg, *args)
 
     def warning_every_n(
-        self,
-        msg: str,
-        *args: Hashable,
-        n: int = 100,
-        scope: LogScope = "process",
+        self, msg: str, *args: Hashable, n: int = 100, scope: LogScope = "process"
     ) -> None:
         """
         As `warning`, but only logs once every `n` calls.
