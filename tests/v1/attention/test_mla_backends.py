@@ -327,6 +327,12 @@ class MockSparseMLAAttentionLayer:
         self._k_scale_float = 1.0
         self._v_scale_float = 1.0
 
+        self._decode_concat_quant_fp8_op = _DecodeConcatQuantFP8(
+            static=True,
+            group_shape=GroupShape.PER_TENSOR,
+            compile_native=True,
+        )
+
     def forward_impl(
         self,
         q: torch.Tensor,
@@ -338,6 +344,7 @@ class MockSparseMLAAttentionLayer:
     ) -> torch.Tensor:
         """Forward for sparse MLA - uses forward_mqa for all tokens."""
         kv_cache_dtype = getattr(self.impl, "kv_cache_dtype", "auto")
+        fp8_attention = kv_cache_dtype.startswith("fp8")
 
         # Write to KV cache
         if kv_cache.numel() > 0:
@@ -349,6 +356,9 @@ class MockSparseMLAAttentionLayer:
                 kv_cache_dtype=kv_cache_dtype,
                 scale=self._k_scale,
             )
+
+        if fp8_attention and kv_cache_dtype != "fp8_ds_mla":
+            kv_cache = kv_cache.view(current_platform.fp8_dtype())
 
         num_tokens = q.shape[0]
 
@@ -367,8 +377,14 @@ class MockSparseMLAAttentionLayer:
         # Convert from (N, B, L) to (B, N, L)
         mqa_ql_nope = mqa_ql_nope.transpose(0, 1)
 
-        # Pass as tuple to forward_mqa
-        mqa_q = (mqa_ql_nope, mqa_q_pe)
+        if fp8_attention and self.impl.supports_quant_query_input:
+            assert mqa_ql_nope.shape[0] == mqa_q_pe.shape[0]
+            assert mqa_ql_nope.shape[1] == mqa_q_pe.shape[1]
+            mqa_q = self._decode_concat_quant_fp8_op(
+                mqa_ql_nope, mqa_q_pe, self._q_scale
+            )
+        else:
+            mqa_q = (mqa_ql_nope, mqa_q_pe)
 
         attn_out, _ = self.impl.forward_mqa(mqa_q, kv_cache, attn_metadata, self)
 

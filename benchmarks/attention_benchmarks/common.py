@@ -30,7 +30,7 @@ def batch_spec_sort_key(spec: str) -> tuple[int, int, int]:
         max_kv_len = max(r.kv_len for r in requests) if requests else 0
         return (batch_size, max_q_len, max_kv_len)
     except Exception:
-        # Fallback for unparseable specs
+        # Fallback for unparsable specs
         return (0, 0, 0)
 
 
@@ -77,6 +77,7 @@ class MockKVBProj:
         self.qk_nope_head_dim = qk_nope_head_dim
         self.v_head_dim = v_head_dim
         self.out_dim = qk_nope_head_dim + v_head_dim
+        self.weight = torch.empty(0, dtype=torch.bfloat16)
 
     def __call__(self, x: torch.Tensor) -> tuple[torch.Tensor]:
         """
@@ -213,6 +214,7 @@ class BenchmarkConfig:
     use_cuda_graphs: bool = False
 
     # MLA-specific
+    prefill_backend: str | None = None
     kv_lora_rank: int | None = None
     qk_nope_head_dim: int | None = None
     qk_rope_head_dim: int | None = None

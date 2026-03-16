@@ -34,7 +34,8 @@ def do_profile(
         record_shapes=True,
     ) as tprof:
         fn(**fn_kwargs)
-        torch.cuda.synchronize(torch.cuda.current_device())
+        device = torch.accelerator.current_device_index()
+        torch.accelerator.synchronize(device=device)
 
     # TODO (varun): Add a descriptive trace file name
     tprof.export_chrome_trace(
@@ -83,12 +84,6 @@ def rank_worker(
     weights: WeightTensors,
 ):
     set_random_seed(pgi.rank)
-
-    # sanity check
-    from vllm import envs
-
-    if config.fused_moe_chunk_size is not None:
-        assert config.fused_moe_chunk_size == envs.VLLM_FUSED_MOE_CHUNK_SIZE
 
     # get weights to this device
     weights.to_current_device()

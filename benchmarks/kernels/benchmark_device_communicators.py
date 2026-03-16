@@ -342,7 +342,7 @@ class CommunicatorBenchmark:
             if not should_use_fn(tensor):
                 return None
 
-            torch.cuda.synchronize()
+            torch.accelerator.synchronize()
             stream = torch.cuda.Stream()
             with torch.cuda.stream(stream):
                 graph_input = tensor.clone()
@@ -360,17 +360,17 @@ class CommunicatorBenchmark:
                         for _ in range(CUDA_GRAPH_CAPTURE_CYCLES):
                             allreduce_fn(graph_input)
 
-            torch.cuda.synchronize()
+            torch.accelerator.synchronize()
             for _ in range(num_warmup):
                 graph.replay()
-            torch.cuda.synchronize()
+            torch.accelerator.synchronize()
 
-            torch.cuda.synchronize()
+            torch.accelerator.synchronize()
             start_time = time.perf_counter()
 
             for _ in range(num_trials):
                 graph.replay()
-            torch.cuda.synchronize()
+            torch.accelerator.synchronize()
 
             end_time = time.perf_counter()
 
@@ -495,7 +495,7 @@ def main():
 
     # Set device
     device = torch.device(f"cuda:{rank}")
-    torch.cuda.set_device(device)
+    torch.accelerator.set_device_index(device)
 
     # Get CPU process group
     cpu_group = dist.new_group(backend="gloo")

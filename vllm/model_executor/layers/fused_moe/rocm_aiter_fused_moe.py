@@ -340,9 +340,6 @@ class AiterExperts(mk.FusedMoEExpertsModular):
     def supports_expert_map(self):
         return True
 
-    def supports_chunking(self):
-        return False
-
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         return TopKWeightAndReduceNoOP()
 

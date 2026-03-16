@@ -157,9 +157,6 @@ class DeepGemmExperts(mk.FusedMoEExpertsModular):
             or moe_parallel_config.use_fi_nvl_one_sided_kernels
         )
 
-    def supports_chunking(self) -> bool:
-        return True
-
     def supports_expert_map(self) -> bool:
         return True
 
