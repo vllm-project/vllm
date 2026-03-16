@@ -61,7 +61,7 @@ if TYPE_CHECKING:
 
 @dataclass
 class GraphCaptureContext:
-    stream: torch.cuda.Stream
+    stream: torch.Stream
 
 
 TensorMetadata = namedtuple("TensorMetadata", ["device", "dtype", "size"])
@@ -459,7 +459,7 @@ class GroupCoordinator:
     @contextmanager
     def graph_capture(self, graph_capture_context: GraphCaptureContext | None = None):
         if graph_capture_context is None:
-            stream = torch.cuda.Stream()
+            stream = torch.Stream()
             graph_capture_context = GraphCaptureContext(stream)
         else:
             stream = graph_capture_context.stream
@@ -1292,7 +1292,7 @@ def graph_capture(device: torch.device):
     in order to explicitly distinguish the kernels to capture
     from other kernels possibly launched on background in the default stream.
     """
-    context = GraphCaptureContext(torch.cuda.Stream(device=device))
+    context = GraphCaptureContext(torch.Stream(device=device))
     with get_tp_group().graph_capture(context), get_pp_group().graph_capture(context):
         yield context
 
