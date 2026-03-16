@@ -169,7 +169,8 @@ class XPUw4A8IntLinearKernel(MPLinearKernel):
         reshaped_x = x.reshape(-1, x.shape[-1])  # [M, K]
         from vllm._xpu_ops import xpu_ops as ops
 
-        # TODO: static and asymmetric quantization cases
+        # TODO: static and asymmetric quantization case
+        # Common code for CompressedTensorsW4A8Int does not read act symmetry data
         quant_x, x_scale, x_zero = ops.dynamic_per_token_quant_ref(reshaped_x, True, 8)
 
         out = torch.ops._xpu_C.int4_gemm_w4a8(
