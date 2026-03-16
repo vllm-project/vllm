@@ -178,6 +178,7 @@ class VllmSerializableFunction(SerializableCallable):  # type: ignore[misc]
         is_encoder: bool = False,
         vllm_backend: Any | None = None,
         sym_tensor_indices: list[int] | None = None,
+        aot_autograd_config: dict[str, Any] | None = None,
     ) -> None:
         assert isinstance(graph_module, torch.fx.GraphModule)
         self.graph_module = graph_module
@@ -188,6 +189,13 @@ class VllmSerializableFunction(SerializableCallable):  # type: ignore[misc]
         self.shape_env = None
         self.vllm_backend = vllm_backend
         self.sym_tensor_indices = sym_tensor_indices
+        self._fake_mode: Any | None = None
+
+        import torch._functorch.config as functorch_config
+
+        self.aot_autograd_config = (
+            aot_autograd_config or functorch_config.save_config_portable()
+        )
         sym_input = next(
             (i for i in self.example_inputs if isinstance(i, torch.SymInt)), None
         )
@@ -209,6 +217,7 @@ class VllmSerializableFunction(SerializableCallable):  # type: ignore[misc]
         state.pop("optimized_call")
         state.pop("shape_env")
         state.pop("vllm_backend", None)
+        state.pop("_fake_mode", None)
         for node in state["graph_module"].graph.nodes:
             node.meta.pop("source_fn_stack", None)
             node.meta.pop("nn_module_stack", None)
@@ -286,6 +295,12 @@ class VllmSerializableFunction(SerializableCallable):  # type: ignore[misc]
         sym_shape_indices_map = state.pop("sym_shape_indices_map", {})
         returns_tuple_map = state.pop("returns_tuple_map", {})
 
+        saved_aot_autograd_config = state["aot_autograd_config"]
+        if saved_aot_autograd_config is not None:
+            functorch_ctx = torch._functorch.config.patch(saved_aot_autograd_config)
+        else:
+            functorch_ctx = contextlib.nullcontext()
+
         if envs.VLLM_USE_MEGA_AOT_ARTIFACT:
             assert standalone_compile_artifacts is not None
             submod_names = standalone_compile_artifacts.submodule_names()
@@ -299,13 +314,14 @@ class VllmSerializableFunction(SerializableCallable):  # type: ignore[misc]
                 num_submods,
             )
 
-            fn = reconstruct_serializable_fn_from_mega_artifact(
-                state=state,
-                standalone_compile_artifacts=standalone_compile_artifacts,
-                vllm_config=get_current_vllm_config(),
-                sym_shape_indices_map=sym_shape_indices_map,
-                returns_tuple_map=returns_tuple_map,
-            )
+            with functorch_ctx:
+                fn = reconstruct_serializable_fn_from_mega_artifact(
+                    state=state,
+                    standalone_compile_artifacts=standalone_compile_artifacts,
+                    vllm_config=get_current_vllm_config(),
+                    sym_shape_indices_map=sym_shape_indices_map,
+                    returns_tuple_map=returns_tuple_map,
+                )
 
             logger.info(
                 "reconstructed serializable fn from standalone compile artifacts"
@@ -328,7 +344,7 @@ class VllmSerializableFunction(SerializableCallable):  # type: ignore[misc]
             vllm_backend: VllmBackend = VllmBackend(
                 vllm_config, state["prefix"], is_encoder
             )
-            with tracing(TracingContext(fake_mode)):
+            with tracing(TracingContext(fake_mode)), functorch_ctx:
                 fn.optimized_call = vllm_backend(
                     state["graph_module"], compile_inputs
                 ).optimized_call
@@ -336,7 +352,36 @@ class VllmSerializableFunction(SerializableCallable):  # type: ignore[misc]
             return fn.optimized_call(*example_inputs)
 
         fn = cls(**state, optimized_call=optimized_call)
+        fn._fake_mode = fake_mode
         return fn
+
+    def finalize_loading(self, vllm_config: VllmConfig) -> None:
+        """Eagerly initialize the compiled backend and perform all loading.
+
+        Must be called after _verify_source_unchanged has populated
+        compilation_config.traced_files, which is needed for cache dir
+        computation.
+        """
+        if self._fake_mode is None:
+            return  # Already finalized, or mega path (no _fake_mode set)
+
+        from torch._guards import TracingContext, tracing
+
+        from vllm.compilation.backends import VllmBackend
+
+        saved_aot_autograd_config = self.aot_autograd_config
+        if saved_aot_autograd_config is not None:
+            functorch_ctx = torch._functorch.config.patch(saved_aot_autograd_config)
+        else:
+            functorch_ctx = contextlib.nullcontext()
+
+        vllm_backend = VllmBackend(vllm_config, self.prefix, self.is_encoder)
+        with tracing(TracingContext(self._fake_mode)), functorch_ctx:
+            result = vllm_backend(self.graph_module, list(self.example_inputs))
+            self.optimized_call = result.optimized_call
+            self.vllm_backend = vllm_backend
+
+        self._fake_mode = None
 
     @property
     def co_name(self) -> Literal["VllmSerializableFunction"]:

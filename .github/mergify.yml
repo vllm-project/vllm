@@ -3,6 +3,7 @@ pull_request_rules:
   description: Automatically apply documentation label
   conditions:
     - label != stale
+    - -closed
     - or:
       - files~=^[^/]+\.md$
       - files~=^docs/
@@ -26,7 +27,7 @@ pull_request_rules:
         Hi @{{author}}, the pre-commit checks have failed. Please run:
 
         ```bash 
-        uv pip install pre-commit
+        uv pip install pre-commit>=4.5.1
         pre-commit install
         pre-commit run --all-files
         ```
@@ -37,15 +38,13 @@ pull_request_rules:
 
         > [!TIP]
         > <details>
-        > <summary>Is <code>mypy</code> or <code>markdownlint</code> failing?</summary>
+        > <summary>Is <code>mypy</code> failing?</summary>
         > <br/>
-        > <code>mypy</code> and <code>markdownlint</code> are run differently in CI. If the failure is related to either of these checks, please use the following commands to run them locally:
+        > <code>mypy</code> is run differently in CI. If the failure is related to this check, please use the following command to run it locally:
         >
         > ```bash
         > # For mypy (substitute "3.10" with the failing version if needed)
         > pre-commit run --hook-stage manual mypy-3.10
-        > # For markdownlint
-        > pre-commit run --hook-stage manual markdownlint
         > ```
         > </details>
 
@@ -335,7 +334,7 @@ pull_request_rules:
     - or:
       - files~=^tests/tool_use/
       - files~=^tests/entrypoints/openai/tool_parsers/
-      - files=tests/entrypoints/openai/test_chat_with_tool_reasoning.py
+      - files=tests/entrypoints/openai/chat_completion/test_chat_with_tool_reasoning.py
       - files~=^vllm/entrypoints/openai/tool_parsers/
       - files=docs/features/tool_calling.md
       - files~=^examples/tool_chat_*
