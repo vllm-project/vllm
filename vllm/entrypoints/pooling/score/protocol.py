@@ -37,7 +37,6 @@ class ScoreRequestMixin(PoolingBasicRequestMixin, ClassifyRequestMixin):
     def to_pooling_params(self, task: PoolingTask = "score"):
         return PoolingParams(
             task=task,
-            truncate_prompt_tokens=self.truncate_prompt_tokens,
             use_activation=self.use_activation,
         )
 
@@ -113,7 +112,6 @@ class RerankRequest(PoolingBasicRequestMixin, ClassifyRequestMixin):
     def to_pooling_params(self, task: PoolingTask = "score"):
         return PoolingParams(
             task=task,
-            truncate_prompt_tokens=self.truncate_prompt_tokens,
             use_activation=self.use_activation,
         )
 

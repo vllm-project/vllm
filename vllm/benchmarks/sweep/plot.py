@@ -324,6 +324,11 @@ def _plot_fig(
     df = filter_by.apply(df)
     df = bin_by.apply(df)
 
+    if len(df) == 0:
+        print(f"No data to plot. Filters: {filter_by}")
+        print("[END FIGURE]")
+        return
+
     # Sort by curve_by columns alphabetically for consistent legend ordering
     if curve_by:
         df = df.sort_values(by=curve_by)
@@ -346,7 +351,45 @@ def _plot_fig(
         else "(All)"
     )
 
-    g = sns.FacetGrid(df, row="row_group", col="col_group", height=fig_height)
+    if len(curve_by) <= 3:
+        hue, style, size, *_ = (*curve_by, None, None, None)
+
+        g = sns.relplot(
+            df,
+            x=var_x,
+            y=var_y,
+            hue=hue,
+            style=style,
+            size=size,
+            markers=True,
+            errorbar="sd" if error_bars else None,
+            kind="line",
+            row="row_group",
+            col="col_group",
+            height=fig_height,
+        )
+    else:
+        df["curve_group"] = (
+            pd.concat(
+                [k + "=" + df[k].astype(str) for k in curve_by],
+                axis=1,
+            ).agg("\n".join, axis=1)
+            if curve_by
+            else "(All)"
+        )
+
+        g = sns.relplot(
+            df,
+            x=var_x,
+            y=var_y,
+            hue="curve_group",
+            markers=True,
+            errorbar="sd" if error_bars else None,
+            kind="line",
+            row="row_group",
+            col="col_group",
+            height=fig_height,
+        )
 
     if row_by and col_by:
         g.set_titles("{row_name}\n{col_name}")
@@ -361,42 +404,6 @@ def _plot_fig(
         g.set(xscale=scale_x)
     if scale_y:
         g.set(yscale=scale_y)
-
-    if len(curve_by) <= 3:
-        hue, style, size, *_ = (*curve_by, None, None, None)
-
-        g.map_dataframe(
-            sns.lineplot,
-            x=var_x,
-            y=var_y,
-            hue=hue,
-            style=style,
-            size=size,
-            markers=True,
-            errorbar="sd" if error_bars else None,
-        )
-
-        g.add_legend(title=hue)
-    else:
-        df["curve_group"] = (
-            pd.concat(
-                [k + "=" + df[k].astype(str) for k in curve_by],
-                axis=1,
-            ).agg("\n".join, axis=1)
-            if curve_by
-            else "(All)"
-        )
-
-        g.map_dataframe(
-            sns.lineplot,
-            x=var_x,
-            y=var_y,
-            hue="curve_group",
-            markers=True,
-            errorbar="sd" if error_bars else None,
-        )
-
-        g.add_legend()
 
     g.savefig(fig_path, dpi=fig_dpi)
     plt.close(g.figure)
@@ -492,7 +499,7 @@ class SweepPlotArgs:
 
     @classmethod
     def from_cli_args(cls, args: argparse.Namespace):
-        output_dir = Path(args.OUTPUT_DIR)
+        output_dir = Path(args.EXPERIMENT_DIR)
         if not output_dir.exists():
             raise ValueError(f"No parameter sweep results under {output_dir}")
 
@@ -524,11 +531,9 @@ class SweepPlotArgs:
     @classmethod
     def add_cli_args(cls, parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         parser.add_argument(
-            "OUTPUT_DIR",
+            "EXPERIMENT_DIR",
             type=str,
-            default="results",
-            help="The directory containing the results to plot, "
-            "i.e., the `--output-dir` argument to the parameter sweep script.",
+            help="The directory containing the sweep results to plot.",
         )
         parser.add_argument(
             "--fig-dir",
@@ -568,13 +573,13 @@ class SweepPlotArgs:
         parser.add_argument(
             "--var-x",
             type=str,
-            default="request_throughput",
+            default="total_token_throughput",
             help="The variable for the x-axis.",
         )
         parser.add_argument(
             "--var-y",
             type=str,
-            default="p99_e2el_ms",
+            default="median_ttft_ms",
             help="The variable for the y-axis",
         )
         parser.add_argument(
