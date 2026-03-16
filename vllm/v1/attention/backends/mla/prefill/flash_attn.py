@@ -9,7 +9,10 @@ import torch
 
 from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
 from vllm.platforms import current_platform
-from vllm.v1.attention.backends.fa_utils import get_flash_attn_version
+from vllm.v1.attention.backends.fa_utils import (
+    get_flash_attn_version,
+    is_flash_attn_varlen_func_available,
+)
 from vllm.v1.attention.backends.mla.prefill.base import (
     MLAPrefillBackend,
     MLAPrefillImpl,
@@ -21,18 +24,10 @@ if TYPE_CHECKING:
         MLACommonPrefillMetadata,
     )
 
-# Check if we're using vllm's flash attention or upstream
-try:
-    from vllm.vllm_flash_attn import (  # type: ignore[attr-defined]
-        flash_attn_varlen_func,
-    )
-
-    is_vllm_fa = True
-except ImportError:
-    # For ROCm use upstream flash attention
-    if current_platform.is_rocm():
-        from flash_attn import flash_attn_varlen_func  # type: ignore[no-redef]
-    is_vllm_fa = False
+if is_flash_attn_varlen_func_available():
+    from vllm.v1.attention.backends.fa_utils import flash_attn_varlen_func
+else:
+    flash_attn_varlen_func = None  # type: ignore[assignment]
 
 
 class FlashAttnPrefillBackend(MLAPrefillBackend):
@@ -51,24 +46,7 @@ class FlashAttnPrefillBackend(MLAPrefillBackend):
 
     @classmethod
     def is_available(cls) -> bool:
-        try:
-            from vllm.vllm_flash_attn import (  # type: ignore[attr-defined]
-                flash_attn_varlen_func,  # noqa: F401
-            )
-
-            return True
-        except ImportError:
-            # Check for ROCm flash attention
-            if current_platform.is_rocm():
-                try:
-                    from flash_attn import (
-                        flash_attn_varlen_func,  # type: ignore[no-redef]  # noqa: F401,F811
-                    )
-
-                    return True
-                except ImportError:
-                    return False
-            return False
+        return is_flash_attn_varlen_func_available()
 
 
 class FlashAttnPrefillImpl(MLAPrefillImpl):
@@ -98,6 +76,10 @@ class FlashAttnPrefillImpl(MLAPrefillImpl):
 
         # Handle the differences between the flash_attn_varlen from
         # flash_attn and the one from vllm_flash_attn
+        assert flash_attn_varlen_func is not None, (
+            "FlashAttnPrefillImpl requires flash_attn_varlen_func. "
+            "Ensure FlashAttnPrefillBackend.is_available() is checked first."
+        )
         qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
         self.flash_attn_varlen_func = flash_attn_varlen_func
         self.vllm_flash_attn_version = get_flash_attn_version(head_size=qk_head_dim)
@@ -121,6 +103,9 @@ class FlashAttnPrefillImpl(MLAPrefillImpl):
             or self.vllm_flash_attn_version == 4
         )
 
+        # Track whether we're using vllm's FA or upstream (for ROCm)
+        self._is_vllm_fa = current_platform.is_cuda() or current_platform.is_xpu()
+
     def _flash_attn_varlen_diff_headdims(
         self,
         q: torch.Tensor,
@@ -137,7 +122,7 @@ class FlashAttnPrefillImpl(MLAPrefillImpl):
                 v, [0, q.shape[-1] - v.shape[-1]], value=0
             )
 
-        if is_vllm_fa:
+        if self._is_vllm_fa:
             kwargs["return_softmax_lse"] = return_softmax_lse
         else:
             # ROCm leverages the upstream flash_attn, which takes a parameter
