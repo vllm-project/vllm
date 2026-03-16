@@ -177,7 +177,7 @@ def resample_audio_pyav(
     Args:
         audio: Input audio. Can be:
             - 1D array ``(samples,)``: mono audio
-            - 2D array ``(channels, samples)``: multi-channel audio
+            - 2D array ``(channels, samples)``: stereo audio
         orig_sr: Original sample rate in Hz.
         target_sr: Target sample rate in Hz.
 
