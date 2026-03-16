@@ -83,7 +83,7 @@ class CacheConfig:
     - "xxhash_cbor" combines canonical CBOR serialization with xxHash for
     reproducible hashing. Requires the optional ``xxhash`` package."""
     calculate_kv_scales: bool = False
-    """Deprecated: This option is deprecated and will be removed in v0.18.
+    """Deprecated: This option is deprecated and will be removed in v0.19.
     It enables dynamic calculation of `k_scale` and `v_scale` when
     kv_cache_dtype is fp8. If `False`, the scales will be loaded from the model
     checkpoint if available. Otherwise, the scales will default to 1.0."""
@@ -212,7 +212,7 @@ class CacheConfig:
         if calculate_kv_scales:
             warnings.warn(
                 "The `--calculate-kv-scales` option is deprecated and will "
-                "be removed in v0.18. The scales will be loaded from the "
+                "be removed in v0.19. The scales will be loaded from the "
                 "model checkpoint if available, otherwise they default to "
                 "1.0.",
                 DeprecationWarning,
