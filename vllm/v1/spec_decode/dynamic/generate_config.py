@@ -270,7 +270,10 @@ def get_acceptance_rate_per_pos(args) -> tuple[float, list[float]]:
     )
 
     sampling_params = SamplingParams(temperature=args.temp, max_tokens=args.output_len)
-    _ = llm.chat(llm_prompts, sampling_params=sampling_params)
+    if args.enable_multimodal_chat:
+        _ = llm.chat(llm_prompts, sampling_params=sampling_params)
+    else:
+        _ = llm.generate(llm_prompts, sampling_params=sampling_params)
 
     metrics = llm.get_metrics()
 
@@ -352,10 +355,13 @@ def main():
     args.num_spec_tokens = max(args.num_speculative_tokens_list)
 
     # Construct result directory path
+    dataset_suffix = (
+        args.dataset_path.replace("/", "_") if args.dataset_path else args.dataset_name
+    )
     args.result_dir = (
         f"{args.result_dir}/tp-{args.tp}_temp-{args.temp}"
         f"_top_p-{args.top_p}_top_k-{args.top_k}"
-        f"/{args.dataset_path.replace('/', '_')}/"
+        f"/{dataset_suffix}/"
     )
     Path(args.result_dir).mkdir(parents=True, exist_ok=True)
 
