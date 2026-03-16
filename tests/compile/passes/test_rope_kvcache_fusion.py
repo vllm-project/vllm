@@ -196,6 +196,7 @@ class QKRoPEKVCacheTestModel(torch.nn.Module):
         AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN,
         AttentionBackendEnum.TRITON_ATTN,
         AttentionBackendEnum.ROCM_ATTN,
+        AttentionBackendEnum.ROCM_AITER_FA,
     ],
 )
 @pytest.mark.parametrize("enable_rope_custom_op", [True])  # [True, False])
