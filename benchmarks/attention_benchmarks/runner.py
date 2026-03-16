@@ -418,8 +418,8 @@ def _run_single_benchmark(
     mem_stats = {}
     if config.profile_memory:
         mem_stats = {
-            "allocated_mb": torch.cuda.memory_allocated(device) / 1024**2,
-            "reserved_mb": torch.cuda.memory_reserved(device) / 1024**2,
+            "allocated_mb": torch.accelerator.memory_allocated(device) / 1024**2,
+            "reserved_mb": torch.accelerator.memory_reserved(device) / 1024**2,
         }
 
     return times, mem_stats
@@ -443,7 +443,7 @@ def run_attention_benchmark(config: BenchmarkConfig) -> BenchmarkResult:
         BenchmarkResult with timing and memory statistics
     """
     device = torch.device(config.device)
-    torch.cuda.set_device(device)
+    torch.accelerator.set_device_index(device)
 
     backend_cfg = _get_backend_config(config.backend)
 
