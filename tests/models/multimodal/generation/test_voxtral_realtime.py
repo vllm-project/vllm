@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import contextlib
 from dataclasses import asdict
 
 import pytest
+import pytest_asyncio
 from mistral_common.audio import Audio
 from mistral_common.protocol.instruct.chunk import RawAudio
 from mistral_common.protocol.transcription.request import (
@@ -75,16 +77,19 @@ def engine():
     engine_args = EngineArgs(**ENGINE_CONFIG)
     llm = LLM(**asdict(engine_args))
     yield llm
-    llm.llm_engine.shutdown()
+    with contextlib.suppress(Exception):
+        llm.llm_engine.engine_core.shutdown()
     import torch
 
     torch.accelerator.empty_cache()
 
 
-@pytest.fixture
-def async_engine() -> AsyncLLM:
+@pytest_asyncio.fixture
+async def async_engine():
     engine_args = AsyncEngineArgs(**ENGINE_CONFIG)
-    return AsyncLLM.from_engine_args(engine_args)
+    llm = AsyncLLM.from_engine_args(engine_args)
+    yield llm
+    llm.shutdown()
 
 
 def test_voxtral_realtime_forward(audio_assets, tokenizer, engine):
