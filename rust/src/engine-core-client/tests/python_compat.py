@@ -25,22 +25,16 @@ class FinishReason(IntEnum):
     REPETITION = 4
 
 
-class SamplingParams(msgspec.Struct, omit_defaults=True, dict=True):
-    n: int = 1
+class EngineCoreSamplingParams(msgspec.Struct, omit_defaults=True, dict=True):
     temperature: float = 1.0
     top_p: float = 1.0
     top_k: int = 0
-    max_tokens: int | None = 16
+    max_tokens: int = 16
     min_tokens: int = 0
-    stop: list[str] = []
     stop_token_ids: list[int] = []
-    ignore_eos: bool = False
+    _eos_token_id: int | None = None
+    _all_stop_token_ids: set[int] = set()
     output_kind: RequestOutputKind = RequestOutputKind.CUMULATIVE
-    structured_outputs: object | None = None
-    logit_bias: object | None = None
-    allowed_token_ids: list[int] | None = None
-    extra_args: object | None = None
-    repetition_detection: object | None = None
 
 
 class EngineCoreRequest(
@@ -51,7 +45,7 @@ class EngineCoreRequest(
     request_id: str
     prompt_token_ids: list[int] | None
     mm_features: object | None
-    sampling_params: SamplingParams | None
+    sampling_params: EngineCoreSamplingParams | None
     pooling_params: object | None
     arrival_time: float
     lora_request: object | None = None
@@ -107,18 +101,16 @@ request = EngineCoreRequest(
     request_id="req-1",
     prompt_token_ids=[11, 22],
     mm_features=None,
-    sampling_params=SamplingParams(
-        n=2,
+    sampling_params=EngineCoreSamplingParams(
         temperature=0.8,
         top_p=0.9,
         top_k=8,
         max_tokens=32,
         min_tokens=1,
-        stop=["stop"],
         stop_token_ids=[151643],
-        ignore_eos=True,
+        _eos_token_id=151645,
+        _all_stop_token_ids={151643, 151645},
         output_kind=RequestOutputKind.FINAL_ONLY,
-        allowed_token_ids=[1, 2, 3],
     ),
     pooling_params=None,
     arrival_time=42.5,

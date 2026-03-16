@@ -12,8 +12,8 @@ use tokio::time::timeout;
 use tracing_subscriber::EnvFilter;
 use vllm_engine_core_client::protocol::handshake::{HandshakeInitMessage, ReadyMessage};
 use vllm_engine_core_client::protocol::{
-    EngineCoreOutput, EngineCoreOutputs, EngineCoreRequest, FinishReason, RequestOutputKind,
-    SamplingParams, UtilityOutput,
+    EngineCoreOutput, EngineCoreOutputs, EngineCoreRequest, EngineCoreSamplingParams, FinishReason,
+    RequestOutputKind, UtilityOutput,
 };
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig, Error};
 use zeromq::prelude::{Socket, SocketRecv, SocketSend};
@@ -38,22 +38,16 @@ fn sample_request_with_id(request_id: &str) -> EngineCoreRequest {
         request_id: request_id.to_string(),
         prompt_token_ids: Some(vec![11, 22]),
         mm_features: None,
-        sampling_params: Some(SamplingParams {
-            n: 2,
+        sampling_params: Some(EngineCoreSamplingParams {
             temperature: 0.8,
             top_p: 0.9,
             top_k: 8,
-            max_tokens: Some(32),
+            max_tokens: 32,
             min_tokens: 1,
-            stop: vec!["stop".to_string()],
             stop_token_ids: vec![151643],
-            ignore_eos: true,
+            eos_token_id: Some(151645),
+            all_stop_token_ids: BTreeSet::from([151643, 151645]),
             output_kind: RequestOutputKind::FinalOnly,
-            structured_outputs: None,
-            logit_bias: None,
-            allowed_token_ids: Some(vec![1, 2, 3]),
-            extra_args: None,
-            repetition_detection: None,
             ..Default::default()
         }),
         pooling_params: None,

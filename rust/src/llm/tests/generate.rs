@@ -9,8 +9,8 @@ use tokio::time::timeout;
 use tracing_subscriber::EnvFilter;
 use vllm_engine_core_client::protocol::handshake::{HandshakeInitMessage, ReadyMessage};
 use vllm_engine_core_client::protocol::{
-    EngineCoreOutput, EngineCoreOutputs, EngineCoreRequest, FinishReason, RequestOutputKind,
-    SamplingParams,
+    EngineCoreOutput, EngineCoreOutputs, EngineCoreRequest, EngineCoreSamplingParams, FinishReason,
+    RequestOutputKind,
 };
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig};
 use vllm_llm::{Error, GenerateRequest, Llm};
@@ -64,12 +64,12 @@ fn request_output(
 fn sample_generate_request(
     request_id: &str,
     output_kind: RequestOutputKind,
-    max_tokens: Option<u32>,
+    max_tokens: u32,
 ) -> GenerateRequest {
     GenerateRequest {
         request_id: request_id.to_string(),
         prompt_token_ids: vec![11, 22],
-        sampling_params: SamplingParams {
+        sampling_params: EngineCoreSamplingParams {
             output_kind,
             max_tokens,
             ..Default::default()
@@ -202,7 +202,7 @@ async fn generate_streams_delta_outputs() {
         .generate(sample_generate_request(
             "req-delta",
             RequestOutputKind::Delta,
-            Some(3),
+            3,
         ))
         .await
         .unwrap();
@@ -256,7 +256,7 @@ async fn generate_streams_cumulative_outputs() {
         .generate(sample_generate_request(
             "req-cumulative",
             RequestOutputKind::Cumulative,
-            Some(3),
+            3,
         ))
         .await
         .unwrap();
@@ -307,7 +307,7 @@ async fn generate_streams_final_only_outputs() {
         .generate(sample_generate_request(
             "req-final",
             RequestOutputKind::FinalOnly,
-            Some(3),
+            3,
         ))
         .await
         .unwrap();
@@ -351,7 +351,7 @@ async fn generate_propagates_unexpected_close_errors() {
         .generate(sample_generate_request(
             "req-close",
             RequestOutputKind::Cumulative,
-            Some(1),
+            1,
         ))
         .await
         .unwrap();
@@ -397,7 +397,7 @@ async fn abort_forwards_to_engine_core_client() {
         .generate(sample_generate_request(
             "req-abort",
             RequestOutputKind::Delta,
-            Some(4),
+            4,
         ))
         .await
         .unwrap();
@@ -445,7 +445,7 @@ async fn dropping_a_live_generate_stream_triggers_abort() {
         .generate(sample_generate_request(
             "req-drop",
             RequestOutputKind::Delta,
-            Some(4),
+            4,
         ))
         .await
         .unwrap();
@@ -499,7 +499,7 @@ async fn duplicate_request_ids_bubble_up_from_engine_core_client() {
         .generate(sample_generate_request(
             "req-dup",
             RequestOutputKind::FinalOnly,
-            Some(1),
+            1,
         ))
         .await
         .unwrap();
@@ -507,7 +507,7 @@ async fn duplicate_request_ids_bubble_up_from_engine_core_client() {
         .generate(sample_generate_request(
             "req-dup",
             RequestOutputKind::FinalOnly,
-            Some(1),
+            1,
         ))
         .await
     {

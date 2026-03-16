@@ -2839,6 +2839,7 @@ dependencies = [
  "llm-tokenizer",
  "rmp-serde",
  "serde",
+ "serde_default",
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",

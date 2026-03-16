@@ -11,8 +11,8 @@ use serde_tuple::{Deserialize_tuple, Serialize_tuple};
 use crate::error::{Error, Result};
 
 // TODO: This module currently mixes reusable frontend-facing semantic types
-// (for example `FinishReason`, `StopReason`, `RequestOutputKind`, and maybe a
-// future cleaned-up `SamplingParams`) with engine-core-specific wire DTOs and
+// (for example `FinishReason`, `StopReason`, `RequestOutputKind`, and future
+// cleaned-up frontend sampling types) with engine-core-specific wire DTOs and
 // handshake/control messages. While the Rust frontend is still evolving quickly,
 // keep them co-located here for iteration speed. Once the higher-level API
 // boundary stabilizes, move the truly reusable semantic types into a lower-level
@@ -29,10 +29,6 @@ pub use classfied_outputs::{
 };
 
 mod defaults {
-    pub fn sampling_n() -> u32 {
-        1
-    }
-
     pub fn temperature() -> f32 {
         1.0
     }
@@ -41,8 +37,8 @@ mod defaults {
         1.0
     }
 
-    pub fn max_tokens() -> Option<u32> {
-        Some(16)
+    pub fn max_tokens() -> u32 {
+        16
     }
 }
 
@@ -123,18 +119,17 @@ pub enum StopReason {
     Text(String),
 }
 
-/// Sampling parameters for text generation.
+/// Engine-core-facing sampling parameters for text generation.
 ///
-/// This is the first-stage strongly typed subset of Python `SamplingParams`.
-/// Complex or less stable fields remain dynamic values.
+/// This is the normalized southbound subset used by the Rust frontend when it
+/// talks to Python engine-core over the wire. User-facing request semantics
+/// such as `stop` strings, `n`, and `ignore_eos` are intentionally handled by
+/// higher layers before values reach this DTO.
 ///
 /// Original Python definition:
 /// <https://github.com/vllm-project/vllm/blob/f22d6e026798a74e6542a52ef776c054f2de572a/vllm/sampling_params.py#L155-L291>
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, DefaultFromSerde)]
-pub struct SamplingParams {
-    /// Number of outputs to return for the given prompt request.
-    #[serde(default = "defaults::sampling_n")]
-    pub n: u32,
+pub struct EngineCoreSamplingParams {
     /// Controls randomness. Lower values are more deterministic; zero means
     /// greedy sampling.
     #[serde(default = "defaults::temperature")]
@@ -147,32 +142,26 @@ pub struct SamplingParams {
     pub top_k: i32,
     /// Maximum number of tokens to generate per output sequence.
     #[serde(default = "defaults::max_tokens")]
-    pub max_tokens: Option<u32>,
+    pub max_tokens: u32,
     /// Minimum number of tokens to generate before EOS or stop-token handling.
     #[serde(default)]
     pub min_tokens: u32,
-    /// Stop strings. Returned output does not include them.
-    #[serde(default)]
-    pub stop: Vec<String>,
     /// Token IDs that stop generation.
     #[serde(default)]
     pub stop_token_ids: Vec<u32>,
-    /// Continue generation after EOS if set.
-    #[serde(default)]
-    pub ignore_eos: bool,
     /// Primary EOS token ID used by engine-core's dedicated EOS stop path.
     ///
     /// This mirrors Python's internal `_eos_token_id` field and is derived by
     /// the frontend from tokenizer/model metadata rather than supplied directly
     /// by end users.
     #[serde(default, rename = "_eos_token_id")]
-    pub _eos_token_id: Option<u32>,
+    pub eos_token_id: Option<u32>,
     /// Complete stop-token set used by engine-core for `min_tokens` masking.
     ///
     /// This mirrors Python's internal `_all_stop_token_ids` field and should
     /// contain explicit `stop_token_ids` plus any frontend-derived EOS token IDs.
     #[serde(default, rename = "_all_stop_token_ids")]
-    pub _all_stop_token_ids: BTreeSet<u32>,
+    pub all_stop_token_ids: BTreeSet<u32>,
     /// Whether higher-level frontend updates are cumulative, delta-based, or
     /// final-only.
     ///
@@ -182,52 +171,6 @@ pub struct SamplingParams {
     /// enforces `FINAL_ONLY` behavior for user-facing request outputs.
     #[serde(default)]
     pub output_kind: RequestOutputKind,
-    /// Structured output configuration carried through as an opaque msgpack value.
-    #[serde(default)]
-    pub structured_outputs: Option<OpaqueValue>,
-    /// Logit bias configuration carried through as an opaque msgpack value.
-    #[serde(default)]
-    pub logit_bias: Option<OpaqueValue>,
-    /// Optional allow-list of token IDs.
-    #[serde(default)]
-    pub allowed_token_ids: Option<Vec<u32>>,
-    /// Arbitrary engine/plugin-specific args.
-    #[serde(default)]
-    pub extra_args: Option<OpaqueValue>,
-    /// Repetition detection config carried through as an opaque msgpack value.
-    #[serde(default)]
-    pub repetition_detection: Option<OpaqueValue>,
-}
-
-impl SamplingParams {
-    /// Apply tokenizer/model-derived EOS token IDs using the same subset of
-    /// semantics as Python `SamplingParams.update_from_generation_config()`.
-    pub fn apply_model_eos_token_ids(
-        &mut self,
-        eos_token_id: Option<u32>,
-        extra_eos_token_ids: &BTreeSet<u32>,
-    ) {
-        self._all_stop_token_ids = self.stop_token_ids.iter().copied().collect();
-        if let Some(eos_token_id) = eos_token_id {
-            self._all_stop_token_ids.insert(eos_token_id);
-        }
-        self._all_stop_token_ids
-            .extend(extra_eos_token_ids.iter().copied());
-
-        self._eos_token_id = if self.ignore_eos { None } else { eos_token_id };
-        if !self.ignore_eos {
-            self.stop_token_ids
-                .extend(extra_eos_token_ids.iter().copied());
-            self.stop_token_ids.sort_unstable();
-            self.stop_token_ids.dedup();
-        }
-    }
-
-    /// Apply one tokenizer-derived primary EOS token ID using the same subset
-    /// of semantics as Python `SamplingParams.update_from_generation_config()`.
-    pub fn apply_primary_eos_token_id(&mut self, eos_token_id: Option<u32>) {
-        self.apply_model_eos_token_ids(eos_token_id, &BTreeSet::new());
-    }
 }
 
 /// Engine-core add-request payload sent from frontend to engine.
@@ -240,7 +183,7 @@ pub struct EngineCoreRequest {
     pub prompt_token_ids: Option<Vec<u32>>,
     /// Multimodal features are preserved in the schema but not yet strongly typed.
     pub mm_features: Option<OpaqueValue>,
-    pub sampling_params: Option<SamplingParams>,
+    pub sampling_params: Option<EngineCoreSamplingParams>,
     /// Pooling parameters are preserved in the schema but not yet strongly typed.
     pub pooling_params: Option<OpaqueValue>,
     pub arrival_time: f64,
@@ -406,8 +349,8 @@ mod tests {
             request_id: "req-1".to_string(),
             prompt_token_ids: Some(vec![1, 2, 3]),
             mm_features: None,
-            sampling_params: Some(SamplingParams {
-                max_tokens: Some(8),
+            sampling_params: Some(EngineCoreSamplingParams {
+                max_tokens: 8,
                 ..Default::default()
             }),
             pooling_params: None,
@@ -471,34 +414,5 @@ mod tests {
             decoded.finished_requests,
             Some(BTreeSet::from(["req-1".to_string()]))
         );
-    }
-
-    #[test]
-    fn sampling_params_apply_model_eos_token_ids_matches_python_subset() {
-        let mut params = SamplingParams {
-            stop_token_ids: vec![11, 22],
-            ..Default::default()
-        };
-
-        params.apply_model_eos_token_ids(Some(99), &BTreeSet::from([55]));
-
-        assert_eq!(params._eos_token_id, Some(99));
-        assert_eq!(params.stop_token_ids, vec![11, 22, 55]);
-        assert_eq!(params._all_stop_token_ids, BTreeSet::from([11, 22, 55, 99]));
-    }
-
-    #[test]
-    fn sampling_params_apply_model_eos_token_ids_respects_ignore_eos() {
-        let mut params = SamplingParams {
-            ignore_eos: true,
-            stop_token_ids: vec![11],
-            ..Default::default()
-        };
-
-        params.apply_model_eos_token_ids(Some(99), &BTreeSet::from([55]));
-
-        assert_eq!(params._eos_token_id, None);
-        assert_eq!(params.stop_token_ids, vec![11]);
-        assert_eq!(params._all_stop_token_ids, BTreeSet::from([11, 55, 99]));
     }
 }

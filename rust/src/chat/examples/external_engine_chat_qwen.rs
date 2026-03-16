@@ -6,8 +6,9 @@ use futures::StreamExt as _;
 use serde_json::Value;
 use tracing_subscriber::EnvFilter;
 use vllm_chat::backends::hf::HfChatBackend;
-use vllm_chat::{ChatEvent, ChatLlm, ChatMessage, ChatOptions, ChatRequest, ChatRole};
-use vllm_engine_core_client::protocol::SamplingParams;
+use vllm_chat::{
+    ChatEvent, ChatLlm, ChatMessage, ChatOptions, ChatRequest, ChatRole, UserSamplingParams,
+};
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig};
 use vllm_llm::Llm;
 
@@ -82,8 +83,8 @@ async fn main() -> Result<()> {
     let request = ChatRequest {
         request_id: request_id.clone(),
         messages: vec![ChatMessage::text(ChatRole::User, args.prompt.clone())],
-        sampling_params: SamplingParams {
-            max_tokens: Some(MAX_TOKENS),
+        sampling_params: UserSamplingParams {
+            max_tokens: MAX_TOKENS,
             temperature: 0.0,
             ..Default::default()
         },

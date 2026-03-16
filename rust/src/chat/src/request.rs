@@ -1,10 +1,24 @@
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
+use serde_default::DefaultFromSerde;
 use serde_json::Value;
-use vllm_engine_core_client::protocol::SamplingParams;
 
 use crate::error::{Error, Result};
+
+mod defaults {
+    pub fn temperature() -> f32 {
+        1.0
+    }
+
+    pub fn top_p() -> f32 {
+        1.0
+    }
+
+    pub fn max_tokens() -> u32 {
+        16
+    }
+}
 
 /// Role label for one text-only chat message.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -129,6 +143,37 @@ impl Default for ChatOptions {
     }
 }
 
+/// User-facing sampling parameters accepted by `vllm-chat`.
+///
+/// This intentionally keeps only the subset that the current Rust chat layer
+/// supports as northbound request semantics. Engine-core-specific normalized
+/// fields are derived later during lowering.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, DefaultFromSerde)]
+pub struct UserSamplingParams {
+    /// Controls randomness. Lower values are more deterministic; zero means
+    /// greedy sampling.
+    #[serde(default = "defaults::temperature")]
+    pub temperature: f32,
+    /// Cumulative probability threshold for nucleus sampling.
+    #[serde(default = "defaults::top_p")]
+    pub top_p: f32,
+    /// Maximum number of top tokens to consider. `0` means all tokens.
+    #[serde(default)]
+    pub top_k: i32,
+    /// Maximum number of tokens to generate.
+    #[serde(default = "defaults::max_tokens")]
+    pub max_tokens: u32,
+    /// Minimum number of tokens to generate before EOS or stop-token handling.
+    #[serde(default)]
+    pub min_tokens: u32,
+    /// Explicit stop token IDs provided by the caller.
+    #[serde(default)]
+    pub stop_token_ids: Vec<u32>,
+    /// If true, do not stop on the model's primary EOS token.
+    #[serde(default)]
+    pub ignore_eos: bool,
+}
+
 /// One text-only chat request ready to be rendered into a prompt and lowered into a generate
 /// request.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -137,8 +182,8 @@ pub struct ChatRequest {
     pub request_id: String,
     /// Ordered chat history to render.
     pub messages: Vec<ChatMessage>,
-    /// Southbound sampling parameters forwarded to `vllm_llm`.
-    pub sampling_params: SamplingParams,
+    /// User-facing sampling parameters accepted by `vllm-chat`.
+    pub sampling_params: UserSamplingParams,
     /// Chat-specific rendering options.
     pub chat_options: ChatOptions,
 }

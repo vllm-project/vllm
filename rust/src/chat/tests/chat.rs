@@ -7,10 +7,13 @@ use std::time::Duration;
 
 use futures::StreamExt as _;
 use tokio::time::timeout;
-use vllm_chat::{ChatBackend, ChatEvent, ChatLlm, ChatMessage, ChatOptions, ChatRequest, ChatRole};
+use vllm_chat::{
+    ChatBackend, ChatEvent, ChatLlm, ChatMessage, ChatOptions, ChatRequest, ChatRole,
+    UserSamplingParams,
+};
 use vllm_engine_core_client::protocol::handshake::{HandshakeInitMessage, ReadyMessage};
 use vllm_engine_core_client::protocol::{
-    EngineCoreOutput, EngineCoreOutputs, EngineCoreRequest, FinishReason, SamplingParams,
+    EngineCoreOutput, EngineCoreOutputs, EngineCoreRequest, FinishReason,
 };
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig};
 use vllm_llm::Llm;
@@ -210,8 +213,8 @@ fn sample_request(request_id: &str) -> ChatRequest {
             ChatMessage::text(ChatRole::System, "You are terse."),
             ChatMessage::text(ChatRole::User, "Say hi"),
         ],
-        sampling_params: SamplingParams {
-            max_tokens: Some(8),
+        sampling_params: UserSamplingParams {
+            max_tokens: 8,
             ..Default::default()
         },
         chat_options: ChatOptions::default(),

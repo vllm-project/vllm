@@ -8,7 +8,10 @@
 pub use backend::{ChatBackend, DynChatBackend, SamplingHints};
 pub use error::{Error, Result};
 pub use event::ChatEvent;
-pub use request::{ChatContent, ChatContentPart, ChatMessage, ChatOptions, ChatRequest, ChatRole};
+pub use request::{
+    ChatContent, ChatContentPart, ChatMessage, ChatOptions, ChatRequest, ChatRole,
+    UserSamplingParams,
+};
 pub use stream::ChatEventStream;
 
 mod backend;

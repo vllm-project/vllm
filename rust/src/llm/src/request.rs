@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use vllm_engine_core_client::protocol::{
-    EngineCoreRequest, OpaqueValue, RequestOutputKind, SamplingParams,
+    EngineCoreRequest, EngineCoreSamplingParams, OpaqueValue, RequestOutputKind,
 };
 
 use crate::error::{Error, Result};
@@ -25,7 +25,7 @@ pub struct GenerateRequest {
     ///
     /// The `output_kind` field controls whether [`crate::GenerateOutput::token_ids`] is
     /// delta-only, cumulative, or final-only.
-    pub sampling_params: SamplingParams,
+    pub sampling_params: EngineCoreSamplingParams,
 
     pub arrival_time: Option<f64>,
     pub cache_salt: Option<String>,
@@ -49,13 +49,6 @@ impl GenerateRequest {
                 request_id: self.request_id,
             });
         }
-        if self.sampling_params.n != 1 {
-            return Err(Error::UnsupportedSamplingCount {
-                request_id: self.request_id,
-                n: self.sampling_params.n,
-            });
-        }
-
         let GenerateRequest {
             request_id,
             prompt_token_ids,
@@ -123,7 +116,7 @@ fn current_unix_timestamp_secs() -> f64 {
 mod tests {
     use std::collections::BTreeMap;
 
-    use vllm_engine_core_client::protocol::{RequestOutputKind, SamplingParams};
+    use vllm_engine_core_client::protocol::{EngineCoreSamplingParams, RequestOutputKind};
 
     use super::GenerateRequest;
     use crate::error::Error;
@@ -132,7 +125,7 @@ mod tests {
         GenerateRequest {
             request_id: "req-1".to_string(),
             prompt_token_ids: vec![11, 22, 33],
-            sampling_params: SamplingParams {
+            sampling_params: EngineCoreSamplingParams {
                 output_kind: RequestOutputKind::Cumulative,
                 ..Default::default()
             },
@@ -185,19 +178,6 @@ mod tests {
         assert!(matches!(
             error,
             Error::EmptyPromptTokenIds { request_id } if request_id == "req-1"
-        ));
-    }
-
-    #[test]
-    fn prepare_rejects_sampling_n_above_one() {
-        let mut request = sample_request();
-        request.sampling_params.n = 2;
-
-        let error = request.prepare().unwrap_err();
-        assert!(matches!(
-            error,
-            Error::UnsupportedSamplingCount { request_id, n }
-                if request_id == "req-1" && n == 2
         ));
     }
 }
