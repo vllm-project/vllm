@@ -1,5 +1,6 @@
 use openai_protocol::chat::ChatCompletionRequest;
 use openai_protocol::common::{StringOrArray, ToolChoice, ToolChoiceValue};
+use tracing::warn;
 
 use crate::error::ApiError;
 
@@ -63,12 +64,9 @@ pub(super) fn validate_request_compat(
         ));
     }
 
-    // if request.stream_options.is_some() {
-    //     return Err(ApiError::invalid_request_param(
-    //         "stream_options are not supported.",
-    //         "stream_options",
-    //     ));
-    // }
+    if request.stream_options.is_some() {
+        warn!("stream_options are currently no-op.");
+    }
 
     if request.response_format.is_some() {
         return Err(ApiError::invalid_request_param(
@@ -233,7 +231,7 @@ fn reject_non_default<T>(value: Option<&T>, param: &str, message: &str) -> Resul
 #[cfg(test)]
 mod tests {
     use openai_protocol::chat::{ChatCompletionRequest, ChatMessage, MessageContent};
-    use openai_protocol::common::{ResponseFormat, StreamOptions, Tool, ToolChoice};
+    use openai_protocol::common::{ResponseFormat, Tool, ToolChoice};
     use serde_json::json;
 
     use super::validate_request_compat;
@@ -286,17 +284,9 @@ mod tests {
     }
 
     #[test]
-    fn validate_request_compat_rejects_response_format_and_stream_options() {
+    fn validate_request_compat_rejects_response_format() {
         let request = ChatCompletionRequest {
             response_format: Some(ResponseFormat::Text),
-            ..base_request()
-        };
-        assert!(validate_request_compat(&request, "Qwen/Qwen1.5-0.5B-Chat").is_err());
-
-        let request = ChatCompletionRequest {
-            stream_options: Some(StreamOptions {
-                include_usage: Some(true),
-            }),
             ..base_request()
         };
         assert!(validate_request_compat(&request, "Qwen/Qwen1.5-0.5B-Chat").is_err());
