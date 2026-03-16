@@ -258,7 +258,8 @@ class AttentionGroup:
 
 
 def select_common_block_size(
-    kv_manager_block_size: int, attn_groups: list[AttentionGroup]
+    kv_manager_block_size: int,
+    backends: list[type[AttentionBackend]],
 ) -> int:
     """
     Select a block size that is supported by all backends and is a factor of
@@ -269,7 +270,7 @@ def select_common_block_size(
 
     Args:
         kv_manager_block_size: Block size of KV cache.
-        attn_groups: List of attention groups.
+        backends: List of attention backend classes.
 
     Returns:
         The selected block size.
@@ -296,8 +297,6 @@ def select_common_block_size(
             if not is_supported:
                 return False
         return True
-
-    backends = [group.backend for group in attn_groups]
 
     # Case 1: if the block_size of kv cache manager is supported by all backends,
     # return it directly.
@@ -356,8 +355,9 @@ def prepare_kernel_block_sizes(
         if isinstance(kv_cache_spec, AttentionSpec):
             # This is an attention backend that supports virtual block splitting.
             kv_manager_block_size = kv_cache_group.kv_cache_spec.block_size
+            group_backends = [g.backend for g in attn_groups[kv_cache_gid]]
             selected_kernel_size = select_common_block_size(
-                kv_manager_block_size, attn_groups[kv_cache_gid]
+                kv_manager_block_size, group_backends
             )
             kernel_block_sizes.append(selected_kernel_size)
         elif isinstance(kv_cache_spec, MambaSpec):
