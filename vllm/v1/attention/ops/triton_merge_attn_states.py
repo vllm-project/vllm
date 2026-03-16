@@ -36,13 +36,7 @@ def merge_attn_states(
         prefill_tokens_with_context = num_tokens
 
     use_fp8 = output_scale is not None
-    if use_fp8:
-        scale_val = output_scale.item()
-        assert scale_val != 0.0, "output_scale must be non-zero"
-        # Pre-invert: multiplication is faster than division in Triton
-        output_scale_inv = 1.0 / scale_val
-    else:
-        output_scale_inv = 0.0
+    output_scale_inv = 1.0 / output_scale if use_fp8 else None
 
     # TODO(woosuk): Use CUDA kernel instead of Triton to minimize CPU overhead.
     merge_attn_states_kernel[(num_tokens, num_query_heads)](
@@ -73,7 +67,7 @@ def merge_attn_states_kernel(
     suffix_lse,  # [NUM_HEADS, NUM_TOKENS]
     prefix_head_stride,
     output_head_stride,
-    output_scale_inv,
+    output_scale_inv,  # pre-computed 1/scale tensor or None
     HEAD_SIZE: tl.constexpr,
     PADDED_HEAD_SIZE: tl.constexpr,
     OUTPUT_LSE: tl.constexpr,
@@ -169,7 +163,7 @@ def merge_attn_states_kernel(
     out = p_out * p_scale + s_out * s_scale
 
     if USE_FP8:
-        out = out * output_scale_inv
+        out = out * tl.load(output_scale_inv)
         out = tl.clamp(out, FP8_MIN, FP8_MAX)
         out = out.to(output.dtype.element_ty)
 
