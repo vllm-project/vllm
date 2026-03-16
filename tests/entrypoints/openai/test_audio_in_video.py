@@ -18,10 +18,10 @@ MODEL_NAME = "Qwen/Qwen2.5-Omni-3B"
 def server():
     args = [
         "--max-model-len",
-        "8192",
+        "18432",
         "--enforce-eager",
         "--limit-mm-per-prompt",
-        json.dumps({"audio": 1, "video": 1}),
+        json.dumps({"audio": 2, "video": 2}),
     ]
 
     with RemoteOpenAIServer(
@@ -57,6 +57,57 @@ async def test_online_audio_in_video(
                 {
                     "type": "video_url",
                     "video_url": {"url": f"data:video/mp4;base64,{video_base64}"},
+                },
+            ],
+        }
+    ]
+
+    # multi-turn to test mm processor cache as well
+    for _ in range(2):
+        chat_completion = await client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=messages,
+            max_tokens=16,
+            extra_body={
+                "mm_processor_kwargs": {
+                    "use_audio_in_video": True,
+                }
+            },
+        )
+
+        assert len(chat_completion.choices) == 1
+        choice = chat_completion.choices[0]
+        assert choice.finish_reason == "length"
+
+
+@pytest.mark.core_model
+@pytest.mark.asyncio
+async def test_online_audio_in_video_multi_videos(
+    client: openai.AsyncOpenAI, video_assets: VideoTestAssets
+):
+    """Test video input with `audio_in_video=True`"""
+
+    # we don't use video_urls above because they missed audio stream.
+    video_0_path = video_assets[0].video_path
+    with open(video_0_path, "rb") as f:
+        video_0_base64 = base64.b64encode(f.read()).decode("utf-8")
+
+    video_1_path = "/home/mozf/develop-projects/vllm/draw.mp4"
+    with open(video_1_path, "rb") as f:
+        video_1_base64 = base64.b64encode(f.read()).decode("utf-8")
+
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "What's in these two videos?"},
+                {
+                    "type": "video_url",
+                    "video_url": {"url": f"data:video/mp4;base64,{video_0_base64}"},
+                },
+                {
+                    "type": "video_url",
+                    "video_url": {"url": f"data:video/mp4;base64,{video_1_base64}"},
                 },
             ],
         }
