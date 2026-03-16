@@ -63,6 +63,7 @@ def create_minimal_vllm_config(
     mla_dims: dict | None = None,
     index_topk: int | None = None,
     prefill_backend: str | None = None,
+    kv_cache_dtype: str = "auto",
 ) -> VllmConfig:
     """
     Create minimal VllmConfig for MLA benchmarks.
@@ -149,7 +150,7 @@ def create_minimal_vllm_config(
     cache_config = CacheConfig(
         block_size=block_size,
         gpu_memory_utilization=0.9,
-        cache_dtype="auto",
+        cache_dtype=kv_cache_dtype,
         enable_prefix_caching=False,
     )
 
@@ -535,6 +536,7 @@ def _create_backend_impl(
     device: torch.device,
     max_num_tokens: int = 8192,
     index_topk: int | None = None,
+    kv_cache_dtype: str = "auto",
 ):
     """
     Create backend implementation instance.
@@ -583,7 +585,7 @@ def _create_backend_impl(
         "num_kv_heads": mla_dims["num_kv_heads"],
         "alibi_slopes": None,
         "sliding_window": None,
-        "kv_cache_dtype": "auto",
+        "kv_cache_dtype": kv_cache_dtype,
         "logits_soft_cap": None,
         "attn_type": "decoder",
         "kv_sharing_target_layer_name": None,
@@ -734,13 +736,26 @@ def _run_single_benchmark(
     )
 
     # Create KV cache
-    kv_cache = torch.zeros(
-        num_blocks,
-        block_size,
-        mla_dims["kv_lora_rank"] + mla_dims["qk_rope_head_dim"],
-        device=device,
-        dtype=torch.bfloat16,
-    )
+    kv_cache_dtype = getattr(config, "kv_cache_dtype", "auto")
+    head_size = mla_dims["kv_lora_rank"] + mla_dims["qk_rope_head_dim"]
+    if kv_cache_dtype == "fp8":
+        from vllm.platforms import current_platform
+
+        kv_cache = torch.zeros(
+            num_blocks,
+            block_size,
+            head_size,
+            device=device,
+            dtype=torch.uint8,
+        ).view(current_platform.fp8_dtype())
+    else:
+        kv_cache = torch.zeros(
+            num_blocks,
+            block_size,
+            head_size,
+            device=device,
+            dtype=torch.bfloat16,
+        )
 
     # Create input tensors for both decode and prefill modes
     decode_inputs, prefill_inputs = _create_input_tensors(
@@ -777,6 +792,17 @@ def _run_single_benchmark(
         forward_fn()
     torch.accelerator.synchronize()
 
+    # Optionally capture a CUDA graph after warmup.
+    # Graph replay eliminates CPU launch overhead so timings reflect pure
+    # kernel time.
+    if config.use_cuda_graphs:
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            forward_fn()
+        benchmark_fn = graph.replay
+    else:
+        benchmark_fn = forward_fn
+
     # Benchmark
     times = []
     for _ in range(config.repeats):
@@ -785,7 +811,7 @@ def _run_single_benchmark(
 
         start.record()
         for _ in range(config.num_layers):
-            forward_fn()
+            benchmark_fn()
         end.record()
 
         torch.accelerator.synchronize()
@@ -852,6 +878,9 @@ def _run_mla_benchmark_batched(
     # Determine if this is a sparse backend
     is_sparse = backend_cfg.get("is_sparse", False)
 
+    # Extract kv_cache_dtype from the first config
+    kv_cache_dtype = getattr(first_config, "kv_cache_dtype", "auto")
+
     # Create and set vLLM config for MLA (reused across all benchmarks)
     vllm_config = create_minimal_vllm_config(
         model_name="deepseek-v3",  # Used only for model path
@@ -859,6 +888,7 @@ def _run_mla_benchmark_batched(
         mla_dims=mla_dims,  # Use custom dims from config or default
         index_topk=index_topk if is_sparse else None,
         prefill_backend=prefill_backend,
+        kv_cache_dtype=kv_cache_dtype,
     )
 
     results = []
@@ -884,6 +914,7 @@ def _run_mla_benchmark_batched(
             vllm_config,
             device,
             index_topk=index_topk if is_sparse else None,
+            kv_cache_dtype=kv_cache_dtype,
         )
 
         # Verify the actual prefill backend matches what was requested
