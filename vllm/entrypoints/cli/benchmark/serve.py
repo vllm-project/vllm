@@ -12,7 +12,6 @@ from vllm.entrypoints.cli.benchmark.base import BenchmarkSubcommandBase
 from vllm.eval.runner import (
     _collect_environment,
     _sanitize_model_name,
-    add_eval_args,
     preload_lm_eval_requests,
     score_lm_eval_offline,
 )
@@ -27,7 +26,6 @@ class BenchmarkServingSubcommand(BenchmarkSubcommandBase):
     @classmethod
     def add_cli_args(cls, parser: argparse.ArgumentParser) -> None:
         add_cli_args(parser)
-        add_eval_args(parser)
 
     @staticmethod
     def cmd(args: argparse.Namespace) -> None:

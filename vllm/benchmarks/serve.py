@@ -1605,6 +1605,10 @@ def add_cli_args(parser: argparse.ArgumentParser):
         "prompt tokens, output tokens, and combined token distributions.",
     )
 
+    from vllm.eval.runner import add_eval_args
+
+    add_eval_args(parser)
+
 
 def main(
     args: argparse.Namespace,
