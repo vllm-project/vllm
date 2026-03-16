@@ -60,6 +60,7 @@ MODEL_REGISTRY: dict[str, ModelConfig] = {
     "google/gemma-3-4b-it": ModelConfig(supports_hma=True),
     "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-FP8": ModelConfig(supports_hma=True),
     "Qwen/Qwen3.5-35B-A3B": ModelConfig(supports_hma=True),
+    "openai/gpt-oss-20b": ModelConfig(supports_hma=True),
 }
 
 

@@ -1,0 +1,8 @@
+# Sliding-window model (MoE) + HMA
+# xfail due to premature eviction in SWA
+hf_model: openai/gpt-oss-20b
+gpu_memory_utilization: 0.8
+use_hma: true
+vllm_serve_extra_args:
+  - --max-model-len
+  - "4096"

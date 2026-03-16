@@ -21,6 +21,7 @@ EXPECTED_VALUES = {
     "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-FP8": 0.84,
     "Qwen/Qwen3.5-35B-A3B": 0.85,
     "microsoft/Phi-4-mini-instruct": 0.82,
+    "openai/gpt-oss-20b": 0.30,
 }
 
 SIMPLE_PROMPT = (
