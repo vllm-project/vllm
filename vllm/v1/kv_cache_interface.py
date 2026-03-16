@@ -184,6 +184,7 @@ class FullAttentionSpec(AttentionSpec):
             head_size_v=specs[0].head_size_v,
             dtype=specs[0].dtype,
             page_size_padded=specs[0].page_size_padded,
+            cache_dtype_str=specs[0].cache_dtype_str,
             sliding_window=cls.merge_window_sizes(sliding_window),
             attention_chunk_size=cls.merge_window_sizes(attention_chunk_size),
         )
@@ -191,7 +192,9 @@ class FullAttentionSpec(AttentionSpec):
             for f in fields(AttentionSpec):
                 assert getattr(spec, f.name) == getattr(merged_spec, f.name), (
                     "All attention layers in the same KV cache group must have "
-                    "the same attention spec."
+                    f"the same attention spec. Field '{f.name}' differs: "
+                    f"{getattr(spec, f.name)!r} != "
+                    f"{getattr(merged_spec, f.name)!r}"
                 )
         assert (merged_spec.sliding_window is not None) + (
             merged_spec.attention_chunk_size is not None
@@ -387,7 +390,9 @@ class SinkFullAttentionSpec(FullAttentionSpec):
             for f in fields(AttentionSpec):
                 assert getattr(spec, f.name) == getattr(merged_spec, f.name), (
                     "All attention layers in the same KV cache group must have "
-                    "the same attention spec."
+                    f"the same attention spec. Field '{f.name}' differs: "
+                    f"{getattr(spec, f.name)!r} != "
+                    f"{getattr(merged_spec, f.name)!r}"
                 )
         assert (merged_spec.sliding_window is not None) + (
             merged_spec.attention_chunk_size is not None
