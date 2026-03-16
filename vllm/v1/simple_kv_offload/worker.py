@@ -2,25 +2,22 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Worker-side handler for SimpleCPUOffloadConnector."""
 
+import queue
+import threading
 from typing import TYPE_CHECKING
 
 import torch
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.utils.platform_utils import is_pin_memory_available
-from vllm.v1.simple_kv_offload import (
-    copy_ops,
-)
-from vllm.v1.simple_kv_offload.metadata import (
-    SimpleCPUOffloadMetadata,
-)
+from vllm.v1.simple_kv_offload import copy_ops
+from vllm.v1.simple_kv_offload.metadata import SimpleCPUOffloadMetadata
 
 if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig
-    from vllm.v1.simple_kv_offload.copy_ops import (  # noqa: E501
-        LaunchParams,
-    )
+    from vllm.v1.simple_kv_offload.copy_ops import BatchMemcpyParams
 
 logger = init_logger(__name__)
 
@@ -47,13 +44,13 @@ class SimpleCPUOffloadWorker:
         self.load_stream: torch.cuda.Stream | None = None
         self.store_stream: torch.cuda.Stream | None = None
 
-        # Cached launch params for the Triton kernel
-        self._store_launch_params: LaunchParams | None = None
-        self._load_launch_params: LaunchParams | None = None
+        # Pre-computed params for batched DMA copies (one per direction).
+        self._store_batch_params: BatchMemcpyParams | None = None
+        self._load_batch_params: BatchMemcpyParams | None = None
 
-        # Ordered (event_idx, event) — stream ordering lets us break early
-        self._load_events: list[tuple[int, torch.cuda.Event]] = []
-        self._store_events: list[tuple[int, torch.cuda.Event]] = []
+        # Ordered (event_idx, Event). Events pre-allocated on main thread.
+        self._load_events: list[tuple[int, torch.Event]] = []
+        self._store_events: list[tuple[int, torch.Event]] = []
         # High-water marks: highest event_idx completed per stream.
         # When the event list is empty, the hwm covers all prior events.
         self._load_hwm: int = -1
@@ -66,15 +63,11 @@ class SimpleCPUOffloadWorker:
         self._pending_load_event_indices: set[int] = set()
         self._pending_store_event_indices: set[int] = set()
 
+        self._copy_queue: queue.SimpleQueue = queue.SimpleQueue()
+
     @property
     def _is_initialized(self) -> bool:
-        """Whether KV caches are registered and ready for transfers."""
-        return (
-            self.gpu_kv_caches is not None
-            and self.cpu_kv_caches is not None
-            and self.load_stream is not None
-            and self.store_stream is not None
-        )
+        return self.gpu_kv_caches is not None and self.cpu_kv_caches is not None
 
     def register_kv_caches(
         self,
@@ -102,7 +95,10 @@ class SimpleCPUOffloadWorker:
         ) -> torch.Tensor:
             if isinstance(v, torch.Tensor):
                 return v
-            return v[0]
+            elif isinstance(v, list):
+                return v[0]
+            else:
+                raise ValueError(f"Unsupported type: {type(v)}")
 
         first_tensor = _representative_tensor(next(iter(kv_caches.values())))
         self.device = first_tensor.device
@@ -119,7 +115,7 @@ class SimpleCPUOffloadWorker:
                 seen_ptrs[ptr] = (name, tensor)
 
         # Reconstruct [num_blocks, page_size_bytes] int8 views from storage
-        # so stride(0) gives page_size_bytes for the Triton copy kernel.
+        # so stride(0) gives page_size_bytes for the block copy op.
         unique_gpu_caches: dict[str, torch.Tensor] = {}
         for name, tensor in seen_ptrs.values():
             storage = tensor.untyped_storage()
@@ -146,34 +142,40 @@ class SimpleCPUOffloadWorker:
         )
 
         pin_memory = is_pin_memory_available()
+        if not pin_memory:
+            logger.warning(
+                "Pinned memory not available. CPU offload performance may be degraded."
+            )
 
         self.gpu_kv_caches = unique_gpu_caches
         self.cpu_kv_caches = {}
         for name, gpu_tensor in unique_gpu_caches.items():
             cpu_shape = (self.num_cpu_blocks,) + gpu_tensor.shape[1:]
             self.cpu_kv_caches[name] = torch.zeros(
-                cpu_shape,
-                dtype=gpu_tensor.dtype,
-                device="cpu",
-                pin_memory=pin_memory,
+                cpu_shape, dtype=gpu_tensor.dtype, device="cpu", pin_memory=pin_memory
             )
-
-        if not pin_memory:
-            logger.warning(
-                "Pinned memory not available. CPU offload performance may be degraded."
-            )
-
-        self._store_launch_params = copy_ops.build_launch_params(
-            self.gpu_kv_caches, self.cpu_kv_caches
-        )
-        self._load_launch_params = copy_ops.build_launch_params(
-            self.cpu_kv_caches, self.gpu_kv_caches
-        )
 
         # Use lowest priority so KV cache I/O yields to compute streams.
         low_pri, _ = torch.cuda.Stream.priority_range()
         self.load_stream = torch.cuda.Stream(priority=low_pri)
         self.store_stream = torch.cuda.Stream(priority=low_pri)
+
+        # Build batch memcpy params after streams are created.
+        self._store_batch_params = copy_ops.build_params(
+            self.gpu_kv_caches,
+            self.cpu_kv_caches,
+            stream=self.store_stream,
+        )
+        self._load_batch_params = copy_ops.build_params(
+            self.cpu_kv_caches,
+            self.gpu_kv_caches,
+            stream=self.load_stream,
+        )
+
+        self._copy_thread = threading.Thread(
+            target=self._copy_loop, args=(self._copy_queue, self.device), daemon=True
+        )
+        self._copy_thread.start()
 
     def bind_connector_metadata(self, metadata: SimpleCPUOffloadMetadata) -> None:
         self._connector_metadata = metadata
@@ -186,15 +188,12 @@ class SimpleCPUOffloadWorker:
         self._connector_metadata = None
 
     def start_load_kv(self) -> None:
-        # NOTE: we defer launching both load and store kernels to
-        # get_finished(), which runs after model execution in both the
-        # normal forward path and the no_forward path. This hides the
-        # CPU-side Triton kernel launch overhead behind GPU compute.
+        # NOTE: we defer launching both load and store to get_finished(),
+        # which runs after model execution. This hides the CPU-side
+        # block copy op overhead (~5ms) behind GPU compute.
         pass
 
     def wait_for_save(self) -> None:
-        # Transfers are submitted in get_finished() instead, so that
-        # they work correctly in both the forward and no_forward paths.
         pass
 
     def get_finished(
@@ -203,29 +202,28 @@ class SimpleCPUOffloadWorker:
     ) -> tuple[set[str] | None, set[str] | None]:
         """Updates from worker to scheduler on completed transfer events.
 
-        Additionally, it will submit deferred load and store transfers, after
-        model execution, to hide CPU-side Triton launch overhead behind
-        GPU compute.
+        Additionally, it will submit deferred load and store transfers after model
+         execution to hide the CPU-side block copy op overhead behind GPU compute.
 
         Returns:
             tuple of (finished_sending, finished_recving).
-            - finish_sending is only used by connector scheduler, and we use it to
-            store the finished store event ids rather than req_ids.
+            - finished_sending is only used by connector scheduler, and we use
+            it to store the finished store event ids rather than req_ids.
             - finished_recving still tracks the req_ids that have finished loading.
         """
-        # (1) Optionally submit deferred transfers
-        if self._is_initialized and self._connector_metadata is not None:
-            metadata = self._connector_metadata
-            self._launch_copy_kernel(  # Launch the load kernel
-                src_blocks=metadata.load_cpu_blocks,
-                dst_blocks=metadata.load_gpu_blocks,
-                event_idx=metadata.load_event,
+        # (1) Submit deferred transfers (if any)
+        metadata = self._connector_metadata
+        if metadata is not None and self._is_initialized:
+            self._launch_copy_kernel(
+                metadata.load_cpu_blocks,
+                metadata.load_gpu_blocks,
+                metadata.load_event,
                 is_store=False,
             )
-            self._launch_copy_kernel(  # Launch the store kernel
-                src_blocks=metadata.store_gpu_blocks,
-                dst_blocks=metadata.store_cpu_blocks,
-                event_idx=metadata.store_event,
+            self._launch_copy_kernel(
+                metadata.store_gpu_blocks,
+                metadata.store_cpu_blocks,
+                metadata.store_event,
                 is_store=True,
             )
 
@@ -233,20 +231,36 @@ class SimpleCPUOffloadWorker:
         finished_recving: set[str] = set()
         finished_sending: set[str] = set()
 
-        load_wm = self._drain_stream_events(is_store=False)
-        meta = self._connector_metadata
-        for j in [j for j in self._pending_load_event_indices if j <= load_wm]:
-            req_ids = meta.load_event_to_reqs.get(j) if meta is not None else None
-            if req_ids:
-                finished_recving.update(req_ids)
-                self._pending_load_event_indices.discard(j)
+        if self._pending_load_event_indices:
+            load_wm = self._drain_stream_events(is_store=False)
+            for j in [j for j in self._pending_load_event_indices if j <= load_wm]:
+                req_ids = (
+                    metadata.load_event_to_reqs.get(j) if metadata is not None else None
+                )
+                if req_ids:
+                    finished_recving.update(req_ids)
+                    self._pending_load_event_indices.discard(j)
 
-        store_wm = self._drain_stream_events(is_store=True)
-        for j in [j for j in self._pending_store_event_indices if j <= store_wm]:
-            self._pending_store_event_indices.discard(j)
-            finished_sending.add(f"__store_done_{j}")
+        if self._pending_store_event_indices:
+            store_wm = self._drain_stream_events(is_store=True)
+            for j in [j for j in self._pending_store_event_indices if j <= store_wm]:
+                self._pending_store_event_indices.discard(j)
+                if finished_sending is None:
+                    finished_sending = set()
+                finished_sending.add(f"__store_done_{j}")
 
-        return finished_sending or None, finished_recving or None
+        return finished_sending, finished_recving
+
+    @staticmethod
+    def _copy_loop(q: queue.SimpleQueue, device: torch.device) -> None:
+        current_platform.set_device(device)
+        while True:
+            item = q.get()
+            if item is None:
+                return
+            src_blocks, dst_blocks, params, stream, event = item
+            copy_ops.copy_blocks(src_blocks, dst_blocks, params)
+            event.record(stream)
 
     def _launch_copy_kernel(
         self,
@@ -255,84 +269,34 @@ class SimpleCPUOffloadWorker:
         event_idx: int,
         is_store: bool,
     ) -> None:
-        """Launch an async block copy on *stream* and record a tracking event."""
         if not src_blocks:
             return
 
-        assert self.gpu_kv_caches is not None
-        assert self.cpu_kv_caches is not None
-
         if is_store:
-            src_caches, dst_caches = self.gpu_kv_caches, self.cpu_kv_caches
-            stream = self.store_stream
-            events = self._store_events
-            launch_params = self._store_launch_params
+            stream, events = self.store_stream, self._store_events
+            batch_params = self._store_batch_params
         else:
-            src_caches, dst_caches = self.cpu_kv_caches, self.gpu_kv_caches
-            stream = self.load_stream
-            events = self._load_events
-            launch_params = self._load_launch_params
+            stream, events = self.load_stream, self._load_events
+            batch_params = self._load_batch_params
 
-        assert stream is not None
+        assert stream is not None and batch_params is not None
 
-        first_src = next(iter(src_caches.values()))
-        first_dst = next(iter(dst_caches.values()))
-        self._validate_block_ids(src_blocks, first_src.shape[0], "Source")
-        self._validate_block_ids(dst_blocks, first_dst.shape[0], "Dest")
-
-        with torch.cuda.stream(stream):
-            block_mapping = torch.tensor(
-                list(zip(src_blocks, dst_blocks)),
-                dtype=torch.int64,
-                device=self.device,
-            )
-
-            copy_ops.copy_blocks(
-                src_caches,
-                dst_caches,
-                block_mapping,
-                launch_params=launch_params,
-            )
-            # record_stream here after kernel launch to prevent the caching allocator
-            # from recycling block_mapping before the kernel finishes reading it.
-            block_mapping.record_stream(stream)
-            event = torch.cuda.Event()
-            event.record(stream)
-
+        event = torch.Event()
+        self._copy_queue.put((src_blocks, dst_blocks, batch_params, stream, event))
         events.append((event_idx, event))
-        logger.debug(
-            "Submitted %s of %d blocks (event_idx=%d) store" if is_store else "load",
-            len(src_blocks),
-            event_idx,
-        )
 
     def _drain_stream_events(self, is_store: bool) -> int:
-        """Drain completed events and return the high-water mark.
-
-        Returns the highest event_idx known to have completed. The hwm
-        is persisted so that when the event list is empty, all prior
-        events are still recognized as finished.
-        """
+        """Drain completed events and return the high-water mark."""
         events = self._store_events if is_store else self._load_events
         hwm = self._store_hwm if is_store else self._load_hwm
         while events:
             event_idx, event = events[0]
-            if event.query():
-                hwm = event_idx
-                events.pop(0)
-            else:
-                break  # Stream ordering: nothing after this can have fired.
+            if not event.query():
+                break
+            hwm = event_idx
+            events.pop(0)
         if is_store:
             self._store_hwm = hwm
         else:
             self._load_hwm = hwm
         return hwm
-
-    @staticmethod
-    def _validate_block_ids(block_ids: list[int], num_blocks: int, label: str) -> None:
-        if not block_ids:
-            return
-        lo, hi = min(block_ids), max(block_ids)
-        if lo < 0 or hi >= num_blocks:
-            bad = lo if lo < 0 else hi
-            raise ValueError(f"{label} block ID {bad} out of bounds [0, {num_blocks})")
