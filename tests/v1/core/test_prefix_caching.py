@@ -2306,3 +2306,105 @@ def test_block_lookup_cache_multi_blocks_per_key():
     assert cache.pop(key1, 11) is block11
     assert cache.get_one_block(key1) is None
     assert cache.pop(key1, 12) is None
+
+
+def test_prefix_cache_block_not_stolen_between_get_and_alloc():
+    """Regression test for the TOCTOU use-after-free bug in the KV block
+    allocator (GitHub issue #37076).
+
+    Scenario (simulating the scheduler's waiting-request loop):
+      1. req_A shares a common prefix with a previously-freed request.
+         get_computed_blocks(req_A) returns the prefix block (ref_cnt==0,
+         sitting in the free/eviction queue).
+      2. Before allocate_slots(req_A) is called, req_B needs a fresh block
+         and its allocate_new_blocks() call would steal the same eviction
+         candidate from the free queue.
+      3. Without the fix, req_A's computed_blocks would point to a block that
+         now belongs to req_B, causing KV data corruption (token bleed).
+      4. With the fix, get_computed_blocks() immediately pins (touches) the
+         returned blocks so that req_B's allocation cannot steal them.
+    """
+    block_size = 4
+    # 4 usable blocks (plus the null block at index 0):
+    #   block 1: req0's prefix block (will be cached)
+    #   block 2: req0's second block
+    #   block 3: req_B's first new block
+    #   block 4: req_B's second new block
+    manager = KVCacheManager(
+        make_kv_cache_config(block_size, 5),
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+    )
+    hash_fn = sha256
+
+    # ── Step 1: warm the cache with a request that fills exactly 1 block ─
+    # Use 2*block_size tokens so req0 fills one full block (gets cached)
+    # plus one more full block, and then call cache_blocks explicitly to
+    # ensure the prefix block is stored under the right hash.
+    prefix_token_ids = list(range(block_size))  # block 0: tokens 0-3
+    suffix_token_ids = list(range(block_size, 2 * block_size))  # block 1: tokens 4-7
+    req0 = make_request("0", prefix_token_ids + suffix_token_ids, block_size, hash_fn)
+    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req0)
+    assert num_computed_tokens == 0
+    blocks0 = manager.allocate_slots(req0, 2 * block_size, 0, computed_blocks)
+    assert blocks0 is not None
+    # cache_blocks is called inside allocate_slots; 2 full blocks are cached.
+    prefix_block = manager.block_pool.blocks[1]  # first allocated block
+    assert prefix_block.ref_cnt == 1
+    assert prefix_block.block_hash is not None, (
+        "Prefix block must be cached after allocating 2 full blocks"
+    )
+    manager.free(req0)
+    # After free, prefix_block has ref_cnt==0 and is an eviction candidate.
+    assert prefix_block.ref_cnt == 0
+
+    # ── Step 2: simulate the scheduler loop ───────────────────────────────
+    # req_A hits the cached prefix. get_computed_blocks() should pin it.
+    req_a = make_request(
+        "A", prefix_token_ids + [42], block_size, hash_fn
+    )  # 5 tokens: 1 full cached block + 1 partial
+    computed_blocks_a, num_computed_a = manager.get_computed_blocks(req_a)
+    assert num_computed_a == block_size, (
+        "req_A should get a prefix cache hit for the 1 full block"
+    )
+    assert computed_blocks_a.blocks[0][0] is prefix_block
+
+    # The fix: prefix_block must be pinned (ref_cnt > 0) so that a
+    # subsequent allocate_new_blocks() for another request cannot steal it.
+    assert prefix_block.ref_cnt == 1, (
+        "Prefix block must be pre-touched by get_computed_blocks() "
+        "to prevent it being stolen before allocate_slots() is called "
+        "(TOCTOU / use-after-free, issue #37076)"
+    )
+
+    # req_B has no cache hit. It needs 2 fresh blocks; these should come from
+    # the unallocated pool, NOT from the pinned prefix_block.
+    req_b = make_request("B", [10, 11, 12, 13, 20, 21, 22, 23], block_size, hash_fn)
+    computed_blocks_b, num_computed_b = manager.get_computed_blocks(req_b)
+    assert num_computed_b == 0
+    blocks_b = manager.allocate_slots(req_b, 2 * block_size, 0, computed_blocks_b)
+    assert blocks_b is not None
+
+    # ── Step 3: verify the prefix block was NOT stolen by req_B ──────────
+    req_b_block_ids = {b.block_id for b in blocks_b.blocks[0]}
+    assert prefix_block.block_id not in req_b_block_ids, (
+        "Prefix block was stolen by req_B's allocation (use-after-free bug)"
+    )
+
+    # ── Step 4: complete req_A allocation ────────────────────────────────
+    blocks_a = manager.allocate_slots(req_a, 1, num_computed_a, computed_blocks_a)
+    assert blocks_a is not None
+    # req_A's block list must include the cached prefix block.
+    prefix_still_tracked = any(
+        b is prefix_block
+        for b in manager.coordinator.single_type_managers[0].req_to_blocks[
+            req_a.request_id
+        ]
+    )
+    assert prefix_still_tracked, (
+        "Prefix block should still be tracked in req_A's block list"
+    )
+
+    manager.free(req_a)
+    manager.free(req_b)

@@ -608,6 +608,12 @@ class Scheduler(SchedulerInterface):
                             # The request cannot be scheduled because
                             # the KVConnector couldn't determine
                             # the number of matched tokens.
+                            # Release the pre-touch applied by
+                            # get_computed_blocks() since allocate_slots()
+                            # will not be called for this request.
+                            self.kv_cache_manager.release_computed_blocks(
+                                new_computed_blocks
+                            )
                             self.waiting.pop_request()
                             skipped_waiting_requests.prepend_request(request)
                             continue

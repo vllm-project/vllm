@@ -193,6 +193,18 @@ class KVCacheManager:
             )
         )
 
+        # Pre-touch the cached hit blocks immediately to pin them out of the
+        # eviction-candidate free queue.  Without this, a block with ref_cnt==0
+        # could be stolen by a subsequent request's allocate_new_blocks() call
+        # within the same scheduling step before allocate_new_computed_blocks()
+        # gets a chance to touch it, leading to KV data corruption (token bleed
+        # between requests).  allocate_new_computed_blocks() will detect that
+        # the blocks are already touched and skip the redundant touch.
+        # If allocation later fails (allocate_slots returns None), the caller
+        # must call release_computed_blocks() to undo this touch.
+        if num_new_computed_tokens > 0:
+            self.coordinator.touch_computed_blocks(computed_blocks)
+
         if self.log_stats:
             assert self.prefix_cache_stats is not None
             self.prefix_cache_stats.record(
@@ -202,6 +214,18 @@ class KVCacheManager:
             )
 
         return self.create_kv_cache_blocks(computed_blocks), num_new_computed_tokens
+
+    def release_computed_blocks(self, computed_blocks: KVCacheBlocks) -> None:
+        """Undo the pre-touch applied by get_computed_blocks().
+
+        Must be called whenever get_computed_blocks() returned a non-empty
+        result but allocate_slots() will NOT be called for this request
+        (e.g. when a KVConnector cannot determine the number of matched tokens
+        and the request is deferred back to the waiting queue).
+        """
+        if computed_blocks is self.empty_kv_cache_blocks:
+            return
+        self.coordinator.release_computed_blocks(computed_blocks.blocks)
 
     def allocate_slots(
         self,
@@ -334,7 +358,11 @@ class KVCacheManager:
         )
 
         if num_blocks_to_allocate > self.block_pool.get_num_free_blocks():
-            # Cannot allocate new blocks
+            # Cannot allocate new blocks. Release the pre-touch that was applied
+            # in get_computed_blocks() so these blocks return to the eviction
+            # candidate pool rather than being unnecessarily pinned.
+            if new_computed_block_list is not self.empty_kv_cache_blocks.blocks:
+                self.coordinator.release_computed_blocks(new_computed_block_list)
             return None
 
         if (
