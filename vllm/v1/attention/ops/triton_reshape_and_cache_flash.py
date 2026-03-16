@@ -423,7 +423,7 @@ def _fp4_e2m1_quantize(val):
     abs_val = tl.minimum(abs_val, 6.0)
 
     # Round to nearest representable value using midpoint thresholds
-    code = tl.zeros_like(abs_val, dtype=tl.int32)
+    code = (abs_val * 0).to(tl.int32)  # zeros with same shape
     code = tl.where(abs_val >= 0.25, 1, code)   # 0.5
     code = tl.where(abs_val >= 0.75, 2, code)   # 1.0
     code = tl.where(abs_val >= 1.25, 3, code)   # 1.5
@@ -499,37 +499,38 @@ def reshape_and_cache_nvfp4_kernel(
     global_k_sf = tl.load(k_scale_ptr)
     global_v_sf = tl.load(v_scale_ptr)
 
-    # Load the group of elements
-    group_offs = tl.arange(0, QUANT_GROUP_SIZE)
-    k_vals = tl.load(key_ptr + src_key_base + group_offs).to(tl.float32)
-    v_vals = tl.load(value_ptr + src_val_base + group_offs).to(tl.float32)
+    # Load even and odd elements separately to avoid fancy indexing
+    # even_offs = [0, 2, 4, ...], odd_offs = [1, 3, 5, ...]
+    pair_offs = tl.arange(0, QUANT_GROUP_SIZE // 2)
+    even_offs = pair_offs * 2
+    odd_offs = even_offs + 1
 
-    # Compute per-group absmax
-    k_absmax = tl.max(tl.abs(k_vals))
-    v_absmax = tl.max(tl.abs(v_vals))
+    k_even = tl.load(key_ptr + src_key_base + even_offs).to(tl.float32)
+    k_odd = tl.load(key_ptr + src_key_base + odd_offs).to(tl.float32)
+    v_even = tl.load(value_ptr + src_val_base + even_offs).to(tl.float32)
+    v_odd = tl.load(value_ptr + src_val_base + odd_offs).to(tl.float32)
+
+    # Compute per-group absmax (over all elements in the group)
+    k_absmax = tl.maximum(tl.max(tl.abs(k_even)), tl.max(tl.abs(k_odd)))
+    v_absmax = tl.maximum(tl.max(tl.abs(v_even)), tl.max(tl.abs(v_odd)))
 
     # Compute block scales: scale = absmax / (FP4_MAX * global_sf)
     # Dequant formula: value = fp4_code * block_scale * global_sf
     k_block_scale = k_absmax / (6.0 * global_k_sf + 1e-12)
     v_block_scale = v_absmax / (6.0 * global_v_sf + 1e-12)
 
-    # Scale values to FP4 range
-    k_scaled = k_vals / (k_block_scale * global_k_sf + 1e-12)
-    v_scaled = v_vals / (v_block_scale * global_v_sf + 1e-12)
+    # Scale values to FP4 range and quantize
+    k_denom = k_block_scale * global_k_sf + 1e-12
+    v_denom = v_block_scale * global_v_sf + 1e-12
 
-    # Quantize to FP4 E2M1
-    k_codes = _fp4_e2m1_quantize(k_scaled)
-    v_codes = _fp4_e2m1_quantize(v_scaled)
+    k_even_codes = _fp4_e2m1_quantize(k_even / k_denom)
+    k_odd_codes = _fp4_e2m1_quantize(k_odd / k_denom)
+    v_even_codes = _fp4_e2m1_quantize(v_even / v_denom)
+    v_odd_codes = _fp4_e2m1_quantize(v_odd / v_denom)
 
-    # Pack pairs of FP4 values into uint8: byte[i] = code[2i] | (code[2i+1] << 4)
-    pair_offs = tl.arange(0, QUANT_GROUP_SIZE // 2)
-    k_lo = k_codes[pair_offs * 2] & 0xF
-    k_hi = (k_codes[pair_offs * 2 + 1] & 0xF) << 4
-    k_packed = (k_lo | k_hi).to(tl.uint8)
-
-    v_lo = v_codes[pair_offs * 2] & 0xF
-    v_hi = (v_codes[pair_offs * 2 + 1] & 0xF) << 4
-    v_packed = (v_lo | v_hi).to(tl.uint8)
+    # Pack: byte[i] = even_code[i] | (odd_code[i] << 4)
+    k_packed = ((k_even_codes & 0xF) | ((k_odd_codes & 0xF) << 4)).to(tl.uint8)
+    v_packed = ((v_even_codes & 0xF) | ((v_odd_codes & 0xF) << 4)).to(tl.uint8)
 
     # Store packed FP4 data
     packed_offset = group_idx * (QUANT_GROUP_SIZE // 2)

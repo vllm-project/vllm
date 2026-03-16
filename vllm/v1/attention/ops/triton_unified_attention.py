@@ -39,7 +39,7 @@ def _nvfp4_decode_magnitude(mag_idx):
 
     Magnitude LUT: [0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0]
     """
-    mag = tl.zeros_like(mag_idx, dtype=tl.float32)
+    mag = (mag_idx * 0).to(tl.float32)  # zeros with same shape
     mag = tl.where(mag_idx == 1, 0.5, mag)
     mag = tl.where(mag_idx == 2, 1.0, mag)
     mag = tl.where(mag_idx == 3, 1.5, mag)
