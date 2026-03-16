@@ -1353,12 +1353,14 @@ def _report_kv_cache_config(
     )
 
     # Log the KV cache size and maximum concurrency.
-    # For hybrid models, only attention groups contribute token capacity;
-    # Mamba groups have constant-size state that doesn't scale with tokens.
+    # For hybrid models, Mamba groups only contribute token capacity when
+    # mamba_cache_mode="all" (prefix caching). In default "none" and "align"
+    # modes, Mamba state is constant-size and doesn't scale with tokens.
+    mamba_cache_mode = vllm_config.cache_config.mamba_cache_mode
     attention_groups = [
         g
         for g in kv_cache_config.kv_cache_groups
-        if not isinstance(g.kv_cache_spec, MambaSpec)
+        if not isinstance(g.kv_cache_spec, MambaSpec) or mamba_cache_mode == "all"
     ]
     num_attention_groups = (
         len(attention_groups)

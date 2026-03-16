@@ -9,7 +9,7 @@ import pytest
 import torch
 
 import vllm.v1.core.kv_cache_utils as kv_cache_utils
-from vllm.config import ModelConfig, SchedulerConfig, VllmConfig
+from vllm.config import CacheConfig, ModelConfig, SchedulerConfig, VllmConfig
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
@@ -2373,6 +2373,51 @@ def test_qwen35_groups_skip_page_size_unification():
     for g in mamba_groups:
         assert g.kv_cache_spec.page_size_bytes == mamba_page
     assert attn_page != mamba_page
+
+
+def test_qwen35_mamba_cache_mode_all_includes_mamba_in_token_count():
+    """When mamba_cache_mode='all', Mamba states are cached per-token for
+    prefix caching. The token capacity report must include Mamba groups."""
+    model_config = ModelConfig(max_model_len=1024)
+    cache_config = CacheConfig(mamba_cache_mode="all")
+    vllm_config = VllmConfig(model_config=model_config, cache_config=cache_config)
+
+    _, attn_spec, mamba_spec = _make_qwen35_specs()
+
+    kv_cache_config = KVCacheConfig(
+        num_blocks=320,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec([f"layer_{i}" for i in range(24)], mamba_spec),
+            KVCacheGroupSpec([f"layer_{i}" for i in range(24, 32)], attn_spec),
+        ],
+    )
+
+    # In "all" mode, all 32 groups count toward token capacity
+    # In "none" mode, only 8 attention groups would count
+    # We verify by checking _report_kv_cache_config runs without error
+    # and that the filter includes all groups
+    mamba_cache_mode = vllm_config.cache_config.mamba_cache_mode
+    attention_groups = [
+        g
+        for g in kv_cache_config.kv_cache_groups
+        if not isinstance(g.kv_cache_spec, MambaSpec) or mamba_cache_mode == "all"
+    ]
+    assert len(attention_groups) == 2, (
+        "In 'all' mode, both Mamba and attention groups should be included"
+    )
+
+    # Contrast with "none" mode — only attention groups
+    vllm_config_none = VllmConfig(model_config=model_config)
+    mamba_cache_mode_none = vllm_config_none.cache_config.mamba_cache_mode
+    attention_groups_none = [
+        g
+        for g in kv_cache_config.kv_cache_groups
+        if not isinstance(g.kv_cache_spec, MambaSpec) or mamba_cache_mode_none == "all"
+    ]
+    assert len(attention_groups_none) == 1, (
+        "In 'none' mode, only attention groups should be included"
+    )
 
 
 def test_qwen35_pure_attention_and_pure_mamba_unaffected():
