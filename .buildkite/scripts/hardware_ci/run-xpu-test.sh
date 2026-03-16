@@ -8,6 +8,7 @@ set -ex
 # Instead for this test we want to execute the tests from the vllm's existing repo form build time
 # This will be removed in future since it will be merged.
 # ls -la /workspace
+echo "pr-1"
 
 pip install tblib==3.1.0
 python3 examples/offline_inference/basic/generate.py --model facebook/opt-125m --block-size 64 --enforce-eager
