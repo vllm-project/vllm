@@ -13,6 +13,7 @@ from typing import Annotated, Any, Literal, TypeAlias
 import torch
 from torch import nn
 from torch.nn import functional as F
+from transformers import BatchFeature, ProcessorMixin
 from transformers.modeling_utils import ModuleUtilsMixin
 from transformers.models.whisper import WhisperFeatureExtractor
 from transformers.models.whisper.modeling_whisper import (
@@ -20,7 +21,6 @@ from transformers.models.whisper.modeling_whisper import (
     WhisperEncoderLayer,
 )
 
-from transformers import BatchFeature, ProcessorMixin
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.model_executor.layers.activation import MulAndSilu, get_act_fn
