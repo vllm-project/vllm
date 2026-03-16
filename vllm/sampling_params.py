@@ -39,6 +39,7 @@ class StructuredOutputsParams:
     regex: str | None = None
     choice: list[str] | None = None
     grammar: str | None = None
+    lark: str | None = None
     json_object: bool | None = None
     # These are other options that can be set.
     disable_any_whitespace: bool = False
@@ -59,6 +60,7 @@ class StructuredOutputsParams:
                 self.regex is not None,
                 self.choice is not None,
                 self.grammar is not None,
+                self.lark is not None,
                 self.json_object is not None,
                 self.structural_tag is not None,
             ]
@@ -85,6 +87,7 @@ class StructuredOutputsParams:
                 "regex",
                 "choice",
                 "grammar",
+                "lark",
                 "json_object",
                 "structural_tag",
             )
@@ -101,6 +104,7 @@ class StructuredOutputsParams:
                 "regex",
                 "choice",
                 "grammar",
+                "lark",
                 "json_object",
             )
         )
@@ -784,12 +788,6 @@ class SamplingParams(
             # allows <|special_token|> and similar, see
             # https://github.com/guidance-ai/llguidance/blob/main/docs/syntax.md#special-tokens
             # Without tokenizer these are disallowed in grammars.
-            if is_mistral_tokenizer(tokenizer):
-                raise ValueError(
-                    "Mistral tokenizer is not supported for the 'guidance' "
-                    "structured output backend. Please use ['xgrammar', 'outlines'] "
-                    "backends or tokenizer_mode='hf' instead."
-                )
             validate_guidance_grammar(self, tokenizer=None)
         elif backend == "outlines":
             # outlines backend
@@ -828,9 +826,9 @@ class SamplingParams(
                         schema = so_params.json
                     skip_guidance = has_guidance_unsupported_json_features(schema)
 
-                if is_mistral_tokenizer(tokenizer) or skip_guidance:
-                    # Fall back to outlines if the tokenizer is Mistral
-                    # or if schema contains features unsupported by guidance
+                if skip_guidance:
+                    # Fall back to outlines if schema contains features
+                    # unsupported by guidance
                     validate_structured_output_request_outlines(self)
                     self.structured_outputs._backend = "outlines"
                 else:
