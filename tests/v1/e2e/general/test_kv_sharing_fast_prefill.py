@@ -9,7 +9,7 @@ from vllm import LLM, SamplingParams
 from vllm.config import CompilationConfig, CompilationMode
 from vllm.platforms import current_platform
 
-from ...utils import check_answers, fork_new_process_for_each_test, prep_prompts
+from ....utils import check_answers, fork_new_process_for_each_test, prep_prompts
 
 # global seed
 SEED = 42
@@ -18,7 +18,7 @@ SEED = 42
 @pytest.fixture
 def test_prompts():
     """
-    Adapted from tests/v1/e2e/test_spec_decode.py
+    Adapted from tests/v1/e2e/spec_decode/test_spec_decode.py
     """
     prompt_types = ["repeat", "sentence"]
     # Setting higher num prompts increases the chance of numerics mismatch
