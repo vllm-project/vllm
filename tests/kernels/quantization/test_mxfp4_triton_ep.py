@@ -75,8 +75,7 @@ class TestMxfp4TritonIsMonolithic:
         "mxfp4_round_up_hidden_size_and_intermediate_size",
     )
     @patch(
-        "vllm.model_executor.layers.quantization.mxfp4."
-        "select_mxfp4_moe_backend",
+        "vllm.model_executor.layers.quantization.mxfp4.select_mxfp4_moe_backend",
     )
     @patch(
         "vllm.model_executor.layers.quantization.mxfp4.get_current_vllm_config",

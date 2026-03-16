@@ -342,7 +342,7 @@ def prepare_moe_fp4_layer_for_marlin(
     # w13_weight shape: (E, 2*N, K//2)
     e = layer.w13_weight.shape[0]
     n = layer.w13_weight.shape[1] // 2  # intermediate_size_per_partition
-    k = layer.w13_weight.shape[2] * 2   # hidden_size
+    k = layer.w13_weight.shape[2] * 2  # hidden_size
 
     # WORKSPACE
     device = layer.w13_weight.device
