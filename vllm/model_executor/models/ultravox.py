@@ -13,7 +13,6 @@ from typing import Annotated, Any, Literal, TypeAlias
 import torch
 from torch import nn
 from torch.nn import functional as F
-from transformers import BatchFeature, ProcessorMixin
 from transformers.modeling_utils import ModuleUtilsMixin
 from transformers.models.whisper import WhisperFeatureExtractor
 from transformers.models.whisper.modeling_whisper import (
@@ -21,6 +20,7 @@ from transformers.models.whisper.modeling_whisper import (
     WhisperEncoderLayer,
 )
 
+from transformers import BatchFeature, ProcessorMixin
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.model_executor.layers.activation import MulAndSilu, get_act_fn
@@ -509,13 +509,14 @@ class ModifiedWhisperEncoder(WhisperEncoder):
             kwargs["layer_head_mask"] = None
 
         for encoder_layer in self.layers:
-            layer_outputs = encoder_layer(
+            hidden_states = encoder_layer(
                 hidden_states,
                 attention_mask,
                 **kwargs,
             )
-
-            hidden_states = layer_outputs[0]
+            # BC version that allows for the old tupled output
+            if isinstance(hidden_states, tuple):
+                hidden_states = hidden_states[0]
 
         hidden_states = self.layer_norm(hidden_states)
         return hidden_states
