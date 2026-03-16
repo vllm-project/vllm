@@ -28,6 +28,4 @@ def test_gpt_oss_router_gemm(batch_size, input_dim, output_dim):
 
     output = ops.gpt_oss_router_gemm(x, weight, bias)
     output_ref = torch.nn.functional.linear(x, weight, bias)
-
-    assert output.shape == (batch_size, output_dim)
-    assert torch.allclose(output, output_ref, rtol=1e-2, atol=1e-2)
+    torch.testing.assert_close(output, output_ref, atol=1e-2, rtol=1e-2)
