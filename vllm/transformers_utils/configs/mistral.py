@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import logging
 from typing import Any
 
 from transformers import PretrainedConfig, WhisperConfig
@@ -120,16 +119,6 @@ def _remap_mistral_yarn_args(config: dict) -> dict:
         "alpha": ("beta_slow", float),
         "apply_scale": ("apply_yarn_scaling", bool),
     }
-
-    # Silence warning from Transformers > v5
-    def _filter_rope_warning(record):
-        return record.getMessage() != (
-            r"Unrecognized keys in `rope_parameters` for 'rope_type'='yarn': "
-            r"{'apply_yarn_scaling'}"
-        )
-
-    logger = logging.getLogger("transformers.modeling_rope_utils")
-    logger.addFilter(_filter_rope_warning)
 
     yarn_config = config.get("yarn") or {}
     config["rope_parameters"] = {
