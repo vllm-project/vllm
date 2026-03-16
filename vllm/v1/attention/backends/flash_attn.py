@@ -342,9 +342,6 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
                 self.attention_config.flash_attn_max_num_splits_for_cuda_graph
             )
 
-        # Persistent buffer for DCP context KV lengths (FULL CUDA graph
-        # compatibility). Pre-allocated so the GPU address stays stable
-        # across CUDA graph replays.
         if self.dcp_world_size > 1:
             max_num_reqs = vllm_config.scheduler_config.max_num_seqs
             self._dcp_context_kv_lens = torch.zeros(
@@ -449,9 +446,6 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         prefix_scheduler_metadata = None
 
         if self.dcp_world_size > 1:
-            # Compute context-only KV lengths (total - new tokens) for this
-            # DCP rank. Written into a persistent buffer so the GPU address
-            # stays stable across CUDA graph replays.
             query_lens = query_start_loc[1 : num_reqs + 1] - query_start_loc[:num_reqs]
             context_kv_lens = seq_lens[:num_reqs] - query_lens
             local_context_kv_lens = get_dcp_local_seq_lens(
@@ -640,8 +634,6 @@ class FlashAttentionImpl(AttentionImpl):
         )
         self.dcp_combine = dcp_a2a_lse_reduce if dcp_a2a else cp_lse_ag_out_rs
 
-        # Pre-allocated FA3 output buffers for DCP CUDA graph compatibility.
-        # FA3 with out=None allocates internally, causing incorrect replay.
         self._dcp_context_out: torch.Tensor | None = None
         self._dcp_query_out: torch.Tensor | None = None
         if vllm_config is not None and self.dcp_world_size > 1:
