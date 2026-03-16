@@ -30,7 +30,7 @@ from vllm.utils.flashinfer import (
 logger = init_logger(__name__)
 
 
-class FlashInferCuteDSLExperts(mk.FusedMoEPermuteExpertsUnpermute):
+class FlashInferCuteDSLExperts(mk.FusedMoEExpertsModular):
     def __init__(
         self,
         moe_config: FusedMoEConfig,
@@ -81,12 +81,6 @@ class FlashInferCuteDSLExperts(mk.FusedMoEPermuteExpertsUnpermute):
         return True
 
     def supports_expert_map(self) -> bool:
-        return False
-
-    def supports_chunking(self) -> bool:
-        # This refers to TP chunking; DP chunking is handled separately.
-        # TODO(shuw@nvidia.com): Set to False to be consistent with
-        # batched_deep_gemm_moe
         return False
 
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:

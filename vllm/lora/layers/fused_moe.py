@@ -32,10 +32,10 @@ from vllm.model_executor.layers.fused_moe.gpt_oss_triton_kernels_moe import (
     UnfusedOAITritonExperts,
 )
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
-    FusedMoEModularKernel,
+    FusedMoEKernel,
 )
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
-    MoEPrepareAndFinalizeNoEP,
+    MoEPrepareAndFinalizeNoDPEPModular,
 )
 
 from .utils import _get_lora_device, try_get_optimal_moe_lora_config
@@ -83,7 +83,11 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
     ):
         if envs.VLLM_TUNED_CONFIG_FOLDER:
             hidden_size = layer.hidden_size
-            intermediate_size = layer.intermediate_size_per_partition
+            intermediate_size = (
+                self.w2_lora_a_stacked[0].shape[-1]
+                if op_prefix == "w2"
+                else self.w13_lora_b_stacked[0].shape[-2]
+            )
             shrink_config = get_lora_op_configs(
                 op_type=f"fused_moe_lora_{op_prefix}_shrink",
                 max_loras=num_loras,
@@ -132,7 +136,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
 
         if getattr(self.base_layer.quant_method, "supports_internal_mk", False):
             # Use the existing modular kernel from the quant method
-            m_fused_moe_fn = self.base_layer.quant_method.moe_mk
+            m_fused_moe_fn = self.base_layer.quant_method.moe_kernel
             # Don't let the kernel own shared experts so the runner can
             # overlap them with routed experts via a separate CUDA stream.
             m_fused_moe_fn.shared_experts = None
@@ -140,8 +144,8 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
             # Create a new modular kernel via select_gemm_impl.
             # Don't pass shared_experts to the kernel so the runner can
             # overlap them with routed experts via a separate CUDA stream.
-            prepare_finalize = MoEPrepareAndFinalizeNoEP()
-            m_fused_moe_fn = FusedMoEModularKernel(
+            prepare_finalize = MoEPrepareAndFinalizeNoDPEPModular()
+            m_fused_moe_fn = FusedMoEKernel(
                 prepare_finalize,
                 self.base_layer.quant_method.select_gemm_impl(
                     prepare_finalize, self.base_layer
@@ -150,10 +154,11 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
 
         if quant_config.use_mxfp4_w4a16:
             assert isinstance(
-                m_fused_moe_fn.fused_experts, (MarlinExperts, UnfusedOAITritonExperts)
+                m_fused_moe_fn.impl.fused_experts,
+                (MarlinExperts, UnfusedOAITritonExperts),
             )
         else:
-            assert isinstance(m_fused_moe_fn.fused_experts, TritonExperts)
+            assert isinstance(m_fused_moe_fn.impl.fused_experts, TritonExperts)
 
         def fwd_decorator(layer, func):
             def wrapper(*args, **kwargs):
@@ -185,9 +190,8 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                     use_int8_w8a16=False,
                     use_int4_w4a16=False,
                 )
-                CHUNK_SIZE = envs.VLLM_FUSED_MOE_CHUNK_SIZE
                 num_tokens = hidden_states.size(0)
-                M = min(num_tokens, CHUNK_SIZE)
+                M = num_tokens
                 max_lora_rank = self.w13_lora_a_stacked[0].shape[-2]
                 shrink_config, expand_config = self._get_lora_moe_configs(
                     op_prefix="w13",
@@ -276,9 +280,8 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                     use_int8_w8a16=False,
                     use_int4_w4a16=False,
                 )
-                CHUNK_SIZE = envs.VLLM_FUSED_MOE_CHUNK_SIZE
                 num_tokens = hidden_states.size(0)
-                M = min(num_tokens, CHUNK_SIZE)
+                M = num_tokens
                 max_lora_rank = self.w2_lora_a_stacked[0].shape[-2]
                 shrink_config, expand_config = self._get_lora_moe_configs(
                     op_prefix="w2",
@@ -333,9 +336,9 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
 
             return wrapper
 
-        fused_experts = m_fused_moe_fn.fused_experts
+        fused_experts = m_fused_moe_fn.impl.fused_experts
 
-        m_fused_moe_fn.forward = fwd_decorator(self.base_layer, m_fused_moe_fn.forward)
+        m_fused_moe_fn.apply = fwd_decorator(self.base_layer, m_fused_moe_fn.apply)
         fused_experts.activation = act_decorator(
             self.base_layer, fused_experts.activation
         )

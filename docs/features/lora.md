@@ -106,7 +106,8 @@ curl http://localhost:8000/v1/completions \
 
 In addition to serving LoRA adapters at server startup, the vLLM server supports dynamically configuring LoRA adapters at runtime through dedicated API endpoints and plugins. This feature can be particularly useful when the flexibility to change models on-the-fly is needed.
 
-Note: Enabling this feature in production environments is risky as users may participate in model adapter management.
+!!! warning
+    This feature comes with security risks. It should not be used in production unless it is an isolated, fully trusted environment.
 
 To enable dynamic LoRA configuration, ensure that the environment variable `VLLM_ALLOW_RUNTIME_LORA_UPDATING`
 is set to `True`.
