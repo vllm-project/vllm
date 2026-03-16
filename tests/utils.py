@@ -360,13 +360,11 @@ class RemoteVLLMServer:
         for entry in proc_path.iterdir():
             if not entry.name.isdigit():
                 continue
+            pid = int(entry.name)
             try:
-                stat = (entry / "stat").read_text()
-                # Field 5 (0-indexed 4) in /proc/<pid>/stat is the pgid.
-                fields = stat.split()
-                if int(fields[4]) == pgid:
-                    members.append(int(entry.name))
-            except (OSError, IndexError, ValueError):
+                if os.getpgid(pid) == pgid:
+                    members.append(pid)
+            except OSError:
                 continue
         return members
 
