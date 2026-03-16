@@ -97,6 +97,6 @@ def test_token_count_parity(server: RemoteOpenAIServer):
     )
     v2_resp.raise_for_status()
     v1_resp.raise_for_status()
-    v2_tokens = v2_resp.json()["meta"]["tokens"]["input_tokens"]
+    v2_tokens = v2_resp.json()["meta"]["billed_units"]["input_tokens"]
     v1_tokens = v1_resp.json()["usage"]["prompt_tokens"]
     assert v2_tokens == v1_tokens

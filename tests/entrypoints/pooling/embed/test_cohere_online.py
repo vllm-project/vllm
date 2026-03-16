@@ -166,8 +166,9 @@ def test_response_structure(server: RemoteOpenAIServer, model_name: str):
     assert r["texts"] == ["test"]
     assert "meta" in r
     assert r["meta"]["api_version"]["version"] == "2"
-    assert "tokens" in r["meta"]
-    assert r["meta"]["tokens"]["input_tokens"] > 0
+    assert "billed_units" in r["meta"]
+    assert r["meta"]["billed_units"]["input_tokens"] > 0
+    assert r["meta"]["billed_units"]["image_tokens"] == 0
 
 
 def test_batch(server: RemoteOpenAIServer, model_name: str):

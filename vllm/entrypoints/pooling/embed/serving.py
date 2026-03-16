@@ -26,11 +26,11 @@ from vllm.entrypoints.chat_utils import (
 from vllm.entrypoints.openai.engine.protocol import UsageInfo
 from vllm.entrypoints.pooling.base.serving import PoolingServing
 from vllm.entrypoints.pooling.embed.cohere_protocol import (
+    CohereBilledUnits,
     CohereEmbedInput,
     CohereEmbedRequest,
     CohereEmbedResponse,
     CohereMeta,
-    CohereTokens,
     build_typed_embeddings,
 )
 from vllm.entrypoints.pooling.embed.io_processor import EmbedIOProcessor
@@ -249,6 +249,8 @@ class ServingEmbedding(PoolingServing):
             else None
         )
 
+        image_tokens = 0
+
         if request.images is not None:
             all_floats, resp_id, total_tokens = await self._cohere_process_chat_batch(
                 request,
@@ -266,6 +268,7 @@ class ServingEmbedding(PoolingServing):
                 truncation_side,
                 max_tokens_check=max_tokens_check,
             )
+            image_tokens = total_tokens
 
         elif request.inputs is not None:
             task_prefix = self._get_task_instruction_prefix(input_type)
@@ -298,6 +301,7 @@ class ServingEmbedding(PoolingServing):
             all_floats,
             resp_id=resp_id,
             total_tokens=total_tokens,
+            image_tokens=image_tokens,
             texts_echo=texts_echo,
         )
 
@@ -388,9 +392,12 @@ class ServingEmbedding(PoolingServing):
         """
         from vllm.transformers_utils.repo_utils import get_hf_file_to_dict
 
-        cfg = get_hf_file_to_dict(
-            "config_sentence_transformers.json", str(model), revision
-        )
+        try:
+            cfg = get_hf_file_to_dict(
+                "config_sentence_transformers.json", str(model), revision
+            )
+        except (ValueError, OSError):
+            return None
         if cfg is None:
             return None
         prompts = cfg.get("prompts")
@@ -498,6 +505,7 @@ class ServingEmbedding(PoolingServing):
         all_floats: list[list[float]],
         resp_id: str,
         total_tokens: int,
+        image_tokens: int,
         texts_echo: list[str] | None,
     ) -> JSONResponse:
         embedding_types = request.embedding_types or ["float"]
@@ -507,12 +515,16 @@ class ServingEmbedding(PoolingServing):
             embedding_types,
         )
 
+        input_tokens = total_tokens - image_tokens
         response = CohereEmbedResponse(
             id=resp_id,
             embeddings=embeddings_obj,
             texts=texts_echo,
             meta=CohereMeta(
-                tokens=CohereTokens(input_tokens=total_tokens),
+                billed_units=CohereBilledUnits(
+                    input_tokens=input_tokens,
+                    image_tokens=image_tokens,
+                ),
             ),
         )
         return JSONResponse(content=response.model_dump(exclude_none=True))

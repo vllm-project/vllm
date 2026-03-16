@@ -476,7 +476,7 @@ curl -X POST "http://localhost:8000/v2/embed" \
       "texts": ["Hello world", "How are you?"],
       "meta": {
         "api_version": {"version": "2"},
-        "tokens": {"input_tokens": 12}
+        "billed_units": {"input_tokens": 12}
       }
     }
     ```
@@ -555,7 +555,7 @@ curl -X POST "http://localhost:8000/v2/embed" \
       "texts": ["What is machine learning?"],
       "meta": {
         "api_version": {"version": "2"},
-        "tokens": {"input_tokens": 8}
+        "billed_units": {"input_tokens": 8}
       }
     }
     ```

@@ -89,6 +89,8 @@ def test_image_embed(server: RemoteOpenAIServer):
     assert "embeddings" in r
     assert len(r["embeddings"]["float"]) == 1
     assert len(r["embeddings"]["float"][0]) > 0
+    assert r["meta"]["billed_units"]["image_tokens"] > 0
+    assert r["meta"]["billed_units"]["input_tokens"] == 0
 
 
 def test_image_batch(server: RemoteOpenAIServer):

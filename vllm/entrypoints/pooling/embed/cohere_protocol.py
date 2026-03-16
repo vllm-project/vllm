@@ -35,7 +35,7 @@ class CohereEmbedInput(BaseModel):
 
 
 class CohereEmbedRequest(BaseModel):
-    model: str
+    model: str | None = None
     input_type: str | None = None
     texts: list[str] | None = None
     images: list[str] | None = None
@@ -51,13 +51,14 @@ class CohereApiVersion(BaseModel):
     version: str = "2"
 
 
-class CohereTokens(BaseModel):
+class CohereBilledUnits(BaseModel):
     input_tokens: int | None = None
+    image_tokens: int | None = None
 
 
 class CohereMeta(BaseModel):
     api_version: CohereApiVersion = Field(default_factory=CohereApiVersion)
-    tokens: CohereTokens | None = None
+    billed_units: CohereBilledUnits | None = None
 
 
 class CohereEmbedByTypeEmbeddings(BaseModel):
@@ -74,6 +75,7 @@ class CohereEmbedResponse(BaseModel):
     embeddings: CohereEmbedByTypeEmbeddings
     texts: list[str] | None = None
     meta: CohereMeta | None = None
+    response_type: Literal["embeddings_by_type"] = "embeddings_by_type"
 
 
 # ---------------------------------------------------------------------------

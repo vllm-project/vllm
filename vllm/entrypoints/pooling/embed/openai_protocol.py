@@ -108,7 +108,7 @@ class EmbeddingResponse(OpenAIBaseModel):
     id: str = Field(default_factory=lambda: f"embd-{random_uuid()}")
     object: str = "list"
     created: int = Field(default_factory=lambda: int(time.time()))
-    model: str
+    model: str | None = None
     data: list[EmbeddingResponseData]
     usage: UsageInfo
 
