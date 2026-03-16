@@ -80,10 +80,11 @@ _REASONING_PARSERS_TO_REGISTER = {
         "qwen3_reasoning_parser",
         "Qwen3ReasoningParser",
     ),
-    "seed_oss": (
-        "seedoss_reasoning_parser",
-        "SeedOSSReasoningParser",
+    "glm4_moe": (
+        "deepseek_v3_reasoning_parser",
+        "DeepSeekV3ReasoningParser",
     ),
+
     "step3": (
         "step3_reasoning_parser",
         "Step3ReasoningParser",
