@@ -6,6 +6,8 @@ import pytest
 from vllm import SamplingParams
 from vllm.platforms import current_platform
 
+from ...utils import large_gpu_mark, multi_gpu_marks
+
 # A trivial request with a short prompt to ensure we run a mixed batch
 SMALL_MESSAGE = [
     {
@@ -34,9 +36,17 @@ MESSAGES = [
 ]
 
 
-# TODO(ben): Add Nemotron-H with MTP
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA not available")
-@pytest.mark.parametrize("model_name", ["Qwen/Qwen3.5-4B"])
+@pytest.mark.parametrize(
+    "model_name",
+    [
+        pytest.param("Qwen/Qwen3.5-4B", marks=[large_gpu_mark(min_gb=40)]),
+        pytest.param(
+            "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8",
+            marks=[large_gpu_mark(min_gb=80)] + multi_gpu_marks(num_gpus=2),
+        ),
+    ],
+)
 @pytest.mark.parametrize("enable_prefix_caching", [False, True])
 def test_mtp_speculative_mixed_batch_short_prefill(
     vllm_runner, model_name, enable_prefix_caching
@@ -46,7 +56,7 @@ def test_mtp_speculative_mixed_batch_short_prefill(
 
     # Set so large that both prefills will be classified as decodes in a mixed batch
     # note, with prefix caching we require chunk_size >= mamba_block_size
-    chunk_size = 256 if not enable_prefix_caching else 8192
+    chunk_size = 256 if not enable_prefix_caching else 16384
     num_draft_tokens = 100
 
     with vllm_runner(
@@ -58,7 +68,7 @@ def test_mtp_speculative_mixed_batch_short_prefill(
         max_num_batched_tokens=chunk_size,
         max_model_len=512,
         enforce_eager=True,
-        tensor_parallel_size=1,
+        tensor_parallel_size=2,
         trust_remote_code=True,
         enable_chunked_prefill=True,
         enable_prefix_caching=enable_prefix_caching,
