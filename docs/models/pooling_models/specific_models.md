@@ -65,7 +65,7 @@ curl -s http://localhost:8000/pooling -H "Content-Type: application/json" -d '{
 }'
 ```
 
-An example can be found here: [examples/pooling/score/colbert_rerank_online.py](../../examples/pooling/score/colbert_rerank_online.py)
+An example can be found here: [examples/pooling/score/colbert_rerank_online.py](../../../examples/pooling/score/colbert_rerank_online.py)
 
 ## ColQwen3 Multi-Modal Late Interaction Models
 
@@ -188,8 +188,8 @@ curl -s http://localhost:8000/pooling -H "Content-Type: application/json" -d '{
 
 ## Examples
 
-- Multi-vector retrieval: [examples/pooling/token_embed/colqwen3_token_embed_online.py](../../examples/pooling/token_embed/colqwen3_token_embed_online.py)
-- Reranking (text + multi-modal): [examples/pooling/score/colqwen3_rerank_online.py](../../examples/pooling/score/colqwen3_rerank_online.py)
+- Multi-vector retrieval: [examples/pooling/token_embed/colqwen3_token_embed_online.py](../../../examples/pooling/token_embed/colqwen3_token_embed_online.py)
+- Reranking (text + multi-modal): [examples/pooling/score/colqwen3_rerank_online.py](../../../examples/pooling/score/colqwen3_rerank_online.py)
 
 ## Llama Nemotron Multimodal
 
