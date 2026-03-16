@@ -45,6 +45,8 @@ pystemmer==3.0.0
     # via mteb
 
 # Multi-modal processing
+av==16.1.0
+    # required for audio_in_video tests
 blobfile==3.0.0
     # Multi-Modal Models Test
 decord==0.6.0
@@ -95,7 +97,7 @@ transformers==4.57.5
 # Pin HF Hub version
 huggingface-hub==0.36.2
 # Pin Mistral Common
-mistral-common[image,audio]==1.9.1
+mistral-common[image,audio]==1.10.0
 # Required for Prithvi tests
 terratorch==1.2.2
 # Required for Prithvi tests

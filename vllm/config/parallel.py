@@ -44,8 +44,11 @@ All2AllBackend = Literal[
     "deepep_high_throughput",
     "deepep_low_latency",
     "mori",
+    "nixl_ep",
     "allgather_reducescatter",
-    "flashinfer_all2allv",
+    "flashinfer_all2allv",  # temporary alias for flashinfer_nvlink_two_sided
+    "flashinfer_nvlink_two_sided",
+    "flashinfer_nvlink_one_sided",
 ]
 
 
@@ -166,7 +169,9 @@ class ParallelConfig:
     - "deepep_high_throughput": Use deepep high-throughput kernels\n
     - "deepep_low_latency": Use deepep low-latency kernels\n
     - "mori": Use mori kernels\n
-    - "flashinfer_all2allv": Use flashinfer alltoallv kernels for mnnvl"""
+    - "nixl_ep": Use nixl-ep kernels\n
+    - "flashinfer_nvlink_two_sided": Use flashinfer two-sided kernels for mnnvl
+    - "flashinfer_nvlink_one_sided": Use flashinfer high-throughput a2a kernels"""
 
     max_parallel_loading_workers: int | None = None
     """Maximum number of parallel loading workers when loading model
@@ -590,6 +595,7 @@ class ParallelConfig:
                 "deepep_high_throughput",
                 "deepep_low_latency",
                 "mori",
+                "nixl_ep",
             )
             and self.enable_expert_parallel
             and self.tensor_parallel_size > 1
