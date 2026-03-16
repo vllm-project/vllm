@@ -15,6 +15,7 @@ from vllm.entrypoints.pooling.classify.protocol import (
     ClassificationResponse,
 )
 from vllm.entrypoints.pooling.embed.protocol import (
+    CohereEmbedRequest,
     EmbeddingBytesResponse,
     EmbeddingChatRequest,
     EmbeddingCompletionRequest,
@@ -50,6 +51,7 @@ AnyPoolingRequest: TypeAlias = (
     | IOProcessorRequest
     | RerankRequest
     | ScoreRequest
+    | CohereEmbedRequest
 )
 
 AnyPoolingResponse: TypeAlias = (

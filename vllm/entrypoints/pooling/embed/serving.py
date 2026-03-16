@@ -5,7 +5,7 @@ from collections.abc import Callable
 from functools import partial
 from typing import Literal, TypeAlias, cast
 
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from typing_extensions import assert_never
 
 from vllm.config import ModelConfig
@@ -14,10 +14,15 @@ from vllm.entrypoints.openai.engine.protocol import UsageInfo
 from vllm.entrypoints.pooling.base.serving import PoolingServing
 from vllm.entrypoints.pooling.embed.io_processor import EmbedIOProcessor
 from vllm.entrypoints.pooling.embed.protocol import (
+    CohereBilledUnits,
+    CohereEmbedRequest,
+    CohereEmbedResponse,
+    CohereMeta,
     EmbeddingBytesResponse,
     EmbeddingRequest,
     EmbeddingResponse,
     EmbeddingResponseData,
+    build_typed_embeddings,
 )
 from vllm.entrypoints.pooling.typing import PoolingServeContext
 from vllm.entrypoints.pooling.utils import (
@@ -26,9 +31,12 @@ from vllm.entrypoints.pooling.utils import (
     encode_pooling_output_float,
     get_json_response_cls,
 )
+from vllm.logger import init_logger
 from vllm.outputs import PoolingRequestOutput
 from vllm.renderers import BaseRenderer
 from vllm.utils.serial_utils import EmbedDType, Endianness
+
+logger = init_logger(__name__)
 
 JSONResponseCLS = get_json_response_cls()
 
@@ -36,14 +44,10 @@ EmbeddingServeContext: TypeAlias = PoolingServeContext[EmbeddingRequest]
 
 
 class ServingEmbedding(PoolingServing):
-    """
-    Embedding API similar to OpenAI's API.
-
-    See https://platform.openai.com/docs/api-reference/embeddings/create
-    for the API specification. This API mimics the OpenAI Embedding API.
-    """
+    """Embedding API supporting both OpenAI and Cohere formats."""
 
     request_id_prefix = "embd"
+    io_processor: EmbedIOProcessor
 
     def init_io_processor(
         self,
@@ -59,6 +63,14 @@ class ServingEmbedding(PoolingServing):
 
     async def _build_response(
         self,
+        ctx: PoolingServeContext,
+    ) -> Response:
+        if isinstance(ctx.request, CohereEmbedRequest):
+            return self._build_cohere_response_from_ctx(ctx)
+        return await self._build_openai_response(ctx)
+
+    async def _build_openai_response(
+        self,
         ctx: EmbeddingServeContext,
     ) -> JSONResponse | StreamingResponse:
         encoding_format = ctx.request.encoding_format
@@ -66,7 +78,7 @@ class ServingEmbedding(PoolingServing):
         endianness = ctx.request.endianness
 
         if encoding_format == "float" or encoding_format == "base64":
-            return self._request_output_to_embed_json_response(
+            return self._openai_json_response(
                 ctx.final_res_batch,
                 ctx.request_id,
                 ctx.created_time,
@@ -77,7 +89,7 @@ class ServingEmbedding(PoolingServing):
             )
 
         if encoding_format == "bytes" or encoding_format == "bytes_only":
-            return self._request_output_to_to_embed_bytes_response(
+            return self._openai_bytes_response(
                 ctx.final_res_batch,
                 ctx.request_id,
                 ctx.created_time,
@@ -89,7 +101,7 @@ class ServingEmbedding(PoolingServing):
 
         assert_never(encoding_format)
 
-    def _request_output_to_embed_json_response(
+    def _openai_json_response(
         self,
         final_res_batch: list[PoolingRequestOutput],
         request_id: str,
@@ -139,7 +151,7 @@ class ServingEmbedding(PoolingServing):
         )
         return JSONResponseCLS(content=response.model_dump())
 
-    def _request_output_to_to_embed_bytes_response(
+    def _openai_bytes_response(
         self,
         final_res_batch: list[PoolingRequestOutput],
         request_id: str,
@@ -177,3 +189,33 @@ class ServingEmbedding(PoolingServing):
             headers=response.headers,
             media_type=response.media_type,
         )
+
+    @staticmethod
+    def _build_cohere_response_from_ctx(
+        ctx: PoolingServeContext,
+    ) -> JSONResponse:
+        request = ctx.request
+        assert isinstance(request, CohereEmbedRequest)
+
+        all_floats = [encode_pooling_output_float(out) for out in ctx.final_res_batch]
+        total_tokens = sum(len(out.prompt_token_ids) for out in ctx.final_res_batch)
+
+        image_tokens = total_tokens if request.images is not None else 0
+        texts_echo = request.texts
+
+        embedding_types = request.embedding_types or ["float"]
+        embeddings_obj = build_typed_embeddings(all_floats, embedding_types)
+
+        input_tokens = total_tokens - image_tokens
+        response = CohereEmbedResponse(
+            id=ctx.request_id,
+            embeddings=embeddings_obj,
+            texts=texts_echo,
+            meta=CohereMeta(
+                billed_units=CohereBilledUnits(
+                    input_tokens=input_tokens,
+                    image_tokens=image_tokens,
+                ),
+            ),
+        )
+        return JSONResponse(content=response.model_dump(exclude_none=True))
