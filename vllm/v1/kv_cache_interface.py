@@ -489,6 +489,14 @@ class KVCacheConfig:
     For models with multiple types of attention, there will be multiple groups,
     see `_get_kv_cache_config_uniform_page_size` for more details.
     """
+    mamba_num_blocks: int | None = None
+    """
+    Number of compact Mamba blocks when using separate Mamba allocation.
+    None means Mamba shares the attention block pool (mamba_cache_mode="all").
+    When set, Mamba tensors are sized for this many blocks instead of
+    num_blocks. This avoids large memory waste in hybrid models where Mamba
+    state is O(1) per request but the shared pool forces O(n)-sized tensors.
+    """
 
     @property
     def has_mamba_layers(self) -> bool:

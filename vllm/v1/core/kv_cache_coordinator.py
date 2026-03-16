@@ -21,6 +21,7 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheSpec,
+    MambaSpec,
 )
 from vllm.v1.request import Request
 
@@ -64,6 +65,11 @@ class KVCacheCoordinator(ABC):
                 kv_cache_group_id=i,
                 dcp_world_size=dcp_world_size,
                 pcp_world_size=pcp_world_size,
+                **(
+                    {"mamba_num_blocks": kv_cache_config.mamba_num_blocks}
+                    if isinstance(kv_cache_group.kv_cache_spec, MambaSpec)
+                    else {}
+                ),
             )
             for i, kv_cache_group in enumerate(self.kv_cache_config.kv_cache_groups)
         )

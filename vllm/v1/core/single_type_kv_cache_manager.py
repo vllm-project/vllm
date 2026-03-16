@@ -762,7 +762,12 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
 
 class MambaManager(SingleTypeKVCacheManager):
     def __init__(
-        self, kv_cache_spec: MambaSpec, block_pool: BlockPool, **kwargs
+        self,
+        kv_cache_spec: MambaSpec,
+        block_pool: BlockPool,
+        *,
+        mamba_num_blocks: int | None = None,
+        **kwargs,
     ) -> None:
         super().__init__(kv_cache_spec, block_pool, **kwargs)
         self.cached_blocks_this_step: set[BlockHashWithGroupId] = set()
@@ -774,6 +779,20 @@ class MambaManager(SingleTypeKVCacheManager):
             self.last_state_block_idx: dict[str, int] = {}
             # The set of the requests that have been allocated blocks
             self._allocated_block_reqs: set[str] = set()
+
+        # Compact mode: Mamba self-manages a small block space (0..C-1)
+        # instead of sharing the attention BlockPool. This avoids large
+        # memory waste from sizing Mamba tensors for N attention blocks
+        # when only C << N compact blocks are needed.
+        self.compact_mode = (
+            mamba_num_blocks is not None and kv_cache_spec.mamba_cache_mode != "all"
+        )
+        if self.compact_mode:
+            assert mamba_num_blocks is not None
+            # Stack of free compact blocks
+            self._compact_free: list[KVCacheBlock] = [
+                KVCacheBlock(block_id=i) for i in range(mamba_num_blocks)
+            ]
 
     @classmethod
     def find_longest_cache_hit(
@@ -833,6 +852,33 @@ class MambaManager(SingleTypeKVCacheManager):
         # that we might actually need.
         num_computed_tokens = max(0, num_computed_tokens - self.num_speculative_blocks)
 
+        if self.compact_mode:
+            # Replicate base class logic but free to compact pool instead of
+            # block_pool. MUST NOT call super() which uses block_pool.
+            num_skipped_tokens = self.get_num_skipped_tokens(num_computed_tokens)
+            if num_skipped_tokens > 0:
+                blocks = self.req_to_blocks[request_id]
+                num_skipped_blocks = num_skipped_tokens // self.block_size
+                num_skipped_blocks = min(num_skipped_blocks, len(blocks))
+                for i in range(num_skipped_blocks - 1, -1, -1):
+                    if blocks[i] == self._null_block:
+                        break
+                    self._compact_free.append(blocks[i])
+                    blocks[i] = self._null_block
+
+            if self.mamba_cache_mode == "align":
+                last_state_block_idx = self.last_state_block_idx.get(request_id)
+                if (
+                    last_state_block_idx is not None
+                    and last_state_block_idx
+                    < cdiv(num_computed_tokens, self.block_size) - 1
+                ):
+                    blocks = self.req_to_blocks[request_id]
+                    if blocks[last_state_block_idx] != self._null_block:
+                        self._compact_free.append(blocks[last_state_block_idx])
+                        blocks[last_state_block_idx] = self._null_block
+            return
+
         super().remove_skipped_blocks(request_id, num_computed_tokens)
         if self.mamba_cache_mode == "align":
             # `last_state_block_idx` refers to the block index allocated two steps ago.
@@ -877,6 +923,41 @@ class MambaManager(SingleTypeKVCacheManager):
             # that kv_cache_manager will think there is no enough blocks to allocate now
             # and don't schedule it in the current step.
             return self.block_pool.num_gpu_blocks + 1
+
+        if self.compact_mode:
+            # Compact mode: check against compact free list, not block pool.
+            # Return 0 (no shared pool blocks needed) or force rejection.
+            if self.mamba_cache_mode != "align":
+                if self.num_speculative_blocks > 0:
+                    num_tokens += (
+                        self.kv_cache_spec.block_size * self.num_speculative_blocks
+                    )
+                req_blocks = self.req_to_blocks[request_id]
+                num_required = cdiv(num_tokens, self.block_size)
+                num_new = max(
+                    0,
+                    num_required - len(new_computed_blocks) - len(req_blocks),
+                )
+            else:
+                num_tokens = num_tokens_main_model
+                num_required_blocks = (
+                    cdiv(num_tokens, self.block_size) + self.num_speculative_blocks
+                )
+                num_new = (
+                    num_required_blocks
+                    - len(new_computed_blocks)
+                    - len(self.req_to_blocks[request_id])
+                )
+                if num_new > 0:
+                    if request_id in self._allocated_block_reqs:
+                        num_new = 1
+                    else:
+                        num_new = 1 + self.num_speculative_blocks
+
+            if num_new > len(self._compact_free):
+                return self.block_pool.num_gpu_blocks + 1  # force rejection
+            return 0  # don't request any shared pool blocks
+
         if self.mamba_cache_mode != "align":
             # Allocate extra `num_speculative_blocks` blocks for
             # speculative decoding (MTP/EAGLE) with linear attention.
@@ -928,6 +1009,71 @@ class MambaManager(SingleTypeKVCacheManager):
         self, request_id: str, num_tokens: int, num_tokens_main_model: int
     ) -> list[KVCacheBlock]:
         assert isinstance(self.kv_cache_spec, MambaSpec)
+
+        if self.compact_mode:
+            if self.mamba_cache_mode != "align":
+                if self.num_speculative_blocks > 0:
+                    num_tokens += self.block_size * self.num_speculative_blocks
+                req_blocks: list[KVCacheBlock] = self.req_to_blocks[request_id]
+                num_required = cdiv(num_tokens, self.block_size)
+                num_new = num_required - len(req_blocks)
+                if num_new <= 0:
+                    return []
+                new_blocks = [self._compact_free.pop() for _ in range(num_new)]
+                req_blocks.extend(new_blocks)
+                return new_blocks
+            else:
+                # "align" mode compact allocation — mirrors non-compact
+                # "align" logic but uses compact free list.
+                num_tokens = num_tokens_main_model
+                req_blocks = self.req_to_blocks[request_id]
+                num_required_blocks = (
+                    cdiv(num_tokens, self.block_size) + self.num_speculative_blocks
+                )
+                if num_required_blocks == len(req_blocks):
+                    return []
+                assert num_required_blocks > len(req_blocks), (
+                    "num_required_blocks "
+                    f"{num_required_blocks} < len(req_blocks) {len(req_blocks)}"
+                )
+                prev_block_len = len(req_blocks)
+                blocks_allocated = request_id in self._allocated_block_reqs
+                if blocks_allocated:
+                    self.last_state_block_idx[request_id] = (
+                        prev_block_len - 1 - self.num_speculative_blocks
+                    )
+                elif prev_block_len > 0:
+                    self.last_state_block_idx[request_id] = prev_block_len - 1
+                num_skipped_blocks = (
+                    num_required_blocks - self.num_speculative_blocks - 1
+                )
+                if prev_block_len < num_skipped_blocks:
+                    req_blocks.extend(
+                        [
+                            self._null_block
+                            for _ in range(prev_block_len, num_skipped_blocks)
+                        ]
+                    )
+                if blocks_allocated:
+                    for block_idx in range(
+                        prev_block_len - self.num_speculative_blocks,
+                        prev_block_len,
+                    ):
+                        if block_idx < num_skipped_blocks:
+                            req_blocks.append(req_blocks[block_idx])
+                            req_blocks[block_idx] = self._null_block
+                        else:
+                            break
+                num_new_blocks = num_required_blocks - len(req_blocks)
+                if blocks_allocated:
+                    assert num_new_blocks <= 1
+                else:
+                    assert num_new_blocks <= self.num_speculative_blocks + 1
+                new_blocks = [self._compact_free.pop() for _ in range(num_new_blocks)]
+                req_blocks.extend(new_blocks)
+                self._allocated_block_reqs.add(request_id)
+                return req_blocks[prev_block_len:]
+
         if self.mamba_cache_mode != "align":
             # Allocate extra `num_speculative_blocks` blocks for
             # speculative decoding (MTP/EAGLE) with linear attention.
@@ -943,7 +1089,7 @@ class MambaManager(SingleTypeKVCacheManager):
             # We can ignore lookahead tokens because current draft models don't have
             # mamba layers.
             num_tokens = num_tokens_main_model
-            req_blocks: list[KVCacheBlock] = self.req_to_blocks[request_id]
+            req_blocks = self.req_to_blocks[request_id]
             # NOTE(tdouble): this is an over-estimate of how many blocks we need because
             # num_tokens can include draft tokens that will later be rejected.
             num_required_blocks = (
@@ -1003,6 +1149,17 @@ class MambaManager(SingleTypeKVCacheManager):
                 return req_blocks[prev_block_len:]
 
     def free(self, request_id: str) -> None:
+        if self.compact_mode:
+            if self.mamba_cache_mode == "align":
+                self._allocated_block_reqs.discard(request_id)
+                self.last_state_block_idx.pop(request_id, None)
+            req_blocks = self.req_to_blocks.pop(request_id, [])
+            # Return compact blocks to free stack (skip null blocks)
+            for block in req_blocks:
+                if not block.is_null:
+                    self._compact_free.append(block)
+            self.num_cached_block.pop(request_id, None)
+            return
         if self.mamba_cache_mode == "align":
             self._allocated_block_reqs.discard(request_id)
             self.last_state_block_idx.pop(request_id, None)
@@ -1017,6 +1174,10 @@ class MambaManager(SingleTypeKVCacheManager):
         return num_computed_tokens - 1
 
     def cache_blocks(self, request: Request, num_tokens: int) -> None:
+        if self.compact_mode:
+            # No prefix caching for compact Mamba — compact block IDs
+            # must never enter the shared pool's cache hash table.
+            return
         num_cached_blocks_before = self.num_cached_block.get(request.request_id, 0)
         super().cache_blocks(request, num_tokens)
         num_cached_blocks_after = self.num_cached_block.get(request.request_id, 0)
