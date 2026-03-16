@@ -118,7 +118,9 @@ class _SharedMmapRegion:
 
         try:
             # Exclusive create — only one worker succeeds
-            self.fd = os.open(self.mmap_path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
+            self.fd = os.open(
+                self.mmap_path, os.O_CREAT | os.O_EXCL | os.O_RDWR | os.O_TRUNC, 0o600
+            )
             os.ftruncate(self.fd, self.total_size_bytes)
             self._creator = True
             logger.info(
