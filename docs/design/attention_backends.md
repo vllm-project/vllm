@@ -137,8 +137,9 @@ Priority is **1 = highest** (tried first).
 | 1 | `FLASH_ATTN_MLA` |
 | 2 | `FLASHMLA` |
 | 3 | `FLASHINFER_MLA` |
-| 4 | `TRITON_MLA` |
-| 5 | `FLASHMLA_SPARSE` |
+| 4 | `FLASHINFER_FA2_MLA` |
+| 5 | `TRITON_MLA` |
+| 6 | `FLASHMLA_SPARSE` |
 
 > **Note:** ROCm and CPU platforms have their own selection logic. See the platform-specific documentation for details.
 
@@ -205,6 +206,7 @@ configuration.
 | Backend | Dtypes | KV Dtypes | Block Sizes | Head Sizes | Sink | Sparse | MM Prefix | DCP | Attention Types | Compute Cap. |
 | ------- | ------ | --------- | ----------- | ---------- | ---- | ------ | --------- | --- | --------------- | ------------ |
 | `CUTLASS_MLA` | fp16, bf16 | `auto`, `bfloat16`, `fp8`, `fp8_e4m3` | 128 | Any | ❌ | ❌ | ❌ | ✅ | Decoder | 10.x |
+| `FLASHINFER_FA2_MLA` | fp16, bf16 | `auto`, `bfloat16` | Any | Any | ❌ | ❌ | ❌ | ✅ | Decoder | Any |
 | `FLASHINFER_MLA` | fp16, bf16 | `auto`, `bfloat16`, `fp8`, `fp8_e4m3` | 32, 64 | Any | ❌ | ❌ | ❌ | ❌ | Decoder | 10.x |
 | `FLASHINFER_MLA_SPARSE` | fp16, bf16 | `auto`, `bfloat16`, `fp8`, `fp8_e4m3` | 32, 64 | 576 | ❌ | ✅ | ❌ | ❌ | Decoder | 10.x |
 | `FLASHMLA` | fp16, bf16 | `auto`, `bfloat16`, `fp8`, `fp8_e4m3` | 64 | Any | ❌ | ❌ | ❌ | ✅ | Decoder | 9.x-10.x |

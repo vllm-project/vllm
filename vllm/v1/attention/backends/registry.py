@@ -74,6 +74,9 @@ class AttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
         "vllm.v1.attention.backends.mla.flashmla_sparse.FlashMLASparseBackend"
     )
     FLASH_ATTN_MLA = "vllm.v1.attention.backends.mla.flashattn_mla.FlashAttnMLABackend"
+    FLASHINFER_FA2_MLA = (
+        "vllm.v1.attention.backends.mla.flashinfer_fa2_mla.FlashInferFA2MLABackend"
+    )
     NO_ATTENTION = "vllm.v1.attention.backends.no_attention.NoAttentionBackend"
     FLEX_ATTENTION = "vllm.v1.attention.backends.flex_attention.FlexAttentionBackend"
     TREE_ATTN = "vllm.v1.attention.backends.tree_attn.TreeAttentionBackend"
