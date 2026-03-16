@@ -289,11 +289,20 @@ def _create_input_tensors(
     device: torch.device,
     dtype: torch.dtype,
 ) -> tuple:
-    """Create Q, K, V input tensors for all layers."""
+    """Create Q, K, V input tensors for all layers.
+
+    When kv_cache_dtype is fp8, queries are cast to fp8 to match backends
+    that require query/key/value dtype consistency (Triton, FlashInfer).
+    """
+    q_dtype = dtype
+    if config.kv_cache_dtype == "fp8":
+        from vllm.platforms import current_platform
+
+        q_dtype = current_platform.fp8_dtype()
     q_list = [
         torch.randn(
             total_q, config.num_q_heads, config.head_dim, device=device, dtype=dtype
-        )
+        ).to(q_dtype)
         for _ in range(config.num_layers)
     ]
     k_list = [
