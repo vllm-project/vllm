@@ -28,7 +28,6 @@ class CPUOffloadingSpec(OffloadingSpec):
             raise Exception(
                 "cpu_bytes_to_use must be specified in kv_connector_extra_config"
             )
-
         # calculate kv_bytes_per_offloaded_block
         assert kv_cache_config is not None
         page_sizes = {
@@ -121,6 +120,9 @@ class CPUOffloadingSpec(OffloadingSpec):
                 cpu_block_size=gpu_block_size * self.block_size_factor,
                 num_cpu_blocks=self.num_blocks,
                 gpu_caches=kv_caches,
+                instance_id=self.vllm_config.instance_id,
+                tp_world_size=self.vllm_config.parallel_config.world_size,
+                total_cpu_bytes=int(self.extra_config["cpu_bytes_to_use"]),
             )
 
         assert self._handlers is not None
