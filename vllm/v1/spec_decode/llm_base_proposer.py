@@ -128,6 +128,8 @@ class SpecDecodeBaseProposer:
             vllm_config.model_config
         )
 
+        self.supports_prompt_embeds = vllm_config.model_config.enable_prompt_embeds
+
         self.draft_attn_groups: list[AttentionGroup] = []
         self.kv_cache_gid: int = -1
         self.eagle3_use_aux_hidden_state: bool = (
@@ -195,6 +197,7 @@ class SpecDecodeBaseProposer:
         if self.needs_extra_input_slots:
             self._raise_if_padded_drafter_batch_disabled()
             self._warn_if_multimodal()
+            self._warn_if_prompt_embeds()
             self._raise_if_mrope()
 
         self.is_rejected_token_mask: torch.Tensor | None = None
@@ -292,6 +295,14 @@ class SpecDecodeBaseProposer:
             logger.warning(
                 "Speculative Decoding with draft models or parallel drafting "
                 "does not fully support multimodal models yet. "
+                "Proceeding with text-only speculative decoding."
+            )
+
+    def _warn_if_prompt_embeds(self):
+        if self.supports_prompt_embeds:
+            logger.warning(
+                "Speculative Decoding with draft models or parallel drafting "
+                "does not fully support prompt embeds yet. "
                 "Proceeding with text-only speculative decoding."
             )
 
@@ -433,6 +444,7 @@ class SpecDecodeBaseProposer:
                 token_indices_to_sample=token_indices_to_sample,
                 cad=common_attn_metadata,
                 num_rejected_tokens_gpu=num_rejected_tokens_gpu,
+                target_inputs_embeds=target_inputs_embeds,
             )
         )
 
@@ -447,6 +459,8 @@ class SpecDecodeBaseProposer:
         model_kwargs, slot_mapping_size = self.build_model_inputs_first_pass(
             num_tokens, num_input_tokens, mm_embed_inputs
         )
+        if not self.supports_mm_inputs and not self.supports_prompt_embeds:
+            model_kwargs.pop("inputs_embeds", None)
 
         with set_forward_context(
             per_layer_attn_metadata,
@@ -554,6 +568,12 @@ class SpecDecodeBaseProposer:
                 self.inputs_embeds[:batch_size] = self.model.embed_input_ids(input_ids)
 
                 input_ids = None
+                inputs_embeds = self.inputs_embeds[:input_batch_size]
+            elif self.supports_prompt_embeds:
+                # Keep input_ids for models that require it (e.g. DeepSeekMTP).
+                self.inputs_embeds[:batch_size] = self.model.embed_input_ids(input_ids)
+
+                input_ids = self.input_ids[:input_batch_size]
                 inputs_embeds = self.inputs_embeds[:input_batch_size]
             else:
                 input_ids = self.input_ids[:input_batch_size]
@@ -667,6 +687,13 @@ class SpecDecodeBaseProposer:
             # Replace the last token with the next token.
             # E.g., [b1, b2, c1, c2, c3, c3] -> [a2, b2, b3, c2, c3, c4]
             self.input_ids[token_indices_to_sample] = next_token_ids
+
+            # Apply the same shift to inputs_embeds using the target
+            # model's embeddings rather than re-embedding from token ids.
+            if self.supports_prompt_embeds and target_inputs_embeds is not None:
+                self.inputs_embeds[: num_tokens - 1] = target_inputs_embeds[1:]
+                next_token_embeds = self.model.embed_input_ids(next_token_ids)
+                self.inputs_embeds[token_indices_to_sample] = next_token_embeds
 
             # copy inputs to buffer for cudagraph
             if self.uses_xdrope_dim > 0 and self.draft_uses_xdrope_dim == 0:
@@ -793,6 +820,11 @@ class SpecDecodeBaseProposer:
             )
 
             input_ids = None
+            inputs_embeds = self.inputs_embeds[:num_input_tokens]
+        elif self.supports_prompt_embeds:
+            # inputs_embeds prepared in set_inputs_first_pass.
+            # Keep input_ids for models that require it (e.g. DeepSeekMTP).
+            input_ids = self.input_ids[:num_input_tokens]
             inputs_embeds = self.inputs_embeds[:num_input_tokens]
         else:
             input_ids = self.input_ids[:num_input_tokens]
@@ -1432,6 +1464,9 @@ class SpecDecodeBaseProposer:
             ):
                 if self.supports_mm_inputs:
                     input_ids = None
+                    inputs_embeds = self.inputs_embeds[:num_input_tokens]
+                elif self.supports_prompt_embeds:
+                    input_ids = self.input_ids[:num_input_tokens]
                     inputs_embeds = self.inputs_embeds[:num_input_tokens]
                 else:
                     input_ids = self.input_ids[:num_input_tokens]
