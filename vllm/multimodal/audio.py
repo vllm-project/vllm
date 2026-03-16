@@ -23,6 +23,7 @@ except ImportError:
 
 
 # ============================================================
+# Aligned with `librosa.get_duration` function
 def get_audio_duration(*, y: npt.NDArray[np.floating], sr: float = 22050) -> float:
     """Get the duration of an audio array in seconds.
 
