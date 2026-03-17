@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer with FlashInfer."""
 
+import math
 from dataclasses import dataclass
 from functools import partial
 from typing import ClassVar
@@ -77,6 +78,7 @@ FP4_DTYPE = torch.uint8
 logger = init_logger(__name__)
 
 trtllm_gen_workspace_buffer = None
+LOG2_E_SCALE = math.log(2.0)
 
 
 def _get_trtllm_gen_workspace_buffer():
@@ -266,7 +268,7 @@ class BatchDCPPrefillWrapper:
             get_dcp_group(),
             return_lse=True,
         )
-        lse_context = lse_context.transpose(0, 1).contiguous()
+        lse_context = (lse_context.transpose(0, 1) * LOG2_E_SCALE).contiguous()
 
         output_query, lse_query = self._new_tokens.run(
             prefill_query,
@@ -274,7 +276,7 @@ class BatchDCPPrefillWrapper:
             value,
             return_lse=True,
         )
-        lse_query = lse_query.transpose(0, 1).contiguous()
+        lse_query = (lse_query.transpose(0, 1) * LOG2_E_SCALE).contiguous()
 
         merge_attn_states(
             out,
