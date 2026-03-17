@@ -34,7 +34,7 @@ steps:
   - tests/entrypoints/test_chat_utils
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/test_chat_with_tool_reasoning.py --ignore=entrypoints/openai/test_oot_registration.py --ignore=entrypoints/openai/test_tensorizer_entrypoint.py --ignore=entrypoints/openai/correctness/  --ignore=entrypoints/openai/tool_parsers/ --ignore=entrypoints/openai/responses
+  - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/chat_completion/test_chat_with_tool_reasoning.py --ignore=entrypoints/openai/chat_completion/test_oot_registration.py --ignore=entrypoints/openai/completion/test_tensorizer_entrypoint.py --ignore=entrypoints/openai/correctness/  --ignore=entrypoints/openai/tool_parsers/ --ignore=entrypoints/openai/responses
   - pytest -v -s entrypoints/test_chat_utils.py
   mirror:
     amd:
