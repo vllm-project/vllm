@@ -1651,7 +1651,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_MONITORX": lambda: bool(
         int(
             os.getenv("VLLM_USE_MONITORX", "1")
-        ) # TODO Default to "0", this is just for testing
+        )  # TODO Default to "0", this is just for testing
     ),
 }
 
