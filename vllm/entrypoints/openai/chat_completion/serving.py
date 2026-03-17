@@ -310,11 +310,14 @@ class OpenAIServingChat(OpenAIServing):
                     trace_headers=trace_headers,
                 )
             else:
-                reasoning_ended = (
-                    reasoning_parser.is_reasoning_end(prompt_token_ids or [])
-                    if reasoning_parser
-                    else None
-                )
+                if not request.include_reasoning:
+                    reasoning_ended = True
+                elif reasoning_parser:
+                    reasoning_ended = reasoning_parser.is_reasoning_end(
+                        prompt_token_ids or []
+                    )
+                else:
+                    reasoning_ended = None
 
                 generator = self.engine_client.generate(
                     engine_prompt,
