@@ -55,6 +55,7 @@ class SingleTypeKVCacheManager(ABC):
         self.kv_cache_spec = kv_cache_spec
         self.block_pool = block_pool
         self.enable_caching = enable_caching
+        self.new_block_ids: list[int] = []
 
         # Mapping from request ID to blocks to track the blocks allocated
         # for each request, so that we can free the blocks when the request
@@ -208,6 +209,8 @@ class SingleTypeKVCacheManager(ABC):
                 cdiv(num_total_computed_tokens, self.block_size) - len(req_blocks)
             )
             req_blocks.extend(allocated_blocks)
+            if type(self.kv_cache_spec) is FullAttentionSpec:
+                self.new_block_ids.extend(b.block_id for b in allocated_blocks)
 
     def allocate_new_blocks(
         self, request_id: str, num_tokens: int, num_tokens_main_model: int
@@ -234,7 +237,15 @@ class SingleTypeKVCacheManager(ABC):
         else:
             new_blocks = self.block_pool.get_new_blocks(num_new_blocks)
             req_blocks.extend(new_blocks)
+            if type(self.kv_cache_spec) is FullAttentionSpec:
+                self.new_block_ids.extend(b.block_id for b in new_blocks)
             return new_blocks
+
+    def take_new_block_ids(self) -> list[int]:
+        """Drain and return block IDs allocated since the last call."""
+        ids = self.new_block_ids
+        self.new_block_ids = []
+        return ids
 
     def cache_blocks(self, request: Request, num_tokens: int) -> None:
         """
