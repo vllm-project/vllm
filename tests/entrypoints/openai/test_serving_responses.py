@@ -8,11 +8,15 @@ from unittest.mock import MagicMock
 import pytest
 import pytest_asyncio
 from openai.types.responses import (
+    ResponseContentPartAddedEvent,
+    ResponseOutputItemAddedEvent,
     ResponseOutputItemDoneEvent,
+    ResponseOutputMessage,
     ResponseReasoningItem,
     ResponseReasoningTextDeltaEvent,
     ResponseReasoningTextDoneEvent,
     ResponseTextDeltaEvent,
+    ResponseTextDoneEvent,
 )
 from openai.types.responses.tool import (
     CodeInterpreterContainerCodeInterpreterToolAuto,
@@ -897,3 +901,222 @@ class TestStreamingReasoningToContentTransition:
         ]
         assert len(item_done_events) == 1
         assert isinstance(item_done_events[0].item, ResponseReasoningItem)
+
+
+def _make_serving_instance_no_parser():
+    """Create an OpenAIServingResponses with no tool/reasoning parser."""
+    engine_client = MagicMock()
+    model_config = MagicMock()
+    model_config.max_model_len = 100
+    model_config.hf_config.model_type = "test"
+    model_config.hf_text_config = MagicMock()
+    model_config.get_diff_sampling_param.return_value = {}
+    engine_client.model_config = model_config
+    engine_client.input_processor = MagicMock()
+    engine_client.io_processor = MagicMock()
+    engine_client.renderer = MagicMock()
+
+    models = MagicMock()
+
+    serving = OpenAIServingResponses(
+        engine_client=engine_client,
+        models=models,
+        openai_serving_render=MagicMock(),
+        request_logger=None,
+        chat_template=None,
+        chat_template_content_format="auto",
+        # No reasoning_parser or tool_parser → self.parser is None
+    )
+    assert serving.parser is None, "Expected no parser for this test fixture"
+    return serving
+
+
+class TestNoParserStreamingLifecycle:
+    """Tests for _process_simple_streaming_events when self.parser is None.
+
+    The fallback path must emit the full event lifecycle
+    (output_item.added, content_part.added, deltas, done events)
+    rather than bare delta events only.
+    """
+
+    @pytest.mark.asyncio
+    async def test_full_lifecycle_events_emitted(self):
+        """When no parser is configured, streaming should still emit:
+        output_item.added → content_part.added → output_text.delta(s)
+        → output_text.done → content_part.done → output_item.done
+        """
+        serving = _make_serving_instance_no_parser()
+
+        contexts = [
+            _make_simple_context_with_output("Hello", [10]),
+            _make_simple_context_with_output(" world", [20]),
+        ]
+
+        async def result_generator():
+            for ctx in contexts:
+                yield ctx
+
+        request = ResponsesRequest(input="hi", tools=[], stream=True)
+        _identity_increment._counter = 0  # type: ignore
+
+        events = []
+        async for event in serving._process_simple_streaming_events(
+            request=request,
+            sampling_params=SamplingParams(),
+            result_generator=result_generator(),
+            context=SimpleContext(),
+            model_name="test-model",
+            tokenizer=MagicMock(),
+            request_metadata=RequestResponseMetadata(request_id="req"),
+            created_time=0,
+            _increment_sequence_number_and_return=_identity_increment,
+        ):
+            events.append(event)
+
+        type_names = [e.type for e in events]
+
+        # Verify the full lifecycle is present
+        assert "response.output_item.added" in type_names
+        assert "response.content_part.added" in type_names
+        assert "response.output_text.delta" in type_names
+        assert "response.output_text.done" in type_names
+        assert "response.content_part.done" in type_names
+        assert "response.output_item.done" in type_names
+
+        # Verify ordering: added events come first, done events come last
+        added_idx = type_names.index("response.output_item.added")
+        part_added_idx = type_names.index("response.content_part.added")
+        first_delta_idx = type_names.index("response.output_text.delta")
+        text_done_idx = type_names.index("response.output_text.done")
+        part_done_idx = type_names.index("response.content_part.done")
+        item_done_idx = type_names.index("response.output_item.done")
+
+        assert added_idx < part_added_idx < first_delta_idx
+        assert first_delta_idx < text_done_idx < part_done_idx < item_done_idx
+
+    @pytest.mark.asyncio
+    async def test_text_deltas_content(self):
+        """Delta events should carry the correct text content."""
+        serving = _make_serving_instance_no_parser()
+
+        contexts = [
+            _make_simple_context_with_output("Hello", [10]),
+            _make_simple_context_with_output(" world", [20]),
+        ]
+
+        async def result_generator():
+            for ctx in contexts:
+                yield ctx
+
+        request = ResponsesRequest(input="hi", tools=[], stream=True)
+        _identity_increment._counter = 0  # type: ignore
+
+        events = []
+        async for event in serving._process_simple_streaming_events(
+            request=request,
+            sampling_params=SamplingParams(),
+            result_generator=result_generator(),
+            context=SimpleContext(),
+            model_name="test-model",
+            tokenizer=MagicMock(),
+            request_metadata=RequestResponseMetadata(request_id="req"),
+            created_time=0,
+            _increment_sequence_number_and_return=_identity_increment,
+        ):
+            events.append(event)
+
+        # Check delta text values
+        text_deltas = [e for e in events if isinstance(e, ResponseTextDeltaEvent)]
+        assert len(text_deltas) == 2
+        assert text_deltas[0].delta == "Hello"
+        assert text_deltas[1].delta == " world"
+
+        # Check done event has full accumulated text
+        text_done = [e for e in events if isinstance(e, ResponseTextDoneEvent)]
+        assert len(text_done) == 1
+        assert text_done[0].text == "Hello world"
+
+        # Check output_item.done has a completed message with the full text
+        item_done = [e for e in events if isinstance(e, ResponseOutputItemDoneEvent)]
+        assert len(item_done) == 1
+        assert isinstance(item_done[0].item, ResponseOutputMessage)
+        assert item_done[0].item.status == "completed"
+
+    @pytest.mark.asyncio
+    async def test_empty_output_no_lifecycle_events(self):
+        """When all outputs are empty, no lifecycle events should be emitted."""
+        serving = _make_serving_instance_no_parser()
+
+        contexts = [
+            _make_simple_context_with_output("", [10]),
+        ]
+
+        async def result_generator():
+            for ctx in contexts:
+                yield ctx
+
+        request = ResponsesRequest(input="hi", tools=[], stream=True)
+        _identity_increment._counter = 0  # type: ignore
+
+        events = []
+        async for event in serving._process_simple_streaming_events(
+            request=request,
+            sampling_params=SamplingParams(),
+            result_generator=result_generator(),
+            context=SimpleContext(),
+            model_name="test-model",
+            tokenizer=MagicMock(),
+            request_metadata=RequestResponseMetadata(request_id="req"),
+            created_time=0,
+            _increment_sequence_number_and_return=_identity_increment,
+        ):
+            events.append(event)
+
+        # No events should be emitted for empty content
+        assert len(events) == 0
+
+    @pytest.mark.asyncio
+    async def test_item_ids_consistent_across_events(self):
+        """The item_id should be consistent across all lifecycle events."""
+        serving = _make_serving_instance_no_parser()
+
+        contexts = [
+            _make_simple_context_with_output("test", [10]),
+        ]
+
+        async def result_generator():
+            for ctx in contexts:
+                yield ctx
+
+        request = ResponsesRequest(input="hi", tools=[], stream=True)
+        _identity_increment._counter = 0  # type: ignore
+
+        events = []
+        async for event in serving._process_simple_streaming_events(
+            request=request,
+            sampling_params=SamplingParams(),
+            result_generator=result_generator(),
+            context=SimpleContext(),
+            model_name="test-model",
+            tokenizer=MagicMock(),
+            request_metadata=RequestResponseMetadata(request_id="req"),
+            created_time=0,
+            _increment_sequence_number_and_return=_identity_increment,
+        ):
+            events.append(event)
+
+        # Extract item_id from the added event
+        added = [e for e in events if isinstance(e, ResponseOutputItemAddedEvent)]
+        assert len(added) == 1
+        item_id = added[0].item.id
+        assert item_id  # not empty
+
+        # All events with item_id should share the same value
+        part_added = [e for e in events if isinstance(e, ResponseContentPartAddedEvent)]
+        assert part_added[0].item_id == item_id
+
+        text_deltas = [e for e in events if isinstance(e, ResponseTextDeltaEvent)]
+        assert text_deltas[0].item_id == item_id
+
+        text_done = [e for e in events if isinstance(e, ResponseTextDoneEvent)]
+        assert text_done[0].item_id == item_id

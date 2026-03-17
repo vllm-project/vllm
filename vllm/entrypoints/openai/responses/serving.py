@@ -17,7 +17,6 @@ from openai.types.responses import (
     ResponseOutputMessage,
     ResponseOutputText,
     ResponseStatus,
-    ResponseTextDeltaEvent,
     response_text_delta_event,
 )
 from openai.types.responses.response_output_text import Logprob, LogprobTopLogprob
@@ -82,6 +81,8 @@ from vllm.entrypoints.openai.responses.streaming_events import (
     StreamingState,
     emit_content_delta_events,
     emit_previous_item_done_events,
+    emit_text_delta_events,
+    emit_text_output_done_events,
     emit_tool_action_events,
 )
 from vllm.entrypoints.openai.responses.utils import (
@@ -1343,7 +1344,11 @@ class OpenAIServingResponses(OpenAIServing):
             ):
                 yield event
         else:
-            # Fallback: no parser — use a minimal inline DeltaMessage path
+            # Fallback: no parser — emit the full event lifecycle for
+            # plain text output so clients see the same added/delta/done
+            # sequence they would with a parser.
+            state = StreamingState()
+            full_text = ""
             async for ctx in result_generator:
                 assert isinstance(ctx, SimpleContext)
                 if ctx.last_output is None:
@@ -1353,17 +1358,15 @@ class OpenAIServingResponses(OpenAIServing):
                     self._raise_if_error(output.finish_reason, request.request_id)
                     delta_message = DeltaMessage(content=output.text)
                     if delta_message.content:
-                        yield _increment_sequence_number_and_return(
-                            ResponseTextDeltaEvent(
-                                type="response.output_text.delta",
-                                sequence_number=-1,
-                                content_index=0,
-                                output_index=0,
-                                item_id="",
-                                delta=delta_message.content,
-                                logprobs=[],
-                            )
-                        )
+                        full_text += delta_message.content
+                        for event in emit_text_delta_events(
+                            delta_message.content, state
+                        ):
+                            yield _increment_sequence_number_and_return(event)
+            # Emit done events only if we actually sent any text deltas
+            if state.sent_output_item_added:
+                for event in emit_text_output_done_events(full_text, state):
+                    yield _increment_sequence_number_and_return(event)
 
     async def _process_harmony_streaming_events(
         self,
