@@ -261,6 +261,7 @@ class MambaForCausalLM(
             intermediate_size=hf_config.intermediate_size,
             state_size=hf_config.state_size,
             conv_kernel=hf_config.conv_kernel,
+            num_spec=vllm_config.num_speculative_tokens,
         )
 
     @classmethod

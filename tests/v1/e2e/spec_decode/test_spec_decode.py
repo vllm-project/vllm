@@ -183,6 +183,61 @@ def test_ngram_and_suffix_correctness(
     cleanup_dist_env_and_memory()
 
 
+@pytest.mark.parametrize(
+    "model_name,speculative_config",
+    [
+        (
+            "ai21labs/Jamba-tiny-dev",
+            {
+                "method": "ngram",
+                "prompt_lookup_max": 3,
+                "prompt_lookup_min": 1,
+                "num_speculative_tokens": 3,
+            },
+        ),
+    ],
+    ids=["jamba_ngram"],
+)
+@single_gpu_only
+def test_mamba1_hybrid_ngram_correctness(
+    model_name: str,
+    speculative_config: dict,
+):
+    """
+    Verify that Mamba1-based hybrid models (Jamba) produce identical output
+    with and without ngram speculative decoding under greedy sampling.
+    """
+    prompts = [
+        "The quick brown fox jumps over the lazy",
+        "Once upon a time in a land far far away",
+        "The meaning of life is",
+    ]
+    sampling_params = SamplingParams(temperature=0, max_tokens=20, ignore_eos=True)
+
+    ref_llm = LLM(model=model_name, max_model_len=256)
+    ref_outputs = ref_llm.generate(prompts, sampling_params)
+    del ref_llm
+    torch.accelerator.empty_cache()
+    cleanup_dist_env_and_memory()
+
+    spec_llm = LLM(
+        model=model_name,
+        speculative_config=speculative_config,
+        max_model_len=256,
+    )
+    spec_outputs = spec_llm.generate(prompts, sampling_params)
+    del spec_llm
+    torch.accelerator.empty_cache()
+    cleanup_dist_env_and_memory()
+
+    for ref, spec in zip(ref_outputs, spec_outputs):
+        assert ref.outputs[0].text == spec.outputs[0].text, (
+            f"Output mismatch:\n"
+            f"  ref:  {ref.outputs[0].text!r}\n"
+            f"  spec: {spec.outputs[0].text!r}"
+        )
+
+
 @pytest.mark.parametrize("async_scheduling", [True], ids=["async"])
 @single_gpu_only
 @large_gpu_mark(min_gb=20)

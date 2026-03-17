@@ -7,7 +7,7 @@ import torch
 from torch import nn
 from torch.nn.parameter import Parameter
 
-from vllm.config import CacheConfig, ModelConfig, get_current_vllm_config
+from vllm.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -193,6 +193,9 @@ class MambaMixer(MambaBase, PluggableLayer):
         self.cache_config = cache_config
         self.prefix = prefix
 
+        vllm_config: VllmConfig = get_current_vllm_config()
+        self.num_spec = vllm_config.num_speculative_tokens
+
     def _ssm_transform(
         self, x: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -290,9 +293,13 @@ class MambaMixer(MambaBase, PluggableLayer):
         num_prefill_tokens = attn_metadata.num_prefill_tokens  # token count
         num_decode_tokens = attn_metadata.num_decode_tokens
         num_prefills = attn_metadata.num_prefills  # request count
-        num_decodes = attn_metadata.num_decode_tokens  # token count (=request)
+        num_decodes = attn_metadata.num_decodes  # request count
         has_prefill = num_prefill_tokens > 0
         has_decode = num_decode_tokens > 0
+
+        # Speculative decoding metadata
+        num_accepted_tokens = attn_metadata.num_accepted_tokens
+        query_start_loc_d = attn_metadata.query_start_loc_d
         num_actual_tokens = num_prefill_tokens + num_decode_tokens
 
         prefill_decode_split = split_batch_to_prefill_and_decode(
@@ -404,6 +411,9 @@ class MambaMixer(MambaBase, PluggableLayer):
                 conv_state_indices=state_indices_tensor_d,
                 block_idx_last_scheduled_token=block_idx_last_scheduled_token_d,
                 initial_state_idx=block_idx_last_computed_token_d,
+                num_accepted_tokens=num_accepted_tokens,
+                query_start_loc=query_start_loc_d,
+                max_query_len=state_indices_tensor_d.size(-1),
             ).transpose(0, 1)
 
             # 3. State Space Model sequence transformation.
@@ -428,6 +438,8 @@ class MambaMixer(MambaBase, PluggableLayer):
                 state_batch_indices=state_indices_tensor_d_input,
                 dst_state_batch_indices=state_indices_tensor_d_output,
                 out=scan_outputs_d,
+                num_accepted_tokens=num_accepted_tokens,
+                cu_seqlens=query_start_loc_d,
             )
             scan_outputs_d = scan_outputs_d.transpose(0, 1)
 
@@ -461,6 +473,7 @@ class MambaMixer(MambaBase, PluggableLayer):
             intermediate_size=self.intermediate_size,
             state_size=self.ssm_state_size,
             conv_kernel=self.conv_kernel_size,
+            num_spec=self.num_spec,
         )
 
     @property

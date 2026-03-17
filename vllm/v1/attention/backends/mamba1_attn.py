@@ -38,7 +38,10 @@ class Mamba1AttentionMetadataBuilder(
         fast_build: bool = False,
         **kwargs: Any,
     ) -> Mamba1AttentionMetadata:
-        common = self._compute_common_metadata(common_attn_metadata)
+        common = self._compute_common_metadata(
+            common_attn_metadata,
+            num_accepted_tokens=kwargs.get("num_accepted_tokens"),
+        )
 
         if (
             common.num_prefills > 0
