@@ -10,6 +10,7 @@ from typing import Any
 import torch
 
 import vllm.envs as envs
+import vllm.ir
 from vllm.config import CUDAGraphMode, ParallelConfig, VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
@@ -388,6 +389,7 @@ def set_forward_context(
         with (
             override_forward_context(forward_context),
             vllm_config.kernel_config.ir_op_priority.set_priority(),
+            vllm.ir.direct_dispatch(vllm_config.compilation_config.ir_direct_dispatch),
         ):
             yield
     finally:

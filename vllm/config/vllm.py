@@ -823,6 +823,13 @@ class VllmConfig:
             else:
                 self.compilation_config.mode = CompilationMode.NONE
 
+        # By default, enable direct IR dispatch if not using custom Inductor lowering
+        if self.compilation_config.ir_direct_dispatch is None:
+            self.compilation_config.ir_direct_dispatch = (
+                self.compilation_config.mode != CompilationMode.VLLM_COMPILE
+                or self.compilation_config.backend != "inductor"
+            )
+
         if all(s not in self.compilation_config.custom_ops for s in ("all", "none")):
             if (
                 self.compilation_config.backend == "inductor"
