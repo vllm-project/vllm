@@ -124,10 +124,42 @@ class TestGetKVConnectorModel:
 
 
 class TestLMCacheConnectorRegisterModel:
-    """Test LMCache connector register_model integration."""
+    """Test LMCache connector register_model delegation."""
+
+    def test_register_model_delegates_to_engine(self):
+        """LMCacheConnectorV1.register_model delegates to _lmcache_engine."""
+        from vllm.distributed.kv_transfer.kv_connector.v1.\
+            lmcache_connector import LMCacheConnectorV1
+
+        mock_engine = MagicMock()
+        mock_model = MagicMock(spec=torch.nn.Module)
+
+        connector = LMCacheConnectorV1.__new__(LMCacheConnectorV1)
+        connector._lmcache_engine = mock_engine
+        connector.register_model(mock_model)
+
+        mock_engine.register_model.assert_called_once_with(mock_model)
+
+    def test_register_model_skips_engine_without_method(self):
+        """register_model is a no-op when engine lacks register_model."""
+        from vllm.distributed.kv_transfer.kv_connector.v1.\
+            lmcache_connector import LMCacheConnectorV1
+
+        # Engine without register_model attribute
+        mock_engine = MagicMock(spec=[])  # empty spec — no attributes
+        mock_model = MagicMock(spec=torch.nn.Module)
+
+        connector = LMCacheConnectorV1.__new__(LMCacheConnectorV1)
+        connector._lmcache_engine = mock_engine
+        # Should not raise
+        connector.register_model(mock_model)
+
+
+class TestLMCacheConnectorV1ImplRegisterModel:
+    """Test LMCacheConnectorV1Impl (native) register_model logic."""
 
     def test_register_model_calls_vllm_model_tracker(self):
-        """LMCacheConnectorV1.register_model registers with VLLMModelTracker."""
+        """LMCacheConnectorV1Impl.register_model registers with VLLMModelTracker."""
         mock_tracker = MagicMock()
         mock_model = MagicMock(spec=torch.nn.Module)
 
@@ -140,12 +172,11 @@ class TestLMCacheConnectorRegisterModel:
                 VLLMModelTracker=mock_tracker
             ),
         }):
-            # Import after mocking
             from vllm.distributed.kv_transfer.kv_connector.v1.\
-                lmcache_connector import LMCacheConnectorV1
+                lmcache_integration.vllm_v1_adapter import LMCacheConnectorV1Impl
 
-            connector = LMCacheConnectorV1.__new__(LMCacheConnectorV1)
-            connector.register_model(mock_model)
+            impl = LMCacheConnectorV1Impl.__new__(LMCacheConnectorV1Impl)
+            impl.register_model(mock_model)
 
         mock_tracker.register_model.assert_called_once()
         call_args = mock_tracker.register_model.call_args
@@ -154,16 +185,15 @@ class TestLMCacheConnectorRegisterModel:
     def test_register_model_graceful_on_import_error(self):
         """register_model doesn't crash if LMCache CacheBlend not installed."""
         from vllm.distributed.kv_transfer.kv_connector.v1.\
-            lmcache_connector import LMCacheConnectorV1
+            lmcache_integration.vllm_v1_adapter import LMCacheConnectorV1Impl
 
-        connector = LMCacheConnectorV1.__new__(LMCacheConnectorV1)
+        impl = LMCacheConnectorV1Impl.__new__(LMCacheConnectorV1Impl)
 
         # Should not raise even if lmcache imports fail
         with patch.dict("sys.modules", {
             "lmcache.v1.compute.models.utils": None,
         }):
-            # This should gracefully handle the ImportError
-            connector.register_model(MagicMock(spec=torch.nn.Module))
+            impl.register_model(MagicMock(spec=torch.nn.Module))
 
 
 class TestMultiConnectorRegisterModel:

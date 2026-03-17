@@ -136,26 +136,10 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
     def register_model(self, model: "torch.nn.Module") -> None:
         """Register model with LMCache's VLLMModelTracker for CacheBlend.
 
-        CacheBlend's blender needs access to model weights for selective
-        layer recomputation. This method is called automatically by vLLM
-        after model loading.
+        Delegates to the underlying LMCache engine implementation.
         """
-        try:
-            from lmcache.v1.compute.models.utils import VLLMModelTracker
-
-            from vllm.distributed.kv_transfer.kv_connector.v1.\
-                lmcache_integration.utils import ENGINE_NAME
-            VLLMModelTracker.register_model(ENGINE_NAME, model)
-            logger.info("Registered model with LMCache VLLMModelTracker")
-        except ImportError:
-            logger.debug(
-                "LMCache CacheBlend model registration not available"
-            )
-        except Exception:
-            logger.warning(
-                "Failed to register model with VLLMModelTracker",
-                exc_info=True,
-            )
+        if hasattr(self._lmcache_engine, "register_model"):
+            self._lmcache_engine.register_model(model)
 
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs: Any) -> None:
         """
