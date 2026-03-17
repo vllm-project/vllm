@@ -994,9 +994,51 @@ class OpenAIServing:
             )
 
             async for res in generator:
-                context.append_output(res)
-                # NOTE(woosuk): The stop condition is handled by the engine.
-                yield context
+                # For streaming harmony models with speculative decoding
+                # (Eagle), multi-token RequestOutputs can span channel
+                # boundaries. Split them into single-token outputs so the
+                # harmony parser processes tokens one at a time, preventing
+                # intermediate channel transitions from being lost.
+                if (
+                    isinstance(context, StreamingHarmonyContext)
+                    and res.outputs
+                    and len(res.outputs[0].token_ids) > 1
+                ):
+                    token_ids = res.outputs[0].token_ids
+                    for tok_i, token_id in enumerate(token_ids):
+                        is_last = tok_i == len(token_ids) - 1
+                        single_output = CompletionOutput(
+                            index=res.outputs[0].index,
+                            text="",
+                            token_ids=[token_id],
+                            cumulative_logprob=res.outputs[0].cumulative_logprob,
+                            logprobs=(
+                                res.outputs[0].logprobs[tok_i : tok_i + 1]
+                                if res.outputs[0].logprobs
+                                else None
+                            ),
+                            finish_reason=(
+                                res.outputs[0].finish_reason if is_last else None
+                            ),
+                            stop_reason=(
+                                res.outputs[0].stop_reason if is_last else None
+                            ),
+                        )
+                        single_res = RequestOutput(
+                            request_id=res.request_id,
+                            prompt=res.prompt,
+                            prompt_token_ids=res.prompt_token_ids,
+                            prompt_logprobs=res.prompt_logprobs,
+                            outputs=[single_output],
+                            finished=res.finished if is_last else False,
+                        )
+                        context.append_output(single_res)
+                        yield context
+                else:
+                    context.append_output(res)
+                    # NOTE(woosuk): The stop condition is handled by
+                    # the engine.
+                    yield context
 
             if not context.need_builtin_tool_call():
                 # The model did not ask for a tool call, so we're done.
