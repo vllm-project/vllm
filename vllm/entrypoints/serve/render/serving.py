@@ -24,6 +24,7 @@ from vllm.entrypoints.openai.parser.harmony_utils import (
     parse_chat_inputs_to_harmony_messages,
     render_for_completion,
 )
+from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.entrypoints.serve.disagg.protocol import (
     GenerateRequest,
     MultiModalFeatures,
@@ -459,9 +460,9 @@ class OpenAIServingRender:
             prompts.extend(prompt_to_seq(prompt_embeds))
         if prompt_input is not None:
             prompts.extend(prompt_to_seq(prompt_input))
-        return await self._preprocess_cmpl(request, prompts)
+        return await self.preprocess_cmpl(request, prompts)
 
-    async def _preprocess_cmpl(
+    async def preprocess_cmpl(
         self,
         request: Any,
         prompts: Sequence[PromptType | bytes],
@@ -500,11 +501,7 @@ class OpenAIServingRender:
         tool_dicts: list[dict[str, Any]] | None = None,
         tool_parser: Callable[[TokenizerLike], ToolParser] | None = None,
     ) -> tuple[list[ConversationMessage], list[ProcessorInputs]]:
-        """Copied from OpenAIServing._preprocess_chat.
-
-        Differences: isinstance check is ChatCompletionRequest-only
-        (ResponsesRequest not supported here); TODO comment dropped accordingly.
-        """
+        """Copied from OpenAIServing._preprocess_chat."""
         renderer = self.renderer
         mm_config = self.model_config.multimodal_config
 
@@ -542,11 +539,11 @@ class OpenAIServingRender:
         if tool_parser is not None:
             tool_choice = getattr(request, "tool_choice", "none")
             if tool_choice != "none":
-                if not isinstance(request, ChatCompletionRequest):
+                if not isinstance(request, ChatCompletionRequest | ResponsesRequest):
                     msg = (
                         "Tool usage is only supported "
-                        " for ChatCompletionRequest, but got "
-                        f"{type(request).__name__}"
+                        "for Chat Completions API or Responses API requests, "
+                        f"but got {type(request).__name__}"
                     )
                     raise NotImplementedError(msg)
                 tokenizer = renderer.get_tokenizer()
