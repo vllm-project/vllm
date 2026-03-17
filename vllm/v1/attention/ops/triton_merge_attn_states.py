@@ -30,8 +30,6 @@ def merge_attn_states(
     prefix_head_stride = prefix_output.stride(1)
     output_head_stride = output.stride(1)
 
-    use_fp8 = output_scale is not None
-
     # TODO(woosuk): Use CUDA kernel instead of Triton to minimize CPU overhead.
     merge_attn_states_kernel[(num_tokens, num_query_heads)](
         output,
@@ -42,11 +40,11 @@ def merge_attn_states(
         suffix_lse,
         prefix_head_stride,
         output_head_stride,
-        output_scale if use_fp8 else None,
+        output_scale,
         head_size,
         padded_head_size,
         output_lse is not None,
-        use_fp8,
+        output_scale is not None,
     )
 
 
