@@ -385,8 +385,8 @@ class QuarkConfig(QuantizationConfig):
             for shard_name in shard_names:
                 if shard_name == layer_name:
                     config = cast(
-                        dict[str, Any],
-                        self.quant_config.get("global_quant_config"))
+                        dict[str, Any], self.quant_config.get("global_quant_config")
+                    )
                 else:
                     config = self._find_matched_config(shard_name, module)
                 shard_configs.append(config)
