@@ -409,13 +409,8 @@ class TritonAttentionImpl(AttentionImpl):
             )
         self.use_alibi_sqrt = use_alibi_sqrt
         self.supports_quant_query_input = current_platform.is_cuda()
-        # Lazy-allocated per-(token, head) scale caches for quantized KV
-        # formats that use per-token scales (e.g. INT8, future NVFP4).
-        # Shape: [num_blocks, block_size, num_kv_heads], dtype=float32.
-        # Memory overhead is accounted for via
-        # AttentionSpec.auxiliary_memory_per_block.
-        self._k_scale_cache: torch.Tensor | None = None
-        self._v_scale_cache: torch.Tensor | None = None
+        # _k_scale_cache / _v_scale_cache are inherited from AttentionImpl
+        # and lazily allocated via ensure_per_token_scale_caches().
 
     def forward(
         self,
@@ -632,30 +627,14 @@ class TritonAttentionImpl(AttentionImpl):
         elif self.kv_cache_dtype.startswith("int8"):
             key_cache = key_cache.view(self.int8_dtype)
             value_cache = value_cache.view(self.int8_dtype)
-            # Lazily allocate per-(token, head) scale caches on first call.
-            # This pattern works for any format in
-            # _DTYPES_WITH_PER_TOKEN_SCALES (currently INT8; NVFP4 etc.
-            # can be added later).
-            # Shape: [num_blocks, block_size, num_kv_heads]
-            if self._k_scale_cache is None:
-                num_blocks, block_size, num_kv_heads = key_cache.shape[:3]
-                self._k_scale_cache = torch.ones(
-                    (num_blocks, block_size, num_kv_heads),
-                    dtype=torch.float32,
-                    device=key_cache.device,
-                )
-                self._v_scale_cache = torch.ones(
-                    (num_blocks, block_size, num_kv_heads),
-                    dtype=torch.float32,
-                    device=value_cache.device,
-                )
+            k_sc, v_sc = self.ensure_per_token_scale_caches(key_cache)
             triton_reshape_and_cache_flash_int8_per_token(
                 key,
                 value,
                 key_cache,
                 value_cache,
-                self._k_scale_cache,
-                self._v_scale_cache,
+                k_sc,
+                v_sc,
                 slot_mapping,
             )
             return

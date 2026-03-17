@@ -712,6 +712,48 @@ class AttentionImplBase(ABC, Generic[T]):
 class AttentionImpl(AttentionImplBase[T], Generic[T]):
     """Standard attention implementation with forward method."""
 
+    # Per-(token, head) scale caches for quantized KV formats that compute
+    # scales dynamically (e.g. INT8, future NVFP4).  Lazily allocated by
+    # ensure_per_token_scale_caches().  Backends that support these formats
+    # should call that method in do_kv_cache_update() instead of managing
+    # allocation themselves.
+    # Shape when allocated: [num_blocks, block_size, num_kv_heads], float32.
+    _k_scale_cache: torch.Tensor | None = None
+    _v_scale_cache: torch.Tensor | None = None
+
+    def ensure_per_token_scale_caches(
+        self,
+        key_cache: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Lazily allocate per-(token, head) float32 scale caches.
+
+        Call this from ``do_kv_cache_update`` for quantized KV formats
+        registered in ``_DTYPES_WITH_PER_TOKEN_SCALES`` (currently INT8;
+        NVFP4 or other formats can be added later).  The returned tensors
+        are cached on *self* and reused across calls.
+
+        Args:
+            key_cache: The key cache tensor, used to infer shape and device.
+                       Expected shape: [num_blocks, block_size, num_kv_heads, head_size].
+
+        Returns:
+            (k_scale_cache, v_scale_cache) — both
+            [num_blocks, block_size, num_kv_heads] float32 tensors.
+        """
+        if self._k_scale_cache is None:
+            num_blocks, block_size, num_kv_heads = key_cache.shape[:3]
+            self._k_scale_cache = torch.ones(
+                (num_blocks, block_size, num_kv_heads),
+                dtype=torch.float32,
+                device=key_cache.device,
+            )
+            self._v_scale_cache = torch.ones(
+                (num_blocks, block_size, num_kv_heads),
+                dtype=torch.float32,
+                device=key_cache.device,
+            )
+        return self._k_scale_cache, self._v_scale_cache  # type: ignore[return-value]
+
     @abstractmethod
     def __init__(
         self,
