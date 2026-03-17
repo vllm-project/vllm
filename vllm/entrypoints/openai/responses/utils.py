@@ -21,7 +21,6 @@ from openai.types.responses.response_reasoning_item import ResponseReasoningItem
 from openai.types.responses.tool import Tool
 
 from vllm import envs
-from vllm.entrypoints.constants import MCP_PREFIX
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionMessageParam
 from vllm.entrypoints.openai.responses.protocol import ResponseInputOutputItem
 from vllm.logger import init_logger
@@ -119,37 +118,52 @@ def construct_input_messages(
     return messages
 
 
-def _maybe_combine_reasoning_and_tool_call(
+def _maybe_combine_assistant_and_tool_call(
     item: ResponseInputOutputItem, messages: list[ChatCompletionMessageParam]
 ) -> ChatCompletionMessageParam | None:
-    """Many models treat MCP calls and reasoning as a single message.
-    This function checks if the last message is a reasoning message and
-    the current message is a tool call"""
-    if not (
-        isinstance(item, ResponseFunctionToolCall)
-        and item.id
-        and item.id.startswith(MCP_PREFIX)
-    ):
+    """Combine a tool call with the preceding assistant message.
+
+    Many models expect tool calls to be part of the same assistant message
+    as the reasoning or content that preceded them. This function merges
+    a ResponseFunctionToolCall into the last assistant message when that
+    message contains reasoning and/or content.
+
+    This handles:
+    - reasoning + tool_call(s)  (e.g. OpenAI harmony style)
+    - content + tool_call(s)    (e.g. Qwen3 style)
+    - reasoning + content + tool_call(s)
+    - multiple consecutive tool calls after a single assistant message
+    """
+    if not isinstance(item, ResponseFunctionToolCall):
         return None
     if len(messages) == 0:
         return None
     last_message = messages[-1]
-    if not (
-        last_message.get("role") == "assistant"
-        and last_message.get("reasoning") is not None
-    ):
+
+    # The preceding message must be an assistant message that carries
+    # reasoning, content, or already-merged tool_calls.
+    if last_message.get("role") != "assistant":
+        return None
+    has_reasoning = last_message.get("reasoning") is not None
+    has_content = last_message.get("content") is not None
+    has_tool_calls = last_message.get("tool_calls") is not None
+    if not (has_reasoning or has_content or has_tool_calls):
         return None
 
-    last_message["tool_calls"] = [
-        ChatCompletionMessageToolCallParam(
-            id=item.call_id,
-            function=FunctionCallTool(
-                name=item.name,
-                arguments=item.arguments,
-            ),
-            type="function",
-        )
-    ]
+    new_tool_call = ChatCompletionMessageToolCallParam(
+        id=item.call_id,
+        function=FunctionCallTool(
+            name=item.name,
+            arguments=item.arguments,
+        ),
+        type="function",
+    )
+
+    # Append to existing tool_calls list, or create a new one.
+    if has_tool_calls:
+        last_message["tool_calls"].append(new_tool_call)
+    else:
+        last_message["tool_calls"] = [new_tool_call]
     return last_message
 
 
@@ -157,14 +171,17 @@ def construct_chat_messages_with_tool_call(
     input_messages: list[ResponseInputOutputItem],
 ) -> list[ChatCompletionMessageParam]:
     """This function wraps _construct_single_message_from_response_item
-    Because some chatMessages come from multiple response items
-    for example a reasoning item and a MCP tool call are two response items
-    but are one chat message
+    Because some chatMessages come from multiple response items.
+    For example, a reasoning/content item and a tool call are two response
+    items but should be rendered as one chat message so that models see
+    tool calls in the same turn as the preceding assistant text.
     """
     messages: list[ChatCompletionMessageParam] = []
     for item in input_messages:
-        maybe_combined_message = _maybe_combine_reasoning_and_tool_call(item, messages)
+        maybe_combined_message = _maybe_combine_assistant_and_tool_call(item, messages)
         if maybe_combined_message is not None:
+            # The last message was already mutated in-place; update
+            # the reference for clarity.
             messages[-1] = maybe_combined_message
         else:
             messages.append(_construct_single_message_from_response_item(item))

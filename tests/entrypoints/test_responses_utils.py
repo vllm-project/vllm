@@ -17,10 +17,9 @@ from openai.types.responses.response_reasoning_item import (
     Summary,
 )
 
-from vllm.entrypoints.constants import MCP_PREFIX
 from vllm.entrypoints.openai.responses.utils import (
     _construct_single_message_from_response_item,
-    _maybe_combine_reasoning_and_tool_call,
+    _maybe_combine_assistant_and_tool_call,
     construct_chat_messages_with_tool_call,
     convert_tool_responses_to_completions_format,
     should_continue_final_message,
@@ -50,8 +49,8 @@ class TestResponsesUtils:
 
         assert result == {"type": "function", "function": input_tool}
 
-    def test_construct_chat_messages_with_tool_call(self):
-        """Test construction of chat messages with tool calls."""
+    def test_construct_chat_messages_with_reasoning_and_tool_call(self):
+        """Test that reasoning + tool call are merged into one message."""
         reasoning_item = ResponseReasoningItem(
             id="lol",
             summary=[],
@@ -65,15 +64,15 @@ class TestResponsesUtils:
             encrypted_content=None,
             status=None,
         )
-        mcp_tool_item = ResponseFunctionToolCall(
-            id="mcp_123",
+        tool_item = ResponseFunctionToolCall(
+            id="fc_123",
             call_id="call_123",
             type="function_call",
             status="completed",
             name="python",
             arguments='{"code": "123+456"}',
         )
-        input_items = [reasoning_item, mcp_tool_item]
+        input_items = [reasoning_item, tool_item]
         messages = construct_chat_messages_with_tool_call(input_items)
 
         assert len(messages) == 1
@@ -85,6 +84,80 @@ class TestResponsesUtils:
         assert (
             message["tool_calls"][0]["function"]["arguments"] == '{"code": "123+456"}'
         )
+
+    def test_construct_chat_messages_content_and_tool_call(self):
+        """Test that content + tool call are merged (Qwen-style models)."""
+        content_item = ResponseOutputMessage(
+            id="msg_1",
+            content=[
+                ResponseOutputText(
+                    annotations=[],
+                    text="Let me check the weather.",
+                    type="output_text",
+                    logprobs=None,
+                )
+            ],
+            role="assistant",
+            status="completed",
+            type="message",
+        )
+        tool_item = ResponseFunctionToolCall(
+            id="fc_1",
+            call_id="call_1",
+            type="function_call",
+            status="completed",
+            name="get_weather",
+            arguments='{"location": "Paris"}',
+        )
+        messages = construct_chat_messages_with_tool_call([content_item, tool_item])
+
+        assert len(messages) == 1
+        msg = messages[0]
+        assert msg["role"] == "assistant"
+        assert msg["content"] == "Let me check the weather."
+        assert len(msg["tool_calls"]) == 1
+        assert msg["tool_calls"][0]["function"]["name"] == "get_weather"
+
+    def test_construct_chat_messages_content_and_parallel_tool_calls(self):
+        """Test content + multiple tool calls merged into one message."""
+        content_item = ResponseOutputMessage(
+            id="msg_1",
+            content=[
+                ResponseOutputText(
+                    annotations=[],
+                    text="Let me check both.",
+                    type="output_text",
+                    logprobs=None,
+                )
+            ],
+            role="assistant",
+            status="completed",
+            type="message",
+        )
+        tc1 = ResponseFunctionToolCall(
+            id="fc_1",
+            call_id="call_1",
+            type="function_call",
+            status="completed",
+            name="get_weather",
+            arguments='{"location": "Paris"}',
+        )
+        tc2 = ResponseFunctionToolCall(
+            id="fc_2",
+            call_id="call_2",
+            type="function_call",
+            status="completed",
+            name="get_weather",
+            arguments='{"location": "London"}',
+        )
+        messages = construct_chat_messages_with_tool_call([content_item, tc1, tc2])
+
+        assert len(messages) == 1
+        msg = messages[0]
+        assert msg["content"] == "Let me check both."
+        assert len(msg["tool_calls"]) == 2
+        assert msg["tool_calls"][0]["id"] == "call_1"
+        assert msg["tool_calls"][1]["id"] == "call_2"
 
     def test_construct_single_message_from_response_item(self):
         item = ResponseReasoningItem(
@@ -625,116 +698,150 @@ class TestShouldContinueFinalMessage:
         assert should_continue_final_message([dict_item]) is False
 
 
-class TestMaybeCombineReasoningAndToolCall:
-    """Tests for _maybe_combine_reasoning_and_tool_call function."""
+class TestMaybeCombineAssistantAndToolCall:
+    """Tests for _maybe_combine_assistant_and_tool_call function."""
 
-    def test_returns_none_when_item_id_is_none(self):
-        """
-        Test fix from PR #31999: when item.id is None, should return None
-        instead of raising TypeError on startswith().
-        """
+    def test_returns_none_when_no_messages(self):
+        """Tool call with empty message list should return None."""
         item = ResponseFunctionToolCall(
             type="function_call",
-            id=None,  # This was causing TypeError before the fix
+            id="fc_1",
             call_id="call_123",
             name="test_function",
             arguments="{}",
         )
         messages: list[ChatCompletionMessageParam] = []
 
-        result = _maybe_combine_reasoning_and_tool_call(item, messages)
-
-        assert result is None
-
-    def test_returns_none_when_id_does_not_start_with_mcp_prefix(self):
-        """Test that non-MCP tool calls are not combined."""
-        item = ResponseFunctionToolCall(
-            type="function_call",
-            id="regular_id",  # Does not start with MCP_PREFIX
-            call_id="call_123",
-            name="test_function",
-            arguments="{}",
-        )
-        messages = [{"role": "assistant", "reasoning": "some reasoning"}]
-
-        result = _maybe_combine_reasoning_and_tool_call(item, messages)
+        result = _maybe_combine_assistant_and_tool_call(item, messages)
 
         assert result is None
 
     def test_returns_none_when_last_message_is_not_assistant(self):
-        """Test that non-assistant last message returns None."""
+        """Non-assistant last message should return None."""
         item = ResponseFunctionToolCall(
             type="function_call",
-            id=f"{MCP_PREFIX}tool_id",
+            id="fc_1",
             call_id="call_123",
             name="test_function",
             arguments="{}",
         )
         messages = [{"role": "user", "content": "hello"}]
 
-        result = _maybe_combine_reasoning_and_tool_call(item, messages)
+        result = _maybe_combine_assistant_and_tool_call(item, messages)
 
         assert result is None
 
-    def test_returns_none_when_last_message_has_no_reasoning(self):
-        """Test that assistant message without reasoning returns None."""
-        item = ResponseFunctionToolCall(
-            type="function_call",
-            id=f"{MCP_PREFIX}tool_id",
-            call_id="call_123",
-            name="test_function",
-            arguments="{}",
-        )
-        messages = [{"role": "assistant", "content": "some content"}]
+    def test_returns_none_for_non_function_tool_call_type(self):
+        """Non-ResponseFunctionToolCall items should return None."""
+        item = {"type": "message", "content": "hello"}
+        messages = [{"role": "assistant", "reasoning": "some reasoning"}]
 
-        result = _maybe_combine_reasoning_and_tool_call(item, messages)
+        result = _maybe_combine_assistant_and_tool_call(item, messages)
 
         assert result is None
 
-    def test_combines_reasoning_and_mcp_tool_call(self):
-        """Test successful combination of reasoning message and MCP tool call."""
+    def test_combines_reasoning_and_tool_call(self):
+        """Tool call should merge into preceding reasoning message."""
         item = ResponseFunctionToolCall(
             type="function_call",
-            id=f"{MCP_PREFIX}tool_id",
+            id="fc_1",
             call_id="call_123",
             name="test_function",
             arguments='{"arg": "value"}',
         )
         messages = [{"role": "assistant", "reasoning": "I need to call this tool"}]
 
-        result = _maybe_combine_reasoning_and_tool_call(item, messages)
+        result = _maybe_combine_assistant_and_tool_call(item, messages)
 
         assert result is not None
         assert result["role"] == "assistant"
         assert result["reasoning"] == "I need to call this tool"
-        assert "tool_calls" in result
         assert len(result["tool_calls"]) == 1
         assert result["tool_calls"][0]["id"] == "call_123"
         assert result["tool_calls"][0]["function"]["name"] == "test_function"
         assert result["tool_calls"][0]["function"]["arguments"] == '{"arg": "value"}'
         assert result["tool_calls"][0]["type"] == "function"
 
-    def test_returns_none_for_non_function_tool_call_type(self):
-        """Test that non-ResponseFunctionToolCall items return None."""
-        # Pass a dict instead of ResponseFunctionToolCall
-        item = {"type": "message", "content": "hello"}
-        messages = [{"role": "assistant", "reasoning": "some reasoning"}]
-
-        result = _maybe_combine_reasoning_and_tool_call(item, messages)
-
-        assert result is None
-
-    def test_returns_none_when_id_is_empty_string(self):
-        """Test that empty string id returns None (falsy check)."""
+    def test_combines_content_and_tool_call(self):
+        """Tool call should merge into preceding content message (Qwen-style)."""
         item = ResponseFunctionToolCall(
             type="function_call",
-            id="",  # Empty string is falsy
+            id="fc_1",
+            call_id="call_123",
+            name="get_weather",
+            arguments='{"location": "Paris"}',
+        )
+        messages = [
+            {"role": "assistant", "content": "Let me check the weather for you."}
+        ]
+
+        result = _maybe_combine_assistant_and_tool_call(item, messages)
+
+        assert result is not None
+        assert result["role"] == "assistant"
+        assert result["content"] == "Let me check the weather for you."
+        assert len(result["tool_calls"]) == 1
+        assert result["tool_calls"][0]["id"] == "call_123"
+        assert result["tool_calls"][0]["function"]["name"] == "get_weather"
+
+    def test_combines_non_mcp_tool_call(self):
+        """Non-MCP tool calls should also be merged (not just mcp_ prefixed)."""
+        item = ResponseFunctionToolCall(
+            type="function_call",
+            id="regular_id",
+            call_id="call_456",
+            name="get_weather",
+            arguments='{"location": "London"}',
+        )
+        messages = [{"role": "assistant", "reasoning": "checking weather"}]
+
+        result = _maybe_combine_assistant_and_tool_call(item, messages)
+
+        assert result is not None
+        assert len(result["tool_calls"]) == 1
+        assert result["tool_calls"][0]["id"] == "call_456"
+
+    def test_appends_multiple_tool_calls(self):
+        """Multiple consecutive tool calls should all be appended."""
+        messages = [{"role": "assistant", "content": "Let me check both locations."}]
+
+        tc1 = ResponseFunctionToolCall(
+            type="function_call",
+            id="fc_1",
+            call_id="call_1",
+            name="get_weather",
+            arguments='{"location": "Paris"}',
+        )
+        result1 = _maybe_combine_assistant_and_tool_call(tc1, messages)
+        assert result1 is not None
+        messages[-1] = result1
+
+        tc2 = ResponseFunctionToolCall(
+            type="function_call",
+            id="fc_2",
+            call_id="call_2",
+            name="get_weather",
+            arguments='{"location": "London"}',
+        )
+        result2 = _maybe_combine_assistant_and_tool_call(tc2, messages)
+        assert result2 is not None
+
+        assert len(result2["tool_calls"]) == 2
+        assert result2["tool_calls"][0]["id"] == "call_1"
+        assert result2["tool_calls"][1]["id"] == "call_2"
+
+    def test_returns_none_for_empty_assistant_message(self):
+        """Assistant message with no reasoning, content, or tool_calls
+        should not be merged into."""
+        item = ResponseFunctionToolCall(
+            type="function_call",
+            id="fc_1",
             call_id="call_123",
             name="test_function",
             arguments="{}",
         )
-        messages = [{"role": "assistant", "reasoning": "some reasoning"}]
+        messages = [{"role": "assistant"}]
 
-        result = _maybe_combine_reasoning_and_tool_call(item, messages)
+        result = _maybe_combine_assistant_and_tool_call(item, messages)
 
         assert result is None
