@@ -70,52 +70,9 @@ class TrtLlmFp8ExpertsBase:
         return True
 
     @staticmethod
-    def _supports_quant_scheme(
-        weight_key: QuantKey | None,
-        activation_key: QuantKey | None,
-    ) -> bool:
-        """Supports Fp8 per-tensor, Fp8 block, and MXFP8."""
-        SUPPORTED_W_A = [
-            (kFp8Static128BlockSym, kFp8Dynamic128Sym),
-            (kFp8StaticTensorSym, kFp8StaticTensorSym),
-            (kMxfp8Static, kMxfp8Dynamic),
-        ]
-        return (weight_key, activation_key) in SUPPORTED_W_A
-
-    @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
         """Supports only SiLU and RELU^2 non-gated activation."""
         return activation in [MoEActivation.SILU, MoEActivation.RELU2_NO_MUL]
-
-    @staticmethod
-    def _supports_routing_method(
-        routing_method: RoutingMethodType,
-        weight_key: QuantKey | None,
-        activation_key: QuantKey | None,
-    ) -> bool:
-        """Monolithic kernels need to express router support."""
-        # NOTE(dbari): TopK routing could also be enabled, but need to validate models
-        # NOTE(dbari): Default is not implemented and should not be enabled until it is
-        if (weight_key, activation_key) in [
-            (kFp8Static128BlockSym, kFp8Dynamic128Sym),
-            (kMxfp8Static, kMxfp8Dynamic),
-        ]:
-            # NOTE(rob): potentially allow others here. This is a conservative list.
-            return routing_method in [
-                RoutingMethodType.DeepSeekV3,
-                RoutingMethodType.Renormalize,
-                RoutingMethodType.RenormalizeNaive,
-            ]
-        elif (weight_key, activation_key) == (kFp8StaticTensorSym, kFp8StaticTensorSym):
-            # NOTE(dbari): as above, potentially allow others here.
-            return routing_method in [
-                RoutingMethodType.DeepSeekV3,
-                RoutingMethodType.Llama4,
-                RoutingMethodType.Renormalize,
-                RoutingMethodType.RenormalizeNaive,
-            ]
-        else:
-            raise ValueError("Unsupported quantization scheme.")
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
