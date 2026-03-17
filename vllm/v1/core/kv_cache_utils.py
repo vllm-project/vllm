@@ -651,12 +651,17 @@ def _check_enough_kv_cache_memory(
 
 
 def max_memory_usage_bytes(
-    vllm_config: VllmConfig, kv_cache_specs: Iterable[KVCacheSpec]
+    vllm_config: VllmConfig,
+    kv_cache_specs: Iterable[KVCacheSpec],
+    max_model_len: int,
 ) -> int:
     """
     Get the maximum memory usage in bytes for the given KV cache specs.
     """
-    return sum(spec.max_memory_usage_bytes(vllm_config) for spec in kv_cache_specs)
+    return sum(
+        spec.max_memory_usage_bytes(vllm_config, max_model_len)
+        for spec in kv_cache_specs
+    )
 
 
 def estimate_max_model_len(
@@ -679,38 +684,31 @@ def estimate_max_model_len(
     Returns:
         The estimated maximum model length that can fit in the available memory.
     """
-    # Save the original max_model_len to restore after estimation
-    original_max_model_len = vllm_config.model_config.max_model_len
 
     # Define a function to check if a given model length fits in memory
     def fits_in_memory(model_len: int) -> bool:
-        # Temporarily modify the max_model_len for this calculation
-        vllm_config.model_config.max_model_len = model_len
-        # Calculate memory needed for the given model length
-        memory_needed = max_memory_usage_bytes(vllm_config, kv_cache_spec.values())
+        memory_needed = max_memory_usage_bytes(
+            vllm_config, kv_cache_spec.values(), model_len
+        )
         return memory_needed <= available_memory
 
-    try:
-        # Binary search for the maximum model length
-        left, right = 1, original_max_model_len
+    # Binary search for the maximum model length
+    left, right = 1, vllm_config.model_config.max_model_len
 
-        # If even the smallest model length doesn't fit, return 0
-        if not fits_in_memory(left):
-            return 0
+    # If even the smallest model length doesn't fit, return 0
+    if not fits_in_memory(left):
+        return 0
 
-        # Binary search for the maximum model length that fits
-        result = 1
-        while left <= right:
-            mid = (left + right) // 2
-            if fits_in_memory(mid):
-                result = mid
-                left = mid + 1
-            else:
-                right = mid - 1
-        return result
-    finally:
-        # Always restore the original max_model_len to avoid side effects
-        vllm_config.model_config.max_model_len = original_max_model_len
+    # Binary search for the maximum model length that fits
+    result = 1
+    while left <= right:
+        mid = (left + right) // 2
+        if fits_in_memory(mid):
+            result = mid
+            left = mid + 1
+        else:
+            right = mid - 1
+    return result
 
 
 def check_enough_kv_cache_memory(
@@ -735,7 +733,11 @@ def check_enough_kv_cache_memory(
     if kv_cache_spec:
         _check_enough_kv_cache_memory(
             available_memory,
-            lambda: max_memory_usage_bytes(vllm_config, kv_cache_spec.values()),
+            lambda: max_memory_usage_bytes(
+                vllm_config,
+                kv_cache_spec.values(),
+                vllm_config.model_config.max_model_len,
+            ),
             vllm_config.model_config.max_model_len,
             lambda am: estimate_max_model_len(vllm_config, kv_cache_spec, am),
         )
@@ -806,7 +808,9 @@ def get_max_concurrency_for_kv_cache_config(
         len(group.layer_names) for group in kv_cache_config.kv_cache_groups
     )
     max_memory_usage_per_request = num_layer_per_group * max_memory_usage_bytes(
-        vllm_config, (group.kv_cache_spec for group in kv_cache_config.kv_cache_groups)
+        vllm_config,
+        (group.kv_cache_spec for group in kv_cache_config.kv_cache_groups),
+        vllm_config.model_config.max_model_len,
     )
     memory_per_block = (
         kv_cache_config.kv_cache_groups[0].kv_cache_spec.page_size_bytes
@@ -1329,6 +1333,7 @@ def _report_kv_cache_config(
 def _max_memory_usage_bytes_from_groups(
     vllm_config: VllmConfig,
     kv_cache_groups: list[KVCacheGroupSpec],
+    max_model_len: int,
 ) -> int:
     """
     Calculate maximum memory usage in bytes from KV cache groups.
@@ -1346,7 +1351,7 @@ def _max_memory_usage_bytes_from_groups(
     ):
         per_layer_specs = kv_cache_groups[0].kv_cache_spec.kv_cache_specs
         return sum(
-            spec.max_memory_usage_bytes(vllm_config)
+            spec.max_memory_usage_bytes(vllm_config, max_model_len)
             for spec in per_layer_specs.values()
         )
 
@@ -1357,7 +1362,10 @@ def _max_memory_usage_bytes_from_groups(
         [group.kv_cache_spec for group in kv_cache_groups]
     )
     blocks_needed = sum(
-        cdiv(group.kv_cache_spec.max_memory_usage_bytes(vllm_config), page_size)
+        cdiv(
+            group.kv_cache_spec.max_memory_usage_bytes(vllm_config, max_model_len),
+            page_size,
+        )
         for group in kv_cache_groups
     )
 
@@ -1373,30 +1381,25 @@ def _estimate_max_model_len_from_groups(
     Binary search for the maximum model length that fits in available memory.
     Returns 0 if even 1 token doesn't fit.
     """
-    original_max = vllm_config.model_config.max_model_len
 
     def fits(model_len: int) -> bool:
-        vllm_config.model_config.max_model_len = model_len
         return (
-            _max_memory_usage_bytes_from_groups(vllm_config, kv_cache_groups)
+            _max_memory_usage_bytes_from_groups(vllm_config, kv_cache_groups, model_len)
             <= available_memory
         )
 
-    try:
-        left, right = 1, original_max
-        if not fits(left):
-            return 0
-        result = 1
-        while left <= right:
-            mid = (left + right) // 2
-            if fits(mid):
-                result = mid
-                left = mid + 1
-            else:
-                right = mid - 1
-        return result
-    finally:
-        vllm_config.model_config.max_model_len = original_max
+    left, right = 1, vllm_config.model_config.max_model_len
+    if not fits(left):
+        return 0
+    result = 1
+    while left <= right:
+        mid = (left + right) // 2
+        if fits(mid):
+            result = mid
+            left = mid + 1
+        else:
+            right = mid - 1
+    return result
 
 
 def _auto_fit_max_model_len(
@@ -1575,7 +1578,12 @@ def get_kv_cache_configs(
             continue
         _check_enough_kv_cache_memory(
             avail_mem,
-            partial(_max_memory_usage_bytes_from_groups, vllm_config, groups),
+            partial(
+                _max_memory_usage_bytes_from_groups,
+                vllm_config,
+                groups,
+                vllm_config.model_config.max_model_len,
+            ),
             vllm_config.model_config.max_model_len,
             partial(_estimate_max_model_len_from_groups, vllm_config, groups),
         )
@@ -1688,3 +1696,13 @@ class BlockHashListWithBlockSize:
 
 
 BlockHashList = list[BlockHash] | BlockHashListWithBlockSize
+
+
+def get_max_num_blocks(
+    vllm_config: VllmConfig, kv_cache_config: KVCacheConfig, num_tokens: int
+) -> int:
+    return sum(
+        group.kv_cache_spec.max_memory_usage_bytes(vllm_config, num_tokens)
+        // group.kv_cache_spec.page_size_bytes
+        for group in kv_cache_config.kv_cache_groups
+    )

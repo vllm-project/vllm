@@ -146,6 +146,12 @@ class SchedulerConfig:
     while a larger value (e.g., 10) reduces host overhead and may increase throughput
     by batching multiple tokens before sending."""
 
+    min_free_block_ratio: float = Field(default=0.0, ge=0.0, le=1.0)
+    """Minimum ratio of free KV cache blocks required to schedule new requests.
+    When the ratio of free blocks after allocating for a new request would fall
+    below this threshold, the scheduler stops admitting new requests to avoid
+    preemption. Set to 0.0 to disable this check (default)."""
+
     @staticmethod
     def default_factory(**kwargs):
         """
