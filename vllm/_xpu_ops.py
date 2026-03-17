@@ -54,7 +54,7 @@ if hasattr(torch.ops._xpu_C, "int4_gemm_w4a8"):
         input_2d = input.view(-1, input.shape[-1])
         M = input_2d.size(0)
         N = q_weight.size(1)
-        return torch.empty((M, N), dtype=torch.float16, device=input.device)
+        return torch.empty((M, N), dtype=input.dtype, device=input.device)
 
 
 if hasattr(torch.ops._xpu_C, "int4_gemm_w4a16"):
@@ -109,7 +109,7 @@ _OPS_REGISTERED = False
 class xpu_ops:
     @staticmethod
     @torch.compile
-    def dynamic_per_token_quant_ref(
+    def dynamic_per_token_int4_int8_quant_ref(
         input: torch.Tensor, use_sym_quant: bool, bits: int
     ):
         original_sizes = input.size()

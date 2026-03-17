@@ -89,6 +89,15 @@ class XPUwNa16LinearKernel(MPLinearKernel):
         return out
 
 
+def _pack_int4_weight(w: torch.Tensor) -> torch.Tensor:
+    # w is [N, K] int8 with values in [-8, 7]
+    w_u4 = w.to(torch.int32) + 8  # shift to [0, 15]
+    w_u4 = w_u4.reshape(w.shape[0], w.shape[1] // 8, 8)  # [N, K/8, 8]
+    shifts = torch.arange(0, 32, 4, dtype=torch.int32, device=w.device)
+    packed = ((w_u4 & 0xF) << shifts[None, None, :]).sum(dim=2).to(torch.int32)
+    return packed
+
+
 class XPUw4A8IntLinearKernel(MPLinearKernel):
     """XPU kernel for W4A8 integer quantization using oneDNN int4_gemm_w4a8.
 
@@ -137,18 +146,9 @@ class XPUw4A8IntLinearKernel(MPLinearKernel):
 
         # weight_packed is [out, in] int8, signed int4 values in [-8, 7]
         w = layer.weight_packed.data  # [out, in]
-        in_size = w.shape[1]
 
         # TODO: implement asym case
-        # Shift signed int4 [-8,7] -> unsigned [0,15]
-        w_u4 = w.to(torch.int32) + 8
-
-        # Pack 8 consecutive uint4 nibbles (along k-dim) into one int32, LE order
-        w_u4 = w_u4.reshape(-1, in_size // 8, 8)  # [out, in/8, 8]
-        shifts = torch.arange(0, 32, 4, dtype=torch.int32, device=device)
-        packed = (
-            ((w_u4 & 0xF) << shifts[None, None, :]).sum(dim=2).to(torch.int32)
-        )  # [out, in/8]
+        packed = _pack_int4_weight(w)  # [out, in/8] packed uint4
 
         replace_parameter(
             layer,
@@ -171,7 +171,9 @@ class XPUw4A8IntLinearKernel(MPLinearKernel):
 
         # TODO: static and asymmetric quantization case
         # Common code for CompressedTensorsW4A8Int does not read act symmetry data
-        quant_x, x_scale, x_zero = ops.dynamic_per_token_quant_ref(reshaped_x, True, 8)
+        quant_x, x_scale, x_zero = ops.dynamic_per_token_int4_int8_quant_ref(
+            reshaped_x, True, 8
+        )
 
         out = torch.ops._xpu_C.int4_gemm_w4a8(
             quant_x,
