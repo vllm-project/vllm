@@ -137,6 +137,11 @@ class BaseFrontendArgs:
     log. The default of None means unlimited."""
     enable_prompt_tokens_details: bool = False
     """If set to True, enable prompt_tokens_details in usage."""
+    enable_per_request_metrics: bool = False
+    """If set to True, enable per-request timing metrics in API responses.
+    When enabled, requests that include `include_metrics=True` will receive
+    timing metrics (TTFT, generation time, queue time, ITL, tokens/s) in
+    the response body."""
     enable_server_load_tracking: bool = False
     """If set to True, enable tracking server_load_metrics in the app state."""
     enable_force_include_usage: bool = False

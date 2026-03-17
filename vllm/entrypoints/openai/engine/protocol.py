@@ -101,11 +101,27 @@ class PromptTokenUsageInfo(OpenAIBaseModel):
     cached_tokens: int | None = None
 
 
+class CompletionTokensDetails(OpenAIBaseModel):
+    reasoning_tokens: int | None = None
+    accepted_prediction_tokens: int | None = None
+    rejected_prediction_tokens: int | None = None
+
+
 class UsageInfo(OpenAIBaseModel):
     prompt_tokens: int = 0
     total_tokens: int = 0
     completion_tokens: int | None = 0
     prompt_tokens_details: PromptTokenUsageInfo | None = None
+    completion_tokens_details: CompletionTokensDetails | None = None
+
+
+class PerRequestTimingMetrics(OpenAIBaseModel):
+    time_to_first_token_ms: float | None = None
+    time_to_first_content_token_ms: float | None = None
+    generation_time_ms: float | None = None
+    queue_time_ms: float | None = None
+    mean_itl_ms: float | None = None
+    tokens_per_second: float | None = None
 
 
 class RequestResponseMetadata(BaseModel):

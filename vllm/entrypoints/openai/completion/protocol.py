@@ -15,6 +15,7 @@ from vllm.entrypoints.openai.engine.protocol import (
     AnyResponseFormat,
     LegacyStructuralTagResponseFormat,
     OpenAIBaseModel,
+    PerRequestTimingMetrics,
     StreamOptions,
     StructuralTagResponseFormat,
     UsageInfo,
@@ -176,6 +177,8 @@ class CompletionRequest(OpenAIBaseModel):
         "(e.g. 'abcdabcdabcd...' or '\\emoji \\emoji \\emoji ...'). This feature "
         "can detect such behavior and terminate early, saving time and tokens.",
     )
+
+    include_metrics: bool = False
 
     # --8<-- [end:completion-extra-params]
 
@@ -484,6 +487,7 @@ class CompletionResponse(OpenAIBaseModel):
     kv_transfer_params: dict[str, Any] | None = Field(
         default=None, description="KVTransfer parameters."
     )
+    metrics: PerRequestTimingMetrics | None = None
 
 
 class CompletionResponseStreamChoice(OpenAIBaseModel):
@@ -512,3 +516,4 @@ class CompletionStreamResponse(OpenAIBaseModel):
     model: str
     choices: list[CompletionResponseStreamChoice]
     usage: UsageInfo | None = Field(default=None)
+    metrics: PerRequestTimingMetrics | None = None

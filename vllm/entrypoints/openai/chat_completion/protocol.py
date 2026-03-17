@@ -26,6 +26,7 @@ from vllm.entrypoints.openai.engine.protocol import (
     FunctionDefinition,
     LegacyStructuralTagResponseFormat,
     OpenAIBaseModel,
+    PerRequestTimingMetrics,
     StreamOptions,
     StructuralTagResponseFormat,
     ToolCall,
@@ -110,6 +111,7 @@ class ChatCompletionResponse(OpenAIBaseModel):
     kv_transfer_params: dict[str, Any] | None = Field(
         default=None, description="KVTransfer parameters."
     )
+    metrics: PerRequestTimingMetrics | None = None
 
 
 class ChatCompletionResponseStreamChoice(OpenAIBaseModel):
@@ -131,6 +133,7 @@ class ChatCompletionStreamResponse(OpenAIBaseModel):
     usage: UsageInfo | None = Field(default=None)
     # not part of the OpenAI spec but for tracing the tokens
     prompt_token_ids: list[int] | None = None
+    metrics: PerRequestTimingMetrics | None = None
 
 
 class ChatCompletionToolsParam(OpenAIBaseModel):
@@ -353,6 +356,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
         "(e.g. 'abcdabcdabcd...' or '\\emoji \\emoji \\emoji ...'). This feature "
         "can detect such behavior and terminate early, saving time and tokens.",
     )
+
+    include_metrics: bool = False
 
     # --8<-- [end:chat-completion-extra-params]
 

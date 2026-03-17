@@ -39,11 +39,13 @@ from vllm.entrypoints.openai.chat_completion.stream_harmony import (
     extract_harmony_streaming_delta,
 )
 from vllm.entrypoints.openai.engine.protocol import (
+    CompletionTokensDetails,
     DeltaFunctionCall,
     DeltaMessage,
     DeltaToolCall,
     ErrorResponse,
     FunctionCall,
+    PerRequestTimingMetrics,
     PromptTokenUsageInfo,
     RequestResponseMetadata,
     ToolCall,
@@ -52,6 +54,7 @@ from vllm.entrypoints.openai.engine.protocol import (
 from vllm.entrypoints.openai.engine.serving import (
     GenerationError,
     OpenAIServing,
+    build_per_request_timing_metrics,
     clamp_prompt_logprobs,
 )
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
@@ -105,6 +108,7 @@ class OpenAIServingChat(OpenAIServing):
         enable_log_outputs: bool = False,
         enable_log_deltas: bool = True,
         default_chat_template_kwargs: dict[str, Any] | None = None,
+        enable_per_request_metrics: bool = False,
     ) -> None:
         super().__init__(
             engine_client=engine_client,
@@ -137,6 +141,7 @@ class OpenAIServingChat(OpenAIServing):
 
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
         self.enable_force_include_usage = enable_force_include_usage
+        self.enable_per_request_metrics = enable_per_request_metrics
         self.default_sampling_params = self.model_config.get_diff_sampling_param()
         mc = self.model_config
         self.override_max_tokens = (
@@ -588,8 +593,10 @@ class OpenAIServingChat(OpenAIServing):
             stream_options, self.enable_force_include_usage
         )
 
+        last_res: RequestOutput | None = None
         try:
             async for res in result_generator:
+                last_res = res
                 if res.prompt_token_ids is not None:
                     num_prompt_tokens = len(res.prompt_token_ids)
                     if res.encoder_prompt_token_ids is not None:
@@ -1223,6 +1230,24 @@ class OpenAIServingChat(OpenAIServing):
                         cached_tokens=num_cached_tokens
                     )
 
+                if reasoning_parser is not None and last_res is not None:
+                    reasoning_tokens = sum(
+                        reasoning_parser.count_reasoning_tokens(list(output.token_ids))
+                        for output in last_res.outputs
+                    )
+                    if reasoning_tokens > 0:
+                        final_usage.completion_tokens_details = CompletionTokensDetails(
+                            reasoning_tokens=reasoning_tokens
+                        )
+
+                stream_per_request_metrics: PerRequestTimingMetrics | None = None
+                if self.enable_per_request_metrics and request.include_metrics:
+                    last_metrics = last_res.metrics if last_res is not None else None
+                    num_sequences = request.n or 1
+                    stream_per_request_metrics = build_per_request_timing_metrics(
+                        last_metrics, completion_tokens // num_sequences
+                    )
+
                 final_usage_chunk = ChatCompletionStreamResponse(
                     id=request_id,
                     object=chunk_object_type,
@@ -1230,6 +1255,7 @@ class OpenAIServingChat(OpenAIServing):
                     choices=[],
                     model=model_name,
                     usage=final_usage,
+                    metrics=stream_per_request_metrics,
                 )
                 final_usage_data = final_usage_chunk.model_dump_json(
                     exclude_unset=True, exclude_none=True
@@ -1610,6 +1636,23 @@ class OpenAIServingChat(OpenAIServing):
                 cached_tokens=final_res.num_cached_tokens
             )
 
+        if reasoning_parser is not None:
+            reasoning_tokens = sum(
+                reasoning_parser.count_reasoning_tokens(list(output.token_ids))
+                for output in final_res.outputs
+            )
+            if reasoning_tokens > 0:
+                usage.completion_tokens_details = CompletionTokensDetails(
+                    reasoning_tokens=reasoning_tokens
+                )
+
+        per_request_metrics: PerRequestTimingMetrics | None = None
+        if self.enable_per_request_metrics and request.include_metrics:
+            num_sequences = request.n or 1
+            per_request_metrics = build_per_request_timing_metrics(
+                final_res.metrics, num_generated_tokens // num_sequences
+            )
+
         request_metadata.final_usage_info = usage
 
         response = ChatCompletionResponse(
@@ -1623,6 +1666,7 @@ class OpenAIServingChat(OpenAIServing):
                 final_res.prompt_token_ids if request.return_token_ids else None
             ),
             kv_transfer_params=final_res.kv_transfer_params,
+            metrics=per_request_metrics,
         )
 
         # Log complete response if output logging is enabled
