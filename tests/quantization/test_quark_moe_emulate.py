@@ -31,6 +31,7 @@ def _compute_emulate(
         supports_mx
         and ocp_mx_scheme is not None
         and ocp_mx_scheme.startswith("w_mxfp4")
+        and ocp_mx_scheme.endswith("a_mxfp4")
         and use_rocm_aiter_moe
     )
     can_use_mxfp4_backend = mxfp4_backend_available
@@ -46,8 +47,9 @@ def _compute_emulate(
     [
         # All conditions met → native CK → no emulation
         (True, "w_mxfp4_a_mxfp4", True, False, False),
-        (True, "w_mxfp4_a_fp8", True, False, False),
-        (True, "w_mxfp4", True, False, False),
+        # w_mxfp4 but activation is NOT a_mxfp4 → CK requires both → emulate
+        (True, "w_mxfp4_a_fp8", True, False, True),
+        (True, "w_mxfp4", True, False, True),
         # AITER disabled (VLLM_ROCM_USE_AITER_MOE=0) → must emulate
         (True, "w_mxfp4_a_mxfp4", False, False, True),
         # Hardware doesn't support MX → must emulate
@@ -62,8 +64,8 @@ def _compute_emulate(
     ],
     ids=[
         "mi350x-w4a4-aiter_on",
-        "mi350x-w4afp8-aiter_on",
-        "mi350x-w4_only-aiter_on",
+        "mi350x-w4afp8-no_ck_needs_a_mxfp4",
+        "mi350x-w4_only-no_ck_needs_a_mxfp4",
         "mi350x-w4a4-aiter_off",
         "no_mx-w4a4-aiter_on",
         "no_mx-w4a4-aiter_off",

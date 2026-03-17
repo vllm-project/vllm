@@ -738,6 +738,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
             current_platform.supports_mx()
             and self.ocp_mx_scheme is not None
             and self.ocp_mx_scheme.startswith("w_mxfp4")
+            and self.ocp_mx_scheme.endswith("a_mxfp4")
             and self.use_rocm_aiter_moe
         )
         can_use_mxfp4_backend = self.mxfp4_backend is not None
@@ -977,13 +978,8 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
 
         from aiter.utility.fp4_utils import e8m0_shuffle
 
-        try:
-            import aiter
-
-            aiter_version = getattr(aiter, "__version__", "unknown")
-        except ImportError:
-            aiter_version = "unknown"
-        logger.info("Using AITER %s for MXFP4 MoE weight processing", aiter_version)
+        logger.info("Using AITER %s for MXFP4 MoE weight processing",
+                    rocm_aiter_ops.get_version())
 
         # Pre-shuffle weight scales
         s0, s1, _ = layer.w13_weight_scale.shape
