@@ -99,7 +99,12 @@ class CPUWorker(Worker):
                 omp_cpuids_list = omp_cpuids_list[
                     local_dp_rank * world_size : (local_dp_rank + 1) * world_size
                 ]
-            self.local_omp_cpuid = omp_cpuids_list[self.rank]
+                # In multi-node setups, self.rank is the global rank, but after
+                # slicing we only have world_size entries for this DP group.
+                # Use modulo to get the correct local index within the slice.
+                self.local_omp_cpuid = omp_cpuids_list[self.rank % world_size]
+            else:
+                self.local_omp_cpuid = omp_cpuids_list[self.rank]
 
         if self.local_omp_cpuid != "nobind":
             ret = torch.ops._C.init_cpu_threads_env(self.local_omp_cpuid)
