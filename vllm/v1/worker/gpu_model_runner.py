@@ -5139,7 +5139,7 @@ class GPUModelRunner(
 
                 pad_attn = cudagraph_runtime_mode == CUDAGraphMode.FULL
                 # populate buffers so that GDN attention triggers JIT complication
-                # of spce-decode before graph capture
+                # of spec-decode before graph capture
                 if (
                     uniform_decode
                     and self.speculative_config is not None
