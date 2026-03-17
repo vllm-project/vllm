@@ -366,16 +366,6 @@ def log_response_diagnostics(
     return diagnostics
 
 
-# ---------------------------------------------------------------------------
-# Default server fixtures (Qwen3-1.7B with tool-calling & structured output)
-#
-# Test files that need a different model/config define their own ``client``
-# fixture which automatically overrides this one for that module.
-# ---------------------------------------------------------------------------
-
-SMALL_MODEL = "Qwen/Qwen3-1.7B"
-
-
 @pytest.fixture(scope="module")
 def default_server_args():
     return [
@@ -395,7 +385,7 @@ def default_server_args():
 @pytest.fixture(scope="module")
 def server_with_store(default_server_args):
     with RemoteOpenAIServer(
-        SMALL_MODEL,
+        "Qwen/Qwen3-1.7B",
         default_server_args,
         env_dict={
             "VLLM_ENABLE_RESPONSES_API_STORE": "1",
