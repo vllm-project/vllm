@@ -285,8 +285,7 @@ def get_bundles_sorted_by_node(
     ray_device_key = current_platform.ray_device_key
     if not ray_device_key:
         raise ValueError(
-            f"current platform {current_platform.device_name}"
-            " does not support ray."
+            f"current platform {current_platform.device_name} does not support ray."
         )
 
     bundle_specs = placement_group.bundle_specs

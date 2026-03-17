@@ -14,12 +14,17 @@ NODE_C = "node_c"
     "bundles_to_node_id,bundle_specs,world_size,expected",
     [
         pytest.param(
-            {0: NODE_C, 1: NODE_A, 2: NODE_B, 3: NODE_C, 4: NODE_A,
-             5: NODE_B},
+            {0: NODE_C, 1: NODE_A, 2: NODE_B, 3: NODE_C, 4: NODE_A, 5: NODE_B},
             [{"GPU": 1}] * 6,
             6,
-            [(1, NODE_A), (4, NODE_A), (2, NODE_B), (5, NODE_B),
-             (0, NODE_C), (3, NODE_C)],
+            [
+                (1, NODE_A),
+                (4, NODE_A),
+                (2, NODE_B),
+                (5, NODE_B),
+                (0, NODE_C),
+                (3, NODE_C),
+            ],
         ),
         pytest.param(
             {0: NODE_B, 1: NODE_B, 2: NODE_A, 3: NODE_A},
@@ -80,9 +85,7 @@ def test_get_bundles_sorted_by_node(
             return_value={"bundles_to_node_id": bundles_to_node_id},
         ),
         patch("vllm.v1.executor.ray_utils.ray") as mock_ray,
-        patch(
-            "vllm.v1.executor.ray_utils.current_platform"
-        ) as mock_platform,
+        patch("vllm.v1.executor.ray_utils.current_platform") as mock_platform,
     ):
         mock_ray.get_runtime_context.return_value = mock_ctx
         mock_platform.ray_device_key = "GPU"

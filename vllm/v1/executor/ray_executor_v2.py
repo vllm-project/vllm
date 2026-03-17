@@ -171,9 +171,7 @@ class RayExecutorV2(MultiprocExecutor):
         )
 
         # Step 2: Query PG table, sort bundles, assign ranks
-        bundle_to_node_id = get_bundles_sorted_by_node(
-            placement_group, self.world_size
-        )
+        bundle_to_node_id = get_bundles_sorted_by_node(placement_group, self.world_size)
         driver_node = ray.get_runtime_context().get_node_id()
 
         # Assign each worker a local rank
