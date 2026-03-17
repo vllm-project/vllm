@@ -127,8 +127,8 @@ Priority is **1 = highest** (tried first).
 | 3 | `FLASH_ATTN_MLA` |
 | 4 | `FLASHMLA` |
 | 5 | `TRITON_MLA` |
-| 6 | `FLASHMLA_SPARSE` |
-| 7 | `FLASHINFER_MLA_SPARSE` |
+| 6 | `FLASHINFER_MLA_SPARSE` |
+| 7 | `FLASHMLA_SPARSE` |
 
 **Ampere/Hopper (SM 8.x-9.x):**
 
