@@ -337,12 +337,9 @@ def prepare_moe_fp4_layer_for_marlin(
 
     group_size = 16 if is_nvfp4 else 32
 
-    # Derive dimensions from actual weight shapes to handle rounded/padded
-    # sizes correctly (e.g., Mxfp4MoEMethod rounds up hidden_dim).
-    # w13_weight shape: (E, 2*N, K//2)
-    e = layer.w13_weight.shape[0]
-    n = layer.w13_weight.shape[1] // 2  # intermediate_size_per_partition
-    k = layer.w13_weight.shape[2] * 2  # hidden_size
+    e = layer.moe_config.num_experts
+    k = layer.moe_config.hidden_size
+    n = layer.moe_config.intermediate_size_per_partition
 
     # WORKSPACE
     device = layer.w13_weight.device

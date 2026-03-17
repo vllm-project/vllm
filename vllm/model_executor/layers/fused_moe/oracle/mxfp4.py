@@ -254,7 +254,11 @@ def select_mxfp4_moe_backend(
         ):
             requested_backend = Mxfp4MoeBackend.BATCHED_MARLIN
         return _return_or_raise(
-            requested_backend, config, kMxfp4Static, None, activation_format
+            requested_backend,
+            config,
+            kMxfp4Static,
+            _backend_activation_key(requested_backend),
+            activation_format,
         )
 
     # Select kernels in order of backend.
