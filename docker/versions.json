@@ -65,7 +65,7 @@
       "default": "true"
     },
     "FLASHINFER_VERSION": {
-      "default": "0.6.4"
+      "default": "0.6.6"
     },
     "GDRCOPY_CUDA_VERSION": {
       "default": "12.8"
@@ -83,7 +83,7 @@
       "default": ">=1.0.17"
     },
     "RUNAI_MODEL_STREAMER_VERSION": {
-      "default": ">=0.15.3"
+      "default": ">=0.15.7"
     }
   }
 }

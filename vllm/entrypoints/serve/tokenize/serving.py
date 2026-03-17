@@ -11,6 +11,7 @@ from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.openai.engine.serving import OpenAIServing
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+from vllm.entrypoints.serve.render.serving import OpenAIServingRender
 from vllm.entrypoints.serve.tokenize.protocol import (
     DetokenizeRequest,
     DetokenizeResponse,
@@ -31,10 +32,12 @@ class OpenAIServingTokenization(OpenAIServing):
         self,
         engine_client: EngineClient,
         models: OpenAIServingModels,
+        openai_serving_render: OpenAIServingRender,
         *,
         request_logger: RequestLogger | None,
         chat_template: str | None,
         chat_template_content_format: ChatTemplateContentFormatOption,
+        default_chat_template_kwargs: dict[str, Any] | None = None,
         trust_request_chat_template: bool = False,
     ) -> None:
         super().__init__(
@@ -43,8 +46,10 @@ class OpenAIServingTokenization(OpenAIServing):
             request_logger=request_logger,
         )
 
+        self.openai_serving_render = openai_serving_render
         self.chat_template = chat_template
         self.chat_template_content_format: Final = chat_template_content_format
+        self.default_chat_template_kwargs = default_chat_template_kwargs or {}
         self.trust_request_chat_template = trust_request_chat_template
 
     async def create_tokenize(
@@ -66,7 +71,7 @@ class OpenAIServingTokenization(OpenAIServing):
                 if request.tools is None
                 else [tool.model_dump() for tool in request.tools]
             )
-            error_check_ret = self._validate_chat_template(
+            error_check_ret = self.openai_serving_render.validate_chat_template(
                 request_chat_template=request.chat_template,
                 chat_template_kwargs=request.chat_template_kwargs,
                 trust_request_chat_template=self.trust_request_chat_template,
@@ -74,16 +79,16 @@ class OpenAIServingTokenization(OpenAIServing):
             if error_check_ret is not None:
                 return error_check_ret
 
-            _, engine_prompts = await self._preprocess_chat(
+            _, engine_prompts = await self.openai_serving_render.preprocess_chat(
                 request,
                 request.messages,
                 default_template=self.chat_template,
                 default_template_content_format=self.chat_template_content_format,
-                default_template_kwargs=None,
+                default_template_kwargs=self.default_chat_template_kwargs,
                 tool_dicts=tool_dicts,
             )
         else:
-            engine_prompts = await self._preprocess_completion(
+            engine_prompts = await self.openai_serving_render.preprocess_completion(
                 request,
                 prompt_input=request.prompt,
                 prompt_embeds=None,
@@ -98,8 +103,9 @@ class OpenAIServingTokenization(OpenAIServing):
                 lora_request=lora_request,
             )
 
-            if "prompt_token_ids" in engine_prompt:
-                input_ids.extend(engine_prompt["prompt_token_ids"])  # type: ignore[typeddict-item]
+            prompt_components = self._extract_prompt_components(engine_prompt)
+            if prompt_components.token_ids is not None:
+                input_ids.extend(prompt_components.token_ids)
 
         token_strs = None
         if request.return_token_strs:

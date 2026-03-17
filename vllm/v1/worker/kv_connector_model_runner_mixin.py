@@ -123,6 +123,7 @@ class KVConnectorModelRunnerMixin:
 
             output.kv_connector_stats = kv_connector.get_kv_connector_stats()
             output.kv_cache_events = kv_connector.get_kv_connector_kv_cache_events()
+            output.kv_connector_worker_meta = kv_connector.build_connector_worker_meta()
 
             if not defer_finalize:
                 kv_connector.clear_connector_metadata()
@@ -190,8 +191,13 @@ class KVConnectorModelRunnerMixin:
         except (AttributeError, NotImplementedError):
             return False
 
-        # check that attention backend include a layers dimension
-        return len(kv_cache_stride_order) == len(kv_cache_shape) + 1
+        # check that attention backend includes a layers dimension
+        if len(kv_cache_stride_order) != len(kv_cache_shape) + 1:
+            return False
+
+        # stride_order[0] == 0 means num_layers stays first in physical
+        # layout (identity permutation), so cross-layer is unsupported.
+        return kv_cache_stride_order[0] != 0
 
     @staticmethod
     def allocate_uniform_kv_caches(
