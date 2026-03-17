@@ -73,6 +73,10 @@ if [ "$DELETE_COUNT" -eq 0 ]; then
   exit 0
 fi
 
+# Create temp file for CLI input JSON, cleaned up on exit
+BATCH_JSON=$(mktemp /tmp/ecr-batch-delete-XXXXXX.json)
+trap 'rm -f "$BATCH_JSON"' EXIT
+
 # Delete in batches of 100 (ECR batch-delete-image limit)
 TOTAL_DELETED=0
 NUM_BATCHES=$(( (DELETE_COUNT + 99) / 100 ))
@@ -81,15 +85,24 @@ for ((i=0; i<DELETE_COUNT; i+=100)); do
   BATCH_SIZE=${#BATCH[@]}
   BATCH_NUM=$(( i/100 + 1 ))
 
-  # Build JSON array for --image-ids
-  IMAGE_IDS_JSON=$(printf '%s\n' "${BATCH[@]}" | jq -R '{imageTag: .}' | jq -s '.')
+  # Build complete CLI input JSON and write to temp file
+  IMAGE_IDS_JSON=$(printf '%s\n' "${BATCH[@]}" | jq -R '{"imageTag": .}' | jq -sc '.')
+  jq -n \
+    --arg repo "$REPO_NAME" \
+    --argjson ids "$IMAGE_IDS_JSON" \
+    '{"repositoryName": $repo, "imageIds": $ids}' > "$BATCH_JSON"
+
+  # Log sample of request JSON for first batch (debugging aid)
+  if [ "$BATCH_NUM" -eq 1 ]; then
+    echo "Sample request JSON (first batch):"
+    jq '{repositoryName, imageIdCount: (.imageIds | length), firstThree: .imageIds[0:3]}' "$BATCH_JSON"
+  fi
 
   echo "Deleting batch ${BATCH_NUM}/${NUM_BATCHES} ($BATCH_SIZE tags)..."
 
   RESULT=$(aws ecr-public batch-delete-image \
-    --repository-name "$REPO_NAME" \
     --region "$REGION" \
-    --image-ids "$IMAGE_IDS_JSON" \
+    --cli-input-json "file://$BATCH_JSON" \
     --output json 2>&1) || true
 
   # Parse response for success/failure counts
@@ -100,6 +113,9 @@ for ((i=0; i<DELETE_COUNT; i+=100)); do
     FAILURE_REASONS=$(echo "$RESULT" | jq -r '.failures[0:3][] | "  \(.failureCode): \(.failureReason)"' 2>/dev/null || echo "  (could not parse response)")
     echo "WARNING: $FAILED deletions failed, $DELETED succeeded. Sample failures:"
     echo "$FAILURE_REASONS"
+  elif [ "$DELETED" -eq 0 ]; then
+    echo "WARNING: 0 tags deleted and 0 failures — possible CLI error. Raw response:"
+    echo "$RESULT" | head -20
   else
     echo "  Deleted $DELETED tags"
   fi
