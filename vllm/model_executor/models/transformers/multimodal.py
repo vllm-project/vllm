@@ -271,6 +271,7 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
         super(SupportsMRoPE, self).__init__(vllm_config=vllm_config, prefix=prefix)
         # Decorate the vision encoder model class to support torch compile if needed
         if should_torch_compile_mm_encoder(vllm_config):
+            self.check_version("5.0.0", "multimodal encoder compilation support")
             encoder_cls = self._get_encoder_cls(
                 config=self.config,
                 dtype=self.model_config.dtype,
