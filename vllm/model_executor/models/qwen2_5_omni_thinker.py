@@ -78,7 +78,9 @@ from vllm.multimodal.parse import (
     ModalityDataItems,
     MultiModalDataItems,
 )
-from vllm.multimodal.processing import BaseDummyInputsBuilder
+from vllm.multimodal.processing import (
+    BaseDummyInputsBuilder,
+)
 from vllm.multimodal.processing.processor import (
     BaseMultiModalProcessor,
     MultiModalPromptUpdates,
@@ -605,6 +607,17 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
                     if use_audio_in_video_tensor.numel() > 0:
                         use_audio_in_video = bool(use_audio_in_video_tensor.item())
                         break
+            # for mutilmodality cache
+            if any(item is None for item in mm_kwargs["video"]):
+                video_token_id = self.info.get_hf_config().video_token_id
+                audio_token_id = self.info.get_hf_config().audio_token_id
+                video_audio_item_num = sum(
+                    id in (video_token_id, audio_token_id) for id in prompt_ids
+                )
+                audio_updates_num = len(mm_prompt_updates.get("audio", []))
+                video_updates_num = len(mm_prompt_updates.get("video", []))
+                if video_audio_item_num != video_updates_num + audio_updates_num:
+                    use_audio_in_video = True
 
         if is_update_applied:
             mm_placeholders = self._find_mm_placeholders(
@@ -761,9 +774,7 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
         def get_replacement_qwen2_use_audio_in_video(item_idx: int):
             nonlocal audio_in_video_item_idx
 
-            audio_num_features = audio_output_lengths[
-                audio_in_video_item_idx + item_idx
-            ]
+            audio_num_features = audio_output_lengths[audio_in_video_item_idx]
             video_grid_thw = out_mm_data["video_grid_thw"][item_idx]
 
             audio_in_video_item_idx += 1
