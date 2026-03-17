@@ -2102,7 +2102,7 @@ class DPEngineCoreProc(EngineCoreProc):
             executor_class,
             log_stats,
             client_handshake_address,
-            dp_rank if vllm_config.parallel_config.dp_per_domain == 1 else domain_rank,
+            engine_index=dp_rank if vllm_config.parallel_config.dp_per_domain == 1 else domain_rank,
         )
 
     def _init_data_parallel(self, vllm_config: VllmConfig):

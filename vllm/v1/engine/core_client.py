@@ -610,7 +610,7 @@ class MPClient(EngineCoreClient):
             offline_mode = parallel_config.data_parallel_rank_local is not None
             # Client manages local+remote EngineCores in pure internal LB case.
             # Client manages local EngineCores in hybrid and external LB case.
-            num_ranks = local_engine_count if local_engines_only else engine_count
+            num_ranks = local_engine_count if parallel_config.local_engines_only else engine_count
             self.engine_ranks_managed = (
                 [engien_rank] if offline_mode else list(range(engien_rank, engien_rank + num_ranks))
             )
