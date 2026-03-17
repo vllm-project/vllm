@@ -200,6 +200,7 @@ def flash_attn_varlen_func(
     k_descale=None,
     v_descale=None,
     num_splits: int = 0,
+    o_scale=None,
     # Version selector
     fa_version: int = DEFAULT_FA_VERSION,
     s_aux=None,
@@ -349,6 +350,7 @@ def flash_attn_varlen_func(
             q_descale,
             k_descale,
             v_descale,
+            o_scale,
             softmax_scale,
             causal,
             real_window_size[0],

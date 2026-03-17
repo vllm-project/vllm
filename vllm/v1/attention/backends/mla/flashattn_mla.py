@@ -21,7 +21,6 @@ from vllm.model_executor.layers.batch_invariant import (
     vllm_is_batch_invariant,
 )
 from vllm.platforms.interface import DeviceCapability
-from vllm.utils.math_utils import round_up
 from vllm.v1.attention.backend import (
     AttentionCGSupport,
     AttentionLayer,
@@ -131,17 +130,19 @@ class FlashAttnMLAMetadataBuilder(MLACommonMetadataBuilder[FlashAttnMLAMetadata]
         self.max_cudagraph_size = self.compilation_config.max_cudagraph_capture_size
 
         if self.use_full_cuda_graph and self.fa_aot_schedule:
-            # FA3 scheduler_metadata size: 1 + round_up(batch_size, 4) * 4
-            # The +1 is for the tile_count_semaphore (synchronization).
-            # The 4 slots per batch element (num_prepare_batch_vectors) are:
-            #   prepare_varlen + dynamic_split + sort_batches + head_swizzle
-            # See: https://github.com/vllm-project/flash-attention/blob/5824e6e/hopper/flash_api.cpp#L664-L671  # noqa: E501
-            max_batch_size = max(
-                vllm_config.scheduler_config.max_num_seqs,
-                self.max_cudagraph_size or 0,
-            )
+            # The scheduler_metadata size is computed as:
+            #   metadata_size = scheduler_needs_semaphore + b_rounded *
+            #   num_prepare_batch_vectors
+            # where b_rounded = round_up(batch_size, 4) and
+            # num_prepare_batch_vectors can be up to 4
+            # (use_prepare_varlen + use_dynamic_split + varlen_sort_batches
+            # + head_swizzle). We allocate for the worst case to avoid buffer
+            # overflows.
+            max_num_seqs = vllm_config.scheduler_config.max_num_seqs
+            max_num_seqs_rounded = (max_num_seqs + 3) // 4 * 4
+            max_scheduler_metadata_size = 1 + max_num_seqs_rounded * 4
             self.scheduler_metadata = torch.zeros(
-                1 + round_up(max_batch_size, 4) * 4,
+                max_scheduler_metadata_size,
                 dtype=torch.int32,
                 device=self.device,
             )
