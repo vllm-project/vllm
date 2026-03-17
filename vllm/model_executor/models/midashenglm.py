@@ -732,7 +732,6 @@ class MiDashengLMModel(nn.Module, SupportsMultiModal, SupportsPP):
                 vllm_config=vllm_config,
                 hf_config=config.text_config,
                 prefix=maybe_prefix(prefix, "decoder"),
-                architectures=["Qwen2ForCausalLM"],
             )
 
         self.make_empty_intermediate_tensors = (
