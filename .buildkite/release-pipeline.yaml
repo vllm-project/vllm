@@ -77,18 +77,20 @@ steps:
   #       env:
   #         DOCKER_BUILDKIT: "1"
 
-  #     - label: "Build wheel - x86_64 - CPU"
-  #       depends_on: ~
-  #       id: build-wheel-x86-cpu
-  #       agents:
-  #         queue: cpu_queue_postmerge
-  #       commands:
-  #         - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg GIT_REPO_CHECK=1 --build-arg VLLM_CPU_AVX512BF16=true --build-arg VLLM_CPU_AVX512VNNI=true --build-arg VLLM_CPU_AMXBF16=true --tag vllm-ci:build-image --target vllm-build --progress plain -f docker/Dockerfile.cpu ."
-  #         - "mkdir artifacts"
-  #         - "docker run --rm -v $(pwd)/artifacts:/artifacts_host vllm-ci:build-image bash -c 'cp -r dist /artifacts_host && chmod -R a+rw /artifacts_host'"
-  #         - "bash .buildkite/scripts/upload-nightly-wheels.sh manylinux_2_35"
-  #       env:
-  #         DOCKER_BUILDKIT: "1"
+
+      # - label: "Build wheel - x86_64 - CPU"
+      #   depends_on: ~
+      #   id: build-wheel-x86-cpu
+      #   agents:
+      #     queue: cpu_queue_postmerge
+      #   commands:
+      #     - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg GIT_REPO_CHECK=1 --build-arg VLLM_CPU_X86=true --tag vllm-ci:build-image --target vllm-build --progress plain -f docker/Dockerfile.cpu ."
+      #     - "mkdir artifacts"
+      #     - "docker run --rm -v $(pwd)/artifacts:/artifacts_host vllm-ci:build-image bash -c 'cp -r dist /artifacts_host && chmod -R a+rw /artifacts_host'"
+      #     - "bash .buildkite/scripts/upload-nightly-wheels.sh manylinux_2_35"
+      #   env:
+      #     DOCKER_BUILDKIT: "1"
+
 
   # - group: "Build release Docker images"
   #   key: "build-release-images"
@@ -144,19 +146,21 @@ steps:
   #       key: block-cpu-release-image-build
   #       depends_on: ~
 
-  #     - label: "Build release image - x86_64 - CPU"
-  #       depends_on:
-  #         - block-cpu-release-image-build
-  #         - input-release-version
-  #       agents:
-  #         queue: cpu_queue_postmerge
-  #       commands:
-  #         - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
-  #         - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg GIT_REPO_CHECK=1 --build-arg VLLM_CPU_AVX512BF16=true --build-arg VLLM_CPU_AVX512VNNI=true --build-arg VLLM_CPU_AMXBF16=true --tag public.ecr.aws/q9t5s3a7/vllm-cpu-release-repo:$(buildkite-agent meta-data get release-version) --tag public.ecr.aws/q9t5s3a7/vllm-cpu-release-repo:latest --progress plain --target vllm-openai -f docker/Dockerfile.cpu ."
-  #         - "docker push public.ecr.aws/q9t5s3a7/vllm-cpu-release-repo:latest"
-  #         - "docker push public.ecr.aws/q9t5s3a7/vllm-cpu-release-repo:$(buildkite-agent meta-data get release-version)"
-  #       env:
-  #         DOCKER_BUILDKIT: "1"
+
+      # - label: "Build release image - x86_64 - CPU"
+      #   depends_on:
+      #     - block-cpu-release-image-build
+      #     - input-release-version
+      #   agents:
+      #     queue: cpu_queue_postmerge
+      #   commands:
+      #     - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
+      #     - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg GIT_REPO_CHECK=1 --build-arg VLLM_CPU_X86=true --tag public.ecr.aws/q9t5s3a7/vllm-cpu-release-repo:$(buildkite-agent meta-data get release-version) --tag public.ecr.aws/q9t5s3a7/vllm-cpu-release-repo:latest --progress plain --target vllm-openai -f docker/Dockerfile.cpu ."
+      #     - "docker push public.ecr.aws/q9t5s3a7/vllm-cpu-release-repo:latest"
+      #     - "docker push public.ecr.aws/q9t5s3a7/vllm-cpu-release-repo:$(buildkite-agent meta-data get release-version)"
+      #   env:
+      #     DOCKER_BUILDKIT: "1"
+
 
   #     - block: "Build release image for arm64 CPU"
   #       key: block-arm64-cpu-release-image-build
