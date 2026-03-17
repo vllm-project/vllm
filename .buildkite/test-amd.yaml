@@ -1229,6 +1229,19 @@ steps:
     - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
     - DP_EP=1 ROCM_ATTN=1 bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
 
+- label: NixlConnector PD accuracy - DeepSeek MLA (Distributed)
+  timeout_in_minutes: 30
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90a]
+  agent_pool: mi250_4
+  num_gpus: 4
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+    - vllm/distributed/kv_transfer/kv_connector/v1/nixl_connector.py
+    - tests/v1/kv_connector/nixl_integration/
+  commands:
+    - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
+    - python v1/kv_connector/nixl_integration/test_config.py '*deepseek_mla*' --extra-vllm-args='--attention-backend ROCM_ATTN'
+
 - label: Distributed Tests (A100) # 68min
   timeout_in_minutes: 90
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90a]
@@ -2853,6 +2866,20 @@ steps:
   commands:
     - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
     - CROSS_LAYERS_BLOCKS=1 ROCM_ATTN=1 bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
+
+- label: NixlConnector PD accuracy - DeepSeek MLA (Distributed)
+  mirror_hardwares: [amdexperimental, amdproduction]
+  agent_pool: mi325_4
+  optional: true
+  timeout_in_minutes: 30
+  working_dir: "/vllm-workspace/tests"
+  num_gpus: 4
+  source_file_dependencies:
+    - vllm/distributed/kv_transfer/kv_connector/v1/nixl_connector.py
+    - tests/v1/kv_connector/nixl_integration/
+  commands:
+    - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
+    - python v1/kv_connector/nixl_integration/test_config.py '*deepseek_mla*' --extra-vllm-args='--attention-backend ROCM_ATTN'
 
 ##### multi gpus test #####
 ##### A100 test #####
@@ -4620,6 +4647,20 @@ steps:
   commands:
     - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
     - CROSS_LAYERS_BLOCKS=1 ROCM_ATTN=1 bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
+
+- label: NixlConnector PD accuracy - DeepSeek MLA (Distributed)
+  mirror_hardwares: [amdexperimental, amdproduction]
+  agent_pool: mi355_4
+  optional: true
+  timeout_in_minutes: 30
+  working_dir: "/vllm-workspace/tests"
+  num_gpus: 4
+  source_file_dependencies:
+    - vllm/distributed/kv_transfer/kv_connector/v1/nixl_connector.py
+    - tests/v1/kv_connector/nixl_integration/
+  commands:
+    - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
+    - python v1/kv_connector/nixl_integration/test_config.py '*deepseek_mla*' --extra-vllm-args='--attention-backend ROCM_ATTN'
 
 ##### multi gpus test #####
 ##### A100 test #####
