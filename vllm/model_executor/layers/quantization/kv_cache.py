@@ -65,10 +65,9 @@ class BaseKVCacheMethod(QuantizeMethodBase):
             is_fp8 = layer.kv_cache_dtype.startswith("fp8")
 
             if is_int8:
-                # INT8 KV cache always uses dynamic per-token scales computed
-                # in the Triton kernel. Checkpoint scales are not used.
-                # Set placeholder values of 1.0 — the real scales are computed
-                # per-(token, head) during cache writes.
+                # Formats with per-token scales (INT8, future NVFP4, etc.)
+                # use dynamic scales computed in the kernel at cache-write
+                # time. Checkpoint scales are not used — set placeholders.
                 layer._k_scale.copy_(1.0)
                 layer._v_scale.copy_(1.0)
                 layer._k_scale_float = 1.0

@@ -1108,7 +1108,7 @@ def get_kv_cache_config_from_groups(
         # different hidden size. Allocate different amount of memory for each
         # layer based on its hidden size.
         spec = kv_cache_groups[0].kv_cache_spec
-        # Auxiliary memory (e.g. INT8 scale caches) is allocated separately
+        # Auxiliary memory (e.g. per-token quantization scale caches) is allocated separately
         # from the KV cache tensor, so subtract it from the budget.
         total_aux = sum(
             s.auxiliary_memory_per_block for s in spec.kv_cache_specs.values()
@@ -1139,7 +1139,7 @@ def get_kv_cache_config_from_groups(
         page_size = get_uniform_page_size(
             [group.kv_cache_spec for group in kv_cache_groups]
         )
-        # Auxiliary memory (e.g. INT8 scale caches) is allocated separately
+        # Auxiliary memory (e.g. per-token quantization scale caches) is allocated separately
         # from the KV cache tensor.  Add it to the effective page size so
         # the block count calculation reserves room for it.
         aux_per_block = max(

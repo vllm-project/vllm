@@ -1041,7 +1041,8 @@ def unified_attention(
     # Optional tensor for prefix lengths (PrefixLM support)
     mm_prefix_range=None,
     use_alibi_sqrt=False,
-    # Optional per-token scale caches for INT8 KV cache
+    # Optional per-(token, head) scale caches for quantized KV formats
+    # that use per-token scales (e.g. INT8, future NVFP4).
     k_scale_cache=None,  # [num_blocks, block_size, num_kv_heads] float32
     v_scale_cache=None,  # [num_blocks, block_size, num_kv_heads] float32
 ):
@@ -1067,16 +1068,19 @@ def unified_attention(
 
     # Detect KV cache type from the actual tensor dtype (set by caller via .view()).
     # This is the authoritative signal — independent of which scale args are passed.
+    # FP8: 1-byte floating-point (e4m3, e5m2).
     use_fp8_kv = k.is_floating_point() and k.element_size() == 1
+    # INT8 (and future integer-quantized formats like NVFP4):
     use_int8_kv = k.dtype == torch.int8
 
-    # INT8 scale granularity — only meaningful when use_int8_kv is True.
-    # Per-token (highest quality): caller passes k_scale_cache, sets k_descale=None.
-    int8_per_token_scale = k_scale_cache is not None
+    # Per-token scale granularity — applies to any format that stores
+    # per-(token, head) scales in a separate cache (INT8 today, NVFP4 later).
+    # Caller passes k_scale_cache/v_scale_cache and sets k_descale=None.
+    per_token_scale = k_scale_cache is not None
     # Per-head: caller passes 1-D [num_kv_heads] k_descale, no scale cache.
-    int8_per_head_scale = (
+    per_head_scale = (
         use_int8_kv
-        and not int8_per_token_scale
+        and not per_token_scale
         and k_descale is not None
         and k_descale.ndim == 1
         and k_descale.numel() > 1
@@ -1192,8 +1196,8 @@ def unified_attention(
             USE_FP8=output_scale is not None,
             USE_FP8_KV=use_fp8_kv,
             USE_INT8_KV=use_int8_kv,
-            INT8_PER_HEAD_SCALE=int8_per_head_scale,
-            INT8_PER_TOKEN_SCALE=int8_per_token_scale,
+            INT8_PER_HEAD_SCALE=per_head_scale,
+            INT8_PER_TOKEN_SCALE=per_token_scale,
             k_scale_cache_ptr=k_scale_cache,
             v_scale_cache_ptr=v_scale_cache,
             stride_ks_blk=k_scale_cache.stride(0) if k_scale_cache is not None else 0,
@@ -1256,8 +1260,8 @@ def unified_attention(
             NUM_SEGMENTS_PER_SEQ=num_par_softmax_segments,
             USE_FP8_KV=use_fp8_kv,
             USE_INT8_KV=use_int8_kv,
-            INT8_PER_HEAD_SCALE=int8_per_head_scale,
-            INT8_PER_TOKEN_SCALE=int8_per_token_scale,
+            INT8_PER_HEAD_SCALE=per_head_scale,
+            INT8_PER_TOKEN_SCALE=per_token_scale,
             k_scale_cache_ptr=k_scale_cache,
             v_scale_cache_ptr=v_scale_cache,
             stride_ks_blk=k_scale_cache.stride(0) if k_scale_cache is not None else 0,

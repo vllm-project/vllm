@@ -409,11 +409,13 @@ class TritonAttentionImpl(AttentionImpl):
             )
         self.use_alibi_sqrt = use_alibi_sqrt
         self.supports_quant_query_input = current_platform.is_cuda()
-        # Lazy-allocated per-(token,head) scale caches for INT8 KV cache.
+        # Lazy-allocated per-(token, head) scale caches for quantized KV
+        # formats that use per-token scales (e.g. INT8, future NVFP4).
         # Shape: [num_blocks, block_size, num_kv_heads], dtype=float32.
-        # Memory overhead is accounted for via AttentionSpec.auxiliary_memory_per_block.
-        self._int8_k_scale_cache: torch.Tensor | None = None
-        self._int8_v_scale_cache: torch.Tensor | None = None
+        # Memory overhead is accounted for via
+        # AttentionSpec.auxiliary_memory_per_block.
+        self._k_scale_cache: torch.Tensor | None = None
+        self._v_scale_cache: torch.Tensor | None = None
 
     def forward(
         self,
@@ -506,22 +508,23 @@ class TritonAttentionImpl(AttentionImpl):
         descale_shape = (cu_seqlens_q.shape[0] - 1, key_cache.shape[2])
         mm_prefix_range_tensor = attn_metadata.mm_prefix_range_tensor
 
-        if self.kv_cache_dtype.startswith("int8"):
-            # INT8 always uses dynamic per-token scales stored in scale caches.
-            int8_k_scale_cache = self._int8_k_scale_cache
-            int8_v_scale_cache = self._int8_v_scale_cache
+        if self._k_scale_cache is not None:
+            # Per-token quantized KV cache (INT8, future NVFP4, etc.):
+            # uses dynamic per-token scales stored in scale caches.
+            per_token_k_scale_cache = self._k_scale_cache
+            per_token_v_scale_cache = self._v_scale_cache
             k_descale = None
             v_descale = None
         elif self.kv_cache_dtype.startswith("fp8"):
             # FP8: always per-tensor scalar scale, expanded to (num_seqs, num_kv_heads).
-            int8_k_scale_cache = None
-            int8_v_scale_cache = None
+            per_token_k_scale_cache = None
+            per_token_v_scale_cache = None
             k_descale = layer._k_scale.expand(descale_shape)
             v_descale = layer._v_scale.expand(descale_shape)
         else:
             # FP16 / auto: no KV quantization, no scales needed.
-            int8_k_scale_cache = None
-            int8_v_scale_cache = None
+            per_token_k_scale_cache = None
+            per_token_v_scale_cache = None
             k_descale = None
             v_descale = None
 
@@ -552,8 +555,8 @@ class TritonAttentionImpl(AttentionImpl):
             sinks=self.sinks,
             output_scale=output_scale,
             mm_prefix_range=mm_prefix_range_tensor,
-            k_scale_cache=int8_k_scale_cache,
-            v_scale_cache=int8_v_scale_cache,
+            k_scale_cache=per_token_k_scale_cache,
+            v_scale_cache=per_token_v_scale_cache,
         )
 
         return output
@@ -629,16 +632,19 @@ class TritonAttentionImpl(AttentionImpl):
         elif self.kv_cache_dtype.startswith("int8"):
             key_cache = key_cache.view(self.int8_dtype)
             value_cache = value_cache.view(self.int8_dtype)
-            # Lazily allocate per-(token,head) scale caches on first call.
-            # [num_blocks, block_size, num_kv_heads]
-            if self._int8_k_scale_cache is None:
+            # Lazily allocate per-(token, head) scale caches on first call.
+            # This pattern works for any format in
+            # _DTYPES_WITH_PER_TOKEN_SCALES (currently INT8; NVFP4 etc.
+            # can be added later).
+            # Shape: [num_blocks, block_size, num_kv_heads]
+            if self._k_scale_cache is None:
                 num_blocks, block_size, num_kv_heads = key_cache.shape[:3]
-                self._int8_k_scale_cache = torch.ones(
+                self._k_scale_cache = torch.ones(
                     (num_blocks, block_size, num_kv_heads),
                     dtype=torch.float32,
                     device=key_cache.device,
                 )
-                self._int8_v_scale_cache = torch.ones(
+                self._v_scale_cache = torch.ones(
                     (num_blocks, block_size, num_kv_heads),
                     dtype=torch.float32,
                     device=value_cache.device,
@@ -648,8 +654,8 @@ class TritonAttentionImpl(AttentionImpl):
                 value,
                 key_cache,
                 value_cache,
-                self._int8_k_scale_cache,
-                self._int8_v_scale_cache,
+                self._k_scale_cache,
+                self._v_scale_cache,
                 slot_mapping,
             )
             return

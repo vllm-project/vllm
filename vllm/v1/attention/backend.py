@@ -930,6 +930,17 @@ def is_quantized_kv_cache(kv_cache_dtype: str) -> bool:
     return kv_cache_dtype.startswith("fp8") or kv_cache_dtype.startswith("int8")
 
 
+# String-based dtype names that use per-(token, head) quantization scales.
+# To add a new format, add its prefix here AND its torch.dtype in
+# kv_cache_interface._DTYPES_WITH_PER_TOKEN_SCALES.
+_PER_TOKEN_SCALE_PREFIXES: tuple[str, ...] = ("int8",)
+
+
+def kv_cache_uses_per_token_scales(kv_cache_dtype: str) -> bool:
+    """Return True if *kv_cache_dtype* (string form) needs per-token scales."""
+    return kv_cache_dtype.startswith(_PER_TOKEN_SCALE_PREFIXES)
+
+
 def subclass_attention_backend(
     name_prefix: str,
     attention_backend_cls: type[AttentionBackend],
