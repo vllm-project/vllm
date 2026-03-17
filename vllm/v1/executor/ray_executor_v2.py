@@ -175,6 +175,7 @@ class RayExecutorV2(MultiprocExecutor):
 
         # Prefer driver node; group by node for TP locality
         bundle_to_node_id = []
+        assert placement_group is not None
         bundle_specs = placement_group.bundle_specs
         assert bundle_specs is not None
         for i, bundle in enumerate(bundle_specs):

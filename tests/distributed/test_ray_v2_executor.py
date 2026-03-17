@@ -33,17 +33,15 @@ def enable_ray_v2_backend():
         "VLLM_USE_RAY_V2_EXECUTOR_BACKEND": os.environ.get(
             "VLLM_USE_RAY_V2_EXECUTOR_BACKEND"
         ),
-        "RAY_RUNTIME_ENV_HOOK": os.environ.get("RAY_RUNTIME_ENV_HOOK"),
         "VLLM_ENABLE_V1_MULTIPROCESSING": os.environ.get(
             "VLLM_ENABLE_V1_MULTIPROCESSING"
         ),
     }
     os.environ["VLLM_USE_RAY_V2_EXECUTOR_BACKEND"] = "1"
-    # TODO (jeffreywang): Is this necessary?
+    # The multiprocess engine forks a subprocess that inherits the Ray
+    # driver connection, causing hangs. RayExecutorV2 already distributes
+    # work via Ray actors, so the EngineCore can run safely in-process.
     os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
-    # TODO (jeffreywang): Figure out vLLM CI
-    # This is only necessary for Anyscale ray cluster.
-    os.environ.pop("RAY_RUNTIME_ENV_HOOK", None)
     try:
         yield
     finally:
@@ -57,17 +55,21 @@ def _cleanup_ray_resources():
     if not ray.is_initialized():
         return
 
-    # Ray actor shutdown is async -- wait until all actors are dead
+    # Ray actor shutdown is async -- wait until all actors are dead.
     dangling_actors = []
-    for _ in range(10):
-        dangling_actors = [
-            actor
-            for actor in list_actors(filters=[("state", "=", "ALIVE")])
-            if actor.class_name == "RayWorkerProc"
-        ]
-        if not dangling_actors:
-            break
-        time.sleep(1)
+    try:
+        for _ in range(10):
+            dangling_actors = [
+                actor
+                for actor in list_actors(filters=[("state", "=", "ALIVE")])
+                if actor.class_name == "RayWorkerProc"
+            ]
+            if not dangling_actors:
+                break
+            time.sleep(1)
+    except Exception:
+        # Tolerate connection errors to the Ray dashboard
+        pass
 
     # Always clean up PGs and shut down Ray, even if actors are dangling,
     # to avoid leaking GPU resources and blocking subsequent tests.
@@ -76,6 +78,8 @@ def _cleanup_ray_resources():
             if pg_info["state"] == "CREATED":
                 pg = PlacementGroup(ray.PlacementGroupID(bytes.fromhex(pg_id)))
                 ray.util.remove_placement_group(pg)
+    except Exception:
+        pass
     finally:
         ray.shutdown()
 
