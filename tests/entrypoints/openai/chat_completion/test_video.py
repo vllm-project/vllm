@@ -7,10 +7,9 @@ import openai
 import pytest
 import pytest_asyncio
 
+from tests.utils import RemoteOpenAIServer
 from vllm.multimodal.utils import encode_video_url, fetch_video
 from vllm.platforms import current_platform
-
-from ...utils import RemoteOpenAIServer
 
 MODEL_NAME = "llava-hf/llava-onevision-qwen2-0.5b-ov-hf"
 MAXIMUM_VIDEOS = 3
