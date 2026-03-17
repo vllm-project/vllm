@@ -66,6 +66,7 @@ def _get_backend_priorities(
                     AttentionBackendEnum.FLASHMLA_SPARSE,
                 ]
             else:
+                # BF16 KV Cache
                 # Prefer FlashInfer at low head counts (FlashMLA uses padding)
                 if num_heads is not None and num_heads <= 16:
                     sparse_backends = [
