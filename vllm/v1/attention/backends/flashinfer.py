@@ -324,6 +324,7 @@ class FlashInferBackend(AttentionBackend):
         "fp8",
         "fp8_e4m3",
         "fp8_e5m2",
+        "nvfp4",
     ]
 
     @staticmethod
@@ -352,6 +353,10 @@ class FlashInferBackend(AttentionBackend):
         head_size: int,
         cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
+        if cache_dtype_str == "nvfp4":
+            # Packed layout: fp4 data + fp8 block scales in last dim
+            last_dim = head_size // 2 + head_size // 16
+            return (num_blocks, 2, block_size, num_kv_heads, last_dim)
         return (num_blocks, 2, block_size, num_kv_heads, head_size)
 
     @staticmethod
@@ -602,7 +607,12 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self.page_size = self.kv_cache_spec.block_size
 
         self.cache_dtype = self.cache_config.cache_dtype
-        if is_quantized_kv_cache(self.cache_dtype):
+        self.is_nvfp4 = self.cache_dtype == "nvfp4"
+        if self.is_nvfp4:
+            # For NVFP4, kv_cache_dtype stays as the string "nvfp4"
+            # which is passed to FlashInferImpl
+            self.kv_cache_dtype = self.cache_dtype
+        elif self.cache_dtype.startswith("fp8"):
             self.kv_cache_dtype = FlashInferBackend.get_fp8_dtype_for_flashinfer(
                 self.cache_dtype
             )
@@ -620,7 +630,13 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             can_use_trtllm
             and not vllm_config.attention_config.disable_flashinfer_q_quantization
         ):
-            self.q_data_type = self.kv_cache_dtype
+            if self.is_nvfp4:
+                # NVFP4 KV cache uses FP8 quantized queries
+                self.q_data_type = FlashInferBackend.get_fp8_dtype_for_flashinfer(
+                    "fp8_e4m3"
+                )
+            else:
+                self.q_data_type = self.kv_cache_dtype
         else:
             self.q_data_type = self.model_config.dtype
 
@@ -1222,6 +1238,8 @@ class FlashInferImpl(AttentionImpl):
             self.sliding_window[0] if self.sliding_window is not None else -1
         )
         self.kv_cache_dtype = kv_cache_dtype
+        self.is_nvfp4 = kv_cache_dtype == "nvfp4"
+        self.fp4_data_dim = head_size // 2 if self.is_nvfp4 else 0
         self.logits_soft_cap = logits_soft_cap
         self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
 
@@ -1404,6 +1422,22 @@ class FlashInferImpl(AttentionImpl):
         stride_order = FlashInferBackend.get_kv_cache_stride_order()
         kv_cache_permute = kv_cache.permute(*stride_order)
 
+        # For NVFP4, split packed kv_cache into data and block scale views.
+        # kv_cache_permute shape (HND):
+        #   [num_blocks, 2, num_heads, block_size, head_size//2 + head_size//16]
+        nvfp4_kv_data = None
+        nvfp4_kv_block_scales = None
+        if self.is_nvfp4:
+            d = self.fp4_data_dim
+            nvfp4_kv_data = (
+                kv_cache_permute[:, 0, :, :, :d],
+                kv_cache_permute[:, 1, :, :, :d],
+            )
+            nvfp4_kv_block_scales = (
+                kv_cache_permute[:, 0, :, :, d:].view(torch.float8_e4m3fn),
+                kv_cache_permute[:, 1, :, :, d:].view(torch.float8_e4m3fn),
+            )
+
         use_dcp = self.dcp_world_size > 1
 
         # Regular attention (common case).
@@ -1486,8 +1520,20 @@ class FlashInferImpl(AttentionImpl):
                     assert self.o_sf_scale is None
                     out = output[num_decode_tokens:]
 
-                if attn_metadata.q_data_type != FP8_DTYPE and is_quantized_kv_cache(
-                    self.kv_cache_dtype
+                prefill_kv_block_scales = None
+                if self.is_nvfp4:
+                    # NVFP4 trtllm-gen kernel requires FP8 query.
+                    assert attn_metadata.q_data_type == FP8_DTYPE, (
+                        "NVFP4 KV cache requires FP8 quantized queries for "
+                        "trtllm-gen prefill. Set "
+                        "disable_flashinfer_q_quantization=False."
+                    )
+                    mock_kv_cache = nvfp4_kv_data
+                    mock_block_table = block_tables_prefill
+                    prefill_kv_block_scales = nvfp4_kv_block_scales  # noqa: F841
+                elif (
+                    attn_metadata.q_data_type != FP8_DTYPE
+                    and self.kv_cache_dtype.startswith("fp8")
                 ):
                     # TRTLLM prefill attention does not support BF16 Q
                     # and fp8 kv cache. So to enable prefill attention
@@ -1632,7 +1678,7 @@ class FlashInferImpl(AttentionImpl):
 
                 trtllm_batch_decode_with_kv_cache(
                     query=decode_query,
-                    kv_cache=kv_cache_permute,
+                    kv_cache=nvfp4_kv_data if self.is_nvfp4 else kv_cache_permute,
                     workspace_buffer=workspace_buffer,
                     block_tables=block_tables_decode,
                     seq_lens=seq_lens_decode,

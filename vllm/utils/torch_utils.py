@@ -41,6 +41,7 @@ STR_DTYPE_TO_TORCH_DTYPE = {
     "fp8_per_token_head": torch.uint8,
     "fp8_inc": torch.float8_e4m3fn,
     "fp8_ds_mla": torch.uint8,
+    "nvfp4": torch.uint8,
 }
 
 TORCH_DTYPE_TO_NUMPY_DTYPE = {
@@ -64,7 +65,11 @@ T = TypeVar("T")
 
 
 def is_quantized_kv_cache(kv_cache_dtype: str) -> bool:
-    return kv_cache_dtype.startswith("fp8") or kv_cache_dtype.endswith("per_token_head")
+    return (
+        kv_cache_dtype.startswith("fp8")
+        or kv_cache_dtype.endswith("per_token_head")
+        or kv_cache_dtype == "nvfp4"
+    )
 
 
 def kv_cache_uses_per_token_head_scales(kv_cache_dtype: str) -> bool:
@@ -395,15 +400,29 @@ def create_kv_caches_with_random_flash(
     value_caches: list[torch.Tensor] = []
 
     for _ in range(num_layers):
-        key_value_cache = torch.empty(
-            size=kv_cache_allocation_shape, dtype=dtype, device=device
-        ).permute(*stride_order)
-        if cache_dtype in ["auto", "half", "bfloat16", "float"]:
-            key_value_cache.uniform_(-scale, scale)
-        elif cache_dtype == "fp8":
-            _generate_random_fp8(key_value_cache, -scale, scale)
+        if cache_dtype == "nvfp4":
+            # NVFP4: packed layout with fp4 data + fp8 block scales in last dim.
+            # last_dim = head_size//2 (fp4 data) + head_size//16 (fp8 scales)
+            last_dim = head_size // 2 + head_size // 16
+            nvfp4_shape = (num_blocks, 2, block_size, num_heads, last_dim)
+            nvfp4_alloc_shape = tuple(nvfp4_shape[i] for i in stride_order)
+            key_value_cache = torch.randint(
+                0,
+                256,
+                size=nvfp4_alloc_shape,
+                dtype=dtype,
+                device=device,
+            ).permute(*stride_order)
         else:
-            raise ValueError(f"Does not support key cache of type {cache_dtype}")
+            key_value_cache = torch.empty(
+                size=kv_cache_allocation_shape, dtype=dtype, device=device
+            ).permute(*stride_order)
+            if cache_dtype in ["auto", "half", "bfloat16", "float"]:
+                key_value_cache.uniform_(-scale, scale)
+            elif cache_dtype == "fp8":
+                _generate_random_fp8(key_value_cache, -scale, scale)
+            else:
+                raise ValueError(f"Does not support key cache of type {cache_dtype}")
         key_caches.append(key_value_cache[:, 0])
         value_caches.append(key_value_cache[:, 1])
     return key_caches, value_caches

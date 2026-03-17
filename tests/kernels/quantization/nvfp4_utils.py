@@ -88,6 +88,57 @@ def break_fp4_bytes(a, dtype):
     return values.reshape(m, n * 2).to(dtype=dtype)
 
 
+def dequant_nvfp4_kv_cache(
+    cache: torch.Tensor, global_scale: float, head_size: int, block_size: int
+) -> torch.Tensor:
+    """Dequantize an NVFP4 KV cache with 4x4-swizzled block scales.
+
+    The input must be in HND layout so that the last two dims are
+    (block_size, last_dim).  For NHD caches, permute to HND first.
+
+    Args:
+        cache: [..., num_heads, block_size, last_dim] uint8, where
+            last_dim = head_size//2 + head_size//16.
+            The second-to-last dim must be block_size (the swizzle T dim).
+        global_scale: checkpoint dequant scale (k_scale or v_scale).
+        head_size: head dimension.
+        block_size: page size.
+
+    Returns:
+        [..., num_heads, block_size, head_size] float32.
+    """
+    data_dim = head_size // 2
+    scale_dim = head_size // 16
+
+    cache_c = cache.contiguous()
+    fp4_packed = cache_c[..., :data_dim]
+    sf_swizzled = cache_c[..., data_dim:]
+
+    # Unswizzle 4x4 block scales on (block_size, scale_dim) plane.
+    # [..., T, S] → [..., T//4, 4, sg, 4] → permute → [..., T, S]
+    batch_shape = sf_swizzled.shape[:-2]
+    T, S = block_size, scale_dim
+    sg = S // 4
+    sf_reshape = sf_swizzled.reshape(*batch_shape, T // 4, 4, sg, 4)
+    ndim = sf_reshape.ndim
+    # Swap the last four dims: (..., T//4, 4, sg, 4) → (..., T//4, 4, 4, sg)
+    perm = list(range(ndim - 4)) + [ndim - 4, ndim - 1, ndim - 3, ndim - 2]
+    sf_linear = sf_reshape.permute(*perm).reshape(*batch_shape, T, S)
+    sf_f32 = sf_linear.view(torch.float8_e4m3fn).to(torch.float32)
+
+    # Unpack fp4
+    shape = fp4_packed.shape  # [..., T, data_dim]
+    fp4_flat = fp4_packed.reshape(-1, data_dim)
+    fp4_vals = break_fp4_bytes(fp4_flat, torch.float32)
+    fp4_vals = fp4_vals.reshape(*shape[:-1], head_size)
+
+    # Dequant: fp4_val * block_scale * global_scale per 16-element group
+    return (
+        fp4_vals.reshape(*shape[:-1], scale_dim, 16)
+        * (sf_f32 * global_scale).unsqueeze(-1)
+    ).reshape(*shape[:-1], head_size)
+
+
 def get_nvfp4_global_scale(a: torch.Tensor):
     return (FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX) / torch.abs(a).max().to(torch.float32)
 

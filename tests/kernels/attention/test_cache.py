@@ -172,7 +172,7 @@ def test_reshape_and_cache(
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("device", CUDA_DEVICES)
-@pytest.mark.parametrize("kv_cache_dtype", KV_CACHE_DTYPE)
+@pytest.mark.parametrize("kv_cache_dtype", KV_CACHE_DTYPE + ["nvfp4"])
 @pytest.mark.parametrize("kv_cache_layout", CACHE_LAYOUTS)
 @pytest.mark.parametrize("kv_scale_type", KV_SCALE_TYPES)
 @pytest.mark.parametrize("implementation", RESHAPE_FLASH_IMPLEMENTATIONS)
@@ -202,6 +202,23 @@ def test_reshape_and_cache_flash(
     if kv_scale_type == "attn_head" and implementation != "cuda":
         pytest.skip("Only CUDA implementation supports attn_head scaling.")
 
+    if kv_cache_dtype == "nvfp4":
+        if implementation != "cuda":
+            pytest.skip("NVFP4 only supports CUDA implementation.")
+        if kv_scale_type != "tensor":
+            pytest.skip("NVFP4 only supports per-tensor scaling.")
+        if head_size % 16 != 0:
+            pytest.skip("NVFP4 requires head_size divisible by 16.")
+        if (head_size // 16) % 4 != 0:
+            pytest.skip(
+                "NVFP4 requires (head_size // 16) divisible by 4 "
+                "for 4x4 block scale swizzle."
+            )
+        if block_size % 4 != 0:
+            pytest.skip("NVFP4 requires block_size divisible by 4.")
+        if dtype not in (torch.float16, torch.bfloat16):
+            pytest.skip("NVFP4 quantization only supports fp16/bf16 input.")
+
     # fp8 conversion requires continugous memory buffer. Reduce the number of
     # blocks and tokens to consume less memory.
     num_tokens = num_tokens // 2
@@ -229,7 +246,11 @@ def test_reshape_and_cache_flash(
     del key_caches
     del value_caches
 
-    if kv_scale_type == "tensor":
+    if kv_cache_dtype == "nvfp4":
+        # Global scale = amax / 448 (per-tensor)
+        k_scale = (key.abs().amax() / 448.0).to(torch.float32)
+        v_scale = (value.abs().amax() / 448.0).to(torch.float32)
+    elif kv_scale_type == "tensor":
         k_scale = (key.amax() / 64.0).to(torch.float32)
         v_scale = (value.amax() / 64.0).to(torch.float32)
     else:  # "attn_head"
@@ -240,8 +261,9 @@ def test_reshape_and_cache_flash(
         y = x if kv_cache_layout == "NHD" else x.permute(0, 2, 1, 3)
         return y.contiguous()
 
-    key_cache_compact = permute_and_compact(key_cache)
-    value_cache_compact = permute_and_compact(value_cache)
+    if kv_cache_dtype != "nvfp4":
+        key_cache_compact = permute_and_compact(key_cache)
+        value_cache_compact = permute_and_compact(value_cache)
 
     def convert_fp8_local(output, input, scale, kv_dtype):
         fp8_input = input.view(current_platform.fp8_dtype())
@@ -257,7 +279,7 @@ def test_reshape_and_cache_flash(
                 result = fp8_input.to(output.dtype) * scale.view(1, -1, 1, 1)
         output.copy_(result)
 
-    # Clone the KV caches.
+    # Clone the KV caches (for non-nvfp4, used as reference baseline).
     if kv_cache_dtype == "fp8":
         cloned_key_cache = torch.empty_like(key_cache_compact, dtype=torch.float16)
         convert_fp8_local(cloned_key_cache, key_cache_compact, k_scale, kv_cache_dtype)
@@ -265,25 +287,27 @@ def test_reshape_and_cache_flash(
         convert_fp8_local(
             cloned_value_cache, value_cache_compact, v_scale, kv_cache_dtype
         )
-    else:
+    elif kv_cache_dtype != "nvfp4":
         cloned_key_cache = key_cache_compact.clone()
         cloned_value_cache = value_cache_compact.clone()
+
     # Call the reshape_and_cache kernel.
     if implementation == "cuda":
-        opcheck(
-            torch.ops._C_cache_ops.reshape_and_cache_flash,
-            (
-                key,
-                value,
-                key_cache,
-                value_cache,
-                slot_mapping,
-                kv_cache_dtype,
-                k_scale,
-                v_scale,
-            ),
-            cond=(head_size == HEAD_SIZES[0]),
-        )
+        if kv_cache_dtype != "nvfp4":
+            opcheck(
+                torch.ops._C_cache_ops.reshape_and_cache_flash,
+                (
+                    key,
+                    value,
+                    key_cache,
+                    value_cache,
+                    slot_mapping,
+                    kv_cache_dtype,
+                    k_scale,
+                    v_scale,
+                ),
+                cond=(head_size == HEAD_SIZES[0]),
+            )
         ops.reshape_and_cache_flash(
             key,
             value,
@@ -309,6 +333,39 @@ def test_reshape_and_cache_flash(
             k_scale,
             v_scale,
         )
+
+    if kv_cache_dtype == "nvfp4":
+        # Verify NVFP4 by dequantizing the entire cache and comparing
+        # the written positions against original bf16 values.
+        # Same pattern as FP8: dequant whole cache, then extract and compare.
+        from tests.kernels.quantization.nvfp4_utils import (
+            dequant_nvfp4_kv_cache,
+        )
+
+        def dequant_nvfp4_cache_nhd(cache, global_scale):
+            # cache: [N, T, H, last_dim] NHD → permute to [N, H, T, last_dim]
+            cache_hnd = cache.permute(0, 2, 1, 3)
+            result_hnd = dequant_nvfp4_kv_cache(
+                cache_hnd, global_scale, head_size, block_size
+            )
+            return result_hnd.permute(0, 2, 1, 3)  # back to [N, T, H, D]
+
+        result_key_cache = dequant_nvfp4_cache_nhd(key_cache, k_scale.item())
+        result_value_cache = dequant_nvfp4_cache_nhd(value_cache, v_scale.item())
+
+        # Flatten [num_blocks, block_size] → [num_slots] and index by slot_mapping.
+        num_slots = num_blocks * block_size
+        result_key_flat = result_key_cache.reshape(num_slots, num_heads, head_size)
+        result_value_flat = result_value_cache.reshape(num_slots, num_heads, head_size)
+
+        torch.testing.assert_close(
+            result_key_flat[slot_mapping], key.float(), atol=1.5, rtol=0.5
+        )
+        torch.testing.assert_close(
+            result_value_flat[slot_mapping], value.float(), atol=1.5, rtol=0.5
+        )
+        return
+
     key_cache_compact = permute_and_compact(key_cache)
     value_cache_compact = permute_and_compact(value_cache)
 
