@@ -25,6 +25,7 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     per_tensor_dequantize,
 )
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import is_torch_equal_or_newer
@@ -265,7 +266,7 @@ def moe_kernel_quantize_input(
         # weights are already dequantized, and we proceed with normal
         # activation quantization below.
 
-    if quant_dtype == torch.float8_e4m3fn or quant_dtype == torch.float8_e4m3fnuz:
+    if quant_dtype == current_platform.fp8_dtype():
         return _fp8_quantize(A, A_scale, per_act_token_quant, block_shape)
     elif quant_dtype == torch.int8:
         return _int8_quantize(A, A_scale, per_act_token_quant, block_shape)

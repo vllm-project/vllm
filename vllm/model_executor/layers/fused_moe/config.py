@@ -346,10 +346,7 @@ class FusedMoEQuantConfig:
 
     @property
     def use_fp8_w8a8(self) -> bool:
-        return (
-            self.quant_dtype == torch.float8_e4m3fn
-            or self.quant_dtype == torch.float8_e4m3fnuz
-        )
+        return self.quant_dtype == current_platform.fp8_dtype()
 
     @property
     def use_int8_w8a8(self) -> bool:
