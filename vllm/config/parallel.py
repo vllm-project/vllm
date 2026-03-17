@@ -454,7 +454,6 @@ class ParallelConfig:
         key = "dp_master_port"
         if self.data_parallel_rank == 0:
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             s.bind((self.data_parallel_master_ip, 0))
             s.listen()
             port = s.getsockname()[1]

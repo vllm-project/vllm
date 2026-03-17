@@ -42,7 +42,6 @@ def _allocate_group_ports(
     ports: list[int] = []
     for _ in range(3):
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         s.bind((host, 0))
         s.listen()
         socks.append(s)
