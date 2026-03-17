@@ -35,6 +35,7 @@ __all__ = [
     "QwenVLProcessor",
     "Qwen3ASRProcessor",
     "SkyworkR1VProcessor",
+    "FireRedASRProcessor"
 ]
 
 _CLASS_TO_MODULE: dict[str, str] = {
@@ -42,6 +43,7 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "CohereASRProcessor": "vllm.transformers_utils.processors.cohere_asr",
     "DeepseekVLV2Processor": "vllm.transformers_utils.processors.deepseek_vl2",
     "Eagle2_5_VLProcessor": "vllm.transformers_utils.processors.eagle2_5_vl",
+    "FireRedASRProcessor": "vllm.transformers_utils.processors.fireredasr",
     "FireRedASR2Processor": "vllm.transformers_utils.processors.fireredasr2",
     "FunASRProcessor": "vllm.transformers_utils.processors.funasr",
     "GLM4VProcessor": "vllm.transformers_utils.processors.glm4v",
