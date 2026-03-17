@@ -32,6 +32,7 @@ from vllm.entrypoints.pooling.utils import (
     encode_pooling_output_base64,
     encode_pooling_output_float,
 )
+from vllm.entrypoints.serve.render.serving import OpenAIServingRender
 from vllm.inputs import EngineInput
 from vllm.logger import init_logger
 from vllm.outputs import PoolingRequestOutput
@@ -47,6 +48,7 @@ class OpenAIServingPooling(OpenAIServing):
         self,
         engine_client: EngineClient,
         models: OpenAIServingModels,
+        openai_serving_render: OpenAIServingRender,
         *,
         request_logger: RequestLogger | None,
         chat_template: str | None,
@@ -59,6 +61,7 @@ class OpenAIServingPooling(OpenAIServing):
             request_logger=request_logger,
         )
 
+        self.openai_serving_render = openai_serving_render
         self.chat_template = chat_template
         self.chat_template_content_format: Final = chat_template_content_format
         self.trust_request_chat_template = trust_request_chat_template
@@ -101,12 +104,12 @@ class OpenAIServingPooling(OpenAIServing):
             raw_prompts = await self.io_processor.pre_process_async(
                 prompt=validated_prompt, request_id=request_id
             )
-            engine_inputs = await self._preprocess_cmpl(
+            engine_inputs = await self.openai_serving_render.preprocess_cmpl(
                 request,
                 prompt_to_seq(raw_prompts),
             )
         elif isinstance(request, PoolingChatRequest):
-            error_check_ret = self._validate_chat_template(
+            error_check_ret = self.openai_serving_render.validate_chat_template(
                 request_chat_template=request.chat_template,
                 chat_template_kwargs=request.chat_template_kwargs,
                 trust_request_chat_template=self.trust_request_chat_template,
@@ -114,7 +117,7 @@ class OpenAIServingPooling(OpenAIServing):
             if error_check_ret is not None:
                 return error_check_ret
 
-            _, engine_inputs = await self._preprocess_chat(
+            _, engine_inputs = await self.openai_serving_render.preprocess_chat(
                 request,
                 request.messages,
                 default_template=self.chat_template,
@@ -122,7 +125,7 @@ class OpenAIServingPooling(OpenAIServing):
                 default_template_kwargs=None,
             )
         elif isinstance(request, PoolingCompletionRequest):
-            engine_inputs = await self._preprocess_completion(
+            engine_inputs = await self.openai_serving_render.preprocess_completion(
                 request,
                 prompt_input=request.input,
                 prompt_embeds=None,
