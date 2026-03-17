@@ -572,6 +572,10 @@ class NixlConnectorScheduler:
                 for g in kv_cache_config.kv_cache_groups
             )
         )
+        self._has_mamba = any(
+            isinstance(g.kv_cache_spec, MambaSpec)
+            for g in kv_cache_config.kv_cache_groups
+        )
 
         logger.info("Initializing NIXL Scheduler %s", engine_id)
         if vllm_config.scheduler_config.disable_hybrid_kv_cache_manager:
@@ -718,9 +722,9 @@ class NixlConnectorScheduler:
                 sock.send_multipart((identity, b"", encoded_data[target_tp_rank]))
 
     def _hma_prefill_token_count(self, num_prompt_tokens: int) -> int:
-        """D-side only. Returns N-1 for HMA models since the decoder
+        """D-side only. Returns N-1 for Mamba models since the decoder
         always recomputes the last token and must start from h(N-1)."""
-        if self._is_hma_required and num_prompt_tokens > 1:
+        if self._has_mamba and num_prompt_tokens > 1:
             return num_prompt_tokens - 1
         return num_prompt_tokens
 
@@ -777,11 +781,7 @@ class NixlConnectorScheduler:
             if count > 0:
                 return count, True
 
-        if (
-            params is not None
-            and params.get("do_remote_decode")
-            and self._is_hma_required
-        ):
+        if params is not None and params.get("do_remote_decode") and self._has_mamba:
             self._truncate_hma_request_for_prefill(request)
 
         # No remote prefill for this request.
