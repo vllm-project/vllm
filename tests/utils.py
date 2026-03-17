@@ -295,7 +295,9 @@ class RemoteVLLMServer:
         # "stabilized at whatever level it's at".
         self._wait_for_gpu_memory_release()
 
-    def _kill_process_group_survivors(self, pgid: int | None) -> None:
+    def _kill_process_group_survivors(
+        self, pgid: int | None, timeout: float = 15.0
+    ) -> None:
         """SIGKILL any processes still in the server's process group
         and wait for them to exit.
 
@@ -331,7 +333,7 @@ class RemoteVLLMServer:
 
         # Wait for each survivor to actually exit so the GPU driver
         # releases its VRAM.
-        deadline = time.time() + 15
+        deadline = time.time() + timeout
         while survivor_pids and time.time() < deadline:
             still_alive = []
             for spid in survivor_pids:
@@ -347,7 +349,7 @@ class RemoteVLLMServer:
         if survivor_pids:
             print(
                 f"[RemoteOpenAIServer] WARNING: processes {survivor_pids} "
-                f"in pgid {pgid} could not be killed within 15s"
+                f"in pgid {pgid} could not be killed within {timeout}s"
             )
 
     @staticmethod
@@ -393,7 +395,9 @@ class RemoteVLLMServer:
             return None
         return None
 
-    def _wait_for_gpu_memory_release(self, timeout: float = 120.0):
+    def _wait_for_gpu_memory_release(
+        self, timeout: float = 120.0, log_interval: float = 10.0
+    ):
         """Wait for GPU memory to drop back toward pre-server levels.
 
         Waits the full timeout for memory to return close to the
@@ -413,7 +417,7 @@ class RemoteVLLMServer:
         target = baseline + headroom_bytes
 
         start = time.time()
-        next_log_time = start + 10
+        next_log_time = start + log_interval
 
         while time.time() - start < timeout:
             used = self._get_gpu_memory_used()
@@ -440,7 +444,7 @@ class RemoteVLLMServer:
                     f"{used_gb:.2f} GB (target: {target_gb:.2f} GB) "
                     f"[{elapsed:.0f}s/{timeout:.0f}s]"
                 )
-                next_log_time = now + 10
+                next_log_time = now + log_interval
 
             time.sleep(1.0)
 
@@ -599,7 +603,9 @@ class RemoteLaunchRenderServer(RemoteVLLMServer):
                 revision=model_config.tokenizer_revision,
             )
 
-    def _wait_for_gpu_memory_release(self, timeout: float = 30.0):
+    def _wait_for_gpu_memory_release(
+        self, timeout: float = 30.0, log_interval: float = 10.0
+    ):
         pass  # No GPU used
 
 
