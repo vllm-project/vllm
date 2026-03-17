@@ -130,6 +130,7 @@ class TrtLlmMxfp4ExpertsMonolithic(
         return (
             not moe_parallel_config.use_all2all_kernels
             and not moe_parallel_config.enable_eplb
+            and moe_parallel_config.dp_size <= 1
         )
 
     @staticmethod
