@@ -18,7 +18,7 @@ use vllm_chat::{ChatEvent, ChatEventStream};
 use vllm_engine_core_client::protocol::{FinishReason, StopReason};
 
 use crate::convert::prepare_chat_request;
-use crate::error::ApiError;
+use crate::error::{ApiError, bail_server_error, server_error};
 use crate::state::AppState;
 
 /// Validate one chat completion request and proxy it into the shared `vllm-chat` stack.
@@ -39,10 +39,10 @@ pub(super) async fn chat_completions(
     let chat_stream = match state.chat.chat(prepared.chat_request).await {
         Ok(stream) => stream,
         Err(error) => {
-            return ApiError::server_error(format!(
+            return server_error!(
                 "failed to submit chat request: {}",
                 error.to_report_string()
-            ))
+            )
             .into_response();
         }
     };
@@ -99,7 +99,7 @@ async fn chat_completion_chunk_stream(
                 }
             },
             Ok(ChatEvent::Done { .. }) => {
-                let error = ApiError::server_error(
+                let error = server_error!(
                     "chat stream terminated without a terminal finish reason",
                 );
                 error!(request_id = %response_id, "missing terminal finish reason");
@@ -111,7 +111,7 @@ async fn chat_completion_chunk_stream(
                     error = %error.as_report(),
                     "chat stream failed"
                 );
-                return Err(ApiError::server_error(error.to_report_string()));
+                bail_server_error!("{}", error.to_report_string());
             }
         }
     }
@@ -230,9 +230,7 @@ fn final_chunk(
         FinishReason::Length => "length",
         FinishReason::Repetition => "stop",
         FinishReason::Abort | FinishReason::Error => {
-            return Err(ApiError::server_error(
-                "stream terminated without a valid OpenAI finish reason",
-            ));
+            bail_server_error!("stream terminated without a valid OpenAI finish reason");
         }
     };
 

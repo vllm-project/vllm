@@ -2,14 +2,15 @@ use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use openai_protocol::common::{ErrorDetail, ErrorResponse};
+use thiserror_ext::{Construct, Macro};
 
 /// Small OpenAI-style error family used by the minimal HTTP layer.
-#[derive(Debug, Clone)]
+#[derive(Debug, Construct, Macro)]
 pub enum ApiError {
     /// The request is syntactically valid OpenAI JSON but asks for unsupported behavior.
     InvalidRequest {
         message: String,
-        param: Option<String>,
+        param: Option<&'static str>,
     },
     /// The requested model name does not match the single configured model.
     ModelNotFound { model: String },
@@ -17,38 +18,7 @@ pub enum ApiError {
     ServerError { message: String },
 }
 
-// TODO: use `thiserror-ext`.
 impl ApiError {
-    /// Build a generic invalid-request error without a parameter name.
-    pub fn invalid_request(message: impl Into<String>) -> Self {
-        Self::InvalidRequest {
-            message: message.into(),
-            param: None,
-        }
-    }
-
-    /// Build an invalid-request error tied to one request parameter.
-    pub fn invalid_request_param(message: impl Into<String>, param: impl Into<String>) -> Self {
-        Self::InvalidRequest {
-            message: message.into(),
-            param: Some(param.into()),
-        }
-    }
-
-    /// Build the standard model-not-found error used by OpenAI-compatible APIs.
-    pub fn model_not_found(model: impl Into<String>) -> Self {
-        Self::ModelNotFound {
-            model: model.into(),
-        }
-    }
-
-    /// Build an internal server error.
-    pub fn server_error(message: impl Into<String>) -> Self {
-        Self::ServerError {
-            message: message.into(),
-        }
-    }
-
     /// Return the HTTP status code associated with this API error.
     pub fn status_code(&self) -> StatusCode {
         match self {
@@ -64,7 +34,7 @@ impl ApiError {
             Self::InvalidRequest { message, param } => (
                 "invalid_request_error",
                 message.clone(),
-                param.clone(),
+                param.map(|p| p.to_string()),
                 Some("invalid_request_error".to_string()),
             ),
             Self::ModelNotFound { model } => (

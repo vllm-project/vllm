@@ -2,7 +2,7 @@ use openai_protocol::chat::ChatCompletionRequest;
 use openai_protocol::common::{StringOrArray, ToolChoice, ToolChoiceValue};
 use tracing::warn;
 
-use crate::error::ApiError;
+use crate::error::{ApiError, bail_invalid_request};
 
 /// Enforce the minimal compatibility contract for the Rust OpenAI server.
 pub(super) fn validate_request_compat(
@@ -14,24 +14,18 @@ pub(super) fn validate_request_compat(
     }
 
     if !request.stream {
-        return Err(ApiError::invalid_request_param(
-            "Only stream=true is supported.",
-            "stream",
-        ));
+        bail_invalid_request!(param = "stream", "Only stream=true is supported.");
     }
 
     if request.n.unwrap_or(1) > 1 {
-        return Err(ApiError::invalid_request_param(
-            "Only n=1 is supported.",
-            "n",
-        ));
+        bail_invalid_request!(param = "n", "Only n=1 is supported.");
     }
 
     if has_non_empty_stop(request.stop.as_ref()) {
-        return Err(ApiError::invalid_request_param(
-            "Stop strings are not supported by the minimal Rust frontend.",
-            "stop",
-        ));
+        bail_invalid_request!(
+            param = "stop",
+            "Stop strings are not supported by the minimal Rust frontend."
+        );
     }
 
     reject_non_zero(
@@ -51,17 +45,11 @@ pub(super) fn validate_request_compat(
     )?;
 
     if request.logprobs {
-        return Err(ApiError::invalid_request_param(
-            "logprobs are not supported.",
-            "logprobs",
-        ));
+        bail_invalid_request!(param = "logprobs", "logprobs are not supported.");
     }
 
     if request.top_logprobs.unwrap_or(0) > 0 {
-        return Err(ApiError::invalid_request_param(
-            "top_logprobs are not supported.",
-            "top_logprobs",
-        ));
+        bail_invalid_request!(param = "top_logprobs", "top_logprobs are not supported.");
     }
 
     if request.stream_options.is_some() {
@@ -69,10 +57,7 @@ pub(super) fn validate_request_compat(
     }
 
     if request.response_format.is_some() {
-        return Err(ApiError::invalid_request_param(
-            "response_format is not supported.",
-            "response_format",
-        ));
+        bail_invalid_request!(param = "response_format", "response_format is not supported.");
     }
 
     if request
@@ -80,19 +65,13 @@ pub(super) fn validate_request_compat(
         .as_ref()
         .is_some_and(|tools| !tools.is_empty())
     {
-        return Err(ApiError::invalid_request_param(
-            "Tool calling is not supported.",
-            "tools",
-        ));
+        bail_invalid_request!(param = "tools", "Tool calling is not supported.");
     }
 
     if let Some(tool_choice) = &request.tool_choice
         && !matches!(tool_choice, ToolChoice::Value(ToolChoiceValue::None))
     {
-        return Err(ApiError::invalid_request_param(
-            "tool_choice is not supported.",
-            "tool_choice",
-        ));
+        bail_invalid_request!(param = "tool_choice", "tool_choice is not supported.");
     }
 
     reject_non_default(
@@ -173,31 +152,25 @@ pub(super) fn validate_request_compat(
             .as_ref()
             .is_some_and(|tools| !tools.is_empty())
     {
-        return Err(ApiError::invalid_request_param(
-            "parallel_tool_calls is not supported.",
-            "parallel_tool_calls",
-        ));
+        bail_invalid_request!(
+            param = "parallel_tool_calls",
+            "parallel_tool_calls is not supported."
+        );
     }
 
     if request.no_stop_trim {
-        return Err(ApiError::invalid_request_param(
-            "no_stop_trim is not supported.",
-            "no_stop_trim",
-        ));
+        bail_invalid_request!(param = "no_stop_trim", "no_stop_trim is not supported.");
     }
 
     if request.return_hidden_states {
-        return Err(ApiError::invalid_request_param(
-            "return_hidden_states is not supported.",
-            "return_hidden_states",
-        ));
+        bail_invalid_request!(
+            param = "return_hidden_states",
+            "return_hidden_states is not supported."
+        );
     }
 
     if request.sampling_seed.is_some() {
-        return Err(ApiError::invalid_request_param(
-            "sampling_seed is not supported.",
-            "sampling_seed",
-        ));
+        bail_invalid_request!(param = "sampling_seed", "sampling_seed is not supported.");
     }
 
     Ok(())
@@ -213,17 +186,21 @@ fn has_non_empty_stop(stop: Option<&StringOrArray>) -> bool {
 }
 
 /// Reject one numeric option unless it is absent or exactly zero.
-fn reject_non_zero(value: Option<f32>, param: &str, message: &str) -> Result<(), ApiError> {
+fn reject_non_zero(value: Option<f32>, param: &'static str, message: &str) -> Result<(), ApiError> {
     if value.unwrap_or(0.0) != 0.0 {
-        return Err(ApiError::invalid_request_param(message, param));
+        bail_invalid_request!(param = param, "{}", message);
     }
     Ok(())
 }
 
 /// Reject one option unless it is entirely absent.
-fn reject_non_default<T>(value: Option<&T>, param: &str, message: &str) -> Result<(), ApiError> {
+fn reject_non_default<T>(
+    value: Option<&T>,
+    param: &'static str,
+    message: &str,
+) -> Result<(), ApiError> {
     if value.is_some() {
-        return Err(ApiError::invalid_request_param(message, param));
+        bail_invalid_request!(param = param, "{}", message);
     }
     Ok(())
 }

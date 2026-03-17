@@ -8,7 +8,7 @@ use vllm_chat::{
     ChatRole, UserSamplingParams,
 };
 
-use crate::error::ApiError;
+use crate::error::{ApiError, bail_invalid_request};
 
 mod validate;
 
@@ -90,20 +90,14 @@ fn convert_message(message: &ChatMessage) -> Result<VllmChatMessage, ApiError> {
             ..
         } => {
             if tool_calls.as_ref().is_some_and(|calls| !calls.is_empty()) {
-                return Err(ApiError::invalid_request(
-                    "Assistant tool_calls are not supported.",
-                ));
+                bail_invalid_request!("Assistant tool_calls are not supported.");
             }
             if reasoning_content.is_some() {
-                return Err(ApiError::invalid_request(
-                    "Assistant reasoning content is not supported.",
-                ));
+                bail_invalid_request!("Assistant reasoning content is not supported.");
             }
 
             let Some(content) = content else {
-                return Err(ApiError::invalid_request(
-                    "Assistant messages must contain text content.",
-                ));
+                bail_invalid_request!("Assistant messages must contain text content.");
             };
 
             Ok(VllmChatMessage::new(
@@ -111,15 +105,13 @@ fn convert_message(message: &ChatMessage) -> Result<VllmChatMessage, ApiError> {
                 convert_content(content)?,
             ))
         }
-        ChatMessage::Tool { .. } => Err(ApiError::invalid_request(
-            "Tool messages are not supported.",
-        )),
-        ChatMessage::Function { .. } => Err(ApiError::invalid_request(
-            "Function messages are not supported.",
-        )),
-        ChatMessage::Developer { .. } => Err(ApiError::invalid_request(
-            "Developer messages are not supported.",
-        )),
+        ChatMessage::Tool { .. } => bail_invalid_request!("Tool messages are not supported."),
+        ChatMessage::Function { .. } => {
+            bail_invalid_request!("Function messages are not supported.")
+        }
+        ChatMessage::Developer { .. } => {
+            bail_invalid_request!("Developer messages are not supported.")
+        }
     }
 }
 
@@ -131,9 +123,7 @@ fn convert_content(content: &MessageContent) -> Result<ChatContent, ApiError> {
             .iter()
             .map(|part| match part {
                 ContentPart::Text { text } => Ok(ChatContentPart::text(text.clone())),
-                _ => Err(ApiError::invalid_request(
-                    "Only text content parts are supported.",
-                )),
+                _ => bail_invalid_request!("Only text content parts are supported."),
             })
             .collect::<Result<Vec<_>, _>>()
             .map(ChatContent::Parts),
