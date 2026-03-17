@@ -348,7 +348,7 @@ def is_valid_config(config: MoETestConfig) -> tuple[bool, str | None]:
         )
 
     # routed_input_transform + quantization + high hidden dimensions
-    # TODO: Disable >= 2048 w/fp8 + deepep LL for now.
+    # TODO: Disable >= 2048 w/fp8 + deepep LL for now due to insane errors.
     if (
         (config.use_routed_input_transform or config.backend == "deepep_low_latency")
         and config.quantization is not None
