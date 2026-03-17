@@ -28,6 +28,9 @@ def test_qwen2_5_vl_compilation(vllm_runner, monkeypatch, model_impl):
     # Disable multiprocessing so that the counter is in the same process
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
 
+    if model_impl == "transformers":
+        pytest.importorskip("transformers", minversion="5.0.0")
+
     with (
         # NOTE: Qwen2.5-VL has 35 models in total - the LLM backend
         # Vision Patch Embed, Vision Patch Merger, and then 32 Vision Blocks
@@ -60,6 +63,9 @@ def test_qwen2_5_vl_no_vit_compilation(vllm_runner, monkeypatch, model_impl):
     """
     # Disable multiprocessing so that the counter is in the same process
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+
+    if model_impl == "transformers":
+        pytest.importorskip("transformers", minversion="5.0.0")
 
     with (
         compilation_counter.expect(num_models_seen=1),
