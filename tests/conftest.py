@@ -95,6 +95,8 @@ PromptImageInput = _PromptMultiModalInput[Image.Image]
 PromptAudioInput = _PromptMultiModalInput[tuple[np.ndarray, int]]
 PromptVideoInput = _PromptMultiModalInput[np.ndarray]
 
+DEVICE_TYPE = current_platform.device_type
+
 
 def _read_prompts(filename: str) -> list[str]:
     with open(filename) as f:
@@ -237,7 +239,7 @@ def workspace_init():
     )
 
     if torch.cuda.is_available():
-        device = torch.device(f"{current_platform.device_type}:0")
+        device = torch.device(f"{DEVICE_TYPE}:0")
         init_workspace_manager(device)
     yield
     reset_workspace_manager()
@@ -296,7 +298,7 @@ class HfRunner:
     def get_default_device(self):
         from vllm.platforms import current_platform
 
-        return "cpu" if current_platform.is_cpu() else current_platform.device_type
+        return "cpu" if current_platform.is_cpu() else DEVICE_TYPE
 
     def wrap_device(self, x: _T, device: str | None = None) -> _T:
         if x is None or isinstance(x, (bool,)):

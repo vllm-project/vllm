@@ -49,6 +49,7 @@ num_accepted_tokens = 1
 prompt_token_ids: list[int] = []
 MODEL = "Qwen/Qwen3-Next-80B-A3B-Instruct-FP8"
 BLOCK_SIZE = 560
+DEVICE_TYPE = current_platform.device_type
 NUM_HIDDEN_LAYERS = 1
 cur_step_action_idx = 0
 cur_step_action: StepAction | None = None
@@ -72,7 +73,7 @@ def get_fake_sample_fn() -> SamplerOutput:
             return SamplerOutput(
                 sampled_token_ids=torch.tensor(
                     [[prompt_token_ids[first_token_id_index]]],
-                    device=current_platform.device_type,
+                    device=DEVICE_TYPE,
                     dtype=torch.int32,
                 ),
                 logprobs_tensors=None,
@@ -85,7 +86,7 @@ def get_fake_sample_fn() -> SamplerOutput:
         return SamplerOutput(
             sampled_token_ids=torch.tensor(
                 [sampled_token_ids],
-                device=current_platform.device_type,
+                device=DEVICE_TYPE,
                 dtype=torch.int32,
             ),
             logprobs_tensors=None,
@@ -131,13 +132,13 @@ def get_fake_propose_draft_token_ids_fn():
                 - 1
                 + num_accepted_tokens
             ],
-            device=current_platform.device_type,
+            device=DEVICE_TYPE,
             dtype=torch.int32,
         )
 
         valid_sampled_tokens_count = torch.tensor(
             [num_accepted_tokens],
-            device=current_platform.device_type,
+            device=DEVICE_TYPE,
             dtype=torch.int32,
         )
 
@@ -145,7 +146,7 @@ def get_fake_propose_draft_token_ids_fn():
 
         return torch.tensor(
             proposed_draft_token_ids,
-            device=current_platform.device_type,
+            device=DEVICE_TYPE,
             dtype=torch.int32,
         )
 

@@ -21,7 +21,8 @@ PAD_SHAPES = [(150, 128, 64), (128, 128, 96)]
 SHAPES.extend(PAD_SHAPES)
 
 SEEDS = [42]
-CUDA_DEVICES = [f"{current_platform.device_type}:0"]
+DEVICE_TYPE = current_platform.device_type
+CUDA_DEVICES = [f"{DEVICE_TYPE}:0"]
 
 
 def get_ref_results(

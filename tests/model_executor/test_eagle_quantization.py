@@ -10,9 +10,10 @@ from vllm.config import LoadConfig, ModelConfig, SpeculativeConfig, VllmConfig
 from vllm.model_executor.models.utils import get_draft_quant_config
 from vllm.platforms import current_platform
 
+DEVICE_TYPE = current_platform.device_type
 DEVICES = (
     [
-        f"{current_platform.device_type}:{i}"
+        f"{DEVICE_TYPE}:{i}"
         for i in range(min(torch.accelerator.device_count(), 2))
     ]
     if current_platform.is_cuda_alike()

@@ -13,8 +13,9 @@ QUANT_DTYPES = [current_platform.fp8_dtype()]
 NUM_TOKENS = [1, 17, 86, 1234, 3045]  # Arbitrary values for testing
 HIDDEN_SIZES = [16, 48, 128, 1562, 4096]  # Arbitrary values for testing
 SEEDS = [0]
+DEVICE_TYPE = current_platform.device_type
 CUDA_DEVICES = [
-    f"{current_platform.device_type}:{i}"
+    f"{DEVICE_TYPE}:{i}"
     for i in range(min(current_platform.device_count(), 2))
 ]
 

@@ -8,6 +8,8 @@ import torch
 from vllm.distributed.eplb.policy.default import DefaultEplbPolicy
 from vllm.platforms import current_platform
 
+DEVICE_TYPE = current_platform.device_type
+
 
 def test_basic_rebalance():
     """Test basic rebalancing functionality"""
@@ -236,7 +238,7 @@ def test_global_load_balance_fallback():
     assert torch.sum(logcnt) == num_replicas
 
 
-@pytest.mark.parametrize("device", ["cpu", current_platform.device_type])
+@pytest.mark.parametrize("device", ["cpu", DEVICE_TYPE])
 def test_device_compatibility(device):
     """Test device compatibility"""
     if device == "cuda" and not torch.cuda.is_available():

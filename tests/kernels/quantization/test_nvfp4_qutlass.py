@@ -179,8 +179,9 @@ def _forward_quantize_ref(x: torch.Tensor, h: torch.Tensor, rot_size: int):
     )
 
 
+DEVICE_TYPE = current_platform.device_type
 DTYPE = torch.bfloat16
-DEVICE = torch.device(f"{current_platform.device_type}:0")
+DEVICE = torch.device(f"{DEVICE_TYPE}:0")
 ROT_SIZES = [16, 32, 64, 128]
 GLOBAL_SCALES = [6.0]
 

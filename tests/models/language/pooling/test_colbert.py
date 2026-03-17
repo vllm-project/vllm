@@ -74,6 +74,7 @@ TEXTS_2 = [
 ]
 
 DTYPE = "half"
+DEVICE_TYPE = current_platform.device_type
 
 
 def _load_hf_model(model_name: str, hf_spec: dict, device: torch.device):
@@ -356,7 +357,7 @@ def test_colbert_hf_comparison(vllm_runner, backend):
         vllm_outputs = vllm_model.token_embed(test_texts)
 
     device = torch.device(
-        current_platform.device_type if torch.cuda.is_available() else "cpu"
+        DEVICE_TYPE if torch.cuda.is_available() else "cpu"
     )
 
     hf_tokenizer = AutoTokenizer.from_pretrained(

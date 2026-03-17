@@ -40,6 +40,8 @@ BACKENDS_TO_TEST = [
     "FLEX_ATTENTION_SLOW",
 ]
 
+DEVICE_TYPE = current_platform.device_type
+
 # Remove flashinfer from the list if it's not available
 try:
     import flashinfer  # noqa: F401
@@ -366,7 +368,7 @@ def _test_backend_correctness(
         num_gpu_blocks=8192,
         hf_config_override=hf_config_override,
     )
-    device = torch.device(f"{current_platform.device_type}:0")
+    device = torch.device(f"{DEVICE_TYPE}:0")
 
     kv_cache_spec = create_standard_kv_cache_spec(vllm_config)
 

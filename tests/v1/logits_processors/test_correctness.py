@@ -38,8 +38,9 @@ PIN_MEMORY_AVAILABLE = is_pin_memory_available()
 MAX_NUM_REQS = 256
 VOCAB_SIZE = 1024
 NUM_OUTPUT_TOKENS = 20
+DEVICE_TYPE = current_platform.device_type
 CUDA_DEVICES = [
-    f"{current_platform.device_type}:{i}"
+    f"{DEVICE_TYPE}:{i}"
     for i in range(1 if current_platform.device_count() == 1 else 2)
 ]
 MAX_NUM_PROMPT_TOKENS = 64

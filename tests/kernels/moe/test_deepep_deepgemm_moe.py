@@ -65,6 +65,8 @@ requires_deep_gemm = pytest.mark.skipif(
 
 P = ParamSpec("P")
 
+DEVICE_TYPE = current_platform.device_type
+
 
 @contextmanager
 def with_dp_metadata(M: int, world_size: int):
@@ -373,7 +375,7 @@ def _test_deepep_deepgemm_moe(
     w1_scale: torch.Tensor,
     w2_scale: torch.Tensor,
 ):
-    device = torch.device(f"{current_platform.device_type}:{pgi.local_rank}")
+    device = torch.device(f"{DEVICE_TYPE}:{pgi.local_rank}")
     init_workspace_manager(device)
 
     set_random_seed(pgi.rank)

@@ -21,8 +21,9 @@ NUM_HEADS = [64]
 NUM_QUERIES_PER_KV = [1, 64]
 HEAD_SIZES = [24, 128]
 DTYPES = [torch.float16]
+DEVICE_TYPE = current_platform.device_type
 CUDA_DEVICES = [
-    f"{current_platform.device_type}:{i}"
+    f"{DEVICE_TYPE}:{i}"
     for i in range(min(current_platform.device_count(), 2))
 ]
 SLIDING_WINDOW = [0, 16, 2048]

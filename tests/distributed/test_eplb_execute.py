@@ -22,10 +22,12 @@ from vllm.platforms import current_platform
 
 from .eplb_utils import distributed_run, set_env_vars_and_device
 
+DEVICE_TYPE = current_platform.device_type
+
 
 def create_expert_indices_with_redundancy(
     num_layers: int,
-    num_logical_experts: int,
+    num_logical_experts: int
     total_physical_experts: int,
     redundancy_config: list[int],  # redundancy for each logical expert
 ) -> torch.Tensor:
@@ -258,7 +260,7 @@ def _test_async_transfer_layer_without_mtp_worker(
         tp_group = get_tp_group()
         ep_group = tp_group.device_group
         ep_rank = torch.distributed.get_rank()
-        device = torch.device(f"{current_platform.device_type}:{ep_rank}")
+        device = torch.device(f"{DEVICE_TYPE}:{ep_rank}")
 
         total_physical_experts = world_size * num_local_experts
         hidden_sizes = [16, 32]
@@ -354,7 +356,7 @@ def _test_rearrange_expert_weights_with_redundancy(
 
         ep_group = get_tp_group().cpu_group
         ep_rank = torch.distributed.get_rank()
-        device = torch.device(f"{current_platform.device_type}:{ep_rank}")
+        device = torch.device(f"{DEVICE_TYPE}:{ep_rank}")
 
         # Test parameters
         total_physical_experts = world_size * num_local_experts
@@ -467,7 +469,7 @@ def _test_rearrange_expert_weights_no_change(env, world_size) -> None:
 
         ep_group = get_tp_group().cpu_group
         ep_rank = torch.distributed.get_rank()
-        device = torch.device(f"{current_platform.device_type}:{ep_rank}")
+        device = torch.device(f"{DEVICE_TYPE}:{ep_rank}")
 
         num_layers = 2
         num_local_experts = 2
@@ -566,7 +568,7 @@ def _test_rearrange_expert_weights_profile_mode(env, world_size) -> None:
 
         ep_group = get_tp_group().cpu_group
         ep_rank = torch.distributed.get_rank()
-        device = torch.device(f"{current_platform.device_type}:{ep_rank}")
+        device = torch.device(f"{DEVICE_TYPE}:{ep_rank}")
 
         num_layers = 1
         num_local_experts = 2

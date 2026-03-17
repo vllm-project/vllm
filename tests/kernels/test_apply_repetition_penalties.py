@@ -17,6 +17,7 @@ VOCAB_SIZES = [17, 256, 1019, 151936, 202048]
 REPETITION_PENALTY_VALUES = [1.05]
 SEEDS = [0]
 DTYPES = [torch.float32, torch.float16]
+DEVICE_TYPE = current_platform.device_type
 
 
 @pytest.mark.parametrize("num_seqs", NUM_SEQS)
@@ -40,7 +41,7 @@ def test_apply_repetition_penalties(
     against a reference implementation.
     """
     set_random_seed(seed)
-    torch.set_default_device(f"{current_platform.device_type}:0")
+    torch.set_default_device(f"{DEVICE_TYPE}:0")
 
     # Create test data
     logits = torch.randn(num_seqs, vocab_size, dtype=dtype)
@@ -97,7 +98,7 @@ def test_apply_repetition_penalties_zero_seqs() -> None:
     seed = 0
 
     set_random_seed(seed)
-    torch.set_default_device(f"{current_platform.device_type}:0")
+    torch.set_default_device(f"{DEVICE_TYPE}:0")
 
     # Create test data
     logits = torch.randn(num_seqs, vocab_size, dtype=dtype)

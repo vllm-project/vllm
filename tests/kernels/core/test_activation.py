@@ -27,8 +27,9 @@ DTYPES = [torch.half, torch.bfloat16, torch.float]
 NUM_TOKENS = [7, 83, 2048]  # Arbitrary values for testing
 D = [512, 13824]  # Arbitrary values for testing
 SEEDS = [0]
+DEVICE_TYPE = current_platform.device_type
 CUDA_DEVICES = [
-    f"{current_platform.device_type}:{i}"
+    f"{DEVICE_TYPE}:{i}"
     for i in range(min(current_platform.device_count(), 2))
 ]
 

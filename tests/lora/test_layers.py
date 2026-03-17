@@ -60,9 +60,10 @@ pytestmark = pytest.mark.skipif(
     reason="Backend not supported",
 )
 
+DEVICE_TYPE = current_platform.device_type
 DEVICES = (
     [
-        f"{current_platform.device_type}:{i}"
+        f"{DEVICE_TYPE}:{i}"
         for i in range(1 if torch.accelerator.device_count() == 1 else 2)
     ]
     if current_platform.is_cuda_alike()
@@ -199,7 +200,7 @@ def create_random_inputs(
     input_size: tuple[int, ...],
     input_range: tuple[float, float],
     input_type: torch.dtype = torch.int,
-    device: torch.device = current_platform.device_type,
+    device: torch.device = DEVICE_TYPE,
 ) -> tuple[list[torch.Tensor], list[int], list[int]]:
     """Creates random inputs.
 

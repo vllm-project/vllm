@@ -35,9 +35,7 @@ def test_rocm_aiter_group_fp8_quant_fake_implementation():
     N = 4096
     group_size = 128
 
-    input_tensor = torch.randn(
-        (M, N), dtype=torch.bfloat16, device=current_platform.device_type
-    )
+    input_tensor = torch.randn((M, N), dtype=torch.bfloat16, device="cuda")
 
     # Verify the op's fake implementation using torch.library.opcheck
     # This checks that the fake function returns tensors with correct shapes and dtypes
@@ -57,9 +55,7 @@ def test_rocm_aiter_group_fp8_quant_torch_compile_with_cudagraph():
     N = 4096
     group_size = 128
 
-    input_tensor = torch.randn(
-        (M, N), dtype=torch.bfloat16, device=current_platform.device_type
-    )
+    input_tensor = torch.randn((M, N), dtype=torch.bfloat16, device="cuda")
 
     # Define a function that uses the op
     def group_fp8_quant_fn(x):
@@ -99,9 +95,7 @@ def test_rocm_aiter_group_fp8_quant_torch_compile_with_cudagraph():
     assert torch.allclose(scales_compiled, scales_eager, rtol=1e-3, atol=1e-3)
 
     # Test with different input (reusing compiled graph)
-    input_tensor_2 = torch.randn(
-        (M, N), dtype=torch.bfloat16, device=current_platform.device_type
-    )
+    input_tensor_2 = torch.randn((M, N), dtype=torch.bfloat16, device="cuda")
     x_fp8_eager_2, scales_eager_2 = group_fp8_quant_fn(input_tensor_2)
     x_fp8_compiled_2, scales_compiled_2 = compiled_fn(input_tensor_2)
 
@@ -127,9 +121,7 @@ def test_rocm_aiter_group_fp8_quant_different_shapes():
     ]
 
     for M, N in test_shapes:
-        input_tensor = torch.randn(
-            (M, N), dtype=torch.bfloat16, device=current_platform.device_type
-        )
+        input_tensor = torch.randn((M, N), dtype=torch.bfloat16, device="cuda")
 
         x_fp8, scales = rocm_aiter_ops.group_fp8_quant(input_tensor, group_size)
 

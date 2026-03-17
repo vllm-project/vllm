@@ -33,8 +33,9 @@ SCALE_UBS = [True, False]
 GROUP_SIZES = [None, [1, 64], [1, 128]]
 TMA_ALIGNMENTS = [0, 4]
 SEEDS = [0]
+DEVICE_TYPE = current_platform.device_type
 CUDA_DEVICES = [
-    f"{current_platform.device_type}:{i}"
+    f"{DEVICE_TYPE}:{i}"
     for i in range(min(current_platform.device_count(), 2))
 ]
 
@@ -44,7 +45,7 @@ EPS = 1e-6
 
 
 def as_float32_tensor(x: float | torch.Tensor) -> torch.Tensor:
-    return torch.as_tensor(x, dtype=torch.float32, device=current_platform.device_type)
+    return torch.as_tensor(x, dtype=torch.float32, device=DEVICE_TYPE)
 
 
 def ref_rms_norm(
@@ -240,7 +241,7 @@ def test_rms_norm(
     if has_scale_ub:
         rms_x, _ = ref_rms_norm(layer, x, residual)
         scale_ub = torch.mean(rms_x).to(
-            dtype=torch.float32, device=current_platform.device_type
+            dtype=torch.float32, device=DEVICE_TYPE
         )
     else:
         scale_ub = None

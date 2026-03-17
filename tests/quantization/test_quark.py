@@ -26,6 +26,8 @@ from vllm.platforms import current_platform
 
 from .reference_mxfp4 import dq_mxfp4_torch, qdq_mxfp4_torch
 
+DEVICE_TYPE = current_platform.device_type
+
 # Minimum amd-quark version for MXFP4/OCP_MX tests (single source of truth).
 QUARK_MXFP4_MIN_VERSION = "0.8.99"
 
@@ -280,7 +282,7 @@ def test_mxfp4_fused_qdq_match_quark(float_dtype: torch.dtype, scalings: list[in
     hidden_size = 64 * 32
     inp = (
         torch.rand(
-            1, hidden_size, dtype=float_dtype, device=current_platform.device_type
+            1, hidden_size, dtype=float_dtype, device=DEVICE_TYPE
         )
         - 0.5
     ) * 2
@@ -327,16 +329,16 @@ def test_mxfp4_dequant_kernel_match_quark(
         reorder=False,
         real_quantized=True,
         float_dtype=float_dtype,
-        device=current_platform.device_type,
+        device=DEVICE_TYPE,
     )
 
-    observer = qspec.observer_cls(qspec, device=current_platform.device_type)
+    observer = qspec.observer_cls(qspec, device=DEVICE_TYPE)
 
     hidden_size = 512
     shape = (11008, hidden_size)
 
     w = (
-        torch.rand(shape, device=current_platform.device_type, dtype=float_dtype) - 0.5
+        torch.rand(shape, device=DEVICE_TYPE, dtype=float_dtype) - 0.5
     ) * 2
 
     # Make it so that different groups have different scales.
@@ -350,7 +352,7 @@ def test_mxfp4_dequant_kernel_match_quark(
     weight_quantizer.scale = scale
 
     w_mxfp4 = weight_quantizer.to_real_quantize_params(w).to(
-        current_platform.device_type
+        DEVICE_TYPE
     )
     weight_quantizer.maybe_convert_and_transpose_scale()
 

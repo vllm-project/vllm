@@ -16,6 +16,8 @@ from ....conftest import ImageTestAssets
 # dynamic_module and trust_remote_code for hf_runner
 DOWNLOAD_PATTERN = ["*.json", "*.py", "*.safetensors", "*.txt", "*.model"]
 
+DEVICE_TYPE = current_platform.device_type
+
 
 @torch.inference_mode()
 def run_intern_vit_test(
@@ -40,9 +42,9 @@ def run_intern_vit_test(
 
     hf_model = AutoModel.from_pretrained(
         model, dtype=torch_dtype, trust_remote_code=True
-    ).to(current_platform.device_type)
+    ).to(DEVICE_TYPE)
     hf_outputs_per_image = [
-        hf_model(pixel_value.to(current_platform.device_type)).last_hidden_state
+        hf_model(pixel_value.to(DEVICE_TYPE)).last_hidden_state
         for pixel_value in pixel_values
     ]
 
@@ -54,9 +56,9 @@ def run_intern_vit_test(
     del hf_model
     cleanup_dist_env_and_memory()
 
-    vllm_model = vllm_model.to(current_platform.device_type, torch_dtype)
+    vllm_model = vllm_model.to(DEVICE_TYPE, torch_dtype)
     vllm_outputs_per_image = [
-        vllm_model(pixel_values=pixel_value.to(current_platform.device_type))
+        vllm_model(pixel_values=pixel_value.to(DEVICE_TYPE))
         for pixel_value in pixel_values
     ]
     del vllm_model

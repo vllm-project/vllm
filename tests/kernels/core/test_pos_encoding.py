@@ -20,8 +20,9 @@ NUM_HEADS = [17]  # Arbitrary values for testing
 BATCH_SIZES = [5]  # Arbitrary values for testing
 SEQ_LENS = [11, 8192]  # Arbitrary values for testing
 SEEDS = [0]
+DEVICE_TYPE = current_platform.device_type
 CUDA_DEVICES = [
-    f"{current_platform.device_type}:{i}"
+    f"{DEVICE_TYPE}:{i}"
     for i in range(min(current_platform.device_count(), 2))
 ]
 USE_KEY = [True, False]

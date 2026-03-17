@@ -22,6 +22,7 @@ if not current_platform.has_device_capability(100):
 FP4_DTYPE = torch.uint8
 FP8_DTYPE = current_platform.fp8_dtype()
 
+DEVICE_TYPE = current_platform.device_type
 DTYPES = [torch.float16, torch.bfloat16]
 SHAPES = [(128, 256), (128, 128), (256, 256), (256, 128)]
 BLOCK_SIZE = 16
@@ -36,7 +37,7 @@ def test_silu_mul_nvfp4_quant(
     shape: tuple[int, int],
 ) -> None:
     set_random_seed(42)
-    device = f"{current_platform.device_type}:0"
+    device = f"{DEVICE_TYPE}:0"
     torch.set_default_device(device)
 
     x = torch.randn(shape, dtype=dtype)

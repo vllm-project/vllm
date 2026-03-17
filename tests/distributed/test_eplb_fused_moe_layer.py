@@ -19,6 +19,8 @@ from vllm.platforms import current_platform
 
 from .eplb_utils import distributed_run, set_env_vars_and_device
 
+DEVICE_TYPE = current_platform.device_type
+
 
 @dataclass
 class TestConfig:
@@ -80,7 +82,7 @@ def make_fused_moe_layer(
         params_dtype=test_config.weight_dtype,
     )
 
-    device = torch.device(f"{current_platform.device_type}:{rank}")
+    device = torch.device(f"{DEVICE_TYPE}:{rank}")
 
     from functools import partial
 

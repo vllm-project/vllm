@@ -39,6 +39,8 @@ INDEX_SELECT_OP = torch.ops.aten.index.Tensor
 VLLM_UNIFIED_KV_CACHE_UPDATE_OP = torch.ops.vllm.unified_kv_cache_update
 FP8_DTYPE = current_platform.fp8_dtype()
 
+DEVICE_TYPE = current_platform.device_type
+
 
 class QKRoPEKVCacheTestModel(torch.nn.Module):
     def __init__(
@@ -225,7 +227,7 @@ def test_rope_kvcache_fusion(
     kv_cache_dtype: str,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    torch.set_default_device(current_platform.device_type)
+    torch.set_default_device(DEVICE_TYPE)
     torch.set_default_dtype(dtype)
     torch.manual_seed(0)
 

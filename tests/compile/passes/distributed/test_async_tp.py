@@ -40,6 +40,8 @@ prompts = [
     "The future of AI is",
 ]
 
+DEVICE_TYPE = current_platform.device_type
+
 
 class TestMMRSModel(torch.nn.Module):
     def __init__(self, hidden_size=16, dtype=torch.float16):
@@ -299,7 +301,7 @@ def async_tp_pass_on_test_model(
 ):
     set_random_seed(0)
 
-    device = torch.device(f"{current_platform.device_type}:{local_rank}")
+    device = torch.device(f"{DEVICE_TYPE}:{local_rank}")
     torch.accelerator.set_device_index(device)
     torch.set_default_device(device)
     torch.set_default_dtype(dtype)
@@ -325,7 +327,7 @@ def async_tp_pass_on_test_model(
         ),
     )
     vllm_config.device_config = DeviceConfig(
-        device=torch.device(current_platform.device_type)
+        device=torch.device(DEVICE_TYPE)
     )
 
     # this is a fake model name to construct the model config

@@ -35,9 +35,10 @@ EMBEDDING_MODULES = {
     "lm_head": "output_embeddings",
 }
 
+DEVICE_TYPE = current_platform.device_type
 DEVICES = (
     [
-        f"{current_platform.device_type}:{i}"
+        f"{DEVICE_TYPE}:{i}"
         for i in range(min(torch.accelerator.device_count(), 2))
     ]
     if current_platform.is_cuda_alike()

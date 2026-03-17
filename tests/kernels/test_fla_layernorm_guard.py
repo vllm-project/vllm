@@ -13,6 +13,8 @@ from vllm.model_executor.layers.fla.ops.layernorm_guard import (
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
+DEVICE_TYPE = current_platform.device_type
+
 
 def layer_norm_ref(
     x,
@@ -116,7 +118,7 @@ def test_layer_norm_fwd_basic(
 ) -> None:
     """Test basic layer norm forward pass without z (gate) tensor."""
     set_random_seed(seed)
-    device = torch.device(f"{current_platform.device_type}:0")
+    device = torch.device(f"{DEVICE_TYPE}:0")
 
     # Create inputs
     x = torch.randn(num_tokens, hidden_size, dtype=dtype, device=device)
@@ -158,7 +160,7 @@ def test_layer_norm_fwd_with_gate(
 ) -> None:
     """Test layer norm forward pass with z (gate) tensor."""
     set_random_seed(42)
-    device = torch.device(f"{current_platform.device_type}:0")
+    device = torch.device(f"{DEVICE_TYPE}:0")
 
     # Create inputs
     x = torch.randn(num_tokens, hidden_size, dtype=dtype, device=device)
@@ -215,7 +217,7 @@ def test_layer_norm_fwd_with_groups(
         )
 
     set_random_seed(42)
-    device = torch.device(f"{current_platform.device_type}:0")
+    device = torch.device(f"{DEVICE_TYPE}:0")
 
     # Create inputs
     x = torch.randn(num_tokens, hidden_size, dtype=dtype, device=device)
@@ -255,7 +257,7 @@ def test_layer_norm_rows_per_block(
 ) -> None:
     """Test that rows_per_block logic works correctly for various M sizes."""
     set_random_seed(42)
-    device = torch.device(f"{current_platform.device_type}:0")
+    device = torch.device(f"{DEVICE_TYPE}:0")
     hidden_size = 1024
 
     # Create inputs
@@ -280,7 +282,7 @@ def test_strided_input(dtype: torch.dtype) -> None:
     """Test that the kernel handles non-contiguous (strided)
     inputs correctly."""
     set_random_seed(42)
-    device = torch.device(f"{current_platform.device_type}:0")
+    device = torch.device(f"{DEVICE_TYPE}:0")
     num_tokens = 128
     hidden_size = 1024
 
@@ -320,7 +322,7 @@ def test_output_buffer_provided(
 ) -> None:
     """Test that the kernel works when an output buffer is provided."""
     set_random_seed(42)
-    device = torch.device(f"{current_platform.device_type}:0")
+    device = torch.device(f"{DEVICE_TYPE}:0")
 
     # Create inputs
     x = torch.randn(num_tokens, hidden_size, dtype=dtype, device=device)
@@ -361,7 +363,7 @@ def test_multidimensional_input(
 ) -> None:
     """Test that the autograd function handles multidimensional inputs."""
     set_random_seed(42)
-    device = torch.device(f"{current_platform.device_type}:0")
+    device = torch.device(f"{DEVICE_TYPE}:0")
     hidden_size = shape[-1]
 
     # Create inputs
@@ -405,7 +407,7 @@ def test_rmsnorm_gated_forward_native_dtype(
 
     from vllm.model_executor.layers.layernorm import RMSNormGated
 
-    device = torch.device(f"{current_platform.device_type}:0")
+    device = torch.device(f"{DEVICE_TYPE}:0")
     set_random_seed(42)
 
     layer = RMSNormGated(

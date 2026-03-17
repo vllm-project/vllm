@@ -53,6 +53,8 @@ if current_platform.is_fp8_fnuz():
         allow_module_level=True,
     )
 
+DEVICE_TYPE = current_platform.device_type    
+
 
 def format_result(verbose, msg, ex=None):
     if ex is not None:
@@ -79,7 +81,7 @@ def rank_worker(
     verbose: bool,
 ):
     # Initialize workspace manager in child process
-    device = torch.device(f"{current_platform.device_type}:{pgi.local_rank}")
+    device = torch.device(f"{DEVICE_TYPE}:{pgi.local_rank}")
     init_workspace_manager(device)
 
     set_random_seed(pgi.rank)

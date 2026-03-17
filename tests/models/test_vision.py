@@ -25,6 +25,8 @@ from vllm.utils.torch_utils import set_random_seed
 
 pytestmark = pytest.mark.cpu_test
 
+DEVICE_TYPE = current_platform.device_type
+
 
 @pytest.mark.parametrize(
     ("select_layers", "num_layers_loaded", "max_possible_layers", "expected_features"),
@@ -467,7 +469,7 @@ def run_dp_sharded_mrope_vision_model_uneven_load_worker(
 @pytest.mark.parametrize("spatial_merge_size", [2, 4])
 def test_simple_mrope_vision_model_spatial_merge(spatial_merge_size: int):
     """Test SimpleMRopeVisionModel with different spatial merge sizes."""
-    device = current_platform.device_type
+    device = DEVICE_TYPE
 
     grid_thw_list = [[1, 4, 4], [1, 6, 6]]  # Two images
     pixel_values_list = []

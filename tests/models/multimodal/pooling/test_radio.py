@@ -18,6 +18,8 @@ from ....conftest import ImageTestAssets
 # dynamic_module and trust_remote_code for hf_runner
 DOWNLOAD_PATTERN = ["*.json", "*.py", "*.safetensors", "*.txt", "*.model"]
 
+DEVICE_TYPE = current_platform.device_type
+
 
 @torch.inference_mode()
 def run_radio_test(
@@ -52,7 +54,7 @@ def run_radio_test(
         config=hf_config,
         dtype=torch_dtype,
         trust_remote_code=True,
-    ).to(current_platform.device_type)
+    ).to(DEVICE_TYPE)
     hf_model.eval()
 
     # A HF model has image normalization as a part of model's forward
@@ -63,7 +65,7 @@ def run_radio_test(
     hf_model.make_preprocessor_external()
 
     hf_outputs_per_image = [
-        hf_model(pixel_value.to(current_platform.device_type))
+        hf_model(pixel_value.to(DEVICE_TYPE))
         for pixel_value in pixel_values
     ]
 
@@ -73,10 +75,10 @@ def run_radio_test(
     )
     vllm_model = RadioModel(vllm_config)
     vllm_model.load_weights(hf_model.state_dict())
-    vllm_model = vllm_model.to(current_platform.device_type, torch_dtype)
+    vllm_model = vllm_model.to(DEVICE_TYPE, torch_dtype)
 
     vllm_outputs_per_image = [
-        vllm_model(pixel_values=pixel_value.to(current_platform.device_type))
+        vllm_model(pixel_values=pixel_value.to(DEVICE_TYPE))
         for pixel_value in pixel_values
     ]
     del vllm_model, hf_model

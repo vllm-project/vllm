@@ -31,7 +31,8 @@ from vllm.lora.ops.triton_ops.utils import _LORA_A_PTR_DICT, _LORA_B_PTR_DICT
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
-DEVICES = [f"{current_platform.device_type}:{0}"]
+DEVICE_TYPE = current_platform.device_type
+DEVICES = [f"{DEVICE_TYPE}:{0}"]
 SEED = [0]
 
 _dict_lock = Lock()

@@ -37,6 +37,8 @@ from vllm.utils.torch_utils import direct_register_custom_op
 TEST_FP8 = current_platform.supports_fp8()
 FP8_DTYPE = current_platform.fp8_dtype()
 
+DEVICE_TYPE = current_platform.device_type
+
 
 class TestSiluMul(torch.nn.Module):
     quant_key = kFp8StaticTensorSym
@@ -273,7 +275,7 @@ MODELS_AND_DO_FUSION = {
 def test_fix_functionalization(
     model_class: torch.nn.Module, do_fusion: bool, dtype: torch.dtype
 ):
-    torch.set_default_device(current_platform.device_type)
+    torch.set_default_device(DEVICE_TYPE)
     torch.set_default_dtype(dtype)
     torch.manual_seed(0)
 

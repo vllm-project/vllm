@@ -33,6 +33,8 @@ FLASH_MLA_UNSUPPORTED_REASON = (
     else "FlashMLA is supported"
 )
 
+DEVICE_TYPE = current_platform.device_type
+
 
 @pytest.mark.skipif(
     not is_flashmla_dense_supported()[0], reason=FLASH_MLA_UNSUPPORTED_REASON
@@ -54,7 +56,7 @@ FLASH_MLA_UNSUPPORTED_REASON = (
 def test_flash_mla(
     b, s_q, mean_sk, h_q, h_kv, d, dv, block_size, causal, varlen, torch_dtype
 ):
-    device = torch.device(f"{current_platform.device_type}:0")
+    device = torch.device(f"{DEVICE_TYPE}:0")
     init_dtype = torch.bfloat16 if torch_dtype == torch.float8_e4m3fn else torch_dtype
     torch.set_default_dtype(init_dtype)
     torch.set_default_device(device)

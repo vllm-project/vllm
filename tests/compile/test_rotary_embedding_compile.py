@@ -16,6 +16,8 @@ from vllm.config.compilation import CompilationMode, CUDAGraphMode
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.platforms import current_platform
 
+DEVICE_TYPE = current_platform.device_type
+
 
 @support_torch_compile
 class RotaryEmbeddingCompileModule(torch.nn.Module):
@@ -45,7 +47,7 @@ def test_rotary_embedding_torch_compile_with_custom_op(monkeypatch):
     monkeypatch.setenv("VLLM_USE_BYTECODE_HOOK", "1")
     monkeypatch.setenv("VLLM_USE_AOT_COMPILE", "0")
 
-    device = current_platform.device_type
+    device = DEVICE_TYPE
     positions = torch.arange(16, device=device)
     query = torch.randn(16, 32, device=device, dtype=torch.bfloat16)
     key = torch.randn(16, 32, device=device, dtype=torch.bfloat16)

@@ -33,6 +33,7 @@ MODELS = [
     ),
 ]
 
+DEVICE_TYPE = current_platform.device_type
 
 @pytest.mark.skipif(
     not is_quant_method_supported("fp8"),
@@ -313,7 +314,7 @@ def test_scaled_fp8_quant(dtype) -> None:
 
     # Note that we use a shape % 4 != 0 to cover edge cases,
     # because scaled_fp8_quant is vectorized by 4.
-    x = (torch.randn(size=(11, 11), device=current_platform.device_type) * 13).to(dtype)
+    x = (torch.randn(size=(11, 11), device=DEVICE_TYPE) * 13).to(dtype)
 
     # Dynamic quantization
     ref_y, inv_scale = ops.scaled_fp8_quant(x, None)
@@ -338,7 +339,7 @@ def test_scaled_fp8_quant(dtype) -> None:
     # non-contiguous input with padding
     m, n, padded_stride = 975, 512, 576
     padded_tensor = (
-        torch.randn(size=(m, padded_stride), device=current_platform.device_type) * 13
+        torch.randn(size=(m, padded_stride), device=DEVICE_TYPE) * 13
     ).to(dtype)
     x_nc = padded_tensor[:, :n]  # shape (m, n) with stride (padded_stride, 1)
 
@@ -408,7 +409,7 @@ def test_fp8_reloading(
             "If this is your use case, consider using a restore function like #26327"
         )
 
-    with torch.device(f"{current_platform.device_type}:0"):
+    with torch.device(f"{DEVICE_TYPE}:0"):
         config = Fp8Config(
             is_checkpoint_fp8_serialized=is_checkpoint_fp8_serialized,
             weight_block_size=weight_block_size,

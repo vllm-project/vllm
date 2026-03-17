@@ -48,7 +48,7 @@ requires_deep_ep = pytest.mark.skipif(
 )
 
 MAX_TOKENS_PER_RANK = 64
-DEVICE = current_platform.device_type
+DEVICE_TYPE = current_platform.device_type
 
 
 def make_weights(
@@ -58,21 +58,21 @@ def make_weights(
     Return weights w1, w2, w1_scale, w2_scale
     """
     if dtype in [torch.float16, torch.bfloat16]:
-        w1 = torch.randn((e, 2 * n, k), device=DEVICE, dtype=dtype) / 10
-        w2 = torch.randn((e, k, n), device=DEVICE, dtype=dtype) / 10
+        w1 = torch.randn((e, 2 * n, k), device=DEVICE_TYPE, dtype=dtype) / 10
+        w2 = torch.randn((e, k, n), device=DEVICE_TYPE, dtype=dtype) / 10
         return w1, w2, None, None
 
     # per-out-channel weight quantization
     assert dtype == torch.float8_e4m3fn
-    w1 = torch.empty((e, 2 * n, k), device=DEVICE, dtype=torch.float16)
-    w2 = torch.empty((e, k, n), device=DEVICE, dtype=torch.float16)
+    w1 = torch.empty((e, 2 * n, k), device=DEVICE_TYPE, dtype=torch.float16)
+    w2 = torch.empty((e, k, n), device=DEVICE_TYPE, dtype=torch.float16)
 
     n_b_scales = 2 * n
     k_b_scales = k
     w1_q = torch.empty_like(w1, dtype=dtype)
     w2_q = torch.empty_like(w2, dtype=dtype)
-    w1_scale = torch.empty((e, n_b_scales, 1), device=DEVICE, dtype=torch.float32)
-    w2_scale = torch.empty((e, k_b_scales, 1), device=DEVICE, dtype=torch.float32)
+    w1_scale = torch.empty((e, n_b_scales, 1), device=DEVICE_TYPE, dtype=torch.float32)
+    w2_scale = torch.empty((e, k_b_scales, 1), device=DEVICE_TYPE, dtype=torch.float32)
     for expert in range(e):
         w1_q[expert], w1_scale[expert] = ops.scaled_fp8_quant(
             w1[expert], use_per_token_if_dynamic=True
@@ -109,14 +109,14 @@ class TestTensors:
             torch.bfloat16 if config.dtype == torch.float8_e4m3fn else config.dtype
         )
         rank_tokens = (
-            torch.randn((config.m, config.k), device=DEVICE, dtype=token_dtype) / 10
+            torch.randn((config.m, config.k), device=DEVICE_TYPE, dtype=token_dtype) / 10
         )
         rank_token_scales = None
 
         topk = torch.randint(
-            low=0, high=config.num_experts, size=(config.m, config.topk), device=DEVICE
+            low=0, high=config.num_experts, size=(config.m, config.topk), device=DEVICE_TYPE
         ).to(dtype=torch.int64)
-        topk_weights = torch.randn(topk.shape, dtype=torch.float32, device=DEVICE)
+        topk_weights = torch.randn(topk.shape, dtype=torch.float32, device=DEVICE_TYPE)
         return TestTensors(
             rank_tokens=rank_tokens,
             rank_token_scales=rank_token_scales,
@@ -359,7 +359,7 @@ def _deep_ep_moe(
     use_fp8_dispatch: bool,
     per_act_token_quant: bool,
 ):
-    device = torch.device(f"{DEVICE}:{pgi.local_rank}")
+    device = torch.device(f"{DEVICE_TYPE}:{pgi.local_rank}")
     init_workspace_manager(device)
 
     if not low_latency_mode:

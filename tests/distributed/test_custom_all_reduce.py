@@ -18,6 +18,8 @@ from ..utils import (
     multi_process_parallel,
 )
 
+DEVICE_TYPE = current_platform.device_type
+
 random.seed(42)
 test_sizes = [random.randint(1024, 2048 * 1024) for _ in range(8)]
 for i, v in enumerate(test_sizes):
@@ -36,7 +38,7 @@ def graph_allreduce(
         m.delenv("CUDA_VISIBLE_DEVICES", raising=False)
         m.delenv("HIP_VISIBLE_DEVICES", raising=False)
         m.delenv("ZE_AFFINITY_MASK", raising=False)
-        device = torch.device(f"{current_platform.device_type}:{rank}")
+        device = torch.device(f"{DEVICE_TYPE}:{rank}")
         torch.accelerator.set_device_index(device)
         init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
         ensure_model_parallel_initialized(tp_size, pp_size)
@@ -95,7 +97,7 @@ def eager_allreduce(
         m.delenv("CUDA_VISIBLE_DEVICES", raising=False)
         m.delenv("HIP_VISIBLE_DEVICES", raising=False)
         m.delenv("ZE_AFFINITY_MASK", raising=False)
-        device = torch.device(f"{current_platform.device_type}:{rank}")
+        device = torch.device(f"{DEVICE_TYPE}:{rank}")
         torch.accelerator.set_device_index(device)
         init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
 

@@ -637,7 +637,7 @@ def use_fused_moe_lora_kernel_tensor_parallel(
 
     set_random_seed(seed)
 
-    device = torch.device(f"{current_platform.device_type}:{local_rank}")
+    device = torch.device(f"{DEVICE_TYPE}:{local_rank}")
     torch.accelerator.set_device_index(device)
     torch.set_default_device(device)
     torch.set_default_dtype(dtype)

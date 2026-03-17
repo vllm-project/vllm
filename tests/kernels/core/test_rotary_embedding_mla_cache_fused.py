@@ -16,6 +16,8 @@ from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
+DEVICE_TYPE = current_platform.device_type
+
 
 @pytest.mark.parametrize("dtype", [torch.half, torch.bfloat16, torch.float])
 @pytest.mark.parametrize("is_neox_style", [False, True])
@@ -30,7 +32,7 @@ from vllm.utils.torch_utils import set_random_seed
 @pytest.mark.parametrize(
     "device",
     [
-        f"{current_platform.device_type}:{i}"
+        f"{DEVICE_TYPE}:{i}"
         for i in range(min(current_platform.device_count(), 2))
     ],
 )

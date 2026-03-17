@@ -42,6 +42,8 @@ BACKENDS_TO_TEST = [
     AttentionBackendEnum.TRITON_MLA,
 ]
 
+DEVICE_TYPE = current_platform.device_type
+
 # Remove sm100 backends from the list if not using sm100
 if not torch.cuda.is_available() or torch.cuda.get_device_properties(0).major < 10:
     BACKENDS_TO_TEST.remove(AttentionBackendEnum.CUTLASS_MLA)
@@ -763,7 +765,7 @@ def test_backend_correctness(
             method="ngram", num_speculative_tokens=query_len - 1
         )
 
-    device = torch.device(f"{current_platform.device_type}:0")
+    device = torch.device(f"{DEVICE_TYPE}:0")
 
     # 1. Setup
     batch_size = batch_spec.batch_size

@@ -14,6 +14,8 @@ from vllm.platforms import current_platform
 # This import automatically registers `torch.ops.silly.attention`
 from . import silly_attention  # noqa: F401
 
+DEVICE_TYPE = current_platform.device_type
+
 
 def test_getitem_moved_to_producer_subgraph():
     """
@@ -146,7 +148,7 @@ def test_consecutive_ops_in_split():
         final_result = torch.sigmoid(attn_inout)
         return final_result
 
-    torch.set_default_device(current_platform.device_type)
+    torch.set_default_device(DEVICE_TYPE)
 
     # Create the traced FX graph for the model
     x = torch.randn(8, 4)
@@ -324,7 +326,7 @@ def test_builtin_empty_only_partition_is_merged():
         "Expected two builtin empty_like nodes in merged non-splitting subgraph"
     )
 
-    x = torch.randn(2, 3, device=current_platform.device_type)
+    x = torch.randn(2, 3, device=DEVICE_TYPE)
     output_original = gm(x)
     output_split = split_gm(x)
     assert torch.allclose(output_original, output_split), "Output mismatch after split"

@@ -190,7 +190,8 @@ def _forward_quantize_ref(
 
 
 DTYPE = torch.bfloat16
-DEVICE = torch.device(f"{current_platform.device_type}:0")
+DEVICE_TYPE = current_platform.device_type
+DEVICE = torch.device(f"{DEVICE_TYPE}:0")
 
 ROT_SIZES = [32, 64, 128]
 SEEDS = [0]

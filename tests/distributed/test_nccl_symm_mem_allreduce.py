@@ -26,6 +26,8 @@ from vllm.distributed.parallel_state import (
 from vllm.platforms import current_platform
 from vllm.utils.system_utils import update_environment_variables
 
+DEVICE_TYPE = current_platform.device_type
+
 torch.manual_seed(42)
 random.seed(44)
 
@@ -37,7 +39,7 @@ def nccl_symm_mem_allreduce_worker(local_rank: int, world_size: int):
     with monkeypatch.context() as m:
         m.delenv("CUDA_VISIBLE_DEVICES", raising=False)
         dtype = torch.bfloat16
-        device = torch.device(f"{current_platform.device_type}:{local_rank}")
+        device = torch.device(f"{DEVICE_TYPE}:{local_rank}")
         torch.accelerator.set_device_index(device)
         torch.set_default_device(device)
         torch.set_default_dtype(dtype)

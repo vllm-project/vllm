@@ -24,7 +24,8 @@ from vllm.config import (
 )
 from vllm.platforms import current_platform
 
-CUDA_DEVICES = [f"{current_platform.device_type}:0"]
+DEVICE_TYPE = current_platform.device_type
+CUDA_DEVICES = [f"{DEVICE_TYPE}:0"]
 
 
 @dataclass

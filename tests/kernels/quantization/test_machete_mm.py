@@ -29,8 +29,9 @@ if current_platform.is_rocm():
         allow_module_level=True,
     )
 
+DEVICE_TYPE = current_platform.device_type    
 CUDA_DEVICES = [
-    f"{current_platform.device_type}:{i}"
+    f"{DEVICE_TYPE}:{i}"
     for i in range(min(current_platform.device_count(), 2))
 ]
 

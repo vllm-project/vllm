@@ -8,6 +8,8 @@ from vllm.utils.mem_utils import MemorySnapshot, memory_profiling
 
 from ..utils import create_new_process_for_each_test
 
+DEVICE_TYPE = current_platform.device_type
+
 
 @create_new_process_for_each_test()
 def test_memory_profiling():
@@ -24,7 +26,7 @@ def test_memory_profiling():
     # load weights
 
     weights = torch.randn(
-        128, 1024, 1024, device=current_platform.device_type, dtype=torch.float32
+        128, 1024, 1024, device=DEVICE_TYPE, dtype=torch.float32
     )
 
     weights_memory = 128 * 1024 * 1024 * 4  # 512 MiB
@@ -44,7 +46,7 @@ def test_memory_profiling():
     ):
         # make a memory spike, 1 GiB
         spike = torch.randn(
-            256, 1024, 1024, device=current_platform.device_type, dtype=torch.float32
+            256, 1024, 1024, device=DEVICE_TYPE, dtype=torch.float32
         )
         del spike
 

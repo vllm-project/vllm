@@ -12,7 +12,7 @@ from vllm.model_executor.layers.fla.ops import (
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
-DEVICE = current_platform.device_type
+DEVICE_TYPE = current_platform.device_type
 
 
 @pytest.mark.parametrize("tp_size", [1])
@@ -31,7 +31,7 @@ def test_fused_sigmoid_gating_delta_rule_update_non_spec(
     head_v_dim: int,
     dtype: torch.dtype,
 ) -> None:
-    torch.set_default_device(DEVICE)
+    torch.set_default_device(DEVICE_TYPE)
     set_random_seed(0)
     key_dim = head_k_dim * num_k_heads
     value_dim = head_v_dim * num_v_heads
@@ -118,7 +118,7 @@ def test_fused_sigmoid_gating_delta_rule_update_spec(
     num_speculative_tokens: int,
     dtype: torch.dtype,
 ) -> None:
-    torch.set_default_device(DEVICE)
+    torch.set_default_device(DEVICE_TYPE)
     set_random_seed(0)
     key_dim = head_k_dim * num_k_heads
     value_dim = head_v_dim * num_v_heads

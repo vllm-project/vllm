@@ -30,6 +30,8 @@ from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 # This import automatically registers `torch.ops.silly.attention`
 from . import silly_attention  # noqa: F401
 
+DEVICE_TYPE = current_platform.device_type
+
 
 def test_version():
     # Test the version comparison logic using the private function
@@ -449,7 +451,7 @@ def test_cached_compilation_config(default_vllm_config):
     from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 
     dtype = torch.bfloat16
-    device = torch.device(f"{current_platform.device_type}:0")
+    device = torch.device(f"{DEVICE_TYPE}:0")
     batch_size, num_qo_heads, head_size = 8, 16, 128
 
     # access and cache default compilation config
@@ -472,7 +474,7 @@ def test_cached_compilation_config(default_vllm_config):
         query_quant = torch.compile(query_quant)
 
         _q_scale = torch.tensor(
-            1.0, dtype=torch.float32, device=current_platform.device_type
+            1.0, dtype=torch.float32, device=DEVICE_TYPE
         )
         query = torch.randn(
             batch_size, num_qo_heads * head_size, dtype=dtype, device=device

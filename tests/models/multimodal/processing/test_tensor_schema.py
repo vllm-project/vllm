@@ -45,6 +45,8 @@ VideoInput: TypeAlias = (
 )
 AudioInput = list[tuple[np.ndarray, int]]
 
+DEVICE_TYPE = current_platform.device_type
+
 
 def _resize_data(
     _data: Image.Image | np.ndarray, size_factor: float
@@ -146,7 +148,7 @@ def initialize_dummy_model(
         initialize_model_parallel(tensor_model_parallel_size=1)
 
         with set_default_torch_dtype(model_config.dtype):
-            torch.set_default_device(current_platform.device_type)
+            torch.set_default_device(DEVICE_TYPE)
             model = model_cls(vllm_config=vllm_config)
             torch.set_default_device(current_device)
         yield model

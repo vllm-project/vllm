@@ -33,7 +33,8 @@ NUM_HEADS = [8]
 NUM_LAYERS = [4]
 DTYPES = [torch.bfloat16]
 SEEDS = [0]
-CUDA_DEVICES = [f"{current_platform.device_type}:0"]
+DEVICE_TYPE = current_platform.device_type
+CUDA_DEVICES = [f"{DEVICE_TYPE}:0"]
 NUM_MAPPINGS = [3]
 
 

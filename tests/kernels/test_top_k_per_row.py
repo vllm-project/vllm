@@ -14,7 +14,7 @@ TOP_K_VALUES = [2048, 3000]
 BATCH_SIZE = [1, 2, 2048]
 NEXT_N = [1, 8]
 DATA_GENERATION = ["random", "10LSBits"]
-DEVICE = current_platform.device_type
+DEVICE_TYPE = current_platform.device_type
 
 
 def create_random_logits(
@@ -31,7 +31,7 @@ def create_random_logits(
     # Generate logits with some structure to make testing more meaningful
     if data_generation == "random":
         logits = torch.randn(
-            row_starts.shape[0], max(row_ends), dtype=dtype, device=DEVICE
+            row_starts.shape[0], max(row_ends), dtype=dtype, device=DEVICE_TYPE
         )
     elif data_generation == "10LSBits":
         top_22_bits_mask = 0xFFFFFC00
@@ -43,7 +43,7 @@ def create_random_logits(
             2**10,
             (row_starts.shape[0], max(row_ends)),
             dtype=torch.int32,
-            device=DEVICE,
+            device=DEVICE_TYPE,
         )
         # Combine: fixed top 22 bits with random last 10 bits
         logits_bits = (fixed_top_22_bits & top_22_bits_mask) | (
@@ -61,9 +61,9 @@ def create_row_boundaries(
     seq_len: int, vocab_size: int
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Create row start and end indices for testing."""
-    row_starts = torch.zeros(seq_len, dtype=torch.int32, device=DEVICE)
+    row_starts = torch.zeros(seq_len, dtype=torch.int32, device=DEVICE_TYPE)
     row_ends = torch.arange(
-        1, seq_len + 1, device=current_platform.device_type, dtype=torch.int32
+        1, seq_len + 1, device=DEVICE_TYPE, dtype=torch.int32
     )
     return row_starts, row_ends
 
@@ -139,7 +139,7 @@ def test_top_k_per_row(
     Test top_k_per_row.
     """
     set_random_seed(0)
-    torch.set_default_device(f"{DEVICE}:0")
+    torch.set_default_device(f"{DEVICE_TYPE}:0")
 
     # Create test data
     vocab_size = 20000
@@ -149,7 +149,7 @@ def test_top_k_per_row(
     )
 
     # Create output tensors
-    indices = torch.empty((num_rows, top_k), dtype=torch.int32, device=DEVICE)
+    indices = torch.empty((num_rows, top_k), dtype=torch.int32, device=DEVICE_TYPE)
 
     # Run CUDA implementation
     torch.ops._C.top_k_per_row_prefill(
@@ -164,7 +164,7 @@ def test_top_k_per_row(
     )
 
     # Run reference implementation
-    torch_indices = torch.empty((num_rows, top_k), dtype=torch.int32, device=DEVICE)
+    torch_indices = torch.empty((num_rows, top_k), dtype=torch.int32, device=DEVICE_TYPE)
     for i in range(num_rows):
         row_end = int(row_ends[i])
         k_i = min(top_k, row_end)
@@ -188,7 +188,7 @@ def _run_top_k_per_row_decode_test(
     """
     Helper function to run top_k_per_row_decode test with given parameters.
     """
-    torch.set_default_device(f"{DEVICE}:0")
+    torch.set_default_device(f"{DEVICE_TYPE}:0")
 
     # Create test data
     num_rows = batch_size * next_n
@@ -197,18 +197,18 @@ def _run_top_k_per_row_decode_test(
         high=vocab_size,
         size=(batch_size,),
         dtype=torch.int32,
-        device=current_platform.device_type,
+        device=DEVICE_TYPE,
     )
-    row_starts = torch.zeros(num_rows, dtype=torch.int32, device=DEVICE)
-    row_indices = torch.arange(num_rows, device=DEVICE) // next_n
-    next_n_offset = torch.arange(num_rows, device=DEVICE) % next_n
+    row_starts = torch.zeros(num_rows, dtype=torch.int32, device=DEVICE_TYPE)
+    row_indices = torch.arange(num_rows, device=DEVICE_TYPE) // next_n
+    next_n_offset = torch.arange(num_rows, device=DEVICE_TYPE) % next_n
     row_ends = seq_lens[row_indices] - next_n + next_n_offset + 1
     logits = create_random_logits(
         row_starts, row_ends, torch.float32, 42, clean_logits, data_generation
     )
 
     # Create output tensors
-    indices = torch.empty((num_rows, top_k), dtype=torch.int32, device=DEVICE)
+    indices = torch.empty((num_rows, top_k), dtype=torch.int32, device=DEVICE_TYPE)
 
     # Run CUDA implementation
     torch.ops._C.top_k_per_row_decode(
@@ -225,7 +225,7 @@ def _run_top_k_per_row_decode_test(
     torch.accelerator.synchronize()
 
     # Run reference implementation
-    torch_indices = torch.empty((num_rows, top_k), dtype=torch.int32, device=DEVICE)
+    torch_indices = torch.empty((num_rows, top_k), dtype=torch.int32, device=DEVICE_TYPE)
     for i in range(num_rows):
         row_end = int(row_ends[i])
         k_i = min(top_k, row_end)
@@ -284,7 +284,7 @@ def test_top_k_per_row_decode_large_vocab_size(clean_logits: bool) -> None:
 @pytest.mark.parametrize("clean_logits", [True, False])
 @torch.inference_mode()
 def test_deepseek_hybrid_topk(clean_logits: bool) -> None:
-    torch.set_default_device(f"{DEVICE}:0")
+    torch.set_default_device(f"{DEVICE_TYPE}:0")
 
     top_k = 2048
 
@@ -295,12 +295,12 @@ def test_deepseek_hybrid_topk(clean_logits: bool) -> None:
 
     # Create sequences with max length < 8192
     seq_lens_short = torch.randint(
-        4000, 8000, (batch_size_short,), dtype=torch.int32, device=DEVICE
+        4000, 8000, (batch_size_short,), dtype=torch.int32, device=DEVICE_TYPE
     )
 
-    row_starts_short = torch.zeros(num_rows_short, dtype=torch.int32, device=DEVICE)
-    row_indices_short = torch.arange(num_rows_short, device=DEVICE) // next_n
-    next_n_offset_short = torch.arange(num_rows_short, device=DEVICE) % next_n
+    row_starts_short = torch.zeros(num_rows_short, dtype=torch.int32, device=DEVICE_TYPE)
+    row_indices_short = torch.arange(num_rows_short, device=DEVICE_TYPE) // next_n
+    next_n_offset_short = torch.arange(num_rows_short, device=DEVICE_TYPE) % next_n
     row_ends_short = (
         seq_lens_short[row_indices_short] - next_n + next_n_offset_short + 1
     )
@@ -310,7 +310,7 @@ def test_deepseek_hybrid_topk(clean_logits: bool) -> None:
     )
 
     indices_vllm = torch.empty(
-        (num_rows_short, top_k), dtype=torch.int32, device=DEVICE
+        (num_rows_short, top_k), dtype=torch.int32, device=DEVICE_TYPE
     )
 
     # Use vllm's kernel for short sequences
@@ -331,19 +331,19 @@ def test_deepseek_hybrid_topk(clean_logits: bool) -> None:
 
     # Create sequences with max length >= 8192
     seq_lens_long = torch.randint(
-        8192, 16384, (batch_size_long,), dtype=torch.int32, device=DEVICE
+        8192, 16384, (batch_size_long,), dtype=torch.int32, device=DEVICE_TYPE
     )
 
-    row_starts_long = torch.zeros(num_rows_long, dtype=torch.int32, device=DEVICE)
-    row_indices_long = torch.arange(num_rows_long, device=DEVICE) // next_n
-    next_n_offset_long = torch.arange(num_rows_long, device=DEVICE) % next_n
+    row_starts_long = torch.zeros(num_rows_long, dtype=torch.int32, device=DEVICE_TYPE)
+    row_indices_long = torch.arange(num_rows_long, device=DEVICE_TYPE) // next_n
+    next_n_offset_long = torch.arange(num_rows_long, device=DEVICE_TYPE) % next_n
     row_ends_long = seq_lens_long[row_indices_long] - next_n + next_n_offset_long + 1
 
     logits_long = create_random_logits(
         row_starts_long, row_ends_long, torch.float32, 43, clean_logits, "random"
     )
 
-    indices = torch.empty((num_rows_long, top_k), dtype=torch.int32, device=DEVICE)
+    indices = torch.empty((num_rows_long, top_k), dtype=torch.int32, device=DEVICE_TYPE)
 
     # Use large_context_topk kernel for long sequences
     if next_n == 1:
@@ -360,7 +360,7 @@ def test_deepseek_hybrid_topk(clean_logits: bool) -> None:
     )
 
     torch_indices_short = torch.empty(
-        (num_rows_short, top_k), dtype=torch.int32, device=DEVICE
+        (num_rows_short, top_k), dtype=torch.int32, device=DEVICE_TYPE
     )
     for i in range(num_rows_short):
         row_end = int(row_ends_short[i])
@@ -378,7 +378,7 @@ def test_deepseek_hybrid_topk(clean_logits: bool) -> None:
     ), "top_k_per_row_decode kernel (short sequences) doesn't match torch.topk"
 
     torch_indices_long = torch.empty(
-        (num_rows_long, top_k), dtype=torch.int32, device=DEVICE
+        (num_rows_long, top_k), dtype=torch.int32, device=DEVICE_TYPE
     )
     for i in range(num_rows_long):
         row_end = int(row_ends_long[i])

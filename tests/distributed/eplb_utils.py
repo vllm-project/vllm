@@ -14,6 +14,8 @@ from vllm.distributed.parallel_state import (
 from vllm.platforms import current_platform
 from vllm.utils.system_utils import update_environment_variables
 
+DEVICE_TYPE = current_platform.device_type
+
 mp.set_start_method("spawn", force=True)
 
 
@@ -42,7 +44,7 @@ def distributed_run(fn, world_size, *args):
 def set_env_vars_and_device(env: dict[str, str]) -> None:
     update_environment_variables(env)
     local_rank = os.environ["LOCAL_RANK"]
-    device = torch.device(f"{current_platform.device_type}:{local_rank}")
+    device = torch.device(f"{DEVICE_TYPE}:{local_rank}")
     torch.accelerator.set_device_index(device)
 
     # Create a minimal vllm config for init_distributed_environment

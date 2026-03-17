@@ -24,6 +24,8 @@ from vllm.config import set_current_vllm_config
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.platforms import current_platform
 
+DEVICE_TYPE = current_platform.device_type
+
 # TODO: Integrate ROCMAiterMLASparseBackend for ROCm.
 # The ROCm sparse MLA backend (rocm_aiter_mla_sparse.py) has a compatible
 # forward_mqa interface but needs validation on ROCm hardware.
@@ -218,7 +220,7 @@ def test_sparse_backend_decode_correctness(
     batch_spec = SPARSE_BACKEND_BATCH_SPECS[batch_name]
     use_fp8_ds_mla_quantization = kv_cache_dtype == "fp8_ds_mla"
 
-    device = torch.device(current_platform.device_type)
+    device = torch.device(DEVICE_TYPE)
     dtype = torch.bfloat16
 
     # Model hyper-parameters (kept intentionally small for the unit test)
@@ -578,7 +580,7 @@ def _triton_convert_reference_impl(
 def test_triton_convert_req_index_to_global_index_decode_only(
     block_size, num_topk_tokens
 ):
-    device = torch.device(current_platform.device_type)
+    device = torch.device(DEVICE_TYPE)
     num_tokens = 8
     num_requests = 4
     max_blocks_per_req = 10
@@ -631,7 +633,7 @@ def test_triton_convert_req_index_to_global_index_decode_only(
     reason="FlashMLASparseBackend requires CUDA 9.0 or higher",
 )
 def test_triton_convert_req_index_to_global_index_with_prefill_workspace(block_size):
-    device = torch.device(current_platform.device_type)
+    device = torch.device(DEVICE_TYPE)
     num_requests = 4
     max_blocks_per_req = 8
     num_topk_tokens = 128
@@ -711,7 +713,7 @@ def test_split_prefill_chunks(seq_lens, max_buf, expected):
 
 def test_triton_convert_returns_valid_counts():
     """Test that return_valid_counts correctly counts non-negative indices."""
-    device = torch.device(current_platform.device_type)
+    device = torch.device(DEVICE_TYPE)
     num_tokens = 8
     num_requests = 2
     max_blocks_per_req = 10

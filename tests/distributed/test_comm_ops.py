@@ -29,6 +29,8 @@ from ..utils import (
     multi_process_parallel,
 )
 
+DEVICE_TYPE = current_platform.device_type
+
 
 @ray.remote(num_gpus=1, max_calls=1)
 def all_reduce_test_worker(
@@ -43,13 +45,13 @@ def all_reduce_test_worker(
     # they will be able to set the device to the correct GPU
     monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
     monkeypatch.delenv("ZE_AFFINITY_MASK", raising=False)
-    device = torch.device(f"{current_platform.device_type}:{rank}")
+    device = torch.device(f"{DEVICE_TYPE}:{rank}")
     torch.accelerator.set_device_index(device)
     init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
     num_elements = 8
     all_tensors = [
         torch.arange(
-            num_elements, dtype=torch.float32, device=current_platform.device_type
+            num_elements, dtype=torch.float32, device=DEVICE_TYPE
         )
         * (r + 1)
         for r in range(tp_size)
@@ -73,14 +75,14 @@ def reduce_scatter_test_worker(
     # they will be able to set the device to the correct GPU
     monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
     monkeypatch.delenv("ZE_AFFINITY_MASK", raising=False)
-    device = torch.device(f"{current_platform.device_type}:{rank}")
+    device = torch.device(f"{DEVICE_TYPE}:{rank}")
     torch.accelerator.set_device_index(device)
     init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
 
     num_elements = 8
     all_tensors = [
         torch.arange(
-            num_elements, dtype=torch.float32, device=current_platform.device_type
+            num_elements, dtype=torch.float32, device=DEVICE_TYPE
         )
         * (r + 1)
         for r in range(tp_size)
@@ -108,7 +110,7 @@ def all_gather_test_worker(
     # they will be able to set the device to the correct GPU
     monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
     monkeypatch.delenv("ZE_AFFINITY_MASK", raising=False)
-    device = torch.device(f"{current_platform.device_type}:{rank}")
+    device = torch.device(f"{DEVICE_TYPE}:{rank}")
     torch.accelerator.set_device_index(device)
     init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
     num_dimensions = 3
@@ -119,7 +121,7 @@ def all_gather_test_worker(
     for all_gather_dimension in range(num_dimensions):
         all_tensors = [
             torch.arange(
-                total_size, dtype=torch.float32, device=current_platform.device_type
+                total_size, dtype=torch.float32, device=DEVICE_TYPE
             ).reshape(tensor_size)
             * (r + 1)
             for r in range(tp_size)
@@ -143,19 +145,19 @@ def broadcast_tensor_dict_test_worker(
     # they will be able to set the device to the correct GPU
     monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
     monkeypatch.delenv("ZE_AFFINITY_MASK", raising=False)
-    device = torch.device(f"{current_platform.device_type}:{rank}")
+    device = torch.device(f"{DEVICE_TYPE}:{rank}")
     torch.accelerator.set_device_index(device)
     init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
     test_dict = {
         # device tensor
-        "a": torch.arange(8, dtype=torch.float32, device=current_platform.device_type),
+        "a": torch.arange(8, dtype=torch.float32, device=DEVICE_TYPE),
         # CPU tensor
         "b": torch.arange(16, dtype=torch.int8, device="cpu"),
         "c": "test",
         "d": [1, 2, 3],
         "e": {"a": 1, "b": 2},
         # empty tensor
-        "f": torch.tensor([], dtype=torch.float32, device=current_platform.device_type),
+        "f": torch.tensor([], dtype=torch.float32, device=DEVICE_TYPE),
     }
 
     if (rank % tp_size) == 0:
@@ -181,20 +183,20 @@ def send_recv_tensor_dict_test_worker(
 ):
     monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
     monkeypatch.delenv("ZE_AFFINITY_MASK", raising=False)
-    device = torch.device(f"{current_platform.device_type}:{rank}")
+    device = torch.device(f"{DEVICE_TYPE}:{rank}")
     torch.accelerator.set_device_index(device)
     init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
 
     test_dict = {
         # device tensor
-        "a": torch.arange(8, dtype=torch.float32, device=current_platform.device_type),
+        "a": torch.arange(8, dtype=torch.float32, device=DEVICE_TYPE),
         # CPU tensor
         "b": torch.arange(16, dtype=torch.int8, device="cpu"),
         "c": "test",
         "d": [1, 2, 3],
         "e": {"a": 1, "b": 2},
         # empty tensor
-        "f": torch.tensor([], dtype=torch.float32, device=current_platform.device_type),
+        "f": torch.tensor([], dtype=torch.float32, device=DEVICE_TYPE),
     }
 
     if not get_pp_group().is_first_rank:
@@ -328,13 +330,13 @@ def send_recv_test_worker(
 ):
     monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
     monkeypatch.delenv("ZE_AFFINITY_MASK", raising=False)
-    device = torch.device(f"{current_platform.device_type}:{rank}")
+    device = torch.device(f"{DEVICE_TYPE}:{rank}")
     torch.accelerator.set_device_index(device)
     init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
 
     size = 64
     test_tensor = torch.arange(
-        64, dtype=torch.float32, device=current_platform.device_type
+        64, dtype=torch.float32, device=DEVICE_TYPE
     )
 
     if not get_pp_group().is_first_rank:

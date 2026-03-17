@@ -13,6 +13,8 @@ from vllm.utils.mem_constants import GiB_bytes
 
 from ..utils import create_new_process_for_each_test, requires_fp8
 
+DEVICE_TYPE = current_platform.device_type
+
 
 @create_new_process_for_each_test("fork" if not current_platform.is_rocm() else "spawn")
 def test_python_error():
@@ -29,14 +31,14 @@ def test_python_error():
         x = torch.empty(
             alloc_bytes,
             dtype=torch.uint8,
-            device=current_platform.device_type,
+            device=DEVICE_TYPE,
         )
         tensors.append(x)
     # release the memory
     allocator.sleep()
 
     # allocate more memory than the total memory
-    y = torch.empty(alloc_bytes, dtype=torch.uint8, device=current_platform.device_type)
+    y = torch.empty(alloc_bytes, dtype=torch.uint8, device=DEVICE_TYPE)
     tensors.append(y)
     with pytest.raises(RuntimeError):
         # when the allocator is woken up, it should raise an error
@@ -48,17 +50,17 @@ def test_python_error():
 def test_basic_cumem():
     # some tensors from default memory pool
     shape = (1024, 1024)
-    x = torch.empty(shape, device=current_platform.device_type)
+    x = torch.empty(shape, device=DEVICE_TYPE)
     x.zero_()
 
     # some tensors from custom memory pool
     allocator = CuMemAllocator.get_instance()
     with allocator.use_memory_pool():
         # custom memory pool
-        y = torch.empty(shape, device=current_platform.device_type)
+        y = torch.empty(shape, device=DEVICE_TYPE)
         y.zero_()
         y += 1
-        z = torch.empty(shape, device=current_platform.device_type)
+        z = torch.empty(shape, device=DEVICE_TYPE)
         z.zero_()
         z += 2
 
@@ -81,16 +83,16 @@ def test_basic_cumem():
 def test_cumem_with_cudagraph():
     allocator = CuMemAllocator.get_instance()
     with allocator.use_memory_pool():
-        weight = torch.eye(1024, device=current_platform.device_type)
+        weight = torch.eye(1024, device=DEVICE_TYPE)
     with allocator.use_memory_pool(tag="discard"):
-        cache = torch.empty(1024, 1024, device=current_platform.device_type)
+        cache = torch.empty(1024, 1024, device=DEVICE_TYPE)
 
     def model(x):
         out = x @ weight
         cache[: out.size(0)].copy_(out)
         return out + 1
 
-    x = torch.empty(128, 1024, device=current_platform.device_type)
+    x = torch.empty(128, 1024, device=DEVICE_TYPE)
 
     # warmup
     model(x)

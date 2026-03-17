@@ -45,6 +45,8 @@ from vllm.platforms import current_platform
 FP8_DTYPE = current_platform.fp8_dtype()
 FP4_DTYPE = torch.uint8
 
+DEVICE_TYPE = current_platform.device_type
+
 
 def is_nvfp4_supported():
     return current_platform.has_device_capability(100)
@@ -224,7 +226,7 @@ def test_fusion_silu_and_mul_quant(
     if model_class is TestSiluMulGroupFp8QuantModel and not IS_AITER_FOUND:
         pytest.skip("AITER is not supported on this GPU.")
 
-    torch.set_default_device(current_platform.device_type)
+    torch.set_default_device(DEVICE_TYPE)
     torch.set_default_dtype(dtype)
 
     x = torch.rand(num_tokens, hidden_size * 2)

@@ -51,6 +51,8 @@ from vllm.utils.deep_gemm import (
 
 FP8_DTYPE = current_platform.fp8_dtype()
 
+DEVICE_TYPE = current_platform.device_type
+
 RMS_OP = torch.ops._C.rms_norm.default
 RMS_ADD_OP = torch.ops._C.fused_add_rms_norm.default
 
@@ -342,7 +344,7 @@ def test_fusion_rmsnorm_quant(
 
     with vllm.config.set_current_vllm_config(vllm_config):
         # Setup device before model creation
-        torch.set_default_device(current_platform.device_type)
+        torch.set_default_device(DEVICE_TYPE)
         torch.set_default_dtype(dtype)
         torch.manual_seed(1)
 
@@ -413,7 +415,7 @@ def test_aiter_fusion_rmsnorm_quant(
 
         rocm_aiter_ops.refresh_env_variables()
 
-        torch.set_default_device(current_platform.device_type)
+        torch.set_default_device(DEVICE_TYPE)
         torch.set_default_dtype(dtype)
         torch.manual_seed(1)
 

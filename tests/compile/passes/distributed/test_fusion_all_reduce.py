@@ -37,6 +37,8 @@ from vllm.platforms import current_platform
 from vllm.utils.system_utils import update_environment_variables
 from vllm.utils.torch_utils import set_random_seed
 
+DEVICE_TYPE = current_platform.device_type
+
 
 class TestAllReduceRMSNormModel(torch.nn.Module):
     def __init__(self, hidden_size=16, token_num=16, eps=1e-6):
@@ -261,7 +263,7 @@ def all_reduce_fusion_pass_on_test_model(
 ):
     set_random_seed(0)
 
-    device = torch.device(f"{current_platform.device_type}:{local_rank}")
+    device = torch.device(f"{DEVICE_TYPE}:{local_rank}")
     torch.accelerator.set_device_index(device)
     torch.set_default_device(device)
     torch.set_default_dtype(dtype)
@@ -294,7 +296,7 @@ def all_reduce_fusion_pass_on_test_model(
         fuse_allreduce_rms=True, eliminate_noops=True
     )
     vllm_config.device_config = DeviceConfig(
-        device=torch.device(current_platform.device_type)
+        device=torch.device(DEVICE_TYPE)
     )
     vllm_config.parallel_config.rank = local_rank  # Setup rank for debug path
 
