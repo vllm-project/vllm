@@ -526,7 +526,7 @@ Expected output:
 
 An OpenAI client example can be found here: [examples/pooling/embed/openai_embedding_matryoshka_fy_client.py](../../../examples/pooling/embed/openai_embedding_matryoshka_fy_client.py)
 
-### Deprecated Features
+### Removed Features
 
 #### Remove normalize from PoolingParams
 

@@ -261,7 +261,7 @@ Implement alignment with transformers [ForSequenceClassificationLoss](https://gi
 
 You can modify the logit_bias through the logit_bias parameter in `vllm.config.PoolerConfig`.
 
-### Deprecated Features
+### Removed Features
 
 #### Remove softmax from PoolingParams
 

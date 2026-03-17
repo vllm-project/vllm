@@ -229,7 +229,7 @@ its Sentence Transformers configuration file (`modules.json`) takes priority ove
 You can further customize this via the `--pooler-config` option,
 which takes priority over both the model's and Sentence Transformers' defaults.
 
-## Deprecated Features
+## Removed Features
 
 ### Encode task
 
