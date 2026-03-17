@@ -44,6 +44,17 @@ class KVCacheSpec:
         """
         raise NotImplementedError
 
+    @property
+    def auxiliary_memory_per_block(self) -> int:
+        """Extra per-block memory not stored in the KV cache tensor itself.
+
+        Override in subclasses that allocate auxiliary buffers (e.g. INT8
+        scale caches).  This is subtracted from available memory when
+        computing how many blocks fit, but is NOT included in
+        page_size_bytes (which sizes the KV cache tensor).
+        """
+        return 0
+
     def copy_with_new_block_size(self, block_size: int) -> Self:
         """
         Create a new KVCacheSpec from self but replacing the block size.
@@ -75,6 +86,25 @@ class AttentionSpec(KVCacheSpec):
             assert self.page_size_padded >= real_page_size
             return self.page_size_padded
         return real_page_size
+
+    @property
+    def auxiliary_memory_per_block(self) -> int:
+        """Extra per-block memory not stored in the KV cache tensor itself.
+
+        For INT8 KV cache, the Triton backend allocates two separate float32
+        scale tensors of shape [num_blocks, block_size, num_kv_heads] — one
+        for keys, one for values.  This memory must be reserved when computing
+        how many blocks fit in GPU memory, but must NOT be included in
+        page_size_bytes (which sizes the KV cache tensor).
+        """
+        if self.dtype != torch.int8:
+            return 0
+        return (
+            2
+            * self.block_size
+            * self.num_kv_heads
+            * get_dtype_size(torch.float32)
+        )
 
     @property
     def real_page_size_bytes(self) -> int:

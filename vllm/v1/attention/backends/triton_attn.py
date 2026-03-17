@@ -411,8 +411,7 @@ class TritonAttentionImpl(AttentionImpl):
         self.supports_quant_query_input = current_platform.is_cuda()
         # Lazy-allocated per-(token,head) scale caches for INT8 KV cache.
         # Shape: [num_blocks, block_size, num_kv_heads], dtype=float32.
-        # TODO: Include scale cache memory in page_size_bytes so the KV block
-        # allocator accounts for this overhead during memory profiling.
+        # Memory overhead is accounted for via AttentionSpec.auxiliary_memory_per_block.
         self._int8_k_scale_cache: torch.Tensor | None = None
         self._int8_v_scale_cache: torch.Tensor | None = None
 
