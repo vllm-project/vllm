@@ -226,7 +226,7 @@ class OpenAIServingRender:
 
         if not self.use_harmony:
             # Common case.
-            error_check_ret = self._validate_chat_template(
+            error_check_ret = self.validate_chat_template(
                 request_chat_template=request.chat_template,
                 chat_template_kwargs=request.chat_template_kwargs,
                 trust_request_chat_template=self.trust_request_chat_template,
@@ -234,7 +234,7 @@ class OpenAIServingRender:
             if error_check_ret is not None:
                 return error_check_ret
 
-            conversation, engine_prompts = await self._preprocess_chat(
+            conversation, engine_prompts = await self.preprocess_chat(
                 request,
                 request.messages,
                 default_template=self.chat_template,
@@ -328,7 +328,7 @@ class OpenAIServingRender:
                 "prompt_logprobs is not compatible with prompt embeds."
             )
 
-        engine_prompts = await self._preprocess_completion(
+        engine_prompts = await self.preprocess_completion(
             request,
             prompt_input=request.prompt,
             prompt_embeds=request.prompt_embeds,
@@ -426,7 +426,7 @@ class OpenAIServingRender:
     ) -> ErrorResponse | None:
         return await self.model_registry.check_model(request.model)
 
-    def _validate_chat_template(
+    def validate_chat_template(
         self,
         request_chat_template: str | None,
         chat_template_kwargs: dict[str, Any] | None,
@@ -447,7 +447,7 @@ class OpenAIServingRender:
             )
         return None
 
-    async def _preprocess_completion(
+    async def preprocess_completion(
         self,
         request: Any,
         prompt_input: str | list[str] | list[int] | list[list[int]] | None,
@@ -490,7 +490,7 @@ class OpenAIServingRender:
             },
         )
 
-    async def _preprocess_chat(
+    async def preprocess_chat(
         self,
         request: Any,
         messages: list[Any],
