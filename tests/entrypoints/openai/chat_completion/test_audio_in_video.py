@@ -8,8 +8,8 @@ import openai
 import pytest
 import pytest_asyncio
 
-from ...conftest import VideoTestAssets
-from ...utils import RemoteOpenAIServer
+from tests.conftest import VideoTestAssets
+from tests.utils import RemoteOpenAIServer
 
 MODEL_NAME = "Qwen/Qwen2.5-Omni-3B"
 
