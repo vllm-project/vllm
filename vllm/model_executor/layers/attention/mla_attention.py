@@ -517,7 +517,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 self._k_scale,
             )
             if self.attn_backend.accept_output_buffer:
-                output = torch.empty(output_shape, dtype=q.dtype, device=q.device)
+                output = torch.zeros(output_shape, dtype=q.dtype, device=q.device)
                 torch.ops.vllm.unified_mla_attention_with_output(
                     q,
                     kv_c_normed,
@@ -690,6 +690,15 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             if not is_sparse_impl:
                 assert attn_metadata.decode is not None
             attn_out, lse = self.impl.forward_mqa(mqa_q, kv_cache, attn_metadata, self)
+
+            # Zero out padded region for CUDA graphs. Padded requests have
+            # seq_lens=0 in the decode metadata (device tensor updated in-place
+            # before each graph replay), so masked_fill_ always launches a kernel
+            # during capture yet only zeros padding slots during replay.
+            if attn_metadata.decode is not None:
+                decode_seq_lens = attn_metadata.decode.seq_lens
+                pad_mask = (decode_seq_lens == 0).view(-1, 1, 1)
+                attn_out[:decode_seq_lens.shape[0]].masked_fill_(pad_mask, 0)
 
             # correct dcp attn_out with lse.
             if self.impl.dcp_world_size > 1:
