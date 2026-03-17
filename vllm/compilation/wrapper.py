@@ -120,7 +120,12 @@ class TorchCompileWithNoGuardsWrapper:
                     entry.guard_type == "SHAPE_ENV" for entry in x
                 ]
             else:
-                options["guard_filter_fn"] = torch.compiler.skip_all_guards_unsafe
+                if hasattr(torch.compiler, "skip_all_guards_unsafe"):
+                    # Torch 2.10+ provides skip_all_guards_unsafe
+                    options["guard_filter_fn"] = torch.compiler.skip_all_guards_unsafe
+                else:
+                    # Equivalent fallback for older PyTorch: skip all guards
+                    options["guard_filter_fn"] = lambda x: [False for _ in x]
 
         compiled_ptr: Any = self.forward
         # Validate that unbacked dynamic shapes require VLLM_USE_BYTECODE_HOOK=False
