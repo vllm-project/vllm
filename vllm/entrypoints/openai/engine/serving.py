@@ -591,20 +591,11 @@ class OpenAIServing:
             )
             raise RequestRejectedError()
 
-    def _convert_generation_error_to_response(self, e: Exception) -> ErrorResponse:
-        """Convert GenerationError or RequestRejectedError to ErrorResponse."""
-        if isinstance(e, GenerationError):
-            return self.create_error_response(
-                str(e), err_type=e.err_type, status_code=e.status_code
-            )
-        # fallback for other exception types
-        return self.create_error_response(str(e))
-
     def _convert_generation_error_to_streaming_response(self, e: Exception) -> str:
         """
         Convert GenerationError or RequestRejectedError to streaming error response.
         """
-        if isinstance(e, (GenerationError)):
+        if isinstance(e, GenerationError):
             return self.create_streaming_error_response(
                 str(e), err_type=e.err_type, status_code=e.status_code
             )
