@@ -76,9 +76,16 @@ ENV UV_LINK_MODE="copy"
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,src=requirements/common.txt,target=/workspace/vllm/requirements/common.txt \
     --mount=type=bind,src=requirements/xpu.txt,target=/workspace/vllm/requirements/xpu.txt \
-    --mount=type=bind,src=requirements/xpu-test.txt,target=/workspace/vllm/requirements/xpu-test.txt \
+    --mount=type=bind,src=requirements/xpu-test.in,target=/workspace/vllm/requirements/xpu-test.in \
     uv pip install --upgrade pip && \
     uv pip install -r requirements/xpu.txt && \
+    uv pip compile /workspace/vllm/requirements/xpu-test.in \
+        -o /workspace/vllm/requirements/xpu-test.txt \
+        -c /workspace/vllm/requirements/xpu.txt \
+        --index-strategy unsafe-best-match \
+        --extra-index-url ${PIP_EXTRA_INDEX_URL} \
+        --python-version ${PYTHON_VERSION} && \
+    \
     uv pip install --no-build-isolation -r /workspace/vllm/requirements/xpu-test.txt
 
 
