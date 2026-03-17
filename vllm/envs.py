@@ -244,6 +244,7 @@ if TYPE_CHECKING:
     VLLM_ELASTIC_EP_SCALE_UP_LAUNCH: bool = False
     VLLM_ELASTIC_EP_DRAIN_REQUESTS: bool = False
     VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS: bool = False
+    VLLM_ROCM_HIP_ONLINE_TUNING: bool = False
 
 
 def get_default_cache_root():
@@ -1025,6 +1026,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     "VLLM_LOG_BATCHSIZE_INTERVAL": lambda: float(
         os.getenv("VLLM_LOG_BATCHSIZE_INTERVAL", "-1")
+    ),
+    # Whether to use HIP online tuning for ROCm
+    # By default is disabled.
+    "VLLM_ROCM_HIP_ONLINE_TUNING": lambda: (
+        os.getenv("VLLM_ROCM_HIP_ONLINE_TUNING", "False").lower() in ("true", "1")
     ),
     "VLLM_DISABLE_COMPILE_CACHE": disable_compile_cache,
     # If set, vllm will run in development mode, which will enable

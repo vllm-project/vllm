@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import argparse
-import os
 import signal
 
 import uvloop
@@ -46,9 +45,6 @@ class ServeSubcommand(CLISubcommand):
 
     @staticmethod
     def cmd(args: argparse.Namespace) -> None:
-        if getattr(args, "hip_online_tuning", False):
-            os.environ["HIP_ONLINE_TUNING"] = "1"
-
         # If model is specified in CLI (as positional arg), it takes precedence
         if hasattr(args, "model_tag") and args.model_tag is not None:
             args.model = args.model_tag
@@ -141,12 +137,6 @@ class ServeSubcommand(CLISubcommand):
             default=False,
             help="Launch a gRPC server instead of the HTTP OpenAI-compatible "
             "server. Requires: pip install vllm[grpc].",
-        )
-        serve_parser.add_argument(
-            "--hip_online_tuning",
-            action="store_true",
-            default=False,
-            help="Enable AITER hipBLASLt online GEMM tuning. Disabled by default.",
         )
         serve_parser.epilog = VLLM_SUBCMD_PARSER_EPILOG.format(subcmd=self.name)
         return serve_parser
