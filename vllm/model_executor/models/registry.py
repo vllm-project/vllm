@@ -274,8 +274,10 @@ _LATE_INTERACTION_MODELS = {
     "ColBERTJinaRobertaModel": ("colbert", "ColBERTJinaRobertaModel"),
     # [Multimodal]
     "ColModernVBertForRetrieval": ("colmodernvbert", "ColModernVBertForRetrieval"),
+    "ColPaliForRetrieval": ("colpali", "ColPaliModel"),
     "ColQwen3": ("colqwen3", "ColQwen3Model"),
     "OpsColQwen3Model": ("colqwen3", "ColQwen3Model"),
+    "ColQwen3_5": ("colqwen3_5", "ColQwen3_5Model"),
     "Qwen3VLNemotronEmbedModel": ("colqwen3", "ColQwen3Model"),
 }
 
