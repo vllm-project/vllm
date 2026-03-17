@@ -914,6 +914,7 @@ def get_cutlass_moe_mm_data(
     n: int,
     k: int,
     blockscale_offsets: torch.Tensor | None = None,
+    is_gated: bool = True,
 ):
     """
     Prepare data necessary to perform CUTLASS grouped matrix multiplications
@@ -937,6 +938,8 @@ def get_cutlass_moe_mm_data(
                           its computation. The number of block scale rows
                           computed with expert E is blockscale_offsets[E + 1] -
                           blockscale_offsets[E]
+    - is_gated: Whether the activation is gated (gate + up). When True, the
+                first GEMM N dimension is 2*n; when False, it is n.
     """
     return torch.ops._C.get_cutlass_moe_mm_data(
         topk_ids,
@@ -949,6 +952,7 @@ def get_cutlass_moe_mm_data(
         n,
         k,
         blockscale_offsets,
+        is_gated,
     )
 
 
