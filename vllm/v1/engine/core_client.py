@@ -139,7 +139,7 @@ class EngineCoreClient(ABC):
     def add_request(self, request: EngineCoreRequest) -> None:
         raise NotImplementedError
 
-    def profile(self, is_start: bool = True, profile_prefix: str | None = None) -> None:
+    def profile(self, is_start: bool = True, profile_prefix: str | None = None, delay: int = 0) -> None:
         raise NotImplementedError
 
     def reset_mm_cache(self) -> None:
@@ -215,7 +215,8 @@ class EngineCoreClient(ABC):
         raise NotImplementedError
 
     async def profile_async(
-        self, is_start: bool = True, profile_prefix: str | None = None
+        self, is_start: bool = True, profile_prefix: str | None = None,
+        delay: int = 0,
     ) -> None:
         raise NotImplementedError
 
@@ -301,8 +302,8 @@ class InprocClient(EngineCoreClient):
     def shutdown(self, timeout: float | None = None) -> None:
         self.engine_core.shutdown()
 
-    def profile(self, is_start: bool = True, profile_prefix: str | None = None) -> None:
-        self.engine_core.profile(is_start, profile_prefix)
+    def profile(self, is_start: bool = True, profile_prefix: str | None = None, delay: int = 0) -> None:
+        self.engine_core.profile(is_start, profile_prefix, delay=delay)
 
     def reset_mm_cache(self) -> None:
         self.engine_core.reset_mm_cache()
@@ -853,8 +854,8 @@ class SyncMPClient(MPClient):
         if request_ids and not self.resources.engine_dead:
             self._send_input(EngineCoreRequestType.ABORT, request_ids)
 
-    def profile(self, is_start: bool = True, profile_prefix: str | None = None) -> None:
-        self.call_utility("profile", is_start, profile_prefix)
+    def profile(self, is_start: bool = True, profile_prefix: str | None = None, delay: int = 0) -> None:
+        self.call_utility("profile", is_start, profile_prefix, delay)
 
     def reset_mm_cache(self) -> None:
         self.call_utility("reset_mm_cache")
@@ -1062,6 +1063,14 @@ class AsyncMPClient(MPClient):
     async def call_utility_async(self, method: str, *args) -> Any:
         return await self._call_utility_async(method, *args, engine=self.core_engine)
 
+    async def call_utility_all_async(self, method: str, *args) -> list[Any]:
+        """Call utility on all engine cores and return all results.
+
+        For DP=1, this is equivalent to call_utility_async wrapped in a list.
+        DP subclasses override to broadcast to all engines.
+        """
+        return [await self.call_utility_async(method, *args)]
+
     async def _call_utility_async(
         self, method: str, *args, engine: EngineIdentity
     ) -> Any:
@@ -1100,9 +1109,11 @@ class AsyncMPClient(MPClient):
         return await self.call_utility_async("is_scheduler_paused")
 
     async def profile_async(
-        self, is_start: bool = True, profile_prefix: str | None = None
-    ) -> None:
-        await self.call_utility_async("profile", is_start, profile_prefix)
+        self, is_start: bool = True, profile_prefix: str | None = None,
+        delay: int = 0, max_steps: int = 0,
+    ) -> float | None:
+        return await self.call_utility_async("profile", is_start, profile_prefix,
+                                             delay, max_steps)
 
     async def reset_mm_cache_async(self) -> None:
         await self.call_utility_async("reset_mm_cache")
@@ -1337,6 +1348,21 @@ class DPAsyncMPClient(AsyncMPClient):
     def get_core_engine_for_request(self, request: EngineCoreRequest):
         return self.core_engine
 
+    async def call_utility_async(self, method: str, *args) -> Any:
+        """Broadcast utility call to ALL DP engine cores.
+
+        Returns the result from the first engine only (consistent with
+        DPLBAsyncMPClient). This ensures sleep/wake_up/set_prefill_only
+        reach all DP ranks, not just rank 0.
+        """
+        return (
+            await asyncio.gather(
+                *[
+                    self._call_utility_async(method, *args, engine=engine)
+                    for engine in self.core_engines
+                ]
+            )
+        )[0]
 
 class DPLBAsyncMPClient(DPAsyncMPClient):
     """Asyncio-compatible client for multi-proc, multi-engine (data parallel)
