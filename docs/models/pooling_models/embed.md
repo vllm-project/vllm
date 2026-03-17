@@ -307,7 +307,6 @@ and passing a list of `messages` in the request. Refer to the examples below for
 
 Full example: [examples/pooling/embed/vision_embedding_online.py](../../../examples/pooling/embed/vision_embedding_online.py)
 
-
 ### Cohere Embed API
 
 Our API is also compatible with [Cohere's Embed v2 API](https://docs.cohere.com/reference/embed) which adds support for some modern embedding feature such as truncation, output dimensions, embedding types, and input types. This endpoint works with any embedding model (including multimodal models).
