@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import warnings
 from dataclasses import field
 from typing import ClassVar, Literal
 
@@ -210,13 +209,11 @@ class CacheConfig:
     @classmethod
     def _warn_deprecated_calculate_kv_scales(cls, calculate_kv_scales: bool) -> bool:
         if calculate_kv_scales:
-            warnings.warn(
+            logger.warning(
                 "The `--calculate-kv-scales` option is deprecated and will "
                 "be removed in v0.19. The scales will be loaded from the "
                 "model checkpoint if available, otherwise they default to "
-                "1.0.",
-                DeprecationWarning,
-                stacklevel=2,
+                "1.0."
             )
         return calculate_kv_scales
 
