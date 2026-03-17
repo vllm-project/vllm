@@ -24,7 +24,7 @@ steps:
     - pytest -v -s v1/engine --ignore v1/engine/test_preprocess_error_handling.py
   mirror:
     amd:
-      device: mi325_1
+      device: mi250_1
       depends_on:
       - image-build-amd
 
@@ -37,7 +37,7 @@ steps:
     - pytest -v -s v1/e2e/general/test_async_scheduling.py
   mirror:
     amd:
-      device: mi325_1
+      device: mi250_1
       depends_on:
       - image-build-amd
 
