@@ -16,6 +16,9 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.openai.orca_metrics import metrics_header
+from vllm.entrypoints.openai.request_stats_headers import (
+    maybe_build_request_stats_headers,
+)
 from vllm.entrypoints.openai.utils import validate_json_request
 from vllm.entrypoints.utils import (
     load_aware_call,
@@ -66,9 +69,13 @@ async def create_chat_completion(request: ChatCompletionRequest, raw_request: Re
         )
 
     elif isinstance(generator, ChatCompletionResponse):
+        headers = {**(metrics_header(metrics_header_format) or {})}
+        stats_headers = maybe_build_request_stats_headers(raw_request)
+        if stats_headers:
+            headers.update(stats_headers)
         return JSONResponse(
             content=generator.model_dump(),
-            headers=metrics_header(metrics_header_format),
+            headers=headers or None,
         )
 
     return StreamingResponse(content=generator, media_type="text/event-stream")

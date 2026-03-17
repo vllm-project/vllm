@@ -14,6 +14,9 @@ from vllm.entrypoints.openai.responses.protocol import (
     ResponsesResponse,
     StreamingResponsesResponse,
 )
+from vllm.entrypoints.openai.request_stats_headers import (
+    maybe_build_request_stats_headers,
+)
 from vllm.entrypoints.openai.responses.serving import OpenAIServingResponses
 from vllm.entrypoints.openai.utils import validate_json_request
 from vllm.entrypoints.utils import (
@@ -68,7 +71,10 @@ async def create_responses(request: ResponsesRequest, raw_request: Request):
             content=generator.model_dump(), status_code=generator.error.code
         )
     elif isinstance(generator, ResponsesResponse):
-        return JSONResponse(content=generator.model_dump())
+        headers = maybe_build_request_stats_headers(raw_request)
+        return JSONResponse(
+            content=generator.model_dump(), headers=headers
+        )
 
     return StreamingResponse(
         content=_convert_stream_to_sse_events(generator), media_type="text/event-stream"

@@ -5,7 +5,7 @@
 # https://github.com/lm-sys/FastChat/blob/168ccc29d3f7edc50823016105c024fe2282732a/fastchat/protocol/openai_api_protocol.py
 import time
 from http import HTTPStatus
-from typing import Any, ClassVar, Literal, TypeAlias
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, TypeAlias
 
 import regex as re
 from pydantic import (
@@ -19,6 +19,9 @@ from vllm.entrypoints.chat_utils import make_tool_call_id
 from vllm.logger import init_logger
 from vllm.utils import random_uuid
 from vllm.utils.import_utils import resolve_obj_by_qualname
+
+if TYPE_CHECKING:
+    from vllm.v1.metrics.stats import RequestStateStats
 
 logger = init_logger(__name__)
 
@@ -109,8 +112,12 @@ class UsageInfo(OpenAIBaseModel):
 
 
 class RequestResponseMetadata(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     request_id: str
     final_usage_info: UsageInfo | None = None
+    request_stats: "RequestStateStats | None" = None
+    num_cached_tokens: int = 0
 
 
 class JsonSchemaResponseFormat(OpenAIBaseModel):

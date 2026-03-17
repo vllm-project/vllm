@@ -14,6 +14,9 @@ from vllm.entrypoints.openai.completion.protocol import (
 from vllm.entrypoints.openai.completion.serving import OpenAIServingCompletion
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.openai.orca_metrics import metrics_header
+from vllm.entrypoints.openai.request_stats_headers import (
+    maybe_build_request_stats_headers,
+)
 from vllm.entrypoints.openai.utils import validate_json_request
 from vllm.entrypoints.utils import (
     load_aware_call,
@@ -58,9 +61,13 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
             content=generator.model_dump(), status_code=generator.error.code
         )
     elif isinstance(generator, CompletionResponse):
+        headers = {**(metrics_header(metrics_header_format) or {})}
+        stats_headers = maybe_build_request_stats_headers(raw_request)
+        if stats_headers:
+            headers.update(stats_headers)
         return JSONResponse(
             content=generator.model_dump(),
-            headers=metrics_header(metrics_header_format),
+            headers=headers or None,
         )
 
     return StreamingResponse(content=generator, media_type="text/event-stream")

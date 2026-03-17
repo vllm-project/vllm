@@ -554,6 +554,11 @@ class OpenAIServingCompletion(OpenAIServing):
             )
 
         request_metadata.final_usage_info = usage
+        if last_final_res is not None:
+            request_metadata.request_stats = last_final_res.metrics
+            request_metadata.num_cached_tokens = (
+                last_final_res.num_cached_tokens or 0
+            )
         if final_res_batch:
             kv_transfer_params = final_res_batch[0].kv_transfer_params
         return CompletionResponse(

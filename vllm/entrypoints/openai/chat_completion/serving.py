@@ -1605,6 +1605,8 @@ class OpenAIServingChat(OpenAIServing):
             )
 
         request_metadata.final_usage_info = usage
+        request_metadata.request_stats = final_res.metrics
+        request_metadata.num_cached_tokens = final_res.num_cached_tokens or 0
 
         response = ChatCompletionResponse(
             id=request_id,
