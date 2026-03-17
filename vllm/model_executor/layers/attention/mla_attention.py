@@ -1865,6 +1865,11 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                     if self._use_cudnn_prefill
                     else MLACommonPrefillMetadata.ChunkedContextMetadata
                 )
+                prefill_tokens_with_context = None
+                if num_prefills_with_context_cpu > 0:
+                    prefill_tokens_with_context = prefill_query_start_loc[
+                        num_prefills_with_context_cpu
+                    ].item()
                 if self.dcp_world_size > 1:
                     chunked_context_metadata = chunked_context_metadata_cls(
                         cu_seq_lens=cu_seq_lens_cpu.to(device, non_blocking=True),
@@ -1884,9 +1889,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                         ),
                         cu_seq_lens_lst=cu_seq_lens_cpu.tolist(),
                         chunk_size=padded_local_max_context_chunk_across_ranks,
-                        prefill_tokens_with_context=prefill_query_start_loc[
-                            num_prefills_with_context_cpu
-                        ].item(),
+                        prefill_tokens_with_context=prefill_tokens_with_context,
                     )
                 else:
                     chunked_context_metadata = chunked_context_metadata_cls(
@@ -1900,9 +1903,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                         ),
                         chunk_total_token=chunk_total_token,
                         workspace=self.chunked_prefill_workspace,
-                        prefill_tokens_with_context=prefill_query_start_loc[
-                            num_prefills_with_context_cpu
-                        ].item(),
+                        prefill_tokens_with_context=prefill_tokens_with_context,
                     )
 
                 if self._use_cudnn_prefill:
