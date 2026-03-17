@@ -229,7 +229,7 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
     && echo "finish git clone flashinfer..." \
     && rm -rf build \
     && export TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list} \
-    && FLASHINFER_ENABLE_AOT=1 python3 setup.py bdist_wheel --dist-dir=../flashinfer-dist --verbose \
+    && FLASHINFER_ENABLE_AOT=1 python3 -m build --wheel --outdir ../flashinfer-dist --verbose \
     && cd .. \
     && rm -rf flashinfer
 
@@ -254,7 +254,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 
 #################### UNITTEST IMAGE #############################
-FROM vllm-base as test
+FROM vllm-base AS test
 COPY tests/ tests/
 
 # install build and runtime dependencies without stable torch version
