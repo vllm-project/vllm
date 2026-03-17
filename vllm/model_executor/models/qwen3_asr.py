@@ -271,7 +271,7 @@ class Qwen3ASRForConditionalGeneration(
     SupportsTranscription,
     SupportsLoRA,
 ):
-    # LoRA support: apply only to the language model, not the audio tower
+    # LoRA support
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -283,14 +283,6 @@ class Qwen3ASRForConditionalGeneration(
             "up_proj",
         ],
     }
-
-    embedding_modules = {
-        "language_model.embed_tokens": "input_embeddings",
-        "language_model.lm_head": "output_embeddings",
-    }
-
-    # Skip the audio encoder when applying LoRA
-    lora_skip_prefixes = ["audio_tower."]
 
     supported_languages = ISO639_1_SUPPORTED_LANGS
 
