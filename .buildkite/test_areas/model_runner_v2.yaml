@@ -18,9 +18,9 @@ steps:
   - pytest -v -s v1/engine/test_llm_engine.py -k "not test_engine_metrics"
   # This requires eager until we sort out CG correctness issues.
   # TODO: remove ENFORCE_EAGER here after https://github.com/vllm-project/vllm/pull/32936 is merged.
-  - ENFORCE_EAGER=1 pytest -v -s v1/e2e/test_async_scheduling.py -k "not ngram"
-  - pytest -v -s v1/e2e/test_context_length.py
-  - pytest -v -s v1/e2e/test_min_tokens.py
+  - ENFORCE_EAGER=1 pytest -v -s v1/e2e/general/test_async_scheduling.py -k "not ngram"
+  - pytest -v -s v1/e2e/general/test_context_length.py
+  - pytest -v -s v1/e2e/general/test_min_tokens.py
   # Temporary hack filter to exclude ngram spec decoding based tests.
   - pytest -v -s v1/entrypoints/llm/test_struct_output_generate.py -k "xgrammar and not speculative_config6 and not speculative_config7 and not speculative_config8 and not speculative_config0"
 
@@ -101,9 +101,9 @@ steps:
   - vllm/v1/worker/gpu/
   - vllm/v1/worker/gpu_worker.py
   - tests/v1/spec_decode/test_max_len.py
-  - tests/v1/e2e/test_spec_decode.py
+  - tests/v1/e2e/spec_decode/test_spec_decode.py
   commands:
   - set -x
   - export VLLM_USE_V2_MODEL_RUNNER=1
   - pytest -v -s v1/spec_decode/test_max_len.py -k "eagle or mtp"
-  - pytest -v -s v1/e2e/test_spec_decode.py -k "eagle or mtp"
+  - pytest -v -s v1/e2e/spec_decode/test_spec_decode.py -k "eagle or mtp"
