@@ -470,27 +470,6 @@ class CpuPlatform(Platform):
         return True
 
     @classmethod
-    def is_avx512_supported(cls) -> bool:
-        if hasattr(torch._C._cpu, "_is_avx512_supported"):
-            return torch._C._cpu._is_avx512_supported()
-        elif hasattr(torch.cpu, "_is_avx512_supported"):
-            return torch.cpu._is_avx512_supported()
-        return False
-
-    @classmethod
-    def is_avx512_bf16_supported(cls) -> bool:
-        return hasattr(torch._C._cpu, '_is_avx512_bf16_supported') \
-            and torch._C._cpu._is_avx512_bf16_supported()
-
-    @classmethod
-    def is_amx_tile_supported(cls) -> bool:
-        if hasattr(torch._C._cpu, "_is_amx_tile_supported"):
-            return torch._C._cpu._is_amx_tile_supported()
-        elif hasattr(torch.cpu, "_is_amx_tile_supported"):
-            return torch.cpu._is_amx_tile_supported()
-        return False
-
-    @classmethod
     def import_kernels(cls) -> None:
         if Platform.get_cpu_architecture() in (CpuArchEnum.X86,):
             # Note: The lib name is _C_AVX2/AVX512, but the module name is _C.
@@ -499,8 +478,8 @@ class CpuPlatform(Platform):
             # successfully. So ignore the exception for now, until we find
             # a solution.
             ignored_msg = "dynamic module does not define module export function"
-            if cls.is_avx512_supported():
-                if cls.is_avx512_bf16_supported():
+            if torch.cpu._is_avx512_supported():
+                if torch.cpu._is_avx512_bf16_supported():
                     try:
                         import vllm._C  # noqa: F401
                     except ImportError as e:
