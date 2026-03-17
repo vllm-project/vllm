@@ -141,10 +141,10 @@ class _SharedMmapRegion:
         self.mmap_obj = mmap.mmap(
             self.fd,
             self.total_size_bytes,
-            flags=mmap.MAP_SHARED,
+            flags=mmap.MAP_SHARED | mmap.MAP_POPULATE,
             prot=mmap.PROT_READ | mmap.PROT_WRITE,
         )
-        self.mmap_obj.madvise(mmap.MADV_WILLNEED)
+        # self.mmap_obj.madvise(mmap.MADV_WILLNEED)
         atexit.register(self.cleanup)
 
     def worker_region(self) -> tuple[int, int]:
