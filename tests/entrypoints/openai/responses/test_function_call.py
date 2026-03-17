@@ -159,6 +159,7 @@ async def test_max_tokens_with_tool_choice_required(
         # exceed `max_output_tokens`,`function_call` should be empty.
         # This behavior should be consistent with OpenAI
         assert out.type != "function_call"
+    assert response.incomplete_details.reason == "max_output_tokens"
 
 
 @pytest.mark.asyncio
