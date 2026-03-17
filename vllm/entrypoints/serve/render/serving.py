@@ -410,13 +410,13 @@ class OpenAIServingRender:
         # truncate here.
         truncate = request.truncate_prompt_tokens
         if truncate is not None:
-            max_input_tokens = (
-                self.model_config.max_model_len
-                - (request.max_completion_tokens or request.max_tokens or 0)
-            )
             if truncate == -1:
-                truncate = max_input_tokens
-            if truncate == 0:
+                max_input_tokens = (
+                    self.model_config.max_model_len
+                    - (request.max_completion_tokens or request.max_tokens or 0)
+                )
+                truncate = max(max_input_tokens, 0)
+            if truncate <= 0:
                 prompt_token_ids = []
             elif len(prompt_token_ids) > truncate:
                 prompt_token_ids = prompt_token_ids[-truncate:]
