@@ -52,19 +52,19 @@ if [ -z "$RECENT_COMMITS" ]; then
 fi
 
 # Identify tags to delete: commit SHA not in recent history
-TAGS_TO_DELETE=""
+TAGS_TO_DELETE=()
 KEEP_COUNT=0
-DELETE_COUNT=0
 while IFS= read -r tag; do
   [ -z "$tag" ] && continue
   COMMIT_SHA="${tag%-rocm-base}"
   if echo "$RECENT_COMMITS" | grep -q "^${COMMIT_SHA}$"; then
     KEEP_COUNT=$((KEEP_COUNT + 1))
   else
-    TAGS_TO_DELETE="${TAGS_TO_DELETE}${tag}"$'\n'
-    DELETE_COUNT=$((DELETE_COUNT + 1))
+    TAGS_TO_DELETE+=("$tag")
   fi
 done <<< "$COMMIT_BASE_TAGS"
+
+DELETE_COUNT=${#TAGS_TO_DELETE[@]}
 
 echo "Keeping $KEEP_COUNT tags (recent commits), deleting $DELETE_COUNT old tags"
 
@@ -74,18 +74,37 @@ if [ "$DELETE_COUNT" -eq 0 ]; then
 fi
 
 # Delete in batches of 100 (ECR batch-delete-image limit)
-echo "$TAGS_TO_DELETE" | grep -v '^$' | while mapfile -t -n 100 BATCH && [ ${#BATCH[@]} -gt 0 ]; do
-  IMAGE_IDS=""
-  for tag in "${BATCH[@]}"; do
-    [ -z "$tag" ] && continue
-    IMAGE_IDS="$IMAGE_IDS imageTag=$tag"
-  done
-  if [ -n "$IMAGE_IDS" ]; then
-    aws ecr-public batch-delete-image \
-      --repository-name "$REPO_NAME" \
-      --region "$REGION" \
-      --image-ids $IMAGE_IDS 2>/dev/null || echo "WARNING: batch-delete failed for some tags"
+TOTAL_DELETED=0
+NUM_BATCHES=$(( (DELETE_COUNT + 99) / 100 ))
+for ((i=0; i<DELETE_COUNT; i+=100)); do
+  BATCH=("${TAGS_TO_DELETE[@]:i:100}")
+  BATCH_SIZE=${#BATCH[@]}
+  BATCH_NUM=$(( i/100 + 1 ))
+
+  # Build JSON array for --image-ids
+  IMAGE_IDS_JSON=$(printf '%s\n' "${BATCH[@]}" | jq -R '{imageTag: .}' | jq -s '.')
+
+  echo "Deleting batch ${BATCH_NUM}/${NUM_BATCHES} ($BATCH_SIZE tags)..."
+
+  RESULT=$(aws ecr-public batch-delete-image \
+    --repository-name "$REPO_NAME" \
+    --region "$REGION" \
+    --image-ids "$IMAGE_IDS_JSON" \
+    --output json 2>&1) || true
+
+  # Parse response for success/failure counts
+  DELETED=$(echo "$RESULT" | jq '.imageIds | length' 2>/dev/null || echo 0)
+  FAILED=$(echo "$RESULT" | jq '.failures | length' 2>/dev/null || echo 0)
+
+  if [ "$FAILED" -gt 0 ]; then
+    FAILURE_REASONS=$(echo "$RESULT" | jq -r '.failures[0:3][] | "  \(.failureCode): \(.failureReason)"' 2>/dev/null || echo "  (could not parse response)")
+    echo "WARNING: $FAILED deletions failed, $DELETED succeeded. Sample failures:"
+    echo "$FAILURE_REASONS"
+  else
+    echo "  Deleted $DELETED tags"
   fi
+
+  TOTAL_DELETED=$((TOTAL_DELETED + DELETED))
 done
 
-echo "Cleanup complete: deleted $DELETE_COUNT old rocm-base tags, kept $KEEP_COUNT + cache key"
+echo "Cleanup complete: deleted $TOTAL_DELETED/$DELETE_COUNT old rocm-base tags, kept $KEEP_COUNT + cache key"
