@@ -807,6 +807,7 @@ def test_same_mamba_output_apc_on_vs_off(
     vllm_runner,
     model: str,
 ) -> None:
+    num_logprobs = 5
     prompts = [
         "hello what is one plus one what is one plus one what is one plus one the answer is",  # noqa: E501
         "hello what is one plus one what is one plus one what is one plus one the answer is",  # noqa: E501
@@ -825,7 +826,7 @@ def test_same_mamba_output_apc_on_vs_off(
             kwargs_no_apc,
             prompts,
             max_tokens,
-            num_logprobs=-1,
+            num_logprobs=num_logprobs,
             vllm_model=vllm_model,
         )
     # With prefix caching
@@ -840,17 +841,13 @@ def test_same_mamba_output_apc_on_vs_off(
             kwargs_with_apc,
             prompts,
             max_tokens,
-            num_logprobs=-1,
+            num_logprobs=num_logprobs,
             vllm_model=vllm_model,
         )
-    texts_no_apc = [
-        outputs_no_apc[0][i][1].removeprefix(prompts[i]) for i in range(len(prompts))
-    ]
-    texts_with_apc = [
-        outputs_with_apc[0][i][1].removeprefix(prompts[i]) for i in range(len(prompts))
-    ]
 
-    for i in range(len(prompts)):
-        assert texts_no_apc[i] == texts_with_apc[i], (
-            f"Mismatch {i}: {texts_no_apc[i]!r} vs {texts_with_apc[i]!r}"
-        )
+    check_logprobs_close(
+        outputs_0_lst=outputs_no_apc[0],
+        outputs_1_lst=outputs_with_apc[0],
+        name_0="vllm_no_apc",
+        name_1="vllm_with_apc",
+    )
