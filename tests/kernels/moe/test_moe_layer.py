@@ -103,11 +103,13 @@ QUANT_METHODS = [
 # Which quantization methods each backend supports.
 # fmt: off
 BACKEND_SUPPORTED_QUANTS: dict[str, set[str | None]] = {
-    "allgather_reducescatter": {None, "fp8", "modelopt_fp8", "modelopt_fp4"},
-    "mori":                    {None, "fp8", "modelopt_fp8"},
-    "flashinfer_all2allv":     {None,        "modelopt_fp8", "modelopt_fp4"},
-    "deepep_low_latency":      {None, "fp8", "modelopt_fp8", "modelopt_fp4"},
-    "deepep_high_throughput":   {None, "fp8", "modelopt_fp8", "modelopt_fp4"},
+    "allgather_reducescatter":     {None, "fp8", "modelopt_fp8", "modelopt_fp4"},
+    "mori":                        {None, "fp8", "modelopt_fp8"},
+    "flashinfer_nvlink_two_sided": {None,        "modelopt_fp8", "modelopt_fp4"},
+    "flashinfer_nvlink_one_sided": {None,        "modelopt_fp8", "modelopt_fp4"},
+    "deepep_low_latency":          {None, "fp8", "modelopt_fp8", "modelopt_fp4"},
+    "deepep_high_throughput":      {None, "fp8", "modelopt_fp8", "modelopt_fp4"},
+    "nixl_ep":                     {None, "fp8", "modelopt_fp8"},
 }
 # fmt: on
 
@@ -381,12 +383,13 @@ def is_valid_config(config: MoETestConfig) -> tuple[bool, str | None]:
     ):
         return False, "modelopt_fp4 not supported on H100+ GPUs"
 
-    # Skip flashinfer_all2allv if not on B100+ (compute capability 10.0+)
+    # Skip flashinfer_nvlink if not on B100+ (compute capability 10.0+)
     if (
-        config.backend == "flashinfer_all2allv"
+        config.backend is not None
+        and config.backend.startswith("flashinfer_nvlink")
         and not current_platform.has_device_capability(100)
     ):
-        return False, "flashinfer_all2allv not supported on H100+ GPUs"
+        return False, "flashinfer_nvlink not supported on H100+ GPUs"
 
     # reduce_results incompatibilities
     if config.reduce_results and config.use_shared_experts:
@@ -419,6 +422,17 @@ def is_valid_config(config: MoETestConfig) -> tuple[bool, str | None]:
                     f"Skipping unsupported K {config.k} in {config.backend} w/o EP.",
                 )
 
+        if config.backend == "nixl_ep":
+            from vllm.model_executor.layers.fused_moe.nixl_ep_prepare_finalize import (  # noqa: E501
+                NixlEPPrepareAndFinalize,
+            )
+
+            if config.k not in NixlEPPrepareAndFinalize.SUPPORTED_HIDDEN_SIZES:
+                return (
+                    False,
+                    f"Skipping unsupported K {config.k} in {config.backend} w/o EP.",
+                )
+
     if config.enable_eplb and config.quantization not in EPLB_SUPPORTED_QUANTS:
         return False, f"EPLB not supported with {config.quantization} quantization."
 
@@ -429,8 +443,12 @@ def is_valid_config(config: MoETestConfig) -> tuple[bool, str | None]:
     if config.reduce_results and world_size == 1:
         return False, "reduce_results=True only makes sense for multi-GPU tests"
 
-    if config.backend == "flashinfer_all2allv" and config.ep_size > 1:
-        return False, "flashinfer_all2allv EP not yet supported."
+    if (
+        config.backend is not None
+        and config.backend.startswith("flashinfer_nvlink")
+        and config.ep_size > 1
+    ):
+        return False, "flashinfer_nvlink EP not yet supported."
 
     if config.enable_eplb and config.num_experts % config.dp_size != 0:
         return False, "EPLB requires num_experts divisible by ep_size"
@@ -1397,7 +1415,7 @@ def _run_one_config(
             atol, rtol = 3.5e-2, 3.5e-2
     elif quantization in ("fp8", "modelopt_fp8"):
         atol, rtol = 6e-2, 6e-2
-    elif quantization == "modelopt_nvfp4":
+    elif quantization == "modelopt_fp4":
         atol = rtol = 1e-1 + k * 5e-4
     else:
         atol, rtol = 6e-2, 6e-2
