@@ -12,6 +12,8 @@ latencies by ~7% (see qwen2_5_vl for example usage)
 To use these ops, you must have a recent version of PyTorch installed (>= 2.4.0)
 """
 
+from typing import Any
+
 import einops
 import torch
 import torch.nn.functional as F
@@ -270,6 +272,13 @@ def vit_torch_sdpa_wrapper(
     )
 
 
+# Cache BatchPrefillWithRaggedKVCacheWrapper instances by workspace buffer
+# data pointer to avoid re-creating the wrapper on every forward pass.
+# The workspace buffer is a long-lived global tensor, so the cache entries
+# are never stale in practice.
+__flashinfer_prefill_wrapper_cache: dict[int, Any] = {}
+
+
 def flashinfer_wrapper(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -299,16 +308,27 @@ def flashinfer_wrapper(
             )
         from flashinfer import BatchPrefillWithRaggedKVCacheWrapper
 
+        # Build qo_indptr on CPU to reduce GPU-CPU synchronisation points.
         # sequence_lengths is [s1, s2, ..., sB, 0, ...(bucketing padding)].
-        # Strip zero-padded dummy entries before building qo_indptr.
-        seq_lens = sequence_lengths.view(-1)
-        real_seq_lens = seq_lens[seq_lens > 0]
+        # One .cpu() transfer is sufficient; subsequent filtering and cumsum
+        # are cheap CPU operations for the small batch sizes typical of ViTs.
+        seq_lens_cpu = sequence_lengths.view(-1).cpu()
+        real_seq_lens_cpu = seq_lens_cpu[seq_lens_cpu > 0]
         qo_indptr = torch.cat(
-            [real_seq_lens.new_zeros(1), torch.cumsum(real_seq_lens, dim=0)]
-        ).cpu()
+            [real_seq_lens_cpu.new_zeros(1), real_seq_lens_cpu.cumsum(0)]
+        )
+
+        # Cache the wrapper by workspace buffer identity so we avoid
+        # re-instantiating it (and re-allocating its internal int workspace)
+        # on every forward pass.  plan() must still be called each time
+        # because qo_indptr changes with each new batch.
+        buf_ptr = workspace_buffer.data_ptr()
+        wrapper = __flashinfer_prefill_wrapper_cache.get(buf_ptr)
+        if wrapper is None:
+            wrapper = BatchPrefillWithRaggedKVCacheWrapper(workspace_buffer, "NHD")
+            __flashinfer_prefill_wrapper_cache[buf_ptr] = wrapper
 
         # ViT attention is full self-attention: kv layout matches qo.
-        wrapper = BatchPrefillWithRaggedKVCacheWrapper(workspace_buffer, "NHD")
         wrapper.plan(
             qo_indptr=qo_indptr,
             kv_indptr=qo_indptr,
