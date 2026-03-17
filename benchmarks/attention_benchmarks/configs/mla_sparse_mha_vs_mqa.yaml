@@ -1,0 +1,55 @@
+# Sparse MLA benchmark: forward_mha vs forward_mqa comparison
+#
+# Compares the single-pass FA4 masked MHA prefill path against the
+# per-token MQA path for extend workloads (prefill with cached context).
+#
+# Run twice to compare:
+#   # MHA path (default):
+#   python run_benchmarks.py --config configs/mla_sparse_mha_vs_mqa.yaml
+#
+#   # MQA path (forced):
+#   python run_benchmarks.py --config configs/mla_sparse_mha_vs_mqa.yaml \
+#       --sparse-mla-force-mqa
+#
+# Or use the API directly:
+#   from mla_runner import run_mla_benchmark
+#   result_mha = run_mla_benchmark("FLASHMLA_SPARSE", config)
+#   result_mqa = run_mla_benchmark("FLASHMLA_SPARSE", config,
+#                                   sparse_mla_force_mqa=True)
+
+model:
+  name: "deepseek-v3"
+  num_layers: 60
+  num_q_heads: 128
+  num_kv_heads: 1
+  head_dim: 576
+  kv_lora_rank: 512
+  qk_nope_head_dim: 128
+  qk_rope_head_dim: 64
+  v_head_dim: 128
+  block_size: 128
+
+batch_specs:
+  # Extend: q_len new tokens with seq_len total sequence
+  # These are the workloads where MHA vs MQA matters
+  - "1q512s4k"
+  - "1q512s8k"
+  - "1q1ks4k"
+  - "1q1ks8k"
+  - "1q2ks8k"
+  - "1q2ks16k"
+  - "1q4ks16k"
+
+  # Batched extend
+  - "4q512s4k"
+  - "4q1ks8k"
+  - "8q512s4k"
+  - "8q512s8k"
+
+backends:
+  - FLASHMLA_SPARSE
+
+device: "cuda:0"
+repeats: 10
+warmup_iters: 3
+profile_memory: true
