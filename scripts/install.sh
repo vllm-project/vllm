@@ -7,10 +7,11 @@ TARGET_VENV=""
 PYTHON_BIN="${PYTHON_BIN:-}"
 EDITABLE=0
 HOST_OS="$(uname -s)"
+RECREATE_VENV=0
 
 usage() {
   cat <<'EOF'
-Usage: ./scripts/install.sh [--system | --user | --venv PATH] [--editable] [--python PYTHON]
+Usage: ./scripts/install.sh [--system | --user | --venv PATH] [--editable] [--python PYTHON] [--recreate]
 
 Install this vLLM checkout with an Ollama-like local CLI launcher.
 
@@ -22,6 +23,7 @@ Modes:
 Options:
   --editable     Install the repo in editable mode
   --python BIN   Python interpreter to use when creating the environment
+  --recreate     Recreate the managed virtual environment instead of reusing it
   -h, --help     Show this message
 EOF
 }
@@ -47,6 +49,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --editable)
       EDITABLE=1
+      shift
+      ;;
+    --recreate)
+      RECREATE_VENV=1
       shift
       ;;
     --python)
@@ -177,7 +183,15 @@ case "${MODE}" in
 esac
 
 mkdir -p "$(dirname "${VENV_DIR}")"
-"${UV_BIN}" venv --python "${PYTHON_BIN}" "${VENV_DIR}"
+if [[ -x "${VENV_DIR}/bin/python" && "${RECREATE_VENV}" -eq 0 ]]; then
+  echo "Reusing existing virtual environment at ${VENV_DIR}"
+else
+  VENV_ARGS=("--python" "${PYTHON_BIN}")
+  if [[ "${RECREATE_VENV}" -eq 1 ]]; then
+    VENV_ARGS+=("--clear")
+  fi
+  "${UV_BIN}" venv "${VENV_ARGS[@]}" "${VENV_DIR}"
+fi
 
 "${UV_BIN}" pip install --python "${VENV_DIR}/bin/python" certifi
 CERT_BUNDLE="$("${VENV_DIR}/bin/python" -c 'import certifi; print(certifi.where())')"
@@ -208,7 +222,7 @@ if [[ "${MODE}" != "venv" ]]; then
   cat > "${BIN_DIR}/vllm" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
-exec "${VENV_DIR}/bin/python" -m vllm.entrypoints.cli.main "\$@"
+exec "${VENV_DIR}/bin/python" "${ROOT_DIR}/scripts/vllm_launcher.py" "\$@"
 EOF
   chmod +x "${BIN_DIR}/vllm"
 fi

@@ -56,47 +56,84 @@ vLLM seamlessly supports most popular open-source models on HuggingFace, includi
 
 Find the full list of supported models [here](https://docs.vllm.ai/en/latest/models/supported_models.html).
 
-## Getting Started
+## What's New
 
-Install vLLM with `pip` or [from source](https://docs.vllm.ai/en/latest/getting_started/installation/gpu/index.html#build-wheel-from-source):
+This version keeps the existing vLLM engine and serving stack, but adds a more direct local-runtime workflow on top of it.
+
+New local-runtime features:
+
+- A repo-local bootstrap installer via `./scripts/install.sh`
+- A simpler CLI centered on `vllm pull`, `vllm run`, and `vllm serve`
+- A lightweight launcher so `vllm`, `vllm --help`, `vllm aliases`, `vllm pull`, and local service management feel immediate
+- Built-in short model aliases such as `deepseek-r1:8b`
+- Managed local background services with `vllm ps`, `vllm stop`, and `vllm logs`
+- A tracked backlog for deferred parity work in `docs/cli/local_runtime_followups.md`
+
+## Quick Start
+
+If you want the fastest path to a local vLLM workflow from this repository:
 
 ```bash
-pip install vllm
+./scripts/install.sh
+vllm aliases
+vllm pull deepseek-r1:8b
+vllm run deepseek-r1:8b
 ```
+
+If you want a local API server instead:
+
+```bash
+vllm serve deepseek-r1:8b
+vllm ps
+```
+
+## Core Flows
+
+### Local Runtime
+
+Use the new local commands when you want an easier terminal-first experience:
+
+- `vllm pull <model>` downloads a model using a short alias or exact Hugging Face repo
+- `vllm run <model>` opens a local shell chat or runs a one-shot prompt
+- `vllm serve <model>` starts a managed local service
+- `vllm aliases` lists the built-in easy-model shortcuts
+- `vllm ps`, `vllm stop`, and `vllm logs` manage those local services
+
+### Built-in Easy Models
+
+This version ships a larger set of built-in aliases so you can pull common models without remembering full Hugging Face repo IDs.
+
+Examples:
+
+- `deepseek-r1:1.5b`, `deepseek-r1:7b`, `deepseek-r1:8b`, `deepseek-r1:14b`, `deepseek-r1:32b`, `deepseek-r1:70b`
+- `llama3.2:1b-instruct`, `llama3.2:3b-instruct`, `llama3.1:8b-instruct`, `llama3.1:70b-instruct`, `llama3.3:70b-instruct`
+- `qwen2.5:0.5b-instruct`, `qwen2.5:1.5b-instruct`, `qwen2.5:3b-instruct`, `qwen2.5:7b-instruct`, `qwen2.5:14b-instruct`, `qwen2.5:32b-instruct`, `qwen2.5:72b-instruct`
+- `qwen2.5-coder:1.5b-instruct`, `qwen2.5-coder:7b-instruct`, `qwen2.5-coder:32b-instruct`
+- `mistral:7b-instruct`, `ministral:8b-instruct`, `mistral-nemo:12b-instruct`, `mixtral:8x7b-instruct`
+- `gemma2:2b-it`, `gemma2:9b-it`, `gemma2:27b-it`
+- `phi3.5:mini-instruct`, `phi3.5:moe-instruct`, `phi4`
+- `smollm2:360m-instruct`, `smollm2:1.7b-instruct`
+
+Use `vllm aliases` for the full installed list.
+
+### Existing vLLM Paths
+
+The existing advanced vLLM workflows still exist:
+
+- `pip install vllm` for the standard package install path
+- `vllm serve` in foreground mode for the existing server-first workflow
+- `vllm chat`, `vllm complete`, `vllm bench`, and `vllm run-batch` for the existing advanced CLI surface
+- Python library usage via `LLM`, `AsyncLLMEngine`, and the OpenAI-compatible server stack
+
+## Documentation
 
 Visit our [documentation](https://docs.vllm.ai/en/latest/) to learn more.
 
 - [Installation](https://docs.vllm.ai/en/latest/getting_started/installation.html)
 - [Quickstart](https://docs.vllm.ai/en/latest/getting_started/quickstart.html)
-- [List of Supported Models](https://docs.vllm.ai/en/latest/models/supported_models.html)
-
-## Fork Updates
-
-This fork adds a more local-runtime-focused UX on top of the existing vLLM engine and server stack.
-
-What is different in this fork:
-
-- A repo-local bootstrap installer via `./scripts/install.sh`
-- A simpler local CLI flow centered on `vllm pull`, `vllm run`, and `vllm serve`
-- Short built-in model aliases such as `deepseek-r1:8b` that resolve to Hugging Face repos
-- Managed local background services with `vllm ps`, `vllm stop`, and `vllm logs`
-- A follow-up tracker for remaining parity work in `docs/cli/local_runtime_followups.md`
-
-Example local flow:
-
-```bash
-./scripts/install.sh
-vllm pull deepseek-r1:8b
-vllm run deepseek-r1:8b
-vllm serve deepseek-r1:8b
-vllm ps
-```
-
-For more detail, see:
-
 - [CLI Guide](./docs/cli/README.md)
-- [Quickstart](./docs/getting_started/quickstart.md)
 - [Local Runtime Follow-ups](./docs/cli/local_runtime_followups.md)
+- [List of Supported Models](https://docs.vllm.ai/en/latest/models/supported_models.html)
 
 ## Contributing
 

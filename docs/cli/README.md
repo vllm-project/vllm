@@ -9,7 +9,7 @@ vllm --help
 Available Commands:
 
 ```bash
-vllm {pull,run,ls,inspect,serve,ps,stop,logs,rm,chat,complete,bench,collect-env,run-batch}
+vllm {pull,run,ls,aliases,inspect,serve,ps,stop,logs,rm,chat,complete,bench,collect-env,run-batch}
 ```
 
 ## Local Runtime
@@ -18,22 +18,43 @@ The local-runtime commands are designed to make a source checkout feel more like
 
 ```bash
 ./scripts/install.sh
+vllm aliases
 vllm pull deepseek-r1:8b
 vllm run deepseek-r1:8b
 vllm serve deepseek-r1:8b
 vllm ps
 ```
 
-### What's Different
+### Main Changes
 
-Compared with the older server-first CLI flow, this fork adds:
+Compared with the older server-first CLI flow, the main additions are:
 
 - A one-script repo install path via `./scripts/install.sh`
+- A lightweight launcher so help and local metadata commands do not have to pull in the full runtime stack
 - Direct shell usage with `vllm run` instead of requiring a separate running server first
 - Built-in model aliases such as `deepseek-r1:8b`
 - Background local service management through `vllm serve`, `vllm ps`, `vllm stop`, and `vllm logs`
 
-The advanced vLLM commands still exist; this fork changes the default user journey rather than removing the underlying engine/server features.
+The advanced vLLM commands still exist; this changes the default user journey rather than removing the underlying engine/server features.
+
+### Fast Path
+
+For a terminal-first workflow, the intended path is:
+
+```bash
+./scripts/install.sh
+vllm aliases
+vllm pull deepseek-r1:8b
+vllm run deepseek-r1:8b
+```
+
+### aliases
+
+List the built-in easy-model names that resolve to Hugging Face repos.
+
+```bash
+vllm aliases
+```
 
 ### pull
 
@@ -62,6 +83,19 @@ Show pulled model metadata and how aliases resolve.
 vllm ls
 vllm inspect deepseek-r1:8b
 ```
+
+### Built-in Easy Models
+
+The built-in aliases currently include:
+
+- `deepseek-r1:1.5b`, `deepseek-r1:7b`, `deepseek-r1:8b`, `deepseek-r1:14b`, `deepseek-r1:32b`, `deepseek-r1:70b`, `deepseek-v3`
+- `llama3.2:1b-instruct`, `llama3.2:3b-instruct`, `llama3.1:8b-instruct`, `llama3.1:70b-instruct`, `llama3.3:70b-instruct`
+- `qwen2.5:0.5b-instruct`, `qwen2.5:1.5b-instruct`, `qwen2.5:3b-instruct`, `qwen2.5:7b-instruct`, `qwen2.5:14b-instruct`, `qwen2.5:32b-instruct`, `qwen2.5:72b-instruct`
+- `qwen2.5-coder:1.5b-instruct`, `qwen2.5-coder:7b-instruct`, `qwen2.5-coder:32b-instruct`
+- `mistral:7b-instruct`, `ministral:8b-instruct`, `mistral-nemo:12b-instruct`, `mixtral:8x7b-instruct`
+- `gemma2:2b-it`, `gemma2:9b-it`, `gemma2:27b-it`
+- `phi3.5:mini-instruct`, `phi3.5:moe-instruct`, `phi4`
+- `smollm2:360m-instruct`, `smollm2:1.7b-instruct`
 
 ## serve
 
