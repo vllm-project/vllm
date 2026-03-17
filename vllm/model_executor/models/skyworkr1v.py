@@ -115,7 +115,8 @@ class SkyworkR1VProcessingInfo(BaseProcessingInfo):
         config = self.get_hf_config()
         vision_config = config.vision_config
 
-        image_size = int(kwargs.get("image_size", vision_config.image_size))
+        image_processor = self.get_image_processor(**kwargs)
+        image_size = image_processor.image_size
         patch_size = int(kwargs.get("patch_size", vision_config.patch_size))
         downsample_ratio = float(
             kwargs.get("downsample_ratio", config.downsample_ratio)
@@ -125,7 +126,7 @@ class SkyworkR1VProcessingInfo(BaseProcessingInfo):
         return self.ctx.init_processor(
             InternVLProcessor,
             tokenizer=self.get_tokenizer(),
-            image_processor=self.get_image_processor(**kwargs),
+            image_processor=image_processor,
             image_seq_length=image_seq_length,
         )
 

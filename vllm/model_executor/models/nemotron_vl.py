@@ -446,7 +446,7 @@ class LlamaNemotronVLEmbedProcessingInfo(BaseInternVLProcessingInfo):
         return self.ctx.init_processor(
             LlamaNemotronVLEmbedProcessor,
             tokenizer=self.get_tokenizer(),
-            image_processor=self.get_image_processor(**kwargs),
+            image_processor=image_processor,
             image_seq_length=image_seq_length,
         )
 
