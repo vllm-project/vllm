@@ -7,7 +7,8 @@ use serde_json::Value;
 use tracing_subscriber::EnvFilter;
 use vllm_chat::backends::hf::HfChatBackend;
 use vllm_chat::{
-    ChatEvent, ChatLlm, ChatMessage, ChatOptions, ChatRequest, ChatRole, UserSamplingParams,
+    AssistantBlockKind, ChatEvent, ChatLlm, ChatMessage, ChatOptions, ChatRequest, ChatRole,
+    UserSamplingParams,
 };
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig};
 use vllm_llm::Llm;
@@ -108,20 +109,23 @@ async fn main() -> Result<()> {
                 ChatEvent::Start => {
                     saw_start = true;
                 }
-                ChatEvent::TextDelta { delta, .. } => {
-                    print!("{delta}");
-                }
                 ChatEvent::Done {
-                    text,
+                    message,
                     token_ids,
                     finish_reason: reason,
                     ..
                 } => {
-                    final_text = text;
+                    final_text = message.text();
                     final_token_ids = token_ids;
                     finish_reason = reason;
                     break;
                 }
+                ChatEvent::BlockDelta { kind, delta, .. } => {
+                    if kind == AssistantBlockKind::Text {
+                        print!("{delta}");
+                    }
+                }
+                ChatEvent::BlockStart { .. } | ChatEvent::BlockEnd { .. } => {}
             }
         }
 

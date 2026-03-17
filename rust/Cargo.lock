@@ -2269,6 +2269,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "reasoning-parser"
+version = "1.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9669c1560700028a5f8c7cff8110907c57c7c638aa79fc61afca28464b85d23d"
+dependencies = [
+ "parking_lot",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
 name = "redox_syscall"
 version = "0.5.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3590,6 +3601,7 @@ dependencies = [
  "futures-async-stream",
  "hf-hub",
  "llm-tokenizer",
+ "reasoning-parser",
  "rmp-serde",
  "serde",
  "serde_default",

@@ -22,6 +22,7 @@ pub struct HfChatBackend {
 }
 
 struct HfChatBackendInner {
+    model_id: String,
     tokenizer: HfTokenizer,
     chat_template: ChatTemplate,
     /// Primary EOS handled by engine-core's dedicated EOS path.
@@ -43,10 +44,10 @@ impl HfChatBackend {
     /// Load one Hugging Face model tokenizer plus adjacent chat/EOS metadata.
     pub async fn from_model(model_id: &str) -> Result<Self> {
         let files = resolve_model_files(model_id).await?;
-        Self::from_resolved_model_files(files)
+        Self::from_resolved_model_files(files, model_id.to_string())
     }
 
-    fn from_resolved_model_files(files: ResolvedModelFiles) -> Result<Self> {
+    fn from_resolved_model_files(files: ResolvedModelFiles, model_id: String) -> Result<Self> {
         let tokenizer = HfTokenizer::from_file(&files.tokenizer_path)
             .map_err(|error| Error::Tokenizer(format!("failed to load tokenizer: {error}")))?;
 
@@ -74,6 +75,7 @@ impl HfChatBackend {
 
         Ok(Self {
             inner: Arc::new(HfChatBackendInner {
+                model_id,
                 tokenizer,
                 chat_template,
                 primary_eos_token_id,
@@ -103,6 +105,10 @@ impl ChatBackend for HfChatBackend {
             .tokenizer
             .decode(token_ids, skip_special_tokens)
             .map_err(|error| Error::Tokenizer(format!("decoding failed: {error}")))
+    }
+
+    fn model_id(&self) -> Option<&str> {
+        Some(&self.inner.model_id)
     }
 
     fn sampling_hints(&self) -> Result<SamplingHints> {

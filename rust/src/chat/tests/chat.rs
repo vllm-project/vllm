@@ -8,8 +8,8 @@ use std::time::Duration;
 use futures::StreamExt as _;
 use tokio::time::timeout;
 use vllm_chat::{
-    ChatBackend, ChatEvent, ChatLlm, ChatMessage, ChatOptions, ChatRequest, ChatRole,
-    UserSamplingParams,
+    AssistantBlockKind, AssistantContentBlock, ChatBackend, ChatEvent, ChatLlm, ChatMessage,
+    ChatOptions, ChatRequest, ChatRole, UserSamplingParams,
 };
 use vllm_engine_core_client::protocol::handshake::{HandshakeInitMessage, ReadyMessage};
 use vllm_engine_core_client::protocol::{
@@ -138,6 +138,7 @@ async fn connect_chat_llm(handshake_address: String, backend: Arc<dyn ChatBacken
 #[derive(Clone)]
 struct FakeChatBackend {
     has_template: bool,
+    model_id: Option<String>,
 }
 
 impl fmt::Debug for FakeChatBackend {
@@ -148,12 +149,23 @@ impl fmt::Debug for FakeChatBackend {
 
 impl FakeChatBackend {
     fn new() -> Self {
-        Self { has_template: true }
+        Self {
+            has_template: true,
+            model_id: None,
+        }
     }
 
     fn without_template() -> Self {
         Self {
             has_template: false,
+            model_id: None,
+        }
+    }
+
+    fn with_model_id(model_id: impl Into<String>) -> Self {
+        Self {
+            has_template: true,
+            model_id: Some(model_id.into()),
         }
     }
 }
@@ -185,6 +197,10 @@ impl ChatBackend for FakeChatBackend {
     fn decode(&self, token_ids: &[u32], _skip_special_tokens: bool) -> vllm_chat::Result<String> {
         let bytes = token_ids.iter().map(|id| *id as u8).collect::<Vec<_>>();
         Ok(String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    fn model_id(&self) -> Option<&str> {
+        self.model_id.as_deref()
     }
 }
 
@@ -285,27 +301,45 @@ async fn chat_streams_text_events() {
     assert_eq!(stream.next().await.unwrap().unwrap(), ChatEvent::Start);
     assert_eq!(
         stream.next().await.unwrap().unwrap(),
-        ChatEvent::TextDelta {
-            delta: "H".to_string(),
-            text: "H".to_string(),
+        ChatEvent::BlockStart {
+            index: 0,
+            kind: AssistantBlockKind::Text,
         }
     );
     assert_eq!(
         stream.next().await.unwrap().unwrap(),
-        ChatEvent::TextDelta {
+        ChatEvent::BlockDelta {
+            index: 0,
+            kind: AssistantBlockKind::Text,
+            delta: "H".to_string(),
+        }
+    );
+    assert_eq!(
+        stream.next().await.unwrap().unwrap(),
+        ChatEvent::BlockDelta {
+            index: 0,
+            kind: AssistantBlockKind::Text,
             delta: "i".to_string(),
-            text: "Hi".to_string(),
+        }
+    );
+    assert_eq!(
+        stream.next().await.unwrap().unwrap(),
+        ChatEvent::BlockEnd {
+            index: 0,
+            block: AssistantContentBlock::Text {
+                text: "Hi".to_string(),
+            },
         }
     );
 
     match stream.next().await {
         Some(Ok(ChatEvent::Done {
-            text,
+            message,
             token_ids,
             finish_reason,
             ..
         })) => {
-            assert_eq!(text, "Hi");
+            assert_eq!(message.text(), "Hi");
             assert_eq!(token_ids, vec![b'H' as u32, b'i' as u32, b'!' as u32]);
             assert_eq!(finish_reason, Some(FinishReason::Stop));
         }
@@ -356,17 +390,34 @@ async fn chat_stream_waits_for_complete_utf8_before_emitting() {
     assert!(matches!(stream.next().await, Some(Ok(ChatEvent::Start))));
     assert_eq!(
         stream.next().await.unwrap().unwrap(),
-        ChatEvent::TextDelta {
+        ChatEvent::BlockStart {
+            index: 0,
+            kind: AssistantBlockKind::Text,
+        }
+    );
+    assert_eq!(
+        stream.next().await.unwrap().unwrap(),
+        ChatEvent::BlockDelta {
+            index: 0,
+            kind: AssistantBlockKind::Text,
             delta: "你".to_string(),
-            text: "你".to_string(),
+        }
+    );
+    assert_eq!(
+        stream.next().await.unwrap().unwrap(),
+        ChatEvent::BlockEnd {
+            index: 0,
+            block: AssistantContentBlock::Text {
+                text: "你".to_string(),
+            },
         }
     );
 
     match stream.next().await {
         Some(Ok(ChatEvent::Done {
-            text, token_ids, ..
+            message, token_ids, ..
         })) => {
-            assert_eq!(text, "你");
+            assert_eq!(message.text(), "你");
             assert_eq!(token_ids, bytes_to_token_ids(&[0xe4, 0xbd, 0xa0, b'!']));
         }
         other => panic!("unexpected final event: {other:?}"),
@@ -412,20 +463,37 @@ async fn chat_stream_flushes_held_text_on_finish() {
     assert!(matches!(stream.next().await, Some(Ok(ChatEvent::Start))));
     assert_eq!(
         stream.next().await.unwrap().unwrap(),
-        ChatEvent::TextDelta {
+        ChatEvent::BlockStart {
+            index: 0,
+            kind: AssistantBlockKind::Text,
+        }
+    );
+    assert_eq!(
+        stream.next().await.unwrap().unwrap(),
+        ChatEvent::BlockDelta {
+            index: 0,
+            kind: AssistantBlockKind::Text,
             delta: "ok st".to_string(),
-            text: "ok st".to_string(),
+        }
+    );
+    assert_eq!(
+        stream.next().await.unwrap().unwrap(),
+        ChatEvent::BlockEnd {
+            index: 0,
+            block: AssistantContentBlock::Text {
+                text: "ok st".to_string(),
+            },
         }
     );
 
     match stream.next().await {
         Some(Ok(ChatEvent::Done {
-            text,
+            message,
             token_ids,
             finish_reason,
             ..
         })) => {
-            assert_eq!(text, "ok st");
+            assert_eq!(message.text(), "ok st");
             assert_eq!(token_ids, bytes_to_token_ids(b"ok st"));
             assert_eq!(finish_reason, Some(FinishReason::Length));
         }
@@ -539,21 +607,222 @@ async fn chat_stream_preserves_terminal_stop_token_when_requested() {
     assert!(matches!(stream.next().await, Some(Ok(ChatEvent::Start))));
     assert_eq!(
         stream.next().await.unwrap().unwrap(),
-        ChatEvent::TextDelta {
+        ChatEvent::BlockStart {
+            index: 0,
+            kind: AssistantBlockKind::Text,
+        }
+    );
+    assert_eq!(
+        stream.next().await.unwrap().unwrap(),
+        ChatEvent::BlockDelta {
+            index: 0,
+            kind: AssistantBlockKind::Text,
             delta: "Hi!".to_string(),
-            text: "Hi!".to_string(),
+        }
+    );
+    assert_eq!(
+        stream.next().await.unwrap().unwrap(),
+        ChatEvent::BlockEnd {
+            index: 0,
+            block: AssistantContentBlock::Text {
+                text: "Hi!".to_string(),
+            },
         }
     );
 
     match stream.next().await {
         Some(Ok(ChatEvent::Done {
-            text, token_ids, ..
+            message, token_ids, ..
         })) => {
-            assert_eq!(text, "Hi!");
+            assert_eq!(message.text(), "Hi!");
             assert_eq!(token_ids, vec![b'H' as u32, b'i' as u32, b'!' as u32]);
         }
         other => panic!("unexpected final event: {other:?}"),
     }
+
+    chat.shutdown().await.unwrap();
+    engine_task.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn chat_stream_separates_reasoning_blocks_automatically() {
+    let handshake_address = unique_tcp_endpoint();
+    let engine_identity = b"engine-chat-reasoning".to_vec();
+
+    let engine_task = tokio::spawn({
+        let engine_handshake = handshake_address.clone();
+        let engine_identity = engine_identity.clone();
+        async move {
+            let (mut dealer, mut push) = setup_mock_engine(engine_handshake, engine_identity).await;
+            let _ = recv_engine_message(&mut dealer).await;
+            send_outputs(
+                &mut push,
+                EngineCoreOutputs {
+                    outputs: vec![
+                        request_output(
+                            "chat-reasoning",
+                            bytes_to_token_ids(b"<think>"),
+                            None,
+                            None,
+                        ),
+                        request_output(
+                            "chat-reasoning",
+                            bytes_to_token_ids(b"reason "),
+                            None,
+                            None,
+                        ),
+                        request_output(
+                            "chat-reasoning",
+                            bytes_to_token_ids(b"more</think>"),
+                            None,
+                            None,
+                        ),
+                        request_output(
+                            "chat-reasoning",
+                            bytes_to_token_ids(b"answer"),
+                            Some(FinishReason::Length),
+                            None,
+                        ),
+                    ],
+                    finished_requests: Some(BTreeSet::from(["chat-reasoning".to_string()])),
+                    ..Default::default()
+                },
+            )
+            .await;
+        }
+    });
+
+    let backend: Arc<dyn ChatBackend> = Arc::new(FakeChatBackend::with_model_id("Qwen/Qwen3-0.6B"));
+    let chat = connect_chat_llm(handshake_address, backend).await;
+
+    let mut stream = chat.chat(sample_request("chat-reasoning")).await.unwrap();
+
+    assert_eq!(stream.next().await.unwrap().unwrap(), ChatEvent::Start);
+    assert_eq!(
+        stream.next().await.unwrap().unwrap(),
+        ChatEvent::BlockStart {
+            index: 0,
+            kind: AssistantBlockKind::Reasoning,
+        }
+    );
+    assert_eq!(
+        stream.next().await.unwrap().unwrap(),
+        ChatEvent::BlockDelta {
+            index: 0,
+            kind: AssistantBlockKind::Reasoning,
+            delta: "reason ".to_string(),
+        }
+    );
+    assert_eq!(
+        stream.next().await.unwrap().unwrap(),
+        ChatEvent::BlockDelta {
+            index: 0,
+            kind: AssistantBlockKind::Reasoning,
+            delta: "more".to_string(),
+        }
+    );
+    assert_eq!(
+        stream.next().await.unwrap().unwrap(),
+        ChatEvent::BlockEnd {
+            index: 0,
+            block: AssistantContentBlock::Reasoning {
+                text: "reason more".to_string(),
+            },
+        }
+    );
+    assert_eq!(
+        stream.next().await.unwrap().unwrap(),
+        ChatEvent::BlockStart {
+            index: 1,
+            kind: AssistantBlockKind::Text,
+        }
+    );
+    assert_eq!(
+        stream.next().await.unwrap().unwrap(),
+        ChatEvent::BlockDelta {
+            index: 1,
+            kind: AssistantBlockKind::Text,
+            delta: "answer".to_string(),
+        }
+    );
+    assert_eq!(
+        stream.next().await.unwrap().unwrap(),
+        ChatEvent::BlockEnd {
+            index: 1,
+            block: AssistantContentBlock::Text {
+                text: "answer".to_string(),
+            },
+        }
+    );
+
+    match stream.next().await {
+        Some(Ok(ChatEvent::Done {
+            message,
+            finish_reason,
+            ..
+        })) => {
+            assert_eq!(message.reasoning(), "reason more");
+            assert_eq!(message.text(), "answer");
+            assert_eq!(finish_reason, Some(FinishReason::Length));
+        }
+        other => panic!("unexpected final event: {other:?}"),
+    }
+
+    chat.shutdown().await.unwrap();
+    engine_task.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn chat_collectors_return_structured_message_and_visible_text() {
+    let handshake_address = unique_tcp_endpoint();
+    let engine_identity = b"engine-chat-collect".to_vec();
+
+    let engine_task = tokio::spawn({
+        let engine_handshake = handshake_address.clone();
+        let engine_identity = engine_identity.clone();
+        async move {
+            let (mut dealer, mut push) = setup_mock_engine(engine_handshake, engine_identity).await;
+            for request_id in ["chat-collect", "chat-collect-2"] {
+                let _ = recv_engine_message(&mut dealer).await;
+                send_outputs(
+                    &mut push,
+                    EngineCoreOutputs {
+                        outputs: vec![request_output(
+                            request_id,
+                            bytes_to_token_ids(b"<think>inner</think>outer"),
+                            Some(FinishReason::Length),
+                            None,
+                        )],
+                        finished_requests: Some(BTreeSet::from([request_id.to_string()])),
+                        ..Default::default()
+                    },
+                )
+                .await;
+            }
+        }
+    });
+
+    let backend: Arc<dyn ChatBackend> = Arc::new(FakeChatBackend::with_model_id("Qwen/Qwen3-0.6B"));
+    let chat = connect_chat_llm(handshake_address.clone(), backend.clone()).await;
+
+    let message = chat
+        .chat(sample_request("chat-collect"))
+        .await
+        .unwrap()
+        .collect_message()
+        .await
+        .unwrap();
+    assert_eq!(message.reasoning(), "inner");
+    assert_eq!(message.text(), "outer");
+
+    let text = chat
+        .chat(sample_request("chat-collect-2"))
+        .await
+        .unwrap()
+        .collect_text()
+        .await
+        .unwrap();
+    assert_eq!(text, "outer");
 
     chat.shutdown().await.unwrap();
     engine_task.await.unwrap();

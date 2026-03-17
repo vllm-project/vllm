@@ -68,6 +68,10 @@ fn request_output(
     }
 }
 
+fn bytes_to_token_ids(bytes: &[u8]) -> Vec<u32> {
+    bytes.iter().map(|byte| u32::from(*byte)).collect()
+}
+
 fn default_stream_output_specs() -> Vec<(Vec<u32>, Option<FinishReason>)> {
     vec![
         (vec![b'h' as u32], None),
@@ -159,7 +163,21 @@ async fn setup_mock_engine(
 }
 
 #[derive(Clone, Debug)]
-struct FakeChatBackend;
+struct FakeChatBackend {
+    model_id: Option<String>,
+}
+
+impl FakeChatBackend {
+    fn new() -> Self {
+        Self { model_id: None }
+    }
+
+    fn with_model_id(model_id: impl Into<String>) -> Self {
+        Self {
+            model_id: Some(model_id.into()),
+        }
+    }
+}
 
 impl ChatBackend for FakeChatBackend {
     fn apply_chat_template(&self, request: &ChatRequest) -> vllm_chat::Result<String> {
@@ -186,6 +204,10 @@ impl ChatBackend for FakeChatBackend {
                 .into_owned(),
         )
     }
+
+    fn model_id(&self) -> Option<&str> {
+        self.model_id.as_deref()
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -193,11 +215,11 @@ struct FailingDecodeChatBackend;
 
 impl ChatBackend for FailingDecodeChatBackend {
     fn apply_chat_template(&self, request: &ChatRequest) -> vllm_chat::Result<String> {
-        FakeChatBackend.apply_chat_template(request)
+        FakeChatBackend::new().apply_chat_template(request)
     }
 
     fn encode(&self, text: &str) -> vllm_chat::Result<Vec<u32>> {
-        FakeChatBackend.encode(text)
+        FakeChatBackend::new().encode(text)
     }
 
     fn decode(&self, token_ids: &[u32], skip_special_tokens: bool) -> vllm_chat::Result<String> {
@@ -207,7 +229,7 @@ impl ChatBackend for FailingDecodeChatBackend {
             ));
         }
 
-        FakeChatBackend.decode(token_ids, skip_special_tokens)
+        FakeChatBackend::new().decode(token_ids, skip_special_tokens)
     }
 }
 
@@ -258,7 +280,7 @@ async fn test_chat_with_engine_outputs(
     test_chat_with_engine_outputs_and_backend(
         engine_identity,
         output_specs,
-        Arc::new(FakeChatBackend),
+        Arc::new(FakeChatBackend::new()),
     )
     .await
 }
@@ -522,12 +544,12 @@ async fn chat_harness_streams_text_events() {
     let mut saw_done = false;
     while let Some(event) = stream.next().await {
         match event.expect("chat event") {
-            ChatEvent::TextDelta { .. } => saw_text = true,
+            ChatEvent::BlockDelta { .. } => saw_text = true,
             ChatEvent::Done { .. } => {
                 saw_done = true;
                 break;
             }
-            ChatEvent::Start => {}
+            ChatEvent::Start | ChatEvent::BlockStart { .. } | ChatEvent::BlockEnd { .. } => {}
         }
     }
     engine_task.await.expect("mock engine task");
@@ -559,16 +581,61 @@ async fn prepared_openai_request_streams_text_events() {
     let mut saw_done = false;
     while let Some(event) = stream.next().await {
         match event.expect("chat event") {
-            ChatEvent::TextDelta { .. } => saw_text = true,
+            ChatEvent::BlockDelta { .. } => saw_text = true,
             ChatEvent::Done { .. } => {
                 saw_done = true;
                 break;
             }
-            ChatEvent::Start => {}
+            ChatEvent::Start | ChatEvent::BlockStart { .. } | ChatEvent::BlockEnd { .. } => {}
         }
     }
     engine_task.await.expect("mock engine task");
 
     assert!(saw_text);
     assert!(saw_done);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reasoning_blocks_are_mapped_to_reasoning_content_sse_chunks() {
+    let (app, engine_task) = test_app_with_backend_and_stream_output_specs(
+        Arc::new(FakeChatBackend::with_model_id("Qwen/Qwen3-0.6B")),
+        vec![
+            (bytes_to_token_ids(b"<think>"), None),
+            (bytes_to_token_ids(b"think "), None),
+            (bytes_to_token_ids(b"more</think>"), None),
+            (bytes_to_token_ids(b"answer"), Some(FinishReason::Length)),
+        ],
+    )
+    .await;
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "Qwen/Qwen1.5-0.5B-Chat",
+                        "stream": true,
+                        "messages": [{"role": "user", "content": "hello"}]
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("read body");
+    engine_task.await.expect("mock engine task");
+    let text = String::from_utf8(body.to_vec()).expect("utf8 body");
+
+    assert!(text.contains("\"reasoning_content\":\"think \""), "{text}");
+    assert!(text.contains("\"reasoning_content\":\"more\""), "{text}");
+    assert!(text.contains("\"content\":\"answer\""), "{text}");
 }

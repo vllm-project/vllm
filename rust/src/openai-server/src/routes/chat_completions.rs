@@ -13,8 +13,8 @@ use openai_protocol::chat::{
 use openai_protocol::validated::ValidatedJson;
 use serde_json::Value;
 use thiserror_ext::AsReport as _;
-use tracing::{error, info};
-use vllm_chat::{ChatEvent, ChatEventStream};
+use tracing::{debug, error, info};
+use vllm_chat::{AssistantBlockKind, ChatEvent, ChatEventStream};
 use vllm_engine_core_client::protocol::{FinishReason, StopReason};
 
 use crate::convert::prepare_chat_request;
@@ -74,8 +74,20 @@ async fn chat_completion_chunk_stream(
     while let Some(next) = stream.next().await {
         match next {
             Ok(ChatEvent::Start) => yield start_chunk(&response_id, &response_model, created),
-            Ok(ChatEvent::TextDelta { delta, .. }) => {
-                yield text_chunk(&response_id, &response_model, created, delta)
+            Ok(ChatEvent::BlockDelta { kind, delta, .. }) => {
+                yield block_delta_chunk(&response_id, &response_model, created, kind, delta)
+            }
+            Ok(ChatEvent::BlockStart { kind, .. }) => {
+                debug!(
+                    request_id = %response_id, ?kind,
+                    "starting new block in chat completion stream"
+                );
+            }
+            Ok(ChatEvent::BlockEnd { .. }) => {
+                debug!(
+                    request_id = %response_id,
+                    "ending current block in chat completion stream"
+                );
             }
             Ok(ChatEvent::Done {
                 finish_reason: Some(finish_reason),
@@ -187,13 +199,30 @@ fn start_chunk(
     }
 }
 
-/// Build one content-delta SSE chunk from one internal text delta.
-fn text_chunk(
+/// Build one content-delta SSE chunk from one internal assistant block delta.
+fn block_delta_chunk(
     response_id: &str,
     response_model: &str,
     created: u64,
+    kind: AssistantBlockKind,
     delta: String,
 ) -> ChatCompletionStreamResponse {
+    let delta = match kind {
+        AssistantBlockKind::Text => ChatMessageDelta {
+            role: None,
+            content: Some(delta),
+            tool_calls: None,
+            reasoning_content: None,
+        },
+        AssistantBlockKind::Reasoning => ChatMessageDelta {
+            role: None,
+            content: None,
+            tool_calls: None,
+            reasoning_content: Some(delta),
+        },
+        AssistantBlockKind::ToolCall => unreachable!(),
+    };
+
     ChatCompletionStreamResponse {
         id: response_id.to_string(),
         object: "chat.completion.chunk".to_string(),
@@ -202,12 +231,7 @@ fn text_chunk(
         system_fingerprint: None,
         choices: vec![ChatStreamChoice {
             index: 0,
-            delta: ChatMessageDelta {
-                role: None,
-                content: Some(delta),
-                tool_calls: None,
-                reasoning_content: None,
-            },
+            delta,
             logprobs: None,
             finish_reason: None,
             matched_stop: None,
@@ -251,15 +275,40 @@ fn stop_reason_to_json(stop_reason: StopReason) -> Value {
 #[cfg(test)]
 mod tests {
     use serde_json::json;
+    use vllm_chat::AssistantBlockKind;
     use vllm_engine_core_client::protocol::{FinishReason, StopReason};
 
-    use super::{final_chunk, text_chunk};
+    use super::{block_delta_chunk, final_chunk};
 
     #[test]
     fn text_chunk_uses_content_only_delta() {
-        let chunk = text_chunk("chatcmpl-1", "model", 1, "hello".to_string());
+        let chunk = block_delta_chunk(
+            "chatcmpl-1",
+            "model",
+            1,
+            AssistantBlockKind::Text,
+            "hello".to_string(),
+        );
         assert_eq!(chunk.choices[0].delta.role, None);
         assert_eq!(chunk.choices[0].delta.content.as_deref(), Some("hello"));
+        assert_eq!(chunk.choices[0].delta.reasoning_content, None);
+    }
+
+    #[test]
+    fn reasoning_chunk_uses_reasoning_content_only_delta() {
+        let chunk = block_delta_chunk(
+            "chatcmpl-1",
+            "model",
+            1,
+            AssistantBlockKind::Reasoning,
+            "thinking".to_string(),
+        );
+        assert_eq!(chunk.choices[0].delta.role, None);
+        assert_eq!(chunk.choices[0].delta.content, None);
+        assert_eq!(
+            chunk.choices[0].delta.reasoning_content.as_deref(),
+            Some("thinking")
+        );
     }
 
     #[test]

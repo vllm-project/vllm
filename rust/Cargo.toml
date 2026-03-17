@@ -19,6 +19,7 @@ futures-async-stream = "0.2.13"
 hf-hub = { version = "0.5.0", features = ["tokio"] }
 hex = "0.4.3"
 openai-protocol = { version = "1.4.0", features = ["axum"] }
+reasoning-parser = "1.2.1"
 smg-tokenizer = { package = "llm-tokenizer", version = "1.3.0" }
 parking_lot = "0.12.5"
 rmp-serde = "1.3.1"

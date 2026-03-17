@@ -29,6 +29,11 @@ pub trait ChatBackend: Send + Sync {
     /// Decode one cumulative token sequence into text.
     fn decode(&self, token_ids: &[u32], skip_special_tokens: bool) -> Result<String>;
 
+    /// Return the backend model ID when available.
+    fn model_id(&self) -> Option<&str> {
+        None
+    }
+
     /// Return tokenizer/model-derived hints used to enrich southbound sampling parameters.
     fn sampling_hints(&self) -> Result<SamplingHints> {
         Ok(SamplingHints::default())
