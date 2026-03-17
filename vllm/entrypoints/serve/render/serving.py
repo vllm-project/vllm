@@ -403,6 +403,22 @@ class OpenAIServingRender:
 
         # Render prompt token ids.
         prompt_token_ids = render_for_completion(messages)
+
+        # Apply truncate_prompt_tokens if specified.
+        # The normal (non-harmony) path handles this via TokenizeParams inside
+        # the renderer, but the harmony path builds tokens directly so we must
+        # truncate here.
+        truncate = request.truncate_prompt_tokens
+        if truncate is not None:
+            max_input_tokens = (
+                self.model_config.max_model_len
+                - (request.max_completion_tokens or request.max_tokens or 0)
+            )
+            if truncate == -1:
+                truncate = max_input_tokens
+            if len(prompt_token_ids) > truncate:
+                prompt_token_ids = prompt_token_ids[-truncate:]
+
         engine_prompt = TokensPrompt(prompt_token_ids=prompt_token_ids)
 
         # Add cache_salt if provided in the request
