@@ -177,8 +177,8 @@ async def transfer_run_periodically(
                         cuda_stream=cuda_stream,
                     )
                     # Block until all GPU writes to the intermediate buffer are complete
-                    # so that step() on the main thread can read the buffer without a
-                    # separate event.
+                    # so that step() on the main thread can read from the intermediate
+                    # buffer without a separate GPU event.
                     cuda_stream.synchronize()
 
                     model_state.result_queue.put(
