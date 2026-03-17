@@ -351,7 +351,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.speculator.set_attn(
                 self.model_state,
                 self.kv_cache_config,
-                self.attn_groups,
                 self.block_tables,
             )
 
