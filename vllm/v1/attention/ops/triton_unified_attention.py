@@ -1070,7 +1070,8 @@ def unified_attention(
     # This is the authoritative signal — independent of which scale args are passed.
     # FP8: 1-byte floating-point (e4m3, e5m2).
     use_fp8_kv = k.is_floating_point() and k.element_size() == 1
-    # INT8 (and future integer-quantized formats like NVFP4):
+    # INT8 KV cache.  Other quantized formats (e.g. NVFP4) would add their
+    # own use_<fmt>_kv flag here with a separate dtype check.
     use_int8_kv = k.dtype == torch.int8
 
     # Per-token scale granularity — applies to any format that stores

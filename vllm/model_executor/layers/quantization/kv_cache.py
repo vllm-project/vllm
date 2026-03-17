@@ -9,7 +9,10 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizeMethodBase,
 )
 from vllm.platforms import current_platform
-from vllm.v1.attention.backend import is_quantized_kv_cache
+from vllm.v1.attention.backend import (
+    is_quantized_kv_cache,
+    kv_cache_uses_per_token_scales,
+)
 
 logger = init_logger(__name__)
 
@@ -61,10 +64,10 @@ class BaseKVCacheMethod(QuantizeMethodBase):
             is_quantized_kv_cache(layer.kv_cache_dtype)
             and not layer.calculate_kv_scales
         ):
-            is_int8 = layer.kv_cache_dtype.startswith("int8")
-            is_fp8 = layer.kv_cache_dtype.startswith("fp8")
+            uses_per_token = kv_cache_uses_per_token_scales(
+                layer.kv_cache_dtype)
 
-            if is_int8:
+            if uses_per_token:
                 # Formats with per-token scales (INT8, future NVFP4, etc.)
                 # use dynamic scales computed in the kernel at cache-write
                 # time. Checkpoint scales are not used — set placeholders.
