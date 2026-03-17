@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from pydantic import Field, model_validator
 
@@ -24,6 +24,14 @@ class PoolingBasicRequestMixin(OpenAIBaseModel):
 
     # --8<-- [start:pooling-common-extra-params]
     truncate_prompt_tokens: Annotated[int, Field(ge=-1)] | None = None
+    truncation_side: Literal["left", "right"] | None = Field(
+        default=None,
+        description=(
+            "Which side to truncate from when truncate_prompt_tokens is active. "
+            "'right' keeps the first N tokens. "
+            "'left' keeps the last N tokens."
+        ),
+    )
     request_id: str = Field(
         default_factory=random_uuid,
         description=(
@@ -34,6 +42,8 @@ class PoolingBasicRequestMixin(OpenAIBaseModel):
     )
     priority: int = Field(
         default=0,
+        ge=-(2**63),
+        le=2**63 - 1,
         description=(
             "The priority of the request (lower means earlier handling; "
             "default: 0). Any priority other than 0 will raise an error "
@@ -124,6 +134,13 @@ class ChatRequestMixin(OpenAIBaseModel):
             "Will be accessible by the chat template."
         ),
     )
+    media_io_kwargs: dict[str, dict[str, Any]] | None = Field(
+        default=None,
+        description=(
+            "Additional kwargs to pass to the media IO connectors, "
+            "keyed by modality. Merged with engine-level media_io_kwargs."
+        ),
+    )
     # --8<-- [end:chat-extra-params]
 
     @model_validator(mode="before")
@@ -151,6 +168,7 @@ class ChatRequestMixin(OpenAIBaseModel):
                     continue_final_message=self.continue_final_message,
                 ),
             ),
+            media_io_kwargs=self.media_io_kwargs,
         )
 
 

@@ -72,6 +72,10 @@ async def init_generate_state(
         tool_server = None
     resolved_chat_template = load_chat_template(args.chat_template)
 
+    # Render endpoints are always backed by OpenAIServingRender so that
+    # /v1/chat/completions/render and /v1/completions/render work on both
+    # generate-mode and render-only servers. Created in init_app_state.
+
     state.openai_serving_responses = (
         OpenAIServingResponses(
             engine_client,
@@ -87,7 +91,6 @@ async def init_generate_state(
             enable_prompt_tokens_details=args.enable_prompt_tokens_details,
             enable_force_include_usage=args.enable_force_include_usage,
             enable_log_outputs=args.enable_log_outputs,
-            log_error_stack=args.log_error_stack,
         )
         if "generate" in supported_tasks
         else None
@@ -97,6 +100,7 @@ async def init_generate_state(
             engine_client,
             state.openai_serving_models,
             args.response_role,
+            openai_serving_render=state.openai_serving_render,
             request_logger=request_logger,
             chat_template=resolved_chat_template,
             chat_template_content_format=args.chat_template_content_format,
@@ -111,23 +115,21 @@ async def init_generate_state(
             enable_force_include_usage=args.enable_force_include_usage,
             enable_log_outputs=args.enable_log_outputs,
             enable_log_deltas=args.enable_log_deltas,
-            log_error_stack=args.log_error_stack,
         )
         if "generate" in supported_tasks
         else None
     )
-    # Warm up chat template processing to avoid first-request latency
     if state.openai_serving_chat is not None:
-        await state.openai_serving_chat.warmup()
+        state.openai_serving_chat.warmup()
     state.openai_serving_completion = (
         OpenAIServingCompletion(
             engine_client,
             state.openai_serving_models,
+            openai_serving_render=state.openai_serving_render,
             request_logger=request_logger,
             return_tokens_as_token_ids=args.return_tokens_as_token_ids,
             enable_prompt_tokens_details=args.enable_prompt_tokens_details,
             enable_force_include_usage=args.enable_force_include_usage,
-            log_error_stack=args.log_error_stack,
         )
         if "generate" in supported_tasks
         else None
@@ -137,6 +139,7 @@ async def init_generate_state(
             engine_client,
             state.openai_serving_models,
             args.response_role,
+            openai_serving_render=state.openai_serving_render,
             request_logger=request_logger,
             chat_template=resolved_chat_template,
             chat_template_content_format=args.chat_template_content_format,
@@ -156,7 +159,6 @@ async def init_generate_state(
             state.openai_serving_models,
             request_logger=request_logger,
             return_tokens_as_token_ids=args.return_tokens_as_token_ids,
-            log_error_stack=args.log_error_stack,
             enable_prompt_tokens_details=args.enable_prompt_tokens_details,
             enable_log_outputs=args.enable_log_outputs,
             force_no_detokenize=args.tokens_only,

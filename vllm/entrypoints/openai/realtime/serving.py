@@ -33,13 +33,11 @@ class OpenAIServingRealtime(OpenAIServing):
         models: OpenAIServingModels,
         *,
         request_logger: RequestLogger | None,
-        log_error_stack: bool = False,
     ):
         super().__init__(
             engine_client=engine_client,
             models=models,
             request_logger=request_logger,
-            log_error_stack=log_error_stack,
         )
 
         self.task_type: Literal["realtime"] = "realtime"

@@ -3,11 +3,11 @@
 
 import os
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, overload
 
 import torch
 from pydantic import Field, field_validator, model_validator
-from torch.distributed import ProcessGroup, ReduceOp
+from torch.distributed import ProcessGroup, ReduceOp, Store
 from typing_extensions import Self
 
 import vllm.envs as envs
@@ -36,14 +36,18 @@ ExpertPlacementStrategy = Literal["linear", "round_robin"]
 DistributedExecutorBackend = Literal["ray", "mp", "uni", "external_launcher"]
 DataParallelBackend = Literal["ray", "mp"]
 EPLBPolicyOption = Literal["default"]
+DCPCommBackend = Literal["ag_rs", "a2a"]
 All2AllBackend = Literal[
     "naive",
     "pplx",
     "deepep_high_throughput",
     "deepep_low_latency",
     "mori",
+    "nixl_ep",
     "allgather_reducescatter",
-    "flashinfer_all2allv",
+    "flashinfer_all2allv",  # temporary alias for flashinfer_nvlink_two_sided
+    "flashinfer_nvlink_two_sided",
+    "flashinfer_nvlink_one_sided",
 ]
 
 
@@ -155,7 +159,9 @@ class ParallelConfig:
     - "deepep_high_throughput": Use deepep high-throughput kernels\n
     - "deepep_low_latency": Use deepep low-latency kernels\n
     - "mori": Use mori kernels\n
-    - "flashinfer_all2allv": Use flashinfer alltoallv kernels for mnnvl"""
+    - "nixl_ep": Use nixl-ep kernels\n
+    - "flashinfer_nvlink_two_sided": Use flashinfer two-sided kernels for mnnvl
+    - "flashinfer_nvlink_one_sided": Use flashinfer high-throughput a2a kernels"""
 
     max_parallel_loading_workers: int | None = None
     """Maximum number of parallel loading workers when loading model
@@ -233,8 +239,14 @@ class ParallelConfig:
     """distributed node rank for multi-node distributed 
     inference when distributed_executor_backend is mp."""
     nnodes: int = 1
-    """num of nodes for multi-node distributed 
+    """num of nodes for multi-node distributed
     inference when distributed_executor_backend is mp."""
+
+    distributed_timeout_seconds: int | None = None
+    """Timeout in seconds for distributed operations (e.g., init_process_group).
+    If set, this value is passed to torch.distributed.init_process_group as the
+    timeout parameter. If None, PyTorch's default timeout is used (600s for NCCL).
+    Increase this for multi-node setups where model downloads may be slow."""
 
     world_size: int = Field(init=False)
     """world_size is TPxPP, it affects the number of workers we create."""
@@ -287,6 +299,14 @@ class ParallelConfig:
     and will be deprecated when PCP is fully supported.
 
     """
+    dcp_comm_backend: DCPCommBackend = "ag_rs"
+    """Communication backend for Decode Context Parallel (DCP).
+    - "ag_rs": AllGather + ReduceScatter (default, existing behavior)
+    - "a2a": All-to-All exchange of partial outputs + LSE, then
+      combine with Triton kernel. Reduces NCCL calls from 3 to 2
+      per layer for MLA models.
+    """
+
     cp_kv_cache_interleave_size: int = 1
     """Interleave size of kv_cache storage while using DCP or PCP.
     For `total_cp_rank = pcp_rank * dcp_world_size + dcp_rank`,
@@ -392,6 +412,11 @@ class ParallelConfig:
                 f"dcp_size={self.decode_context_parallel_size}."
             )
 
+        if self.dcp_comm_backend == "a2a" and self.decode_context_parallel_size <= 1:
+            raise ValueError(
+                "dcp_comm_backend='a2a' requires decode_context_parallel_size > 1."
+            )
+
         return self
 
     @property
@@ -493,7 +518,17 @@ class ParallelConfig:
     def get_next_stateless_eplb_group_port(self) -> list[int]:
         return self._stateless_eplb_group_port_list.pop()
 
-    def stateless_init_dp_group(self, return_store: bool = False) -> ProcessGroup:
+    @overload
+    def stateless_init_dp_group(
+        self, return_store: Literal[False] = ...
+    ) -> ProcessGroup: ...
+    @overload
+    def stateless_init_dp_group(
+        self, return_store: Literal[True] = ...
+    ) -> tuple[ProcessGroup, Store]: ...
+    def stateless_init_dp_group(
+        self, return_store: bool = False
+    ) -> ProcessGroup | tuple[ProcessGroup, Store]:
         # NOTE: In high-concurrency scenarios multiple processes
         # can pick the same (currently free) port through a race
         # condition when calling `get_open_port()`. When the first
@@ -550,6 +585,7 @@ class ParallelConfig:
                 "deepep_high_throughput",
                 "deepep_low_latency",
                 "mori",
+                "nixl_ep",
             )
             and self.enable_expert_parallel
             and self.tensor_parallel_size > 1
