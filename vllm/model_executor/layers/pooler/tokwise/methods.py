@@ -47,13 +47,8 @@ class AllPool(TokenPoolingMethod):
         pooling_metadata: PoolingMetadata,
     ) -> list[TokenPoolingMethodOutputItem]:
         pooling_cursor = pooling_metadata.get_pooling_cursor()
-        hidden_states_lst = [
-            hidden_states[first : last + 1]
-            for first, last in zip(
-                pooling_cursor.first_token_indices_gpu.tolist(),
-                pooling_cursor.last_token_indices_gpu.tolist(),
-            )
-        ]
+        split_sizes = pooling_cursor.num_scheduled_tokens_cpu.tolist()
+        hidden_states_lst = list(hidden_states.split(split_sizes, dim=0))
 
         if not self.enable_chunked_prefill:
             return hidden_states_lst
