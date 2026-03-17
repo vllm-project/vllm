@@ -246,12 +246,23 @@ def check_moe_marlin_supports_layer(layer: LinearBase, group_size: int) -> bool:
     return supports_shape and supports_group_size and supports_router_weight
 
 
-def marlin_moe_intermediate_size(w1_packed: torch.Tensor, w2_packed: torch.Tensor):
+def marlin_moe_intermediate_size(
+    w1_packed: torch.Tensor,
+    w2_packed: torch.Tensor,
+    layer: torch.nn.Module | None = None,
+):
     """
     Given Marlin packed weight matrices w1_packed, and w2_packed,
     return the MoE intermediate size N
+
+    If layer is provided and has a marlin_moe_intermediate_size attribute,
+    use that value. Otherwise, fall back to computing from w2_packed.
     """
     marlin_tile_size = 16
+
+    if layer is not None and hasattr(layer, "marlin_moe_intermediate_size"):
+        return layer.marlin_moe_intermediate_size
+
     return w2_packed.size(1) * marlin_tile_size
 
 
