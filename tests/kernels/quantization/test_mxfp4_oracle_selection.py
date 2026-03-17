@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
-Temporary test to verify MXFP4 oracle for-loop selection logic.
+Test MXFP4 oracle for-loop selection logic.
 Tests that the priority-based backend selection and MXFP8 activation
 key mapping work correctly.
 """

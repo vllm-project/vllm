@@ -155,9 +155,7 @@ def map_mxfp4_backend(runner_backend: str) -> Mxfp4MoeBackend:
     )
 
 
-def _get_priority_backends(
-    config: FusedMoEConfig,
-) -> list[Mxfp4MoeBackend]:
+def _get_priority_backends() -> list[Mxfp4MoeBackend]:
     """
     Get available backends in priority order based on platform and config.
     Only includes BF16 backends. MXFP8 backends are selected via env vars.
@@ -236,6 +234,7 @@ def select_mxfp4_moe_backend(
         activation_key: QuantKey | None,
         activation_format: mk.FusedMoEActivationFormat,
     ) -> tuple[Mxfp4MoeBackend, type[mk.FusedMoEExperts]]:
+        reason: str | None = None
         for k_cls in backend_to_kernel_cls(backend):
             supported, reason = k_cls.is_supported_config(
                 k_cls, config, weight_key, activation_key, activation_format
@@ -262,7 +261,7 @@ def select_mxfp4_moe_backend(
         )
 
     # Select kernels in order of backend.
-    AVAILABLE_BACKENDS = _get_priority_backends(config)
+    AVAILABLE_BACKENDS = _get_priority_backends()
 
     # Handle explicit FlashInfer MXFP4 BF16 configuration.
     if envs.is_set("VLLM_USE_FLASHINFER_MOE_MXFP4_BF16"):
@@ -286,6 +285,11 @@ def select_mxfp4_moe_backend(
                     None,
                     activation_format,
                 )
+            raise ValueError(
+                "VLLM_USE_FLASHINFER_MOE_MXFP4_BF16=1 is set but the "
+                "current device capability is not supported. "
+                "Only SM90 (CUTLASS) and SM100+ (TRTLLM) are supported."
+            )
 
     # Handle explicit FlashInfer MXFP4 MXFP8 TRTLLM configuration.
     if (
@@ -605,7 +609,8 @@ def convert_to_mxfp4_moe_kernel_format(
                 w2_bias,
             )
 
-        elif mxfp4_backend == Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_BF16:
+        else:
+            assert mxfp4_backend == Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_BF16
 
             def _interleave_mxfp4_cutlass_sm90(w):
                 w_shape = w.shape
@@ -639,12 +644,12 @@ def convert_to_mxfp4_moe_kernel_format(
         w2_bias = w2_bias.to(torch.float32)
 
         w13_weight, w13_flex, w13_scale = _swizzle_mxfp4(
-            layer.w13_weight,
-            layer.w13_weight_scale,
+            w13_weight,
+            w13_weight_scale,
         )
         w2_weight, w2_flex, w2_scale = _swizzle_mxfp4(
-            layer.w2_weight,
-            layer.w2_weight_scale,
+            w2_weight,
+            w2_weight_scale,
         )
 
         w13_precision_config = PrecisionConfig(
@@ -670,8 +675,6 @@ def convert_to_mxfp4_moe_kernel_format(
             f"Unsupported mxfp4_backend: {mxfp4_backend}: "
             f"should be one of: {list(Mxfp4MoeBackend)}."
         )
-
-    raise AssertionError("unreachable")
 
 
 def make_mxfp4_moe_quant_config(
