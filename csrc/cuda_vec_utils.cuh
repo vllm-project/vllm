@@ -196,6 +196,7 @@ __forceinline__ __device__ u32x8_t ld256_cs(const u32x8_t* addr) {
   return val;
 #else
   assert(false && "ld256_cs requires SM100+ with CUDA 12.9+");
+  return u32x8_t{};
 #endif
 }
 
