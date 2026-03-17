@@ -7,71 +7,77 @@
 </p>
 
 <h3 align="center">
-Easy, fast, and cheap LLM serving for everyone
+High-performance LLM inference and serving, with a simpler local runtime
 </h3>
 
 <p align="center">
 | <a href="https://docs.vllm.ai"><b>Documentation</b></a> | <a href="https://blog.vllm.ai/"><b>Blog</b></a> | <a href="https://arxiv.org/abs/2309.06180"><b>Paper</b></a> | <a href="https://x.com/vllm_project"><b>Twitter/X</b></a> | <a href="https://discuss.vllm.ai"><b>User Forum</b></a> | <a href="https://slack.vllm.ai"><b>Developer Slack</b></a> |
 </p>
 
-🔥 We have built a vllm website to help you get started with vllm. Please visit [vllm.ai](https://vllm.ai) to learn more.
-For events, please visit [vllm.ai/events](https://vllm.ai/events) to join us.
+vLLM documentation, updates, and project resources are available at [vllm.ai](https://vllm.ai).
 
 ---
 
-## About
+## Overview
 
-vLLM is a fast and easy-to-use library for LLM inference and serving.
+vLLM is a high-performance inference and serving engine for large language models. This repository also adds a more direct local-runtime experience intended to make a source checkout feel closer to a local application install.
 
-Originally developed in the [Sky Computing Lab](https://sky.cs.berkeley.edu) at UC Berkeley, vLLM has evolved into a community-driven project with contributions from both academia and industry.
+The updated workflow focuses on:
 
-vLLM is fast with:
+- one-command installation from this repository
+- a lightweight `vllm` launcher for help, model management, and local runtime commands
+- short built-in model aliases for common Hugging Face models
+- direct shell-based execution with `vllm run`
+- managed local services through `vllm serve`, `vllm ps`, `vllm stop`, and `vllm logs`
 
-- State-of-the-art serving throughput
-- Efficient management of attention key and value memory with [**PagedAttention**](https://blog.vllm.ai/2023/06/20/vllm.html)
-- Continuous batching of incoming requests
-- Fast model execution with CUDA/HIP graph
-- Quantizations: [GPTQ](https://arxiv.org/abs/2210.17323), [AWQ](https://arxiv.org/abs/2306.00978), [AutoRound](https://arxiv.org/abs/2309.05516), INT4, INT8, and FP8
-- Optimized CUDA kernels, including integration with FlashAttention and FlashInfer
-- Speculative decoding
-- Chunked prefill
+The underlying vLLM engine and server stack remain intact, including:
 
-vLLM is flexible and easy to use with:
+- [PagedAttention](https://blog.vllm.ai/2023/06/20/vllm.html)
+- continuous batching
+- OpenAI-compatible serving
+- support for popular Hugging Face models
+- quantization, scheduling, and distributed inference features from vLLM
 
-- Seamless integration with popular Hugging Face models
-- High-throughput serving with various decoding algorithms, including *parallel sampling*, *beam search*, and more
-- Tensor, pipeline, data and expert parallelism support for distributed inference
-- Streaming outputs
-- OpenAI-compatible API server
-- Support for NVIDIA GPUs, AMD CPUs and GPUs, Intel CPUs and GPUs, PowerPC CPUs, Arm CPUs, and TPU. Additionally, support for diverse hardware plugins such as Intel Gaudi, IBM Spyre and Huawei Ascend.
-- Prefix caching support
-- Multi-LoRA support
+## Key Capabilities
 
-vLLM seamlessly supports most popular open-source models on HuggingFace, including:
+This repository is designed to support both the familiar vLLM workflows and a simpler local launcher flow.
 
-- Transformer-like LLMs (e.g., Llama)
-- Mixture-of-Expert LLMs (e.g., Mixtral, Deepseek-V2 and V3)
-- Embedding Models (e.g., E5-Mistral)
-- Multi-modal LLMs (e.g., LLaVA)
+- `./scripts/install.sh` installs the checkout with a standalone `vllm` command
+- `vllm --help` and other local metadata commands start quickly without loading the full runtime stack first
+- `vllm pull`, `vllm run`, and `vllm serve` provide the primary terminal workflow
+- `vllm aliases` exposes built-in short names for commonly used models
+- local runtime state is managed with `vllm ls`, `vllm inspect`, `vllm ps`, `vllm stop`, `vllm logs`, and `vllm rm`
+- deferred parity work and planned improvements are tracked in [docs/cli/local_runtime_followups.md](./docs/cli/local_runtime_followups.md)
 
-Find the full list of supported models [here](https://docs.vllm.ai/en/latest/models/supported_models.html).
+## Installation
 
-## What's New
+The shortest installation path from this repository is:
 
-This version keeps the existing vLLM engine and serving stack, but adds a more direct local-runtime workflow on top of it.
+```bash
+./scripts/install.sh
+vllm --help
+```
 
-New local-runtime features:
+The installer supports:
 
-- A repo-local bootstrap installer via `./scripts/install.sh`
-- A simpler CLI centered on `vllm pull`, `vllm run`, and `vllm serve`
-- A lightweight launcher so `vllm`, `vllm --help`, `vllm aliases`, `vllm pull`, and local service management feel immediate
-- Built-in short model aliases such as `deepseek-r1:8b`
-- Managed local background services with `vllm ps`, `vllm stop`, and `vllm logs`
-- A tracked backlog for deferred parity work in `docs/cli/local_runtime_followups.md`
+- system install
+- user-local install
+- explicit virtualenv install
+
+Examples:
+
+```bash
+./scripts/install.sh
+./scripts/install.sh --system
+./scripts/install.sh --venv .venv
+./scripts/install.sh --recreate
+```
+
+On Linux, the intended outcome is a usable `vllm` command installed directly into your path. On macOS, the installer currently uses the CPU source-build path; future Apple GPU support is planned separately.
 
 ## Quick Start
 
-If you want the fastest path to a local vLLM workflow from this repository:
+For a terminal-first local workflow:
 
 ```bash
 ./scripts/install.sh
@@ -80,32 +86,40 @@ vllm pull deepseek-r1:8b
 vllm run deepseek-r1:8b
 ```
 
-If you want a local API server instead:
+To start a local API service:
 
 ```bash
 vllm serve deepseek-r1:8b
 vllm ps
 ```
 
-## Core Flows
+## Local Runtime Workflow
 
-### Local Runtime
+The local launcher is organized around a small set of common commands:
 
-Use the new local commands when you want an easier terminal-first experience:
-
-- `vllm pull <model>` downloads a model using a short alias or exact Hugging Face repo
-- `vllm run <model>` opens a local shell chat or runs a one-shot prompt
+- `vllm pull <model>` downloads a model from an alias, Hugging Face repo, or local path
+- `vllm run <model>` runs directly in your shell for chat or prompt-based generation
 - `vllm serve <model>` starts a managed local service
-- `vllm aliases` lists the built-in easy-model shortcuts
-- `vllm ps`, `vllm stop`, and `vllm logs` manage those local services
+- `vllm aliases` lists the built-in short model names
+- `vllm ls` and `vllm inspect <model>` show local model metadata and resolution
+- `vllm ps`, `vllm stop`, and `vllm logs` manage background services
 
-### Built-in Easy Models
+This keeps the default local path simple while preserving the full vLLM runtime and API-serving capabilities.
 
-This version ships a larger set of built-in aliases so you can pull common models without remembering full Hugging Face repo IDs.
+## Model Support
 
-Examples:
+There are two layers of model support to keep in mind:
 
-- `deepseek-r1:1.5b`, `deepseek-r1:7b`, `deepseek-r1:8b`, `deepseek-r1:14b`, `deepseek-r1:32b`, `deepseek-r1:70b`
+1. Easy aliases
+2. Broader vLLM model support
+
+### Built-in Aliases
+
+The launcher includes a built-in alias catalog so common models can be referenced with short names instead of full Hugging Face repository IDs.
+
+Current aliases include:
+
+- `deepseek-r1:1.5b`, `deepseek-r1:7b`, `deepseek-r1:8b`, `deepseek-r1:14b`, `deepseek-r1:32b`, `deepseek-r1:70b`, `deepseek-v3`
 - `llama3.2:1b-instruct`, `llama3.2:3b-instruct`, `llama3.1:8b-instruct`, `llama3.1:70b-instruct`, `llama3.3:70b-instruct`
 - `qwen2.5:0.5b-instruct`, `qwen2.5:1.5b-instruct`, `qwen2.5:3b-instruct`, `qwen2.5:7b-instruct`, `qwen2.5:14b-instruct`, `qwen2.5:32b-instruct`, `qwen2.5:72b-instruct`
 - `qwen2.5-coder:1.5b-instruct`, `qwen2.5-coder:7b-instruct`, `qwen2.5-coder:32b-instruct`
@@ -114,16 +128,27 @@ Examples:
 - `phi3.5:mini-instruct`, `phi3.5:moe-instruct`, `phi4`
 - `smollm2:360m-instruct`, `smollm2:1.7b-instruct`
 
-Use `vllm aliases` for the full installed list.
+Run `vllm aliases` to inspect the installed catalog.
 
-### Existing vLLM Paths
+### General vLLM Compatibility
 
-The existing advanced vLLM workflows still exist:
+The alias list is only a convenience layer. `vllm pull` and `vllm run` also accept:
 
-- `pip install vllm` for the standard package install path
-- `vllm serve` in foreground mode for the existing server-first workflow
-- `vllm chat`, `vllm complete`, `vllm bench`, and `vllm run-batch` for the existing advanced CLI surface
-- Python library usage via `LLM`, `AsyncLLMEngine`, and the OpenAI-compatible server stack
+- exact Hugging Face repositories such as `meta-llama/Llama-3.1-8B-Instruct`
+- local filesystem paths
+
+Broader compatibility still follows what vLLM itself supports. For the full model-compatibility matrix, see [Supported Models](https://docs.vllm.ai/en/latest/models/supported_models.html).
+
+## Existing vLLM Workflows
+
+The local launcher flow is intended to improve the default user experience, not replace the existing vLLM interfaces.
+
+You can still use:
+
+- Python library APIs such as `LLM` and `AsyncLLMEngine`
+- foreground `vllm serve`
+- `vllm chat`, `vllm complete`, `vllm bench`, and `vllm run-batch`
+- standard package installation and development workflows
 
 ## Documentation
 
