@@ -241,7 +241,6 @@ class CohereASRCrossAttention(CohereASRAttention):
         self,
         hidden_states: torch.Tensor,
         encoder_hidden_states: torch.Tensor | None,
-        output_prefix: str,
     ) -> torch.Tensor:
         q, _ = self.q_proj(hidden_states)
 
@@ -374,7 +373,6 @@ class CohereASRDecoderLayer(nn.Module):
         self,
         hidden_states: torch.Tensor,
         encoder_hidden_states: torch.Tensor | None,
-        output_prefix: str,
     ) -> torch.Tensor:
         residual = hidden_states
         hidden_states = self.layer_norm_1(hidden_states)
@@ -386,7 +384,6 @@ class CohereASRDecoderLayer(nn.Module):
         hidden_states = self.second_sub_layer(
             hidden_states=hidden_states,
             encoder_hidden_states=encoder_hidden_states,
-            output_prefix=output_prefix,
         )
 
         hidden_states = residual + hidden_states
@@ -457,11 +454,10 @@ class CohereASRDecoder(nn.Module):
         encoder_hidden_states: torch.Tensor | None,
     ) -> torch.Tensor:
         hidden_states = self.get_input_embeddings(input_ids, positions)
-        for decoder_idx, decoder_layer in enumerate(self.layers):
+        for decoder_layer in self.layers:
             hidden_states = decoder_layer(
                 hidden_states,
                 encoder_hidden_states=encoder_hidden_states,
-                output_prefix=f"canary_decoder_layer_hidden_states_{decoder_idx}",
             )
 
         hidden_states = self.final_layer_norm(hidden_states)

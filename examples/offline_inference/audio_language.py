@@ -73,7 +73,7 @@ def run_audioflamingo3(question: str, audio_count: int) -> ModelRequestData:
 # CohereASR
 def run_cohere_asr(question: str, audio_count: int) -> ModelRequestData:
     assert audio_count == 1, "CohereASR only support single audio input per prompt"
-    # TODO (ekagra): change to the correct path once we have the final model ckpt
+    # TODO (ekagra): add HF ckpt after asr release
     model_name = "/host/engines/vllm/audio/2b-release"
 
     prompt = (

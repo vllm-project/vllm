@@ -156,7 +156,7 @@ def run_evaluation(
     "model_config",
     [
         ("openai/whisper-large-v3", 12.744980),
-        # TODO (ekagra): add final model ckpt here
+        # TODO (ekagra): add HF ckpt after asr release
         # ("/host/engines/vllm/audio/2b-release", 11.73),
     ],
 )
