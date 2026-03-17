@@ -116,7 +116,10 @@ def _worker_parallel_launch(
         traceback.print_exc()
         raise
     finally:
-        cleanup_dist_env_and_memory()
+        if vllm_config is not None:
+            cleanup_dist_env_and_memory()
+        else:
+            torch.distributed.destroy_process_group()
 
 
 def parallel_launch_with_config(

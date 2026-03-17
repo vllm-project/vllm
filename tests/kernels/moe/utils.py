@@ -469,7 +469,6 @@ def fused_moe(
     )
 
 
-# CustomOp?
 class BaselineMM(torch.nn.Module):
     def __init__(
         self,
@@ -477,11 +476,20 @@ class BaselineMM(torch.nn.Module):
         out_dtype: torch.dtype,
     ):
         super().__init__()
-        self.b = b.to(dtype=torch.float32)
+        self.b = torch.nn.Parameter(b.to(dtype=torch.float32))
         self.out_dtype = out_dtype
 
     def forward(self, a: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor | None]:
         return torch.mm(a.to(dtype=torch.float32), self.b).to(self.out_dtype), None
+
+
+class BaselineSiluAndMul(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        d = x.shape[-1] // 2
+        return torch.nn.functional.silu(x[..., :d]) * x[..., d:]
 
 
 class TestMLP(torch.nn.Module):
@@ -494,7 +502,7 @@ class TestMLP(torch.nn.Module):
         super().__init__()
         self.gate_up_proj = BaselineMM(w1, out_dtype)
         self.down_proj = BaselineMM(w2, out_dtype)
-        self.act_fn = SiluAndMul()
+        self.act_fn = BaselineSiluAndMul()
 
     def forward(self, x):
         x, _ = self.gate_up_proj(x)
