@@ -9,16 +9,12 @@ import json
 import os
 import re
 import signal
-import socket
-import subprocess
 import sys
 import time
 from pathlib import Path
 from typing import Any
 
-
-REPO_ROOT = Path(__file__).resolve().parents[1]
-ALIASES_PATH = REPO_ROOT / "vllm" / "entrypoints" / "cli" / "model_aliases.py"
+ALIASES_RELATIVE_PATH = Path("vllm") / "entrypoints" / "cli" / "model_aliases.py"
 
 
 def _config_root() -> Path:
@@ -37,6 +33,19 @@ LOCAL_USER_ALIASES = LOCAL_RUNTIME_DIR / "aliases.json"
 def ensure_runtime_dirs() -> None:
     LOCAL_RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
     (LOCAL_RUNTIME_DIR / "logs").mkdir(parents=True, exist_ok=True)
+
+
+def _find_aliases_path() -> Path:
+    repo_candidate = Path(__file__).resolve().parents[1] / ALIASES_RELATIVE_PATH
+    if repo_candidate.exists():
+        return repo_candidate
+
+    for entry in map(Path, sys.path):
+        candidate = entry / ALIASES_RELATIVE_PATH
+        if candidate.exists():
+            return candidate
+
+    raise RuntimeError("Unable to locate model_aliases.py for the vLLM launcher.")
 
 
 def _read_json(path: Path, default: dict[str, Any]) -> dict[str, Any]:
@@ -59,9 +68,10 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
 
 
 def _load_builtin_aliases() -> dict[str, dict[str, str]]:
-    spec = importlib.util.spec_from_file_location("_vllm_aliases", ALIASES_PATH)
+    aliases_path = _find_aliases_path()
+    spec = importlib.util.spec_from_file_location("_vllm_aliases", aliases_path)
     if spec is None or spec.loader is None:
-        raise RuntimeError(f"Unable to load aliases from {ALIASES_PATH}")
+        raise RuntimeError(f"Unable to load aliases from {aliases_path}")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return getattr(module, "BUILTIN_MODEL_ALIASES")

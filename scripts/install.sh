@@ -217,14 +217,20 @@ else
   "${UV_BIN}" pip install --python "${VENV_DIR}/bin/python" "${INSTALL_TARGET}"
 fi
 
-if [[ "${MODE}" != "venv" ]]; then
-  mkdir -p "${BIN_DIR}"
-  cat > "${BIN_DIR}/vllm" <<EOF
-#!/usr/bin/env bash
-set -euo pipefail
-exec "${VENV_DIR}/bin/python" "${ROOT_DIR}/scripts/vllm_launcher.py" "\$@"
-EOF
-  chmod +x "${BIN_DIR}/vllm"
+install_launcher() {
+  local target="$1"
+  mkdir -p "$(dirname "${target}")"
+  {
+    printf '#!%s\n' "${VENV_DIR}/bin/python"
+    tail -n +2 "${ROOT_DIR}/scripts/vllm_launcher.py"
+  } > "${target}"
+  chmod +x "${target}"
+}
+
+if [[ "${MODE}" == "venv" ]]; then
+  install_launcher "${VENV_DIR}/bin/vllm"
+else
+  install_launcher "${BIN_DIR}/vllm"
 fi
 
 echo
