@@ -72,7 +72,7 @@ In addition, we have the following custom APIs:
     - Only applicable to [classification models](../models/pooling_models/classify.md).
 - [Cohere Embed API](../models/pooling_models/embed.md#cohere-embed-api) (`/v2/embed`)
     - Compatible with [Cohere's Embed API](https://docs.cohere.com/reference/embed)
-    - Works with any [embedding model](../models/pooling_models.md), including multimodal models.
+    - Works with any [embedding model](../models/pooling_models/embed.md#supported-models), including multimodal models.
 - [Score API](../models/pooling_models/score.md#score-api) (`/score`)
     - Applicable to [score models](../models/pooling_models/score.md).
 - [Re-rank API](../models/pooling_models/score.md#re-rank-api) (`/rerank`, `/v1/rerank`, `/v2/rerank`)
