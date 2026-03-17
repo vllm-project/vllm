@@ -55,6 +55,7 @@ Within classification tasks, there is a specialized subcategory: Cross-encoder (
 We also have some special models that support multiple pooling tasks, or have specific usage scenarios, or support special inputs and outputs.
 
 For more detailed information, please refer to the link below.
+
 - [Classification Models](classify.md)
 - [Embedding models](embed.md)
 - [Reward Models](reward.md)
@@ -127,12 +128,12 @@ print(f"Data: {data!r}")
 Our online Server provides endpoints that correspond to the offline APIs:
 
 - [Embeddings API](embed.md#online-serving) is similar to `LLM.embed` and is applicable to sequence embedding models.
-  - [Cohere Embed API](embed.md#cohere-embed-api) (`/v2/embed`)
-  - [Openai-compatible Embeddings API](embed.md#openai-compatible-embeddings-api) (`/v1/embeddings`)
+    - [Cohere Embed API](embed.md#cohere-embed-api) (`/v2/embed`)
+    - [Openai-compatible Embeddings API](embed.md#openai-compatible-embeddings-api) (`/v1/embeddings`)
 - [Classification API](classify.md#online-serving)(`/classify`) is similar to `LLM.classify` and is applicable to sequence classification models.
 - [Score API](score.md#online-serving) is similar to `LLM.score` for score models.
-  - [Score API](score.md#score-api)(`/score`)
-  - [Rerank API](score.md#rerank-api) (`/rerank`, `/v1/rerank`, `/v2/rerank`)
+    - [Score API](score.md#score-api)(`/score`)
+    - [Rerank API](score.md#rerank-api) (`/rerank`, `/v1/rerank`, `/v2/rerank`)
 - Pooling API(`/pooling`) is similar to `LLM.encode`, being applicable to all types of pooling models.
 
 The following introduces the Pooling API. For other APIs, please refer to the link above.
