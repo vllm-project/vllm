@@ -151,7 +151,7 @@ async def test_max_tokens_with_tool_choice_required(
         input=prompt,
         tools=tools,
         tool_choice="required",
-        max_output_tokens=1,
+        max_output_tokens=10,
     )
     assert len(response.output) >= 1
     for out in response.output:
