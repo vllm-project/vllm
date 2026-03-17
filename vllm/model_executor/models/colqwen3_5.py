@@ -155,28 +155,23 @@ class ColQwen3_5Model(
                 "Unable to determine text hidden size from config. "
                 "Expected 'hidden_size' or 'text_config.hidden_size'."
             )
-        self._proj_hidden_size = hidden_size
 
         # (ColPali: dim, projection_dim, colbert_dim)
-        self.embed_dim: int | None = (
+        self.embed_dim: int = (
             getattr(config, "embed_dim", None)
             or getattr(config, "dims", None)
             or getattr(config, "dim", None)
             or getattr(config, "projection_dim", None)
             or getattr(config, "colbert_dim", None)
+            or 128  # default from reference implementation
         )
 
-        # Build the projection layer if embed_dim is known
-        if self.embed_dim is not None:
-            self.custom_text_proj = nn.Linear(
-                hidden_size,
-                self.embed_dim,
-                bias=False,
-                dtype=head_dtype,
-            )
-        else:
-            # Will be created during load_weights when dim is inferred
-            self.custom_text_proj = None
+        self.custom_text_proj = nn.Linear(
+            hidden_size,
+            self.embed_dim,
+            bias=False,
+            dtype=head_dtype,
+        )
 
         pooler_config = vllm_config.model_config.pooler_config
         assert pooler_config is not None
@@ -205,12 +200,12 @@ class ColQwen3_5Model(
         if not isinstance(hidden_states, torch.Tensor):
             return hidden_states  # type: ignore
 
-        proj_dtype = self.custom_text_proj.weight.dtype  # type: ignore
+        proj_dtype = self.custom_text_proj.weight.dtype
         if hidden_states.dtype != proj_dtype:
             hidden_states = hidden_states.to(proj_dtype)
 
         # Project to embedding dimension (normalization handled by pooler)
-        return self.custom_text_proj(hidden_states)  # type: ignore
+        return self.custom_text_proj(hidden_states)
 
     # Names used for the projection layer across different ColQwen3.5 variants
     _PROJ_LAYER_NAMES = {
@@ -240,27 +235,12 @@ class ColQwen3_5Model(
         )
         loaded = loader.load_weights(model_weights, mapper=self.hf_to_vllm_mapper)
 
-        if proj_weights:
-            model_dtype = next(self.language_model.parameters()).dtype
-            model_device = next(self.language_model.parameters()).device
-
-            for name, weight in proj_weights:
-                if self.embed_dim is None and "weight" in name:
-                    self.embed_dim = weight.shape[0]
-                    self.custom_text_proj = nn.Linear(
-                        self._proj_hidden_size,
-                        self.embed_dim,
-                        bias=False,
-                        dtype=model_dtype,
-                    )
-                    self.custom_text_proj.to(model_device)
-
-                if self.custom_text_proj is not None:
-                    param_name = name.split(".")[-1]
-                    param = getattr(self.custom_text_proj, param_name, None)
-                    if param is not None:
-                        weight = weight.to(device=param.device, dtype=param.dtype)
-                        default_weight_loader(param, weight)
-                        loaded.add(f"custom_text_proj.{param_name}")
+        for name, weight in proj_weights:
+            param_name = name.split(".")[-1]
+            param = getattr(self.custom_text_proj, param_name, None)
+            if param is not None:
+                weight = weight.to(device=param.device, dtype=param.dtype)
+                default_weight_loader(param, weight)
+                loaded.add(f"custom_text_proj.{param_name}")
 
         return loaded
