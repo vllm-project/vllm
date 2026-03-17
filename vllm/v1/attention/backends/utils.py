@@ -593,13 +593,10 @@ def reorder_batch_to_split_decodes_and_prefills(
     requests with <= decode_threshold tokens at the front of the batch.
 
     The batch is reordered into 4 regions:
-        decode:       actual decodes (num_computed >= num_prompt AND
-                      num_scheduled <= threshold)
-        short_extend: short extends (0 < num_computed < num_prompt AND
-                      num_scheduled <= threshold)
-        long_extend:  long extends (num_computed > 0 AND
-                      num_scheduled > threshold)
-        prefill:      first chunks (num_computed == 0)
+        decode:        (num_scheduled <= threshold AND is not prefilling)
+        short_extend:  (num_scheduled <= threshold AND is chunked prefilling)
+        long_extend:   (num_scheduled > threshold AND is chunked prefilling)
+        prefill:       (num_computed == 0)   # First chunks
 
     Returns:
         True if the batch was modified, False otherwise.
