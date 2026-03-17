@@ -586,7 +586,7 @@ class InternVLProcessor(InternVLProcessorLike, ProcessorMixin):
 
                 text = processed_text
 
-            text_inputs = self.tokenizer(processed_text, return_tensors=return_tensors)
+            text_inputs = self.tokenizer(text, return_tensors=return_tensors)
         else:
             text_inputs = {}
 
