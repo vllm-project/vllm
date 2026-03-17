@@ -231,6 +231,9 @@ class EngineCore:
         # environment variable overrides after this point)
         enable_envs_cache()
 
+        # Pause state for "keep" mode - freezes requests in queue.
+        self._scheduler_paused = False
+
     @instrument(span_name="Prepare model")
     def _initialize_kv_caches(self, vllm_config: VllmConfig) -> KVCacheConfig:
         start = time.time()
