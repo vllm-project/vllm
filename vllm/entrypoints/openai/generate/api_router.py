@@ -74,26 +74,7 @@ async def init_generate_state(
 
     # Render endpoints are always backed by OpenAIServingRender so that
     # /v1/chat/completions/render and /v1/completions/render work on both
-    # generate-mode and render-only servers.
-    # It is created first so that OpenAIServingChat and OpenAIServingCompletion
-    # can delegate their preprocessing logic to it.
-    from vllm.entrypoints.serve.render.serving import OpenAIServingRender
-
-    state.openai_serving_render = OpenAIServingRender(
-        model_config=engine_client.model_config,
-        renderer=engine_client.renderer,
-        io_processor=engine_client.io_processor,
-        model_registry=state.openai_serving_models.registry,
-        request_logger=request_logger,
-        chat_template=resolved_chat_template,
-        chat_template_content_format=args.chat_template_content_format,
-        trust_request_chat_template=args.trust_request_chat_template,
-        enable_auto_tools=args.enable_auto_tool_choice,
-        exclude_tools_when_tool_choice_none=args.exclude_tools_when_tool_choice_none,
-        tool_parser=args.tool_call_parser,
-        default_chat_template_kwargs=args.default_chat_template_kwargs,
-        log_error_stack=args.log_error_stack,
-    )
+    # generate-mode and render-only servers. Created in init_app_state.
 
     state.openai_serving_responses = (
         OpenAIServingResponses(
