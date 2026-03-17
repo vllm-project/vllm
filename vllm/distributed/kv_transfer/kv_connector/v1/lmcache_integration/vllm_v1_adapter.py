@@ -1027,7 +1027,21 @@ class LMCacheConnectorV1Impl:
                     is_first = False
 
         for layerwise_storer in self.layerwise_storers:
-            next(layerwise_storer)
+            try:
+                next(layerwise_storer)
+            except StopIteration:
+                # Generator is exhausted, ignore
+                pass
+            except KeyError as e:
+                # LMCache may raise KeyError when there's a cache key
+                # mismatch in layerwise mode. Log and continue to avoid
+                # crashing the engine.
+                logger.warning(
+                    "KeyError in layerwise storage (layer %d): %s. "
+                    "This can happen when there's a cache key mismatch.",
+                    self.current_layer,
+                    e,
+                )
 
         self.current_layer += 1
 
@@ -1048,7 +1062,20 @@ class LMCacheConnectorV1Impl:
 
         if self.use_layerwise:
             for layerwise_storer in self.layerwise_storers:
-                next(layerwise_storer)
+                try:
+                    next(layerwise_storer)
+                except StopIteration:
+                    # Generator is exhausted, ignore
+                    pass
+                except KeyError as e:
+                    # LMCache may raise KeyError when there's a cache key
+                    # mismatch in layerwise mode. Log and continue to avoid
+                    # crashing the engine.
+                    logger.warning(
+                        "KeyError in wait_for_save during layerwise storage: %s. "
+                        "This can happen when there's a cache key mismatch.",
+                        e,
+                    )
             return
 
         assert len(self.kv_caches) > 0
