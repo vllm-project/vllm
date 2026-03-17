@@ -7,7 +7,6 @@ from vllm.config import ModelConfig, PoolerConfig, VllmConfig
 from vllm.entrypoints.openai.engine.protocol import UsageInfo
 from vllm.entrypoints.pooling.base.protocol import EmbedRequestMixin
 from vllm.inputs.data import PromptType
-from vllm.logger import init_logger
 from vllm.outputs import PoolingRequestOutput
 from vllm.plugins.io_processors.interface import (
     IOProcessor,
@@ -23,8 +22,6 @@ from .types import (
     SparseEmbeddingResponseData,
     SparseEmbeddingTokenWeight,
 )
-
-logger = init_logger(__name__)
 
 
 class BgeM3SparseEmbeddingsProcessor(
@@ -44,7 +41,6 @@ class BgeM3SparseEmbeddingsProcessor(
                 self.default_pooling_params[param] = getattr(pooler_config, param)
         self.embed_dimensions = vllm_config.model_config.embedding_size
         self.embed_request_queue: list[EmbedRequestMixin] = []
-        logger.info(self)
 
     def __repr__(self) -> str:
         return (
