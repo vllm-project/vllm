@@ -679,9 +679,8 @@ class VllmConfig:
         from vllm.v1.executor.abstract import Executor
 
         executor_backend = self.parallel_config.distributed_executor_backend
-        executor_supports_async_sched = Executor.get_class(
-            self
-        ).supports_async_scheduling()
+        executor_class = Executor.get_class(self)
+        executor_supports_async_sched = executor_class.supports_async_scheduling()
 
         if self.scheduler_config.async_scheduling:
             # Async scheduling explicitly enabled, hard fail any incompatibilities.
