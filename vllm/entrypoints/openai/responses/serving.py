@@ -1251,8 +1251,17 @@ class OpenAIServingResponses(OpenAIServing):
             tool_types = extract_tool_types(request.tools)
             with_custom_tools = has_custom_tools(tool_types)
 
+            # When tool_choice=none, suppress tool awareness in the
+            # prompt so the model doesn't attempt tool calls.  The
+            # structural tag grammar already blocks tool channels, but
+            # omitting tools from the system/developer messages
+            # prevents the model from even reasoning about calling them.
+            tools_visible = (
+                with_custom_tools and request.tool_choice != "none"
+            )
+
             sys_msg = self._construct_harmony_system_input_message(
-                request, with_custom_tools, tool_types
+                request, tools_visible, tool_types
             )
             messages.append(sys_msg)
 
@@ -1261,7 +1270,7 @@ class OpenAIServingResponses(OpenAIServing):
             # function tools, AND response format schemas.
             response_format_schema = _extract_response_format_schema(request)
             needs_dev_msg = (
-                with_custom_tools or response_format_schema is not None
+                tools_visible or response_format_schema is not None
             )
 
             if needs_dev_msg:
@@ -1272,7 +1281,7 @@ class OpenAIServingResponses(OpenAIServing):
                     )
                 dev_msg = get_developer_message(
                     instructions=dev_instructions,
-                    tools=request.tools if with_custom_tools else None,
+                    tools=request.tools if tools_visible else None,
                 )
                 messages.append(dev_msg)
             messages += construct_harmony_previous_input_messages(request)
