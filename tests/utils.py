@@ -122,6 +122,12 @@ ROCM_EXTRA_ARGS = (
     if current_platform.is_rocm()
     else []
 )
+# Python-API equivalent of ROCM_EXTRA_ARGS for use with EngineArgs kwargs.
+ROCM_ENGINE_KWARGS: dict = (
+    {"enable_prefix_caching": False, "max_num_seqs": 1}
+    if current_platform.is_rocm()
+    else {}
+)
 
 
 class RemoteVLLMServer:
@@ -235,13 +241,10 @@ class RemoteVLLMServer:
         except (ProcessLookupError, OSError):
             pgid = None
 
-        # Phase 1: graceful SIGTERM to the entire process group
-        if pgid is not None:
-            with contextlib.suppress(ProcessLookupError, OSError):
-                os.killpg(pgid, signal.SIGTERM)
-                print(f"[RemoteOpenAIServer] Sent SIGTERM to process group {pgid}")
-        else:
+        # Phase 1: graceful SIGTERM to the root process
+        with contextlib.suppress(ProcessLookupError, OSError):
             self.proc.terminate()
+            print(f"[RemoteOpenAIServer] Sent SIGTERM to process {pid}")
 
         try:
             self.proc.wait(timeout=15)
