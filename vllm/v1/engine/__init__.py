@@ -101,6 +101,9 @@ class EngineCoreRequest(
 
     reasoning_ended: bool | None = None
 
+    mm_preprocess_time_s: float = 0.0
+    mm_cache_time_s: float = 0.0
+
     @property
     def params(self) -> SamplingParams | PoolingParams:
         """Return the processed params (sampling or pooling)."""
@@ -165,6 +168,8 @@ class EngineCoreOutput(
     # The number of NaNs in logits.
     # A value greater than 0 indicates that the output is corrupted.
     num_nans_in_logits: int = 0
+
+    mm_encoder_time_s: float = 0.0
 
     @property
     def finished(self) -> bool:

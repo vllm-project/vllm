@@ -218,6 +218,11 @@ class RequestStateStats:
     # Track if this request is corrupted (NaNs in logits)
     is_corrupted: bool = False
 
+    # Multimodal timing metrics (seconds).
+    mm_preprocess_time_s: float = 0.0
+    mm_cache_time_s: float = 0.0
+    mm_encoder_time_s: float = 0.0
+
 
 @dataclass
 class FinishedRequestStats:
@@ -235,6 +240,11 @@ class FinishedRequestStats:
     mean_time_per_output_token: float = 0.0
     is_corrupted: bool = False
     num_cached_tokens: int = 0
+
+    # Multimodal timing metrics (seconds).
+    mm_preprocess_time_s: float = 0.0
+    mm_cache_time_s: float = 0.0
+    mm_encoder_time_s: float = 0.0
 
 
 @dataclass
@@ -363,6 +373,10 @@ class IterationStats:
         ):
             req_stats.is_corrupted = True
 
+        # Propagate MM encoder timing.
+        if output.mm_encoder_time_s > 0.0:
+            req_stats.mm_encoder_time_s = output.mm_encoder_time_s
+
         # Process request-level engine core events
         if output.events is not None:
             self.update_from_events(
@@ -452,6 +466,9 @@ class IterationStats:
             mean_time_per_output_token=mean_time_per_output_token,
             is_corrupted=req_stats.is_corrupted,
             num_cached_tokens=num_cached_tokens,
+            mm_preprocess_time_s=req_stats.mm_preprocess_time_s,
+            mm_cache_time_s=req_stats.mm_cache_time_s,
+            mm_encoder_time_s=req_stats.mm_encoder_time_s,
         )
         self.finished_requests.append(finished_req)
 

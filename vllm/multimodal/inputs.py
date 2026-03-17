@@ -1062,6 +1062,16 @@ A dictionary containing per-item placeholder ranges for each modality.
 """
 
 
+class MMTimingStats(TypedDict, total=False):
+    """Timing statistics for multimodal preprocessing stages."""
+
+    mm_preprocess_time_s: float
+    """Time in seconds spent in multimodal preprocessing."""
+
+    mm_cache_time_s: float
+    """Time in seconds spent in multimodal cache operations."""
+
+
 class MultiModalInputs(_InputOptions):
     """
     Represents the outputs of
@@ -1089,6 +1099,9 @@ class MultiModalInputs(_InputOptions):
     For each modality, information about the placeholder tokens in
     `prompt_token_ids`.
     """
+
+    mm_timing_stats: NotRequired[MMTimingStats]
+    """Timing statistics for multimodal preprocessing and cache operations."""
 
 
 def mm_inputs(

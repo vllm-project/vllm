@@ -620,9 +620,15 @@ class BaseRenderer(ABC, Generic[_T]):
             tokenization_kwargs=tokenization_kwargs or {},
         )
         mm_timing_ctx = self._mm_timing_registry.get(mm_req_id)
+        mm_timing_ctx.enabled = True
 
         with set_default_torch_num_threads():
             mm_inputs = mm_processor.apply(mm_processor_inputs, mm_timing_ctx)
+
+        if mm_timing_ctx.total_secs > 0.0:
+            timing_stats = mm_inputs.get("mm_timing_stats", {})
+            timing_stats["mm_preprocess_time_s"] = mm_timing_ctx.total_secs
+            mm_inputs["mm_timing_stats"] = timing_stats
 
         self.update_mm_cache_stats()
 

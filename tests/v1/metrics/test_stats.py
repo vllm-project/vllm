@@ -209,3 +209,52 @@ def test_prompt_token_stats_full_external_transfer_recompute():
     assert stats.local_cache_hit == 0
     assert stats.external_kv_transfer == 1000
     assert stats.recomputed_tokens == 1
+
+
+def test_mm_timing_metrics_propagated_to_finished_request():
+    """Test that MM timing metrics are propagated to FinishedRequestStats."""
+    iteration_stats = IterationStats()
+    req_stats = RequestStateStats(arrival_time=0.0)
+    req_stats.scheduled_ts = 0.1
+    req_stats.first_token_ts = 0.5
+    req_stats.last_token_ts = 2.0
+    req_stats.num_generation_tokens = 10
+    req_stats.mm_preprocess_time_s = 0.123
+    req_stats.mm_cache_time_s = 0.045
+    req_stats.mm_encoder_time_s = 0.678
+
+    iteration_stats.update_from_finished_request(
+        finish_reason=FinishReason.STOP,
+        num_prompt_tokens=1000,
+        max_tokens_param=100,
+        req_stats=req_stats,
+        num_cached_tokens=0,
+    )
+
+    finished_req = iteration_stats.finished_requests[0]
+    assert finished_req.mm_preprocess_time_s == 0.123
+    assert finished_req.mm_cache_time_s == 0.045
+    assert finished_req.mm_encoder_time_s == 0.678
+
+
+def test_mm_timing_metrics_default_zero():
+    """Test that MM timing metrics default to 0 for non-MM requests."""
+    iteration_stats = IterationStats()
+    req_stats = RequestStateStats(arrival_time=0.0)
+    req_stats.scheduled_ts = 0.1
+    req_stats.first_token_ts = 0.5
+    req_stats.last_token_ts = 2.0
+    req_stats.num_generation_tokens = 10
+
+    iteration_stats.update_from_finished_request(
+        finish_reason=FinishReason.STOP,
+        num_prompt_tokens=500,
+        max_tokens_param=50,
+        req_stats=req_stats,
+        num_cached_tokens=0,
+    )
+
+    finished_req = iteration_stats.finished_requests[0]
+    assert finished_req.mm_preprocess_time_s == 0.0
+    assert finished_req.mm_cache_time_s == 0.0
+    assert finished_req.mm_encoder_time_s == 0.0

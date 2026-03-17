@@ -1285,6 +1285,7 @@ class Scheduler(SchedulerInterface):
         num_nans_in_logits = model_runner_output.num_nans_in_logits
         kv_connector_output = model_runner_output.kv_connector_output
         cudagraph_stats = model_runner_output.cudagraph_stats
+        mm_encoder_time_s_map = model_runner_output.mm_encoder_time_s
 
         perf_stats: PerfStats | None = None
         if self.perf_metrics and self.perf_metrics.is_enabled():
@@ -1418,6 +1419,15 @@ class Scheduler(SchedulerInterface):
             if num_nans_in_logits is not None and req_id in num_nans_in_logits:
                 request.num_nans_in_logits = num_nans_in_logits[req_id]
 
+            # Accumulate MM encoder timing for this request.
+            req_encoder_time_s = 0.0
+            if (
+                mm_encoder_time_s_map is not None
+                and req_id in mm_encoder_time_s_map
+            ):
+                request.mm_encoder_time_s += mm_encoder_time_s_map[req_id]
+                req_encoder_time_s = request.mm_encoder_time_s
+
             # Get prompt logprobs for this request.
             prompt_logprobs_tensors = prompt_logprobs_dict.get(req_id)
             if (
@@ -1443,6 +1453,7 @@ class Scheduler(SchedulerInterface):
                         num_external_computed_tokens=request.num_external_computed_tokens,
                         routed_experts=routed_experts,
                         num_nans_in_logits=request.num_nans_in_logits,
+                        mm_encoder_time_s=req_encoder_time_s,
                     )
                 )
             else:
