@@ -179,6 +179,8 @@ class SpeculativeConfig:
     # dynamic speculative decoding control
     dynamic_config_path: str | None = None
     """Path to config file for dynamic speculative decoding, if provided."""
+    dynamic_config: SkipValidation[DynamicSpeculativeConfig] | None = None
+    """Loaded dynamic speculative config, populated from dynamic_config_path."""
 
     # params generated in the post-init stage
     draft_model_config: SkipValidation[ModelConfig] = None  # type: ignore
@@ -649,8 +651,6 @@ class SpeculativeConfig:
                 data = json.load(f)
 
             self.dynamic_config = DynamicSpeculativeConfig(**data)
-        else:
-            self.dynamic_config = None
 
         return self
 
