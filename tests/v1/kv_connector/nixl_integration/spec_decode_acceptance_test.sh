@@ -39,11 +39,6 @@ MAX_MODEL_LEN="${MAX_MODEL_LEN:-16384}"
 PREFILL_SPEC_CONFIG="{\"method\":\"${SD_METHOD}\",\"model\":\"${SD_MODEL}\",\"num_speculative_tokens\":1,\"max_model_len\":${MAX_MODEL_LEN}}"
 DECODE_SPEC_CONFIG="{\"method\":\"${SD_METHOD}\",\"model\":\"${SD_MODEL}\",\"num_speculative_tokens\":${NUM_SPEC_TOKENS},\"max_model_len\":${MAX_MODEL_LEN}}"
 
-# ── Attention backend config ─────────────────────────────────────────────
-
-ATTENTION_BACKEND="${ATTENTION_BACKEND:-FLASH_ATTN}"
-echo "Using attention backend: ${ATTENTION_BACKEND}"
-
 # ── Test matrix ──────────────────────────────────────────────────────────
 
 KV_BUFFER_DEVICES="${KV_BUFFER_DEVICES:-cuda cpu}"
