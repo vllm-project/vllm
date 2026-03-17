@@ -621,7 +621,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 "outputs ('json', 'regex' or 'choice')."
             )
         # you can only either use structured outputs or tools, not both
-        if count > 1 and data.get("tool_choice", "none") not in (
+        if count > 0 and data.get("tool_choice", "none") not in (
             "none",
             "auto",
             "required",
