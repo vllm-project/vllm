@@ -14,7 +14,7 @@ if has_flashinfer():
     def flashinfer_tinygemm_router_gemm_impl(
         x: torch.Tensor,
         weight: torch.Tensor,
-        bias: torch.Tensor,
+        bias: torch.Tensor | None,
         out: torch.Tensor,
     ) -> None:
         from flashinfer.gemm.routergemm import tinygemm_bf16
@@ -24,7 +24,7 @@ if has_flashinfer():
     def flashinfer_tinygemm_router_gemm_fake(
         x: torch.Tensor,
         weight: torch.Tensor,
-        bias: torch.Tensor,
+        bias: torch.Tensor | None,
         out: torch.Tensor,
     ) -> None:
         return
