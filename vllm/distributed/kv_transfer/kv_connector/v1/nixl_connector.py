@@ -724,22 +724,24 @@ class NixlConnectorScheduler:
             return num_prompt_tokens - 1
         return num_prompt_tokens
 
-    def _truncate_hma_request_for_prefill(
-        self, request: "Request"
-    ) -> None:
+    def _truncate_hma_request_for_prefill(self, request: "Request") -> None:
         """For P-side HMA requests, drop the last prompt token so the
         prefiller computes h(N-1) instead of h(N). The decoder will
         recompute the last token to derive h(N) correctly.
 
         Idempotent: skips if already truncated."""
         params = request.kv_transfer_params
-        if params is not None and not params.get("_p_side_truncated"):
-            if request.prompt_token_ids and len(request.prompt_token_ids) > 1:
-                request.prompt_token_ids.pop()
-                request._all_token_ids.pop()
-                request.num_prompt_tokens -= 1
-                request.max_tokens = 1
-                params["_p_side_truncated"] = True
+        if (
+            params is not None
+            and not params.get("_p_side_truncated")
+            and request.prompt_token_ids
+            and len(request.prompt_token_ids) > 1
+        ):
+            request.prompt_token_ids.pop()
+            request._all_token_ids.pop()
+            request.num_prompt_tokens -= 1
+            request.max_tokens = 1
+            params["_p_side_truncated"] = True
 
     def get_num_new_matched_tokens(
         self, request: "Request", num_computed_tokens: int
@@ -775,9 +777,12 @@ class NixlConnectorScheduler:
             if count > 0:
                 return count, True
 
-        if params is not None and params.get("do_remote_decode"):
-            if self._is_hma_required:
-                self._truncate_hma_request_for_prefill(request)
+        if (
+            params is not None
+            and params.get("do_remote_decode")
+            and self._is_hma_required
+        ):
+            self._truncate_hma_request_for_prefill(request)
 
         # No remote prefill for this request.
         return 0, False
