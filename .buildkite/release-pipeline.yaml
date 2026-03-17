@@ -639,6 +639,9 @@ steps:
         
         echo "Loaded base image: $${ECR_IMAGE_TAG}"
         
+        # Clean up old per-commit rocm-base tags (keep rolling window of 300)
+        bash .buildkite/scripts/cleanup-ecr-rocm-base-tags.sh "$${ECR_IMAGE_TAG}" 300 || echo "WARNING: ECR tag cleanup failed (non-fatal)"
+
         # Tag the base image for release (optional, but useful for tracking)
         docker tag "$${ECR_IMAGE_TAG}" public.ecr.aws/q9t5s3a7/vllm-release-repo:$${BUILDKITE_COMMIT}-rocm-base
         docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$${BUILDKITE_COMMIT}-rocm-base
@@ -682,17 +685,18 @@ steps:
   - label: "Publish nightly ROCm image to DockerHub"
     depends_on:
       - build-rocm-release-image
-    if: build.env("NIGHTLY") == "1"
     agents:
       queue: small_cpu_queue_postmerge
     commands:
-      - "DRY_RUN=1 bash .buildkite/scripts/push-nightly-builds-rocm.sh"
+      - "bash .buildkite/scripts/push-nightly-builds-rocm.sh"
       # Clean up old nightly builds (keep only last 14)
-      - "DRY_RUN=1 bash .buildkite/scripts/cleanup-nightly-builds.sh nightly- vllm/vllm-openai-rocm"
-    plugins:
-      - docker-login#v3.0.0:
-          username: vllmbot
-          password-env: DOCKERHUB_TOKEN
+      - "bash .buildkite/scripts/cleanup-nightly-builds.sh nightly- vllm/vllm-openai-rocm"
+      - "bash .buildkite/scripts/cleanup-nightly-builds.sh base-nightly- vllm/vllm-openai-rocm"
+    # plugins:
+    #   - docker-login#v3.0.0:
+    #       username: vllmbot
+    #       password-env: DOCKERHUB_TOKEN
     env:
+      DRY_RUN: "1"
       DOCKER_BUILDKIT: "1"
       DOCKERHUB_USERNAME: "vllmbot"
