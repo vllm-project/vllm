@@ -14,7 +14,7 @@ import torch.fx as fx
 from torch._inductor.runtime.triton_heuristics import CachingAutotuner
 from torch._logging._internal import trace_structured
 
-from vllm.compilation.backends import VllmBackend
+from vllm.compilation.backends import _SHAPE_CACHE_UNSET, VllmBackend
 from vllm.config import VllmConfig
 from vllm.config.utils import Range
 from vllm.logger import init_logger
@@ -83,6 +83,10 @@ class RangeEntry:
 
 
 class PiecewiseBackend:
+    # Shared runtime-shape dispatch cache aliased from VllmBackend.
+    # Declared here so mypy has a single canonical definition.
+    _shape_dispatch_cache: list[object]
+
     def __init__(
         self,
         graph: fx.GraphModule | None,
@@ -184,6 +188,8 @@ class PiecewiseBackend:
 
         # Track whether we've logged the graph for this subgraph (only log once)
         self._graph_logged = False
+
+        self._build_find_range_caches()
 
         if self.graph is not None:
             self.compile_all_ranges()
@@ -337,19 +343,82 @@ class PiecewiseBackend:
             )
             range_entry.compiled = True
 
+    def _build_find_range_caches(self) -> None:
+        """Precompute lookup structures used by _find_range_for_shape.
+
+        Called once at the end of __init__ after range_entries is finalized.
+        Avoids per-call Range allocation and hashing on the dispatch hotpath.
+        """
+        # Pre-zip ranges+entries once so _find_range_for_shape never re-hashes.
+        # Built unconditionally; _find_range_for_shape returns None early when
+        # compile_sizes is None, so this list is never consulted in that case.
+        self._compile_ranges_and_entries: list[tuple[Range, RangeEntry]] = [
+            (r, self.range_entries[r]) for r in self.compile_ranges
+        ]
+
+        # Exact compile-size -> RangeEntry dict (O(1) int lookup, no Range alloc).
+        self._compile_size_to_entry: dict[int, RangeEntry] = {}
+        if self.compile_sizes is not None:
+            for s in self.compile_sizes:
+                if isinstance(s, int):
+                    # Every int in compile_sizes is guaranteed to have a
+                    # Range(s,s) entry in range_entries by __init__ construction.
+                    self._compile_size_to_entry[s] = self.range_entries[
+                        Range(start=s, end=s)
+                    ]
+
+        # Shared range-dispatch cache across all PiecewiseBackend instances
+        # that share the same vllm_backend (e.g. all 81 subgraph backends for
+        # Llama3-70B). The first subgraph to see a runtime_shape pays the
+        # O(#compile_ranges) scan; the remaining 80 get an O(1) list lookup.
+        # Maps runtime_shape -> matched Range (or None if no range matched).
+        vllm_backend = getattr(self, "vllm_backend", None)
+        if vllm_backend is not None:
+            self._shape_dispatch_cache = vllm_backend._shape_dispatch_cache
+        else:
+            # Fallback for tests that construct PiecewiseBackend without a
+            # real vllm_backend (object.__new__ + manual attribute setting).
+            # Size-1 list: all real shapes are out-of-bounds → uncached scan.
+            self._shape_dispatch_cache = [_SHAPE_CACHE_UNSET]
+
     def _find_range_for_shape(self, runtime_shape: int) -> RangeEntry | None:
-        # First we try to find the range entry for the concrete compile size
-        # If not found, we search for the range entry
-        # that contains the runtime shape.
+        # fast path: O(1) exact-size dict, no Range allocation or hashing.
         if self.compile_sizes is None:
             return None
 
-        if runtime_shape in self.compile_sizes:
-            return self.range_entries[Range(start=runtime_shape, end=runtime_shape)]
-        else:
-            for range in self.compile_ranges:
-                if runtime_shape in range:
-                    return self.range_entries[range]
+        # Normalize to a plain int so that SymInt / numpy-int keys hash and
+        # compare correctly against the pre-built int-keyed dict and list index.
+        runtime_shape = int(runtime_shape)
+
+        entry = self._compile_size_to_entry.get(runtime_shape)
+        if entry is not None:
+            return entry
+
+        # Shared list cache: index by runtime_shape — pure integer dereference,
+        # no hashing. All subgraph backends for the same model share one list.
+        # The first subgraph to see a shape pays the O(#ranges) scan; the rest
+        # get an O(1) list lookup.
+        cache = self._shape_dispatch_cache
+        if 0 <= runtime_shape < len(cache):
+            cached = cache[runtime_shape]
+            if cached is _SHAPE_CACHE_UNSET:
+                found: Range | None = None
+                for r, _ in self._compile_ranges_and_entries:
+                    if runtime_shape in r:
+                        found = r
+                        break
+                cache[runtime_shape] = found
+                cached = found
+            if cached is None:
+                return None
+            assert isinstance(cached, Range)
+            return self.range_entries[cached]
+
+        # runtime_shape is out of the preallocated cache bounds — do an
+        # uncached scan (should never happen in normal operation).
+        for r, e in self._compile_ranges_and_entries:
+            if runtime_shape in r:
+                return e
         return None
 
     def __call__(self, *args: Any) -> Any:

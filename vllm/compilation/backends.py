@@ -48,6 +48,10 @@ from .passes.pass_manager import PostGradPassManager
 
 logger = init_logger(__name__)
 
+# Sentinel stored in _shape_dispatch_cache to distinguish "not yet computed"
+# from a cached None (shape matched no compile range).
+_SHAPE_CACHE_UNSET: object = object()
+
 
 def make_copy_and_call(
     sym_tensor_indices: list[int],
@@ -799,6 +803,12 @@ class VllmBackend:
     # Copy of CompilationConfig.inductor_compile_config +
     # an entry for PostGradPassManager
     inductor_config: dict[str, Any]
+    # Shared runtime-shape -> compile Range dispatch cache.
+    # Preallocated to max_num_batched_tokens+1 so lookup is a pure list index
+    # (no hashing). Stores Range on hit, None on miss, _SHAPE_CACHE_UNSET when
+    # not yet computed. Populated lazily: the first of the N subgraph backends
+    # pays the O(#ranges) scan; the remaining N-1 get an O(1) list lookup.
+    _shape_dispatch_cache: list[object]
 
     def __init__(
         self,
@@ -836,6 +846,11 @@ class VllmBackend:
         # in future we need PostGradPassManager.uuid() to be executed
         # only at compile time.
         self.inductor_config = deepcopy(self.compilation_config.inductor_compile_config)
+        # Shared dispatch cache — see _shape_dispatch_cache class annotation.
+        max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+        self._shape_dispatch_cache: list[object] = [_SHAPE_CACHE_UNSET] * (
+            max_tokens + 1
+        )
         # `torch.compile` is JIT compiled, so we don't need to
         # do anything here
 
