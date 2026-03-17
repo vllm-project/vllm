@@ -14,6 +14,10 @@ import regex as re
 import zmq
 from quart import Quart, make_response, request
 
+from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
+    MoRIIOConstants,
+)
+
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 prefill_instances: list[dict] = []
@@ -166,27 +170,6 @@ async def stream_decode_response(session, response, request_id):
         await session.close()
 
 
-async def send_request_to_decode(endpoint, req_data, request_id):
-    async with aiohttp.ClientSession(
-        timeout=aiohttp.ClientTimeout(total=6 * 6000 * 6000)
-    ) as session:
-        headers = {
-            "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}",
-            "X-Request-Id": request_id,
-        }
-        async with session.post(
-            url=endpoint, json=req_data, headers=headers
-        ) as response:
-            if response.status == 200:
-                async for chunk_bytes in response.content.iter_chunked(1024):
-                    yield chunk_bytes
-            else:
-                raise RuntimeError(
-                    "send_request_to_decode response.status != 200,response.statuus = ",
-                    response.status,
-                )
-
-
 def example_round_robin_dp_loader(request_number, dp_size):
     return request_nums % dp_size
 
@@ -233,7 +216,8 @@ async def handle_request():
             )
 
         dip, dport = extract_ip_port_fast(decode_instance_endpoint["request_address"])
-        ip, port = extract_ip_port_fast(prefill_instance_endpoint["request_address"])
+
+        transfer_id = f"{MoRIIOConstants.TRANSFER_PREFIX}-{str(uuid.uuid4())}"
 
         req_data_to_prefill = copy.deepcopy(req_data)
         req_data_to_prefill["kv_transfer_params"] = {}
@@ -244,6 +228,7 @@ async def handle_request():
         req_data_to_prefill["kv_transfer_params"]["remote_tp_size"] = (
             decode_instance_endpoint["tp_size"]
         )
+        req_data_to_prefill["kv_transfer_params"]["transfer_id"] = transfer_id
 
         send_prefill_task = asyncio.create_task(
             send_request_to_prefill(
@@ -289,6 +274,7 @@ async def handle_request():
 
         if selected_prefill_dp_rank is not None:
             req_data["kv_transfer_params"]["remote_dp_rank"] = selected_prefill_dp_rank
+        req_data["kv_transfer_params"]["transfer_id"] = transfer_id
 
         decode_request_task = asyncio.create_task(
             start_decode_request(

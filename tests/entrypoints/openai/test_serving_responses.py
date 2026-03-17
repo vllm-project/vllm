@@ -6,6 +6,13 @@ from unittest.mock import MagicMock
 
 import pytest
 import pytest_asyncio
+from openai.types.responses import (
+    ResponseOutputItemDoneEvent,
+    ResponseReasoningItem,
+    ResponseReasoningTextDeltaEvent,
+    ResponseReasoningTextDoneEvent,
+    ResponseTextDeltaEvent,
+)
 from openai.types.responses.tool import (
     CodeInterpreterContainerCodeInterpreterToolAuto,
     LocalShell,
@@ -13,16 +20,26 @@ from openai.types.responses.tool import (
     Tool,
 )
 
+import vllm.envs as envs
 from vllm.entrypoints.mcp.tool_server import ToolServer
-from vllm.entrypoints.openai.engine.protocol import ErrorResponse
-from vllm.entrypoints.openai.responses.context import ConversationContext
+from vllm.entrypoints.openai.engine.protocol import (
+    DeltaMessage,
+    ErrorResponse,
+    RequestResponseMetadata,
+)
+from vllm.entrypoints.openai.responses.context import ConversationContext, SimpleContext
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.entrypoints.openai.responses.serving import (
     OpenAIServingResponses,
     _extract_allowed_tools_from_mcp_requests,
     extract_tool_types,
 )
+from vllm.entrypoints.openai.responses.streaming_events import (
+    StreamingState,
+)
 from vllm.inputs.data import TokensPrompt
+from vllm.outputs import CompletionOutput, RequestOutput
+from vllm.sampling_params import SamplingParams
 
 
 class MockConversationContext(ConversationContext):
@@ -125,12 +142,14 @@ class TestInitializeToolSessions:
         engine_client = MagicMock()
 
         model_config = MagicMock()
+        model_config.max_model_len = 100
         model_config.hf_config.model_type = "test"
         model_config.get_diff_sampling_param.return_value = {}
         engine_client.model_config = model_config
 
         engine_client.input_processor = MagicMock()
         engine_client.io_processor = MagicMock()
+        engine_client.renderer = MagicMock()
 
         models = MagicMock()
 
@@ -211,12 +230,14 @@ class TestValidateGeneratorInput:
         engine_client = MagicMock()
 
         model_config = MagicMock()
+        model_config.max_model_len = 100
         model_config.hf_config.model_type = "test"
         model_config.get_diff_sampling_param.return_value = {}
         engine_client.model_config = model_config
 
         engine_client.input_processor = MagicMock()
         engine_client.io_processor = MagicMock()
+        engine_client.renderer = MagicMock()
 
         models = MagicMock()
 
@@ -228,9 +249,6 @@ class TestValidateGeneratorInput:
             chat_template=None,
             chat_template_content_format="auto",
         )
-
-        # Set max_model_len for testing
-        instance.max_model_len = 100
 
         return instance
 
@@ -256,6 +274,87 @@ class TestValidateGeneratorInput:
         # Should return an ErrorResponse
         assert result is not None
         assert isinstance(result, ErrorResponse)
+
+
+@pytest.mark.asyncio
+async def test_reasoning_tokens_counted_for_text_reasoning_model(monkeypatch):
+    """Ensure reasoning_tokens usage is derived from thinking token spans."""
+
+    class FakeTokenizer:
+        def __init__(self):
+            self._vocab = {"<think>": 1, "</think>": 2, "reason": 3, "final": 4}
+
+        def get_vocab(self):
+            return self._vocab
+
+    # Force non-harmony, SimpleContext path
+    monkeypatch.setattr(envs, "VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT", False)
+
+    engine_client = MagicMock()
+    model_config = MagicMock()
+    model_config.hf_config.model_type = "test"
+    model_config.hf_text_config = MagicMock()
+    model_config.get_diff_sampling_param.return_value = {}
+    engine_client.model_config = model_config
+    engine_client.input_processor = MagicMock()
+    engine_client.io_processor = MagicMock()
+    engine_client.renderer = MagicMock()
+
+    tokenizer = FakeTokenizer()
+    engine_client.renderer.get_tokenizer.return_value = tokenizer
+
+    models = MagicMock()
+
+    serving = OpenAIServingResponses(
+        engine_client=engine_client,
+        models=models,
+        request_logger=None,
+        chat_template=None,
+        chat_template_content_format="auto",
+        reasoning_parser="qwen3",
+    )
+
+    # Build a SimpleContext with thinking tokens in the output.
+    context = SimpleContext()
+    token_ids = [1, 10, 2, 20]  # <think> 10 </think> 20 -> reasoning token count = 1
+    completion = CompletionOutput(
+        index=0,
+        text="<think>reason</think>final",
+        token_ids=token_ids,
+        cumulative_logprob=0.0,
+        logprobs=None,
+        finish_reason="stop",
+        stop_reason=None,
+    )
+    req_output = RequestOutput(
+        request_id="req",
+        prompt="hi",
+        prompt_token_ids=[7, 8],
+        prompt_logprobs=None,
+        outputs=[completion],
+        finished=True,
+        num_cached_tokens=0,
+    )
+    context.append_output(req_output)
+
+    async def dummy_result_generator():
+        yield None
+
+    request = ResponsesRequest(input="hi", tools=[], stream=False)
+    sampling_params = SamplingParams(max_tokens=16)
+    metadata = RequestResponseMetadata(request_id="req")
+
+    response = await serving.responses_full_generator(
+        request=request,
+        sampling_params=sampling_params,
+        result_generator=dummy_result_generator(),
+        context=context,
+        model_name="test-model",
+        tokenizer=tokenizer,
+        request_metadata=metadata,
+    )
+
+    assert response.usage.output_tokens_details.reasoning_tokens == 1
 
 
 class TestExtractAllowedToolsFromMcpRequests:
@@ -351,3 +450,426 @@ class TestExtractAllowedToolsFromMcpRequests:
             "server1": ["tool1"],
             "server2": ["tool2"],
         }
+
+
+class TestHarmonyPreambleStreaming:
+    """Tests for preamble (commentary with no recipient) streaming events."""
+
+    @staticmethod
+    def _make_ctx(*, channel, recipient, delta="hello"):
+        """Build a lightweight mock StreamingHarmonyContext."""
+        ctx = MagicMock()
+        ctx.last_content_delta = delta
+        ctx.parser.current_channel = channel
+        ctx.parser.current_recipient = recipient
+        return ctx
+
+    @staticmethod
+    def _make_previous_item(*, channel, recipient, text="preamble text"):
+        """Build a lightweight mock previous_item (openai_harmony Message)."""
+        content_part = MagicMock()
+        content_part.text = text
+        item = MagicMock()
+        item.channel = channel
+        item.recipient = recipient
+        item.content = [content_part]
+        return item
+
+    def test_preamble_delta_emits_text_events(self) -> None:
+        """commentary + recipient=None should emit output_text.delta events."""
+        from vllm.entrypoints.openai.responses.streaming_events import (
+            emit_content_delta_events,
+        )
+
+        ctx = self._make_ctx(channel="commentary", recipient=None)
+        state = StreamingState()
+
+        events = emit_content_delta_events(ctx, state)
+
+        type_names = [e.type for e in events]
+        assert "response.output_text.delta" in type_names
+        assert "response.output_item.added" in type_names
+
+    def test_preamble_delta_second_token_no_added(self) -> None:
+        """Second preamble token should emit delta only, not added again."""
+        from vllm.entrypoints.openai.responses.streaming_events import (
+            emit_content_delta_events,
+        )
+
+        ctx = self._make_ctx(channel="commentary", recipient=None, delta="w")
+        state = StreamingState()
+        state.sent_output_item_added = True
+        state.current_item_id = "msg_test"
+        state.current_content_index = 0
+
+        events = emit_content_delta_events(ctx, state)
+
+        type_names = [e.type for e in events]
+        assert "response.output_text.delta" in type_names
+        assert "response.output_item.added" not in type_names
+
+    def test_commentary_with_function_recipient_not_preamble(self) -> None:
+        """commentary + recipient='functions.X' must NOT use preamble path."""
+        from vllm.entrypoints.openai.responses.streaming_events import (
+            emit_content_delta_events,
+        )
+
+        ctx = self._make_ctx(
+            channel="commentary",
+            recipient="functions.get_weather",
+        )
+        state = StreamingState()
+
+        events = emit_content_delta_events(ctx, state)
+
+        type_names = [e.type for e in events]
+        assert "response.output_text.delta" not in type_names
+
+    def test_preamble_done_emits_text_done_events(self) -> None:
+        """Completed preamble should emit text done + content_part done +
+        output_item done, same shape as final channel."""
+        from vllm.entrypoints.openai.responses.streaming_events import (
+            emit_previous_item_done_events,
+        )
+
+        previous = self._make_previous_item(channel="commentary", recipient=None)
+        state = StreamingState()
+        state.current_item_id = "msg_test"
+        state.current_output_index = 0
+        state.current_content_index = 0
+
+        events = emit_previous_item_done_events(previous, state)
+
+        type_names = [e.type for e in events]
+        assert "response.output_text.done" in type_names
+        assert "response.content_part.done" in type_names
+        assert "response.output_item.done" in type_names
+
+    def test_commentary_with_recipient_no_preamble_done(self) -> None:
+        """commentary + recipient='functions.X' should route to function call
+        done, not preamble done."""
+        from vllm.entrypoints.openai.responses.streaming_events import (
+            emit_previous_item_done_events,
+        )
+
+        previous = self._make_previous_item(
+            channel="commentary", recipient="functions.get_weather"
+        )
+        state = StreamingState()
+        state.current_item_id = "fc_test"
+
+        events = emit_previous_item_done_events(previous, state)
+
+        type_names = [e.type for e in events]
+        assert "response.output_text.done" not in type_names
+
+
+def _make_simple_context_with_output(text, token_ids):
+    """Create a SimpleContext with a RequestOutput containing the given text."""
+    ctx = SimpleContext()
+    completion = CompletionOutput(
+        index=0,
+        text=text,
+        token_ids=token_ids,
+        cumulative_logprob=0.0,
+        logprobs=None,
+        finish_reason=None,
+        stop_reason=None,
+    )
+    req_output = RequestOutput(
+        request_id="req",
+        prompt="hi",
+        prompt_token_ids=[7, 8],
+        prompt_logprobs=None,
+        outputs=[completion],
+        finished=False,
+        num_cached_tokens=0,
+    )
+    ctx.append_output(req_output)
+    return ctx
+
+
+def _make_serving_instance_with_reasoning():
+    """Create an OpenAIServingResponses with a mocked reasoning parser."""
+    engine_client = MagicMock()
+    model_config = MagicMock()
+    model_config.max_model_len = 100
+    model_config.hf_config.model_type = "test"
+    model_config.hf_text_config = MagicMock()
+    model_config.get_diff_sampling_param.return_value = {}
+    engine_client.model_config = model_config
+    engine_client.input_processor = MagicMock()
+    engine_client.io_processor = MagicMock()
+    engine_client.renderer = MagicMock()
+
+    models = MagicMock()
+
+    serving = OpenAIServingResponses(
+        engine_client=engine_client,
+        models=models,
+        request_logger=None,
+        chat_template=None,
+        chat_template_content_format="auto",
+        reasoning_parser="qwen3",
+    )
+    return serving
+
+
+def _identity_increment(event):
+    """Simple identity callable for _increment_sequence_number_and_return."""
+    seq = getattr(_identity_increment, "_counter", 0)
+    if hasattr(event, "sequence_number"):
+        event.sequence_number = seq
+    _identity_increment._counter = seq + 1  # type: ignore
+    return event
+
+
+class TestStreamingReasoningToContentTransition:
+    """Tests for _process_simple_streaming_events reasoning-to-content
+    transition, specifically the fix for mixed deltas that carry both
+    reasoning and content simultaneously."""
+
+    @pytest.mark.asyncio
+    async def test_mixed_delta_reasoning_and_content_emits_reasoning_delta(
+        self, monkeypatch
+    ):
+        """When the reasoning parser produces a delta with both reasoning
+        and content set (e.g. reasoning end and content start in the same
+        chunk), the trailing reasoning text must be emitted as a
+        ResponseReasoningTextDeltaEvent and included in the
+        ResponseReasoningTextDoneEvent text."""
+
+        monkeypatch.setattr(envs, "VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT", False)
+        serving = _make_serving_instance_with_reasoning()
+
+        # Sequence of DeltaMessages the mock reasoning parser will return
+        delta_sequence = [
+            DeltaMessage(reasoning="thinking..."),
+            DeltaMessage(reasoning=" end", content="hello"),  # mixed delta
+            DeltaMessage(content=" world"),
+        ]
+        call_count = 0
+
+        def mock_extract_reasoning_streaming(**kwargs):
+            nonlocal call_count
+            result = delta_sequence[call_count]
+            call_count += 1
+            return result
+
+        # Mock the reasoning parser on the serving instance
+        mock_parser = MagicMock()
+        mock_parser.extract_reasoning_streaming = mock_extract_reasoning_streaming
+        mock_parser.extract_tool_calls_streaming = mock_extract_reasoning_streaming
+        serving.parser = MagicMock()
+        serving.parser.reasoning_parser_cls = MagicMock(return_value=mock_parser)
+        serving.parser.tool_parser_cls = MagicMock(return_value=mock_parser)
+        # Create contexts for each streaming chunk
+        contexts = [
+            _make_simple_context_with_output("chunk1", [10]),
+            _make_simple_context_with_output("chunk2", [20]),
+            _make_simple_context_with_output("chunk3", [30]),
+        ]
+
+        async def result_generator():
+            for ctx in contexts:
+                yield ctx
+
+        request = ResponsesRequest(input="hi", tools=[], stream=True)
+        sampling_params = SamplingParams(max_tokens=64)
+        metadata = RequestResponseMetadata(request_id="req")
+        _identity_increment._counter = 0  # type: ignore
+
+        events = []
+        async for event in serving._process_simple_streaming_events(
+            request=request,
+            sampling_params=sampling_params,
+            result_generator=result_generator(),
+            context=SimpleContext(),
+            model_name="test-model",
+            tokenizer=MagicMock(),
+            request_metadata=metadata,
+            created_time=0,
+            _increment_sequence_number_and_return=_identity_increment,
+        ):
+            events.append(event)
+
+        # The first reasoning delta should be emitted
+        reasoning_deltas = [
+            e for e in events if isinstance(e, ResponseReasoningTextDeltaEvent)
+        ]
+        assert len(reasoning_deltas) == 2
+        assert reasoning_deltas[0].delta == "thinking..."
+        # The trailing reasoning from the mixed delta must also be emitted
+        assert reasoning_deltas[1].delta == " end"
+
+        # The done event must include both reasoning parts
+        reasoning_done = [
+            e for e in events if isinstance(e, ResponseReasoningTextDoneEvent)
+        ]
+        assert len(reasoning_done) == 1
+        assert reasoning_done[0].text == "thinking... end"
+
+        # Content deltas should be emitted for both the mixed delta's
+        # content and the pure content delta
+        text_deltas = [e for e in events if isinstance(e, ResponseTextDeltaEvent)]
+        assert len(text_deltas) == 2
+        assert text_deltas[0].delta == "hello"
+        assert text_deltas[1].delta == " world"
+
+    @pytest.mark.asyncio
+    async def test_transition_without_mixed_delta_no_extra_reasoning_event(
+        self, monkeypatch
+    ):
+        """When the transition from reasoning to content is clean (no mixed
+        delta), no extra reasoning delta event should be emitted."""
+
+        monkeypatch.setattr(envs, "VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT", False)
+        serving = _make_serving_instance_with_reasoning()
+
+        delta_sequence = [
+            DeltaMessage(reasoning="thinking"),
+            DeltaMessage(content="answer"),
+        ]
+        call_count = 0
+
+        def mock_extract_reasoning_streaming(**kwargs):
+            nonlocal call_count
+            result = delta_sequence[call_count]
+            call_count += 1
+            return result
+
+        mock_parser = MagicMock()
+        mock_parser.extract_reasoning_streaming = mock_extract_reasoning_streaming
+        mock_parser.extract_tool_calls_streaming = mock_extract_reasoning_streaming
+        serving.parser = MagicMock()
+        serving.parser.reasoning_parser_cls = MagicMock(return_value=mock_parser)
+        serving.parser.tool_parser_cls = MagicMock(return_value=mock_parser)
+
+        contexts = [
+            _make_simple_context_with_output("chunk1", [10]),
+            _make_simple_context_with_output("chunk2", [20]),
+        ]
+
+        async def result_generator():
+            for ctx in contexts:
+                yield ctx
+
+        request = ResponsesRequest(input="hi", tools=[], stream=True)
+        sampling_params = SamplingParams(max_tokens=64)
+        metadata = RequestResponseMetadata(request_id="req")
+        _identity_increment._counter = 0  # type: ignore
+
+        events = []
+        async for event in serving._process_simple_streaming_events(
+            request=request,
+            sampling_params=sampling_params,
+            result_generator=result_generator(),
+            context=SimpleContext(),
+            model_name="test-model",
+            tokenizer=MagicMock(),
+            request_metadata=metadata,
+            created_time=0,
+            _increment_sequence_number_and_return=_identity_increment,
+        ):
+            events.append(event)
+
+        # Exactly one reasoning delta
+        reasoning_deltas = [
+            e for e in events if isinstance(e, ResponseReasoningTextDeltaEvent)
+        ]
+        assert len(reasoning_deltas) == 1
+        assert reasoning_deltas[0].delta == "thinking"
+
+        # Done event has just "thinking"
+        reasoning_done = [
+            e for e in events if isinstance(e, ResponseReasoningTextDoneEvent)
+        ]
+        assert len(reasoning_done) == 1
+        assert reasoning_done[0].text == "thinking"
+
+        # One content delta
+        text_deltas = [e for e in events if isinstance(e, ResponseTextDeltaEvent)]
+        assert len(text_deltas) == 1
+        assert text_deltas[0].delta == "answer"
+
+    @pytest.mark.asyncio
+    async def test_reasoning_only_stream_no_content(self, monkeypatch):
+        """When the stream has only reasoning deltas and no content, the
+        reasoning done event should be emitted at finalization with the
+        full accumulated text, and no text delta events should appear."""
+
+        monkeypatch.setattr(envs, "VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT", False)
+        serving = _make_serving_instance_with_reasoning()
+
+        delta_sequence = [
+            DeltaMessage(reasoning="step 1"),
+            DeltaMessage(reasoning=" step 2"),
+        ]
+        call_count = 0
+
+        def mock_extract_reasoning_streaming(**kwargs):
+            nonlocal call_count
+            result = delta_sequence[call_count]
+            call_count += 1
+            return result
+
+        mock_parser = MagicMock()
+        mock_parser.extract_reasoning_streaming = mock_extract_reasoning_streaming
+        mock_parser.extract_tool_calls_streaming = mock_extract_reasoning_streaming
+        serving.parser = MagicMock()
+        serving.parser.reasoning_parser_cls = MagicMock(return_value=mock_parser)
+        serving.parser.tool_parser_cls = MagicMock(return_value=mock_parser)
+
+        contexts = [
+            _make_simple_context_with_output("chunk1", [10]),
+            _make_simple_context_with_output("chunk2", [20]),
+        ]
+
+        async def result_generator():
+            for ctx in contexts:
+                yield ctx
+
+        request = ResponsesRequest(input="hi", tools=[], stream=True)
+        sampling_params = SamplingParams(max_tokens=64)
+        metadata = RequestResponseMetadata(request_id="req")
+        _identity_increment._counter = 0  # type: ignore
+
+        events = []
+        async for event in serving._process_simple_streaming_events(
+            request=request,
+            sampling_params=sampling_params,
+            result_generator=result_generator(),
+            context=SimpleContext(),
+            model_name="test-model",
+            tokenizer=MagicMock(),
+            request_metadata=metadata,
+            created_time=0,
+            _increment_sequence_number_and_return=_identity_increment,
+        ):
+            events.append(event)
+
+        # Two reasoning deltas
+        reasoning_deltas = [
+            e for e in events if isinstance(e, ResponseReasoningTextDeltaEvent)
+        ]
+        assert len(reasoning_deltas) == 2
+        assert reasoning_deltas[0].delta == "step 1"
+        assert reasoning_deltas[1].delta == " step 2"
+
+        # Done event at finalization with accumulated text
+        reasoning_done = [
+            e for e in events if isinstance(e, ResponseReasoningTextDoneEvent)
+        ]
+        assert len(reasoning_done) == 1
+        assert reasoning_done[0].text == "step 1 step 2"
+
+        # No content text deltas
+        text_deltas = [e for e in events if isinstance(e, ResponseTextDeltaEvent)]
+        assert len(text_deltas) == 0
+
+        # Final item should be a reasoning item
+        item_done_events = [
+            e for e in events if isinstance(e, ResponseOutputItemDoneEvent)
+        ]
+        assert len(item_done_events) == 1
+        assert isinstance(item_done_events[0].item, ResponseReasoningItem)

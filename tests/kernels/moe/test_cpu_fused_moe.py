@@ -6,7 +6,8 @@ import torch
 
 from tests.kernels.allclose_default import get_default_atol, get_default_rtol
 from vllm._custom_ops import cpu_fused_moe, cpu_prepack_moe_weight
-from vllm.model_executor.layers.fused_moe.cpu_fused_moe import _CPU_MOE_ACT
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+from vllm.model_executor.layers.fused_moe.cpu_fused_moe import _CPU_MOE_ACT_FN
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
@@ -19,7 +20,7 @@ EXPERT_NUM = [
 HIDDEN_DIM = [128, 2880]
 INTERMEDIATE_DIM = [128, 2880]
 BATCH_SIZE = [1, 64, 256]
-ACT = ["silu", "swigluoai"]
+ACT = [MoEActivation.SILU, MoEActivation.SWIGLUOAI]
 USE_BIAS = [True, False]
 ISA = ["amx", "vec"] if torch._C._cpu._is_amx_tile_supported() else ["vec"]
 DTYPE = [torch.bfloat16]
@@ -33,7 +34,7 @@ def ref_fused_moe(
     w2_bias: torch.Tensor | None,
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
-    activation: str,
+    activation: MoEActivation,
 ) -> torch.Tensor:
     len_experts = w13.size(0)
 
@@ -68,12 +69,7 @@ def ref_fused_moe(
             tokens_for_this_expert, curr_w13, curr_w13_bias
         )
         # Note: to simulate the kernel implementation
-        gate_up = (
-            _CPU_MOE_ACT[activation]
-            .forward_native(gate_up)
-            .to(dtype=input.dtype)
-            .float()
-        )
+        gate_up = _CPU_MOE_ACT_FN[activation](gate_up).to(dtype=input.dtype).float()
         expert_out = torch.nn.functional.linear(gate_up, curr_w2, curr_w2_bias)
 
         outputs.append(expert_out)
@@ -108,7 +104,7 @@ def test_cpu_fused_moe(
     intermediate_size: int,
     use_bias: bool,
     dtype: torch.dtype,
-    act: str,
+    act: MoEActivation,
     isa: str,
 ):
     set_random_seed(0)
@@ -158,7 +154,7 @@ def test_cpu_fused_moe(
         w2_bias,
         topk_weight,
         topk_ids,
-        act,
+        act.value,
         isa,
     )
 

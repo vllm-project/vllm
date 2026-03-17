@@ -2,20 +2,21 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass, field
-from http import HTTPStatus
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 
 from vllm.config.multimodal import MultiModalConfig
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.entrypoints.openai.completion.serving import OpenAIServingCompletion
-from vllm.entrypoints.openai.engine.protocol import ErrorResponse
+from vllm.entrypoints.openai.engine.protocol import GenerationError
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+from vllm.entrypoints.serve.render.serving import OpenAIServingRender
 from vllm.outputs import CompletionOutput, RequestOutput
-from vllm.tokenizers import get_tokenizer
+from vllm.renderers.hf import HfRenderer
+from vllm.tokenizers.registry import tokenizer_args_from_config
 from vllm.v1.engine.async_llm import AsyncLLM
 
 MODEL_NAME = "openai-community/gpt2"
@@ -35,6 +36,7 @@ class MockHFConfig:
 class MockModelConfig:
     task = "generate"
     runner_type = "generate"
+    model = MODEL_NAME
     tokenizer = MODEL_NAME
     trust_remote_code = False
     tokenizer_mode = "auto"
@@ -42,7 +44,6 @@ class MockModelConfig:
     tokenizer_revision = None
     multimodal_config = MultiModalConfig()
     hf_config = MockHFConfig()
-    logits_processor_pattern = None
     logits_processors: list[str] | None = None
     diff_sampling_param: dict | None = None
     allowed_local_media_path: str = ""
@@ -51,9 +52,22 @@ class MockModelConfig:
     generation_config: str = "auto"
     media_io_kwargs: dict[str, dict[str, Any]] = field(default_factory=dict)
     skip_tokenizer_init = False
+    is_encoder_decoder: bool = False
+    is_multimodal_model: bool = False
 
     def get_diff_sampling_param(self):
         return self.diff_sampling_param or {}
+
+
+@dataclass
+class MockParallelConfig:
+    _api_process_rank: int = 0
+
+
+@dataclass
+class MockVllmConfig:
+    model_config: MockModelConfig
+    parallel_config: MockParallelConfig
 
 
 def _build_serving_completion(engine: AsyncLLM) -> OpenAIServingCompletion:
@@ -61,37 +75,41 @@ def _build_serving_completion(engine: AsyncLLM) -> OpenAIServingCompletion:
         engine_client=engine,
         base_model_paths=BASE_MODEL_PATHS,
     )
-    serving_completion = OpenAIServingCompletion(
+    serving_render = OpenAIServingRender(
+        model_config=engine.model_config,
+        renderer=engine.renderer,
+        io_processor=engine.io_processor,
+        model_registry=models.registry,
+        request_logger=None,
+        chat_template=None,
+        chat_template_content_format="auto",
+    )
+    return OpenAIServingCompletion(
         engine,
         models,
+        openai_serving_render=serving_render,
         request_logger=None,
     )
 
-    async def _fake_process_inputs(
-        request_id,
-        engine_prompt,
-        sampling_params,
-        *,
-        lora_request,
-        trace_headers,
-        priority,
-        data_parallel_rank,
-    ):
-        return dict(engine_prompt), {}
 
-    serving_completion._process_inputs = AsyncMock(side_effect=_fake_process_inputs)
-    return serving_completion
+def _build_renderer(model_config: MockModelConfig):
+    _, tokenizer_name, _, kwargs = tokenizer_args_from_config(model_config)
+
+    return HfRenderer.from_config(
+        MockVllmConfig(model_config, parallel_config=MockParallelConfig()),
+        tokenizer_kwargs={**kwargs, "tokenizer_name": tokenizer_name},
+    )
 
 
 @pytest.mark.asyncio
 async def test_completion_error_non_stream():
     """test finish_reason='error' returns 500 InternalServerError (non-streaming)"""
     mock_engine = MagicMock(spec=AsyncLLM)
-    mock_engine.get_tokenizer.return_value = get_tokenizer(MODEL_NAME)
     mock_engine.errored = False
     mock_engine.model_config = MockModelConfig()
     mock_engine.input_processor = MagicMock()
     mock_engine.io_processor = MagicMock()
+    mock_engine.renderer = _build_renderer(mock_engine.model_config)
 
     serving_completion = _build_serving_completion(mock_engine)
 
@@ -129,23 +147,19 @@ async def test_completion_error_non_stream():
         stream=False,
     )
 
-    response = await serving_completion.create_completion(request)
-
-    assert isinstance(response, ErrorResponse)
-    assert response.error.type == "InternalServerError"
-    assert response.error.message == "Internal server error"
-    assert response.error.code == HTTPStatus.INTERNAL_SERVER_ERROR
+    with pytest.raises(GenerationError):
+        await serving_completion.create_completion(request)
 
 
 @pytest.mark.asyncio
 async def test_completion_error_stream():
     """test finish_reason='error' returns 500 InternalServerError (streaming)"""
     mock_engine = MagicMock(spec=AsyncLLM)
-    mock_engine.get_tokenizer.return_value = get_tokenizer(MODEL_NAME)
     mock_engine.errored = False
     mock_engine.model_config = MockModelConfig()
     mock_engine.input_processor = MagicMock()
     mock_engine.io_processor = MagicMock()
+    mock_engine.renderer = _build_renderer(mock_engine.model_config)
 
     serving_completion = _build_serving_completion(mock_engine)
 
@@ -217,3 +231,36 @@ async def test_completion_error_stream():
         f"Expected error message in chunks: {chunks}"
     )
     assert chunks[-1] == "data: [DONE]\n\n"
+
+
+def test_json_schema_response_format_missing_schema():
+    """When response_format type is 'json_schema' but the json_schema field
+    is not provided, request construction should raise a validation error
+    so the API returns 400 instead of 500."""
+    with pytest.raises(Exception, match="json_schema.*must be provided"):
+        CompletionRequest(
+            model=MODEL_NAME,
+            prompt="Test prompt",
+            max_tokens=10,
+            response_format={"type": "json_schema"},
+        )
+
+
+def test_negative_prompt_token_ids_nested():
+    """Negative token IDs in prompt (nested list) should raise validation error."""
+    with pytest.raises(Exception, match="greater than or equal to 0"):
+        CompletionRequest(
+            model=MODEL_NAME,
+            prompt=[[-1]],
+            max_tokens=10,
+        )
+
+
+def test_negative_prompt_token_ids_flat():
+    """Negative token IDs in prompt (flat list) should raise validation error."""
+    with pytest.raises(Exception, match="greater than or equal to 0"):
+        CompletionRequest(
+            model=MODEL_NAME,
+            prompt=[-1],
+            max_tokens=10,
+        )

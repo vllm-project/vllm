@@ -78,6 +78,7 @@ class LlavaNextImageEmbeddingInputs(TensorSchema):
 LlavaNextImageInputs: TypeAlias = (
     LlavaNextImagePixelInputs | LlavaNextImageEmbeddingInputs
 )
+"""Alias for supported LLaVA-NeXT image input types."""
 
 
 class LlavaNextLikeConfig(LlavaLikeConfig, Protocol):
@@ -106,6 +107,7 @@ class LlavaNextProcessingInfo(BaseLlavaProcessingInfo):
         image_width: int,
         image_height: int,
     ) -> int:
+        """Get the number of image tokens for the given image dimensions."""
         hf_config = self.get_hf_config()
         vision_encoder_info = self.get_vision_encoder_info()
 
@@ -268,11 +270,15 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsP
         self.config = config
         self.multimodal_config = multimodal_config
 
+        self.configure_mm_token_handling(
+            vocab_size=config.text_config.vocab_size,
+            mm_token_ids=[config.image_token_index],
+        )
+
         with self._mark_tower_model(vllm_config, "image"):
             self.vision_tower = init_vision_tower_for_llava(
                 config,
                 quant_config=quant_config,
-                multimodal_config=multimodal_config,
                 require_post_norm=False,
                 prefix=maybe_prefix(prefix, "vision_tower"),
             )
@@ -284,6 +290,8 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsP
                 text_hidden_size=config.text_config.hidden_size,
                 projector_hidden_act=config.projector_hidden_act,
                 multimodal_projector_bias=config.multimodal_projector_bias,
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "multi_modal_projector"),
             )
 
         with self._mark_language_model(vllm_config):
@@ -494,8 +502,6 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsP
         multimodal_embeddings: MultiModalEmbeddings | None = None,
         *,
         is_multimodal: torch.Tensor | None = None,
-        # Multi-modal token ID may exceed vocab size
-        handle_oov_mm_token: bool = True,
     ) -> torch.Tensor:
         # This is to satisfy the type checker for each overload
         if multimodal_embeddings is None or is_multimodal is None:
@@ -505,12 +511,11 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsP
             input_ids,
             multimodal_embeddings=multimodal_embeddings,
             is_multimodal=is_multimodal,
-            handle_oov_mm_token=handle_oov_mm_token,
         )
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,

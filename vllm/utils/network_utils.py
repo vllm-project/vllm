@@ -11,12 +11,12 @@ from collections.abc import (
     Sequence,
 )
 from typing import Any
-from urllib.parse import urlparse
 from uuid import uuid4
 
 import psutil
 import zmq
 import zmq.asyncio
+from urllib3.util import parse_url
 
 import vllm.envs as envs
 from vllm.logger import init_logger
@@ -167,16 +167,34 @@ def get_open_port() -> int:
 
 
 def get_open_ports_list(count: int = 5) -> list[int]:
-    """Get a list of open ports."""
-    ports = set[int]()
-    while len(ports) < count:
-        ports.add(get_open_port())
-    return list(ports)
+    """Get a list of unique open ports.
+
+    When VLLM_PORT is set, scans upward from that port, advancing
+    the start position after each find so every port is unique.
+    """
+    ports_set = set[int]()
+    if envs.VLLM_PORT is not None:
+        next_port = envs.VLLM_PORT
+        for _ in range(count):
+            port = _get_open_port(start_port=next_port, max_attempts=1000)
+            ports_set.add(port)
+            next_port = port + 1
+        return list(ports_set)
+    else:
+        while len(ports_set) < count:
+            ports_set.add(get_open_port())
+
+    return list(ports_set)
 
 
-def _get_open_port() -> int:
-    port = envs.VLLM_PORT
+def _get_open_port(
+    start_port: int | None = None,
+    max_attempts: int | None = None,
+) -> int:
+    start_port = start_port if start_port is not None else envs.VLLM_PORT
+    port = start_port
     if port is not None:
+        attempts = 0
         while True:
             try:
                 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -185,6 +203,12 @@ def _get_open_port() -> int:
             except OSError:
                 port += 1  # Increment port number if already in use
                 logger.info("Port %d is already in use, trying port %d", port - 1, port)
+            attempts += 1
+            if max_attempts is not None and attempts >= max_attempts:
+                raise RuntimeError(
+                    f"Could not find open port after {max_attempts} "
+                    f"attempts starting from port {start_port}"
+                )
     # try ipv4
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -217,13 +241,15 @@ def find_process_using_port(port: int) -> psutil.Process | None:
 
 def split_zmq_path(path: str) -> tuple[str, str, str]:
     """Split a zmq path into its parts."""
-    parsed = urlparse(path)
+    parsed = parse_url(path)
     if not parsed.scheme:
         raise ValueError(f"Invalid zmq path: {path}")
 
     scheme = parsed.scheme
     host = parsed.hostname or ""
     port = str(parsed.port or "")
+    if host.startswith("[") and host.endswith("]"):
+        host = host[1:-1]  # Remove brackets for IPv6 address
 
     if scheme == "tcp" and not all((host, port)):
         # The host and port fields are required for tcp
@@ -262,6 +288,7 @@ def make_zmq_socket(
     bind: bool | None = None,
     identity: bytes | None = None,
     linger: int | None = None,
+    router_handover: bool = False,
 ) -> zmq.Socket | zmq.asyncio.Socket:  # type: ignore[name-defined]
     """Make a ZMQ socket with the proper bind/connect semantics."""
 
@@ -287,6 +314,10 @@ def make_zmq_socket(
     if socket_type in (zmq.PUSH, zmq.DEALER, zmq.ROUTER):
         socket.setsockopt(zmq.SNDHWM, 0)
         socket.setsockopt(zmq.SNDBUF, buf_size)
+
+    if socket_type == zmq.ROUTER and router_handover:
+        # Let a new connection take over an identity left behind by a dead one.
+        socket.setsockopt(zmq.ROUTER_HANDOVER, 1)
 
     if identity is not None:
         socket.setsockopt(zmq.IDENTITY, identity)
@@ -318,12 +349,20 @@ def zmq_socket_ctx(
     bind: bool | None = None,
     linger: int = 0,
     identity: bytes | None = None,
+    router_handover: bool = False,
 ) -> Iterator[zmq.Socket]:
     """Context manager for a ZMQ socket"""
 
     ctx = zmq.Context()  # type: ignore[attr-defined]
     try:
-        yield make_zmq_socket(ctx, path, socket_type, bind=bind, identity=identity)
+        yield make_zmq_socket(
+            ctx,
+            path,
+            socket_type,
+            bind=bind,
+            identity=identity,
+            router_handover=router_handover,
+        )
     except KeyboardInterrupt:
         logger.debug("Got Keyboard Interrupt.")
 

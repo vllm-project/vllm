@@ -116,7 +116,7 @@ class Dequantizer4b {
       scalar_vec_t output_vec_0(wb_0);
       scalar_vec_t output_vec_1(wb_1);
 
-      // AMX needs to interlave K elements to pack as 32 bits
+      // AMX needs to interleave K elements to pack as 32 bits
       if constexpr (isa == ISA::AMX) {
         vec_op::interleave_save(output_vec_0, output_vec_1, curr_weight);
       } else {

@@ -14,7 +14,6 @@ from typing import (
     TYPE_CHECKING,
     Any,
     Generic,
-    Optional,
     TypeVar,
     Union,
     overload,
@@ -221,15 +220,17 @@ class APIServerProcessManager:
         # The extra processes are managed by their owners
         self._finalizer = weakref.finalize(self, shutdown, self.processes)
 
-    def close(self) -> None:
-        self._finalizer()
+    def shutdown(self, timeout: float | None = None) -> None:
+        """Shutdown API server processes with configurable timeout"""
+        if self._finalizer.detach() is not None:
+            shutdown(self.processes, timeout=timeout)
 
 
 def wait_for_completion_or_failure(
     api_server_manager: APIServerProcessManager,
     engine_manager: Union["CoreEngineProcManager", "CoreEngineActorManager"]
     | None = None,
-    coordinator: Optional["DPCoordinator"] = None,
+    coordinator: "DPCoordinator | None" = None,
 ) -> None:
     """Wait for all processes to complete or detect if any fail.
 
@@ -289,25 +290,30 @@ def wait_for_completion_or_failure(
     except Exception as e:
         logger.exception("Exception occurred while running API servers: %s", str(e))
         raise
-    finally:
-        logger.info("Terminating remaining processes ...")
-        api_server_manager.close()
-        if coordinator:
-            coordinator.close()
-        if engine_manager:
-            engine_manager.close()
 
 
 # Note(rob): shutdown function cannot be a bound method,
 # else the gc cannot collect the object.
-def shutdown(procs: list[BaseProcess]):
+def shutdown(procs: list[BaseProcess], timeout: float | None = None) -> None:
+    """Shutdown processes with timeout.
+
+    Args:
+        procs: List of processes to shutdown
+        timeout: Maximum time in seconds to wait for graceful shutdown
+    """
+    if timeout is None:
+        timeout = 0.0
+
+    # Allow at least 5 seconds for remaining procs to terminate.
+    timeout = max(timeout, 5.0)
+
     # Shutdown the process.
     for proc in procs:
         if proc.is_alive():
             proc.terminate()
 
-    # Allow 5 seconds for remaining procs to terminate.
-    deadline = time.monotonic() + 5
+    # Allow time for remaining procs to terminate.
+    deadline = time.monotonic() + timeout
     for proc in procs:
         remaining = deadline - time.monotonic()
         if remaining <= 0:

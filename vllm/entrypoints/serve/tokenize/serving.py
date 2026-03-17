@@ -3,18 +3,14 @@
 from dataclasses import dataclass
 from typing import Any, Final
 
-import jinja2
 from fastapi import Request
 
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.entrypoints.logger import RequestLogger
-from vllm.entrypoints.openai.engine.protocol import (
-    ErrorResponse,
-)
+from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.openai.engine.serving import OpenAIServing
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
-from vllm.entrypoints.renderer import RenderConfig
 from vllm.entrypoints.serve.tokenize.protocol import (
     DetokenizeRequest,
     DetokenizeResponse,
@@ -23,7 +19,7 @@ from vllm.entrypoints.serve.tokenize.protocol import (
     TokenizeResponse,
     TokenizerInfoResponse,
 )
-from vllm.inputs import TokensPrompt
+from vllm.inputs import TokensPrompt, token_inputs
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
 
@@ -39,18 +35,18 @@ class OpenAIServingTokenization(OpenAIServing):
         request_logger: RequestLogger | None,
         chat_template: str | None,
         chat_template_content_format: ChatTemplateContentFormatOption,
+        default_chat_template_kwargs: dict[str, Any] | None = None,
         trust_request_chat_template: bool = False,
-        log_error_stack: bool = False,
     ) -> None:
         super().__init__(
             engine_client=engine_client,
             models=models,
             request_logger=request_logger,
-            log_error_stack=log_error_stack,
         )
 
         self.chat_template = chat_template
         self.chat_template_content_format: Final = chat_template_content_format
+        self.default_chat_template_kwargs = default_chat_template_kwargs or {}
         self.trust_request_chat_template = trust_request_chat_template
 
     async def create_tokenize(
@@ -64,65 +60,60 @@ class OpenAIServingTokenization(OpenAIServing):
 
         request_id = f"tokenize-{self._base_request_id(raw_request)}"
 
-        try:
-            lora_request = self._maybe_get_adapters(request)
+        lora_request = self._maybe_get_adapters(request)
 
-            tokenizer = await self.engine_client.get_tokenizer()
-            renderer = self._get_renderer(tokenizer)
+        if isinstance(request, TokenizeChatRequest):
+            tool_dicts = (
+                None
+                if request.tools is None
+                else [tool.model_dump() for tool in request.tools]
+            )
+            error_check_ret = self._validate_chat_template(
+                request_chat_template=request.chat_template,
+                chat_template_kwargs=request.chat_template_kwargs,
+                trust_request_chat_template=self.trust_request_chat_template,
+            )
+            if error_check_ret is not None:
+                return error_check_ret
 
-            if isinstance(request, TokenizeChatRequest):
-                tool_dicts = (
-                    None
-                    if request.tools is None
-                    else [tool.model_dump() for tool in request.tools]
-                )
-                error_check_ret = self._validate_chat_template(
-                    request_chat_template=request.chat_template,
-                    chat_template_kwargs=request.chat_template_kwargs,
-                    trust_request_chat_template=self.trust_request_chat_template,
-                )
-                if error_check_ret is not None:
-                    return error_check_ret
-
-                _, engine_prompts = await self._preprocess_chat(
-                    request,
-                    tokenizer,
-                    request.messages,
-                    tool_dicts=tool_dicts,
-                    chat_template=request.chat_template or self.chat_template,
-                    chat_template_content_format=self.chat_template_content_format,
-                    add_generation_prompt=request.add_generation_prompt,
-                    continue_final_message=request.continue_final_message,
-                    chat_template_kwargs=request.chat_template_kwargs,
-                    add_special_tokens=request.add_special_tokens,
-                )
-            else:
-                engine_prompts = await renderer.render_prompt(
-                    prompt_or_prompts=request.prompt,
-                    config=self._build_render_config(request),
-                )
-        except (ValueError, TypeError, jinja2.TemplateError) as e:
-            logger.exception("Error in preprocessing prompt inputs")
-            return self.create_error_response(f"{e} {e.__cause__}")
+            _, engine_prompts = await self._preprocess_chat(
+                request,
+                request.messages,
+                default_template=self.chat_template,
+                default_template_content_format=self.chat_template_content_format,
+                default_template_kwargs=self.default_chat_template_kwargs,
+                tool_dicts=tool_dicts,
+            )
+        else:
+            engine_prompts = await self._preprocess_completion(
+                request,
+                prompt_input=request.prompt,
+                prompt_embeds=None,
+            )
 
         input_ids: list[int] = []
         for engine_prompt in engine_prompts:
             self._log_inputs(
-                request_id, engine_prompt, params=None, lora_request=lora_request
+                request_id,
+                engine_prompt,
+                params=None,
+                lora_request=lora_request,
             )
 
-            if isinstance(engine_prompt, dict) and "prompt_token_ids" in engine_prompt:
-                input_ids.extend(engine_prompt["prompt_token_ids"])
+            prompt_components = self._extract_prompt_components(engine_prompt)
+            if prompt_components.token_ids is not None:
+                input_ids.extend(prompt_components.token_ids)
 
         token_strs = None
         if request.return_token_strs:
+            tokenizer = self.renderer.get_tokenizer()
             token_strs = tokenizer.convert_ids_to_tokens(input_ids)
 
         return TokenizeResponse(
             tokens=input_ids,
             token_strs=token_strs,
             count=len(input_ids),
-            max_model_len=self.max_model_len,
+            max_model_len=self.model_config.max_model_len,
         )
 
     async def create_detokenize(
@@ -138,37 +129,28 @@ class OpenAIServingTokenization(OpenAIServing):
 
         lora_request = self._maybe_get_adapters(request)
 
-        tokenizer = await self.engine_client.get_tokenizer()
-
         self._log_inputs(
             request_id,
-            TokensPrompt(prompt_token_ids=request.tokens),
+            token_inputs(request.tokens),
             params=None,
             lora_request=lora_request,
         )
 
-        prompt_input = await self._tokenize_prompt_input_async(
-            request,
-            tokenizer,
-            request.tokens,
+        engine_prompt = await self.renderer.tokenize_prompt_async(
+            TokensPrompt(prompt_token_ids=request.tokens),
+            request.build_tok_params(self.model_config),
         )
-        input_text = prompt_input["prompt"]
+        prompt_text = engine_prompt["prompt"]  # type: ignore[typeddict-item]
 
-        return DetokenizeResponse(prompt=input_text)
+        return DetokenizeResponse(prompt=prompt_text)
 
     async def get_tokenizer_info(
         self,
     ) -> TokenizerInfoResponse | ErrorResponse:
         """Get comprehensive tokenizer information."""
-        try:
-            tokenizer = await self.engine_client.get_tokenizer()
-            info = TokenizerInfo(tokenizer, self.chat_template).to_dict()
-            return TokenizerInfoResponse(**info)
-        except Exception as e:
-            return self.create_error_response(f"Failed to get tokenizer info: {str(e)}")
-
-    def _build_render_config(self, request: TokenizeRequest) -> RenderConfig:
-        return RenderConfig(add_special_tokens=request.add_special_tokens)
+        tokenizer = self.renderer.get_tokenizer()
+        info = TokenizerInfo(tokenizer, self.chat_template).to_dict()
+        return TokenizerInfoResponse(**info)
 
 
 @dataclass

@@ -29,7 +29,6 @@ import torch
 from torch import nn
 from transformers import PretrainedConfig
 
-from vllm.attention.layer import Attention, AttentionType
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ParallelConfig, VllmConfig
 from vllm.distributed import (
@@ -41,7 +40,8 @@ from vllm.distributed import (
     tensor_model_parallel_all_gather,
 )
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.attention.static_sink_attention import (
+from vllm.model_executor.layers.attention import (
+    Attention,
     StaticSinkAttention,
 )
 from vllm.model_executor.layers.fused_moe import SharedFusedMoE
@@ -84,6 +84,7 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.config import set_default_rope_theta
+from vllm.v1.attention.backend import AttentionType
 from vllm.v1.attention.backends.flash_attn_diffkv import FlashAttentionDiffKVBackend
 
 
@@ -536,10 +537,16 @@ class OpenPanguEmbeddedAttention(nn.Module):
         if is_gguf and config.model_type == "PanguEmbedded":
             is_neox_style = False
 
+        rope_parameters = config.rope_parameters or {}
+        if rope_parameters is not None and rope_parameters.get(
+            "mrope_interleaved", False
+        ):
+            rope_parameters["rope_type"] = "openpangu"
+
         self.rotary_emb = get_rope(
             self.head_dim,
             max_position=self.max_position_embeddings,
-            rope_parameters=config.rope_parameters,
+            rope_parameters=rope_parameters,
             is_neox_style=is_neox_style,
         )
 
@@ -1022,7 +1029,6 @@ class OpenPanguModel(nn.Module):
         self.config = config
         self.num_redundant_experts = eplb_config.num_redundant_experts
 
-        self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
 
         if get_pp_group().is_first_rank or (
@@ -1056,7 +1062,7 @@ class OpenPanguModel(nn.Module):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None,
         inputs_embeds: torch.Tensor | None = None,
@@ -1286,7 +1292,7 @@ class OpenPanguModelBase(nn.Module, SupportsPP, SupportsLoRA):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,

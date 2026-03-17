@@ -5,7 +5,7 @@ import os
 import uuid
 from collections.abc import Generator
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 import torch
 from lmcache import utils
@@ -274,7 +274,7 @@ class ReqMeta:
         load_spec: LoadSpec | None = None,
         discard_partial_chunks: bool = True,
         save_decode_cache: bool = False,
-    ) -> Optional["ReqMeta"]:
+    ) -> "ReqMeta | None":
         """Create the request metadata from a request tracker.
 
         Args:
@@ -398,7 +398,7 @@ class ReqMeta:
         )
 
 
-def need_gpu_interm_buffer(lmcache_config: LMCacheEngineConfig):
+def need_gpu_interim_buffer(lmcache_config: LMCacheEngineConfig):
     return not lmcache_config.enable_pd
 
 
@@ -483,9 +483,9 @@ def _init_lmcache_engine(
     )
 
     # Change current device.
-    num_gpus = torch.cuda.device_count()
+    num_gpus = torch.accelerator.device_count()
     local_rank = parallel_config.rank % num_gpus
-    torch.cuda.set_device(local_rank)
+    torch.accelerator.set_device_index(local_rank)
     device = torch.device(f"cuda:{local_rank}")
     metadata = LMCacheEngineMetadata(
         model_config.model,
@@ -497,7 +497,7 @@ def _init_lmcache_engine(
         use_mla,
     )
 
-    use_gpu = need_gpu_interm_buffer(lmcache_config)
+    use_gpu = need_gpu_interim_buffer(lmcache_config)
     vllm_gpu_connector: (
         VLLMBufferLayerwiseGPUConnector
         | VLLMPagedMemGPUConnectorV2

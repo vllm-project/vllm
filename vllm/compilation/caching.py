@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import contextlib
 import hashlib
 import inspect
 import os
@@ -43,15 +44,15 @@ class StandaloneCompiledArtifacts:
     split on attn)
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         # dict from submodule name to byte hash
-        self.submodule_bytes = {}
+        self.submodule_bytes: dict[str, str] = {}
         # dict from byte hash to bytes
-        self.submodule_bytes_store = {}
+        self.submodule_bytes_store: dict[str, bytes] = {}
         # dict from byte hash to loaded module
-        self.loaded_submodule_store = {}
+        self.loaded_submodule_store: dict[str, Any] = {}
 
-    def insert(self, submod_name: str, shape: str, entry: bytes):
+    def insert(self, submod_name: str, shape: str, entry: bytes) -> None:
         hasher = hashlib.sha256()
         hasher.update(entry)
         hex_digest = hasher.hexdigest()
@@ -86,7 +87,7 @@ class StandaloneCompiledArtifacts:
             self.submodule_bytes[f"{submod_name}_{shape}"]
         ]
 
-    def get_loaded(self, submod_name: str, shape: str):
+    def get_loaded(self, submod_name: str, shape: str) -> Any:
         logger.debug(
             "getting artifact for submod %s with shape %s",
             submod_name,
@@ -119,7 +120,7 @@ class StandaloneCompiledArtifacts:
 
         from torch._inductor.standalone_compile import AOTCompiledArtifact
 
-        def _load_entry(entry_bytes) -> AOTCompiledArtifact:
+        def _load_entry(entry_bytes: bytes) -> AOTCompiledArtifact:
             entry = pickle.loads(entry_bytes)
             return AOTCompiledArtifact.deserialize(entry)
 
@@ -132,16 +133,28 @@ class StandaloneCompiledArtifacts:
 
         logger.debug("loaded all %s submodules", self.num_artifacts())
 
-    def __getstate__(self):
+    def __getstate__(self) -> dict[str, dict[str, str] | dict[str, bytes]]:
         return {
             "submodule_bytes": self.submodule_bytes,
             "submodule_bytes_store": self.submodule_bytes_store,
         }
 
-    def __setstate__(self, state):
+    def __setstate__(self, state: dict[str, dict[str, Any]]) -> None:
         self.submodule_bytes = state["submodule_bytes"]
         self.submodule_bytes_store = state["submodule_bytes_store"]
         self.loaded_submodule_store = {}
+
+
+@contextlib.contextmanager
+def patch_pytree_map_over_slice():
+    pytree._private_register_pytree_node(
+        slice, lambda x: ([x.start, x.stop, x.step], None), lambda x, c: slice(*x)
+    )
+
+    try:
+        yield
+    finally:
+        pytree._deregister_pytree_node(slice)
 
 
 class VllmSerializableFunction(SerializableCallable):  # type: ignore[misc]
@@ -165,6 +178,7 @@ class VllmSerializableFunction(SerializableCallable):  # type: ignore[misc]
         is_encoder: bool = False,
         vllm_backend: Any | None = None,
         sym_tensor_indices: list[int] | None = None,
+        aot_autograd_config: dict[str, Any] | None = None,
     ) -> None:
         assert isinstance(graph_module, torch.fx.GraphModule)
         self.graph_module = graph_module
@@ -175,6 +189,13 @@ class VllmSerializableFunction(SerializableCallable):  # type: ignore[misc]
         self.shape_env = None
         self.vllm_backend = vllm_backend
         self.sym_tensor_indices = sym_tensor_indices
+        self._fake_mode: Any | None = None
+
+        import torch._functorch.config as functorch_config
+
+        self.aot_autograd_config = (
+            aot_autograd_config or functorch_config.save_config_portable()
+        )
         sym_input = next(
             (i for i in self.example_inputs if isinstance(i, torch.SymInt)), None
         )
@@ -196,6 +217,7 @@ class VllmSerializableFunction(SerializableCallable):  # type: ignore[misc]
         state.pop("optimized_call")
         state.pop("shape_env")
         state.pop("vllm_backend", None)
+        state.pop("_fake_mode", None)
         for node in state["graph_module"].graph.nodes:
             node.meta.pop("source_fn_stack", None)
             node.meta.pop("nn_module_stack", None)
@@ -235,7 +257,10 @@ class VllmSerializableFunction(SerializableCallable):  # type: ignore[misc]
                 lambda inp: torch.empty_like(inp, device="meta"),
                 state["example_inputs"],
             )
-        with patch.object(GraphPickler, "reducer_override", _graph_reducer_override):
+        with (
+            patch.object(GraphPickler, "reducer_override", _graph_reducer_override),
+            patch_pytree_map_over_slice(),
+        ):
             state["graph_module"] = GraphPickler.dumps(
                 state["graph_module"], Options(ops_filter=None)
             )
@@ -261,7 +286,8 @@ class VllmSerializableFunction(SerializableCallable):  # type: ignore[misc]
 
         state = pickle.loads(data)
         fake_mode = FakeTensorMode(shape_env=ShapeEnv())
-        state["graph_module"] = GraphPickler.loads(state["graph_module"], fake_mode)
+        with patch_pytree_map_over_slice():
+            state["graph_module"] = GraphPickler.loads(state["graph_module"], fake_mode)
         state["graph_module"].recompile()
         state["example_inputs"] = GraphPickler.loads(state["example_inputs"], fake_mode)
 
@@ -269,61 +295,89 @@ class VllmSerializableFunction(SerializableCallable):  # type: ignore[misc]
         sym_shape_indices_map = state.pop("sym_shape_indices_map", {})
         returns_tuple_map = state.pop("returns_tuple_map", {})
 
+        saved_aot_autograd_config = state["aot_autograd_config"]
+        if saved_aot_autograd_config is not None:
+            functorch_ctx = torch._functorch.config.patch(saved_aot_autograd_config)
+        else:
+            functorch_ctx = contextlib.nullcontext()
+
         if envs.VLLM_USE_MEGA_AOT_ARTIFACT:
             assert standalone_compile_artifacts is not None
             submod_names = standalone_compile_artifacts.submodule_names()
             num_submods = len(submod_names)
             num_artifacts = standalone_compile_artifacts.num_artifacts()
 
+            with functorch_ctx:
+                fn = reconstruct_serializable_fn_from_mega_artifact(
+                    state=state,
+                    standalone_compile_artifacts=standalone_compile_artifacts,
+                    vllm_config=get_current_vllm_config(),
+                    sym_shape_indices_map=sym_shape_indices_map,
+                    returns_tuple_map=returns_tuple_map,
+                )
+
             logger.info(
-                "reconstructing serializable fn from standalone compile "
+                "reconstructed serializable fn from standalone compile "
                 "artifacts. num_artifacts=%d num_submods=%d",
                 num_artifacts,
                 num_submods,
             )
 
-            fn = reconstruct_serializable_fn_from_mega_artifact(
-                state=state,
-                standalone_compile_artifacts=standalone_compile_artifacts,
-                vllm_config=get_current_vllm_config(),
-                sym_shape_indices_map=sym_shape_indices_map,
-                returns_tuple_map=returns_tuple_map,
-            )
-
-            logger.info(
-                "reconstructed serializable fn from standalone compile artifacts"
-            )
-
             return fn
 
-        # Fall back to standard VllmBackend
+        # Fall back to standard VllmBackend.
+        # Use a lazy closure: the backend needs traced_files for cache
+        # dir computation, but those are only populated after
+        # _verify_source_unchanged runs in decorators.py (which happens
+        # after deserialization completes).
         from vllm.compilation.backends import VllmBackend
 
         is_encoder = state.get("is_encoder", False)
-        vllm_backend: VllmBackend = VllmBackend(
-            get_current_vllm_config(), state["prefix"], is_encoder
-        )
+        vllm_config = get_current_vllm_config()
+        compile_inputs = list(state["example_inputs"])
 
         def optimized_call(*example_inputs: Any) -> Any:
-            """
-            On the first run of the optimized call, we rerun the compiler
-            backend which should result in a cache hit. After the backend
-            call returns, we just do a one-time replacement of the optimized
-            call with the compiled function, so that subsequent calls are on
-            the AOT compiled path.
-            """
-            compile_inputs = [
-                inp if inp is not None else example_inputs[i]
-                for i, inp in enumerate(fn.example_inputs)
-            ]
-            with tracing(TracingContext(fake_mode)):
+            vllm_backend: VllmBackend = VllmBackend(
+                vllm_config, state["prefix"], is_encoder
+            )
+            with tracing(TracingContext(fake_mode)), functorch_ctx:
                 fn.optimized_call = vllm_backend(
                     state["graph_module"], compile_inputs
                 ).optimized_call
+                fn.vllm_backend = vllm_backend
             return fn.optimized_call(*example_inputs)
 
         fn = cls(**state, optimized_call=optimized_call)
+        fn._fake_mode = fake_mode
         return fn
+
+    def finalize_loading(self, vllm_config: VllmConfig) -> None:
+        """Eagerly initialize the compiled backend and perform all loading.
+
+        Must be called after _verify_source_unchanged has populated
+        compilation_config.traced_files, which is needed for cache dir
+        computation.
+        """
+        if self._fake_mode is None:
+            return  # Already finalized, or mega path (no _fake_mode set)
+
+        from torch._guards import TracingContext, tracing
+
+        from vllm.compilation.backends import VllmBackend
+
+        saved_aot_autograd_config = self.aot_autograd_config
+        if saved_aot_autograd_config is not None:
+            functorch_ctx = torch._functorch.config.patch(saved_aot_autograd_config)
+        else:
+            functorch_ctx = contextlib.nullcontext()
+
+        vllm_backend = VllmBackend(vllm_config, self.prefix, self.is_encoder)
+        with tracing(TracingContext(self._fake_mode)), functorch_ctx:
+            result = vllm_backend(self.graph_module, list(self.example_inputs))
+            self.optimized_call = result.optimized_call
+            self.vllm_backend = vllm_backend
+
+        self._fake_mode = None
 
     @property
     def co_name(self) -> Literal["VllmSerializableFunction"]:
@@ -387,7 +441,7 @@ def reconstruct_serializable_fn_from_mega_artifact(
     standalone_compile_artifacts.load_all()
 
     submod_names = standalone_compile_artifacts.submodule_names()
-    compiled_callables: dict[str, dict[str, Callable]] = {}
+    compiled_callables: dict[str, dict[str, Callable[..., Any]]] = {}
 
     for cache_key in standalone_compile_artifacts.submodule_bytes:
         submod_name, shape_str = cache_key.rsplit("_", 1)
@@ -495,9 +549,10 @@ def _compute_code_hash_with_content(file_contents: dict[str, str]) -> str:
             # e.g. exec(). We can't actually check these.
             continue
         hash_content.append(content)
-    return safe_hash(
+    result: str = safe_hash(
         "\n".join(hash_content).encode(), usedforsecurity=False
     ).hexdigest()
+    return result
 
 
 def _compute_code_hash(files: set[str]) -> str:

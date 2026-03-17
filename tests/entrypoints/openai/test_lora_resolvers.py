@@ -14,9 +14,11 @@ from vllm.entrypoints.openai.completion.serving import OpenAIServingCompletion
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+from vllm.entrypoints.serve.render.serving import OpenAIServingRender
 from vllm.lora.request import LoRARequest
 from vllm.lora.resolver import LoRAResolver, LoRAResolverRegistry
-from vllm.tokenizers import get_tokenizer
+from vllm.renderers.hf import HfRenderer
+from vllm.tokenizers.registry import tokenizer_args_from_config
 from vllm.v1.engine.async_llm import AsyncLLM
 
 MODEL_NAME = "openai-community/gpt2"
@@ -35,6 +37,7 @@ class MockModelConfig:
     """Minimal mock ModelConfig for testing."""
 
     model: str = MODEL_NAME
+    runner_type = "generate"
     tokenizer: str = MODEL_NAME
     trust_remote_code: bool = False
     tokenizer_mode: str = "auto"
@@ -43,16 +46,28 @@ class MockModelConfig:
     multimodal_config: MultiModalConfig = field(default_factory=MultiModalConfig)
     hf_config: MockHFConfig = field(default_factory=MockHFConfig)
     logits_processors: list[str] | None = None
-    logits_processor_pattern: str | None = None
     diff_sampling_param: dict | None = None
     allowed_local_media_path: str = ""
     allowed_media_domains: list[str] | None = None
     encoder_config = None
     generation_config: str = "auto"
     skip_tokenizer_init: bool = False
+    is_encoder_decoder: bool = False
+    is_multimodal_model: bool = False
 
     def get_diff_sampling_param(self):
         return self.diff_sampling_param or {}
+
+
+@dataclass
+class MockParallelConfig:
+    _api_process_rank: int = 0
+
+
+@dataclass
+class MockVllmConfig:
+    model_config: MockModelConfig
+    parallel_config: MockParallelConfig
 
 
 class MockLoRAResolver(LoRAResolver):
@@ -85,14 +100,20 @@ def register_mock_resolver():
         del LoRAResolverRegistry.resolvers[MOCK_RESOLVER_NAME]
 
 
+def _build_renderer(model_config: MockModelConfig):
+    _, tokenizer_name, _, kwargs = tokenizer_args_from_config(model_config)
+
+    return HfRenderer.from_config(
+        MockVllmConfig(model_config, parallel_config=MockParallelConfig()),
+        tokenizer_kwargs={**kwargs, "tokenizer_name": tokenizer_name},
+    )
+
+
 @pytest.fixture
 def mock_serving_setup():
     """Provides a mocked engine and serving completion instance."""
     mock_engine = MagicMock(spec=AsyncLLM)
     mock_engine.errored = False
-
-    tokenizer = get_tokenizer(MODEL_NAME)
-    mock_engine.get_tokenizer = AsyncMock(return_value=tokenizer)
 
     async def mock_add_lora_side_effect(lora_request: LoRARequest):
         """Simulate engine behavior when adding LoRAs."""
@@ -118,18 +139,24 @@ def mock_serving_setup():
     mock_engine.model_config = MockModelConfig()
     mock_engine.input_processor = MagicMock()
     mock_engine.io_processor = MagicMock()
+    mock_engine.renderer = _build_renderer(mock_engine.model_config)
 
     models = OpenAIServingModels(
         engine_client=mock_engine,
         base_model_paths=BASE_MODEL_PATHS,
     )
 
-    serving_completion = OpenAIServingCompletion(
-        mock_engine, models, request_logger=None
+    serving_render = OpenAIServingRender(
+        model_config=mock_engine.model_config,
+        renderer=mock_engine.renderer,
+        io_processor=mock_engine.io_processor,
+        model_registry=models.registry,
+        request_logger=None,
+        chat_template=None,
+        chat_template_content_format="auto",
     )
-
-    serving_completion._process_inputs = AsyncMock(
-        return_value=(MagicMock(name="engine_request"), {})
+    serving_completion = OpenAIServingCompletion(
+        mock_engine, models, openai_serving_render=serving_render, request_logger=None
     )
 
     return mock_engine, serving_completion

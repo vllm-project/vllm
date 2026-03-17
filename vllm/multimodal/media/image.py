@@ -8,21 +8,25 @@ import pybase64
 import torch
 from PIL import Image
 
-from vllm.logger import init_logger
+from vllm.utils.serial_utils import tensor2base64
 
 from ..image import convert_image_mode, rgba_to_rgb
 from .base import MediaIO, MediaWithBytes
 
-logger = init_logger(__file__)
-
 
 class ImageMediaIO(MediaIO[Image.Image]):
+    """Configuration values can be user-provided either by --media-io-kwargs or
+    by the runtime API field "media_io_kwargs". Ensure proper validation and
+    error handling.
+    """
+
     def __init__(self, image_mode: str = "RGB", **kwargs) -> None:
         super().__init__()
 
         self.image_mode = image_mode
         # `kwargs` contains custom arguments from
-        # --media-io-kwargs for this modality.
+        # --media-io-kwargs for this modality, merged with
+        # per-request runtime media_io_kwargs via merge_kwargs().
         # They can be passed to the underlying
         # media loaders (e.g. custom implementations)
         # for flexible control.
@@ -77,17 +81,8 @@ class ImageMediaIO(MediaIO[Image.Image]):
         self,
         media: Image.Image,
         *,
-        image_format: str | None = None,
+        image_format: str = "PNG",
     ) -> str:
-        if image_format is None:
-            logger.warning_once(
-                "The default format of `ImageMediaIO.encode_base64` will be changed "
-                'from "JPEG" to "PNG" in v0.15 to avoid lossy compression. '
-                "To continue using the old default, "
-                'pass `format="JPEG"` explicitly to silence this warning.'
-            )
-            image_format = "JPEG"
-
         image = media
 
         with BytesIO() as buffer:
@@ -99,6 +94,13 @@ class ImageMediaIO(MediaIO[Image.Image]):
 
 
 class ImageEmbeddingMediaIO(MediaIO[torch.Tensor]):
+    """Image embedding MediaIO implementation.
+
+    Configuration values can be user-provided either by --media-io-kwargs or
+    by the runtime API field "media_io_kwargs". Ensure proper validation and
+    error handling.
+    """
+
     def __init__(self) -> None:
         super().__init__()
 
@@ -121,4 +123,4 @@ class ImageEmbeddingMediaIO(MediaIO[torch.Tensor]):
             return tensor.to_dense()
 
     def encode_base64(self, media: torch.Tensor) -> str:
-        return pybase64.b64encode(media.numpy()).decode("utf-8")
+        return tensor2base64(media)

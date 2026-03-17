@@ -11,9 +11,10 @@ This ensures that 'pip install vllm' automatically installs the correct custom w
 instead of allowing pip to download different versions from PyPI.
 """
 
-import re
 import sys
 from pathlib import Path
+
+import regex as re
 
 
 def extract_version_from_wheel(wheel_name: str) -> str:
@@ -63,7 +64,7 @@ def get_custom_wheel_versions(install_dir: str) -> dict[str, str]:
         ("torchaudio-", "torchaudio"),  # Match torchaudio-
         ("amdsmi-", "amdsmi"),  # Match amdsmi-
         ("flash_attn-", "flash-attn"),  # Match flash_attn-
-        ("aiter-", "aiter"),  # Match aiter-
+        ("amd_aiter-", "amd-aiter"),  # Match amd_aiter-
     ]
 
     for wheel_file in install_path.glob("*.whl"):
