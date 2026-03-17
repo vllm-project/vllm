@@ -22,7 +22,8 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.network_utils import get_tcp_uri
 from vllm.utils.system_utils import decorate_logs, set_process_title
-from vllm.v1.engine.utils import CoreEngineProcManager, launch_core_engines
+from vllm.v1.engine.core import EngineCoreProc
+from vllm.v1.engine.utils import CoreEngineProcManager, launch_core_engines, DomainCoreEngineProcManager
 from vllm.v1.executor import Executor
 from vllm.v1.executor.multiproc_executor import MultiprocExecutor
 from vllm.v1.metrics.prometheus import setup_multiprocess_prometheus
@@ -209,16 +210,32 @@ def run_headless(args: argparse.Namespace):
     )
 
     # Create the engines.
-    engine_manager = CoreEngineProcManager(
-        local_engine_count=local_engine_count,
-        start_index=vllm_config.parallel_config.data_parallel_rank,
-        local_start_index=0,
-        vllm_config=vllm_config,
-        local_client=False,
-        handshake_address=handshake_address,
-        executor_class=Executor.get_class(vllm_config),
-        log_stats=not engine_args.disable_log_stats,
-    )
+    if parallel_config.dp_per_domain > 1:
+        local_engine_count=local_engine_count // parallel_config.dp_per_domain
+        domain_rank=vllm_config.parallel_config.data_parallel_rank // parallel_config.dp_per_domain
+
+        engine_manager = DomainCoreEngineProcManager(
+            target_fn=EngineCoreProc.run_domain_engine_core,
+            local_engine_count=local_engine_count,
+            start_index=domain_rank,
+            local_start_index=0,
+            vllm_config=vllm_config,
+            local_client=False,
+            handshake_address=handshake_address,
+            executor_class=Executor.get_class(vllm_config),
+            log_stats=not engine_args.disable_log_stats,
+        )
+    else:
+        engine_manager = CoreEngineProcManager(
+            local_engine_count=local_engine_count,
+            start_index=vllm_config.parallel_config.data_parallel_rank,
+            local_start_index=0,
+            vllm_config=vllm_config,
+            local_client=False,
+            handshake_address=handshake_address,
+            executor_class=Executor.get_class(vllm_config),
+            log_stats=not engine_args.disable_log_stats,
+        )
 
     try:
         engine_manager.join_first()
