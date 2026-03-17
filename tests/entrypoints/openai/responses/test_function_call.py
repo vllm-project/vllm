@@ -118,7 +118,7 @@ async def test_function_tool_use(
         tool_choice=tool_choice,
         temperature=0.0,
     )
-
+    print(response.model_dump_json(indent=2))
     assert len(response.output) >= 1
     tool_call = None
     reasoning = None
