@@ -199,7 +199,7 @@ def _mxfp8_e4m3_quantize(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     assert A_scale is None
     assert not per_act_token_quant
-    assert block_shape is None
+    assert block_shape is None or block_shape == [1, 32]
     return mxfp8_e4m3_quantize(A, is_sf_swizzled_layout)
 
 
