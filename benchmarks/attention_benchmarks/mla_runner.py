@@ -787,11 +787,14 @@ def _run_single_benchmark(
     # Sparse MLA backends always use forward_mqa.
     # Non-sparse backends (MLACommonMetadata) use .decode/.prefill sub-objects.
     # Some sparse backends use num_decode_tokens/num_prefills directly.
-    has_decode = is_sparse or (
+    #
+    # sparse_mla_force_mqa overrides: even for prefill metadata, use MQA.
+    force_mqa = getattr(config, "sparse_mla_force_mqa", False)
+    has_decode = is_sparse or force_mqa or (
         getattr(metadata, "decode", None) is not None
         or getattr(metadata, "num_decode_tokens", 0) > 0
     )
-    has_prefill = not is_sparse and (
+    has_prefill = not (is_sparse or force_mqa) and (
         getattr(metadata, "prefill", None) is not None
         or getattr(metadata, "num_prefills", 0) > 0
     )
