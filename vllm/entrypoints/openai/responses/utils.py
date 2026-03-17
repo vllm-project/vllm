@@ -21,7 +21,6 @@ from openai.types.responses.response_reasoning_item import ResponseReasoningItem
 from openai.types.responses.tool import Tool
 
 from vllm import envs
-from vllm.entrypoints.constants import MCP_PREFIX
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionMessageParam
 from vllm.entrypoints.openai.responses.protocol import ResponseInputOutputItem
 from vllm.logger import init_logger
@@ -119,51 +118,65 @@ def construct_input_messages(
     return messages
 
 
-def _maybe_combine_reasoning_and_tool_call(
+def _maybe_combine_prevmsg_and_tool_call(
     item: ResponseInputOutputItem, messages: list[ChatCompletionMessageParam]
 ) -> ChatCompletionMessageParam | None:
-    """Many models treat MCP calls and reasoning as a single message.
-    This function checks if the last message is a reasoning message and
-    the current message is a tool call"""
-    if not (
-        isinstance(item, ResponseFunctionToolCall)
-        and item.id
-        and item.id.startswith(MCP_PREFIX)
-    ):
+    """Append tool call to previous message if applicable.
+
+    Many models treat tool calls, content, and reasoning as a single message.
+    If the current item is a tool call and the last message contains content,
+    reasoning, or prior tool calls, append the tool call to that message.
+    """
+    if not (isinstance(item, ResponseFunctionToolCall)):
         return None
     if len(messages) == 0:
         return None
     last_message = messages[-1]
     if not (
         last_message.get("role") == "assistant"
-        and last_message.get("reasoning") is not None
+        and (
+            last_message.get("reasoning") is not None
+            or last_message.get("content") is not None
+            or last_message.get("tool_calls") is not None
+        )
     ):
         return None
 
-    last_message["tool_calls"] = [
-        ChatCompletionMessageToolCallParam(
-            id=item.call_id,
-            function=FunctionCallTool(
-                name=item.name,
-                arguments=item.arguments,
-            ),
-            type="function",
+    if last_message.get("tool_calls") is None:
+        last_message["tool_calls"] = [
+            ChatCompletionMessageToolCallParam(
+                id=item.call_id,
+                function=FunctionCallTool(
+                    name=item.name,
+                    arguments=item.arguments,
+                ),
+                type="function",
+            )
+        ]
+    else:
+        last_message["tool_calls"].append(
+            ChatCompletionMessageToolCallParam(
+                id=item.call_id,
+                function=FunctionCallTool(
+                    name=item.name,
+                    arguments=item.arguments,
+                ),
+                type="function",
+            )
         )
-    ]
     return last_message
 
 
 def construct_chat_messages_with_tool_call(
     input_messages: list[ResponseInputOutputItem],
 ) -> list[ChatCompletionMessageParam]:
-    """This function wraps _construct_single_message_from_response_item
-    Because some chatMessages come from multiple response items
-    for example a reasoning item and a MCP tool call are two response items
-    but are one chat message
+    """Build chat messages from response items.
+
+    Some chat messages span multiple response items (e.g., reasoning + tool calls).
     """
     messages: list[ChatCompletionMessageParam] = []
     for item in input_messages:
-        maybe_combined_message = _maybe_combine_reasoning_and_tool_call(item, messages)
+        maybe_combined_message = _maybe_combine_prevmsg_and_tool_call(item, messages)
         if maybe_combined_message is not None:
             messages[-1] = maybe_combined_message
         else:
