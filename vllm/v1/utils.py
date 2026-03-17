@@ -10,6 +10,7 @@ from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from multiprocessing import connection
 from multiprocessing.process import BaseProcess
+from threading import Thread
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -34,6 +35,7 @@ if TYPE_CHECKING:
 
     from vllm.v1.engine.coordinator import DPCoordinator
     from vllm.v1.engine.utils import CoreEngineActorManager, CoreEngineProcManager
+    from vllm.v1.fault_tolerance.utils import FaultToleranceZmqAddresses
 
 logger = init_logger(__name__)
 
@@ -173,6 +175,7 @@ class APIServerProcessManager:
         input_addresses: list[str],
         output_addresses: list[str],
         stats_update_address: str | None = None,
+        fault_tolerance_addresses: "FaultToleranceZmqAddresses|None|str" = None,
     ):
         """Initialize and start API server worker processes.
 
@@ -205,6 +208,12 @@ class APIServerProcessManager:
             }
             if stats_update_address is not None:
                 client_config["stats_update_address"] = stats_update_address
+            if fault_tolerance_addresses is not None:
+                from vllm.v1.fault_tolerance.utils import FaultToleranceZmqAddresses
+
+                if isinstance(fault_tolerance_addresses, FaultToleranceZmqAddresses):
+                    fault_tolerance_addresses = fault_tolerance_addresses.to_str()
+                client_config["fault_tolerance_addresses"] = fault_tolerance_addresses
 
             proc = spawn_context.Process(
                 target=target_server_fn,
@@ -258,11 +267,22 @@ def wait_for_completion_or_failure(
             sentinel_to_proc[coordinator.proc.sentinel] = coordinator.proc
 
         actor_run_refs = []
-        if isinstance(engine_manager, CoreEngineProcManager):
-            for proc in engine_manager.processes:
-                sentinel_to_proc[proc.sentinel] = proc
-        elif isinstance(engine_manager, CoreEngineActorManager):
-            actor_run_refs = engine_manager.get_run_refs()
+        assert engine_manager is not None
+        if engine_manager.vllm_config.fault_tolerance_config.enable_fault_tolerance:
+            # Start a thread to monitor engine liveness.
+            # Do not exit when engine is down.
+            Thread(
+                target=engine_manager.monitor_engine_liveness,
+                args=(engine_manager.notify_engine_down,),
+                daemon=True,
+                name="ClientEngineMonitor",
+            ).start()
+        else:
+            if isinstance(engine_manager, CoreEngineProcManager):
+                for proc in engine_manager.processes:
+                    sentinel_to_proc[proc.sentinel] = proc
+            elif isinstance(engine_manager, CoreEngineActorManager):
+                actor_run_refs = engine_manager.get_run_refs()
 
         # Check if any process terminates
         while sentinel_to_proc or actor_run_refs:

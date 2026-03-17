@@ -228,6 +228,7 @@ class EngineCoreRequestType(enum.Enum):
     EXECUTOR_FAILED = b"\x04"
     # Sentinel to wake up input_queue.get() during shutdown.
     WAKEUP = b"\x05"
+    PAUSE = b"\x06"
 
 
 class ReconfigureDistributedRequest(msgspec.Struct):
@@ -250,3 +251,10 @@ class ReconfigureRankType(enum.IntEnum):
 
     KEEP_CURRENT_RANK = -1
     SHUTDOWN_CURRENT_RANK = -2
+
+
+class EngineStatusType(enum.IntEnum):
+    HEALTHY = 0
+    DEAD = 1
+    UNHEALTHY = 2
+    PAUSED = 3

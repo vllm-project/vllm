@@ -131,6 +131,7 @@ class ElasticEPScalingExecutor:
     def __init__(self, worker):
         self.worker_ref = weakref.ref(worker)
         self.reconfig_request = None
+        # todo: add fault tolerance related states to support elastic EP
 
     @property
     def worker(self):

@@ -38,13 +38,17 @@ from vllm.transformers_utils.config import maybe_register_config_serialize_by_va
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.async_utils import cancel_task_threadsafe
 from vllm.utils.collection_utils import as_list
-from vllm.v1.engine import EngineCoreRequest, PauseMode
+from vllm.v1.engine import (
+    EngineCoreRequest,
+    PauseMode,
+)
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
 from vllm.v1.engine.input_processor import InputProcessor
 from vllm.v1.engine.output_processor import OutputProcessor, RequestOutputCollector
 from vllm.v1.engine.parallel_sampling import ParentRequest
 from vllm.v1.executor import Executor
+from vllm.v1.fault_tolerance.utils import FaultToleranceRequest, FaultToleranceResult
 from vllm.v1.metrics.loggers import (
     StatLoggerFactory,
     StatLoggerManager,
@@ -1012,6 +1016,16 @@ class AsyncLLM(EngineClient):
             self.vllm_config.parallel_config.data_parallel_size = new_data_parallel_size
         finally:
             set_scaling_elastic_ep(False)
+
+    async def handle_fault(
+        self, fault_tolerance_request: FaultToleranceRequest
+    ) -> FaultToleranceResult:
+        """send fault tolerance instruction to the engine"""
+        return await self.engine_core.handle_fault(fault_tolerance_request)
+
+    async def get_fault_info(self):
+        """report exception in engine core"""
+        return await self.engine_core.fault_reporter()
 
     @property
     def is_running(self) -> bool:

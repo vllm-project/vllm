@@ -5,6 +5,7 @@ from typing import Any, Optional
 import torch
 from torch.distributed import Backend, ProcessGroup
 
+from vllm.config import FaultToleranceConfig
 from vllm.distributed.device_communicators.cuda_communicator import CudaCommunicator
 from vllm.distributed.parallel_state import (
     GroupCoordinator,
@@ -45,6 +46,7 @@ class StatelessGroupCoordinator(GroupCoordinator):
         group_ports: list[list[int]] | None = None,
         global_rank: int = 0,
         global_world_size: int = 1,
+        fault_tolerance_config: FaultToleranceConfig | None = None,
     ):
         group_name = group_name or "anonymous"
         self.unique_name = _get_unique_name(group_name)
@@ -88,6 +90,7 @@ class StatelessGroupCoordinator(GroupCoordinator):
                     world_size=self.world_size,
                     backend="gloo",
                     group_name=f"{self.unique_name}_cpu",
+                    fault_tolerance_config=fault_tolerance_config,
                 )
                 tcp_store_group = StatelessProcessGroup.create(
                     host=host,
