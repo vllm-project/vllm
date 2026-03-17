@@ -742,12 +742,12 @@ class AttentionImpl(AttentionImplBase[T], Generic[T]):
         """
         if self._k_scale_cache is None:
             num_blocks, block_size, num_kv_heads = key_cache.shape[:3]
-            self._k_scale_cache = torch.ones(
+            self._k_scale_cache = torch.empty(
                 (num_blocks, block_size, num_kv_heads),
                 dtype=torch.float32,
                 device=key_cache.device,
             )
-            self._v_scale_cache = torch.ones(
+            self._v_scale_cache = torch.empty(
                 (num_blocks, block_size, num_kv_heads),
                 dtype=torch.float32,
                 device=key_cache.device,
