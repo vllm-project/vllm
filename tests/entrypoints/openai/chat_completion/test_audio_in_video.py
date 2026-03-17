@@ -1,15 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import base64
 import json
 
 import openai
+import pybase64 as base64
 import pytest
 import pytest_asyncio
 
-from ...conftest import VideoTestAssets
-from ...utils import RemoteOpenAIServer
+from tests.conftest import VideoTestAssets
+from tests.utils import RemoteOpenAIServer
 
 MODEL_NAME = "Qwen/Qwen2.5-Omni-3B"
 
