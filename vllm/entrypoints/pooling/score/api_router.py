@@ -44,10 +44,7 @@ def rerank(request: Request) -> ServingScores | None:
 async def create_score(request: ScoreRequest, raw_request: Request):
     handler = score(raw_request)
     if handler is None:
-        base_server = raw_request.app.state.openai_serving_tokenization
-        return base_server.create_error_response(
-            message="The model does not support Score API"
-        )
+        raise NotImplementedError("The model does not support Score API")
 
     generator = await handler.create_score(request, raw_request)
 
@@ -93,10 +90,7 @@ async def create_score_v1(request: ScoreRequest, raw_request: Request):
 async def do_rerank(request: RerankRequest, raw_request: Request):
     handler = rerank(raw_request)
     if handler is None:
-        base_server = raw_request.app.state.openai_serving_tokenization
-        return base_server.create_error_response(
-            message="The model does not support Rerank (Score) API"
-        )
+        raise NotImplementedError("The model does not support Rerank (Score) API")
 
     generator = await handler.do_rerank(request, raw_request)
 
