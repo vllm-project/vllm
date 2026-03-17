@@ -251,18 +251,18 @@ More examples can be found here: [examples/pooling/classify](../../../examples/p
 
 You can enable or disable activation via `use_activation`.
 
-#### Problem type (e.g. multi_label_classification)
+#### Problem type (e.g. `multi_label_classification`)
 
-You can modify the problem_type via problem_type in the Hugging Face config. The supported problem types are: single_label_classification, multi_label_classification, and regression.
+You can modify the `problem_type` via problem_type in the Hugging Face config. The supported problem types are: `single_label_classification`, `multi_label_classification`, and `regression`.
 
 Implement alignment with transformers [ForSequenceClassificationLoss](https://github.com/huggingface/transformers/blob/57bb6db6ee4cfaccc45b8d474dfad5a17811ca60/src/transformers/loss/loss_utils.py#L92).
 
 #### logit_bias (sigmoid_normalize)
 
-You can modify the logit_bias through the logit_bias parameter in `vllm.config.PoolerConfig`.
+You can modify the `logit_bias` through the logit_bias parameter in `vllm.config.PoolerConfig`.
 
 ### Removed Features
 
 #### Remove softmax from PoolingParams
 
-We have already removed softmax and activation from PoolingParams. Instead, use `use_activation`, since we allow `classify` and `token_classify` to use any activation function.
+We have already removed `softmax` and `activation` from PoolingParams. Instead, use `use_activation`, since we allow `classify` and `token_classify` to use any activation function.

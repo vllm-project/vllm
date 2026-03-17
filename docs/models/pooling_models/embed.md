@@ -528,6 +528,6 @@ An OpenAI client example can be found here: [examples/pooling/embed/openai_embed
 
 ### Removed Features
 
-#### Remove normalize from PoolingParams
+#### Remove `normalize` from PoolingParams
 
-We have already removed normalize from PoolingParams, use `use_activation` instead.
+We have already removed `normalize` from PoolingParams, use `use_activation` instead.

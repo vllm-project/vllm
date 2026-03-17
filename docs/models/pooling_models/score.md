@@ -1,6 +1,6 @@
 # Score Models
 
-The Score models is designed to compute similarity scores between two input prompts. It supports three model types (aka `score_type`): `cross-encoder`, `late-interaction`, and `bi-encoder`.
+The score models is designed to compute similarity scores between two input prompts. It supports three model types (aka `score_type`): `cross-encoder`, `late-interaction`, and `bi-encoder`.
 
 This functionality is supported through the offline `LLM.score(...)` API, along with several online APIs: the `/score` API and the rerank APIs available at `/rerank`, `/v1/rerank`, and `/v2/rerank`.
 
