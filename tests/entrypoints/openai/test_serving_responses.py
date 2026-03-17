@@ -659,9 +659,10 @@ class TestStreamingReasoningToContentTransition:
         # Mock the reasoning parser on the serving instance
         mock_parser = MagicMock()
         mock_parser.extract_reasoning_streaming = mock_extract_reasoning_streaming
+        mock_parser.extract_tool_calls_streaming = mock_extract_reasoning_streaming
         serving.parser = MagicMock()
         serving.parser.reasoning_parser_cls = MagicMock(return_value=mock_parser)
-
+        serving.parser.tool_parser_cls = MagicMock(return_value=mock_parser)
         # Create contexts for each streaming chunk
         contexts = [
             _make_simple_context_with_output("chunk1", [10]),
@@ -739,8 +740,10 @@ class TestStreamingReasoningToContentTransition:
 
         mock_parser = MagicMock()
         mock_parser.extract_reasoning_streaming = mock_extract_reasoning_streaming
+        mock_parser.extract_tool_calls_streaming = mock_extract_reasoning_streaming
         serving.parser = MagicMock()
         serving.parser.reasoning_parser_cls = MagicMock(return_value=mock_parser)
+        serving.parser.tool_parser_cls = MagicMock(return_value=mock_parser)
 
         contexts = [
             _make_simple_context_with_output("chunk1", [10]),
@@ -812,8 +815,10 @@ class TestStreamingReasoningToContentTransition:
 
         mock_parser = MagicMock()
         mock_parser.extract_reasoning_streaming = mock_extract_reasoning_streaming
+        mock_parser.extract_tool_calls_streaming = mock_extract_reasoning_streaming
         serving.parser = MagicMock()
         serving.parser.reasoning_parser_cls = MagicMock(return_value=mock_parser)
+        serving.parser.tool_parser_cls = MagicMock(return_value=mock_parser)
 
         contexts = [
             _make_simple_context_with_output("chunk1", [10]),
