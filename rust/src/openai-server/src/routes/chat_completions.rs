@@ -220,7 +220,6 @@ fn block_delta_chunk(
             tool_calls: None,
             reasoning_content: Some(delta),
         },
-        AssistantBlockKind::ToolCall => unreachable!(),
     };
 
     ChatCompletionStreamResponse {

@@ -6,8 +6,8 @@ use futures::StreamExt as _;
 use tracing_subscriber::EnvFilter;
 use vllm_chat::backends::hf::HfChatBackend;
 use vllm_chat::{
-    AssistantBlockKind, ChatEvent, ChatLlm, ChatMessage, ChatOptions, ChatRequest, ChatRole,
-    UserSamplingParams,
+    AssistantBlockKind, AssistantContentBlocksExt as _, ChatEvent, ChatLlm, ChatMessage,
+    ChatOptions, ChatRequest, ChatRole, UserSamplingParams,
 };
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig};
 use vllm_llm::Llm;
@@ -111,7 +111,6 @@ async fn main() -> Result<()> {
                     match kind {
                         AssistantBlockKind::Reasoning => print!("[reasoning] "),
                         AssistantBlockKind::Text => print!("[answer] "),
-                        AssistantBlockKind::ToolCall => print!("[tool] "),
                     }
                     saw_stream_output = true;
                 }
@@ -121,7 +120,7 @@ async fn main() -> Result<()> {
                     finish_reason: reason,
                     ..
                 } => {
-                    final_reasoning = message.reasoning();
+                    final_reasoning = message.reasoning().unwrap_or_default();
                     final_text = message.text();
                     final_token_ids = token_ids;
                     finish_reason = reason;
@@ -131,7 +130,6 @@ async fn main() -> Result<()> {
                     AssistantBlockKind::Reasoning | AssistantBlockKind::Text => {
                         print!("{delta}");
                     }
-                    AssistantBlockKind::ToolCall => {}
                 },
                 ChatEvent::BlockEnd { .. } => {}
             }

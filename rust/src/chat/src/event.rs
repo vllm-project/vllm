@@ -1,27 +1,22 @@
+use std::ops::Deref;
+
+use serde::{Deserialize, Serialize};
 use vllm_engine_core_client::protocol::{FinishReason, StopReason};
 
 /// Semantic kind of one assistant output block.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AssistantBlockKind {
     Text,
     Reasoning,
-    ToolCall,
+    // ToolCall,
 }
 
 /// One structured assistant output block.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AssistantContentBlock {
-    Text {
-        text: String,
-    },
-    Reasoning {
-        text: String,
-    },
-    ToolCall {
-        id: String,
-        name: String,
-        arguments: String,
-    },
+    Text { text: String },
+    Reasoning { text: String },
+    // ToolCall { ... },
 }
 
 impl AssistantContentBlock {
@@ -30,7 +25,6 @@ impl AssistantContentBlock {
         match self {
             Self::Text { .. } => AssistantBlockKind::Text,
             Self::Reasoning { .. } => AssistantBlockKind::Reasoning,
-            Self::ToolCall { .. } => AssistantBlockKind::ToolCall,
         }
     }
 
@@ -38,23 +32,15 @@ impl AssistantContentBlock {
         match kind {
             AssistantBlockKind::Text => Self::Text { text },
             AssistantBlockKind::Reasoning => Self::Reasoning { text },
-            AssistantBlockKind::ToolCall => {
-                unreachable!("tool call cannot be constructed from text deltas")
-            }
         }
     }
 }
 
-/// Final structured assistant message assembled from the event stream.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct AssistantMessage {
-    pub content: Vec<AssistantContentBlock>,
-}
-
-impl AssistantMessage {
+#[easy_ext::ext(AssistantContentBlocksExt)]
+impl [AssistantContentBlock] {
     /// Concatenate all visible final-answer text blocks.
     pub fn text(&self) -> String {
-        self.blocks_of_kind(AssistantBlockKind::Text)
+        self.iter()
             .filter_map(|block| match block {
                 AssistantContentBlock::Text { text } => Some(text.as_str()),
                 _ => None,
@@ -62,26 +48,35 @@ impl AssistantMessage {
             .collect()
     }
 
-    /// Concatenate all extracted reasoning blocks.
-    pub fn reasoning(&self) -> String {
-        self.blocks_of_kind(AssistantBlockKind::Reasoning)
-            .filter_map(|block| match block {
-                AssistantContentBlock::Reasoning { text } => Some(text.as_str()),
-                _ => None,
-            })
-            .collect()
+    /// Concatenate all extracted reasoning blocks, if any.
+    pub fn reasoning(&self) -> Option<String> {
+        Some(
+            self.iter()
+                .filter_map(|block| match block {
+                    AssistantContentBlock::Reasoning { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect(),
+        )
+        .filter(|s: &String| !s.is_empty())
     }
+}
 
-    /// Iterate over blocks of one semantic kind.
-    pub fn blocks_of_kind(
-        &self,
-        kind: AssistantBlockKind,
-    ) -> impl Iterator<Item = &AssistantContentBlock> + '_ {
-        self.content
-            .iter()
-            .filter(move |block| block.kind() == kind)
+/// Final structured assistant message assembled from the event stream.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AssistantMessage {
+    pub content: Vec<AssistantContentBlock>,
+}
+
+impl Deref for AssistantMessage {
+    type Target = [AssistantContentBlock];
+
+    fn deref(&self) -> &Self::Target {
+        &self.content
     }
+}
 
+impl AssistantMessage {
     /// Push one new block to the end of the message content.
     pub(crate) fn push_block(&mut self, block: AssistantContentBlock) {
         self.content.push(block);

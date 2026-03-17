@@ -3,7 +3,9 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::AssistantContentBlocksExt;
 use crate::error::{Error, Result};
+use crate::event::{AssistantContentBlock, AssistantMessage};
 
 /// Role label for one text-only chat message.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -20,6 +22,7 @@ pub enum ChatRole {
 pub enum ChatContentPart {
     /// One plain-text content block.
     Text { text: String },
+    // Image...
 }
 
 impl ChatContentPart {
@@ -42,7 +45,7 @@ impl ChatContentPart {
 pub enum ChatContent {
     /// Simple text content.
     Text(String),
-    /// OpenAI-style text blocks.
+    /// OpenAI-style blocks.
     Parts(Vec<ChatContentPart>),
 }
 
@@ -75,30 +78,90 @@ impl From<Vec<ChatContentPart>> for ChatContent {
     }
 }
 
-/// One text-only chat message.
+/// One chat message.
 ///
 /// Original Python API reference:
 /// <https://github.com/vllm-project/vllm/blob/bc2c0c86efb28e77677a3cfb8687e976914a313a/vllm/entrypoints/chat_utils.py#L309-L333>
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ChatMessage {
-    /// Semantic role used by the chat template.
-    pub role: ChatRole,
-    /// Plain-text message content, either as a raw string or OpenAI-style text blocks.
-    pub content: ChatContent,
+#[serde(tag = "role", rename_all = "snake_case")]
+pub enum ChatMessage {
+    /// System message content.
+    System { content: ChatContent },
+    /// User message content.
+    User { content: ChatContent },
+    /// Assistant history content assembled from structured assistant blocks.
+    Assistant { content: Vec<AssistantContentBlock> },
 }
 
 impl ChatMessage {
-    /// Construct one chat message from any supported text-only content shape.
-    pub fn new(role: ChatRole, content: impl Into<ChatContent>) -> Self {
-        Self {
-            role,
+    /// Construct one chat message with plain string content.
+    pub fn text(role: ChatRole, text: impl Into<String>) -> Self {
+        let content: String = text.into();
+
+        match role {
+            ChatRole::System => Self::system(content),
+            ChatRole::User => Self::user(content),
+            ChatRole::Assistant => Self::assistant_text(content),
+        }
+    }
+
+    /// Construct one chat message with system role.
+    pub fn system(content: impl Into<ChatContent>) -> Self {
+        Self::System {
             content: content.into(),
         }
     }
 
-    /// Construct one chat message with plain string content.
-    pub fn text(role: ChatRole, text: impl Into<String>) -> Self {
-        Self::new(role, text.into())
+    /// Construct one chat message with user role.
+    pub fn user(content: impl Into<ChatContent>) -> Self {
+        Self::User {
+            content: content.into(),
+        }
+    }
+
+    /// Construct one chat message with assistant role and plain string content.
+    pub fn assistant_text(text: impl Into<String>) -> Self {
+        Self::Assistant {
+            content: vec![AssistantContentBlock::Text { text: text.into() }],
+        }
+    }
+
+    /// Construct one chat message with assistant role and structured content blocks.
+    pub fn assistant_blocks(content: Vec<AssistantContentBlock>) -> Self {
+        Self::Assistant { content }
+    }
+
+    /// Return the chat role of this message.
+    pub fn role(&self) -> ChatRole {
+        match self {
+            Self::System { .. } => ChatRole::System,
+            Self::User { .. } => ChatRole::User,
+            Self::Assistant { .. } => ChatRole::Assistant,
+        }
+    }
+
+    /// Concatenate the visible text carried by this message.
+    pub fn text_content(&self) -> Result<String> {
+        match self {
+            Self::System { content } | Self::User { content } => content.try_flatten_to_text(),
+            Self::Assistant { content } => Ok(content.text()),
+        }
+    }
+
+    /// Concatenate assistant reasoning text when present.
+    pub fn reasoning_content(&self) -> Option<String> {
+        match self {
+            Self::Assistant { content } => content.reasoning(),
+            _ => None,
+        }
+    }
+}
+
+impl From<AssistantMessage> for ChatMessage {
+    fn from(value: AssistantMessage) -> Self {
+        Self::Assistant {
+            content: value.content,
+        }
     }
 }
 
@@ -178,8 +241,7 @@ impl Default for UserSamplingParams {
     }
 }
 
-/// One text-only chat request ready to be rendered into a prompt and lowered into a generate
-/// request.
+/// One chat request ready to be rendered into a prompt and lowered into a generate request.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ChatRequest {
     /// Stable caller-supplied request ID.
@@ -220,7 +282,8 @@ impl ChatRole {
 mod tests {
     use serde_json::json;
 
-    use super::{ChatContent, ChatContentPart};
+    use super::{ChatContent, ChatContentPart, ChatMessage, ChatRole};
+    use crate::event::AssistantContentBlock;
 
     #[test]
     fn chat_content_deserializes_from_raw_string() {
@@ -257,5 +320,21 @@ mod tests {
             ChatContentPart::text(" world"),
         ]);
         assert_eq!(content.try_flatten_to_text().unwrap(), "hello world");
+    }
+
+    #[test]
+    fn assistant_message_collects_visible_and_reasoning_text() {
+        let message = ChatMessage::assistant_blocks(vec![
+            AssistantContentBlock::Reasoning {
+                text: "inner".to_string(),
+            },
+            AssistantContentBlock::Text {
+                text: "outer".to_string(),
+            },
+        ]);
+
+        assert_eq!(message.role(), ChatRole::Assistant);
+        assert_eq!(message.text_content().unwrap(), "outer");
+        assert_eq!(message.reasoning_content().as_deref(), Some("inner"));
     }
 }

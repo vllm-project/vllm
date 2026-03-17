@@ -4,8 +4,8 @@ use openai_protocol::chat::{ChatCompletionRequest, ChatMessage, MessageContent};
 use openai_protocol::common::ContentPart;
 use uuid::Uuid;
 use vllm_chat::{
-    ChatContent, ChatContentPart, ChatMessage as VllmChatMessage, ChatOptions, ChatRequest,
-    ChatRole, UserSamplingParams,
+    AssistantContentBlock, ChatContent, ChatContentPart, ChatMessage as VllmChatMessage,
+    ChatOptions, ChatRequest, UserSamplingParams,
 };
 
 use crate::error::{ApiError, bail_invalid_request};
@@ -31,11 +31,7 @@ pub fn prepare_chat_request(
     validate::validate_request_compat(request, configured_model)?;
 
     let response_id = format!("chatcmpl-{}", Uuid::new_v4());
-    let messages = request
-        .messages
-        .iter()
-        .map(convert_message)
-        .collect::<Result<Vec<_>, _>>()?;
+    let messages = request.messages.iter().map(convert_message).try_collect()?;
 
     let mut template_kwargs = HashMap::new();
     if let Some(kwargs) = &request.chat_template_kwargs {
@@ -70,39 +66,39 @@ pub fn prepare_chat_request(
     })
 }
 
-/// Lower one OpenAI chat message into the text-only `vllm-chat` message shape.
-// TODO: use `TryFrom`?
+/// Lower one OpenAI chat message into the `vllm-chat` message shape.
 fn convert_message(message: &ChatMessage) -> Result<VllmChatMessage, ApiError> {
     match message {
-        ChatMessage::System { content, .. } => Ok(VllmChatMessage::new(
-            ChatRole::System,
-            convert_content(content)?,
-        )),
-        ChatMessage::User { content, .. } => Ok(VllmChatMessage::new(
-            ChatRole::User,
-            convert_content(content)?,
-        )),
+        ChatMessage::System { content, .. } => {
+            Ok(VllmChatMessage::system(convert_content(content)?))
+        }
+        ChatMessage::User { content, .. } => Ok(VllmChatMessage::user(convert_content(content)?)),
         ChatMessage::Assistant {
             content,
             tool_calls,
             reasoning_content,
-            ..
+            name: _,
         } => {
             if tool_calls.as_ref().is_some_and(|calls| !calls.is_empty()) {
                 bail_invalid_request!("Assistant tool_calls are not supported.");
             }
-            if reasoning_content.is_some() {
-                bail_invalid_request!("Assistant reasoning content is not supported.");
+
+            let mut blocks = Vec::new();
+            if let Some(reasoning_content) = reasoning_content
+                && !reasoning_content.is_empty()
+            {
+                blocks.push(AssistantContentBlock::Reasoning {
+                    text: reasoning_content.clone(),
+                });
+            }
+            if let Some(content) = content {
+                blocks.extend(convert_assistant_text_blocks(content)?);
+            }
+            if blocks.is_empty() {
+                bail_invalid_request!("Assistant messages must contain text or reasoning content.");
             }
 
-            let Some(content) = content else {
-                bail_invalid_request!("Assistant messages must contain text content.");
-            };
-
-            Ok(VllmChatMessage::new(
-                ChatRole::Assistant,
-                convert_content(content)?,
-            ))
+            Ok(VllmChatMessage::assistant_blocks(blocks))
         }
         ChatMessage::Tool { .. } => bail_invalid_request!("Tool messages are not supported."),
         ChatMessage::Function { .. } => {
@@ -114,7 +110,7 @@ fn convert_message(message: &ChatMessage) -> Result<VllmChatMessage, ApiError> {
     }
 }
 
-/// Convert one OpenAI message content value into the supported text-only internal format.
+/// Convert the given OpenAI message content value into the internal format in `vllm-chat`.
 fn convert_content(content: &MessageContent) -> Result<ChatContent, ApiError> {
     match content {
         MessageContent::Text(text) => Ok(ChatContent::Text(text.clone())),
@@ -124,8 +120,26 @@ fn convert_content(content: &MessageContent) -> Result<ChatContent, ApiError> {
                 ContentPart::Text { text } => Ok(ChatContentPart::text(text.clone())),
                 _ => bail_invalid_request!("Only text content parts are supported."),
             })
-            .collect::<Result<Vec<_>, _>>()
+            .try_collect()
             .map(ChatContent::Parts),
+    }
+}
+
+/// Convert the given OpenAI assistant message content into the internal format in `vllm-chat`.
+fn convert_assistant_text_blocks(
+    content: &MessageContent,
+) -> Result<Vec<AssistantContentBlock>, ApiError> {
+    match content {
+        MessageContent::Text(text) => Ok(vec![AssistantContentBlock::Text { text: text.clone() }]),
+        MessageContent::Parts(parts) => parts
+            .iter()
+            .map(|part| match part {
+                ContentPart::Text { text } => {
+                    Ok(AssistantContentBlock::Text { text: text.clone() })
+                }
+                _ => bail_invalid_request!("Only text content parts are supported."),
+            })
+            .try_collect(),
     }
 }
 
@@ -173,8 +187,7 @@ mod tests {
             ChatRequest {
                 request_id: "<placeholder>",
                 messages: [
-                    ChatMessage {
-                        role: User,
+                    User {
                         content: Parts(
                             [
                                 Text {
@@ -218,8 +231,7 @@ mod tests {
             ChatRequest {
                 request_id: "<placeholder>",
                 messages: [
-                    ChatMessage {
-                        role: User,
+                    User {
                         content: Text(
                             "hello",
                         ),
@@ -276,5 +288,56 @@ mod tests {
         };
 
         assert!(prepare_chat_request(&request, "Qwen/Qwen1.5-0.5B-Chat").is_err());
+    }
+
+    #[test]
+    fn prepare_chat_request_accepts_assistant_reasoning_history() {
+        let request = ChatCompletionRequest {
+            messages: vec![ChatMessage::Assistant {
+                content: Some(MessageContent::Text("answer".to_string())),
+                name: None,
+                tool_calls: None,
+                reasoning_content: Some("inner".to_string()),
+            }],
+            ..base_request()
+        };
+
+        let mut prepared =
+            prepare_chat_request(&request, "Qwen/Qwen1.5-0.5B-Chat").expect("request is valid");
+        prepared.chat_request.request_id = "<placeholder>".to_string();
+        expect_test::expect![[r#"
+            ChatRequest {
+                request_id: "<placeholder>",
+                messages: [
+                    Assistant {
+                        content: [
+                            Reasoning {
+                                text: "inner",
+                            },
+                            Text {
+                                text: "answer",
+                            },
+                        ],
+                    },
+                ],
+                sampling_params: UserSamplingParams {
+                    temperature: None,
+                    top_p: None,
+                    top_k: None,
+                    max_tokens: None,
+                    min_tokens: None,
+                    include_stop_str_in_output: false,
+                    stop_token_ids: None,
+                    ignore_eos: false,
+                    skip_special_tokens: false,
+                },
+                chat_options: ChatOptions {
+                    add_generation_prompt: true,
+                    continue_final_message: false,
+                    template_kwargs: {},
+                },
+            }
+        "#]]
+        .assert_debug_eq(&prepared.chat_request);
     }
 }

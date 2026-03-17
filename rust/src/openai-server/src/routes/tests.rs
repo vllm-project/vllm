@@ -183,9 +183,9 @@ impl ChatBackend for FakeChatBackend {
     fn apply_chat_template(&self, request: &ChatRequest) -> vllm_chat::Result<String> {
         let mut prompt = String::new();
         for message in &request.messages {
-            prompt.push_str(message.role.as_str());
+            prompt.push_str(message.role().as_str());
             prompt.push_str(": ");
-            prompt.push_str(&message.content.try_flatten_to_text()?);
+            prompt.push_str(&message.text_content()?);
             prompt.push('\n');
         }
         if request.chat_options.add_generation_prompt {

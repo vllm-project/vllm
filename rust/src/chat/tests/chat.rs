@@ -8,8 +8,8 @@ use std::time::Duration;
 use futures::StreamExt as _;
 use tokio::time::timeout;
 use vllm_chat::{
-    AssistantBlockKind, AssistantContentBlock, ChatBackend, ChatEvent, ChatLlm, ChatMessage,
-    ChatOptions, ChatRequest, ChatRole, UserSamplingParams,
+    AssistantBlockKind, AssistantContentBlock, AssistantContentBlocksExt as _, ChatBackend,
+    ChatEvent, ChatLlm, ChatMessage, ChatOptions, ChatRequest, ChatRole, UserSamplingParams,
 };
 use vllm_engine_core_client::protocol::handshake::{HandshakeInitMessage, ReadyMessage};
 use vllm_engine_core_client::protocol::{
@@ -178,9 +178,9 @@ impl ChatBackend for FakeChatBackend {
 
         let mut prompt = String::new();
         for message in &request.messages {
-            prompt.push_str(message.role.as_str());
+            prompt.push_str(message.role().as_str());
             prompt.push_str(": ");
-            prompt.push_str(&message.content.try_flatten_to_text()?);
+            prompt.push_str(&message.text_content()?);
             prompt.push('\n');
         }
         if request.chat_options.add_generation_prompt {
@@ -761,7 +761,7 @@ async fn chat_stream_separates_reasoning_blocks_automatically() {
             finish_reason,
             ..
         })) => {
-            assert_eq!(message.reasoning(), "reason more");
+            assert_eq!(message.reasoning().unwrap(), "reason more");
             assert_eq!(message.text(), "answer");
             assert_eq!(finish_reason, Some(FinishReason::Length));
         }
@@ -812,7 +812,7 @@ async fn chat_collectors_return_structured_message_and_visible_text() {
         .collect_message()
         .await
         .unwrap();
-    assert_eq!(message.reasoning(), "inner");
+    assert_eq!(message.reasoning().unwrap(), "inner");
     assert_eq!(message.text(), "outer");
 
     let text = chat

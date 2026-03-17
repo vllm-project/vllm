@@ -1,6 +1,7 @@
 use std::path::Path;
 
-use serde_json::{Value, json};
+use serde::Serialize;
+use serde_json::Value;
 use smg_tokenizer::ChatTemplateState;
 use smg_tokenizer::chat_template::{
     ChatTemplateContentFormat, ChatTemplateParams, load_chat_template_from_config,
@@ -8,9 +9,9 @@ use smg_tokenizer::chat_template::{
 };
 use thiserror_ext::AsReport as _;
 
-use crate::Error;
 use crate::error::Result;
 use crate::request::{ChatContent, ChatMessage, ChatRequest};
+use crate::{AssistantContentBlocksExt, Error};
 
 /// Chat template handling for Hugging Face models.
 ///
@@ -89,6 +90,17 @@ impl ChatTemplate {
     }
 }
 
+/// Chat message in the JSON shape expected by Jinja chat templates.
+#[derive(Serialize)]
+struct AssistantTemplateMessage {
+    role: &'static str,
+    content: Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_content: Option<String>,
+}
+
 /// Convert chat messages into the JSON shape expected by Jinja chat templates.
 fn template_messages_to_json(
     messages: &[ChatMessage],
@@ -104,10 +116,33 @@ fn template_message_to_json(
     message: &ChatMessage,
     content_format: ChatTemplateContentFormat,
 ) -> Result<Value> {
-    Ok(json!({
-        "role": message.role.as_str(),
-        "content": template_content_to_json(&message.content, content_format)?,
-    }))
+    let msg = match message {
+        ChatMessage::System { content } => AssistantTemplateMessage {
+            role: "system",
+            content: template_content_to_json(content, content_format)?,
+            reasoning: None,
+            reasoning_content: None,
+        },
+        ChatMessage::User { content } => AssistantTemplateMessage {
+            role: "user",
+            content: template_content_to_json(content, content_format)?,
+            reasoning: None,
+            reasoning_content: None,
+        },
+        ChatMessage::Assistant { content } => {
+            let text = content.text();
+            let reasoning = content.reasoning();
+            let content = template_content_to_json(&ChatContent::Text(text), content_format)?;
+            AssistantTemplateMessage {
+                role: "assistant",
+                content,
+                reasoning: reasoning.clone(),
+                reasoning_content: reasoning,
+            }
+        }
+    };
+
+    Ok(serde_json::to_value(msg).expect("chat message should serialize to valid JSON"))
 }
 
 fn template_content_to_json(
@@ -127,7 +162,7 @@ mod tests {
     use crate::request::{
         ChatContentPart, ChatMessage, ChatOptions, ChatRequest, ChatRole, UserSamplingParams,
     };
-    use crate::{Error, Result};
+    use crate::{AssistantContentBlock, Error, Result};
 
     fn sample_request(messages: Vec<ChatMessage>) -> ChatRequest {
         ChatRequest {
@@ -188,13 +223,10 @@ mod tests {
 
     #[test]
     fn chat_template_flattens_text_parts_for_string_templates() {
-        let request = sample_request(vec![ChatMessage::new(
-            ChatRole::User,
-            vec![
-                ChatContentPart::text("hello"),
-                ChatContentPart::text(" world"),
-            ],
-        )]);
+        let request = sample_request(vec![ChatMessage::user(vec![
+            ChatContentPart::text("hello"),
+            ChatContentPart::text(" world"),
+        ])]);
 
         let rendered = render(Some("{{ messages[0].content }}"), &request).unwrap();
 
@@ -218,13 +250,10 @@ mod tests {
 
     #[test]
     fn chat_template_emits_openai_text_blocks_for_structured_templates() {
-        let request = sample_request(vec![ChatMessage::new(
-            ChatRole::User,
-            vec![
-                ChatContentPart::text("hello"),
-                ChatContentPart::text("world"),
-            ],
-        )]);
+        let request = sample_request(vec![ChatMessage::user(vec![
+            ChatContentPart::text("hello"),
+            ChatContentPart::text("world"),
+        ])]);
 
         let rendered = render(
             Some(
@@ -243,5 +272,25 @@ mod tests {
         let error = render(None, &request).unwrap_err();
 
         assert!(matches!(error, Error::MissingChatTemplate));
+    }
+
+    #[test]
+    fn chat_template_exposes_assistant_reasoning_separately() {
+        let request = sample_request(vec![ChatMessage::assistant_blocks(vec![
+            AssistantContentBlock::Reasoning {
+                text: "inner".to_string(),
+            },
+            AssistantContentBlock::Text {
+                text: "outer".to_string(),
+            },
+        ])]);
+
+        let rendered = render(
+            Some("{{ messages[0].reasoning_content }}|{{ messages[0].content }}"),
+            &request,
+        )
+        .unwrap();
+
+        assert_eq!(rendered, "inner|outer");
     }
 }

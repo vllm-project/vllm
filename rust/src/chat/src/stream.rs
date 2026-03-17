@@ -4,7 +4,7 @@ use std::task::{Context, Poll};
 use futures::Stream;
 
 use crate::error::Result;
-use crate::event::{AssistantMessage, ChatEvent};
+use crate::event::{AssistantContentBlocksExt as _, AssistantMessage, ChatEvent};
 
 /// Per-request stream of chat events.
 pub struct ChatEventStream {

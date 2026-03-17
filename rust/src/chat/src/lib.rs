@@ -11,7 +11,10 @@
 
 pub use backend::{ChatBackend, DynChatBackend, SamplingHints};
 pub use error::{Error, Result};
-pub use event::{AssistantBlockKind, AssistantContentBlock, AssistantMessage, ChatEvent};
+pub use event::{
+    AssistantBlockKind, AssistantContentBlock, AssistantContentBlocksExt, AssistantMessage,
+    ChatEvent,
+};
 use futures::StreamExt;
 pub use request::{
     ChatContent, ChatContentPart, ChatMessage, ChatOptions, ChatRequest, ChatRole,

@@ -1,4 +1,5 @@
 #![feature(coroutines)]
+#![feature(iterator_try_collect)]
 
 //! Minimal OpenAI-compatible HTTP server above [`vllm_chat`].
 //!
