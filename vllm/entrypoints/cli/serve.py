@@ -23,7 +23,7 @@ from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.network_utils import get_tcp_uri
 from vllm.utils.system_utils import decorate_logs, set_process_title
 from vllm.v1.engine.core import EngineCoreProc
-from vllm.v1.engine.utils import CoreEngineProcManager, launch_core_engines, DomainCoreEngineProcManager
+from vllm.v1.engine.utils import CoreEngineProcManager, launch_core_engines, DomainCoreEngineProcManager, launch_domain_core_engines
 from vllm.v1.executor import Executor
 from vllm.v1.executor.multiproc_executor import MultiprocExecutor
 from vllm.v1.metrics.prometheus import setup_multiprocess_prometheus
@@ -296,8 +296,10 @@ def run_multi_api_server(args: argparse.Namespace):
 
     addresses = get_engine_zmq_addresses(vllm_config, num_api_servers)
 
-    with launch_core_engines(
-        vllm_config, executor_class, log_stats, addresses, num_api_servers
+    with (
+        launch_domain_core_engines(vllm_config, executor_class, log_stats, addresses, num_api_servers)
+        if vllm_config.parallel_config.dp_per_domain > 1
+        else launch_core_engines(vllm_config, executor_class, log_stats, addresses, num_api_servers)
     ) as (local_engine_manager, coordinator, addresses):
         # Construct common args for the APIServerProcessManager up-front.
         api_server_manager_kwargs = dict(
