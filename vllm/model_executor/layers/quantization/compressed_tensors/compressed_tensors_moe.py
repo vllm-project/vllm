@@ -324,6 +324,12 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
         )
         delattr(layer, "w2_weight_packed")
 
+        logger.warning_once(
+            "Your GPU does not have native support for FP4 computation but "
+            "FP4 quantization is being used. Weight-only FP4 compression "
+            "will be used leveraging the Marlin kernel. This may degrade "
+            "performance for compute-heavy workloads."
+        )
         prepare_moe_fp4_layer_for_marlin(layer)
 
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
@@ -564,6 +570,7 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
             shared_experts=layer.shared_experts,
             routing_tables=layer._maybe_init_expert_routing_tables(),
         )
+        self.moe_kernel.fused_experts.process_weights_after_loading(layer)
 
     def maybe_make_prepare_finalize(
         self,
@@ -2445,7 +2452,7 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             w2_scale=layer.w2_weight_scale,  # group scale
             g1_alphas=layer.w13_weight_chan_scale,
             g2_alphas=layer.w2_weight_chan_scale,
-            per_act_token_quant=True,  # always use dynamc per-token
+            per_act_token_quant=True,  # always use dynamic per-token
             per_out_ch_quant=True,  # always use per-channel
         )
 

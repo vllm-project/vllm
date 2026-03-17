@@ -646,7 +646,7 @@ class IsaacImageProcessor:
         return_tensors: str | TensorType | None,
         **kwargs: Unpack[IsaacImageProcessorKwargs],
     ) -> BatchFeature:
-        """Preprocess images into format compatibile with vLLM input processing."""
+        """Preprocess images into format compatible with vLLM input processing."""
 
         all_pixel_values: list[torch.Tensor] = []
         all_image_grids: list[torch.Tensor] = []

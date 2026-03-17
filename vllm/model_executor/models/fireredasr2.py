@@ -41,7 +41,7 @@ from vllm.multimodal.processing import (
     PromptUpdateDetails,
 )
 from vllm.transformers_utils.processor import cached_processor_from_config
-from vllm.transformers_utils.processors.fireredasr2_processor import (
+from vllm.transformers_utils.processors.fireredasr2 import (
     FireRedASR2FeatureExtractor,
 )
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
@@ -107,7 +107,7 @@ class Conv2dSubsampling(nn.Module):
         )
 
         self.subsampling = 4
-        left_context = right_context = 3  # both exclude currect frame
+        left_context = right_context = 3  # both exclude current frame
         self.context = left_context + 1 + right_context  # 7
 
     def forward(

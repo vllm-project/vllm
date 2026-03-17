@@ -203,7 +203,7 @@ class TestEngineRegistry:
 
 def test_nccl_receive_weights_without_init_raises():
     """Test that receive_weights raises if init_transfer_engine wasn't called."""
-    if torch.cuda.device_count() < 1:
+    if torch.accelerator.device_count() < 1:
         pytest.skip("Need at least 1 GPU for this test")
 
     config = WeightTransferConfig(backend="nccl")
@@ -251,7 +251,7 @@ def trainer_broadcast_tensor(
     dtype = getattr(torch, tensor_dtype)
     tensor_to_send = torch.ones(tensor_shape, dtype=dtype, device="cuda:0")
     comm.broadcast(tensor_to_send, src=0, stream=torch.cuda.current_stream())
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     return True
 
@@ -309,7 +309,7 @@ def inference_receive_tensor(
         shapes=[tensor_shape],
     )
     engine.receive_weights(update_info, noop_load_weights)
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     # Verify we received the tensor
     success = False
@@ -336,7 +336,7 @@ def inference_receive_tensor(
 
 
 @pytest.mark.skipif(
-    torch.cuda.device_count() < 2,
+    torch.accelerator.device_count() < 2,
     reason="Need at least 2 GPUs to run NCCL weight transfer test.",
 )
 def test_nccl_weight_transfer_between_processes():
@@ -382,7 +382,7 @@ class TestIPCWeightTransferUpdateInfoValidation:
 
     def test_valid_update_info(self):
         """Test creating valid IPCWeightTransferUpdateInfo."""
-        if torch.cuda.device_count() < 1:
+        if torch.accelerator.device_count() < 1:
             pytest.skip("Need at least 1 GPU for this test")
 
         # Create a dummy tensor and IPC handle
@@ -404,7 +404,7 @@ class TestIPCWeightTransferUpdateInfoValidation:
 
     def test_mismatched_dtype_names_raises(self):
         """Test that mismatched dtype_names length raises ValueError."""
-        if torch.cuda.device_count() < 1:
+        if torch.accelerator.device_count() < 1:
             pytest.skip("Need at least 1 GPU for this test")
 
         dummy_tensor = torch.ones(10, 10, device="cuda:0")
@@ -422,7 +422,7 @@ class TestIPCWeightTransferUpdateInfoValidation:
 
     def test_mismatched_shapes_raises(self):
         """Test that mismatched shapes length raises ValueError."""
-        if torch.cuda.device_count() < 1:
+        if torch.accelerator.device_count() < 1:
             pytest.skip("Need at least 1 GPU for this test")
 
         dummy_tensor = torch.ones(10, 10, device="cuda:0")
@@ -440,7 +440,7 @@ class TestIPCWeightTransferUpdateInfoValidation:
 
     def test_mismatched_ipc_handles_raises(self):
         """Test that mismatched ipc_handles length raises ValueError."""
-        if torch.cuda.device_count() < 1:
+        if torch.accelerator.device_count() < 1:
             pytest.skip("Need at least 1 GPU for this test")
 
         dummy_tensor = torch.ones(10, 10, device="cuda:0")
@@ -456,10 +456,12 @@ class TestIPCWeightTransferUpdateInfoValidation:
                 ipc_handles=ipc_handles,
             )
 
-    def test_valid_update_info_from_pickled(self):
+    def test_valid_update_info_from_pickled(self, monkeypatch):
         """Test creating IPCWeightTransferUpdateInfo from pickled handles."""
-        if torch.cuda.device_count() < 1:
+        if torch.accelerator.device_count() < 1:
             pytest.skip("Need at least 1 GPU for this test")
+
+        monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
 
         dummy_tensor = torch.ones(10, 10, device="cuda:0")
         ipc_handle = reduce_tensor(dummy_tensor)
@@ -477,9 +479,21 @@ class TestIPCWeightTransferUpdateInfoValidation:
         assert info.ipc_handles == ipc_handles
         assert info.ipc_handles_pickled is None
 
+    def test_pickled_requires_insecure_serialization_flag(self, monkeypatch):
+        """Test that pickled handles are rejected unless env flag is enabled."""
+        monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "0")
+
+        with pytest.raises(ValueError, match="VLLM_ALLOW_INSECURE_SERIALIZATION=1"):
+            IPCWeightTransferUpdateInfo(
+                names=[],
+                dtype_names=[],
+                shapes=[],
+                ipc_handles_pickled=base64.b64encode(pickle.dumps([])).decode("utf-8"),
+            )
+
     def test_both_handles_and_pickled_raises(self):
         """Test that providing both ipc_handles and ipc_handles_pickled raises."""
-        if torch.cuda.device_count() < 1:
+        if torch.accelerator.device_count() < 1:
             pytest.skip("Need at least 1 GPU for this test")
 
         dummy_tensor = torch.ones(10, 10, device="cuda:0")
@@ -526,7 +540,7 @@ class TestIPCEngineParsing:
 
     def test_parse_update_info_valid(self):
         """Test parsing valid update info dict."""
-        if torch.cuda.device_count() < 1:
+        if torch.accelerator.device_count() < 1:
             pytest.skip("Need at least 1 GPU for this test")
 
         config = WeightTransferConfig(backend="ipc")
@@ -556,10 +570,12 @@ class TestIPCEngineParsing:
         assert update_info.shapes == [[100, 100], [50]]
         assert len(update_info.ipc_handles) == 2
 
-    def test_parse_update_info_pickled(self):
+    def test_parse_update_info_pickled(self, monkeypatch):
         """Test parsing update info with pickled IPC handles (HTTP path)."""
-        if torch.cuda.device_count() < 1:
+        if torch.accelerator.device_count() < 1:
             pytest.skip("Need at least 1 GPU for this test")
+
+        monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
 
         config = WeightTransferConfig(backend="ipc")
         parallel_config = create_mock_parallel_config()
@@ -614,7 +630,7 @@ class TrainerActor:
         ipc_handle = reduce_tensor(self.tensor)
         gpu_uuid = get_physical_gpu_id(0)
 
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
 
         self.ipc_handle_dict = {
             "ipc_handle": ipc_handle,
@@ -688,7 +704,7 @@ def inference_receive_ipc_tensor(
 
     update_info = engine.parse_update_info(update_dict)
     engine.receive_weights(update_info, noop_load_weights)
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     # Verify we received the tensor
     success = False
@@ -715,7 +731,7 @@ def inference_receive_ipc_tensor(
 
 
 @pytest.mark.skipif(
-    torch.cuda.device_count() < 1,
+    torch.accelerator.device_count() < 1,
     reason="Need at least 1 GPU to run IPC weight transfer test.",
 )
 @pytest.mark.parametrize("mode", ["ray", "http"])
@@ -773,7 +789,7 @@ def test_ipc_weight_transfer_between_processes(mode: str):
 
 def test_ipc_receive_weights_missing_gpu_uuid_raises():
     """Test that receive_weights raises if GPU UUID not found in IPC handles."""
-    if torch.cuda.device_count() < 1:
+    if torch.accelerator.device_count() < 1:
         pytest.skip("Need at least 1 GPU for this test")
 
     config = WeightTransferConfig(backend="ipc")

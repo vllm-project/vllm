@@ -4,7 +4,7 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, replace
 from enum import Enum
-from typing import TYPE_CHECKING, Any, ClassVar, Generic, Protocol, TypeVar, get_args
+from typing import TYPE_CHECKING, Any, ClassVar, Generic, Protocol, TypeVar
 
 import numpy as np
 import torch
@@ -51,7 +51,11 @@ class AttentionBackend(ABC):
     # makes sure the output tensor is allocated inside the cudagraph.
     accept_output_buffer: bool = False
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
-    supported_kv_cache_dtypes: ClassVar[list["CacheDType"]] = ["auto", "bfloat16"]
+    supported_kv_cache_dtypes: ClassVar[list["CacheDType"]] = [
+        "auto",
+        "float16",
+        "bfloat16",
+    ]
 
     # Does attention's forward() include kv cache update?
     forward_includes_kv_cache_update: bool = True
@@ -85,6 +89,26 @@ class AttentionBackend(ABC):
         cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
         raise NotImplementedError
+
+    @classmethod
+    def get_kv_cache_block_dim(
+        cls,
+        block_size: int,
+        num_kv_heads: int,
+        head_size: int,
+        cache_dtype_str: str = "auto",
+    ) -> int:
+        """Discover which tensor dim is the block index, since different
+        backends lay out dims differently."""
+        _S = 1234567
+        shape = cls.get_kv_cache_shape(
+            _S,
+            block_size,
+            num_kv_heads,
+            head_size,
+            cache_dtype_str=cache_dtype_str,
+        )
+        return shape.index(_S)
 
     @staticmethod
     def get_kv_cache_stride_order(
@@ -144,14 +168,8 @@ class AttentionBackend(ABC):
 
     @classmethod
     def supports_block_size(cls, block_size: int | None) -> bool:
-        from vllm.config.cache import BlockSize
-
         if block_size is None:
             return True
-
-        valid_sizes = get_args(BlockSize)
-        if block_size not in valid_sizes:
-            return False
 
         supported_kernel_block_sizes = cls.get_supported_kernel_block_sizes()
         if not supported_kernel_block_sizes:
@@ -166,6 +184,17 @@ class AttentionBackend(ABC):
             if block_size % supported_size == 0:
                 return True
         return False
+
+    @classmethod
+    def get_preferred_block_size(cls, default_block_size: int) -> int:
+        supported_sizes = cls.get_supported_kernel_block_sizes()
+        if not supported_sizes:
+            return default_block_size
+
+        if cls.supports_block_size(default_block_size):
+            return default_block_size
+
+        return min(s.base if isinstance(s, MultipleOf) else s for s in supported_sizes)
 
     @classmethod
     def is_mla(cls) -> bool:
@@ -210,7 +239,7 @@ class AttentionBackend(ABC):
         head_size: int,
         dtype: torch.dtype,
         kv_cache_dtype: "CacheDType | None",
-        block_size: int,
+        block_size: int | None,
         use_mla: bool,
         has_sink: bool,
         use_sparse: bool,
@@ -224,7 +253,7 @@ class AttentionBackend(ABC):
         head_size: int,
         dtype: torch.dtype,
         kv_cache_dtype: "CacheDType | None",
-        block_size: int,
+        block_size: int | None,
         use_mla: bool,
         has_sink: bool,
         use_sparse: bool,
@@ -252,7 +281,7 @@ class AttentionBackend(ABC):
             else:
                 invalid_reasons.append("non-MLA not supported")
         if has_sink and not cls.supports_sink():
-            invalid_reasons.append("sink setting not supported")
+            invalid_reasons.append("attention sinks not supported")
         if use_sparse != cls.is_sparse():
             if use_sparse:
                 invalid_reasons.append("sparse not supported")
