@@ -1494,9 +1494,9 @@ class EngineCoreProc(EngineCore):
                 # Non-MoE DP ranks are completely independent, so treat like DP=1.
                 # Note that parallel_config.data_parallel_index will still reflect
                 # the original DP rank.
-                parallel_config.data_parallel_size = 1
-                parallel_config.data_parallel_size_local = 1
-                parallel_config.domain_parallel_rank = 0
+                if parallel_config.dp_per_domain == 1:
+                    parallel_config.data_parallel_size = 1
+                    parallel_config.data_parallel_size_local = 1
                 engine_core = EngineCoreProc(*args, engine_index=domain_rank, **kwargs)
 
             assert engine_core is not None
