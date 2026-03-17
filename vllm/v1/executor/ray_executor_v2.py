@@ -27,6 +27,7 @@ from vllm.v1.executor.multiproc_executor import (
     WorkerProc,
 )
 from vllm.v1.executor.ray_utils import (
+    get_bundles_sorted_by_node,
     initialize_ray_cluster,
     ray,
 )
@@ -170,34 +171,10 @@ class RayExecutorV2(MultiprocExecutor):
         )
 
         # Step 2: Query PG table, sort bundles, assign ranks
-        pg_table = ray.util.placement_group_table(placement_group)
-        bundle_to_node = pg_table["bundles_to_node_id"]
-
-        # Prefer driver node; group by node for TP locality
-        bundle_to_node_id = []
-        assert placement_group is not None
-        bundle_specs = placement_group.bundle_specs
-        assert bundle_specs is not None
-        for i, bundle in enumerate(bundle_specs):
-            ray_device_key = current_platform.ray_device_key
-            if not ray_device_key:
-                raise ValueError(
-                    f"current platform {current_platform.device_name}"
-                    " does not support ray."
-                )
-
-            if bundle.get(ray_device_key):
-                node_id = bundle_to_node.get(i) or bundle_to_node.get(str(i))
-                bundle_to_node_id.append((i, node_id))
-
-        bundle_to_node_id = bundle_to_node_id[: self.world_size]
+        bundle_to_node_id = get_bundles_sorted_by_node(
+            placement_group, self.world_size
+        )
         driver_node = ray.get_runtime_context().get_node_id()
-
-        def _sort_key(item):
-            _, node_id = item
-            return (0 if node_id == driver_node else 1, node_id)
-
-        bundle_to_node_id.sort(key=_sort_key)
 
         # Assign each worker a local rank
         node_rank_counter: dict[str, int] = defaultdict(int)
@@ -340,9 +317,9 @@ class RayExecutorV2(MultiprocExecutor):
             return not executor or executor.shutting_down
 
         def monitor_workers():
-            # TODO (jeffreywang): Is there a better way?
-            # Poll with timeout; a blocking ray.wait() would segfault
-            # if Ray is torn down while this thread is waiting.
+            # Poll with a timeout rather than blocking on ray.wait()
+            # because a blocking call would segfault if Ray is torn down
+            # while this thread is inside it.
             while not _should_stop() and ray.is_initialized():
                 try:
                     done, _ = ray.wait(run_refs, num_returns=1, timeout=5.0)
@@ -378,9 +355,9 @@ class RayExecutorV2(MultiprocExecutor):
 
         Must be called before tearing down Ray resources — the monitor
         may be inside ray.wait() which would segfault if Ray is shut
-        down underneath it.  When the monitor itself calls shutdown()
-        (on worker death), we skip the join because the thread is
-        about to return anyway.
+        down underneath it. When the monitor itself calls shutdown()
+        on worker death, we skip the join because the thread is about
+        to return anyway.
         """
         monitor = getattr(self, "_monitor_thread", None)
         if (

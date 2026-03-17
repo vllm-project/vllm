@@ -270,6 +270,44 @@ def _verify_bundles(
             )
 
 
+def get_bundles_sorted_by_node(
+    placement_group: "PlacementGroup",
+    world_size: int,
+) -> list[tuple[int, str]]:
+    """
+    Return GPU bundle indices paired with node IDs, sorted driver-first.
+
+    This utility has to be invoked from the driver node.
+    """
+    pg_data = placement_group_table(placement_group)
+    bundle_to_node = pg_data["bundles_to_node_id"]
+
+    ray_device_key = current_platform.ray_device_key
+    if not ray_device_key:
+        raise ValueError(
+            f"current platform {current_platform.device_name}"
+            " does not support ray."
+        )
+
+    bundle_specs = placement_group.bundle_specs
+    assert bundle_specs is not None
+    bundle_to_node_id: list[tuple[int, str]] = []
+    for i, bundle in enumerate(bundle_specs):
+        if bundle.get(ray_device_key):
+            node_id = bundle_to_node.get(i) or bundle_to_node.get(str(i))
+            bundle_to_node_id.append((i, node_id))
+
+    bundle_to_node_id = bundle_to_node_id[:world_size]
+    driver_node = ray.get_runtime_context().get_node_id()
+
+    def _sort_key(item):
+        _, node_id = item
+        return (0 if node_id == driver_node else 1, node_id)
+
+    bundle_to_node_id.sort(key=_sort_key)
+    return bundle_to_node_id
+
+
 def _wait_until_pg_ready(current_placement_group: "PlacementGroup"):
     """Wait until a placement group is ready.
 
