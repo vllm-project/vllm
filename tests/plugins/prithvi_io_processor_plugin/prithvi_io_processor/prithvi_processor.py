@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import base64
 import datetime
 import os
 import tempfile
@@ -11,6 +10,7 @@ from typing import Any
 
 import albumentations
 import numpy as np
+import pybase64 as base64
 import rasterio
 import regex as re
 import torch

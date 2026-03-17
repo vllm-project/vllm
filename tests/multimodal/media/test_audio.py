@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import base64
 from pathlib import Path
 from unittest.mock import patch
 
 import librosa
 import numpy as np
+import pybase64 as base64
 import pytest
 
 from vllm.multimodal.media import AudioMediaIO

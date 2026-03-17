@@ -2,13 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
-import base64
 import mimetypes
 import os
 from tempfile import NamedTemporaryFile, TemporaryDirectory
 
 import aiohttp
 import numpy as np
+import pybase64 as base64
 import pytest
 import requests
 import torch

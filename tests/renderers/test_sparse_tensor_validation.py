@@ -5,9 +5,9 @@ Tests verify that malicious sparse tensors are rejected before they can trigger
 out-of-bounds memory writes during to_dense() operations.
 """
 
-import base64
 import io
 
+import pybase64 as base64
 import pytest
 import torch
 

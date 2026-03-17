@@ -14,7 +14,6 @@ generation. Supported dataset types include:
 
 import argparse
 import ast
-import base64
 import io
 import json
 import logging
@@ -31,6 +30,7 @@ from tempfile import NamedTemporaryFile
 from typing import Any, cast
 
 import numpy as np
+import pybase64 as base64
 from huggingface_hub import snapshot_download
 from PIL import Image
 from typing_extensions import deprecated

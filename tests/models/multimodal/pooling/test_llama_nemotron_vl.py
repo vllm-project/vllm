@@ -9,10 +9,10 @@ Tests for the LlamaNemotronVL model family:
 Both variants share a SigLIP vision encoder with a bidirectional LLaMA backbone.
 """
 
-import base64
 from io import BytesIO
 from pathlib import Path
 
+import pybase64 as base64
 import pytest
 import torch
 from transformers import AutoModel, AutoModelForSequenceClassification, AutoProcessor

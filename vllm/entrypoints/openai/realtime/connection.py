@@ -2,13 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
-import base64
 import json
 from collections.abc import AsyncGenerator
 from http import HTTPStatus
 from uuid import uuid4
 
 import numpy as np
+import pybase64 as base64
 from fastapi import WebSocket
 from starlette.websockets import WebSocketDisconnect
 
