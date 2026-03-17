@@ -116,7 +116,7 @@ def fi_chunk_gated_delta_rule(
     beta: torch.Tensor,
     initial_state: torch.Tensor,
     output_final_state: bool,
-    cu_seqlens: torch.LongTensor | None = None,
+    cu_seqlens: torch.Tensor | None = None,
     use_qk_l2norm_in_kernel: bool = True,
 ):
     from flashinfer.gdn_prefill import (
@@ -178,7 +178,7 @@ class ChunkGatedDeltaRule(CustomOp):
         beta: torch.Tensor,
         initial_state: torch.Tensor,
         output_final_state: bool,
-        cu_seqlens: torch.LongTensor | None = None,
+        cu_seqlens: torch.Tensor | None = None,
         use_qk_l2norm_in_kernel: bool = True,
     ):
         return fi_chunk_gated_delta_rule(
@@ -202,7 +202,7 @@ class ChunkGatedDeltaRule(CustomOp):
         beta: torch.Tensor,
         initial_state: torch.Tensor,
         output_final_state: bool,
-        cu_seqlens: torch.LongTensor | None = None,
+        cu_seqlens: torch.Tensor | None = None,
         use_qk_l2norm_in_kernel: bool = True,
     ):
         return fla_chunk_gated_delta_rule(
@@ -707,8 +707,9 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             v = torch.randn(
                 1, T, num_v_heads, self.head_v_dim, device=device, dtype=dtype
             )
-            g = torch.randn(1, T, num_v_heads, device=device, dtype=dtype)
-            beta = torch.randn(1, T, num_v_heads, device=device, dtype=dtype)
+            dummy_a = torch.randn(T, num_v_heads, device=device, dtype=dtype)
+            dummy_b = torch.randn(T, num_v_heads, device=device, dtype=dtype)
+            g, beta = fused_gdn_gating(self.A_log, dummy_a, dummy_b, self.dt_bias)
             state = torch.zeros(
                 1,
                 num_v_heads,
@@ -717,7 +718,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                 device=device,
                 dtype=state_dtype,
             )
-            cu_seqlens = torch.tensor([0, T], device=device, dtype=torch.long)
+            cu_seqlens = torch.tensor([0, T], device=device, dtype=torch.int32)
 
             try:
                 self.chunk_gated_delta_rule(
@@ -727,7 +728,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                     g=g,
                     beta=beta,
                     initial_state=state,
-                    output_final_state=False,
+                    output_final_state=True,
                     cu_seqlens=cu_seqlens,
                     use_qk_l2norm_in_kernel=True,
                 )
@@ -747,7 +748,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                     self.prefix,
                 )
             finally:
-                del q, k, v, g, beta, state, cu_seqlens
+                del q, k, v, dummy_a, dummy_b, g, beta, state, cu_seqlens
 
         torch.accelerator.empty_cache()
 
