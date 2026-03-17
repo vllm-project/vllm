@@ -74,3 +74,8 @@ Please refer to the [pooling API](pooling.md#online-serving) and use `"task":"to
 ## More examples
 
 More examples can be found here: [examples/pooling/token_classify](../../../examples/pooling/token_classify)
+
+## Features
+
+Token classification features should be consistent with (sequence) classification. For more information, see [this page](classify.md#features).
+

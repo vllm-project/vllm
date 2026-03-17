@@ -11,7 +11,7 @@ This functionality is supported through the offline `LLM.score(...)` API, along 
 
 ### [cross-encoder models](https://www.sbert.net/examples/applications/cross-encoder/README.html)
 
-Cross-encoder and reranker models are a subset of classification models that accept two prompts as input and output num_labels equal to 1.
+Cross-encoder (aka reranker) models are a subset of classification models that accept two prompts as input and output num_labels equal to 1.
 
 - Text only models
 
@@ -400,3 +400,28 @@ Result documents will be sorted by relevance, and the `index` property can be us
 ## More examples
 
 More examples can be found here: [examples/pooling/score](../../../examples/pooling/score)
+
+## Features
+
+AS cross-encoder models are a subset of classification models that accept two prompts as input and output num_labels equal to 1, cross-encoder features should be consistent with (sequence) classification. For more information, see [this page](classify.md#features).
+
+### Score Template
+
+Score Template is only supported for cross-encoder models.
+
+Some scoring models require a specific prompt format to work correctly. You can specify a custom score template using the `--chat-template` parameter (see [Chat Template](../../serving/openai_compatible_server.md#chat-template)).
+
+Score templates are supported for **cross-encoder** models only. If you are using an **embedding** model for scoring, vLLM does not apply a score template.
+
+Like chat templates, the score template receives a `messages` list. For scoring, each message has a `role` attribute—either `"query"` or `"document"`. For the usual kind of point-wise cross-encoder, you can expect exactly two messages: one query and one document. To access the query and document content, use Jinja's `selectattr` filter:
+
+- **Query**: `{{ (messages | selectattr("role", "eq", "query") | first).content }}`
+- **Document**: `{{ (messages | selectattr("role", "eq", "document") | first).content }}`
+
+This approach is more robust than index-based access (`messages[0]`, `messages[1]`) because it selects messages by their semantic role. It also avoids assumptions about message ordering if additional message types are added to `messages` in the future.
+
+Example template file: [examples/pooling/score/template/nemotron-rerank.jinja](../../../examples/pooling/score/template/nemotron-rerank.jinja)
+
+### Enable/disable activation
+
+You can enable or disable activation via use_activation only works for cross-encoder models.

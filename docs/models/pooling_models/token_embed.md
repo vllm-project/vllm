@@ -107,3 +107,7 @@ Please refer to the [pooling API](pooling.md#online-serving) and use `"task":"to
 ## More examples
 
 More examples can be found here: [examples/pooling/token_embed](../../../examples/pooling/token_embed)
+
+## Features
+
+Token embedding features should be consistent with (sequence) embedding. For more information, see [this page](embed.md#features).
