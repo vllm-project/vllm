@@ -40,13 +40,13 @@ def _swizzle_mxfp4(quant_tensor, scale, num_warps):
         value_layout = StridedLayout
         scale_layout = StridedLayout
     elif current_platform.is_rocm():
-        from vllm.platforms.rocm import on_gfx950
+        from vllm.platforms.rocm import on_gfx950, on_gfx1250
 
         value_layout = StridedLayout
-        if on_gfx950():
-            from triton_kernels.tensor_details.layout import GFX950MXScaleLayout
+        if on_gfx950() or on_gfx1250():
+            from triton_kernels.tensor_details.layout import CDNA4MXScaleLayout
 
-            scale_layout = GFX950MXScaleLayout
+            scale_layout = CDNA4MXScaleLayout
         else:
             scale_layout = StridedLayout
     else:
@@ -112,7 +112,8 @@ def _can_support_mxfp4(
 def get_padding_alignment():
     return (
         256
-        if triton.runtime.driver.active.get_current_target().arch in ("gfx950",)
+        if triton.runtime.driver.active.get_current_target().arch
+        in ("gfx950", "gfx1250")
         else 128
     )
 
