@@ -652,8 +652,14 @@ class ConvSubsampling(nn.Module):
         self.conv = MaskedConvSequential(*layers)
 
     def calc_length(
-        self, lengths, all_paddings, kernel_size, stride, ceil_mode, repeat_num=1
-    ):
+        self,
+        lengths: torch.Tensor,
+        all_paddings: int,
+        kernel_size: int,
+        stride: int,
+        ceil_mode: bool,
+        repeat_num: int = 1,
+    ) -> torch.Tensor:
         """Calculates the output length of a Tensor passed
         through a convolution or max pooling layer"""
         add_pad: float = all_paddings - kernel_size
@@ -978,7 +984,6 @@ class CohereASRMultiHeadAttention(nn.Module):
         self,
         n_head: int,
         n_feat: int,
-        max_cache_len: int = 0,
         use_bias: bool = True,
     ) -> None:
         """Construct an MultiHeadedAttention object."""
@@ -1095,14 +1100,12 @@ class RelPositionMultiHeadAttention(CohereASRMultiHeadAttention):
         n_feat: int,
         pos_bias_u: nn.Parameter | torch.Tensor | None,
         pos_bias_v: nn.Parameter | torch.Tensor | None,
-        max_cache_len: int = 0,
         use_bias: bool = True,
     ) -> None:
         """Construct an RelPositionMultiHeadedAttention object."""
         super().__init__(
             n_head=n_head,
             n_feat=n_feat,
-            max_cache_len=max_cache_len,
             use_bias=use_bias,
         )
         # linear transformation for positional encoding
@@ -1244,7 +1247,6 @@ class ConformerLayer(torch.nn.Module):
 
         # multi-headed self-attention module
         self.norm_self_att = nn.LayerNorm(d_model)
-        MHA_max_cache_len = att_context_size[0]
 
         assert self_attention_model == "rel_pos"
 
@@ -1253,7 +1255,6 @@ class ConformerLayer(torch.nn.Module):
             n_feat=d_model,
             pos_bias_u=pos_bias_u,
             pos_bias_v=pos_bias_v,
-            max_cache_len=MHA_max_cache_len,
             use_bias=use_bias,
         )
 
@@ -1332,7 +1333,7 @@ class ConformerEncoder(nn.Module):
     https://arxiv.org/abs/2005.08100
     """
 
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+    def __init__(self, *, vllm_config: VllmConfig):
         super().__init__()
 
         self.hf_config = vllm_config.model_config.hf_config
@@ -1544,8 +1545,13 @@ class ConformerEncoder(nn.Module):
         return audio_signal, length
 
     def _create_masks(
-        self, att_context_size, padding_length, max_audio_length, offset, device
-    ):
+        self,
+        att_context_size: list[int],
+        padding_length: torch.Tensor,
+        max_audio_length: int,
+        offset: torch.Tensor | None,
+        device: torch.device,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         if self.self_attention_model != "rel_pos_local_attn":
             att_mask = torch.ones(
                 1, max_audio_length, max_audio_length, dtype=torch.bool, device=device
@@ -1622,12 +1628,12 @@ class ConformerEncoder(nn.Module):
 
     def _calc_context_sizes(
         self,
-        att_context_size,
-        att_context_probs,
-        att_context_style,
-        conv_context_size,
-        conv_kernel_size,
-    ):
+        att_context_size: list[int] | list[list[int]] | None,
+        att_context_probs: list[float] | None,
+        att_context_style: str,
+        conv_context_size: list[int] | str | None,
+        conv_kernel_size: int,
+    ) -> tuple[list[list[int]], list[int], list[float], list[int]]:
         # convert att_context_size to a standard list of lists
         if att_context_size:
             att_context_size_all = list(att_context_size)
@@ -1705,9 +1711,7 @@ class ConformerEncoder(nn.Module):
 class CohereASRModel(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
-        self.encoder = ConformerEncoder(
-            vllm_config=vllm_config, prefix=f"{prefix}.encoder"
-        )
+        self.encoder = ConformerEncoder(vllm_config=vllm_config)
 
         self.decoder = CohereASRDecoder(
             vllm_config=vllm_config, prefix=f"{prefix}.decoder"
@@ -2141,18 +2145,6 @@ class CohereASRForConditionalGeneration(
             out = self.model.get_encoder_outputs(audio_input, seq_lens)
 
         return out
-
-    def get_input_embeddings(
-        self,
-        input_ids: torch.Tensor,
-        multimodal_embeddings: MultiModalEmbeddings | None = None,
-        *,
-        is_multimodal: torch.Tensor | None = None,
-        handle_oov_mm_token: bool = False,
-    ) -> torch.Tensor:
-        # This method just returns the decoder sequence embeddings since
-        # CohereASR does not have encoder text tokens.
-        return self.model.decoder.get_input_embeddings(input_ids)
 
     def _parse_and_validate_audio_input(
         self, **kwargs: object

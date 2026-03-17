@@ -261,12 +261,14 @@ class InputPreprocessor:
         encoder_prompt = prompt["encoder_prompt"]
         decoder_prompt = prompt["decoder_prompt"]
 
-        skip = False
+        skip_decoder_start_token = False
         if self.renderer.mm_processor is not None:
             from vllm.multimodal.processing import EncDecMultiModalProcessor
 
             if isinstance(self.renderer.mm_processor, EncDecMultiModalProcessor):
-                skip = self.renderer.mm_processor.skip_decoder_start_token
+                skip_decoder_start_token = (
+                    self.renderer.mm_processor.skip_decoder_start_token
+                )
 
         return build_enc_dec_inputs(
             encoder_inputs=self._prompt_to_llm_inputs(
@@ -282,7 +284,7 @@ class InputPreprocessor:
                 )
             ),
             decoder_start_token_id=self.renderer.get_dec_start_token_id(),
-            skip_decoder_start_token=skip,
+            skip_decoder_start_token=skip_decoder_start_token,
         )
 
     def _process_decoder_only_prompt(
