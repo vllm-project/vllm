@@ -24,8 +24,6 @@ from vllm.config import set_current_vllm_config
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.platforms import current_platform
 
-DEVICE_TYPE = current_platform.device_type
-
 # TODO: Integrate ROCMAiterMLASparseBackend for ROCm.
 # The ROCm sparse MLA backend (rocm_aiter_mla_sparse.py) has a compatible
 # forward_mqa interface but needs validation on ROCm hardware.
@@ -64,6 +62,8 @@ SPARSE_BACKEND_BATCH_SPECS["large_q_prefill"] = BatchSpec(
 SPARSE_BACKEND_BATCH_SPECS["large_q_pure_prefill"] = BatchSpec(
     seq_lens=[256] * 2, query_lens=[256] * 2
 )
+
+DEVICE_TYPE = current_platform.device_type
 
 
 def _float_to_e8m0_truncate(f: float) -> float:

@@ -164,7 +164,11 @@ def test_top_k_per_row(
     )
 
     # Run reference implementation
-    torch_indices = torch.empty((num_rows, top_k), dtype=torch.int32, device=DEVICE_TYPE)
+    torch_indices = torch.empty(
+        (num_rows, top_k),
+        dtype=torch.int32,
+        device=DEVICE_TYPE,
+    )
     for i in range(num_rows):
         row_end = int(row_ends[i])
         k_i = min(top_k, row_end)
@@ -225,7 +229,11 @@ def _run_top_k_per_row_decode_test(
     torch.accelerator.synchronize()
 
     # Run reference implementation
-    torch_indices = torch.empty((num_rows, top_k), dtype=torch.int32, device=DEVICE_TYPE)
+    torch_indices = torch.empty(
+        (num_rows, top_k),
+        dtype=torch.int32,
+        device=DEVICE_TYPE,
+    )
     for i in range(num_rows):
         row_end = int(row_ends[i])
         k_i = min(top_k, row_end)
@@ -298,7 +306,11 @@ def test_deepseek_hybrid_topk(clean_logits: bool) -> None:
         4000, 8000, (batch_size_short,), dtype=torch.int32, device=DEVICE_TYPE
     )
 
-    row_starts_short = torch.zeros(num_rows_short, dtype=torch.int32, device=DEVICE_TYPE)
+    row_starts_short = torch.zeros(
+        num_rows_short,
+        dtype=torch.int32,
+        device=DEVICE_TYPE,
+    )
     row_indices_short = torch.arange(num_rows_short, device=DEVICE_TYPE) // next_n
     next_n_offset_short = torch.arange(num_rows_short, device=DEVICE_TYPE) % next_n
     row_ends_short = (

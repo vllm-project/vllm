@@ -27,7 +27,7 @@ DEVICE_TYPE = current_platform.device_type
 
 def create_expert_indices_with_redundancy(
     num_layers: int,
-    num_logical_experts: int
+    num_logical_experts: int,
     total_physical_experts: int,
     redundancy_config: list[int],  # redundancy for each logical expert
 ) -> torch.Tensor:

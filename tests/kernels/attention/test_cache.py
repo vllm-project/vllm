@@ -13,7 +13,11 @@ from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
 DEVICE_TYPE = current_platform.device_type
-COPYING_DIRECTION = [(DEVICE_TYPE, "cpu"), (DEVICE_TYPE, DEVICE_TYPE), ("cpu", DEVICE_TYPE)]
+COPYING_DIRECTION = [
+    (DEVICE_TYPE, "cpu"),
+    (DEVICE_TYPE, DEVICE_TYPE),
+    ("cpu", DEVICE_TYPE),
+]
 DTYPES = [torch.bfloat16, torch.float]
 NUM_TOKENS = [42]  # Arbitrary values for testing
 NUM_LAYERS = [1]  # Arbitrary values for testing

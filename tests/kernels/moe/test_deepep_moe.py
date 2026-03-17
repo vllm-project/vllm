@@ -109,12 +109,22 @@ class TestTensors:
             torch.bfloat16 if config.dtype == torch.float8_e4m3fn else config.dtype
         )
         rank_tokens = (
+            torch.randn(
+                (config.m, config.k),
+                device=DEVICE_TYPE,
+                dtype=token_dtype,
+            ) / 10
+        )
+        rank_tokens = (
             torch.randn((config.m, config.k), device=DEVICE_TYPE, dtype=token_dtype) / 10
         )
         rank_token_scales = None
 
         topk = torch.randint(
-            low=0, high=config.num_experts, size=(config.m, config.topk), device=DEVICE_TYPE
+            low=0,
+            high=config.num_experts,
+            size=(config.m, config.topk),
+            device=DEVICE_TYPE,
         ).to(dtype=torch.int64)
         topk_weights = torch.randn(topk.shape, dtype=torch.float32, device=DEVICE_TYPE)
         return TestTensors(
