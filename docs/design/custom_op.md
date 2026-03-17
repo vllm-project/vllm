@@ -170,9 +170,9 @@ For example:
 **12. Encoder:**
 
 ```python
---8<-- "vllm\model_executor\models\deepencoder2.py:qwen2_decoder"
+--8<-- "vllm/model_executor/models/deepencoder2.py:qwen2_decoder"
 
---8<-- "vllm\model_executor\layers\attention\mm_encoder_attention.py:mm_encoder_attn"
+--8<-- "vllm/model_executor/layers/attention/mm_encoder_attention.py:mm_encoder_attn"
 
 --8<-- "vllm/model_executor/models/deepencoder.py:rel_pos_attention"
 ```
