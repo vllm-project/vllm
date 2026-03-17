@@ -45,10 +45,12 @@ pystemmer==3.0.0
     # via mteb
 
 # Multi-modal processing
+av==16.1.0
+    # required for audio_in_video tests
 blobfile==3.0.0
     # Multi-Modal Models Test
 decord==0.6.0
-    # video processing, required by entrypoints/openai/test_video.py
+    # video processing, required by entrypoints/openai/chat_completion/test_video.py
 rapidfuzz==3.12.1
 
 # OpenAI compatibility and testing

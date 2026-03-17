@@ -165,6 +165,7 @@ class TestInitializeToolSessions:
         instance = OpenAIServingResponses(
             engine_client=engine_client,
             models=models,
+            openai_serving_render=MagicMock(),
             request_logger=None,
             chat_template=None,
             chat_template_content_format="auto",
@@ -251,6 +252,7 @@ class TestValidateGeneratorInput:
         instance = OpenAIServingResponses(
             engine_client=engine_client,
             models=models,
+            openai_serving_render=MagicMock(),
             request_logger=None,
             chat_template=None,
             chat_template_content_format="auto",
@@ -314,6 +316,7 @@ async def test_reasoning_tokens_counted_for_text_reasoning_model(monkeypatch):
     serving = OpenAIServingResponses(
         engine_client=engine_client,
         models=models,
+        openai_serving_render=MagicMock(),
         request_logger=None,
         chat_template=None,
         chat_template_content_format="auto",
@@ -684,6 +687,7 @@ def _make_serving_instance_with_reasoning():
     serving = OpenAIServingResponses(
         engine_client=engine_client,
         models=models,
+        openai_serving_render=MagicMock(),
         request_logger=None,
         chat_template=None,
         chat_template_content_format="auto",
