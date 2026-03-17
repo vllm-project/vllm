@@ -99,7 +99,7 @@ steps:
     - pytest -v -s models/language/pooling -m 'not core_model'
   mirror:
     amd:
-      device: mi250_1
+      device: mi325_1
       depends_on:
       - image-build-amd
 
