@@ -16,6 +16,7 @@ from vllm.v1.kv_offload.mediums import CPULoadStoreSpec, GPULoadStoreSpec
 from vllm.v1.kv_offload.reuse_manager import FilterReusedOffloadingManager
 from vllm.v1.kv_offload.spec import OffloadingSpec
 from vllm.v1.kv_offload.worker.cpu_gpu import CpuGpuOffloadingHandlers
+from vllm.v1.kv_offload.worker.shared_mmap_region import SharedMmapRegion
 from vllm.v1.kv_offload.worker.worker import OffloadingHandler
 
 
@@ -114,15 +115,18 @@ class CPUOffloadingSpec(OffloadingSpec):
             assert len(self.gpu_block_size) == 1
             gpu_block_size = self.gpu_block_size[0]
 
+            mmap_region = SharedMmapRegion(
+                instance_id=self.vllm_config.instance_id,
+                total_size_bytes=int(self.extra_config["cpu_bytes_to_use"]),
+                tp_world_size=self.vllm_config.parallel_config.world_size,
+            )
             self._handlers = CpuGpuOffloadingHandlers(
                 attn_backends=attn_backends,
                 gpu_block_size=gpu_block_size,
                 cpu_block_size=gpu_block_size * self.block_size_factor,
                 num_cpu_blocks=self.num_blocks,
                 gpu_caches=kv_caches,
-                instance_id=self.vllm_config.instance_id,
-                tp_world_size=self.vllm_config.parallel_config.world_size,
-                total_cpu_bytes=int(self.extra_config["cpu_bytes_to_use"]),
+                mmap_region=mmap_region,
             )
 
         assert self._handlers is not None
