@@ -530,6 +530,17 @@ class Qwen3ASRForConditionalGeneration(
             tower_model=["audio_tower."],
         )
 
+    def get_num_mm_encoder_tokens(self, num_audio_tokens: int) -> int:
+        """Return the number of tokens processed by the audio tower encoder.
+
+        Required for LoRA support on the tower module.
+        """
+        # For Qwen3-ASR, the audio tower produces one embedding per audio
+        # placeholder token inserted into the prompt (no additional
+        # merge/downsample step like vision towers). Therefore, the encoder
+        # token budget is identity.
+        return num_audio_tokens
+
     @classmethod
     def get_speech_to_text_config(
         cls, model_config: ModelConfig, task_type: str
