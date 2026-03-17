@@ -155,7 +155,7 @@ class AudioMediaIO(MediaIO[tuple[npt.NDArray, float]]):
             soundfile.write(buffer, audio, sr, format=audio_format)
             data = buffer.getvalue()
 
-        return base64.b64encode(data).decode("utf-8")
+        return pybase64.b64encode(data).decode("utf-8")
 
 
 class AudioEmbeddingMediaIO(MediaIO[torch.Tensor]):
