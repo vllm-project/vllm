@@ -36,12 +36,15 @@ Key Classes
 - PresetConfigSearch: Custom autotuner that returns pre-tuned configs
 """
 
+import warnings
 from collections.abc import Callable
 from typing import Any, cast, overload
 
 import torch
 from torch.library import Library
 
+from vllm.kernels.helion.config_manager import ConfigManager
+from vllm.kernels.helion.utils import get_canonical_gpu_name
 from vllm.logger import init_logger
 from vllm.utils.import_utils import has_helion
 from vllm.utils.torch_utils import direct_register_custom_op
@@ -211,9 +214,6 @@ class ConfiguredHelionKernel:
         return config_selector
 
     def _load_platform_configs(self) -> None:
-        from vllm.kernels.helion.config_manager import ConfigManager
-        from vllm.kernels.helion.utils import get_canonical_gpu_name
-
         self.platform = get_canonical_gpu_name()
         config_manager = ConfigManager.get_instance()
         self.configs = config_manager.get_platform_configs(self.op_name, self.platform)
@@ -254,12 +254,14 @@ class HelionKernelWrapper:
         op_name: str,
         fake_impl: Callable,
         helion_settings: "helion.Settings | None" = None,
+        ver: int = 1,
     ):
         # Validate helion_settings doesn't conflict with our custom autotuner
         validate_helion_settings(helion_settings, op_name)
 
         self.raw_kernel_func = raw_kernel_func
         self.op_name = op_name
+        self.ver = ver
         self._fake_impl = fake_impl
         self.helion_settings = helion_settings
         self._config_picker: (
@@ -267,6 +269,10 @@ class HelionKernelWrapper:
         ) = None
         self._configured_kernel: ConfiguredHelionKernel | None = None
         self._input_generator: Callable[[], dict[str, tuple[Any, ...]]] | None = None
+
+    @property
+    def versioned_name(self) -> str:
+        return f"{self.op_name}_v{self.ver}"
 
     def __call__(self, *args, **kwargs):
         # CustomOp fallback: register as torch custom op for torch.compile
@@ -408,7 +414,7 @@ class HelionKernelWrapper:
 
         if self._configured_kernel is None:
             self._configured_kernel = ConfiguredHelionKernel(
-                op_name=self.op_name,
+                op_name=self.versioned_name,
                 config_picker=self._config_picker,
                 raw_kernel_func=self.raw_kernel_func,
                 helion_settings=self.helion_settings,
@@ -417,32 +423,87 @@ class HelionKernelWrapper:
         return self._configured_kernel
 
     def _get_or_register_custom_op(self) -> Any:
-        if hasattr(torch.ops.vllm_helion, self.op_name):
-            return getattr(torch.ops.vllm_helion, self.op_name)
+        if hasattr(torch.ops.vllm_helion, self.versioned_name):
+            return getattr(torch.ops.vllm_helion, self.versioned_name)
 
         configured_kernel = self.get_configured_op()
 
-        logger.info("Registering op: vllm_helion::%s", self.op_name)
+        logger.info("Registering op: vllm_helion::%s", self.versioned_name)
         direct_register_custom_op(
-            op_name=self.op_name,
+            op_name=self.versioned_name,
             op_func=configured_kernel._decorated_kernel,
             mutates_args=None,
             fake_impl=self._fake_impl,
             target_lib=vllm_helion_lib,
         )
-        return getattr(torch.ops.vllm_helion, self.op_name)
+        return getattr(torch.ops.vllm_helion, self.versioned_name)
 
 
 # Global registry for tracking all registered HelionKernelWrapper instances
-_REGISTERED_KERNELS: dict[str, HelionKernelWrapper] = {}
+# Nested dict: {op_name: {version: wrapper}}
+_REGISTERED_KERNELS: dict[str, dict[int, HelionKernelWrapper]] = {}
 
 
-def get_registered_kernels() -> dict[str, HelionKernelWrapper]:
+def get_registered_kernels() -> dict[str, dict[int, HelionKernelWrapper]]:
     return _REGISTERED_KERNELS.copy()
 
 
-def get_kernel_by_name(kernel_name: str) -> HelionKernelWrapper | None:
-    return _REGISTERED_KERNELS.get(kernel_name)
+def get_kernel(kernel_name: str, ver: int) -> HelionKernelWrapper | None:
+    """Return a specific version of a kernel, or None."""
+    versions = _REGISTERED_KERNELS.get(kernel_name)
+    if not versions:
+        return None
+    return versions.get(ver)
+
+
+def resolve_kernel(
+    kernel_name: str,
+    config_manager: ConfigManager,
+    platform: str,
+) -> HelionKernelWrapper:
+    """Resolve the best version of a kernel for the given platform.
+
+    Iterates versions newest-first, returns first with configs for
+    the platform. Emits DeprecationWarning if falling back to an
+    older version.
+    """
+    versions = _REGISTERED_KERNELS.get(kernel_name)
+    if not versions:
+        raise KeyError(f"No kernel registered with name '{kernel_name}'")
+
+    newest_ver = max(versions)
+
+    for ver in sorted(versions, reverse=True):
+        wrapper = versions[ver]
+        configs = config_manager.get_platform_configs(wrapper.versioned_name, platform)
+        if configs:
+            if ver < newest_ver:
+                warnings.warn(
+                    f"Kernel '{kernel_name}' is using v{ver} because "
+                    f"newer v{newest_ver} lacks configs for platform "
+                    f"'{platform}'.",
+                    DeprecationWarning,
+                    stacklevel=2,
+                )
+            return wrapper
+
+    raise ValueError(
+        f"No configs available for any version of kernel '{kernel_name}' "
+        f"on platform '{platform}'"
+    )
+
+
+def resolve_all_kernels() -> dict[str, HelionKernelWrapper]:
+    """Resolve best version for all registered kernels on current platform."""
+    platform = get_canonical_gpu_name()
+    config_manager = ConfigManager()
+    resolved = {}
+    for name in _REGISTERED_KERNELS:
+        try:
+            resolved[name] = resolve_kernel(name, config_manager, platform)
+        except (ValueError, KeyError):
+            logger.debug("Could not resolve kernel '%s', skipping", name)
+    return resolved
 
 
 def infer_fake_impl(
@@ -478,6 +539,7 @@ def register_kernel(
     *,
     fake_impl: Callable | None = None,
     helion_settings: "helion.Settings | None" = None,
+    ver: int = 1,
 ) -> HelionKernelWrapper: ...
 
 
@@ -487,6 +549,7 @@ def register_kernel(
     *,
     fake_impl: Callable | None = None,
     helion_settings: "helion.Settings | None" = None,
+    ver: int = 1,
 ) -> Callable[[Callable], HelionKernelWrapper]: ...
 
 
@@ -495,22 +558,32 @@ def register_kernel(
     *,
     fake_impl: Callable | None = None,
     helion_settings: "helion.Settings | None" = None,
+    ver: int = 1,
 ) -> HelionKernelWrapper | Callable[[Callable], HelionKernelWrapper]:
     """
     Decorator to register a Helion kernel function as a HelionKernelWrapper.
 
     Wraps the raw kernel function in a HelionKernelWrapper and registers it
     in the global kernel registry. Auto-generates fake_impl if not provided.
+
+    Args:
+        ver: Version number for this kernel implementation (must be >= 1).
     """
+    if ver < 1:
+        raise ValueError(f"ver must be >= 1, got {ver}")
 
     def decorator(kernel_func: Callable) -> HelionKernelWrapper:
         op_name = op_name_or_func if isinstance(op_name_or_func, str) else None
         final_op_name = op_name if op_name else kernel_func.__name__
 
-        if final_op_name in _REGISTERED_KERNELS:
+        if (
+            final_op_name in _REGISTERED_KERNELS
+            and ver in _REGISTERED_KERNELS[final_op_name]
+        ):
             raise ValueError(
-                f"Helion kernel '{final_op_name}' is already registered. "
-                f"Use a different op_name or check for duplicate registrations."
+                f"Helion kernel '{final_op_name}' version {ver} is already "
+                f"registered. Use a different ver or check for duplicate "
+                f"registrations."
             )
 
         final_fake_impl = fake_impl
@@ -526,13 +599,15 @@ def register_kernel(
             op_name=final_op_name,
             fake_impl=final_fake_impl,
             helion_settings=helion_settings,
+            ver=ver,
         )
 
-        _REGISTERED_KERNELS[final_op_name] = kernel_wrapper
+        _REGISTERED_KERNELS.setdefault(final_op_name, {})[ver] = kernel_wrapper
 
         logger.info(
-            "Registered Helion kernel '%s' as HelionKernelWrapper",
+            "Registered Helion kernel '%s' v%d as HelionKernelWrapper",
             kernel_func.__name__,
+            ver,
         )
 
         return kernel_wrapper

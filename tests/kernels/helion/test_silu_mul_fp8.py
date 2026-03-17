@@ -35,7 +35,7 @@ def skip_if_platform_unsupported():
         except RuntimeError:
             config_manager = ConfigManager()
 
-        configs = config_manager.get_platform_configs("silu_mul_fp8", platform)
+        configs = config_manager.get_platform_configs("silu_mul_fp8_v1", platform)
         if len(configs) == 0:
             pytest.skip("Current GPU platform not supported for silu_mul_fp8 kernel")
 
@@ -368,23 +368,22 @@ class TestSiluMulFp8PytorchReference:
 
 class TestSiluMulFp8Integration:
     def test_kernel_registration_integration(self):
-        from vllm.kernels.helion.register import get_registered_kernels
+        from vllm.kernels.helion.register import get_kernel
 
-        registered_kernels = get_registered_kernels()
-        assert "silu_mul_fp8" in registered_kernels
-
-        kernel_wrapper = registered_kernels["silu_mul_fp8"]
+        kernel_wrapper = get_kernel("silu_mul_fp8", 1)
+        assert kernel_wrapper is not None
         assert kernel_wrapper.op_name == "silu_mul_fp8"
+        assert kernel_wrapper.ver == 1
         assert kernel_wrapper._config_picker is not None
 
     def test_fake_impl_functionality(self):
         skip_if_platform_unsupported()
-        from vllm.kernels.helion.register import get_registered_kernels
+        from vllm.kernels.helion.register import get_kernel
 
         input_tensor = torch.randn(32, 4096, dtype=torch.bfloat16, device="cuda")
         scale = torch.tensor([0.5], dtype=torch.float32, device="cuda")
-        registered_kernels = get_registered_kernels()
-        kernel_wrapper = registered_kernels["silu_mul_fp8"]
+        kernel_wrapper = get_kernel("silu_mul_fp8", 1)
+        assert kernel_wrapper is not None
         fake_impl = kernel_wrapper._fake_impl
 
         fake_output = fake_impl(input_tensor, scale)

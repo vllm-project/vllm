@@ -5,14 +5,17 @@
 Autotune registered Helion kernels for optimal configurations.
 
 Usage:
-    # Autotune all registered kernels
+    # Autotune all registered kernels (latest version of each)
     python scripts/autotune_helion_kernels.py
 
-    # Autotune specific kernel
+    # Autotune specific kernel (latest version)
     python scripts/autotune_helion_kernels.py --kernels silu_mul_fp8
 
-    # Autotune multiple kernels
-    python scripts/autotune_helion_kernels.py --kernels silu_mul_fp8 rms_norm_fp8
+    # Autotune specific version of a kernel
+    python scripts/autotune_helion_kernels.py --kernels silu_mul_fp8:1
+
+    # Autotune multiple kernels with different versions
+    python scripts/autotune_helion_kernels.py --kernels silu_mul_fp8:1 rms_norm_fp8:2
 
     # Force re-autotuning
     python scripts/autotune_helion_kernels.py --force
@@ -34,7 +37,7 @@ try:
 
     from vllm.kernels.helion import (
         ConfigManager,
-        get_kernel_by_name,
+        get_kernel,
         get_registered_kernels,
     )
     from vllm.kernels.helion.utils import get_canonical_gpu_name
@@ -68,7 +71,11 @@ def list_kernels() -> None:
     print("=" * 50)
 
     for name in sorted(kernels.keys()):
-        print(f"  {name}")
+        versions = kernels[name]
+        newest = max(versions)
+        for ver in sorted(versions):
+            suffix = "" if ver == newest else " [superseded]"
+            print(f"  {name} v{ver}{suffix}")
 
     print(f"\nTotal: {len(kernels)} kernels")
 
@@ -87,19 +94,21 @@ def check_requirements() -> bool:
 
 def autotune_kernel(
     kernel_name: str,
+    version: int,
     platform: str,
     config_manager: ConfigManager,
     force: bool = False,
     autotune_effort: str = "quick",
 ) -> AutotuneResult:
+    kernel_wrapper = get_kernel(kernel_name, version)
     logger.debug(
-        "Starting autotune for kernel '%s' with effort='%s'",
+        "Starting autotune for kernel '%s' v%d with effort='%s'",
         kernel_name,
+        version,
         autotune_effort,
     )
-    kernel_wrapper = get_kernel_by_name(kernel_name)
     if kernel_wrapper is None:
-        error_msg = f"Kernel '{kernel_name}' not found in registry"
+        error_msg = f"Kernel '{kernel_name}' version {version} not found in registry"
         logger.error(error_msg)
         return AutotuneResult(
             status="error",
@@ -109,6 +118,10 @@ def autotune_kernel(
             configs={},
         )
 
+    # TODO(gmagogsfm): get_inputs() allocates real tensors just to derive
+    # config keys.  Consider a lightweight get_config_keys() that returns
+    # keys without materialising tensors, so we can skip already-tuned
+    # configs before doing any GPU work.
     try:
         with FakeTensorMode():
             all_config_keys = list(kernel_wrapper.get_inputs().keys())
@@ -122,6 +135,9 @@ def autotune_kernel(
             failed=0,
             configs={},
         )
+
+    # From here on, use the versioned name for config lookup and logging.
+    kernel_name = kernel_wrapper.versioned_name
 
     try:
         logger.info(
@@ -297,37 +313,69 @@ def summarize_results(results: dict[str, AutotuneResult]) -> bool:
     return not has_failures
 
 
-def get_kernels_to_autotune(requested_kernels: list[str] | None) -> list[str]:
+def parse_kernel_spec(spec: str) -> tuple[str, int | None]:
+    """Parse 'name' or 'name:version' into (name, version|None)."""
+    if ":" in spec:
+        name, ver_str = spec.rsplit(":", 1)
+        try:
+            ver = int(ver_str)
+        except ValueError:
+            logger.error(
+                "Invalid version in '%s': '%s' is not an integer", spec, ver_str
+            )
+            sys.exit(1)
+        return name, ver
+    return spec, None
+
+
+def get_kernels_to_autotune(
+    requested: list[str] | None,
+) -> dict[str, int]:
+    """Parse kernel specs and resolve versions.
+
+    Returns dict mapping kernel name to resolved version number.
+    """
     all_kernels = get_registered_kernels()
     if not all_kernels:
         logger.error("No Helion kernels found in registry")
         sys.exit(1)
 
-    if not requested_kernels:
-        return list(all_kernels.keys())
+    if not requested:
+        return {name: max(versions) for name, versions in all_kernels.items()}
 
-    if len(requested_kernels) != len(set(requested_kernels)):
-        duplicates = [
-            k for k in set(requested_kernels) if requested_kernels.count(k) > 1
-        ]
+    parsed = [parse_kernel_spec(spec) for spec in requested]
+
+    names = [name for name, _ in parsed]
+    if len(names) != len(set(names)):
+        duplicates = [k for k in set(names) if names.count(k) > 1]
         logger.error("Duplicate kernel names in --kernels flag: %s", duplicates)
         sys.exit(1)
 
-    kernels_to_autotune = []
-    missing_kernels = []
-
-    for kernel_name in requested_kernels:
-        if kernel_name in all_kernels:
-            kernels_to_autotune.append(kernel_name)
+    result = {}
+    errors = []
+    for name, ver in parsed:
+        if name not in all_kernels:
+            errors.append(f"Kernel '{name}' not found")
+            continue
+        versions = all_kernels[name]
+        if ver is not None:
+            if ver not in versions:
+                errors.append(
+                    f"Version {ver} not found for kernel '{name}'. "
+                    f"Available: {sorted(versions.keys())}"
+                )
+                continue
+            result[name] = ver
         else:
-            missing_kernels.append(kernel_name)
+            result[name] = max(versions)
 
-    if missing_kernels:
-        logger.error("Kernel(s) not found: %s", missing_kernels)
+    if errors:
+        for err in errors:
+            logger.error(err)
         logger.error("Available kernels: %s", list(all_kernels.keys()))
         sys.exit(1)
 
-    return kernels_to_autotune
+    return result
 
 
 def main():
@@ -340,7 +388,11 @@ def main():
     parser.add_argument(
         "--kernels",
         nargs="+",
-        help="Kernel(s) to autotune (default: all kernels)",
+        help=(
+            "Kernel(s) to autotune, with optional version suffix "
+            "(e.g. 'silu_mul_fp8' or 'silu_mul_fp8:1'). "
+            "Default: latest version of all kernels."
+        ),
     )
 
     parser.add_argument(
@@ -417,13 +469,18 @@ def main():
         "Will autotune %d kernel(s) for platform '%s': %s",
         len(kernels_to_autotune),
         platform,
-        kernels_to_autotune,
+        [f"{name}:v{ver}" for name, ver in kernels_to_autotune.items()],
     )
 
     results = {}
-    for kernel_name in kernels_to_autotune:
+    for kernel_name, version in kernels_to_autotune.items():
         result = autotune_kernel(
-            kernel_name, platform, config_manager, args.force, args.autotune_effort
+            kernel_name,
+            version,
+            platform,
+            config_manager,
+            args.force,
+            args.autotune_effort,
         )
         results[kernel_name] = result
 

@@ -27,9 +27,10 @@ from vllm.kernels.helion.register import (
     _HOP_AVAILABLE,
     ConfiguredHelionKernel,
     HelionKernelWrapper,
-    get_kernel_by_name,
+    get_kernel,
     get_registered_kernels,
     register_kernel,
+    resolve_kernel,
     validate_helion_settings,
 )
 
@@ -475,7 +476,8 @@ class TestHelionKernelWrapper:
 
         existing_op = Mock()
         mock_namespace = Mock()
-        mock_namespace.test_kernel = existing_op
+        # Custom op is now registered with versioned_name
+        setattr(mock_namespace, wrapper.versioned_name, existing_op)
 
         with (
             patch(
@@ -582,8 +584,8 @@ class TestKernelRegistry:
         # Should have same content
         assert result1 == result2
 
-    def test_get_kernel_by_name_returns_kernel(self):
-        """Test get_kernel_by_name returns registered kernel."""
+    def test_get_kernel_returns_kernel(self):
+        """Test get_kernel returns specific version."""
         wrapper = HelionKernelWrapper(
             raw_kernel_func=Mock(),
             op_name="test_kernel",
@@ -592,15 +594,15 @@ class TestKernelRegistry:
 
         from vllm.kernels.helion.register import _REGISTERED_KERNELS
 
-        _REGISTERED_KERNELS["test_kernel"] = wrapper
+        _REGISTERED_KERNELS["test_kernel"] = {1: wrapper}
 
-        result = get_kernel_by_name("test_kernel")
+        result = get_kernel("test_kernel", 1)
         assert result is wrapper
 
-    def test_get_kernel_by_name_returns_none_for_missing(self):
-        """Test get_kernel_by_name returns None for missing kernel."""
-        result = get_kernel_by_name("nonexistent")
-        assert result is None
+    def test_get_kernel_returns_none_for_missing(self):
+        """Test get_kernel returns None for missing kernel."""
+        assert get_kernel("nonexistent", 1) is None
+        assert get_kernel("nonexistent", 99) is None
 
     def test_register_kernel_auto_generates_fake_impl(self):
         """Test register_kernel auto-generates fake_impl when not provided."""
@@ -646,7 +648,8 @@ class TestKernelRegistry:
 
         registered_kernels = get_registered_kernels()
         assert "test_kernel" in registered_kernels
-        assert registered_kernels["test_kernel"] is test_kernel
+        assert 1 in registered_kernels["test_kernel"]
+        assert registered_kernels["test_kernel"][1] is test_kernel
 
     def test_register_kernel_passes_helion_settings(self):
         """Test register_kernel passes helion_settings to wrapper."""
@@ -699,15 +702,15 @@ class TestKernelRegistry:
         assert test_kernel._config_picker is my_picker
 
     def test_register_kernel_raises_on_duplicate_registration(self):
-        """Test register_kernel raises error on duplicate names."""
+        """Test register_kernel raises error on same name + same version."""
 
-        @register_kernel("duplicate_name")
+        @register_kernel("duplicate_name", ver=1)
         def kernel1(x):
             return x
 
         with pytest.raises(ValueError, match="already registered"):
 
-            @register_kernel("duplicate_name")
+            @register_kernel("duplicate_name", ver=1)
             def kernel2(x):
                 return x
 
@@ -735,3 +738,177 @@ class TestKernelRegistry:
 
             # Should not call warning
             mock_logger.warning.assert_not_called()
+
+
+class TestVersionedKernelRegistration(TestKernelRegistry):
+    """Test suite for versioned kernel registration."""
+
+    def test_register_same_kernel_multiple_versions(self):
+        """Test registering multiple versions of the same kernel."""
+
+        @register_kernel("multi_ver", ver=1)
+        def kernel_v1(x):
+            return x
+
+        @register_kernel("multi_ver", ver=2)
+        def kernel_v2(x):
+            return x
+
+        versions = get_registered_kernels()["multi_ver"]
+        assert 1 in versions
+        assert 2 in versions
+        assert versions[1] is kernel_v1
+        assert versions[2] is kernel_v2
+
+    def test_register_duplicate_version_raises(self):
+        """Test that registering the same name+version raises."""
+
+        @register_kernel("dup_ver", ver=1)
+        def kernel_v1(x):
+            return x
+
+        with pytest.raises(ValueError, match="already registered"):
+
+            @register_kernel("dup_ver", ver=1)
+            def kernel_v1_dup(x):
+                return x
+
+    def test_bare_decorator_defaults_to_ver_1(self):
+        """Test bare @register_kernel defaults to ver=1."""
+
+        @register_kernel
+        def bare_kernel(x):
+            return x
+
+        assert bare_kernel.ver == 1
+
+    def test_versioned_name_property(self):
+        """Test versioned_name returns op_name_vN."""
+
+        @register_kernel("vname_test", ver=3)
+        def kernel_v3(x):
+            return x
+
+        assert kernel_v3.versioned_name == "vname_test_v3"
+
+    def test_older_version_is_implicitly_deprecated(self):
+        """Older versions are implicitly deprecated by existence of newer ones."""
+
+        @register_kernel("implicit_dep", ver=1)
+        def kernel_v1(x):
+            return x
+
+        @register_kernel("implicit_dep", ver=2)
+        def kernel_v2(x):
+            return x
+
+        versions = get_registered_kernels()["implicit_dep"]
+        assert max(versions) == 2
+        assert 1 in versions  # v1 exists but is implicitly deprecated
+
+    def test_ver_must_be_positive(self):
+        """Test that ver < 1 raises ValueError."""
+        with pytest.raises(ValueError, match="ver must be >= 1"):
+
+            @register_kernel("bad_ver", ver=0)
+            def kernel_v0(x):
+                return x
+
+
+class TestResolveKernel(TestKernelRegistry):
+    """Test suite for resolve_kernel function."""
+
+    def _make_config_manager(self, config_map):
+        """Helper to create a mock ConfigManager for resolve tests.
+
+        Args:
+            config_map: dict mapping versioned_name to configs dict.
+                        e.g. {"my_kernel_v2": {"default": config}, "my_kernel_v1": {}}
+
+        Returns:
+            A mock ConfigManager whose get_platform_configs looks up config_map.
+        """
+        mock_config_manager = Mock(spec=ConfigManager)
+        mock_config_manager.get_platform_configs = Mock(
+            side_effect=lambda name, platform: config_map.get(name, {})
+        )
+        return mock_config_manager
+
+    def test_resolves_to_latest_with_configs(self):
+        """Test resolve_kernel picks newest version that has configs."""
+
+        @register_kernel("resolve_latest", ver=1)
+        def kernel_v1(x):
+            return x
+
+        @register_kernel("resolve_latest", ver=2)
+        def kernel_v2(x):
+            return x
+
+        cm = self._make_config_manager(
+            {
+                "resolve_latest_v2": {"default": Mock()},
+                "resolve_latest_v1": {"default": Mock()},
+            }
+        )
+        result = resolve_kernel("resolve_latest", cm, "nvidia_h200")
+        assert result is kernel_v2
+
+    def test_falls_back_to_older_version(self):
+        """Test resolve_kernel falls back when newest has no configs."""
+
+        @register_kernel("resolve_fallback", ver=1)
+        def kernel_v1(x):
+            return x
+
+        @register_kernel("resolve_fallback", ver=2)
+        def kernel_v2(x):
+            return x
+
+        cm = self._make_config_manager(
+            {
+                "resolve_fallback_v2": {},
+                "resolve_fallback_v1": {"default": Mock()},
+            }
+        )
+        result = resolve_kernel("resolve_fallback", cm, "nvidia_h200")
+        assert result is kernel_v1
+
+    def test_emits_deprecation_warning_on_fallback(self):
+        """Test resolve_kernel emits DeprecationWarning on fallback."""
+        import warnings as _warnings
+
+        @register_kernel("resolve_warn", ver=1)
+        def kernel_v1(x):
+            return x
+
+        @register_kernel("resolve_warn", ver=2)
+        def kernel_v2(x):
+            return x
+
+        cm = self._make_config_manager(
+            {
+                "resolve_warn_v2": {},
+                "resolve_warn_v1": {"default": Mock()},
+            }
+        )
+        with _warnings.catch_warnings(record=True) as w:
+            _warnings.simplefilter("always")
+            result = resolve_kernel("resolve_warn", cm, "nvidia_h200")
+
+        assert result is kernel_v1
+        assert len(w) == 1
+        assert issubclass(w[0].category, DeprecationWarning)
+        assert "v1" in str(w[0].message)
+        assert "v2" in str(w[0].message)
+
+    def test_raises_when_no_configs(self):
+        """Test resolve_kernel raises when no version has configs."""
+
+        @register_kernel("resolve_none", ver=1)
+        def kernel_v1(x):
+            return x
+
+        cm = self._make_config_manager({"resolve_none_v1": {}})
+        with pytest.raises(ValueError, match="No configs available"):
+            resolve_kernel("resolve_none", cm, "nvidia_h200")
