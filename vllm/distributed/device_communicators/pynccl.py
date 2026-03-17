@@ -174,7 +174,7 @@ class PyNcclCommunicator:
             ncclDataTypeEnum.from_torch(in_tensor.dtype),
             ncclRedOpTypeEnum.from_torch(op),
             self.comm,
-            cudaStream_t(stream.cuda_stream),
+            cudaStream_t(stream.native_handle),
         )
         return out_tensor
 
@@ -198,7 +198,7 @@ class PyNcclCommunicator:
             input_tensor.numel(),
             ncclDataTypeEnum.from_torch(input_tensor.dtype),
             self.comm,
-            cudaStream_t(stream.cuda_stream),
+            cudaStream_t(stream.native_handle),
         )
 
     def all_gatherv(
@@ -231,7 +231,7 @@ class PyNcclCommunicator:
                 ncclDataTypeEnum.from_torch(input_tensor.dtype),
                 root,
                 self.comm,
-                cudaStream_t(stream.cuda_stream),
+                cudaStream_t(stream.native_handle),
             )
             split_offset += split_size
         self.nccl.ncclGroupEnd()
@@ -261,7 +261,7 @@ class PyNcclCommunicator:
             ncclDataTypeEnum.from_torch(input_tensor.dtype),
             ncclRedOpTypeEnum.from_torch(op),
             self.comm,
-            cudaStream_t(stream.cuda_stream),
+            cudaStream_t(stream.native_handle),
         )
 
     def reduce_scatterv(
@@ -296,7 +296,7 @@ class PyNcclCommunicator:
                 ncclRedOpTypeEnum.from_torch(op),
                 root,
                 self.comm,
-                cudaStream_t(stream.cuda_stream),
+                cudaStream_t(stream.native_handle),
             )
             split_offset += split_size
         self.nccl.ncclGroupEnd()
@@ -325,7 +325,7 @@ class PyNcclCommunicator:
             nccl_dtype,
             dst,
             self.comm,
-            cudaStream_t(stream.cuda_stream),
+            cudaStream_t(stream.native_handle),
         )
 
     def recv(self, tensor: torch.Tensor, src: int, stream=None):
@@ -352,7 +352,7 @@ class PyNcclCommunicator:
             nccl_dtype,
             src,
             self.comm,
-            cudaStream_t(stream.cuda_stream),
+            cudaStream_t(stream.native_handle),
         )
 
     def broadcast(self, tensor: torch.Tensor, src: int, stream=None):
@@ -378,7 +378,7 @@ class PyNcclCommunicator:
             ncclDataTypeEnum.from_torch(tensor.dtype),
             src,
             self.comm,
-            cudaStream_t(stream.cuda_stream),
+            cudaStream_t(stream.native_handle),
         )
 
     def group_start(self):
