@@ -1470,7 +1470,7 @@ class Scheduler(SchedulerInterface):
                         finish_reason=request.get_finished_reason(),
                         events=request.take_events(),
                         trace_headers=request.trace_headers,
-                        num_cached_tokens=request.num_cached_tokens,
+                        num_cached_tokens=max(0, request.num_cached_tokens),
                     )
                 )
 
