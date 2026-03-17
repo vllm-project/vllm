@@ -22,6 +22,11 @@ steps:
   commands:
     - pytest -v -s v1/engine/test_preprocess_error_handling.py
     - pytest -v -s v1/engine --ignore v1/engine/test_preprocess_error_handling.py
+  mirror:
+    amd:
+      device: mi325_1
+      depends_on:
+      - image-build-amd
 
 - label: e2e Scheduling (1 GPU)
   timeout_in_minutes: 30
@@ -30,6 +35,11 @@ steps:
     - tests/v1/e2e/general/
   commands:
     - pytest -v -s v1/e2e/general/test_async_scheduling.py
+  mirror:
+    amd:
+      device: mi325_1
+      depends_on:
+      - image-build-amd
 
 - label: e2e Core (1 GPU)
   timeout_in_minutes: 30
@@ -38,6 +48,11 @@ steps:
     - tests/v1/e2e/general/
   commands:
     - pytest -v -s v1/e2e/general --ignore v1/e2e/general/test_async_scheduling.py
+  mirror:
+    amd:
+      device: mi325_1
+      depends_on:
+      - image-build-amd
 
 - label: V1 e2e (2 GPUs)
   timeout_in_minutes: 60 # TODO: Fix timeout after we have more confidence in the test stability
@@ -51,7 +66,7 @@ steps:
     - pytest -v -s v1/e2e/spec_decode/test_spec_decode.py -k "tensor_parallelism"
   mirror:
     amd:
-      device: mi325_2
+      device: mi250_2
       depends_on:
       - image-build-amd
 
