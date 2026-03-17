@@ -58,3 +58,4 @@ opentelemetry-api >= 1.27.0
 opentelemetry-exporter-otlp >= 1.27.0
 opentelemetry-semantic-conventions-ai >= 0.4.1
 kaldi-native-fbank >= 1.18.7
+librosa==0.10.2.post1
