@@ -105,6 +105,7 @@ from vllm.entrypoints.openai.responses.utils import (
     construct_tool_dicts,
     extract_tool_types,
 )
+from vllm.entrypoints.serve.render.serving import OpenAIServingRender
 from vllm.entrypoints.utils import get_max_tokens
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs.data import ProcessorInputs, token_inputs
@@ -165,6 +166,7 @@ class OpenAIServingResponses(OpenAIServing):
         self,
         engine_client: EngineClient,
         models: OpenAIServingModels,
+        openai_serving_render: OpenAIServingRender,
         *,
         request_logger: RequestLogger | None,
         chat_template: str | None,
@@ -185,6 +187,7 @@ class OpenAIServingResponses(OpenAIServing):
             return_tokens_as_token_ids=return_tokens_as_token_ids,
         )
 
+        self.openai_serving_render = openai_serving_render
         self.chat_template = chat_template
         self.chat_template_content_format: Final = chat_template_content_format
         self.enable_log_outputs = enable_log_outputs
@@ -587,7 +590,7 @@ class OpenAIServingResponses(OpenAIServing):
             prev_response_output=prev_response.output if prev_response else None,
         )
 
-        _, engine_prompts = await self._preprocess_chat(
+        _, engine_prompts = await self.openai_serving_render.preprocess_chat(
             request,
             messages,
             default_template=self.chat_template,
