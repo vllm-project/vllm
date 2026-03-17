@@ -25,7 +25,7 @@ class CustomQwen2Decoder(PluggableLayer):
     non-causal attention + causal attention
     token_type_ids ：0=non-causal, 1=causal
     """
-    
+
     # --8<-- [end:qwen2_decoder]
 
     def __init__(
