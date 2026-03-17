@@ -273,4 +273,4 @@ docker run \
     -e "CMDS=${commands}" \
     --name "${container_name}" \
     "${image_name}" \
-    bash -c 'set -e; echo "${ZE_AFFINITY_MASK:-}"; eval "$CMDS"'
+    bash -c 'set -e; echo "ZE_AFFINITY_MASK is ${ZE_AFFINITY_MASK:-}"; eval "$CMDS"'
