@@ -78,4 +78,3 @@ More examples can be found here: [examples/pooling/token_classify](../../../exam
 ## Features
 
 Token classification features should be consistent with (sequence) classification. For more information, see [this page](classify.md#features).
-
