@@ -54,6 +54,10 @@ _TOOL_PARSERS_TO_REGISTER = {
         "granite_tool_parser",
         "GraniteToolParser",
     ),
+    "granite4": (
+        "granite4_tool_parser",
+        "Granite4ToolParser",
+    ),
     "hermes": (
         "hermes_tool_parser",
         "Hermes2ProToolParser",
