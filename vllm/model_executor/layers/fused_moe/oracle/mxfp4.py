@@ -153,6 +153,34 @@ def map_mxfp4_backend(runner_backend: str) -> Mxfp4MoeBackend:
     )
 
 
+def _get_priority_backends(
+    config: FusedMoEConfig,
+) -> list[Mxfp4MoeBackend]:
+    """
+    Get available backends in priority order based on platform and config.
+    Only includes BF16 backends. MXFP8 backends are selected via env vars.
+    """
+    _AVAILABLE_BACKENDS = [
+        Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16,
+        Mxfp4MoeBackend.TRITON,
+        Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_BF16,
+        Mxfp4MoeBackend.TRITON_UNFUSED,
+        Mxfp4MoeBackend.MARLIN,
+        Mxfp4MoeBackend.BATCHED_MARLIN,
+    ]
+    return _AVAILABLE_BACKENDS
+
+
+def _backend_activation_key(backend: Mxfp4MoeBackend) -> QuantKey | None:
+    """Map backend to its activation key (MXFP8 or None for BF16)."""
+    if backend in (
+        Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8,
+        Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_MXFP8,
+    ):
+        return kMxfp8Dynamic
+    return None
+
+
 def select_mxfp4_moe_backend(
     config: FusedMoEConfig,
 ) -> tuple[Mxfp4MoeBackend, type[mk.FusedMoEExperts] | None]:
@@ -160,8 +188,6 @@ def select_mxfp4_moe_backend(
     Select the primary MXFP4 MoE backend.
     Note: Shape-specific fallbacks may still occur at runtime.
     """
-    from vllm.utils.flashinfer import has_flashinfer
-
     triton_kernels_supported = has_triton_kernels() and (
         9,
         0,
@@ -294,41 +320,27 @@ def select_mxfp4_moe_backend(
             activation_format,
         )
 
-    # Default backend selection by platform
-    if (
-        not fi_bf16_disabled
-        and current_platform.is_device_capability_family(100)
-        and has_flashinfer()
-    ):
-        return _return_or_raise(
-            Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16,
-            config,
-            kMxfp4Static,
-            None,
-            activation_format,
-        )
-    elif current_platform.has_device_capability(90) and triton_kernels_supported:
-        return _return_or_raise(
-            Mxfp4MoeBackend.TRITON,
-            config,
-            kMxfp4Static,
-            None,
-            activation_format,
-        )
-    elif current_platform.has_device_capability(70):
-        backend = (
-            Mxfp4MoeBackend.MARLIN
-            if activation_format == mk.FusedMoEActivationFormat.Standard
-            else Mxfp4MoeBackend.BATCHED_MARLIN
-        )
-        return _return_or_raise(
-            backend,
-            config,
-            kMxfp4Static,
-            None,
-            activation_format,
-        )
-    elif current_platform.is_xpu():
+    # Select kernels in order of backend.
+    AVAILABLE_BACKENDS = _get_priority_backends(config)
+
+    # Handle env var removals (matching FP8 pattern)
+    if fi_bf16_disabled:
+        AVAILABLE_BACKENDS.remove(Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16)
+        AVAILABLE_BACKENDS.remove(Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_BF16)
+
+    for backend in AVAILABLE_BACKENDS:
+        activation_key = _backend_activation_key(backend)
+        for k_cls in backend_to_kernel_cls(backend):
+            supported, reason = k_cls.is_supported_config(
+                k_cls, config, kMxfp4Static, activation_key, activation_format
+            )
+            if supported:
+                logger.info_once(_make_log_backend(backend), scope="local")
+                return backend, k_cls
+            else:
+                logger.debug_once(_make_log_unsupported(backend, reason), scope="local")
+
+    if current_platform.is_xpu():
         backend = Mxfp4MoeBackend.XPU
         logger.info_once(_make_log_backend(backend))
         return backend, None
@@ -396,21 +408,18 @@ def convert_to_mxfp4_moe_kernel_format(
     sf_block_size = 32  # mxfp4 block size
 
     if mxfp4_backend in (Mxfp4MoeBackend.MARLIN, Mxfp4MoeBackend.BATCHED_MARLIN):
-        from vllm.model_executor.layers.quantization.utils.marlin_utils import (
-            get_marlin_input_dtype,
-        )
         from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
-            prepare_moe_fp4_layer_for_marlin,
+            prepare_moe_mxfp4_layer_for_marlin,
         )
 
-        prepare_moe_fp4_layer_for_marlin(layer, input_dtype=get_marlin_input_dtype())
-        return (
-            layer.w13_weight,
-            layer.w2_weight,
-            layer.w13_weight_scale,
-            layer.w2_weight_scale,
-            getattr(layer, "w13_bias", None),
-            getattr(layer, "w2_bias", None),
+        return prepare_moe_mxfp4_layer_for_marlin(
+            layer,
+            w13_weight,
+            w2_weight,
+            w13_weight_scale,
+            w2_weight_scale,
+            w13_bias,
+            w2_bias,
         )
 
     elif mxfp4_backend in TRTLLM_BACKENDS:
