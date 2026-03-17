@@ -121,6 +121,10 @@ void medium_context_topk(const torch::Tensor& score, torch::Tensor& indices,
 void large_context_topk(const torch::Tensor& logits, const torch::Tensor& lengths,
                         torch::Tensor& output, torch::Tensor& workspace, int64_t k);
 
+void persistent_topk(const torch::Tensor& logits, const torch::Tensor& lengths,
+                     torch::Tensor& output, torch::Tensor& workspace,
+                     int64_t k);
+
 void rms_norm_static_fp8_quant(torch::Tensor& out, torch::Tensor& input,
                                torch::Tensor& weight, torch::Tensor& scale,
                                double epsilon);

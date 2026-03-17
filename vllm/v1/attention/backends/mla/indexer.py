@@ -86,8 +86,6 @@ class DeepSeekV32IndexerDecodeMetadata:
     decode_lens: torch.Tensor
     requires_padding: bool
     schedule_metadata: torch.Tensor
-    use_medium_context_topk: bool
-    use_large_context_topk: bool
     offsets: torch.Tensor | None  # Precomputed offsets for speculative decoding
 
 
@@ -323,21 +321,6 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             # Use CPU to avoid GPU sync; breaking async scheduling
             requires_padding = (decode_lens_cpu.max() > decode_lens_cpu.min()).item()  # noqa: E501
 
-            # Decision logic based on micro-benchmark results.
-            # See: https://github.com/vllm-project/vllm/pull/34265
-            # Three ranges:
-            #   top_k_per_row_decode: seq_len <= 8K (fastest at 4K-8K)
-            #   medium_context_topk: 8K < seq_len < 96K
-            #   large_context_topk (radix): seq_len >= 64K (fastest at 64K+)
-            # large_context_topk uses PTX intrinsics -> not supported on ROCm
-            max_seq_len = common_attn_metadata.max_seq_len
-            use_large_context_topk = (
-                max_seq_len >= 65536 and current_platform.is_cuda()
-            )
-            use_medium_context_topk = (
-                max_seq_len > 8192 and not use_large_context_topk
-            )
-
             next_n = 1 + self.num_speculative_tokens
             if next_n > 1:
                 offsets = torch.arange(next_n, device=self.device, dtype=torch.int32)
@@ -355,8 +338,6 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 decode_lens=decode_lens,
                 requires_padding=requires_padding,
                 schedule_metadata=self.scheduler_metadata_buffer,
-                use_medium_context_topk=use_medium_context_topk,
-                use_large_context_topk=use_large_context_topk,
                 offsets=offsets,
             )
 

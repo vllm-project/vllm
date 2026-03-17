@@ -201,6 +201,11 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "Tensor workspace, int k) -> ()");
   ops.impl("large_context_topk", torch::kCUDA, &large_context_topk);
 
+  ops.def(
+      "persistent_topk(Tensor logits, Tensor lengths, Tensor! output, "
+      "Tensor workspace, int k) -> ()");
+  ops.impl("persistent_topk", torch::kCUDA, &persistent_topk);
+
   // Layernorm-quant
   // Apply Root Mean Square (RMS) Normalization to the input tensor.
   ops.def(

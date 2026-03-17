@@ -1684,7 +1684,6 @@ class GPUModelRunner(
         num_scheduled_tokens: dict[str, int] | None = None,
         cascade_attn_prefix_lens: list[list[int]] | None = None,
         slot_mappings: dict[int, torch.Tensor] | None = None,
-        capture_max_seq_len: int = 0,
     ) -> tuple[PerLayerAttnMetadata, CommonAttentionMetadata | None]:
         """
         :return: tuple[attn_metadata, spec_decode_common_attn_metadata]
@@ -1702,14 +1701,10 @@ class GPUModelRunner(
             attn_metadata = [dict() for _ in range(len(ubatch_slices))]
 
         if for_cudagraph_capture:
-            # When capture_max_seq_len is set, use it to allow seq_len-
-            # specialized graphs (e.g., different topk kernels for different
-            # seq_len ranges). Otherwise fall back to max_model_len to ensure
-            # correct kernel selection for backends like FA with sliding window.
-            if capture_max_seq_len > 0:
-                max_seq_len = capture_max_seq_len
-            else:
-                max_seq_len = self.max_model_len
+            # For some attention backends (e.g. FA) with sliding window models we need
+            # to make sure the backend see a max_seq_len that is larger to the sliding
+            # window size when capturing to make sure the correct kernel is selected.
+            max_seq_len = self.max_model_len
         else:
             max_seq_len = self.seq_lens.np[:num_reqs].max().item()
 
@@ -3093,7 +3088,6 @@ class GPUModelRunner(
         force_has_lora: bool | None = None,
         force_num_active_loras: int | None = None,
         num_encoder_reqs: int = 0,
-        max_seq_len: int = 0,
     ) -> tuple[
         CUDAGraphMode,
         BatchDescriptor,
@@ -3130,7 +3124,6 @@ class GPUModelRunner(
                 uniform_decode=uniform_decode,
                 disable_full=disable_full,
                 num_active_loras=num_active_loras,
-                max_seq_len=max_seq_len,
             )
             if not force_eager
             else (CUDAGraphMode.NONE, BatchDescriptor(num_tokens_padded))
@@ -3402,10 +3395,6 @@ class GPUModelRunner(
                     scheduler_output.num_common_prefix_blocks,
                 )
 
-            # Compute max_seq_len for seq_len-specialized CUDA graph dispatch.
-            # seq_lens.np is set by _prepare_inputs before this point.
-            actual_max_seq_len = int(self.seq_lens.np[:num_reqs].max())
-
             (
                 cudagraph_mode,
                 batch_desc,
@@ -3419,7 +3408,6 @@ class GPUModelRunner(
                 max_num_scheduled_tokens=max_num_scheduled_tokens,
                 use_cascade_attn=cascade_attn_prefix_lens is not None,
                 num_encoder_reqs=len(scheduler_output.scheduled_encoder_inputs),
-                max_seq_len=actual_max_seq_len,
             )
 
             logger.debug(
@@ -4632,7 +4620,6 @@ class GPUModelRunner(
         remove_lora: bool = True,
         is_graph_capturing: bool = False,
         num_active_loras: int = 0,
-        max_seq_len: int = 0,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Run a dummy forward pass to warm up/profile run or capture the
@@ -4742,7 +4729,6 @@ class GPUModelRunner(
                 # `force_num_active_loras` is used for cudagraph capture; because we
                 # need to capture graphs for specific num_active_loras counts
                 force_num_active_loras=num_active_loras,
-                max_seq_len=max_seq_len,
             )
         )
 
@@ -4807,9 +4793,6 @@ class GPUModelRunner(
                 ubatch_slices=ubatch_slices_padded if pad_attn else ubatch_slices,
                 for_cudagraph_capture=is_graph_capturing,
                 slot_mappings=slot_mappings_by_group,
-                # Use the original max_seq_len param (not batch_desc.max_seq_len)
-                # so warmup runs also use the target seq_len for kernel selection.
-                capture_max_seq_len=max_seq_len,
             )
 
         with self.maybe_dummy_run_with_lora(
@@ -5335,7 +5318,6 @@ class GPUModelRunner(
                     cudagraph_runtime_mode=CUDAGraphMode.NONE,
                     allow_microbatching=allow_microbatching,
                     num_active_loras=num_active_loras,
-                    max_seq_len=batch_desc.max_seq_len,
                 )
 
             # Capture run
@@ -5345,7 +5327,6 @@ class GPUModelRunner(
                 allow_microbatching=allow_microbatching,
                 num_active_loras=num_active_loras,
                 is_graph_capturing=True,
-                max_seq_len=batch_desc.max_seq_len,
             )
         self.maybe_remove_all_loras(self.lora_config)
 
@@ -5600,32 +5581,6 @@ class GPUModelRunner(
             self.cudagraph_batch_sizes = (
                 capture_sizes if capture_sizes is not None else []
             )
-
-        # Configure seq_len-specialized FULL graphs for models with
-        # sparse attention indexer (topk kernel selection depends on seq_len).
-        # Three topk kernel ranges based on micro-benchmarks:
-        #   top_k_per_row_decode: seq_len <= 8K
-        #   medium_context_topk:  8K < seq_len < 64K
-        #   large_context_topk:   seq_len >= 64K
-        # Each range needs a separate CUDA graph since Python-level kernel
-        # selection is frozen during FULL graph capture.
-        TOPK_SHORT_THRESHOLD = 8192
-        TOPK_LARGE_THRESHOLD = 65536
-        if cudagraph_mode.decode_mode() == CUDAGraphMode.FULL:
-            has_indexer = any(
-                attn_backend.get_name() == "DEEPSEEK_V32_INDEXER"
-                for attn_backend_set in attention_backends
-                for attn_backend in attn_backend_set
-            )
-            if has_indexer:
-                buckets = []
-                if self.max_model_len > TOPK_SHORT_THRESHOLD:
-                    buckets.append(TOPK_SHORT_THRESHOLD)
-                if self.max_model_len >= TOPK_LARGE_THRESHOLD:
-                    buckets.append(TOPK_LARGE_THRESHOLD - 1)
-                buckets.append(self.max_model_len)
-                if len(buckets) > 1:
-                    self.cudagraph_dispatcher.set_seq_len_buckets(buckets)
 
         # Trigger cudagraph dispatching keys initialization after
         # resolved cudagraph mode.

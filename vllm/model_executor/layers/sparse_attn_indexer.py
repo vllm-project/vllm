@@ -168,44 +168,20 @@ def sparse_attn_indexer(
         num_rows = logits.shape[0]
         topk_indices = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
 
-        if decode_metadata.use_large_context_topk:
-            if next_n == 1:
-                lengths = decode_metadata.seq_lens
-            else:
-                # (bs,) -> (bs, 1) + (next_n,) -> (bs, next_n) -> (bs * next_n,)
-                lengths = (
-                    decode_metadata.seq_lens.unsqueeze(1)
-                    - next_n
-                    + 1
-                    + decode_metadata.offsets
-                ).flatten()
+        if next_n == 1:
+            lengths = decode_metadata.seq_lens
+        else: #TODO: isn't this a problem for next_n > 1 and top_k_per_row_decode?
+            # (bs,) -> (bs, 1) + (next_n,) -> (bs, next_n) -> (bs * next_n,)
+            lengths = (
+                decode_metadata.seq_lens.unsqueeze(1)
+                - next_n
+                + 1
+                + decode_metadata.offsets
+            ).flatten()
 
-            torch.ops._C.large_context_topk(
-                logits, lengths, topk_indices, topk_workspace, topk_tokens
-            )
-        elif decode_metadata.use_medium_context_topk:
-            if next_n == 1:
-                lengths = decode_metadata.seq_lens
-            else:
-                lengths = (
-                    decode_metadata.seq_lens.unsqueeze(1)
-                    - next_n
-                    + 1
-                    + decode_metadata.offsets
-                ).flatten()
-
-            torch.ops._C.medium_context_topk(logits, topk_indices, lengths, None)
-        else:
-            torch.ops._C.top_k_per_row_decode(
-                logits,
-                next_n,
-                decode_metadata.seq_lens,
-                topk_indices,
-                num_rows,
-                logits.stride(0),
-                logits.stride(1),
-                topk_tokens,
-            )
+        torch.ops._C.persistent_topk(
+            logits, lengths, topk_indices, topk_workspace, topk_tokens
+        )
 
         if decode_metadata.requires_padding:
             # if padded, we need to unpack
