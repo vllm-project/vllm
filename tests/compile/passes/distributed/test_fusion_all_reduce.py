@@ -179,7 +179,7 @@ class TestAllReduceFusedAddRMSNormStaticQuantFP4Model(torch.nn.Module):
     def ops_in_model_before(self):
         return [
             torch.ops.vllm.all_reduce.default,
-            torch.ops._C.scaled_fp4_quant.default,
+            torch.ops._C.scaled_fp4_quant.out,
         ]
 
 
