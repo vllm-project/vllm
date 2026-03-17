@@ -59,7 +59,7 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "Ovis2_5Processor": "vllm.transformers_utils.processors.ovis2_5",
     "QwenVLProcessor": "vllm.transformers_utils.processors.qwen_vl",
     "Qwen3ASRProcessor": "vllm.transformers_utils.processors.qwen3_asr",
-    "SkyworkR1VProcessor": "vllm.transformers_utils.processors.skywork_r1v",
+    "SkyworkR1VProcessor": "vllm.transformers_utils.processors.skyworkr1v",
 }
 
 

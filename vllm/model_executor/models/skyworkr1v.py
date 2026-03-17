@@ -43,7 +43,7 @@ from vllm.multimodal.processing import (
     PromptUpdate,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.processors.skywork_r1v import SkyworkR1VProcessor
+from vllm.transformers_utils.processors.skyworkr1v import SkyworkR1VProcessor
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
