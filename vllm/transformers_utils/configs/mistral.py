@@ -134,6 +134,9 @@ def _remap_mistral_yarn_args(config: dict) -> dict:
             # Cast to remove Transformers > v5 type warnings
             config["rope_parameters"][new_name] = cast(yarn_config.pop(old_name))
 
+    # Ignore apply_yarn_scaling in Transformers > v5 RoPE validation to remove warnings
+    config["ignore_keys_at_rope_validation"] = ["apply_yarn_scaling"]
+
     assert len(yarn_config) == 0, f"Unparsed yarn config: {yarn_config}"
 
     return config
