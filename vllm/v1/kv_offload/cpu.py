@@ -42,10 +42,8 @@ class CPUOffloadingSpec(OffloadingSpec):
             * len(kv_cache_config.kv_cache_tensors)
             * vllm_config.parallel_config.world_size
         )
-        kv_bytes_per_offloaded_block = kv_bytes_per_block * (
-            self.offloaded_block_size // self.gpu_block_size
-        )
 
+        kv_bytes_per_offloaded_block = kv_bytes_per_block * self.block_size_factor
         self.num_blocks = (
             int(cpu_bytes_to_use) // kv_bytes_per_offloaded_block
             if kv_bytes_per_offloaded_block > 0
@@ -67,8 +65,11 @@ class CPUOffloadingSpec(OffloadingSpec):
                 kv_events_config is not None and kv_events_config.enable_kv_cache_events
             )
 
+            assert len(self.gpu_block_size) == 1
+            gpu_block_size = self.gpu_block_size[0]
+            offloaded_block_size = gpu_block_size * self.block_size_factor
             backend = CPUBackend(
-                block_size=self.offloaded_block_size, num_blocks=self.num_blocks
+                block_size=offloaded_block_size, num_blocks=self.num_blocks
             )
 
             if self.eviction_policy == "lru":
@@ -111,10 +112,13 @@ class CPUOffloadingSpec(OffloadingSpec):
                     "CPU Offloading is currently only supported on CUDA-alike GPUs"
                 )
 
+            assert len(self.gpu_block_size) == 1
+            gpu_block_size = self.gpu_block_size[0]
+
             self._handlers = CpuGpuOffloadingHandlers(
                 attn_backends=attn_backends,
-                gpu_block_size=self.gpu_block_size,
-                cpu_block_size=self.offloaded_block_size,
+                gpu_block_size=gpu_block_size,
+                cpu_block_size=gpu_block_size * self.block_size_factor,
                 num_cpu_blocks=self.num_blocks,
                 gpu_caches=kv_caches,
             )
