@@ -364,14 +364,6 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             "initialization logic. This function should not be called."
         )
 
-    @property
-    def is_monolithic(self) -> bool:
-        if self.moe_kernel is None:
-            if hasattr(self, "experts_cls") and self.experts_cls is not None:
-                return self.experts_cls.is_monolithic()
-            return False
-        return self.moe_kernel.is_monolithic
-
     def apply(
         self,
         layer: FusedMoE,

@@ -327,7 +327,3 @@ class TrtLlmMxfp4ExpertsModular(TrtLlmMxfp4ExpertsBase, mk.FusedMoEExpertsModula
             trtllm_fp4_block_scale_routed_moe(**kwargs)
 
         return output
-
-
-# Backward-compatible alias
-TrtLlmGenExperts = TrtLlmMxfp4ExpertsModular

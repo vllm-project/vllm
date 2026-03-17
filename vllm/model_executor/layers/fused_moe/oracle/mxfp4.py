@@ -141,7 +141,9 @@ def map_mxfp4_backend(runner_backend: str) -> Mxfp4MoeBackend:
     """Map user's moe_backend string to Mxfp4MoeBackend."""
     mapping: dict[str, Mxfp4MoeBackend] = {
         "flashinfer_trtllm": Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16,
+        "flashinfer_trtllm_afp8": Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8,
         "flashinfer_cutlass": Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_BF16,
+        "flashinfer_cutlass_afp8": Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_MXFP8,
         "triton": Mxfp4MoeBackend.TRITON,
         "marlin": Mxfp4MoeBackend.MARLIN,
     }
@@ -243,7 +245,6 @@ def select_mxfp4_moe_backend(
                 return backend, k_cls
         raise ValueError(_make_log_unsupported(backend, reason))
 
-    # Issue 10 fix: handle explicit moe_backend from user (matches FP8/NvFP4)
     runner_backend = config.moe_backend
     if runner_backend != "auto":
         requested_backend = map_mxfp4_backend(runner_backend)
@@ -256,33 +257,31 @@ def select_mxfp4_moe_backend(
             requested_backend, config, kMxfp4Static, None, activation_format
         )
 
-    # Track if FlashInfer BF16 is explicitly disabled
-    fi_bf16_disabled = (
-        envs.is_set("VLLM_USE_FLASHINFER_MOE_MXFP4_BF16")
-        and not envs.VLLM_USE_FLASHINFER_MOE_MXFP4_BF16
-    )
+    # Select kernels in order of backend.
+    AVAILABLE_BACKENDS = _get_priority_backends(config)
 
     # Handle explicit FlashInfer MXFP4 BF16 configuration.
-    if (
-        envs.is_set("VLLM_USE_FLASHINFER_MOE_MXFP4_BF16")
-        and envs.VLLM_USE_FLASHINFER_MOE_MXFP4_BF16
-    ):
-        if current_platform.is_device_capability(90):
-            return _return_or_raise(
-                Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_BF16,
-                config,
-                kMxfp4Static,
-                None,
-                activation_format,
-            )
-        if current_platform.is_device_capability_family(100):
-            return _return_or_raise(
-                Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16,
-                config,
-                kMxfp4Static,
-                None,
-                activation_format,
-            )
+    if envs.is_set("VLLM_USE_FLASHINFER_MOE_MXFP4_BF16"):
+        if not envs.VLLM_USE_FLASHINFER_MOE_MXFP4_BF16:
+            AVAILABLE_BACKENDS.remove(Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16)
+            AVAILABLE_BACKENDS.remove(Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_BF16)
+        else:
+            if current_platform.is_device_capability(90):
+                return _return_or_raise(
+                    Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_BF16,
+                    config,
+                    kMxfp4Static,
+                    None,
+                    activation_format,
+                )
+            if current_platform.is_device_capability_family(100):
+                return _return_or_raise(
+                    Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16,
+                    config,
+                    kMxfp4Static,
+                    None,
+                    activation_format,
+                )
 
     # Handle explicit FlashInfer MXFP4 MXFP8 TRTLLM configuration.
     if (
@@ -319,14 +318,6 @@ def select_mxfp4_moe_backend(
             None,
             activation_format,
         )
-
-    # Select kernels in order of backend.
-    AVAILABLE_BACKENDS = _get_priority_backends(config)
-
-    # Handle env var removals (matching FP8 pattern)
-    if fi_bf16_disabled:
-        AVAILABLE_BACKENDS.remove(Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16)
-        AVAILABLE_BACKENDS.remove(Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_BF16)
 
     for backend in AVAILABLE_BACKENDS:
         activation_key = _backend_activation_key(backend)
