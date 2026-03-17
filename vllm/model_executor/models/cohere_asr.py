@@ -511,9 +511,7 @@ class MaskedConvSequential(nn.Sequential):
         x = self.apply_channel_mask(x, mask)
         return x, current_lengths.long()
 
-    def _create_mask(
-        self, tensor: torch.Tensor, lengths: torch.Tensor
-    ) -> torch.Tensor:
+    def _create_mask(self, tensor: torch.Tensor, lengths: torch.Tensor) -> torch.Tensor:
         """Create broadcastable mask from per-sample lengths.
 
         Returns a (B, 1, T, 1) mask that broadcasts over channels and
@@ -561,16 +559,10 @@ class ConvSubsampling(nn.Module):
         super().__init__()
         if activation is None:
             activation = nn.ReLU()
-        self._subsampling = subsampling
-        self._conv_channels = conv_channels
-        self._feat_in = feat_in
-        self._feat_out = feat_out
 
         if subsampling_factor % 2 != 0:
             raise ValueError("Sampling factor should be a multiply of 2!")
         self._sampling_num = int(math.log(subsampling_factor, 2))
-        self.subsampling_factor = subsampling_factor
-        self.is_causal = is_causal
 
         if (
             subsampling_conv_chunking_factor != -1
@@ -580,7 +572,6 @@ class ConvSubsampling(nn.Module):
             raise ValueError(
                 "subsampling_conv_chunking_factor should be -1, 1, or a power of 2"
             )
-        self.subsampling_conv_chunking_factor = subsampling_conv_chunking_factor
 
         in_channels = 1
         layers = []
@@ -590,11 +581,10 @@ class ConvSubsampling(nn.Module):
         self._kernel_size = 3
         self._ceil_mode = False
 
-        assert not self.is_causal
+        assert not is_causal
 
         self._left_padding = (self._kernel_size - 1) // 2
         self._right_padding = (self._kernel_size - 1) // 2
-        self._max_cache_len = 0
 
         # Layer 1
         # [1, T, num_melspec] -> [conv_channels, T//2, num_melspec//2]
@@ -749,9 +739,7 @@ class RelPositionalEncoding(PositionalEncoding):
         xscale (bool): whether to scale the input by sqrt(d_model)
     """
 
-    def extend_pe(
-        self, length: int, device: torch.device, dtype: torch.dtype
-    ) -> None:
+    def extend_pe(self, length: int, device: torch.device, dtype: torch.dtype) -> None:
         """Reset and extend the positional encodings if needed."""
         needed_size = 2 * length - 1
         if hasattr(self, "pe") and self.pe.size(1) >= needed_size:
@@ -810,12 +798,9 @@ class ConformerFeedForward(nn.Module):
         super().__init__()
         if activation is None:
             activation = Swish()
-        self.d_model = d_model
-        self.d_ff = d_ff
-        self.use_bias = use_bias
-        self.linear1 = nn.Linear(d_model, d_ff, bias=self.use_bias)
+        self.linear1 = nn.Linear(d_model, d_ff, bias=use_bias)
         self.activation = activation
-        self.linear2 = nn.Linear(d_ff, d_model, bias=self.use_bias)
+        self.linear2 = nn.Linear(d_ff, d_model, bias=use_bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.linear1(x)
@@ -857,7 +842,6 @@ class CausalConv1D(nn.Conv1d):
         device=None,
         dtype=None,
     ) -> None:
-        self.cache_drop_size = None
         if padding is None:
             self._left_padding = kernel_size - 1
             self._right_padding = stride - 1
@@ -876,8 +860,6 @@ class CausalConv1D(nn.Conv1d):
                 self._right_padding = padding[1]
             else:
                 raise ValueError(f"Invalid padding param: {padding}!")
-
-        self._max_cache_len = self._left_padding
 
         super().__init__(
             in_channels=in_channels,
@@ -924,16 +906,11 @@ class ConformerConvolution(nn.Module):
     ) -> None:
         super().__init__()
         assert (kernel_size - 1) % 2 == 0
-        self.d_model = d_model
-        self.kernel_size = kernel_size
-        self.norm_type = norm_type
-        self.use_bias = use_bias
 
         if conv_context_size is None:
             conv_context_size = (kernel_size - 1) // 2
 
         assert pointwise_activation == "glu_"
-        self.pointwise_activation = pointwise_activation
         dw_conv_input_dim = d_model
 
         self.pointwise_conv1 = nn.Conv1d(
@@ -942,7 +919,7 @@ class ConformerConvolution(nn.Module):
             kernel_size=1,
             stride=1,
             padding=0,
-            bias=self.use_bias,
+            bias=use_bias,
         )
 
         self.depthwise_conv = CausalConv1D(
@@ -952,7 +929,7 @@ class ConformerConvolution(nn.Module):
             stride=1,
             padding=conv_context_size,
             groups=dw_conv_input_dim,
-            bias=self.use_bias,
+            bias=use_bias,
         )
 
         assert norm_type == "batch_norm"
@@ -965,7 +942,7 @@ class ConformerConvolution(nn.Module):
             kernel_size=1,
             stride=1,
             padding=0,
-            bias=self.use_bias,
+            bias=use_bias,
         )
 
     def forward(
@@ -1007,8 +984,6 @@ class CohereASRMultiHeadAttention(nn.Module):
         """Construct an MultiHeadedAttention object."""
         super().__init__()
 
-        self.cache_drop_size = None
-        self.use_bias = use_bias
         assert n_feat % n_head == 0
         self.d_k = n_feat // n_head
         self.s_d_k = math.sqrt(self.d_k)
@@ -1017,8 +992,6 @@ class CohereASRMultiHeadAttention(nn.Module):
         self.linear_k = nn.Linear(n_feat, n_feat, bias=use_bias)
         self.linear_v = nn.Linear(n_feat, n_feat, bias=use_bias)
         self.linear_out = nn.Linear(n_feat, n_feat, bias=use_bias)
-
-        self._max_cache_len = max_cache_len
 
     def forward_qkv(
         self,
@@ -1251,7 +1224,6 @@ class ConformerLayer(torch.nn.Module):
             att_context_size = [-1, -1]
 
         self.self_attention_model = self_attention_model
-        self.n_heads = n_heads
         self.fc_factor = 0.5
 
         # first feed forward module
@@ -1392,19 +1364,17 @@ class ConformerEncoder(nn.Module):
 
         d_ff = d_model * ff_expansion_factor
         self.d_model = d_model
-        self.n_layers = n_layers
         self._feat_in = feat_in
         self.att_context_style = att_context_style
         self.subsampling_factor = subsampling_factor
-        self.subsampling_conv_chunking_factor = subsampling_conv_chunking_factor
 
         self.self_attention_model = self_attention_model
 
         # Setting up the att_context_size
         (
-            self.att_context_size_all,
+            _,
             self.att_context_size,
-            self.att_context_probs,
+            _,
             self.conv_context_size,
         ) = self._calc_context_sizes(
             att_context_style=att_context_style,
@@ -1487,7 +1457,6 @@ class ConformerEncoder(nn.Module):
             self.out_proj = None
             self._feat_out = d_model
         self.set_max_audio_length(self.pos_emb_max_len)
-        self.use_pad_mask = True
 
     def get_num_encoder_cross_attn_tokens(self, num_encoder_input_tokens: int) -> int:
         num_encoder_cross_attn_tokens = math.ceil(
@@ -1503,7 +1472,6 @@ class ConformerEncoder(nn.Module):
         Args:
             max_audio_length (int): New maximum sequence length.
         """
-        self.max_audio_length = max_audio_length
         device = next(self.parameters()).device
         dtype = next(self.parameters()).dtype
         self.pos_enc.extend_pe(max_audio_length, device, dtype)
