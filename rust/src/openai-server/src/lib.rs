@@ -1,3 +1,5 @@
+#![feature(coroutines)]
+
 //! Minimal OpenAI-compatible HTTP server above [`vllm_chat`].
 //!
 //! This crate keeps the northbound surface intentionally narrow:

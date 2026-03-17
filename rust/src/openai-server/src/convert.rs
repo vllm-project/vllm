@@ -1,17 +1,12 @@
 use std::collections::HashMap;
 
-use openai_protocol::chat::{
-    ChatCompletionRequest, ChatCompletionStreamResponse, ChatMessage, ChatMessageDelta,
-    ChatStreamChoice, MessageContent,
-};
+use openai_protocol::chat::{ChatCompletionRequest, ChatMessage, MessageContent};
 use openai_protocol::common::ContentPart;
-use serde_json::Value;
 use uuid::Uuid;
 use vllm_chat::{
     ChatContent, ChatContentPart, ChatMessage as VllmChatMessage, ChatOptions, ChatRequest,
     ChatRole, UserSamplingParams,
 };
-use vllm_engine_core_client::protocol::{FinishReason, StopReason};
 
 use crate::error::ApiError;
 
@@ -74,92 +69,6 @@ pub fn prepare_chat_request(
         response_model: configured_model.to_string(),
         chat_request,
     })
-}
-
-/// Build the initial assistant-role SSE chunk required by the OpenAI streaming protocol.
-pub fn start_chunk(
-    response_id: &str,
-    response_model: &str,
-    created: u64,
-) -> ChatCompletionStreamResponse {
-    ChatCompletionStreamResponse {
-        id: response_id.to_string(),
-        object: "chat.completion.chunk".to_string(),
-        created,
-        model: response_model.to_string(),
-        system_fingerprint: None,
-        choices: vec![ChatStreamChoice {
-            index: 0,
-            delta: ChatMessageDelta {
-                role: Some("assistant".to_string()),
-                content: None,
-                tool_calls: None,
-                reasoning_content: None,
-            },
-            logprobs: None,
-            finish_reason: None,
-            matched_stop: None,
-        }],
-        usage: None,
-    }
-}
-
-/// Build one content-delta SSE chunk from one internal text delta.
-pub fn text_chunk(
-    response_id: &str,
-    response_model: &str,
-    created: u64,
-    delta: String,
-) -> ChatCompletionStreamResponse {
-    ChatCompletionStreamResponse {
-        id: response_id.to_string(),
-        object: "chat.completion.chunk".to_string(),
-        created,
-        model: response_model.to_string(),
-        system_fingerprint: None,
-        choices: vec![ChatStreamChoice {
-            index: 0,
-            delta: ChatMessageDelta {
-                role: None,
-                content: Some(delta),
-                tool_calls: None,
-                reasoning_content: None,
-            },
-            logprobs: None,
-            finish_reason: None,
-            matched_stop: None,
-        }],
-        usage: None,
-    }
-}
-
-/// Build the terminal SSE chunk carrying the OpenAI finish reason.
-pub fn final_chunk(
-    response_id: &str,
-    response_model: &str,
-    created: u64,
-    finish_reason: FinishReason,
-    stop_reason: Option<StopReason>,
-) -> Result<ChatCompletionStreamResponse, ApiError> {
-    let finish_reason = match finish_reason {
-        FinishReason::Stop => "stop",
-        FinishReason::Length => "length",
-        FinishReason::Repetition => "stop",
-        FinishReason::Abort | FinishReason::Error => {
-            return Err(ApiError::server_error(
-                "stream terminated without a valid OpenAI finish reason",
-            ));
-        }
-    };
-
-    let matched_stop = stop_reason.map(stop_reason_to_json);
-
-    Ok(
-        ChatCompletionStreamResponse::builder(response_id.to_string(), response_model.to_string())
-            .created(created)
-            .add_choice_finish_reason(0, finish_reason, matched_stop)
-            .build(),
-    )
 }
 
 /// Lower one OpenAI chat message into the text-only `vllm-chat` message shape.
@@ -231,11 +140,6 @@ fn convert_content(content: &MessageContent) -> Result<ChatContent, ApiError> {
     }
 }
 
-/// Convert one internal stop reason into the OpenAI-compatible `matched_stop` JSON shape.
-fn stop_reason_to_json(stop_reason: StopReason) -> Value {
-    serde_json::to_value(stop_reason).expect("StopReason must serialize to JSON")
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -243,9 +147,8 @@ mod tests {
     use openai_protocol::chat::{ChatCompletionRequest, ChatMessage, MessageContent};
     use openai_protocol::common::ContentPart;
     use serde_json::json;
-    use vllm_engine_core_client::protocol::{FinishReason, StopReason};
 
-    use super::{final_chunk, prepare_chat_request, text_chunk};
+    use super::prepare_chat_request;
 
     fn base_request() -> ChatCompletionRequest {
         ChatCompletionRequest {
@@ -315,48 +218,5 @@ mod tests {
         };
 
         assert!(prepare_chat_request(&request, "Qwen/Qwen1.5-0.5B-Chat").is_err());
-    }
-
-    #[test]
-    fn text_chunk_uses_content_only_delta() {
-        let chunk = text_chunk("chatcmpl-1", "model", 1, "hello".to_string());
-        assert_eq!(chunk.choices[0].delta.role, None);
-        assert_eq!(chunk.choices[0].delta.content.as_deref(), Some("hello"));
-    }
-
-    #[test]
-    fn final_chunk_maps_stop_finish_reason_and_matched_stop() {
-        let chunk = final_chunk(
-            "chatcmpl-1",
-            "model",
-            1,
-            FinishReason::Stop,
-            Some(StopReason::Text("stop".to_string())),
-        )
-        .expect("finish reason is valid");
-
-        assert_eq!(chunk.choices[0].finish_reason.as_deref(), Some("stop"));
-        assert_eq!(chunk.choices[0].matched_stop, Some(json!("stop")));
-    }
-
-    #[test]
-    fn final_chunk_maps_length_finish_reason() {
-        let chunk = final_chunk(
-            "chatcmpl-1",
-            "model",
-            1,
-            FinishReason::Length,
-            Some(StopReason::TokenId(42)),
-        )
-        .expect("finish reason is valid");
-
-        assert_eq!(chunk.choices[0].finish_reason.as_deref(), Some("length"));
-        assert_eq!(chunk.choices[0].matched_stop, Some(json!(42)));
-    }
-
-    #[test]
-    fn final_chunk_rejects_abort_and_error_finish_reasons() {
-        assert!(final_chunk("chatcmpl-1", "model", 1, FinishReason::Abort, None).is_err());
-        assert!(final_chunk("chatcmpl-1", "model", 1, FinishReason::Error, None).is_err());
     }
 }

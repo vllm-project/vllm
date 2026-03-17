@@ -4,7 +4,7 @@ use axum::response::{IntoResponse, Response};
 use openai_protocol::common::{ErrorDetail, ErrorResponse};
 
 /// Small OpenAI-style error family used by the minimal HTTP layer.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum ApiError {
     /// The request is syntactically valid OpenAI JSON but asks for unsupported behavior.
     InvalidRequest {
@@ -48,45 +48,52 @@ impl ApiError {
             message: message.into(),
         }
     }
-}
 
-impl IntoResponse for ApiError {
-    fn into_response(self) -> Response {
-        let (status, error_type, message, param, code) = match self {
+    /// Return the HTTP status code associated with this API error.
+    pub fn status_code(&self) -> StatusCode {
+        match self {
+            Self::InvalidRequest { .. } => StatusCode::BAD_REQUEST,
+            Self::ModelNotFound { .. } => StatusCode::NOT_FOUND,
+            Self::ServerError { .. } => StatusCode::INTERNAL_SERVER_ERROR,
+        }
+    }
+
+    /// Convert this error into the standard OpenAI-compatible JSON error payload.
+    pub fn to_error_response(&self) -> ErrorResponse {
+        let (error_type, message, param, code) = match self {
             Self::InvalidRequest { message, param } => (
-                StatusCode::BAD_REQUEST,
                 "invalid_request_error",
-                message,
-                param,
+                message.clone(),
+                param.clone(),
                 Some("invalid_request_error".to_string()),
             ),
             Self::ModelNotFound { model } => (
-                StatusCode::NOT_FOUND,
                 "invalid_request_error",
                 format!("The model `{model}` does not exist."),
                 Some("model".to_string()),
                 Some("model_not_found".to_string()),
             ),
             Self::ServerError { message } => (
-                StatusCode::INTERNAL_SERVER_ERROR,
                 "server_error",
-                message,
+                message.clone(),
                 None,
                 Some("server_error".to_string()),
             ),
         };
 
-        (
-            status,
-            Json(ErrorResponse {
-                error: ErrorDetail {
-                    message,
-                    error_type: error_type.to_string(),
-                    param,
-                    code,
-                },
-            }),
-        )
-            .into_response()
+        ErrorResponse {
+            error: ErrorDetail {
+                message,
+                error_type: error_type.to_string(),
+                param,
+                code,
+            },
+        }
+    }
+}
+
+impl IntoResponse for ApiError {
+    fn into_response(self) -> Response {
+        (self.status_code(), Json(self.to_error_response())).into_response()
     }
 }

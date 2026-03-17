@@ -10,7 +10,8 @@ use futures::StreamExt as _;
 use serde_json::json;
 use tower::util::ServiceExt as _;
 use vllm_chat::{
-    ChatBackend, ChatEvent, ChatLlm, ChatMessage, ChatRequest, ChatRole, UserSamplingParams,
+    ChatBackend, ChatEvent, ChatLlm, ChatMessage, ChatRequest, ChatRole, Error as ChatError,
+    UserSamplingParams,
 };
 use vllm_engine_core_client::protocol::handshake::{HandshakeInitMessage, ReadyMessage};
 use vllm_engine_core_client::protocol::{
@@ -64,6 +65,33 @@ fn request_output(
         num_external_computed_tokens: 0,
         routed_experts: None,
         num_nans_in_logits: 0,
+    }
+}
+
+fn default_stream_output_specs() -> Vec<(Vec<u32>, Option<FinishReason>)> {
+    vec![
+        (vec![b'h' as u32], None),
+        (vec![b'i' as u32], None),
+        (vec![b'!' as u32], Some(FinishReason::Stop)),
+    ]
+}
+
+fn engine_outputs_for_request(
+    request_id: &str,
+    output_specs: Vec<(Vec<u32>, Option<FinishReason>)>,
+) -> EngineCoreOutputs {
+    EngineCoreOutputs {
+        engine_index: 0,
+        outputs: output_specs
+            .into_iter()
+            .map(|(token_ids, finish_reason)| request_output(request_id, token_ids, finish_reason))
+            .collect(),
+        scheduler_stats: None,
+        timestamp: 0.0,
+        utility_output: None,
+        finished_requests: None,
+        wave_complete: None,
+        start_wave: None,
     }
 }
 
@@ -160,61 +188,36 @@ impl ChatBackend for FakeChatBackend {
     }
 }
 
-async fn test_app() -> axum::Router {
-    let handshake_address = unique_tcp_endpoint();
-    let engine_identity = b"engine-openai".to_vec();
+#[derive(Clone, Debug)]
+struct FailingDecodeChatBackend;
 
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "test harness background mock engine"
-    )]
-    tokio::spawn({
-        let engine_handshake = handshake_address.clone();
-        let engine_identity = engine_identity.clone();
-        async move {
-            let (mut dealer, mut push) = setup_mock_engine(engine_handshake, engine_identity).await;
-            let add = recv_engine_message(&mut dealer).await;
-            let request: EngineCoreRequest =
-                rmp_serde::from_slice(&add[1]).expect("decode request");
-            let response_id = request.request_id.clone();
-            send_outputs(
-                &mut push,
-                EngineCoreOutputs {
-                    engine_index: 0,
-                    outputs: vec![
-                        request_output(&response_id, vec![b'h' as u32], None),
-                        request_output(&response_id, vec![b'i' as u32], None),
-                        request_output(&response_id, vec![b'!' as u32], Some(FinishReason::Stop)),
-                    ],
-                    scheduler_stats: None,
-                    timestamp: 0.0,
-                    utility_output: None,
-                    finished_requests: None,
-                    wave_complete: None,
-                    start_wave: None,
-                },
-            )
-            .await;
-            tokio::time::sleep(Duration::from_millis(50)).await;
+impl ChatBackend for FailingDecodeChatBackend {
+    fn apply_chat_template(&self, request: &ChatRequest) -> vllm_chat::Result<String> {
+        FakeChatBackend.apply_chat_template(request)
+    }
+
+    fn encode(&self, text: &str) -> vllm_chat::Result<Vec<u32>> {
+        FakeChatBackend.encode(text)
+    }
+
+    fn decode(&self, token_ids: &[u32], skip_special_tokens: bool) -> vllm_chat::Result<String> {
+        if token_ids.contains(&(b'i' as u32)) {
+            return Err(ChatError::Tokenizer(
+                "forced decode failure for streaming test".to_string(),
+            ));
         }
-    });
 
-    let client = EngineCoreClient::connect(EngineCoreClientConfig {
-        handshake_address,
-        local_host: "127.0.0.1".to_string(),
-        ready_timeout: Duration::from_secs(2),
-        client_index: 0,
-    })
-    .await
-    .expect("connect client");
-
-    let chat = Arc::new(ChatLlm::new(Llm::new(client), Arc::new(FakeChatBackend)));
-    build_router(Arc::new(AppState::new("Qwen/Qwen1.5-0.5B-Chat", chat)))
+        FakeChatBackend.decode(token_ids, skip_special_tokens)
+    }
 }
 
-async fn test_app_with_engine_handle() -> (axum::Router, tokio::task::JoinHandle<()>) {
+async fn test_chat_with_engine_outputs_and_backend(
+    engine_identity: &[u8],
+    output_specs: Vec<(Vec<u32>, Option<FinishReason>)>,
+    backend: Arc<dyn ChatBackend>,
+) -> (Arc<ChatLlm>, tokio::task::JoinHandle<()>) {
     let handshake_address = unique_tcp_endpoint();
-    let engine_identity = b"engine-openai".to_vec();
+    let engine_identity = engine_identity.to_vec();
 
     let engine_task = tokio::spawn({
         let engine_handshake = handshake_address.clone();
@@ -224,26 +227,12 @@ async fn test_app_with_engine_handle() -> (axum::Router, tokio::task::JoinHandle
             let add = recv_engine_message(&mut dealer).await;
             let request: EngineCoreRequest =
                 rmp_serde::from_slice(&add[1]).expect("decode request");
-            let response_id = request.request_id.clone();
             send_outputs(
                 &mut push,
-                EngineCoreOutputs {
-                    engine_index: 0,
-                    outputs: vec![
-                        request_output(&response_id, vec![b'h' as u32], None),
-                        request_output(&response_id, vec![b'i' as u32], None),
-                        request_output(&response_id, vec![b'!' as u32], Some(FinishReason::Stop)),
-                    ],
-                    scheduler_stats: None,
-                    timestamp: 0.0,
-                    utility_output: None,
-                    finished_requests: None,
-                    wave_complete: None,
-                    start_wave: None,
-                },
+                engine_outputs_for_request(&request.request_id, output_specs),
             )
             .await;
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            tokio::time::sleep(Duration::from_millis(200)).await;
         }
     });
 
@@ -256,7 +245,50 @@ async fn test_app_with_engine_handle() -> (axum::Router, tokio::task::JoinHandle
     .await
     .expect("connect client");
 
-    let chat = Arc::new(ChatLlm::new(Llm::new(client), Arc::new(FakeChatBackend)));
+    (
+        Arc::new(ChatLlm::new(Llm::new(client), backend)),
+        engine_task,
+    )
+}
+
+async fn test_chat_with_engine_outputs(
+    engine_identity: &[u8],
+    output_specs: Vec<(Vec<u32>, Option<FinishReason>)>,
+) -> (Arc<ChatLlm>, tokio::task::JoinHandle<()>) {
+    test_chat_with_engine_outputs_and_backend(
+        engine_identity,
+        output_specs,
+        Arc::new(FakeChatBackend),
+    )
+    .await
+}
+
+async fn test_app() -> axum::Router {
+    let (chat, _engine_task) =
+        test_chat_with_engine_outputs(b"engine-openai", default_stream_output_specs()).await;
+    build_router(Arc::new(AppState::new("Qwen/Qwen1.5-0.5B-Chat", chat)))
+}
+
+async fn test_app_with_engine_handle() -> (axum::Router, tokio::task::JoinHandle<()>) {
+    test_app_with_stream_output_specs(default_stream_output_specs()).await
+}
+
+async fn test_app_with_stream_output_specs(
+    output_specs: Vec<(Vec<u32>, Option<FinishReason>)>,
+) -> (axum::Router, tokio::task::JoinHandle<()>) {
+    let (chat, engine_task) = test_chat_with_engine_outputs(b"engine-openai", output_specs).await;
+    (
+        build_router(Arc::new(AppState::new("Qwen/Qwen1.5-0.5B-Chat", chat))),
+        engine_task,
+    )
+}
+
+async fn test_app_with_backend_and_stream_output_specs(
+    backend: Arc<dyn ChatBackend>,
+    output_specs: Vec<(Vec<u32>, Option<FinishReason>)>,
+) -> (axum::Router, tokio::task::JoinHandle<()>) {
+    let (chat, engine_task) =
+        test_chat_with_engine_outputs_and_backend(b"engine-openai", output_specs, backend).await;
     (
         build_router(Arc::new(AppState::new("Qwen/Qwen1.5-0.5B-Chat", chat))),
         engine_task,
@@ -264,53 +296,7 @@ async fn test_app_with_engine_handle() -> (axum::Router, tokio::task::JoinHandle
 }
 
 async fn test_chat_with_engine_handle() -> (Arc<ChatLlm>, tokio::task::JoinHandle<()>) {
-    let handshake_address = unique_tcp_endpoint();
-    let engine_identity = b"engine-openai-chat".to_vec();
-
-    let engine_task = tokio::spawn({
-        let engine_handshake = handshake_address.clone();
-        let engine_identity = engine_identity.clone();
-        async move {
-            let (mut dealer, mut push) = setup_mock_engine(engine_handshake, engine_identity).await;
-            let add = recv_engine_message(&mut dealer).await;
-            let request: EngineCoreRequest =
-                rmp_serde::from_slice(&add[1]).expect("decode request");
-            let response_id = request.request_id.clone();
-            send_outputs(
-                &mut push,
-                EngineCoreOutputs {
-                    engine_index: 0,
-                    outputs: vec![
-                        request_output(&response_id, vec![b'h' as u32], None),
-                        request_output(&response_id, vec![b'i' as u32], None),
-                        request_output(&response_id, vec![b'!' as u32], Some(FinishReason::Stop)),
-                    ],
-                    scheduler_stats: None,
-                    timestamp: 0.0,
-                    utility_output: None,
-                    finished_requests: None,
-                    wave_complete: None,
-                    start_wave: None,
-                },
-            )
-            .await;
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    });
-
-    let client = EngineCoreClient::connect(EngineCoreClientConfig {
-        handshake_address,
-        local_host: "127.0.0.1".to_string(),
-        ready_timeout: Duration::from_secs(2),
-        client_index: 0,
-    })
-    .await
-    .expect("connect client");
-
-    (
-        Arc::new(ChatLlm::new(Llm::new(client), Arc::new(FakeChatBackend))),
-        engine_task,
-    )
+    test_chat_with_engine_outputs(b"engine-openai-chat", default_stream_output_specs()).await
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -393,6 +379,7 @@ async fn invalid_request_returns_openai_error() {
 async fn happy_path_returns_sse_stream() {
     let (app, engine_task) = test_app_with_engine_handle().await;
     let response = app
+        .clone()
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -426,8 +413,93 @@ async fn happy_path_returns_sse_stream() {
     engine_task.await.expect("mock engine task");
     let text = String::from_utf8(body.to_vec()).expect("utf8 body");
 
-    assert!(text.contains("\"role\":\"assistant\""));
-    assert!(text.starts_with("data: "));
+    assert!(text.contains("\"role\":\"assistant\""), "{text}");
+    assert!(text.starts_with("data: "), "{text}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stream_error_is_returned_as_openai_error_sse() {
+    let (app, engine_task) = test_app_with_backend_and_stream_output_specs(
+        Arc::new(FailingDecodeChatBackend),
+        default_stream_output_specs(),
+    )
+    .await;
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "Qwen/Qwen1.5-0.5B-Chat",
+                        "stream": true,
+                        "messages": [{"role": "user", "content": "hello"}]
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("read body");
+    engine_task.await.expect("mock engine task");
+    let text = String::from_utf8(body.to_vec()).expect("utf8 body");
+
+    assert!(text.contains("\"role\":\"assistant\""), "{text}");
+    assert!(text.contains("\"type\":\"server_error\""), "{text}");
+    assert!(
+        text.contains("forced decode failure for streaming test"),
+        "{text}"
+    );
+    assert!(text.trim_end().ends_with("data: [DONE]"), "{text}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn invalid_terminal_finish_reason_is_returned_as_openai_error_sse() {
+    let (app, engine_task) =
+        test_app_with_stream_output_specs(vec![(vec![], Some(FinishReason::Error))]).await;
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "Qwen/Qwen1.5-0.5B-Chat",
+                        "stream": true,
+                        "messages": [{"role": "user", "content": "hello"}]
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("read body");
+    engine_task.await.expect("mock engine task");
+    let text = String::from_utf8(body.to_vec()).expect("utf8 body");
+
+    assert!(text.contains("\"role\":\"assistant\""), "{text}");
+    assert!(text.contains("\"type\":\"server_error\""), "{text}");
+    assert!(
+        text.contains("stream terminated without a valid OpenAI finish reason"),
+        "{text}"
+    );
+    assert!(text.trim_end().ends_with("data: [DONE]"), "{text}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
