@@ -70,6 +70,34 @@ Visit our [documentation](https://docs.vllm.ai/en/latest/) to learn more.
 - [Quickstart](https://docs.vllm.ai/en/latest/getting_started/quickstart.html)
 - [List of Supported Models](https://docs.vllm.ai/en/latest/models/supported_models.html)
 
+## Fork Updates
+
+This fork adds a more local-runtime-focused UX on top of the existing vLLM engine and server stack.
+
+What is different in this fork:
+
+- A repo-local bootstrap installer via `./scripts/install.sh`
+- A simpler local CLI flow centered on `vllm pull`, `vllm run`, and `vllm serve`
+- Short built-in model aliases such as `deepseek-r1:8b` that resolve to Hugging Face repos
+- Managed local background services with `vllm ps`, `vllm stop`, and `vllm logs`
+- A follow-up tracker for remaining parity work in `docs/cli/local_runtime_followups.md`
+
+Example local flow:
+
+```bash
+./scripts/install.sh
+vllm pull deepseek-r1:8b
+vllm run deepseek-r1:8b
+vllm serve deepseek-r1:8b
+vllm ps
+```
+
+For more detail, see:
+
+- [CLI Guide](./docs/cli/README.md)
+- [Quickstart](./docs/getting_started/quickstart.md)
+- [Local Runtime Follow-ups](./docs/cli/local_runtime_followups.md)
+
 ## Contributing
 
 We welcome and value any contributions and collaborations.

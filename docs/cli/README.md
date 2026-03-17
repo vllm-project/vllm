@@ -24,6 +24,17 @@ vllm serve deepseek-r1:8b
 vllm ps
 ```
 
+### What's Different
+
+Compared with the older server-first CLI flow, this fork adds:
+
+- A one-script repo install path via `./scripts/install.sh`
+- Direct shell usage with `vllm run` instead of requiring a separate running server first
+- Built-in model aliases such as `deepseek-r1:8b`
+- Background local service management through `vllm serve`, `vllm ps`, `vllm stop`, and `vllm logs`
+
+The advanced vLLM commands still exist; this fork changes the default user journey rather than removing the underlying engine/server features.
+
 ### pull
 
 Resolve a model alias or exact Hugging Face repo and pre-download the model locally.
