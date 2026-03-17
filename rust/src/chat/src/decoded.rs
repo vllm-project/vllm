@@ -10,15 +10,21 @@ use crate::error::{Error, Result};
 use crate::incremental::IncrementalTextDecoder;
 
 /// Internal decoded-text event emitted before higher-level reasoning adaptation.
+///
+/// For user-facing structured events, see [`crate::ChatEvent`].
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum DecodedTextEvent {
+    /// The request was accepted and streaming has started.
     Start,
-    TextDelta {
-        delta: String,
-        text: String,
-    },
+    /// A delta of text has been decoded.
+    ///
+    /// Upper-level may further parse this as reasoning or tool calls.
+    TextDelta { delta: String, text: String },
+    /// Terminal event carrying the full decoded text and final metadata.
     Done {
         text: String,
+        /// Raw cumulative output token IDs, including a terminal stop token when
+        /// the engine emitted one.
         token_ids: Vec<u32>,
         finish_reason: Option<FinishReason>,
         stop_reason: Option<StopReason>,

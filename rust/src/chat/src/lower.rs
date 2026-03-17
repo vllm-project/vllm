@@ -13,6 +13,9 @@ pub(crate) struct PreparedChatRequest {
     pub generate_request: GenerateRequest,
 }
 
+/// Convert a high-level [`ChatRequest`] into a lower-level [`GenerateRequest`] ready to be sent to
+/// the `llm` crate, enriching the user sampling parameters with tokenizer/model-derived hints from
+/// the chat backend as needed.
 pub(crate) fn lower_chat_request(
     request: ChatRequest,
     prompt_token_ids: Vec<u32>,

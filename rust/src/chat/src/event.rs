@@ -38,11 +38,9 @@ impl AssistantContentBlock {
         match kind {
             AssistantBlockKind::Text => Self::Text { text },
             AssistantBlockKind::Reasoning => Self::Reasoning { text },
-            AssistantBlockKind::ToolCall => Self::ToolCall {
-                id: String::new(),
-                name: String::new(),
-                arguments: text,
-            },
+            AssistantBlockKind::ToolCall => {
+                unreachable!("tool call cannot be constructed from text deltas")
+            }
         }
     }
 }
@@ -84,6 +82,7 @@ impl AssistantMessage {
             .filter(move |block| block.kind() == kind)
     }
 
+    /// Push one new block to the end of the message content.
     pub(crate) fn push_block(&mut self, block: AssistantContentBlock) {
         self.content.push(block);
     }

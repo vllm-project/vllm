@@ -8,6 +8,7 @@
 use futures::{StreamExt as _, pin_mut};
 use futures_async_stream::try_stream;
 use reasoning_parser::ReasoningParser;
+use thiserror_ext::AsReport;
 use tracing::warn;
 use vllm_engine_core_client::protocol::{FinishReason, StopReason};
 
@@ -55,6 +56,7 @@ impl StructuredEventState {
     fn process_text_delta(&mut self, delta: &str) -> Vec<ChatEvent> {
         let mut events = Vec::new();
 
+        // If we have a reasoning parser, try to parse the delta into reasoning vs. normal text.
         if let Some(parser) = self.reasoning_parser.as_mut() {
             match parser.parse_reasoning_streaming_incremental(delta) {
                 Ok(result) => {
@@ -70,7 +72,7 @@ impl StructuredEventState {
                     if !self.reasoning_parser_failed {
                         warn!(
                             parser = parser.model_type(),
-                            error = %error,
+                            error = %error.as_report(),
                             "reasoning parser failed; falling back to plain text blocks"
                         );
                         self.reasoning_parser_failed = true;
@@ -112,6 +114,7 @@ impl StructuredEventState {
         }
 
         match self.open_block.as_mut() {
+            // If there's a currently open block of the same kind, append to it.
             Some(open) if open.kind == kind => {
                 open.text.push_str(&delta);
                 events.push(ChatEvent::BlockDelta {
@@ -120,6 +123,7 @@ impl StructuredEventState {
                     delta,
                 });
             }
+            // Otherwise, close the currently open block (if any) and start a new one.
             _ => {
                 self.close_open_block(events);
                 let index = self.message.content.len();
