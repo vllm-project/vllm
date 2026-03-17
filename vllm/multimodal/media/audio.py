@@ -82,18 +82,55 @@ def extract_audio_from_video_bytes(
     return audio, float(native_sr)
 
 
+def is_video(data: bytes) -> bool:
+    """Check if the fetched bytes are video"""
+    if len(data) < 12:
+        return False
+
+    box_type = data[4:8]
+    major_brand = data[8:12]
+
+    MP4_BRANDS = {
+        b"mp41",
+        b"mp42",  # MP4
+        b"isom",  # ISO Base Media
+        b"iso2",
+        b"iso4",
+        b"iso5",
+        b"iso6",
+        b"M4V ",
+        b"M4A ",  # Apple
+        b"avc1",  # H.264
+        b"dash",  # DASH
+        b"mmp4",
+        b"MSNV",
+    }
+
+    is_avi = data[:4] == b"RIFF" and major_brand == b"AVI "
+    is_mp4 = box_type == b"ftyp" and major_brand in MP4_BRANDS
+    return is_mp4 or is_avi
+
+
 class AudioMediaIO(MediaIO[tuple[npt.NDArray, float]]):
+    """Configuration values can be user-provided either by --media-io-kwargs or
+    by the runtime API field "media_io_kwargs". Ensure proper validation and
+    error handling.
+    """
+
     def __init__(self, **kwargs) -> None:
         super().__init__()
 
         # `kwargs` contains custom arguments from
-        # --media-io-kwargs for this modality.
+        # --media-io-kwargs for this modality, merged with
+        # per-request runtime media_io_kwargs via merge_kwargs().
         # They can be passed to the underlying
         # media loaders (e.g. custom implementations)
         # for flexible control.
         self.kwargs = kwargs
 
     def load_bytes(self, data: bytes) -> tuple[npt.NDArray, float]:
+        if is_video(data):
+            return extract_audio_from_video_bytes(data)
         return librosa.load(BytesIO(data), sr=None)
 
     def load_base64(
@@ -122,6 +159,11 @@ class AudioMediaIO(MediaIO[tuple[npt.NDArray, float]]):
 
 
 class AudioEmbeddingMediaIO(MediaIO[torch.Tensor]):
+    """Configuration values can be user-provided either by --media-io-kwargs or
+    by the runtime API field "media_io_kwargs". Ensure proper validation and
+    error handling.
+    """
+
     def __init__(self) -> None:
         super().__init__()
 
