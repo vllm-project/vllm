@@ -75,13 +75,13 @@ For more information about `LLM.embed`, see [this page](classify.md#offline-infe
 ### `LLM.embed`
 
 The [embed][vllm.LLM.embed] method outputs an embedding vector for each prompt.
-It is primarily designed for [embedding models](embed.md). 
+It is primarily designed for [embedding models](embed.md).
 For more information about `LLM.embed`, see [this page](embed.md#offline-inference).
 
 ### `LLM.score`
 
 The [score][vllm.LLM.score] method outputs similarity scores between sentence pairs.
-It is primarily designed for [score models](score.md). 
+It is primarily designed for [score models](score.md).
 
 ### `LLM.encode`
 
