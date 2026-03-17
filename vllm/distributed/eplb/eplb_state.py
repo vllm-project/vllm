@@ -1105,8 +1105,12 @@ def _commit_eplb_maps_for_layer(
     # Commit physical_to_logical_map
     src = new_physical_to_logical_map[layer]
     dst = model_state.physical_to_logical_map[layer]
-    # The number of physical experts must stay the same while running Async EPLB
-    assert src.shape == dst.shape
+    assert src.shape == dst.shape, (
+        "The number of physical experts must stay the same while running Async EPLB. "
+        "Current number of physical experts: %d. New number of physical experts %d.",
+        dst.shape[0],
+        src.shape[0],
+    )
     dst.copy_(src, non_blocking=True)
 
     # Commit logical_to_physical_map
