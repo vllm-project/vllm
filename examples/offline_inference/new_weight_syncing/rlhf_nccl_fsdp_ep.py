@@ -193,14 +193,7 @@ async def generate_batch(engine, prompts, sampling_params):
 
 
 async def main():
-    ray.init(
-        runtime_env={
-            "env_vars": {
-                "PYTHONPATH": "/home/ray/default/personal/vllm",
-                "RAY_DEDUP_LOGS": "0",
-            }
-        }
-    )
+    ray.init()
 
     # Download model weights to local/shared disk once.
     local_model_path = snapshot_download(MODEL_NAME)
