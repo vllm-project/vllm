@@ -1047,10 +1047,7 @@ class BatchedTritonExperts(mk.FusedMoEExpertsModular):
             compute_type = tl.float16
         elif hidden_states.dtype == torch.float32:
             compute_type = tl.float32
-        elif (
-            hidden_states.dtype == torch.float8_e4m3fn
-            or hidden_states.dtype == torch.float8_e4m3fnuz
-        ):
+        elif hidden_states.dtype == current_platform.fp8_dtype():
             compute_type = tl.bfloat16
         else:
             raise ValueError(f"Unsupported compute_type: {hidden_states.dtype}")
