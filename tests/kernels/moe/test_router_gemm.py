@@ -21,7 +21,7 @@ from vllm.utils.torch_utils import set_random_seed
             or current_platform.is_device_capability_family(100)
         )
     ),
-    reason="This test only runs on CUDA Hopper or Blackwell platform.",
+    reason="This test only runs on Hopper or Blackwell GPUs.",
 )
 @pytest.mark.parametrize("batch_size", [1, 2, 4, 8])
 @pytest.mark.parametrize("input_dim", [360, 720, 1440, 2880])
