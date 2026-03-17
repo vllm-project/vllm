@@ -146,7 +146,7 @@ class SchedulerConfig:
     while a larger value (e.g., 10) reduces host overhead and may increase throughput
     by batching multiple tokens before sending."""
 
-    num_cp_reqs: int = Field(default=0, ge=0)
+    num_cp_seqs: int = Field(default=0, ge=0)
     """The number of sequences to be processed in a single iteration for cp.
     """
 

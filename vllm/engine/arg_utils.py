@@ -618,7 +618,7 @@ class EngineArgs:
 
     # domain parallel config
     dp_per_domain: int = ParallelConfig.dp_per_domain
-    # num_cp_reqs: number of requests to be processed in a single iteration for cp.
+    # num_cp_seqs: number of requests to be processed in a single iteration for cp.
     num_cp_seqs: int = SchedulerConfig.num_cp_seqs
 
     def __post_init__(self):

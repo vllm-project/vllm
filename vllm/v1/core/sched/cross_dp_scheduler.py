@@ -155,7 +155,7 @@ class CrossDPScheduler(Scheduler):
             hash_block_size=self.block_size,
             metrics_collector=self.kv_metrics_collector,
         )
-        self.max_cp_tokens = self.vllm_config.scheduler_config.num_cp_reqs
+        self.max_cp_tokens = self.vllm_config.scheduler_config.num_cp_seqs
         self.graph_size_for_cp = self.vllm_config.compilation_config.cudagraph_capture_sizes_for_cp
         assert self.max_cp_tokens >= self.graph_size_for_cp, "max_cp_tokens should be greater than or equal to graph_size_for_cp"
         # Request queue control the token threshold for long requests.
