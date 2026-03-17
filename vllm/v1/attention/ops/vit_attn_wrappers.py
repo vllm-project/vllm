@@ -292,6 +292,11 @@ def flashinfer_wrapper(
     # BatchPrefillWithRaggedKVCacheWrapper which internally uses the fa2
     # backend (CUTLASS FlashAttention 2 compiled JIT for the target SM).
     if not current_platform.has_device_capability(80):
+        if (head_dim := q.shape[-1]) % 64 != 0:
+            raise ValueError(
+                "FlashInfer FA2 Prefill kernels require head dimension to "
+                f"be divisible by 64, got head dim {head_dim}"
+            )
         from flashinfer import BatchPrefillWithRaggedKVCacheWrapper
 
         # sequence_lengths is [s1, s2, ..., sB, 0, ...(bucketing padding)].
