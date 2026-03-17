@@ -51,6 +51,10 @@ fn lower_sampling_params(
     SamplingHints {
         primary_eos_token_id,
         extra_eos_token_ids,
+        default_temperature,
+        default_top_p,
+        default_top_k,
+        default_max_tokens,
     }: SamplingHints,
 ) -> EngineCoreSamplingParams {
     let UserSamplingParams {
@@ -60,10 +64,19 @@ fn lower_sampling_params(
         max_tokens,
         min_tokens,
         include_stop_str_in_output: _,
-        mut stop_token_ids,
+        stop_token_ids,
         ignore_eos,
         skip_special_tokens: _,
     } = sampling_params;
+
+    let temperature = temperature.or(default_temperature).unwrap_or(1.0);
+    let top_p = top_p.or(default_top_p).unwrap_or(1.0);
+    let top_k = top_k.or(default_top_k).unwrap_or(0);
+    // TODO: resolve `max_tokens` against prompt length / max model length later, like vLLM's
+    // OpenAI frontend does today.
+    let max_tokens = max_tokens.or(default_max_tokens).unwrap_or(65536);
+    let min_tokens = min_tokens.unwrap_or(0);
+    let mut stop_token_ids = stop_token_ids.unwrap_or_default();
 
     let mut all_stop_token_ids = BTreeSet::from_iter(stop_token_ids.iter().copied());
     if let Some(primary_eos_token_id) = primary_eos_token_id {
@@ -104,7 +117,8 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::*;
-    use crate::backend::SamplingHints;
+    use crate::backend::{ChatBackend, SamplingHints};
+    use crate::backends::hf::HfChatBackend;
     use crate::request::{ChatOptions, ChatRequest, UserSamplingParams};
 
     fn sample_request() -> ChatRequest {
@@ -116,23 +130,32 @@ mod tests {
         }
     }
 
+    fn sample_sampling_hints() -> SamplingHints {
+        SamplingHints {
+            primary_eos_token_id: Some(99),
+            extra_eos_token_ids: BTreeSet::from([77]),
+            default_temperature: None,
+            default_top_p: None,
+            default_top_k: None,
+            default_max_tokens: None,
+        }
+    }
+
     #[test]
     fn lower_chat_request_applies_python_style_eos_hints() {
-        let prepared = lower_chat_request(
-            sample_request(),
-            vec![1, 2, 3],
-            SamplingHints {
-                primary_eos_token_id: Some(99),
-                extra_eos_token_ids: BTreeSet::from([77]),
-            },
-        )
-        .unwrap();
+        let prepared =
+            lower_chat_request(sample_request(), vec![1, 2, 3], sample_sampling_hints()).unwrap();
 
         let params = prepared.generate_request.sampling_params;
         assert_eq!(params.eos_token_id, Some(99));
         assert_eq!(params.stop_token_ids, vec![77]);
         assert_eq!(params.all_stop_token_ids, BTreeSet::from([77, 99]));
         assert_eq!(params.output_kind, RequestOutputKind::Delta);
+        assert_eq!(params.temperature, 1.0);
+        assert_eq!(params.top_p, 1.0);
+        assert_eq!(params.top_k, 0);
+        assert_eq!(params.max_tokens, 65536);
+        assert_eq!(params.min_tokens, 0);
     }
 
     #[test]
@@ -140,15 +163,7 @@ mod tests {
         let mut request = sample_request();
         request.sampling_params.ignore_eos = true;
 
-        let prepared = lower_chat_request(
-            request,
-            vec![1, 2, 3],
-            SamplingHints {
-                primary_eos_token_id: Some(99),
-                extra_eos_token_ids: BTreeSet::from([77]),
-            },
-        )
-        .unwrap();
+        let prepared = lower_chat_request(request, vec![1, 2, 3], sample_sampling_hints()).unwrap();
 
         let params = prepared.generate_request.sampling_params;
         assert_eq!(params.eos_token_id, None);
@@ -160,7 +175,7 @@ mod tests {
     #[test]
     fn lower_chat_request_preserves_explicit_stop_token_ids_in_all_stop_set() {
         let mut request = sample_request();
-        request.sampling_params.stop_token_ids = vec![11, 77];
+        request.sampling_params.stop_token_ids = Some(vec![11, 77]);
 
         let prepared = lower_chat_request(
             request,
@@ -168,6 +183,10 @@ mod tests {
             SamplingHints {
                 primary_eos_token_id: Some(99),
                 extra_eos_token_ids: BTreeSet::from([77, 88]),
+                default_temperature: None,
+                default_top_p: None,
+                default_top_k: None,
+                default_max_tokens: None,
             },
         )
         .unwrap();
@@ -175,5 +194,117 @@ mod tests {
         let params = prepared.generate_request.sampling_params;
         assert_eq!(params.stop_token_ids, vec![11, 77, 88]);
         assert_eq!(params.all_stop_token_ids, BTreeSet::from([11, 77, 88, 99]));
+    }
+
+    #[test]
+    fn lower_chat_request_prefers_user_values_over_generation_defaults() {
+        let mut request = sample_request();
+        request.sampling_params.temperature = Some(0.2);
+        request.sampling_params.top_p = Some(0.3);
+        request.sampling_params.top_k = Some(4);
+        request.sampling_params.max_tokens = Some(32);
+        request.sampling_params.min_tokens = Some(2);
+
+        let prepared = lower_chat_request(
+            request,
+            vec![1, 2, 3],
+            SamplingHints {
+                primary_eos_token_id: None,
+                extra_eos_token_ids: BTreeSet::new(),
+                default_temperature: Some(0.8),
+                default_top_p: Some(0.9),
+                default_top_k: Some(12),
+                default_max_tokens: Some(128),
+            },
+        )
+        .unwrap();
+
+        let params = prepared.generate_request.sampling_params;
+        assert_eq!(params.temperature, 0.2);
+        assert_eq!(params.top_p, 0.3);
+        assert_eq!(params.top_k, 4);
+        assert_eq!(params.max_tokens, 32);
+        assert_eq!(params.min_tokens, 2);
+    }
+
+    #[test]
+    fn lower_chat_request_uses_generation_defaults_when_user_omits_values() {
+        let prepared = lower_chat_request(
+            sample_request(),
+            vec![1, 2, 3],
+            SamplingHints {
+                primary_eos_token_id: None,
+                extra_eos_token_ids: BTreeSet::new(),
+                default_temperature: Some(0.8),
+                default_top_p: Some(0.9),
+                default_top_k: Some(12),
+                default_max_tokens: Some(128),
+            },
+        )
+        .unwrap();
+
+        let params = prepared.generate_request.sampling_params;
+        assert_eq!(params.temperature, 0.8);
+        assert_eq!(params.top_p, 0.9);
+        assert_eq!(params.top_k, 12);
+        assert_eq!(params.max_tokens, 128);
+        assert_eq!(params.min_tokens, 0);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires network access to Hugging Face"]
+    async fn lower_chat_request_uses_real_qwen_generation_defaults() {
+        let backend = HfChatBackend::from_model("Qwen/Qwen3-0.6B")
+            .await
+            .expect("load qwen tokenizer and generation config");
+        let hints = backend.sampling_hints().expect("collect sampling hints");
+
+        expect_test::expect![[r#"
+            SamplingHints {
+                primary_eos_token_id: Some(
+                    151645,
+                ),
+                extra_eos_token_ids: {
+                    151643,
+                },
+                default_temperature: Some(
+                    0.6,
+                ),
+                default_top_p: Some(
+                    0.95,
+                ),
+                default_top_k: Some(
+                    20,
+                ),
+                default_max_tokens: None,
+            }
+        "#]]
+        .assert_debug_eq(&hints);
+
+        let prepared =
+            lower_chat_request(sample_request(), vec![1, 2, 3], hints).expect("lower request");
+        let params = prepared.generate_request.sampling_params;
+
+        expect_test::expect![[r#"
+            EngineCoreSamplingParams {
+                temperature: 0.6,
+                top_p: 0.95,
+                top_k: 20,
+                max_tokens: 65536,
+                min_tokens: 0,
+                stop_token_ids: [
+                    151643,
+                ],
+                eos_token_id: Some(
+                    151645,
+                ),
+                all_stop_token_ids: {
+                    151643,
+                    151645,
+                },
+                output_kind: Delta,
+            }
+        "#]]
+        .assert_debug_eq(&params);
     }
 }

@@ -510,7 +510,7 @@ async fn chat_harness_streams_text_events() {
             request_id: "chat-harness".to_string(),
             messages: vec![ChatMessage::text(ChatRole::User, "hello")],
             sampling_params: UserSamplingParams {
-                max_tokens: 8,
+                max_tokens: Some(8),
                 ..Default::default()
             },
             chat_options: Default::default(),

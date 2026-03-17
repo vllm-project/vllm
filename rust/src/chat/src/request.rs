@@ -1,29 +1,9 @@
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
-use serde_default::DefaultFromSerde;
 use serde_json::Value;
 
 use crate::error::{Error, Result};
-
-mod defaults {
-    pub fn temperature() -> f32 {
-        1.0
-    }
-
-    pub fn top_p() -> f32 {
-        1.0
-    }
-
-    pub fn max_tokens() -> u32 {
-        // TODO: make it reasonable
-        65536
-    }
-
-    pub fn skip_special_tokens() -> bool {
-        true
-    }
-}
 
 /// Role label for one text-only chat message.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -156,39 +136,46 @@ impl Default for ChatOptions {
 ///
 /// Original Python definition:
 /// <https://github.com/vllm-project/vllm/blob/f22d6e026798a74e6542a52ef776c054f2de572a/vllm/sampling_params.py#L155-L291>
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, DefaultFromSerde)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UserSamplingParams {
     /// Controls randomness. Lower values are more deterministic; zero means
-    /// greedy sampling.
-    #[serde(default = "defaults::temperature")]
-    pub temperature: f32,
+    /// greedy sampling. `None` means no explicit user override.
+    pub temperature: Option<f32>,
     /// Cumulative probability threshold for nucleus sampling.
-    #[serde(default = "defaults::top_p")]
-    pub top_p: f32,
-    /// Maximum number of top tokens to consider. `0` means all tokens.
-    #[serde(default)]
-    pub top_k: i32,
-    /// Maximum number of tokens to generate.
-    #[serde(default = "defaults::max_tokens")]
-    pub max_tokens: u32,
+    pub top_p: Option<f32>,
+    /// Maximum number of top tokens to consider. `Some(0)` means all tokens.
+    pub top_k: Option<i32>,
+    /// Maximum number of tokens to generate. `None` means no explicit user override.
+    pub max_tokens: Option<u32>,
     /// Minimum number of tokens to generate before EOS or stop-token handling.
-    #[serde(default)]
-    pub min_tokens: u32,
+    pub min_tokens: Option<u32>,
     /// If true, keep the terminal stop token in the decoded output text.
     ///
     /// This currently affects token-based stop handling only; string stop
     /// sequences are still out of scope for the minimal Rust chat layer.
-    #[serde(default)]
     pub include_stop_str_in_output: bool,
-    /// Explicit stop token IDs provided by the caller.
-    #[serde(default)]
-    pub stop_token_ids: Vec<u32>,
+    /// Explicit stop token IDs provided by the caller. `None` means no explicit user override.
+    pub stop_token_ids: Option<Vec<u32>>,
     /// If true, do not stop on the model's primary EOS token.
-    #[serde(default)]
     pub ignore_eos: bool,
     /// If true, special tokens are skipped during incremental detokenization.
-    #[serde(default = "defaults::skip_special_tokens")]
     pub skip_special_tokens: bool,
+}
+
+impl Default for UserSamplingParams {
+    fn default() -> Self {
+        Self {
+            temperature: None,
+            top_p: None,
+            top_k: None,
+            max_tokens: None,
+            min_tokens: None,
+            include_stop_str_in_output: false,
+            stop_token_ids: None,
+            ignore_eos: false,
+            skip_special_tokens: true,
+        }
+    }
 }
 
 /// One text-only chat request ready to be rendered into a prompt and lowered into a generate

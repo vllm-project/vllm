@@ -6,10 +6,14 @@ use crate::request::ChatRequest;
 
 /// Tokenizer/model-derived hints used to fill Python-aligned internal sampling metadata before
 /// requests are lowered into engine-core.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct SamplingHints {
     pub primary_eos_token_id: Option<u32>,
     pub extra_eos_token_ids: BTreeSet<u32>,
+    pub default_temperature: Option<f32>,
+    pub default_top_p: Option<f32>,
+    pub default_top_k: Option<i32>,
+    pub default_max_tokens: Option<u32>,
 }
 
 /// Minimal prompt-processing backend needed by `vllm-chat`.

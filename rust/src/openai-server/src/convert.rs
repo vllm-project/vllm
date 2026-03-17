@@ -46,14 +46,13 @@ pub fn prepare_chat_request(
         request_id: response_id.clone(),
         messages,
         sampling_params: UserSamplingParams {
-            // TODO: single source of truth for default sampling parameters
-            temperature: request.temperature.unwrap_or(1.0),
-            top_p: request.top_p.unwrap_or(1.0),
-            top_k: request.top_k.unwrap_or(0),
-            max_tokens: request.max_completion_tokens.unwrap_or(65536),
-            min_tokens: request.min_tokens.unwrap_or(0),
+            temperature: request.temperature,
+            top_p: request.top_p,
+            top_k: request.top_k,
+            max_tokens: request.max_completion_tokens,
+            min_tokens: request.min_tokens,
             include_stop_str_in_output: false,
-            stop_token_ids: request.stop_token_ids.clone().unwrap_or_default(),
+            stop_token_ids: request.stop_token_ids.clone(),
             ignore_eos: request.ignore_eos,
             skip_special_tokens: request.skip_special_tokens,
         },
@@ -172,10 +171,26 @@ mod tests {
         assert!(!prepared.chat_request.chat_options.add_generation_prompt);
         assert!(prepared.chat_request.chat_options.continue_final_message);
         assert!(!prepared.chat_request.sampling_params.skip_special_tokens);
+        assert_eq!(prepared.chat_request.sampling_params.temperature, None);
+        assert_eq!(prepared.chat_request.sampling_params.top_p, None);
+        assert_eq!(prepared.chat_request.sampling_params.max_tokens, None);
         assert_eq!(
             prepared.chat_request.chat_options.template_kwargs["foo"],
             json!("bar")
         );
+    }
+
+    #[test]
+    fn prepare_chat_request_keeps_optional_sampling_fields_unset() {
+        let prepared = prepare_chat_request(&base_request(), "Qwen/Qwen1.5-0.5B-Chat")
+            .expect("request is valid");
+
+        assert_eq!(prepared.chat_request.sampling_params.temperature, None);
+        assert_eq!(prepared.chat_request.sampling_params.top_p, None);
+        assert_eq!(prepared.chat_request.sampling_params.top_k, None);
+        assert_eq!(prepared.chat_request.sampling_params.max_tokens, None);
+        assert_eq!(prepared.chat_request.sampling_params.stop_token_ids, None);
+        assert_eq!(prepared.chat_request.sampling_params.min_tokens, None);
     }
 
     #[test]

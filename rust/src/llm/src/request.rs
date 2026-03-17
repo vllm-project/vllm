@@ -125,10 +125,7 @@ mod tests {
         GenerateRequest {
             request_id: "req-1".to_string(),
             prompt_token_ids: vec![11, 22, 33],
-            sampling_params: EngineCoreSamplingParams {
-                output_kind: RequestOutputKind::Cumulative,
-                ..Default::default()
-            },
+            sampling_params: EngineCoreSamplingParams::for_test(),
             arrival_time: Some(42.5),
             cache_salt: Some("salt".to_string()),
             trace_headers: Some(BTreeMap::from([(

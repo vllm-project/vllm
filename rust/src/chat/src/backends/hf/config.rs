@@ -36,6 +36,14 @@ impl NamedSpecialToken {
 pub(super) struct GenerationConfig {
     #[serde(default)]
     pub eos_token_id: Option<OneOrManyTokenIds>,
+    #[serde(default)]
+    pub temperature: Option<f32>,
+    #[serde(default)]
+    pub top_p: Option<f32>,
+    #[serde(default)]
+    pub top_k: Option<i32>,
+    #[serde(default)]
+    pub max_new_tokens: Option<u32>,
 }
 
 /// HF generation configs allow either one EOS id or a list of EOS ids.

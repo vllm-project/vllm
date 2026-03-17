@@ -57,7 +57,10 @@ pub(super) fn validate_request_compat(
     }
 
     if request.response_format.is_some() {
-        bail_invalid_request!(param = "response_format", "response_format is not supported.");
+        bail_invalid_request!(
+            param = "response_format",
+            "response_format is not supported."
+        );
     }
 
     if request

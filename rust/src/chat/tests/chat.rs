@@ -215,7 +215,7 @@ fn sample_request(request_id: &str) -> ChatRequest {
             ChatMessage::text(ChatRole::User, "Say hi"),
         ],
         sampling_params: UserSamplingParams {
-            max_tokens: 8,
+            max_tokens: Some(8),
             ..Default::default()
         },
         chat_options: ChatOptions::default(),

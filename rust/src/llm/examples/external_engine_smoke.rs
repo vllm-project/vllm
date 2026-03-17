@@ -49,7 +49,7 @@ fn build_request(request_id: String, max_tokens: u32) -> GenerateRequest {
         sampling_params: EngineCoreSamplingParams {
             max_tokens,
             output_kind: RequestOutputKind::FinalOnly,
-            ..Default::default()
+            ..EngineCoreSamplingParams::for_test()
         },
         arrival_time: None,
         cache_salt: None,

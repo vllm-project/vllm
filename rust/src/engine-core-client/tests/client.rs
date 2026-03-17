@@ -48,7 +48,6 @@ fn sample_request_with_id(request_id: &str) -> EngineCoreRequest {
             eos_token_id: Some(151645),
             all_stop_token_ids: BTreeSet::from([151643, 151645]),
             output_kind: RequestOutputKind::FinalOnly,
-            ..Default::default()
         }),
         pooling_params: None,
         arrival_time: 42.5,

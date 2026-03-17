@@ -28,21 +28,6 @@ pub use classfied_outputs::{
     ClassifiedEngineCoreOutputs, DpControlMessage, OtherEngineCoreOutputs, RequestBatchOutputs,
 };
 
-mod defaults {
-    pub fn temperature() -> f32 {
-        1.0
-    }
-
-    pub fn top_p() -> f32 {
-        1.0
-    }
-
-    pub fn max_tokens() -> u32 {
-        // TODO: make it reasonable
-        65536
-    }
-}
-
 /// Request types are encoded as single-byte protocol constants so they can be
 /// sent over the ZMQ socket without an extra encoding step.
 ///
@@ -129,39 +114,33 @@ pub enum StopReason {
 ///
 /// Original Python definition:
 /// <https://github.com/vllm-project/vllm/blob/f22d6e026798a74e6542a52ef776c054f2de572a/vllm/sampling_params.py#L155-L291>
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, DefaultFromSerde)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EngineCoreSamplingParams {
     /// Controls randomness. Lower values are more deterministic; zero means
     /// greedy sampling.
-    #[serde(default = "defaults::temperature")]
     pub temperature: f32,
     /// Cumulative probability threshold for nucleus sampling.
-    #[serde(default = "defaults::top_p")]
     pub top_p: f32,
     /// Maximum number of top tokens to consider. `0` means all tokens.
-    #[serde(default)]
     pub top_k: i32,
     /// Maximum number of tokens to generate per output sequence.
-    #[serde(default = "defaults::max_tokens")]
     pub max_tokens: u32,
     /// Minimum number of tokens to generate before EOS or stop-token handling.
-    #[serde(default)]
     pub min_tokens: u32,
     /// Token IDs that stop generation.
-    #[serde(default)]
     pub stop_token_ids: Vec<u32>,
     /// Primary EOS token ID used by engine-core's dedicated EOS stop path.
     ///
     /// This mirrors Python's internal `_eos_token_id` field and is derived by
     /// the frontend from tokenizer/model metadata rather than supplied directly
     /// by end users.
-    #[serde(default, rename = "_eos_token_id")]
+    #[serde(rename = "_eos_token_id")]
     pub eos_token_id: Option<u32>,
     /// Complete stop-token set used by engine-core for `min_tokens` masking.
     ///
     /// This mirrors Python's internal `_all_stop_token_ids` field and should
     /// contain explicit `stop_token_ids` plus any frontend-derived EOS token IDs.
-    #[serde(default, rename = "_all_stop_token_ids")]
+    #[serde(rename = "_all_stop_token_ids")]
     pub all_stop_token_ids: BTreeSet<u32>,
     /// Whether higher-level frontend updates are cumulative, delta-based, or
     /// final-only.
@@ -170,8 +149,24 @@ pub struct EngineCoreSamplingParams {
     /// engine-core ZMQ protocol, callers should still treat outputs as
     /// incremental step updates. Python's frontend `OutputProcessor` is what
     /// enforces `FINAL_ONLY` behavior for user-facing request outputs.
-    #[serde(default)]
     pub output_kind: RequestOutputKind,
+}
+
+impl EngineCoreSamplingParams {
+    /// Constructs a default sampling params for testing purposes only.
+    pub fn for_test() -> Self {
+        Self {
+            temperature: 1.0,
+            top_p: 1.0,
+            top_k: 0,
+            max_tokens: 65536,
+            min_tokens: 0,
+            stop_token_ids: Vec::new(),
+            eos_token_id: None,
+            all_stop_token_ids: BTreeSet::new(),
+            output_kind: RequestOutputKind::default(),
+        }
+    }
 }
 
 /// Engine-core add-request payload sent from frontend to engine.
@@ -352,7 +347,7 @@ mod tests {
             mm_features: None,
             sampling_params: Some(EngineCoreSamplingParams {
                 max_tokens: 8,
-                ..Default::default()
+                ..EngineCoreSamplingParams::for_test()
             }),
             pooling_params: None,
             arrival_time: 1234.5,

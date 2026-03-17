@@ -29,7 +29,6 @@ struct Args {
 
 const CLIENT_INDEX: u32 = 0;
 const OUTPUT_TIMEOUT_SECS: u64 = 120;
-const MAX_TOKENS: u32 = 16;
 const ENABLE_THINKING_KEY: &str = "enable_thinking";
 
 fn unique_request_id() -> String {
@@ -84,8 +83,7 @@ async fn main() -> Result<()> {
         request_id: request_id.clone(),
         messages: vec![ChatMessage::text(ChatRole::User, args.prompt.clone())],
         sampling_params: UserSamplingParams {
-            max_tokens: MAX_TOKENS,
-            temperature: 0.0,
+            temperature: Some(0.0),
             ..Default::default()
         },
         chat_options,

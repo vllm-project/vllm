@@ -10,6 +10,7 @@ use tokenizers::Tokenizer as HfTokenizer;
 use self::config::{load_generation_config, load_tokenizer_config};
 use self::model_files::{ResolvedModelFiles, resolve_model_files};
 use crate::backend::{ChatBackend, SamplingHints};
+use crate::backends::hf::config::GenerationConfig;
 use crate::error::{Error, Result};
 use crate::request::ChatRequest;
 use crate::template::ChatTemplate;
@@ -27,6 +28,9 @@ struct HfChatBackendInner {
     primary_eos_token_id: Option<u32>,
     /// Additional EOS ids that should flow through stop-token handling.
     extra_eos_token_ids: BTreeSet<u32>,
+    /// Generation-config for sampling defaults that may be inherited when the user does not
+    /// explicitly override them.
+    generation_config: GenerationConfig,
 }
 
 impl fmt::Debug for HfChatBackend {
@@ -58,11 +62,12 @@ impl HfChatBackend {
             .as_ref()
             .and_then(|token| tokenizer.token_to_id(token.as_str()));
 
-        let mut extra_eos_token_ids =
-            load_generation_config(files.generation_config_path.as_deref())?
-                .eos_token_id
-                .map(|value| value.into_set())
-                .unwrap_or_default();
+        let generation_config = load_generation_config(files.generation_config_path.as_deref())?;
+        let mut extra_eos_token_ids = generation_config
+            .eos_token_id
+            .clone()
+            .map(|value| value.into_set())
+            .unwrap_or_default();
         if let Some(primary_eos_token_id) = primary_eos_token_id {
             extra_eos_token_ids.remove(&primary_eos_token_id);
         }
@@ -73,6 +78,7 @@ impl HfChatBackend {
                 chat_template,
                 primary_eos_token_id,
                 extra_eos_token_ids,
+                generation_config,
             }),
         })
     }
@@ -103,6 +109,10 @@ impl ChatBackend for HfChatBackend {
         Ok(SamplingHints {
             primary_eos_token_id: self.inner.primary_eos_token_id,
             extra_eos_token_ids: self.inner.extra_eos_token_ids.clone(),
+            default_temperature: self.inner.generation_config.temperature,
+            default_top_p: self.inner.generation_config.top_p,
+            default_top_k: self.inner.generation_config.top_k,
+            default_max_tokens: self.inner.generation_config.max_new_tokens,
         })
     }
 }

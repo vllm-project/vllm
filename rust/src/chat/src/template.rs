@@ -124,14 +124,16 @@ fn template_content_to_json(
 #[cfg(test)]
 mod tests {
     use super::ChatTemplate;
-    use crate::request::{ChatContentPart, ChatMessage, ChatOptions, ChatRequest, ChatRole};
+    use crate::request::{
+        ChatContentPart, ChatMessage, ChatOptions, ChatRequest, ChatRole, UserSamplingParams,
+    };
     use crate::{Error, Result};
 
     fn sample_request(messages: Vec<ChatMessage>) -> ChatRequest {
         ChatRequest {
             request_id: "render-test".to_string(),
             messages,
-            sampling_params: Default::default(),
+            sampling_params: UserSamplingParams::default(),
             chat_options: ChatOptions::default(),
         }
     }

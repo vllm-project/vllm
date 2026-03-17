@@ -23,6 +23,7 @@ vllm-llm.workspace = true
 anyhow.workspace = true
 bytes.workspace = true
 clap.workspace = true
+expect-test.workspace = true
 rmp-serde.workspace = true
 tempfile.workspace = true
 tokio.workspace = true

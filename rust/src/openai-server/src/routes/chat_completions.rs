@@ -99,9 +99,8 @@ async fn chat_completion_chunk_stream(
                 }
             },
             Ok(ChatEvent::Done { .. }) => {
-                let error = server_error!(
-                    "chat stream terminated without a terminal finish reason",
-                );
+                let error =
+                    server_error!("chat stream terminated without a terminal finish reason",);
                 error!(request_id = %response_id, "missing terminal finish reason");
                 return Err(error);
             }

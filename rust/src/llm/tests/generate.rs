@@ -72,7 +72,7 @@ fn sample_generate_request(
         sampling_params: EngineCoreSamplingParams {
             output_kind,
             max_tokens,
-            ..Default::default()
+            ..EngineCoreSamplingParams::for_test()
         },
         arrival_time: Some(42.5),
         cache_salt: None,
