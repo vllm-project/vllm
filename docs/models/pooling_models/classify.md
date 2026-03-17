@@ -238,3 +238,8 @@ curl -v "http://127.0.0.1:8000/classify" \
       }
     }
     ```
+
+
+## More examples
+
+More examples can be found here: [examples/pooling/classify](../../../examples/pooling/classify)

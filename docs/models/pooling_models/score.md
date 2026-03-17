@@ -1,6 +1,6 @@
 # Score Models
 
-The Score models is designed to compute similarity scores between two input prompts. It supports three model architectures: `cross-encoder`, `late-interaction`, and `bi-encoder` models.
+The Score models is designed to compute similarity scores between two input prompts. It supports three model types (aka `score_type`): `cross-encoder`, `late-interaction`, and `bi-encoder`.
 
 This functionality is supported through the offline `LLM.score(...)` API, along with several online APIs: the `/score` API and the Re-rank APIs available at `/rerank`, `/v1/rerank`, and `/v2/rerank`.
 
@@ -396,3 +396,7 @@ Result documents will be sorted by relevance, and the `index` property can be us
       ]
     }
     ```
+
+## More examples
+
+More examples can be found here: [examples/pooling/score](../../../examples/pooling/score)

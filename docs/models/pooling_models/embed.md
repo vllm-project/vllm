@@ -2,7 +2,7 @@
 
 Embedding models are a class of machine learning models designed to transform unstructured data—such as text, images, or audio—into a structured numerical representation known as an embedding.
 
-This functionality is supported through the `embed` pooling task, the `offline LLM.embed(...)` and `LLM.encode(..., pooling_task="embed")` APIs, as well as the online `/v1/embeddings` API.
+This functionality is supported through the `embed` pooling task, the `offline LLM.embed(...)` and `LLM.encode(..., pooling_task="embed")` APIs, as well as the online OpenAI-Compatible Embeddings API(`/v1/embeddings`) API and Cohere Embed API(`/v2/embed`).
 
 The primary distinction between (sequence) embedding and token embedding lies in their output granularity: (sequence) embedding produces a single embedding vector for an entire input sequence, whereas token embedding generates an embedding for each individual token within the sequence.
 
@@ -437,3 +437,7 @@ depend on the model:
   the valid `input_type` values. For example, `Snowflake/snowflake-arctic-embed-xs` defines `"query"`,
   so setting `input_type: "query"` prepends `"Represent this sentence for searching relevant passages: "`.
 - **Other models**: `input_type` is not accepted and will raise a validation error if passed.
+
+## More examples
+
+More examples can be found here: [examples/pooling/embed](../../../examples/pooling/embed)

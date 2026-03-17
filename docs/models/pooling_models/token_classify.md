@@ -70,3 +70,7 @@ print(f"Data: {data!r}")
 ## Online Serving
 
 Please refer to the [pooling API](pooling.md#online-serving) and use `"task":"token_classify"`.
+
+## More examples
+
+More examples can be found here: [examples/pooling/token_classify](../../../examples/pooling/token_classify)

@@ -103,3 +103,7 @@ print(f"Score: {score}")
 ## Online Serving
 
 Please refer to the [pooling API](pooling.md#online-serving) and use `"task":"token_embed"`.
+
+## More examples
+
+More examples can be found here: [examples/pooling/token_embed](../../../examples/pooling/token_embed)

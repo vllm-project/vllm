@@ -22,7 +22,7 @@ If your model is not in the above list, we will try to automatically convert the
 
 ### Token (Outcome) Reward Models
 
-The difference between the sequence classification task and the token classification task is that sequence classification outputs one result for each sequence, while token classification outputs a result for each token.
+The key distinction between (sequence) classification and token classification lies in their output granularity: (sequence) classification produces a single result for an entire input sequence, whereas token classification yields a result for each individual token within the sequence.
 
 Using token classification models as reward models, the usage and supported features are the same as for normal [token classification models](token_classify.md).
 
