@@ -35,7 +35,7 @@ steps:
   parallelism: 2
 
 - label: Kernels MoE Test %N
-  timeout_in_minutes: 60
+  timeout_in_minutes: 25
   source_file_dependencies:
   - csrc/quantization/cutlass_w8a8/moe/
   - csrc/moe/
@@ -47,7 +47,7 @@ steps:
   commands:
     - pytest -v -s kernels/moe --ignore=kernels/moe/test_modular_oai_triton_moe.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
     - pytest -v -s kernels/moe/test_modular_oai_triton_moe.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
-  parallelism: 2
+  parallelism: 5
 
 - label: Kernels Mamba Test
   timeout_in_minutes: 45
