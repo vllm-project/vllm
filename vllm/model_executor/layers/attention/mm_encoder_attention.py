@@ -6,7 +6,7 @@ import numpy as np
 import torch
 
 from vllm.logger import init_logger
-from vllm.model_executor.custom_op import CustomOp, get_oot_class_by_name
+from vllm.model_executor.custom_op import CustomOp, maybe_get_oot_by_class
 from vllm.model_executor.models.vision import get_vit_attn_backend
 from vllm.utils.math_utils import round_up
 from vllm.v1.attention.backends.fa_utils import get_flash_attn_version
@@ -125,7 +125,7 @@ class MMEncoderAttention(CustomOp):
         cu_seqlens: np.ndarray,
         device: torch.device,
     ) -> torch.Tensor | None:
-        if (oot_class := get_oot_class_by_name(cls.__name__)) is not None:
+        if (oot_class := maybe_get_oot_by_class(cls)) is not cls:
             return oot_class.maybe_compute_seq_lens(attn_backend, cu_seqlens, device)  # type: ignore[attr-defined]
 
         if attn_backend != AttentionBackendEnum.FLASHINFER:
@@ -149,7 +149,7 @@ class MMEncoderAttention(CustomOp):
         tp_size: int,
         device: torch.device,
     ) -> torch.Tensor:
-        if (oot_class := get_oot_class_by_name(cls.__name__)) is not None:
+        if (oot_class := maybe_get_oot_by_class(cls)) is not cls:
             return oot_class.maybe_recompute_cu_seqlens(  # type: ignore[attr-defined]
                 attn_backend, cu_seqlens, hidden_size, tp_size, device
             )
