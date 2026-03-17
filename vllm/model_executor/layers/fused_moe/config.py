@@ -1172,6 +1172,10 @@ class FusedMoEConfig:
     # kernel is free to use inplace or not.
     disable_inplace: bool = True
 
+    # The resolved model architecture string (e.g. "MiniMaxM2ForCausalLM").
+    # Used by the backend oracle to apply model-specific kernel selection rules.
+    model_arch: str | None = None
+
     def __post_init__(self):
         if self.dp_size > 1:
             logger.debug_once(

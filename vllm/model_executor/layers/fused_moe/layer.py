@@ -564,6 +564,11 @@ class FusedMoE(CustomOp):
             routing_method=self.routing_method_type,
             # TODO: in_dtype == out_dtype?
             disable_inplace=disable_inplace() or self._shared_experts is not None,
+            model_arch=(
+                vllm_config.model_config.architecture
+                if vllm_config.model_config is not None
+                else None
+            ),
         )
         if self.moe_config.use_mori_kernels:
             assert self.rocm_aiter_fmoe_enabled, (
