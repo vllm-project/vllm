@@ -37,6 +37,7 @@ from vllm.inputs.data import PromptType, TokensPrompt
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import (
     MultiModalEmbeddings,
+    SupportsLoRA,
     SupportsMRoPE,
     SupportsMultiModal,
     SupportsPP,
@@ -268,7 +269,29 @@ class Qwen3ASRForConditionalGeneration(
     SupportsPP,
     SupportsMRoPE,
     SupportsTranscription,
+    SupportsLoRA,
 ):
+    # LoRA support: apply only to the language model, not the audio tower
+    packed_modules_mapping = {
+        "qkv_proj": [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+        ],
+        "gate_up_proj": [
+            "gate_proj",
+            "up_proj",
+        ],
+    }
+
+    embedding_modules = {
+        "language_model.embed_tokens": "input_embeddings",
+        "language_model.lm_head": "output_embeddings",
+    }
+
+    # Skip the audio encoder when applying LoRA
+    lora_skip_prefixes = ["audio_tower."]
+
     supported_languages = ISO639_1_SUPPORTED_LANGS
 
     hf_to_vllm_mapper = WeightsMapper(
