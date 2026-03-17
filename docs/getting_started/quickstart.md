@@ -10,6 +10,18 @@ This guide will help you quickly get started with vLLM to perform:
 - OS: Linux
 - Python: 3.10 -- 3.13
 
+## Repo Install Shortcut
+
+If you are working from a local checkout of this repository and want an easier Ollama-like install flow, you can bootstrap the local CLI directly from the repo:
+
+```bash
+./scripts/install.sh
+vllm pull deepseek-r1:8b
+vllm run deepseek-r1:8b
+```
+
+The installer also supports `--user`, `--system`, and `--venv <path>` modes.
+
 ## Installation
 
 === "NVIDIA CUDA"

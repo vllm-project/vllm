@@ -9,7 +9,47 @@ vllm --help
 Available Commands:
 
 ```bash
-vllm {chat,complete,serve,bench,collect-env,run-batch}
+vllm {pull,run,ls,inspect,serve,ps,stop,logs,rm,chat,complete,bench,collect-env,run-batch}
+```
+
+## Local Runtime
+
+The local-runtime commands are designed to make a source checkout feel more like a local model runner:
+
+```bash
+./scripts/install.sh
+vllm pull deepseek-r1:8b
+vllm run deepseek-r1:8b
+vllm serve deepseek-r1:8b
+vllm ps
+```
+
+### pull
+
+Resolve a model alias or exact Hugging Face repo and pre-download the model locally.
+
+```bash
+vllm pull deepseek-r1:8b
+vllm pull meta-llama/Llama-3.1-8B-Instruct
+```
+
+### run
+
+Run a model directly in your shell without starting a separate API server first.
+
+```bash
+vllm run deepseek-r1:8b
+vllm run deepseek-r1:8b --prompt "Explain KV cache in one paragraph."
+vllm run meta-llama/Llama-3.1-8B-Instruct --complete --prompt "The future of inference is"
+```
+
+### ls and inspect
+
+Show pulled model metadata and how aliases resolve.
+
+```bash
+vllm ls
+vllm inspect deepseek-r1:8b
 ```
 
 ## serve
@@ -20,6 +60,13 @@ Start with a model:
 
 ```bash
 vllm serve meta-llama/Llama-2-7b-hf
+```
+
+By default, `vllm serve` now starts a managed background service. Use `--foreground` to keep the previous blocking behavior:
+
+```bash
+vllm serve deepseek-r1:8b
+vllm serve meta-llama/Llama-3.1-8B-Instruct --foreground
 ```
 
 Specify the port:
@@ -54,6 +101,17 @@ vllm serve --help=page
 ```
 
 See [vllm serve](./serve.md) for the full reference of all available arguments.
+
+### ps, stop, logs, rm
+
+Manage local background services and pulled model metadata.
+
+```bash
+vllm ps
+vllm logs deepseek-r1-8b
+vllm stop deepseek-r1-8b
+vllm rm deepseek-r1:8b
+```
 
 ## chat
 
@@ -186,3 +244,5 @@ For detailed options of any subcommand, use:
 ```bash
 vllm <subcommand> --help
 ```
+
+Tracked follow-up items for the local-runtime UX live in [local_runtime_followups.md](./local_runtime_followups.md).
