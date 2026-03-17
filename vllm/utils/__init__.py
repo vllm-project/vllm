@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
+import socket
 import uuid
 
 import torch
@@ -36,26 +38,15 @@ def length_from_prompt_token_ids_or_embeds(
         return prompt_token_len
 
 
-def is_moe_layer(module: torch.nn.Module) -> bool:
-    # TODO(bnell): Should use isinstance but can't due to circular dependencies.
-    def _check_bases(cls):
-        if cls.__name__ == "FusedMoE":
-            return True
-
-        for b in cls.__bases__:
-            if _check_bases(b):
-                return True
-
-    return _check_bases(module.__class__)
-
-import os
-
 def is_restore() -> str:
-    # return os.getenv("GRUS_SNAPSHOT_IMAGE_PATH", None)
     return os.path.exists("/root/.grusflag")
 
-def get_containerd_id() -> str:
-    return os.getenv("SNAPSHOT_CONTAINER_ID", None)
-
-def get_pod_ip() -> str:
-    return os.getenv("POD_IP", None)
+def get_local_ip():
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.settimeout(0.1)
+    # 连接到外部服务器（这里用Google的DNS）
+    s.connect(("8.8.8.8", 80))
+    # 获取本地套接字的地址
+    ip = s.getsockname()[0]
+    s.close()
+    return ip

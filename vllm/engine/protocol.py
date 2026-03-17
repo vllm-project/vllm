@@ -171,6 +171,16 @@ class EngineClient(ABC):
         ...
 
     @abstractmethod
+    async def suspend(self, model_save_path=None) -> None:
+        """Suspend the engine"""
+        ...
+
+    @abstractmethod
+    async def resume(self, data_parallel_master_ip = None, model_path=None) -> None:
+        """Resume the engine"""
+        ...
+
+    @abstractmethod
     async def is_sleeping(self) -> bool:
         """Check whether the engine is sleeping"""
         ...

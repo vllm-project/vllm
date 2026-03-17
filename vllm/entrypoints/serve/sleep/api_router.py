@@ -4,6 +4,7 @@
 
 from fastapi import APIRouter, FastAPI, Request
 from fastapi.responses import JSONResponse, Response
+from fastapi import HTTPException, status
 
 import vllm.envs as envs
 from vllm.engine.protocol import EngineClient
@@ -47,6 +48,33 @@ async def wake_up(raw_request: Request):
 async def is_sleeping(raw_request: Request):
     is_sleeping = await engine_client(raw_request).is_sleeping()
     return JSONResponse(content={"is_sleeping": is_sleeping})
+
+@router.post("/suspend")
+async def suspend(raw_request: Request):
+    model_save_path = raw_request.query_params.get("model_save_path")
+    # 校验参数是否存在
+    if model_save_path is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Missing required parameter: model_save_path"
+        )
+    await engine_client(raw_request).suspend(model_save_path=model_save_path)
+    return Response(status_code=200)
+
+@router.post("/resume")
+async def resume(raw_request: Request):
+    # get POST params
+    data_parallel_master_ip = raw_request.query_params.get("data_parallel_master_ip")
+    model_path = raw_request.query_params.get("model_path")
+    # 校验参数是否存在
+    if data_parallel_master_ip is None or model_path is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Missing required parameter: data_parallel_master_ip and model_path"
+        )
+
+    await engine_client(raw_request).resume(data_parallel_master_ip=data_parallel_master_ip, model_path=model_path)
+    return Response(status_code=200)
 
 
 def attach_router(app: FastAPI):
