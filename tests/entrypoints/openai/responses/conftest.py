@@ -8,6 +8,9 @@ from collections.abc import Callable
 from typing import Any
 
 import pytest
+import pytest_asyncio
+
+from tests.utils import RemoteOpenAIServer
 
 logger = logging.getLogger(__name__)
 
@@ -361,3 +364,48 @@ def log_response_diagnostics(
     )
 
     return diagnostics
+
+
+# ---------------------------------------------------------------------------
+# Default server fixtures (Qwen3-1.7B with tool-calling & structured output)
+#
+# Test files that need a different model/config define their own ``client``
+# fixture which automatically overrides this one for that module.
+# ---------------------------------------------------------------------------
+
+SMALL_MODEL = "Qwen/Qwen3-1.7B"
+
+
+@pytest.fixture(scope="module")
+def default_server_args():
+    return [
+        "--max-model-len",
+        "8192",
+        "--enforce-eager",  # For faster startup.
+        "--enable-auto-tool-choice",
+        "--structured-outputs-config.backend",
+        "xgrammar",
+        "--tool-call-parser",
+        "hermes",
+        "--reasoning-parser",
+        "qwen3",
+    ]
+
+
+@pytest.fixture(scope="module")
+def server_with_store(default_server_args):
+    with RemoteOpenAIServer(
+        SMALL_MODEL,
+        default_server_args,
+        env_dict={
+            "VLLM_ENABLE_RESPONSES_API_STORE": "1",
+            "VLLM_SERVER_DEV_MODE": "1",
+        },
+    ) as remote_server:
+        yield remote_server
+
+
+@pytest_asyncio.fixture
+async def client(server_with_store):
+    async with server_with_store.get_async_client() as async_client:
+        yield async_client
