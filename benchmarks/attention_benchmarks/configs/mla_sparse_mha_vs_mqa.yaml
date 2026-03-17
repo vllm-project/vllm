@@ -1,8 +1,5 @@
 # Sparse MLA benchmark: forward_mha vs forward_mqa comparison
 #
-# Compares the single-pass FA4 masked MHA prefill path against the
-# per-token MQA path for extend workloads (prefill with cached context).
-#
 # Usage:
 #   python benchmark.py --config configs/mla_sparse_mha_vs_mqa.yaml
 
@@ -21,20 +18,26 @@ model:
   block_size: 128
 
 batch_specs:
-  # Extend: q_len new tokens with seq_len total sequence
-  - "1q512s4k"
-  - "1q512s8k"
-  - "1q1ks4k"
-  - "1q1ks8k"
-  - "1q2ks8k"
-  - "1q2ks16k"
-  - "1q4ks16k"
+  # Pure prefill (no context) — isolates kv_b_proj + causal attn cost
+  - "q64"
+  - "q128"
+  - "q256"
+  - "q512"
+  - "q1k"
+  - "q2k"
+  - "q4k"
+  - "q8k"
 
-  # Batched extend
-  - "4q512s4k"
-  - "4q1ks8k"
-  - "8q512s4k"
-  - "8q512s8k"
+  # Large batch of short extends — can kv_b_proj batch amortize?
+  - "16q64s128"
+  - "32q64s128"
+  - "64q64s128"
+
+  # Large q_len with small context — best case for MHA
+  - "1q1ks1k"
+  - "1q2ks2k"
+  - "1q4ks4k"
+  - "1q8ks8k"
 
 backends:
   - FLASHMLA_SPARSE
