@@ -438,16 +438,19 @@ def _post_update_kernel(
 
     for i in range(num_sampled):
         token_id = tl.load(sampled_tokens_ptr + req_id * sampled_tokens_stride + i)
-        token_ptr = (
-            output_bin_counts_ptr + req_state_idx * output_bin_counts_stride + token_id
-        )
-        count = tl.load(token_ptr)
-        count += 1
-        tl.store(token_ptr, count)
         tl.store(
             all_token_ids_ptr + req_state_idx * all_token_ids_stride + total_len + i,
             token_id,
         )
+
+        if output_bin_counts_ptr is not None:
+            token_ptr = (
+                output_bin_counts_ptr
+                + req_state_idx * output_bin_counts_stride
+                + token_id
+            )
+            count = tl.load(token_ptr)
+            tl.store(token_ptr, count + 1)
 
     query_start = tl.load(query_start_loc_ptr + req_id)
     query_end = tl.load(query_start_loc_ptr + req_id + 1)
@@ -467,7 +470,7 @@ def post_update(
     # [max_num_reqs]
     last_sampled_tokens: torch.Tensor,
     # [max_num_reqs, vocab_size]
-    output_bin_counts: torch.Tensor,
+    output_bin_counts: torch.Tensor | None,
     # [num_reqs, num_speculative_steps + 1]
     sampled_tokens: torch.Tensor,
     # [num_reqs]
@@ -487,7 +490,7 @@ def post_update(
         num_computed_tokens,
         last_sampled_tokens,
         output_bin_counts,
-        output_bin_counts.stride(0),
+        output_bin_counts.stride(0) if output_bin_counts is not None else 0,
         sampled_tokens,
         sampled_tokens.stride(0),
         num_sampled,

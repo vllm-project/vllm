@@ -16,10 +16,12 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.platforms import current_platform
 from vllm.v1.attention.backend import AttentionBackend
+from vllm.v1.kv_cache_interface import MambaSpec
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 
 if TYPE_CHECKING:
     from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
+    from vllm.v1.kv_cache_interface import KVCacheSpec
 
 logger = init_logger(__name__)
 
@@ -85,6 +87,7 @@ class KVOutputAggregator:
         finished_sending = set[str]()
         finished_recving = set[str]()
         aggregated_kv_connector_stats = None
+        aggregated_kv_connector_worker_meta = None
         combined_kv_cache_events = None
         invalid_block_ids = set[int]()
         for model_runner_output in outputs:
@@ -127,6 +130,17 @@ class KVOutputAggregator:
                         aggregated_kv_connector_stats.aggregate(kv_connector_stats)
                     )
 
+            # Aggregate kv_connector_worker_meta from all workers.
+            if aggregated_kv_connector_worker_meta is None:
+                # Use the first worker's kv_connector_worker_meta as accumulator.
+                aggregated_kv_connector_worker_meta = kv_output.kv_connector_worker_meta
+            elif kv_connector_worker_meta := kv_output.kv_connector_worker_meta:
+                aggregated_kv_connector_worker_meta = (
+                    aggregated_kv_connector_worker_meta.aggregate(
+                        kv_connector_worker_meta
+                    )
+                )
+
             # Combine kv_cache_events from all workers.
             if combined_kv_cache_events is None:
                 # Use the first worker's kv_cache events as start event list.
@@ -151,6 +165,7 @@ class KVOutputAggregator:
             finished_recving=finished_recving or None,
             kv_connector_stats=aggregated_kv_connector_stats or None,
             kv_cache_events=combined_kv_cache_events or None,
+            kv_connector_worker_meta=aggregated_kv_connector_worker_meta or None,
             invalid_block_ids=invalid_block_ids,
             expected_finished_count=self._expected_finished_count,
         )
@@ -315,22 +330,26 @@ class TpKVTopology:
     remote_tp_size: dict[EngineId, int]
     is_mla: bool
     total_num_kv_heads: int
-    attn_backend: type[AttentionBackend]
+    attn_backends: list[type[AttentionBackend]]
     engine_id: EngineId
     remote_block_size: dict[EngineId, int]
     tensor_shape: torch.Size | None = None
+    is_mamba: bool = False
 
     def __post_init__(self):
         # Figure out whether the first dimension of the cache is K/V
         # or num_blocks. This is used to register the memory regions correctly.
-        _MOCK_BLOCK_SIZE = 16
-        kv_cache_shape = self.attn_backend.get_kv_cache_shape(
-            num_blocks=1, block_size=_MOCK_BLOCK_SIZE, num_kv_heads=1, head_size=1
-        )
-        logger.debug("Test kv_cache_shape: %s", kv_cache_shape)
+        attn_backend = self.attn_backends[0]
+        if not self.is_mamba:
+            _MOCK_BLOCK_SIZE = 16
+            kv_cache_shape: tuple[int, ...] = attn_backend.get_kv_cache_shape(
+                num_blocks=1, block_size=_MOCK_BLOCK_SIZE, num_kv_heads=1, head_size=1
+            )
+            logger.debug("Test kv_cache_shape: %s", kv_cache_shape)
         # Non-MLA backends caches have 5 dims [2, num_blocks, H,N,D],
         # we just mock num_blocks to 1 for the dimension check below.
-        self._is_kv_layout_blocks_first = (
+        # Hybrid SSM models assume a single blocks_first layout
+        self._is_kv_layout_blocks_first = self.is_mamba or (
             len(kv_cache_shape) == 5 and kv_cache_shape[0] == 1
         )
 
@@ -347,7 +366,7 @@ class TpKVTopology:
             _MOCK_NUM_LAYERS = 80
             kv_cache_shape = (_MOCK_NUM_LAYERS,) + kv_cache_shape
             try:
-                kv_cache_stride_order = self.attn_backend.get_kv_cache_stride_order(
+                kv_cache_stride_order = attn_backend.get_kv_cache_stride_order(
                     include_num_layers_dimension=self._cross_layers_blocks
                 )
             except (AttributeError, NotImplementedError):
@@ -469,6 +488,30 @@ class TpKVTopology:
     ) -> list[int]:
         remote_tp_size = self.remote_tp_size[remote_engine_id]
         return self.get_target_remote_ranks(remote_tp_size)
+
+    def get_transfer_cache_regions(
+        self, cache: torch.Tensor, layer_spec: "KVCacheSpec"
+    ) -> list[torch.Tensor] | torch.Tensor:
+        """Return the cache tensor(s) to register as NIXL memory regions,
+        also accounting for hybrid SSM models specificities.
+        """
+        if isinstance(layer_spec, MambaSpec):
+            # Register the whole kv cache shared tensor, including SSM/Conv. This is
+            # similar to FI with the difference that SSM/Conv have different sizes
+            conv, ssm = cache
+            return [conv]
+
+        # Check may be hacky but it's matching `_update_hybrid_attention_mamba_layout`.
+        if self.is_mamba and cache.shape[0] == 2:
+            # When MAMBA is present, all backends are blocks first, so that blocks
+            # can be shared between attention layers and mamba layers. Runner
+            # `_update_hybrid_attention_mamba_layout` already adjusted strides
+            # for FlashAttn-like backends so its num_blocks first.
+            # Swap [2<>num_blocks] dims to get required layout for hybrid SSM.
+            cache = cache.transpose(0, 1)
+
+        # Regular case: backends like FA register K/V in separate regions
+        return cache if self.split_k_and_v else [cache]
 
 
 def get_current_attn_backends(
