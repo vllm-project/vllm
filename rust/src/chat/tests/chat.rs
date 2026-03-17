@@ -8,8 +8,8 @@ use std::time::Duration;
 use futures::StreamExt as _;
 use tokio::time::timeout;
 use vllm_chat::{
-    AssistantBlockKind, AssistantContentBlock, AssistantContentBlocksExt as _, ChatBackend,
-    ChatEvent, ChatLlm, ChatMessage, ChatOptions, ChatRequest, ChatRole, UserSamplingParams,
+    AssistantBlockKind, AssistantContentBlock, AssistantMessageExt as _, ChatBackend, ChatEvent,
+    ChatLlm, ChatMessage, ChatOptions, ChatRequest, ChatRole, UserSamplingParams,
 };
 use vllm_engine_core_client::protocol::handshake::{HandshakeInitMessage, ReadyMessage};
 use vllm_engine_core_client::protocol::{
@@ -819,10 +819,10 @@ async fn chat_collectors_return_structured_message_and_visible_text() {
         .chat(sample_request("chat-collect-2"))
         .await
         .unwrap()
-        .collect_text()
+        .collect_message()
         .await
         .unwrap();
-    assert_eq!(text, "outer");
+    assert_eq!(text.text(), "outer");
 
     chat.shutdown().await.unwrap();
     engine_task.await.unwrap();

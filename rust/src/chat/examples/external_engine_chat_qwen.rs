@@ -6,8 +6,8 @@ use futures::StreamExt as _;
 use tracing_subscriber::EnvFilter;
 use vllm_chat::backends::hf::HfChatBackend;
 use vllm_chat::{
-    AssistantBlockKind, AssistantContentBlocksExt as _, ChatEvent, ChatLlm, ChatMessage,
-    ChatOptions, ChatRequest, ChatRole, UserSamplingParams,
+    AssistantBlockKind, AssistantMessageExt as _, ChatEvent, ChatLlm, ChatMessage, ChatOptions,
+    ChatRequest, ChatRole, UserSamplingParams,
 };
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig};
 use vllm_llm::Llm;

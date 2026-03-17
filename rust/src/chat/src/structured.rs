@@ -144,7 +144,10 @@ impl StructuredEventState {
             return;
         };
 
-        let block = AssistantContentBlock::from_text_delta(open.kind, open.text);
+        let block = match open.kind {
+            AssistantBlockKind::Text => AssistantContentBlock::Text { text: open.text },
+            AssistantBlockKind::Reasoning => AssistantContentBlock::Reasoning { text: open.text },
+        };
         self.message.push_block(block.clone());
         events.push(ChatEvent::BlockEnd {
             index: open.index,

@@ -11,7 +11,7 @@ use thiserror_ext::AsReport as _;
 
 use crate::error::Result;
 use crate::request::{ChatContent, ChatMessage, ChatRequest};
-use crate::{AssistantContentBlocksExt, Error};
+use crate::{AssistantMessageExt, Error};
 
 /// Chat template handling for Hugging Face models.
 ///
@@ -97,6 +97,7 @@ struct AssistantTemplateMessage {
     content: Value,
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning: Option<String>,
+    // TODO: why do we need duplicated fields for reasoning?
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning_content: Option<String>,
 }

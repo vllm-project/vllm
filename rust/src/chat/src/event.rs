@@ -27,16 +27,9 @@ impl AssistantContentBlock {
             Self::Reasoning { .. } => AssistantBlockKind::Reasoning,
         }
     }
-
-    pub(crate) fn from_text_delta(kind: AssistantBlockKind, text: String) -> Self {
-        match kind {
-            AssistantBlockKind::Text => Self::Text { text },
-            AssistantBlockKind::Reasoning => Self::Reasoning { text },
-        }
-    }
 }
 
-#[easy_ext::ext(AssistantContentBlocksExt)]
+#[easy_ext::ext(AssistantMessageExt)]
 impl [AssistantContentBlock] {
     /// Concatenate all visible final-answer text blocks.
     pub fn text(&self) -> String {

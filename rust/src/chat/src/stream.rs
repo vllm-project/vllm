@@ -4,7 +4,7 @@ use std::task::{Context, Poll};
 use futures::Stream;
 
 use crate::error::Result;
-use crate::event::{AssistantContentBlocksExt as _, AssistantMessage, ChatEvent};
+use crate::event::{AssistantMessage, ChatEvent};
 
 /// Per-request stream of chat events.
 pub struct ChatEventStream {
@@ -38,11 +38,6 @@ impl ChatEventStream {
             }
         }
         Ok(message)
-    }
-
-    /// Collect the stream to completion and return the final visible assistant text.
-    pub async fn collect_text(self) -> Result<String> {
-        Ok(self.collect_message().await?.text())
     }
 }
 
