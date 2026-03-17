@@ -8,16 +8,18 @@
 ## What are pooling models?
 
 Natural Language Processing (NLP) can be primarily divided into the following two types of tasks:
+
 - Natural Language Understanding (NLU)
 - Natural Language Generation (NLG)
 
 The generative models supported by vLLM cover a variety of task types, such as the large language models (LLMs) we are familiar with, multimodal models (VLM) that handle multimodal inputs like images, videos, and audio, speech-to-text transcription models, and real-time models that support streaming input. Their common feature is the ability to generate text. Taking it a step further, vLLM-Omni supports the generation of multimodal content, including images, videos, and audio.
 
 As the capabilities of generative models continue to improve, the boundaries of these models are also constantly expanding. However, certain application scenarios still require specialized small language models to efficiently complete specific tasks. These models typically have the following characteristics:
+
 - They do not require content generation.
 - They only need to perform very limited functions, without requiring strong generalization, creativity, or high intelligence.
 - They demand extremely low latency and may operate on cost-constrained hardware.
-- The number of model parameters is usually less than 1 billion.
+- The number of model parameters is usually less than 10 billion.
 
 Although these models are relatively small in scale, they are still based on the Transformer architecture, similar or even identical to the most advanced large language models today. Many recently released pooling models are also fine-tuned from large language models, allowing them to benefit from the continuous improvements in large models. This architecture similarity enables them to reuse much of vLLM’s infrastructure. If compatible, we would be happy to help them leverage the latest features of vLLM as well.
 
@@ -57,14 +59,14 @@ Each pooling model in vLLM supports one or more of these tasks according to
 [Pooler.get_supported_tasks][vllm.model_executor.layers.pooler.Pooler.get_supported_tasks],
 enabling the corresponding APIs:
 
-| Task             | APIs                                                                          |
-| ---------------- | ----------------------------------------------------------------------------- |
-| `embed`          | `LLM.embed(...)`, `LLM.score(...)`\*, `LLM.encode(..., pooling_task="embed")` |
-| `classify`       | `LLM.classify(...)`, `LLM.encode(..., pooling_task="classify")`               |
-| `score`          | `LLM.score(...)`                                                              |
-| `token_classify` | `LLM.reward(...)`, `LLM.encode(..., pooling_task="token_classify")`           |
-| `token_embed`    | `LLM.encode(..., pooling_task="token_embed")`                                 |
-| `plugin`         | `LLM.encode(..., pooling_task="plugin")`                                      |
+| Task             | APIs                                                                       |
+|------------------|----------------------------------------------------------------------------|
+| `embed`          | `LLM.embed(...)`,`LLM.encode(..., pooling_task="embed")`, `LLM.score(...)` |
+| `classify`       | `LLM.classify(...)`, `LLM.encode(..., pooling_task="classify")`            |
+| `score`          | `LLM.score(...)`                                                           |
+| `token_classify` | `LLM.reward(...)`, `LLM.encode(..., pooling_task="token_classify")`        |
+| `token_embed`    | `LLM.encode(..., pooling_task="token_embed")`, `LLM.score(...)`            |
+| `plugin`         | `LLM.encode(..., pooling_task="plugin")`                                   |
 
 ### `LLM.classify`
 
@@ -87,14 +89,90 @@ It is primarily designed for [score models](score.md).
 
 The [encode][vllm.LLM.encode] method is available to all pooling models in vLLM.
 
+!!! note
+    Please use one of the more specific methods or set the task directly when using `LLM.encode`:
+
+    - For embeddings, use `LLM.embed(...)` or `pooling_task="embed"`.
+    - For classification logits, use `LLM.classify(...)` or `pooling_task="classify"`.
+    - For similarity scores, use `LLM.score(...)`.
+    - For rewards, use `LLM.reward(...)` or `pooling_task="token_classify"`.
+    - For token classification, use `pooling_task="token_classify"`.
+    - For multi-vector retrieval, use `pooling_task="token_embed"`.
+    - For IO Processor Plugins, use `pooling_task="plugin"`.
+
+### Examples
+
+```python
+from vllm import LLM
+
+llm = LLM(model="intfloat/e5-small", runner="pooling")
+(output,) = llm.encode("Hello, my name is", pooling_task="embed")
+
+data = output.outputs.data
+print(f"Data: {data!r}")
+```
+
 ## Online Serving
 
 Our online Server provides endpoints that correspond to the offline APIs:
 
 - [Embeddings API](embed.md#online-serving) is similar to `LLM.embed` and is applicable to sequence embedding models.
-- [Classification API](classify.md#online-serving) is similar to `LLM.classify` and is applicable to sequence classification models.
+  - [Cohere Embed API](embed.md#cohere-embed-api) (`/v2/embed`)
+  - [Openai-compatible Embeddings API](embed.md#openai-compatible-embeddings-api) (`/v1/embeddings`)
+- [Classification API](classify.md#online-serving)(`/classify`) is similar to `LLM.classify` and is applicable to sequence classification models.
 - [Score API](score.md#online-serving) is similar to `LLM.score` for score models.
-- [Pooling API](pooling.md#online-serving) is similar to `LLM.encode`, being applicable to all types of pooling models.
+  - [Score API](score.md#score-api)(`/score`)
+  - [Rerank API](score.md#rerank-api) (`/rerank`, `/v1/rerank`, `/v2/rerank`)
+- Pooling API(`/pooling`) is similar to `LLM.encode`, being applicable to all types of pooling models.
+
+The following introduces the Pooling API. For other APIs, please refer to the link above.
+
+### Pooling API
+
+Our Pooling API (`/pooling`) is similar to `LLM.encode`, being applicable to all types of pooling models.
+
+The input format is the same as [Embeddings API](embed.md#openai-compatible-embeddings-api), but the output data can contain an arbitrary nested list, not just a 1-D list of floats.
+
+Code example: [examples/pooling/pooling/pooling_online.py](../../../examples/pooling/pooling/pooling_online.py)
+
+!!! note
+    Please use one of the more specific APIs or set the task directly when using the Pooling API:
+
+    - For embeddings, use [Embeddings API](embed.md) or `"task":"embed"`.
+    - For classification logits, use [Classification API](classify.md) or `"task":"classify"`.
+    - For similarity scores, use [Score API](score.md).
+    - For rewards, use `"task":"token_classify"`.
+    - For token classification, use `"task":"token_classify"`.
+    - For multi-vector retrieval and token embeddings, use `"task":"token_embed"`.
+    - For IO Processor Plugins, use `"task":"plugin"`.
+
+### Examples
+
+```python
+# start a supported embeddings model server with `vllm serve`, e.g.
+# vllm serve intfloat/e5-small
+import requests
+
+host = "localhost"
+port = "8000"
+model_name = "intfloat/e5-small"
+
+api_url = f"http://{host}:{port}/pooling"
+
+prompts = [
+    "Hello, my name is",
+    "The president of the United States is",
+    "The capital of France is",
+    "The future of AI is",
+]
+prompt = {"model": model_name, "input": prompts, "task": "embed"}
+
+response = requests.post(api_url, json=prompt)
+
+for output in response.json()["data"]:
+    data = output["data"]
+    print(f"Data: {data!r} (size={len(data)})")
+```
 
 ## Configuration
 

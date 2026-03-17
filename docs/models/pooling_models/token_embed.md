@@ -102,7 +102,7 @@ print(f"Score: {score}")
 
 ## Online Serving
 
-Please refer to the [pooling API](pooling.md#online-serving) and use `"task":"token_embed"`.
+Please refer to the [pooling API](README.md#pooling-api) and use `"task":"token_embed"`.
 
 ## More examples
 

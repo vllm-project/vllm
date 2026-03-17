@@ -66,8 +66,8 @@ In addition, we have the following custom APIs:
 
 - [Tokenizer API](#tokenizer-api) (`/tokenize`, `/detokenize`)
     - Applicable to any model with a tokenizer.
-- [Pooling API](../models/pooling_models/pooling.md#pooling-api-1) (`/pooling`)
-    - Applicable to all [pooling models](../models/pooling_models/pooling.md).
+- [pooling API](../models/pooling_models/README.md#pooling-api) (`/pooling`)
+    - Applicable to all [pooling models](../models/pooling_models/README.md).
 - [Classification API](../models/pooling_models/classify.md#classification-api) (`/classify`)
     - Only applicable to [classification models](../models/pooling_models/classify.md).
 - [Cohere Embed API](../models/pooling_models/embed.md#cohere-embed-api) (`/v2/embed`)
