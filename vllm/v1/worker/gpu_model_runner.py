@@ -5510,13 +5510,14 @@ class GPUModelRunner(
                             dummy_modality
                         ]
 
-                        logger.info(
+                        logger.info_once(
                             "Encoder cache will be initialized with a "
                             "budget of %s tokens, and profiled with "
                             "%s %s items of the maximum feature size.",
                             encoder_budget,
                             max_mm_items_per_batch,
                             dummy_modality,
+                            scope="local",
                         )
 
                         # Create dummy batch of multimodal inputs.
