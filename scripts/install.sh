@@ -4,8 +4,9 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MODE="auto"
 TARGET_VENV=""
-PYTHON_BIN="${PYTHON_BIN:-python3}"
+PYTHON_BIN="${PYTHON_BIN:-}"
 EDITABLE=0
+HOST_OS="$(uname -s)"
 
 usage() {
   cat <<'EOF'
@@ -81,15 +82,52 @@ if [[ "${MODE}" == "system" && "$(id -u)" -ne 0 ]]; then
   exit 1
 fi
 
-if ! command -v "${PYTHON_BIN}" >/dev/null 2>&1; then
-  echo "Python interpreter not found: ${PYTHON_BIN}" >&2
-  exit 1
-fi
-
 if ! command -v curl >/dev/null 2>&1; then
   echo "curl is required to bootstrap uv." >&2
   exit 1
 fi
+
+pick_python() {
+  local candidate=""
+
+  if [[ -n "${PYTHON_BIN}" ]]; then
+    candidate="${PYTHON_BIN}"
+    if ! command -v "${candidate}" >/dev/null 2>&1; then
+      echo "Python interpreter not found: ${candidate}" >&2
+      exit 1
+    fi
+    echo "${candidate}"
+    return
+  fi
+
+  for candidate in python3.13 python3.12 python3.11 python3.10; do
+    if command -v "${candidate}" >/dev/null 2>&1; then
+      echo "${candidate}"
+      return
+    fi
+  done
+
+  if command -v python3 >/dev/null 2>&1; then
+    echo "python3"
+    return
+  fi
+
+  echo "No supported Python interpreter found. Install Python 3.10-3.13 or pass --python." >&2
+  exit 1
+}
+
+validate_python_version() {
+  local candidate="$1"
+  if ! "${candidate}" -c 'import sys; raise SystemExit(0 if (3, 10) <= sys.version_info[:2] < (3, 14) else 1)'; then
+    local actual_version
+    actual_version="$("${candidate}" -c 'import sys; print(".".join(map(str, sys.version_info[:3])))')"
+    echo "Unsupported Python version: ${actual_version}. vLLM requires Python >=3.10,<3.14." >&2
+    exit 1
+  fi
+}
+
+PYTHON_BIN="$(pick_python)"
+validate_python_version "${PYTHON_BIN}"
 
 ensure_uv() {
   if command -v uv >/dev/null 2>&1; then
@@ -141,8 +179,24 @@ esac
 mkdir -p "$(dirname "${VENV_DIR}")"
 "${UV_BIN}" venv --python "${PYTHON_BIN}" "${VENV_DIR}"
 
+"${UV_BIN}" pip install --python "${VENV_DIR}/bin/python" certifi
+CERT_BUNDLE="$("${VENV_DIR}/bin/python" -c 'import certifi; print(certifi.where())')"
+export SSL_CERT_FILE="${CERT_BUNDLE}"
+export REQUESTS_CA_BUNDLE="${CERT_BUNDLE}"
+
 INSTALL_TARGET="${ROOT_DIR}"
-export VLLM_USE_PRECOMPILED="${VLLM_USE_PRECOMPILED:-1}"
+if [[ "${HOST_OS}" == "Darwin" ]]; then
+  echo "macOS detected: using the Apple Silicon CPU source-build path." >&2
+  "${UV_BIN}" pip install \
+    --python "${VENV_DIR}/bin/python" \
+    --index-strategy unsafe-best-match \
+    -r "${ROOT_DIR}/requirements/cpu.txt"
+  export VLLM_TARGET_DEVICE="${VLLM_TARGET_DEVICE:-cpu}"
+  export VLLM_USE_PRECOMPILED=0
+else
+  export VLLM_USE_PRECOMPILED="${VLLM_USE_PRECOMPILED:-1}"
+fi
+
 if [[ "${EDITABLE}" -eq 1 ]]; then
   "${UV_BIN}" pip install --python "${VENV_DIR}/bin/python" -e "${INSTALL_TARGET}"
 else

@@ -18,6 +18,7 @@ These items are intentionally tracked so the new local vLLM UX can ship in stage
 - Validate and document the local installer flow on macOS.
 - Validate and document the local installer flow on Windows.
 - Add platform-specific launcher and process-management behavior where Linux assumptions are currently baked in.
+- Add Apple Silicon GPU support via MLX / Metal integration, instead of relying on bare Torch MPS or CPU-only local execution on macOS.
 
 ## Documentation follow-ups
 
