@@ -7,16 +7,51 @@ import vllm._custom_ops as ops
 from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.platforms import current_platform
+from vllm.utils.flashinfer import has_flashinfer
 from vllm.utils.torch_utils import direct_register_custom_op
+
+if has_flashinfer():
+
+    def flashinfer_tinygemm_impl(
+        x: torch.Tensor,
+        weight: torch.Tensor,
+        bias: torch.Tensor | None,
+    ) -> torch.Tensor:
+        from flashinfer.gemm.routergemm import tinygemm_bf16
+
+        if x.shape[0] <= 128:
+            output = torch.empty(
+                x.shape[0],
+                weight.shape[0],
+                dtype=torch.bfloat16,
+                device=x.device,
+            )
+            tinygemm_bf16(x, weight, output, bias)
+            return output
+        else:
+            return torch.nn.functional.linear(x, weight, bias)
+
+    def flashinfer_tinygemm_fake(
+        x: torch.Tensor,
+        weight: torch.Tensor,
+        bias: torch.Tensor | None,
+    ) -> torch.Tensor:
+        return x.new_empty((x.shape[0], weight.shape[0]))
+
+    direct_register_custom_op(
+        op_name="flashinfer_tinygemm",
+        op_func=flashinfer_tinygemm_impl,
+        fake_impl=flashinfer_tinygemm_fake,
+    )
 
 
 @PluggableLayer.register("gate_linear")
 class GateLinear(ReplicatedLinear):
-    """MoE gate linear layer with three-tier GEMM dispatch:
+    """MoE gate linear layer with four-tier GEMM dispatch:
 
     1. DSV3 specialized kernel (SM90+, batch<=16, supported dims)
-    2. gpt-oss specialized kernel (SM90+, batch<=128, supported dims)
-    3. cuBLAS bf16×bf16→fp32 (SM90+ + bf16 + fp32 out_dtype)
+    2. cuBLAS bf16×bf16→fp32 (SM90+ + bf16 + fp32 out_dtype)
+    3. Flashinfer tinygemm_bf16 kernel (SM90+, batch<=128, supported dims)
     4. F.linear via ReplicatedLinear (ultimate fallback)
 
     The ``out_dtype`` attribute is mutable and can be set after init
@@ -27,10 +62,6 @@ class GateLinear(ReplicatedLinear):
     # Dimensions supported by the DSV3 specialized kernel
     DSV3_SUPPORTED_NUM_EXPERTS = [256, 384]
     DSV3_SUPPORTED_HIDDEN_SIZES = [7168]
-
-    # Dimensions supported by the gpt-oss specialized kernel
-    GPT_OSS_SUPPORTED_NUM_EXPERTS = [32, 128]
-    GPT_OSS_SUPPORTED_HIDDEN_SIZES = [2880]
 
     def __init__(
         self,
@@ -73,12 +104,14 @@ class GateLinear(ReplicatedLinear):
         )
 
         # gpt-oss specialized kernel eligibility (SM90+, exact dims)
-        self.allow_gpt_oss_router_gemm = (
+        self.allow_flashinfer_tinygemm = (
             self.weight.dtype == torch.bfloat16
+            and (self.out_dtype is None or self.out_dtype == torch.bfloat16)
             and current_platform.is_cuda()
             and is_hopper_or_blackwell
-            and output_size in self.GPT_OSS_SUPPORTED_NUM_EXPERTS
-            and input_size in self.GPT_OSS_SUPPORTED_HIDDEN_SIZES
+            and has_flashinfer()
+            and input_size % 64 == 0
+            and output_size % 16 == 0
         )
 
         # cuBLAS bf16→fp32 eligibility
@@ -117,14 +150,14 @@ class GateLinear(ReplicatedLinear):
             )
             return output, None
 
-        # Tier 2: gpt-oss specialized kernel
-        if self.allow_gpt_oss_router_gemm:
-            output = torch.ops.vllm.gpt_oss_router_gemm(x, self.weight, self.bias)
-            return output, None
-
-        # Tier 3: cuBLAS bf16→fp32
+        # Tier 2: cuBLAS bf16→fp32
         if self.allow_cublas_router_gemm and x.dtype == torch.bfloat16:
             output = ops.router_gemm_bf16_fp32(x, self.weight)
+            return output, None
+
+        # Tier 3: Flashinfer tinygemm_bf16
+        if self.allow_flashinfer_tinygemm and x.dtype == torch.bfloat16:
+            output = torch.ops.vllm.flashinfer_tinygemm(x, self.weight, self.bias)
             return output, None
 
         # Tier 4: F.linear (ReplicatedLinear)
@@ -134,30 +167,3 @@ class GateLinear(ReplicatedLinear):
         if self.out_dtype is not None and output.dtype != self.out_dtype:
             output = output.to(self.out_dtype)
         return output, output_bias
-
-
-def gpt_oss_router_gemm_impl(
-    x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor
-) -> torch.Tensor:
-    """
-    Dynamically run min-latency gemm if num_tokens <= 128.
-    This must be wrapped in a custom op because our torch.compile integration
-    does not support runtime dispatching on num_tokens.
-    """
-    if x.shape[0] <= 128:
-        return ops.gpt_oss_router_gemm(x, weight, bias)
-    else:
-        return torch.nn.functional.linear(x, weight, bias)
-
-
-def gpt_oss_router_gemm_fake(
-    x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor
-) -> torch.Tensor:
-    return x.new_empty((x.shape[0], weight.shape[0]))
-
-
-direct_register_custom_op(
-    op_name="gpt_oss_router_gemm",
-    op_func=gpt_oss_router_gemm_impl,
-    fake_impl=gpt_oss_router_gemm_fake,
-)
