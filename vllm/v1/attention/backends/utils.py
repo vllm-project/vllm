@@ -863,3 +863,37 @@ def mamba_get_block_table_tensor(
         )
         indices_to_gather = (start_indices.unsqueeze(1) + offsets).to(torch.int64)
         return torch.gather(block_table, 1, indices_to_gather)
+
+def reorder_batch_to_split_cp_and_normal(
+    input_batch: "InputBatch",
+    scheduler_output: "SchedulerOutput",
+) -> bool:
+    """Move CP-flagged requests to the front of the batch."""
+    logger.info(f"chenxiao--debug input_batch:{input_batch._req_ids}")
+    req_ids = input_batch.req_ids
+    is_cp = np.array([True if scheduler_output.cp_rank_scheduled_tokens[rid] > 1 else False for rid in req_ids])
+    if not is_cp.any() or is_cp.all():
+        return False
+    tgt = np.arange(len(req_ids))
+    tgt_cp, tgt_ncp = tgt[is_cp], tgt[~is_cp]
+    tgt[:] = np.concatenate([tgt_cp, tgt_ncp])
+    visited = np.zeros(len(tgt), dtype=bool)
+    for src, dst in enumerate(tgt):
+        if not visited[src] and src != dst:
+            # 处理一个完整的循环链
+            current = src
+            cycle = []
+            
+            # 收集整个循环链
+            while not visited[current]:
+                visited[current] = True
+                cycle.append(current)
+                current = tgt[current]
+            
+            # 在循环链内交换元素
+            if len(cycle) > 1:
+                for i in range(len(cycle) - 1):
+                    pos1, pos2 = cycle[i], cycle[i + 1]
+                    logger.info(f"chenxiao--debug swap_states src: {pos1}, dst: {pos2}")
+                    input_batch.swap_states(pos1, pos2)
+    return True
