@@ -60,6 +60,10 @@ class ScatterSplitReplacementPass(VllmInductorPass):
     def __call__(self, graph: fx.Graph) -> None:
         count = 0
 
+        target_ops = [torch.ops._C.rotary_embedding.default]
+        if hasattr(torch.ops.vllm, "rocm_aiter_triton_rotary_embedding"):
+            target_ops.append(torch.ops.vllm.rocm_aiter_triton_rotary_embedding.default)
+
         for node in graph.nodes:
             if not is_func(node, auto_functionalized):
                 continue
@@ -67,7 +71,7 @@ class ScatterSplitReplacementPass(VllmInductorPass):
             kwargs = node.kwargs
             at_target = node.args[0]
 
-            if at_target == torch.ops._C.rotary_embedding.default:
+            if at_target in target_ops:
                 query = kwargs["query"]
                 key = kwargs["key"]
                 getitem_nodes = {}

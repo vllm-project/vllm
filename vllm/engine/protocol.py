@@ -148,7 +148,7 @@ class EngineClient(ABC):
         ...
 
     @abstractmethod
-    async def sleep(self, level: int = 1) -> None:
+    async def sleep(self, level: int = 1, mode: "PauseMode" = "abort") -> None:
         """Sleep the engine"""
         ...
 
@@ -198,6 +198,11 @@ class EngineClient(ABC):
     @abstractmethod
     async def is_paused(self) -> bool:
         """Return whether the engine is currently paused."""
+        ...
+
+    @abstractmethod
+    def shutdown(self, timeout: float | None = None) -> None:
+        """Shutdown the engine with optional timeout."""
         ...
 
     async def scale_elastic_ep(

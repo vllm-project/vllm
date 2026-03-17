@@ -18,22 +18,27 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 
 
-class TrtLlmGenExperts(mk.FusedMoEPermuteExpertsUnpermute):
+class TrtLlmGenExperts(mk.FusedMoEExpertsModular):
     """TensorRT-LLM-based fused MoE expert implementation."""
 
     def __init__(
         self,
         moe_config: FusedMoEConfig,
         quant_config: FusedMoEQuantConfig,
-        gemm1_alpha,
-        gemm1_beta,
-        gemm1_clamp_limit,
         max_capture_size,
     ):
         super().__init__(moe_config, quant_config)
-        self.gemm1_alpha = gemm1_alpha
-        self.gemm1_beta = gemm1_beta
-        self.gemm1_clamp_limit = gemm1_clamp_limit
+        self.device = torch.accelerator.current_device_index()
+        self.num_experts = moe_config.num_local_experts
+        self.gemm1_alpha = torch.tensor(
+            [1.702] * self.num_experts, dtype=torch.float32, device=self.device
+        )
+        self.gemm1_beta = torch.tensor(
+            [1.0] * self.num_experts, dtype=torch.float32, device=self.device
+        )
+        self.gemm1_clamp_limit = torch.tensor(
+            [7.0] * self.num_experts, dtype=torch.float32, device=self.device
+        )
         self.max_capture_size = max_capture_size
 
     @staticmethod
@@ -77,9 +82,6 @@ class TrtLlmGenExperts(mk.FusedMoEPermuteExpertsUnpermute):
             "TrtLlmGenExperts is not yet used by an Oracle. "
             "This method should not be called."
         )
-
-    def supports_chunking(self) -> bool:
-        return True
 
     def supports_expert_map(self) -> bool:
         return True

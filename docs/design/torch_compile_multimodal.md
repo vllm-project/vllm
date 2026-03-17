@@ -26,16 +26,13 @@ This feature is off by default, but can be enabled by setting `compile_mm_encode
 
 To compile a multimodal component such as an encoder, we follow the same mechanism as the LLM text backbone, with a few additional scaffoldings:
 
-1. The `@support_torch_compile` decorator should include `enable_if=should_torch_compile_mm_vit`. This will gate the compilation behind our
+1. The `@support_torch_compile` decorator should include `enable_if=should_torch_compile_mm_encoder`. This will gate the compilation behind our
 `compile_mm_encoder` configuration
 
 2. `with set_model_tag("<component_name>", is_encoder=True)` context manager should be used around the nn.Module's instantiation. Since torch.compile
 relies on caching artifacts to reduce start time, we must properly propagate the `<component_name>` information to the cache in order to avoid collisions
 with the LLM text-backbone, or other instances of the same artifact (as is the case with vision block). `is_encoder=True` is also needed for encoder
 components (see Compile Range Integration).
-
-3. `with set_forward_context` context manager should be used around the nn.Module's forward call. This will properly forward the vllm_config which is needed
-for torch.compile integration.
 
 ### CompilationConfig
 
