@@ -71,7 +71,7 @@ class OpenAIServingTokenization(OpenAIServing):
                 if request.tools is None
                 else [tool.model_dump() for tool in request.tools]
             )
-            error_check_ret = self.openai_serving_render._validate_chat_template(
+            error_check_ret = self.openai_serving_render.validate_chat_template(
                 request_chat_template=request.chat_template,
                 chat_template_kwargs=request.chat_template_kwargs,
                 trust_request_chat_template=self.trust_request_chat_template,
@@ -79,7 +79,7 @@ class OpenAIServingTokenization(OpenAIServing):
             if error_check_ret is not None:
                 return error_check_ret
 
-            _, engine_prompts = await self.openai_serving_render._preprocess_chat(
+            _, engine_prompts = await self.openai_serving_render.preprocess_chat(
                 request,
                 request.messages,
                 default_template=self.chat_template,
@@ -88,7 +88,7 @@ class OpenAIServingTokenization(OpenAIServing):
                 tool_dicts=tool_dicts,
             )
         else:
-            engine_prompts = await self.openai_serving_render._preprocess_completion(
+            engine_prompts = await self.openai_serving_render.preprocess_completion(
                 request,
                 prompt_input=request.prompt,
                 prompt_embeds=None,
