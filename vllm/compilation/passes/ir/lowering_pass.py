@@ -137,3 +137,12 @@ class VllmIRLoweringPass(VllmInductorPass):
         if failed_nodes or failed_ops:
             logger.warning("Failed to lower vLLM IR ops: %s", ",".join(failed_ops))
             logger.warning("Full node list: %s", failed_nodes)
+
+    def uuid(self) -> str:
+        """IR op priority affects lowering pass, so we include it in the cache key."""
+        priorities = {name: op.get_priority() for name, op in IrOp.registry.items()}
+        priorities_str = ";".join(
+            f"{name}={','.join(p)}" for name, p in priorities.items()
+        )
+        # TODO ir op impl uuid (ir op itself gets hit)
+        return super().uuid() + priorities_str
