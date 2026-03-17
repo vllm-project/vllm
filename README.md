@@ -24,10 +24,11 @@ vLLM is a high-performance inference and serving engine for large language model
 
 The updated workflow focuses on:
 
-- one-command installation from this repository
+- explicit repo-local installation from this repository
 - a lightweight `vllm` launcher for help, model management, and local runtime commands
 - short built-in model aliases for common Hugging Face models
 - direct shell-based execution with `vllm run`
+- backend diagnostics and model preflight via `vllm doctor`, `vllm status`, and `vllm preflight`
 - managed local services through `vllm serve`, `vllm ps`, `vllm stop`, and `vllm logs`
 
 The underlying vLLM engine and server stack remain intact, including:
@@ -54,9 +55,12 @@ This repository is designed to support both the familiar vLLM workflows and a si
 The shortest installation path from this repository is:
 
 ```bash
+uv --version
 ./scripts/install.sh
 vllm --help
 ```
+
+`./scripts/install.sh` expects `uv` to already be installed. If it is missing, the script exits with a link to Astral's official installation instructions rather than bootstrapping it through `curl | sh`.
 
 The installer supports:
 
@@ -81,6 +85,7 @@ For a terminal-first local workflow:
 
 ```bash
 ./scripts/install.sh
+vllm doctor
 vllm aliases
 vllm pull deepseek-r1:8b
 vllm run deepseek-r1:8b
@@ -100,11 +105,29 @@ The local launcher is organized around a small set of common commands:
 - `vllm pull <model>` downloads a model from an alias, Hugging Face repo, or local path
 - `vllm run <model>` runs directly in your shell for chat or prompt-based generation
 - `vllm serve <model>` starts a managed local service
+- `vllm doctor`, `vllm status`, and `vllm preflight` expose backend selection, Apple/plugin fallback, and fit estimation
 - `vllm aliases` lists the built-in short model names
 - `vllm ls` or `vllm list` and `vllm inspect <model>` show local model metadata and resolution
 - `vllm ps`, `vllm stop`, and `vllm logs` manage background services
 
 This keeps the default local path simple while preserving the full vLLM runtime and API-serving capabilities.
+
+## Backend Selection
+
+The local UX layer keeps backend choice inspectable instead of implicit.
+
+- Apple Silicon prefers a plugin-based Apple GPU path when available
+- otherwise the CLI falls back cleanly to CPU and explains why
+- NVIDIA, ROCm, XPU, and CPU paths continue to use the existing vLLM serving/runtime mechanisms
+- TensorRT-LLM is surfaced as optional NVIDIA interoperability, not a replacement for native vLLM CUDA execution
+
+Use:
+
+```bash
+vllm doctor
+vllm doctor deepseek-r1:8b
+vllm preflight qwen2.5:7b-instruct --profile low-memory
+```
 
 ## Model Support
 
@@ -157,6 +180,12 @@ Visit our [documentation](https://docs.vllm.ai/en/latest/) to learn more.
 - [Installation](https://docs.vllm.ai/en/latest/getting_started/installation.html)
 - [Quickstart](https://docs.vllm.ai/en/latest/getting_started/quickstart.html)
 - [CLI Guide](./docs/cli/README.md)
+- [Local Runtime Quickstart](./docs/cli/local_runtime_quickstart.md)
+- [Apple Silicon Quickstart](./docs/cli/apple_silicon.md)
+- [Backend Selection](./docs/cli/backend_selection.md)
+- [TensorRT-LLM Interoperability](./docs/cli/trtllm_interop.md)
+- [Troubleshooting](./docs/cli/troubleshooting.md)
+- [Local Runtime UX Design Note](./docs/design/local_runtime_ux.md)
 - [Local Runtime Follow-ups](./docs/cli/local_runtime_followups.md)
 - [List of Supported Models](https://docs.vllm.ai/en/latest/models/supported_models.html)
 

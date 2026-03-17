@@ -1,6 +1,8 @@
 # vLLM CLI Guide
 
-The vllm command-line tool is used to run and manage vLLM models. You can start by viewing the help message with:
+The `vllm` command-line tool is still the front door to the same high-performance vLLM engine, but this fork adds a local-runtime layer on top so common local workflows are faster to discover and easier to manage.
+
+Start by viewing the help message with:
 
 ```bash
 vllm --help
@@ -9,12 +11,12 @@ vllm --help
 Available Commands:
 
 ```bash
-vllm {pull,run,ls,list,aliases,inspect,serve,ps,stop,logs,rm,chat,complete,bench,collect-env,run-batch}
+vllm {pull,run,ls,list,aliases,inspect,doctor,status,preflight,serve,ps,stop,logs,rm,chat,complete,bench,collect-env,run-batch}
 ```
 
 ## Local Runtime
 
-The local-runtime commands are designed to make a source checkout feel more like a local model runner:
+The local-runtime commands are designed to make a source checkout feel more like a local inference runtime without replacing vLLM's serving architecture:
 
 ```bash
 ./scripts/install.sh
@@ -25,6 +27,8 @@ vllm serve deepseek-r1:8b
 vllm ps
 ```
 
+The installer intentionally requires `uv` to be installed first. It does not use `curl | sh`. If `uv` is missing, the script exits with a link to Astral's official installation instructions.
+
 ### Main Changes
 
 Compared with the older server-first CLI flow, the main additions are:
@@ -34,6 +38,9 @@ Compared with the older server-first CLI flow, the main additions are:
 - Direct shell usage with `vllm run` instead of requiring a separate running server first
 - Built-in model aliases such as `deepseek-r1:8b`
 - Background local service management through `vllm serve`, `vllm ps`, `vllm stop`, and `vllm logs`
+- Explicit backend diagnostics through `vllm doctor`, `vllm status`, and `vllm preflight`
+- Plugin-aware Apple Silicon reporting that prefers `vllm-metal` style backends when present and explains CPU fallback otherwise
+- Local performance profiles so users can choose `balanced`, `throughput`, or `low-memory` defaults without losing access to advanced vLLM flags
 
 The advanced vLLM commands still exist; this changes the default user journey rather than removing the underlying engine/server features.
 
@@ -47,6 +54,33 @@ vllm aliases
 vllm pull deepseek-r1:8b
 vllm run deepseek-r1:8b
 ```
+
+### Backend Selection and Diagnostics
+
+The local CLI keeps backend selection explicit. It does not replace vLLM's platform architecture; it inspects the environment and reports what it will use.
+
+```bash
+vllm doctor
+vllm doctor deepseek-r1:8b
+vllm status llama3.1:8b-instruct
+vllm preflight qwen2.5:7b-instruct --profile low-memory
+```
+
+The diagnostics report includes:
+
+- detected OS and architecture
+- selected backend and fallback reason
+- available platform plugins
+- model fit/preflight estimate
+- TensorRT-LLM relevance on NVIDIA systems
+
+See:
+
+- [Local Runtime Quickstart](./local_runtime_quickstart.md)
+- [Backend Selection](./backend_selection.md)
+- [Apple Silicon Quickstart](./apple_silicon.md)
+- [TensorRT-LLM Interoperability](./trtllm_interop.md)
+- [Troubleshooting](./troubleshooting.md)
 
 ### aliases
 
@@ -73,6 +107,8 @@ Run a model directly in your shell without starting a separate API server first.
 vllm run deepseek-r1:8b
 vllm run deepseek-r1:8b --prompt "Explain KV cache in one paragraph."
 vllm run meta-llama/Llama-3.1-8B-Instruct --complete --prompt "The future of inference is"
+vllm run deepseek-r1:8b --profile throughput
+vllm run llama3.2:3b-instruct --profile low-memory
 ```
 
 ### ls, list, and inspect
@@ -83,6 +119,7 @@ Show pulled model metadata and how aliases resolve.
 vllm ls
 vllm list
 vllm inspect deepseek-r1:8b
+vllm inspect deepseek-r1:8b --backend apple-metal --profile balanced --json
 ```
 
 ### Built-in Easy Models
@@ -100,7 +137,7 @@ The built-in aliases currently include:
 
 ## serve
 
-Starts the vLLM OpenAI Compatible API server.
+Starts the vLLM OpenAI Compatible API server while preserving the existing vLLM serving path.
 
 Start with a model:
 
@@ -113,13 +150,17 @@ By default, `vllm serve` now starts a managed background service. Use `--foregro
 ```bash
 vllm serve deepseek-r1:8b
 vllm serve meta-llama/Llama-3.1-8B-Instruct --foreground
+vllm serve qwen2.5:7b-instruct --profile throughput
 ```
 
 Specify the port:
 
 ```bash
 vllm serve meta-llama/Llama-2-7b-hf --port 8100
+vllm serve meta-llama/Llama-2-7b-hf --port=8100
 ```
+
+The background-service path now respects both `--port 8100` and `--port=8100` exactly. If you choose a port explicitly, the CLI does not silently replace it with a random one.
 
 Serve over a Unix domain socket:
 
@@ -158,6 +199,16 @@ vllm logs deepseek-r1-8b
 vllm stop deepseek-r1-8b
 vllm rm deepseek-r1:8b
 ```
+
+## Local Profiles
+
+The local runtime adds a small defaulting layer for common local use cases:
+
+- `balanced`: keep prefix caching on and leave graph/compile behavior close to vLLM defaults
+- `throughput`: push memory utilization higher and prefer throughput-friendly defaults
+- `low-memory`: reduce memory pressure for laptop and smaller-device workflows
+
+Profiles only fill in defaults that the user did not specify explicitly.
 
 ## chat
 

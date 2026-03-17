@@ -88,11 +88,6 @@ if [[ "${MODE}" == "system" && "$(id -u)" -ne 0 ]]; then
   exit 1
 fi
 
-if ! command -v curl >/dev/null 2>&1; then
-  echo "curl is required to bootstrap uv." >&2
-  exit 1
-fi
-
 pick_python() {
   local candidate=""
 
@@ -141,20 +136,15 @@ ensure_uv() {
     return
   fi
 
-  echo "Installing uv..." >&2
-  curl -LsSf https://astral.sh/uv/install.sh | sh
+  cat >&2 <<'EOF'
+uv is required to install this local-runtime vLLM environment, but it was not found on PATH.
 
-  if [[ -x "${HOME}/.local/bin/uv" ]]; then
-    echo "${HOME}/.local/bin/uv"
-    return
-  fi
+Install uv first using the official instructions:
+  https://docs.astral.sh/uv/getting-started/installation/
 
-  if command -v uv >/dev/null 2>&1; then
-    command -v uv
-    return
-  fi
-
-  echo "uv installation succeeded but uv is not on PATH." >&2
+Then re-run:
+  ./scripts/install.sh
+EOF
   exit 1
 }
 

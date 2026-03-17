@@ -51,6 +51,21 @@ COMMAND_SPECS = (
         help="Show how a model reference resolves locally.",
     ),
     CommandSpec(
+        name="doctor",
+        module="vllm.entrypoints.cli.local",
+        help="Show backend diagnostics and model compatibility details.",
+    ),
+    CommandSpec(
+        name="status",
+        module="vllm.entrypoints.cli.local",
+        help="Alias for `doctor`.",
+    ),
+    CommandSpec(
+        name="preflight",
+        module="vllm.entrypoints.cli.local",
+        help="Estimate whether a model is likely to fit on the selected backend.",
+    ),
+    CommandSpec(
         name="serve",
         module="vllm.entrypoints.cli.serve",
         help="Launch a local OpenAI-compatible API server.",

@@ -15,12 +15,15 @@ This guide will help you quickly get started with vLLM to perform:
 If you are working from a local checkout of this repository and want an easier Ollama-like install flow, you can bootstrap the local CLI directly from the repo:
 
 ```bash
+uv --version
 ./scripts/install.sh
+vllm doctor
 vllm pull deepseek-r1:8b
 vllm run deepseek-r1:8b
 ```
 
 The installer also supports `--user`, `--system`, and `--venv <path>` modes.
+It expects `uv` to already be installed and will print official installation guidance if it is missing.
 
 ## Installation
 

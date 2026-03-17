@@ -148,6 +148,9 @@ def _print_help() -> None:
         "  vllm list\n"
         "  vllm aliases\n"
         "  vllm inspect <model>\n"
+        "  vllm doctor [model]\n"
+        "  vllm status [model]\n"
+        "  vllm preflight <model>\n"
         "  vllm ps\n"
         "  vllm stop <service>\n"
         "  vllm logs <service>\n"
@@ -163,6 +166,8 @@ def _print_help() -> None:
         "  vllm pull deepseek-r1:8b\n"
         "  vllm run llama3.2:3b-instruct\n"
         "  vllm serve qwen2.5:7b-instruct\n"
+        "  vllm doctor deepseek-r1:8b\n"
+        "  vllm preflight llama3.1:8b-instruct --profile low-memory\n"
         "  vllm aliases\n"
     )
 
