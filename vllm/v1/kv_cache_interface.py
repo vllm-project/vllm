@@ -89,13 +89,14 @@ class AttentionSpec(KVCacheSpec):
 
     @property
     def auxiliary_memory_per_block(self) -> int:
-        """Extra per-block memory not stored in the KV cache tensor itself.
+        """Per-block memory for auxiliary buffers allocated outside the KV
+        cache tensor (e.g. per-token quantization scale caches).
 
-        For INT8 KV cache, the Triton backend allocates two separate float32
-        scale tensors of shape [num_blocks, block_size, num_kv_heads] — one
-        for keys, one for values.  This memory must be reserved when computing
-        how many blocks fit in GPU memory, but must NOT be included in
-        page_size_bytes (which sizes the KV cache tensor).
+        This is factored into the block count calculation but NOT into
+        page_size_bytes, which must match the KV cache tensor layout
+        exactly for reshape/view to work.
+
+        Override this if a new dtype needs similar auxiliary storage.
         """
         if self.dtype != torch.int8:
             return 0
