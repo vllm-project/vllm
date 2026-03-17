@@ -1394,6 +1394,8 @@ class SpecDecodeBaseProposer:
                 )
             elif (
                 hasattr(target_language_model, "lm_head")
+                and hasattr(target_language_model.lm_head, "weight")
+                and hasattr(self.model.lm_head, "weight")
                 and isinstance(target_language_model.lm_head.weight, torch.Tensor)
                 and isinstance(self.model.lm_head.weight, torch.Tensor)
                 # TODO: Offload to CPU for comparison to avoid extra GPU memory
