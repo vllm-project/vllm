@@ -127,7 +127,7 @@ Priority is **1 = highest** (tried first).
 | 3 | `FLASH_ATTN_MLA` |
 | 4 | `FLASHMLA` |
 | 5 | `TRITON_MLA` |
-| 6 | `FLASHINFER_MLA_SPARSE` |
+| 6 | `FLASHINFER_MLA_SPARSE`**\*** |
 | 7 | `FLASHMLA_SPARSE` |
 
 **Ampere/Hopper (SM 8.x-9.x):**
@@ -140,6 +140,8 @@ Priority is **1 = highest** (tried first).
 | 4 | `TRITON_MLA` |
 | 5 | `FLASHMLA_SPARSE` |
 
+> **\*** For sparse MLA, FP8 KV cache always prefers `FLASHINFER_MLA_SPARSE`. With BF16 KV cache, `FLASHINFER_MLA_SPARSE` is preferred for low query-head counts (<= 16), while `FLASHMLA_SPARSE` is preferred otherwise.
+>
 > **Note:** ROCm and CPU platforms have their own selection logic. See the platform-specific documentation for details.
 
 ## Legend
