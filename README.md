@@ -101,7 +101,7 @@ The local launcher is organized around a small set of common commands:
 - `vllm run <model>` runs directly in your shell for chat or prompt-based generation
 - `vllm serve <model>` starts a managed local service
 - `vllm aliases` lists the built-in short model names
-- `vllm ls` and `vllm inspect <model>` show local model metadata and resolution
+- `vllm ls` or `vllm list` and `vllm inspect <model>` show local model metadata and resolution
 - `vllm ps`, `vllm stop`, and `vllm logs` manage background services
 
 This keeps the default local path simple while preserving the full vLLM runtime and API-serving capabilities.

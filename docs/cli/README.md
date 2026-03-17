@@ -9,7 +9,7 @@ vllm --help
 Available Commands:
 
 ```bash
-vllm {pull,run,ls,aliases,inspect,serve,ps,stop,logs,rm,chat,complete,bench,collect-env,run-batch}
+vllm {pull,run,ls,list,aliases,inspect,serve,ps,stop,logs,rm,chat,complete,bench,collect-env,run-batch}
 ```
 
 ## Local Runtime
@@ -75,12 +75,13 @@ vllm run deepseek-r1:8b --prompt "Explain KV cache in one paragraph."
 vllm run meta-llama/Llama-3.1-8B-Instruct --complete --prompt "The future of inference is"
 ```
 
-### ls and inspect
+### ls, list, and inspect
 
 Show pulled model metadata and how aliases resolve.
 
 ```bash
 vllm ls
+vllm list
 vllm inspect deepseek-r1:8b
 ```
 

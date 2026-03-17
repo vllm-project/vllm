@@ -36,6 +36,11 @@ COMMAND_SPECS = (
         help="List locally tracked models.",
     ),
     CommandSpec(
+        name="list",
+        module="vllm.entrypoints.cli.local",
+        help="List locally tracked models. Alias for `ls`.",
+    ),
+    CommandSpec(
         name="aliases",
         module="vllm.entrypoints.cli.local",
         help="List built-in model aliases.",

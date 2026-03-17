@@ -284,6 +284,18 @@ class ListCommand(CLISubcommand):
         return subparsers.add_parser(self.name, help="List pulled local models.")
 
 
+class ListAliasCommand(ListCommand):
+    name = "list"
+
+    def subparser_init(
+        self, subparsers: argparse._SubParsersAction
+    ) -> FlexibleArgumentParser:
+        return subparsers.add_parser(
+            self.name,
+            help="List pulled local models. Alias for `vllm ls`.",
+        )
+
+
 class InspectCommand(CLISubcommand):
     name = "inspect"
 
@@ -435,6 +447,7 @@ def cmd_init() -> list[CLISubcommand]:
         PullCommand(),
         RunCommand(),
         ListCommand(),
+        ListAliasCommand(),
         InspectCommand(),
         PsCommand(),
         StopCommand(),

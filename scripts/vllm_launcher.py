@@ -145,6 +145,7 @@ def _print_help() -> None:
         "  vllm run <model> [options]\n"
         "  vllm serve <model> [options]\n"
         "  vllm ls\n"
+        "  vllm list\n"
         "  vllm aliases\n"
         "  vllm inspect <model>\n"
         "  vllm ps\n"
@@ -435,7 +436,7 @@ def main() -> int:
 
     if command == "aliases":
         return _cmd_aliases()
-    if command == "ls":
+    if command in {"ls", "list"}:
         return _cmd_ls()
     if command == "inspect":
         return _cmd_inspect(rest)

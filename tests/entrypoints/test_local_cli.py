@@ -101,3 +101,12 @@ def test_parse_serve_local_service_flags():
     assert args.foreground is True
     assert args.service_name == "deepseek"
     assert args.no_wait is True
+
+
+def test_parse_list_alias_command():
+    parser = FlexibleArgumentParser(description="test")
+    subparsers = parser.add_subparsers(required=False, dest="subparser")
+    local_cli.ListAliasCommand().subparser_init(subparsers)
+
+    args = parser.parse_args(["list"])
+    assert args.subparser == "list"

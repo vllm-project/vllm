@@ -193,28 +193,45 @@ else
   "${UV_BIN}" venv "${VENV_ARGS[@]}" "${VENV_DIR}"
 fi
 
+export PATH="${VENV_DIR}/bin:${PATH}"
+
+if [[ -x "${VENV_DIR}/bin/ninja" ]]; then
+  export CMAKE_ARGS="${CMAKE_ARGS:-} -DCMAKE_MAKE_PROGRAM=${VENV_DIR}/bin/ninja"
+fi
+
 "${UV_BIN}" pip install --python "${VENV_DIR}/bin/python" certifi
 CERT_BUNDLE="$("${VENV_DIR}/bin/python" -c 'import certifi; print(certifi.where())')"
 export SSL_CERT_FILE="${CERT_BUNDLE}"
 export REQUESTS_CA_BUNDLE="${CERT_BUNDLE}"
 
 INSTALL_TARGET="${ROOT_DIR}"
+INSTALL_ARGS=()
 if [[ "${HOST_OS}" == "Darwin" ]]; then
   echo "macOS detected: using the Apple Silicon CPU source-build path." >&2
   "${UV_BIN}" pip install \
     --python "${VENV_DIR}/bin/python" \
     --index-strategy unsafe-best-match \
     -r "${ROOT_DIR}/requirements/cpu.txt"
+  "${UV_BIN}" pip install \
+    --python "${VENV_DIR}/bin/python" \
+    -r "${ROOT_DIR}/requirements/build.txt"
   export VLLM_TARGET_DEVICE="${VLLM_TARGET_DEVICE:-cpu}"
   export VLLM_USE_PRECOMPILED=0
+  INSTALL_ARGS+=(--no-build-isolation)
 else
   export VLLM_USE_PRECOMPILED="${VLLM_USE_PRECOMPILED:-1}"
 fi
 
 if [[ "${EDITABLE}" -eq 1 ]]; then
-  "${UV_BIN}" pip install --python "${VENV_DIR}/bin/python" -e "${INSTALL_TARGET}"
+  "${UV_BIN}" pip install \
+    --python "${VENV_DIR}/bin/python" \
+    "${INSTALL_ARGS[@]}" \
+    -e "${INSTALL_TARGET}"
 else
-  "${UV_BIN}" pip install --python "${VENV_DIR}/bin/python" "${INSTALL_TARGET}"
+  "${UV_BIN}" pip install \
+    --python "${VENV_DIR}/bin/python" \
+    "${INSTALL_ARGS[@]}" \
+    "${INSTALL_TARGET}"
 fi
 
 install_launcher() {
