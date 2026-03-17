@@ -1163,6 +1163,16 @@ class GPUModelRunner(
         req_data = scheduler_output.scheduled_cached_reqs
         scheduled_spec_tokens = scheduler_output.scheduled_spec_decode_tokens
 
+        # When dynamic SD chose a smaller K in the previous step, trim the
+        # scheduler output in-place so that input preparation, rejection
+        # accounting, and prev_num_draft_len all reflect the actual K.
+        if (
+            self._optimal_num_speculative_tokens is not None
+            and self.use_async_scheduling
+            and scheduled_spec_tokens
+        ):
+            self._trim_spec_tokens_for_dynamic_sd(scheduler_output)
+
         # Save scheduler-allocated spec lengths before trimming so
         # prev_num_draft_len keeps the optimistic count for rejection correction.
         original_num_spec_per_req: dict[str, int] = {}
@@ -4151,6 +4161,33 @@ class GPUModelRunner(
             if (req_state := self.requests.get(req_id)) is not None:
                 req_state.output_token_ids.append(-1)
         self.input_batch.prev_req_id_to_index = prev_req_id_to_index
+
+    def _trim_spec_tokens_for_dynamic_sd(
+        self, scheduler_output: "SchedulerOutput"
+    ) -> None:
+        """Trim scheduled spec tokens to match dynamic SD's optimal K.
+
+        Called in _update_states when async scheduling is active and the
+        previous step determined a lower optimal K than what the scheduler
+        allocated.  Modifies scheduler_output in-place so that the engine
+        core's update_from_output sees the trimmed counts in its rejection
+        logic, avoiding double-correction with the scheduler-side fix.
+        """
+        k = self._optimal_num_speculative_tokens
+        assert k is not None
+        spec_decode_tokens = scheduler_output.scheduled_spec_decode_tokens
+        for req_id in list(spec_decode_tokens):
+            tokens = spec_decode_tokens[req_id]
+            scheduled_k = len(tokens)
+            if scheduled_k <= k:
+                continue
+            tokens_to_trim = scheduled_k - k
+            scheduler_output.total_num_scheduled_tokens -= tokens_to_trim
+            scheduler_output.num_scheduled_tokens[req_id] -= tokens_to_trim
+            if k == 0:
+                spec_decode_tokens.pop(req_id)
+            else:
+                spec_decode_tokens[req_id] = tokens[:k]
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         if not self.num_spec_tokens or not self._draft_token_req_ids:
