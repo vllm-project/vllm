@@ -85,7 +85,7 @@ class QuantFP8(CustomOp):
         x: torch.Tensor,
         scale: torch.Tensor | None = None,
         scale_ub: torch.Tensor | None = None,
-        **kwargs,
+        use_triton: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         from vllm.model_executor.layers.quantization.utils import fp8_utils
 
@@ -135,9 +135,8 @@ class QuantFP8(CustomOp):
         x: torch.Tensor,
         scale: torch.Tensor | None = None,
         scale_ub: torch.Tensor | None = None,
-        **kwargs,
+        use_triton: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        use_triton = kwargs.get("use_triton", False)
         if self.is_group_quant and use_triton:
             assert scale is None, "Dynamic group quantization does not use scale"
 
@@ -171,6 +170,7 @@ class QuantFP8(CustomOp):
         x: torch.Tensor,
         scale: torch.Tensor | None = None,
         scale_ub: torch.Tensor | None = None,
+        use_triton: bool = False,
     ):
         if self.is_group_quant and not self.static:
             assert scale is None, "Dynamic group quantization does not use scale"

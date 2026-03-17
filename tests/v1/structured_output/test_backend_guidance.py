@@ -83,6 +83,7 @@ def test_grammar_bitmask_with_specdec():
             ),
         )
         sampling_params.structured_outputs._backend = "guidance"
+        sampling_params.update_from_generation_config({}, tokenizer.eos_token_id)
 
         my_req_id = f"my_req_id_{i}"
         request = Request(
@@ -90,7 +91,6 @@ def test_grammar_bitmask_with_specdec():
             prompt_token_ids=prompt[:i],
             sampling_params=sampling_params,
             pooling_params=None,
-            eos_token_id=tokenizer.eos_token_id,
         )
 
         structured_output_manager.grammar_init(request)
@@ -147,13 +147,13 @@ def test_grammar_init_async_and_sync(async_grammar):
         ),
     )
     sampling_params.structured_outputs._backend = "guidance"
+    sampling_params.update_from_generation_config({}, tokenizer.eos_token_id)
 
     request = Request(
         "test_request",
         prompt_token_ids=prompt,
         sampling_params=sampling_params,
         pooling_params=None,
-        eos_token_id=tokenizer.eos_token_id,
     )
 
     structured_output_manager.grammar_init(request)

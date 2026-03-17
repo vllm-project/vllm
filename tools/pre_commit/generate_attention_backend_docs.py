@@ -49,6 +49,11 @@ MLA_ATTENTION_FILE = (
 # Backends to skip during doc generation
 SKIP_BACKENDS = {"CUSTOM", "TORCH_SDPA"}
 
+BACKEND_KV_DTYPE_EXCLUDES: dict[str, set[str]] = {
+    # fp8 is an alias for fp8_ds_mla for FlashMLA Sparse
+    "FLASHMLA_SPARSE": {"fp8"},
+}
+
 
 def is_relevant_file(filepath: str) -> bool:
     """Check if a file matches any of the relevant patterns."""
@@ -546,10 +551,19 @@ def analyze_backend(backend_name: str, class_path: str) -> dict[str, Any] | None
             tree, impl_class_name, "can_return_lse_for_decode", False, file_path
         )
 
+    kv_cache_dtypes = parse_kv_cache_dtypes(class_node)
+    if backend_name in BACKEND_KV_DTYPE_EXCLUDES:
+        excluded = BACKEND_KV_DTYPE_EXCLUDES[backend_name]
+        kv_cache_dtypes = ", ".join(
+            d
+            for d in (d.strip() for d in kv_cache_dtypes.split(","))
+            if d not in excluded
+        )
+
     return {
         "name": backend_name,
         "dtypes": parse_supported_dtypes(class_node),
-        "kv_cache_dtypes": parse_kv_cache_dtypes(class_node),
+        "kv_cache_dtypes": kv_cache_dtypes,
         "block_sizes": parse_block_sizes(class_node),
         "head_sizes": parse_head_sizes(class_node),
         "attn_types": parse_attention_types(class_node),
@@ -563,14 +577,53 @@ def analyze_backend(backend_name: str, class_path: str) -> dict[str, Any] | None
 
 
 # ---------------------------------------------------------------------------
-# Special backend variant parsers (FA2/FA3, FlashInfer TRTLLM, MLA prefill)
+# Special backend variant parsers (FA2/FA3/FA4, FlashInfer TRTLLM, MLA prefill)
 # ---------------------------------------------------------------------------
 
 
-def parse_flash_attn_features() -> dict[str, dict[str, Any]]:
-    """Parse fa_utils.py to detect FA2 vs FA3 feature differences.
+def _parse_fa4_supported_caps() -> str | None:
+    """Parse flash_attn_interface.py for FA4 supported compute capabilities.
 
-    Returns a dict with 'fa2' and 'fa3' keys containing their respective
+    Looks for `cc not in [9, 10, 11]` pattern in _is_fa4_supported().
+    """
+    fa_interface_file = (
+        REPO_ROOT / "vllm" / "vllm_flash_attn" / "flash_attn_interface.py"
+    )
+    if not fa_interface_file.exists():
+        return None
+
+    try:
+        tree = ast.parse(fa_interface_file.read_text())
+    except Exception:
+        return None
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef) or node.name != "_is_fa4_supported":
+            continue
+        for n in ast.walk(node):
+            if not (
+                isinstance(n, ast.Compare)
+                and len(n.ops) == 1
+                and isinstance(n.ops[0], ast.NotIn)
+                and isinstance(n.comparators[0], ast.List)
+            ):
+                continue
+            caps: list[int] = [
+                e.value
+                for e in n.comparators[0].elts
+                if isinstance(e, ast.Constant) and isinstance(e.value, int)
+            ]
+            if caps:
+                caps.sort()
+                return f"{caps[0]}.x-{caps[-1]}.x"
+
+    return None
+
+
+def parse_flash_attn_features() -> dict[str, dict[str, Any]]:
+    """Parse fa_utils.py to detect FA2 vs FA3 vs FA4 feature differences.
+
+    Returns a dict with 'fa2', 'fa3', and 'fa4' keys containing their respective
     feature overrides for compute capability, KV cache dtypes, and sink support.
     """
     if not FA_UTILS_FILE.exists():
@@ -585,6 +638,7 @@ def parse_flash_attn_features() -> dict[str, dict[str, Any]]:
     fa3_supports_fp8 = False
     fa3_supports_sinks = False
     fa3_compute_cap: str | None = None
+    fa4_compute_cap: str | None = None
 
     for node in ast.walk(tree):
         if not isinstance(node, ast.FunctionDef):
@@ -614,14 +668,12 @@ def parse_flash_attn_features() -> dict[str, dict[str, Any]]:
                     fa3_supports_sinks = True
                     break
 
-        # Check get_flash_attn_version for FA3 compute capability
-        # Look for the ternary: 3 if (device_capability.major == 9 ...) else 2
+        # Check get_flash_attn_version for FA3/FA4 compute capability
         if node.name == "get_flash_attn_version":
             for n in ast.walk(node):
-                # Look for IfExp (ternary) with `device_capability.major == 9`
+                # Handle IfExp (ternary) with `device_capability.major == 9`
                 if isinstance(n, ast.IfExp):
                     test = n.test
-                    # Check if test is a BoolOp (and) containing the major check
                     if isinstance(test, ast.BoolOp):
                         for val in test.values:
                             if (
@@ -634,6 +686,38 @@ def parse_flash_attn_features() -> dict[str, dict[str, Any]]:
                                 fa3_compute_cap = f"{val.comparators[0].value}.x"
                                 break
 
+                # Handle If statements for FA3/FA4 detection
+                # e.g. `if device_capability.major == 9` -> FA3
+                #      `elif device_capability.major >= 10` -> FA4
+                if isinstance(n, ast.If):
+                    test = n.test
+                    comparisons = (
+                        [v for v in test.values if isinstance(v, ast.Compare)]
+                        if isinstance(test, ast.BoolOp)
+                        else [test]
+                        if isinstance(test, ast.Compare)
+                        else []
+                    )
+                    for comp in comparisons:
+                        if not (
+                            isinstance(comp.left, ast.Attribute)
+                            and comp.left.attr == "major"
+                            and comp.comparators
+                            and isinstance(comp.comparators[0], ast.Constant)
+                            and isinstance(comp.comparators[0].value, int)
+                        ):
+                            continue
+                        op = comp.ops[0]
+                        val = comp.comparators[0].value
+                        if isinstance(op, ast.Eq) and fa3_compute_cap is None:
+                            fa3_compute_cap = f"{val}.x"
+                        elif isinstance(op, ast.GtE) and fa4_compute_cap is None:
+                            fa4_compute_cap = f"≥{val}.0"
+
+    # Fallback: try to parse FA4 compute caps from flash_attn_interface.py
+    if fa4_compute_cap is None:
+        fa4_compute_cap = _parse_fa4_supported_caps()
+
     return {
         "fa2": {
             "supports_fp8": False,
@@ -643,6 +727,11 @@ def parse_flash_attn_features() -> dict[str, dict[str, Any]]:
             "compute_capability": fa3_compute_cap,
             "supports_fp8": fa3_supports_fp8,
             "supports_sink": fa3_supports_sinks,
+        },
+        "fa4": {
+            "compute_capability": fa4_compute_cap,
+            "supports_fp8": False,
+            "supports_sink": False,
         },
     }
 
@@ -760,7 +849,7 @@ def parse_mla_prefill_backends() -> list[dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
-# Backend variant expansion (FA2/FA3, FlashInfer native/TRTLLM)
+# Backend variant expansion (FA2/FA3/FA4, FlashInfer native/TRTLLM)
 # ---------------------------------------------------------------------------
 
 
@@ -768,7 +857,7 @@ def _expand_flash_attn_variants(
     all_backends: list[dict[str, Any]],
     fa_features: dict[str, dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Expand FLASH_ATTN into FA2 and FA3 variants with different capabilities."""
+    """Expand FLASH_ATTN into FA2, FA3, and FA4 variants."""
     expanded = []
     for backend in all_backends:
         if backend["name"] != "FLASH_ATTN":
@@ -801,6 +890,18 @@ def _expand_flash_attn_variants(
 
         expanded.append(fa2)
         expanded.append(fa3)
+
+        # Create FA4 entry if FA4 features are available
+        if "fa4" in fa_features:
+            fa4 = backend.copy()
+            fa4["version"] = "FA4*"
+            fa4["_sort_key"] = "FLASH_ATTN"
+            fa4["_sort_order"] = 2
+            if fa_features["fa4"].get("compute_capability"):
+                fa4["compute_capability"] = fa_features["fa4"]["compute_capability"]
+            fa4["supports_sink"] = fa_features["fa4"]["supports_sink"]
+            expanded.append(fa4)
+
     return expanded
 
 
@@ -901,10 +1002,50 @@ def parse_cuda_priority_lists() -> dict[str, list[str]]:
 
 
 def _get_backends_from_return(stmts: list) -> list[str]:
-    """Extract backend names from return statements in a list of statements."""
+    """Extract backend names from return statements in a list of statements.
+
+    Handles starred unpacking (e.g. ``*sparse_backends``) by resolving the
+    variable from assignments found in the same statement list.  When the
+    variable is conditionally assigned (inside an ``if/else``), the ``else``
+    branch value is used as the representative default.
+    """
+    # Collect variable assignments so we can resolve starred expressions.
+    # For conditional assignments, last-written (else branch) wins.
+    var_assigns: dict[str, list[str]] = {}
+    for stmt in stmts:
+        if isinstance(stmt, ast.Assign) and isinstance(stmt.value, ast.List):
+            for target in stmt.targets:
+                if isinstance(target, ast.Name):
+                    var_assigns[target.id] = [
+                        e.attr for e in stmt.value.elts if isinstance(e, ast.Attribute)
+                    ]
+        elif isinstance(stmt, ast.If):
+            for branch in (stmt.body, stmt.orelse):
+                for branch_stmt in branch:
+                    if isinstance(branch_stmt, ast.Assign) and isinstance(
+                        branch_stmt.value, ast.List
+                    ):
+                        for target in branch_stmt.targets:
+                            if isinstance(target, ast.Name):
+                                var_assigns[target.id] = [
+                                    e.attr
+                                    for e in branch_stmt.value.elts
+                                    if isinstance(e, ast.Attribute)
+                                ]
+
     for stmt in stmts:
         if isinstance(stmt, ast.Return) and isinstance(stmt.value, ast.List):
-            return [e.attr for e in stmt.value.elts if isinstance(e, ast.Attribute)]
+            backends: list[str] = []
+            for e in stmt.value.elts:
+                if isinstance(e, ast.Attribute):
+                    backends.append(e.attr)
+                elif (
+                    isinstance(e, ast.Starred)
+                    and isinstance(e.value, ast.Name)
+                    and e.value.id in var_assigns
+                ):
+                    backends.extend(var_assigns[e.value.id])
+            return backends
     return []
 
 
@@ -1012,11 +1153,11 @@ def _render_table(
 ) -> list[str]:
     """Render a markdown table from column specs and backend data."""
     header = "| " + " | ".join(name for name, _ in columns) + " |"
-    sep = "|" + "|".join("-" * (len(name) + 2) for name, _ in columns) + "|"
+    sep = "| " + " | ".join("-" * len(name) for name, _ in columns) + " |"
     lines = [header, sep]
     for info in sorted(backends, key=_sort_key):
         row = "| " + " | ".join(fmt(info) for _, fmt in columns) + " |"
-        lines.append(row)
+        lines.append(row.replace("  ", " "))
     return lines
 
 
@@ -1127,7 +1268,7 @@ def _priority_table(title: str, backends: list[str]) -> list[str]:
         f"**{title}:**",
         "",
         "| Priority | Backend |",
-        "|----------|---------|",
+        "| -------- | ------- |",
         *[f"| {i} | `{b}` |" for i, b in enumerate(backends, 1)],
         "",
     ]
@@ -1176,7 +1317,7 @@ def generate_legend() -> str:
     return """## Legend
 
 | Column | Description |
-|--------|-------------|
+| ------ | ----------- |
 | **Dtypes** | Supported model data types (fp16, bf16, fp32) |
 | **KV Dtypes** | Supported KV cache data types (`auto`, `fp8`, `fp8_e4m3`, etc.) |
 | **Block Sizes** | Supported KV cache block sizes (%N means multiples of N) |
@@ -1207,7 +1348,7 @@ def generate_mla_section(
         "configuration.",
         "",
         "| Backend | Description | Compute Cap. | Enable | Disable | Notes |",
-        "|---------|-------------|--------------|--------|---------|-------|",
+        "| ------- | ----------- | ------------ | ------ | ------- | ----- |",
     ]
 
     for backend in prefill_backends:
@@ -1219,7 +1360,7 @@ def generate_mla_section(
             backend["disable"],
             backend.get("notes", ""),
         )
-        lines.append(row)
+        lines.append(row.replace("  ", " "))
 
     lines.extend(
         [
@@ -1320,7 +1461,8 @@ def generate_docs() -> str:
     if fa_features:
         footnotes.append(
             "> **\\*** Specify the FlashAttention version via "
-            "`--attention-config.flash_attn_version=2` or `3`. Default is FA3 on SM90, "
+            "`--attention-config.flash_attn_version=2`, `3`, or `4`. "
+            "Default is FA4 on SM100+ (Blackwell), FA3 on SM90 (Hopper), "
             "FA2 otherwise."
         )
     if footnotes:

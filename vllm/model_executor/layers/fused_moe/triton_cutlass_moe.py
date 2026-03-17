@@ -5,6 +5,7 @@
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
@@ -31,8 +32,8 @@ class TritonOrCutlassExperts(FallbackExperts):
 
     @staticmethod
     def get_clses() -> tuple[
-        type[mk.FusedMoEPermuteExpertsUnpermute],
-        type[mk.FusedMoEPermuteExpertsUnpermute],
+        type[mk.FusedMoEExpertsModular],
+        type[mk.FusedMoEExpertsModular],
     ]:
         return (CutlassExpertsFp8, TritonExperts)
 
@@ -45,7 +46,7 @@ class TritonOrCutlassExperts(FallbackExperts):
         global_num_experts: int,
         local_num_experts: int,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
-        activation: str,
+        activation: MoEActivation,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         # Small batch fallback for sm100.
         if self.is_sm100 and M <= 8:
@@ -76,7 +77,7 @@ class TritonOrCutlassExperts(FallbackExperts):
         hidden_states: torch.Tensor,
         w1: torch.Tensor,
         w2: torch.Tensor,
-    ) -> mk.FusedMoEPermuteExpertsUnpermute:
+    ) -> mk.FusedMoEExpertsModular:
         # Small batch fallback for sm100.
         if self.is_sm100 and hidden_states.shape[0] <= 8:
             return self.fallback_experts

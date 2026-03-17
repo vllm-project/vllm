@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
+
 import httpx
 import pytest
 import pytest_asyncio
@@ -46,6 +48,27 @@ def server(request):
         "--max-model-len",
         "1024",
         "--enforce-eager",
+        # On ROCm (e.g. MI355X/gfx950), bf16 GEMM results can differ by
+        # 1 ULP when the batch dimension (M) changes, because different M
+        # values cause the Tensile backend to select different tile
+        # configurations with different fp32 accumulation orders. With
+        # prefix caching, cache-miss prefills compute all tokens in one
+        # pass (large M) while cache-hit requests compute only the
+        # uncached suffix (small M), seeding a divergence that amplifies
+        # through the residual stream and flips argmax tokens.
+        # See: https://github.com/vllm-project/vllm/issues/33123
+        #
+        # Either disable prefix caching entirely, or enable it with
+        # --deterministic-prefix-caching which forces cache-miss prefills
+        # to split at block boundaries so the suffix GEMM shape is always
+        # identical regardless of cache state.
+        #
+        # Option A: disable prefix caching
+        "--no-enable-prefix-caching",
+        #
+        # Option B: deterministic prefix caching
+        # "--enable-prefix-caching",
+        # "--deterministic-prefix-caching",
     ]
 
     extra_args = getattr(request, "param", None)
@@ -56,7 +79,11 @@ def server(request):
             else [str(extra_args)]
         )
 
-    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
+    envs = os.environ.copy()
+    # See: https://github.com/vllm-project/vllm/pull/33493#issuecomment-3888060787
+    envs["VLLM_ROCM_USE_SKINNY_GEMM"] = "0"
+
+    with RemoteOpenAIServer(MODEL_NAME, args, env_dict=envs) as remote_server:
         yield remote_server
 
 

@@ -36,6 +36,8 @@ The class provides the following primitives:
 
         get_finished() - called with ids of finished requests, returns
             ids of requests that have completed async sending/recving.
+        build_connector_worker_meta() - builds metadata to be sent
+            back to the scheduler-side connector
 """
 
 import enum
@@ -129,7 +131,7 @@ class KVConnectorRole(enum.Enum):
 class KVConnectorHandshakeMetadata(ABC):  # noqa: B024
     """
     Metadata used for out of band connector handshake between
-    P/D workers. This needs to serializeable.
+    P/D workers. This needs to serializable.
     """
 
     pass
@@ -137,11 +139,32 @@ class KVConnectorHandshakeMetadata(ABC):  # noqa: B024
 
 class KVConnectorMetadata(ABC):  # noqa: B024
     """
-    Abstract Metadata used to communicate between the
-    Scheduler KVConnector and Worker KVConnector.
+    Abstract Metadata used to communicate
+    Scheduler KVConnector -> Worker KVConnector.
     """
 
     pass
+
+
+class KVConnectorWorkerMetadata(ABC):
+    """
+    Abstract Metadata used to communicate back
+    Worker KVConnector -> Scheduler KVConnector.
+
+    Each worker can output its own metadata.
+    For a single engine step, all metadata objects returned by workers
+    will be aggregated using the `aggregate` method below, before
+    being passed to the Scheduler KVConnector.
+    """
+
+    @abstractmethod
+    def aggregate(
+        self, other: "KVConnectorWorkerMetadata"
+    ) -> "KVConnectorWorkerMetadata":
+        """
+        Aggregate metadata with another `KVConnectorWorkerMetadata` object.
+        """
+        pass
 
 
 class KVConnectorBase_V1(ABC):
@@ -409,6 +432,16 @@ class KVConnectorBase_V1(ABC):
         """
         return None
 
+    def build_connector_worker_meta(self) -> KVConnectorWorkerMetadata | None:
+        """
+        Build the KVConnector worker metadata for this engine step.
+
+        Returns:
+            KVConnectorWorkerMetadata: the worker metadata.
+            None if no worker metadata is available.
+        """
+        return None
+
     # ==============================
     # Scheduler-side methods
     # ==============================
@@ -542,6 +575,28 @@ class KVConnectorBase_V1(ABC):
                 "on the abstract base class"
             )
         return None
+
+    @classmethod
+    def requires_piecewise_for_cudagraph(cls, extra_config: dict[str, Any]) -> bool:
+        """
+        Check if this connector requires PIECEWISE CUDA graph mode.
+
+        Connectors that use asynchronous layer-by-layer operations
+        (wait_for_layer_load/save_kv_layer) should override this method
+        to return True when those operations are enabled. These operations
+        cannot be captured in CUDA graphs and will be skipped during replay,
+        causing data races. PIECEWISE mode allows Python code to execute
+        between graph pieces, ensuring proper synchronization.
+
+        Args:
+            extra_config: The kv_connector_extra_config dict from
+                KVTransferConfig.
+
+        Returns:
+            True if this connector requires PIECEWISE CUDA graph mode,
+            False otherwise.
+        """
+        return False
 
     def get_finished_count(self) -> int | None:
         """

@@ -26,22 +26,14 @@ from vllm.config import (
     VllmConfig,
     set_current_vllm_config,
 )
-from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.quantization.kernels.scaled_mm.cutlass import (
+from vllm.model_executor.kernels.linear import (
     CutlassFP8ScaledMMLinearKernel,
-)
-from vllm.model_executor.layers.quantization.kernels.scaled_mm.flashinfer import (
     FlashInferFP8ScaledMMLinearKernel,
-)
-from vllm.model_executor.layers.quantization.kernels.scaled_mm.pytorch import (
+    FP8ScaledMMLinearKernel,
     PerTensorTorchFP8ScaledMMLinearKernel,
-)
-from vllm.model_executor.layers.quantization.kernels.scaled_mm.rocm import (
     ROCmFP8ScaledMMLinearKernel,
 )
-from vllm.model_executor.layers.quantization.kernels.scaled_mm.ScaledMMLinearKernel import (  # noqa: E501
-    FP8ScaledMMLinearKernel,
-)
+from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.quantization.utils.fp8_utils import W8A8BlockFp8LinearOp
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
@@ -190,8 +182,24 @@ TEST_KERNELS = ROCM_KERNELS if current_platform.is_rocm() else CUDA_KERNELS
     "model_class, enable_quant_fp8_custom_op, force_kernel",
     list(itertools.product([TestSiluMulFp8QuantModel], [True, False], TEST_KERNELS))
     + [
-        (TestSiluMulNvfp4QuantModel, False, None),
-        (TestSiluMulGroupFp8QuantModel, False, None),
+        pytest.param(
+            TestSiluMulNvfp4QuantModel,
+            False,
+            None,
+            marks=pytest.mark.skipif(
+                not current_platform.is_cuda(), reason="CUDA only"
+            ),
+        ),
+        # GroupFP8Quant fusion only works with AITER on ROCm.
+        # and the enable_quant_fp8_custom_op must be True.
+        pytest.param(
+            TestSiluMulGroupFp8QuantModel,
+            True,
+            None,
+            marks=pytest.mark.skipif(
+                not current_platform.is_rocm(), reason="ROCm only"
+            ),
+        ),
     ],
 )
 @pytest.mark.skipif(
@@ -209,6 +217,7 @@ def test_fusion_silu_and_mul_quant(
     enable_silu_mul_custom_op: bool,
     enable_quant_fp8_custom_op: bool,
     force_kernel: FP8ScaledMMLinearKernel | None,
+    monkeypatch: pytest.MonkeyPatch,
 ):
     if model_class is TestSiluMulNvfp4QuantModel and not is_nvfp4_supported():
         pytest.skip("NVFP4 is not supported on this GPU.")
@@ -235,13 +244,16 @@ def test_fusion_silu_and_mul_quant(
         ),
     )
 
-    with set_current_vllm_config(config):
+    with set_current_vllm_config(config), monkeypatch.context() as m:
         fusion_passes = [ActivationQuantFusionPass(config)]
-        if IS_AITER_FOUND:
+        if IS_AITER_FOUND and model_class is TestSiluMulGroupFp8QuantModel:
+            from vllm._aiter_ops import rocm_aiter_ops
             from vllm.compilation.passes.fusion.rocm_aiter_fusion import (
                 RocmAiterSiluMulFp8GroupQuantFusionPass,
             )
 
+            m.setenv("VLLM_ROCM_USE_AITER", "1")
+            rocm_aiter_ops.refresh_env_variables()
             fusion_passes += [RocmAiterSiluMulFp8GroupQuantFusionPass(config)]
 
         passes = [NoOpEliminationPass(config), *fusion_passes, PostCleanupPass(config)]

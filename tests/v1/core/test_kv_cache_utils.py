@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import hashlib
 import importlib
 from collections.abc import Callable
 from typing import Any
@@ -42,6 +43,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     KVCacheSpec,
     KVCacheTensor,
+    MambaSpec,
     MLAAttentionSpec,
     SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
@@ -84,13 +86,15 @@ def make_request(
             )
             mm_features.append(mm_feature)
 
+    sampling_params = SamplingParams(max_tokens=17)
+    sampling_params.update_from_generation_config({}, eos_token_id=100)
+
     return Request(
         request_id=request_id,
         prompt_token_ids=prompt_token_ids,
         mm_features=mm_features if mm_features else None,
-        sampling_params=SamplingParams(max_tokens=17),
+        sampling_params=sampling_params,
         pooling_params=None,
-        eos_token_id=100,
         lora_request=None,
         cache_salt=cache_salt,
         block_hasher=get_request_block_hasher(block_size, hash_fn),
@@ -154,6 +158,24 @@ def new_chunked_local_attention_spec(
     )
 
 
+def new_mamba_spec(
+    block_size=16,
+    shapes=((2, 512), (3, 32, 32)),
+    dtypes=(torch.float32, torch.float32),
+    num_speculative_blocks=2,
+    mamba_cache_mode="none",
+    page_size_padded=None,
+):
+    return MambaSpec(
+        block_size=block_size,
+        shapes=shapes,
+        dtypes=dtypes,
+        page_size_padded=page_size_padded,
+        mamba_cache_mode=mamba_cache_mode,
+        num_speculative_blocks=num_speculative_blocks,
+    )
+
+
 @pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
 def test_none_hash(monkeypatch, hash_fn):
     import vllm.v1.core.kv_cache_utils
@@ -197,6 +219,18 @@ def test_kv_cache_block():
 
     block.reset_hash()
     assert block.block_hash is None
+
+
+def test_kv_cache_block_uses_slots():
+    block = KVCacheBlock(block_id=0)
+
+    # Slots eliminate per-instance __dict__, saving ~264 bytes per block.
+    # At 100K+ blocks this avoids tens of MB of overhead and GC pressure.
+    assert not hasattr(block, "__dict__")
+
+    # Verify that slots actually prevent dynamic attribute assignment.
+    with pytest.raises(AttributeError):
+        block.unexpected_field = True
 
 
 def test_free_kv_cache_block_queue_initialization():
@@ -305,7 +339,7 @@ def test_free_kv_cache_block_queue_append_n():
 
     # Create an empty FreeKVCacheBlockQueue
     invalid_queue = FreeKVCacheBlockQueue([])
-    # set prev_free_block to None and this will cause assertation in append_n
+    # set prev_free_block to None and this will cause assertion in append_n
     invalid_queue.fake_free_list_tail.prev_free_block = None
     with pytest.raises(AssertionError):
         # Append 1 block
@@ -496,14 +530,41 @@ def test_generate_block_hash_extra_keys_prompt_embeds():
     # Test with prompt embeds for the first block
     extra_keys, _ = generate_block_hash_extra_keys(request, 0, 5, 0)
     expected_embeds = prompt_embeds[0:5]
-    expected_bytes = kv_cache_utils.tensor_data(expected_embeds).tobytes()
-    assert extra_keys == (expected_bytes,)
+    expected_hash = hashlib.sha256(kv_cache_utils.tensor_data(expected_embeds)).digest()
+    assert extra_keys == (expected_hash,)
 
     # Test with prompt embeds for the second block
     extra_keys, _ = generate_block_hash_extra_keys(request, 5, 10, 0)
     expected_embeds = prompt_embeds[5:10]
-    expected_bytes = kv_cache_utils.tensor_data(expected_embeds).tobytes()
-    assert extra_keys == (expected_bytes,)
+    expected_hash = hashlib.sha256(kv_cache_utils.tensor_data(expected_embeds)).digest()
+    assert extra_keys == (expected_hash,)
+
+
+def test_generate_block_hash_extra_keys_prompt_embeds_cached(monkeypatch):
+    prompt_embeds = torch.randn(10, 3)
+    request = make_request(
+        request_id="0",
+        prompt_token_ids=None,
+        mm_positions=None,
+        mm_hashes=None,
+        prompt_embeds=prompt_embeds,
+        block_size=20,
+    )
+
+    num_tensor_data_calls = 0
+    original_tensor_data = kv_cache_utils.tensor_data
+
+    def counting_tensor_data(tensor: torch.Tensor):
+        nonlocal num_tensor_data_calls
+        num_tensor_data_calls += 1
+        return original_tensor_data(tensor)
+
+    monkeypatch.setattr(kv_cache_utils, "tensor_data", counting_tensor_data)
+
+    extra_keys_1, _ = generate_block_hash_extra_keys(request, 0, 5, 0)
+    extra_keys_2, _ = generate_block_hash_extra_keys(request, 0, 5, 0)
+    assert extra_keys_1 == extra_keys_2
+    assert num_tensor_data_calls == 1
 
 
 def test_generate_block_hash_extra_keys_different_prompt_embeds():
@@ -1856,22 +1917,26 @@ def test_request_block_hasher_with_prompt_embeds(hash_fn: Callable[[Any], bytes]
     block_hashes = request.block_hashes
     assert len(block_hashes) == 2
 
-    block1_embeds_bytes = tensor_data(prompt_embeds[:block_size]).tobytes()
+    block1_embeds_hash = hashlib.sha256(
+        tensor_data(prompt_embeds[:block_size])
+    ).digest()
     expected_hash1 = hash_fn(
         (
             kv_cache_utils.NONE_HASH,
             tuple(prompt_token_ids[:block_size]),
-            (block1_embeds_bytes,),
+            (block1_embeds_hash,),
         )
     )
     assert block_hashes[0] == expected_hash1
 
-    block2_embeds_bytes = tensor_data(prompt_embeds[block_size:num_tokens]).tobytes()
+    block2_embeds_hash = hashlib.sha256(
+        tensor_data(prompt_embeds[block_size:num_tokens])
+    ).digest()
     expected_hash2 = hash_fn(
         (
             block_hashes[0],
             tuple(prompt_token_ids[block_size:num_tokens]),
-            (block2_embeds_bytes,),
+            (block2_embeds_hash,),
         )
     )
     assert block_hashes[1] == expected_hash2
@@ -1901,22 +1966,26 @@ def test_request_with_prompt_embeds_and_mm_inputs(hash_fn: Callable[[Any], bytes
     block_hashes = request.block_hashes
     assert len(block_hashes) == 2
 
-    block1_embeds_bytes = tensor_data(prompt_embeds[:block_size]).tobytes()
+    block1_embeds_hash = hashlib.sha256(
+        tensor_data(prompt_embeds[:block_size])
+    ).digest()
     expected_hash1 = hash_fn(
         (
             kv_cache_utils.NONE_HASH,
             tuple(prompt_token_ids[:block_size]),
-            ("hash1", block1_embeds_bytes),
+            ("hash1", block1_embeds_hash),
         )
     )
     assert block_hashes[0] == expected_hash1
 
-    block2_embeds_bytes = tensor_data(prompt_embeds[block_size:num_tokens]).tobytes()
+    block2_embeds_hash = hashlib.sha256(
+        tensor_data(prompt_embeds[block_size:num_tokens])
+    ).digest()
     expected_hash2 = hash_fn(
         (
             block_hashes[0],
             tuple(prompt_token_ids[block_size:num_tokens]),
-            ("hash2", block2_embeds_bytes),
+            ("hash2", block2_embeds_hash),
         )
     )
     assert block_hashes[1] == expected_hash2
@@ -1958,6 +2027,28 @@ def test_auto_fit_max_model_len():
     # Should be reduced to fit in memory
     assert vllm_config.model_config.max_model_len < 1024
     assert vllm_config.model_config.max_model_len > 0
+
+
+def test_auto_fit_max_model_len_with_hybrid():
+    """Test that auto-fit works with hybrid KV cache specs."""
+    # Create config with original_max_model_len=-1 to trigger auto-fit
+    model_config = ModelConfig(max_model_len=8192)
+    # Simulate the user passing -1 by setting original_max_model_len
+    model_config.original_max_model_len = -1
+    vllm_config = VllmConfig(model_config=model_config)
+
+    mem_per_block_per_layer = 16 * 2 * 64 * 4 * 2  # 16KB per block per layer
+    gamma = 2
+    kv_cache_specs = {
+        "layer_1": new_mamba_spec(num_speculative_blocks=gamma),
+        "layer_2": new_kv_cache_spec(),
+    }
+
+    available_memory = mem_per_block_per_layer * (1024 // 16 + 1 + gamma)
+    _kv_cache_configs = get_kv_cache_configs(
+        vllm_config, [kv_cache_specs], [available_memory]
+    )
+    assert vllm_config.model_config.max_model_len == 1024
 
 
 def test_auto_fit_max_model_len_not_triggered():
