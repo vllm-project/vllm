@@ -50,7 +50,7 @@ av==16.1.0
 blobfile==3.0.0
     # Multi-Modal Models Test
 decord==0.6.0
-    # video processing, required by entrypoints/openai/test_video.py
+    # video processing, required by entrypoints/openai/chat_completion/test_video.py
 rapidfuzz==3.12.1
 
 # OpenAI compatibility and testing

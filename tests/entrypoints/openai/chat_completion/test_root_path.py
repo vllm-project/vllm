@@ -8,7 +8,7 @@ from typing import Any, NamedTuple
 import openai  # use the official client for correctness check
 import pytest
 
-from ...utils import RemoteOpenAIServer
+from tests.utils import RemoteOpenAIServer
 
 # # any model with a chat template should work here
 MODEL_NAME = "Qwen/Qwen2-1.5B-Instruct"

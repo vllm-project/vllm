@@ -11,10 +11,9 @@ import pytest
 import regex as re
 import torch
 
+from tests.utils import RemoteOpenAIServer
 from vllm.config import ModelConfig
 from vllm.renderers.embed_utils import safe_load_prompt_embeds
-
-from ...utils import RemoteOpenAIServer
 
 
 @pytest.mark.asyncio

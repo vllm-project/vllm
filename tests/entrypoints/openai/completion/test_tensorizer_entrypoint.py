@@ -9,6 +9,7 @@ import pytest
 import pytest_asyncio
 import torch.cuda
 
+from tests.utils import RemoteOpenAIServer
 from vllm.engine.arg_utils import EngineArgs
 from vllm.model_executor.model_loader.tensorizer import (
     TensorizerConfig,
@@ -16,8 +17,6 @@ from vllm.model_executor.model_loader.tensorizer import (
     tensorize_vllm_model,
 )
 from vllm.platforms import current_platform
-
-from ...utils import RemoteOpenAIServer
 
 MODEL_NAME = "unsloth/llama-3.2-1b-Instruct"
 LORA_PATH = "davzoku/finqa_adapter_1b"

@@ -7,10 +7,9 @@ import openai
 import pytest
 import pytest_asyncio
 
+from tests.utils import RemoteOpenAIServer
 from vllm.assets.audio import AudioAsset
 from vllm.multimodal.utils import encode_audio_base64, encode_audio_url, fetch_audio
-
-from ...utils import RemoteOpenAIServer
 
 MODEL_NAME = "fixie-ai/ultravox-v0_5-llama-3_2-1b"
 TEST_AUDIO_URLS = [
