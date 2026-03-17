@@ -226,6 +226,7 @@ class Worker(WorkerBase):
                 not in ("ray", "external_launcher")
                 and parallel_config.data_parallel_backend != "ray"
                 and parallel_config.nnodes_within_dp == 1
+                and parallel_config.dp_per_domain == 1
             ):
                 # Use local DP rank if available, otherwise use global DP rank.
                 dp_local_rank = self.parallel_config.data_parallel_rank_local
@@ -751,13 +752,19 @@ class Worker(WorkerBase):
 
     @torch.inference_mode()
     def sample_tokens(
-        self, grammar_output: "GrammarOutput | None"
+        self, grammar_outputs: "GrammarOutput | None | list[GrammarOutput | True]"
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput:
+        if isinstance(grammar_outputs, list):
+            grammar_output = grammar_outputs[self.model_runner.cp_rank]
+            if grammar_output is True:
+                return False
+        else:
+            grammar_output = grammar_outputs
         return self.model_runner.sample_tokens(grammar_output)
 
     @torch.inference_mode()
     def execute_model(
-        self, scheduler_output: "SchedulerOutput"
+        self, scheduler_outputs: "SchedulerOutput | list[SchedulerOutput | None]"
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
         # ensure any previous non-blocking PP sends are complete
         if self._pp_send_work:
@@ -765,6 +772,12 @@ class Worker(WorkerBase):
                 handle.wait()
             self._pp_send_work = []
 
+        if isinstance(scheduler_outputs, list):
+            scheduler_output = scheduler_outputs[self.model_runner.cp_rank]
+            if scheduler_output.total_num_scheduled_tokens == 0 and not scheduler_output.none_tokens_in_peer_sched:
+                self.model_runner._dummy_run(1, uniform_decode=True)
+        else:
+            scheduler_output = scheduler_outputs
         intermediate_tensors = None
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
