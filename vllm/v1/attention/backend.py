@@ -738,7 +738,8 @@ class AttentionImpl(AttentionImplBase[T], Generic[T]):
 
         Args:
             key_cache: The key cache tensor, used to infer shape and device.
-                       Expected shape: [num_blocks, block_size, num_kv_heads, head_size].
+                       Expected shape:
+                       [num_blocks, block_size, num_kv_heads, head_size].
 
         Returns:
             (k_scale_cache, v_scale_cache) — both

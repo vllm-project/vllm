@@ -119,12 +119,7 @@ class AttentionSpec(KVCacheSpec):
         if not kv_cache_needs_per_token_scales(self.dtype):
             return 0
         # Two scale buffers (K and V), each [block_size, num_kv_heads] f32.
-        return (
-            2
-            * self.block_size
-            * self.num_kv_heads
-            * get_dtype_size(torch.float32)
-        )
+        return 2 * self.block_size * self.num_kv_heads * get_dtype_size(torch.float32)
 
     @property
     def real_page_size_bytes(self) -> int:

@@ -64,8 +64,7 @@ class BaseKVCacheMethod(QuantizeMethodBase):
             is_quantized_kv_cache(layer.kv_cache_dtype)
             and not layer.calculate_kv_scales
         ):
-            uses_per_token = kv_cache_uses_per_token_scales(
-                layer.kv_cache_dtype)
+            uses_per_token = kv_cache_uses_per_token_scales(layer.kv_cache_dtype)
 
             if uses_per_token:
                 # Formats with per-token scales (INT8, future NVFP4, etc.)
@@ -126,11 +125,7 @@ class BaseKVCacheMethod(QuantizeMethodBase):
             layer._k_scale_float = float(k_scale)
             layer._v_scale_float = float(v_scale)
 
-            if (
-                k_scale == 1.0
-                and v_scale == 1.0
-                and "e5m2" not in layer.kv_cache_dtype
-            ):
+            if k_scale == 1.0 and v_scale == 1.0 and "e5m2" not in layer.kv_cache_dtype:
                 logger.warning_once(
                     "Using KV cache scaling factor 1.0 for fp8_e4m3. "
                     "If this is unintended, verify that k/v_scale "

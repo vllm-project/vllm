@@ -1108,14 +1108,13 @@ def get_kv_cache_config_from_groups(
         # different hidden size. Allocate different amount of memory for each
         # layer based on its hidden size.
         spec = kv_cache_groups[0].kv_cache_spec
-        # Auxiliary memory (e.g. per-token quantization scale caches) is allocated separately
-        # from the KV cache tensor, so subtract it from the budget.
+        # Auxiliary memory (e.g. per-token quantization scale
+        # caches) is allocated separately from the KV cache
+        # tensor, so subtract it from the budget.
         total_aux = sum(
             s.auxiliary_memory_per_block for s in spec.kv_cache_specs.values()
         )
-        num_blocks = (
-            available_memory // (spec.page_size_bytes + total_aux)
-        )
+        num_blocks = available_memory // (spec.page_size_bytes + total_aux)
         num_blocks = may_override_num_blocks(vllm_config, num_blocks)
         per_layer_specs = spec.kv_cache_specs
         kv_cache_tensors = [
@@ -1139,16 +1138,18 @@ def get_kv_cache_config_from_groups(
         page_size = get_uniform_page_size(
             [group.kv_cache_spec for group in kv_cache_groups]
         )
-        # Auxiliary memory (e.g. per-token quantization scale caches) is allocated separately
-        # from the KV cache tensor.  Add it to the effective page size so
+        # Auxiliary memory (e.g. per-token quantization scale
+        # caches) is allocated separately from the KV cache
+        # tensor.  Add it to the effective page size so
         # the block count calculation reserves room for it.
         aux_per_block = max(
-            group.kv_cache_spec.auxiliary_memory_per_block
-            for group in kv_cache_groups
+            group.kv_cache_spec.auxiliary_memory_per_block for group in kv_cache_groups
         )
         assert group_size > 0, "group_size must be greater than 0"
         num_blocks = get_num_blocks(
-            vllm_config, group_size, available_memory,
+            vllm_config,
+            group_size,
+            available_memory,
             page_size + aux_per_block,
         )
         kv_cache_tensors = []
