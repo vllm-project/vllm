@@ -9,9 +9,9 @@ import pytest_asyncio
 from openai import OpenAI
 from openai_harmony import ToolDescription, ToolNamespaceConfig
 
+from tests.utils import RemoteOpenAIServer
 from vllm.entrypoints.mcp.tool_server import MCPToolServer
 
-from ....utils import RemoteOpenAIServer
 from .conftest import (
     BASE_TEST_ENV,
     events_contain_type,
