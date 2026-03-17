@@ -182,7 +182,7 @@ class CohereASRAttention(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-    ):
+    ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
@@ -242,7 +242,7 @@ class CohereASRCrossAttention(CohereASRAttention):
         hidden_states: torch.Tensor,
         encoder_hidden_states: torch.Tensor | None,
         output_prefix: str,
-    ):
+    ) -> torch.Tensor:
         q, _ = self.q_proj(hidden_states)
 
         # Encoder hidden states are only computed once during prefill phase.
@@ -286,7 +286,7 @@ class CohereASRMLP(nn.Module):
             prefix=f"{prefix}.fc2",
         )
 
-    def forward(self, hidden_states: torch.Tensor):
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         hidden_states, _ = self.dense_in(hidden_states)
         hidden_states = self.activation_fn(hidden_states)
         hidden_states, _ = self.dense_out(hidden_states)
@@ -303,7 +303,7 @@ class FixedPositionalEncoding(nn.Module):
         max_sequence_length: maximum allowed length of the input sequence
     """
 
-    def __init__(self, hidden_size, max_sequence_length=512):
+    def __init__(self, hidden_size: int, max_sequence_length: int = 512) -> None:
         super().__init__()
 
         self._hidden_size = hidden_size
@@ -312,11 +312,9 @@ class FixedPositionalEncoding(nn.Module):
             hidden_size=self._hidden_size, max_sequence_length=self._max_sequence_length
         )
 
-    def _build_pos_enc(self, hidden_size, max_sequence_length, device=None):
-        """
-        Builds/replaces pre-computed positional encoding.
-        """
-        pos_enc = torch.zeros(max_sequence_length, hidden_size, device=device)
+    def _build_pos_enc(self, hidden_size: int, max_sequence_length: int) -> None:
+        """Builds/replaces pre-computed positional encoding."""
+        pos_enc = torch.zeros(max_sequence_length, hidden_size)
         position = torch.arange(0.0, max_sequence_length).unsqueeze(1)
         coef = -math.log(10000.0) / hidden_size
         div_term = torch.exp(coef * torch.arange(0.0, hidden_size, 2))
@@ -325,7 +323,7 @@ class FixedPositionalEncoding(nn.Module):
         pos_enc.div_(math.sqrt(hidden_size))
         self.register_buffer("pos_enc", pos_enc)
 
-    def forward(self, position_ids):
+    def forward(self, position_ids: torch.Tensor) -> torch.Tensor:
         embeddings = torch.embedding(self.pos_enc, position_ids)
         return embeddings
 
@@ -377,7 +375,7 @@ class CohereASRDecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         encoder_hidden_states: torch.Tensor | None,
         output_prefix: str,
-    ):
+    ) -> torch.Tensor:
         residual = hidden_states
         hidden_states = self.layer_norm_1(hidden_states)
         hidden_states = self.first_sub_layer(hidden_states=hidden_states)
@@ -401,7 +399,13 @@ class CohereASRDecoderLayer(nn.Module):
 
 
 class TransformerEmbedding(nn.Module):
-    def __init__(self, vocab_size, hidden_size, max_target_positions, padding_idx):
+    def __init__(
+        self,
+        vocab_size: int,
+        hidden_size: int,
+        max_target_positions: int,
+        padding_idx: int,
+    ) -> None:
         super().__init__()
         self.token_embedding = nn.Embedding(vocab_size, hidden_size, padding_idx)
         self.position_embedding = FixedPositionalEncoding(
@@ -448,10 +452,10 @@ class CohereASRDecoder(nn.Module):
 
     def forward(
         self,
-        input_ids,
+        input_ids: torch.Tensor,
         positions: torch.Tensor,
         encoder_hidden_states: torch.Tensor | None,
-    ):
+    ) -> torch.Tensor:
         hidden_states = self.get_input_embeddings(input_ids, positions)
         for decoder_idx, decoder_layer in enumerate(self.layers):
             hidden_states = decoder_layer(
@@ -474,8 +478,9 @@ class CohereASRDecoder(nn.Module):
 
 # ----- Encoder START -----
 class MaskedConvSequential(nn.Sequential):
-    def forward(self, x, lengths):
-        # Convert input (batch, time, features) to conv format
+    def forward(
+        self, x: torch.Tensor, lengths: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         x = x.unsqueeze(1)  # (batch, 1, time, features)
         current_lengths = lengths.clone().float()
         mask = self._create_mask(x, current_lengths.long())
@@ -506,7 +511,9 @@ class MaskedConvSequential(nn.Sequential):
         x = self.apply_channel_mask(x, mask)
         return x, current_lengths.long()
 
-    def _create_mask(self, tensor, lengths):
+    def _create_mask(
+        self, tensor: torch.Tensor, lengths: torch.Tensor
+    ) -> torch.Tensor:
         """Create broadcastable mask from per-sample lengths.
 
         Returns a (B, 1, T, 1) mask that broadcasts over channels and
@@ -518,7 +525,9 @@ class MaskedConvSequential(nn.Sequential):
         ) < lengths.unsqueeze(1)
         return time_mask.to(tensor.dtype).unsqueeze(1).unsqueeze(-1)
 
-    def apply_channel_mask(self, tensor, mask):
+    def apply_channel_mask(
+        self, tensor: torch.Tensor, mask: torch.Tensor
+    ) -> torch.Tensor:
         """Apply mask in-place via broadcasting.
 
         tensor: (B, C, T, F),  mask: (B, 1, T, 1)
@@ -540,15 +549,15 @@ class MaskedConvSequential(nn.Sequential):
 class ConvSubsampling(nn.Module):
     def __init__(
         self,
-        subsampling,
-        subsampling_factor,
-        feat_in,
-        feat_out,
-        conv_channels,
-        subsampling_conv_chunking_factor=1,
-        activation=None,
-        is_causal=False,
-    ):
+        subsampling: str,
+        subsampling_factor: int,
+        feat_in: int,
+        feat_out: int,
+        conv_channels: int,
+        subsampling_conv_chunking_factor: int = 1,
+        activation: nn.Module | None = None,
+        is_causal: bool = False,
+    ) -> None:
         super().__init__()
         if activation is None:
             activation = nn.ReLU()
@@ -664,10 +673,11 @@ class ConvSubsampling(nn.Module):
             lengths = torch.ceil(lengths) if ceil_mode else torch.floor(lengths)
         return lengths.to(dtype=torch.int)
 
-    def forward(self, x, lengths):
+    def forward(
+        self, x: torch.Tensor, lengths: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         x, lengths = self.conv(x, lengths)
 
-        # Flatten Channel and Frequency Axes
         if self.conv2d_subsampling:
             b, c, t, f = x.size()
             x = self.out(x.transpose(1, 2).reshape(b, t, -1))
@@ -686,13 +696,15 @@ class PositionalEncoding(torch.nn.Module):
         xscale (bool): whether to scale the input by sqrt(d_model)
     """
 
-    def __init__(self, d_model, max_len=5000, xscale=None):
+    def __init__(
+        self, d_model: int, max_len: int = 5000, xscale: float | None = None
+    ) -> None:
         super().__init__()
         self.d_model = d_model
         self.xscale = xscale
         self.max_len = max_len
 
-    def create_pe(self, positions, dtype):
+    def create_pe(self, positions: torch.Tensor, dtype: torch.dtype) -> None:
         pos_length = positions.size(0)
         pe = torch.zeros(pos_length, self.d_model, device=positions.device)
         div_term = torch.exp(
@@ -709,7 +721,9 @@ class PositionalEncoding(torch.nn.Module):
         else:
             self.register_buffer("pe", pe, persistent=False)
 
-    def forward(self, x: torch.Tensor, cache_len=0):
+    def forward(
+        self, x: torch.Tensor, cache_len: int = 0
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """Adds positional encoding.
         Args:
             x (torch.Tensor): Input. Its shape is (batch, time, feature_size)
@@ -735,7 +749,9 @@ class RelPositionalEncoding(PositionalEncoding):
         xscale (bool): whether to scale the input by sqrt(d_model)
     """
 
-    def extend_pe(self, length, device, dtype):
+    def extend_pe(
+        self, length: int, device: torch.device, dtype: torch.dtype
+    ) -> None:
         """Reset and extend the positional encodings if needed."""
         needed_size = 2 * length - 1
         if hasattr(self, "pe") and self.pe.size(1) >= needed_size:
@@ -745,7 +761,9 @@ class RelPositionalEncoding(PositionalEncoding):
         ).unsqueeze(1)
         self.create_pe(positions=positions, dtype=dtype)
 
-    def forward(self, x, cache_len=0):
+    def forward(
+        self, x: torch.Tensor, cache_len: int = 0
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """Compute positional encoding.
         Args:
             x (torch.Tensor): Input. Its shape is (batch, time, feature_size)
@@ -782,7 +800,13 @@ class ConformerFeedForward(nn.Module):
         training of huge models.
     """
 
-    def __init__(self, d_model, d_ff, activation=None, use_bias=True):
+    def __init__(
+        self,
+        d_model: int,
+        d_ff: int,
+        activation: nn.Module | None = None,
+        use_bias: bool = True,
+    ) -> None:
         super().__init__()
         if activation is None:
             activation = Swish()
@@ -793,7 +817,7 @@ class ConformerFeedForward(nn.Module):
         self.activation = activation
         self.linear2 = nn.Linear(d_ff, d_model, bias=self.use_bias)
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.linear1(x)
         x = self.activation(x)
         x = self.linear2(x)
@@ -869,7 +893,7 @@ class CausalConv1D(nn.Conv1d):
             dtype=dtype,
         )
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = F.pad(x, pad=(self._left_padding, self._right_padding))
         return super().forward(x)
 
@@ -891,13 +915,13 @@ class ConformerConvolution(nn.Module):
 
     def __init__(
         self,
-        d_model,
-        kernel_size,
-        norm_type="batch_norm",
-        conv_context_size=None,
-        pointwise_activation="glu_",
-        use_bias=True,
-    ):
+        d_model: int,
+        kernel_size: int,
+        norm_type: str = "batch_norm",
+        conv_context_size: int | None = None,
+        pointwise_activation: str = "glu_",
+        use_bias: bool = True,
+    ) -> None:
         super().__init__()
         assert (kernel_size - 1) % 2 == 0
         self.d_model = d_model
@@ -944,7 +968,9 @@ class ConformerConvolution(nn.Module):
             bias=self.use_bias,
         )
 
-    def forward(self, x, pad_mask=None):
+    def forward(
+        self, x: torch.Tensor, pad_mask: torch.Tensor | None = None
+    ) -> torch.Tensor:
         x = x.transpose(1, 2)
         x = self.pointwise_conv1(x)
 
@@ -973,11 +999,11 @@ class CohereASRMultiHeadAttention(nn.Module):
 
     def __init__(
         self,
-        n_head,
-        n_feat,
-        max_cache_len=0,
-        use_bias=True,
-    ):
+        n_head: int,
+        n_feat: int,
+        max_cache_len: int = 0,
+        use_bias: bool = True,
+    ) -> None:
         """Construct an MultiHeadedAttention object."""
         super().__init__()
 
@@ -994,7 +1020,12 @@ class CohereASRMultiHeadAttention(nn.Module):
 
         self._max_cache_len = max_cache_len
 
-    def forward_qkv(self, query, key, value):
+    def forward_qkv(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Transforms query, key and value.
         Args:
             query (torch.Tensor): (batch, time1, size)
@@ -1015,7 +1046,12 @@ class CohereASRMultiHeadAttention(nn.Module):
 
         return q, k, v
 
-    def forward_attention(self, value, scores, mask):
+    def forward_attention(
+        self,
+        value: torch.Tensor,
+        scores: torch.Tensor,
+        mask: torch.Tensor | None,
+    ) -> torch.Tensor:
         """Compute attention context vector.
         Args:
             value (torch.Tensor): (batch, time2, size)
@@ -1043,7 +1079,14 @@ class CohereASRMultiHeadAttention(nn.Module):
 
         return self.linear_out(x)  # (batch, time1, d_model)
 
-    def forward(self, query, key, value, mask, pos_emb=None):
+    def forward(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        mask: torch.Tensor | None,
+        pos_emb: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         """Compute 'Scaled Dot Product Attention'.
         Args:
             query (torch.Tensor): (batch, time1, size)
@@ -1075,13 +1118,13 @@ class RelPositionMultiHeadAttention(CohereASRMultiHeadAttention):
 
     def __init__(
         self,
-        n_head,
-        n_feat,
-        pos_bias_u,
-        pos_bias_v,
-        max_cache_len=0,
-        use_bias=True,
-    ):
+        n_head: int,
+        n_feat: int,
+        pos_bias_u: nn.Parameter | torch.Tensor | None,
+        pos_bias_v: nn.Parameter | torch.Tensor | None,
+        max_cache_len: int = 0,
+        use_bias: bool = True,
+    ) -> None:
         """Construct an RelPositionMultiHeadedAttention object."""
         super().__init__(
             n_head=n_head,
@@ -1104,7 +1147,7 @@ class RelPositionMultiHeadAttention(CohereASRMultiHeadAttention):
             self.pos_bias_u = pos_bias_u
             self.pos_bias_v = pos_bias_v
 
-    def rel_shift(self, x):
+    def rel_shift(self, x: torch.Tensor) -> torch.Tensor:
         """Compute relative positional encoding.
         Args:
             x (torch.Tensor): (batch, nheads, time, 2*time-1)
@@ -1118,7 +1161,14 @@ class RelPositionMultiHeadAttention(CohereASRMultiHeadAttention):
         x = x[:, :, 1:].view(b, h, qlen, pos_len)  # (b, h, t1, t2)
         return x
 
-    def forward(self, query, key, value, mask, pos_emb):
+    def forward(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        mask: torch.Tensor | None,
+        pos_emb: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         """Compute 'Scaled Dot Product Attention' with rel. positional encoding.
         Args:
             query (torch.Tensor): (batch, time1, size)
@@ -1184,18 +1234,18 @@ class ConformerLayer(torch.nn.Module):
 
     def __init__(
         self,
-        d_model,
-        d_ff,
-        self_attention_model="rel_pos",
-        n_heads=4,
-        conv_kernel_size=31,
-        conv_norm_type="batch_norm",
-        conv_context_size=None,
-        pos_bias_u=None,
-        pos_bias_v=None,
-        att_context_size=None,
-        use_bias=True,
-    ):
+        d_model: int,
+        d_ff: int,
+        self_attention_model: str = "rel_pos",
+        n_heads: int = 4,
+        conv_kernel_size: int = 31,
+        conv_norm_type: str = "batch_norm",
+        conv_context_size: int | None = None,
+        pos_bias_u: nn.Parameter | torch.Tensor | None = None,
+        pos_bias_v: nn.Parameter | torch.Tensor | None = None,
+        att_context_size: list[int] | None = None,
+        use_bias: bool = True,
+    ) -> None:
         super().__init__()
         if att_context_size is None:
             att_context_size = [-1, -1]
@@ -1245,11 +1295,11 @@ class ConformerLayer(torch.nn.Module):
 
     def forward(
         self,
-        x,
-        att_mask=None,
-        pos_emb=None,
-        pad_mask=None,
-    ):
+        x: torch.Tensor,
+        att_mask: torch.Tensor | None = None,
+        pos_emb: torch.Tensor | None = None,
+        pad_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         """
         Args:
             x (torch.Tensor): input signals (B, T, d_model)
@@ -1445,7 +1495,7 @@ class ConformerEncoder(nn.Module):
         )
         return num_encoder_cross_attn_tokens
 
-    def set_max_audio_length(self, max_audio_length):
+    def set_max_audio_length(self, max_audio_length: int) -> None:
         """
         Sets maximum input length.
         Pre-calculates internal seq_range mask.
@@ -1460,9 +1510,9 @@ class ConformerEncoder(nn.Module):
 
     def forward(
         self,
-        audio_signal,
-        length,
-    ):
+        audio_signal: torch.Tensor,
+        length: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         if audio_signal.shape[-2] != self._feat_in:
             raise ValueError(
                 f"audio_signal should have shape "
@@ -1478,9 +1528,9 @@ class ConformerEncoder(nn.Module):
 
     def forward_internal(
         self,
-        audio_signal,
-        length=None,
-    ):
+        audio_signal: torch.Tensor,
+        length: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         if length is None:
             length = audio_signal.new_full(
                 (audio_signal.size(0),),
@@ -2198,23 +2248,6 @@ class CohereASRForConditionalGeneration(
             skip_substrs=["model.conv.batch_norm.num_batches_tracked"],
         )
 
-        # add fake zeros bias for k_proj to state_dict
-        weights = _create_fake_bias_for_k_proj(weights)
         return loader.load_weights(
             map(transform, weights), mapper=self.hf_to_vllm_mapper
         )
-
-
-def _create_fake_bias_for_k_proj(
-    weights: Iterable[tuple[str, torch.Tensor]],
-) -> Iterable[tuple[str, torch.Tensor]]:
-    """
-    Create full zeros bias for k_proj weight in self-attn and x-attn layers.
-    So that the bias for k_proj in qkv_proj can be initialized with zeros.
-    """
-    for name, weight in weights:
-        if name.endswith(".k_proj.weight"):
-            bias = torch.zeros(weight.size(0))
-            bias_name = name.replace("weight", "bias")
-            yield from [(name, weight), (bias_name, bias)]
-        yield name, weight
