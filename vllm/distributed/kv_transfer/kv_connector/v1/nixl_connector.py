@@ -415,6 +415,14 @@ class NixlConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_scheduler is not None
         return self.connector_scheduler.build_connector_meta(scheduler_output)
 
+    def request_finished(
+        self,
+        request: "Request",
+        block_ids: list[int],
+    ) -> tuple[bool, dict[str, Any] | None]:
+        assert self.connector_scheduler is not None
+        return self.connector_scheduler.request_finished(request, (block_ids,))
+
     def request_finished_all_groups(
         self,
         request: "Request",
@@ -807,20 +815,12 @@ class NixlConnectorScheduler:
             # Only trigger 1 KV transfer per request.
             params["do_remote_prefill"] = False
 
-    def build_connector_meta(
+    def _build_save_meta(
         self,
+        meta: NixlConnectorMetadata,
         scheduler_output: SchedulerOutput,
-    ) -> KVConnectorMetadata:
-        meta = NixlConnectorMetadata()
-
-        # Loop through scheduled reqs and convert to ReqMeta.
-        for req_id, (req, block_ids) in self._reqs_need_recv.items():
-            assert req.kv_transfer_params is not None
-            meta.add_new_req_to_recv(
-                request_id=req_id,
-                local_block_ids=block_ids,
-                kv_transfer_params=req.kv_transfer_params,
-            )
+    ) -> None:
+        # only called when use_host_buffer is True to build the save metadata
 
         # NOTE: For the prefill side, there might be a chance that an early added
         # request is a chunked prefill, so we need to check if new blocks are added
@@ -849,6 +849,24 @@ class NixlConnectorScheduler:
                 # _reqs_need_save until all blocks are scheduled with req_meta.
                 # Therefore, only pop if `not is_partial`.
                 self._reqs_need_save.pop(req_id)
+
+    def build_connector_meta(
+        self,
+        scheduler_output: SchedulerOutput,
+    ) -> KVConnectorMetadata:
+        meta = NixlConnectorMetadata()
+
+        # Loop through scheduled reqs and convert to ReqMeta.
+        for req_id, (req, block_ids) in self._reqs_need_recv.items():
+            assert req.kv_transfer_params is not None
+            meta.add_new_req_to_recv(
+                request_id=req_id,
+                local_block_ids=block_ids,
+                kv_transfer_params=req.kv_transfer_params,
+            )
+
+        if self.use_host_buffer:
+            self._build_save_meta(meta, scheduler_output)
 
         meta.reqs_to_send = self._reqs_need_send
         meta.reqs_in_batch = self._reqs_in_batch
