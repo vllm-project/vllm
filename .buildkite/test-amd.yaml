@@ -818,14 +818,14 @@ steps:
   - vllm/config/model.py
   - vllm/model_executor
   - tests/model_executor
-  - tests/entrypoints/openai/test_tensorizer_entrypoint.py
+  - tests/entrypoints/openai/completion/test_tensorizer_entrypoint.py
   - vllm/_aiter_ops.py
   - vllm/platforms/rocm.py
   commands:
   - apt-get update && apt-get install -y curl libsodium23
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s model_executor
-  - pytest -v -s entrypoints/openai/test_tensorizer_entrypoint.py
+  - pytest -v -s entrypoints/openai/completion/test_tensorizer_entrypoint.py
 
 
 - label: Benchmarks # TBD
@@ -1232,7 +1232,7 @@ steps:
   - pytest -v -s plugins_tests/test_scheduler_plugins.py
   - pip install -e ./plugins/vllm_add_dummy_model
   - pytest -v -s distributed/test_distributed_oot.py
-  - pytest -v -s entrypoints/openai/test_oot_registration.py
+  - pytest -v -s entrypoints/openai/completion/test_oot_registration.py
   - pytest -v -s models/test_oot_registration.py
   - pytest -v -s plugins/lora_resolvers
   # END: other tests
@@ -1397,7 +1397,7 @@ steps:
   - tests/entrypoints/test_chat_utils
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/test_chat_with_tool_reasoning.py --ignore=entrypoints/openai/test_oot_registration.py --ignore=entrypoints/openai/test_tensorizer_entrypoint.py --ignore=entrypoints/openai/correctness/  --ignore=entrypoints/openai/tool_parsers/ --ignore=entrypoints/openai/responses
+  - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/chat_completion/test_chat_with_tool_reasoning.py --ignore=entrypoints/openai/chat_completion/test_oot_registration.py --ignore=entrypoints/openai/completion/test_tensorizer_entrypoint.py --ignore=entrypoints/openai/correctness/  --ignore=entrypoints/openai/tool_parsers/ --ignore=entrypoints/openai/responses
   - pytest -v -s entrypoints/test_chat_utils.py
 
 
@@ -2839,7 +2839,7 @@ steps:
   - tests/entrypoints/test_chat_utils
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/test_chat_with_tool_reasoning.py --ignore=entrypoints/openai/test_oot_registration.py --ignore=entrypoints/openai/test_tensorizer_entrypoint.py --ignore=entrypoints/openai/correctness/  --ignore=entrypoints/openai/tool_parsers/ --ignore=entrypoints/openai/responses
+  - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/chat_completion/test_chat_with_tool_reasoning.py --ignore=entrypoints/openai/chat_completion/test_oot_registration.py --ignore=entrypoints/openai/completion/test_tensorizer_entrypoint.py --ignore=entrypoints/openai/correctness/  --ignore=entrypoints/openai/tool_parsers/ --ignore=entrypoints/openai/responses
   - pytest -v -s entrypoints/test_chat_utils.py
 
 

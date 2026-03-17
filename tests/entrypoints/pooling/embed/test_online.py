@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import base64
 import json
 
 import numpy as np
 import openai
+import pybase64 as base64
 import pytest
 import pytest_asyncio
 import requests
