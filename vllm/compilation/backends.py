@@ -741,6 +741,11 @@ class VllmBackend:
     # Copy of CompilationConfig.inductor_compile_config +
     # an entry for PostGradPassManager
     inductor_config: dict[str, Any]
+    # Shared runtime-shape -> compile Range dispatch cache.
+    # Populated lazily by PiecewiseBackend._find_range_for_shape: the first of
+    # the N subgraph backends to see a runtime_shape pays the O(#ranges) scan;
+    # the remaining N-1 backends get an O(1) dict lookup.
+    _shape_dispatch_cache: dict[int, Range | None]
 
     def __init__(
         self,
@@ -778,6 +783,8 @@ class VllmBackend:
         # in future we need PostGradPassManager.uuid() to be executed
         # only at compile time.
         self.inductor_config = deepcopy(self.compilation_config.inductor_compile_config)
+        # Shared dispatch cache — see _shape_dispatch_cache class annotation.
+        self._shape_dispatch_cache: dict[int, Range | None] = {}
         # `torch.compile` is JIT compiled, so we don't need to
         # do anything here
 
