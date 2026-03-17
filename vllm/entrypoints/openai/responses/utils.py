@@ -154,7 +154,9 @@ def _maybe_combine_prevmsg_and_tool_call(
             )
         ]
     else:
-        last_message["tool_calls"].append(
+        tool_calls = last_message["tool_calls"]
+        assert isinstance(tool_calls, list)
+        tool_calls.append(
             ChatCompletionMessageToolCallParam(
                 id=item.call_id,
                 function=FunctionCallTool(
