@@ -416,7 +416,9 @@ class OpenAIServingRender:
             )
             if truncate == -1:
                 truncate = max_input_tokens
-            if len(prompt_token_ids) > truncate:
+            if truncate == 0:
+                prompt_token_ids = []
+            elif len(prompt_token_ids) > truncate:
                 prompt_token_ids = prompt_token_ids[-truncate:]
 
         engine_prompt = TokensPrompt(prompt_token_ids=prompt_token_ids)
