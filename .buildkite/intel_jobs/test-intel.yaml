@@ -62,4 +62,5 @@ steps:
           --ignore=v1/kv_connector/unit/test_multi_connector.py \
           --ignore=v1/kv_connector/unit/test_example_connector.py \
           --ignore=v1/kv_connector/unit/test_lmcache_integration.py \
-          -k "not (test_register_kv_caches and FLASH_ATTN and True) and not (test_abort_timeout_on_prefiller and ray)"  #waiting for PR#37179
+          -k 'not (test_register_kv_caches and FLASH_ATTN and True)' \
+          -k 'not (test_abort_timeout_on_prefiller and ray)'  #waiting for PR#37179
