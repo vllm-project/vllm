@@ -44,6 +44,46 @@ class RecvMetadata:
 MoveToBufferResult = tuple[np.ndarray, np.ndarray, RecvMetadata]
 
 
+@dataclass
+class AsyncEPLBLayerResult:
+    """
+    The result of one completed async EPLB layer transfer.
+
+    Produced by the async worker after transfer_layer() completes and
+    cuda_stream.synchronize() is called — meaning all GPU writes to
+    expert_buffer are finished before step() ever dequeues this object.
+
+    Consumed by EplbState.step() via EplbModelState.result_queue.
+    """
+
+    layer_idx: int
+    """Index of the MoE layer that was transferred."""
+    new_physical_to_logical_map: torch.Tensor
+    """
+    New physical→logical mapping for all layers, on CPU.
+    Shape: (num_moe_layers, num_physical_experts)
+    All layer results in a single cycle share the same tensor object.
+    """
+    new_logical_to_physical_map: torch.Tensor
+    """
+    New logical→physical mapping for all layers, on GPU.
+    Shape: (num_moe_layers, num_logical_experts, max_slots)
+    All layer results in a single cycle share the same tensor object.
+    """
+    new_logical_replica_count: torch.Tensor
+    """
+    New replica count for all layers, on GPU.
+    Shape: (num_moe_layers, num_logical_experts)
+    All layer results in a single cycle share the same tensor object.
+    """
+    is_unchanged: np.ndarray
+    """Per-physical-expert flag: weight was not moved during transfer."""
+    is_received_locally: np.ndarray
+    """Per-physical-expert flag: weight was received on this rank."""
+    recv_metadata: RecvMetadata
+    """Metadata describing what was received during transfer_layer."""
+
+
 def get_ep_ranks_with_experts_batch(
     expert_ids: np.ndarray,
     num_local_experts: int,
