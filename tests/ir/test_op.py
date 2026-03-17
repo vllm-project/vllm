@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import logging
+from typing import Any
 
 import pytest
 import torch
+from torch import fx
 from torch.fx.experimental.proxy_tensor import make_fx
 
 import vllm.ir.op
@@ -118,29 +120,36 @@ class TestIrOpCustomAdd:
     # FX visibility
     # -------------------------
 
-    def test_fx_sees_single_custom_op(self):
+    @pytest.mark.parametrize("direct_dispatch", [True, False])
+    @pytest.mark.parametrize("symbolic_trace", [True, False])
+    def test_trace_sees_single_custom_op(
+        self, symbolic_trace: bool, direct_dispatch: bool
+    ):
         def fn(x, y):
             return _custom_add(x, y)
 
-        gm = torch.fx.symbolic_trace(fn)
+        def find_fn(target: Any, gm: fx.GraphModule):
+            return gm.graph.find_nodes(op="call_function", target=target)
 
-        assert any(
-            "vllm_ir._custom_add" in str(n.target)
-            for n in gm.graph.nodes
-            if n.op == "call_function"
-        )
+        with vllm.ir.direct_dispatch(direct_dispatch):
+            if symbolic_trace:
+                gm = torch.fx.symbolic_trace(fn)
+            else:
+                gm = make_fx(fn)(torch.randn(2, 2), torch.randn(2, 2))
 
-    def test_dynamo_sees_single_custom_op(self):
-        def fn(x, y):
-            return _custom_add(x, y)
+            x1, y1 = torch.rand(5, 4), torch.rand(5, 4)
+            out_fx = gm(x1, y1)
+            out_eager = fn(x1, y1)
 
-        fx_gm = make_fx(fn)(torch.randn(2, 2), torch.randn(2, 2))
+        # check behavior matches eager in all cases
+        torch.testing.assert_close(out_fx, out_eager)
 
-        assert any(
-            "vllm_ir._custom_add" in str(n.target)
-            for n in fx_gm.graph.nodes
-            if n.op == "call_function"
-        )
+        # check that IR nodes only appear if direct_dispatch=False
+        ir_nodes = find_fn(torch.ops.vllm_ir._custom_add.default, gm)
+        if direct_dispatch:
+            assert len(ir_nodes) == 0, gm.code
+        else:
+            assert len(ir_nodes) == 1, gm.code
 
 
 @_custom_add.register_impl("impl_a")

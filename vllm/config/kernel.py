@@ -105,7 +105,10 @@ class KernelConfig:
     """Configuration for kernel selection and warmup behavior."""
 
     ir_op_priority: IrOpPriorityConfig = Field(default_factory=IrOpPriorityConfig)
-    """vLLM IR op priority for dispatching/lowering during the forward pass."""
+    """
+    vLLM IR op priority for dispatching/lowering during the forward pass.
+    Platform defaults appended automatically during VllmConfig.__post_init__.
+    """
 
     enable_flashinfer_autotune: bool = Field(default=None)
     """If True, run FlashInfer autotuning during kernel warmup."""

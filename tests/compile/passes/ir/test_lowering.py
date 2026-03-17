@@ -5,6 +5,7 @@ import torch
 from torch import nn
 
 import vllm.kernels  # noqa: F401 to register kernels
+from vllm import ir
 from vllm.compilation.passes.ir.lowering_pass import (
     VllmIRLoweringPass,
 )
@@ -42,7 +43,7 @@ def test_lowering_rms_norm(rms_provider, default_vllm_config):
 
     model = Model()
     x = torch.randn(8, 16, dtype=torch.bfloat16)
-    with ops.rms_norm.set_priority([rms_provider, "native"]):
+    with ops.rms_norm.set_priority([rms_provider, "native"]), ir.direct_dispatch(False):
         compiled_model = torch.compile(model, backend=backend, fullgraph=True)
         compiled_unlowered_model = torch.compile(
             model, backend=backend_unlowered, fullgraph=True
@@ -56,6 +57,9 @@ def test_lowering_rms_norm(rms_provider, default_vllm_config):
     assert selected["rms_norm_1"] == rms_provider
     assert selected["rms_norm_2"] == "native"
 
-    output2 = compiled_model(x)
+    # Compiled function guards on global value, avoid recompilation
+    with ir.direct_dispatch(False):
+        output2 = compiled_model(x)
+
     torch.testing.assert_close(output_unlowered, output)
     torch.testing.assert_close(output_unlowered, output2)

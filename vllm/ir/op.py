@@ -18,6 +18,26 @@ logger = init_logger(__name__)
 RESERVED_PROVIDERS = ["native", "unfused"]
 """Providers that are reserved and cannot be used for custom implementations."""
 
+_DIRECT_DISPATCH: bool = False
+"""Global override flag to skip the torch op layer."""
+
+
+@contextlib.contextmanager
+def direct_dispatch(direct: bool = True):
+    """
+    Context manager to set direct dispatch mode for vLLM IR ops.
+    When direct dispatch is enabled, the torch custom op layer is skipped
+    and IR ops dispatch directly to the implementation.
+    Helpful for avoiding torch dispatch overhead in eager mode
+    and avoiding the need for lowering for platforms not using Inductor.
+    """
+
+    global _DIRECT_DISPATCH
+    old = _DIRECT_DISPATCH
+    _DIRECT_DISPATCH = direct
+    yield
+    _DIRECT_DISPATCH = old
+
 
 # 0-param decorator overload
 @overload
@@ -206,9 +226,13 @@ class IrOp:
         THIS FUNCTION IS ON THE HOT PATH (OP DISPATCH), MUST BE FAST.
         """
         if not self._priority_impls:
-            logger.warning_once(
-                "Priority not set for op %s, using native implementation.", self.name
-            )
+            if not torch.compiler.is_compiling():
+                # Logging not compatible with Dynamo tracing
+                # (this code is exposed when direct_dispatch is enabled)
+                logger.warning_once(
+                    "Priority not set for op %s, using native implementation.",
+                    self.name,
+                )
             return self.impls["native"]
 
         for impl in self._priority_impls:
@@ -220,14 +244,15 @@ class IrOp:
             if impl.supports_args(*args, **kwargs):
                 return impl
 
-            logger.debug(
-                "Skipping provider %s because it does not support "
-                "%s with args=%s kwargs=%s",
-                impl.provider,
-                self.name,
-                lazy(lambda: tensors_str_no_data(args)),
-                lazy(lambda: tensors_str_no_data(kwargs)),
-            )
+            if not torch.compiler.is_compiling():
+                logger.debug(
+                    "Skipping provider %s because it does not support "
+                    "%s with args=%s kwargs=%s",
+                    impl.provider,
+                    self.name,
+                    lazy(lambda: tensors_str_no_data(args)),
+                    lazy(lambda: tensors_str_no_data(kwargs)),
+                )
 
         raise RuntimeError(
             "Priority set incorrectly: the last implementation must "
@@ -235,6 +260,9 @@ class IrOp:
         )
 
     def __call__(self, *args, **kwargs) -> Any:
+        if _DIRECT_DISPATCH:
+            return self._inner_call(*args, **kwargs)
+
         return self.torch_op(*args, **kwargs)
 
     def get_priority(self) -> list[str]:
