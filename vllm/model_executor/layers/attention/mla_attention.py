@@ -601,6 +601,15 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         num_mqa_tokens = attn_metadata.num_decode_tokens
         num_mha_tokens = q.size(0) - num_mqa_tokens
 
+        # When sparse_mla_force_mqa is set, route all tokens through MQA.
+        if (
+            is_sparse_impl
+            and num_mha_tokens > 0
+            and self._vllm_config.attention_config.sparse_mla_force_mqa
+        ):
+            num_mqa_tokens = q.size(0)
+            num_mha_tokens = 0
+
         if num_mha_tokens > 0:
             self.impl.forward_mha(
                 q[num_mqa_tokens:],

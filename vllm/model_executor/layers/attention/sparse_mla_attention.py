@@ -19,6 +19,7 @@ import torch
 from vllm.config import get_current_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
+from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backend import (
     AttentionMetadata,
     SparseMLAAttentionImpl,
@@ -41,6 +42,84 @@ _M_BLOCK_SIZE = 128
 _N_BLOCK_SIZE = 128
 
 
+@triton.jit
+def _scatter_topk_kernel(
+    mask_ptr,  # (B, max_Q, max_S) int32 output
+    topk_ptr,  # (total_topk_rows, topk_stride) int32 packed topk indices
+    cu_q_lens_ptr,  # (B+1,) int32 cumulative query lengths
+    ctx_lens_ptr,  # (B,) int32 context lengths
+    max_seq_len: tl.constexpr,
+    topk: tl.constexpr,
+    topk_stride: tl.constexpr,
+    max_q_len: tl.constexpr,
+    BLOCK_TOPK: tl.constexpr,
+    NUM_REQS: tl.constexpr,
+):
+    """Write 1 at each valid topk position in the mask.
+
+    Grid: (total_topk_rows,) where total_topk_rows = sum(q_lens).
+    Each program handles one query token's topk entries.
+    """
+    row_idx = tl.program_id(0)
+
+    # Find batch index: count how many cu_q_lens boundaries are <= row_idx.
+    b: tl.int32 = 0
+    for i in tl.static_range(NUM_REQS):
+        next_start = tl.load(cu_q_lens_ptr + i + 1)
+        b += tl.where(next_start <= row_idx, 1, 0)
+
+    q_start = tl.load(cu_q_lens_ptr + b)
+    q_local = row_idx - q_start
+    ctx_len = tl.load(ctx_lens_ptr + b)
+
+    # Load topk indices for this query token
+    topk_row_ptr = topk_ptr + row_idx * topk_stride
+    offsets = tl.arange(0, BLOCK_TOPK)
+    in_range = offsets < topk
+    indices = tl.load(topk_row_ptr + offsets, mask=in_range, other=-1)
+
+    # Only write valid context indices
+    valid = in_range & (indices >= 0) & (indices < ctx_len)
+    mask_row_ptr = mask_ptr + (b * max_q_len + q_local) * max_seq_len
+    tl.store(mask_row_ptr + indices, tl.where(valid, 1, 0), mask=valid)
+
+
+@triton.jit
+def _fill_causal_kernel(
+    mask_ptr,  # (B, max_Q, max_S) int32 output
+    ctx_lens_ptr,  # (B,) int32 context lengths
+    q_lens_ptr,  # (B,) int32 query lengths
+    max_q_len: tl.constexpr,
+    max_seq_len: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+):
+    """Fill causal self-attention bits for new tokens.
+
+    Grid: (B * max_Q,). Each program handles one (batch, query_idx)
+    and writes the causal stripe in blocks of BLOCK_K.
+    """
+    pid = tl.program_id(0)
+    b = pid // max_q_len
+    q_idx = pid % max_q_len
+
+    q_len = tl.load(q_lens_ptr + b)
+    if q_idx >= q_len:
+        return
+
+    ctx_len = tl.load(ctx_lens_ptr + b)
+    # New-token KV positions: [ctx_len, ctx_len + q_len)
+    # Query q_idx attends to kv positions ctx_len .. ctx_len + q_idx (inclusive)
+    causal_end = ctx_len + q_idx  # last kv position this query attends to
+
+    mask_row_ptr = mask_ptr + (b * max_q_len + q_idx) * max_seq_len
+
+    # Write 1s from ctx_len to causal_end (inclusive) in blocks
+    for k_start in range(0, q_len, BLOCK_K):
+        kv_offsets = ctx_len + k_start + tl.arange(0, BLOCK_K)
+        in_bounds = kv_offsets <= causal_end
+        tl.store(mask_row_ptr + kv_offsets, 1, mask=in_bounds)
+
+
 def _build_sparse_causal_mask(
     topk_indices_per_req: list[torch.Tensor],
     ctx_lens: list[int],
@@ -51,39 +130,54 @@ def _build_sparse_causal_mask(
 ) -> torch.Tensor:
     """Build a dense (B, max_Q, max_S) int32 mask combining topk + causal.
 
-    For each request i, query token j (0-indexed within the request):
-      - Context positions (kv_idx < ctx_len_i):
-            1 if kv_idx is in topk_indices for that query token, else 0
-      - New-token positions (kv_idx >= ctx_len_i):
-            1 if (kv_idx - ctx_len_i) <= j (causal self-attention), else 0
+    Uses two Triton kernels to avoid per-request Python loops:
+      1. _scatter_topk_kernel: writes 1 at each valid topk context position
+      2. _fill_causal_kernel: writes causal self-attention bits for new tokens
     """
     B = len(ctx_lens)
     mask = torch.zeros(B, max_q_len, max_seq_len, dtype=torch.int32, device=device)
 
-    for i in range(B):
-        q_len = q_lens[i]
-        ctx_len = ctx_lens[i]
-        if q_len == 0:
-            continue
+    total_q = sum(q_lens)
+    if total_q == 0:
+        return mask
 
-        # Topk context bits
-        if ctx_len > 0:
-            req_topk = topk_indices_per_req[i]  # (q_len, topk)
-            # Clamp to valid context range; invalid indices become sentinel
-            valid = (req_topk >= 0) & (req_topk < ctx_len)
-            safe_idx = torch.where(valid, req_topk, torch.zeros_like(req_topk))
-            # scatter 1s at valid positions
-            mask[i, :q_len].scatter_(
-                1,
-                safe_idx.long(),
-                valid.to(torch.int32),
-            )
+    # Pack topk indices into a contiguous (total_q, topk) tensor
+    topk_packed = torch.cat(topk_indices_per_req, dim=0)  # (total_q, topk)
+    topk_k = topk_packed.shape[1]
 
-        # Causal self-attention bits for new tokens
-        # New token kv positions are [ctx_len, ctx_len + q_len)
-        # Query j attends to kv positions ctx_len..ctx_len+j (inclusive)
-        causal = torch.tril(torch.ones(q_len, q_len, dtype=torch.int32, device=device))
-        mask[i, :q_len, ctx_len : ctx_len + q_len] = causal
+    # Build cumulative q_lens for batch index lookup in the kernel
+    q_lens_t = torch.tensor(q_lens, dtype=torch.int32, device=device)
+    cu_q_lens = torch.zeros(B + 1, dtype=torch.int32, device=device)
+    torch.cumsum(q_lens_t, dim=0, out=cu_q_lens[1:])
+    ctx_lens_t = torch.tensor(ctx_lens, dtype=torch.int32, device=device)
+
+    # Kernel 1: Scatter topk context bits
+    if any(cl > 0 for cl in ctx_lens):
+        BLOCK_TOPK = triton.next_power_of_2(topk_k)
+        _scatter_topk_kernel[(total_q,)](
+            mask,
+            topk_packed,
+            cu_q_lens,
+            ctx_lens_t,
+            max_seq_len=max_seq_len,
+            topk=topk_k,
+            topk_stride=topk_packed.stride(0),
+            max_q_len=max_q_len,
+            BLOCK_TOPK=BLOCK_TOPK,
+            NUM_REQS=B,
+        )
+
+    # Kernel 2: Fill causal self-attention bits
+    BLOCK_K = triton.next_power_of_2(max_q_len) if max_q_len > 0 else 128
+    BLOCK_K = min(BLOCK_K, 1024)
+    _fill_causal_kernel[(B * max_q_len,)](
+        mask,
+        ctx_lens_t,
+        q_lens_t,
+        max_q_len=max_q_len,
+        max_seq_len=max_seq_len,
+        BLOCK_K=BLOCK_K,
+    )
 
     return mask
 

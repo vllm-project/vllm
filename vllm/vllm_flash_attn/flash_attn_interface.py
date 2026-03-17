@@ -413,8 +413,8 @@ def flash_attn_varlen_func(
             mask_mod=mask_mod,
             aux_tensors=aux_tensors,
             block_sparse_tensors=block_sparse_tensors,
-            m_block_size=m_block_size,
-            n_block_size=n_block_size,
+            **({"m_block_size": m_block_size} if m_block_size is not None else {}),
+            **({"n_block_size": n_block_size} if n_block_size is not None else {}),
         )
     else:
         raise ValueError(f"Unsupported FA version: {fa_version}")

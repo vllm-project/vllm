@@ -65,6 +65,7 @@ def create_minimal_vllm_config(
     index_topk: int | None = None,
     prefill_backend: str | None = None,
     kv_cache_dtype: str = "auto",
+    sparse_mla_force_mqa: bool = False,
 ) -> VllmConfig:
     """
     Create minimal VllmConfig for MLA benchmarks.
@@ -81,6 +82,8 @@ def create_minimal_vllm_config(
         prefill_backend: Prefill backend name (e.g., "fa3", "fa4", "flashinfer",
                         "cudnn", "trtllm"). Configures the attention config to
                         force the specified prefill backend.
+        sparse_mla_force_mqa: If True, forces all sparse MLA tokens through
+                    forward_mqa (even prefill tokens).
 
     Returns:
         VllmConfig for benchmarking
@@ -192,6 +195,9 @@ def create_minimal_vllm_config(
         vllm_config.attention_config.use_trtllm_ragged_deepseek_prefill = prefill_cfg[
             "use_trtllm_ragged_deepseek_prefill"
         ]
+
+    if sparse_mla_force_mqa:
+        vllm_config.attention_config.sparse_mla_force_mqa = True
 
     return vllm_config
 
@@ -887,6 +893,7 @@ def _run_mla_benchmark_batched(
     configs_with_params: list[tuple],  # [(config, threshold, num_splits), ...]
     index_topk: int = 2048,
     prefill_backend: str | None = None,
+    sparse_mla_force_mqa: bool = False,
 ) -> list[BenchmarkResult]:
     """
     Unified batched MLA benchmark runner for all backends.
@@ -905,6 +912,8 @@ def _run_mla_benchmark_batched(
         index_topk: Topk value for sparse MLA backends (default 2048)
         prefill_backend: Prefill backend name (e.g., "fa3", "fa4").
             When set, forces the specified FlashAttention version for prefill.
+        sparse_mla_force_mqa: If True, forces all sparse MLA tokens through
+            forward_mqa (even prefill tokens).
 
     Returns:
         List of BenchmarkResult objects
@@ -955,6 +964,7 @@ def _run_mla_benchmark_batched(
         index_topk=index_topk if is_sparse else None,
         prefill_backend=prefill_backend,
         kv_cache_dtype=kv_cache_dtype,
+        sparse_mla_force_mqa=sparse_mla_force_mqa,
     )
 
     results = []
@@ -1068,6 +1078,7 @@ def run_mla_benchmark(
     num_kv_splits: int | None = None,
     index_topk: int = 2048,
     prefill_backend: str | None = None,
+    sparse_mla_force_mqa: bool = False,
 ) -> BenchmarkResult | list[BenchmarkResult]:
     """
     Unified MLA benchmark runner for all backends.
@@ -1087,6 +1098,8 @@ def run_mla_benchmark(
         index_topk: Topk value for sparse MLA backends (default 2048)
         prefill_backend: Prefill backend name (e.g., "fa3", "fa4").
             When set, forces the specified FlashAttention version for prefill.
+        sparse_mla_force_mqa: If True, forces all sparse MLA tokens through
+            forward_mqa (even prefill tokens).
 
     Returns:
         BenchmarkResult (single mode) or list of BenchmarkResult (batched mode)
@@ -1111,7 +1124,11 @@ def run_mla_benchmark(
 
     # Use unified batched execution
     results = _run_mla_benchmark_batched(
-        backend, configs_with_params, index_topk, prefill_backend=prefill_backend
+        backend,
+        configs_with_params,
+        index_topk,
+        prefill_backend=prefill_backend,
+        sparse_mla_force_mqa=sparse_mla_force_mqa,
     )
 
     # Return single result or list based on input
