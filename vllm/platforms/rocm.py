@@ -90,7 +90,7 @@ def _sync_hip_cuda_env_vars():
 _sync_hip_cuda_env_vars()
 
 # Enable HIP online tuning early, before hipBLASLt initializes.
-if envs.VLLM_ROCM_HIP_ONLINE_TUNING:
+if envs.VLLM_ROCM_USE_AITER_HIP_ONLINE_TUNING:
     os.environ["HIP_ONLINE_TUNING"] = "1"
 
 # AMDSMI utils

@@ -245,7 +245,7 @@ if TYPE_CHECKING:
     VLLM_ELASTIC_EP_SCALE_UP_LAUNCH: bool = False
     VLLM_ELASTIC_EP_DRAIN_REQUESTS: bool = False
     VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS: bool = False
-    VLLM_ROCM_HIP_ONLINE_TUNING: bool = False
+    VLLM_ROCM_USE_AITER_HIP_ONLINE_TUNING: bool = False
     VLLM_NIXL_EP_MAX_NUM_RANKS: int = 32
 
 
@@ -1043,8 +1043,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Whether to use HIP online tuning for ROCm
     # By default is disabled.
-    "VLLM_ROCM_HIP_ONLINE_TUNING": lambda: (
-        os.getenv("VLLM_ROCM_HIP_ONLINE_TUNING", "False").lower() in ("true", "1")
+    "VLLM_ROCM_USE_AITER_HIP_ONLINE_TUNING": lambda: (
+        os.getenv("VLLM_ROCM_USE_AITER_HIP_ONLINE_TUNING", "False").lower()
+        in ("true", "1")
     ),
     "VLLM_DISABLE_COMPILE_CACHE": disable_compile_cache,
     # If set, vllm will run in development mode, which will enable
