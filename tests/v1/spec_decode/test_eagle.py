@@ -979,6 +979,7 @@ def test_propose(method, attn_backend, num_speculative_tokens, monkeypatch):
     proposer.draft_attn_groups = [mock_attn_group]
 
     result = proposer.propose(
+        num_speculative_tokens=num_speculative_tokens,
         target_token_ids=target_token_ids,
         target_positions=target_positions,
         target_hidden_states=target_hidden_states,
@@ -1134,6 +1135,7 @@ def test_propose_tree(spec_token_tree):
 
     # Propose draft tokens.
     result = proposer.propose(
+        num_speculative_tokens=num_speculative_tokens,
         target_token_ids=target_token_ids,
         target_positions=target_positions,
         target_hidden_states=target_hidden_states,

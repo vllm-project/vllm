@@ -384,7 +384,7 @@ class SpecDecodeBaseProposer:
 
     def propose(
         self,
-        optimal_num_speculative_tokens: int | None,
+        num_speculative_tokens: int,
         # [num_tokens]
         target_token_ids: torch.Tensor,
         # [num_tokens] or [3, num_tokens] when M-RoPE is enabled
@@ -402,9 +402,7 @@ class SpecDecodeBaseProposer:
         | list[dict[str, torch.Tensor]]
         | None = None,
     ) -> torch.Tensor:
-        # Use optimal num speculative tokens if provided
-        if optimal_num_speculative_tokens is not None:
-            self.num_speculative_tokens = optimal_num_speculative_tokens
+        self.num_speculative_tokens = num_speculative_tokens
 
         batch_size = common_attn_metadata.batch_size()
 

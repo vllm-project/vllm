@@ -264,6 +264,7 @@ def test_propose():
         mock_has_kv.return_value = False
 
         draft_tokens, kv_connector_output = proposer.propose(
+            num_speculative_tokens=1,
             sampled_token_ids=sampled_token_ids,
             target_hidden_states=target_hidden_states,
             common_attn_metadata=common_attn_metadata,
@@ -335,6 +336,7 @@ def test_propose_different_layer_counts(num_hidden_layers):
         mock_has_kv.return_value = False
 
         draft_tokens, _ = proposer.propose(
+            num_speculative_tokens=1,
             sampled_token_ids=sampled_token_ids,
             target_hidden_states=target_hidden_states,
             common_attn_metadata=common_attn_metadata,
