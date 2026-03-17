@@ -3157,7 +3157,7 @@ class ASRDataset(HuggingFaceDataset):
         **kwargs,
     ) -> list:
         output_len = output_len if output_len is not None else self.DEFAULT_OUTPUT_LEN
-        if "openai" in tokenizer.name_or_path:
+        if "openai" in getattr(tokenizer, "name_or_path", ""):
             prompt = "<|startoftranscript|><|en|><|transcribe|><|notimestamps|>"
         else:
             prompt = ""
