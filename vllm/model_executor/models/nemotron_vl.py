@@ -1,18 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
-# adapted from https://huggingface.co/OpenGVLab/InternVL2-4B/blob/main/modeling_internvl_chat.py
-# --------------------------------------------------------
-# InternVL
-# Copyright (c) 2023 OpenGVLab
-# Licensed under The MIT License [see LICENSE for details]
-# --------------------------------------------------------
 import math
 from collections.abc import Iterable
 
 import torch
 import torch.nn as nn
-import torchvision.transforms as T
 from transformers import AutoModel, PretrainedConfig
 
 from vllm.config import VllmConfig
@@ -32,9 +24,11 @@ from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.siglip import SiglipVisionModel
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import IntermediateTensors
-from vllm.tokenizers import TokenizerLike
 from vllm.transformers_utils.processor import cached_image_processor_from_config
-from vllm.transformers_utils.processors.nemotron_vl import NemotronVLProcessor
+from vllm.transformers_utils.processors.nemotron_vl import (
+    LlamaNemotronVLEmbedProcessor,
+    NemotronVLProcessor,
+)
 from vllm.transformers_utils.repo_utils import get_hf_file_to_dict
 
 from .interfaces import (
@@ -390,91 +384,6 @@ class LlamaNemotronVLChatModel(nn.Module, SupportsMultiModal, SupportsPP, Suppor
 #   - Bidirectional (non-causal) LLaMA language model
 #   - Pooler output instead of generative logits
 # --------------------------------------------------------
-
-# SigLIP normalization constants
-SIGLIP_MEAN = (0.5, 0.5, 0.5)
-SIGLIP_STD = (0.5, 0.5, 0.5)
-
-
-def build_siglip_transform(input_size: int):
-    """Build transform for SigLIP vision encoder with normalization.
-
-    Extends the base transform from nemotron_vl with SigLIP-specific normalization.
-    """
-    base_transform = build_transform(input_size=input_size)
-    return T.Compose(
-        [
-            base_transform,
-            T.Normalize(mean=SIGLIP_MEAN, std=SIGLIP_STD),
-        ]
-    )
-
-
-class LlamaNemotronVLEmbedProcessor(NemotronVLProcessor):
-    """
-    Processor for LlamaNemotronVL embedding model.
-
-    Inherits from NemotronVLProcessor and specializes it for embedding tasks:
-    - Uses SigLIP transform with normalization instead of base transform
-    - Uses different image context token (<IMG_CONTEXT> vs <image>)
-    """
-
-    IMG_CONTEXT = "<IMG_CONTEXT>"
-
-    def __init__(
-        self,
-        config: PretrainedConfig,
-        tokenizer: TokenizerLike,
-        processor_config: dict,
-        *,
-        min_dynamic_patch: int | None = None,
-        max_dynamic_patch: int | None = None,
-        dynamic_image_size: bool | None = None,
-    ) -> None:
-        if min_dynamic_patch is None:
-            min_dynamic_patch = processor_config.get(
-                "min_input_tiles",
-                getattr(config, "min_dynamic_patch", 1),
-            )
-        if max_dynamic_patch is None:
-            max_dynamic_patch = processor_config.get(
-                "max_input_tiles",
-                getattr(config, "max_dynamic_patch", 1),
-            )
-        if dynamic_image_size is None:
-            dynamic_image_size = processor_config.get(
-                "dynamic_image_size",
-                getattr(config, "dynamic_image_size", True),
-            )
-        super().__init__(
-            config=config,
-            tokenizer=tokenizer,
-            image_processor=None,
-            min_dynamic_patch=min_dynamic_patch,
-            max_dynamic_patch=max_dynamic_patch,
-            dynamic_image_size=dynamic_image_size,
-        )
-
-    def _get_transform(self) -> T.Compose:
-        """Override to add SigLIP normalization."""
-        return build_siglip_transform(input_size=self.image_size)
-
-    def _replace_image_tokens(
-        self,
-        text: list[str],
-        pixel_values_lst: list[torch.Tensor],
-    ) -> list[str]:
-        """Override with simpler token replacement for embedding model.
-
-        No temporary placeholder needed because IMG_CONTEXT is <IMG_CONTEXT>,
-        not <image>, so there's no collision risk.
-        """
-        for pixel_values in pixel_values_lst:
-            num_patches = pixel_values.shape[0]
-            feature_size = num_patches * self.num_image_token
-            image_repl = self.get_image_repl(feature_size, num_patches)
-            text = [t.replace("<image>", image_repl.full, 1) for t in text]
-        return text
 
 
 class LlamaNemotronVLEmbedProcessingInfo(NemotronVLProcessingInfo):

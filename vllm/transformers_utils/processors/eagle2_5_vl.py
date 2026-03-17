@@ -1,16 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# Adapted from NVIDIA Eagle2.5-VL model
+# https://huggingface.co/nvidia/Eagle2.5-8B
 from transformers import PretrainedConfig
 
 from vllm.multimodal.processing import PromptUpdateDetails
 from vllm.tokenizers import TokenizerLike
 
-from .internvl import (
-    IMG_CONTEXT,
-    IMG_END,
-    IMG_START,
-    BaseInternVLProcessor,
-)
+from .internvl import IMG_CONTEXT, IMG_END, IMG_START, BaseInternVLProcessor
 
 
 class Eagle2_5_VLProcessor(BaseInternVLProcessor):

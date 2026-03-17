@@ -1,7 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+# adapted from https://huggingface.co/OpenGVLab/InternVL2-4B/blob/main/modeling_internvl_chat.py
+# --------------------------------------------------------
+# InternVL
+# Copyright (c) 2023 OpenGVLab
+# Licensed under The MIT License [see LICENSE for details]
+# --------------------------------------------------------
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import Any, TypeVar
 
 import numpy.typing as npt
 import torch
@@ -10,10 +17,10 @@ from PIL import Image
 from transformers import BatchFeature, PretrainedConfig, TensorType
 
 from vllm.multimodal.image import convert_image_mode
-from vllm.multimodal.processing import (
-    PromptUpdateDetails,
-)
+from vllm.multimodal.processing import PromptUpdateDetails
 from vllm.tokenizers import TokenizerLike
+
+_T = TypeVar("_T")
 
 IMG_START = "<img>"
 IMG_END = "</img>"
@@ -398,7 +405,7 @@ class BaseInternVLProcessor(ABC):
                 text = [t.replace("<image>", image_repl.full, 1) for t in text]
         return text, image_inputs
 
-    def _make_batch_input(self, input_item: Any | list[Any] | None = None):
+    def _make_batch_input(self, input_item: _T | list[_T] | None = None) -> list[_T]:
         if input_item is None:
             input_item = []
         if not isinstance(input_item, list):
@@ -409,12 +416,15 @@ class BaseInternVLProcessor(ABC):
         self,
         text: str | list[str] | None = None,
         images: Image.Image | list[Image.Image] | None = None,
+        *,
         min_dynamic_patch: int | None = None,
         max_dynamic_patch: int | None = None,
         dynamic_image_size: bool | None = None,
         return_tensors: str | TensorType | None = None,
+        **kwargs,
     ) -> BatchFeature:
-        text, images = [self._make_batch_input(x) for x in (text, images)]
+        text = self._make_batch_input(text)
+        images = self._make_batch_input(images)
 
         text, image_inputs = self._preprocess_image(
             text=text,
@@ -501,28 +511,31 @@ class InternVLProcessor(BaseInternVLProcessor):
         text: list[str],
         videos: list[npt.NDArray],
         dynamic_image_size: bool | None = None,
-    ):
+    ) -> tuple[list[str], dict[str, Any]]:
         if len(videos) == 0 or not self.supports_video:
-            video_inputs = {}
-        else:
-            pixel_values_lst_video = self._videos_to_pixel_values_lst(
-                videos,
-                dynamic_image_size=dynamic_image_size,
+            return text, {}
+
+        video_token = self.video_token
+        assert video_token is not None
+
+        pixel_values_lst_video = self._videos_to_pixel_values_lst(
+            videos,
+            dynamic_image_size=dynamic_image_size,
+        )
+        video_inputs = {
+            "pixel_values_flat_video": torch.cat(pixel_values_lst_video),
+            "video_num_patches": torch.tensor(
+                [len(item) for item in pixel_values_lst_video]
+            ),
+        }
+
+        for pixel_values in pixel_values_lst_video:
+            num_patches = pixel_values.shape[0]
+
+            video_repl = self.get_video_repl(
+                self.num_image_token, num_patches, video_token
             )
-            video_inputs = {
-                "pixel_values_flat_video": torch.cat(pixel_values_lst_video),
-                "video_num_patches": torch.tensor(
-                    [len(item) for item in pixel_values_lst_video]
-                ),
-            }
-
-            for pixel_values in pixel_values_lst_video:
-                num_patches = pixel_values.shape[0]
-
-                video_repl = self.get_video_repl(
-                    self.num_image_token, num_patches, self.video_token
-                )
-                text = [t.replace("<video>", video_repl.full, 1) for t in text]
+            text = [t.replace("<video>", video_repl.full, 1) for t in text]
         return text, video_inputs
 
     def __call__(
@@ -530,14 +543,16 @@ class InternVLProcessor(BaseInternVLProcessor):
         text: str | list[str] | None = None,
         images: Image.Image | list[Image.Image] | None = None,
         videos: npt.NDArray | list[npt.NDArray] | None = None,
+        *,
         min_dynamic_patch: int | None = None,
         max_dynamic_patch: int | None = None,
         dynamic_image_size: bool | None = None,
         return_tensors: str | TensorType | None = None,
+        **kwargs,
     ) -> BatchFeature:
-        text, images, videos = [
-            self._make_batch_input(x) for x in (text, images, videos)
-        ]
+        text = self._make_batch_input(text)
+        images = self._make_batch_input(images)
+        videos = self._make_batch_input(videos)
 
         text, image_inputs = self._preprocess_image(
             text=text,
@@ -572,9 +587,12 @@ class InternVLProcessor(BaseInternVLProcessor):
     def get_video_repl(
         self,
         feature_size: int,
-        num_patches: int | None = None,
+        num_patches: int | None,
         video_context_token: str = IMG_CONTEXT,
     ) -> PromptUpdateDetails[str]:
+        if num_patches is None:
+            raise NotImplementedError("Embedding inputs are not supported")
+
         repl_features = video_context_token * self.num_image_token
         repl_features_with_sep = IMG_START + repl_features + IMG_END
         # num_patches is equal to num_frames

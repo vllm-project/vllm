@@ -14,6 +14,12 @@ from vllm.tokenizers import TokenizerLike
 
 from .internvl import InternVLProcessor
 
+# Configure PIL to handle large images without warnings
+# This prevents DecompressionBombWarning for legitimate large images
+Image.MAX_IMAGE_PIXELS = None  # Disable the limit entirely
+# Alternative: Set a specific higher limit
+# Image.MAX_IMAGE_PIXELS = 300000000  # ~300M pixels
+
 
 def build_transform(input_size: int):
     return T.Compose(
@@ -175,7 +181,7 @@ class NemotronVLProcessor(InternVLProcessor):
         self,
         config: PretrainedConfig,
         tokenizer: TokenizerLike,
-        image_processor: BaseImageProcessorFast | None = None,
+        image_processor: BaseImageProcessorFast,
         *,
         min_dynamic_patch: int | None = None,
         max_dynamic_patch: int | None = None,
@@ -317,3 +323,88 @@ class NemotronVLProcessor(InternVLProcessor):
         repl_full = self.IMG_START + repl_features + self.IMG_END
 
         return PromptUpdateDetails.select_text(repl_full, self.IMG_CONTEXT)
+
+
+# SigLIP normalization constants
+SIGLIP_MEAN = (0.5, 0.5, 0.5)
+SIGLIP_STD = (0.5, 0.5, 0.5)
+
+
+def build_siglip_transform(input_size: int):
+    """Build transform for SigLIP vision encoder with normalization.
+
+    Extends the base transform from nemotron_vl with SigLIP-specific normalization.
+    """
+    return T.Compose(
+        [
+            build_transform(input_size=input_size),
+            T.Normalize(mean=SIGLIP_MEAN, std=SIGLIP_STD),
+        ]
+    )
+
+
+class LlamaNemotronVLEmbedProcessor(NemotronVLProcessor):
+    """
+    Processor for LlamaNemotronVL embedding model.
+
+    Inherits from NemotronVLProcessor and specializes it for embedding tasks:
+    - Uses SigLIP transform with normalization instead of base transform
+    - Uses different image context token (<IMG_CONTEXT> vs <image>)
+    """
+
+    IMG_CONTEXT = "<IMG_CONTEXT>"
+
+    def __init__(
+        self,
+        config: PretrainedConfig,
+        tokenizer: TokenizerLike,
+        processor_config: dict,
+        *,
+        min_dynamic_patch: int | None = None,
+        max_dynamic_patch: int | None = None,
+        dynamic_image_size: bool | None = None,
+    ) -> None:
+        if min_dynamic_patch is None:
+            min_dynamic_patch = processor_config.get(
+                "min_input_tiles",
+                getattr(config, "min_dynamic_patch", 1),
+            )
+        if max_dynamic_patch is None:
+            max_dynamic_patch = processor_config.get(
+                "max_input_tiles",
+                getattr(config, "max_dynamic_patch", 1),
+            )
+        if dynamic_image_size is None:
+            dynamic_image_size = processor_config.get(
+                "dynamic_image_size",
+                getattr(config, "dynamic_image_size", True),
+            )
+        super().__init__(
+            config=config,
+            tokenizer=tokenizer,
+            image_processor=None,
+            min_dynamic_patch=min_dynamic_patch,
+            max_dynamic_patch=max_dynamic_patch,
+            dynamic_image_size=dynamic_image_size,
+        )
+
+    def _get_transform(self) -> T.Compose:
+        """Override to add SigLIP normalization."""
+        return build_siglip_transform(input_size=self.image_size)
+
+    def _replace_image_tokens(
+        self,
+        text: list[str],
+        pixel_values_lst: list[torch.Tensor],
+    ) -> list[str]:
+        """Override with simpler token replacement for embedding model.
+
+        No temporary placeholder needed because IMG_CONTEXT is <IMG_CONTEXT>,
+        not <image>, so there's no collision risk.
+        """
+        for pixel_values in pixel_values_lst:
+            num_patches = pixel_values.shape[0]
+            feature_size = num_patches * self.num_image_token
+            image_repl = self.get_image_repl(feature_size, num_patches)
+            text = [t.replace("<image>", image_repl.full, 1) for t in text]
+        return text

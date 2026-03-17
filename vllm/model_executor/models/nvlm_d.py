@@ -27,13 +27,14 @@ from vllm.multimodal.processing import (
     PromptUpdate,
     PromptUpdateDetails,
 )
-from vllm.transformers_utils.processors.nvlm_d import NVLMProcessor
+from vllm.transformers_utils.processors.nvlm_d import IMG_PAD, NVLMProcessor
 
 from .intern_vit import InternVisionModel
 from .internvl import (
     BaseInternVLDummyInputsBuilder,
     BaseInternVLMultiModalProcessor,
     BaseInternVLProcessingInfo,
+    InternVLChatModel,
 )
 
 

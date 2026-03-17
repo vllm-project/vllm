@@ -1,5 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+# adapted from https://huggingface.co/nvidia/NVLM-D-72B/blob/main/modeling_nvlm_d.py
+# --------------------------------------------------------
+# NVLM-D
+# Copyright (c) 2024 NVIDIA
+# Licensed under Apache 2.0 License [see LICENSE for details]
+# --------------------------------------------------------
 from vllm.multimodal.processing import PromptUpdateDetails
 
 from .internvl import BaseInternVLProcessor
