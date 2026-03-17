@@ -919,11 +919,15 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         # Guard access to seq_lens_cpu, which may not always be needed
         # and can be expensive to retrieve in async mode.
         needs_seq_lens_cpu = self.use_dcp or use_cascade or not is_only_trtllm_decode
-        seq_lens_cpu = common_attn_metadata.seq_lens_cpu if needs_seq_lens_cpu else None
+        seq_lens_cpu = (
+            common_attn_metadata.seq_lens.cpu() if needs_seq_lens_cpu else None
+        )
 
         # Adjust seq_lens_cpu for DCP
         if self.use_dcp:
             assert seq_lens_cpu is not None
+            # Keep the shared metadata immutable for mixed decode/prefill batches.
+            seq_lens_cpu = seq_lens_cpu.clone()
             if num_prefills > 0:
                 qo_indptr_prefill_cpu = (
                     qo_indptr_cpu[num_decodes:] - qo_indptr_cpu[num_decodes]
