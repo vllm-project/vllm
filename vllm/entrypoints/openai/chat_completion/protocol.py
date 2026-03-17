@@ -350,7 +350,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
         "in output tokens. If such repetition is detected, generation will "
         "be ended early. LLMs can sometimes generate repetitive, unhelpful "
         "token patterns, stopping only when they hit the maximum output length "
-        "(e.g. 'abcdabcdabcd...' or '\\emoji \\emoji \\emoji ...'). This feature "
+        "(e.g. 'abcdabcdabcd...' or " + r"'\emoji \emoji \emoji ...'" + "). This feature "
         "can detect such behavior and terminate early, saving time and tokens.",
     )
 
