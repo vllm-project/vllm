@@ -34,7 +34,14 @@ class AnthropicUsage(BaseModel):
 class AnthropicContentBlock(BaseModel):
     """Content block in message"""
 
-    type: Literal["text", "image", "tool_use", "tool_result", "thinking"]
+    type: Literal[
+        "text",
+        "image",
+        "tool_use",
+        "tool_result",
+        "thinking",
+        "redacted_thinking",
+    ]
     text: str | None = None
     # For image content
     source: dict[str, Any] | None = None
@@ -48,6 +55,8 @@ class AnthropicContentBlock(BaseModel):
     # For thinking content
     thinking: str | None = None
     signature: str | None = None
+    # For redacted thinking content (safety-filtered by the API)
+    data: str | None = None
 
 
 class AnthropicMessage(BaseModel):

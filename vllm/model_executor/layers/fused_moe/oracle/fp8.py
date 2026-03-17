@@ -444,7 +444,7 @@ def convert_to_fp8_moe_kernel_format(
         Fp8MoeBackend.FLASHINFER_CUTLASS,
         Fp8MoeBackend.FLASHINFER_TRTLLM,
     ]:
-        w13, w2, w13_scale = prepare_fp8_moe_layer_for_fi(
+        w13, w2, w13_scale, w2_scale = prepare_fp8_moe_layer_for_fi(
             layer=layer,
             w13=w13,
             w2=w2,
@@ -512,6 +512,21 @@ def make_fp8_moe_quant_config(
             g1_alphas=(w1_scale * a1_scale).squeeze(),
             g2_alphas=(w2_scale * a2_scale).squeeze(),
         )
+    # MXFP8 uses "mxfp8" quant_dtype so the prepare step dispatches to
+    # _mxfp8_e4m3_quantize rather than standard FP8 block quantization.
+    # Non-swizzled layout is required since the TRTLLM kernel expects
+    # scales in (num_tokens, hidden_dim // 32) format.
+    if block_shape == [1, 32]:
+        return FusedMoEQuantConfig.make(
+            "mxfp8",
+            w1_scale=w1_scale,
+            w2_scale=w2_scale,
+            a1_scale=a1_scale,
+            a2_scale=a2_scale,
+            block_shape=block_shape,
+            is_nvfp4_scale_swizzled=False,
+        )
+
     # All other backends use normal config.
     return fp8_w8a8_moe_quant_config(
         w1_scale=w1_scale,

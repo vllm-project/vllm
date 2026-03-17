@@ -34,9 +34,6 @@ relies on caching artifacts to reduce start time, we must properly propagate the
 with the LLM text-backbone, or other instances of the same artifact (as is the case with vision block). `is_encoder=True` is also needed for encoder
 components (see Compile Range Integration).
 
-3. `with set_forward_context` context manager should be used around the nn.Module's forward call. This will properly forward the vllm_config which is needed
-for torch.compile integration.
-
 ### CompilationConfig
 
 With the exception of `compile_mm_encoder: true`, the multimodal encoder will inherit from the same compilation config as the text LLM. We may extend

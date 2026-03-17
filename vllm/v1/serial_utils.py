@@ -8,7 +8,7 @@ from collections.abc import Callable, Sequence
 from functools import partial
 from inspect import isclass
 from types import FunctionType
-from typing import Any, TypeAlias, get_type_hints
+from typing import Any, ClassVar, TypeAlias, cast, get_type_hints
 
 import cloudpickle
 import msgspec
@@ -460,6 +460,19 @@ def run_method(
 
 
 class PydanticMsgspecMixin:
+    """Make a ``msgspec.Struct`` compatible with Pydantic for both
+    **validation** (JSON/dict -> Struct) and **serialization**
+    (Struct -> JSON-safe dict).
+
+    Subclasses may set ``__pydantic_msgspec_exclude__`` (a ``set[str]``)
+    to list non-underscore field names that should also be stripped from
+    serialized output.  Fields whose names start with ``_`` are always
+    excluded automatically.
+    """
+
+    # Subclasses can override to exclude additional public-but-internal keys.
+    __pydantic_msgspec_exclude__: ClassVar[set[str]] = set()
+
     @classmethod
     def __get_pydantic_core_schema__(
         cls, source_type: Any, handler: GetCoreSchemaHandler
@@ -476,30 +489,60 @@ class PydanticMsgspecMixin:
         # Build the Pydantic typed_dict_field for each msgspec field
         fields = {}
         for name, hint in type_hints.items():
+            if name not in msgspec_fields:
+                # Skip ClassVar and other non-struct annotations.
+                continue
+            # Skip private fields — they are excluded from serialization
+            # and should not appear in the generated JSON/OpenAPI schema.
+            if name.startswith("_"):
+                continue
             msgspec_field = msgspec_fields[name]
 
             # typed_dict_field using the handler to get the schema
             field_schema = handler(hint)
 
             # Add default value to the schema.
+            # Mark fields with defaults as not required so the generated
+            # JSON Schema stays consistent with ``omit_defaults=True``
+            # serialization (fields at their default value may be absent).
             if msgspec_field.default_factory is not msgspec.NODEFAULT:
                 wrapped_schema = core_schema.with_default_schema(
                     schema=field_schema,
                     default_factory=msgspec_field.default_factory,
                 )
-                fields[name] = core_schema.typed_dict_field(wrapped_schema)
+                fields[name] = core_schema.typed_dict_field(
+                    wrapped_schema, required=False
+                )
             elif msgspec_field.default is not msgspec.NODEFAULT:
                 wrapped_schema = core_schema.with_default_schema(
                     schema=field_schema,
                     default=msgspec_field.default,
                 )
-                fields[name] = core_schema.typed_dict_field(wrapped_schema)
+                fields[name] = core_schema.typed_dict_field(
+                    wrapped_schema, required=False
+                )
             else:
                 # No default, so Pydantic will treat it as required
                 fields[name] = core_schema.typed_dict_field(field_schema)
-        return core_schema.no_info_after_validator_function(
+        typed_dict_then_convert = core_schema.no_info_after_validator_function(
             cls._validate_msgspec,
             core_schema.typed_dict_schema(fields),
+        )
+
+        # Build a serializer that strips private / excluded fields.
+        serializer = core_schema.plain_serializer_function_ser_schema(
+            cls._serialize_msgspec,
+            info_arg=False,
+        )
+
+        # Accept either an already-constructed msgspec.Struct instance or a
+        # JSON/dict-like payload.
+        return core_schema.union_schema(
+            [
+                core_schema.is_instance_schema(source_type),
+                typed_dict_then_convert,
+            ],
+            serialization=serializer,
         )
 
     @classmethod
@@ -510,3 +553,25 @@ class PydanticMsgspecMixin:
         if isinstance(value, dict):
             return cls(**value)
         return msgspec.convert(value, type=cls)
+
+    @staticmethod
+    def _serialize_msgspec(value: Any) -> Any:
+        """Serialize a msgspec.Struct to a JSON-compatible dict, stripping
+        private (``_``-prefixed) and explicitly excluded fields.
+
+        Uses ``msgspec.to_builtins`` which respects ``omit_defaults=True``,
+        so only fields that differ from their declared defaults are included.
+        """
+        raw = msgspec.to_builtins(value)
+        if not isinstance(raw, dict):
+            return raw
+
+        exclude: set[str] = cast(
+            set[str],
+            getattr(type(value), "__pydantic_msgspec_exclude__", set()),
+        )
+        for key in list(raw):
+            if key.startswith("_") or key in exclude:
+                del raw[key]
+
+        return raw

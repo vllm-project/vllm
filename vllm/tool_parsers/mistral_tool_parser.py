@@ -241,7 +241,10 @@ class MistralToolParser(ToolParser):
         delta_token_ids: Sequence[int],
         request: ChatCompletionRequest,
     ) -> DeltaMessage | None:
-        if self.bot_token_id not in current_token_ids:
+        has_bot_token = (
+            self.bot_token_id in current_token_ids or self.bot_token in current_text
+        )
+        if not has_bot_token:
             # if the tool call token is not in the tokens generated so far,
             # append output to contents since it's not a tool
             return DeltaMessage(content=delta_text)
@@ -275,7 +278,8 @@ class MistralToolParser(ToolParser):
         additional_content: str = ""
         if self.streaming_state == StreamingState.WAITING_FOR_TOOL_START:
             # this is the first tool call
-            assert self.bot_token_id in delta_token_ids
+            if self.bot_token not in delta_text:
+                return DeltaMessage(content=delta_text)
             if not delta_text.startswith(self.bot_token):
                 additional_content += delta_text.split(self.bot_token)[0]
                 delta_text = self.bot_token + "".join(
@@ -411,7 +415,7 @@ class MistralToolParser(ToolParser):
             index=self.current_tool_id, type="function"
         )
         current_tool_call_modified = False
-        if self.bot_token_id in delta_token_ids:
+        if self.bot_token_id in delta_token_ids or self.bot_token in delta_text:
             # this is the first tool call
             if not delta_text.startswith(self.bot_token):
                 content = delta_text.split(self.bot_token)[0]

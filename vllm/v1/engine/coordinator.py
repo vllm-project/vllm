@@ -104,8 +104,10 @@ class DPCoordinator:
         """Returns tuple of ZMQ input address, output address."""
         return self.coord_in_address, self.coord_out_address
 
-    def close(self):
-        self._finalizer()
+    def shutdown(self, timeout: float | None = None) -> None:
+        """Shutdown coordinator process with configurable timeout."""
+        if self._finalizer.detach() is not None:
+            shutdown([self.proc], timeout=timeout)
 
 
 class EngineState:
@@ -246,9 +248,9 @@ class DPCoordinatorProc:
                         # Subscription message, on the other hand, is sent
                         # by each engine during initialization
                         publish_back.send(b"READY")
-                    else:
+                    elif buffer != b"\x00":
                         logger.error(
-                            "DP Coordinator receives unexpected message from engines"
+                            "DP Coordinator received unexpected message from engines"
                         )
 
                 if publish_front in events:

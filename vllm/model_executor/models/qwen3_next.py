@@ -137,7 +137,7 @@ def fi_chunk_gated_delta_rule(
     fi_state = initial_state.to(torch.float32)
     fi_g = g.to(torch.float32)
     fi_beta = beta.to(torch.float32)
-    output, final_state = chunk_gated_delta_rule_fi(
+    result = chunk_gated_delta_rule_fi(
         q=q,
         k=k,
         v=v,
@@ -147,21 +147,59 @@ def fi_chunk_gated_delta_rule(
         output_final_state=output_final_state,
         cu_seqlens=cu_seqlens,
     )
+    # FlashInfer returns (output, state) when output_final_state=True,
+    # or just output when output_final_state=False.
     # Unsqueeze back to 4D (1, L, H, D) to match fla output format
-    return output.unsqueeze(0), final_state
+    if output_final_state:
+        output, final_state = result
+        return output.unsqueeze(0), final_state
+    else:
+        return result.unsqueeze(0), None
 
 
 @CustomOp.register("chunk_gated_delta_rule")
 class ChunkGatedDeltaRule(CustomOp):
     def __init__(self) -> None:
         super().__init__()
-        if current_platform.is_cuda() and current_platform.is_device_capability(90):
-            logger.info_once(
-                "Using FlashInfer GDN prefill kernel on CUDA compute capability 90"
+        backend = (
+            str(
+                get_current_vllm_config().additional_config.get(
+                    "gdn_prefill_backend", "auto"
+                )
             )
-            self._forward_method = self.forward_cuda
+            .strip()
+            .lower()
+        )
+        supports_flashinfer = (
+            current_platform.is_cuda() and current_platform.is_device_capability(90)
+        )
+
+        if backend == "flashinfer":
+            use_flashinfer = supports_flashinfer
+            if not use_flashinfer:
+                logger.warning_once(
+                    "GDN prefill backend 'flashinfer' is selected but "
+                    "cannot use this kernel on the current platform. "
+                    "Falling back to Triton/FLA."
+                )
+        elif backend == "triton":
+            use_flashinfer = False
         else:
-            self._forward_method = self.forward_native
+            use_flashinfer = supports_flashinfer
+
+        if use_flashinfer:
+            logger.info_once("Using FlashInfer GDN prefill kernel")
+            logger.info_once(
+                "FlashInfer GDN prefill kernel is JIT-compiled; first run may "
+                "take a while to compile. Set `--gdn-prefill-backend triton` to "
+                "avoid JIT compile time."
+            )
+        else:
+            logger.info_once("Using Triton/FLA GDN prefill kernel")
+
+        self._forward_method = (
+            self.forward_cuda if use_flashinfer else self.forward_native
+        )
 
     def forward_cuda(
         self,

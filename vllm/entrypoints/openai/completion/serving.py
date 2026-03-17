@@ -5,7 +5,7 @@ import asyncio
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 from fastapi import Request
 
@@ -42,6 +42,9 @@ from vllm.tokenizers import TokenizerLike
 from vllm.utils.async_utils import merge_async_iterators
 from vllm.utils.collection_utils import as_list
 
+if TYPE_CHECKING:
+    from vllm.entrypoints.serve.render.serving import OpenAIServingRender
+
 logger = init_logger(__name__)
 
 
@@ -51,6 +54,7 @@ class OpenAIServingCompletion(OpenAIServing):
         engine_client: EngineClient,
         models: OpenAIServingModels,
         *,
+        openai_serving_render: "OpenAIServingRender",
         request_logger: RequestLogger | None,
         return_tokens_as_token_ids: bool = False,
         enable_prompt_tokens_details: bool = False,
@@ -63,6 +67,7 @@ class OpenAIServingCompletion(OpenAIServing):
             return_tokens_as_token_ids=return_tokens_as_token_ids,
         )
 
+        self.openai_serving_render = openai_serving_render
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
         self.enable_force_include_usage = enable_force_include_usage
 
@@ -79,7 +84,10 @@ class OpenAIServingCompletion(OpenAIServing):
         request: CompletionRequest,
     ) -> list[ProcessorInputs] | ErrorResponse:
         """
-        render completion request by validating and preprocessing inputs.
+        Validate the model and preprocess a completion request.
+
+        Delegates preprocessing logic to OpenAIServingRender, adding the
+        engine-aware checks (LoRA model validation, engine health).
 
         Returns:
             A list of engine_prompts on success,
@@ -95,25 +103,7 @@ class OpenAIServingCompletion(OpenAIServing):
         if self.engine_client.errored:
             raise self.engine_client.dead_error
 
-        # Return error for unsupported features.
-        if request.suffix is not None:
-            return self.create_error_response("suffix is not currently supported")
-
-        if request.echo and request.prompt_embeds is not None:
-            return self.create_error_response("Echo is unsupported with prompt embeds.")
-
-        if request.prompt_logprobs is not None and request.prompt_embeds is not None:
-            return self.create_error_response(
-                "prompt_logprobs is not compatible with prompt embeds."
-            )
-
-        engine_prompts = await self._preprocess_completion(
-            request,
-            prompt_input=request.prompt,
-            prompt_embeds=request.prompt_embeds,
-        )
-
-        return engine_prompts
+        return await self.openai_serving_render.render_completion(request)
 
     async def create_completion(
         self,

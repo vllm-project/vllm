@@ -575,7 +575,7 @@ static __global__ __launch_bounds__(kNumThreadsPerBlock) void topKPerRowDecode(
   // The range of logits within the row.
   int rowStart = 0;
   int seq_len = seqLens[rowIdx / next_n];
-  int rowEnd = seq_len - next_n + (rowIdx % next_n) + 1;
+  int rowEnd = max(0, seq_len - next_n + (rowIdx % next_n) + 1);
 
   // Local pointers to this block
   if constexpr (!multipleBlocksPerRow && !mergeBlocks) {

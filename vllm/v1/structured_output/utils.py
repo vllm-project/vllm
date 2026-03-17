@@ -116,7 +116,18 @@ def apply_grammar_bitmask(
         )
         index_tensor = index_tensor.to(logits.device, non_blocking=True)
 
-    xgr.apply_token_bitmask_inplace(logits, grammar_bitmask, indices=index_tensor)
+    # Handle dtype conversion for CPU (older xgrammar CPU kernels require float32)
+    # See: https://github.com/vllm-project/vllm/issues/31901
+    if logits.device.type == "cpu" and logits.dtype != torch.float32:
+        # Convert to float32, apply bitmask, then convert back
+        logits_float32 = logits.to(torch.float32)
+        xgr.apply_token_bitmask_inplace(
+            logits_float32, grammar_bitmask, indices=index_tensor
+        )
+        # Copy the modified values back to the original tensor
+        logits.copy_(logits_float32.to(logits.dtype))
+    else:
+        xgr.apply_token_bitmask_inplace(logits, grammar_bitmask, indices=index_tensor)
 
 
 class OutlinesVocabulary:

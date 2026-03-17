@@ -331,8 +331,8 @@ def create_error_response(
             err_type = "InternalServerError"
             status_code = exc.status_code
             param = None
-        elif exc.__class__.__name__ == "TemplateError":
-            # jinja2.TemplateError (avoid importing jinja2)
+        elif any(cls.__name__ == "TemplateError" for cls in type(exc).__mro__):
+            # jinja2.TemplateError and its subclasses (avoid importing jinja2)
             err_type = "BadRequestError"
             status_code = HTTPStatus.BAD_REQUEST
             param = None

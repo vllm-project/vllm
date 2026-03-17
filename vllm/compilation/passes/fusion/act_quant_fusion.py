@@ -148,11 +148,11 @@ class SiluMulNvfp4QuantPattern(ActivationQuantPattern):
             result_silu_mul = self.silu_and_mul_matcher(input)
             at = auto_functionalized(
                 self.QUANT_OP,
-                output=result,
                 input=result_silu_mul,
-                output_scale=output_scale,
                 input_scale=scale,
                 is_sf_swizzled_layout=True,
+                output=result,
+                output_scale=output_scale,
             )
             return at[1], at[2]
 

@@ -6,7 +6,6 @@
 import time
 from typing import Any, Literal, TypeAlias
 
-import torch
 from openai.types.responses import (
     ResponseCodeInterpreterCallCodeDeltaEvent,
     ResponseCodeInterpreterCallCodeDoneEvent,
@@ -78,7 +77,8 @@ from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
 
-_LONG_INFO = torch.iinfo(torch.long)
+_INT64_MIN = -(2**63)
+_INT64_MAX = 2**63 - 1
 
 
 class InputTokensDetails(OpenAIBaseModel):
@@ -210,6 +210,8 @@ class ResponsesRequest(OpenAIBaseModel):
     )
     priority: int = Field(
         default=0,
+        ge=_INT64_MIN,
+        le=_INT64_MAX,
         description=(
             "The priority of the request (lower means earlier handling; "
             "default: 0). Any priority other than 0 will raise an error "
@@ -246,7 +248,7 @@ class ResponsesRequest(OpenAIBaseModel):
     )
 
     repetition_penalty: float | None = None
-    seed: int | None = Field(None, ge=_LONG_INFO.min, le=_LONG_INFO.max)
+    seed: int | None = Field(None, ge=_INT64_MIN, le=_INT64_MAX)
     stop: str | list[str] | None = []
     ignore_eos: bool = False
     vllm_xargs: dict[str, str | int | float | list[str | int | float]] | None = Field(

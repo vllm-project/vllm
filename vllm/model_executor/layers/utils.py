@@ -231,6 +231,30 @@ def dispatch_cpu_unquantized_gemm(
     N, K = layer.weight.size()
     dtype = layer.weight.dtype
 
+    # Zen CPU path: zentorch_linear_unary with optional eager weight prepacking.
+    if current_platform.is_zen_cpu() and hasattr(
+        torch.ops.zentorch, "zentorch_linear_unary"
+    ):
+        zen_weight = layer.weight.detach()
+        is_prepacked = False
+
+        if envs.VLLM_ZENTORCH_WEIGHT_PREPACK and hasattr(
+            torch.ops.zentorch, "zentorch_weight_prepack_for_linear"
+        ):
+            zen_weight = torch.ops.zentorch.zentorch_weight_prepack_for_linear(
+                zen_weight
+            )
+            is_prepacked = True
+
+        layer.cpu_linear = lambda x, weight, bias, _p=is_prepacked: (
+            torch.ops.zentorch.zentorch_linear_unary(
+                x, zen_weight, bias, is_weight_prepacked=_p
+            )
+        )
+        if remove_weight:
+            layer.weight = torch.nn.Parameter(torch.empty(0), requires_grad=False)
+        return
+
     if envs.VLLM_CPU_SGL_KERNEL and check_cpu_sgl_kernel(N, K, dtype):
         packed_weight = torch.ops._C.convert_weight_packed(layer.weight)
         if getattr(layer, "bias", None) is not None:

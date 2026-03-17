@@ -457,6 +457,18 @@ async def test_completion_stream_options(client: openai.AsyncOpenAI, model_name:
             )
             assert final_chunk.choices == []
 
+    # Test stream=True, stream_options={}
+    stream = await client.completions.create(
+        model=model_name,
+        prompt=prompt,
+        max_tokens=5,
+        temperature=0.0,
+        stream=True,
+        stream_options={},
+    )
+    async for chunk in stream:
+        assert chunk.usage is None
+
     # Test stream=False, stream_options=
     #     {"include_usage": None}
     with pytest.raises(BadRequestError):
