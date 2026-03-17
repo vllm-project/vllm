@@ -396,12 +396,10 @@ class CutlassExpertsFp8(CutlassExpertsFp8Base):
         # Note that the BATCHED activation format does not use
         # the expert map for identifying experts.
         return not (
-            moe_parallel_config.use_fi_all2allv_kernels
+            moe_parallel_config.use_fi_nvl_two_sided_kernels
             or moe_parallel_config.use_deepep_ht_kernels
+            or moe_parallel_config.use_fi_nvl_one_sided_kernels
         )
-
-    def supports_chunking(self) -> bool:
-        return True
 
     def supports_expert_map(self) -> bool:
         return False
@@ -444,9 +442,6 @@ class CutlassBatchedExpertsFp8(CutlassExpertsFp8Base):
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.BatchedExperts
-
-    def supports_chunking(self) -> bool:
-        return False
 
     def supports_expert_map(self) -> bool:
         return False
@@ -664,6 +659,13 @@ def run_cutlass_moe_fp4(
 class CutlassExpertsFp4(mk.FusedMoEExpertsModular):
     """CUTLASS FP4 fused MoE expert implementation."""
 
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        # Fuse activation scales into w_scale_2 in-place so that
+        # g1/g2_alphas (which reference the same tensor) stay in sync
+        # when EPLB rearranges the parameter.
+        layer.w13_weight_scale_2.data.mul_(layer.w13_input_scale)
+        layer.w2_weight_scale_2.data.mul_(layer.w2_input_scale)
+
     @property
     def expects_unquantized_inputs(self) -> bool:
         return True
@@ -712,9 +714,6 @@ class CutlassExpertsFp4(mk.FusedMoEExpertsModular):
 
     def supports_expert_map(self) -> bool:
         return False
-
-    def supports_chunking(self) -> bool:
-        return True
 
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         return TopKWeightAndReduceNoOP()
@@ -997,9 +996,6 @@ class CutlassExpertsW4A8Fp8(mk.FusedMoEExpertsModular):
             "CutlassExpertsW4A8Fp8 is not yet used by an Oracle. "
             "This method should not be called."
         )
-
-    def supports_chunking(self) -> bool:
-        return True
 
     def supports_expert_map(self) -> bool:
         return True

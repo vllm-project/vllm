@@ -11,7 +11,6 @@ from typing import Final, Literal, TypeAlias, TypeVar, cast
 
 import numpy as np
 from fastapi import Request
-from soundfile import LibsndfileError
 from transformers import PreTrainedTokenizerBase
 
 import vllm.envs as envs
@@ -44,6 +43,7 @@ from vllm.logger import init_logger
 from vllm.logprobs import FlatLogprobs, Logprob
 from vllm.model_executor.models import SupportsTranscription
 from vllm.multimodal.audio import split_audio
+from vllm.multimodal.media.audio import extract_audio_from_video_bytes
 from vllm.outputs import RequestOutput
 from vllm.renderers.inputs import DictPrompt, EncoderDecoderDictPrompt
 from vllm.renderers.inputs.preprocess import parse_enc_dec_prompt, parse_model_prompt
@@ -55,6 +55,11 @@ try:
     import librosa
 except ImportError:
     librosa = PlaceholderModule("librosa")  # type: ignore[assignment]
+
+try:
+    import soundfile as sf
+except ImportError:
+    sf = PlaceholderModule("soundfile")  # type: ignore[assignment]
 
 # Public libsndfile error codes exposed via `soundfile.LibsndfileError.code`, soundfile
 # being librosa's main backend. Used to validate if an audio loading error is due to a
@@ -202,16 +207,35 @@ class OpenAISpeechToText(OpenAIServing):
                 value=len(audio_data) / 1024**2,
             )
 
-        with io.BytesIO(audio_data) as bytes_:
-            try:
-                # NOTE resample to model SR here for efficiency. This is also a
-                # pre-requisite for chunking, as it assumes Whisper SR.
-                y, sr = librosa.load(bytes_, sr=self.asr_config.sample_rate)
-            except LibsndfileError as exc:
-                # Distinguish client errors (invalid audio) from server errors
-                if exc.code in _BAD_SF_CODES:
-                    raise ValueError("Invalid or unsupported audio file.") from exc
+        # Decode audio bytes.  For container formats (MP4, M4A, WebM) that
+        # soundfile cannot detect from a BytesIO stream, _load_audio_bytes
+        # transparently falls back to ffmpeg via an in-memory fd.
+        # NOTE resample to model SR here for efficiency. This is also a
+        # pre-requisite for chunking, as it assumes Whisper SR.
+        try:
+            with io.BytesIO(audio_data) as buf:
+                y, sr = librosa.load(buf, sr=self.asr_config.sample_rate)  # type: ignore[return-value]
+        except sf.LibsndfileError as exc:
+            # Only fall back for known format-detection failures.
+            # Re-raise anything else (e.g. corrupt but recognised format).
+            if exc.code not in _BAD_SF_CODES:
                 raise
+            logger.debug(
+                "librosa/soundfile could not decode audio from BytesIO "
+                "(code=%s: %s); falling back to pyav in-process decode",
+                exc.code,
+                exc,
+            )
+            try:
+                native_y, native_sr = extract_audio_from_video_bytes(audio_data)
+                sr = self.asr_config.sample_rate
+                y = librosa.resample(native_y, orig_sr=native_sr, target_sr=sr)
+            except Exception as pyav_exc:
+                logger.debug(
+                    "pyAV fallback also failed: %s",
+                    pyav_exc,
+                )
+                raise ValueError("Invalid or unsupported audio file.") from pyav_exc
 
         duration = librosa.get_duration(y=y, sr=sr)
         do_split_audio = (

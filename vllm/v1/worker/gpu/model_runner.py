@@ -90,7 +90,7 @@ from vllm.v1.worker.gpu.spec_decode import init_speculator
 from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
     set_eagle3_aux_hidden_state_layers,
 )
-from vllm.v1.worker.gpu.spec_decode.rejection_sample import rejection_sample
+from vllm.v1.worker.gpu.spec_decode.rejection_sampler import RejectionSampler
 from vllm.v1.worker.gpu.spec_decode.utils import DraftTokensHandler
 from vllm.v1.worker.gpu.states import RequestState
 from vllm.v1.worker.gpu.structured_outputs import StructuredOutputsWorker
@@ -125,6 +125,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.max_model_len = self.model_config.max_model_len
         self.max_num_tokens = self.scheduler_config.max_num_batched_tokens
         self.max_num_reqs = self.scheduler_config.max_num_seqs
+        self.is_encoder_decoder = self.model_config.is_encoder_decoder
 
         self.use_async_scheduling = self.scheduler_config.async_scheduling
         self.output_copy_stream = torch.cuda.Stream(self.device)
@@ -159,11 +160,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if self.supports_mm_inputs and self.is_first_pp_rank:
             self.encoder_cache = EncoderCache()
 
+        # Speculative decoding.
         self.speculator = None
         self.num_speculative_steps = 0
         self.use_aux_hidden_state_outputs = False
+        use_strict_rejection_sampling = False
         if self.speculative_config is not None:
             self.num_speculative_steps = self.speculative_config.num_speculative_tokens
+            use_strict_rejection_sampling = (
+                self.speculative_config.rejection_sample_method == "strict"
+            )
+
             if self.is_last_pp_rank:
                 self.speculator = init_speculator(self.vllm_config, self.device)
 
@@ -176,6 +183,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Draft tokens propagation - for spec-dec + struct outputs.
         self.draft_tokens_handler = DraftTokensHandler(self.device)
 
+        # Pooling models.
+        self.is_pooling_model = self.model_config.runner_type == "pooling"
+        self.pooling_runner: PoolingRunner | None = None
+
+        # General request states.
         self.req_states = RequestState(
             max_num_reqs=self.max_num_reqs,
             max_model_len=self.max_model_len,
@@ -183,21 +195,42 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_speculative_steps=self.num_speculative_steps,
             vocab_size=self.vocab_size,
             device=self.device,
+            model_dtype=self.dtype,
+            cache_draft_logits=not use_strict_rejection_sampling,
         )
         self.input_buffers = InputBuffers(
             max_num_reqs=self.max_num_reqs,
             max_num_tokens=self.max_num_tokens,
             device=self.device,
         )
-        self.sampler = Sampler(
-            max_num_reqs=self.max_num_reqs,
-            vocab_size=self.vocab_size,
-            device=self.device,
-            req_states=self.req_states,
-            logprobs_mode=self.model_config.logprobs_mode,
-            num_speculative_tokens=self.num_speculative_steps + 1,
-        )
-        self.prompt_logprobs_worker = PromptLogprobsWorker(self.max_num_reqs)
+
+        self.sampler: Sampler | None = None
+        self.rejection_sampler: RejectionSampler | None = None
+        self.prompt_logprobs_worker: PromptLogprobsWorker | None = None
+        self.structured_outputs_worker: StructuredOutputsWorker | None = None
+        if self.is_last_pp_rank and not self.is_pooling_model:
+            # Initialize sampling-related workers.
+            # These components are only set up on the last PP rank and
+            # for generative (non-pooling) models.
+            self.sampler = Sampler(
+                max_num_reqs=self.max_num_reqs,
+                vocab_size=self.vocab_size,
+                device=self.device,
+                req_states=self.req_states,
+                logprobs_mode=self.model_config.logprobs_mode,
+                num_speculative_tokens=self.num_speculative_steps + 1,
+            )
+            self.rejection_sampler = RejectionSampler(
+                self.sampler,
+                num_speculative_steps=self.num_speculative_steps,
+                use_strict_rejection_sampling=use_strict_rejection_sampling,
+            )
+            self.prompt_logprobs_worker = PromptLogprobsWorker(self.max_num_reqs)
+            self.structured_outputs_worker = StructuredOutputsWorker(
+                max_num_logits=self.max_num_reqs * (self.num_speculative_steps + 1),
+                vocab_size=self.vocab_size,
+                device=self.device,
+            )
 
         # CUDA graphs.
         self.decode_query_len = self.num_speculative_steps + 1
@@ -207,20 +240,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.compilation_config.cudagraph_mode,
             decode_query_len=self.decode_query_len,
         )
-        # Structured outputs worker.
-        self.structured_outputs_worker = StructuredOutputsWorker(
-            max_num_logits=self.max_num_reqs * (self.num_speculative_steps + 1),
-            vocab_size=self.vocab_size,
-            device=self.device,
-        )
         # LoRA-related workers.
         self.lora_state = LoraState(max_num_reqs=self.max_num_reqs)
         # KV Connector if configured.
         self.kv_connector: KVConnector = NO_OP_KV_CONNECTOR
-
-        # Pooling models.
-        self.is_pooling_model = self.model_config.runner_type == "pooling"
-        self.pooling_runner: PoolingRunner | None = None
 
         # For transferring state from execute_model to subsequent sample_tokens call.
         self.execute_model_state: ExecuteModelState | None = None
@@ -232,9 +255,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         tasks: list[SupportedTask] = []
         if self.model_config.runner_type == "generate":
-            tasks.append("generate")
-        if self.pooling_runner is not None:
-            tasks.extend(self.pooling_runner.get_supported_pooling_tasks())
+            tasks.extend(self.model_state.get_supported_generation_tasks())
+        if self.is_pooling_model:
+            # Do not rely on pooling_runner here, since this information is needed
+            # on the first PP rank, while pooling_runner is only initialized
+            # on the last PP rank.
+            tasks.extend(PoolingRunner.get_supported_tasks(self.model))
         return tuple(tasks)
 
     def load_model(self, *args, **kwargs) -> None:
@@ -274,7 +300,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.model_state = init_model_state(
             self.vllm_config, self.model, self.encoder_cache, self.device
         )
-        if self.is_pooling_model:
+        if self.is_pooling_model and self.is_last_pp_rank:
             self.pooling_runner = PoolingRunner(self.model)
 
     def get_model(self) -> nn.Module:
@@ -296,11 +322,20 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             for kv_cache_group in kv_cache_config.kv_cache_groups
         ]
 
+        block_table_max_model_len = self.max_model_len
+        if self.is_encoder_decoder:
+            # Cross-attention block tables need to index encoder tokens
+            # (e.g., Whisper ~1500), which can exceed decoder max_model_len.
+            block_table_max_model_len = max(
+                block_table_max_model_len,
+                getattr(self.model_config.hf_config, "max_source_positions", 0),
+            )
+
         self.block_tables = BlockTables(
             block_sizes=block_sizes,
             max_num_reqs=self.max_num_reqs,
             max_num_batched_tokens=self.max_num_tokens,
-            max_model_len=self.max_model_len,
+            max_model_len=block_table_max_model_len,
             device=self.device,
             cp_size=self.dcp_size,
             cp_rank=self.dcp_rank,
@@ -396,6 +431,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # dummy run the eagle speculator's propose to ensure DP/EP sync.
         if self.speculator is not None:
+            assert self.sampler is not None
             self.speculator.propose(
                 input_batch=input_batch,
                 attn_metadata=attn_metadata,
@@ -412,6 +448,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 next_prefill_tokens=self.req_states.next_prefill_tokens,
                 temperature=self.sampler.sampling_states.temperature.gpu,
                 seeds=self.sampler.sampling_states.seeds.gpu,
+                draft_logits_out=self.req_states.draft_logits,
                 num_tokens_across_dp=num_tokens_across_dp,
                 dummy_run=True,
                 skip_attn_for_dummy_run=skip_attn,
@@ -425,25 +462,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def _dummy_sampler_run(self, hidden_states: torch.Tensor) -> None:
         num_reqs = hidden_states.shape[0]
         logits = self.model.compute_logits(hidden_states)
-        idx_mapping = torch.arange(num_reqs, dtype=torch.int32, device=self.device)
-        idx_mapping_np = np.arange(num_reqs, dtype=np.int32)
-        pos = torch.zeros(num_reqs, dtype=torch.int64, device=self.device)
-        dummy_input_ids = torch.zeros(num_reqs, dtype=torch.int32, device=self.device)
-        expanded_local_pos = torch.zeros(
-            num_reqs, dtype=torch.int32, device=self.device
+        dummy_input_batch = InputBatch.make_dummy(
+            num_reqs, num_reqs, self.input_buffers
         )
+
         # NOTE(woosuk): During the initial memory profiling, the sampler may skip
         # top_k, top_p, and logprobs, using less GPU memory than what is possible
         # during actual execution.
-        self.sampler(
-            logits,
-            idx_mapping,
-            idx_mapping_np,
-            idx_mapping_np,
-            pos,
-            dummy_input_ids,
-            expanded_local_pos,
-        )
+        assert self.sampler is not None
+        self.sampler(logits, dummy_input_batch)
 
     @torch.inference_mode()
     def _dummy_pooler_run(self, hidden_states: torch.Tensor) -> None:
@@ -532,13 +559,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
         return cuda_graph_size
 
-    def warmup_for_prefill(self) -> None:
-        # For FlashInfer, we would like to execute a dummy prefill run
-        # to trigger JIT compilation.
-        if all("FLASHINFER" in b.get_name() for b in self.attn_backends.values()):
-            self._dummy_run(self.max_num_tokens, skip_attn=False)
-            torch.accelerator.synchronize()
-
     def finish_requests(self, scheduler_output: SchedulerOutput) -> None:
         finished_req_ids = scheduler_output.finished_req_ids
         preempted_req_ids = scheduler_output.preempted_req_ids
@@ -548,7 +568,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.req_states.remove_request(req_id)
             if self.encoder_cache is not None:
                 self.encoder_cache.remove_request(req_id)
-            self.prompt_logprobs_worker.remove_request(req_id)
+            if self.prompt_logprobs_worker is not None:
+                self.prompt_logprobs_worker.remove_request(req_id)
             self.lora_state.remove_request(req_id)
 
     def free_states(self, scheduler_output: SchedulerOutput) -> None:
@@ -579,18 +600,21 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
             self.lora_state.add_request(req_id, req_index, new_req_data.lora_request)
 
-            if new_req_data.sampling_params is not None:
+            if self.is_last_pp_rank and new_req_data.sampling_params is not None:
+                assert self.sampler is not None
                 self.sampler.add_request(
                     req_index, prompt_len, new_req_data.sampling_params
                 )
+                assert self.prompt_logprobs_worker is not None
                 self.prompt_logprobs_worker.add_request(
                     req_id, req_index, new_req_data.sampling_params
                 )
 
         if scheduler_output.scheduled_new_reqs:
             self.req_states.apply_staged_writes()
-            self.sampler.apply_staged_writes()
             self.model_state.apply_staged_writes()
+        if self.sampler is not None:
+            self.sampler.apply_staged_writes()
 
     def update_requests(self, scheduler_output: SchedulerOutput) -> None:
         # Add new blocks for the existing requests.
@@ -775,11 +799,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         grammar_output: GrammarOutput | None,
     ) -> tuple[SamplerOutput, torch.Tensor, torch.Tensor]:
         sample_hidden_states = hidden_states[input_batch.logits_indices]
-        sample_pos = input_batch.positions[input_batch.logits_indices]
-        input_ids = input_batch.input_ids[input_batch.logits_indices]
         logits = self.model.compute_logits(sample_hidden_states)
         if grammar_output is not None:
             # Apply grammar bitmask to the logits in-place.
+            assert self.structured_outputs_worker is not None
             self.structured_outputs_worker.apply_grammar_bitmask(
                 logits,
                 input_batch,
@@ -787,34 +810,26 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 grammar_output.grammar_bitmask,
             )
 
-        # Sample tokens and compute logprobs (if needed).
-        sampler_output = self.sampler(
-            logits,
-            input_batch.expanded_idx_mapping,
-            input_batch.idx_mapping_np,
-            input_batch.cu_num_logits_np,
-            sample_pos,
-            input_ids,
-            input_batch.expanded_local_pos,
-        )
-
         if input_batch.num_draft_tokens == 0:
             # No draft tokens (common case).
-            num_sampled = input_batch.seq_lens.new_ones(input_batch.num_reqs)
+            assert self.sampler is not None
+            sampler_output = self.sampler(logits, input_batch)
         else:
             # Rejection sampling for spec decoding.
-            sampled_tokens, num_sampled = rejection_sample(
-                sampler_output.sampled_token_ids,
-                input_ids,
-                input_batch.cu_num_logits,
-                self.num_speculative_steps,
+            assert self.rejection_sampler is not None
+            sampler_output = self.rejection_sampler(
+                logits,
+                input_batch,
+                # Draft logits are needed for probabilistic rejection sampling.
+                self.req_states.draft_logits[input_batch.idx_mapping]
+                if self.req_states.draft_logits is not None
+                else None,
             )
-            sampler_output.sampled_token_ids = sampled_tokens
 
         # Get the number of sampled and rejected tokens.
         # For chunked prefills, num_sampled and num_rejected are both 0.
         num_sampled, num_rejected = get_num_sampled_and_rejected(
-            num_sampled,
+            sampler_output.num_sampled,
             input_batch.seq_lens,
             input_batch.cu_num_logits,
             input_batch.idx_mapping,
@@ -830,11 +845,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         num_rejected: torch.Tensor,
     ) -> None:
         # Update the number of computed tokens.
+        if self.is_last_pp_rank:
+            assert self.sampler is not None
+            output_bin_counts = self.sampler.penalties_state.output_bin_counts
+        else:
+            output_bin_counts = None
         post_update(
             input_batch.idx_mapping,
             self.req_states.num_computed_tokens.gpu,
             self.req_states.last_sampled_tokens,
-            self.sampler.penalties_state.output_bin_counts,
+            output_bin_counts,
             sampled_tokens,
             num_sampled,
             num_rejected,
@@ -881,6 +901,19 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_reqs, num_toks, uniform_tok_count
         )
         num_tokens_across_dp = None
+
+        skip_compiled = False
+        if self.is_encoder_decoder and scheduler_output.scheduled_encoder_inputs:
+            # Encoder-decoder models such as Whisper should run eager/non-compiled
+            # when encoder inputs are scheduled, because this step updates
+            # cross-attention cache with dynamic encoder outputs.
+            # Override batch_desc to NONE.
+            skip_compiled = True
+            batch_desc = BatchExecutionDescriptor(
+                cg_mode=CUDAGraphMode.NONE,
+                num_tokens=num_toks,
+                num_reqs=num_reqs,
+            )
 
         if self.dp_size > 1:
             batch_desc, num_tokens_across_dp = sync_cudagraph_and_dp_padding(
@@ -959,6 +992,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             "input_ids": input_batch.input_ids,
             "positions": input_batch.positions,
             "inputs_embeds": inputs_embeds,
+            "intermediate_tensors": intermediate_tensors,
             # NOTE: Values returned by `prepare_inputs` will override the default
             # values above.
             **self.model_state.prepare_inputs(input_batch, self.req_states),
@@ -967,7 +1001,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Update for non-first PP ranks.
             model_inputs["input_ids"] = None
             model_inputs["inputs_embeds"] = None
-            model_inputs["intermediate_tensors"] = intermediate_tensors
+            assert intermediate_tensors is not None
 
         # Run model.
         if batch_desc.cg_mode == CUDAGraphMode.FULL:
@@ -996,6 +1030,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 num_tokens_across_dp=num_tokens_across_dp,
                 batch_descriptor=batch_descriptor,
                 slot_mapping=slot_mappings_by_layer,
+                skip_compiled=skip_compiled,
             ):
                 self.kv_connector.pre_forward(scheduler_output)
                 model_output = self.model(**model_inputs)
@@ -1061,6 +1096,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Broadcast to non-last PP ranks (handles spec decode multi-token).
             pp_broadcast(sampler_output.sampled_token_ids, num_sampled, num_rejected)
 
+        assert self.prompt_logprobs_worker is not None
         prompt_logprobs_dict = self.prompt_logprobs_worker.compute_prompt_logprobs(
             self.model.compute_logits,
             hidden_states,
@@ -1100,6 +1136,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             input_batch, sampler_output.sampled_token_ids, num_sampled, num_rejected
         )
         if self.speculator is not None:
+            assert self.sampler is not None
             draft_tokens = self.speculator.propose(
                 input_batch,
                 attn_metadata,
@@ -1112,6 +1149,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.req_states.next_prefill_tokens,
                 self.sampler.sampling_states.temperature.gpu,
                 self.sampler.sampling_states.seeds.gpu,
+                self.req_states.draft_logits,
                 num_tokens_across_dp=num_tokens_across_dp,
             )
             self.req_states.draft_tokens[input_batch.idx_mapping] = draft_tokens

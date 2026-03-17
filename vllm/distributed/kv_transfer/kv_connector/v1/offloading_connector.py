@@ -24,7 +24,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
 )
 from vllm.forward_context import ForwardContext
 from vllm.logger import init_logger
-from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.kv_cache_utils import BlockHash
@@ -126,6 +126,7 @@ class OffloadingConnector(KVConnectorBase_V1):
     ):
         super().__init__(vllm_config, role, kv_cache_config)
 
+        assert kv_cache_config is not None
         spec = OffloadingSpecFactory.create_spec(vllm_config, kv_cache_config)
 
         self.connector_scheduler: OffloadingConnectorScheduler | None = None
@@ -245,9 +246,10 @@ class OffloadingConnectorScheduler:
     """Implementation of Scheduler side methods"""
 
     def __init__(self, spec: OffloadingSpec):
-        self.gpu_block_size = spec.gpu_block_size
-        self.offloaded_block_size = spec.offloaded_block_size
-        self.block_size_factor = self.offloaded_block_size // self.gpu_block_size
+        assert len(spec.gpu_block_size) == 1
+        self.gpu_block_size = spec.gpu_block_size[0]
+        self.offloaded_block_size = self.gpu_block_size * spec.block_size_factor
+        self.block_size_factor = spec.block_size_factor
         self.manager: OffloadingManager = spec.get_manager()
 
         self._requests: dict[ReqId, Request] = {}
@@ -416,7 +418,9 @@ class OffloadingConnectorScheduler:
 
             req = self._requests[req_id]
             new_tokens = scheduler_output.num_scheduled_tokens[req_id]
-            total_tokens = req.num_computed_tokens + new_tokens
+            expected_tokens = req.num_computed_tokens + new_tokens
+            # with async scheduling, some tokens may be missing
+            total_tokens = min(expected_tokens, req.num_tokens)
             num_blocks = total_tokens // self.offloaded_block_size
             start_block_idx = self._next_stored_block_idx.get(req_id, 0)
             num_new_blocks = num_blocks - start_block_idx
@@ -424,8 +428,8 @@ class OffloadingConnectorScheduler:
             if num_new_blocks <= 0:
                 continue
 
-            # NOTE: In async scheduling, placeholders may temporarily make
-            # len(req.block_hashes) < num_blocks * self.block_size_factor.
+            num_gpu_blocks = num_blocks * self.block_size_factor
+            assert len(req.block_hashes) >= num_gpu_blocks
 
             new_block_hashes = self._get_block_hashes(
                 req, start_idx=start_block_idx, end_idx=num_blocks
@@ -529,6 +533,9 @@ class OffloadingConnectorScheduler:
         req_id = request.request_id
         self._requests.pop(req_id, None)
         self._request_block_ids.pop(req_id, None)
+
+        # TODO(orozery): possibly kickoff offload for last block
+        # which may have been deferred due to async scheduling
         self._next_stored_block_idx.pop(req_id, None)
 
         request_being_stored = req_id in self._reqs_being_stored
@@ -594,7 +601,9 @@ class OffloadingConnectorWorker:
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         layer_names = list(kv_caches.keys())
         layers = get_layers_from_vllm_config(
-            self.spec.vllm_config, Attention, layer_names
+            self.spec.vllm_config,
+            AttentionLayerBase,  # type: ignore[type-abstract]
+            layer_names,
         )
         attn_backends = {
             layer_name: layers[layer_name].get_attn_backend()
