@@ -82,22 +82,6 @@ class TrtLlmFp8ExpertsBase:
             or moe_parallel_config.use_naive_all2all_kernels
         ) and not moe_parallel_config.enable_eplb
 
-    @staticmethod
-    def _supports_router_logits_dtype(
-        router_logits_dtype: torch.dtype | None,
-        routing_method: RoutingMethodType,
-    ) -> bool:
-        """
-        The FlashInfer TRTLLM FP8 kernel expects bfloat16 router_logits by default.
-        Only DeepSeekV3 routing supports float32 router_logits (which is converted
-        internally in the kernel).
-        """
-        if router_logits_dtype == torch.float32:
-            # Only DeepSeekV3 routing handles float32 logits
-            # https://github.com/flashinfer-ai/flashinfer/issues/2469
-            return routing_method == RoutingMethodType.DeepSeekV3
-        return True
-
     def supports_chunking(self) -> bool:
         return False
 
@@ -262,6 +246,22 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
             (kMxfp8Static, kMxfp8Dynamic),
         ]
         return (weight_key, activation_key) in SUPPORTED_W_A
+
+    @staticmethod
+    def _supports_router_logits_dtype(
+        router_logits_dtype: torch.dtype | None,
+        routing_method: RoutingMethodType,
+    ) -> bool:
+        """
+        The FlashInfer TRTLLM FP8 kernel expects bfloat16 router_logits by default.
+        Only DeepSeekV3 routing supports float32 router_logits (which is converted
+        internally in the kernel).
+        """
+        if router_logits_dtype == torch.float32:
+            # Only DeepSeekV3 routing handles float32 logits
+            # https://github.com/flashinfer-ai/flashinfer/issues/2469
+            return routing_method == RoutingMethodType.DeepSeekV3
+        return True
 
     @staticmethod
     def _supports_routing_method(
