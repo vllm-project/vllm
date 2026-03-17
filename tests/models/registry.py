@@ -640,7 +640,9 @@ _LATE_INTERACTION_EXAMPLE_MODELS = {
         "OpenSearch-AI/Ops-Colqwen3-4B", trust_remote_code=True
     ),
     "ColQwen3_5": _HfExamplesInfo(
-        "athrael-soju/colqwen3.5-4.5B-v3", trust_remote_code=True
+        "athrael-soju/colqwen3.5-4.5B-v3",
+        trust_remote_code=True,
+        max_model_len=4096,
     ),
     "Qwen3VLNemotronEmbedModel": _HfExamplesInfo(
         "nvidia/nemotron-colembed-vl-4b-v2",
