@@ -16,6 +16,18 @@ is_batch_invariant = vllm_is_batch_invariant()
 float8_info = torch.finfo(current_platform.fp8_dtype())
 
 
+def get_num_stages():
+    if current_platform.is_cuda():
+        cap = torch.cuda.get_device_capability()
+        # B200 (sm_100) cannot pipeline loops containing tl.make_tensor_descriptor
+        # with dynamic base pointers — the pipeliner cannot predicate tensormap_create.
+        if cap >= (10, 0):
+            return 1
+        return 3  # H100 (sm_90) and older work fine with 3 stages
+    else:
+        return 3
+
+
 @triton.jit
 def cdiv_fn(x, y):
     return (x + y - 1) // y
@@ -1093,6 +1105,7 @@ def unified_attention_td(
             num_seqs=num_seqs,
             BLOCK_M=BLOCK_M,
             USE_FP8=output_scale is not None,
+            num_stages=get_num_stages(),
         )
     else:
         num_par_softmax_segments = 16
@@ -1168,6 +1181,7 @@ def unified_attention_td(
             num_seqs=num_seqs,
             BLOCK_M=BLOCK_M,
             NUM_SEGMENTS_PER_SEQ=num_par_softmax_segments,
+            num_stages=get_num_stages(),
         )
         reduce_segments[(q.shape[0], num_query_heads)](
             output_ptr=out,
