@@ -116,15 +116,41 @@ mod tests {
             ..Default::default()
         };
 
-        let classified = outputs.classify();
-        assert!(matches!(
-            classified,
-            ClassifiedEngineCoreOutputs::RequestBatch(RequestBatchOutputs {
-                outputs,
-                finished_requests: Some(_),
-                ..
-            }) if outputs.len() == 1
-        ));
+        expect_test::expect![[r#"
+            RequestBatch(
+                RequestBatchOutputs {
+                    engine_index: 0,
+                    outputs: [
+                        EngineCoreOutput {
+                            request_id: "req-1",
+                            new_token_ids: [
+                                7,
+                            ],
+                            new_logprobs: None,
+                            new_prompt_logprobs_tensors: None,
+                            pooling_output: None,
+                            finish_reason: None,
+                            stop_reason: None,
+                            events: None,
+                            kv_transfer_params: None,
+                            trace_headers: None,
+                            num_cached_tokens: 0,
+                            num_external_computed_tokens: 0,
+                            routed_experts: None,
+                            num_nans_in_logits: 0,
+                        },
+                    ],
+                    scheduler_stats: None,
+                    timestamp: 0.0,
+                    finished_requests: Some(
+                        {
+                            "req-1",
+                        },
+                    ),
+                },
+            )
+        "#]]
+        .assert_debug_eq(&outputs.classify());
     }
 
     #[test]
@@ -138,14 +164,20 @@ mod tests {
             ..Default::default()
         };
 
-        let classified = outputs.classify();
-        assert!(matches!(
-            classified,
-            ClassifiedEngineCoreOutputs::Other(OtherEngineCoreOutputs::Utility {
-                utility_output,
-                ..
-            }) if utility_output.call_id == 42
-        ));
+        expect_test::expect![[r#"
+            Other(
+                Utility {
+                    engine_index: 0,
+                    timestamp: 0.0,
+                    utility_output: UtilityOutput {
+                        call_id: 42,
+                        failure_message: None,
+                        result: None,
+                    },
+                },
+            )
+        "#]]
+        .assert_debug_eq(&outputs.classify());
     }
 
     #[test]
@@ -155,14 +187,18 @@ mod tests {
             ..Default::default()
         };
 
-        let classified = outputs.classify();
-        assert!(matches!(
-            classified,
-            ClassifiedEngineCoreOutputs::Other(OtherEngineCoreOutputs::DpControl {
-                control: DpControlMessage::StartWave(3),
-                ..
-            })
-        ));
+        expect_test::expect![[r#"
+            Other(
+                DpControl {
+                    engine_index: 0,
+                    timestamp: 0.0,
+                    control: StartWave(
+                        3,
+                    ),
+                },
+            )
+        "#]]
+        .assert_debug_eq(&outputs.classify());
     }
 
     #[test]
@@ -181,10 +217,47 @@ mod tests {
             ..Default::default()
         };
 
-        let classified = outputs.clone().classify();
-        assert_eq!(
-            classified,
-            ClassifiedEngineCoreOutputs::Other(OtherEngineCoreOutputs::Raw(outputs))
-        );
+        expect_test::expect![[r#"
+            Other(
+                Raw(
+                    EngineCoreOutputs {
+                        engine_index: 0,
+                        outputs: [
+                            EngineCoreOutput {
+                                request_id: "req-1",
+                                new_token_ids: [
+                                    7,
+                                ],
+                                new_logprobs: None,
+                                new_prompt_logprobs_tensors: None,
+                                pooling_output: None,
+                                finish_reason: None,
+                                stop_reason: None,
+                                events: None,
+                                kv_transfer_params: None,
+                                trace_headers: None,
+                                num_cached_tokens: 0,
+                                num_external_computed_tokens: 0,
+                                routed_experts: None,
+                                num_nans_in_logits: 0,
+                            },
+                        ],
+                        scheduler_stats: None,
+                        timestamp: 0.0,
+                        utility_output: Some(
+                            UtilityOutput {
+                                call_id: 1,
+                                failure_message: None,
+                                result: None,
+                            },
+                        ),
+                        finished_requests: None,
+                        wave_complete: None,
+                        start_wave: None,
+                    },
+                ),
+            )
+        "#]]
+        .assert_debug_eq(&outputs.classify());
     }
 }

@@ -147,23 +147,56 @@ mod tests {
         assert_eq!(prepared.prompt_token_ids(), &[11, 22, 33]);
 
         let request = prepared.engine_request;
-        assert_eq!(request.request_id, "req-1");
-        assert_eq!(request.prompt_token_ids, Some(vec![11, 22, 33]));
-        assert_eq!(request.arrival_time, 42.5);
-        assert_eq!(request.cache_salt.as_deref(), Some("salt"));
-        assert_eq!(request.priority, 3);
-        assert_eq!(request.data_parallel_rank, Some(2));
-        assert_eq!(request.reasoning_ended, Some(true));
-        assert_eq!(
-            request
-                .trace_headers
-                .as_ref()
-                .and_then(|headers| headers.get("x-trace-id")),
-            Some(&"abc".to_string())
-        );
-        assert!(request.sampling_params.is_some());
-        assert!(request.pooling_params.is_none());
-        assert!(request.external_req_id.is_none());
+        expect_test::expect![[r#"
+            EngineCoreRequest {
+                request_id: "req-1",
+                prompt_token_ids: Some(
+                    [
+                        11,
+                        22,
+                        33,
+                    ],
+                ),
+                mm_features: None,
+                sampling_params: Some(
+                    EngineCoreSamplingParams {
+                        temperature: 1.0,
+                        top_p: 1.0,
+                        top_k: 0,
+                        max_tokens: 65536,
+                        min_tokens: 0,
+                        stop_token_ids: [],
+                        eos_token_id: None,
+                        all_stop_token_ids: {},
+                        output_kind: Cumulative,
+                    },
+                ),
+                pooling_params: None,
+                arrival_time: 42.5,
+                lora_request: None,
+                cache_salt: Some(
+                    "salt",
+                ),
+                data_parallel_rank: Some(
+                    2,
+                ),
+                prompt_embeds: None,
+                client_index: 0,
+                current_wave: 0,
+                priority: 3,
+                trace_headers: Some(
+                    {
+                        "x-trace-id": "abc",
+                    },
+                ),
+                resumable: false,
+                external_req_id: None,
+                reasoning_ended: Some(
+                    true,
+                ),
+            }
+        "#]]
+        .assert_debug_eq(&request);
     }
 
     #[test]

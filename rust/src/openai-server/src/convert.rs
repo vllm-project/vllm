@@ -164,33 +164,86 @@ mod tests {
         request.skip_special_tokens = false;
         request.chat_template_kwargs = Some(HashMap::from([("foo".to_string(), json!("bar"))]));
 
-        let prepared =
+        let mut prepared =
             prepare_chat_request(&request, "Qwen/Qwen1.5-0.5B-Chat").expect("request is valid");
 
         assert!(prepared.response_id.starts_with("chatcmpl-"));
-        assert!(!prepared.chat_request.chat_options.add_generation_prompt);
-        assert!(prepared.chat_request.chat_options.continue_final_message);
-        assert!(!prepared.chat_request.sampling_params.skip_special_tokens);
-        assert_eq!(prepared.chat_request.sampling_params.temperature, None);
-        assert_eq!(prepared.chat_request.sampling_params.top_p, None);
-        assert_eq!(prepared.chat_request.sampling_params.max_tokens, None);
-        assert_eq!(
-            prepared.chat_request.chat_options.template_kwargs["foo"],
-            json!("bar")
-        );
+        prepared.chat_request.request_id = "<placeholder>".to_string();
+        expect_test::expect![[r#"
+            ChatRequest {
+                request_id: "<placeholder>",
+                messages: [
+                    ChatMessage {
+                        role: User,
+                        content: Parts(
+                            [
+                                Text {
+                                    text: "hello",
+                                },
+                            ],
+                        ),
+                    },
+                ],
+                sampling_params: UserSamplingParams {
+                    temperature: None,
+                    top_p: None,
+                    top_k: None,
+                    max_tokens: None,
+                    min_tokens: None,
+                    include_stop_str_in_output: false,
+                    stop_token_ids: None,
+                    ignore_eos: false,
+                    skip_special_tokens: false,
+                },
+                chat_options: ChatOptions {
+                    add_generation_prompt: false,
+                    continue_final_message: true,
+                    template_kwargs: {
+                        "foo": String("bar"),
+                    },
+                },
+            }
+        "#]]
+        .assert_debug_eq(&prepared.chat_request);
     }
 
     #[test]
     fn prepare_chat_request_keeps_optional_sampling_fields_unset() {
-        let prepared = prepare_chat_request(&base_request(), "Qwen/Qwen1.5-0.5B-Chat")
+        let mut prepared = prepare_chat_request(&base_request(), "Qwen/Qwen1.5-0.5B-Chat")
             .expect("request is valid");
 
-        assert_eq!(prepared.chat_request.sampling_params.temperature, None);
-        assert_eq!(prepared.chat_request.sampling_params.top_p, None);
-        assert_eq!(prepared.chat_request.sampling_params.top_k, None);
-        assert_eq!(prepared.chat_request.sampling_params.max_tokens, None);
-        assert_eq!(prepared.chat_request.sampling_params.stop_token_ids, None);
-        assert_eq!(prepared.chat_request.sampling_params.min_tokens, None);
+        assert!(prepared.response_id.starts_with("chatcmpl-"));
+        prepared.chat_request.request_id = "<placeholder>".to_string();
+        expect_test::expect![[r#"
+            ChatRequest {
+                request_id: "<placeholder>",
+                messages: [
+                    ChatMessage {
+                        role: User,
+                        content: Text(
+                            "hello",
+                        ),
+                    },
+                ],
+                sampling_params: UserSamplingParams {
+                    temperature: None,
+                    top_p: None,
+                    top_k: None,
+                    max_tokens: None,
+                    min_tokens: None,
+                    include_stop_str_in_output: false,
+                    stop_token_ids: None,
+                    ignore_eos: false,
+                    skip_special_tokens: false,
+                },
+                chat_options: ChatOptions {
+                    add_generation_prompt: true,
+                    continue_final_message: false,
+                    template_kwargs: {},
+                },
+            }
+        "#]]
+        .assert_debug_eq(&prepared.chat_request);
     }
 
     #[test]

@@ -10,6 +10,7 @@ vllm-engine-core-client.workspace = true
 
 [dev-dependencies]
 anyhow.workspace = true
+expect-test.workspace = true
 bytes.workspace = true
 clap.workspace = true
 rmp-serde.workspace = true

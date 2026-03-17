@@ -3613,6 +3613,7 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "enum-as-inner",
+ "expect-test",
  "futures",
  "hex",
  "parking_lot",
@@ -3639,6 +3640,7 @@ dependencies = [
  "anyhow",
  "bytes",
  "clap",
+ "expect-test",
  "futures",
  "rmp-serde",
  "thiserror 2.0.18",
@@ -3658,6 +3660,7 @@ dependencies = [
  "axum",
  "bytes",
  "clap",
+ "expect-test",
  "futures",
  "futures-async-stream",
  "openai-protocol",

@@ -651,27 +651,46 @@ fn python_msgpack_fixtures_match_rust_encoding() {
 
     let decoded_request: EngineCoreRequest = rmp_serde::from_slice(&request_bytes).unwrap();
     let expected_request = sample_request();
-    assert_eq!(decoded_request.request_id, expected_request.request_id);
-    assert_eq!(
-        decoded_request.prompt_token_ids,
-        expected_request.prompt_token_ids
-    );
-    assert_eq!(
-        decoded_request.sampling_params,
-        expected_request.sampling_params
-    );
-    assert_eq!(decoded_request.arrival_time, expected_request.arrival_time);
+    assert_eq!(decoded_request, expected_request);
 
     let decoded_outputs: EngineCoreOutputs = rmp_serde::from_slice(&outputs_bytes).unwrap();
-    assert_eq!(decoded_outputs.outputs.len(), 1);
-    assert_eq!(decoded_outputs.outputs[0].request_id, "req-1");
-    assert_eq!(decoded_outputs.outputs[0].new_token_ids, vec![7, 8]);
-    assert_eq!(
-        decoded_outputs.outputs[0].finish_reason,
-        Some(FinishReason::Length)
-    );
-    assert_eq!(
-        decoded_outputs.finished_requests,
-        Some(["req-1".to_string()].into_iter().collect())
-    );
+    expect_test::expect![[r#"
+        EngineCoreOutputs {
+            engine_index: 0,
+            outputs: [
+                EngineCoreOutput {
+                    request_id: "req-1",
+                    new_token_ids: [
+                        7,
+                        8,
+                    ],
+                    new_logprobs: None,
+                    new_prompt_logprobs_tensors: None,
+                    pooling_output: None,
+                    finish_reason: Some(
+                        Length,
+                    ),
+                    stop_reason: None,
+                    events: None,
+                    kv_transfer_params: None,
+                    trace_headers: None,
+                    num_cached_tokens: 0,
+                    num_external_computed_tokens: 0,
+                    routed_experts: None,
+                    num_nans_in_logits: 0,
+                },
+            ],
+            scheduler_stats: None,
+            timestamp: 0.0,
+            utility_output: None,
+            finished_requests: Some(
+                {
+                    "req-1",
+                },
+            ),
+            wave_complete: None,
+            start_wave: None,
+        }
+    "#]]
+    .assert_debug_eq(&decoded_outputs);
 }

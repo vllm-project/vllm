@@ -147,15 +147,27 @@ mod tests {
             lower_chat_request(sample_request(), vec![1, 2, 3], sample_sampling_hints()).unwrap();
 
         let params = prepared.generate_request.sampling_params;
-        assert_eq!(params.eos_token_id, Some(99));
-        assert_eq!(params.stop_token_ids, vec![77]);
-        assert_eq!(params.all_stop_token_ids, BTreeSet::from([77, 99]));
-        assert_eq!(params.output_kind, RequestOutputKind::Delta);
-        assert_eq!(params.temperature, 1.0);
-        assert_eq!(params.top_p, 1.0);
-        assert_eq!(params.top_k, 0);
-        assert_eq!(params.max_tokens, 65536);
-        assert_eq!(params.min_tokens, 0);
+        expect_test::expect![[r#"
+            EngineCoreSamplingParams {
+                temperature: 1.0,
+                top_p: 1.0,
+                top_k: 0,
+                max_tokens: 65536,
+                min_tokens: 0,
+                stop_token_ids: [
+                    77,
+                ],
+                eos_token_id: Some(
+                    99,
+                ),
+                all_stop_token_ids: {
+                    77,
+                    99,
+                },
+                output_kind: Delta,
+            }
+        "#]]
+        .assert_debug_eq(&params);
     }
 
     #[test]
@@ -166,10 +178,23 @@ mod tests {
         let prepared = lower_chat_request(request, vec![1, 2, 3], sample_sampling_hints()).unwrap();
 
         let params = prepared.generate_request.sampling_params;
-        assert_eq!(params.eos_token_id, None);
-        assert_eq!(params.stop_token_ids, Vec::<u32>::new());
-        assert_eq!(params.all_stop_token_ids, BTreeSet::from([77, 99]));
-        assert_eq!(params.output_kind, RequestOutputKind::Delta);
+        expect_test::expect![[r#"
+            EngineCoreSamplingParams {
+                temperature: 1.0,
+                top_p: 1.0,
+                top_k: 0,
+                max_tokens: 65536,
+                min_tokens: 0,
+                stop_token_ids: [],
+                eos_token_id: None,
+                all_stop_token_ids: {
+                    77,
+                    99,
+                },
+                output_kind: Delta,
+            }
+        "#]]
+        .assert_debug_eq(&params);
     }
 
     #[test]
@@ -192,8 +217,31 @@ mod tests {
         .unwrap();
 
         let params = prepared.generate_request.sampling_params;
-        assert_eq!(params.stop_token_ids, vec![11, 77, 88]);
-        assert_eq!(params.all_stop_token_ids, BTreeSet::from([11, 77, 88, 99]));
+        expect_test::expect![[r#"
+            EngineCoreSamplingParams {
+                temperature: 1.0,
+                top_p: 1.0,
+                top_k: 0,
+                max_tokens: 65536,
+                min_tokens: 0,
+                stop_token_ids: [
+                    11,
+                    77,
+                    88,
+                ],
+                eos_token_id: Some(
+                    99,
+                ),
+                all_stop_token_ids: {
+                    11,
+                    77,
+                    88,
+                    99,
+                },
+                output_kind: Delta,
+            }
+        "#]]
+        .assert_debug_eq(&params);
     }
 
     #[test]
@@ -220,11 +268,20 @@ mod tests {
         .unwrap();
 
         let params = prepared.generate_request.sampling_params;
-        assert_eq!(params.temperature, 0.2);
-        assert_eq!(params.top_p, 0.3);
-        assert_eq!(params.top_k, 4);
-        assert_eq!(params.max_tokens, 32);
-        assert_eq!(params.min_tokens, 2);
+        expect_test::expect![[r#"
+            EngineCoreSamplingParams {
+                temperature: 0.2,
+                top_p: 0.3,
+                top_k: 4,
+                max_tokens: 32,
+                min_tokens: 2,
+                stop_token_ids: [],
+                eos_token_id: None,
+                all_stop_token_ids: {},
+                output_kind: Delta,
+            }
+        "#]]
+        .assert_debug_eq(&params);
     }
 
     #[test]
@@ -244,11 +301,20 @@ mod tests {
         .unwrap();
 
         let params = prepared.generate_request.sampling_params;
-        assert_eq!(params.temperature, 0.8);
-        assert_eq!(params.top_p, 0.9);
-        assert_eq!(params.top_k, 12);
-        assert_eq!(params.max_tokens, 128);
-        assert_eq!(params.min_tokens, 0);
+        expect_test::expect![[r#"
+            EngineCoreSamplingParams {
+                temperature: 0.8,
+                top_p: 0.9,
+                top_k: 12,
+                max_tokens: 128,
+                min_tokens: 0,
+                stop_token_ids: [],
+                eos_token_id: None,
+                all_stop_token_ids: {},
+                output_kind: Delta,
+            }
+        "#]]
+        .assert_debug_eq(&params);
     }
 
     #[tokio::test]
