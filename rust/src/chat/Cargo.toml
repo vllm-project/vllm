@@ -15,6 +15,7 @@ smg-tokenizer.workspace = true
 thiserror.workspace = true
 thiserror-ext.workspace = true
 tokenizers.workspace = true
+tracing.workspace = true
 vllm-engine-core-client.workspace = true
 vllm-llm.workspace = true
 

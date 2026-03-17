@@ -1,9 +1,10 @@
+use std::slice;
 use std::sync::Arc;
 
 use parking_lot::Mutex;
 use thiserror_ext::AsReport as _;
 use tokio::sync::{Mutex as AsyncMutex, mpsc};
-use tracing::{debug, warn};
+use tracing::{debug, info, trace, warn};
 use zeromq::RouterSendHalf;
 
 use crate::client::state::{ClientClosedState, OutputReceiver, RequestRegistry};
@@ -98,6 +99,16 @@ impl ClientInner {
         Ok(())
     }
 
+    /// Handle an abort request by sending the abort message to the engine.
+    pub async fn do_abort_requests(
+        &self,
+        engine_identity: &[u8],
+        request_ids: &[String],
+    ) -> Result<()> {
+        self.send_to_engine(engine_identity, EngineCoreRequestType::Abort, &request_ids)
+            .await
+    }
+
     /// Shut down by closing all active request streams and then closing the input socket to signal
     /// the engine that no more messages will be sent.
     pub async fn shutdown(&self) {
@@ -127,13 +138,10 @@ pub(crate) async fn run_abort_loop(
             debug!(request_id, "skip auto-abort for inactive request");
             continue;
         }
+        info!(request_id, "auto-aborting request due to dropped stream");
 
         if let Err(error) = inner
-            .send_to_engine(
-                &engine_identity,
-                EngineCoreRequestType::Abort,
-                &vec![request_id.clone()],
-            )
+            .do_abort_requests(&engine_identity, slice::from_ref(&request_id))
             .await
         {
             warn!(
@@ -181,17 +189,17 @@ pub(crate) async fn run_output_dispatcher_loop(
                 // safety net to capture any requests marked as finished by the engine.
                 if let Some(finished_requests) = batch.finished_requests.as_ref() {
                     for request_id in finished_requests {
-                        debug!(request_id, "request completed via finished_requests");
+                        trace!(request_id, "request completed via finished_requests");
                     }
                     drop(inner.finish_requests(finished_requests));
                 }
 
                 if batch.scheduler_stats.is_some() {
-                    debug!("ignoring scheduler stats in request batch");
+                    trace!("ignoring scheduler stats in request batch");
                 }
             }
             ClassifiedEngineCoreOutputs::Other(other) => {
-                debug!(outputs = ?other, "ignoring non-request engine-core output");
+                warn!(outputs = ?other, "ignoring non-request engine-core output");
                 // TODO: handle other outputs, like utility call
             }
         }

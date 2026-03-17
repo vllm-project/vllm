@@ -3277,6 +3277,7 @@ dependencies = [
  "tower",
  "tower-layer",
  "tower-service",
+ "tracing",
 ]
 
 [[package]]
@@ -3581,6 +3582,7 @@ dependencies = [
  "thiserror-ext",
  "tokenizers",
  "tokio",
+ "tracing",
  "tracing-subscriber",
  "uuid",
  "vllm-engine-core-client",
@@ -3645,6 +3647,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tower",
+ "tower-http",
  "tracing",
  "tracing-subscriber",
  "uuid",

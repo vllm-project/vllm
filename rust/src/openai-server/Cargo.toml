@@ -15,6 +15,7 @@ futures.workspace = true
 openai-protocol.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
+tower-http.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true

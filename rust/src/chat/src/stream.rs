@@ -3,6 +3,7 @@ use std::task::{Context, Poll};
 
 use futures::Stream;
 use futures_async_stream::try_stream;
+use tracing::info;
 use vllm_engine_core_client::protocol::FinishReason;
 use vllm_llm::GenerateOutputStream;
 
@@ -126,6 +127,15 @@ async fn chat_event_stream(
         }
 
         if output.finished() {
+            info!(
+                request_id = %request.request_id,
+                finish_reason = ?output.raw.finish_reason,
+                stop_reason = ?output.raw.stop_reason,
+                text_length = text.chars().count(),
+                token_count = token_ids.len(),
+                "request finished with terminal output"
+            );
+
             yield ChatEvent::Done {
                 text,
                 token_ids,

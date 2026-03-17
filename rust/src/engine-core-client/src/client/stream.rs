@@ -75,7 +75,7 @@ impl Stream for EngineCoreOutputStream {
                     Err(error) => {
                         // If we get an error from the output stream, mark the stream as terminated
                         // with an error.
-                        debug!(self.request_id, error = %error.as_report(), "request encountered an error");
+                        warn!(self.request_id, error = %error.as_report(), "request encountered an error");
                         self.state = State::ClosedWithError;
                     }
                 }
@@ -85,7 +85,7 @@ impl Stream for EngineCoreOutputStream {
                 // If we get a `None` without seeing a finished output, this is an unexpected close
                 // from the engine side. Mark the stream as terminated with an unexpected close
                 // state and send an error down the stream to notify the caller.
-                debug!(self.request_id, "request stream closed unexpectedly");
+                warn!(self.request_id, "request stream closed unexpectedly");
                 self.state = State::UnexpectedClose;
 
                 Poll::Ready(Some(Err(Error::RequestStreamClosed {

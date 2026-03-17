@@ -31,6 +31,7 @@ tempfile = "3.23.0"
 thiserror = "2.0.16"
 thiserror-ext = "0.3.0"
 tower = { version = "0.5.3", features = ["util"] }
+tower-http = { version = "0.6.8", features = ["trace"] }
 tokio = { version = "1.47.1", features = [
     "macros",
     "net",

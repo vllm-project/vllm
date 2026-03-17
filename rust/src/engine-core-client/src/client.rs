@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use tokio::sync::mpsc;
 use tokio_util::task::AbortOnDropHandle;
-use tracing::debug;
+use tracing::{info, trace};
 
 use crate::client::imp::{ClientInner, run_abort_loop, run_output_dispatcher_loop};
 use crate::error::Result;
@@ -125,7 +125,7 @@ impl EngineCoreClient {
     pub async fn call(&self, mut req: EngineCoreRequest) -> Result<EngineCoreOutputStream> {
         req.client_index = self.config.client_index;
         req.validate()?;
-        debug!(
+        trace!(
             request_id = %req.request_id,
             client_index = req.client_index,
             request = ?req,
@@ -154,18 +154,14 @@ impl EngineCoreClient {
     pub async fn abort(&self, ids: &[String]) -> Result<()> {
         let abortable = self.inner.abortable_request_ids(ids)?;
 
-        debug!(request_ids = ?ids, abortable_request_ids = ?abortable, "sending abort request ids");
+        trace!(request_ids = ?ids, abortable_request_ids = ?abortable, "sending abort request ids");
 
         if abortable.is_empty() {
             return Ok(());
         }
 
         self.inner
-            .send_to_engine(
-                &self.engine_identity,
-                EngineCoreRequestType::Abort,
-                &abortable,
-            )
+            .do_abort_requests(&self.engine_identity, &abortable)
             .await
     }
 
@@ -180,7 +176,7 @@ impl EngineCoreClient {
             ..
         } = self;
 
-        debug!("shutting down engine-core client");
+        info!("shutting down engine-core client");
         inner.shutdown().await;
         drop(abort_tx);
 
@@ -191,7 +187,7 @@ impl EngineCoreClient {
         output_task.abort();
         let _ = tokio::join!(abort_task, dispatcher_task, output_task);
 
-        debug!("engine-core client shut down");
+        info!("engine-core client shut down");
         Ok(())
     }
 }
