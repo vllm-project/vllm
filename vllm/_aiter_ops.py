@@ -672,7 +672,23 @@ def _rocm_aiter_fused_allreduce_rmsnorm_impl(
             reg_buffer = aiter_ar.input_buffer
 
         total_bytes = input_.numel() * input_.element_size()
-        use_1stage = total_bytes <= 128 * 1024
+        hidden_dim = input_.shape[-1]
+        token_num = input_.shape[0]
+        hidden_ok = hidden_dim in (512, 1024, 2048, 4096)
+        token_ok = token_num <= 80
+        world_size = aiter_ar.world_size
+        full_nvlink = aiter_ar.fully_connected
+
+        if world_size == 2:
+            size_ok = True
+        elif full_nvlink and world_size <= 4:
+            size_ok = total_bytes < 160 * 1024
+        elif full_nvlink and world_size <= 8:
+            size_ok = total_bytes < 80 * 1024
+        else:
+            size_ok = False
+
+        use_1stage = hidden_ok and token_ok and size_ok
         fused_allreduce_rmsnorm(
             aiter_ar._ptr,
             input_,
@@ -1072,8 +1088,6 @@ class rocm_aiter_ops:
     # TODO: Consolidate under _LINEAR_ENABLED
     _TRITON_UNQUANT_GEMM = envs.VLLM_ROCM_USE_AITER_TRITON_GEMM
 
-    _AR_MAX_SIZE = 8192 * 1024 * 8 * 2
-
     @classmethod
     def refresh_env_variables(cls):
         """
@@ -1161,16 +1175,6 @@ class rocm_aiter_ops:
             "per_128x128": QuantType.per_128x128,
         }
         return mapping.get(name)
-
-    @classmethod
-    def custom_allreduce_max_size(cls, world_size: int) -> int | None:
-        """Returns max allreduce size in bytes for aiter. None if unsupported."""
-        if not cls.is_enabled():
-            return None
-        AITER_SUPPORTED_WORLD_SIZES = [2, 4, 6, 8]
-        if world_size not in AITER_SUPPORTED_WORLD_SIZES:
-            return None
-        return cls._AR_MAX_SIZE
 
     @classmethod
     @if_aiter_supported

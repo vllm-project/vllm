@@ -15,6 +15,8 @@ logger = init_logger(__name__)
 # Global instance — one per worker process, initialized once
 _aiter_allreduce: Optional["AiterAllreduce"] = None
 
+_AR_MAX_SIZE = 8192 * 1024 * 8 * 2
+
 
 def is_weak_contiguous(inp: torch.Tensor):
     return inp.is_contiguous() or (
@@ -28,7 +30,7 @@ def get_aiter_allreduce() -> Optional["AiterAllreduce"]:
 
 
 def initialize_aiter_allreduce(
-    world_size: int, rank: int, max_size: int, group: ProcessGroup, device: torch.device
+    world_size: int, rank: int, group: ProcessGroup, device: torch.device
 ) -> None:
     """Initialize the aiter fused AR+RMSNorm instance if not already done.
 
@@ -39,12 +41,11 @@ def initialize_aiter_allreduce(
     if _aiter_allreduce is not None:
         return
     try:
-        _aiter_allreduce = AiterAllreduce(world_size, rank, max_size, group, device)
+        _aiter_allreduce = AiterAllreduce(world_size, rank, group, device)
         logger.debug(
-            "Initialized aiter allreduce: world_size=%d, rank=%d, max_size=%d",
+            "Initialized aiter allreduce: world_size=%d, rank=%d",
             world_size,
             rank,
-            max_size,
         )
     except Exception as e:
         logger.warning("Failed to initialize aiter allreduce: %s", e)
@@ -75,7 +76,6 @@ class AiterAllreduce:
         self,
         world_size: int,
         rank: int,
-        max_size: int,
         group: ProcessGroup,
         device: torch.device,
     ) -> None:
@@ -84,7 +84,8 @@ class AiterAllreduce:
         self.group = group
         self.rank = rank
         self.world_size = world_size
-        self.max_size = max_size
+
+        self.max_size = _AR_MAX_SIZE
         self.group = group
         self._IS_CAPTURING = False
         self._ptr = 0
@@ -105,14 +106,14 @@ class AiterAllreduce:
         # (256 bytes) and a temporary buffer for storing intermediate
         # allreduce results.
         # if current_platform.is_rocm():
-        self.meta = aiter_ops.allocate_meta_buffer(aiter_ops.meta_size() + max_size)
+        self.meta_size = aiter_ops.meta_size()
+        self.meta = aiter_ops.allocate_meta_buffer(
+            aiter_ops.meta_size() + self.max_size
+        )
         # This is a pre-registered IPC buffer. In eager mode, input tensors
         # are first copied into this buffer before allreduce is performed
-        self.input_buffer = torch.empty(max_size, dtype=torch.uint8, device=self.device)
-        # This is a pre-registered IPC buffer for output. In eager mode, kernel
-        # writes results to this buffer, then it's copied to the actual output
-        self.output_buffer = torch.empty(
-            max_size, dtype=torch.uint8, device=self.device
+        self.input_buffer = torch.empty(
+            self.max_size, dtype=torch.uint8, device=self.device
         )
         # This is a buffer for storing the tuples of pointers pointing to
         # IPC buffers from all ranks. Each registered tuple has size of
@@ -122,7 +123,6 @@ class AiterAllreduce:
         self.rank_data = torch.empty(
             8 * 1024 * 1024, dtype=torch.uint8, device=self.device
         )
-        self.max_size = max_size
         self.world_size = world_size
         handle = aiter_ops.get_meta_buffer_ipc_handle(self.meta)
         shard_data = (
@@ -224,6 +224,9 @@ class AiterAllreduce:
             self._IS_CAPTURING = False
             if self._ptr:
                 self.register_graph_buffers()
+
+    def __del__(self):
+        self.close()
 
     def close(self) -> None:
         if self._ptr:

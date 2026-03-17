@@ -15,6 +15,7 @@ from vllm.config import VllmConfig
 from vllm.config.utils import Range
 from vllm.distributed import get_tp_group, tensor_model_parallel_all_reduce
 from vllm.distributed.device_communicators.aiter_all_reduce import (
+    _AR_MAX_SIZE,
     destroy_aiter_allreduce,
     initialize_aiter_allreduce,
 )
@@ -983,19 +984,16 @@ class RocmAiterAllReduceFusionPass(VllmPatternMatcherPass):
 
         assert isinstance(ca_comm, CustomAllreduce)
         hidden_dim = config.model_config.get_hidden_size()
-        max_size = rocm_aiter_ops.custom_allreduce_max_size(self.tp_size)
-        if max_size is None:
-            logger.warning_once("max size is required.")
-            return
 
         element_size = torch.tensor([], dtype=self.model_dtype).element_size()
-        self.max_token_num = (max_size / 2) // (hidden_dim * element_size)
-        print(" max token num")
-        print(self.max_token_num)
+        self.max_token_num = (_AR_MAX_SIZE / 2) // (hidden_dim * element_size)
+        self.max_token_num = min(
+            self.max_token_num, config.scheduler_config.max_num_batched_tokens
+        )
 
         rank = get_tensor_model_parallel_rank()
         group = get_tp_group().cpu_group
-        initialize_aiter_allreduce(self.tp_size, rank, max_size, group, self.device)
+        initialize_aiter_allreduce(self.tp_size, rank, group, self.device)
         self.patterns: PatternMatcherPass = PatternMatcherPass(
             pass_name="rocm_aiter_allreduce_rmsnorm_fusion_pass"
         )
