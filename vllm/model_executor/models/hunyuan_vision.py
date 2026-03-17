@@ -85,6 +85,7 @@ from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (
     MultiModalEmbeddings,
+    SupportsEagle,
     SupportsEagle3,
     SupportsLoRA,
     SupportsMultiModal,
@@ -800,6 +801,7 @@ class HunYuanVLForConditionalGeneration(
     SupportsPP,
     SupportsQuant,
     SupportsXDRoPE,
+    SupportsEagle,
     SupportsEagle3,
 ):
     # To ensure correct weight loading and mapping.
@@ -986,13 +988,6 @@ class HunYuanVLForConditionalGeneration(
                 image_embeddings = self._process_image_input(multimodal_input)
                 multimodal_embeddings += tuple(image_embeddings)
         return multimodal_embeddings
-
-    def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
-        self.language_model.model.aux_hidden_state_layers = layers
-
-    def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:
-        num_layers = len(self.language_model.model.layers)
-        return (2, num_layers // 2, num_layers - 3)
 
     def forward(
         self,

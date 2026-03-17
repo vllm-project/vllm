@@ -42,21 +42,12 @@ async def test_chat_render_basic(client):
     assert response.status_code == 200
     data = response.json()
 
-    assert isinstance(data, list)
-    assert len(data) == 2
-
-    conversation, engine_inputs = data
-
-    assert isinstance(conversation, list)
-    assert conversation[0]["role"] == "user"
-
-    assert isinstance(engine_inputs, list)
-    assert len(engine_inputs) > 0
-    first_prompt = engine_inputs[0]
-    assert "prompt_token_ids" in first_prompt
-    assert "prompt" in first_prompt
-    assert isinstance(first_prompt["prompt_token_ids"], list)
-    assert all(isinstance(t, int) for t in first_prompt["prompt_token_ids"])
+    # Response should be a GenerateRequest dict
+    assert isinstance(data, dict)
+    assert "token_ids" in data
+    assert isinstance(data["token_ids"], list)
+    assert len(data["token_ids"]) > 0
+    assert all(isinstance(t, int) for t in data["token_ids"])
 
 
 @pytest.mark.asyncio
@@ -74,28 +65,12 @@ async def test_chat_render_multi_turn(client):
     )
 
     assert response.status_code == 200
-    conversation, engine_inputs = response.json()
+    data = response.json()
 
-    assert len(conversation) == 3
-    assert conversation[0]["role"] == "user"
-    assert conversation[1]["role"] == "assistant"
-    assert conversation[2]["role"] == "user"
-    assert len(engine_inputs) > 0
-    assert len(engine_inputs[0]["prompt_token_ids"]) > 0
-
-
-@pytest.mark.asyncio
-async def test_chat_render_invalid_model(client):
-    response = await client.post(
-        "/v1/chat/completions/render",
-        json={
-            "model": "nonexistent-model",
-            "messages": [{"role": "user", "content": "Hello"}],
-        },
-    )
-
-    assert response.status_code == 404
-    assert "error" in response.json()
+    assert isinstance(data, dict)
+    assert "token_ids" in data
+    assert isinstance(data["token_ids"], list)
+    assert len(data["token_ids"]) > 0
 
 
 # -- Completion Render --
@@ -118,11 +93,13 @@ async def test_completion_render_basic(client):
     assert len(data) > 0
 
     first_prompt = data[0]
-    assert "prompt_token_ids" in first_prompt
-    assert "prompt" in first_prompt
-    assert isinstance(first_prompt["prompt_token_ids"], list)
-    assert len(first_prompt["prompt_token_ids"]) > 0
-    assert "Once upon a time" in first_prompt["prompt"]
+    assert "token_ids" in first_prompt
+    assert "sampling_params" in first_prompt
+    assert "model" in first_prompt
+    assert "request_id" in first_prompt
+    assert isinstance(first_prompt["token_ids"], list)
+    assert len(first_prompt["token_ids"]) > 0
+    assert first_prompt["request_id"].startswith("cmpl-")
 
 
 @pytest.mark.asyncio
@@ -142,9 +119,12 @@ async def test_completion_render_multiple_prompts(client):
     assert len(data) == 2
 
     for prompt in data:
-        assert "prompt_token_ids" in prompt
-        assert "prompt" in prompt
-        assert len(prompt["prompt_token_ids"]) > 0
+        assert "token_ids" in prompt
+        assert "sampling_params" in prompt
+        assert "model" in prompt
+        assert "request_id" in prompt
+        assert len(prompt["token_ids"]) > 0
+        assert prompt["request_id"].startswith("cmpl-")
 
 
 @pytest.mark.asyncio

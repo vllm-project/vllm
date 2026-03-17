@@ -29,11 +29,13 @@ from vllm.entrypoints.chat_utils import load_chat_template
 from vllm.entrypoints.launcher import serve_http
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.cli_args import make_arg_parser, validate_parsed_serve_args
+from vllm.entrypoints.openai.engine.protocol import GenerationError
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.openai.server_utils import (
     engine_error_handler,
     exception_handler,
+    generation_error_handler,
     get_uvicorn_log_config,
     http_exception_handler,
     lifespan,
@@ -263,6 +265,7 @@ def build_app(
     app.exception_handler(RequestValidationError)(validation_exception_handler)
     app.exception_handler(EngineGenerateError)(engine_error_handler)
     app.exception_handler(EngineDeadError)(engine_error_handler)
+    app.exception_handler(GenerationError)(generation_error_handler)
     app.exception_handler(Exception)(exception_handler)
 
     # Ensure --api-key option from CLI takes precedence over VLLM_API_KEY
@@ -368,6 +371,7 @@ async def init_app_state(
         request_logger=request_logger,
         chat_template=resolved_chat_template,
         chat_template_content_format=args.chat_template_content_format,
+        default_chat_template_kwargs=args.default_chat_template_kwargs,
         trust_request_chat_template=args.trust_request_chat_template,
     )
 
@@ -456,6 +460,9 @@ async def init_render_app_state(
     )
 
     state.openai_serving_models = model_registry
+
+    # Expose tokenization via the render handler (no engine required).
+    state.openai_serving_tokenization = state.openai_serving_render
 
     state.vllm_config = vllm_config
     # Disable stats logging — there is no engine to poll.

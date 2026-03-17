@@ -38,7 +38,6 @@ from vllm.compilation.decorators import (
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import get_tensor_model_parallel_world_size
-from vllm.forward_context import set_forward_context
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.fused_moe import FusedMoE
@@ -798,20 +797,16 @@ class Llama4ForConditionalGeneration(
         self.num_moe_layers = len(self.moe_layers)
 
     def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
-        """Set which layers should output auxiliary hidden states for EAGLE3."""
         # Delegate to underlying language model (Llama4ForCausalLM)
         assert hasattr(self.language_model, "set_aux_hidden_state_layers")
         self.language_model.set_aux_hidden_state_layers(layers)
 
-    def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:
-        """Get the layer indices for auxiliary hidden state outputs.
-
-        Note: The GPU model runner will override this with layers from
-        the speculative config if available, providing dynamic configuration.
-        """
+    def get_eagle3_default_aux_hidden_state_layers(self) -> tuple[int, ...]:
         # Delegate to underlying language model (Llama4ForCausalLM)
-        assert hasattr(self.language_model, "get_eagle3_aux_hidden_state_layers")
-        return self.language_model.get_eagle3_aux_hidden_state_layers()
+        assert hasattr(
+            self.language_model, "get_eagle3_default_aux_hidden_state_layers"
+        )
+        return self.language_model.get_eagle3_default_aux_hidden_state_layers()
 
     def set_eplb_state(
         self,
@@ -876,10 +871,7 @@ class Llama4ForConditionalGeneration(
         if image_input is None:
             return []
 
-        with (
-            set_forward_context(None, self.vllm_config),
-        ):
-            return self._process_image_input(image_input)
+        return self._process_image_input(image_input)
 
     def forward(
         self,
