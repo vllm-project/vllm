@@ -10,6 +10,7 @@ from transformers import RobertaConfig
 
 from vllm.config import ModelConfig, PoolerConfig, VllmConfig
 from vllm.model_executor.layers.pooler import (
+    BgeM3Pooler,
     BOSEOSFilter,
     DispatchPooler,
     Pooler,
@@ -216,24 +217,29 @@ class BgeM3EmbeddingModel(RobertaEmbeddingModel):
         self.colbert_linear = nn.Linear(
             self.hidden_size, self.hidden_size, dtype=self.head_dtype
         )
+        embed_pooler = pooler_for_embed(pooler_config)
+        token_classify_pooler = BOSEOSFilter(
+            pooler_for_token_classify(
+                pooler_config,
+                pooling=AllPool(),
+                classifier=self.sparse_linear,
+                act_fn=torch.relu,
+            ),
+            self.bos_token_id,
+            self.eos_token_id,
+        )
 
         return DispatchPooler(
             {
-                "embed": pooler_for_embed(pooler_config),
+                "embed": embed_pooler,
                 "token_embed": BOSEOSFilter(
                     pooler_for_token_embed(pooler_config, self.colbert_linear),
                     self.bos_token_id,
                     # for some reason m3 only filters the bos for colbert vectors
                 ),
-                "token_classify": BOSEOSFilter(
-                    pooler_for_token_classify(
-                        pooler_config,
-                        pooling=AllPool(),
-                        classifier=self.sparse_linear,
-                        act_fn=torch.relu,
-                    ),
-                    self.bos_token_id,
-                    self.eos_token_id,
+                "token_classify": token_classify_pooler,
+                "embed&token_classify": BgeM3Pooler(
+                    token_classify_pooler, embed_pooler
                 ),
             }
         )
