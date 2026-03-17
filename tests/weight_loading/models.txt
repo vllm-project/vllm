@@ -19,7 +19,6 @@ compressed-tensors, nm-testing/tinyllama-oneshot-w8a16-per-channel, main
 compressed-tensors, nm-testing/Meta-Llama-3-8B-FP8-compressed-tensors-test, main
 compressed-tensors, nm-testing/Phi-3-mini-128k-instruct-FP8, main
 compressed-tensors, neuralmagic/Phi-3-medium-128k-instruct-quantized.w4a16, main
-compressed-tensors, nm-testing/TinyLlama-1.1B-Chat-v1.0-actorder-group, main
 #compressed-tensors, mgoin/DeepSeek-Coder-V2-Lite-Instruct-FP8, main
 compressed-tensors, nm-testing/SparseLlama-3.1-8B-gsm8k-pruned.2of4-FP8-Dynamic-testing, main, 90
 compressed-tensors, nm-testing/SparseLlama-3.1-8B-gsm8k-pruned.2of4-W8A8-testing, main, 90

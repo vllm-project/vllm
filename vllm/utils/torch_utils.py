@@ -17,6 +17,7 @@ from packaging.version import Version
 from torch.library import Library, infer_schema
 
 import vllm.envs as envs
+from vllm.logger import init_logger
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
@@ -25,9 +26,7 @@ else:
     ModelConfig = object
     IntermediateTensors = object
 
-import logging
-
-logger = logging.getLogger(__name__)
+logger = init_logger(__name__)
 
 
 STR_DTYPE_TO_TORCH_DTYPE = {
@@ -104,12 +103,36 @@ def set_default_torch_dtype(dtype: torch.dtype):
 
 
 @contextlib.contextmanager
-def set_default_torch_num_threads(num_threads: int):
-    """Sets the default number of threads for PyTorch to the given value."""
+def set_default_torch_num_threads(num_threads: int | None = None):
+    """
+    Sets the default number of threads for PyTorch to the given value.
+
+    `None` means using the value of the environment variable `OMP_NUM_THREADS`
+    (or `1` if that is not available).
+    """
+    if num_threads is None:
+        num_threads = 1
+
+        try:
+            num_threads = int(os.environ["OMP_NUM_THREADS"])
+        except KeyError:
+            logger.debug_once(
+                "OMP_NUM_THREADS is not set; defaulting Torch threads to %d.",
+                num_threads,
+            )
+        except ValueError:
+            logger.warning_once(
+                "OMP_NUM_THREADS is invalid; defaulting Torch threads to %d.",
+                num_threads,
+            )
+
     old_num_threads = torch.get_num_threads()
     torch.set_num_threads(num_threads)
-    yield
-    torch.set_num_threads(old_num_threads)
+
+    try:
+        yield
+    finally:
+        torch.set_num_threads(old_num_threads)
 
 
 @contextlib.contextmanager
@@ -544,8 +567,8 @@ def current_stream() -> torch.cuda.Stream:
     return _current_stream_tls.value
 
 
-# Global auxilary stream for running operations in background streams.
-# We have single global auxilary stream to avoid an explosion of streams
+# Global auxiliary stream for running operations in background streams.
+# We have single global auxiliary stream to avoid an explosion of streams
 # for every layer (and make profiling look sane).
 #
 # aux_stream() is currently used for:
@@ -601,7 +624,7 @@ def cuda_device_count_stateless() -> int:
     """Get number of CUDA devices, caching based on the value of
     CUDA_VISIBLE_DEVICES at the time of call.
 
-    This should be used instead of torch.cuda.device_count()
+    This should be used instead of torch.accelerator.device_count()
     unless CUDA_VISIBLE_DEVICES has already been set to the desired
     value."""
 
@@ -651,12 +674,22 @@ def weak_ref_tensors(
     raise ValueError("Invalid type for tensors")
 
 
-def get_cuda_view_from_cpu_tensor(cpu_tensor: torch.Tensor) -> torch.Tensor:
+def get_accelerator_view_from_cpu_tensor(cpu_tensor: torch.Tensor) -> torch.Tensor:
     """
-    Get a CUDA view of a CPU tensor using Unified Virtual Addressing (UVA).
+    Get an accelerator view of a CPU tensor using Unified Virtual Addressing (UVA).
     """
-    assert cpu_tensor.is_pinned(), "CPU tensor must be pinned"
-    return torch.ops._C.get_cuda_view_from_cpu_tensor(cpu_tensor)
+    from vllm.platforms import current_platform
+
+    if current_platform.is_xpu():
+        assert cpu_tensor.is_pinned(), "CPU tensor must be pinned"
+        return torch.ops._C.get_xpu_view_from_cpu_tensor(cpu_tensor)
+    elif current_platform.is_cuda() or current_platform.is_rocm():
+        return torch.ops._C.get_cuda_view_from_cpu_tensor(cpu_tensor)
+    else:
+        raise ValueError(
+            f"`get_accelerator_view_from_cpu_tensor` is currently "
+            f"not supported in: {current_platform.device_name}"
+        )
 
 
 # Helper function used in testing.
@@ -707,9 +740,49 @@ def is_torch_equal(target: str) -> bool:
         return Version(importlib.metadata.version("torch")) == Version(target)
 
 
+HAS_OPAQUE_TYPE = is_torch_equal_or_newer("2.11.0.dev")
+
+if HAS_OPAQUE_TYPE:
+    from torch._opaque_base import OpaqueBase
+else:
+    OpaqueBase = object  # type: ignore[misc, assignment]
+
+
+class ModuleName(OpaqueBase):  # type: ignore[misc]
+    """Wraps a module name string for use as a torch opaque type.
+
+    When torch >= 2.11, this is registered as a hoisted value-type opaque
+    object so that torch.compile lifts it as a graph input instead of baking
+    it as a constant.  This avoids per-layer recompilation for MOE ops.
+    """
+
+    def __init__(self, value: str):
+        self.value = value
+
+    def __eq__(self, other):
+        return isinstance(other, ModuleName) and self.value == other.value
+
+    def __hash__(self):
+        return hash(self.value)
+
+    def __fx_repr__(self):
+        return (f"ModuleName({self.value!r})", {ModuleName})
+
+
+if HAS_OPAQUE_TYPE:
+    from torch._library.opaque_object import register_opaque_type
+
+    register_opaque_type(ModuleName, typ="value", hoist=True)
+
+
 # Supports xccl with PyTorch versions >= 2.8.0.dev for XPU platform
 def supports_xccl() -> bool:
     return torch.distributed.is_xccl_available()
+
+
+# Supports XPU Graph with PyTorch versions >= 2.11.0.dev for XPU platform
+def supports_xpu_graph() -> bool:
+    return is_torch_equal_or_newer("2.11.0.dev")
 
 
 # create a library to hold the custom op

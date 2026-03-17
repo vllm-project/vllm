@@ -2,8 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, NamedTuple, TypeAlias
+from typing import TYPE_CHECKING, NamedTuple, TypeAlias, TypeVar
 
 import numpy as np
 import torch
@@ -13,9 +14,13 @@ from vllm.v1.core.sched.output import SchedulerOutput
 
 if TYPE_CHECKING:
     from vllm.distributed.kv_events import KVConnectorKVEvents
+    from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+        KVConnectorWorkerMetadata,
+    )
     from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 else:
     KVConnectorStats = object
+    KVConnectorWorkerMetadata = object
     KVConnectorKVEvents = object
 
 
@@ -51,13 +56,17 @@ class LogprobsTensors(NamedTuple):
     logprobs: torch.Tensor
     # [num_reqs x num_generated_tokens]
     selected_token_ranks: torch.Tensor
+    # [num_reqs]
+    cu_num_generated_tokens: list[int] | None = None
 
     def tolists(self, cu_num_generated_tokens: list[int] | None = None):
         return LogprobsLists(
             self.logprob_token_ids.cpu().numpy(),
             self.logprobs.cpu().numpy(),
             self.selected_token_ranks.cpu().numpy(),
-            cu_num_generated_tokens,
+            cu_num_generated_tokens
+            if cu_num_generated_tokens is not None
+            else self.cu_num_generated_tokens,
         )
 
     def to_cpu_nonblocking(self) -> "LogprobsTensors":
@@ -67,10 +76,14 @@ class LogprobsTensors(NamedTuple):
             self.logprob_token_ids.to("cpu", non_blocking=True),
             self.logprobs.to("cpu", non_blocking=True),
             self.selected_token_ranks.to("cpu", non_blocking=True),
+            self.cu_num_generated_tokens,
         )
 
     def filter(self, mask: torch.Tensor) -> "LogprobsTensors":
         """Filter the logprobs tensors with the given bool mask."""
+        assert self.cu_num_generated_tokens is None, (
+            "filter can't be used with cu_num_generated_tokens"
+        )
         return LogprobsTensors(
             self.logprob_token_ids[mask],
             self.logprobs[mask],
@@ -112,6 +125,20 @@ class SamplerOutput:
     logprobs_tensors: LogprobsTensors | None
 
 
+T = TypeVar("T")
+
+
+def _combine_non_none(f: Callable[[T, T], T], items: list[T | None]) -> T | None:
+    non_none = [item for item in items if item is not None]
+    if len(non_none) == 0:
+        return None
+
+    combined = non_none[0]
+    for item in non_none[1:]:
+        combined = f(combined, item)
+    return combined
+
+
 @dataclass
 class KVConnectorOutput:
     # [req_ids]
@@ -119,6 +146,7 @@ class KVConnectorOutput:
     finished_recving: set[str] | None = None
     kv_connector_stats: KVConnectorStats | None = None
     kv_cache_events: KVConnectorKVEvents | None = None
+    kv_connector_worker_meta: KVConnectorWorkerMetadata | None = None
     # IDs of externally computed KV blocks that failed to load.
     # Requests referencing these blocks should be rescheduled to recompute them
     invalid_block_ids: set[int] = field(default_factory=set)
@@ -136,6 +164,44 @@ class KVConnectorOutput:
             and not self.kv_connector_stats
             and not self.kv_cache_events
             and not self.invalid_block_ids
+            and not self.kv_connector_worker_meta
+        )
+
+    @classmethod
+    def merge(cls, *outputs: "KVConnectorOutput"):
+        assert len(outputs) > 0, "Cannot merge empty outputs"
+        finished_sending = _combine_non_none(
+            set.union, [output.finished_sending for output in outputs]
+        )
+        finished_recving = _combine_non_none(
+            set.union, [output.finished_recving for output in outputs]
+        )
+        kv_connector_stats = _combine_non_none(
+            lambda x, y: x.aggregate(y),
+            [output.kv_connector_stats for output in outputs],
+        )
+        kv_cache_events = _combine_non_none(
+            lambda x, y: x.merge(y),
+            [output.kv_cache_events for output in outputs],
+        )
+        invalid_block_ids = _combine_non_none(
+            set.union, [output.invalid_block_ids for output in outputs]
+        )
+        assert invalid_block_ids is not None
+
+        assert all(
+            output.expected_finished_count == outputs[0].expected_finished_count
+            for output in outputs
+        )
+        expected_finished_count = outputs[0].expected_finished_count
+
+        return cls(
+            finished_sending=finished_sending,
+            finished_recving=finished_recving,
+            kv_connector_stats=kv_connector_stats,
+            kv_cache_events=kv_cache_events,
+            invalid_block_ids=invalid_block_ids,
+            expected_finished_count=expected_finished_count,
         )
 
 

@@ -13,6 +13,7 @@ import torch.nn as nn
 from PIL import Image
 
 from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
+from vllm.config.cache import CacheConfig
 from vllm.config.multimodal import (
     AudioDummyOptions,
     BaseDummyOptions,
@@ -24,13 +25,10 @@ from vllm.distributed import (
     init_distributed_environment,
     initialize_model_parallel,
 )
-from vllm.model_executor.models.interfaces import (
-    SupportsMultiModal,
-    supports_multimodal,
-)
+from vllm.model_executor.models.interfaces import supports_multimodal
 from vllm.multimodal import MULTIMODAL_REGISTRY, BatchedTensorInputs
 from vllm.multimodal.processing import BaseMultiModalProcessor, InputProcessingContext
-from vllm.multimodal.utils import group_mm_kwargs_by_modality
+from vllm.multimodal.utils import group_and_batch_mm_kwargs
 from vllm.platforms import current_platform
 from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.utils.collection_utils import is_list_of
@@ -86,7 +84,6 @@ def resize_mm_data(
 
 
 def create_batched_mm_kwargs(
-    model_cls: type[SupportsMultiModal],
     model_config: ModelConfig,
     processor: BaseMultiModalProcessor,
     size_factors: tuple[float, ...] = (1.0, 0.5, 0.25),
@@ -101,24 +98,24 @@ def create_batched_mm_kwargs(
     processor_inputs = dummy_inputs.get_dummy_processor_inputs(
         seq_len=model_config.max_model_len,
         mm_counts=mm_counts,
+        mm_options={},
     )
-    mm_data = processor_inputs.mm_data
+    mm_items = processor_inputs.mm_data_items
     resized_mm_data = {
-        modality: resize_mm_data(data, size_factors)
-        for modality, data in mm_data.items()
+        modality: resize_mm_data(items.data, size_factors)
+        for modality, items in mm_items.items()
     }
 
     # video metadata will be added back to the resized video data here.
     text_prompt, token_prompt = get_text_token_prompts(processor, resized_mm_data)
 
-    mm_kwargs = processor.apply(
+    mm_kwargs = processor(
         prompt=token_prompt if text_prompt is None else text_prompt,
-        mm_data=resized_mm_data,
+        mm_items=processor.info.parse_mm_data(resized_mm_data),
         hf_processor_mm_kwargs=processor_inputs.hf_processor_mm_kwargs,
-        tokenization_kwargs=processor_inputs.tokenization_kwargs,
     )["mm_kwargs"].require_data()
 
-    return group_mm_kwargs_by_modality(
+    return group_and_batch_mm_kwargs(
         [
             (modality, item)
             for modality in supported_mm_limits
@@ -135,7 +132,9 @@ def initialize_dummy_model(
 ):
     temp_file = tempfile.mkstemp()[1]
     current_device = torch.get_default_device()
-    vllm_config = VllmConfig(model_config=model_config)
+    vllm_config = VllmConfig(
+        model_config=model_config, cache_config=CacheConfig(block_size=16)
+    )
     with set_current_vllm_config(vllm_config=vllm_config):
         init_distributed_environment(
             world_size=1,
@@ -246,9 +245,7 @@ def test_model_tensor_schema(model_id: str):
     processor = factories.build_processor(ctx, cache=None)
 
     with initialize_dummy_model(model_cls, model_config) as model:
-        for modality, _, mm_kwargs in create_batched_mm_kwargs(
-            model_cls, model_config, processor
-        ):
+        for modality, _, mm_kwargs in create_batched_mm_kwargs(model_config, processor):
             for method_name in inputs_parse_methods:
                 print(
                     f"Testing `{method_name}` with modality={modality} "

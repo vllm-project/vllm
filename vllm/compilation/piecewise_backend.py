@@ -3,6 +3,7 @@
 
 import dataclasses
 import io
+import json
 import pickle
 from collections.abc import Callable
 from pickle import Pickler
@@ -11,14 +12,67 @@ from typing import Any
 import torch._functorch.config
 import torch.fx as fx
 from torch._inductor.runtime.triton_heuristics import CachingAutotuner
+from torch._logging._internal import trace_structured
 
 from vllm.compilation.backends import VllmBackend
-from vllm.compilation.monitor import end_monitoring_torch_compile
 from vllm.config import VllmConfig
 from vllm.config.utils import Range
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
+
+
+def get_fake_args_from_graph(graph: fx.GraphModule) -> list[Any]:
+    """Get fake args directly from graph placeholder nodes."""
+    fake_args = []
+    for node in graph.graph.nodes:
+        if node.op == "placeholder":
+            fake_args.append(node.meta["example_value"])
+        else:
+            break
+    return fake_args
+
+
+def create_concrete_args(graph: fx.GraphModule, size: int) -> list[Any]:
+    """Create Fake example inputs with symbolic dims replaced by a concrete size.
+
+    Used for single-size compilation where we need concrete-shaped inputs.
+    The Dynamo-captured graph gives us example inputs with SymInts in them.
+    """
+    from torch._prims_common import compute_required_storage_length
+    from torch._subclasses.fake_tensor import FakeTensorMode
+    from torch.fx.experimental.symbolic_shapes import ShapeEnv, is_symbolic
+
+    def concretize(sym_val: Any) -> int:
+        """Replace all symbolic variables in a SymInt expression with size."""
+        if not is_symbolic(sym_val):
+            return int(sym_val)
+        expr = sym_val.node.expr
+        return int(expr.subs({s: size for s in expr.free_symbols}))
+
+    fake_mode = FakeTensorMode(shape_env=ShapeEnv())
+
+    args: list[Any] = []
+    with fake_mode:
+        for node in graph.graph.nodes:
+            if node.op != "placeholder":
+                break
+            val = node.meta["example_value"]
+            if isinstance(val, torch.SymInt):
+                args.append(concretize(val))
+            elif isinstance(val, torch.Tensor):
+                new_shape = tuple(concretize(d) for d in val.shape)
+                new_strides = tuple(concretize(s) for s in val.stride())
+                new_storage_offset = concretize(val.storage_offset())
+                needed_size = compute_required_storage_length(
+                    new_shape, new_strides, new_storage_offset
+                )
+                t = torch.empty(needed_size, dtype=val.dtype, device=val.device)
+                t = t.as_strided(new_shape, new_strides, new_storage_offset)
+                args.append(t)
+            else:
+                args.append(val)
+    return args
 
 
 @dataclasses.dataclass
@@ -39,6 +93,7 @@ class PiecewiseBackend:
         vllm_backend: VllmBackend,
         returns_tuple: bool,
         compiled_runnables: dict[str, Callable[..., Any]] | None = None,
+        submod_name: str = "",
     ):
         """
         The backend for piecewise compilation.
@@ -70,6 +125,7 @@ class PiecewiseBackend:
         self.total_piecewise_compiles = total_piecewise_compiles
         self.vllm_backend = vllm_backend
         self.compiled_runnables = compiled_runnables
+        self.submod_name = submod_name
 
         self.is_first_graph = piecewise_compile_index == 0
         self.is_last_graph = piecewise_compile_index == total_piecewise_compiles - 1
@@ -104,10 +160,6 @@ class PiecewiseBackend:
         # the entries for ranges that we need to either
         self.range_entries: dict[Range, RangeEntry] = {}
 
-        # to_be_compiled_ranges tracks the remaining ranges to compile,
-        # and updates during the compilation process, so we need to copy it
-        self.to_be_compiled_ranges: set[Range] = set(self.compile_ranges)
-
         # We only keep compilation management inside this class directly.
         if self.compile_sizes is not None:
             for size in self.compile_sizes:
@@ -124,19 +176,19 @@ class PiecewiseBackend:
                         self.range_entries[range] = RangeEntry(
                             compile_range=range,
                         )
-                        self.to_be_compiled_ranges.add(range)
 
         for range in self.compile_ranges:
             self.range_entries[range] = RangeEntry(
                 compile_range=range,
             )
 
-        # get the on_compilation_complete callback from context...
-        # PiecewiseBackend is created during the first call,
-        # which is when the context is set (see compilation/decorators.py)
-        from vllm.compilation.backends import _on_compilation_complete_callback
+        # Track whether we've logged the graph for this subgraph (only log once)
+        self._graph_logged = False
 
-        self.on_compilation_complete = _on_compilation_complete_callback.get()
+        if self.graph is not None:
+            self.compile_all_ranges()
+        else:
+            self.load_all_ranges()
 
     def get_compiled_graph_wrapper(
         self, compiled_graph: Callable[..., Any]
@@ -152,16 +204,6 @@ class PiecewiseBackend:
                 return graph_output[0]
 
         return compiled_graph_wrapper
-
-    def check_for_ending_compilation(self) -> None:
-        if self.is_last_graph and not self.to_be_compiled_ranges:
-            # no specific sizes to compile
-            # save the hash of the inductor graph for the next run
-            self.vllm_backend.compiler_manager.save_to_file()
-            end_monitoring_torch_compile(self.vllm_config)
-            # Call the completion callback (e.g., to save AOT compiled function)
-            if self.on_compilation_complete is not None:
-                self.on_compilation_complete()
 
     def to_bytes(self) -> dict[str, bytes]:
         class StandaloneCompiledArtifactsPickler(Pickler):
@@ -199,64 +241,101 @@ class PiecewiseBackend:
 
         return out
 
-    def _fakify_args(self, args: tuple[Any, ...]) -> list[Any]:
-        # We need to pass fake example_inputs, otherwise torch.compile
-        # will fakify the example_inputs potentially causing some non dynamic
-        # dimension to be be duck shaped to other existing shapes that have hints
-        # matching their values.
-        # This is problem because it can lead to unintended specializations!
-        # if the new wrongly dynamic dim is specialized
-        # it will force specializing the whole shape
-        # torch.compile probably should not accept
-        # non fake tensors as example inputs!
-        # See issue https://github.com/vllm-project/vllm/issues/27899
-        fake_example_inputs = []
-        assert self.graph is not None
-        for node in self.graph.graph.nodes:
-            # All place holders come first
-            if node.op == "placeholder":
-                fake_example_inputs.append(node.meta["example_value"])
-            else:
-                break
-        assert len(fake_example_inputs) == len(args)
-        return fake_example_inputs
+    def compile_all_ranges(self) -> None:
+        """Compile all range entries for this piecewise subgraph up front."""
+        assert self.graph is not None, (
+            "Cannot compile without a graph. "
+            "When loading from cache/AOT artifacts, "
+            "compile_all_ranges should not be called."
+        )
 
-    def _maybe_compile_for_range_entry(
-        self, range_entry: RangeEntry, args: tuple[Any, ...]
-    ) -> Any:
-        if not range_entry.compiled:
-            if self.compiled_runnables is not None:
-                range_entry.runnable = self.get_compiled_graph_wrapper(
-                    self.compiled_runnables[str(range_entry.compile_range)]
+        for range_entry in self.range_entries.values():
+            if range_entry.compiled:
+                continue
+
+            self._log_compile_start(range_entry.compile_range)
+
+            if range_entry.compile_range.is_single_size():
+                args_list = create_concrete_args(
+                    self.graph, range_entry.compile_range.start
                 )
             else:
-                # args are real arguments
-                # fakify for range, real args for concrete size.
-                # For concrete size, we clear the shape env in
-                # compiler_manager.compile() so no need to fakify.
-                args_list = (
-                    self._fakify_args(args)
-                    if not range_entry.compile_range.is_single_size()
-                    else list(args)
-                )
+                args_list = get_fake_args_from_graph(self.graph)
 
-                with (
-                    torch._functorch.config.patch("bundled_autograd_cache", True),
-                ):
-                    range_entry.runnable = self.vllm_backend.compiler_manager.compile(
-                        self.graph,
-                        args_list,
-                        self.vllm_backend.inductor_config,
-                        self.compilation_config,
-                        compile_range=range_entry.compile_range,
-                        graph_index=self.piecewise_compile_index,
-                        num_graphs=self.total_piecewise_compiles,
-                    )
+            range_entry.runnable = self.vllm_backend.compiler_manager.compile(
+                self.graph,
+                args_list,
+                self.vllm_backend.inductor_config,
+                self.compilation_config,
+                compile_range=range_entry.compile_range,
+                graph_index=self.piecewise_compile_index,
+                num_graphs=self.total_piecewise_compiles,
+            )
 
             range_entry.compiled = True
-            self.to_be_compiled_ranges.remove(range_entry.compile_range)
 
-            self.check_for_ending_compilation()
+    def _log_compile_start(self, compile_range: Range):
+        """Log compilation event for TORCH_TRACE/tlparse."""
+        is_cudagraph_size = (
+            self.compile_sizes is not None and compile_range.start in self.compile_sizes
+        )
+        subgraph_index = self.piecewise_compile_index
+        submod_name = self.submod_name
+        trace_structured(
+            "artifact",
+            metadata_fn=lambda: {
+                "name": "vllm_piecewise_compile_start",
+                "encoding": "json",
+            },
+            payload_fn=lambda: json.dumps(
+                {
+                    "piecewise_index": subgraph_index,
+                    "submod_name": submod_name,
+                    "total_piecewise_compiles": self.total_piecewise_compiles,
+                    "compile_range_start": compile_range.start,
+                    "compile_range_end": compile_range.end,
+                    "is_single_size": compile_range.is_single_size(),
+                    "is_cudagraph_capture_size": is_cudagraph_size,
+                }
+            ),
+        )
+
+        # Log the subgraph graph dump only once per subgraph (not per size)
+        # to reduce log file size. The graph code is the same for all sizes.
+        if not self._graph_logged:
+            self._graph_logged = True
+            assert self.graph is not None
+            trace_structured(
+                "graph_dump",
+                metadata_fn=lambda: {
+                    "name": f"vllm_{submod_name}",
+                },
+                payload_fn=lambda: self.graph.print_readable(print_output=False),
+            )
+
+    def load_all_ranges(self) -> None:
+        """Load all pre-compiled runnables for this piecewise subgraph.
+
+        Called during warm start to wrap all cached compiled_runnables
+        into range_entry.runnable up front, analogous to compile_all_ranges()
+        for the cold start path.
+        """
+        assert self.compiled_runnables is not None, (
+            "load_all_ranges should only be called when compiled_runnables "
+            "is set (warm start / cache loading path)."
+        )
+        for range_entry in self.range_entries.values():
+            if range_entry.compiled:
+                continue
+            key = str(range_entry.compile_range)
+            assert key in self.compiled_runnables, (
+                f"Missing compiled runnable for range {range_entry.compile_range}. "
+                f"Available keys: {list(self.compiled_runnables.keys())}"
+            )
+            range_entry.runnable = self.get_compiled_graph_wrapper(
+                self.compiled_runnables[key]
+            )
+            range_entry.compiled = True
 
     def _find_range_for_shape(self, runtime_shape: int) -> RangeEntry | None:
         # First we try to find the range entry for the concrete compile size
@@ -280,6 +359,9 @@ class PiecewiseBackend:
         assert range_entry is not None, (
             f"Shape: {runtime_shape} out of considered ranges: {self.compile_ranges}"
         )
-
-        self._maybe_compile_for_range_entry(range_entry, args)
+        assert range_entry.compiled, (
+            "All ranges should be compiled or loaded up front in "
+            "PiecewiseBackend.__init__. "
+            f"range_entry={range_entry.compile_range}"
+        )
         return range_entry.runnable(*args)

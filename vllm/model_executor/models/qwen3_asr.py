@@ -23,7 +23,7 @@
 """Inference-only Qwen3-ASR model."""
 
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Any, Literal, cast
+from typing import Any, Literal
 
 import numpy as np
 import torch
@@ -33,7 +33,7 @@ from transformers.models.whisper import WhisperFeatureExtractor
 
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
-from vllm.inputs.data import PromptType
+from vllm.inputs.data import PromptType, TokensPrompt
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import (
     MultiModalEmbeddings,
@@ -90,6 +90,7 @@ from vllm.transformers_utils.processors.qwen3_asr import (
 )
 
 logger = init_logger(__name__)
+_ASR_TEXT_TAG = "<asr_text>"
 
 
 def _get_feat_extract_output_lengths(input_lengths: torch.Tensor):
@@ -124,6 +125,13 @@ class Qwen3ASRProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"audio": None}
 
+    def get_data_parser(self) -> MultiModalDataParser:
+        feature_extractor = self.get_feature_extractor()
+        return Qwen3ASRMultiModalDataParser(
+            target_sr=feature_extractor.sampling_rate,
+            expected_hidden_size=self._get_expected_hidden_size(),
+        )
+
 
 class Qwen3ASRDummyInputsBuilder(BaseDummyInputsBuilder[Qwen3ASRProcessingInfo]):
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
@@ -138,7 +146,7 @@ class Qwen3ASRDummyInputsBuilder(BaseDummyInputsBuilder[Qwen3ASRProcessingInfo])
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
         num_audios = mm_counts.get("audio", 0)
 
@@ -152,7 +160,7 @@ class Qwen3ASRDummyInputsBuilder(BaseDummyInputsBuilder[Qwen3ASRProcessingInfo])
             * feature_extractor.sampling_rate
         )
 
-        audio_overrides = mm_options.get("audio") if mm_options else None
+        audio_overrides = mm_options.get("audio")
 
         return {
             "audio": self._get_dummy_audios(
@@ -193,12 +201,6 @@ class Qwen3ASRMultiModalDataParser(MultiModalDataParser):
 class Qwen3ASRMultiModalProcessor(
     Qwen3OmniMoeThinkerMultiModalProcessor,
 ):
-    def _get_data_parser(self) -> MultiModalDataParser:
-        feature_extractor = self.info.get_feature_extractor()
-        return Qwen3ASRMultiModalDataParser(
-            target_sr=feature_extractor.sampling_rate,
-        )
-
     def _get_mm_fields_config(
         self,
         hf_inputs: BatchFeature,
@@ -294,19 +296,21 @@ class Qwen3ASRForConditionalGeneration(
         multimodal_config = vllm_config.model_config.multimodal_config
         self.config = thinker_config
         self.multimodal_config = multimodal_config
-
-        self.audio_tower = Qwen3OmniMoeAudioEncoder(
-            thinker_config.audio_config,
-            prefix=maybe_prefix(prefix, "audio_tower"),
-        )
         self.quant_config = quant_config
 
-        self.language_model = Qwen3ForCausalLM(
-            vllm_config=vllm_config.with_hf_config(
-                thinker_config.text_config, architectures=["Qwen3ForCausalLM"]
-            ),
-            prefix=maybe_prefix(prefix, "language_model"),
-        )
+        with self._mark_tower_model(vllm_config, "audio"):
+            self.audio_tower = Qwen3OmniMoeAudioEncoder(
+                thinker_config.audio_config,
+                prefix=maybe_prefix(prefix, "audio_tower"),
+            )
+
+        with self._mark_language_model(vllm_config):
+            self.language_model = Qwen3ForCausalLM(
+                vllm_config=vllm_config.with_hf_config(
+                    thinker_config.text_config, architectures=["Qwen3ForCausalLM"]
+                ),
+                prefix=maybe_prefix(prefix, "language_model"),
+            )
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
@@ -361,9 +365,6 @@ class Qwen3ASRForConditionalGeneration(
         )
         return audio_features.split(audio_output_lengths.tolist())
 
-    def get_language_model(self) -> torch.nn.Module:
-        return self.language_model
-
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings | None:
         mm_input_by_modality = self._parse_and_validate_multimodal_inputs(**kwargs)
         if not mm_input_by_modality:
@@ -388,13 +389,11 @@ class Qwen3ASRForConditionalGeneration(
         multimodal_embeddings: MultiModalEmbeddings | None = None,
         *,
         is_multimodal: torch.Tensor | None = None,
-        handle_oov_mm_token: bool = False,
     ) -> torch.Tensor:
         inputs_embeds = self._embed_text_input_ids(
             input_ids,
             self.language_model.embed_input_ids,
             is_multimodal=is_multimodal,
-            handle_oov_mm_token=handle_oov_mm_token,
         )
 
         if multimodal_embeddings is None or len(multimodal_embeddings) == 0:
@@ -556,12 +555,30 @@ class Qwen3ASRForConditionalGeneration(
         else:
             prompt = (
                 f"<|im_start|>user\n{audio_placeholder}<|im_end|>\n"
-                f"<|im_start|>assistant\nlanguage {full_lang_name_to}<asr_text>"
+                f"<|im_start|>assistant\nlanguage {full_lang_name_to}{_ASR_TEXT_TAG}"
             )
 
         prompt_token_ids = tokenizer.encode(prompt)
-        prompt_dict = {
-            "prompt_token_ids": prompt_token_ids,
-            "multi_modal_data": {"audio": audio},
-        }
-        return cast(PromptType, prompt_dict)
+
+        return TokensPrompt(
+            prompt_token_ids=prompt_token_ids,
+            multi_modal_data={"audio": audio},
+        )
+
+    @classmethod
+    def post_process_output(cls, text: str) -> str:
+        """
+        Post-process Qwen3-ASR raw output to extract clean transcription.
+
+        The model outputs in format: "language {lang}<asr_text>{transcription}"
+        This method strips the language prefix and asr_text tags.
+        """
+        if not text:
+            return ""
+
+        if _ASR_TEXT_TAG not in text:
+            return text
+
+        # Split on <asr_text> tag and take the transcription part
+        _, text_part = text.rsplit(_ASR_TEXT_TAG, 1)
+        return text_part

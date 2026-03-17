@@ -10,6 +10,7 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 
 import vllm.envs as envs
+from tests.utils import ensure_current_vllm_config
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.distributed.device_communicators.cuda_communicator import CudaCommunicator
 from vllm.distributed.device_communicators.pynccl import register_nccl_symmetric_ops
@@ -37,7 +38,7 @@ def nccl_symm_mem_allreduce_worker(local_rank: int, world_size: int):
         m.delenv("CUDA_VISIBLE_DEVICES", raising=False)
         dtype = torch.bfloat16
         device = torch.device(f"cuda:{local_rank}")
-        torch.cuda.set_device(device)
+        torch.accelerator.set_device_index(device)
         torch.set_default_device(device)
         torch.set_default_dtype(dtype)
         update_environment_variables(
@@ -51,7 +52,8 @@ def nccl_symm_mem_allreduce_worker(local_rank: int, world_size: int):
         )
 
         init_distributed_environment()
-        initialize_model_parallel(tensor_model_parallel_size=world_size)
+        with ensure_current_vllm_config():
+            initialize_model_parallel(tensor_model_parallel_size=world_size)
 
         cuda_communicator = typing.cast(
             CudaCommunicator, get_tp_group().device_communicator
@@ -82,7 +84,7 @@ def nccl_symm_mem_allreduce_worker(local_rank: int, world_size: int):
 @pytest.mark.parametrize("world_size", [2])
 @pytest.mark.skipif(envs.VLLM_TARGET_DEVICE not in ["cuda"], reason="Only test on CUDA")
 def test_nccl_symm_mem_allreduce(monkeypatch: pytest.MonkeyPatch, world_size):
-    if world_size > torch.cuda.device_count():
+    if world_size > torch.accelerator.device_count():
         pytest.skip("Not enough GPUs to run the test.")
 
     # Enable SymmMemCommunicator

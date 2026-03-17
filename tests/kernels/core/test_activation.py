@@ -17,6 +17,8 @@ from vllm.model_executor.layers.activation import (
     QuickGELU,
     SiluAndMul,
     SwigluOAIAndMul,
+    SwigluStepAndMul,
+    swiglustep_and_mul_triton,
 )
 from vllm.utils.torch_utils import set_random_seed
 
@@ -24,7 +26,9 @@ DTYPES = [torch.half, torch.bfloat16, torch.float]
 NUM_TOKENS = [7, 83, 2048]  # Arbitrary values for testing
 D = [512, 13824]  # Arbitrary values for testing
 SEEDS = [0]
-CUDA_DEVICES = [f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)]
+CUDA_DEVICES = [
+    f"cuda:{i}" for i in range(1 if torch.accelerator.device_count() == 1 else 2)
+]
 
 
 @pytest.mark.parametrize(
@@ -36,6 +40,7 @@ CUDA_DEVICES = [f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 e
         "gelu_tanh",
         "fatrelu",
         "swigluoai_and_mul",
+        "swiglustep_and_mul",
     ],
 )
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
@@ -75,9 +80,12 @@ def test_act_and_mul(
     elif activation == "swigluoai_and_mul":
         layer = SwigluOAIAndMul()
         fn = torch.ops._C.swigluoai_and_mul
+    elif activation == "swiglustep_and_mul":
+        layer = SwigluStepAndMul()
+        fn = swiglustep_and_mul_triton
     out = layer(x)
     ref_out = layer.forward_native(x)
-    if activation == "swigluoai_and_mul":
+    if activation in ["swigluoai_and_mul", "swiglustep_and_mul"]:
         rtol = {
             # For fp16, change the relative tolerance from 1e-3 to 2e-3
             torch.float16: 2e-3,
@@ -104,7 +112,7 @@ def test_act_and_mul(
         opcheck(fn, (out, x, threshold))
     elif activation == "swigluoai_and_mul":
         opcheck(fn, (out, x, layer.alpha, layer.limit))
-    else:
+    elif activation != "swiglustep_and_mul":
         opcheck(fn, (out, x))
 
 

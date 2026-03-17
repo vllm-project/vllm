@@ -150,6 +150,12 @@ KVConnectorFactory.register_connector(
 )
 
 KVConnectorFactory.register_connector(
+    "ExampleHiddenStatesConnector",
+    "vllm.distributed.kv_transfer.kv_connector.v1.example_hidden_states_connector",
+    "ExampleHiddenStatesConnector",
+)
+
+KVConnectorFactory.register_connector(
     "P2pNcclConnector",
     "vllm.distributed.kv_transfer.kv_connector.v1.p2p.p2p_nccl_connector",
     "P2pNcclConnector",
@@ -198,6 +204,12 @@ KVConnectorFactory.register_connector(
 )
 KVConnectorFactory.register_connector(
     "MooncakeConnector",
-    "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_connector",
+    "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector",
     "MooncakeConnector",
+)
+
+KVConnectorFactory.register_connector(
+    "FlexKVConnectorV1",
+    "vllm.distributed.kv_transfer.kv_connector.v1.flexkv_connector",
+    "FlexKVConnectorV1",
 )

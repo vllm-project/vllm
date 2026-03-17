@@ -85,7 +85,7 @@ In order for the language model to support chat protocol, vLLM requires the mode
 a chat template in its tokenizer configuration. The chat template is a Jinja2 template that
 specifies how roles, messages, and other chat-specific tokens are encoded in the input.
 
-An example chat template for `NousResearch/Meta-Llama-3-8B-Instruct` can be found [here](https://github.com/meta-llama/llama3?tab=readme-ov-file#instruction-tuned-models)
+An example chat template for `NousResearch/Meta-Llama-3-8B-Instruct` can be found [here](https://llama.com/docs/model-cards-and-prompt-formats/meta-llama-3/#prompt-template-for-meta-llama-3)
 
 Some models do not provide a chat template even though they are instruction/chat fine-tuned. For those models,
 you can manually specify their chat template in the `--chat-template` parameter with the file path to the chat
@@ -191,7 +191,7 @@ vllm serve NousResearch/Meta-Llama-3-8B-Instruct --enable-offline-docs
 Our Completions API is compatible with [OpenAI's Completions API](https://platform.openai.com/docs/api-reference/completions);
 you can use the [official OpenAI Python client](https://github.com/openai/openai-python) to interact with it.
 
-Code example: [examples/online_serving/openai_completion_client.py](../../examples/online_serving/openai_completion_client.py)
+Code example: [examples/basic/online_serving/openai_completion_client.py](../../examples/basic/online_serving/openai_completion_client.py)
 
 #### Extra parameters
 
@@ -222,7 +222,7 @@ see our [Multimodal Inputs](../features/multimodal_inputs.md) guide for more inf
 
 - *Note: `image_url.detail` parameter is not supported.*
 
-Code example: [examples/online_serving/openai_chat_completion_client.py](../../examples/online_serving/openai_chat_completion_client.py)
+Code example: [examples/basic/online_serving/openai_chat_completion_client.py](../../examples/basic/online_serving/openai_chat_completion_client.py)
 
 #### Extra parameters
 
@@ -312,7 +312,7 @@ and passing a list of `messages` in the request. Refer to the examples below for
     vllm serve TIGER-Lab/VLM2Vec-Full --runner pooling \
       --trust-remote-code \
       --max-model-len 4096 \
-      --chat-template examples/template_vlm2vec_phi3v.jinja
+      --chat-template examples/pooling/embed/template/vlm2vec_phi3v.jinja
     ```
 
     !!! important
@@ -320,7 +320,7 @@ and passing a list of `messages` in the request. Refer to the examples below for
         to run this model in embedding mode instead of text generation mode.
 
         The custom chat template is completely different from the original one for this model,
-        and can be found here: [examples/template_vlm2vec_phi3v.jinja](../../examples/template_vlm2vec_phi3v.jinja)
+        and can be found here: [examples/pooling/embed/template/vlm2vec_phi3v.jinja](../../examples/pooling/embed/template/vlm2vec_phi3v.jinja)
 
     Since the request schema is not defined by OpenAI client, we post a request to the server using the lower-level `requests` library:
 
@@ -360,14 +360,14 @@ and passing a list of `messages` in the request. Refer to the examples below for
     vllm serve MrLight/dse-qwen2-2b-mrl-v1 --runner pooling \
       --trust-remote-code \
       --max-model-len 8192 \
-      --chat-template examples/template_dse_qwen2_vl.jinja
+      --chat-template examples/pooling/embed/template/dse_qwen2_vl.jinja
     ```
 
     !!! important
         Like with VLM2Vec, we have to explicitly pass `--runner pooling`.
 
         Additionally, `MrLight/dse-qwen2-2b-mrl-v1` requires an EOS token for embeddings, which is handled
-        by a custom chat template: [examples/template_dse_qwen2_vl.jinja](../../examples/template_dse_qwen2_vl.jinja)
+        by a custom chat template: [examples/pooling/embed/template/dse_qwen2_vl.jinja](../../examples/pooling/embed/template/dse_qwen2_vl.jinja)
 
     !!! important
         `MrLight/dse-qwen2-2b-mrl-v1` requires a placeholder image of the minimum image size for text query embeddings. See the full code
@@ -439,6 +439,8 @@ you can use the [official OpenAI Python client](https://github.com/openai/openai
     To use the Transcriptions API, please install with extra audio dependencies using `pip install vllm[audio]`.
 
 Code example: [examples/online_serving/openai_transcription_client.py](../../examples/online_serving/openai_transcription_client.py)
+
+NOTE: beam search is currently supported in the transcriptions endpoint for encoder-decoder multimodal models, e.g., whisper, but highly inefficient as work for handling the encoder/decoder cache is actively ongoing. This is an active point of ongoing optimization and will be handled properly in the very near future.
 
 #### API Enforced Limits
 
@@ -533,7 +535,7 @@ The following [sampling parameters](../api/README.md#inference-parameters) are s
 ??? code
 
     ```python
-    --8<-- "vllm/entrypoints/openai/protocol.py:transcription-sampling-params"
+    --8<-- "vllm/entrypoints/openai/speech_to_text/protocol.py:transcription-sampling-params"
     ```
 
 The following extra parameters are supported:
@@ -541,7 +543,7 @@ The following extra parameters are supported:
 ??? code
 
     ```python
-    --8<-- "vllm/entrypoints/openai/protocol.py:transcription-extra-params"
+    --8<-- "vllm/entrypoints/openai/speech_to_text/protocol.py:transcription-extra-params"
     ```
 
 ### Translations API
@@ -561,13 +563,13 @@ Code example: [examples/online_serving/openai_translation_client.py](../../examp
 The following [sampling parameters](../api/README.md#inference-parameters) are supported.
 
 ```python
---8<-- "vllm/entrypoints/openai/protocol.py:translation-sampling-params"
+--8<-- "vllm/entrypoints/openai/speech_to_text/protocol.py:translation-sampling-params"
 ```
 
 The following extra parameters are supported:
 
 ```python
---8<-- "vllm/entrypoints/openai/protocol.py:translation-extra-params"
+--8<-- "vllm/entrypoints/openai/speech_to_text/protocol.py:translation-extra-params"
 ```
 
 ### Realtime API
@@ -597,7 +599,7 @@ Audio must be sent as base64-encoded PCM16 audio at 16kHz sample rate, mono chan
 #### Client → Server Events
 
 | Event | Description |
-|-------|-------------|
+| ----- | ----------- |
 | `input_audio_buffer.append` | Send base64-encoded audio chunk: `{"type": "input_audio_buffer.append", "audio": "<base64>"}` |
 | `input_audio_buffer.commit` | Trigger transcription processing or end: `{"type": "input_audio_buffer.commit", "final": bool}` |
 | `session.update` | Configure session: `{"type": "session.update", "model": "model-name"}` |
@@ -605,60 +607,16 @@ Audio must be sent as base64-encoded PCM16 audio at 16kHz sample rate, mono chan
 #### Server → Client Events
 
 | Event | Description |
-|-------|-------------|
+| ----- | ----------- |
 | `session.created` | Connection established with session ID and timestamp |
 | `transcription.delta` | Incremental transcription text: `{"type": "transcription.delta", "delta": "text"}` |
 | `transcription.done` | Final transcription with usage stats |
 | `error` | Error notification with message and optional code |
 
-#### Python WebSocket Example
+#### Example Clients
 
-??? code
-
-    ```python
-    import asyncio
-    import base64
-    import json
-    import websockets
-
-    async def realtime_transcribe():
-        uri = "ws://localhost:8000/v1/realtime"
-
-        async with websockets.connect(uri) as ws:
-            # Wait for session.created
-            response = await ws.recv()
-            print(f"Session: {response}")
-
-            # Commit buffer
-            await ws.send(json.dumps({
-                "type": "input_audio_buffer.commit"
-            }))
-
-            # Send audio chunks (example with file)
-            with open("audio.raw", "rb") as f:
-                while chunk := f.read(4096):
-                    await ws.send(json.dumps({
-                        "type": "input_audio_buffer.append",
-                        "audio": base64.b64encode(chunk).decode()
-                    }))
-
-            # Signal all audio is sent
-            await ws.send(json.dumps({
-                "type": "input_audio_buffer.commit",
-                "final": True,
-            }))
-
-            # Receive transcription
-            while True:
-                response = json.loads(await ws.recv())
-                if response["type"] == "transcription.delta":
-                    print(response["delta"], end="", flush=True)
-                elif response["type"] == "transcription.done":
-                    print(f"\nFinal: {response['text']}")
-                    break
-
-    asyncio.run(realtime_transcribe())
-    ```
+- [openai_realtime_client.py](https://github.com/vllm-project/vllm/tree/main/examples/online_serving/openai_realtime_client.py) - Upload and transcribe an audio file
+- [openai_realtime_microphone_client.py](https://github.com/vllm-project/vllm/tree/main/examples/online_serving/openai_realtime_microphone_client.py) - Gradio demo for live microphone transcription
 
 ### Tokenizer API
 
@@ -1004,28 +962,34 @@ You can pass multi-modal inputs to scoring models by passing `content` including
 
         ```python
         import requests
-
+        
         response = requests.post(
             "http://localhost:8000/v1/score",
             json={
                 "model": "jinaai/jina-reranker-m0",
                 "queries": "slm markdown",
-                "documents": {
-                    "content": [
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": "https://raw.githubusercontent.com/jina-ai/multimodal-reranker-test/main/handelsblatt-preview.png"
-                            },
-                        },
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": "https://raw.githubusercontent.com/jina-ai/multimodal-reranker-test/main/paper-11.png"
-                            },
-                        },
-                    ],
-                },
+                "documents": [
+                    {
+                        "content": [
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": "https://raw.githubusercontent.com/jina-ai/multimodal-reranker-test/main/handelsblatt-preview.png"
+                                },
+                            }
+                        ],
+                    },
+                    {
+                        "content": [
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": "https://raw.githubusercontent.com/jina-ai/multimodal-reranker-test/main/handelsblatt-preview.png"
+                                },
+                            }
+                        ]
+                    },
+                ],
             },
         )
         response.raise_for_status()
@@ -1051,7 +1015,6 @@ The following Score API parameters are supported:
 
 ```python
 --8<-- "vllm/entrypoints/pooling/base/protocol.py:pooling-common-params"
---8<-- "vllm/entrypoints/pooling/score/protocol.py:score-extra-params"
 ```
 
 The following extra parameters are supported:
@@ -1059,7 +1022,6 @@ The following extra parameters are supported:
 ```python
 --8<-- "vllm/entrypoints/pooling/base/protocol.py:pooling-common-extra-params"
 --8<-- "vllm/entrypoints/pooling/base/protocol.py:classify-extra-params"
---8<-- "vllm/entrypoints/pooling/score/protocol.py:score-extra-params"
 ```
 
 #### CausalLM Models (Generative Scoring)
@@ -1202,7 +1164,6 @@ The following Re-rank API parameters are supported:
 ```python
 --8<-- "vllm/entrypoints/pooling/base/protocol.py:pooling-common-params"
 --8<-- "vllm/entrypoints/pooling/base/protocol.py:classify-extra-params"
---8<-- "vllm/entrypoints/pooling/score/protocol.py:score-extra-params"
 ```
 
 The following extra parameters are supported:
@@ -1210,7 +1171,6 @@ The following extra parameters are supported:
 ```python
 --8<-- "vllm/entrypoints/pooling/base/protocol.py:pooling-common-extra-params"
 --8<-- "vllm/entrypoints/pooling/base/protocol.py:classify-extra-params"
---8<-- "vllm/entrypoints/pooling/score/protocol.py:rerank-extra-params"
 ```
 
 ## Ray Serve LLM

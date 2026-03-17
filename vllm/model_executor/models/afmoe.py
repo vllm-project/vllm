@@ -36,7 +36,12 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
 )
-from vllm.model_executor.models.interfaces import SupportsLoRA, SupportsPP
+from vllm.model_executor.models.interfaces import (
+    EagleModelMixin,
+    SupportsEagle3,
+    SupportsLoRA,
+    SupportsPP,
+)
 from vllm.model_executor.models.llama import LlamaMLP as AfmoeMLP
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
@@ -138,6 +143,7 @@ class AfmoeMoE(nn.Module):
             e_score_correction_bias=self.expert_bias,
             enable_eplb=self.enable_eplb,
             num_redundant_experts=self.n_redundant_experts,
+            router_logits_dtype=torch.float32,
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -379,7 +385,7 @@ class AfmoeDecoderLayer(nn.Module):
         "inputs_embeds": 0,
     }
 )
-class AfmoeModel(nn.Module):
+class AfmoeModel(nn.Module, EagleModelMixin):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
@@ -429,7 +435,7 @@ class AfmoeModel(nn.Module):
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
-    ) -> torch.Tensor | IntermediateTensors:
+    ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
@@ -446,8 +452,14 @@ class AfmoeModel(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        for layer in islice(self.layers, self.start_layer, self.end_layer):
+        aux_hidden_states = self._maybe_add_hidden_state([], 0, hidden_states, residual)
+        for idx, layer in enumerate(
+            islice(self.layers, self.start_layer, self.end_layer)
+        ):
             hidden_states, residual = layer(positions, hidden_states, residual)
+            self._maybe_add_hidden_state(
+                aux_hidden_states, idx + 1, hidden_states, residual
+            )
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
@@ -455,6 +467,10 @@ class AfmoeModel(nn.Module):
             )
 
         hidden_states, _ = self.norm(hidden_states, residual)
+
+        if len(aux_hidden_states) > 0:
+            return hidden_states, aux_hidden_states
+
         return hidden_states
 
     def make_empty_intermediate_tensors(
@@ -586,7 +602,7 @@ class AfmoeModel(nn.Module):
         return loaded_params
 
 
-class AfmoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
+class AfmoeForCausalLM(nn.Module, SupportsPP, SupportsEagle3, SupportsLoRA):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -679,7 +695,7 @@ class AfmoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
-    ) -> torch.Tensor | IntermediateTensors:
+    ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
         hidden_states = self.model(
             input_ids, positions, intermediate_tensors, inputs_embeds
         )
