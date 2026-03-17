@@ -7,9 +7,9 @@ ColPali is a multi-vector retrieval model based on PaliGemma backbone
 It produces per-token embeddings for both text and image inputs.
 """
 
-import base64
 from io import BytesIO
 
+import pybase64 as base64
 import pytest
 import torch
 from PIL import Image
