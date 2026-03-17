@@ -43,8 +43,11 @@ from vllm.model_executor.layers.quantization.modelopt import (
     ModelOptNvFp4Config,
 )
 from vllm.platforms import current_platform
-from vllm.utils.flashinfer import has_flashinfer_all2all
-from vllm.utils.import_utils import has_deep_ep, has_mori
+from vllm.utils.flashinfer import (
+    has_flashinfer_nvlink_one_sided,
+    has_flashinfer_nvlink_two_sided,
+)
+from vllm.utils.import_utils import has_deep_ep, has_mori, has_nixl_ep
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import cuda_device_count_stateless, set_random_seed
 from vllm.v1.worker.workspace import (
@@ -78,11 +81,17 @@ BACKENDS = ["allgather_reducescatter"]
 if has_mori():
     BACKENDS += ["mori"]
 
-if has_flashinfer_all2all():
-    BACKENDS += ["flashinfer_all2allv"]
+if has_flashinfer_nvlink_two_sided():
+    BACKENDS += ["flashinfer_nvlink_two_sided"]
+
+if has_flashinfer_nvlink_one_sided():
+    BACKENDS += ["flashinfer_nvlink_one_sided"]
 
 if has_deep_ep():
     BACKENDS += ["deepep_low_latency", "deepep_high_throughput"]
+
+if has_nixl_ep():
+    BACKENDS += ["nixl_ep"]
 
 QUANT_METHODS = [
     None,
@@ -1393,7 +1402,7 @@ def _run_one_config(
     else:
         atol, rtol = 6e-2, 6e-2
 
-    torch.cuda.synchronize()  # Is this needed?
+    torch.accelerator.synchronize()  # TODO: Is this needed?
     torch.testing.assert_close(expected, actual, atol=atol, rtol=rtol)
 
 
@@ -1637,7 +1646,9 @@ def test_moe_layer(
             if sub_test_config in test_configs:
                 new_test_configs.append(sub_test_config)
             else:
-                pytest.skip("subtest config does not match any valid test configuation")
+                pytest.skip(
+                    "subtest config does not match any valid test configuration"
+                )
         test_configs = new_test_configs
 
     try:
@@ -1650,6 +1661,5 @@ def test_moe_layer(
             verbosity,
         )
     finally:
-        # Is this needed?
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()  # TODO: Is this needed?
         torch.accelerator.empty_cache()
