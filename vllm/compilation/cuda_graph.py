@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import dataclasses
-import inspect
 import weakref
 from collections import Counter
 from collections.abc import Callable
@@ -26,6 +25,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.offloader.base import get_offloader
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import current_stream, weak_ref_tensors
+from vllm.v1.attention.backend import AttentionMetadata
 
 logger = init_logger(__name__)
 
@@ -125,63 +125,29 @@ class CUDAGraphLogging:
         self.reset()
 
 
-def _extract_tensor_addresses(
-    obj: Any, prefix: str = "", visited: set | None = None
+def _extract_metadata_addresses(
+    attn_metadata: dict[str, AttentionMetadata]
+    | list[dict[str, AttentionMetadata]]
+    | None,
 ) -> dict[str, int]:
-    """
-    Recursively extract memory addresses of CUDA tensors from nested structures.
-    Uses visited set to prevent infinite recursion, but never adds tensors to visited
-    since views can recreate Python objects pointing to same memory.
-    """
-    if visited is None:
-        visited = set()
-
     addresses: dict[str, int] = {}
-
-    # Handle tensor before checking visited, since we don't add tensors to visited
-    if isinstance(obj, torch.Tensor):
-        if obj.is_cuda:
-            addresses[prefix] = obj.data_ptr()
+    if attn_metadata is None:
         return addresses
 
-    # Prevent infinite recursion for container objects
-    if id(obj) in visited:
-        return addresses
+    if isinstance(attn_metadata, list):
+        # This is for DBO. List of size two, one for each microbatch.
+        # We will check the metadata addresses for the first one,
+        # assuming the second one has the same addresses.
+        attn_metadata = attn_metadata[0]
 
-    visited.add(id(obj))
-
-    try:
-        if isinstance(obj, dict):
-            for k, v in obj.items():
-                new_prefix = f"{prefix}.{k}" if prefix else str(k)
-                addresses.update(_extract_tensor_addresses(v, new_prefix, visited))
-        elif isinstance(obj, (list, tuple)):
-            for i, v in enumerate(obj):
-                new_prefix = f"{prefix}[{i}]" if prefix else f"[{i}]"
-                addresses.update(_extract_tensor_addresses(v, new_prefix, visited))
-        elif dataclasses.is_dataclass(obj):
-            for field in dataclasses.fields(obj):
-                new_prefix = f"{prefix}.{field.name}" if prefix else field.name
-                try:
-                    v = getattr(obj, field.name)
-                    addresses.update(_extract_tensor_addresses(v, new_prefix, visited))
-                except AttributeError:
-                    pass
-        elif hasattr(obj, "__dict__"):
-            # Use vars(obj) instead of dir() to avoid triggering @property getters
-            try:
-                for k, v in vars(obj).items():
-                    if not k.startswith("_") and not isinstance(
-                        getattr(type(obj), k, None), property
-                    ):
-                        new_prefix = f"{prefix}.{k}" if prefix else k
-                        addresses.update(
-                            _extract_tensor_addresses(v, new_prefix, visited)
-                        )
-            except TypeError:
-                pass
-    finally:
-        pass
+    for k, v in attn_metadata.items():
+        assert dataclasses.is_dataclass(v)
+        for field in dataclasses.fields(v):
+            if field.name.startswith("__"):
+                continue
+            tensor_candidate = getattr(v, field.name, None)
+            if isinstance(tensor_candidate, torch.Tensor) and tensor_candidate.is_cuda:
+                addresses[f"{k}.{field.name}"] = tensor_candidate.data_ptr()
 
     return addresses
 
@@ -194,7 +160,8 @@ class CUDAGraphEntry:
 
     # for cudagraph debugging, track the input addresses
     # during capture, and check if they are the same during replay
-    input_addresses: dict[str, int] | None = None
+    input_addresses: list[int] | None = None
+    metadata_addresses: dict[str, int] | None = None
 
 
 @dataclasses.dataclass
@@ -282,23 +249,6 @@ class CUDAGraphWrapper:
         # in case we need to access the original runnable.
         return self.runnable
 
-    def _get_inputs_to_extract(
-        self, forward_context: Any, args: tuple[Any, ...], kwargs: dict[str, Any]
-    ) -> dict[str, Any]:
-        try:
-            target_func = getattr(self.runnable, "forward", self.runnable)
-            sig = inspect.signature(target_func)
-            bound_args = sig.bind(*args, **kwargs)
-            bound_args.apply_defaults()
-            inputs_to_extract = dict(bound_args.arguments)
-        except (ValueError, TypeError):
-            inputs_to_extract = {"args": args, "kwargs": kwargs}
-
-        if self.runtime_mode == CUDAGraphMode.FULL:
-            inputs_to_extract["attn_metadata"] = forward_context.attn_metadata
-
-        return inputs_to_extract
-
     @property
     def cudagraph_wrapper(self) -> "CUDAGraphWrapper":
         return self
@@ -353,10 +303,16 @@ class CUDAGraphWrapper:
             validate_cudagraph_capturing_enabled()
 
             if self.is_debugging_mode:
-                inputs_to_extract = self._get_inputs_to_extract(
-                    forward_context, args, kwargs
+                entry.input_addresses = [
+                    x.data_ptr() for x in args if isinstance(x, torch.Tensor)
+                ]
+                entry.input_addresses.extend(
+                    v.data_ptr() for v in kwargs.values() if isinstance(v, torch.Tensor)
                 )
-                entry.input_addresses = _extract_tensor_addresses(inputs_to_extract)
+                if self.runtime_mode == CUDAGraphMode.FULL:
+                    entry.metadata_addresses = _extract_metadata_addresses(
+                        forward_context.attn_metadata
+                    )
 
             cudagraph = torch.cuda.CUDAGraph()
 
@@ -417,45 +373,55 @@ class CUDAGraphWrapper:
             return output
 
         if self.is_debugging_mode:
-            # check if the input addresses are the same
-            inputs_to_extract = self._get_inputs_to_extract(
-                forward_context, args, kwargs
+            new_input_addresses = [
+                x.data_ptr() for x in args if isinstance(x, torch.Tensor)
+            ]
+            new_input_addresses.extend(
+                v.data_ptr() for v in kwargs.values() if isinstance(v, torch.Tensor)
             )
-            new_input_addresses = _extract_tensor_addresses(inputs_to_extract)
+            args_match = new_input_addresses == entry.input_addresses
 
-            if new_input_addresses != entry.input_addresses:
-                # Find the differences
-                old_keys = set(
-                    entry.input_addresses.keys() if entry.input_addresses else []
+            # Check metadata dict (only in FULL mode)
+            metadata_match = True
+            new_metadata_addresses = None
+            if self.runtime_mode == CUDAGraphMode.FULL:
+                new_metadata_addresses = _extract_metadata_addresses(
+                    forward_context.attn_metadata
                 )
-                new_keys = set(new_input_addresses.keys())
+                metadata_match = new_metadata_addresses == entry.metadata_addresses
 
-                missing_keys = old_keys - new_keys
-                added_keys = new_keys - old_keys
-
-                mismatched_keys = []
-                for k in old_keys.intersection(new_keys):
-                    if (
-                        entry.input_addresses is not None
-                        and entry.input_addresses[k] != new_input_addresses[k]
-                    ):
-                        mismatched_keys.append(
-                            (k, entry.input_addresses[k], new_input_addresses[k])
-                        )
-
+            if not (args_match and metadata_match):
                 error_msg = [
                     "Input addresses for cudagraphs are different during replay."
                 ]
-                if missing_keys:
-                    error_msg.append(f"Missing keys: {missing_keys}")
-                if added_keys:
-                    error_msg.append(f"Added keys: {added_keys}")
-                if mismatched_keys:
+
+                if not args_match:
                     error_msg.append(
-                        "Mismatched addresses (key, old_address, new_address):"
+                        f"Expected {entry.input_addresses}, got {new_input_addresses}"
                     )
-                    for k, old_addr, new_addr in mismatched_keys:
-                        error_msg.append(f"  {k}: {old_addr} vs {new_addr}")
+
+                if not metadata_match:
+                    old_meta = entry.metadata_addresses or {}
+                    new_meta = new_metadata_addresses or {}
+
+                    old_keys = set(old_meta.keys())
+                    new_keys = set(new_meta.keys())
+                    missing = old_keys - new_keys
+                    added = new_keys - old_keys
+                    changed = {
+                        k: (old_meta[k], new_meta[k])
+                        for k in old_keys & new_keys
+                        if old_meta[k] != new_meta[k]
+                    }
+                    error_msg.append("Differences in attn_metadata detected:")
+                    if missing:
+                        error_msg.append(f"  Missing tensors: {missing}")
+                    if added:
+                        error_msg.append(f"  New tensors: {added}")
+                    if changed:
+                        error_msg.append("  Changed addresses:")
+                        for k, (old_addr, new_addr) in changed.items():
+                            error_msg.append(f"    {k}: {old_addr} -> {new_addr}")
 
                 raise AssertionError("\n".join(error_msg))
 
