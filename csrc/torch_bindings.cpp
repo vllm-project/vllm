@@ -489,8 +489,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "                        Tensor! problem_sizes1, Tensor! problem_sizes2, "
       "                        Tensor! input_permutation, "
       "                        Tensor! output_permutation, int num_experts, "
-      "                        int n, int k, Tensor? blockscale_offsets) -> "
-      "()");
+      "                        int n, int k, Tensor? blockscale_offsets, "
+      "                        bool is_gated) -> ()");
   ops.impl("get_cutlass_moe_mm_data", torch::kCUDA, &get_cutlass_moe_mm_data);
 
   // compute per-expert problem sizes from expert_first_token_offset
