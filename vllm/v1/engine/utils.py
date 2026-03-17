@@ -784,9 +784,10 @@ class CoreEngineActorManager:
             pg = self.created_placement_groups.pop()
             is_local = self.placement_group_is_local.pop()
             if is_local:
-                self.local_engine_actors.pop()
+                actor = self.local_engine_actors.pop()
             else:
-                self.remote_engine_actors.pop()
+                actor = self.remote_engine_actors.pop()
+            ray.kill(actor)
             ray.util.remove_placement_group(pg)
 
     def get_run_refs(self):

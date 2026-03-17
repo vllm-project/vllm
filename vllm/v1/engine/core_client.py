@@ -1585,7 +1585,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             self.vllm_config,
             new_data_parallel_size,
         )
-        wait_future = self._eep_wait_for_setup_switch_complete()
+        wait_future = asyncio.ensure_future(self._eep_wait_for_setup_switch_complete())
 
         # Phase 3: Wait for new engines to be created
         # and reconfig messages to be received
@@ -1678,7 +1678,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         # NOTE(yongji): Immediately stop sending requests to the removing engines.
         self.core_engines = self.core_engines[:new_data_parallel_size]
         self.lb_engines = self.lb_engines[:new_data_parallel_size]
-        wait_future = self._eep_wait_for_setup_switch_complete()
+        wait_future = asyncio.ensure_future(self._eep_wait_for_setup_switch_complete())
 
         await asyncio.gather(*reconfig_futures)
 
