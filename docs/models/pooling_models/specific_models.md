@@ -1,4 +1,4 @@
-# Specific models
+# Specific Model Examples
 
 ## ColBERT Late Interaction Models
 

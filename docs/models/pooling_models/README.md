@@ -49,7 +49,7 @@ For more detailed information, please refer to the link below.
 - [Token Classification Models](token_classify.md)
 - [Token Embedding Models](token_embed.md)
 - [Score Models](score.md)
-- [Specific Models](specific_models.md)
+- [Specific Model Examples](specific_models.md)
 
 ## Offline Inference
 
