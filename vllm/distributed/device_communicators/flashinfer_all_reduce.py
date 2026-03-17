@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+import atexit
+import gc
 import torch
 import torch.distributed as dist
 from torch.distributed import ProcessGroup
@@ -139,11 +141,25 @@ def destroy_fi_ar_workspace():
         _fi_ar_quant_workspace is not None
         and _fi_ar_quant_workspace is not _fi_ar_workspace
     ):
-        _fi_ar_quant_workspace.destroy()
+        try:
+            _fi_ar_quant_workspace.destroy()
+        except Exception as e:
+            logger.warning(
+                "Failed to destroy flashinfer quant workspace during shutdown: %s",
+                e)
     _fi_ar_quant_workspace = None
     if _fi_ar_workspace is not None:
-        _fi_ar_workspace.destroy()
+        try:
+            _fi_ar_workspace.destroy()
+        except Exception as e:
+            logger.warning(
+                "Failed to destroy flashinfer workspace during shutdown: %s",
+                e)
         _fi_ar_workspace = None
+    gc.collect()
+
+
+atexit.register(destroy_fi_ar_workspace)
 
 
 class FlashInferAllReduce:
