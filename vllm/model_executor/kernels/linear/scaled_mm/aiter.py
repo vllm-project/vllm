@@ -61,7 +61,7 @@ class AiterInt8ScaledMMLinearKernel(CutlassInt8ScaledMMLinearKernel):
     ) -> torch.Tensor:
         """
         `AiterInt8ScaledMMLinearKernel` implements a fused version of
-            `output = torch.mm((scale_a* a), (scale_b * b)).to(out_dtype)`
+            `output = torch.mm((scale_a * a), (scale_b * b)).to(out_dtype)`
         where scale_a * a and scale_b * b are implemented using numpy-style
         broadcasting.
         Currently only support per-tensor-per-tensor GEMM
@@ -119,7 +119,7 @@ class AiterInt8ScaledMMLinearKernel(CutlassInt8ScaledMMLinearKernel):
         return rocm_aiter_ops.w8a8_gemm(x_q, w_q.t(), x_s, w_s, bias, out_dtype)
 
 
-class AiterShuffledPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
+class AiterPreshuffledPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
     @classmethod
     def is_supported(
         cls, compute_capability: int | None = None
@@ -200,7 +200,7 @@ class AiterShuffledPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         bias: torch.Tensor | None,
         output_shape: list,
     ) -> torch.Tensor:
-        return rocm_aiter_ops.shuffled_per_token_w8a8_gemm(
+        return rocm_aiter_ops.preshuffled_per_token_w8a8_gemm(
             A, B, As, Bs, bias, out_dtype
         )
 
@@ -210,7 +210,7 @@ class AiterPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
     def is_supported(
         cls, compute_capability: int | None = None
     ) -> tuple[bool, str | None]:
-        return AiterShuffledPerTokenFp8ScaledMMLinearKernel.is_supported(
+        return AiterPreshuffledPerTokenFp8ScaledMMLinearKernel.is_supported(
             compute_capability
         )
 
