@@ -1,11 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Callable
 from typing import Any
 
 import torch
 
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.platforms import current_platform
+from vllm.triton_utils import triton
 from vllm.utils.import_utils import has_triton_kernels
 from vllm.utils.torch_utils import direct_register_custom_op, is_torch_equal_or_newer
 
@@ -44,7 +47,7 @@ def _swizzle_mxfp4(quant_tensor, scale, num_warps=8):
         value_layout = StridedLayout
         scale_layout = StridedLayout
     elif current_platform.is_rocm():
-        from vllm.platforms.rocm import on_gfx950
+        from vllm.platforms.rocm import on_gfx950, on_gfx1250
 
         value_layout = StridedLayout
         if on_gfx950():
@@ -58,6 +61,10 @@ def _swizzle_mxfp4(quant_tensor, scale, num_warps=8):
                 from triton_kernels.tensor_details.layout import CDNA4MXScaleLayout
 
                 scale_layout = CDNA4MXScaleLayout
+        elif on_gfx1250():
+            from triton_kernels.tensor_details.layout import CDNA4MXScaleLayout
+
+            scale_layout = CDNA4MXScaleLayout
         else:
             scale_layout = StridedLayout
     else:
@@ -89,6 +96,44 @@ def _swizzle_mxfp4(quant_tensor, scale, num_warps=8):
     )
     scale = convert_layout(wrap_torch_tensor(scale), scale_layout, **scale_layout_opts)
     return quant_tensor, InFlexData(), scale
+
+
+def _can_support_mxfp4(
+    use_grouped_topk: bool = False,
+    topk_group: int | None = None,
+    num_expert_group: int | None = None,
+    expert_map: torch.Tensor | None = None,
+    custom_routing_function: Callable | None = None,
+    e_score_correction_bias: torch.Tensor | None = None,
+    apply_router_weight_on_input: bool = False,
+    scoring_func: str = "softmax",
+    activation: MoEActivation = MoEActivation.SWIGLUOAI,
+    expert_load_view: torch.Tensor | None = None,
+    logical_to_physical_map: torch.Tensor | None = None,
+    logical_replica_count: torch.Tensor | None = None,
+):
+    return not (
+        use_grouped_topk
+        or topk_group
+        or num_expert_group
+        or custom_routing_function
+        or e_score_correction_bias
+        or apply_router_weight_on_input
+        or scoring_func != "softmax"
+        or activation != MoEActivation.SWIGLUOAI
+        or expert_load_view
+        or logical_to_physical_map
+        or logical_replica_count
+    )
+
+
+def get_padding_alignment():
+    return (
+        256
+        if triton.runtime.driver.active.get_current_target().arch
+        in ("gfx950", "gfx1250")
+        else 128
+    )
 
 
 def _dequant_mxfp4(
