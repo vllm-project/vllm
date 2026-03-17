@@ -169,12 +169,12 @@ def run_profiling_sweep(args):
         "/v1/chat/completions",
         "--dataset-name",
         args.dataset_name,
-        "--dataset-path",
-        args.dataset_path,
         f"--temperature={args.temp}",
         f"--top-p={args.top_p}",
         f"--top-k={args.top_k}",
     ]
+    if args.dataset_path:
+        bench_cmd.extend(["--dataset-path", args.dataset_path])
 
     serve_params = build_serve_params(
         method=args.method,
