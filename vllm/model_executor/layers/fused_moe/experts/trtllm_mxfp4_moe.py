@@ -310,7 +310,7 @@ class TrtLlmMxfp4ExpertsModular(TrtLlmMxfp4ExpertsBase, mk.FusedMoEExpertsModula
             "local_expert_offset": local_expert_offset,
             "local_num_experts": local_num_experts,
             "routed_scaling_factor": None,
-            "routing_method_type": 1,
+            "routing_method_type": self.routing_method_type,
             "do_finalize": True,
             "output": output,
             "tune_max_num_tokens": max(self.max_capture_size, 1),
