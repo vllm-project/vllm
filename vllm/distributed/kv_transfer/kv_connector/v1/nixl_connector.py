@@ -717,6 +717,40 @@ class NixlConnectorScheduler:
                     logger.warning("Connection listener got unexpected message %s", msg)
                 sock.send_multipart((identity, b"", encoded_data[target_tp_rank]))
 
+    def _hma_prefill_token_count(self, num_prompt_tokens: int) -> int:
+        """For HMA/Mamba models, returns N-1 to avoid transferring
+        state that already includes the last prompt token's contribution.
+        The decoder will recompute the last token to derive h(N)."""
+        if self._is_hma_required and num_prompt_tokens > 1:
+            return num_prompt_tokens - 1
+        return num_prompt_tokens
+
+    def _truncate_hma_request_for_prefill(
+        self, request: "Request"
+    ) -> None:
+        """Truncate P-side prompt to N-1 tokens for HMA/Mamba models.
+
+        On the prefill worker (do_remote_decode), we remove the last
+        prompt token so the model computes h(N-1). Setting max_tokens=1
+        causes the request to finish after one decode sample (which does
+        NOT update Mamba state), triggering the KV transfer of h(N-1).
+
+        Guarded by params["_p_side_truncated"] for idempotency across
+        preemption / re-scheduling cycles.
+        """
+        params = request.kv_transfer_params
+        if (
+            params is not None
+            and params.get("do_remote_decode")
+            and not params.get("_p_side_truncated")
+        ):
+            if request.prompt_token_ids and len(request.prompt_token_ids) > 1:
+                request.prompt_token_ids.pop()
+                request._all_token_ids.pop()
+                request.num_prompt_tokens -= 1
+                request.max_tokens = 1
+                params["_p_side_truncated"] = True
+
     def get_num_new_matched_tokens(
         self, request: "Request", num_computed_tokens: int
     ) -> tuple[int, bool]:
@@ -746,9 +780,13 @@ class NixlConnectorScheduler:
         if params is not None and params.get("do_remote_prefill"):
             # Remote prefill: get all prompt blocks from remote.
             token_ids = request.prompt_token_ids or []
-            count = len(token_ids) - num_computed_tokens
+            actual = self._hma_prefill_token_count(len(token_ids))
+            count = actual - num_computed_tokens
             if count > 0:
                 return count, True
+
+        if self._is_hma_required:
+            self._truncate_hma_request_for_prefill(request)
 
         # No remote prefill for this request.
         return 0, False
