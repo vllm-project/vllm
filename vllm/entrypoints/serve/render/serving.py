@@ -411,9 +411,8 @@ class OpenAIServingRender:
         truncate = request.truncate_prompt_tokens
         if truncate is not None:
             if truncate == -1:
-                max_input_tokens = (
-                    self.model_config.max_model_len
-                    - (request.max_completion_tokens or request.max_tokens or 0)
+                max_input_tokens = self.model_config.max_model_len - (
+                    request.max_completion_tokens or request.max_tokens or 0
                 )
                 truncate = max(max_input_tokens, 0)
             if truncate <= 0:
