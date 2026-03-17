@@ -1,10 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import functools
 from contextlib import nullcontext
 from typing import TYPE_CHECKING
 
 import torch
 import torch.nn.functional as F
+import torch.utils._pytree as pytree
+from torch._dynamo import allow_in_graph
+from torch._higher_order_ops.scan import (
+    _extract_carry_and_out,
+    scan_op,
+    wrap_combine_fn_flat,
+)
 
 import vllm.envs as envs
 from vllm.distributed import (
@@ -705,75 +713,110 @@ class DefaultMoERunner(MoERunner):
             chunked_shared = None
 
         # ------------------------------------------------------------------
-        # Chunk loop: process each (num_chunks, max_tokens, feat) slice.
+        # Scan body: one chunk per iteration.
         #
-        # NOTE: torch.scan is intentionally NOT used here yet.  Blocker 1
-        # (the outer torch.ops.vllm.moe_forward custom op) makes the entire
-        # function opaque to torch.compile regardless, so switching to
-        # torch.scan would add the generic_scan pre-allocation call — an
-        # extra RDMA dispatch+combine round trip per forward pass that
-        # corrupts DeepEP-LL protocol state — with no compile benefit.
-        # Once Blocker 1 is resolved, replace this loop with torch.scan.
+        # @allow_in_graph: tells dynamo to record _apply_chunk as an opaque
+        # call in the FX graph rather than tracing into its internals.
+        # This prevents dynamo from encountering untraceable C++ RDMA objects
+        # (deep_ep.Buffer, dispatch handles — Errors 1 and 2).
+        #
+        # is_fake guard: reenter_make_fx inside trace_scan calls combine_fn
+        # with FakeTensors to build the scan's combine_graph submodule.
+        # Executing RDMA-backed CUDA kernels on FakeTensors crashes (Error 3).
+        # The guard short-circuits to return correctly shaped zero tensors for
+        # shape inference without touching any RDMA state.
+        # The return type must match the real path exactly (Error 6):
+        # two-output case returns a 2-tuple, single-output returns a tensor.
         # ------------------------------------------------------------------
         mk_owns_shared = self.quant_method.mk_owns_shared_expert
         has_two_outputs = has_separate_shared_experts or mk_owns_shared
+        chunk_s_input = chunked_shared if chunked_shared is not None else chunked_hidden
 
-        if has_two_outputs:
-            H_shared = (
-                chunked_shared.size(-1)
-                if chunked_shared is not None
-                else full_hidden_states.size(-1)
-            )
-            stacked_shared = full_hidden_states.new_zeros(
-                num_chunks, max_tokens, H_shared
-            )
-            stacked_fused = full_hidden_states.new_zeros(num_chunks, max_tokens, H)
-        else:
-            stacked_out = full_hidden_states.new_zeros(num_chunks, max_tokens, H)
+        _layer = layer
+        _runner = self
+        _has_sep = has_separate_shared_experts
+        _mk_owns_shared = mk_owns_shared
+        _has_two = has_two_outputs
 
-        for chunk_idx in range(num_chunks):
-            chunk_h = chunked_hidden[chunk_idx]
-            chunk_tw = chunked_topk_weights[chunk_idx]
-            chunk_ti = chunked_topk_ids[chunk_idx]
-            chunk_s = (
-                chunked_shared[chunk_idx]
-                if chunked_shared is not None
-                else chunk_h
-            )
-
-            out = self.quant_method.apply(
-                layer=layer,
+        @allow_in_graph
+        def _apply_chunk(
+            carry: torch.Tensor,
+            xs_slice: tuple[
+                torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor
+            ],
+        ) -> tuple:
+            chunk_h, chunk_tw, chunk_ti, chunk_s = xs_slice
+            # is_fake guard (Error 3 / Error 6)
+            if isinstance(chunk_h, torch._subclasses.FakeTensor):
+                if _has_two:
+                    return (carry.clone(), (torch.zeros_like(chunk_s), torch.zeros_like(chunk_h)))
+                return (carry.clone(), torch.zeros_like(chunk_h))
+            out = _runner.quant_method.apply(
+                layer=_layer,
                 x=chunk_h,
                 topk_weights=chunk_tw,
                 topk_ids=chunk_ti,
                 shared_experts_input=chunk_s,
             )
-
-            if has_separate_shared_experts:
-                assert self.shared_experts is not None
+            if _has_sep:
+                assert _runner.shared_experts is not None
                 assert not isinstance(out, tuple)
-                shared_out = self.shared_experts(chunk_s)
-                stacked_shared[chunk_idx].copy_(shared_out, non_blocking=True)
-                stacked_fused[chunk_idx].copy_(out, non_blocking=True)
-            elif mk_owns_shared:
+                shared_out = _runner.shared_experts(chunk_s)
+                return (carry.clone(), (shared_out, out))
+            elif _mk_owns_shared:
                 assert isinstance(out, tuple)
-                shared_out, fused_out = out
-                stacked_shared[chunk_idx].copy_(shared_out, non_blocking=True)
-                stacked_fused[chunk_idx].copy_(fused_out, non_blocking=True)
+                return (carry.clone(), out)
             else:
-                assert isinstance(out, torch.Tensor)
-                stacked_out[chunk_idx].copy_(out, non_blocking=True)
+                return (carry.clone(), out)
+
+        dummy_carry = full_hidden_states.new_zeros(1)
+        xs_tuple = (chunked_hidden, chunked_topk_weights, chunked_topk_ids, chunk_s_input)
+
+        # ------------------------------------------------------------------
+        # Run the scan via scan_op directly (not via torch.scan).
+        #
+        # torch.scan() wraps scan_op inside _maybe_compile_and_run_fn which
+        # calls torch.compile(backend="eager") inside setup_compilation_env().
+        # setup_compilation_env() temporarily removes vLLM's pre-dispatch
+        # TorchFunctionMode from the stack; DeepEP-LL RDMA dispatch depends
+        # on that mode being present, so removing it corrupts the protocol
+        # and produces garbled output.
+        #
+        # Calling scan_op directly bypasses _maybe_compile_and_run_fn and
+        # leaves all TorchFunctionModes intact.  Dispatch behaviour:
+        #   - Eager mode (Blocker 1 present): scan_op_dense → generic_scan
+        #     → N calls with real tensors, no extra RDMA dispatch.
+        #   - Under outer torch.compile (post-Blocker 1): ScanHigherOrderVariable
+        #     in dynamo traces combine_fn_flat as a subgraph correctly.
+        # ------------------------------------------------------------------
+        leaves_init, spec_init = pytree.tree_flatten(dummy_carry)
+        leaves_xs, spec_xs = pytree.tree_flatten(xs_tuple)
+        combine_fn_flat = functools.partial(
+            wrap_combine_fn_flat,
+            combine_fn=_apply_chunk,
+            spec_init=spec_init,
+            spec_xs=spec_xs,
+            num_init_leaves=len(leaves_init),
+            num_inp_leaves=len(leaves_xs),
+        )
+        raw_result = list(
+            scan_op(combine_fn_flat, leaves_init, leaves_xs, additional_inputs=())
+        )
+        _, out_leaves = _extract_carry_and_out(raw_result, len(leaves_init))
 
         # ------------------------------------------------------------------
         # Trim stacked (num_chunks, max_tokens, feat) -> (num_tokens, feat)
+        # out_leaves: flat list of stacked output tensors, one per output.
         # ------------------------------------------------------------------
         if has_two_outputs:
+            stacked_shared, stacked_fused = out_leaves[0], out_leaves[1]
+            H_shared_final = stacked_shared.size(-1)
             return (
-                stacked_shared.reshape(-1, H_shared)[:num_tokens],
+                stacked_shared.reshape(-1, H_shared_final)[:num_tokens],
                 stacked_fused.reshape(-1, H)[:num_tokens],
             )
         else:
-            return stacked_out.reshape(-1, H)[:num_tokens]
+            return out_leaves[0].reshape(-1, H)[:num_tokens]
 
     def forward_impl(
         self,
