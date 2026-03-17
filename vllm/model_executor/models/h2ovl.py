@@ -28,7 +28,7 @@ from vllm.multimodal.processing.processor import (
     PromptUpdate,
     TimingContext,
 )
-from vllm.transformers_utils.processors.h2ovl import H2OVLProcessor
+from vllm.transformers_utils.processors.h2ovl import H2OVLImageProcessor, H2OVLProcessor
 
 from .intern_vit import InternVisionModel
 from .internvl import (
@@ -40,12 +40,36 @@ from .internvl import (
 
 
 class H2OVLProcessingInfo(BaseInternVLProcessingInfo):
+    def get_image_processor(self, **kwargs):
+        config = self.get_hf_config()
+        vision_config = config.vision_config
+
+        kwargs.setdefault("image_size", vision_config.image_size)
+        kwargs.setdefault("min_dynamic_patch", config.min_dynamic_patch)
+        kwargs.setdefault("max_dynamic_patch", config.max_dynamic_patch)
+        kwargs.setdefault("dynamic_image_size", config.dynamic_image_size)
+        kwargs.setdefault("use_thumbnail", config.use_thumbnail)
+        kwargs.setdefault("use_msac", config.use_msac)
+
+        return H2OVLImageProcessor(**kwargs)
+
     def get_hf_processor(self, **kwargs: object) -> H2OVLProcessor:
+        config = self.get_hf_config()
+        vision_config = config.vision_config
+
+        image_processor = self.get_image_processor(**kwargs)
+        image_size = image_processor.image_size
+        patch_size = int(kwargs.get("patch_size", vision_config.patch_size))
+        downsample_ratio = float(
+            kwargs.get("downsample_ratio", config.downsample_ratio)
+        )
+        image_seq_length = int((image_size // patch_size) ** 2 * (downsample_ratio**2))
+
         return self.ctx.init_processor(
             H2OVLProcessor,
-            config=self.get_hf_config(),
             tokenizer=self.get_tokenizer(),
-            **kwargs,
+            image_processor=image_processor,
+            image_seq_length=image_seq_length,
         )
 
     def get_num_image_tokens(
@@ -106,7 +130,7 @@ class H2OVLMultiModalProcessor(BaseInternVLMultiModalProcessor[H2OVLProcessingIn
             if num_patches is not None:
                 assert isinstance(num_patches, int)
 
-            return hf_processor.get_image_repl(feature_size, num_patches)
+            return hf_processor.get_image_repl(num_patches, num_features=feature_size)
 
         return [
             PromptReplacement(

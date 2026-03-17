@@ -27,7 +27,8 @@ from vllm.multimodal.processing import (
     PromptUpdate,
     PromptUpdateDetails,
 )
-from vllm.transformers_utils.processors.nvlm_d import IMG_PAD, NVLMProcessor
+from vllm.transformers_utils.processors.internvl import InternVLImageProcessor
+from vllm.transformers_utils.processors.nvlm_d import NVLMProcessor
 
 from .intern_vit import InternVisionModel
 from .internvl import (
@@ -39,12 +40,25 @@ from .internvl import (
 
 
 class NVLMProcessingInfo(BaseInternVLProcessingInfo):
+    def get_image_processor(self, **kwargs):
+        config = self.get_hf_config()
+        vision_config = config.vision_config
+
+        kwargs.setdefault("image_size", vision_config.image_size)
+        kwargs.setdefault("patch_size", vision_config.patch_size)
+        kwargs.setdefault("downsample_ratio", config.downsample_ratio)
+        kwargs.setdefault("min_dynamic_patch", config.min_dynamic_patch)
+        kwargs.setdefault("max_dynamic_patch", config.max_dynamic_patch)
+        kwargs.setdefault("dynamic_image_size", config.dynamic_image_size)
+        kwargs.setdefault("use_thumbnail", config.use_thumbnail)
+
+        return InternVLImageProcessor(**kwargs)
+
     def get_hf_processor(self, **kwargs: object) -> NVLMProcessor:
         return self.ctx.init_processor(
             NVLMProcessor,
-            config=self.get_hf_config(),
             tokenizer=self.get_tokenizer(),
-            **kwargs,
+            image_processor=self.get_image_processor(**kwargs),
         )
 
 
@@ -117,9 +131,11 @@ class NVLMMultiModalProcessor(BaseInternVLMultiModalProcessor[NVLMProcessingInfo
             if num_patches is not None:
                 assert isinstance(num_patches, int)
 
-            repl = hf_processor.get_image_repl(feature_size, num_patches)
+            repl = hf_processor.get_image_repl(num_patches, num_features=feature_size)
 
-            return PromptUpdateDetails.select_text(repl.full + "\n", IMG_PAD)
+            return PromptUpdateDetails.select_text(
+                repl.full + "\n", hf_processor.image_token
+            )
 
         # See note in dummy data regarding why we have the extra newline
         return [

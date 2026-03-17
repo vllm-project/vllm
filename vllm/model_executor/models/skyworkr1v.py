@@ -43,7 +43,10 @@ from vllm.multimodal.processing import (
     PromptUpdate,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.processors.skyworkr1v import SkyworkR1VProcessor
+from vllm.transformers_utils.processors.internvl import (
+    InternVLImageProcessor,
+    InternVLProcessor,
+)
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
@@ -96,12 +99,34 @@ SkyworkR1VImageInputs: TypeAlias = (
 
 
 class SkyworkR1VProcessingInfo(BaseProcessingInfo):
-    def get_hf_processor(self, **kwargs: object) -> SkyworkR1VProcessor:
+    def get_image_processor(self, **kwargs):
+        config = self.get_hf_config()
+        vision_config = config.vision_config
+
+        kwargs.setdefault("image_size", vision_config.image_size)
+        kwargs.setdefault("min_dynamic_patch", config.min_dynamic_patch)
+        kwargs.setdefault("max_dynamic_patch", config.max_dynamic_patch)
+        kwargs.setdefault("dynamic_image_size", config.dynamic_image_size)
+        kwargs.setdefault("use_thumbnail", config.use_thumbnail)
+
+        return InternVLImageProcessor(**kwargs)
+
+    def get_hf_processor(self, **kwargs: object) -> InternVLProcessor:
+        config = self.get_hf_config()
+        vision_config = config.vision_config
+
+        image_size = int(kwargs.get("image_size", vision_config.image_size))
+        patch_size = int(kwargs.get("patch_size", vision_config.patch_size))
+        downsample_ratio = float(
+            kwargs.get("downsample_ratio", config.downsample_ratio)
+        )
+        image_seq_length = int((image_size // patch_size) ** 2 * (downsample_ratio**2))
+
         return self.ctx.init_processor(
-            SkyworkR1VProcessor,
-            config=self.get_hf_config(),
+            InternVLProcessor,
             tokenizer=self.get_tokenizer(),
-            **kwargs,
+            image_processor=self.get_image_processor(**kwargs),
+            image_seq_length=image_seq_length,
         )
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
@@ -112,7 +137,7 @@ class SkyworkR1VProcessingInfo(BaseProcessingInfo):
         *,
         image_width: int,
         image_height: int,
-        processor: SkyworkR1VProcessor,
+        processor: InternVLProcessor,
     ) -> int:
         return processor.get_num_image_tokens(
             image_width=image_width,
@@ -252,7 +277,7 @@ class SkyworkR1VMultiModalProcessor(BaseMultiModalProcessor[SkyworkR1VProcessing
             if num_patches is not None:
                 assert isinstance(num_patches, int)
 
-            return hf_processor.get_image_repl(feature_size, num_patches)
+            return hf_processor.get_image_repl(num_patches, num_features=feature_size)
 
         return [
             PromptReplacement(
