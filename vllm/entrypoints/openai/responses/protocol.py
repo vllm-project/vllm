@@ -27,6 +27,7 @@ from openai.types.responses import (
     ResponseReasoningTextDeltaEvent,
     ResponseReasoningTextDoneEvent,
     ResponseStatus,
+    ResponseTextConfig,
     ResponseWebSearchCallCompletedEvent,
     ResponseWebSearchCallInProgressEvent,
     ResponseWebSearchCallSearchingEvent,
@@ -35,7 +36,6 @@ from openai.types.responses import (
     ResponseCompletedEvent as OpenAIResponseCompletedEvent,
 )
 from openai.types.responses import ResponseCreatedEvent as OpenAIResponseCreatedEvent
-from openai.types.responses import ResponseFormatTextConfig as ResponseTextConfig
 from openai.types.responses import (
     ResponseInProgressEvent as OpenAIResponseInProgressEvent,
 )
@@ -330,13 +330,13 @@ class ResponsesRequest(OpenAIBaseModel):
         structured_outputs = self.structured_outputs
 
         # Also check text.format for OpenAI-style json_schema
-        if self.text is not None:
+        if self.text is not None and self.text.format is not None:
             if structured_outputs is not None:
                 raise VLLMValidationError(
-                    "Cannot specify both structured_outputs and text with json_schema",
+                    "Cannot specify both structured_outputs and text.format",
                     parameter="structured_outputs",
                 )
-            response_format = self.text
+            response_format = self.text.format
             if (
                 response_format.type == "json_schema"
                 and response_format.schema_ is not None

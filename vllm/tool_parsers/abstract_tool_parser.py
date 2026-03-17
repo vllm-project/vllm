@@ -6,8 +6,9 @@ import os
 from collections.abc import Callable, Sequence
 from functools import cached_property
 
-from openai.types.responses.response_format_text_json_schema_config import (
+from openai.types.responses import (
     ResponseFormatTextJSONSchemaConfig,
+    ResponseTextConfig,
 )
 
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
@@ -71,7 +72,8 @@ class ToolParser:
                 )
                 request.response_format = None
             if isinstance(request, ResponsesRequest):
-                request.text = ResponseFormatTextJSONSchemaConfig(
+                request.text = ResponseTextConfig()
+                request.text.format = ResponseFormatTextJSONSchemaConfig(
                     name="tool_calling_response",
                     schema=json_schema_from_tool,
                     type="json_schema",
