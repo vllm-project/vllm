@@ -8,6 +8,7 @@ use smg_tokenizer::chat_template::{
     load_chat_template_from_file,
 };
 use thiserror_ext::AsReport as _;
+use tracing::trace;
 
 use crate::error::Result;
 use crate::request::{ChatContent, ChatMessage, ChatRequest};
@@ -59,6 +60,13 @@ impl ChatTemplate {
     /// submitted to the model.
     pub fn apply_chat_template(&self, request: &ChatRequest) -> Result<String> {
         let messages = template_messages_to_json(&request.messages, self.inner.content_format())?;
+        trace!(
+            request_id = %request.request_id,
+            message_count = messages.len(),
+            content_format = ?self.inner.content_format(),
+            ?messages,
+            "applying chat template"
+        );
 
         let merged_template_kwargs = {
             let mut kwargs = request.chat_options.template_kwargs.clone();
@@ -69,7 +77,8 @@ impl ChatTemplate {
             kwargs
         };
 
-        self.inner
+        let prompt = self
+            .inner
             .apply(
                 &messages,
                 ChatTemplateParams {
@@ -86,7 +95,16 @@ impl ChatTemplate {
                 } else {
                     Error::Tokenizer(message)
                 }
-            })
+            })?;
+
+        trace!(
+            request_id = %request.request_id,
+            prompt_len = prompt.len(),
+            prompt,
+            "rendered chat template prompt"
+        );
+
+        Ok(prompt)
     }
 }
 
@@ -95,11 +113,13 @@ impl ChatTemplate {
 struct AssistantTemplateMessage {
     role: &'static str,
     content: Value,
+    // Reasoning-capable HF templates are inconsistent on the exact field name,
+    // so expose both variants for compatibility.
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning: Option<String>,
-    // TODO: why do we need duplicated fields for reasoning?
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning_content: Option<String>,
+    // tool_calls: Option<Vec<...>>,
 }
 
 /// Convert chat messages into the JSON shape expected by Jinja chat templates.
@@ -159,11 +179,15 @@ fn template_content_to_json(
 
 #[cfg(test)]
 mod tests {
+    use expect_test::expect;
+
     use super::ChatTemplate;
     use crate::request::{
         ChatContentPart, ChatMessage, ChatOptions, ChatRequest, ChatRole, UserSamplingParams,
     };
     use crate::{AssistantContentBlock, Error, Result};
+
+    const QWEN3_0_6B_TEMPLATE: &str = include_str!("../tests/templates/qwen3.jinja");
 
     fn sample_request(messages: Vec<ChatMessage>) -> ChatRequest {
         ChatRequest {
@@ -293,5 +317,67 @@ mod tests {
         .unwrap();
 
         assert_eq!(rendered, "inner|outer");
+    }
+
+    #[test]
+    fn qwen3_template_omits_reasoning_for_historical_assistant_messages() {
+        let request = sample_request(vec![
+            ChatMessage::text(
+                ChatRole::User,
+                "Hi. Tell me about the capital of France in short",
+            ),
+            ChatMessage::assistant_blocks(vec![
+                AssistantContentBlock::Reasoning {
+                    text: "\nOkay, the user is asking... I think that's all.\n".to_string(),
+                },
+                AssistantContentBlock::Text {
+                    text: "Paris is the capital of France.".to_string(),
+                },
+            ]),
+            ChatMessage::text(ChatRole::User, "Tell me about Paris more."),
+        ]);
+
+        let rendered = render(Some(QWEN3_0_6B_TEMPLATE), &request).unwrap();
+
+        expect![[r#"
+            <|im_start|>user
+            Hi. Tell me about the capital of France in short<|im_end|>
+            <|im_start|>assistant
+            Paris is the capital of France.<|im_end|>
+            <|im_start|>user
+            Tell me about Paris more.<|im_end|>
+            <|im_start|>assistant
+        "#]]
+        .assert_eq(&rendered);
+    }
+
+    #[test]
+    fn qwen3_template_keeps_reasoning_after_the_last_user_query() {
+        let mut request = sample_request(vec![
+            ChatMessage::text(ChatRole::User, "What is 1 + 1?"),
+            ChatMessage::assistant_blocks(vec![
+                AssistantContentBlock::Reasoning {
+                    text: "need simple arithmetic".to_string(),
+                },
+                AssistantContentBlock::Text {
+                    text: "2".to_string(),
+                },
+            ]),
+        ]);
+        request.chat_options.add_generation_prompt = false;
+
+        let rendered = render(Some(QWEN3_0_6B_TEMPLATE), &request).unwrap();
+
+        expect![[r#"
+            <|im_start|>user
+            What is 1 + 1?<|im_end|>
+            <|im_start|>assistant
+            <think>
+            need simple arithmetic
+            </think>
+
+            2<|im_end|>
+        "#]]
+        .assert_eq(&rendered);
     }
 }
