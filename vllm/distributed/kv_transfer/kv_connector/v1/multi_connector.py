@@ -219,6 +219,10 @@ class MultiConnector(KVConnectorBase_V1):
         for c in self._connectors:
             c.register_kv_caches(kv_caches)
 
+    def register_model(self, model: "torch.nn.Module") -> None:
+        for c in self._connectors:
+            c.register_model(model)
+
     # We must override the base class method here because we need to bind
     # the metadata to each connector in the order of the connectors in the
     # MultiKVConnectorMetadata.

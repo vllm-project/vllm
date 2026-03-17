@@ -513,6 +513,11 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         self.worker_adapter.register_kv_caches(kv_caches)
         return
 
+    def register_model(self, model: "torch.nn.Module") -> None:
+        """Register model — delegates to worker adapter."""
+        if hasattr(self.worker_adapter, "register_model"):
+            self.worker_adapter.register_model(model)
+
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs: Any) -> None:
         """
         Start loading the KV cache from the connector to vLLM's paged

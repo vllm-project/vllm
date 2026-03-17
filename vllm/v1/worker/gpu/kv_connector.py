@@ -47,7 +47,10 @@ class KVConnector:
 
 class ActiveKVConnector(KVConnector):
     def __init__(
-        self, vllm_config: VllmConfig, kv_caches_dict: dict[str, torch.Tensor]
+        self,
+        vllm_config: VllmConfig,
+        kv_caches_dict: dict[str, torch.Tensor],
+        model: torch.nn.Module | None = None,
     ):
         self.vllm_config = vllm_config
         self.kv_connector = get_kv_transfer_group()
@@ -56,6 +59,11 @@ class ActiveKVConnector(KVConnector):
         # (see https://github.com/vllm-project/vllm/pull/27743)
         self.kv_connector.register_kv_caches(kv_caches_dict)
         self.kv_connector.set_host_xfer_buffer_ops(copy_kv_blocks)
+
+        # Register model for connectors that need model weights
+        # (e.g. LMCache CacheBlend selective recomputation).
+        if model is not None:
+            self.kv_connector.register_model(model)
 
         self._disabled = False
 
@@ -125,10 +133,12 @@ NO_OP_KV_CONNECTOR = KVConnector()
 
 
 def get_kv_connector(
-    vllm_config: VllmConfig, kv_caches_dict: dict[str, torch.Tensor]
+    vllm_config: VllmConfig,
+    kv_caches_dict: dict[str, torch.Tensor],
+    model: torch.nn.Module | None = None,
 ) -> KVConnector:
     if not has_kv_transfer_group():
         # No-op connector.
         return NO_OP_KV_CONNECTOR
 
-    return ActiveKVConnector(vllm_config, kv_caches_dict)
+    return ActiveKVConnector(vllm_config, kv_caches_dict, model=model)

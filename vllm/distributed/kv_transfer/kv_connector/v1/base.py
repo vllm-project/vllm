@@ -264,6 +264,19 @@ class KVConnectorBase_V1(ABC):
         """
         return
 
+    def register_model(self, model: "torch.nn.Module") -> None:
+        """
+        Register the loaded vLLM model with the connector.
+
+        Connectors that need access to model weights (e.g. LMCache's
+        CacheBlend selective recomputation) can override this method.
+        Called after model loading and before inference begins.
+
+        Args:
+            model: the loaded vLLM model (nn.Module).
+        """
+        return
+
     def register_cross_layers_kv_cache(
         self, kv_cache: torch.Tensor, attn_backend: type["AttentionBackend"]
     ):

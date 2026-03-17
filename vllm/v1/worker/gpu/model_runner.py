@@ -363,7 +363,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.attn_backends,
             self.device,
         )
-        self.kv_connector = get_kv_connector(self.vllm_config, kv_caches_dict)
+        self.kv_connector = get_kv_connector(
+            self.vllm_config, kv_caches_dict, model=self.model
+        )
 
     @torch.inference_mode()
     def _dummy_run(
