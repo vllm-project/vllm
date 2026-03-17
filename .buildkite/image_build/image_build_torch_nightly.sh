@@ -15,6 +15,14 @@ BUILDKITE_COMMIT=$3
 BRANCH=$4
 IMAGE_TAG=$5
 
+# --- Arguments ---
+echo "--- :mag: Arguments"
+echo "REGISTRY: ${REGISTRY}"
+echo "REPO: ${REPO}"
+echo "BUILDKITE_COMMIT: ${BUILDKITE_COMMIT}"
+echo "BRANCH: ${BRANCH}"
+echo "IMAGE_TAG: ${IMAGE_TAG}"
+
 # --- ECR login ---
 echo "--- :key: ECR login"
 aws ecr-public get-login-password --region us-east-1 \
@@ -43,8 +51,7 @@ docker buildx build --file docker/Dockerfile \
   --build-arg buildkite_commit="$BUILDKITE_COMMIT" \
   --build-arg USE_SCCACHE=1 \
   --build-arg PYTORCH_NIGHTLY=1 \
-  --build-arg TORCH_CUDA_ARCH_LIST="8.0 8.9 9.0 10.0 12.0" \
-  --build-arg FI_TORCH_CUDA_ARCH_LIST="8.0 8.9 9.0a 10.0a 12.0a" \
+  --build-arg torch_cuda_arch_list="8.0 8.9 9.0 10.0 12.0" \
   --tag "$IMAGE_TAG" \
   --push \
   --target test \
