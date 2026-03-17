@@ -378,7 +378,7 @@ class GraniteMoeHybridModel(nn.Module):
                 hidden_states = inputs_embeds
             else:
                 hidden_states = self.embed_input_ids(input_ids)
-                hidden_states = hidden_states * self.embedding_multiplier
+            hidden_states *= self.embedding_multiplier
             residual = None
         else:
             if intermediate_tensors is None:

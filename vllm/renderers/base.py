@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
+import copy
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
@@ -75,6 +76,7 @@ class BaseRenderer(ABC, Generic[_T]):
 
         self.config = config
         self.model_config = config.model_config
+        self.api_process_rank = config.parallel_config._api_process_rank
 
         self.tokenizer = tokenizer
 
@@ -85,14 +87,21 @@ class BaseRenderer(ABC, Generic[_T]):
         self._mm_cache_stats: MultiModalCacheStats | None = None
         if config.model_config.is_multimodal_model:
             from vllm.multimodal import MULTIMODAL_REGISTRY as mm_registry
+            from vllm.multimodal.registry import MultiModalTimingRegistry
 
             mm_processor_cache = mm_registry.processor_cache_from_config(config)
+
+            # Deep-copy the tokenizer so the multimodal processor gets its
+            # own Rust tokenizer backend.  Without this, concurrent access
+            # from AsyncMicrobatchTokenizer and call_hf_processor causes
+            # "RuntimeError: Already borrowed" from the Rust RefCell.
+            # See: https://github.com/huggingface/tokenizers/issues/537
+            mm_tokenizer = copy.deepcopy(tokenizer)
 
             with set_default_torch_num_threads():
                 self.mm_processor = mm_registry.create_processor(
                     config.model_config,
-                    config.observability_config,
-                    tokenizer=tokenizer,
+                    tokenizer=mm_tokenizer,
                     cache=mm_processor_cache,
                 )
 
@@ -102,6 +111,9 @@ class BaseRenderer(ABC, Generic[_T]):
             # This is used to generate internal request ID for MM processing
             # It has no relation to the request ID for engine core
             self._mm_req_counter = AtomicCounter()
+            self._mm_timing_registry = MultiModalTimingRegistry(
+                config.observability_config
+            )
 
     def get_tokenizer(self) -> _T:
         tokenizer = self.tokenizer
@@ -153,6 +165,59 @@ class BaseRenderer(ABC, Generic[_T]):
 
         if self._mm_cache_stats is not None:
             self._mm_cache_stats.reset = True
+
+    def warmup(self, chat_params: ChatParams) -> None:
+        """
+        Warm up this renderer to avoid first-request latency.
+
+        For chat requests:
+        - Jinja2 template compilation
+
+        For multi-modal requests:
+        - Importing libraries such as librosa triggers JIT compilation.
+        """
+        from vllm.entrypoints.chat_utils import ChatTemplateResolutionError
+
+        try:
+            logger.debug("Warming up chat template processing...")
+            start_time = time.perf_counter()
+
+            self.render_chat([[{"role": "user", "content": "warmup"}]], chat_params)
+
+            elapsed = time.perf_counter() - start_time
+            logger.debug("Chat template warmup completed in %.3fs", elapsed)
+        except ChatTemplateResolutionError:
+            logger.debug("This model does not support chat template.")
+        except Exception:
+            logger.warning("Chat template warmup failed", exc_info=True)
+
+        if self.mm_processor:
+            from vllm.multimodal.processing import TimingContext
+
+            model_config = self.model_config
+            mm_config = model_config.get_multimodal_config()
+            processor = self.mm_processor
+            mm_limits = processor.info.allowed_mm_limits
+
+            try:
+                logger.debug("Warming up multi-modal processing...")
+                start_time = time.perf_counter()
+
+                processor_inputs = processor.dummy_inputs.get_dummy_processor_inputs(
+                    seq_len=model_config.max_model_len,
+                    mm_counts=dict.fromkeys(mm_limits, 1),
+                    mm_options=mm_config.limit_per_prompt,
+                )
+                _ = processor.apply(
+                    processor_inputs, timing_ctx=TimingContext(enabled=False)
+                )
+
+                elapsed = time.perf_counter() - start_time
+                logger.info("Multi-modal warmup completed in %.3fs", elapsed)
+            except Exception:
+                logger.warning("Multi-modal warmup failed")
+            finally:
+                self.clear_mm_cache()
 
     def shutdown(self) -> None:
         mm_processor_cache = self.mm_processor_cache
@@ -534,27 +599,30 @@ class BaseRenderer(ABC, Generic[_T]):
         tokenization_kwargs: dict[str, Any] | None,
     ) -> "MultiModalInputs":
         from vllm.multimodal.parse import parse_mm_uuids
-        from vllm.multimodal.processing.context import set_request_id
+        from vllm.multimodal.processing import ProcessorInputs as MMProcessorInputs
 
-        mm_req_id = f"renderer-mm-{self._mm_req_counter.inc(1)}"
+        mm_req_id = f"renderer{self.api_process_rank}-mm-{self._mm_req_counter.inc(1)}"
 
         mm_processor = self.get_mm_processor()
 
         mm_data_items = mm_processor.info.parse_mm_data(mm_data)
         mm_uuid_items = parse_mm_uuids(mm_uuids)
 
-        mm_uuids = self._process_mm_uuids(
+        mm_uuid_items = self._process_mm_uuids(
             mm_data, mm_data_items, mm_uuid_items, mm_req_id
         )
 
-        with set_request_id(mm_req_id), set_default_torch_num_threads():
-            mm_inputs = mm_processor.apply(
-                prompt,
-                mm_data_items,
-                mm_uuid_items,
-                hf_processor_mm_kwargs=mm_processor_kwargs,
-                tokenization_kwargs=tokenization_kwargs,
-            )
+        mm_processor_inputs = MMProcessorInputs(
+            prompt,
+            mm_data_items,
+            mm_uuid_items,
+            hf_processor_mm_kwargs=mm_processor_kwargs or {},
+            tokenization_kwargs=tokenization_kwargs or {},
+        )
+        mm_timing_ctx = self._mm_timing_registry.get(mm_req_id)
+
+        with set_default_torch_num_threads():
+            mm_inputs = mm_processor.apply(mm_processor_inputs, mm_timing_ctx)
 
         self.update_mm_cache_stats()
 

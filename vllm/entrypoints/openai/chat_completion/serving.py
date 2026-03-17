@@ -6,13 +6,12 @@ import json
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
-from typing import Any, Final
+from http import HTTPStatus
+from typing import TYPE_CHECKING, Any, Final
 
-import jinja2
 import partial_json_parser
 import regex as re
 from fastapi import Request
-from openai_harmony import Message as OpenAIMessage
 from partial_json_parser.core.options import Allow
 
 from vllm.engine.protocol import EngineClient
@@ -57,34 +56,29 @@ from vllm.entrypoints.openai.engine.serving import (
 )
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.openai.parser.harmony_utils import (
-    get_developer_message,
     get_stop_tokens_for_assistant_actions,
     get_streamable_parser_for_assistant,
-    get_system_message,
-    parse_chat_inputs_to_harmony_messages,
     parse_chat_output,
-    render_for_completion,
 )
 from vllm.entrypoints.openai.utils import maybe_filter_parallel_tool_calls
 from vllm.entrypoints.utils import get_max_tokens, should_include_usage
-from vllm.inputs.data import ProcessorInputs, TokensPrompt
+from vllm.inputs.data import ProcessorInputs
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.parser import ParserManager
 from vllm.reasoning import ReasoningParser
+from vllm.renderers import ChatParams
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import TokenizerLike
-from vllm.tokenizers.mistral import (
-    MistralTokenizer,
-    maybe_serialize_tool_calls,
-    truncate_tool_call_ids,
-    validate_request_params,
-)
 from vllm.tool_parsers import ToolParser
 from vllm.tool_parsers.mistral_tool_parser import MistralToolCall
 from vllm.tool_parsers.utils import partial_json_loads
 from vllm.utils.collection_utils import as_list
+from vllm.utils.mistral import is_mistral_tokenizer
+
+if TYPE_CHECKING:
+    from vllm.entrypoints.serve.render.serving import OpenAIServingRender
 
 logger = init_logger(__name__)
 
@@ -96,6 +90,7 @@ class OpenAIServingChat(OpenAIServing):
         models: OpenAIServingModels,
         response_role: str,
         *,
+        openai_serving_render: "OpenAIServingRender",
         request_logger: RequestLogger | None,
         chat_template: str | None,
         chat_template_content_format: ChatTemplateContentFormatOption,
@@ -109,7 +104,6 @@ class OpenAIServingChat(OpenAIServing):
         enable_force_include_usage: bool = False,
         enable_log_outputs: bool = False,
         enable_log_deltas: bool = True,
-        log_error_stack: bool = False,
         default_chat_template_kwargs: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(
@@ -117,9 +111,9 @@ class OpenAIServingChat(OpenAIServing):
             models=models,
             request_logger=request_logger,
             return_tokens_as_token_ids=return_tokens_as_token_ids,
-            log_error_stack=log_error_stack,
         )
 
+        self.openai_serving_render = openai_serving_render
         self.response_role = response_role
         self.chat_template = chat_template
         self.chat_template_content_format: Final = chat_template_content_format
@@ -178,51 +172,24 @@ class OpenAIServingChat(OpenAIServing):
         self.supports_code_interpreter = False
         self.python_tool = None
 
-    async def warmup(self) -> None:
-        """
-        Warm up the chat template processing to avoid first-request latency.
-
-        This method triggers Jinja2 template compilation and content format
-        detection that would otherwise happen on the first real request,
-        causing increased latency on the first request.
-        """
-        logger.info("Warming up chat template processing...")
-        start_time = time.perf_counter()
-
-        try:
-            # Create a minimal dummy request
-            dummy_request = ChatCompletionRequest(
-                messages=[{"role": "user", "content": "warmup"}],
-                model=None,
-                max_completion_tokens=1,
+    def warmup(self) -> None:
+        self.renderer.warmup(
+            ChatParams(
+                chat_template=self.chat_template,
+                chat_template_content_format=self.chat_template_content_format,
+                chat_template_kwargs=self.default_chat_template_kwargs,
             )
-
-            # Call _preprocess_chat to trigger template compilation
-            # This forces:
-            # 1. Chat template content format detection
-            # 2. Jinja2 template compilation
-            # 3. Tokenizer initialization for chat
-            await self._preprocess_chat(
-                dummy_request,
-                dummy_request.messages,
-                default_template=self.chat_template,
-                default_template_content_format=self.chat_template_content_format,
-                default_template_kwargs=self.default_chat_template_kwargs,
-            )
-
-            elapsed = (time.perf_counter() - start_time) * 1000
-            logger.info("Chat template warmup completed in %.1fms", elapsed)
-
-        except Exception:
-            # Log but don't fail server startup if warmup fails
-            logger.exception("Chat template warmup failed")
+        )
 
     async def render_chat_request(
         self,
         request: ChatCompletionRequest,
     ) -> tuple[list[ConversationMessage], list[ProcessorInputs]] | ErrorResponse:
         """
-        render chat request by validating and preprocessing inputs.
+        Validate the model and preprocess a chat completion request.
+
+        Delegates preprocessing logic to OpenAIServingRender, adding the
+        engine-aware checks (LoRA model validation, engine health).
 
         Returns:
             A tuple of (conversation, engine_prompts) on success,
@@ -239,83 +206,7 @@ class OpenAIServingChat(OpenAIServing):
         if self.engine_client.errored:
             raise self.engine_client.dead_error
 
-        try:
-            tokenizer = self.renderer.tokenizer
-
-            tool_parser = self.tool_parser
-
-            if isinstance(tokenizer, MistralTokenizer):
-                # because of issues with pydantic we need to potentially
-                # re-serialize the tool_calls field of the request
-                # for more info: see comment in `maybe_serialize_tool_calls`
-                maybe_serialize_tool_calls(request)  # type: ignore[arg-type]
-                truncate_tool_call_ids(request)  # type: ignore[arg-type]
-                validate_request_params(request)
-
-            # Check if tool parsing is unavailable (common condition)
-            tool_parsing_unavailable = (
-                tool_parser is None
-                and not isinstance(tokenizer, MistralTokenizer)
-                and not self.use_harmony
-            )
-
-            # Validate tool_choice when tool parsing is required but unavailable
-            if tool_parsing_unavailable and request.tool_choice not in (
-                None,
-                "none",
-            ):
-                if request.tool_choice == "auto" and not self.enable_auto_tools:
-                    # for hf tokenizers, "auto" tools requires
-                    # --enable-auto-tool-choice and --tool-call-parser
-                    return self.create_error_response(
-                        '"auto" tool choice requires '
-                        "--enable-auto-tool-choice and --tool-call-parser to be set"
-                    )
-                elif request.tool_choice != "auto":
-                    # "required" or named tool requires tool parser
-                    return self.create_error_response(
-                        f'tool_choice="{request.tool_choice}" requires '
-                        "--tool-call-parser to be set"
-                    )
-
-            if request.tools is None or (
-                request.tool_choice == "none"
-                and self.exclude_tools_when_tool_choice_none
-            ):
-                tool_dicts = None
-            else:
-                tool_dicts = [tool.model_dump() for tool in request.tools]
-
-            if not self.use_harmony:
-                # Common case.
-                error_check_ret = self._validate_chat_template(
-                    request_chat_template=request.chat_template,
-                    chat_template_kwargs=request.chat_template_kwargs,
-                    trust_request_chat_template=self.trust_request_chat_template,
-                )
-                if error_check_ret is not None:
-                    return error_check_ret
-
-                conversation, engine_prompts = await self._preprocess_chat(
-                    request,
-                    request.messages,
-                    default_template=self.chat_template,
-                    default_template_content_format=self.chat_template_content_format,
-                    default_template_kwargs=self.default_chat_template_kwargs,
-                    tool_dicts=tool_dicts,
-                    tool_parser=tool_parser,
-                )
-            else:
-                # For GPT-OSS.
-                should_include_tools = tool_dicts is not None
-                conversation, engine_prompts = self._make_request_with_harmony(
-                    request, should_include_tools
-                )
-        except (ValueError, TypeError, RuntimeError, jinja2.TemplateError) as e:
-            logger.exception("Error in preprocessing prompt inputs")
-            return self.create_error_response(e)
-
-        return conversation, engine_prompts
+        return await self.openai_serving_render.render_chat(request)
 
     async def create_chat_completion(
         self,
@@ -333,20 +224,16 @@ class OpenAIServingChat(OpenAIServing):
         tokenizer = self.renderer.tokenizer
         assert tokenizer is not None
         reasoning_parser: ReasoningParser | None = None
-        try:
-            if self.reasoning_parser_cls:
-                # Pass the same chat template kwargs as used in tokenization
-                chat_template_kwargs = self._prepare_extra_chat_template_kwargs(
-                    request.chat_template_kwargs,
-                    self.default_chat_template_kwargs,
-                )
-                reasoning_parser = self.reasoning_parser_cls(
-                    tokenizer,
-                    chat_template_kwargs=chat_template_kwargs,  # type: ignore[call-arg]
-                )
-        except RuntimeError as e:
-            logger.exception("Error in reasoning parser creation.")
-            return self.create_error_response(str(e))
+        if self.reasoning_parser_cls:
+            # Pass the same chat template kwargs as used in tokenization
+            chat_template_kwargs = self._prepare_extra_chat_template_kwargs(
+                request.chat_template_kwargs,
+                self.default_chat_template_kwargs,
+            )
+            reasoning_parser = self.reasoning_parser_cls(
+                tokenizer,
+                chat_template_kwargs=chat_template_kwargs,  # type: ignore[call-arg]
+            )
         result = await self.render_chat_request(request)
         if isinstance(result, ErrorResponse):
             return result
@@ -361,15 +248,9 @@ class OpenAIServingChat(OpenAIServing):
         if raw_request:
             raw_request.state.request_metadata = request_metadata
 
-        try:
-            lora_request = self._maybe_get_adapters(
-                request, supports_default_mm_loras=True
-            )
+        lora_request = self._maybe_get_adapters(request, supports_default_mm_loras=True)
 
-            model_name = self.models.model_name(lora_request)
-        except (ValueError, TypeError, RuntimeError) as e:
-            logger.exception("Error preparing request components")
-            return self.create_error_response(e)
+        model_name = self.models.model_name(lora_request)
 
         # Extract data_parallel_rank from header (router can inject it)
         data_parallel_rank = self._get_data_parallel_rank(raw_request)
@@ -377,81 +258,79 @@ class OpenAIServingChat(OpenAIServing):
         # Schedule the request and get the result generator.
         max_model_len = self.model_config.max_model_len
         generators: list[AsyncGenerator[RequestOutput, None]] = []
-        try:
-            for i, engine_prompt in enumerate(engine_prompts):
-                prompt_token_ids = self._extract_prompt_components(
-                    engine_prompt
-                ).token_ids
+        for i, engine_prompt in enumerate(engine_prompts):
+            prompt_token_ids = self._extract_prompt_components(engine_prompt).token_ids
 
-                # If we are creating sub requests for multiple prompts, ensure that they
-                # have unique request ids.
-                sub_request_id = (
-                    request_id if len(engine_prompts) == 1 else f"{request_id}_{i}"
+            # If we are creating sub requests for multiple prompts, ensure that they
+            # have unique request ids.
+            sub_request_id = (
+                request_id if len(engine_prompts) == 1 else f"{request_id}_{i}"
+            )
+
+            max_tokens = get_max_tokens(
+                max_model_len,
+                request.max_completion_tokens
+                if request.max_completion_tokens is not None
+                else request.max_tokens,
+                self._extract_prompt_len(engine_prompt),
+                self.default_sampling_params,
+                self.override_max_tokens,
+            )
+
+            sampling_params: SamplingParams | BeamSearchParams
+            if request.use_beam_search:
+                sampling_params = request.to_beam_search_params(
+                    max_tokens, self.default_sampling_params
                 )
-
-                max_tokens = get_max_tokens(
-                    max_model_len,
-                    request.max_completion_tokens
-                    if request.max_completion_tokens is not None
-                    else request.max_tokens,
-                    self._extract_prompt_len(engine_prompt),
+            else:
+                sampling_params = request.to_sampling_params(
+                    max_tokens,
                     self.default_sampling_params,
-                    self.override_max_tokens,
                 )
 
-                sampling_params: SamplingParams | BeamSearchParams
-                if request.use_beam_search:
-                    sampling_params = request.to_beam_search_params(
-                        max_tokens, self.default_sampling_params
-                    )
-                else:
-                    sampling_params = request.to_sampling_params(
-                        max_tokens,
-                        self.default_sampling_params,
-                    )
+            self._log_inputs(
+                sub_request_id,
+                engine_prompt,
+                params=sampling_params,
+                lora_request=lora_request,
+            )
 
-                self._log_inputs(
-                    sub_request_id,
-                    engine_prompt,
+            trace_headers = (
+                None
+                if raw_request is None
+                else await self._get_trace_headers(raw_request.headers)
+            )
+
+            if isinstance(sampling_params, BeamSearchParams):
+                generator = self.beam_search(
+                    prompt=engine_prompt,
+                    request_id=sub_request_id,
                     params=sampling_params,
                     lora_request=lora_request,
+                    trace_headers=trace_headers,
                 )
-
-                trace_headers = (
-                    None
-                    if raw_request is None
-                    else await self._get_trace_headers(raw_request.headers)
-                )
-
-                if isinstance(sampling_params, BeamSearchParams):
-                    generator = self.beam_search(
-                        prompt=engine_prompt,
-                        request_id=sub_request_id,
-                        params=sampling_params,
-                        lora_request=lora_request,
-                        trace_headers=trace_headers,
+            else:
+                if not request.include_reasoning:
+                    reasoning_ended = True
+                elif reasoning_parser:
+                    reasoning_ended = reasoning_parser.is_reasoning_end(
+                        prompt_token_ids or []
                     )
                 else:
-                    reasoning_ended = (
-                        reasoning_parser.is_reasoning_end(prompt_token_ids or [])
-                        if reasoning_parser
-                        else None
-                    )
+                    reasoning_ended = None
 
-                    generator = self.engine_client.generate(
-                        engine_prompt,
-                        sampling_params,
-                        sub_request_id,
-                        lora_request=lora_request,
-                        trace_headers=trace_headers,
-                        priority=request.priority,
-                        data_parallel_rank=data_parallel_rank,
-                        reasoning_ended=reasoning_ended,
-                    )
+                generator = self.engine_client.generate(
+                    engine_prompt,
+                    sampling_params,
+                    sub_request_id,
+                    lora_request=lora_request,
+                    trace_headers=trace_headers,
+                    priority=request.priority,
+                    data_parallel_rank=data_parallel_rank,
+                    reasoning_ended=reasoning_ended,
+                )
 
-                generators.append(generator)
-        except ValueError as e:
-            return self.create_error_response(e)
+            generators.append(generator)
 
         assert len(generators) == 1
         (result_generator,) = generators
@@ -468,21 +347,16 @@ class OpenAIServingChat(OpenAIServing):
                 reasoning_parser,
             )
 
-        try:
-            return await self.chat_completion_full_generator(
-                request,
-                result_generator,
-                request_id,
-                model_name,
-                conversation,
-                tokenizer,
-                request_metadata,
-                reasoning_parser,
-            )
-        except GenerationError as e:
-            return self._convert_generation_error_to_response(e)
-        except ValueError as e:
-            return self.create_error_response(e)
+        return await self.chat_completion_full_generator(
+            request,
+            result_generator,
+            request_id,
+            model_name,
+            conversation,
+            tokenizer,
+            request_metadata,
+            reasoning_parser,
+        )
 
     def get_chat_request_role(self, request: ChatCompletionRequest) -> str:
         if request.add_generation_prompt:
@@ -639,8 +513,6 @@ class OpenAIServingChat(OpenAIServing):
         request_metadata: RequestResponseMetadata,
         reasoning_parser: ReasoningParser | None = None,
     ) -> AsyncGenerator[str, None]:
-        from vllm.tokenizers.mistral import MistralTokenizer
-
         created_time = int(time.time())
         chunk_object_type: Final = "chat.completion.chunk"
         first_iteration = True
@@ -900,6 +772,17 @@ class OpenAIServingChat(OpenAIServing):
                         harmony_tools_streamed[i] |= tools_streamed_flag
                     # handle streaming deltas for tools with named tool_choice
                     elif tool_choice_function_name:
+                        # When encountering think end id in prompt_token_ids
+                        # i.e {"enable_thinking": False},
+                        # check BEFORE calling the parser to avoid a spurious
+                        # reasoning delta on the first chunk.
+                        if (
+                            reasoning_parser
+                            and not reasoning_end_arr[i]
+                            and prompt_is_reasoning_end_arr[i]
+                        ):
+                            reasoning_end_arr[i] = True
+
                         if (
                             reasoning_parser
                             and not reasoning_end_arr[i]
@@ -918,16 +801,11 @@ class OpenAIServingChat(OpenAIServing):
                                     output.token_ids,
                                 )
                             )
-                            # When encountering think end id in delta_token_ids
-                            # or think end id in prompt_token_ids
-                            # i.e {"enable_thinking": False},
+                            # When encountering think end id in delta_token_ids,
                             # set reasoning status to end.
                             # Only keep 'content', remove 'reasoning'.
-                            if (
-                                reasoning_parser.is_reasoning_end(
-                                    as_list(output.token_ids)
-                                )
-                                or prompt_is_reasoning_end_arr[i]
+                            if reasoning_parser.is_reasoning_end(
+                                as_list(output.token_ids)
                             ):
                                 reasoning_end_arr[i] = True
                                 if delta_message and delta_message.content:
@@ -949,7 +827,7 @@ class OpenAIServingChat(OpenAIServing):
                                 )
                             else:
                                 # Generate ID based on tokenizer type
-                                if isinstance(tokenizer, MistralTokenizer):
+                                if is_mistral_tokenizer(tokenizer):
                                     tool_call_id = MistralToolCall.generate_random_id()
                                 else:
                                     tool_call_id = make_tool_call_id(
@@ -1116,14 +994,23 @@ class OpenAIServingChat(OpenAIServing):
 
                     # when only reasoning
                     elif reasoning_parser:
-                        delta_message = reasoning_parser.extract_reasoning_streaming(
-                            previous_text,
-                            current_text,
-                            delta_text,
-                            previous_token_ids,
-                            current_token_ids,
-                            output.token_ids,
-                        )
+                        # When encountering think end id in prompt_token_ids
+                        # i.e {"enable_thinking": False},
+                        # set reasoning status to end.
+                        # Route all generated tokens as content directly.
+                        if prompt_is_reasoning_end_arr[i]:
+                            delta_message = DeltaMessage(content=delta_text)
+                        else:
+                            delta_message = (
+                                reasoning_parser.extract_reasoning_streaming(
+                                    previous_text,
+                                    current_text,
+                                    delta_text,
+                                    previous_token_ids,
+                                    current_token_ids,
+                                    output.token_ids,
+                                )
+                            )
                     # handle streaming just a content delta
                     else:
                         delta_message = DeltaMessage(content=delta_text)
@@ -1240,13 +1127,23 @@ class OpenAIServingChat(OpenAIServing):
                                 )
 
                             # get the expected call based on partial JSON
-                            # parsing which "autocompletes" the JSON
-                            expected_call = json.dumps(
-                                tool_parser.prev_tool_call_arr[index].get(
-                                    "arguments", {}
-                                ),
-                                ensure_ascii=False,
+                            # parsing which "autocompletes" the JSON.
+                            # Tool parsers (e.g. Qwen3Coder) store
+                            # arguments as a JSON string in
+                            # prev_tool_call_arr. Calling json.dumps()
+                            # on an already-serialized string would
+                            # double-serialize it (e.g. '{"k":1}' becomes
+                            # '"{\\"k\\":1}"'), which then causes the
+                            # replace() below to fail and append the
+                            # entire double-serialized string as a
+                            # spurious final delta.
+                            args = tool_parser.prev_tool_call_arr[index].get(
+                                "arguments", {}
                             )
+                            if isinstance(args, str):
+                                expected_call = args
+                            else:
+                                expected_call = json.dumps(args, ensure_ascii=False)
 
                             # get what we've streamed so far for arguments
                             # for the current tool
@@ -1395,10 +1292,13 @@ class OpenAIServingChat(OpenAIServing):
                 final_res = res
         except asyncio.CancelledError:
             return self.create_error_response("Client disconnected")
-        except ValueError as e:
-            return self.create_error_response(e)
 
-        assert final_res is not None
+        if final_res is None:
+            return self.create_error_response(
+                "No output received from the engine.",
+                err_type="InternalServerError",
+                status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
 
         choices: list[ChatCompletionResponseChoice] = []
         if self.tool_call_id_type == "kimi_k2":
@@ -1501,19 +1401,9 @@ class OpenAIServingChat(OpenAIServing):
                 tool_parser_cls=self.tool_parser,
             )
             tool_call_class = (
-                MistralToolCall if isinstance(tokenizer, MistralTokenizer) else ToolCall
+                MistralToolCall if is_mistral_tokenizer(tokenizer) else ToolCall
             )
-            if self.use_harmony:
-                # Harmony models already have parsed content and tool_calls
-                # through parse_chat_output. Respect its output directly.
-                message = ChatMessage(
-                    role=role,
-                    reasoning=reasoning,
-                    content=content,
-                    tool_calls=tool_calls if tool_calls else [],
-                )
-
-            elif (not self.enable_auto_tools or not self.tool_parser) and (
+            if (not self.enable_auto_tools or not self.tool_parser) and (
                 not isinstance(request.tool_choice, ChatCompletionNamedToolChoiceParam)
                 and request.tool_choice != "required"
             ):
@@ -1557,7 +1447,7 @@ class OpenAIServingChat(OpenAIServing):
 
             elif request.tool_choice and request.tool_choice == "required":
                 tool_call_class_items = []
-                assert tool_calls is not None and len(tool_calls) > 0
+                tool_calls = tool_calls or []
                 for idx, tool_call in enumerate(tool_calls):
                     # Use native ID if available,
                     # otherwise generate ID with correct id_type
@@ -1925,48 +1815,3 @@ class OpenAIServingChat(OpenAIServing):
                 )
             ]
         )
-
-    def _make_request_with_harmony(
-        self,
-        request: ChatCompletionRequest,
-        should_include_tools: bool = True,
-    ):
-        messages: list[OpenAIMessage] = []
-
-        # because of issues with pydantic we need to potentially
-        # re-serialize the tool_calls field of the request
-        # for more info: see comment in `maybe_serialize_tool_calls`
-        maybe_serialize_tool_calls(request)  # type: ignore[arg-type]
-
-        # Add system message.
-        # NOTE: In Chat Completion API, browsing is enabled by default
-        # if the model supports it. TODO: Support browsing.
-        assert not self.supports_browsing
-        assert not self.supports_code_interpreter
-        sys_msg = get_system_message(
-            reasoning_effort=request.reasoning_effort,
-            browser_description=None,
-            python_description=None,
-            with_custom_tools=should_include_tools,
-        )
-        messages.append(sys_msg)
-
-        # Add developer message.
-        if request.tools:
-            dev_msg = get_developer_message(
-                tools=request.tools if should_include_tools else None  # type: ignore[arg-type]
-            )
-            messages.append(dev_msg)
-
-        # Add user message.
-        messages.extend(parse_chat_inputs_to_harmony_messages(request.messages))
-
-        # Render prompt token ids.
-        prompt_token_ids = render_for_completion(messages)
-        engine_prompt = TokensPrompt(prompt_token_ids=prompt_token_ids)
-
-        # Add cache_salt if provided in the request
-        if request.cache_salt is not None:
-            engine_prompt["cache_salt"] = request.cache_salt
-
-        return messages, [engine_prompt]
