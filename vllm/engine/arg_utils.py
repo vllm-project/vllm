@@ -508,6 +508,7 @@ class EngineArgs:
     lora_dtype: str | torch.dtype | None = LoRAConfig.lora_dtype
     enable_tower_connector_lora: bool = LoRAConfig.enable_tower_connector_lora
     specialize_active_lora: bool = LoRAConfig.specialize_active_lora
+    enable_fp8_lora: bool = LoRAConfig.enable_fp8_lora
 
     ray_workers_use_nsight: bool = ParallelConfig.ray_workers_use_nsight
     num_gpu_blocks_override: int | None = CacheConfig.num_gpu_blocks_override
@@ -1111,6 +1112,7 @@ class EngineArgs:
         lora_group.add_argument(
             "--specialize-active-lora", **lora_kwargs["specialize_active_lora"]
         )
+        lora_group.add_argument("--enable-fp8-lora", **lora_kwargs["enable_fp8_lora"])
 
         # Observability arguments
         observability_kwargs = get_kwargs(ObservabilityConfig)
@@ -1802,6 +1804,7 @@ class EngineArgs:
                 lora_dtype=self.lora_dtype,
                 enable_tower_connector_lora=self.enable_tower_connector_lora,
                 specialize_active_lora=self.specialize_active_lora,
+                enable_fp8_lora=self.enable_fp8_lora,
                 max_cpu_loras=self.max_cpu_loras
                 if self.max_cpu_loras and self.max_cpu_loras > 0
                 else None,

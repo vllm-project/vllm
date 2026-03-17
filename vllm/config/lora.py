@@ -65,6 +65,10 @@ class LoRAConfig:
     for variable LoRA usage patterns at the cost of increased startup time and
     memory usage. Only takes effect when cudagraph_specialize_lora is True.
     """
+    enable_fp8_lora: bool = False
+    """When enabled, FP8  are used for LoRA computation.
+    LoRA weights are dynamically quantized to FP8 at compute time. This can improve 
+    throughput on reduce the LoRA memory."""
 
     def compute_hash(self) -> str:
         """
@@ -84,6 +88,7 @@ class LoRAConfig:
         factors.append(self.fully_sharded_loras)
         factors.append(self.lora_dtype)
         factors.append(self.enable_tower_connector_lora)
+        factors.append(self.enable_fp8_lora)
 
         hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
