@@ -3,11 +3,13 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use async_openai::Client;
 use async_openai::config::OpenAIConfig;
-use async_openai::types::chat::CreateChatCompletionStreamResponse;
+use async_openai::types::chat::{
+    ChatCompletionRequestUserMessageArgs, CreateChatCompletionRequest,
+    CreateChatCompletionRequestArgs,
+};
 use async_openai::types::models::ListModelResponse;
 use clap::Parser;
 use futures::StreamExt as _;
-use serde_json::json;
 use tokio::sync::oneshot;
 use tracing_subscriber::EnvFilter;
 use vllm_openai_server::{Config, serve};
@@ -27,7 +29,7 @@ struct Args {
     ready_timeout_secs: u64,
     #[arg(
         long,
-        default_value = "Write exactly 4 short numbered facts about Paris. Each fact must be on its own line. Do not add any introduction or conclusion."
+        default_value = "What is the capital of France? Answer with one word."
     )]
     prompt: String,
 }
@@ -121,33 +123,36 @@ async fn stream_completion(
     model: &str,
     prompt: &str,
 ) -> Result<String> {
-    // We have to pass a custom request here to set the `chat_template_kwargs` to disable thinking,
-    // which is not yet supported by the minimal Rust frontend.
-    let request = json!({
-        "model": model,
-        "stream": true,
-        "messages": [
-            {
-                "role": "user",
-                "content": prompt,
-            }
-        ],
-        "temperature": 0.0,
-        "max_completion_tokens": 128,
-        "chat_template_kwargs": {
-            "enable_thinking": false
-        }
-    });
+    // Keep this smoke test on async-openai's standard `create_stream` path so it exercises
+    // the ordinary typed chat-completions client without BYOT request/response types.
+    //
+    // The current async-openai chat-completions stream delta type does not expose our
+    // OpenAI-compatible `reasoning_content` extension field, so this example only validates the
+    // assistant role chunk, visible `content` deltas, and terminal finish chunk. Reasoning
+    // coverage lives in our own route tests and in the `vllm-chat` smoke example.
+    let request: CreateChatCompletionRequest = CreateChatCompletionRequestArgs::default()
+        .model(model)
+        .stream(true)
+        .temperature(0.0)
+        .max_completion_tokens(128u32)
+        .messages([ChatCompletionRequestUserMessageArgs::default()
+            .content(prompt)
+            .build()
+            .context("failed to build user chat message")?
+            .into()])
+        .build()
+        .context("failed to build chat completion request")?;
 
     let mut stream = client
         .chat()
-        .create_stream_byot::<_, CreateChatCompletionStreamResponse>(request)
+        .create_stream(request)
         .await
         .context("failed to create streaming chat completion")?;
 
     let mut final_text = String::new();
     let mut saw_role = false;
     let mut saw_finish_reason = false;
+    let mut saw_text = false;
 
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.context("streaming chat completion failed")?;
@@ -156,8 +161,12 @@ async fn stream_completion(
                 saw_role = true;
             }
             if let Some(delta) = choice.delta.content {
+                if !saw_text {
+                    print!("[answer] ");
+                }
                 print!("{delta}");
                 final_text.push_str(&delta);
+                saw_text = true;
             }
             if choice.finish_reason.is_some() {
                 saw_finish_reason = true;

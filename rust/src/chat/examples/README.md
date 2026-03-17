@@ -28,13 +28,12 @@ cargo run -p vllm-chat --example external_engine_chat_qwen -- \
 ```
 
 The example now defaults to `Qwen/Qwen3-0.6B`. The current `vllm-chat`
-request model stays text-only, but it now supports either plain string content
-or OpenAI-style text blocks. Tool use, reasoning fields, and multimodal parts
-are still out of scope. The example also sets
-`chat_options.template_kwargs["enable_thinking"] = false` so Qwen3 runs in
-non-thinking mode by default. It uses the Rust `tokenizers` library for the
-tokenizer itself, plus standard Hugging Face config files to load the chat
-template and EOS metadata.
+request model stays text-first and supports either plain string content or
+OpenAI-style text blocks, while the output side now emits structured assistant
+events and automatically separates reasoning blocks for supported models. Tool
+use and multimodal inputs are still out of scope. It uses the Rust
+`tokenizers` library for the tokenizer itself, plus standard Hugging Face
+config files to load the chat template and EOS metadata.
 
 IMPORTANT: Restart `vllm` each time you run the smoke test. The current headless
 engine cannot safely handle frontend reconnects after the client shuts down.

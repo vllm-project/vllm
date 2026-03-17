@@ -13,7 +13,8 @@ The project is organized as a Cargo workspace with 4 crates, layered bottom-up:
 │  vllm-openai-server             │  OpenAI-compatible HTTP API (axum)
 ├─────────────────────────────────┤
 │  vllm-chat                      │  Chat interface: message rendering,
-│                                 │  tokenization, streaming chat events
+│                                 │  tokenization, structured assistant
+│                                 │  events, reasoning parsing
 ├─────────────────────────────────┤
 │  vllm-llm                       │  Thin token-in/token-out facade over the
 │                                 │  engine client

@@ -1,12 +1,13 @@
 #![feature(coroutines)]
 #![feature(trait_alias)]
 
-//! Minimal text-only chat facade above [`vllm_llm`].
+//! Minimal chat facade above [`vllm_llm`].
 //!
 //! This crate keeps the northbound boundary intentionally small:
 //! `messages -> rendered prompt -> tokenized prompt -> engine request -> streamed structured
-//! events`. It is closer to vLLM's internal chat-rendering flow than to a full OpenAI-compatible
-//! surface.
+//! assistant events`. The request side remains text-first, while the response side can emit
+//! structured reasoning and final-answer blocks. It is closer to vLLM's internal chat-rendering
+//! flow than to a full OpenAI-compatible surface.
 
 pub use backend::{ChatBackend, DynChatBackend, SamplingHints};
 pub use error::{Error, Result};
@@ -34,10 +35,11 @@ use lower::lower_chat_request;
 use reasoning_parser::ParserFactory as ReasoningParserFactory;
 use vllm_llm::Llm;
 
-/// Text-only chat facade layered above [`vllm_llm::Llm`].
+/// Chat facade with a text-first request model layered above [`vllm_llm::Llm`].
 ///
 /// This mirrors the useful shape of vLLM's frontend pipeline:
-/// `messages -> rendered prompt -> tokenized prompt -> engine request -> streamed text events`.
+/// `messages -> rendered prompt -> tokenized prompt -> engine request -> streamed structured
+/// assistant events`.
 pub struct ChatLlm {
     llm: Llm,
     backend: DynChatBackend,

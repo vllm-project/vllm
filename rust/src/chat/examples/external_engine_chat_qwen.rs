@@ -3,7 +3,6 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 use futures::StreamExt as _;
-use serde_json::Value;
 use tracing_subscriber::EnvFilter;
 use vllm_chat::backends::hf::HfChatBackend;
 use vllm_chat::{
@@ -30,7 +29,6 @@ struct Args {
 
 const CLIENT_INDEX: u32 = 0;
 const OUTPUT_TIMEOUT_SECS: u64 = 120;
-const ENABLE_THINKING_KEY: &str = "enable_thinking";
 
 fn unique_request_id() -> String {
     format!("rust-chat-smoke-{}", uuid::Uuid::new_v4())
@@ -75,10 +73,6 @@ async fn main() -> Result<()> {
 
     let llm = Llm::new(client);
     let chat = ChatLlm::new(llm, backend);
-    let mut chat_options = ChatOptions::default();
-    chat_options
-        .template_kwargs
-        .insert(ENABLE_THINKING_KEY.to_string(), Value::Bool(false));
 
     let request = ChatRequest {
         request_id: request_id.clone(),
@@ -87,27 +81,39 @@ async fn main() -> Result<()> {
             temperature: Some(0.0),
             ..Default::default()
         },
-        chat_options,
+        chat_options: ChatOptions::default(),
     };
 
     println!("request_id={request_id}");
     println!("prompt={}", args.prompt);
-    println!("{ENABLE_THINKING_KEY}=false");
 
     let mut stream = chat
         .chat(request)
         .await
         .context("failed to submit chat request")?;
     let output = tokio::time::timeout(output_timeout, async {
+        let mut final_reasoning = String::new();
         let mut final_text = String::new();
         let mut final_token_ids = Vec::new();
         let mut finish_reason = None;
         let mut saw_start = false;
+        let mut saw_stream_output = false;
 
         while let Some(event) = stream.next().await.transpose()? {
             match event {
                 ChatEvent::Start => {
                     saw_start = true;
+                }
+                ChatEvent::BlockStart { kind, .. } => {
+                    if saw_stream_output {
+                        println!();
+                    }
+                    match kind {
+                        AssistantBlockKind::Reasoning => print!("[reasoning] "),
+                        AssistantBlockKind::Text => print!("[answer] "),
+                        AssistantBlockKind::ToolCall => print!("[tool] "),
+                    }
+                    saw_stream_output = true;
                 }
                 ChatEvent::Done {
                     message,
@@ -115,17 +121,19 @@ async fn main() -> Result<()> {
                     finish_reason: reason,
                     ..
                 } => {
+                    final_reasoning = message.reasoning();
                     final_text = message.text();
                     final_token_ids = token_ids;
                     finish_reason = reason;
                     break;
                 }
-                ChatEvent::BlockDelta { kind, delta, .. } => {
-                    if kind == AssistantBlockKind::Text {
+                ChatEvent::BlockDelta { kind, delta, .. } => match kind {
+                    AssistantBlockKind::Reasoning | AssistantBlockKind::Text => {
                         print!("{delta}");
                     }
-                }
-                ChatEvent::BlockStart { .. } | ChatEvent::BlockEnd { .. } => {}
+                    AssistantBlockKind::ToolCall => {}
+                },
+                ChatEvent::BlockEnd { .. } => {}
             }
         }
 
@@ -134,7 +142,7 @@ async fn main() -> Result<()> {
         if !saw_start {
             bail!("chat stream ended without a start event");
         }
-        Ok::<_, anyhow::Error>((final_text, final_token_ids, finish_reason))
+        Ok::<_, anyhow::Error>((final_reasoning, final_text, final_token_ids, finish_reason))
     })
     .await
     .context("timed out waiting for chat output")??;
@@ -143,9 +151,10 @@ async fn main() -> Result<()> {
         .await
         .context("failed to shut down chat client")?;
 
-    println!("final_text={:?}", output.0);
-    println!("final_token_ids={:?}", output.1);
-    println!("finish_reason={:?}", output.2);
+    println!("final_reasoning={:?}", output.0);
+    println!("final_text={:?}", output.1);
+    println!("final_token_ids={:?}", output.2);
+    println!("finish_reason={:?}", output.3);
 
     Ok(())
 }

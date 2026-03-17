@@ -8,7 +8,7 @@ use vllm_chat::ChatLlm;
 pub struct AppState {
     /// Public model ID returned by `/v1/models` and validated on chat requests.
     pub model_id: String,
-    /// Shared text-only chat facade used by all requests.
+    /// Shared chat facade used by all requests.
     pub chat: Arc<ChatLlm>,
 }
 
