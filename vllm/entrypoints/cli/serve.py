@@ -142,6 +142,12 @@ class ServeSubcommand(CLISubcommand):
             help="Launch a gRPC server instead of the HTTP OpenAI-compatible "
             "server. Requires: pip install vllm[grpc].",
         )
+        serve_parser.add_argument(
+            "--hip_online_tuning",
+            action="store_true",
+            default=False,
+            help="Enable AITER hipBLASLt online GEMM tuning. Disabled by default.",
+        )
         serve_parser.epilog = VLLM_SUBCMD_PARSER_EPILOG.format(subcmd=self.name)
         return serve_parser
 
