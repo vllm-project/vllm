@@ -257,4 +257,10 @@ class GptOssReasoningParser(ReasoningParser):
                 })
                 base_tag["format"]["triggers"].append("<|channel|>final")
 
+        # For tool_choice=required or named tool, force at least one triggered
+        # tag. This blocks <|channel|>final and EOS at the grammar level until
+        # the model has emitted at least one tool-call channel.
+        if tool_choice == "required" or isinstance(tool_choice, dict):
+            base_tag["format"]["at_least_one"] = True
+
         return json.dumps(base_tag)
