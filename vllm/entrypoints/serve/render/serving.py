@@ -460,9 +460,9 @@ class OpenAIServingRender:
             prompts.extend(prompt_to_seq(prompt_embeds))
         if prompt_input is not None:
             prompts.extend(prompt_to_seq(prompt_input))
-        return await self._preprocess_cmpl(request, prompts)
+        return await self.preprocess_cmpl(request, prompts)
 
-    async def _preprocess_cmpl(
+    async def preprocess_cmpl(
         self,
         request: Any,
         prompts: Sequence[PromptType | bytes],
