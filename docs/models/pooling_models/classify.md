@@ -14,7 +14,7 @@ Many classification models support both (sequence) classification and token clas
 
 The most fundamental application of classification models is to categorize input data into predefined classes.
 
-### cross-encoder models
+### Cross-encoder models
 
 Cross-encoder and reranker models are a subset of classification models that accept two prompts as input and output num_labels equal to 1. For more information on cross-encoder models, , please refer to [this page](score.md#cross-encoder-models).
 
@@ -249,7 +249,7 @@ More examples can be found here: [examples/pooling/classify](../../../examples/p
 
 #### Enable/disable activation
 
-You can enable or disable activation via use_activation.
+You can enable or disable activation via `use_activation`.
 
 #### Problem type (e.g. multi_label_classification)
 

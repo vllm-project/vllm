@@ -75,9 +75,9 @@ In addition, we have the following custom APIs:
     - Works with any [embedding model](../models/pooling_models/embed.md#supported-models), including multimodal models.
 - [Score API](../models/pooling_models/score.md#score-api) (`/score`)
     - Applicable to [score models](../models/pooling_models/score.md).
-- [Re-rank API](../models/pooling_models/score.md#re-rank-api) (`/rerank`, `/v1/rerank`, `/v2/rerank`)
-    - Implements [Jina AI's v1 re-rank API](https://jina.ai/reranker/)
-    - Also compatible with [Cohere's v1 & v2 re-rank APIs](https://docs.cohere.com/v2/reference/rerank)
+- [Rerank API](../models/pooling_models/score.md#rerank-api) (`/rerank`, `/v1/rerank`, `/v2/rerank`)
+    - Implements [Jina AI's v1 rerank API](https://jina.ai/reranker/)
+    - Also compatible with [Cohere's v1 & v2 rerank APIs](https://docs.cohere.com/v2/reference/rerank)
     - Jina and Cohere's APIs are very similar; Jina's includes extra information in the rerank endpoint's response.
 
 ## Chat Template

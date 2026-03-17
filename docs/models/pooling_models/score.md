@@ -2,7 +2,7 @@
 
 The Score models is designed to compute similarity scores between two input prompts. It supports three model types (aka `score_type`): `cross-encoder`, `late-interaction`, and `bi-encoder`.
 
-This functionality is supported through the offline `LLM.score(...)` API, along with several online APIs: the `/score` API and the Re-rank APIs available at `/rerank`, `/v1/rerank`, and `/v2/rerank`.
+This functionality is supported through the offline `LLM.score(...)` API, along with several online APIs: the `/score` API and the rerank APIs available at `/rerank`, `/v1/rerank`, and `/v2/rerank`.
 
 !!! note
     vLLM handles only the model inference component of RAG pipelines (such as embedding generation and reranking). For higher-level RAG orchestration, you should leverage integration frameworks like [LangChain](https://github.com/langchain-ai/langchain).
@@ -82,11 +82,11 @@ This functionality is supported through the offline `LLM.score(...)` API, along 
     vllm serve Qwen/Qwen3-VL-Reranker-2B --hf_overrides '{"architectures": ["Qwen3VLForSequenceClassification"],"classifier_from_token": ["no", "yes"],"is_original_qwen3_reranker": true}'
     ```
 
-### late-interaction models
+### Late-interaction models
 
 All models that support token embedding task also support using the score API to compute similarity scores by calculating the late interaction of two input prompts. See [this page](token_embed.md) for more information about token embedding models.
 
-### bi-encoder
+### Bi-encoder
 
 All models that support embedding task also support using the score API to compute similarity scores by calculating the cosine similarity of two input prompt's embeddings. See [this page](embed.md) for more information about embedding models.
 
@@ -328,17 +328,17 @@ Full example:
 - [examples/pooling/score/vision_score_api_online.py](../../../examples/pooling/score/vision_score_api_online.py)
 - [examples/pooling/score/vision_rerank_api_online.py](../../../examples/pooling/score/vision_rerank_api_online.py)
 
-### Re-rank API
+### Rerank API
 
-`/rerank`, `/v1/rerank`, and `/v2/rerank` APIs are compatible with both [Jina AI's re-rank API interface](https://jina.ai/reranker/) and
-[Cohere's re-rank API interface](https://docs.cohere.com/v2/reference/rerank) to ensure compatibility with
+`/rerank`, `/v1/rerank`, and `/v2/rerank` APIs are compatible with both [Jina AI's rerank API interface](https://jina.ai/reranker/) and
+[Cohere's rerank API interface](https://docs.cohere.com/v2/reference/rerank) to ensure compatibility with
 popular open-source tools.
 
 Code example: [examples/pooling/score/rerank_api_online.py](../../../examples/pooling/score/rerank_api_online.py)
 
 #### Parameters
 
-The following Re-rank API parameters are supported:
+The following rerank api parameters are supported:
 
 ```python
 --8<-- "vllm/entrypoints/pooling/base/protocol.py:pooling-common-params"
@@ -424,4 +424,4 @@ Example template file: [examples/pooling/score/template/nemotron-rerank.jinja](.
 
 ### Enable/disable activation
 
-You can enable or disable activation via use_activation only works for cross-encoder models.
+You can enable or disable activation via `use_activation` only works for cross-encoder models.

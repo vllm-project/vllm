@@ -448,7 +448,7 @@ More examples can be found here: [examples/pooling/embed](../../../examples/pool
 
 #### Enable/disable normalize
 
-You can enable or disable normalize via use_activation.
+You can enable or disable normalize via `use_activation`.
 
 #### Matryoshka Embeddings
 

@@ -5,7 +5,7 @@
 
     We plan to optimize pooling models in vLLM. Please comment on <https://github.com/vllm-project/vllm/issues/21796> if you have any suggestions!
 
-## What is the pooling model?
+## What are pooling models?
 
 Natural Language Processing (NLP) can be primarily divided into the following two types of tasks:
 - Natural Language Understanding (NLU)
