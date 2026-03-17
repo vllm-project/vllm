@@ -18,12 +18,11 @@ from vllm.distributed.kv_transfer.kv_connector.v1.p2p.p2p_nccl_engine import (
 )
 from vllm.distributed.parallel_state import get_world_group
 from vllm.logger import init_logger
-from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadata
-from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 
 if TYPE_CHECKING:
     from vllm.forward_context import ForwardContext
+    from vllm.v1.attention.backend import AttentionMetadata
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
@@ -160,9 +159,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
             Returns:
                 None. The function modifies `layer` in-place.
             """
-            if (
-                isinstance(attn_metadata, MLACommonMetadata) or layer.shape[1] == 2
-            ):  # MLA or FlashInfer
+            if layer.ndim == 3 or layer.shape[1] == 2:  # MLA or FlashInfer
                 num_block = kv_cache.shape[0]
                 self.check_tensors_except_dim(layer, kv_cache, 0)
                 if len(block_ids) == num_block:
@@ -216,6 +213,10 @@ class P2pNcclConnector(KVConnectorBase_V1):
 
                 layer = kv_cache[forward_context.virtual_engine]
 
+                # Skip non-standard KV caches (e.g. V3.2 Indexer
+                # uint8 cache) that should not be transferred.
+                if layer.dtype == torch.uint8:
+                    continue
                 kv_cache = self.p2p_nccl_engine.recv_tensor(
                     request.request_id + "#" + layer_name, remote_address
                 )
@@ -243,7 +244,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
         self,
         layer_name: str,
         kv_layer: torch.Tensor,
-        attn_metadata: AttentionMetadata,
+        attn_metadata: "AttentionMetadata",
         **kwargs: Any,
     ) -> None:
         """Start saving the KV cache of the layer from vLLM's paged buffer
@@ -284,9 +285,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
                 torch.Tensor: A tensor containing the extracted KV slices.
                 Returns None if the layout is unsupported.
             """
-            if (
-                isinstance(attn_metadata, MLACommonMetadata) or layer.shape[1] == 2
-            ):  # MLA or FlashInfer
+            if layer.ndim == 3 or layer.shape[1] == 2:  # MLA or FlashInfer
                 return layer[block_ids, ...]
 
             if layer.shape[0] == 2:  # FlashAttention
@@ -302,6 +301,15 @@ class P2pNcclConnector(KVConnectorBase_V1):
             remote_address = ip + ":" + str(port + self._rank)
 
             kv_cache = extract_kv_from_layer(kv_layer, request.block_ids)
+            if kv_cache is None:
+                logger.warning(
+                    "🚧Unsupported KV cache layout for layer %s, "
+                    "request_id:%s, shape:%s",
+                    layer_name,
+                    request_id,
+                    kv_layer.shape,
+                )
+                continue
             self.p2p_nccl_engine.send_tensor(
                 request_id + "#" + layer_name, kv_cache, remote_address
             )
