@@ -133,6 +133,7 @@ print(f"Data: {data!r}")
 The [score][vllm.LLM.score] method outputs similarity scores between sentence pairs.
 
 All models that support embedding task also support using the score API to compute similarity scores by calculating the cosine similarity of two input prompt's embeddings.
+
 ```python
 from vllm import LLM
 
@@ -205,7 +206,7 @@ these extra parameters are supported instead:
 
 #### Examples
 
-If the model has a [chat template](../../serving/openai_compatible_server.md#chat-template), you can replace `inputs` with a list of `messages` (same schema as [Chat API](#chat-api))
+If the model has a [chat template](../../serving/openai_compatible_server.md#chat-template), you can replace `inputs` with a list of `messages` (same schema as [Chat API](../../serving/openai_compatible_server.md#chat-api))
 which will be treated as a single prompt to the model. Here is a convenience function for calling the API while retaining OpenAI's type annotations:
 
 ??? code
@@ -305,3 +306,135 @@ and passing a list of `messages` in the request. Refer to the examples below for
         example below for details.
 
 Full example: [examples/pooling/embed/vision_embedding_online.py](../../../examples/pooling/embed/vision_embedding_online.py)
+
+
+### Cohere Embed API
+
+Our API is also compatible with [Cohere's Embed v2 API](https://docs.cohere.com/reference/embed) which adds support for some modern embedding feature such as truncation, output dimensions, embedding types, and input types. This endpoint works with any embedding model (including multimodal models).
+
+#### Cohere Embed API request parameters
+
+| Parameter | Type | Required | Description |
+| --------- | ---- | -------- | ----------- |
+| `model` | string | Yes | Model name |
+| `input_type` | string | No | Prompt prefix key (model-dependent, see below) |
+| `texts` | list[string] | No | Text inputs (use one of `texts`, `images`, or `inputs`) |
+| `images` | list[string] | No | Base64 data URI images |
+| `inputs` | list[object] | No | Mixed text and image content objects |
+| `embedding_types` | list[string] | No | Output types (default: `["float"]`) |
+| `output_dimension` | int | No | Truncate embeddings to this dimension (Matryoshka) |
+| `truncate` | string | No | `END`, `START`, or `NONE` (default: `END`) |
+
+#### Text embedding
+
+```bash
+curl -X POST "http://localhost:8000/v2/embed" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "Snowflake/snowflake-arctic-embed-m-v1.5",
+    "input_type": "query",
+    "texts": ["Hello world", "How are you?"],
+    "embedding_types": ["float"]
+  }'
+```
+
+??? console "Response"
+
+    ```json
+    {
+      "id": "embd-...",
+      "embeddings": {
+        "float": [
+          [0.012, -0.034, ...],
+          [0.056, 0.078, ...]
+        ]
+      },
+      "texts": ["Hello world", "How are you?"],
+      "meta": {
+        "api_version": {"version": "2"},
+        "billed_units": {"input_tokens": 12}
+      }
+    }
+    ```
+
+#### Mixed text and image inputs
+
+For multimodal models, you can embed images by passing base64 data URIs. The `inputs` field accepts a list of objects with mixed text and image content:
+
+```bash
+curl -X POST "http://localhost:8000/v2/embed" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "google/siglip-so400m-patch14-384",
+    "inputs": [
+      {
+        "content": [
+          {"type": "text", "text": "A photo of a cat"},
+          {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBOR..."}}
+        ]
+      }
+    ],
+    "embedding_types": ["float"]
+  }'
+```
+
+#### Embedding types
+
+The `embedding_types` parameter controls the output format. Multiple types can be requested in a single call:
+
+| Type | Description |
+| ---- | ----------- |
+| `float` | Raw float32 embeddings (default) |
+| `binary` | Bit-packed signed binary |
+| `ubinary` | Bit-packed unsigned binary |
+| `base64` | Little-endian float32 encoded as base64 |
+
+```bash
+curl -X POST "http://localhost:8000/v2/embed" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "Snowflake/snowflake-arctic-embed-m-v1.5",
+    "input_type": "query",
+    "texts": ["What is machine learning?"],
+    "embedding_types": ["float", "binary"]
+  }'
+```
+
+??? console "Response"
+
+    ```json
+    {
+      "id": "embd-...",
+      "embeddings": {
+        "float": [[0.012, -0.034, ...]],
+        "binary": [[42, -117, ...]]
+      },
+      "texts": ["What is machine learning?"],
+      "meta": {
+        "api_version": {"version": "2"},
+        "billed_units": {"input_tokens": 8}
+      }
+    }
+    ```
+
+#### Truncation
+
+The `truncate` parameter controls how inputs exceeding the model's maximum sequence length are handled:
+
+| Value | Behavior |
+| ----- | --------- |
+| `END` (default) | Keep the first tokens, drop the end |
+| `START` | Keep the last tokens, drop the beginning |
+| `NONE` | Return an error if the input is too long |
+
+#### Input type and prompt prefixes
+
+The `input_type` field selects a prompt prefix to prepend to each text input. The available values
+depend on the model:
+
+- **Models with `task_instructions` in `config.json`**: The keys from the `task_instructions` dict are
+  the valid `input_type` values and the corresponding value is prepended to each text.
+- **Models with `config_sentence_transformers.json` prompts**: The keys from the `prompts` dict are
+  the valid `input_type` values. For example, `Snowflake/snowflake-arctic-embed-xs` defines `"query"`,
+  so setting `input_type: "query"` prepends `"Represent this sentence for searching relevant passages: "`.
+- **Other models**: `input_type` is not accepted and will raise a validation error if passed.

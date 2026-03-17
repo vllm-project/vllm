@@ -81,4 +81,5 @@ for output in response.json()["data"]:
 ```
 
 ## More examples
+
 More examples can be found here: [examples/pooling/pooling](../../../examples/pooling/pooling)

@@ -53,7 +53,7 @@ We currently support the following OpenAI APIs:
     - Only applicable to [text generation models](../models/generative_models.md) with a [chat template](../serving/openai_compatible_server.md#chat-template).
     - *Note: `user` parameter is ignored.*
     - *Note:* Setting the `parallel_tool_calls` parameter to `false` ensures vLLM only returns zero or one tool call per request. Setting it to `true` (the default) allows returning more than one tool call per request. There is no guarantee more than one tool call will be returned if this is set to `true`, as that behavior is model dependent and not all models are designed to support parallel tool calls.
-- [Embeddings API](#embeddings-api) (`/v1/embeddings`)
+- [Embeddings API](../models/pooling_models/embed.md#openai-compatible-embeddings-api) (`/v1/embeddings`)
     - Only applicable to [embedding models](../models/pooling_models/embed.md).
 - [Transcriptions API](#transcriptions-api) (`/v1/audio/transcriptions`)
     - Only applicable to [Automatic Speech Recognition (ASR) models](../models/supported_models.md#transcription).
@@ -66,13 +66,16 @@ In addition, we have the following custom APIs:
 
 - [Tokenizer API](#tokenizer-api) (`/tokenize`, `/detokenize`)
     - Applicable to any model with a tokenizer.
-- [Pooling API](#pooling-api) (`/pooling`)
+- [Pooling API](../models/pooling_models/pooling.md#pooling-api-1) (`/pooling`)
     - Applicable to all [pooling models](../models/pooling_models/pooling.md).
-- [Classification API](#classification-api) (`/classify`)
+- [Classification API](../models/pooling_models/classify.md#classification-api) (`/classify`)
     - Only applicable to [classification models](../models/pooling_models/classify.md).
-- [Score API](#score-api) (`/score`)
+- [Cohere Embed API](../models/pooling_models/embed.md#cohere-embed-api) (`/v2/embed`)
+    - Compatible with [Cohere's Embed API](https://docs.cohere.com/reference/embed)
+    - Works with any [embedding model](../models/pooling_models.md), including multimodal models.
+- [Score API](../models/pooling_models/score.md#score-api) (`/score`)
     - Applicable to [score models](../models/pooling_models/score.md).
-- [Re-rank API](#re-rank-api) (`/rerank`, `/v1/rerank`, `/v2/rerank`)
+- [Re-rank API](../models/pooling_models/score.md#re-rank-api) (`/rerank`, `/v1/rerank`, `/v2/rerank`)
     - Implements [Jina AI's v1 re-rank API](https://jina.ai/reranker/)
     - Also compatible with [Cohere's v1 & v2 re-rank APIs](https://docs.cohere.com/v2/reference/rerank)
     - Jina and Cohere's APIs are very similar; Jina's includes extra information in the rerank endpoint's response.
