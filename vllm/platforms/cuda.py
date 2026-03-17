@@ -52,7 +52,7 @@ def _get_backend_priorities(
 ) -> list[AttentionBackendEnum]:
     """Get backend priorities with lazy import to avoid circular dependency."""
     if use_mla:
-        if device_capability.major == 10:
+        if device_capability.major >= 10:
             # Prefer FlashInfer at low head counts (FlashMLA uses padding)
             if num_heads is not None and num_heads <= 16:
                 sparse_backends = [
@@ -249,10 +249,20 @@ class CudaPlatformBase(Platform):
             except ImportError:
                 invalid_reasons = ["ImportError"]
             if invalid_reasons:
-                raise ValueError(
-                    f"Selected backend {selected_backend} is not valid for "
-                    f"this configuration. Reason: {invalid_reasons}"
-                )
+                if (invalid_reasons == ['sparse not supported']
+                        and attn_selector_config.use_sparse):
+                    logger.warning_once(
+                        'Selected backend %s does not support sparse. '
+                        'Falling back to dense MLA.', selected_backend)
+                    fallback = attn_selector_config._replace(use_sparse=False)
+                    invalid_reasons = backend_class.validate_configuration(
+                        device_capability=device_capability,
+                        **fallback._asdict())
+                if invalid_reasons:
+                    raise ValueError(
+                        f"Selected backend {selected_backend} is not valid for "
+                        f"this configuration. Reason: {invalid_reasons}"
+                    )
             else:
                 logger.info("Using %s backend.", selected_backend)
                 return selected_backend.get_path()
@@ -278,10 +288,28 @@ class CudaPlatformBase(Platform):
             f"{config_str}. Reasons: {reasons_str}."
         )
         if len(valid_backends_priorities) == 0:
-            raise ValueError(
-                f"No valid attention backend found for {cls.device_name} "
-                f"with {config_str}. Reasons: {reasons_str}."
-            )
+            # Fallback: if sparse MLA was requested but no sparse backend
+            # is valid on this device, retry with non-sparse (dense) MLA.
+            if attn_selector_config.use_sparse:
+                logger.warning_once(
+                    'No sparse MLA backend available on this device '
+                    '(compute capability %s). Falling back to dense MLA.',
+                    device_capability.as_version_str(),
+                )
+                fallback_config = attn_selector_config._replace(
+                    use_sparse=False)
+                valid_backends_priorities, fb_reasons = (
+                    cls.get_valid_backends(
+                        device_capability=device_capability,
+                        attn_selector_config=fallback_config,
+                        num_heads=num_heads,
+                    ))
+                all_invalid_reasons.update(fb_reasons)
+            if len(valid_backends_priorities) == 0:
+                raise ValueError(
+                    f"No valid attention backend found for {cls.device_name} "
+                    f"with {config_str}. Reasons: {reasons_str}."
+                )
 
         # We have found some valid backends. Select the one with the
         # highest priority.

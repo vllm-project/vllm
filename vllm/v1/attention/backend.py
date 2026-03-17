@@ -853,12 +853,17 @@ class MLAAttentionImpl(AttentionImplBase[T], Generic[T]):
             return
         from vllm import _custom_ops as ops
 
+        # The C++ op only understands 'auto' and 'fp8'/'fp8_e4m3'.
+        # For non-quantized dtypes (e.g. 'bfloat16'), use 'auto'.
+        effective_dtype = kv_cache_dtype
+        if kv_cache_dtype in ('bfloat16', 'float16'):
+            effective_dtype = 'auto'
         ops.concat_and_cache_mla(
             kv_c_normed,
             k_pe.squeeze(1),
             kv_cache,
             slot_mapping.flatten(),
-            kv_cache_dtype=kv_cache_dtype,
+            kv_cache_dtype=effective_dtype,
             scale=k_scale,
         )
 
@@ -920,12 +925,17 @@ class SparseMLAAttentionImpl(AttentionImplBase[T], Generic[T]):
             return
         from vllm import _custom_ops as ops
 
+        # The C++ op only understands 'auto' and 'fp8'/'fp8_e4m3'.
+        # For non-quantized dtypes (e.g. 'bfloat16'), use 'auto'.
+        effective_dtype = kv_cache_dtype
+        if kv_cache_dtype in ('bfloat16', 'float16'):
+            effective_dtype = 'auto'
         ops.concat_and_cache_mla(
             kv_c_normed,
             k_pe.squeeze(1),
             kv_cache,
             slot_mapping.flatten(),
-            kv_cache_dtype=kv_cache_dtype,
+            kv_cache_dtype=effective_dtype,
             scale=k_scale,
         )
 
