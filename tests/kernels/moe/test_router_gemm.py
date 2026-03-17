@@ -14,8 +14,14 @@ from vllm.utils.torch_utils import set_random_seed
 
 
 @pytest.mark.skipif(
-    not (current_platform.is_cuda() and current_platform.has_device_capability(90)),
-    reason="This test is skipped on non-CUDA platform.",
+    not (
+        current_platform.is_cuda()
+        and (
+            current_platform.is_device_capability(90)
+            or current_platform.is_device_capability_family(100)
+        )
+    ),
+    reason="This test only runs on CUDA Hopper or Blackwell platform.",
 )
 @pytest.mark.parametrize("batch_size", [1, 2, 4, 8])
 @pytest.mark.parametrize("input_dim", [360, 720, 1440, 2880])
