@@ -421,10 +421,10 @@ class Qwen2_5_VisionAttention(nn.Module):
 
 @support_torch_compile(
     dynamic_arg_dims={
-        "x": 0,
-        "cu_seqlens": 0,
-        "rotary_pos_emb_cos": 0,
-        "rotary_pos_emb_sin": 0,
+        "x": {0: "b"},
+        "cu_seqlens": {0: "b"},
+        "rotary_pos_emb_cos": {0: "b"},
+        "rotary_pos_emb_sin": {0: "b"},
     },
     enable_if=should_torch_compile_mm_encoder,
 )
@@ -483,7 +483,7 @@ class Qwen2_5_VisionBlock(nn.Module):
 
 @support_torch_compile(
     dynamic_arg_dims={
-        "x": 0,
+        "x": {0: "b"},
     },
     enable_if=should_torch_compile_mm_encoder,
 )
@@ -518,7 +518,7 @@ class Qwen2_5_VisionPatchEmbed(nn.Module):
 
 @support_torch_compile(
     dynamic_arg_dims={
-        "x": 0,
+        "x": {0: "b"},
     },
     enable_if=should_torch_compile_mm_encoder,
 )

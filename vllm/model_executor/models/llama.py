@@ -342,7 +342,7 @@ class LlamaDecoderLayer(nn.Module):
     # mark_unbacked_dims={"input_ids": 0},
     dynamic_arg_dims={
         "input_ids": {0: "b"},
-        "positions": {0: "b"},
+        "positions": {-1: "b"},
         "intermediate_tensors": {0: "b"},
         "inputs_embeds": {0: "b"},
     },

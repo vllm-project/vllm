@@ -314,7 +314,14 @@ class GLMTransformer(nn.Module):
         return hidden_states
 
 
-@support_torch_compile
+@support_torch_compile(
+    dynamic_arg_dims={
+        "input_ids": {0: "b"},
+        "positions": {-1: "b"},
+        "intermediate_tensors": {0: "b"},
+        "inputs_embeds": {0: "b"},
+    }
+)
 class ChatGLMModel(nn.Module, SupportsQuant):
     packed_modules_mapping = {
         "linear_proj.merged_proj": [
