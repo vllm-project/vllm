@@ -326,14 +326,20 @@ class DeepEPHTAll2AllManager(DeepEPAll2AllManagerBase):
 
         assert num_rdma_bytes is not None
         assert num_qps_per_rank is not None
-        return dict(
+        # TODO: remove platform-specific logic
+        # once ROCm DeepEP is updated with the latest APIs.
+        kwargs = dict(
             group=self.cpu_group,
             num_nvl_bytes=num_nvl_bytes,
             num_rdma_bytes=num_rdma_bytes,
             low_latency_mode=False,
             num_qps_per_rank=num_qps_per_rank,
-            explicitly_destroy=True,
         )
+        if not current_platform.is_rocm():
+            kwargs.update(
+                explicitly_destroy=True,
+            )
+        return kwargs
 
     def get_handle(self, kwargs):
         assert len(kwargs) == 0, (
