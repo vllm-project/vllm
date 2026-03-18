@@ -1,4 +1,4 @@
-# Score Models
+# Scoring Models
 
 The score models is designed to compute similarity scores between two input prompts. It supports three model types (aka `score_type`): `cross-encoder`, `late-interaction`, and `bi-encoder`.
 

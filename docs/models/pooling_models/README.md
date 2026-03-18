@@ -61,7 +61,7 @@ For more detailed information, please refer to the link below.
 - [Reward Models](reward.md)
 - [Token Classification Models](token_classify.md)
 - [Token Embedding Models](token_embed.md)
-- [Score Models](score.md)
+- [Scoring Models](score.md)
 - [Specific Model Examples](specific_models.md)
 
 ## Offline Inference
@@ -127,14 +127,15 @@ print(f"Data: {data!r}")
 
 Our online Server provides endpoints that correspond to the offline APIs:
 
-- [Embeddings API](embed.md#online-serving) is similar to `LLM.embed` and is applicable to sequence embedding models.
+- Corresponding to `LLM.embed`:
     - [Cohere Embed API](embed.md#cohere-embed-api) (`/v2/embed`)
     - [Openai-compatible Embeddings API](embed.md#openai-compatible-embeddings-api) (`/v1/embeddings`)
-- [Classification API](classify.md#online-serving)(`/classify`) is similar to `LLM.classify` and is applicable to sequence classification models.
-- [Score API](score.md#online-serving) is similar to `LLM.score` for score models.
+- Corresponding to `LLM.classify`:
+    - [Classification API](classify.md#online-serving)(`/classify`) 
+- Corresponding to `LLM.score`:
     - [Score API](score.md#score-api)(`/score`)
     - [Rerank API](score.md#rerank-api) (`/rerank`, `/v1/rerank`, `/v2/rerank`)
-- Pooling API(`/pooling`) is similar to `LLM.encode`, being applicable to all types of pooling models.
+- Pooling API (`/pooling`) is similar to `LLM.encode`, being applicable to all types of pooling models.
 
 The following introduces the Pooling API. For other APIs, please refer to the link above.
 

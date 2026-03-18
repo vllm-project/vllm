@@ -257,9 +257,9 @@ You can modify the `problem_type` via problem_type in the Hugging Face config. T
 
 Implement alignment with transformers [ForSequenceClassificationLoss](https://github.com/huggingface/transformers/blob/57bb6db6ee4cfaccc45b8d474dfad5a17811ca60/src/transformers/loss/loss_utils.py#L92).
 
-#### logit_bias (sigmoid_normalize)
+#### Logit bias
 
-You can modify the `logit_bias` through the logit_bias parameter in `vllm.config.PoolerConfig`.
+You can modify the `logit_bias` (also known as `sigmoid_normalize` in ...) through the logit_bias parameter in `vllm.config.PoolerConfig`.
 
 ### Removed Features
 

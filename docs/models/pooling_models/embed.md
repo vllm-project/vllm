@@ -10,13 +10,13 @@ Many embedding models support both (sequence) embedding and token embedding. For
 
 ## Typical Use Cases
 
-### Get embedding
+### Embedding
 
-The most basic use case of embedding models is get embedding.
+The most basic use case of embedding models is to embed the inputs, e.g. for RAG.
 
-### Get similarity scores
+### Pairwise Similarity
 
-Using the score API to compute similarity scores by calculating the cosine similarity of two input prompt's embeddings. See [Score API](score.md) for more information.
+You can compute pairwise similarity scores to build a similarity matrix using the [Score API](score.md).
 
 ## Supported Models
 
