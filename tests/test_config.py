@@ -1166,6 +1166,7 @@ def _update_fake_nested_overrides(target, overrides):
             if nested_target is not None and (
                 isinstance(nested_target, dict)
                 or isinstance(nested_target, PretrainedConfig)
+                or hasattr(nested_target, "__dict__")
             ):
                 _update_fake_nested_overrides(nested_target, value)
                 continue
@@ -1365,6 +1366,9 @@ def test_mtp_draft_model_config_preserves_mapping_target_hf_overrides():
 
     draft_model_config = speculative_config.draft_model_config
     assert callable(draft_model_config.hf_overrides)
+    assert draft_model_config.hf_overrides.get("text_config") == dict(
+        target_hf_overrides
+    )["text_config"]
     assert draft_model_config.hf_config.text_config.rope_parameters == {
         "rope_type": "yarn",
         "factor": 2.0,
@@ -1423,3 +1427,24 @@ def test_mtp_draft_model_config_callable_hf_overrides_is_picklable():
         restored_config.text_config.rope_parameters
         == _CALLABLE_TARGET_ROPE_PARAMETERS
     )
+
+
+@pytest.mark.skip_global_cleanup
+def test_mtp_draft_model_config_allows_non_dict_nested_override_values():
+    """Nested config attributes should allow scalar replacement values."""
+    target_hf_overrides = {
+        "text_config": None,
+    }
+    target_model_config = _make_fake_target_model_config(target_hf_overrides)
+
+    with patch("vllm.config.speculative.ModelConfig", _FakeDraftModelConfig):
+        speculative_config = SpeculativeConfig(
+            target_model_config=target_model_config,
+            target_parallel_config=ParallelConfig(),
+            method="mtp",
+            num_speculative_tokens=1,
+        )
+
+    draft_model_config = speculative_config.draft_model_config
+    assert draft_model_config.hf_config.text_config is None
+    assert draft_model_config.hf_config.model_type == "qwen3_5_mtp"

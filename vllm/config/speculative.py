@@ -80,6 +80,11 @@ class _DraftHfOverrides:
             hf_config = self.target_hf_overrides(hf_config)
         return SpeculativeConfig.hf_config_override(hf_config)
 
+    def get(self, key: str, default: Any = None) -> Any:
+        if isinstance(self.target_hf_overrides, Mapping):
+            return self.target_hf_overrides.get(key, default)
+        return default
+
 
 @config
 class SpeculativeConfig:
@@ -391,7 +396,11 @@ class SpeculativeConfig:
 
         for key, value in overrides.items():
             attr = getattr(config, key, None)
-            if attr is not None and isinstance(attr, PretrainedConfig):
+            if (
+                attr is not None
+                and isinstance(attr, PretrainedConfig)
+                and isinstance(value, dict)
+            ):
                 SpeculativeConfig._update_nested_hf_config(attr, value)
             else:
                 setattr(config, key, value)
