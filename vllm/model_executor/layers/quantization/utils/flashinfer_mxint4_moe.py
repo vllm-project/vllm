@@ -238,29 +238,32 @@ def flashinfer_trtllm_mxint4_moe(
     if routing_method_type == RoutingMethodType.DeepSeekV3:
         router_logits = router_logits.to(torch.float32)
 
-    out = trtllm_mxint4_block_scale_moe(
-        routing_logits=router_logits,
-        routing_bias=routing_bias,
-        hidden_states=x,
-        gemm1_weights=w13_weight_packed.data,
-        gemm1_weights_scale=w13_weight_scale.data,
-        gemm1_alpha=None,
-        gemm1_beta=None,
-        gemm1_clamp_limit=None,
-        gemm2_weights=w2_weight_packed.data,
-        gemm2_weights_scale=w2_weight_scale.data,
-        num_experts=global_num_experts,
-        top_k=top_k,
-        n_group=num_expert_group if num_expert_group is not None else 0,
-        topk_group=topk_group if topk_group is not None else 0,
-        intermediate_size=intermediate_size_per_partition,
-        local_expert_offset=ep_rank * local_num_experts,
-        local_num_experts=local_num_experts,
-        routed_scaling_factor=None,
-        routing_method_type=routing_method_type,
-        enable_pdl=None,
-        output=None,
-        tune_max_num_tokens=8192,
-    ).to(x.dtype)
+    # Disable autotune until
+    # https://github.com/flashinfer-ai/flashinfer/issues/2023 is resolved.
+    from vllm.utils.flashinfer import autotune
 
-    return out
+    with autotune(False):
+        return trtllm_mxint4_block_scale_moe(
+            routing_logits=router_logits,
+            routing_bias=routing_bias,
+            hidden_states=x,
+            gemm1_weights=w13_weight_packed.data,
+            gemm1_weights_scale=w13_weight_scale.data,
+            gemm1_alpha=None,
+            gemm1_beta=None,
+            gemm1_clamp_limit=None,
+            gemm2_weights=w2_weight_packed.data,
+            gemm2_weights_scale=w2_weight_scale.data,
+            num_experts=global_num_experts,
+            top_k=top_k,
+            n_group=num_expert_group if num_expert_group is not None else 0,
+            topk_group=topk_group if topk_group is not None else 0,
+            intermediate_size=intermediate_size_per_partition,
+            local_expert_offset=ep_rank * local_num_experts,
+            local_num_experts=local_num_experts,
+            routed_scaling_factor=None,
+            routing_method_type=routing_method_type,
+            enable_pdl=None,
+            output=None,
+            tune_max_num_tokens=8192,
+        ).to(x.dtype)

@@ -259,6 +259,13 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool | None,
     ):
+        # Skip this kernel during autotuning dummy run to avoid
+        # CUDA errors from incompatible autotuning (flashinfer#2023).
+        import vllm.utils.flashinfer as fi_utils
+
+        if fi_utils._is_fi_autotuning:
+            return
+
         from flashinfer.fused_moe.core import ActivationType
 
         activation_str_to_value_map = {
@@ -366,32 +373,38 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
             fc1_expert_weights = w1
             fc2_expert_weights = w2
 
-        _ = flashinfer_cutlass_fused_moe(
-            input=hidden_states,
-            token_selected_experts=topk_ids.to(torch.int),
-            token_final_scales=topk_weights,
-            fc1_expert_weights=fc1_expert_weights,
-            fc2_expert_weights=fc2_expert_weights,
-            fc1_expert_biases=fc1_expert_biases,
-            fc2_expert_biases=fc2_expert_biases,
-            swiglu_alpha=swiglu_alpha,
-            swiglu_beta=swiglu_beta,
-            swiglu_limit=swiglu_limit,
-            output=output,
-            output_dtype=self.out_dtype,
-            quant_scales=quant_scales,
-            input_sf=a1q_scale,
-            tp_size=self.tp_size,
-            tp_rank=self.tp_rank,
-            ep_size=self.ep_size,
-            ep_rank=self.ep_rank,
-            activation_type=activation_str_to_value_map[activation],
-            # Informs FlashInfer to use the block-scale decoding path when True
-            use_deepseek_fp8_block_scale=self.use_deepseek_fp8_block_scale,
-            use_mxfp8_act_scaling=use_mxfp8_act_scaling,
-            use_w4_group_scaling=use_w4_group_scaling,
-            tune_max_num_tokens=max(self.max_capture_size, 1),
-        )
+        # Disable autotune until
+        # https://github.com/flashinfer-ai/flashinfer/issues/2023 is resolved.
+        from vllm.utils.flashinfer import autotune
+
+        with autotune(False):
+            flashinfer_cutlass_fused_moe(
+                input=hidden_states,
+                token_selected_experts=topk_ids.to(torch.int),
+                token_final_scales=topk_weights,
+                fc1_expert_weights=fc1_expert_weights,
+                fc2_expert_weights=fc2_expert_weights,
+                fc1_expert_biases=fc1_expert_biases,
+                fc2_expert_biases=fc2_expert_biases,
+                swiglu_alpha=swiglu_alpha,
+                swiglu_beta=swiglu_beta,
+                swiglu_limit=swiglu_limit,
+                output=output,
+                output_dtype=self.out_dtype,
+                quant_scales=quant_scales,
+                input_sf=a1q_scale,
+                tp_size=self.tp_size,
+                tp_rank=self.tp_rank,
+                ep_size=self.ep_size,
+                ep_rank=self.ep_rank,
+                activation_type=activation_str_to_value_map[activation],
+                # Informs FlashInfer to use the block-scale decoding
+                # path when True
+                use_deepseek_fp8_block_scale=(self.use_deepseek_fp8_block_scale),
+                use_mxfp8_act_scaling=use_mxfp8_act_scaling,
+                use_w4_group_scaling=use_w4_group_scaling,
+                tune_max_num_tokens=max(self.max_capture_size, 1),
+            )
 
     def moe_sum(self, input: torch.Tensor, output: torch.Tensor) -> None:
         # No support for LoRA in flashinfer_cutlass_fused_moe.

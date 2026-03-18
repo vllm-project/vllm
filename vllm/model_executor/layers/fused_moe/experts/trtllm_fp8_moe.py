@@ -380,27 +380,32 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
             use_shuffled_weight = False
             hidden_states_scale = a1q_scale.t().contiguous()
 
-        return flashinfer.fused_moe.trtllm_fp8_block_scale_moe(
-            routing_logits=router_logits,
-            routing_bias=e_score_correction_bias,
-            hidden_states=hidden_states,
-            hidden_states_scale=hidden_states_scale,
-            gemm1_weights=w1,
-            gemm1_weights_scale=self.quant_config.w1_scale,
-            gemm2_weights=w2,
-            gemm2_weights_scale=self.quant_config.w2_scale,
-            num_experts=global_num_experts,
-            top_k=self.topk,
-            n_group=(num_expert_group or 0),
-            topk_group=(topk_group or 0),
-            intermediate_size=self.intermediate_size_per_partition,
-            local_expert_offset=self.ep_rank * self.local_num_experts,
-            local_num_experts=self.local_num_experts,
-            routed_scaling_factor=routed_scaling_factor,
-            routing_method_type=self.routing_method_type,
-            use_shuffled_weight=use_shuffled_weight,
-            fp8_quantization_type=fp8_quant_type,
-        )
+        # Disable autotune until
+        # https://github.com/flashinfer-ai/flashinfer/issues/2023 is resolved.
+        from vllm.utils.flashinfer import autotune
+
+        with autotune(False):
+            return flashinfer.fused_moe.trtllm_fp8_block_scale_moe(
+                routing_logits=router_logits,
+                routing_bias=e_score_correction_bias,
+                hidden_states=hidden_states,
+                hidden_states_scale=hidden_states_scale,
+                gemm1_weights=w1,
+                gemm1_weights_scale=self.quant_config.w1_scale,
+                gemm2_weights=w2,
+                gemm2_weights_scale=self.quant_config.w2_scale,
+                num_experts=global_num_experts,
+                top_k=self.topk,
+                n_group=(num_expert_group or 0),
+                topk_group=(topk_group or 0),
+                intermediate_size=self.intermediate_size_per_partition,
+                local_expert_offset=self.ep_rank * self.local_num_experts,
+                local_num_experts=self.local_num_experts,
+                routed_scaling_factor=routed_scaling_factor,
+                routing_method_type=self.routing_method_type,
+                use_shuffled_weight=use_shuffled_weight,
+                fp8_quantization_type=fp8_quant_type,
+            )
 
     def _apply_per_tensor(
         self,
@@ -437,28 +442,32 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
         if self.routing_method_type == RoutingMethodType.DeepSeekV3:
             router_logits = router_logits.to(torch.float32)
 
-        out = flashinfer.fused_moe.trtllm_fp8_per_tensor_scale_moe(
-            routing_logits=router_logits,
-            routing_bias=e_score_correction_bias,
-            hidden_states=hidden_states,
-            gemm1_weights=w1,
-            output1_scales_scalar=self._g1_scale_c,
-            output1_scales_gate_scalar=self._g1_alphas,
-            gemm2_weights=w2,
-            output2_scales_scalar=self._g2_alphas,
-            num_experts=global_num_experts,
-            top_k=self.topk,
-            n_group=num_expert_group or 0,
-            topk_group=topk_group or 0,
-            intermediate_size=self.intermediate_size_per_partition,
-            local_expert_offset=self.ep_rank * self.local_num_experts,
-            local_num_experts=self.local_num_experts,
-            routed_scaling_factor=routed_scaling_factor,
-            use_routing_scales_on_input=apply_router_weight_on_input,
-            routing_method_type=self.routing_method_type,
-            activation_type=activation_type,
-        )
-        return out
+        # Disable autotune until
+        # https://github.com/flashinfer-ai/flashinfer/issues/2023 is resolved.
+        from vllm.utils.flashinfer import autotune
+
+        with autotune(False):
+            return flashinfer.fused_moe.trtllm_fp8_per_tensor_scale_moe(
+                routing_logits=router_logits,
+                routing_bias=e_score_correction_bias,
+                hidden_states=hidden_states,
+                gemm1_weights=w1,
+                output1_scales_scalar=self._g1_scale_c,
+                output1_scales_gate_scalar=self._g1_alphas,
+                gemm2_weights=w2,
+                output2_scales_scalar=self._g2_alphas,
+                num_experts=global_num_experts,
+                top_k=self.topk,
+                n_group=num_expert_group or 0,
+                topk_group=topk_group or 0,
+                intermediate_size=self.intermediate_size_per_partition,
+                local_expert_offset=self.ep_rank * self.local_num_experts,
+                local_num_experts=self.local_num_experts,
+                routed_scaling_factor=routed_scaling_factor,
+                use_routing_scales_on_input=apply_router_weight_on_input,
+                routing_method_type=self.routing_method_type,
+                activation_type=activation_type,
+            )
 
     def apply(
         self,
