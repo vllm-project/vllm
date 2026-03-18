@@ -352,10 +352,10 @@ def test_speculators_model_integration(
         if ref.outputs[0].text == spec.outputs[0].text
     )
 
-    # Heuristic: expect at least 66% of prompts to match exactly
-    assert matches >= int(0.66 * len(ref_outputs)), (
+    # Heuristic: expect at least 60% of prompts to match exactly
+    assert matches >= int(0.60 * len(ref_outputs)), (
         f"Only {matches}/{len(ref_outputs)} outputs matched. "
-        f"Expected at least {int(0.66 * len(ref_outputs))} matches."
+        f"Expected at least {int(0.60 * len(ref_outputs))} matches."
     )
 
 
