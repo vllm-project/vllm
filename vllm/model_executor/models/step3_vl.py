@@ -937,13 +937,25 @@ class Step3VLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP)
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
-
         config = vllm_config.model_config.hf_config
         multimodal_config = vllm_config.model_config.multimodal_config
 
         self.config = config
         self.multimodal_config = multimodal_config
         self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
+
+        # NOTE: This behavior is consistent with the previous OOV handling,
+        # but does not currently handle the start/stop toks around the
+        # image features (<patch_start> <patch_end> <im_start> <im_end>)
+        # See: https://huggingface.co/stepfun-ai/step3/blob/main/processing_step3v.py#L323
+        #
+        # If this becomes an issue or we refactor to handle this using the
+        # processor info in the future, it would probably be best to handle
+        # those too.
+        self.configure_mm_token_handling(
+            self.config.text_config.vocab_size,
+            [self.config.image_token_id],
+        )
 
         with self._mark_tower_model(vllm_config, "image"):
             self.vision_model = Step3VisionTransformer(
@@ -1080,8 +1092,6 @@ class Step3VLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP)
         multimodal_embeddings: MultiModalEmbeddings | None = None,
         *,
         is_multimodal: torch.Tensor | None = None,
-        # Multi-modal token ID may exceed vocab size
-        handle_oov_mm_token: bool = True,
     ) -> torch.Tensor:
         # This is to satisfy the type checker for each overload
         if multimodal_embeddings is None or is_multimodal is None:
@@ -1091,7 +1101,6 @@ class Step3VLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP)
             input_ids,
             multimodal_embeddings=multimodal_embeddings,
             is_multimodal=is_multimodal,
-            handle_oov_mm_token=handle_oov_mm_token,
         )
 
     def forward(
