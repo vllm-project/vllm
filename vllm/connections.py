@@ -6,7 +6,7 @@ import functools
 import time
 from collections.abc import Callable, Coroutine, Mapping, MutableMapping
 from pathlib import Path
-from typing import Any, ParamSpec, TypeVar, overload
+from typing import Any, ParamSpec, TypeVar
 
 import aiohttp
 import requests
@@ -99,20 +99,10 @@ def _log_retry(
     )
 
 
-@overload
-def _retry(
-    fn: Callable[_P, Coroutine[Any, Any, _T]],
-) -> Callable[_P, Coroutine[Any, Any, _T]]: ...
-
-
-@overload
-def _retry(
+def _sync_retry(
     fn: Callable[_P, _T],
-) -> Callable[_P, _T]: ...
-
-
-def _retry(fn: Callable[_P, Any]) -> Callable[_P, Any]:
-    """Add retry logic with exponential backoff to a sync or async method.
+) -> Callable[_P, _T]:
+    """Add retry logic with exponential backoff to a sync method.
 
     The decorated method must accept ``timeout`` as a keyword argument.
     The decorator replaces it with a per-attempt timeout that grows by
@@ -120,46 +110,8 @@ def _retry(fn: Callable[_P, Any]) -> Callable[_P, Any]:
     hosts is absorbed.
     """
 
-    if asyncio.iscoroutinefunction(fn):
-
-        @functools.wraps(fn)
-        async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
-            base_timeout: float | None = kwargs.get("timeout")
-            max_retries = max(envs.VLLM_MEDIA_FETCH_MAX_RETRIES, 1)
-
-            for attempt in range(max_retries):
-                attempt_timeout = (
-                    base_timeout * (_RETRY_BACKOFF_FACTOR**attempt)
-                    if base_timeout is not None
-                    else None
-                )
-                try:
-                    return await fn(
-                        *args,
-                        **{**kwargs, "timeout": attempt_timeout},
-                    )
-                except Exception as e:
-                    if not _is_retryable(e) or attempt + 1 >= max_retries:
-                        raise
-                    backoff = _RETRY_BACKOFF_FACTOR**attempt
-                    _log_retry(
-                        args,
-                        kwargs,
-                        attempt,
-                        max_retries,
-                        attempt_timeout,
-                        e,
-                        backoff,
-                        base_timeout,
-                    )
-                    await asyncio.sleep(backoff)
-
-            raise AssertionError("unreachable")
-
-        return async_wrapper  # type: ignore[return-value]
-
     @functools.wraps(fn)
-    def sync_wrapper(*args: Any, **kwargs: Any) -> Any:
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
         base_timeout: float | None = kwargs.get("timeout")
         max_retries = max(envs.VLLM_MEDIA_FETCH_MAX_RETRIES, 1)
 
@@ -189,7 +141,55 @@ def _retry(fn: Callable[_P, Any]) -> Callable[_P, Any]:
 
         raise AssertionError("unreachable")
 
-    return sync_wrapper  # type: ignore[return-value]
+    return wrapper  # type: ignore[return-value]
+
+
+def _async_retry(
+    fn: Callable[_P, Coroutine[Any, Any, _T]],
+) -> Callable[_P, Coroutine[Any, Any, _T]]:
+    """Add retry logic with exponential backoff to an async method.
+
+    The decorated method must accept ``timeout`` as a keyword argument.
+    The decorator replaces it with a per-attempt timeout that grows by
+    ``_RETRY_BACKOFF_FACTOR`` on each retry so transient slowness on busy
+    hosts is absorbed.
+    """
+
+    @functools.wraps(fn)
+    async def wrapper(*args: Any, **kwargs: Any) -> Any:
+        base_timeout: float | None = kwargs.get("timeout")
+        max_retries = max(envs.VLLM_MEDIA_FETCH_MAX_RETRIES, 1)
+
+        for attempt in range(max_retries):
+            attempt_timeout = (
+                base_timeout * (_RETRY_BACKOFF_FACTOR**attempt)
+                if base_timeout is not None
+                else None
+            )
+            try:
+                return await fn(
+                    *args,
+                    **{**kwargs, "timeout": attempt_timeout},
+                )
+            except Exception as e:
+                if not _is_retryable(e) or attempt + 1 >= max_retries:
+                    raise
+                backoff = _RETRY_BACKOFF_FACTOR**attempt
+                _log_retry(
+                    args,
+                    kwargs,
+                    attempt,
+                    max_retries,
+                    attempt_timeout,
+                    e,
+                    backoff,
+                    base_timeout,
+                )
+                await asyncio.sleep(backoff)
+
+        raise AssertionError("unreachable")
+
+    return wrapper  # type: ignore[return-value]
 
 
 class HTTPConnection:
@@ -236,9 +236,13 @@ class HTTPConnection:
         allow_redirects: bool = True,
     ):
         self._validate_http_url(url)
-        return self.get_sync_client().get(
+
+        client = self.get_sync_client()
+        extra_headers = extra_headers or {}
+
+        return client.get(
             url,
-            headers=self._headers(**(extra_headers or {})),
+            headers=self._headers(**extra_headers),
             stream=stream,
             timeout=timeout,
             allow_redirects=allow_redirects,
@@ -253,9 +257,13 @@ class HTTPConnection:
         allow_redirects: bool = True,
     ):
         self._validate_http_url(url)
-        return (await self.get_async_client()).get(
+
+        client = await self.get_async_client()
+        extra_headers = extra_headers or {}
+
+        return client.get(
             url,
-            headers=self._headers(**(extra_headers or {})),
+            headers=self._headers(**extra_headers),
             timeout=timeout,
             allow_redirects=allow_redirects,
         )
@@ -275,7 +283,7 @@ class HTTPConnection:
             r.raise_for_status()
             return await extract(r)
 
-    @_retry
+    @_sync_retry
     def get_bytes(
         self,
         url: str,
@@ -290,7 +298,7 @@ class HTTPConnection:
             allow_redirects=allow_redirects,
         )
 
-    @_retry
+    @_async_retry
     async def async_get_bytes(
         self,
         url: str,
@@ -335,7 +343,7 @@ class HTTPConnection:
             timeout=timeout,
         )
 
-    @_retry
+    @_sync_retry
     def download_file(
         self,
         url: str,
@@ -359,7 +367,7 @@ class HTTPConnection:
                 save_path.unlink()
             raise
 
-    @_retry
+    @_async_retry
     async def async_download_file(
         self,
         url: str,
