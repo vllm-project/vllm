@@ -3,9 +3,9 @@
 
 import logging
 import os
-import pickle
 from collections import UserDict
 from dataclasses import MISSING, Field, asdict, dataclass, field
+from multiprocessing.reduction import ForkingPickler
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -1164,8 +1164,7 @@ def _update_fake_nested_overrides(target, overrides):
                 nested_target = getattr(target, key, None)
 
             if nested_target is not None and (
-                isinstance(nested_target, dict)
-                or isinstance(nested_target, PretrainedConfig)
+                isinstance(nested_target, (dict, PretrainedConfig))
                 or hasattr(nested_target, "__dict__")
             ):
                 _update_fake_nested_overrides(nested_target, value)
@@ -1208,7 +1207,6 @@ def _callable_target_hf_overrides(hf_config):
 
 
 class _FakeDraftModelConfig:
-
     def __init__(self, **kwargs):
         self.model = kwargs["model"]
         self.hf_overrides = kwargs["hf_overrides"]
@@ -1293,9 +1291,7 @@ def test_mtp_draft_model_config_preserves_target_hf_overrides():
 @pytest.mark.skip_global_cleanup
 def test_mtp_draft_model_config_preserves_callable_target_hf_overrides():
     """Test that callable target HF overrides are composed for MTP drafts."""
-    target_model_config = _make_fake_target_model_config(
-        _callable_target_hf_overrides
-    )
+    target_model_config = _make_fake_target_model_config(_callable_target_hf_overrides)
 
     with patch("vllm.config.speculative.ModelConfig", _FakeDraftModelConfig):
         speculative_config = SpeculativeConfig(
@@ -1366,9 +1362,10 @@ def test_mtp_draft_model_config_preserves_mapping_target_hf_overrides():
 
     draft_model_config = speculative_config.draft_model_config
     assert callable(draft_model_config.hf_overrides)
-    assert draft_model_config.hf_overrides.get("text_config") == dict(
-        target_hf_overrides
-    )["text_config"]
+    assert (
+        draft_model_config.hf_overrides.get("text_config")
+        == dict(target_hf_overrides)["text_config"]
+    )
     assert draft_model_config.hf_config.text_config.rope_parameters == {
         "rope_type": "yarn",
         "factor": 2.0,
@@ -1398,9 +1395,7 @@ def test_mtp_draft_model_config_keeps_default_hf_config_override():
 @pytest.mark.skip_global_cleanup
 def test_mtp_draft_model_config_callable_hf_overrides_is_picklable():
     """Composed callable overrides should remain picklable."""
-    target_model_config = _make_fake_target_model_config(
-        _callable_target_hf_overrides
-    )
+    target_model_config = _make_fake_target_model_config(_callable_target_hf_overrides)
 
     with patch("vllm.config.speculative.ModelConfig", _FakeDraftModelConfig):
         speculative_config = SpeculativeConfig(
@@ -1410,10 +1405,10 @@ def test_mtp_draft_model_config_callable_hf_overrides_is_picklable():
             num_speculative_tokens=1,
         )
 
-    serialized_overrides = pickle.dumps(
+    serialized_overrides = ForkingPickler.dumps(
         speculative_config.draft_model_config.hf_overrides
     )
-    restored_overrides = pickle.loads(serialized_overrides)
+    restored_overrides = ForkingPickler.loads(serialized_overrides)
     restored_config = restored_overrides(
         _FakeHFConfig(
             model_type="qwen3_5",
@@ -1424,8 +1419,7 @@ def test_mtp_draft_model_config_callable_hf_overrides_is_picklable():
 
     assert restored_config.model_type == "qwen3_5_mtp"
     assert (
-        restored_config.text_config.rope_parameters
-        == _CALLABLE_TARGET_ROPE_PARAMETERS
+        restored_config.text_config.rope_parameters == _CALLABLE_TARGET_ROPE_PARAMETERS
     )
 
 

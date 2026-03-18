@@ -377,9 +377,7 @@ class SpeculativeConfig:
                     isinstance(nested_target, dict)
                     or hasattr(nested_target, "__dict__")
                 ):
-                    SpeculativeConfig._update_nested_hf_config(
-                        nested_target, value
-                    )
+                    SpeculativeConfig._update_nested_hf_config(nested_target, value)
                     continue
 
             if isinstance(target, dict):
