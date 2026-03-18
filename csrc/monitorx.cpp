@@ -136,7 +136,10 @@ static PyObject* method_monitorx(PyObject* self, PyObject* args,
         break;
       }
 
-      Py_BEGIN_ALLOW_THREADS _mm_mwaitx(0, 0, 0);
+      // Run mwaitx with enabled timeout (bit 1). The actual timeout value
+      // is not very important, we just want to ensure we don't lock up
+      // here for too long.
+      Py_BEGIN_ALLOW_THREADS _mm_mwaitx((1 << 1), 0, 1000000);
       Py_END_ALLOW_THREADS
     }
 
