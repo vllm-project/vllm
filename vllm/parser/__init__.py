@@ -4,6 +4,7 @@
 from vllm.parser.abstract_parser import (
     DelegatingParser,
     Parser,
+    StreamingParseState,
     _WrappedParser,
 )
 from vllm.parser.parser_manager import ParserManager
@@ -12,6 +13,7 @@ __all__ = [
     "Parser",
     "DelegatingParser",
     "ParserManager",
+    "StreamingParseState",
     "_WrappedParser",
 ]
 
