@@ -5,9 +5,13 @@
 Run `pytest tests/kernels/helion/test_dynamic_per_token_scaled_fp8_quant.py`.
 """
 
+from typing import Any
+
 import pytest
 import torch
+from torch._subclasses.fake_tensor import FakeTensorMode
 
+from tests.kernels.helion.utils import skip_if_platform_unsupported
 from tests.kernels.quant_utils import FP8_DTYPE
 from vllm.kernels.helion.config_manager import ConfigManager
 from vllm.kernels.helion.ops.dynamic_per_token_scaled_fp8_quant import (
@@ -26,34 +30,18 @@ if not has_helion():
     )
 
 
-def skip_if_platform_unsupported():
-    try:
-        from vllm.kernels.helion.utils import get_canonical_gpu_name
-
-        if not torch.cuda.is_available():
-            pytest.skip("CUDA not available")
-
-        platform = get_canonical_gpu_name()
-
-        try:
-            config_manager = ConfigManager.get_instance()
-        except RuntimeError:
-            config_manager = ConfigManager()
-
-        configs = config_manager.get_platform_configs(
-            "dynamic_per_token_scaled_fp8_quant", platform
+def _generate_fake_input(num_tokens: int, hidden_size: int) -> tuple[Any, ...]:
+    with FakeTensorMode():
+        input = torch.randn(
+            num_tokens, hidden_size, device="cuda", dtype=torch.bfloat16
         )
-        if len(configs) == 0:
-            pytest.skip(
-                "Current GPU platform not supported for"
-                "dynamic_per_token_scaled_fp8_quant kernel"
-            )
-
-    except (ImportError, RuntimeError, KeyError):
-        pytest.skip(
-            "Error detecting platform support for"
-            "dynamic_per_token_scaled_fp8_quant kernel"
+        result = torch.empty(
+            input.shape, device=input.device, dtype=current_platform.fp8_dtype()
         )
+        scale = torch.empty((num_tokens, 1), device=input.device, dtype=torch.float32)
+        scale_ub = torch.mean(input).to(torch.float32)
+        args = (result, input, scale, scale_ub)
+        return args
 
 
 @pytest.fixture(autouse=True)
@@ -72,18 +60,7 @@ class TestDynamicPerTokenScaledFp8QuantConfigPicker:
             "hidden_size_4096_num_tokens_16",
         ]
 
-        num_tokens = 16
-        hidden_size = 4096
-        input = torch.randn(
-            num_tokens, hidden_size, device="cuda", dtype=torch.bfloat16
-        )
-        result = torch.empty(
-            input.shape, device=input.device, dtype=current_platform.fp8_dtype()
-        )
-        scale = torch.empty((num_tokens, 1), device=input.device, dtype=torch.float32)
-        scale_ub = torch.mean(input).to(torch.float32)
-        args = (result, input, scale, scale_ub)
-
+        args = _generate_fake_input(16, 4096)
         selected_key = pick_config(args, config_keys)
         assert selected_key == "hidden_size_4096_num_tokens_16"
 
@@ -96,54 +73,21 @@ class TestDynamicPerTokenScaledFp8QuantConfigPicker:
             "hidden_size_4096_num_tokens_32",
         ]
 
-        num_tokens = 20
-        hidden_size = 3000
-        input = torch.randn(
-            num_tokens, hidden_size, device="cuda", dtype=torch.bfloat16
-        )
-        result = torch.empty(
-            input.shape, device=input.device, dtype=current_platform.fp8_dtype()
-        )
-        scale = torch.empty((num_tokens, 1), device=input.device, dtype=torch.float32)
-        scale_ub = torch.mean(input).to(torch.float32)
-        args = (result, input, scale, scale_ub)
-
+        args = _generate_fake_input(20, 3000)
         selected_key = pick_config(args, config_keys)
         assert selected_key == "hidden_size_2048_num_tokens_32"
 
     def test_config_picker_fallback_to_default(self):
         config_keys = ["default"]
 
-        num_tokens = 16
-        hidden_size = 4096
-        input = torch.randn(
-            num_tokens, hidden_size, device="cuda", dtype=torch.bfloat16
-        )
-        result = torch.empty(
-            input.shape, device=input.device, dtype=current_platform.fp8_dtype()
-        )
-        scale = torch.empty((num_tokens, 1), device=input.device, dtype=torch.float32)
-        scale_ub = torch.mean(input).to(torch.float32)
-        args = (result, input, scale, scale_ub)
-
+        args = _generate_fake_input(16, 4096)
         selected_key = pick_config(args, config_keys)
         assert selected_key == "default"
 
     def test_config_picker_no_configs(self):
         config_keys: list[str] = []
 
-        num_tokens = 16
-        hidden_size = 4096
-        input = torch.randn(
-            num_tokens, hidden_size, device="cuda", dtype=torch.bfloat16
-        )
-        result = torch.empty(
-            input.shape, device=input.device, dtype=current_platform.fp8_dtype()
-        )
-        scale = torch.empty((num_tokens, 1), device=input.device, dtype=torch.float32)
-        scale_ub = torch.mean(input).to(torch.float32)
-        args = (result, input, scale, scale_ub)
-
+        args = _generate_fake_input(16, 4096)
         selected_key = pick_config(args, config_keys)
         assert selected_key is None
 
@@ -154,18 +98,7 @@ class TestDynamicPerTokenScaledFp8QuantConfigPicker:
             "hidden_size_4096_num_tokens_16",
         ]
 
-        num_tokens = 32
-        hidden_size = 8192
-        input = torch.randn(
-            num_tokens, hidden_size, device="cuda", dtype=torch.bfloat16
-        )
-        result = torch.empty(
-            input.shape, device=input.device, dtype=current_platform.fp8_dtype()
-        )
-        scale = torch.empty((num_tokens, 1), device=input.device, dtype=torch.float32)
-        scale_ub = torch.mean(input).to(torch.float32)
-        args = (result, input, scale, scale_ub)
-
+        args = _generate_fake_input(32, 8192)
         selected_key = pick_config(args, config_keys)
         assert selected_key == "hidden_size_4096_num_tokens_16"
 
@@ -174,18 +107,7 @@ class TestDynamicPerTokenScaledFp8QuantConfigPicker:
             "bad_key_4096_bad_key_16",
         ]
 
-        num_tokens = 16
-        hidden_size = 4096
-        input = torch.randn(
-            num_tokens, hidden_size, device="cuda", dtype=torch.bfloat16
-        )
-        result = torch.empty(
-            input.shape, device=input.device, dtype=current_platform.fp8_dtype()
-        )
-        scale = torch.empty((num_tokens, 1), device=input.device, dtype=torch.float32)
-        scale_ub = torch.mean(input).to(torch.float32)
-        args = (result, input, scale, scale_ub)
-
+        args = _generate_fake_input(16, 4096)
         with pytest.raises(ValueError):
             pick_config(args, config_keys)
 
@@ -204,6 +126,7 @@ class TestDynamicPerTokenScaledFp8QuantCorrectness:
         has_scale_ub: bool,
         seed: int,
     ) -> None:
+        skip_if_platform_unsupported("dynamic_per_token_scaled_fp8_quant")
         set_random_seed(seed)
 
         x = (
@@ -245,22 +168,12 @@ class TestDynamicPerTokenScaledFp8QuantIntegration:
         assert kernel_wrapper._mutates_args == ["result", "scale"]
 
     def test_fake_impl_functionality(self):
-        skip_if_platform_unsupported()
+        skip_if_platform_unsupported("dynamic_per_token_scaled_fp8_quant")
         from vllm.kernels.helion.register import get_registered_kernels
 
         registered_kernels = get_registered_kernels()
         kernel_wrapper = registered_kernels["dynamic_per_token_scaled_fp8_quant"]
         fake_impl = kernel_wrapper._fake_impl
 
-        num_tokens = 16
-        hidden_size = 4096
-        input = torch.randn(
-            num_tokens, hidden_size, device="cuda", dtype=torch.bfloat16
-        )
-        result = torch.empty(
-            input.shape, device=input.device, dtype=current_platform.fp8_dtype()
-        )
-        scale = torch.empty((num_tokens, 1), device=input.device, dtype=torch.float32)
-        scale_ub = torch.mean(input).to(torch.float32)
-
-        assert fake_impl(result, input, scale, scale_ub) is None
+        args = _generate_fake_input(16, 4096)
+        assert fake_impl(*args) is None
