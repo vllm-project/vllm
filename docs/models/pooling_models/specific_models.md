@@ -83,7 +83,7 @@ Start the server:
 vllm serve TomoroAI/tomoro-colqwen3-embed-4b --max-model-len 4096
 ```
 
-## Text-only scoring and reranking
+### Text-only scoring and reranking
 
 Use the `/rerank` API:
 
@@ -109,7 +109,7 @@ curl -s http://localhost:8000/score -H "Content-Type: application/json" -d '{
 }'
 ```
 
-## Multi-modal scoring and reranking (text query × image documents)
+### Multi-modal scoring and reranking (text query × image documents)
 
 The `/score` and `/rerank` APIs also accept multi-modal inputs directly.
 Pass image documents using the `data_1`/`data_2` (for `/score`) or `documents` (for `/rerank`) fields
@@ -157,7 +157,7 @@ curl -s http://localhost:8000/rerank -H "Content-Type: application/json" -d '{
 }'
 ```
 
-## Raw token embeddings
+### Raw token embeddings
 
 You can also get the raw token embeddings using the `/pooling` API with `token_embed` task:
 
@@ -186,14 +186,55 @@ curl -s http://localhost:8000/pooling -H "Content-Type: application/json" -d '{
 }'
 ```
 
-## Examples
+### Examples
 
 - Multi-vector retrieval: [examples/pooling/token_embed/colqwen3_token_embed_online.py](../../../examples/pooling/token_embed/colqwen3_token_embed_online.py)
 - Reranking (text + multi-modal): [examples/pooling/score/colqwen3_rerank_online.py](../../../examples/pooling/score/colqwen3_rerank_online.py)
 
+### ColQwen3.5 Multi-Modal Late Interaction Models
+
+ColQwen3.5 is based on [ColPali](https://arxiv.org/abs/2407.01449), extending ColBERT's late interaction approach to **multi-modal** inputs. It uses the Qwen3.5 hybrid backbone (linear + full attention) and produces per-token L2-normalized vectors for MaxSim scoring.
+
+| Architecture | Backbone | Example HF Models |
+| - | - | - |
+| `ColQwen3_5` | Qwen3.5 | `athrael-soju/colqwen3.5-4.5B` |
+
+Start the server:
+
+```shell
+vllm serve athrael-soju/colqwen3.5-4.5B --max-model-len 4096
+```
+
+Then you can use the rerank endpoint:
+
+```shell
+curl -s http://localhost:8000/rerank -H "Content-Type: application/json" -d '{
+    "model": "athrael-soju/colqwen3.5-4.5B",
+    "query": "What is machine learning?",
+    "documents": [
+        "Machine learning is a subset of artificial intelligence.",
+        "Python is a programming language.",
+        "Deep learning uses neural networks."
+    ]
+}'
+```
+
+Or the score endpoint:
+
+```shell
+curl -s http://localhost:8000/score -H "Content-Type: application/json" -d '{
+    "model": "athrael-soju/colqwen3.5-4.5B",
+    "text_1": "What is the capital of France?",
+    "text_2": ["The capital of France is Paris.", "Python is a programming language."]
+}'
+```
+
+An example can be found here: [examples/pooling/score/colqwen3_5_rerank_online.py](../../examples/pooling/score/colqwen3_5_rerank_online.py)
+
+
 ## Llama Nemotron Multimodal
 
-## Embedding Model
+### Embedding Model
 
 Llama Nemotron VL Embedding models combine the bidirectional Llama embedding backbone
 (from `nvidia/llama-nemotron-embed-1b-v2`) with SigLIP as the vision encoder to produce
@@ -254,7 +295,7 @@ curl -s http://localhost:8000/v1/embeddings -H "Content-Type: application/json" 
 }'
 ```
 
-## Reranker Model
+### Reranker Model
 
 Llama Nemotron VL reranker models combine the same bidirectional Llama + SigLIP
 backbone with a sequence-classification head for cross-encoder scoring and reranking.
