@@ -10,10 +10,10 @@ from flashinfer.rope import apply_rope_with_cos_sin_cache
 from torch import nn
 from transformers import Qwen3Config
 
+from vllm._custom_ops import reshape_and_cache_flash
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
-from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -34,9 +34,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     maybe_remap_kv_scale_name,
 )
 from vllm.multimodal.inputs import NestedTensors
-from vllm.platforms import current_platform
 from vllm.transformers_utils.config import set_default_rope_theta
-from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backend import AttentionType
 
 from .qwen2 import Qwen2MLP as Qwen3MLP
@@ -51,71 +49,12 @@ from .utils import (
 logger = init_logger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# vllm::dflash_attn  –  slim custom op for DFlash cross-attention.
-#
-# QKV projection, per-head norms, and RoPE for query tokens all live in the
-# compiled graph (DFlashQwen3Attention.forward).  This op only:
-#   1. Concats precomputed context K/V with query K/V
-#   2. Runs the self-attention backend
-# ---------------------------------------------------------------------------
-
-
-def dflash_attn(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    output: torch.Tensor,
-    layer_name: str,
-) -> None:
-    """Run DFlash cross-attention with precomputed context K/V.
-
-    q, k, v are the fully-processed (projected, normed, RoPE'd) QKV of the
-    query tokens (padded, fixed shape – produced in the compiled graph).
-    *output* is a pre-allocated buffer whose address stays stable across
-    CUDA graph replays.
-
-    Precomputed context K/V is read from the ForwardContext side-channel.
-    """
-    fc = get_forward_context()
-    context_k, context_v = fc.dflash_context_kv[layer_name]
-
-    # Concat precomputed context K/V with query K/V
-    k = torch.cat([context_k, k], dim=0)
-    v = torch.cat([context_v, v], dim=0)
-
-    # Run the self-attention (KV-cache update + backend) eagerly.
-    layer = fc.no_compile_layers[layer_name]  # DFlashQwen3Attention
-    attn_layer = fc.no_compile_layers[layer.attn.layer_name]
-    attn_output = attn_layer(q, k, v)
-
-    # Write into the pre-allocated output buffer so its address stays stable
-    # for piecewise CUDA graph replay.
-    output.copy_(attn_output)
-
-
-def dflash_attn_fake(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    output: torch.Tensor,
-    layer_name: str,
-) -> None:
-    return
-
-
-direct_register_custom_op(
-    op_name="dflash_attn",
-    op_func=dflash_attn,
-    mutates_args=["output"],
-    fake_impl=dflash_attn_fake,
-    dispatch_key=current_platform.dispatch_key,
-)
-
-
 class DFlashQwen3Attention(nn.Module):
-    """Cross-attention for DFlash: K/V from concat(context, query),
-    Q from query only. Adapted from Qwen3Attention."""
+    """Attention for DFlash speculative decoding.
+
+    Context KVs are pre-inserted into the KV cache before the forward pass.
+    This layer handles only query tokens via standard attention.
+    Adapted from Qwen3Attention."""
 
     def __init__(
         self,
@@ -186,23 +125,15 @@ class DFlashQwen3Attention(nn.Module):
         self.q_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
         self.k_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
 
-        compilation_config = get_current_vllm_config().compilation_config
-        if prefix in compilation_config.static_forward_context:
-            raise ValueError(f"Duplicate layer name: {prefix}")
-        compilation_config.static_forward_context[prefix] = self
-
     def forward(
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
-        # QKV projection + per-head norms + RoPE run in the compiled graph
-        # (fixed-shape query tokens only).
         qkv = F.linear(hidden_states, self.qkv_proj.weight, self.qkv_proj.bias)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
-        # Per-head RMSNorm (reshape so last dim = head_dim, use the
-        # vllm RMSNorm modules which are torch.compile-friendly).
+        # Per-head RMSNorm
         q_shape, k_shape = q.shape, k.shape
         q = self.q_norm(
             q.view(*q_shape[:-1], q_shape[-1] // self.head_dim, self.head_dim)
@@ -211,25 +142,11 @@ class DFlashQwen3Attention(nn.Module):
             k.view(*k_shape[:-1], k_shape[-1] // self.head_dim, self.head_dim)
         ).view(k_shape)
 
-        # Rotary embeddings (CustomOp, torch.compile-friendly)
         q, k = self.rotary_emb(positions, q, k)
 
-        # Pre-allocate output buffer in the FX graph so that split_graph
-        # places it in the compiled piece before the splitting op.  The
-        # CUDA graph pool then keeps its address stable across replays.
-        attn_output = torch.empty(
-            hidden_states.shape[0],
-            self.q_size,
-            dtype=hidden_states.dtype,
-            device=hidden_states.device,
-        )
-        torch.ops.vllm.dflash_attn(
-            q,
-            k,
-            v,
-            attn_output,
-            layer_name=self.layer_name,
-        )
+        # Standard attention: writes query K/V to cache, reads full
+        # sequence from cache (including pre-inserted context KVs).
+        attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
         return output
 
@@ -370,12 +287,12 @@ class DFlashQwen3Model(nn.Module):
         return self.embed_tokens(input_ids)
 
     def _build_fused_kv_buffers(self) -> None:
-        """Build fused weight buffers for batched precompute_context_kv.
+        """Build fused weight buffers for precompute_and_store_context_kv.
 
         Must be called after weights are loaded.  Stacks the KV-projection
         weights, K-norm weights, and RoPE parameters from every attention
-        layer so that precompute_context_kv can run one GEMM, one norm,
-        and one RoPE call for *all* layers at once.
+        layer so that precompute_and_store_context_kv can run one fused
+        GEMM for all layers at once.
         """
         layers_attn = [layer.self_attn for layer in self.layers]
         attn0 = layers_attn[0]
@@ -404,22 +321,23 @@ class DFlashQwen3Model(nn.Module):
         self._kv_size = attn0.kv_size
         self._head_dim = attn0.head_dim
         self._num_kv_heads = attn0.num_kv_heads
-        self._attn_layer_names = [a.layer_name for a in layers_attn]
         self._rms_norm_eps = attn0.q_norm.variance_epsilon
 
-    @torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
-    def precompute_context_kv(
+        # References to inner Attention layers for direct cache writes
+        self._attn_layers = [layer.self_attn.attn for layer in self.layers]
+
+    def precompute_and_store_context_kv(
         self,
         context_states: torch.Tensor,
         context_positions: torch.Tensor,
-    ) -> dict[str, tuple[torch.Tensor, torch.Tensor]]:
-        """Precompute projected, normed, and RoPE'd K/V for context states.
+        context_slot_mapping: torch.Tensor | None = None,
+    ) -> None:
+        """Precompute projected, normed, RoPE'd K/V for context states
+        and optionally write them directly into each layer's KV cache.
 
-        All layers are processed in one fused GEMM, one fused RMSNorm, and
-        one fused RoPE call.  Requires _build_fused_kv_buffers() to have
-        been called after weight loading.
-
-        Returns a dict mapping layer_name -> (k, v).
+        When context_slot_mapping is None (e.g. during dummy_run), only
+        the computation runs — useful for memory profiling without
+        requiring valid slot mappings or a bound KV cache.
         """
         num_ctx = context_states.shape[0]
         L = self._num_attn_layers
@@ -428,51 +346,54 @@ class DFlashQwen3Model(nn.Module):
         nkv = self._num_kv_heads
 
         # --- Fused KV projection (one GEMM for all layers) ---
-        # [num_ctx, L * 2 * kv]
         all_kv_flat = F.linear(
             self.hidden_norm(context_states), self._fused_kv_weight, self._fused_kv_bias
         )
-        # [L, num_ctx, 2 * kv]
         all_kv = all_kv_flat.view(num_ctx, L, 2 * kv).transpose(0, 1).contiguous()
-        # Split K / V – each [L, num_ctx, kv]  (non-contiguous views)
         all_k, all_v = all_kv.split(kv, dim=-1)
 
-        # --- Per-head RMSNorm on K (one flashinfer rmsnorm kernel per layer) ---
-        # [L, num_ctx, nkv, hd] -> per-layer [num_ctx * nkv, hd] rmsnorm
+        # --- Per-layer: RMSNorm K, RoPE K, cache insert ---
         all_k = all_k.reshape(L, num_ctx * nkv, hd).contiguous()
-        all_k = torch.stack(
-            [
-                rmsnorm(
-                    input=all_k[i],
-                    weight=self._k_norm_weights[i],
-                    eps=self._rms_norm_eps,
-                )
-                for i in range(L)
-            ]
-        )
-        # [L, num_ctx, kv]
-        all_k = all_k.reshape(L, num_ctx, kv).contiguous()
+        for i in range(L):
+            # RMSNorm on K
+            k_normed = rmsnorm(
+                input=all_k[i],
+                weight=self._k_norm_weights[i],
+                eps=self._rms_norm_eps,
+            )
+            k_normed = k_normed.reshape(num_ctx, kv)
 
-        # --- Fused RoPE on K (flatten layers into batch, tile positions) ---
-        # [L * num_ctx, kv]
-        k_flat = all_k.reshape(L * num_ctx, kv)
-        positions_tiled = context_positions.repeat(L)
-        # Use torch.compile-able vllm rope
-        _, k_rope = apply_rope_with_cos_sin_cache(
-            positions=positions_tiled,
-            query=k_flat,
-            key=k_flat,
-            head_size=self._rope_head_size,
-            cos_sin_cache=self._rope_cos_sin_cache,
-            is_neox=self._rope_is_neox,
-        )
-        # [L, num_ctx, kv]
-        all_k = k_rope.view(L, num_ctx, kv)
-        all_v = all_v.contiguous()
+            # RoPE on K
+            _, k_roped = apply_rope_with_cos_sin_cache(
+                positions=context_positions,
+                query=k_normed,
+                key=k_normed,
+                head_size=self._rope_head_size,
+                cos_sin_cache=self._rope_cos_sin_cache,
+                is_neox=self._rope_is_neox,
+            )
 
-        return {
-            name: (all_k[i], all_v[i]) for i, name in enumerate(self._attn_layer_names)
-        }
+            if context_slot_mapping is None:
+                continue
+
+            # Reshape for cache: [num_ctx, num_kv_heads, head_dim]
+            k_cache_ready = k_roped.view(num_ctx, nkv, hd)
+            v_cache_ready = all_v[i].contiguous().view(num_ctx, nkv, hd)
+
+            # Write directly to cache
+            attn = self._attn_layers[i]
+            kv_cache = attn.kv_cache[0]  # virtual_engine=0
+            key_cache, value_cache = kv_cache.unbind(0)
+            reshape_and_cache_flash(
+                k_cache_ready,
+                v_cache_ready,
+                key_cache,
+                value_cache,
+                context_slot_mapping,
+                attn.kv_cache_dtype,
+                attn._k_scale,
+                attn._v_scale,
+            )
 
     def forward(
         self,
@@ -599,13 +520,16 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
         logits_new[:, targets] = logits
         return logits_new
 
-    def precompute_context_kv(
+    def precompute_and_store_context_kv(
         self,
         context_states: torch.Tensor,
         context_positions: torch.Tensor,
-    ) -> dict[str, tuple[torch.Tensor, torch.Tensor]]:
-        """Precompute projected + RoPE'd K/V for context states, all layers."""
-        return self.model.precompute_context_kv(context_states, context_positions)
+        context_slot_mapping: torch.Tensor | None = None,
+    ) -> None:
+        """Precompute projected + RoPE'd K/V and write to cache."""
+        self.model.precompute_and_store_context_kv(
+            context_states, context_positions, context_slot_mapping
+        )
 
     def combine_hidden_states(
         self,

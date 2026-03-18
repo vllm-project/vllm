@@ -692,7 +692,6 @@ class CompilationConfig:
         "vllm::kda_attention",
         "vllm::sparse_attn_indexer",
         "vllm::rocm_aiter_sparse_attn_indexer",
-        "vllm::dflash_attn",
     ]
 
     def compute_hash(self) -> str:

@@ -206,11 +206,6 @@ class ForwardContext:
 
     ubatch_slices: UBatchSlices | None = None
 
-    # DFlash speculative decoding: precomputed context K/V (per layer) stored
-    # here so they stay outside compiled / CUDA-graphed pieces.
-    # The vllm::dflash_attn custom op reads them.
-    dflash_context_kv: dict[str, tuple[torch.Tensor, torch.Tensor]] | None = None
-
     # If True, bypass the compiled model call, e.g. by using .forward() directly
     skip_compiled: bool = False
 

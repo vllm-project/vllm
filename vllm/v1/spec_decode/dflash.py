@@ -7,10 +7,7 @@ import torch
 from typing_extensions import override
 
 from vllm.config import VllmConfig
-from vllm.forward_context import (
-    get_forward_context,
-    set_forward_context,
-)
+from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.triton_utils import triton
 from vllm.v1.attention.backend import CommonAttentionMetadata
@@ -90,7 +87,6 @@ class DFlashProposer(SpecDecodeBaseProposer):
 
         # Store for build_model_inputs_first_pass to use
         self._dflash_num_context = num_context
-        self._dflash_num_positions = num_all_positions
 
         # Copy hidden states (wide memcpy, not suitable for triton)
         self.hidden_states[:num_context] = target_hidden_states
@@ -134,7 +130,18 @@ class DFlashProposer(SpecDecodeBaseProposer):
             BLOCK_SIZE=BLOCK_SIZE,
         )
 
-        slot_mapping = self._slot_mapping_buffer[:num_all_positions]
+        # Save context slot_mapping for pre-insertion (clone because buffer
+        # will be reused by _get_slot_mapping)
+        self._dflash_context_slot_mapping = self._slot_mapping_buffer[
+            :num_context
+        ].clone()
+
+        # Only query slot_mapping for the model forward pass — context KVs
+        # are pre-inserted into cache before the forward.  Clone to avoid
+        # aliasing with the buffer that _get_slot_mapping writes into.
+        query_slot_mapping = self._slot_mapping_buffer[
+            num_context:num_all_positions
+        ].clone()
         new_query_start_loc = self.arange[: batch_size + 1] * num_query_per_req
 
         new_cad = CommonAttentionMetadata(
@@ -151,7 +158,7 @@ class DFlashProposer(SpecDecodeBaseProposer):
             max_query_len=num_query_per_req,
             max_seq_len=cad.max_seq_len + num_query_per_req,
             block_table_tensor=cad.block_table_tensor,
-            slot_mapping=slot_mapping,
+            slot_mapping=query_slot_mapping,
             causal=False,  # Non-causal attention is required for DFlash
         )
 
@@ -181,16 +188,15 @@ class DFlashProposer(SpecDecodeBaseProposer):
             )
         )
 
-        # Unpadded context + padded query
-        num_positions = num_tokens + num_query_tokens
-
-        # Make sure to use EAGLE's own buffer during cudagraph capture.
+        # Slot mapping sized to num_input_tokens (query only), matching
+        # the K/V tensor size from the model forward.  Context KVs are
+        # pre-inserted separately and don't flow through the model.
         if (
             self._draft_attn_layer_names
             and slot_mappings is not None
             and next(iter(self._draft_attn_layer_names)) in slot_mappings
         ):
-            slot_mapping_dict = self._get_slot_mapping(num_positions)
+            slot_mapping_dict = self._get_slot_mapping(num_input_tokens)
         else:
             slot_mapping_dict = slot_mappings or {}
 
@@ -205,9 +211,11 @@ class DFlashProposer(SpecDecodeBaseProposer):
         else:
             context_positions = all_positions[:, :num_tokens]
             self.query_positions[:num_input_tokens] = all_positions[:, num_tokens:]
-        dflash_context_kv = self.model.precompute_context_kv(
-            context_states, context_positions
-        )
+
+        # Run the KV projection (GEMM + norms + RoPE) for memory profiling,
+        # but skip the cache write — dummy_run doesn't have valid
+        # context slot_mappings.
+        self.model.precompute_and_store_context_kv(context_states, context_positions)
         with set_forward_context(
             None,
             self.vllm_config,
@@ -216,8 +224,6 @@ class DFlashProposer(SpecDecodeBaseProposer):
             cudagraph_runtime_mode=cudagraph_runtime_mode,
             slot_mapping=slot_mapping_dict,
         ):
-            fc = get_forward_context()
-            fc.dflash_context_kv = dflash_context_kv
             self.model(
                 input_ids=self.input_ids[:num_input_tokens],
                 positions=self.query_positions[:num_input_tokens],
@@ -245,8 +251,12 @@ class DFlashProposer(SpecDecodeBaseProposer):
         else:
             context_positions = all_positions[:, :num_context]
             self.query_positions[:num_input_tokens] = all_positions[:, num_context:]
-        context_kv = self.model.precompute_context_kv(
-            self.hidden_states[:num_context], context_positions
+
+        # Pre-insert context KVs directly into cache
+        self.model.precompute_and_store_context_kv(
+            self.hidden_states[:num_context],
+            context_positions,
+            self._dflash_context_slot_mapping,
         )
         return (
             dict(
@@ -254,10 +264,8 @@ class DFlashProposer(SpecDecodeBaseProposer):
                 positions=self.query_positions[:num_input_tokens],
                 inputs_embeds=None,
             ),
-            self._dflash_num_positions,
-            {
-                "dflash_context_kv": context_kv,
-            },
+            num_input_tokens,
+            {},
         )
 
     @override
