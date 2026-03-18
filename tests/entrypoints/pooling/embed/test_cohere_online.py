@@ -7,10 +7,10 @@ embedding models, covering text embedding, embedding type conversions,
 response structure, batching, normalisation, and semantic similarity.
 """
 
-import base64
 import struct
 
 import numpy as np
+import pybase64 as base64
 import pytest
 import requests
 
