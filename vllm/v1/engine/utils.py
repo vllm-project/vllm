@@ -133,7 +133,7 @@ class CoreEngineProcManager:
             )
 
         self._finalizer = weakref.finalize(self, shutdown, self.processes)
-        self.shutdown_monitor = False
+        self.manager_stopped = threading.Event()
 
         try:
             for proc, local_dp_rank in zip(self.processes, local_dp_ranks):
@@ -155,47 +155,31 @@ class CoreEngineProcManager:
 
     def shutdown(self, timeout: float | None = None) -> None:
         """Shutdown engine core processes with configurable timeout."""
-        self.shutdown_monitor = True
+        self.manager_stopped.set()
         if self._finalizer.detach() is not None:
             shutdown(self.processes, timeout=timeout)
 
-    def monitor_engine_liveness(
-        self,
-        engine_down_callback: Callable[..., None] | None = None,
-    ) -> None:
-        """
-        Monitor engine core process liveness.
-
-        Args:
-            engine_down_callback:
-                Optional callback invoked once for each detected dead process.
-                The callback is called with keyword arguments:
-                    dead_proc: The process that exited.
-                    all_processes: The full list of engine processes.
-        """
+    def monitor_engine_liveness(self) -> None:
+        """Monitor engine core process liveness."""
 
         sentinel_to_proc = {proc.sentinel: proc for proc in self.processes}
         sentinels = set(sentinel_to_proc.keys())
 
-        while sentinels and not self.shutdown_monitor:
+        while sentinels and not self.manager_stopped.is_set():
             died_sentinels = connection.wait(sentinels, timeout=1)
 
             for sentinel in died_sentinels:
-                proc = sentinel_to_proc[cast(int, sentinel)]
+                proc = sentinel_to_proc.pop(cast(int, sentinel))
                 exitcode = proc.exitcode
                 if exitcode != 0:
-                    logger.error(
-                        "Engine core proc %s died unexpectedly.",
-                        proc.name,
-                    )
+                    logger.error("Engine core proc %s died unexpectedly.", proc.name)
+            if died_sentinels:
+                # Any engine exit currently triggers a shutdown. Future
+                # work (e.g., Elastic and fault-tolerant EP) will add finer-grained
+                # handling for different exit scenarios.
+                break
 
-                if engine_down_callback is not None:
-                    engine_down_callback(
-                        dead_proc=proc,
-                        all_processes=self.processes,
-                    )
-
-            sentinels -= set(died_sentinels)
+        self.shutdown()
 
     def sentinels(self) -> list:
         return [proc.sentinel for proc in self.processes]
@@ -334,7 +318,7 @@ class CoreEngineActorManager:
         self.log_stats = log_stats
         local_engine_count = vllm_config.parallel_config.data_parallel_size_local
         world_size = vllm_config.parallel_config.world_size
-        self.shutdown_monitor = False
+        self.manager_stopped = threading.Event()
 
         if ray.is_initialized():
             logger.info("Ray is already initialized. Skipping Ray initialization.")
@@ -432,8 +416,11 @@ class CoreEngineActorManager:
 
         ray.get(refs)
         self.run_refs = []
+        self.actor_run_ref_dict = dict()
         for actor in self.local_engine_actors + self.remote_engine_actors:
-            self.run_refs.append(actor.run.remote())
+            ref = actor.run.remote()
+            self.run_refs.append(ref)
+            self.actor_run_ref_dict[actor] = ref
 
     @staticmethod
     def create_dp_placement_groups(
@@ -813,7 +800,9 @@ class CoreEngineActorManager:
         ) + self.remote_engine_actors[-(len(placement_groups) - new_local_engines) :]
 
         for actor in actors:
-            self.run_refs.append(actor.run.remote())
+            ref = actor.run.remote()
+            self.run_refs.append(ref)
+            self.actor_run_ref_dict[actor] = ref
 
         cur_vllm_config.parallel_config.data_parallel_size = new_data_parallel_size
         # Update old_vllm_config with new data_parallel_size_local if any new
@@ -837,48 +826,48 @@ class CoreEngineActorManager:
             pg = self.created_placement_groups.pop()
             is_local = self.placement_group_is_local.pop()
             if is_local:
-                self.local_engine_actors.pop()
+                actor = self.local_engine_actors.pop()
             else:
-                self.remote_engine_actors.pop()
+                actor = self.remote_engine_actors.pop()
             ray.util.remove_placement_group(pg)
+            ref = self.actor_run_ref_dict.pop(actor)
+            self.run_refs.remove(ref)
 
     def get_run_refs(self):
         return self.run_refs
 
-    def monitor_engine_liveness(
-        self,
-        engine_down_callback: Callable[..., None] | None = None,
-    ) -> None:
+    def monitor_engine_liveness(self) -> None:
         import ray
 
-        processed_done_refs: set[ray.ObjectRef] = set()
-        while not self.shutdown_monitor:
-            actor_run_refs = set(self.get_run_refs())
+        while not self.manager_stopped.is_set():
+            actor_run_refs = list(self.get_run_refs())
             if not actor_run_refs:
                 logger.info(
                     "There are no actors to monitor currently. "
                     "The monitoring function is about to terminate."
                 )
                 break
-
-            refs_to_watch = list(actor_run_refs - processed_done_refs)
-            actor_done_refs, _ = ray.wait(refs_to_watch, timeout=5)
+            actor_done_refs, _ = ray.wait(actor_run_refs, timeout=5)
+            unexpected_failure = False
             for actor_ref in actor_done_refs:
+                if actor_ref not in self.get_run_refs():
+                    # The run refs may have been updated by elastic scale-down.
+                    continue
                 try:
                     ray.get(actor_ref)
                 except ray.exceptions.RayActorError:
                     logger.error("Engine core actor died: %s", actor_ref)
-                if engine_down_callback is not None:
-                    engine_down_callback(
-                        dead_proc=actor_ref, all_processes=list(actor_run_refs)
-                    )
+                    unexpected_failure = True
 
-                processed_done_refs.add(actor_ref)
+            if unexpected_failure:
+                break
+
+        self.shutdown()
 
     def shutdown(self, timeout: float | None = None) -> None:
         import ray
 
-        self.shutdown_monitor = True
+        self.manager_stopped.set()
         for actor in self.local_engine_actors + self.remote_engine_actors:
             ray.kill(actor)
         for pg in self.created_placement_groups:

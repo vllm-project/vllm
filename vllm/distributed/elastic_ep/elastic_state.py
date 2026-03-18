@@ -4,6 +4,7 @@ import enum
 import time
 import weakref
 from datetime import timedelta
+from threading import Timer
 from typing import TYPE_CHECKING, Literal, TypeAlias
 
 import torch.distributed

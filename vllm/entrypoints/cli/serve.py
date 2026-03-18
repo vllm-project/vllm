@@ -229,11 +229,8 @@ def run_headless(args: argparse.Namespace):
         log_stats=not engine_args.disable_log_stats,
     )
 
-    def callback(*_, **__):
-        engine_manager.shutdown_monitor = True
-
     try:
-        engine_manager.monitor_engine_liveness(callback)
+        engine_manager.monitor_engine_liveness()
     finally:
         timeout = None
         if shutdown_requested:

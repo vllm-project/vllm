@@ -640,23 +640,26 @@ class MPClient(EngineCoreClient):
         """Start a monitor thread for engine core processes."""
         engine_manager = self.resources.engine_manager
         if engine_manager is None:
+            # No engine processes to monitor
             return
 
         self_ref = weakref.ref(self)
 
-        def shutdown_callback(*_, **__):
+        # Monitor engine core process liveness. If any die unexpectedly,
+        # marks the engine as dead, and shuts down the client.
+        def monitor_engine_cores():
+            engine_manager.monitor_engine_liveness()
             _self = self_ref()
             if not _self or not _self._finalizer.alive or _self.resources.engine_dead:
                 return
             _self.resources.engine_dead = True
-            engine_manager.shutdown_monitor = True
             _self.shutdown()
+            # Note: For MPClient, we don't have a failure callback mechanism
+            # like MultiprocExecutor, but we set engine_dead flag which will
+            # cause subsequent operations to raise EngineDeadError
 
         Thread(
-            target=engine_manager.monitor_engine_liveness,
-            args=(shutdown_callback,),
-            daemon=True,
-            name="MPClientEngineMonitor",
+            target=monitor_engine_cores, daemon=True, name="MPClientEngineMonitor"
         ).start()
 
 
