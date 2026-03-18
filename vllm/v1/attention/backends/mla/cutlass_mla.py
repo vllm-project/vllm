@@ -41,6 +41,8 @@ class CutlassMLABackend(MLACommonBackend):
         "auto",
         "float16",
         "bfloat16",
+        "fp8",
+        "fp8_e4m3",
     ]
 
     @staticmethod
@@ -252,6 +254,11 @@ class CutlassMLAImpl(MLACommonImpl[MLACommonMetadata]):
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         assert kv_c_and_k_pe_cache.numel() > 0
         assert attn_metadata.decode is not None
+
+        if layer._q_scale_float != 1.0 or layer._k_scale_float != 1.0:
+            raise NotImplementedError(
+                "CutlassMLAImpl does not support scaling for q and kv_latent yet"
+            )
 
         if type(q) is tuple:
             q_nope, q_pe = q
