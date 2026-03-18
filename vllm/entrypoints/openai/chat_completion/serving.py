@@ -448,10 +448,21 @@ class OpenAIServingChat(OpenAIServing):
                     param_match = re.search(
                         r'.*"parameters":\s*(.*)', current_text, re.DOTALL
                     )
-                    arguments = param_match.group(1) if param_match else ""
-                    arguments, _ = OpenAIServingChat._filter_delta_text(
-                        arguments, previous_text
-                    )
+                    if param_match:
+                        arguments = param_match.group(1)
+                        # Use the text in current_text before arguments as
+                        # context so _filter_delta_text starts at the correct
+                        # bracket nesting level. Using previous_text here is
+                        # wrong when previous_text ends mid-JSON at a higher
+                        # nesting level (e.g. level 2), which causes the
+                        # closing '}' of the parameters object to pass the
+                        # level-0 check and get included in the output.
+                        args_context = current_text[: param_match.start(1)]
+                        arguments, _ = OpenAIServingChat._filter_delta_text(
+                            arguments, args_context
+                        )
+                    else:
+                        arguments = ""
 
                     # if this iteration finishes a previous tool call but a
                     # new incomplete tool is already generated, take the
