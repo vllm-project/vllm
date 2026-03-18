@@ -350,10 +350,7 @@ class Attention(nn.Module, AttentionLayerBase):
         # use a placeholder kv cache tensor during init, which will be replaced
         # by bind_kv_cache
         # this variable will not be accessed if use_direct_call is True
-        self.kv_cache = [
-            torch.tensor([])
-            for _ in range(vllm_config.parallel_config.pipeline_parallel_size)
-        ]
+        self.kv_cache = torch.tensor([])
 
         # Initialize KV cache quantization attributes
         _init_kv_cache_quant(self, quant_config, prefix)
@@ -600,7 +597,7 @@ def get_attention_context(
     if isinstance(attn_metadata, dict):
         attn_metadata = attn_metadata[layer_name]
     attn_layer: Attention | MLAAttention = forward_context.no_compile_layers[layer_name]
-    kv_cache = attn_layer.kv_cache[0]
+    kv_cache = attn_layer.kv_cache
     slot_mapping = forward_context.slot_mapping
     assert isinstance(slot_mapping, dict), (
         f"Expected slot_mapping to be a dict, got {type(slot_mapping)}. "

@@ -115,7 +115,7 @@ def collect_mamba_copy_meta(
         layer_names = kv_cache_config.kv_cache_groups[mamba_group_id].layer_names
         for layer_name in layer_names:
             attention = forward_context[layer_name]
-            kv_caches: list[torch.Tensor] = attention.kv_cache[0]
+            kv_caches: list[torch.Tensor] = attention.kv_cache
             for state, state_copy_func in zip(kv_caches, mamba_state_copy_funcs):
                 copy_spec = state_copy_func(
                     state, block_ids, src_block_idx, accept_token_bias + 1
