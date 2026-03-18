@@ -410,8 +410,6 @@ class TritonAttentionImpl(AttentionImpl):
             )
         self.use_alibi_sqrt = use_alibi_sqrt
         self.supports_quant_query_input = current_platform.is_cuda()
-        # _k_scale_cache / _v_scale_cache are inherited from AttentionImpl
-        # and lazily allocated via ensure_int8_scale_caches().
 
     def forward(
         self,
