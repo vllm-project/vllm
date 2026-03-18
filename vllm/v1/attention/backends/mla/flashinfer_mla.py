@@ -190,24 +190,29 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
         # Reuse pre-allocated zero-init output buffer to avoid a memset
         # kernel on every CUDA graph replay.
         # q is 4D: (batch, q_len_per_req, num_heads, head_dim)
-        B, q_len_per_req, num_heads_q = q.shape[0], q.shape[1], q.shape[2]
-        dtype = (
-            torch.bfloat16 if is_quantized_kv_cache(self.kv_cache_dtype) else q.dtype
-        )
-        out_tail = (q_len_per_req, num_heads_q, self.kv_lora_rank)
-        if (
-            self._decode_out is None
-            or self._decode_out.shape[0] < B
-            or self._decode_out.shape[1:] != out_tail
-            or self._decode_out.dtype != dtype
-        ):
-            self._decode_out = torch.zeros(
-                B,
-                *out_tail,
-                dtype=dtype,
-                device=q.device,
+        # FlashInfer expects out as 3D (batch, num_heads, kv_lora_rank),
+        # so we can only pass it for single-token decode (q_len == 1).
+        B, q_len_per_req = q.shape[0], q.shape[1]
+        out_kwargs: dict[str, torch.Tensor] = {}
+        if q_len_per_req == 1:
+            dtype = (
+                torch.bfloat16
+                if is_quantized_kv_cache(self.kv_cache_dtype)
+                else q.dtype
             )
-        out = self._decode_out[:B]
+            if (
+                self._decode_out is None
+                or self._decode_out.shape[0] < B
+                or self._decode_out.dtype != dtype
+            ):
+                self._decode_out = torch.zeros(
+                    B,
+                    q.shape[2],
+                    self.kv_lora_rank,
+                    dtype=dtype,
+                    device=q.device,
+                )
+            out_kwargs["out"] = self._decode_out[:B]
 
         o = trtllm_batch_decode_with_kv_cache_mla(
             query=q,
@@ -221,7 +226,7 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
             max_seq_len=attn_metadata.max_seq_len,
             bmm1_scale=self.bmm1_scale,
             bmm2_scale=self.bmm2_scale,
-            out=out,
+            **out_kwargs,
         )
 
         # Flatten the output for consistent shape
