@@ -52,7 +52,7 @@ The process reward models used for evaluating intermediate steps are crucial to 
 
 ## Pooling task corresponding to reward model types
 
-| Types                              | Pooling tasks  |
+| Reward Model types                 | Pooling tasks  |
 |------------------------------------|----------------|
 | (sequence) (outcome) reward models | classify       |
 | token (outcome) reward models      | token_classify |
