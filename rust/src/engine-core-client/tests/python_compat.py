@@ -25,12 +25,17 @@ class FinishReason(IntEnum):
     REPETITION = 4
 
 
-class EngineCoreSamplingParams(msgspec.Struct, omit_defaults=True, dict=True):
+class EngineCoreSamplingParams(msgspec.Struct, dict=True):
     temperature: float = 1.0
     top_p: float = 1.0
     top_k: int = 0
+    seed: int | None = None
     max_tokens: int = 65536
     min_tokens: int = 0
+    min_p: float = 0.0
+    frequency_penalty: float = 0.0
+    presence_penalty: float = 0.0
+    repetition_penalty: float = 1.0
     stop_token_ids: list[int] = []
     _eos_token_id: int | None = None
     _all_stop_token_ids: set[int] = set()
@@ -105,8 +110,13 @@ request = EngineCoreRequest(
         temperature=0.8,
         top_p=0.9,
         top_k=8,
+        seed=None,
         max_tokens=32,
         min_tokens=1,
+        min_p=0.0,
+        frequency_penalty=0.0,
+        presence_penalty=0.0,
+        repetition_penalty=1.0,
         stop_token_ids=[151643],
         _eos_token_id=151645,
         _all_stop_token_ids={151643, 151645},

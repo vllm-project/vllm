@@ -232,10 +232,20 @@ pub struct UserSamplingParams {
     pub top_p: Option<f32>,
     /// Maximum number of top tokens to consider. `Some(0)` means all tokens.
     pub top_k: Option<i32>,
+    /// Random seed used by the sampler when present.
+    pub seed: Option<u64>,
     /// Maximum number of tokens to generate. `None` means no explicit user override.
     pub max_tokens: Option<u32>,
     /// Minimum number of tokens to generate before EOS or stop-token handling.
     pub min_tokens: Option<u32>,
+    /// Minimum probability threshold for token sampling. `None` means no explicit user override.
+    pub min_p: Option<f32>,
+    /// Frequency penalty applied by the sampler. `None` means no explicit user override.
+    pub frequency_penalty: Option<f32>,
+    /// Presence penalty applied by the sampler. `None` means no explicit user override.
+    pub presence_penalty: Option<f32>,
+    /// Repetition penalty applied by the sampler. `None` means no explicit user override.
+    pub repetition_penalty: Option<f32>,
     /// If true, keep the terminal stop token in the decoded output text.
     ///
     /// This currently affects token-based stop handling only; string stop
@@ -255,8 +265,13 @@ impl Default for UserSamplingParams {
             temperature: None,
             top_p: None,
             top_k: None,
+            seed: None,
             max_tokens: None,
             min_tokens: None,
+            min_p: None,
+            frequency_penalty: None,
+            presence_penalty: None,
+            repetition_penalty: None,
             include_stop_str_in_output: false,
             stop_token_ids: None,
             ignore_eos: false,

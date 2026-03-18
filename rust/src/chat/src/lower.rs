@@ -59,6 +59,8 @@ fn lower_sampling_params(
         default_temperature,
         default_top_p,
         default_top_k,
+        default_min_p,
+        default_repetition_penalty,
         default_max_tokens,
     }: SamplingHints,
 ) -> EngineCoreSamplingParams {
@@ -66,21 +68,36 @@ fn lower_sampling_params(
         temperature,
         top_p,
         top_k,
+        seed,
         max_tokens,
         min_tokens,
+        min_p,
+        frequency_penalty,
+        presence_penalty,
+        repetition_penalty,
         include_stop_str_in_output: _,
         stop_token_ids,
         ignore_eos,
         skip_special_tokens: _,
     } = sampling_params;
 
+    // Mirrors the model-generation-config inheritance used by vLLM's OpenAI chat path:
+    // https://github.com/vllm-project/vllm/blob/bc2c0c86efb28e77677a3cfb8687e976914a313a/vllm/entrypoints/openai/chat_completion/protocol.py#L424-L450
     let temperature = temperature.or(default_temperature).unwrap_or(1.0);
     let top_p = top_p.or(default_top_p).unwrap_or(1.0);
     let top_k = top_k.or(default_top_k).unwrap_or(0);
     // TODO: resolve `max_tokens` against prompt length / max model length later, like vLLM's
     // OpenAI frontend does today.
     let max_tokens = max_tokens.or(default_max_tokens).unwrap_or(65536);
+    let min_p = min_p.or(default_min_p).unwrap_or(0.0);
+    let repetition_penalty = repetition_penalty
+        .or(default_repetition_penalty)
+        .unwrap_or(1.0);
+
     let min_tokens = min_tokens.unwrap_or(0);
+    let frequency_penalty = frequency_penalty.unwrap_or(0.0);
+    let presence_penalty = presence_penalty.unwrap_or(0.0);
+
     let mut stop_token_ids = stop_token_ids.unwrap_or_default();
 
     let mut all_stop_token_ids = BTreeSet::from_iter(stop_token_ids.iter().copied());
@@ -97,8 +114,13 @@ fn lower_sampling_params(
         temperature,
         top_p,
         top_k,
+        seed,
         max_tokens,
         min_tokens,
+        min_p,
+        frequency_penalty,
+        presence_penalty,
+        repetition_penalty,
         stop_token_ids,
         eos_token_id: (!ignore_eos).then_some(primary_eos_token_id).flatten(),
         all_stop_token_ids,
@@ -144,6 +166,8 @@ mod tests {
             default_temperature: None,
             default_top_p: None,
             default_top_k: None,
+            default_min_p: None,
+            default_repetition_penalty: None,
             default_max_tokens: None,
         }
     }
@@ -159,8 +183,13 @@ mod tests {
                 temperature: 1.0,
                 top_p: 1.0,
                 top_k: 0,
+                seed: None,
                 max_tokens: 65536,
                 min_tokens: 0,
+                min_p: 0.0,
+                frequency_penalty: 0.0,
+                presence_penalty: 0.0,
+                repetition_penalty: 1.0,
                 stop_token_ids: [
                     77,
                 ],
@@ -190,8 +219,13 @@ mod tests {
                 temperature: 1.0,
                 top_p: 1.0,
                 top_k: 0,
+                seed: None,
                 max_tokens: 65536,
                 min_tokens: 0,
+                min_p: 0.0,
+                frequency_penalty: 0.0,
+                presence_penalty: 0.0,
+                repetition_penalty: 1.0,
                 stop_token_ids: [],
                 eos_token_id: None,
                 all_stop_token_ids: {
@@ -218,6 +252,8 @@ mod tests {
                 default_temperature: None,
                 default_top_p: None,
                 default_top_k: None,
+                default_min_p: None,
+                default_repetition_penalty: None,
                 default_max_tokens: None,
             },
         )
@@ -229,8 +265,13 @@ mod tests {
                 temperature: 1.0,
                 top_p: 1.0,
                 top_k: 0,
+                seed: None,
                 max_tokens: 65536,
                 min_tokens: 0,
+                min_p: 0.0,
+                frequency_penalty: 0.0,
+                presence_penalty: 0.0,
+                repetition_penalty: 1.0,
                 stop_token_ids: [
                     11,
                     77,
@@ -269,6 +310,8 @@ mod tests {
                 default_temperature: Some(0.8),
                 default_top_p: Some(0.9),
                 default_top_k: Some(12),
+                default_min_p: Some(0.1),
+                default_repetition_penalty: Some(1.2),
                 default_max_tokens: Some(128),
             },
         )
@@ -280,8 +323,13 @@ mod tests {
                 temperature: 0.2,
                 top_p: 0.3,
                 top_k: 4,
+                seed: None,
                 max_tokens: 32,
                 min_tokens: 2,
+                min_p: 0.1,
+                frequency_penalty: 0.0,
+                presence_penalty: 0.0,
+                repetition_penalty: 1.2,
                 stop_token_ids: [],
                 eos_token_id: None,
                 all_stop_token_ids: {},
@@ -302,6 +350,8 @@ mod tests {
                 default_temperature: Some(0.8),
                 default_top_p: Some(0.9),
                 default_top_k: Some(12),
+                default_min_p: Some(0.1),
+                default_repetition_penalty: Some(1.2),
                 default_max_tokens: Some(128),
             },
         )
@@ -313,8 +363,13 @@ mod tests {
                 temperature: 0.8,
                 top_p: 0.9,
                 top_k: 12,
+                seed: None,
                 max_tokens: 128,
                 min_tokens: 0,
+                min_p: 0.1,
+                frequency_penalty: 0.0,
+                presence_penalty: 0.0,
+                repetition_penalty: 1.2,
                 stop_token_ids: [],
                 eos_token_id: None,
                 all_stop_token_ids: {},
@@ -349,6 +404,12 @@ mod tests {
                 default_top_k: Some(
                     20,
                 ),
+                default_min_p: Some(
+                    0.1,
+                ),
+                default_repetition_penalty: Some(
+                    1.2,
+                ),
                 default_max_tokens: None,
             }
         "#]]
@@ -363,8 +424,13 @@ mod tests {
                 temperature: 0.6,
                 top_p: 0.95,
                 top_k: 20,
+                seed: None,
                 max_tokens: 65536,
                 min_tokens: 0,
+                min_p: 0.1,
+                frequency_penalty: 0.0,
+                presence_penalty: 0.0,
+                repetition_penalty: 1.2,
                 stop_token_ids: [
                     151643,
                 ],

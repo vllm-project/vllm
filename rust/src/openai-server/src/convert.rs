@@ -46,8 +46,13 @@ pub fn prepare_chat_request(
             temperature: request.temperature,
             top_p: request.top_p,
             top_k: request.top_k,
+            seed: request.sampling_seed,
             max_tokens: request.max_completion_tokens,
             min_tokens: request.min_tokens,
+            min_p: request.min_p,
+            frequency_penalty: request.frequency_penalty,
+            presence_penalty: request.presence_penalty,
+            repetition_penalty: request.repetition_penalty,
             include_stop_str_in_output: false,
             stop_token_ids: request.stop_token_ids.clone(),
             ignore_eos: request.ignore_eos,
@@ -262,8 +267,13 @@ mod tests {
                     temperature: None,
                     top_p: None,
                     top_k: None,
+                    seed: None,
                     max_tokens: None,
                     min_tokens: None,
+                    min_p: None,
+                    frequency_penalty: None,
+                    presence_penalty: None,
+                    repetition_penalty: None,
                     include_stop_str_in_output: false,
                     stop_token_ids: None,
                     ignore_eos: false,
@@ -304,8 +314,75 @@ mod tests {
                     temperature: None,
                     top_p: None,
                     top_k: None,
+                    seed: None,
                     max_tokens: None,
                     min_tokens: None,
+                    min_p: None,
+                    frequency_penalty: None,
+                    presence_penalty: None,
+                    repetition_penalty: None,
+                    include_stop_str_in_output: false,
+                    stop_token_ids: None,
+                    ignore_eos: false,
+                    skip_special_tokens: false,
+                },
+                chat_options: ChatOptions {
+                    add_generation_prompt: true,
+                    continue_final_message: false,
+                    template_kwargs: {},
+                },
+                tools: [],
+                tool_choice: Auto,
+            }
+        "#]]
+        .assert_debug_eq(&prepared.chat_request);
+    }
+
+    #[test]
+    fn prepare_chat_request_preserves_sampling_passthrough_fields() {
+        let request = ChatCompletionRequest {
+            sampling_seed: Some(42),
+            min_p: Some(0.2),
+            frequency_penalty: Some(0.3),
+            presence_penalty: Some(0.4),
+            repetition_penalty: Some(1.1),
+            ..base_request()
+        };
+
+        let mut prepared =
+            prepare_chat_request(&request, "Qwen/Qwen1.5-0.5B-Chat").expect("request is valid");
+        prepared.chat_request.request_id = "<placeholder>".to_string();
+        expect_test::expect![[r#"
+            ChatRequest {
+                request_id: "<placeholder>",
+                messages: [
+                    User {
+                        content: Text(
+                            "hello",
+                        ),
+                    },
+                ],
+                sampling_params: UserSamplingParams {
+                    temperature: None,
+                    top_p: None,
+                    top_k: None,
+                    seed: Some(
+                        42,
+                    ),
+                    max_tokens: None,
+                    min_tokens: None,
+                    min_p: Some(
+                        0.2,
+                    ),
+                    frequency_penalty: Some(
+                        0.3,
+                    ),
+                    presence_penalty: Some(
+                        0.4,
+                    ),
+                    repetition_penalty: Some(
+                        1.1,
+                    ),
                     include_stop_str_in_output: false,
                     stop_token_ids: None,
                     ignore_eos: false,
@@ -389,8 +466,13 @@ mod tests {
                     temperature: None,
                     top_p: None,
                     top_k: None,
+                    seed: None,
                     max_tokens: None,
                     min_tokens: None,
+                    min_p: None,
+                    frequency_penalty: None,
+                    presence_penalty: None,
+                    repetition_penalty: None,
                     include_stop_str_in_output: false,
                     stop_token_ids: None,
                     ignore_eos: false,
@@ -477,8 +559,13 @@ mod tests {
                     temperature: None,
                     top_p: None,
                     top_k: None,
+                    seed: None,
                     max_tokens: None,
                     min_tokens: None,
+                    min_p: None,
+                    frequency_penalty: None,
+                    presence_penalty: None,
+                    repetition_penalty: None,
                     include_stop_str_in_output: false,
                     stop_token_ids: None,
                     ignore_eos: false,

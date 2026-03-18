@@ -123,10 +123,20 @@ pub struct EngineCoreSamplingParams {
     pub top_p: f32,
     /// Maximum number of top tokens to consider. `0` means all tokens.
     pub top_k: i32,
+    /// Random seed used by the sampler when present.
+    pub seed: Option<u64>,
     /// Maximum number of tokens to generate per output sequence.
     pub max_tokens: u32,
     /// Minimum number of tokens to generate before EOS or stop-token handling.
     pub min_tokens: u32,
+    /// Minimum probability threshold for token sampling.
+    pub min_p: f32,
+    /// Frequency penalty applied by the sampler.
+    pub frequency_penalty: f32,
+    /// Presence penalty applied by the sampler.
+    pub presence_penalty: f32,
+    /// Repetition penalty applied by the sampler.
+    pub repetition_penalty: f32,
     /// Token IDs that stop generation.
     pub stop_token_ids: Vec<u32>,
     /// Primary EOS token ID used by engine-core's dedicated EOS stop path.
@@ -159,8 +169,13 @@ impl EngineCoreSamplingParams {
             temperature: 1.0,
             top_p: 1.0,
             top_k: 0,
+            seed: None,
             max_tokens: 65536,
             min_tokens: 0,
+            min_p: 0.0,
+            frequency_penalty: 0.0,
+            presence_penalty: 0.0,
+            repetition_penalty: 1.0,
             stop_token_ids: Vec::new(),
             eos_token_id: None,
             all_stop_token_ids: BTreeSet::new(),

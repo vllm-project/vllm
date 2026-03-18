@@ -29,16 +29,6 @@ pub(super) fn validate_request_compat(
     }
 
     reject_non_zero(
-        request.frequency_penalty,
-        "frequency_penalty",
-        "Only frequency_penalty=0 is supported.",
-    )?;
-    reject_non_zero(
-        request.presence_penalty,
-        "presence_penalty",
-        "Only presence_penalty=0 is supported.",
-    )?;
-    reject_non_zero(
         request.verbosity.map(|value| value as f32),
         "verbosity",
         "Verbosity control is not supported.",
@@ -131,12 +121,10 @@ pub(super) fn validate_request_compat(
         "service_tier is not supported.",
     )?;
     #[expect(deprecated, reason = "OpenAI protocol still exposes legacy seed")]
-    reject_non_default(request.seed.as_ref(), "seed", "seed is not supported.")?;
-    reject_non_default(request.min_p.as_ref(), "min_p", "min_p is not supported.")?;
     reject_non_default(
-        request.repetition_penalty.as_ref(),
-        "repetition_penalty",
-        "repetition_penalty is not supported.",
+        request.seed.as_ref(),
+        "seed",
+        "seed is not supported, use sampling_seed instead.",
     )?;
     reject_non_default(
         request.regex.as_ref(),
@@ -177,11 +165,6 @@ pub(super) fn validate_request_compat(
             "return_hidden_states is not supported."
         );
     }
-
-    if request.sampling_seed.is_some() {
-        bail_invalid_request!(param = "sampling_seed", "sampling_seed is not supported.");
-    }
-
     Ok(())
 }
 
@@ -249,12 +232,17 @@ mod tests {
     }
 
     #[test]
-    fn validate_request_compat_rejects_non_zero_penalties_and_accepts_function_tools() {
+    fn validate_request_compat_accepts_non_zero_penalties_and_function_tools() {
         let request = ChatCompletionRequest {
             frequency_penalty: Some(0.5),
+            presence_penalty: Some(0.25),
+            min_p: Some(0.2),
+            repetition_penalty: Some(1.1),
+            sampling_seed: Some(7),
             ..base_request()
         };
-        assert!(validate_request_compat(&request, "Qwen/Qwen1.5-0.5B-Chat").is_err());
+        validate_request_compat(&request, "Qwen/Qwen1.5-0.5B-Chat")
+            .expect("sampling fields should be accepted");
 
         let request = ChatCompletionRequest {
             tools: Some(vec![Tool {
@@ -270,6 +258,17 @@ mod tests {
         };
         validate_request_compat(&request, "Qwen/Qwen1.5-0.5B-Chat")
             .expect("function tools should be accepted");
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn validate_request_compat_rejects_deprecated_seed() {
+        let request = ChatCompletionRequest {
+            seed: Some(7),
+            ..base_request()
+        };
+
+        assert!(validate_request_compat(&request, "Qwen/Qwen1.5-0.5B-Chat").is_err());
     }
 
     #[test]

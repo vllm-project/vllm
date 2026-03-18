@@ -182,6 +182,8 @@ impl ChatBackend for HfChatBackend {
             default_temperature: self.inner.generation_config.temperature,
             default_top_p: self.inner.generation_config.top_p,
             default_top_k: self.inner.generation_config.top_k,
+            default_min_p: self.inner.generation_config.min_p,
+            default_repetition_penalty: self.inner.generation_config.repetition_penalty,
             default_max_tokens: self.inner.generation_config.max_new_tokens,
         })
     }
