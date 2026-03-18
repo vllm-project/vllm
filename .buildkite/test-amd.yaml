@@ -1448,7 +1448,7 @@ steps:
   - tests/distributed/test_torchrun_example_moe.py
   - examples/offline_inference/rlhf.py
   - examples/offline_inference/rlhf_colocate.py
-  - examples/rl/
+  - examples/offline_inference/new_weight_syncing/
   - tests/examples/offline_inference/data_parallel.py
   - vllm/platforms/rocm.py
   commands:
