@@ -11,7 +11,7 @@ This RFC proposes a structured approach to online (post-training, dynamic) quant
 We propose:
 1. A new `OnlineQuantizationConfig` base class that explicitly models online quantization concerns (layer ignoring, per-layer-type scheme overrides, backend selection)
 2. New explicit quantization method strings (`fp8_tensorwise`, `fp8_blockwise`, `int8_channelwise`, etc.) that unambiguously select online schemes
-3. An `online_quantization_config` parameter on `LLM`/`EngineArgs` for structured configuration beyond what a string can express
+3. A `quantization_config` parameter on `LLM`/`EngineArgs` for structured configuration beyond what a string can express
 4. Full backward compatibility with existing `quantization="fp8"` behavior and out-of-tree plugins
 
 ## 2. Motivation
@@ -29,7 +29,7 @@ We propose:
 ### What this enables
 
 - `LLM(model, quantization="fp8_blockwise")` — clear, unambiguous online FP8 with block scaling
-- `LLM(model, quantization="fp8_blockwise", online_quantization_config={"ignore": ["lm_head"], "moe_scheme": "fp8_tensorwise"})` — skip the output head, use tensorwise for MoE
+- `LLM(model, quantization="fp8_blockwise", quantization_config={"ignore": ["lm_head"], "moe_scheme": "fp8_tensorwise"})` — skip the output head, use tensorwise for MoE. Internally mapped to `OnlineFp8BlockwiseConfig(**kwargs)` when `is_online` is true.
 - Out-of-tree plugins can subclass `OnlineQuantizationConfig` and register via `@register_quantization_config` with the same structured knobs
 - Existing `quantization="fp8"` behavior is unchanged
 
@@ -85,7 +85,7 @@ class OnlineQuantizationConfig(QuantizationConfig, ABC):
 - `is_online = True` class attribute enables duck-type checking in `get_quant_config()` without maintaining a hardcoded list. Out-of-tree plugins that subclass `OnlineQuantizationConfig` get this for free.
 - `get_config_filenames()` returns `[]` — online configs never read from checkpoint files.
 - `from_config()` has a default implementation instead of being left abstract. Online configs are primarily constructed from user arguments, not checkpoint metadata. Subclasses can override if they need to extract partial information from checkpoints.
-- `ignore` uses glob-style patterns matching layer prefixes (e.g., `"model.layers.0.*"`, `"lm_head"`).
+- `ignore` uses exact string match by default, with opt-in regex via `"re:"` prefix (e.g., `"lm_head"` for exact match, `"re:model\\.layers\\.[0-3]\\..*"` for regex).
 - `linear_scheme` and `moe_scheme` allow per-layer-type overrides. When `None`, the default scheme of the config is used for all layer types.
 - `backend` selects the compute backend (`"auto"`, `"vllm"`, `"quark"`, `"cutlass"`, etc.).
 
@@ -167,7 +167,7 @@ method_to_config: dict[str, type[QuantizationConfig]] = {
 }
 ```
 
-### 3.4 `online_quantization_config` parameter
+### 3.4 `quantization_config` parameter
 
 A new optional parameter on `LLM` and `EngineArgs`:
 
@@ -178,7 +178,7 @@ class LLM:
         model: str,
         *,
         quantization: QuantizationMethods | None = None,
-        online_quantization_config: dict[str, Any] | None = None,  # NEW
+        quantization_config: dict[str, Any] | None = None,  # NEW
         ...
     ):
 ```
@@ -190,7 +190,7 @@ This dict is passed as `**kwargs` to the `OnlineQuantizationConfig` subclass con
 quant_cls = get_quantization_config(model_config.quantization)
 
 if getattr(quant_cls, 'is_online', False):
-    user_cfg = model_config.online_quantization_config or {}
+    user_cfg = model_config.quantization_config or {}
     return quant_cls(**user_cfg)
 else:
     # Existing offline path unchanged
@@ -201,7 +201,7 @@ else:
 
 ```bash
 vllm serve model --quantization fp8_blockwise \
-    --online-quantization-config '{"ignore": ["lm_head"], "backend": "cutlass"}'
+    --quantization-config '{"ignore": ["lm_head"], "backend": "cutlass"}'
 ```
 
 ### 3.5 Changes to `_verify_quantization()`
@@ -254,7 +254,7 @@ def get_quant_config(
 
     # Online schemes: construct from user config, not checkpoint
     if getattr(quant_cls, 'is_online', False):
-        user_cfg = getattr(model_config, 'online_quantization_config', None) or {}
+        user_cfg = getattr(model_config, 'quantization_config', None) or {}
         return quant_cls(**user_cfg)
 
     # Existing offline path — unchanged
@@ -292,7 +292,7 @@ class MyOnlineQuantConfig(OnlineQuantizationConfig):
 llm = LLM(
     model="my-bf16-model",
     quantization="my_online_quant",
-    online_quantization_config={"my_param": "custom", "ignore": ["lm_head"]},
+    quantization_config={"my_param": "custom", "ignore": ["lm_head"]},
 )
 ```
 
@@ -316,7 +316,7 @@ The `is_online` class attribute on `OnlineQuantizationConfig` means the `get_qua
 |---|---|
 | `quantization="fp8_tensorwise"` | Explicit online FP8 tensorwise via `OnlineFp8TensorwiseConfig` |
 | `quantization="fp8_blockwise"` | Explicit online FP8 blockwise via `OnlineFp8BlockwiseConfig` |
-| `online_quantization_config={...}` | Structured config passed to online config constructor |
+| `quantization_config={...}` | Structured config passed to online config constructor |
 | Online scheme + checkpoint with quant metadata | `FutureWarning` (not an error) |
 
 ### Deprecation path
@@ -331,42 +331,37 @@ The implicit online behavior of `quantization="fp8"` (when the checkpoint is bf1
 | **New:** `quantization/online_config.py` | `OnlineQuantizationConfig` base class | Low — new file |
 | **New:** `quantization/online_fp8.py` | `OnlineFp8TensorwiseConfig`, `OnlineFp8BlockwiseConfig` | Low — new file, delegates to existing methods |
 | **New:** `quantization/online_int8.py` | `OnlineInt8ChannelwiseConfig` | Low — new file |
-| `config/model.py` | Add `online_quantization_config` field, update `_verify_quantization()` | Medium — validation path |
+| `config/model.py` | Add `quantization_config` field, update `_verify_quantization()` | Medium — validation path |
 | `model_loader/weight_utils.py` | Add early-return branch in `get_quant_config()` for `is_online` | Medium — critical path |
-| `engine/arg_utils.py` | Add `online_quantization_config` parameter | Low — additive |
-| `entrypoints/llm.py` | Add `online_quantization_config` parameter | Low — additive |
+| `engine/arg_utils.py` | Add `quantization_config` parameter | Low — additive |
+| `entrypoints/llm.py` | Add `quantization_config` parameter | Low — additive |
 | Existing quant method classes | No changes initially | None |
 
 ## 6. Open Questions
 
-### 6.1 One class per scheme vs parameterized base
+### 6.1 One class per scheme vs parameterized base — **DECIDED: Option A**
 
-**Option A (proposed):** One concrete class per scheme (`OnlineFp8TensorwiseConfig`, `OnlineFp8BlockwiseConfig`, etc.). Each maps to a unique `quantization` string.
+One concrete class per scheme (`OnlineFp8TensorwiseConfig`, `OnlineFp8BlockwiseConfig`, etc.). Each maps to a unique `quantization` string.
 
-**Option B:** A single `OnlineQuantizationConfig` class parameterized by `scheme="fp8_tensorwise"`, with a single `quantization="online"` string.
-
-We propose Option A because:
+Rationale:
 - It integrates cleanly with the existing string-based registry (`get_quantization_config("fp8_blockwise")` returns a class)
 - Each scheme can have scheme-specific parameters (e.g., `weight_block_size` only on blockwise)
 - Plugin authors can subclass a specific scheme rather than the generic base
 - The `quantization` string remains the primary dispatch key, consistent with the rest of vLLM
 
-### 6.2 Should `moe_scheme` / `linear_scheme` overrides reference other registered schemes?
+### 6.2 Should `moe_scheme` / `linear_scheme` overrides reference other registered schemes? — **DECIDED: Option B**
 
-If `moe_scheme="fp8_tensorwise"` is specified on an `OnlineFp8BlockwiseConfig`, should we:
-- **(A)** Look up `OnlineFp8TensorwiseConfig` from the registry and use its `get_quant_method()` for MoE layers
-- **(B)** Have the config class interpret the string internally and select the right method class
+The base `OnlineQuantizationConfig` class should delegate internally — interpret the string and select the right method class directly. Cross-config delegation adds complexity and circular dependency risks. The config class knows which method classes exist and can select directly.
 
-We lean toward **(B)** for simplicity — the config class knows which method classes exist and can select directly. Cross-config delegation (A) adds complexity and circular dependency risks.
+### 6.3 How should `ignore` patterns work? — **DECIDED: Exact match + regex via prefix**
 
-### 6.3 How should `ignore` patterns work?
+`ignore` patterns use **exact string match** by default. To use regex, prefix the pattern with `"re:"`.
 
-Options:
-- **(A)** Exact prefix match (`"lm_head"` matches `model.lm_head` but not `model.lm_head.weight`)
-- **(B)** Glob patterns (`"*.lm_head"`, `"model.layers.0.*"`)
-- **(C)** Regex
+Examples:
+- `"lm_head"` — exact match against the layer name
+- `"re:model\\.layers\\.[0-3]\\..*"` — regex match for layers 0-3
 
-We propose **(B)** — glob patterns are familiar, expressive enough, and consistent with other vLLM config patterns (e.g., `Fp8Config.ignored_layers` already uses string matching).
+Rationale: Exact match covers the common case simply. Regex (opt-in via `"re:"` prefix) provides full expressiveness when needed, without the ambiguity of glob patterns.
 
 ### 6.4 Should online configs support `from_config()` for hybrid scenarios?
 
@@ -390,16 +385,16 @@ Instead of extending the `quantization` string namespace, introduce a parallel `
 
 ### 7.3 YAML/TOML config file for quantization
 
-Instead of `online_quantization_config` as a dict, require a config file path.
+Instead of `quantization_config` as a dict, require a config file path.
 
-**Deferred, not rejected.** A config file makes sense for complex multi-layer quantization recipes. But the dict approach works for the common cases and can be extended to accept a file path later (e.g., `online_quantization_config="path/to/quant.yaml"`).
+**Deferred, not rejected.** A config file makes sense for complex multi-layer quantization recipes. But the dict approach works for the common cases and can be extended to accept a file path later (e.g., `quantization_config="path/to/quant.yaml"`).
 
 ## 8. Implementation Plan
 
 ### Phase 1: Foundation (this RFC)
 - Add `OnlineQuantizationConfig` base class
 - Add `OnlineFp8TensorwiseConfig` as the first concrete implementation
-- Wire up `online_quantization_config` parameter through `LLM` → `EngineArgs` → `ModelConfig` → `VllmConfig`
+- Wire up `quantization_config` parameter through `LLM` → `EngineArgs` → `ModelConfig` → `VllmConfig`
 - Add `is_online` dispatch branch in `get_quant_config()`
 - Add deprecation warning in `_verify_quantization()`
 - Tests: unit tests for config creation, integration test with a small bf16 model
@@ -411,5 +406,5 @@ Instead of `online_quantization_config` as a dict, require a config file path.
 
 ### Phase 3: Advanced features
 - Per-layer scheme overrides (`linear_scheme`, `moe_scheme`)
-- Config file support (`online_quantization_config="path/to/recipe.yaml"`)
+- Config file support (`quantization_config="path/to/recipe.yaml"`)
 - Deprecation warning for implicit online behavior of `quantization="fp8"`
