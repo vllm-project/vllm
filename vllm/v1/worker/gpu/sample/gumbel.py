@@ -55,6 +55,8 @@ def _gumbel_sample_kernel(
     local_argmax_stride,
     local_max_ptr,
     local_max_stride,
+    processed_logits_ptr,
+    processed_logits_stride,
     logits_ptr,
     logits_stride,
     expanded_idx_mapping_ptr,
@@ -79,6 +81,20 @@ def _gumbel_sample_kernel(
     logits = logits.to(tl.float32)
 
     temp = tl.load(temp_ptr + req_state_idx).to(tl.float32)
+    if temp != 0.0 and APPLY_TEMPERATURE:
+        # Apply temperature.
+        # NOTE(woosuk): Match the behavior of _temperature_kernel.
+        # E.g., if the kernel uses tl.div_rn, we should use tl.div_rn here too.
+        logits = logits / temp
+
+    # Store the temperature-applied logits.
+    if processed_logits_ptr is not None:
+        tl.store(
+            processed_logits_ptr + req_state_idx * processed_logits_stride + block,
+            logits,
+            mask=mask,
+        )
+
     if temp != 0.0:
         # Calculate the seed for gumbel noise.
         seed = tl.load(seeds_ptr + req_state_idx)
@@ -89,12 +105,6 @@ def _gumbel_sample_kernel(
         u = tl.rand(gumbel_seed, block)
         u = tl.maximum(u, 1e-7)
         gumbel_noise = -tl.log(-tl.log(u))
-
-        # Apply temperature.
-        if APPLY_TEMPERATURE:
-            # NOTE(woosuk): Match the behavior of _temperature_kernel.
-            # E.g., if the kernel uses tl.div_rn, we should use tl.div_rn here too.
-            logits = logits / temp
 
         # Apply gumbel noise.
         logits = tl.where(mask, logits + gumbel_noise, float("-inf"))
@@ -112,27 +122,20 @@ def gumbel_sample(
     seed: torch.Tensor,  # [max_num_reqs]
     pos: torch.Tensor,  # [num_tokens]
     apply_temperature: bool,
+    processed_logits_out: torch.Tensor | None = None,  # [num_reqs, vocab_size]
 ) -> torch.Tensor:
     num_tokens, vocab_size = logits.shape
     BLOCK_SIZE = 1024
     num_blocks = triton.cdiv(vocab_size, BLOCK_SIZE)
-    local_argmax = torch.empty(
-        num_tokens,
-        num_blocks,
-        dtype=torch.int64,
-        device=logits.device,
-    )
-    local_max = torch.empty(
-        num_tokens,
-        num_blocks,
-        dtype=torch.float32,
-        device=logits.device,
-    )
+    local_argmax = logits.new_empty(num_tokens, num_blocks, dtype=torch.int64)
+    local_max = logits.new_empty(num_tokens, num_blocks, dtype=torch.float32)
     _gumbel_sample_kernel[(num_tokens, num_blocks)](
         local_argmax,
         local_argmax.stride(0),
         local_max,
         local_max.stride(0),
+        processed_logits_out,
+        processed_logits_out.stride(0) if processed_logits_out is not None else 0,
         logits,
         logits.stride(0),
         expanded_idx_mapping,

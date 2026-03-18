@@ -76,10 +76,10 @@ def enable_pickle(monkeypatch):
 )
 @pytest.mark.skipif(not QUARK_MXFP4_AVAILABLE, reason="amd-quark>=0.9 is not available")
 def test_mxfp4_loading_and_execution_moe(vllm_runner, model_case: ModelCase):
-    if torch.cuda.device_count() < model_case.tp:
+    if torch.accelerator.device_count() < model_case.tp:
         pytest.skip(
             f"This test requires >={model_case.tp} gpus, got only "
-            f"{torch.cuda.device_count()}"
+            f"{torch.accelerator.device_count()}"
         )
 
     # `cudagraph_capture_sizes=[16]` to reduce load time.
