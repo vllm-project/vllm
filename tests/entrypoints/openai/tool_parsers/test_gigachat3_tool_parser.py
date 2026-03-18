@@ -5,13 +5,20 @@ import json
 
 import pytest
 
-from tests.entrypoints.openai.tool_parsers.utils import (
+from tests.tool_parsers.utils import (
     run_tool_extraction,
     run_tool_extraction_streaming,
 )
 from vllm.entrypoints.openai.engine.protocol import FunctionCall
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers import ToolParser, ToolParserManager
+
+MSG_SEP_TOKEN = "<|message_sep|>\n\n"
+ROLE_SEP_TOKEN = "<|role_sep|>\n"
+EOS_TOKEN = "</s>"
+TOOL_HEADER_GIGACHAT3 = f"function call{ROLE_SEP_TOKEN}"
+TOOL_HEADER_GIGACHAT31 = "<|function_call|>"
+
 
 SIMPLE_ARGS_DICT = {
     "action": "create",
@@ -24,7 +31,10 @@ SIMPLE_FUNCTION_JSON = json.dumps(
     },
     ensure_ascii=False,
 )
-SIMPLE_FUNCTION_OUTPUT = "function call" + SIMPLE_FUNCTION_JSON
+SIMPLE_FUNCTION_OUTPUT_GIGACHAT3 = (
+    f"{MSG_SEP_TOKEN}{TOOL_HEADER_GIGACHAT3}{SIMPLE_FUNCTION_JSON}"
+)
+SIMPLE_FUNCTION_OUTPUT_GIGACHAT31 = f"{TOOL_HEADER_GIGACHAT31}{SIMPLE_FUNCTION_JSON}"
 SIMPLE_FUNCTION_CALL = FunctionCall(
     name="manage_user_memory",
     arguments=json.dumps(SIMPLE_ARGS_DICT, ensure_ascii=False),
@@ -38,7 +48,12 @@ PARAMETERLESS_FUNCTION_JSON = json.dumps(
     },
     ensure_ascii=False,
 )
-PARAMETERLESS_FUNCTION_OUTPUT = "function call" + PARAMETERLESS_FUNCTION_JSON
+PARAMETERLESS_FUNCTION_OUTPUT_GIGACHAT3 = (
+    f"{MSG_SEP_TOKEN}{TOOL_HEADER_GIGACHAT3}{PARAMETERLESS_FUNCTION_JSON}"
+)
+PARAMETERLESS_FUNCTION_OUTPUT_GIGACHAT31 = (
+    f"{TOOL_HEADER_GIGACHAT31}{PARAMETERLESS_FUNCTION_JSON}"
+)
 PARAMETERLESS_FUNCTION_CALL = FunctionCall(
     name="manage_user_memory",
     arguments=json.dumps({}, ensure_ascii=False),
@@ -62,17 +77,38 @@ COMPLEX_FUNCTION_JSON = json.dumps(
     },
     ensure_ascii=False,
 )
-COMPLEX_FUNCTION_OUTPUT = "function call" + COMPLEX_FUNCTION_JSON
+COMPLEX_FUNCTION_OUTPUT_GIGACHAT3 = (
+    f"{MSG_SEP_TOKEN}{TOOL_HEADER_GIGACHAT3}{COMPLEX_FUNCTION_JSON}"
+)
+COMPLEX_FUNCTION_OUTPUT_GIGACHAT31 = f"{TOOL_HEADER_GIGACHAT31}{COMPLEX_FUNCTION_JSON}"
 COMPLEX_FUNCTION_CALL = FunctionCall(
     name="manage_user_memory",
     arguments=json.dumps(COMPLEX_ARGS_DICT, ensure_ascii=False),
 )
 
 
+CONTENT_TEXT = "I'll check that for you."
+MIXED_OUTPUT_GIGACHAT3 = f"{CONTENT_TEXT}{SIMPLE_FUNCTION_OUTPUT_GIGACHAT3}"
+MIXED_OUTPUT_GIGACHAT31 = f"{CONTENT_TEXT}{SIMPLE_FUNCTION_OUTPUT_GIGACHAT31}"
+
+
+@pytest.fixture(name="gigachat_tokenizer")
+def fixture_gigachat_tokenizer(default_tokenizer: TokenizerLike):
+    default_tokenizer.add_tokens(
+        [
+            MSG_SEP_TOKEN,
+            ROLE_SEP_TOKEN,
+            TOOL_HEADER_GIGACHAT31,
+            EOS_TOKEN,
+        ]
+    )
+    return default_tokenizer
+
+
 @pytest.mark.parametrize("streaming", [True, False])
-def test_no_tool_call(streaming: bool, default_tokenizer: TokenizerLike):
+def test_no_tool_call(streaming: bool, gigachat_tokenizer: TokenizerLike):
     tool_parser: ToolParser = ToolParserManager.get_tool_parser("gigachat3")(
-        default_tokenizer
+        gigachat_tokenizer
     )
     model_output = "How can I help you today?"
     content, tool_calls = run_tool_extraction(
@@ -85,45 +121,143 @@ def test_no_tool_call(streaming: bool, default_tokenizer: TokenizerLike):
 TEST_CASES = [
     pytest.param(
         True,
-        SIMPLE_FUNCTION_OUTPUT,
+        SIMPLE_FUNCTION_OUTPUT_GIGACHAT3,
         [SIMPLE_FUNCTION_CALL],
         None,
-        id="simple_streaming",
+        id="simple_streaming_gigachat3",
     ),
     pytest.param(
         False,
-        SIMPLE_FUNCTION_OUTPUT,
+        SIMPLE_FUNCTION_OUTPUT_GIGACHAT3,
         [SIMPLE_FUNCTION_CALL],
         None,
-        id="simple_nonstreaming",
+        id="simple_nonstreaming_gigachat3",
     ),
     pytest.param(
         True,
-        PARAMETERLESS_FUNCTION_OUTPUT,
+        PARAMETERLESS_FUNCTION_OUTPUT_GIGACHAT3,
         [PARAMETERLESS_FUNCTION_CALL],
         None,
-        id="parameterless_streaming",
+        id="parameterless_streaming_gigachat3",
     ),
     pytest.param(
         False,
-        PARAMETERLESS_FUNCTION_OUTPUT,
+        PARAMETERLESS_FUNCTION_OUTPUT_GIGACHAT3,
         [PARAMETERLESS_FUNCTION_CALL],
         None,
-        id="parameterless_nonstreaming",
+        id="parameterless_nonstreaming_gigachat3",
     ),
     pytest.param(
         True,
-        COMPLEX_FUNCTION_OUTPUT,
+        COMPLEX_FUNCTION_OUTPUT_GIGACHAT3,
         [COMPLEX_FUNCTION_CALL],
         None,
-        id="complex_streaming",
+        id="complex_streaming_gigachat3",
     ),
     pytest.param(
         False,
-        COMPLEX_FUNCTION_OUTPUT,
+        COMPLEX_FUNCTION_OUTPUT_GIGACHAT3,
         [COMPLEX_FUNCTION_CALL],
         None,
-        id="complex_nonstreaming",
+        id="complex_nonstreaming_gigachat3",
+    ),
+    pytest.param(
+        True,
+        MIXED_OUTPUT_GIGACHAT3,
+        [SIMPLE_FUNCTION_CALL],
+        CONTENT_TEXT,
+        id="mixed_content_streaming_gigachat3",
+    ),
+    pytest.param(
+        False,
+        MIXED_OUTPUT_GIGACHAT3,
+        [SIMPLE_FUNCTION_CALL],
+        CONTENT_TEXT,
+        id="mixed_content_nonstreaming_gigachat3",
+    ),
+    pytest.param(
+        True,
+        MIXED_OUTPUT_GIGACHAT3 + EOS_TOKEN,
+        [SIMPLE_FUNCTION_CALL],
+        CONTENT_TEXT,
+        id="mixed_content_streaming_with_eos_gigachat3",
+    ),
+    pytest.param(
+        False,
+        MIXED_OUTPUT_GIGACHAT3 + EOS_TOKEN,
+        [SIMPLE_FUNCTION_CALL],
+        CONTENT_TEXT,
+        id="mixed_content_nonstreaming_with_eos_gigachat3",
+    ),
+    pytest.param(
+        True,
+        SIMPLE_FUNCTION_OUTPUT_GIGACHAT31,
+        [SIMPLE_FUNCTION_CALL],
+        None,
+        id="simple_streaming_gigachat31",
+    ),
+    pytest.param(
+        False,
+        SIMPLE_FUNCTION_OUTPUT_GIGACHAT31,
+        [SIMPLE_FUNCTION_CALL],
+        None,
+        id="simple_nonstreaming_gigachat31",
+    ),
+    pytest.param(
+        True,
+        PARAMETERLESS_FUNCTION_OUTPUT_GIGACHAT31,
+        [PARAMETERLESS_FUNCTION_CALL],
+        None,
+        id="parameterless_streaming_gigachat31",
+    ),
+    pytest.param(
+        False,
+        PARAMETERLESS_FUNCTION_OUTPUT_GIGACHAT31,
+        [PARAMETERLESS_FUNCTION_CALL],
+        None,
+        id="parameterless_nonstreaming_gigachat31",
+    ),
+    pytest.param(
+        True,
+        COMPLEX_FUNCTION_OUTPUT_GIGACHAT31,
+        [COMPLEX_FUNCTION_CALL],
+        None,
+        id="complex_streaming_gigachat31",
+    ),
+    pytest.param(
+        False,
+        COMPLEX_FUNCTION_OUTPUT_GIGACHAT31,
+        [COMPLEX_FUNCTION_CALL],
+        None,
+        id="complex_nonstreaming_gigachat31",
+    ),
+    pytest.param(
+        True,
+        MIXED_OUTPUT_GIGACHAT31,
+        [SIMPLE_FUNCTION_CALL],
+        CONTENT_TEXT,
+        id="mixed_content_streaming_gigachat31",
+    ),
+    pytest.param(
+        False,
+        MIXED_OUTPUT_GIGACHAT31,
+        [SIMPLE_FUNCTION_CALL],
+        CONTENT_TEXT,
+        id="mixed_content_nonstreaming_gigachat31",
+    ),
+    pytest.param(
+        True,
+        MIXED_OUTPUT_GIGACHAT31 + EOS_TOKEN,
+        [SIMPLE_FUNCTION_CALL],
+        CONTENT_TEXT,
+        id="mixed_content_streaming_with_eos_gigachat31",
+    ),
+    pytest.param(
+        False,
+        MIXED_OUTPUT_GIGACHAT31 + EOS_TOKEN,
+        [SIMPLE_FUNCTION_CALL],
+        CONTENT_TEXT,
+        id="mixed_content_nonstreaming_with_eos_gigachat31",
     ),
 ]
 
@@ -136,14 +270,16 @@ def test_tool_call(
     model_output: str,
     expected_tool_calls: list[FunctionCall],
     expected_content: str | None,
-    default_tokenizer: TokenizerLike,
+    gigachat_tokenizer: TokenizerLike,
 ):
     tool_parser: ToolParser = ToolParserManager.get_tool_parser("gigachat3")(
-        default_tokenizer
+        gigachat_tokenizer
     )
     content, tool_calls = run_tool_extraction(
         tool_parser, model_output, streaming=streaming
     )
+    if content == "":
+        content = None
     assert content == expected_content
     assert len(tool_calls) == len(expected_tool_calls)
     for actual, expected in zip(tool_calls, expected_tool_calls):
@@ -154,15 +290,46 @@ def test_tool_call(
         assert actual_args == expected_args
 
 
-def test_streaming_tool_call_with_large_steps(default_tokenizer: TokenizerLike):
+@pytest.mark.parametrize(
+    "model_output_deltas",
+    [
+        pytest.param(
+            [
+                CONTENT_TEXT[:3],
+                CONTENT_TEXT[3:5],
+                CONTENT_TEXT[5:],
+                MSG_SEP_TOKEN,
+                TOOL_HEADER_GIGACHAT3,
+                COMPLEX_FUNCTION_JSON[:40],
+                COMPLEX_FUNCTION_JSON[40:-1],
+                COMPLEX_FUNCTION_JSON[-1],
+            ],
+            id="gigachat3",
+        ),
+        pytest.param(
+            [
+                CONTENT_TEXT[:3],
+                CONTENT_TEXT[3:5],
+                CONTENT_TEXT[5:],
+                TOOL_HEADER_GIGACHAT31,
+                COMPLEX_FUNCTION_JSON[:40],
+                COMPLEX_FUNCTION_JSON[40:-1],
+                COMPLEX_FUNCTION_JSON[-1],
+            ],
+            id="gigachat31",
+        ),
+    ],
+)
+def test_streaming_tool_call_with_large_steps(
+    model_output_deltas: list[str],
+    gigachat_tokenizer: TokenizerLike,
+):
+    """
+    Test that the closing braces are streamed correctly.
+    """
     tool_parser: ToolParser = ToolParserManager.get_tool_parser("gigachat3")(
-        default_tokenizer
+        gigachat_tokenizer
     )
-    model_output_deltas = [
-        "function call",
-        COMPLEX_FUNCTION_JSON[:40],
-        COMPLEX_FUNCTION_JSON[40:],
-    ]
     reconstructor = run_tool_extraction_streaming(
         tool_parser,
         model_output_deltas,

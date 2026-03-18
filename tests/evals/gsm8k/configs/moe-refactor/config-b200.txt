@@ -15,3 +15,4 @@ Mixtral-8x7B-BF16-fi-cutlass.yaml
 Mixtral-8x7B-BF16-triton.yaml
 Nemotron-Nano-30B-Fp8-ModelOpt-fi-trtllm.yaml
 Nemotron-Nano-30B-NvFp4-ModelOpt-fi-cutlass.yaml
+Nemotron-Nano-30B-NvFp4-ModelOpt-vllm-cutlass.yaml
