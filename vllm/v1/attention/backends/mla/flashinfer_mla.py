@@ -189,19 +189,21 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
 
         # Reuse pre-allocated zero-init output buffer to avoid a memset
         # kernel on every CUDA graph replay.
-        B = q.shape[0]
+        # q is 4D: (batch, q_len_per_req, num_heads, head_dim)
+        B, q_len_per_req, num_heads_q = q.shape[0], q.shape[1], q.shape[2]
         dtype = (
             torch.bfloat16 if is_quantized_kv_cache(self.kv_cache_dtype) else q.dtype
         )
+        out_tail = (q_len_per_req, num_heads_q, self.kv_lora_rank)
         if (
             self._decode_out is None
             or self._decode_out.shape[0] < B
+            or self._decode_out.shape[1:] != out_tail
             or self._decode_out.dtype != dtype
         ):
             self._decode_out = torch.zeros(
                 B,
-                q.shape[2],
-                self.kv_lora_rank,
+                *out_tail,
                 dtype=dtype,
                 device=q.device,
             )
