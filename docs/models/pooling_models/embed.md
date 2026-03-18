@@ -2,7 +2,18 @@
 
 Embedding models are a class of machine learning models designed to transform unstructured data—such as text, images, or audio—into a structured numerical representation known as an embedding.
 
-This functionality is supported through the `embed` pooling task, the offline `LLM.embed(...)` and `LLM.encode(..., pooling_task="embed")` APIs, as well as the online OpenAI-Compatible Embeddings API(`/v1/embeddings`) API and Cohere Embed API(`/v2/embed`).
+## Summary
+
+- Model Types: (sequence) embedding models
+- Pooling Tasks: `embed`
+- Offline APIs:
+    - `LLM.embed(...)`
+    - `LLM.encode(..., pooling_task="embed")`
+    - `LLM.score(...)`
+- Online APIs: 
+    - [Cohere Embed API](embed.md#cohere-embed-api) (`/v2/embed`)
+    - [Openai-compatible Embeddings API](embed.md#openai-compatible-embeddings-api) (`/v1/embeddings`)
+    - Pooling API (`/pooling`)
 
 The primary distinction between (sequence) embedding and token embedding lies in their output granularity: (sequence) embedding produces a single embedding vector for an entire input sequence, whereas token embedding generates an embedding for each individual token within the sequence.
 

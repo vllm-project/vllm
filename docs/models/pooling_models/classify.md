@@ -2,7 +2,16 @@
 
 Classification involves predicting which predefined category, class, or label best corresponds to a given input.
 
-This functionality is supported through the `classify` pooling task, the offline `LLM.classify(...)` and `LLM.encode(..., pooling_task="classify")` APIs, as well as the online `/classify` API.
+## Summary
+
+- Model Types: (sequence) classification models
+- Pooling Tasks: `classify`
+- Offline APIs:
+    - `LLM.classify(...)`
+    - `LLM.encode(..., pooling_task="classify")`
+- Online APIs: 
+    - [Classification API](classify.md#online-serving)(`/classify`)
+    - Pooling API (`/pooling`)
 
 The key distinction between (sequence) classification and token classification lies in their output granularity: (sequence) classification produces a single result for an entire input sequence, whereas token classification yields a result for each individual token within the sequence.
 

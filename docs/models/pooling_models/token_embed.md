@@ -1,6 +1,13 @@
 # Token Embedding Models
 
-Token embedding is supported through the `token_embed` pooling task, the offline `LLM.encode(..., pooling_task="embed")` API, and the online `/pooling` API.
+## Summary
+
+- Model Types: Token classification models
+- Pooling Tasks: `token_embed`
+- Offline APIs:
+    - `LLM.encode(..., pooling_task="token_embed")`
+- Online APIs:
+    - Pooling API (`/pooling`)
 
 The difference between the (sequence) embedding task and the token embedding task is that (sequence) embedding outputs one embedding for each sequence, while token embedding outputs a embedding for each token.
 
