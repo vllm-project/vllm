@@ -371,13 +371,15 @@ class CompilerManager:
                 logger.info_once(
                     "Cache the graph of compile range %s for later use",
                     str(compile_range),
+                    scope="local",
                 )
-            logger.debug(
+            logger.debug_once(
                 "Store the %s-th graph for compile range%s from %s via handle %s",
                 graph_index,
                 str(compile_range),
                 self.compiler.name,
                 handle,
+                scope="local",
             )
 
         # after compiling the last graph, record the end time
