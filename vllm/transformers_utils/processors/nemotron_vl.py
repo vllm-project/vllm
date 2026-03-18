@@ -4,20 +4,11 @@
 import torch
 import torchvision.transforms as T
 from PIL import Image
-from transformers import BaseImageProcessorFast, BatchFeature, TensorType
-from transformers.processing_utils import ProcessorMixin
 
 from vllm.multimodal.image import convert_image_mode
-from vllm.multimodal.processing import PromptUpdateDetails
 from vllm.tokenizers.hf import HfTokenizer
 
-from .internvl import (
-    InternVLImageProcessor,
-    InternVLProcessor,
-    InternVLProcessorLike,
-    get_internvl_target_ratios,
-    resolve_internvl_min_max_num,
-)
+from .internvl import InternVLImageProcessor, InternVLProcessor
 
 # Configure PIL to handle large images without warnings
 # This prevents DecompressionBombWarning for legitimate large images
@@ -177,7 +168,35 @@ def image_to_pixel_values_nemotron_vl(
     return pixel_values
 
 
-class LlamaNemotronNanoVLProcessor(InternVLProcessorLike, ProcessorMixin):
+class LlamaNemotronNanoVLImageProcessor(InternVLImageProcessor):
+    def _images_to_pixel_values_lst(
+        self,
+        images: list[Image.Image],
+        min_dynamic_patch: int | None = None,
+        max_dynamic_patch: int | None = None,
+        dynamic_image_size: bool | None = None,
+    ) -> list[torch.Tensor]:
+        min_num, max_num = self.resolve_min_max_num(
+            min_dynamic_patch=min_dynamic_patch,
+            max_dynamic_patch=max_dynamic_patch,
+            dynamic_image_size=dynamic_image_size,
+            use_thumbnail=False,  # Applied in image_to_pixel_values
+        )
+
+        return [
+            image_to_pixel_values_nemotron_vl(
+                image,
+                input_size=self.image_size,
+                min_num=min_num,
+                max_num=max_num,
+                use_thumbnail=self.use_thumbnail,
+                transform=build_transform(self.image_size),
+            )
+            for image in images
+        ]
+
+
+class LlamaNemotronNanoVLProcessor(InternVLProcessor):
     """
     This model doesn't define its own HF processor,
     so we implement our own one here.
@@ -186,11 +205,9 @@ class LlamaNemotronNanoVLProcessor(InternVLProcessorLike, ProcessorMixin):
     https://huggingface.co/nvidia/Llama-3.1-Nemotron-Nano-VL-8B-V1/blob/main/image_processing.py
     """
 
-    attributes = ["image_processor", "tokenizer"]
-
     def __init__(
         self,
-        image_processor: BaseImageProcessorFast,
+        image_processor: LlamaNemotronNanoVLImageProcessor,
         tokenizer: HfTokenizer,
         *,
         image_seq_length: int,
@@ -198,38 +215,14 @@ class LlamaNemotronNanoVLProcessor(InternVLProcessorLike, ProcessorMixin):
         start_image_token: str = "<img>",
         end_image_token: str = "</img>",
     ) -> None:
-        self.image_processor = image_processor
-        self.tokenizer = tokenizer
-
-        self.image_seq_length = image_seq_length
-        self.image_token = image_token
-        self.start_image_token = start_image_token
-        self.end_image_token = end_image_token
-
-        self.image_token_id = tokenizer.convert_tokens_to_ids(image_token)
-        self.start_image_token_id = tokenizer.convert_tokens_to_ids(start_image_token)
-        self.end_image_token_id = tokenizer.convert_tokens_to_ids(end_image_token)
-
-    def resolve_target_ratios(
-        self,
-        *,
-        max_num_tiles: int | None = None,
-        use_thumbnail: bool | None = None,
-    ) -> list[tuple[int, int]]:
-        image_processor = self.image_processor
-        if max_num_tiles is None:
-            max_num_tiles = image_processor.max_num_tiles
-        if use_thumbnail is None:
-            use_thumbnail = image_processor.use_thumbnail
-
-        min_num, max_num = resolve_internvl_min_max_num(
-            min_dynamic_patch=1,
-            max_dynamic_patch=max_num_tiles,
-            dynamic_image_size=True,
-            use_thumbnail=use_thumbnail,
+        super().__init__(
+            image_processor=image_processor,
+            tokenizer=tokenizer,
+            image_seq_length=image_seq_length,
+            image_token=image_token,
+            start_image_token=start_image_token,
+            end_image_token=end_image_token,
         )
-
-        return get_internvl_target_ratios(min_num, max_num)
 
     def get_num_image_tokens(
         self,
@@ -251,81 +244,6 @@ class LlamaNemotronNanoVLProcessor(InternVLProcessorLike, ProcessorMixin):
         )
 
         return num_patches * self.image_seq_length
-
-    def get_image_repl(
-        self,
-        num_patches: int | None,
-        num_features: int | None = None,
-    ) -> PromptUpdateDetails[str]:
-        if num_patches is None:
-            assert num_features is not None
-        else:
-            num_features = num_patches * self.image_seq_length
-
-        context_token = self.image_token
-        repl_features = context_token * num_features
-        repl_full = self.start_image_token + repl_features + self.end_image_token
-
-        return PromptUpdateDetails.select_text(repl_full, context_token)
-
-    def __call__(
-        self,
-        text: str | list[str] | None = None,
-        images: Image.Image | list[Image.Image] | None = None,
-        *,
-        max_num_tiles: int | None = None,
-        use_thumbnail: bool | None = None,
-        return_tensors: str | TensorType | None = None,
-        **kwargs,
-    ) -> BatchFeature:
-        if images is not None:
-            image_inputs = self.image_processor(
-                images=images,
-                max_num_tiles=max_num_tiles,
-                use_thumbnail=use_thumbnail,
-                return_tensors=return_tensors,
-            )
-            image_inputs["pixel_values_flat"] = image_inputs.pop("pixel_values")
-            image_inputs["image_num_patches"] = image_inputs.pop("num_patches")
-            image_num_patches = image_inputs["image_num_patches"]
-        else:
-            image_inputs = {}
-            image_num_patches = []
-
-        if text is not None:
-            if not isinstance(text, list):
-                text = [text]
-
-            if image_inputs:
-                image_token = self.image_token
-                image_index = 0
-                processed_text = list[str]()
-                replace_strings = list[str]()
-
-                for prompt in text:
-                    new_prompt = prompt
-
-                    while image_token in new_prompt:
-                        new_prompt = new_prompt.replace(image_token, "<placeholder>", 1)
-                        image_repl = self.get_image_repl(image_num_patches[image_index])
-                        replace_strings.append(image_repl.full)
-                        image_index += 1
-
-                    while "<placeholder>" in new_prompt:
-                        replace_str = replace_strings.pop(0)
-                        new_prompt = new_prompt.replace("<placeholder>", replace_str, 1)
-
-                    processed_text.append(new_prompt)
-
-                text = processed_text
-
-            text_inputs = self.tokenizer(text, return_tensors=return_tensors)
-        else:
-            text_inputs = {}
-
-        combined_outputs = {**text_inputs, **image_inputs}
-
-        return BatchFeature(combined_outputs, tensor_type=return_tensors)
 
 
 # SigLIP normalization constants

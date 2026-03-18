@@ -26,6 +26,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.processor import cached_image_processor_from_config
 from vllm.transformers_utils.processors.nemotron_vl import (
+    LlamaNemotronNanoVLImageProcessor,
     LlamaNemotronNanoVLProcessor,
     LlamaNemotronVLEmbedImageProcessor,
     LlamaNemotronVLEmbedProcessor,
@@ -52,7 +53,17 @@ class NemotronVLProcessingInfo(BaseInternVLProcessingInfo):
     """Processing info for Nemotron VL models."""
 
     def get_image_processor(self, **kwargs: object):
-        return cached_image_processor_from_config(self.ctx.model_config, **kwargs)
+        orig_processor = cached_image_processor_from_config(
+            self.ctx.model_config, **kwargs
+        )
+
+        return LlamaNemotronNanoVLImageProcessor(
+            image_size=orig_processor.image_size,
+            min_dynamic_patch=1,
+            max_dynamic_patch=orig_processor.max_num_tiles,
+            dynamic_image_size=True,
+            use_thumbnail=orig_processor.use_thumbnail,
+        )
 
     def get_hf_processor(self, **kwargs: object) -> LlamaNemotronNanoVLProcessor:
         config = self.get_hf_config()
