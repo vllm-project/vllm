@@ -160,14 +160,24 @@ class LoRAModelManager:
             device=self.device,
             lora_config=self.lora_config,
         )
+
         lm_prefix = self.mm_mapping.language_model[0]
         self.punica_wrapper_mapping[lm_prefix] = llm_punica_wrapper
-
         if self.lora_config.enable_tower_connector_lora:
             self.supports_tower_connector_lora = self.supports_mm and hasattr(
                 self.model, "get_num_mm_encoder_tokens"
             )
         if not self.supports_tower_connector_lora:
+            return
+
+        if (
+            vllm_config.model_config.multimodal_config
+            and vllm_config.model_config.multimodal_config.language_model_only
+        ):
+            logger.warning(
+                "When the multimodal model only initializes the language model,"
+                "disable `enable_tower_connector_lora`"
+            )
             return
 
         logger.warning(
