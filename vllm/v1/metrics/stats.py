@@ -140,13 +140,10 @@ class QueueTimeTracker:
         self.aggregated_queue_time = 0.0
         self.queue: deque[tuple[int, float]] = deque()
         self._last_observation_time: float | None = None
-        # Cache the avg at last observation time for decay calculation
-        self._last_avg_queue_time: float = 0.0
 
     def observe(self, queue_time: float) -> None:
         """Observe the queue time of a single finished request."""
         self._last_observation_time = time.time()
-        self._last_avg_queue_time = self.avg_queue_time
         self.queue.append((1, queue_time))
         self.aggregated_requests += 1
         self.aggregated_queue_time += queue_time
@@ -191,7 +188,6 @@ class QueueTimeTracker:
         self.aggregated_queue_time = 0.0
         self.queue.clear()
         self._last_observation_time = None
-        self._last_avg_queue_time = 0.0
 
 
 @dataclass
