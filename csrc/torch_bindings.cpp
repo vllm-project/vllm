@@ -203,7 +203,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
 
   ops.def(
       "persistent_topk(Tensor logits, Tensor lengths, Tensor! output, "
-      "Tensor workspace, int k) -> ()");
+      "Tensor workspace, int k, int max_seq_len) -> ()");
   ops.impl("persistent_topk", torch::kCUDA, &persistent_topk);
 
   // Layernorm-quant

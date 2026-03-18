@@ -2,6 +2,8 @@
 #define PERSISTENT_TOPK_LARGE_CUH_
 
 #include "persistent_topk_common.cuh"
+#include "persistent_topk_decode.cuh"
+#include "persistent_topk_medium.cuh"
 
 namespace vllm {
 namespace persistent {
@@ -100,8 +102,7 @@ __device__ void large_topk_cuda(PersistentTopKParams params) {
   __syncthreads();
 
   int barrier_phase = 0;
-  const uint32_t total_iters =
-      (params.num_rows + num_groups - 1) / num_groups;
+  const uint32_t total_iters = (params.num_rows + num_groups - 1) / num_groups;
 
   for (uint32_t iter = 0; iter < total_iters; iter++) {
     const uint32_t row_idx = group_id + iter * num_groups;
@@ -111,14 +112,23 @@ __device__ void large_topk_cuda(PersistentTopKParams params) {
     int32_t* row_output = params.output + row_idx * TopK;
     const float* row_input = params.input + row_idx * params.stride;
 
-    // -- Trivial case: seq_len <= TopK --
-    if (seq_len <= static_cast<uint32_t>(TopK)) {
-      for (uint32_t i = tx; i < static_cast<uint32_t>(TopK);
-           i += kThreadsPerBlock) {
-        row_output[i] = (i < seq_len) ? static_cast<int32_t>(i) : -1;
-      }
-      uint32_t next_hist_idx = ((iter + 1) * 4) % 3;
+    // -- Non-large rows: only CTA 0 processes, no barriers needed --
+    if (seq_len <= LARGE_THRESHOLD) {
       if (cta_in_group == 0) {
+        if (seq_len <= static_cast<uint32_t>(TopK)) {
+          for (uint32_t i = tx; i < static_cast<uint32_t>(TopK);
+               i += kThreadsPerBlock) {
+            row_output[i] = (i < seq_len) ? static_cast<int32_t>(i) : -1;
+          }
+        } else if (seq_len <= static_cast<uint32_t>(DECODE_THRESHOLD)) {
+          decode_topk_cuda(row_input, row_output, seq_len);
+        } else {
+          fast_topk_cuda_tl(row_input, row_output, 0, seq_len);
+        }
+      }
+      // Clean histogram for potential next large row
+      if (cta_in_group == 0) {
+        uint32_t next_hist_idx = ((iter + 1) * 4) % 3;
         for (uint32_t i = tx; i < RADIX; i += kThreadsPerBlock) {
           state->histogram[next_hist_idx][i] = 0;
         }
@@ -128,30 +138,28 @@ __device__ void large_topk_cuda(PersistentTopKParams params) {
 
     // -- Compute this CTA's chunk bounds --
     const uint32_t my_chunk_start = cta_in_group * chunk_size;
-    const uint32_t my_chunk_end =
-        (my_chunk_start + chunk_size < seq_len)
-            ? my_chunk_start + chunk_size
-            : seq_len;
+    const uint32_t my_chunk_end = (my_chunk_start + chunk_size < seq_len)
+                                      ? my_chunk_start + chunk_size
+                                      : seq_len;
     const uint32_t actual_chunk_size =
         (my_chunk_start < seq_len) ? (my_chunk_end - my_chunk_start) : 0;
 
     // -- Stage 1: Load chunk to shared memory as ordered uint32 --
     {
-      const uint32_t aligned_size =
-          (actual_chunk_size / VEC_SIZE) * VEC_SIZE;
+      const uint32_t aligned_size = (actual_chunk_size / VEC_SIZE) * VEC_SIZE;
 
       for (uint32_t i = tx * VEC_SIZE; i < aligned_size;
            i += kThreadsPerBlock * VEC_SIZE) {
         const float* src = row_input + my_chunk_start + i;
         if constexpr (VEC_SIZE == 4) {
           float4 v = *reinterpret_cast<const float4*>(src);
-          shared_ordered[i]     = convert_to_uint32_v2(v.x);
+          shared_ordered[i] = convert_to_uint32_v2(v.x);
           shared_ordered[i + 1] = convert_to_uint32_v2(v.y);
           shared_ordered[i + 2] = convert_to_uint32_v2(v.z);
           shared_ordered[i + 3] = convert_to_uint32_v2(v.w);
         } else if constexpr (VEC_SIZE == 2) {
           float2 v = *reinterpret_cast<const float2*>(src);
-          shared_ordered[i]     = convert_to_uint32_v2(v.x);
+          shared_ordered[i] = convert_to_uint32_v2(v.x);
           shared_ordered[i + 1] = convert_to_uint32_v2(v.y);
         } else {
           shared_ordered[i] = convert_to_uint32_v2(*src);
@@ -159,8 +167,7 @@ __device__ void large_topk_cuda(PersistentTopKParams params) {
       }
       for (uint32_t i = aligned_size + tx; i < actual_chunk_size;
            i += kThreadsPerBlock) {
-        shared_ordered[i] =
-            convert_to_uint32_v2(row_input[my_chunk_start + i]);
+        shared_ordered[i] = convert_to_uint32_v2(row_input[my_chunk_start + i]);
       }
     }
     __syncthreads();
@@ -202,8 +209,7 @@ __device__ void large_topk_cuda(PersistentTopKParams params) {
 
       for (uint32_t i = tx; i < actual_chunk_size; i += kThreadsPerBlock) {
         uint32_t ordered = shared_ordered[i];
-        uint32_t mask =
-            (round == 0) ? 0u : (~0u << (32 - round * 8));
+        uint32_t mask = (round == 0) ? 0u : (~0u << (32 - round * 8));
         if ((ordered & mask) == prefix) {
           uint32_t bucket = (ordered >> shift) & 0xFF;
           atomicAdd(&local_histogram[bucket], 1);
@@ -226,9 +232,8 @@ __device__ void large_topk_cuda(PersistentTopKParams params) {
       if (tx == 0) {
         red_release(&state->arrival_counter, 1);
       }
-      wait_ge(
-          &state->arrival_counter,
-          (barrier_phase + 1) * static_cast<int>(ctas_per_group), tx);
+      wait_ge(&state->arrival_counter,
+              (barrier_phase + 1) * static_cast<int>(ctas_per_group), tx);
       barrier_phase++;
       __syncthreads();
 
@@ -295,8 +300,7 @@ __device__ void large_topk_cuda(PersistentTopKParams params) {
       local_histogram[0] = 0;
       if (local_gt_count > 0) {
         local_histogram[1] =
-            atomicAdd(&state->output_counter,
-                      static_cast<int>(local_gt_count));
+            atomicAdd(&state->output_counter, static_cast<int>(local_gt_count));
       }
     }
     __syncthreads();
@@ -312,9 +316,8 @@ __device__ void large_topk_cuda(PersistentTopKParams params) {
     if (tx == 0) {
       red_release(&state->arrival_counter, 1);
     }
-    wait_ge(
-        &state->arrival_counter,
-        (barrier_phase + 1) * static_cast<int>(ctas_per_group), tx);
+    wait_ge(&state->arrival_counter,
+            (barrier_phase + 1) * static_cast<int>(ctas_per_group), tx);
     barrier_phase++;
     __syncthreads();
 

@@ -211,7 +211,7 @@ def sparse_attn_indexer(
 
         if next_n == 1:
             lengths = decode_metadata.seq_lens
-        else: #TODO: isn't this a problem for next_n > 1 and top_k_per_row_decode?
+        else:  # TODO: isn't this a problem for next_n > 1 and top_k_per_row_decode?
             # (bs,) -> (bs, 1) + (next_n,) -> (bs, next_n) -> (bs * next_n,)
             lengths = (
                 decode_metadata.seq_lens.unsqueeze(1)
@@ -221,9 +221,14 @@ def sparse_attn_indexer(
             ).flatten()
 
         if current_platform.is_cuda():
-          torch.ops._C.persistent_topk(
-              logits, lengths, topk_indices, topk_workspace, topk_tokens
-          )
+            torch.ops._C.persistent_topk(
+                logits,
+                lengths,
+                topk_indices,
+                topk_workspace,
+                topk_tokens,
+                attn_metadata.max_seq_len,
+            )
         else:
             if current_platform.is_xpu():
                 ops.top_k_per_row_decode(
