@@ -309,8 +309,8 @@ class MoERunnerBase(MoERunner):
         """
         return (
             self.shared_experts is not None
-            and self.quant_method.moe_mk is not None
-            and self.quant_method.moe_mk.output_is_reduced()
+            and self.quant_method.moe_kernel is not None
+            and self.quant_method.moe_kernel.output_is_reduced()
         )
 
     def _maybe_reduce_shared_expert_output(
