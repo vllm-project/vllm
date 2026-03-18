@@ -29,9 +29,8 @@ def reshape_and_cache_kernel_flash(
     block_size: tl.constexpr,
     x: tl.constexpr,
     USE_HEAD_MAJOR_LAYOUT: tl.constexpr,
-    # Quantization flags
-    QUANTIZED_KV_CACHE: tl.constexpr,  # True for fp8/int8
-    INT8_PER_HEAD_SCALE: tl.constexpr,  # True for int8 per-head scale [num_heads]
+    # Quantization: 0=none, 1=fp8 (INT8 uses dedicated per-token kernel)
+    KV_QUANT_MODE: tl.constexpr,
     # tune parameters
     TILE_SIZE: tl.constexpr,
 ):
@@ -78,27 +77,11 @@ def reshape_and_cache_kernel_flash(
     key_load = tl.load(
         key_ptr + src_key_idx + tile_pos, mask=tile_pos < (num_heads * head_size)
     )
-    if QUANTIZED_KV_CACHE:
-        # tl.store will do the correct implicit cast to quantized format (fp8/int8),
-        # based on the key_cache_ptr.dtype.element_ty
+    if KV_QUANT_MODE == 1:  # FP8
         if key_load.dtype.is_fp8():
-            # FP8: pass through; triton handles implicit fp8 cast on store
             key_tile = key_load
         else:
-            # INT8: divide by scale then clamp to [-128, 127]
-            if INT8_PER_HEAD_SCALE:
-                # Per-head scale: gather one scale value per element in tile.
-                # tile_pos spans [0, num_heads*head_size), head = tile_pos // head_size
-                cur_head = tile_pos // head_size
-                k_scale_val = tl.load(
-                    k_scale + cur_head, mask=tile_pos < (num_heads * head_size)
-                )
-            else:
-                k_scale_val = tl.load(k_scale)
-            key_tile = key_load / k_scale_val
-            if key_cache_ptr.dtype.element_ty == tl.int8:
-                # INT8 has no automatic saturation: clamp explicitly
-                key_tile = tl.clamp(key_tile, -128.0, 127.0)
+            key_tile = key_load / tl.load(k_scale)
     else:
         key_tile = key_load
 
@@ -106,24 +89,11 @@ def reshape_and_cache_kernel_flash(
     value_load = tl.load(
         value_ptr + src_value_idx + tile_pos, mask=tile_pos < (num_heads * head_size)
     )
-    if QUANTIZED_KV_CACHE:
+    if KV_QUANT_MODE == 1:  # FP8
         if value_load.dtype.is_fp8():
-            # FP8: pass through; triton handles implicit fp8 cast on store
             value_tile = value_load
         else:
-            # INT8: divide by scale then clamp to [-128, 127]
-            if INT8_PER_HEAD_SCALE:
-                cur_head = tile_pos // head_size
-                v_scale_val = tl.load(
-                    v_scale + cur_head, mask=tile_pos < (num_heads * head_size)
-                )
-            else:
-                v_scale_val = tl.load(v_scale)
-            # tl.store casts to the cache dtype (fp8/int8) on store
-            value_tile = value_load / v_scale_val
-            if value_cache_ptr.dtype.element_ty == tl.int8:
-                # INT8 has no automatic saturation: clamp explicitly
-                value_tile = tl.clamp(value_tile, -128.0, 127.0)
+            value_tile = value_load / tl.load(v_scale)
     else:
         value_tile = value_load
 
@@ -366,23 +336,18 @@ def triton_reshape_and_cache_flash(
         "uint8 is not supported by triton reshape_and_cache_flash"
     )
 
-    QUANTIZED_KV_CACHE = kv_cache_dtype.startswith(("fp8", "int8"))
-    # Per-head INT8 scale: k_scale is a 1-D tensor [num_heads] rather than a scalar.
-    # FP8 always uses per-tensor scale.
-    INT8_PER_HEAD_SCALE = (
-        kv_cache_dtype.startswith("int8") and k_scale.ndim == 1 and k_scale.numel() > 1
-    )
-    if QUANTIZED_KV_CACHE:
+    # KV_QUANT_MODE: 0=none, 1=fp8 (INT8 uses dedicated per-token kernel)
+    KV_QUANT_MODE = 1 if kv_cache_dtype.startswith("fp8") else 0
+    if KV_QUANT_MODE == 1:
         assert kv_cache_torch_dtype in [
             torch.float8_e4m3fn,
             torch.float8_e5m2,
             torch.uint8,
             torch.float8_e4m3fnuz,
-            torch.int8,
         ], (
             f"unsupported dtype of KV cache tensor, got "
-            f"{kv_cache_torch_dtype}. Supported kv cache dtypes: fp8e4m3fn, "
-            "fp8e5m2, uint8, int8, bfloat16, float16, float32, fp8e4m3fnuz."
+            f"{kv_cache_torch_dtype}. Supported FP8 dtypes: fp8e4m3fn, "
+            "fp8e5m2, uint8, fp8e4m3fnuz."
         )
 
     # heuristics instead of autotuning
@@ -424,9 +389,7 @@ def triton_reshape_and_cache_flash(
         block_size=block_size,
         x=x,
         USE_HEAD_MAJOR_LAYOUT=use_head_major_layout,
-        # Quantization flags
-        QUANTIZED_KV_CACHE=QUANTIZED_KV_CACHE,
-        INT8_PER_HEAD_SCALE=INT8_PER_HEAD_SCALE,
+        KV_QUANT_MODE=KV_QUANT_MODE,
         # autotune parameters
         TILE_SIZE=TILE_SIZE,
         num_warps=num_warps,

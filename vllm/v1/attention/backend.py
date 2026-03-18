@@ -3,7 +3,7 @@
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, replace
-from enum import Enum
+from enum import Enum, IntEnum
 from typing import TYPE_CHECKING, Any, ClassVar, Generic, Protocol, TypeVar
 
 import numpy as np
@@ -714,27 +714,55 @@ class AttentionImplBase(ABC, Generic[T]):
 
 
 class AttentionImpl(AttentionImplBase[T], Generic[T]):
-    """Standard attention implementation with forward method."""
+    """Standard attention implementation with forward method.
 
-    # Per-(token, head) scale caches for quantized KV formats that compute
-    # scales dynamically (e.g. INT8, future NVFP4).  Lazily allocated by
-    # ensure_per_token_scale_caches().  Backends that support these formats
-    # should call that method in do_kv_cache_update() instead of managing
-    # allocation themselves.
+    Quantized KV Cache Contract
+    ---------------------------
+    Backends that add a quantized KV dtype (e.g. ``"int8"``) to their
+    ``AttentionBackend.supported_kv_cache_dtypes`` must handle two paths:
+
+    **Write path** (``do_kv_cache_update``):
+      * INT8 (``kv_quant_mode == KVQuantMode.INT8_PER_TOKEN``): call
+        ``self.ensure_int8_scale_caches(key_cache)`` to get
+        ``(k_scale_cache, v_scale_cache)``, then quantize key/value into
+        the cache with dynamic per-(token, head) scales, writing scales
+        to the returned buffers.  Each backend provides its own
+        quantization kernel (C++/CUDA, Triton, etc.).
+      * FP8: use ``layer._k_scale`` / ``layer._v_scale`` (per-tensor).
+
+    **Read path** (``forward``):
+      * If ``self._k_scale_cache is not None``: pass per-token scale
+        caches to the attention kernel for dequantization.
+      * If FP8: pass ``layer._k_scale`` / ``layer._v_scale``.
+      * Otherwise: no scales needed.
+
+    Base-class infrastructure:
+      * ``ensure_int8_scale_caches(key_cache)`` — lazy allocation.
+      * ``_k_scale_cache`` / ``_v_scale_cache`` — ``None`` until first call.
+      * ``kv_quant_mode`` property — avoids string matching on dtype.
+      * Memory accounting is automatic via
+        ``AttentionSpec.auxiliary_memory_per_block``.
+    """
+
+    # INT8 per-(token, head) scale caches.  Lazily allocated by
+    # ensure_int8_scale_caches().
     # Shape when allocated: [num_blocks, block_size, num_kv_heads], float32.
     _k_scale_cache: torch.Tensor | None = None
     _v_scale_cache: torch.Tensor | None = None
 
-    def ensure_per_token_scale_caches(
+    @property
+    def kv_quant_mode(self) -> "KVQuantMode":
+        """Return the KV cache quantization mode for this layer."""
+        return get_kv_quant_mode(self.kv_cache_dtype)
+
+    def ensure_int8_scale_caches(
         self,
         key_cache: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Lazily allocate per-(token, head) float32 scale caches.
+        """Lazily allocate INT8 per-(token, head) float32 scale caches.
 
-        Call this from ``do_kv_cache_update`` for quantized KV formats
-        registered in ``_DTYPES_WITH_PER_TOKEN_SCALES`` (currently INT8;
-        NVFP4 or other formats can be added later).  The returned tensors
-        are cached on *self* and reused across calls.
+        Call from ``do_kv_cache_update`` when
+        ``kv_quant_mode == KVQuantMode.INT8_PER_TOKEN``.
 
         Args:
             key_cache: The key cache tensor, used to infer shape and device.
@@ -973,19 +1001,34 @@ class SparseMLAAttentionImpl(AttentionImplBase[T], Generic[T]):
         )
 
 
+class KVQuantMode(IntEnum):
+    """KV cache quantization mode.
+
+    Used by attention backends and kernels to dispatch quantization logic
+    without string matching on ``kv_cache_dtype``.
+    """
+
+    NONE = 0
+    FP8 = 1
+    INT8_PER_TOKEN = 2
+
+
+def get_kv_quant_mode(kv_cache_dtype: str) -> KVQuantMode:
+    """Map a ``kv_cache_dtype`` string to a :class:`KVQuantMode`."""
+    if kv_cache_dtype.startswith("fp8"):
+        return KVQuantMode.FP8
+    if kv_cache_dtype.startswith("int8"):
+        return KVQuantMode.INT8_PER_TOKEN
+    return KVQuantMode.NONE
+
+
 def is_quantized_kv_cache(kv_cache_dtype: str) -> bool:
-    return kv_cache_dtype.startswith("fp8") or kv_cache_dtype.startswith("int8")
-
-
-# String-based dtype names that use per-(token, head) quantization scales.
-# To add a new format, add its prefix here AND its torch.dtype in
-# kv_cache_interface._DTYPES_WITH_PER_TOKEN_SCALES.
-_PER_TOKEN_SCALE_PREFIXES: tuple[str, ...] = ("int8",)
+    return get_kv_quant_mode(kv_cache_dtype) != KVQuantMode.NONE
 
 
 def kv_cache_uses_per_token_scales(kv_cache_dtype: str) -> bool:
-    """Return True if *kv_cache_dtype* (string form) needs per-token scales."""
-    return kv_cache_dtype.startswith(_PER_TOKEN_SCALE_PREFIXES)
+    """Return True if *kv_cache_dtype* needs per-token scales."""
+    return get_kv_quant_mode(kv_cache_dtype) == KVQuantMode.INT8_PER_TOKEN
 
 
 def subclass_attention_backend(

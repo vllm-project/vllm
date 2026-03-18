@@ -479,8 +479,8 @@ class Attention(nn.Module, AttentionLayerBase):
                 )
 
     def calc_kv_scales(self, query, key, value):
-        # Quantized formats with per-token scales (INT8, NVFP4, etc.) compute
-        # scales dynamically in the kernel — calc_kv_scales is only for FP8.
+        # INT8 computes scales dynamically in the kernel —
+        # calc_kv_scales is only for FP8.
         self._k_scale.copy_(torch.abs(key).max() / self.k_range)
         self._v_scale.copy_(torch.abs(value).max() / self.v_range)
         self._k_scale_float = self._k_scale.item()

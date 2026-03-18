@@ -67,9 +67,8 @@ class BaseKVCacheMethod(QuantizeMethodBase):
             uses_per_token = kv_cache_uses_per_token_scales(layer.kv_cache_dtype)
 
             if uses_per_token:
-                # Formats with per-token scales (INT8, future NVFP4, etc.)
-                # use dynamic scales computed in the kernel at cache-write
-                # time. Checkpoint scales are not used — set placeholders.
+                # INT8 uses dynamic per-token scales computed in the kernel
+                # at cache-write time. Checkpoint scales are not used.
                 layer._k_scale.copy_(1.0)
                 layer._v_scale.copy_(1.0)
                 layer._k_scale_float = 1.0

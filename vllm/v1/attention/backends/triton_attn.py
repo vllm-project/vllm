@@ -26,6 +26,7 @@ from vllm.v1.attention.backend import (
     AttentionMetadataBuilder,
     AttentionType,
     CommonAttentionMetadata,
+    KVQuantMode,
     MultipleOf,
 )
 from vllm.v1.attention.ops.triton_prefill_attention import context_attention_fwd
@@ -399,7 +400,6 @@ class TritonAttentionImpl(AttentionImpl):
 
         self.attn_type = attn_type
         self.fp8_dtype = current_platform.fp8_dtype()
-        self.int8_dtype = torch.int8
 
         self.sinks = sinks
         if sinks is not None:
@@ -411,7 +411,7 @@ class TritonAttentionImpl(AttentionImpl):
         self.use_alibi_sqrt = use_alibi_sqrt
         self.supports_quant_query_input = current_platform.is_cuda()
         # _k_scale_cache / _v_scale_cache are inherited from AttentionImpl
-        # and lazily allocated via ensure_per_token_scale_caches().
+        # and lazily allocated via ensure_int8_scale_caches().
 
     def forward(
         self,
@@ -477,17 +477,18 @@ class TritonAttentionImpl(AttentionImpl):
 
         # For decoder and cross-attention, use KV cache as before
         key_cache, value_cache = kv_cache.unbind(1)
-        if self.kv_cache_dtype.startswith("fp8"):
+        quant_mode = self.kv_quant_mode
+        if quant_mode == KVQuantMode.FP8:
             if key_cache.dtype != self.fp8_dtype:
                 key_cache = key_cache.view(self.fp8_dtype)
                 value_cache = value_cache.view(self.fp8_dtype)
             assert layer._q_scale_float == 1.0, (
                 "A non 1.0 q_scale is not currently supported."
             )
-        elif self.kv_cache_dtype.startswith("int8"):
-            if key_cache.dtype != self.int8_dtype:
-                key_cache = key_cache.view(self.int8_dtype)
-                value_cache = value_cache.view(self.int8_dtype)
+        elif quant_mode == KVQuantMode.INT8_PER_TOKEN:
+            if key_cache.dtype != torch.int8:
+                key_cache = key_cache.view(torch.int8)
+                value_cache = value_cache.view(torch.int8)
 
         cu_seqlens_q = attn_metadata.query_start_loc
         seqused_k = attn_metadata.seq_lens
@@ -505,20 +506,18 @@ class TritonAttentionImpl(AttentionImpl):
         mm_prefix_range_tensor = attn_metadata.mm_prefix_range_tensor
 
         if self._k_scale_cache is not None:
-            # Per-token quantized KV cache (INT8, future NVFP4, etc.):
-            # uses dynamic per-token scales stored in scale caches.
+            # INT8: dynamic per-token scales stored in scale caches.
             per_token_k_scale_cache = self._k_scale_cache
             per_token_v_scale_cache = self._v_scale_cache
             k_descale = None
             v_descale = None
-        elif self.kv_cache_dtype.startswith("fp8"):
-            # FP8: always per-tensor scalar scale, expanded to (num_seqs, num_kv_heads).
+        elif quant_mode == KVQuantMode.FP8:
+            # FP8: per-tensor scalar scale.
             per_token_k_scale_cache = None
             per_token_v_scale_cache = None
             k_descale = layer._k_scale.expand(descale_shape)
             v_descale = layer._v_scale.expand(descale_shape)
         else:
-            # FP16 / auto: no KV quantization, no scales needed.
             per_token_k_scale_cache = None
             per_token_v_scale_cache = None
             k_descale = None
@@ -619,16 +618,11 @@ class TritonAttentionImpl(AttentionImpl):
         key_cache, value_cache = kv_cache.unbind(1)
 
         # Reshape the input keys and values and store them in the cache.
-        if self.kv_cache_dtype.startswith("fp8"):
-            key_cache = key_cache.view(self.fp8_dtype)
-            value_cache = value_cache.view(self.fp8_dtype)
-            # triton kernel does not support uint8 kv_cache
-            #  (because some explicit casts (e.g. float8_e4m3fnuz)
-            #   are not supported)
-        elif self.kv_cache_dtype.startswith("int8"):
-            key_cache = key_cache.view(self.int8_dtype)
-            value_cache = value_cache.view(self.int8_dtype)
-            k_sc, v_sc = self.ensure_per_token_scale_caches(key_cache)
+        quant_mode = self.kv_quant_mode
+        if quant_mode == KVQuantMode.INT8_PER_TOKEN:
+            key_cache = key_cache.view(torch.int8)
+            value_cache = value_cache.view(torch.int8)
+            k_sc, v_sc = self.ensure_int8_scale_caches(key_cache)
             triton_reshape_and_cache_flash_int8_per_token(
                 key,
                 value,
@@ -639,6 +633,9 @@ class TritonAttentionImpl(AttentionImpl):
                 slot_mapping,
             )
             return
+        if quant_mode == KVQuantMode.FP8:
+            key_cache = key_cache.view(self.fp8_dtype)
+            value_cache = value_cache.view(self.fp8_dtype)
         triton_reshape_and_cache_flash(
             key,
             value,
