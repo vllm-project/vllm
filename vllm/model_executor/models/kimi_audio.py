@@ -514,7 +514,6 @@ class KimiAudioForConditionalGeneration(
         multimodal_embeddings: tuple[torch.Tensor, ...] | None = None,
         *,
         is_multimodal: torch.Tensor | None = None,
-        handle_oov_mm_token: bool = False,
     ) -> torch.Tensor:
         """Embed input IDs and fuse with audio embeddings.
 

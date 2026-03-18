@@ -297,6 +297,7 @@ def build_enc_dec_input(
     encoder_input: SingletonInput,
     decoder_input: SingletonInput | None,
     decoder_start_token_id: int,
+    skip_decoder_start_token: bool = False,
 ) -> EncoderDecoderInput:
     enc_input = _validate_enc_input(encoder_input)
 
@@ -326,10 +327,11 @@ def build_enc_dec_input(
     else:
         assert_never(enc_input)
 
-    dec_input_new["prompt_token_ids"] = _prepare_decoder_input_ids_for_generation(
-        dec_input_new["prompt_token_ids"],
-        decoder_start_token_id,
-    )
+    if not skip_decoder_start_token:
+        dec_input_new["prompt_token_ids"] = _prepare_decoder_input_ids_for_generation(
+            dec_input_new["prompt_token_ids"],
+            decoder_start_token_id,
+        )
 
     if cache_salt := enc_input.get("cache_salt"):
         dec_input_new["cache_salt"] = cache_salt

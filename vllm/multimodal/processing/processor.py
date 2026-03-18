@@ -1677,6 +1677,8 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
 
 class EncDecMultiModalProcessor(BaseMultiModalProcessor[_I]):
+    skip_decoder_start_token: bool = False
+
     @abstractmethod
     def create_encoder_prompt(
         self,
