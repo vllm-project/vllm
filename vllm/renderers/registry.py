@@ -22,6 +22,7 @@ _VLLM_RENDERERS = {
     "kimi_audio": ("kimi_audio", "KimiAudioRenderer"),
     "mistral": ("mistral", "MistralRenderer"),
     "qwen_vl": ("qwen_vl", "QwenVLRenderer"),
+    "step_audio_2": ("step_audio_2", "StepAudio2Renderer"),
     "terratorch": ("terratorch", "TerratorchRenderer"),
 }
 

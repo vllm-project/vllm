@@ -260,6 +260,7 @@ class DeltaMessage(OpenAIBaseModel):
     content: str | None = None
     reasoning: str | None = None
     tool_calls: list[DeltaToolCall] = Field(default_factory=list)
+    tts_content: dict[str, str] | None = None
 
 
 class GenerationError(Exception):

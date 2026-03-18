@@ -14,6 +14,7 @@ import regex as re
 from fastapi import Request
 from partial_json_parser.core.options import Allow
 
+from vllm.audio_parser import AudioParserManager
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (
     ChatTemplateContentFormatOption,
@@ -100,6 +101,7 @@ class OpenAIServingChat(OpenAIServing):
         enable_auto_tools: bool = False,
         exclude_tools_when_tool_choice_none: bool = False,
         tool_parser: str | None = None,
+        audio_parser: str | None = None,
         enable_prompt_tokens_details: bool = False,
         enable_force_include_usage: bool = False,
         enable_log_outputs: bool = False,
@@ -134,6 +136,8 @@ class OpenAIServingChat(OpenAIServing):
             model_name=self.model_config.model,
         )
         self.exclude_tools_when_tool_choice_none = exclude_tools_when_tool_choice_none
+        # set up audio parser
+        self.audio_parser = self._get_audio_parser(audio_parser_name=audio_parser)
 
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
         self.enable_force_include_usage = enable_force_include_usage
@@ -180,6 +184,14 @@ class OpenAIServingChat(OpenAIServing):
                 chat_template_kwargs=self.default_chat_template_kwargs,
             )
         )
+
+    def _get_audio_parser(self, audio_parser_name: str | None) -> type[Any] | None:
+        if not audio_parser_name:
+            return None
+        try:
+            return AudioParserManager.get_audio_parser(audio_parser_name)
+        except Exception as e:
+            raise TypeError(f"{audio_parser_name=} has not been registered") from e
 
     async def render_chat_request(
         self,
@@ -583,6 +595,18 @@ class OpenAIServingChat(OpenAIServing):
             yield "data: [DONE]\n\n"
             return
 
+        # Prepare audio parser
+        audio_parser_inst = None
+        is_audio_output = False
+        audio_all_prev_token_ids: list[list[int]] = [[] for _ in range(num_choices)]
+        # Buffer for incomplete multi-byte chars during streaming decode
+        audio_pending_text_ids: list[list[int]] = [[] for _ in range(num_choices)]
+        if self.audio_parser and tokenizer is not None:
+            try:
+                audio_parser_inst = self.audio_parser(tokenizer)
+            except Exception:
+                logger.exception("Error in audio parser creation.")
+
         stream_options = request.stream_options
         include_usage, include_continuous_usage = should_include_usage(
             stream_options, self.enable_force_include_usage
@@ -594,6 +618,10 @@ class OpenAIServingChat(OpenAIServing):
                     num_prompt_tokens = len(res.prompt_token_ids)
                     if res.encoder_prompt_token_ids is not None:
                         num_prompt_tokens += len(res.encoder_prompt_token_ids)
+                    if audio_parser_inst is not None:
+                        is_audio_output = audio_parser_inst.is_audio_output(
+                            res.prompt_token_ids
+                        )
 
                 # We need to do it here, because if there are exceptions in
                 # the result_generator, it needs to be sent as the FIRST
@@ -1044,6 +1072,43 @@ class OpenAIServingChat(OpenAIServing):
                             continue
                         delta_message = DeltaMessage()
 
+                    # Audio content extraction for streaming
+                    if audio_parser_inst is not None and is_audio_output:
+                        try:
+                            delta_tids = as_list(output.token_ids)
+                            prev_audio_ids = audio_all_prev_token_ids[i]
+                            curr_audio_ids = prev_audio_ids + delta_tids
+                            audio_all_prev_token_ids[i] = curr_audio_ids
+                            tts_text_ids, tts_audio_ids, _ = (
+                                audio_parser_inst.extract_audio_content_streaming(
+                                    prev_audio_ids,
+                                    curr_audio_ids,
+                                    delta_tids,
+                                    is_audio_output,
+                                )
+                            )
+                            if tts_text_ids or tts_audio_ids:
+                                # Decode tts_text with byte fallback
+                                # handling for multi-byte chars split
+                                # across token boundaries
+                                current_tts_text = tokenizer.decode(tts_text_ids)
+                                if "\ufffd" in current_tts_text:
+                                    audio_pending_text_ids[i].extend(tts_text_ids)
+                                    current_tts_text = tokenizer.decode(
+                                        audio_pending_text_ids[i]
+                                    )
+                                    if "\ufffd" in current_tts_text:
+                                        continue
+                                    audio_pending_text_ids[i] = []
+
+                                delta_message.tts_content = {
+                                    "tts_text": current_tts_text,
+                                    "tts_audio": tokenizer.decode(tts_audio_ids),
+                                }
+                                delta_message.content = ""
+                        except Exception:
+                            logger.exception("Error in streaming audio extraction.")
+
                     # Log streaming delta if output logging is enabled
                     if self.enable_log_outputs and self.request_logger:
                         delta_content_parts = []
@@ -1315,6 +1380,37 @@ class OpenAIServingChat(OpenAIServing):
             out_logprobs = output.logprobs
             tool_call_info = None
 
+            # Audio content extraction
+            tts_content = None
+            output_text = output.text
+            if self.audio_parser and tokenizer is not None:
+                try:
+                    audio_parser_inst = self.audio_parser(tokenizer)
+                    is_audio_out = audio_parser_inst.is_audio_output(
+                        final_res.prompt_token_ids
+                    )
+                    tts_text_ids, tts_audio_ids, other_ids = (
+                        audio_parser_inst.extract_audio_content_nonstreaming(
+                            token_ids, request, is_audio_out
+                        )
+                    )
+                    if tts_text_ids or tts_audio_ids:
+                        output_text = tokenizer.decode(
+                            other_ids, skip_special_tokens=True
+                        )
+                        tts_text = (
+                            tokenizer.decode(tts_text_ids) if tts_text_ids else ""
+                        )
+                        tts_audio = (
+                            tokenizer.decode(tts_audio_ids) if tts_audio_ids else ""
+                        )
+                        tts_content = {
+                            "tts_text": tts_text,
+                            "tts_audio": tts_audio,
+                        }
+                except Exception:
+                    logger.exception("Error in audio content extraction.")
+
             if request.logprobs and request.top_logprobs is not None:
                 assert out_logprobs is not None, "Did not output logprobs"
                 logprobs = self._create_chat_logprobs(
@@ -1382,13 +1478,13 @@ class OpenAIServingChat(OpenAIServing):
                 # If the reasoning parser is enabled,
                 # tool calls are extracted exclusively from the content.
                 reasoning, content = reasoning_parser.extract_reasoning(
-                    output.text, request=request
+                    output_text, request=request
                 )
                 if not request.include_reasoning:
                     reasoning = None
             else:
                 reasoning = None
-                content = output.text
+                content = output_text
 
             auto_tools_called = False
             # if auto tools are not enabled, and a named tool choice using
@@ -1407,7 +1503,12 @@ class OpenAIServingChat(OpenAIServing):
                 not isinstance(request.tool_choice, ChatCompletionNamedToolChoiceParam)
                 and request.tool_choice != "required"
             ):
-                message = ChatMessage(role=role, reasoning=reasoning, content=content)
+                message = ChatMessage(
+                    role=role,
+                    reasoning=reasoning,
+                    content=content,
+                    tts_content=tts_content,
+                )
 
             elif (
                 request.tool_choice
@@ -1443,6 +1544,7 @@ class OpenAIServingChat(OpenAIServing):
                     reasoning=reasoning,
                     content="",
                     tool_calls=tool_call_class_items,
+                    tts_content=tts_content,
                 )
 
             elif request.tool_choice and request.tool_choice == "required":
@@ -1478,12 +1580,18 @@ class OpenAIServingChat(OpenAIServing):
                     content="",
                     tool_calls=tool_call_class_items,
                     reasoning=reasoning,
+                    tts_content=tts_content,
                 )
 
             # if the request doesn't use tool choice
             # OR specifies to not use a tool
             elif not request.tool_choice or request.tool_choice == "none":
-                message = ChatMessage(role=role, reasoning=reasoning, content=content)
+                message = ChatMessage(
+                    role=role,
+                    reasoning=reasoning,
+                    content=content,
+                    tts_content=tts_content,
+                )
 
             # handle when there are tools and tool choice is auto
             elif (
@@ -1526,6 +1634,7 @@ class OpenAIServingChat(OpenAIServing):
                         reasoning=reasoning,
                         content=content,
                         tool_calls=tool_call_items,
+                        tts_content=tts_content,
                     )
 
                 else:
@@ -1541,6 +1650,7 @@ class OpenAIServingChat(OpenAIServing):
                         role=role,
                         reasoning=reasoning,
                         content=ret_content,
+                        tts_content=tts_content,
                     )
 
             # undetermined case that is still important to handle
@@ -1550,7 +1660,12 @@ class OpenAIServingChat(OpenAIServing):
                     " if tools should be extracted. Returning a standard chat "
                     "completion."
                 )
-                message = ChatMessage(role=role, reasoning=reasoning, content=content)
+                message = ChatMessage(
+                    role=role,
+                    reasoning=reasoning,
+                    content=content,
+                    tts_content=tts_content,
+                )
             # In OpenAI's API, when a tool is called, the finish_reason is:
             # "tool_calls" for "auto" or "required" tool calls,
             # and "stop" for named tool calls.

@@ -38,6 +38,7 @@ _VLLM_TOKENIZERS = {
     "kimi_audio": ("kimi_audio", "KimiAudioTokenizer"),
     "mistral": ("mistral", "MistralTokenizer"),
     "qwen_vl": ("qwen_vl", "QwenVLTokenizer"),
+    "step_audio_2": ("step_audio_2", "StepAudio2Tokenizer"),
 }
 
 
@@ -162,6 +163,12 @@ def resolve_tokenizer_args(
     # Fallback to HF tokenizer
     if tokenizer_mode == "auto":
         tokenizer_mode = "hf"
+
+    # StepAudio2 models bundle a tokenizer JSON that can trigger the
+    # known mistral regex compatibility warning in recent Transformers.
+    # Enable the upstream compatibility fix by default.
+    if tokenizer_mode == "step_audio_2":
+        kwargs.setdefault("fix_mistral_regex", True)
 
     return tokenizer_mode, tokenizer_name, args, kwargs
 

@@ -535,6 +535,7 @@ _MULTIMODAL_MODELS = {
     "UltravoxModel": ("ultravox", "UltravoxModel"),
     "VoxtralForConditionalGeneration": ("voxtral", "VoxtralForConditionalGeneration"),  # noqa: E501
     "VoxtralRealtimeGeneration": ("voxtral_realtime", "VoxtralRealtimeGeneration"),  # noqa: E501
+    "StepAudio2ForCausalLM": ("mm_step_audio", "StepAudio2ForCausalLM"),
     # [Encoder-decoder]
     "CohereASRForConditionalGeneration": (
         "cohere_asr",

@@ -60,6 +60,8 @@ from vllm.utils.import_utils import LazyLoader
 if TYPE_CHECKING:
     import torch
     import transformers
+
+    from vllm.tokenizers.step_audio_2 import StepAudio2Tokenizer
 else:
     transformers = LazyLoader("transformers", globals(), "transformers")
     torch = LazyLoader("torch", globals(), "torch")
@@ -1649,6 +1651,18 @@ async def parse_chat_messages_async(
     mm_data, mm_uuids = await mm_tracker.resolve_items()
 
     return conversation, mm_data, mm_uuids
+
+
+def apply_step_audio_2_chat_template(
+    tokenizer: "StepAudio2Tokenizer",
+    conversation: list[ConversationMessage],
+    chat_template: str | None = None,
+    **kwargs: Any,
+) -> list[int]:
+    return tokenizer.apply_chat_template_trans_ta4(
+        conversation=conversation,
+        **kwargs,
+    )
 
 
 def get_history_tool_calls_cnt(conversation: list[ConversationMessage]):
