@@ -212,8 +212,7 @@ class CUDAGraphWrapper:
         if hasattr(self.runnable, key):
             return getattr(self.runnable, key)
         raise AttributeError(
-            f"Attribute {key} not exists in the runnable of "
-            f"cudagraph wrapper: {self.runnable}"
+            f"Attribute {key} not exists in the runnable of cudagraph wrapper"
         )
 
     def unwrap(self) -> Callable[..., Any]:
