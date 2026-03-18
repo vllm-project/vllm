@@ -45,8 +45,6 @@ class MyLLM(LLM):
         # Each worker uses 0.4 GPU so that two instances fit on the same GPU.
         os.environ["VLLM_RAY_PER_WORKER_GPUS"] = "0.4"
         os.environ["VLLM_RAY_BUNDLE_INDICES"] = "0"
-        # needed for ipc handle serialization
-        os.environ["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
         super().__init__(*args, **kwargs)
 
 
@@ -76,7 +74,7 @@ class TrainModel:
         """Broadcast weights to the inference engine using IPC."""
         self.llm_handle = llm_handle
         trainer_args = IPCTrainerSendWeightsArgs(
-            mode="ray", llm_handle=llm_handle, packed=packed
+            send_mode="ray", llm_handle=llm_handle, packed=packed
         )
         IPCWeightTransferEngine.trainer_send_weights(
             iterator=self.train_model.named_parameters(),
@@ -84,7 +82,7 @@ class TrainModel:
         )
 
 
-ray.init(runtime_env={})
+ray.init()
 
 pg_colocate = placement_group([{"GPU": 1, "CPU": 0}])
 ray.get(pg_colocate.ready())

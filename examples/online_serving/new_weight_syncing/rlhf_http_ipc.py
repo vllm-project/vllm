@@ -18,7 +18,7 @@ Prerequisites:
     Start a vLLM server with weight transfer enabled and reduced GPU memory
     utilization to leave room for the training model:
 
-    $ VLLM_SERVER_DEV_MODE=1 VLLM_ALLOW_INSECURE_SERIALIZATION=1 \
+    $ VLLM_SERVER_DEV_MODE=1 \
         vllm serve facebook/opt-125m --enforce-eager \
         --weight-transfer-config '{"backend": "ipc"}' \
         --load-format dummy \
@@ -148,7 +148,7 @@ def main():
 
     # Broadcast weights via IPC handles using HTTP mode
     print("Broadcasting weights via CUDA IPC (HTTP)...")
-    trainer_args = IPCTrainerSendWeightsArgs(mode="http", url=BASE_URL)
+    trainer_args = IPCTrainerSendWeightsArgs(send_mode="http", url=BASE_URL)
     IPCWeightTransferEngine.trainer_send_weights(
         iterator=train_model.named_parameters(),
         trainer_args=trainer_args,

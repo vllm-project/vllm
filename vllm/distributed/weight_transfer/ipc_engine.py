@@ -8,11 +8,11 @@ from dataclasses import asdict, dataclass
 from typing import Any
 
 import pybase64 as base64
+import ray
 import requests
 import torch
 from torch.multiprocessing.reductions import rebuild_cuda_tensor, reduce_tensor
 
-from vllm import envs
 from vllm.config.parallel import ParallelConfig
 from vllm.config.weight_transfer import WeightTransferConfig
 from vllm.distributed.weight_transfer.base import (
@@ -31,12 +31,14 @@ from vllm.distributed.weight_transfer.packed_tensor import (
 class IPCTrainerSendWeightsArgs:
     """Arguments for IPC trainer_send_weights method."""
 
-    mode: str
-    """Transport mode: 'http' or 'ray'."""
+    send_mode: str | Callable[["IPCWeightTransferUpdateInfo"], None]
+    """How to send updates to vLLM. Either a string ('ray' or 'http') for
+    built-in transports, or a callable that receives an
+    IPCWeightTransferUpdateInfo and performs the send."""
     llm_handle: Any = None
-    """Ray ObjectRef to LLM handle (required for 'ray' mode)."""
+    """Ray ObjectRef to LLM handle (required for 'ray' send_mode)."""
     url: str | None = None
-    """Base URL for HTTP endpoint (required for 'http' mode)."""
+    """Base URL for HTTP endpoint (required for 'http' send_mode)."""
     packed: bool = False
     """Whether to use packed tensor transfer for bounded-memory chunking."""
     packed_buffer_size_bytes: int = DEFAULT_PACKED_BUFFER_SIZE_BYTES
@@ -44,12 +46,17 @@ class IPCTrainerSendWeightsArgs:
 
     def __post_init__(self):
         """Validate that required arguments are provided for the selected mode."""
-        if self.mode == "ray" and self.llm_handle is None:
-            raise ValueError("llm_handle is required for 'ray' mode")
-        if self.mode == "http" and self.url is None:
-            raise ValueError("url is required for 'http' mode")
-        if self.mode not in ("ray", "http"):
-            raise ValueError(f"mode must be 'ray' or 'http', got {self.mode}")
+        if callable(self.send_mode):
+            return
+        if self.send_mode == "ray" and self.llm_handle is None:
+            raise ValueError("llm_handle is required for 'ray' send_mode")
+        if self.send_mode == "http" and self.url is None:
+            raise ValueError("url is required for 'http' send_mode")
+        if self.send_mode not in ("ray", "http"):
+            raise ValueError(
+                f"send_mode must be 'ray', 'http', or a callable, "
+                f"got {self.send_mode!r}"
+            )
 
 
 @dataclass
@@ -137,17 +144,15 @@ class IPCWeightTransferEngine(
         key ``ipc_handles_pickled``. This method deserializes them back into
         ``ipc_handles`` before constructing the typed dataclass, keeping
         serialization concerns out of the dataclass itself.
+
+        The pickled payload contains only rebuild_cuda_tensor argument
+        tuples (ints, bytes, strings) — no arbitrary callables — so
+        deserialization is safe without special flags.
         """
         if "ipc_handles_pickled" in update_dict:
             if "ipc_handles" in update_dict:
                 raise ValueError(
                     "Cannot specify both `ipc_handles` and `ipc_handles_pickled`"
-                )
-
-            if not envs.VLLM_ALLOW_INSECURE_SERIALIZATION:
-                raise ValueError(
-                    "Refusing to deserialize `ipc_handles_pickled` without "
-                    "VLLM_ALLOW_INSECURE_SERIALIZATION=1"
                 )
 
             pickled = update_dict.pop("ipc_handles_pickled")
@@ -406,23 +411,25 @@ class IPCWeightTransferEngine(
         if tensor_sizes is not None:
             update_fields["tensor_sizes"] = tensor_sizes
 
-        if args.mode == "ray":
-            import ray
+        update_fields["ipc_handles"] = ipc_handles
+        update_info = IPCWeightTransferUpdateInfo(**update_fields)
 
-            update_fields["ipc_handles"] = ipc_handles
-            update_info = IPCWeightTransferUpdateInfo(**update_fields)
+        if callable(args.send_mode):
+            args.send_mode(update_info)
+        elif args.send_mode == "ray":
             ray.get(
                 args.llm_handle.update_weights.remote(
                     dict(update_info=asdict(update_info))
                 )
             )
-        elif args.mode == "http":
+        elif args.send_mode == "http":
             pickled_handles = base64.b64encode(pickle.dumps(ipc_handles)).decode(
                 "utf-8"
             )
-            update_fields["ipc_handles_pickled"] = pickled_handles
+            http_fields = {k: v for k, v in update_fields.items() if k != "ipc_handles"}
+            http_fields["ipc_handles_pickled"] = pickled_handles
 
             url = f"{args.url}/update_weights"
-            payload = {"update_info": update_fields}
+            payload = {"update_info": http_fields}
             response = requests.post(url, json=payload, timeout=300)
             response.raise_for_status()

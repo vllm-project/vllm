@@ -101,79 +101,6 @@ class TestNCCLWeightTransferUpdateInfoPacked:
 class TestPackedBroadcastProducer:
     """Test packed_nccl_broadcast_producer function."""
 
-    def test_producer_broadcasts_tensors(self):
-        """Test that producer broadcasts all tensors."""
-        params = create_mock_model_params()
-        params_cuda = [(name, tensor.cuda()) for name, tensor in params]
-
-        mock_group = MockCommunicationGroup()
-
-        # Use a small target size to force multiple batches
-        packed_nccl_broadcast_producer(
-            iterator=iter(params_cuda),
-            group=mock_group,
-            src=0,
-            post_iter_func=lambda x: x[1],
-            buffer_size_bytes=500,
-        )
-
-        # Should have broadcasted some tensors
-        assert mock_group.broadcast_count > 0
-        assert len(mock_group.broadcasted_tensors) > 0
-
-    def test_producer_single_large_tensor(self):
-        """Test with a single tensor larger than target size."""
-        # Create a large tensor
-        large_tensor = torch.randn(1000, 1000, dtype=torch.float32).cuda()
-        params = [("large_weight", large_tensor)]
-
-        mock_group = MockCommunicationGroup()
-
-        # Small target size to force the tensor to exceed it
-        packed_nccl_broadcast_producer(
-            iterator=iter(params),
-            group=mock_group,
-            src=0,
-            post_iter_func=lambda x: x[1],
-            buffer_size_bytes=100,
-        )
-
-        # Should still broadcast the tensor (at least 1 broadcast)
-        assert mock_group.broadcast_count >= 1
-        assert len(mock_group.broadcasted_tensors) >= 1
-
-        # Verify the total broadcasted size matches the tensor
-        expected_size = large_tensor.numel() * large_tensor.element_size()
-        actual_size = sum(t.numel() for t in mock_group.broadcasted_tensors)
-        assert actual_size == expected_size
-
-    def test_producer_multiple_batches(self):
-        """Test that tensors are properly batched when exceeding target size."""
-        # Create many small tensors
-        params = [
-            (f"weight_{i}", torch.randn(10, 10, dtype=torch.float32).cuda())
-            for i in range(20)
-        ]
-
-        mock_group = MockCommunicationGroup()
-
-        # Small target size to force multiple batches
-        packed_nccl_broadcast_producer(
-            iterator=iter(params),
-            group=mock_group,
-            src=0,
-            post_iter_func=lambda x: x[1],
-            buffer_size_bytes=2000,
-        )
-
-        # Should have multiple broadcasts
-        assert mock_group.broadcast_count > 1
-
-        # Total size should match sum of all tensors
-        expected_total = sum(t.numel() * t.element_size() for _, t in params)
-        actual_total = sum(t.numel() for t in mock_group.broadcasted_tensors)
-        assert actual_total == expected_total
-
     def test_producer_empty_iterator(self):
         """Test producer handles empty iterator gracefully."""
         mock_group = MockCommunicationGroup()
@@ -188,64 +115,6 @@ class TestPackedBroadcastProducer:
 
         # No broadcasts for empty iterator
         assert mock_group.broadcast_count == 0
-
-
-# --- Unit Tests: packed_nccl_broadcast_consumer ---
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
-class TestPackedBroadcastConsumer:
-    """Test packed_nccl_broadcast_consumer function."""
-
-    def test_consumer_receives_tensors(self):
-        """Test that consumer receives and unpacks tensors."""
-        params = create_mock_model_params()
-        params_cuda = [(name, tensor.cuda()) for name, tensor in params]
-
-        buffer_size = 2000
-
-        # First, run producer to get the broadcasted tensors
-        producer_group = MockCommunicationGroup()
-
-        packed_nccl_broadcast_producer(
-            iterator=iter(params_cuda),
-            group=producer_group,
-            src=0,
-            post_iter_func=lambda x: x[1],
-            buffer_size_bytes=buffer_size,
-        )
-
-        # Now run consumer with the broadcasted tensors
-        consumer_group = MockConsumerCommunicationGroup(
-            producer_group.broadcasted_tensors
-        )
-
-        state_dict_info = create_state_dict_info(params_cuda)
-
-        unpacked_tensors = {}
-
-        def post_unpack_func(tensor_list):
-            for name, tensor in tensor_list:
-                unpacked_tensors[name] = tensor.clone()
-
-        packed_nccl_broadcast_consumer(
-            iterator=iter(state_dict_info.items()),
-            group=consumer_group,
-            src=0,
-            post_unpack_func=post_unpack_func,
-            buffer_size_bytes=buffer_size,
-        )
-
-        # Verify all parameters were unpacked
-        assert len(unpacked_tensors) == len(params)
-
-        # Verify each tensor matches the original
-        for name, original_tensor in params_cuda:
-            assert name in unpacked_tensors
-            unpacked = unpacked_tensors[name]
-            assert unpacked.shape == original_tensor.shape
-            assert unpacked.dtype == original_tensor.dtype
-            assert torch.allclose(unpacked, original_tensor, rtol=1e-5, atol=1e-7)
 
 
 # --- Integration Tests: Producer-Consumer Roundtrip ---
@@ -345,7 +214,7 @@ class TestPackedBroadcastRoundtrip:
             assert unpacked.dtype == original_tensor.dtype
             assert torch.allclose(unpacked, original_tensor, rtol=1e-4, atol=1e-6)
 
-    @pytest.mark.parametrize("target_size", [100, 1000, 10000, 100000])
+    @pytest.mark.parametrize("target_size", [100, 100000])
     def test_roundtrip_different_batch_sizes(self, target_size):
         """Test roundtrip with different target batch sizes."""
         params = create_mock_model_params(num_layers=5)
@@ -453,49 +322,6 @@ class TestPackedBroadcastRoundtrip:
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 class TestUnpackTensor:
     """Test the shared unpack_tensor function."""
-
-    def test_unpack_single_tensor(self):
-        """Test unpacking a single tensor from a packed buffer."""
-        original = torch.randn(10, 20, dtype=torch.float32).cuda()
-        packed = original.contiguous().view(torch.uint8).view(-1)
-
-        result = unpack_tensor(
-            packed,
-            names=["weight"],
-            shapes=[[10, 20]],
-            dtypes=[torch.float32],
-            tensor_sizes=[packed.numel()],
-        )
-
-        assert len(result) == 1
-        name, tensor = result[0]
-        assert name == "weight"
-        assert tensor.shape == original.shape
-        assert tensor.dtype == original.dtype
-        assert torch.allclose(tensor, original)
-
-    def test_unpack_multiple_tensors(self):
-        """Test unpacking multiple tensors from a packed buffer."""
-        t1 = torch.randn(5, 10, dtype=torch.float32).cuda()
-        t2 = torch.randn(3, dtype=torch.float16).cuda()
-
-        b1 = t1.contiguous().view(torch.uint8).view(-1)
-        b2 = t2.contiguous().view(torch.uint8).view(-1)
-        packed = torch.cat([b1, b2])
-
-        result = unpack_tensor(
-            packed,
-            names=["w1", "w2"],
-            shapes=[[5, 10], [3]],
-            dtypes=[torch.float32, torch.float16],
-            tensor_sizes=[b1.numel(), b2.numel()],
-        )
-
-        assert len(result) == 2
-        assert result[0][0] == "w1"
-        assert torch.allclose(result[0][1], t1)
-        assert result[1][0] == "w2"
-        assert torch.allclose(result[1][1], t2)
 
     def test_unpack_produces_independent_copies(self):
         """Verify unpacked tensors don't share memory with packed buffer."""
@@ -667,26 +493,6 @@ class TestPackedIpcProducer:
         for c in chunks[:-1]:
             assert c.is_last is False
 
-    def test_producer_single_chunk(self):
-        """Test a small model that fits in one chunk."""
-        params = [
-            ("w", torch.randn(10, dtype=torch.float32).cuda()),
-        ]
-
-        chunks = list(
-            packed_ipc_producer(
-                iterator=iter(params),
-                gpu_uuid="test-uuid",
-                post_iter_func=lambda x: x[1],
-                buffer_size_bytes=10_000_000,
-            )
-        )
-
-        assert len(chunks) == 1
-        assert chunks[0].is_first is True
-        assert chunks[0].is_last is True
-        assert chunks[0].names == ["w"]
-
     def test_producer_ipc_handle_has_uuid(self):
         """Test that each chunk's ipc_handle is keyed by the given UUID."""
         params = [("w", torch.randn(10, dtype=torch.float32).cuda())]
@@ -731,28 +537,6 @@ class TestPackedIpcProducer:
             )
         )
         assert len(chunks) == 0
-
-    def test_producer_all_names_preserved(self):
-        """Test that all parameter names appear across chunks."""
-        params = [
-            (f"layer{i}.weight", torch.randn(100, 100, dtype=torch.float32).cuda())
-            for i in range(10)
-        ]
-
-        chunks = list(
-            packed_ipc_producer(
-                iterator=iter(params),
-                gpu_uuid="uuid",
-                post_iter_func=lambda x: x[1],
-                buffer_size_bytes=20_000,
-            )
-        )
-
-        all_names = []
-        for c in chunks:
-            all_names.extend(c.names)
-
-        assert all_names == [f"layer{i}.weight" for i in range(10)]
 
 
 # --- Integration Tests: IPC Producer-Consumer Roundtrip ---

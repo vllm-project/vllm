@@ -103,7 +103,7 @@ class TrainModel:
 
 # Initialize Ray and set the visible devices. The vLLM engine will
 # be placed on GPUs 1 and 2.
-ray.init(runtime_env={})
+ray.init()
 
 # Create a placement group that reserves GPU 1–2 for the vLLM inference engine.
 # Learn more about Ray placement groups:
