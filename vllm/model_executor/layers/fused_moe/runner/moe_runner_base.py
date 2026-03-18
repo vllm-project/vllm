@@ -177,7 +177,7 @@ def _moe_forward_shared_fake(
 direct_register_custom_op(
     op_name="moe_forward",
     op_func=_moe_forward,
-    mutates_args=["hidden_states"],  # is this still true?
+    mutates_args=["hidden_states"],
     fake_impl=_moe_forward_fake,
     tags=(torch.Tag.needs_fixed_stride_order,),
 )
