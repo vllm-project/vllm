@@ -35,6 +35,20 @@ from .monitor import monitor_profiling_run, monitor_torch_compile
 # shape_id parameter was added to mark_unbacked in PyTorch 2.11.0
 _SUPPORTS_SHAPE_ID = is_torch_equal_or_newer("2.11.0")
 
+# min/max bounds support landed in PyTorch 2.12 (#176313)
+_SUPPORTS_MIN_MAX = is_torch_equal_or_newer("2.12.0.dev")
+
+
+# Identifier for the batch dimension in unbacked dynamic shapes.
+# Arguments that share the same shape_id are assigned the same
+# unbacked symbolic size by torch.compile, eliminating the need
+# for explicit shape_invariants (torch._check calls).
+#
+# When used with DynamicShapesType.UNBACKED, the min/max range for
+# this symbol is automatically derived from the compilation config
+# to be 1 to max_num_batched_tokens.
+BATCH_SHAPE_ID = "__vllm_batch_dim"
+
 if TYPE_CHECKING:
     # Only added on nightly/2.10 so wrap
     try:
@@ -414,6 +428,11 @@ def _support_torch_compile(
     def _mark_dynamic_inputs(
         mod: type[_T], ds_type: DynamicShapesType, *args: Any, **kwargs: Any
     ) -> None:
+        # Get max batch size for unbacked symint bounds.
+        # This lets Inductor use 32-bit indexing and fewer DeviceGuard
+        # blocks, matching the backed symint codegen quality.
+        max_num_batched_tokens = mod.vllm_config.scheduler_config.max_num_batched_tokens
+
         def mark_dynamic(
             arg: torch.Tensor, dim_shape_pairs: list[tuple[int, str | None]]
         ) -> None:
@@ -425,11 +444,18 @@ def _support_torch_compile(
                                 raise RuntimeError(
                                     f"shape_id='{shape_id}' requires PyTorch >= 2.11.0"
                                 )
+                            bounds: dict[str, int] = {}
+                            if _SUPPORTS_MIN_MAX and shape_id == BATCH_SHAPE_ID:
+                                bounds = {
+                                    "min": 1,
+                                    "max": max_num_batched_tokens,
+                                }
                             torch._dynamo.decorators.mark_unbacked(
                                 arg,
                                 dim,
                                 hint_override=arg.size()[dim],
                                 shape_id=shape_id,
+                                **bounds,
                             )
                         else:
                             torch._dynamo.decorators.mark_unbacked(
