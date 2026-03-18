@@ -34,11 +34,11 @@ Of course, we also have "plugin" tasks that allow users to customize input and o
 ```text
 Pooling Tasks
 ├── Sequence-wise Tasks
-│ ├── Classify – Outputs class labels
-│ └── Embed – Outputs vector representations
+│ ├── classify – Outputs class labels 
+│ └── embed – Outputs vector representations
 └── Token-wise Tasks
-    ├── Token Classify – Outputs class for each token
-    └── Token Embed – Outputs vector for each token
+    ├── token_classify – Outputs class for each token
+    └── token_embed – Outputs vector for each token
 ```
 
 Within classification tasks, there is a specialized subcategory: Cross-encoder (aka reranker) models. These models are a subset of classification models that accept two prompts as input and output num_labels equal to 1.
