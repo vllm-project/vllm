@@ -436,10 +436,7 @@ def make_nvfp4_moe_kernel(
     kernel = mk.FusedMoEKernel(
         prepare_finalize,
         experts,
-        shared_experts=(
-            shared_experts
-            if prepare_finalize.supports_async() else None
-        ),
+        shared_experts=shared_experts if prepare_finalize.supports_async() else None,
         inplace=False,
     )
 

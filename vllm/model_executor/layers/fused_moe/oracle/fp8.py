@@ -584,10 +584,7 @@ def make_fp8_moe_kernel(
     kernel = mk.FusedMoEKernel(
         prepare_finalize,
         experts,
-        shared_experts=(
-            shared_experts
-            if prepare_finalize.supports_async() else None
-        ),
+        shared_experts=shared_experts if prepare_finalize.supports_async() else None,
         inplace=(
             not moe_config.disable_inplace
             and fp8_backend != Fp8MoeBackend.FLASHINFER_CUTLASS
