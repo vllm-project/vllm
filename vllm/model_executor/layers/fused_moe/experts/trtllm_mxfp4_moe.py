@@ -188,6 +188,8 @@ class TrtLlmMxfp4ExpertsMonolithic(
             x_quant = hidden_states
             x_scale = None
 
+        output = torch.empty_like(hidden_states)
+
         return trtllm_fp4_block_scale_moe(
             routing_logits=router_logits.to(torch.bfloat16),
             routing_bias=None,
@@ -216,6 +218,7 @@ class TrtLlmMxfp4ExpertsMonolithic(
             routing_method_type=self.routing_method_type,
             do_finalize=True,
             tune_max_num_tokens=max(self.max_capture_size, 1),
+            output=output,
         )[0]
 
 
