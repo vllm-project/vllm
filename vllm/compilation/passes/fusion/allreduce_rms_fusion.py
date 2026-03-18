@@ -178,9 +178,7 @@ if flashinfer_comm is not None:
             ar_fusion_patterns.kARResidualRMSNormFP4Quant,
         )
         workspace = (
-            get_fi_ar_quant_workspace()
-            if is_quant_pattern
-            else get_fi_ar_workspace()
+            get_fi_ar_quant_workspace() if is_quant_pattern else get_fi_ar_workspace()
         )
 
         if workspace is None:
@@ -204,9 +202,7 @@ if flashinfer_comm is not None:
                 else get_fi_ar_workspace()
             )
             if workspace is None:
-                raise RuntimeError(
-                    "FlashInfer workspace is None after initialization"
-                )
+                raise RuntimeError("FlashInfer workspace is None after initialization")
         assert flashinfer_comm is not None
         if norm_out is None:
             norm_out = allreduce_in
