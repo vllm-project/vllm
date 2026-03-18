@@ -3,6 +3,7 @@
 import argparse
 import contextlib
 import multiprocessing
+import threading
 import time
 import weakref
 from collections.abc import Callable, Sequence
@@ -173,6 +174,7 @@ class APIServerProcessManager:
         input_addresses: list[str],
         output_addresses: list[str],
         stats_update_address: str | None = None,
+        local_engine_manager=None,
     ):
         """Initialize and start API server worker processes.
 
@@ -213,6 +215,12 @@ class APIServerProcessManager:
             )
             self.processes.append(proc)
             proc.start()
+            t = threading.Thread(
+                target=self.monitor_process,
+                args=(proc, local_engine_manager, i),
+                daemon=True,
+            )
+            t.start()
 
         logger.info("Started %d API server processes", len(self.processes))
 
@@ -224,6 +232,13 @@ class APIServerProcessManager:
         """Shutdown API server processes with configurable timeout"""
         if self._finalizer.detach() is not None:
             shutdown(self.processes, timeout=timeout)
+
+    def monitor_process(self, proc, local_engine_manager, i) -> None:
+        logger.info("Started ApiServer_%d process alive monitor", i)
+        while proc.is_alive():
+            time.sleep(0.2)
+        if local_engine_manager:
+            local_engine_manager.close()
 
 
 def wait_for_completion_or_failure(
