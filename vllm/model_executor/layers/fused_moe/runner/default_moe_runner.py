@@ -415,7 +415,10 @@ class DefaultMoERunner(MoERunner):
 
         # This is the dimension after transform (for routed expert output slicing)
         transformed_hidden_dim = hidden_states.shape[-1]
-        if self.moe_config.hidden_dim != transformed_hidden_dim:
+        if (
+            not self.quant_method.skip_forward_padding
+            and self.moe_config.hidden_dim != transformed_hidden_dim
+        ):
             hidden_states = F.pad(
                 hidden_states,
                 (0, self.moe_config.hidden_dim - transformed_hidden_dim),
