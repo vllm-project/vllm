@@ -20,7 +20,7 @@ Cross-encoder (aka reranker) models are a subset of classification models that a
 
 ### As reward Models
 
-Using (sequence) classification models as reward models, For more information, see [Reward Models](reward.md).
+Using (sequence) classification models as reward models. For more information, see [Reward Models](reward.md).
 
 ## Supported Models
 
@@ -259,7 +259,7 @@ Implement alignment with transformers [ForSequenceClassificationLoss](https://gi
 
 #### Logit bias
 
-You can modify the `logit_bias` (also known as `sigmoid_normalize` in ...) through the logit_bias parameter in `vllm.config.PoolerConfig`.
+You can modify the `logit_bias` (aka `sigmoid_normalize`) through the logit_bias parameter in `vllm.config.PoolerConfig`.
 
 ### Removed Features
 
