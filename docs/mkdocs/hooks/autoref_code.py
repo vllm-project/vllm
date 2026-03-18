@@ -50,12 +50,7 @@ def _has_docstring(node: ast.AST) -> bool:
     """Check if a class or function node has a docstring."""
     if not isinstance(node, ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef):
         return False
-    return (
-        node.body
-        and isinstance(node.body[0], ast.Expr)
-        and isinstance(node.body[0].value, ast.Constant)
-        and isinstance(node.body[0].value.value, str)
-    )
+    return ast.get_docstring(node, clean=False) is not None
 
 
 def _module_path(filepath: Path) -> str:
@@ -150,7 +145,7 @@ def on_page_markdown(
 
     def _mask_block(match: re.Match) -> str:
         masks.append(match.group(0))
-        return f"\x00CODEBLOCK{len(masks) - 1}\x00"
+        return rf"\uE000CODEBLOCK{len(masks) - 1}\uE000"
 
     masked = _FENCED_BLOCK.sub(_mask_block, markdown)
 
@@ -166,7 +161,7 @@ def on_page_markdown(
     result = _INLINE_CODE.sub(_replace, masked)
 
     # Step 3: Restore masked code blocks.
-    for i, block in enumerate(masks):
-        result = result.replace(f"\x00CODEBLOCK{i}\x00", block)
-
+    result = re.sub(
+        r"\uE000CODEBLOCK(\d+)\uE000", lambda m: masks[int(m.group(1))], result
+    )
     return result
