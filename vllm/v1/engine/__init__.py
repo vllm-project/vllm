@@ -14,7 +14,7 @@ from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
-from vllm.v1.metrics.stats import SchedulerStats
+from vllm.v1.metrics.stats import PrefillStats, SchedulerStats
 from vllm.v1.outputs import LogprobsLists, LogprobsTensors
 from vllm.v1.serial_utils import UtilityResult
 
@@ -157,10 +157,9 @@ class EngineCoreOutput(
     kv_transfer_params: dict[str, Any] | None = None
 
     trace_headers: Mapping[str, str] | None = None
-    # The number of tokens with prefix cache hits (local + external).
-    num_cached_tokens: int = 0
-    # The number of tokens computed remotely (original count from connector).
-    num_external_computed_tokens: int = 0
+
+    prefill_stats: PrefillStats | None = None
+
     routed_experts: np.ndarray | None = None
     # The number of NaNs in logits.
     # A value greater than 0 indicates that the output is corrupted.
