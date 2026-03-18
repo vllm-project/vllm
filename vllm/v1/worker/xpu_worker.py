@@ -15,7 +15,7 @@ from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.utils import report_usage_stats
 from vllm.v1.worker.gpu_worker import Worker, init_worker_distributed_environment
 from vllm.v1.worker.workspace import init_workspace_manager
-from vllm.v1.worker.xpu_model_runner import XPUModelRunner
+from vllm.v1.worker.xpu_model_runner import XPUModelRunner, XPUModelRunnerV2
 
 from .utils import request_memory
 
@@ -60,7 +60,7 @@ class XPUWorker(Worker):
             and current_platform.is_xpu()
         ):
             self.device = torch.device(f"xpu:{self.local_rank}")
-            current_platform.set_device(self.device)
+            torch.accelerator.set_device_index(self.device)
             current_platform.check_if_supports_dtype(self.model_config.dtype)
             torch.accelerator.empty_cache()
             self.init_gpu_memory = torch.xpu.get_device_properties(
@@ -85,6 +85,9 @@ class XPUWorker(Worker):
             current_platform.dist_backend,
         )
 
+        # global all_reduce needed for overall oneccl warm up
+        torch.distributed.all_reduce(torch.zeros(1).xpu())
+
         # Set random seed.
         set_random_seed(self.model_config.seed)
 
@@ -105,7 +108,8 @@ class XPUWorker(Worker):
         init_workspace_manager(self.device, num_ubatches)
 
         # Construct the model runner
-        self.model_runner = XPUModelRunner(  # type: ignore
+        model_runner = XPUModelRunnerV2 if self.use_v2_model_runner else XPUModelRunner
+        self.model_runner = model_runner(  # type: ignore
             self.vllm_config, self.device
         )
 

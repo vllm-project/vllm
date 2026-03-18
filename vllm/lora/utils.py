@@ -5,6 +5,7 @@ import os
 from typing import TYPE_CHECKING
 
 import huggingface_hub
+import regex as re
 from huggingface_hub.utils import HfHubHTTPError, HFValidationError
 from torch import nn
 from transformers import PretrainedConfig
@@ -193,7 +194,7 @@ def parse_fine_tuned_lora_name(
     raise ValueError(f"{name} is unsupported LoRA weight")
 
 
-def is_base_embeddding_weights(name: str) -> bool:
+def is_base_embedding_weights(name: str) -> bool:
     # hardcoded subfixes for input & output embedding weights
     embedding_suffixes = (
         ".embed_tokens.base_layer.weight",
@@ -224,6 +225,57 @@ def get_supported_lora_modules(model: nn.Module) -> list[str]:
             supported_lora_modules.add(name.split(".")[-1])
 
     return list(supported_lora_modules)
+
+
+def is_supported_lora_module(
+    module_name: str,
+    supported_lora_modules: list[str],
+) -> bool:
+    """Check if a module is in the model's supported LoRA modules.
+
+    Uses regex suffix matching against the model-defined supported modules
+    list (e.g., matching "model.layers.0.self_attn.o_proj" against
+    "o_proj").
+
+    Args:
+        module_name: Full dot-separated module name.
+        supported_lora_modules: List of module suffixes supported by the
+            model.
+
+    Returns:
+        True if the module is supported, False otherwise.
+    """
+    return any(
+        re.match(
+            r".*\.{target_module}$".format(target_module=target_module),
+            module_name,
+        )
+        or target_module == module_name
+        for target_module in supported_lora_modules
+    )
+
+
+def is_in_target_modules(
+    module_name: str,
+    target_modules: list[str] | None,
+) -> bool:
+    """Check if a module passes the deployment-time target_modules filter.
+
+    When target_modules is None (no restriction), all modules pass.
+    Otherwise, the module's suffix must be in the target_modules list.
+
+    Args:
+        module_name: Full dot-separated module name.
+        target_modules: Optional deployment-time restriction list from
+            LoRAConfig.target_modules.
+
+    Returns:
+        True if the module passes the filter, False otherwise.
+    """
+    if target_modules is None:
+        return True
+    module_suffix = module_name.split(".")[-1]
+    return module_suffix in set(target_modules)
 
 
 def get_adapter_absolute_path(lora_path: str) -> str:

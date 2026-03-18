@@ -11,6 +11,26 @@ from vllm.sampling_params import RequestOutputKind
 from vllm.tasks import PoolingTask
 
 
+class LateInteractionParams(
+    msgspec.Struct,
+    omit_defaults=True,  # type: ignore[call-arg]
+    array_like=True,
+):  # type: ignore[call-arg]
+    """Metadata for worker-side late-interaction scoring.
+
+    Attributes:
+        mode:
+            - "cache_query": cache query token embeddings
+            - "score_doc": score a document against a cached query.
+        query_key: stable key used for both DP routing and worker cache lookup.
+        query_uses: expected number of document requests
+    """
+
+    mode: str
+    query_key: str
+    query_uses: int | None = None
+
+
 class PoolingParams(
     msgspec.Struct,
     omit_defaults=True,  # type: ignore[call-arg]
@@ -46,6 +66,7 @@ class PoolingParams(
     task: PoolingTask | None = None
     requires_token_ids: bool = False
     skip_reading_prefix_cache: bool | None = None
+    late_interaction_params: LateInteractionParams | None = None
     extra_kwargs: dict[str, Any] | None = None
     output_kind: RequestOutputKind = RequestOutputKind.FINAL_ONLY
 
@@ -73,6 +94,10 @@ class PoolingParams(
         if self.task == "plugin":
             if self.skip_reading_prefix_cache is None:
                 self.skip_reading_prefix_cache = True
+            return
+
+        # skipping verify, let plugins configure and validate pooling params
+        if self.task not in self.valid_parameters:
             return
 
         # NOTE: Task validation needs to done against the model instance,
@@ -193,6 +218,7 @@ class PoolingParams(
             f"returned_token_ids={self.returned_token_ids}, "
             f"requires_token_ids={self.requires_token_ids}, "
             f"skip_reading_prefix_cache={self.skip_reading_prefix_cache}, "
+            f"late_interaction_params={self.late_interaction_params}, "
             f"extra_kwargs={self.extra_kwargs})"
         )
 
