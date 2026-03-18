@@ -199,9 +199,11 @@ def test_min_characters_vs_min_tokens_independence(llm_v1: LLM):
     Both constraints should be respected.
     """
     # Use both min_tokens and min_characters
+    min_tokens = 5
+    min_characters = 30
     sampling_params = SamplingParams(
-        min_tokens=5,
-        min_characters=30,
+        min_tokens=min_tokens,
+        min_characters=min_characters,
         max_tokens=50,
         stop=["e"],  # Common letter
         temperature=GREEDY,
@@ -220,8 +222,12 @@ def test_min_characters_vs_min_tokens_independence(llm_v1: LLM):
     print(f"Token count: {token_count}, Character count: {char_count}")
 
     # Both constraints should be satisfied
-    assert token_count >= 5, f"min_tokens not satisfied: {token_count} < 5"
-    assert char_count >= 20, f"min_characters not satisfied: {char_count} < 20"
+    assert token_count >= min_tokens, (
+        f"min_tokens not satisfied: {token_count} < {min_tokens}"
+    )
+    assert char_count >= min_characters, (
+        f"min_characters not satisfied: {char_count} < {min_characters}"
+    )
 
 
 def test_min_characters_does_not_block_eos(llm_v1: LLM):
