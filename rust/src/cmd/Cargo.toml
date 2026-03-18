@@ -1,0 +1,21 @@
+[package]
+name = "vllm-cmd"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "vllm-rs"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+futures.workspace = true
+libc.workspace = true
+tokio = { workspace = true, features = ["process", "signal"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+vllm-openai-server.workspace = true
+
+[dev-dependencies]
+expect-test.workspace = true

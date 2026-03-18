@@ -10,16 +10,15 @@ path = "src/lib.rs"
 [dependencies]
 anyhow.workspace = true
 axum.workspace = true
-clap.workspace = true
 futures.workspace = true
 futures-async-stream.workspace = true
 openai-protocol.workspace = true
 serde_json.workspace = true
+thiserror-ext.workspace = true
 tokio.workspace = true
 tower-http.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
-thiserror-ext.workspace = true
 uuid.workspace = true
 vllm-chat.workspace = true
 vllm-engine-core-client.workspace = true
@@ -27,9 +26,9 @@ vllm-llm.workspace = true
 
 [dev-dependencies]
 anyhow.workspace = true
-expect-test.workspace = true
 async-openai = { workspace = true, features = ["full"] }
 bytes.workspace = true
+expect-test.workspace = true
 rmp-serde.workspace = true
 tower.workspace = true
 zeromq.workspace = true

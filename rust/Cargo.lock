@@ -3627,6 +3627,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "vllm-cmd"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "expect-test",
+ "futures",
+ "libc",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "vllm-openai-server",
+]
+
+[[package]]
 name = "vllm-engine-core-client"
 version = "0.1.0"
 dependencies = [
@@ -3678,7 +3693,6 @@ dependencies = [
  "async-openai",
  "axum",
  "bytes",
- "clap",
  "expect-test",
  "futures",
  "futures-async-stream",

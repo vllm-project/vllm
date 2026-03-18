@@ -4,7 +4,7 @@ use bytes::Bytes;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tokio::time::timeout;
-use tracing::{debug, error, trace, warn};
+use tracing::{debug, error, info, trace, warn};
 use zeromq::prelude::{Socket, SocketRecv, SocketSend};
 use zeromq::{PullSocket, RouterSendHalf, RouterSocket, ZmqMessage};
 
@@ -37,6 +37,8 @@ pub async fn connect(
     local_host: &str,
     ready_timeout: Duration,
 ) -> Result<ConnectedTransport> {
+    info!("waiting for engine to connect");
+
     // 1. Bind handshake socket and local input/output sockets.
     debug!(
         handshake_address,
@@ -89,6 +91,8 @@ pub async fn connect(
     // 4. Wait for the engine to connect to the input socket and register itself.
     wait_for_input_registration(&mut input_socket, &engine_identity, ready_timeout).await?;
     debug!(?engine_identity, "engine input registered");
+
+    info!("engine connected");
 
     let (input_send, _) = input_socket.split();
 

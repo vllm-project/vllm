@@ -1,0 +1,119 @@
+use std::time::Duration;
+
+use clap::{Args, Parser, Subcommand};
+use vllm_openai_server::Config;
+
+use crate::managed_engine::ManagedEngineConfig;
+
+/// Top-level parser for the `vllm-rs` binary.
+#[derive(Debug, Parser)]
+#[command(
+    name = "vllm-rs",
+    about = "Rust frontend and managed-engine CLI for vLLM."
+)]
+pub struct Cli {
+    #[command(subcommand)]
+    pub command: Command,
+}
+
+/// Supported top-level CLI commands.
+#[derive(Debug, Subcommand, PartialEq, Eq)]
+pub enum Command {
+    /// Run the Rust OpenAI frontend against an already running headless Python engine.
+    Frontend(FrontendArgs),
+    /// Launch a managed Python headless engine, then run the Rust OpenAI frontend.
+    Serve(ServeArgs),
+}
+
+/// Runtime arguments shared by the external-engine and managed-engine paths.
+#[derive(Debug, Clone, Args, PartialEq, Eq)]
+pub struct FrontendRuntimeArgs {
+    /// Hugging Face model identifier used both for backend loading and public model ID.
+    #[arg(long)]
+    pub model: String,
+    /// HTTP bind host for the OpenAI-compatible server.
+    #[arg(long, default_value = "127.0.0.1")]
+    pub bind_host: String,
+    /// HTTP bind port for the OpenAI-compatible server.
+    #[arg(long, default_value_t = 8000)]
+    pub port: u16,
+    /// Local host/IP announced to the headless engine for ZMQ sockets.
+    #[arg(long, default_value = "127.0.0.1")]
+    pub engine_local_host: String,
+    /// Maximum time to wait for the engine handshake to complete.
+    #[arg(long, default_value_t = 30)]
+    pub ready_timeout_secs: u64,
+}
+
+impl FrontendRuntimeArgs {
+    /// Build one OpenAI-server runtime config for the resolved handshake address.
+    fn into_config(self, handshake_address: String) -> Config {
+        Config {
+            handshake_address,
+            model: self.model,
+            bind_host: self.bind_host,
+            port: self.port,
+            engine_local_host: self.engine_local_host,
+            ready_timeout: Duration::from_secs(self.ready_timeout_secs),
+        }
+    }
+}
+
+/// Arguments for connecting the Rust frontend to an already running headless engine.
+#[derive(Debug, Clone, Args, PartialEq, Eq)]
+pub struct FrontendArgs {
+    /// Headless vLLM engine handshake endpoint, for example `tcp://127.0.0.1:62100`.
+    #[arg(long)]
+    pub handshake_address: String,
+    #[command(flatten)]
+    pub runtime: FrontendRuntimeArgs,
+}
+
+impl FrontendArgs {
+    /// Convert the CLI arguments into the OpenAI server's runtime config.
+    pub fn into_config(self) -> Config {
+        self.runtime.into_config(self.handshake_address)
+    }
+}
+
+/// Arguments for the managed-engine mode that spawns Python on behalf of the user.
+#[derive(Debug, Clone, Args, PartialEq, Eq)]
+pub struct ServeArgs {
+    #[command(flatten)]
+    pub runtime: FrontendRuntimeArgs,
+    /// Python executable used to launch the managed headless vLLM engine.
+    #[arg(long, default_value = "python3")]
+    pub python: String,
+    /// Host used for the managed headless-engine handshake endpoint.
+    #[arg(long, default_value = "127.0.0.1")]
+    pub handshake_host: String,
+    /// Port used for the managed headless-engine handshake endpoint.
+    #[arg(long, default_value_t = 62100)]
+    pub handshake_port: u16,
+    /// Additional arguments forwarded to `python -m vllm.entrypoints.cli.main serve ...`.
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    pub python_args: Vec<String>,
+}
+
+impl ServeArgs {
+    /// Render the managed-engine handshake endpoint in the format expected by the client.
+    pub fn handshake_address(&self) -> String {
+        format!("tcp://{}:{}", self.handshake_host, self.handshake_port)
+    }
+
+    /// Build the OpenAI-server runtime config that should connect to the managed engine.
+    pub fn frontend_config(&self) -> Config {
+        self.runtime.clone().into_config(self.handshake_address())
+    }
+
+    /// Build the managed Python-engine spawn configuration.
+    pub fn into_managed_engine_config(self) -> ManagedEngineConfig {
+        ManagedEngineConfig {
+            python: self.python,
+            model: self.runtime.model,
+            handshake_host: self.handshake_host,
+            handshake_port: self.handshake_port,
+            python_args: self.python_args,
+        }
+    }
+}
