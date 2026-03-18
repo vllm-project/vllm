@@ -94,6 +94,46 @@ if flashinfer_comm is not None:
 
     MiB = 1024 * 1024
 
+    def _initialize_fi_ar_workspaces(
+        world_size: int,
+        rank: int,
+        max_token_num: int,
+        hidden_dim: int,
+        dtype: torch.dtype,
+        group,
+    ) -> bool:
+        """Initialize FlashInfer AR workspaces. Returns True on success."""
+        for workspace_init_fn in [
+            initialize_fi_ar_workspace,
+            initialize_fi_ar_quant_workspace,
+        ]:
+            try:
+                workspace_init_fn(
+                    world_size=world_size,
+                    rank=rank,
+                    max_token_num=max_token_num,
+                    hidden_dim=hidden_dim,
+                    dtype=dtype,
+                    group=group,
+                )
+            except Exception as e:
+                if "multicast" in str(e).lower():
+                    logger.warning_once(
+                        "AllReduce fusion pass is disabled: flashinfer workspace "
+                        "creation failed: %s. This is expected on GPUs without "
+                        "NVSwitch (e.g., NVLink bridge-only or PCIe topologies). "
+                        "Falling back to non-fused allreduce.",
+                        str(e),
+                    )
+                else:
+                    logger.warning_once(
+                        "Failed to initialize FlashInfer All Reduce workspace: %s. "
+                        "AllReduce fusion pass will be disabled.",
+                        e,
+                    )
+                return False
+        return True
+
     def call_trtllm_fused_allreduce_norm(
         allreduce_in: torch.Tensor,
         residual: torch.Tensor,
@@ -133,16 +173,40 @@ if flashinfer_comm is not None:
 
         # Select workspace based on pattern: quant patterns use the
         # trtllm quant workspace, non-quant patterns use the primary workspace.
-        if pattern_code in (
+        is_quant_pattern = pattern_code in (
             ar_fusion_patterns.kARResidualRMSNormFP8Quant,
             ar_fusion_patterns.kARResidualRMSNormFP4Quant,
-        ):
-            workspace = get_fi_ar_quant_workspace()
-        else:
-            workspace = get_fi_ar_workspace()
-        assert workspace is not None, (
-            "Flashinfer workspace must be initialized when using flashinfer"
         )
+        workspace = (
+            get_fi_ar_quant_workspace()
+            if is_quant_pattern
+            else get_fi_ar_workspace()
+        )
+
+        if workspace is None:
+            # Workspace may not be initialized by AllReduceFusionPass if the function is
+            # directly loaded from torch AOT compile cache. Lazily initialize here.
+            _, hidden_dim = allreduce_in.shape
+            if not _initialize_fi_ar_workspaces(
+                world_size=world_size,
+                rank=get_tensor_model_parallel_rank(),
+                max_token_num=max_token_num,
+                hidden_dim=hidden_dim,
+                dtype=allreduce_in.dtype,
+                group=get_tp_group().device_group,
+            ):
+                raise RuntimeError(
+                    "Failed to initialize FlashInfer All Reduce workspace"
+                )
+            workspace = (
+                get_fi_ar_quant_workspace()
+                if is_quant_pattern
+                else get_fi_ar_workspace()
+            )
+            if workspace is None:
+                raise RuntimeError(
+                    "FlashInfer workspace is None after initialization"
+                )
         assert flashinfer_comm is not None
         if norm_out is None:
             norm_out = allreduce_in
@@ -753,35 +817,15 @@ class AllReduceFusionPass(VllmPatternMatcherPass):
             scope="global",
         )
 
-        for workspace_init_fn in [
-            initialize_fi_ar_workspace,
-            initialize_fi_ar_quant_workspace,
-        ]:
-            try:
-                workspace_init_fn(
-                    world_size=self.tp_size,
-                    rank=rank,
-                    max_token_num=self.max_token_num,
-                    hidden_dim=self.hidden_dim,
-                    dtype=self.model_dtype,
-                    group=self.group,
-                )
-            except Exception as e:
-                if "multicast" in str(e).lower():
-                    logger.warning(
-                        "AllReduce fusion pass is disabled: flashinfer workspace "
-                        "creation failed: %s. This is expected on GPUs without "
-                        "NVSwitch (e.g., NVLink bridge-only or PCIe topologies). "
-                        "Falling back to non-fused allreduce.",
-                        str(e),
-                    )
-                else:
-                    logger.warning(
-                        "Failed to initialize FlashInfer All Reduce workspace: %s. "
-                        "AllReduce fusion pass will be disabled.",
-                        e,
-                    )
-                return
+        if not _initialize_fi_ar_workspaces(
+            world_size=self.tp_size,
+            rank=rank,
+            max_token_num=self.max_token_num,
+            hidden_dim=self.hidden_dim,
+            dtype=self.model_dtype,
+            group=self.group,
+        ):
+            return
 
         self.allreduce_params = FlashInferFusedAllReduceParams(
             world_size=self.tp_size,
