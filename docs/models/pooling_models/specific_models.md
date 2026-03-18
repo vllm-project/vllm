@@ -231,7 +231,6 @@ curl -s http://localhost:8000/score -H "Content-Type: application/json" -d '{
 
 An example can be found here: [examples/pooling/score/colqwen3_5_rerank_online.py](../../examples/pooling/score/colqwen3_5_rerank_online.py)
 
-
 ## Llama Nemotron Multimodal
 
 ### Embedding Model
