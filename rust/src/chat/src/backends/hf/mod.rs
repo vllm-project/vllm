@@ -3,9 +3,13 @@ mod model_files;
 
 use std::collections::BTreeSet;
 use std::fmt;
+use std::path::Path;
 use std::sync::Arc;
 
+use fastokens::Tokenizer as FastokensTokenizer;
+use thiserror_ext::AsReport;
 use tokenizers::Tokenizer as HfTokenizer;
+use tracing::info;
 
 use self::config::{load_generation_config, load_tokenizer_config};
 use self::model_files::{ResolvedModelFiles, resolve_model_files};
@@ -15,7 +19,73 @@ use crate::error::{Error, Result};
 use crate::request::ChatRequest;
 use crate::template::ChatTemplate;
 
-/// [`ChatBackend`] implementation built directly on the Rust Hugging Face stack.
+/// Set this environment variable to `1` to disable `fastokens` and fall back to the HuggingFace
+/// `tokenizers` crate.
+const DISABLE_FASTOKENS_ENV: &str = "VLLM_RS_DISABLE_FASTOKENS";
+
+/// Tokenizer implementation that can be either HuggingFace `tokenizers` or `fastokens`.
+enum TokenizerImpl {
+    Hf(Box<HfTokenizer>),
+    Fastokens(Box<FastokensTokenizer>),
+}
+
+/// Returns `true` when the user has opted out of `fastokens` via [`DISABLE_FASTOKENS_ENV`].
+fn fastokens_disabled() -> bool {
+    std::env::var(DISABLE_FASTOKENS_ENV).is_ok_and(|v| v == "1")
+}
+
+impl TokenizerImpl {
+    fn from_file(path: &Path) -> Result<Self> {
+        if fastokens_disabled() {
+            info!("loading tokenizer with HuggingFace tokenizers");
+            let t = HfTokenizer::from_file(path).map_err(|error| {
+                Error::Tokenizer(format!("failed to load tokenizer: {}", error.as_report()))
+            })?;
+            Ok(Self::Hf(Box::new(t)))
+        } else {
+            info!("loading tokenizer with fastokens");
+            let t = FastokensTokenizer::from_file(path).map_err(|error| {
+                Error::Tokenizer(format!("failed to load tokenizer: {}", error.as_report()))
+            })?;
+            Ok(Self::Fastokens(Box::new(t)))
+        }
+    }
+
+    fn encode(&self, text: &str) -> Result<Vec<u32>> {
+        match self {
+            Self::Hf(t) => {
+                let encoding = t.encode(text, false).map_err(|error| {
+                    Error::Tokenizer(format!("encoding failed: {}", error.as_report()))
+                })?;
+                Ok(encoding.get_ids().to_vec())
+            }
+            Self::Fastokens(t) => t.encode_with_special_tokens(text, false).map_err(|error| {
+                Error::Tokenizer(format!("encoding failed: {}", error.as_report()))
+            }),
+        }
+    }
+
+    fn decode(&self, token_ids: &[u32], skip_special_tokens: bool) -> Result<String> {
+        match self {
+            Self::Hf(t) => t.decode(token_ids, skip_special_tokens).map_err(|error| {
+                Error::Tokenizer(format!("decoding failed: {}", error.as_report()))
+            }),
+            Self::Fastokens(t) => t.decode(token_ids, skip_special_tokens).map_err(|error| {
+                Error::Tokenizer(format!("decoding failed: {}", error.as_report()))
+            }),
+        }
+    }
+
+    fn token_to_id(&self, token: &str) -> Option<u32> {
+        match self {
+            Self::Hf(t) => t.token_to_id(token),
+            Self::Fastokens(t) => t.token_to_id(token),
+        }
+    }
+}
+
+/// [`ChatBackend`] implementation built on HuggingFace model files, with a configurable tokenizer
+/// engine (either HuggingFace `tokenizers` or `fastokens`).
 #[derive(Clone)]
 pub struct HfChatBackend {
     inner: Arc<HfChatBackendInner>,
@@ -23,7 +93,7 @@ pub struct HfChatBackend {
 
 struct HfChatBackendInner {
     model_id: String,
-    tokenizer: HfTokenizer,
+    tokenizer: TokenizerImpl,
     chat_template: ChatTemplate,
     /// Primary EOS handled by engine-core's dedicated EOS path.
     primary_eos_token_id: Option<u32>,
@@ -42,14 +112,16 @@ impl fmt::Debug for HfChatBackend {
 
 impl HfChatBackend {
     /// Load one Hugging Face model tokenizer plus adjacent chat/EOS metadata.
+    ///
+    /// By default the faster `fastokens` crate is used for tokenization. Set
+    /// `VLLM_RS_DISABLE_FASTOKENS=1` to fall back to the HuggingFace `tokenizers` crate.
     pub async fn from_model(model_id: &str) -> Result<Self> {
         let files = resolve_model_files(model_id).await?;
         Self::from_resolved_model_files(files, model_id.to_string())
     }
 
     fn from_resolved_model_files(files: ResolvedModelFiles, model_id: String) -> Result<Self> {
-        let tokenizer = HfTokenizer::from_file(&files.tokenizer_path)
-            .map_err(|error| Error::Tokenizer(format!("failed to load tokenizer: {error}")))?;
+        let tokenizer = TokenizerImpl::from_file(&files.tokenizer_path)?;
 
         let tokenizer_config = load_tokenizer_config(files.tokenizer_config_path.as_deref())?;
 
@@ -92,19 +164,11 @@ impl ChatBackend for HfChatBackend {
     }
 
     fn encode(&self, text: &str) -> Result<Vec<u32>> {
-        let encoding = self
-            .inner
-            .tokenizer
-            .encode(text, false)
-            .map_err(|error| Error::Tokenizer(format!("encoding failed: {error}")))?;
-        Ok(encoding.get_ids().to_vec())
+        self.inner.tokenizer.encode(text)
     }
 
     fn decode(&self, token_ids: &[u32], skip_special_tokens: bool) -> Result<String> {
-        self.inner
-            .tokenizer
-            .decode(token_ids, skip_special_tokens)
-            .map_err(|error| Error::Tokenizer(format!("decoding failed: {error}")))
+        self.inner.tokenizer.decode(token_ids, skip_special_tokens)
     }
 
     fn model_id(&self) -> Option<&str> {

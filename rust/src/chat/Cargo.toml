@@ -16,6 +16,7 @@ serde_json.workspace = true
 smg-tokenizer.workspace = true
 thiserror.workspace = true
 thiserror-ext.workspace = true
+fastokens.workspace = true
 tokenizers.workspace = true
 tracing.workspace = true
 vllm-engine-core-client.workspace = true

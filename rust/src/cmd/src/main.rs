@@ -46,8 +46,8 @@ async fn main() -> Result<()> {
     match Cli::parse().command {
         Command::Frontend(args) => vllm_openai_server::serve(args.into_config(), ctrl_c()).await,
         Command::Serve(args) => {
-            let handshake_port =
-                allocate_handshake_port().context("failed to allocate managed engine handshake port")?;
+            let handshake_port = allocate_handshake_port()
+                .context("failed to allocate managed engine handshake port")?;
             let engine_config = args.clone().into_managed_engine_config(handshake_port);
             let config = args.to_frontend_config(engine_config.handshake_address());
 

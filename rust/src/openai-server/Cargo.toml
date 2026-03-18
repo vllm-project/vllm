@@ -28,6 +28,7 @@ vllm-llm.workspace = true
 anyhow.workspace = true
 async-openai = { workspace = true, features = ["full"] }
 bytes.workspace = true
+clap.workspace = true
 expect-test.workspace = true
 rmp-serde.workspace = true
 tower.workspace = true

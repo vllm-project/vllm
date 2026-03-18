@@ -40,6 +40,7 @@ smg-tokenizer = { package = "llm-tokenizer", version = "1.3.0" }
 tempfile = "3.23.0"
 thiserror = "2.0.16"
 thiserror-ext = "0.3.0"
+fastokens = "0.1.0"
 tokenizers = "0.22.0"
 tokio = { version = "1.47.1", features = [
     "macros",
