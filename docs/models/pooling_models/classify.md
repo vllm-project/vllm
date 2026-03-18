@@ -23,42 +23,21 @@ Many classification models support both (sequence) classification and token clas
 
 The most fundamental application of classification models is to categorize input data into predefined classes.
 
-## Advanced Use Cases
+## Supported Models
+
+--8<-- "docs/models/pooling_models/supported_models.inc.md:classify-models"
 
 ### As cross-encoder models
 
-Cross-encoder (aka reranker) models are a subset of classification models that accept two prompts as input and output num_labels equal to 1. Most [cross-encoder models](scoring.md#cross-encoder-models) can also be used as classification models. For more information on cross-encoder models, please refer to [this page](scoring.md#cross-encoder-models).
+Cross-encoder (aka reranker) models are a subset of classification models that accept two prompts as input and output num_labels equal to 1. Most [cross-encoder models](scoring.md#cross-encoder-models) can also be used as classification models. For more information on cross-encoder models, please refer to [this page](scoring.md).
+
+--8<-- "docs/models/pooling_models/supported_models.inc.md:score-models"
 
 ### As reward Models
 
 Using (sequence) classification models as reward models. For more information, see [Reward Models](reward.md).
 
-## Supported Models
-
-### Text-only Models
-
-| Architecture | Models | Example HF Models | [LoRA](../../features/lora.md) | [PP](../../serving/parallelism_scaling.md) |
-| ------------ | ------ | ----------------- | ------------------------------ | ------------------------------------------ |
-| `ErnieForSequenceClassification` | BERT-like Chinese ERNIE | `Forrest20231206/ernie-3.0-base-zh-cls` | | |
-| `GPT2ForSequenceClassification` | GPT2 | `nie3e/sentiment-polish-gpt2-small` | | |
-| `Qwen2ForSequenceClassification`<sup>C</sup> | Qwen2-based | `jason9693/Qwen2.5-1.5B-apeach` | | |
-| `*Model`<sup>C</sup>, `*ForCausalLM`<sup>C</sup>, etc. | Generative models | N/A | \* | \* |
-
-### Multimodal Models
-
-!!! note
-    For more information about multimodal models inputs, see [this page](../supported_models.md#list-of-multimodal-language-models).
-
-| Architecture | Models | Inputs | Example HF Models | [LoRA](../../features/lora.md) | [PP](../../serving/parallelism_scaling.md) |
-| ------------ | ------ | ------ | ----------------- | ------------------------------ | ------------------------------------------ |
-| `Qwen2_5_VLForSequenceClassification`<sup>C</sup> | Qwen2_5_VL-based | T + I<sup>E+</sup> + V<sup>E+</sup> | `muziyongshixin/Qwen2.5-VL-7B-for-VideoCls` | | |
-| `*ForConditionalGeneration`<sup>C</sup>, `*ForCausalLM`<sup>C</sup>, etc. | Generative models | \* | N/A | \* | \* |
-
-<sup>C</sup> Automatically converted into a classification model via `--convert classify`. ([details](./README.md#model-conversion))  
-\* Feature support is the same as that of the original model.
-
-If your model is not in the above list, we will try to automatically convert the model using
-[as_seq_cls_model][vllm.model_executor.models.adapters.as_seq_cls_model]. By default, the class probabilities are extracted from the softmaxed hidden state corresponding to the last token.
+--8<-- "docs/models/pooling_models/supported_models.inc.md:sequence-reward-models"
 
 ## Offline Inference
 
