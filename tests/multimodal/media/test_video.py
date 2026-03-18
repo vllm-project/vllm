@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import io
 from pathlib import Path
 
 import numpy as np
 import numpy.typing as npt
+import pybase64
 import pytest
 from PIL import Image
 
@@ -244,8 +246,6 @@ def test_load_base64_jpeg_returns_metadata():
     metadata, which broke downstream consumers that rely on fields like
     total_num_frames and fps. See PR #37301.
     """
-    import io
-    import pybase64
 
     num_test_frames = 3
     frame_width, frame_height = 8, 8

@@ -81,8 +81,7 @@ class VideoMediaIO(MediaIO[tuple[npt.NDArray, dict[str, Any]]]):
             )
 
             frames = np.stack(
-                [np.asarray(load_frame(frame_data))
-                 for frame_data in data.split(",")]
+                [np.asarray(load_frame(frame_data)) for frame_data in data.split(",")]
             )
             total = int(frames.shape[0])
             fps = float(self.kwargs.get("fps", 1))
