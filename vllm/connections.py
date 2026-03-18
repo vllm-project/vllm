@@ -2,19 +2,21 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
-import logging
+import functools
 import time
-from collections.abc import Mapping, MutableMapping
+from collections.abc import Callable, Mapping, MutableMapping
 from pathlib import Path
+from typing import Any
 
 import aiohttp
 import requests
 from urllib3.util import parse_url
 
 import vllm.envs as envs
+from vllm.logger import init_logger
 from vllm.version import __version__ as VLLM_VERSION
 
-logger = logging.getLogger(__name__)
+logger = init_logger(__name__)
 
 
 def _is_retryable(exc: Exception) -> bool:
@@ -61,6 +63,86 @@ def _is_retryable(exc: Exception) -> bool:
         return True
     # aiohttp 5xx -- raise_for_status() throws ClientResponseError
     return isinstance(exc, aiohttp.ClientResponseError) and exc.status >= 500
+
+
+def _sync_retry(fn: Callable[..., Any]) -> Callable[..., Any]:
+    """Add retry logic with exponential backoff to a sync method.
+
+    The decorated method must accept ``timeout`` as a keyword argument.
+    The decorator replaces it with a per-attempt timeout that grows by 4x
+    on each retry so transient slowness on busy hosts is absorbed.
+    """
+
+    @functools.wraps(fn)
+    def wrapper(self: "HTTPConnection", *args: Any, **kwargs: Any) -> Any:
+        timeout: float | None = kwargs.get("timeout")
+        max_retries = max(envs.VLLM_MEDIA_FETCH_MAX_RETRIES, 1)
+
+        for attempt in range(max_retries):
+            attempt_timeout = timeout * (4**attempt) if timeout is not None else None
+            try:
+                return fn(self, *args, **{**kwargs, "timeout": attempt_timeout})
+            except Exception as e:
+                if not _is_retryable(e) or attempt + 1 >= max_retries:
+                    raise
+                backoff = 4**attempt
+                logger.warning(
+                    "HTTP fetch failed for %s (attempt %d/%d, "
+                    "timeout=%ss): %s -- retrying in %ds with "
+                    "timeout=%ss",
+                    args[0] if args else kwargs.get("url"),
+                    attempt + 1,
+                    max_retries,
+                    attempt_timeout,
+                    e,
+                    backoff,
+                    timeout * (4 ** (attempt + 1)) if timeout is not None else None,
+                )
+                time.sleep(backoff)
+
+        raise AssertionError("unreachable")
+
+    return wrapper
+
+
+def _async_retry(fn: Callable[..., Any]) -> Callable[..., Any]:
+    """Add retry logic with exponential backoff to an async method.
+
+    The decorated method must accept ``timeout`` as a keyword argument.
+    The decorator replaces it with a per-attempt timeout that grows by 4x
+    on each retry so transient slowness on busy hosts is absorbed.
+    """
+
+    @functools.wraps(fn)
+    async def wrapper(self: "HTTPConnection", *args: Any, **kwargs: Any) -> Any:
+        timeout: float | None = kwargs.get("timeout")
+        max_retries = max(envs.VLLM_MEDIA_FETCH_MAX_RETRIES, 1)
+
+        for attempt in range(max_retries):
+            attempt_timeout = timeout * (4**attempt) if timeout is not None else None
+            try:
+                return await fn(self, *args, **{**kwargs, "timeout": attempt_timeout})
+            except Exception as e:
+                if not _is_retryable(e) or attempt + 1 >= max_retries:
+                    raise
+                backoff = 4**attempt
+                logger.warning(
+                    "HTTP fetch failed for %s (attempt %d/%d, "
+                    "timeout=%ss): %s -- retrying in %ds with "
+                    "timeout=%ss",
+                    args[0] if args else kwargs.get("url"),
+                    attempt + 1,
+                    max_retries,
+                    attempt_timeout,
+                    e,
+                    backoff,
+                    timeout * (4 ** (attempt + 1)) if timeout is not None else None,
+                )
+                await asyncio.sleep(backoff)
+
+        raise AssertionError("unreachable")
+
+    return wrapper
 
 
 class HTTPConnection:
@@ -141,43 +223,23 @@ class HTTPConnection:
             allow_redirects=allow_redirects,
         )
 
+    @_sync_retry
     def get_bytes(
-        self, url: str, *, timeout: float | None = None, allow_redirects: bool = True
+        self,
+        url: str,
+        *,
+        timeout: float | None = None,
+        allow_redirects: bool = True,
     ) -> bytes:
-        max_retries = max(envs.VLLM_MEDIA_FETCH_MAX_RETRIES, 1)
+        with self.get_response(
+            url,
+            timeout=timeout,
+            allow_redirects=allow_redirects,
+        ) as r:
+            r.raise_for_status()
+            return r.content
 
-        for attempt in range(max_retries):
-            # 4x the timeout on each retry so transient slowness on
-            # busy hosts is absorbed by later attempts.
-            attempt_timeout = timeout * (4**attempt) if timeout is not None else None
-            try:
-                with self.get_response(
-                    url,
-                    timeout=attempt_timeout,
-                    allow_redirects=allow_redirects,
-                ) as r:
-                    r.raise_for_status()
-                    return r.content
-            except Exception as e:
-                if not _is_retryable(e) or attempt + 1 >= max_retries:
-                    raise
-                backoff = 4**attempt
-                logger.warning(
-                    "HTTP fetch failed for %s (attempt %d/%d, "
-                    "timeout=%ss): %s -- retrying in %ds with "
-                    "timeout=%ss",
-                    url,
-                    attempt + 1,
-                    max_retries,
-                    attempt_timeout,
-                    e,
-                    backoff,
-                    timeout * (4 ** (attempt + 1)) if timeout is not None else None,
-                )
-                time.sleep(backoff)
-
-        raise AssertionError("unreachable")
-
+    @_async_retry
     async def async_get_bytes(
         self,
         url: str,
@@ -185,37 +247,13 @@ class HTTPConnection:
         timeout: float | None = None,
         allow_redirects: bool = True,
     ) -> bytes:
-        max_retries = max(envs.VLLM_MEDIA_FETCH_MAX_RETRIES, 1)
-
-        for attempt in range(max_retries):
-            attempt_timeout = timeout * (4**attempt) if timeout is not None else None
-            try:
-                async with await self.get_async_response(
-                    url,
-                    timeout=attempt_timeout,
-                    allow_redirects=allow_redirects,
-                ) as r:
-                    r.raise_for_status()
-                    return await r.read()
-            except Exception as e:
-                if not _is_retryable(e) or attempt + 1 >= max_retries:
-                    raise
-                backoff = 4**attempt
-                logger.warning(
-                    "HTTP fetch failed for %s (attempt %d/%d, "
-                    "timeout=%ss): %s -- retrying in %ds with "
-                    "timeout=%ss",
-                    url,
-                    attempt + 1,
-                    max_retries,
-                    attempt_timeout,
-                    e,
-                    backoff,
-                    timeout * (4 ** (attempt + 1)) if timeout is not None else None,
-                )
-                await asyncio.sleep(backoff)
-
-        raise AssertionError("unreachable")
+        async with await self.get_async_response(
+            url,
+            timeout=timeout,
+            allow_redirects=allow_redirects,
+        ) as r:
+            r.raise_for_status()
+            return await r.read()
 
     def get_text(self, url: str, *, timeout: float | None = None) -> str:
         with self.get_response(url, timeout=timeout) as r:
@@ -251,6 +289,7 @@ class HTTPConnection:
 
             return await r.json()
 
+    @_sync_retry
     def download_file(
         self,
         url: str,
@@ -259,42 +298,22 @@ class HTTPConnection:
         timeout: float | None = None,
         chunk_size: int = 128,
     ) -> Path:
-        max_retries = max(envs.VLLM_MEDIA_FETCH_MAX_RETRIES, 1)
+        try:
+            with self.get_response(url, timeout=timeout) as r:
+                r.raise_for_status()
 
-        for attempt in range(max_retries):
-            attempt_timeout = timeout * (4**attempt) if timeout is not None else None
-            try:
-                with self.get_response(url, timeout=attempt_timeout) as r:
-                    r.raise_for_status()
+                with save_path.open("wb") as f:
+                    for chunk in r.iter_content(chunk_size):
+                        f.write(chunk)
 
-                    with save_path.open("wb") as f:
-                        for chunk in r.iter_content(chunk_size):
-                            f.write(chunk)
+            return save_path
+        except Exception:
+            # Clean up partial downloads before retrying or propagating
+            if save_path.exists():
+                save_path.unlink()
+            raise
 
-                return save_path
-            except Exception as e:
-                # Clean up partial downloads before retrying
-                if save_path.exists():
-                    save_path.unlink()
-                if not _is_retryable(e) or attempt + 1 >= max_retries:
-                    raise
-                backoff = 4**attempt
-                logger.warning(
-                    "HTTP download failed for %s (attempt %d/%d, "
-                    "timeout=%ss): %s -- retrying in %ds with "
-                    "timeout=%ss",
-                    url,
-                    attempt + 1,
-                    max_retries,
-                    attempt_timeout,
-                    e,
-                    backoff,
-                    timeout * (4 ** (attempt + 1)) if timeout is not None else None,
-                )
-                time.sleep(backoff)
-
-        raise AssertionError("unreachable")
-
+    @_async_retry
     async def async_download_file(
         self,
         url: str,
@@ -303,42 +322,20 @@ class HTTPConnection:
         timeout: float | None = None,
         chunk_size: int = 128,
     ) -> Path:
-        max_retries = max(envs.VLLM_MEDIA_FETCH_MAX_RETRIES, 1)
+        try:
+            async with await self.get_async_response(url, timeout=timeout) as r:
+                r.raise_for_status()
 
-        for attempt in range(max_retries):
-            attempt_timeout = timeout * (4**attempt) if timeout is not None else None
-            try:
-                async with await self.get_async_response(
-                    url, timeout=attempt_timeout
-                ) as r:
-                    r.raise_for_status()
+                with save_path.open("wb") as f:
+                    async for chunk in r.content.iter_chunked(chunk_size):
+                        f.write(chunk)
 
-                    with save_path.open("wb") as f:
-                        async for chunk in r.content.iter_chunked(chunk_size):
-                            f.write(chunk)
-
-                return save_path
-            except Exception as e:
-                if save_path.exists():
-                    save_path.unlink()
-                if not _is_retryable(e) or attempt + 1 >= max_retries:
-                    raise
-                backoff = 4**attempt
-                logger.warning(
-                    "HTTP download failed for %s (attempt %d/%d, "
-                    "timeout=%ss): %s -- retrying in %ds with "
-                    "timeout=%ss",
-                    url,
-                    attempt + 1,
-                    max_retries,
-                    attempt_timeout,
-                    e,
-                    backoff,
-                    timeout * (4 ** (attempt + 1)) if timeout is not None else None,
-                )
-                await asyncio.sleep(backoff)
-
-        raise AssertionError("unreachable")
+            return save_path
+        except Exception:
+            # Clean up partial downloads before retrying or propagating
+            if save_path.exists():
+                save_path.unlink()
+            raise
 
 
 global_http_connection = HTTPConnection()
