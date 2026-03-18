@@ -350,6 +350,7 @@ def get_requests(args, tokenizer):
         "tokenizer": tokenizer,
         "lora_path": args.lora_path,
         "max_loras": args.max_loras,
+        "lora_assignment": getattr(args, "lora_assignment", "random"),
         "num_requests": args.num_prompts,
     }
 
@@ -777,6 +778,15 @@ def add_cli_args(parser: argparse.ArgumentParser):
         default=None,
         help="Path to the lora adapters to use. This can be an absolute path, "
         "a relative path, or a Hugging Face model identifier.",
+    )
+    parser.add_argument(
+        "--lora-assignment",
+        type=str,
+        default="random",
+        choices=["random", "round-robin"],
+        help="Strategy for assigning LoRA adapters to requests. "
+        "'random' (default) selects a LoRA at random for each request. "
+        "'round-robin' cycles through LoRAs deterministically.",
     )
     parser.add_argument(
         "--prefix-len",
