@@ -3,20 +3,34 @@ use std::ops::Deref;
 use serde::{Deserialize, Serialize};
 use vllm_engine_core_client::protocol::{FinishReason, StopReason};
 
+/// One finalized assistant tool call.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AssistantToolCall {
+    pub id: String,
+    pub name: String,
+    pub arguments: String,
+}
+
 /// Semantic kind of one assistant output block.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AssistantBlockKind {
+    /// Visible final-answer text.
     Text,
+    /// Extracted reasoning content.
     Reasoning,
-    // ToolCall,
+    /// One finalized tool call.
+    ToolCall,
 }
 
 /// One structured assistant output block.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AssistantContentBlock {
+    /// Visible final-answer text.
     Text { text: String },
+    /// Extracted reasoning content.
     Reasoning { text: String },
-    // ToolCall { ... },
+    /// One finalized tool call.
+    ToolCall(AssistantToolCall),
 }
 
 impl AssistantContentBlock {
@@ -25,6 +39,15 @@ impl AssistantContentBlock {
         match self {
             Self::Text { .. } => AssistantBlockKind::Text,
             Self::Reasoning { .. } => AssistantBlockKind::Reasoning,
+            Self::ToolCall(..) => AssistantBlockKind::ToolCall,
+        }
+    }
+
+    /// Return this block as one finalized tool call, if applicable.
+    pub fn as_tool_call(&self) -> Option<&AssistantToolCall> {
+        match self {
+            Self::ToolCall(call) => Some(call),
+            _ => None,
         }
     }
 }
@@ -52,6 +75,11 @@ impl [AssistantContentBlock] {
                 .collect(),
         )
         .filter(|s: &String| !s.is_empty())
+    }
+
+    /// Return finalized assistant tool calls in encounter order.
+    pub fn tool_calls(&self) -> impl Iterator<Item = &AssistantToolCall> {
+        self.iter().filter_map(AssistantContentBlock::as_tool_call)
     }
 }
 
@@ -96,6 +124,23 @@ pub enum ChatEvent {
     BlockEnd {
         index: usize,
         block: AssistantContentBlock,
+    },
+    /// One tool call has started.
+    ToolCallStart {
+        index: usize,
+        id: String,
+        name: String,
+    },
+    /// One incremental tool-call arguments delta.
+    ToolCallArgumentsDelta {
+        index: usize,
+        id: String,
+        delta: String,
+    },
+    /// One tool call has ended.
+    ToolCallEnd {
+        index: usize,
+        call: AssistantToolCall,
     },
     /// Terminal event carrying the final assembled assistant message and finish metadata.
     Done {

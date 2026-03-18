@@ -26,6 +26,8 @@ pub(crate) fn lower_chat_request(
         messages: _,
         sampling_params,
         chat_options: _,
+        tools: _,
+        tool_choice: _,
     } = &request;
 
     let generate_request = GenerateRequest {
@@ -122,7 +124,7 @@ mod tests {
     use super::*;
     use crate::backend::{ChatBackend, SamplingHints};
     use crate::backends::hf::HfChatBackend;
-    use crate::request::{ChatOptions, ChatRequest, UserSamplingParams};
+    use crate::request::{ChatOptions, ChatRequest, ChatToolChoice, UserSamplingParams};
 
     fn sample_request() -> ChatRequest {
         ChatRequest {
@@ -130,6 +132,8 @@ mod tests {
             messages: vec![],
             sampling_params: UserSamplingParams::default(),
             chat_options: ChatOptions::default(),
+            tools: Vec::new(),
+            tool_choice: ChatToolChoice::None,
         }
     }
 

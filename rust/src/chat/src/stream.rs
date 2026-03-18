@@ -34,7 +34,14 @@ impl ChatEventStream {
             match event {
                 ChatEvent::BlockEnd { block, .. } => message.push_block(block),
                 ChatEvent::Done { message: done, .. } => return Ok(done),
-                ChatEvent::Start | ChatEvent::BlockStart { .. } | ChatEvent::BlockDelta { .. } => {}
+                ChatEvent::ToolCallEnd { call, .. } => {
+                    message.push_block(crate::event::AssistantContentBlock::ToolCall(call));
+                }
+                ChatEvent::Start
+                | ChatEvent::BlockStart { .. }
+                | ChatEvent::BlockDelta { .. }
+                | ChatEvent::ToolCallStart { .. }
+                | ChatEvent::ToolCallArgumentsDelta { .. } => {}
             }
         }
         Ok(message)

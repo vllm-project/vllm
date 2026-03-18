@@ -1,11 +1,12 @@
 use std::collections::HashMap;
 
 use openai_protocol::chat::{ChatCompletionRequest, ChatMessage, MessageContent};
-use openai_protocol::common::ContentPart;
+use openai_protocol::common::{ContentPart, ToolChoice, ToolChoiceValue};
 use uuid::Uuid;
 use vllm_chat::{
-    AssistantContentBlock, ChatContent, ChatContentPart, ChatMessage as VllmChatMessage,
-    ChatOptions, ChatRequest, UserSamplingParams,
+    AssistantContentBlock, AssistantToolCall, ChatContent, ChatContentPart,
+    ChatMessage as VllmChatMessage, ChatOptions, ChatRequest, ChatTool, ChatToolChoice,
+    UserSamplingParams,
 };
 
 use crate::error::{ApiError, bail_invalid_request};
@@ -57,6 +58,8 @@ pub fn prepare_chat_request(
             continue_final_message: request.continue_final_message,
             template_kwargs,
         },
+        tools: convert_tools(request.tools.as_deref())?,
+        tool_choice: convert_tool_choice(request.tool_choice.as_ref())?,
     };
 
     Ok(PreparedRequest {
@@ -79,10 +82,6 @@ fn convert_message(message: &ChatMessage) -> Result<VllmChatMessage, ApiError> {
             reasoning_content,
             name: _,
         } => {
-            if tool_calls.as_ref().is_some_and(|calls| !calls.is_empty()) {
-                bail_invalid_request!("Assistant tool_calls are not supported.");
-            }
-
             let mut blocks = Vec::new();
             if let Some(reasoning_content) = reasoning_content
                 && !reasoning_content.is_empty()
@@ -94,13 +93,24 @@ fn convert_message(message: &ChatMessage) -> Result<VllmChatMessage, ApiError> {
             if let Some(content) = content {
                 blocks.extend(convert_assistant_text_blocks(content)?);
             }
+            if let Some(tool_calls) = tool_calls {
+                blocks.extend(convert_assistant_tool_calls(tool_calls)?);
+            }
             if blocks.is_empty() {
-                bail_invalid_request!("Assistant messages must contain text or reasoning content.");
+                bail_invalid_request!(
+                    "Assistant messages must contain text, reasoning content, or tool_calls."
+                );
             }
 
             Ok(VllmChatMessage::assistant_blocks(blocks))
         }
-        ChatMessage::Tool { .. } => bail_invalid_request!("Tool messages are not supported."),
+        ChatMessage::Tool {
+            content,
+            tool_call_id,
+        } => Ok(VllmChatMessage::tool_response(
+            convert_content(content)?,
+            tool_call_id.clone(),
+        )),
         ChatMessage::Function { .. } => {
             bail_invalid_request!("Function messages are not supported.")
         }
@@ -143,12 +153,63 @@ fn convert_assistant_text_blocks(
     }
 }
 
+fn convert_assistant_tool_calls(
+    tool_calls: &[openai_protocol::common::ToolCall],
+) -> Result<Vec<AssistantContentBlock>, ApiError> {
+    tool_calls
+        .iter()
+        .map(|tool_call| {
+            if tool_call.tool_type != "function" {
+                bail_invalid_request!("Only function tool calls are supported.");
+            }
+
+            Ok(AssistantContentBlock::ToolCall(AssistantToolCall {
+                id: tool_call.id.clone(),
+                name: tool_call.function.name.clone(),
+                arguments: tool_call
+                    .function
+                    .arguments
+                    .clone()
+                    .unwrap_or_else(|| "{}".to_string()),
+            }))
+        })
+        .collect()
+}
+
+fn convert_tools(
+    tools: Option<&[openai_protocol::common::Tool]>,
+) -> Result<Vec<ChatTool>, ApiError> {
+    tools
+        .unwrap_or(&[])
+        .iter()
+        .map(|tool| {
+            if tool.tool_type != "function" {
+                bail_invalid_request!("Only function tools are supported.");
+            }
+            Ok(ChatTool {
+                name: tool.function.name.clone(),
+                description: tool.function.description.clone(),
+                parameters: tool.function.parameters.clone(),
+                strict: tool.function.strict,
+            })
+        })
+        .collect()
+}
+
+fn convert_tool_choice(tool_choice: Option<&ToolChoice>) -> Result<ChatToolChoice, ApiError> {
+    match tool_choice {
+        None | Some(ToolChoice::Value(ToolChoiceValue::Auto)) => Ok(ChatToolChoice::Auto),
+        Some(ToolChoice::Value(ToolChoiceValue::None)) => Ok(ChatToolChoice::None),
+        _ => bail_invalid_request!("tool_choice={:?} is not supported yet.", tool_choice),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
 
     use openai_protocol::chat::{ChatCompletionRequest, ChatMessage, MessageContent};
-    use openai_protocol::common::ContentPart;
+    use openai_protocol::common::{ContentPart, Tool, ToolChoice};
     use serde_json::json;
 
     use super::prepare_chat_request;
@@ -215,6 +276,8 @@ mod tests {
                         "foo": String("bar"),
                     },
                 },
+                tools: [],
+                tool_choice: Auto,
             }
         "#]]
         .assert_debug_eq(&prepared.chat_request);
@@ -253,6 +316,8 @@ mod tests {
                     continue_final_message: false,
                     template_kwargs: {},
                 },
+                tools: [],
+                tool_choice: Auto,
             }
         "#]]
         .assert_debug_eq(&prepared.chat_request);
@@ -336,6 +401,112 @@ mod tests {
                     continue_final_message: false,
                     template_kwargs: {},
                 },
+                tools: [],
+                tool_choice: Auto,
+            }
+        "#]]
+        .assert_debug_eq(&prepared.chat_request);
+    }
+
+    #[test]
+    fn prepare_chat_request_accepts_tools_and_tool_history() {
+        let request = ChatCompletionRequest {
+            messages: vec![
+                ChatMessage::Assistant {
+                    content: None,
+                    name: None,
+                    tool_calls: Some(vec![openai_protocol::common::ToolCall {
+                        id: "call_1".to_string(),
+                        tool_type: "function".to_string(),
+                        function: openai_protocol::common::FunctionCallResponse {
+                            name: "get_weather".to_string(),
+                            arguments: Some(r#"{"city":"Paris"}"#.to_string()),
+                        },
+                    }]),
+                    reasoning_content: None,
+                },
+                ChatMessage::Tool {
+                    content: MessageContent::Text("Sunny".to_string()),
+                    tool_call_id: "call_1".to_string(),
+                },
+            ],
+            tools: Some(vec![Tool {
+                tool_type: "function".to_string(),
+                function: openai_protocol::common::Function {
+                    name: "get_weather".to_string(),
+                    description: Some("Get weather".to_string()),
+                    parameters: json!({
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                    }),
+                    strict: None,
+                },
+            }]),
+            tool_choice: Some(ToolChoice::Value(
+                openai_protocol::common::ToolChoiceValue::None,
+            )),
+            ..base_request()
+        };
+
+        let mut prepared =
+            prepare_chat_request(&request, "Qwen/Qwen1.5-0.5B-Chat").expect("request is valid");
+        prepared.chat_request.request_id = "<placeholder>".to_string();
+        expect_test::expect![[r#"
+            ChatRequest {
+                request_id: "<placeholder>",
+                messages: [
+                    Assistant {
+                        content: [
+                            ToolCall(
+                                AssistantToolCall {
+                                    id: "call_1",
+                                    name: "get_weather",
+                                    arguments: "{\"city\":\"Paris\"}",
+                                },
+                            ),
+                        ],
+                    },
+                    ToolResponse {
+                        content: Text(
+                            "Sunny",
+                        ),
+                        tool_call_id: "call_1",
+                    },
+                ],
+                sampling_params: UserSamplingParams {
+                    temperature: None,
+                    top_p: None,
+                    top_k: None,
+                    max_tokens: None,
+                    min_tokens: None,
+                    include_stop_str_in_output: false,
+                    stop_token_ids: None,
+                    ignore_eos: false,
+                    skip_special_tokens: false,
+                },
+                chat_options: ChatOptions {
+                    add_generation_prompt: true,
+                    continue_final_message: false,
+                    template_kwargs: {},
+                },
+                tools: [
+                    ChatTool {
+                        name: "get_weather",
+                        description: Some(
+                            "Get weather",
+                        ),
+                        parameters: Object {
+                            "type": String("object"),
+                            "properties": Object {
+                                "city": Object {
+                                    "type": String("string"),
+                                },
+                            },
+                        },
+                        strict: None,
+                    },
+                ],
+                tool_choice: None,
             }
         "#]]
         .assert_debug_eq(&prepared.chat_request);

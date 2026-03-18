@@ -10,8 +10,8 @@ use futures::StreamExt as _;
 use serde_json::json;
 use tower::util::ServiceExt as _;
 use vllm_chat::{
-    ChatBackend, ChatEvent, ChatLlm, ChatMessage, ChatRequest, ChatRole, Error as ChatError,
-    UserSamplingParams,
+    ChatBackend, ChatEvent, ChatLlm, ChatMessage, ChatRequest, ChatRole, ChatToolChoice,
+    Error as ChatError, UserSamplingParams,
 };
 use vllm_engine_core_client::protocol::handshake::{HandshakeInitMessage, ReadyMessage};
 use vllm_engine_core_client::protocol::{
@@ -536,6 +536,8 @@ async fn chat_harness_streams_text_events() {
                 ..Default::default()
             },
             chat_options: Default::default(),
+            tools: Vec::new(),
+            tool_choice: ChatToolChoice::None,
         })
         .await
         .expect("submit chat request");
@@ -549,7 +551,12 @@ async fn chat_harness_streams_text_events() {
                 saw_done = true;
                 break;
             }
-            ChatEvent::Start | ChatEvent::BlockStart { .. } | ChatEvent::BlockEnd { .. } => {}
+            ChatEvent::Start
+            | ChatEvent::BlockStart { .. }
+            | ChatEvent::BlockEnd { .. }
+            | ChatEvent::ToolCallStart { .. }
+            | ChatEvent::ToolCallArgumentsDelta { .. }
+            | ChatEvent::ToolCallEnd { .. } => {}
         }
     }
     engine_task.await.expect("mock engine task");
@@ -586,7 +593,12 @@ async fn prepared_openai_request_streams_text_events() {
                 saw_done = true;
                 break;
             }
-            ChatEvent::Start | ChatEvent::BlockStart { .. } | ChatEvent::BlockEnd { .. } => {}
+            ChatEvent::Start
+            | ChatEvent::BlockStart { .. }
+            | ChatEvent::BlockEnd { .. }
+            | ChatEvent::ToolCallStart { .. }
+            | ChatEvent::ToolCallArgumentsDelta { .. }
+            | ChatEvent::ToolCallEnd { .. } => {}
         }
     }
     engine_task.await.expect("mock engine task");
@@ -638,4 +650,68 @@ async fn reasoning_blocks_are_mapped_to_reasoning_content_sse_chunks() {
     assert!(text.contains("\"reasoning_content\":\"think \""), "{text}");
     assert!(text.contains("\"reasoning_content\":\"more\""), "{text}");
     assert!(text.contains("\"content\":\"answer\""), "{text}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tool_calls_are_mapped_to_tool_call_sse_chunks() {
+    let (app, engine_task) = test_app_with_backend_and_stream_output_specs(
+        Arc::new(FakeChatBackend::with_model_id("Qwen/Qwen3-0.6B")),
+        vec![
+            (
+                bytes_to_token_ids(b"<tool_call>\n{\"name\":\"get_weather\", "),
+                None,
+            ),
+            (
+                bytes_to_token_ids(b"\"arguments\":{\"city\":\"Paris\"}}\n</tool_call>"),
+                Some(FinishReason::Stop),
+            ),
+        ],
+    )
+    .await;
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "Qwen/Qwen1.5-0.5B-Chat",
+                        "stream": true,
+                        "messages": [{"role": "user", "content": "hello"}],
+                        "tools": [{
+                            "type": "function",
+                            "function": {
+                                "name": "get_weather",
+                                "description": "Get weather",
+                                "parameters": {
+                                    "type": "object",
+                                    "properties": {"city": {"type": "string"}}
+                                }
+                            }
+                        }]
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("read body");
+    engine_task.await.expect("mock engine task");
+    let text = String::from_utf8(body.to_vec()).expect("utf8 body");
+
+    assert!(text.contains("\"tool_calls\":"), "{text}");
+    assert!(text.contains("\"name\":\"get_weather\""), "{text}");
+    assert!(
+        text.contains("\"arguments\":\"{\\\"city\\\":\\\"Paris\\\"}\""),
+        "{text}"
+    );
+    assert!(text.contains("\"finish_reason\":\"tool_calls\""), "{text}");
 }

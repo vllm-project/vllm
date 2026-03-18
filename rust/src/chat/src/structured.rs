@@ -1,23 +1,23 @@
-//! Adapts low-level decoded text updates into structured chat events.
+//! Adapts parsed assistant updates into structured chat events.
 //!
-//! This module is the only place in `vllm-chat` that understands reasoning
-//! separation. The token-to-text decoding path remains isolated in
-//! `decoded.rs`, while this adapter consumes decoded text deltas and assembles
-//! higher-level assistant content blocks.
+//! This module remains the final assembly stage in `vllm-chat`. Token-to-text
+//! decoding still lives in `decoded.rs`, while reasoning separation and tool
+//! parsing are handled earlier by their own adapters. This stage consumes those
+//! parsed deltas and assembles higher-level assistant content blocks.
 
 use futures::{StreamExt as _, pin_mut};
 use futures_async_stream::try_stream;
-use reasoning_parser::ReasoningParser;
-use thiserror_ext::AsReport;
-use tracing::warn;
 use vllm_engine_core_client::protocol::{FinishReason, StopReason};
 
-use crate::decoded::{DecodedTextEvent, DecodedTextEventStream};
 use crate::error::Error;
-use crate::event::{AssistantBlockKind, AssistantContentBlock, AssistantMessage, ChatEvent};
+use crate::event::{
+    AssistantBlockKind, AssistantContentBlock, AssistantMessage, AssistantToolCall, ChatEvent,
+};
+use crate::pipeline::{AssistantStreamEvent, AssistantStreamEventStream};
 
-/// One currently open assistant block being assembled from streamed deltas.
-struct OpenBlock {
+/// One currently open assistant text-like block being assembled from streamed
+/// deltas.
+struct OpenTextBlock {
     /// Stable position of this block in the final assistant message.
     index: usize,
     /// Semantic kind of the block being assembled.
@@ -26,65 +26,92 @@ struct OpenBlock {
     text: String,
 }
 
+/// One currently open assistant tool call being assembled from streamed deltas.
+struct OpenToolCall {
+    /// Stable position of this tool call in the final assistant message.
+    index: usize,
+    /// Accumulated finalized tool-call payload.
+    call: AssistantToolCall,
+}
+
 /// Per-stream block assembly state.
 ///
-/// The adapter maintains one currently open block and appends deltas to it until the semantic kind
-/// changes or the stream terminates.
+/// The adapter maintains at most one open text block and one open tool call,
+/// and appends deltas to them until the semantic kind changes or the stream
+/// terminates.
 struct StructuredEventState {
     /// Final assistant message assembled so far.
     message: AssistantMessage,
-    /// Currently open block, if any.
-    open_block: Option<OpenBlock>,
-    /// Optional reasoning parser for streams whose model supports reasoning separation.
-    reasoning_parser: Option<Box<dyn ReasoningParser>>,
-    /// Whether reasoning parsing has already failed for this stream.
-    reasoning_parser_failed: bool,
+    /// Currently open text or reasoning block, if any.
+    open_text_block: Option<OpenTextBlock>,
+    /// Currently open tool call, if any.
+    open_tool_call: Option<OpenToolCall>,
 }
 
 impl StructuredEventState {
     /// Create one fresh assembly state for a new streamed response.
-    fn new(reasoning_parser: Option<Box<dyn ReasoningParser>>) -> Self {
+    fn new() -> Self {
         Self {
             message: AssistantMessage::default(),
-            open_block: None,
-            reasoning_parser,
-            reasoning_parser_failed: false,
+            open_text_block: None,
+            open_tool_call: None,
         }
     }
 
-    /// Convert one decoded text delta into zero or more structured chat events.
-    fn process_text_delta(&mut self, delta: &str) -> Vec<ChatEvent> {
+    /// Convert one parsed text delta into zero or more structured chat events.
+    fn process_text_delta(&mut self, kind: AssistantBlockKind, delta: String) -> Vec<ChatEvent> {
         let mut events = Vec::new();
+        self.close_open_tool_call(&mut events);
+        self.push_text_delta(kind, delta, &mut events);
+        events
+    }
 
-        // If we have a reasoning parser, try to parse the delta into reasoning vs. normal text.
-        if let Some(parser) = self.reasoning_parser.as_mut() {
-            match parser.parse_reasoning_streaming_incremental(delta) {
-                Ok(result) => {
-                    self.push_delta(
-                        AssistantBlockKind::Reasoning,
-                        result.reasoning_text,
-                        &mut events,
-                    );
-                    self.push_delta(AssistantBlockKind::Text, result.normal_text, &mut events);
-                    return events;
-                }
-                Err(error) => {
-                    if !self.reasoning_parser_failed {
-                        warn!(
-                            parser = parser.model_type(),
-                            error = %error.as_report(),
-                            "reasoning parser failed; falling back to plain text blocks"
-                        );
-                        self.reasoning_parser_failed = true;
-                    }
-                    self.reasoning_parser = None;
-                    self.push_delta(AssistantBlockKind::Text, delta.to_string(), &mut events);
-                    return events;
-                }
-            }
-        }
+    /// Start one new tool call, closing any incompatible open block first.
+    fn start_tool_call(&mut self, id: String, name: String) -> Vec<ChatEvent> {
+        let mut events = Vec::new();
+        self.close_open_text_block(&mut events);
+        self.close_open_tool_call(&mut events);
 
-        self.push_delta(AssistantBlockKind::Text, delta.to_string(), &mut events);
+        let index = self.message.content.len();
+        self.open_tool_call = Some(OpenToolCall {
+            index,
+            call: AssistantToolCall {
+                id: id.clone(),
+                name: name.clone(),
+                arguments: String::new(),
+            },
+        });
+        events.push(ChatEvent::ToolCallStart { index, id, name });
+        events
+    }
+
+    /// Append one incremental tool-call arguments delta.
+    fn push_tool_call_arguments(&mut self, id: String, delta: String) -> Vec<ChatEvent> {
+        let mut events = Vec::new();
+        let Some(open_tool_call) = self.open_tool_call.as_mut() else {
+            return events;
+        };
+        open_tool_call.call.arguments.push_str(&delta);
+        events.push(ChatEvent::ToolCallArgumentsDelta {
+            index: open_tool_call.index,
+            id,
+            delta,
+        });
+        events
+    }
+
+    /// Finalize one tool call and append it to the assembled assistant message.
+    fn end_tool_call(&mut self, call: AssistantToolCall) -> Vec<ChatEvent> {
+        let mut events = Vec::new();
+        let index = self
+            .open_tool_call
+            .as_ref()
+            .map(|open_tool_call| open_tool_call.index)
+            .unwrap_or(self.message.content.len());
+        self.open_tool_call = None;
+        self.message
+            .push_block(AssistantContentBlock::ToolCall(call.clone()));
+        events.push(ChatEvent::ToolCallEnd { index, call });
         events
     }
 
@@ -96,7 +123,8 @@ impl StructuredEventState {
         stop_reason: Option<StopReason>,
     ) -> Vec<ChatEvent> {
         let mut events = Vec::new();
-        self.close_open_block(&mut events);
+        self.close_open_text_block(&mut events);
+        self.close_open_tool_call(&mut events);
         events.push(ChatEvent::Done {
             message: self.message.clone(),
             token_ids,
@@ -106,28 +134,34 @@ impl StructuredEventState {
         events
     }
 
-    /// Append one semantic delta to the current block, or open a new block when
-    /// the semantic kind changes.
-    fn push_delta(&mut self, kind: AssistantBlockKind, delta: String, events: &mut Vec<ChatEvent>) {
+    /// Append one semantic text delta to the current block, or open a new block
+    /// when the semantic kind changes.
+    fn push_text_delta(
+        &mut self,
+        kind: AssistantBlockKind,
+        delta: String,
+        events: &mut Vec<ChatEvent>,
+    ) {
         if delta.is_empty() {
             return;
         }
 
-        match self.open_block.as_mut() {
+        match self.open_text_block.as_mut() {
             // If there's a currently open block of the same kind, append to it.
-            Some(open) if open.kind == kind => {
-                open.text.push_str(&delta);
+            Some(open_block) if open_block.kind == kind => {
+                open_block.text.push_str(&delta);
                 events.push(ChatEvent::BlockDelta {
-                    index: open.index,
+                    index: open_block.index,
                     kind,
                     delta,
                 });
             }
-            // Otherwise, close the currently open block (if any) and start a new one.
+            // Otherwise, close the currently open block (if any) and start a
+            // new one.
             _ => {
-                self.close_open_block(events);
+                self.close_open_text_block(events);
                 let index = self.message.content.len();
-                self.open_block = Some(OpenBlock {
+                self.open_text_block = Some(OpenTextBlock {
                     index,
                     kind,
                     text: delta.clone(),
@@ -138,50 +172,83 @@ impl StructuredEventState {
         }
     }
 
-    /// Finalize the currently open block, if present.
-    fn close_open_block(&mut self, events: &mut Vec<ChatEvent>) {
-        let Some(open) = self.open_block.take() else {
+    /// Finalize the currently open text block, if present.
+    fn close_open_text_block(&mut self, events: &mut Vec<ChatEvent>) {
+        let Some(open_block) = self.open_text_block.take() else {
             return;
         };
 
-        let block = match open.kind {
-            AssistantBlockKind::Text => AssistantContentBlock::Text { text: open.text },
-            AssistantBlockKind::Reasoning => AssistantContentBlock::Reasoning { text: open.text },
+        let block = match open_block.kind {
+            AssistantBlockKind::Text => AssistantContentBlock::Text {
+                text: open_block.text,
+            },
+            AssistantBlockKind::Reasoning => AssistantContentBlock::Reasoning {
+                text: open_block.text,
+            },
+            AssistantBlockKind::ToolCall => {
+                unreachable!("tool calls must not be assembled as text blocks")
+            }
         };
         self.message.push_block(block.clone());
         events.push(ChatEvent::BlockEnd {
-            index: open.index,
+            index: open_block.index,
             block,
+        });
+    }
+
+    /// Finalize the currently open tool call, if present.
+    fn close_open_tool_call(&mut self, events: &mut Vec<ChatEvent>) {
+        let Some(open_tool_call) = self.open_tool_call.take() else {
+            return;
+        };
+
+        self.message
+            .push_block(AssistantContentBlock::ToolCall(open_tool_call.call.clone()));
+        events.push(ChatEvent::ToolCallEnd {
+            index: open_tool_call.index,
+            call: open_tool_call.call,
         });
     }
 }
 
-/// Wrap one decoded-text stream into the public structured chat event stream.
+/// Wrap one parsed assistant stream into the public structured chat event
+/// stream.
 #[try_stream(ok = ChatEvent, error = Error)]
-pub(crate) async fn structured_chat_event_stream(
-    decoded_stream: impl DecodedTextEventStream,
-    reasoning_parser: Option<Box<dyn ReasoningParser>>,
-) {
-    pin_mut!(decoded_stream);
+pub(crate) async fn structured_chat_event_stream(stream: impl AssistantStreamEventStream) {
+    pin_mut!(stream);
 
-    let mut state = StructuredEventState::new(reasoning_parser);
+    let mut state = StructuredEventState::new();
 
-    while let Some(event) = decoded_stream.next().await.transpose()? {
+    while let Some(event) = stream.next().await.transpose()? {
         match event {
-            DecodedTextEvent::Start => yield ChatEvent::Start,
-            DecodedTextEvent::TextDelta { delta, .. } => {
-                for structured_event in state.process_text_delta(&delta) {
-                    yield structured_event;
+            AssistantStreamEvent::Start => yield ChatEvent::Start,
+            AssistantStreamEvent::TextDelta { kind, delta } => {
+                for next in state.process_text_delta(kind, delta) {
+                    yield next;
                 }
             }
-            DecodedTextEvent::Done {
+            AssistantStreamEvent::ToolCallStart { id, name } => {
+                for next in state.start_tool_call(id, name) {
+                    yield next;
+                }
+            }
+            AssistantStreamEvent::ToolCallArgumentsDelta { id, delta } => {
+                for next in state.push_tool_call_arguments(id, delta) {
+                    yield next;
+                }
+            }
+            AssistantStreamEvent::ToolCallEnd { call } => {
+                for next in state.end_tool_call(call) {
+                    yield next;
+                }
+            }
+            AssistantStreamEvent::Done {
                 token_ids,
                 finish_reason,
                 stop_reason,
-                ..
             } => {
-                for structured_event in state.finish(token_ids, finish_reason, stop_reason) {
-                    yield structured_event;
+                for next in state.finish(token_ids, finish_reason, stop_reason) {
+                    yield next;
                 }
             }
         }

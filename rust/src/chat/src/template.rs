@@ -60,6 +60,7 @@ impl ChatTemplate {
     /// submitted to the model.
     pub fn apply_chat_template(&self, request: &ChatRequest) -> Result<String> {
         let messages = template_messages_to_json(&request.messages, self.inner.content_format())?;
+        let tools = request.template_tools();
         trace!(
             request_id = %request.request_id,
             message_count = messages.len(),
@@ -83,7 +84,7 @@ impl ChatTemplate {
                 &messages,
                 ChatTemplateParams {
                     add_generation_prompt: request.chat_options.add_generation_prompt,
-                    tools: None,
+                    tools: tools.as_deref(),
                     documents: None,
                     template_kwargs: Some(&merged_template_kwargs),
                 },
@@ -119,7 +120,26 @@ struct AssistantTemplateMessage {
     reasoning: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning_content: Option<String>,
-    // tool_calls: Option<Vec<...>>,
+    // Function-call-capable templates commonly expect assistant tool calls
+    // under this OpenAI-compatible field name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_calls: Option<Vec<Value>>,
+    // Tool-role messages refer back to the assistant call they are answering.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_call_id: Option<String>,
+}
+
+impl AssistantTemplateMessage {
+    fn placeholder() -> Self {
+        Self {
+            role: "",
+            content: Value::Null,
+            reasoning: None,
+            reasoning_content: None,
+            tool_calls: None,
+            tool_call_id: None,
+        }
+    }
 }
 
 /// Convert chat messages into the JSON shape expected by Jinja chat templates.
@@ -141,29 +161,65 @@ fn template_message_to_json(
         ChatMessage::System { content } => AssistantTemplateMessage {
             role: "system",
             content: template_content_to_json(content, content_format)?,
-            reasoning: None,
-            reasoning_content: None,
+            ..AssistantTemplateMessage::placeholder()
         },
         ChatMessage::User { content } => AssistantTemplateMessage {
             role: "user",
             content: template_content_to_json(content, content_format)?,
-            reasoning: None,
-            reasoning_content: None,
+            ..AssistantTemplateMessage::placeholder()
         },
         ChatMessage::Assistant { content } => {
             let text = content.text();
             let reasoning = content.reasoning();
+            let tool_calls = template_tool_calls_to_json(content)?;
             let content = template_content_to_json(&ChatContent::Text(text), content_format)?;
             AssistantTemplateMessage {
                 role: "assistant",
                 content,
                 reasoning: reasoning.clone(),
                 reasoning_content: reasoning,
+                tool_calls,
+                tool_call_id: None,
             }
         }
+        ChatMessage::ToolResponse {
+            content,
+            tool_call_id,
+        } => AssistantTemplateMessage {
+            role: "tool",
+            content: template_content_to_json(content, content_format)?,
+            tool_call_id: Some(tool_call_id.clone()),
+            ..AssistantTemplateMessage::placeholder()
+        },
     };
 
     Ok(serde_json::to_value(msg).expect("chat message should serialize to valid JSON"))
+}
+
+fn template_tool_calls_to_json(
+    content: &[crate::AssistantContentBlock],
+) -> Result<Option<Vec<Value>>> {
+    let mut tool_calls = Vec::new();
+
+    for tool_call in content.tool_calls() {
+        let arguments = serde_json::from_str::<Value>(&tool_call.arguments).map_err(|error| {
+            Error::Tokenizer(format!(
+                "assistant tool call `{}` has invalid JSON arguments: {error}",
+                tool_call.id
+            ))
+        })?;
+
+        tool_calls.push(serde_json::json!({
+            "id": tool_call.id,
+            "type": "function",
+            "function": {
+                "name": tool_call.name,
+                "arguments": arguments,
+            }
+        }));
+    }
+
+    Ok((!tool_calls.is_empty()).then_some(tool_calls))
 }
 
 fn template_content_to_json(
@@ -183,7 +239,8 @@ mod tests {
 
     use super::ChatTemplate;
     use crate::request::{
-        ChatContentPart, ChatMessage, ChatOptions, ChatRequest, ChatRole, UserSamplingParams,
+        ChatContentPart, ChatMessage, ChatOptions, ChatRequest, ChatRole, ChatTool, ChatToolChoice,
+        UserSamplingParams,
     };
     use crate::{AssistantContentBlock, Error, Result};
 
@@ -195,6 +252,8 @@ mod tests {
             messages,
             sampling_params: UserSamplingParams::default(),
             chat_options: ChatOptions::default(),
+            tools: Vec::new(),
+            tool_choice: ChatToolChoice::None,
         }
     }
 
@@ -379,5 +438,53 @@ mod tests {
             2<|im_end|>
         "#]]
         .assert_eq(&rendered);
+    }
+
+    #[test]
+    fn chat_template_exposes_tools_to_templates_when_auto_enabled() {
+        let mut request = sample_request(vec![ChatMessage::text(ChatRole::User, "hello")]);
+        request.tools = vec![ChatTool {
+            name: "get_weather".to_string(),
+            description: Some("Get weather".to_string()),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {"city": {"type": "string"}},
+                "required": ["city"],
+            }),
+            strict: None,
+        }];
+        request.tool_choice = ChatToolChoice::Auto;
+
+        let rendered = render(
+            Some("{{ tools[0].function.name }}|{{ tools[0].function.parameters.required[0] }}"),
+            &request,
+        )
+        .unwrap();
+
+        assert_eq!(rendered, "get_weather|city");
+    }
+
+    #[test]
+    fn chat_template_exposes_assistant_tool_calls_and_tool_messages() {
+        let request = sample_request(vec![
+            ChatMessage::assistant_blocks(vec![AssistantContentBlock::ToolCall(
+                crate::AssistantToolCall {
+                    id: "call_1".to_string(),
+                    name: "get_weather".to_string(),
+                    arguments: r#"{"city":"Paris"}"#.to_string(),
+                },
+            )]),
+            ChatMessage::tool_response("Sunny", "call_1"),
+        ]);
+
+        let rendered = render(
+            Some(
+                "{{ messages[0].tool_calls[0].function.name }}|{{ messages[0].tool_calls[0].function.arguments.city }}|{{ messages[1].tool_call_id }}|{{ messages[1].content }}",
+            ),
+            &request,
+        )
+        .unwrap();
+
+        assert_eq!(rendered, "get_weather|Paris|call_1|Sunny");
     }
 }

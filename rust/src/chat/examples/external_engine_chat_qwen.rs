@@ -7,7 +7,7 @@ use tracing_subscriber::EnvFilter;
 use vllm_chat::backends::hf::HfChatBackend;
 use vllm_chat::{
     AssistantBlockKind, AssistantMessageExt as _, ChatEvent, ChatLlm, ChatMessage, ChatOptions,
-    ChatRequest, ChatRole, UserSamplingParams,
+    ChatRequest, ChatRole, ChatToolChoice, UserSamplingParams,
 };
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig};
 use vllm_llm::Llm;
@@ -82,6 +82,8 @@ async fn main() -> Result<()> {
             ..Default::default()
         },
         chat_options: ChatOptions::default(),
+        tools: Vec::new(),
+        tool_choice: ChatToolChoice::None,
     };
 
     println!("request_id={request_id}");
@@ -111,7 +113,15 @@ async fn main() -> Result<()> {
                     match kind {
                         AssistantBlockKind::Reasoning => print!("[reasoning] "),
                         AssistantBlockKind::Text => print!("[answer] "),
+                        AssistantBlockKind::ToolCall => {}
                     }
+                    saw_stream_output = true;
+                }
+                ChatEvent::ToolCallStart { name, .. } => {
+                    if saw_stream_output {
+                        println!();
+                    }
+                    print!("[tool:{name}] ");
                     saw_stream_output = true;
                 }
                 ChatEvent::Done {
@@ -130,8 +140,10 @@ async fn main() -> Result<()> {
                     AssistantBlockKind::Reasoning | AssistantBlockKind::Text => {
                         print!("{delta}");
                     }
+                    AssistantBlockKind::ToolCall => {}
                 },
-                ChatEvent::BlockEnd { .. } => {}
+                ChatEvent::ToolCallArgumentsDelta { delta, .. } => print!("{delta}"),
+                ChatEvent::BlockEnd { .. } | ChatEvent::ToolCallEnd { .. } => {}
             }
         }
 

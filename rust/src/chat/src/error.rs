@@ -13,6 +13,10 @@ pub enum Error {
     MissingChatTemplate,
     #[error("tokenizer error: {0}")]
     Tokenizer(String),
+    #[error("tool parsing requires a backend model ID")]
+    ToolParserRequiresModelId,
+    #[error("tool parsing is not available for model `{model_id}`")]
+    ToolParserUnavailableForModel { model_id: String },
     #[error("chat request stream `{request_id}` closed before terminal output")]
     StreamClosedBeforeTerminalOutput { request_id: String },
     #[error("llm request failed: {0}")]

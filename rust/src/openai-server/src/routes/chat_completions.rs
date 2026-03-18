@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -10,6 +11,7 @@ use futures_async_stream::try_stream;
 use openai_protocol::chat::{
     ChatCompletionRequest, ChatCompletionStreamResponse, ChatMessageDelta, ChatStreamChoice,
 };
+use openai_protocol::common::{FunctionCallDelta, ToolCallDelta};
 use openai_protocol::validated::ValidatedJson;
 use serde_json::Value;
 use thiserror_ext::AsReport as _;
@@ -71,6 +73,8 @@ async fn chat_completion_chunk_stream(
     response_model: String,
     created: u64,
 ) {
+    let mut tool_call_indices = BTreeMap::<String, u32>::new();
+
     while let Some(next) = stream.next().await {
         match next {
             Ok(ChatEvent::Start) => yield start_chunk(&response_id, &response_model, created),
@@ -89,6 +93,35 @@ async fn chat_completion_chunk_stream(
                     "ending current block in chat completion stream"
                 );
             }
+            Ok(ChatEvent::ToolCallStart { id, name, .. }) => {
+                let tool_index = tool_call_indices.len() as u32;
+                tool_call_indices.insert(id.clone(), tool_index);
+                yield tool_call_start_chunk(
+                    &response_id,
+                    &response_model,
+                    created,
+                    tool_index,
+                    id,
+                    name,
+                );
+            }
+            Ok(ChatEvent::ToolCallArgumentsDelta { id, delta, .. }) => {
+                let Some(&tool_index) = tool_call_indices.get(&id) else {
+                    error!(request_id = %response_id, tool_call_id = %id, "missing tool call index");
+                    bail_server_error!("tool call stream state is inconsistent");
+                };
+                yield tool_call_arguments_chunk(
+                    &response_id,
+                    &response_model,
+                    created,
+                    tool_index,
+                    id,
+                    delta,
+                );
+            }
+            Ok(ChatEvent::ToolCallEnd { .. }) => {
+                debug!(request_id = %response_id, "ending current tool call in chat completion stream");
+            }
             Ok(ChatEvent::Done {
                 finish_reason: Some(finish_reason),
                 stop_reason,
@@ -99,6 +132,7 @@ async fn chat_completion_chunk_stream(
                 created,
                 finish_reason,
                 stop_reason,
+                !tool_call_indices.is_empty(),
             ) {
                 Ok(chunk) => yield chunk,
                 Err(error) => {
@@ -220,6 +254,9 @@ fn block_delta_chunk(
             tool_calls: None,
             reasoning_content: Some(delta),
         },
+        AssistantBlockKind::ToolCall => {
+            unreachable!("tool calls must flow through dedicated tool-call chunks")
+        }
     };
 
     ChatCompletionStreamResponse {
@@ -239,6 +276,82 @@ fn block_delta_chunk(
     }
 }
 
+fn tool_call_start_chunk(
+    response_id: &str,
+    response_model: &str,
+    created: u64,
+    tool_index: u32,
+    id: String,
+    name: String,
+) -> ChatCompletionStreamResponse {
+    ChatCompletionStreamResponse {
+        id: response_id.to_string(),
+        object: "chat.completion.chunk".to_string(),
+        created,
+        model: response_model.to_string(),
+        system_fingerprint: None,
+        choices: vec![ChatStreamChoice {
+            index: 0,
+            delta: ChatMessageDelta {
+                role: None,
+                content: None,
+                tool_calls: Some(vec![ToolCallDelta {
+                    index: tool_index,
+                    id: Some(id),
+                    tool_type: Some("function".to_string()),
+                    function: Some(FunctionCallDelta {
+                        name: Some(name),
+                        arguments: None,
+                    }),
+                }]),
+                reasoning_content: None,
+            },
+            logprobs: None,
+            finish_reason: None,
+            matched_stop: None,
+        }],
+        usage: None,
+    }
+}
+
+fn tool_call_arguments_chunk(
+    response_id: &str,
+    response_model: &str,
+    created: u64,
+    tool_index: u32,
+    id: String,
+    delta: String,
+) -> ChatCompletionStreamResponse {
+    ChatCompletionStreamResponse {
+        id: response_id.to_string(),
+        object: "chat.completion.chunk".to_string(),
+        created,
+        model: response_model.to_string(),
+        system_fingerprint: None,
+        choices: vec![ChatStreamChoice {
+            index: 0,
+            delta: ChatMessageDelta {
+                role: None,
+                content: None,
+                tool_calls: Some(vec![ToolCallDelta {
+                    index: tool_index,
+                    id: Some(id),
+                    tool_type: None,
+                    function: Some(FunctionCallDelta {
+                        name: None,
+                        arguments: Some(delta),
+                    }),
+                }]),
+                reasoning_content: None,
+            },
+            logprobs: None,
+            finish_reason: None,
+            matched_stop: None,
+        }],
+        usage: None,
+    }
+}
+
 /// Build the terminal SSE chunk carrying the OpenAI finish reason.
 fn final_chunk(
     response_id: &str,
@@ -246,8 +359,10 @@ fn final_chunk(
     created: u64,
     finish_reason: FinishReason,
     stop_reason: Option<StopReason>,
+    saw_tool_calls: bool,
 ) -> Result<ChatCompletionStreamResponse, ApiError> {
     let finish_reason = match finish_reason {
+        FinishReason::Stop if saw_tool_calls => "tool_calls",
         FinishReason::Stop => "stop",
         FinishReason::Length => "length",
         FinishReason::Repetition => "stop",
@@ -318,6 +433,7 @@ mod tests {
             1,
             FinishReason::Stop,
             Some(StopReason::Text("stop".to_string())),
+            false,
         )
         .expect("finish reason is valid");
 
@@ -333,6 +449,7 @@ mod tests {
             1,
             FinishReason::Length,
             Some(StopReason::TokenId(42)),
+            false,
         )
         .expect("finish reason is valid");
 
@@ -342,7 +459,18 @@ mod tests {
 
     #[test]
     fn final_chunk_rejects_abort_and_error_finish_reasons() {
-        assert!(final_chunk("chatcmpl-1", "model", 1, FinishReason::Abort, None).is_err());
-        assert!(final_chunk("chatcmpl-1", "model", 1, FinishReason::Error, None).is_err());
+        assert!(final_chunk("chatcmpl-1", "model", 1, FinishReason::Abort, None, false).is_err());
+        assert!(final_chunk("chatcmpl-1", "model", 1, FinishReason::Error, None, false).is_err());
+    }
+
+    #[test]
+    fn final_chunk_maps_stop_to_tool_calls_when_tool_calls_were_streamed() {
+        let chunk = final_chunk("chatcmpl-1", "model", 1, FinishReason::Stop, None, true)
+            .expect("finish reason is valid");
+
+        assert_eq!(
+            chunk.choices[0].finish_reason.as_deref(),
+            Some("tool_calls")
+        );
     }
 }

@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use openai_protocol::common::{Function as OpenAiFunction, Tool as OpenAiTool};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -14,6 +15,7 @@ pub enum ChatRole {
     System,
     User,
     Assistant,
+    ToolResponse,
 }
 
 /// One text-only chat content part in OpenAI-style block format.
@@ -91,6 +93,11 @@ pub enum ChatMessage {
     User { content: ChatContent },
     /// Assistant history content assembled from structured assistant blocks.
     Assistant { content: Vec<AssistantContentBlock> },
+    /// Tool response content associated with one prior assistant tool call.
+    ToolResponse {
+        content: ChatContent,
+        tool_call_id: String,
+    },
 }
 
 impl ChatMessage {
@@ -102,6 +109,12 @@ impl ChatMessage {
             ChatRole::System => Self::system(content),
             ChatRole::User => Self::user(content),
             ChatRole::Assistant => Self::assistant_text(content),
+            ChatRole::ToolResponse => {
+                panic!(
+                    "tool response messages require a tool_call_id; \
+                     use ChatMessage::tool_response() instead"
+                )
+            }
         }
     }
 
@@ -131,19 +144,30 @@ impl ChatMessage {
         Self::Assistant { content }
     }
 
+    /// Construct one tool-role message.
+    pub fn tool_response(content: impl Into<ChatContent>, tool_call_id: impl Into<String>) -> Self {
+        Self::ToolResponse {
+            content: content.into(),
+            tool_call_id: tool_call_id.into(),
+        }
+    }
+
     /// Return the chat role of this message.
     pub fn role(&self) -> ChatRole {
         match self {
             Self::System { .. } => ChatRole::System,
             Self::User { .. } => ChatRole::User,
             Self::Assistant { .. } => ChatRole::Assistant,
+            Self::ToolResponse { .. } => ChatRole::ToolResponse,
         }
     }
 
     /// Concatenate the visible text carried by this message.
     pub fn text_content(&self) -> Result<String> {
         match self {
-            Self::System { content } | Self::User { content } => content.try_flatten_to_text(),
+            Self::System { content }
+            | Self::User { content }
+            | Self::ToolResponse { content, .. } => content.try_flatten_to_text(),
             Self::Assistant { content } => Ok(content.text()),
         }
     }
@@ -152,7 +176,7 @@ impl ChatMessage {
     pub fn reasoning_content(&self) -> Option<String> {
         match self {
             Self::Assistant { content } => content.reasoning(),
-            _ => None,
+            Self::System { .. } | Self::User { .. } | Self::ToolResponse { .. } => None,
         }
     }
 }
@@ -241,6 +265,43 @@ impl Default for UserSamplingParams {
     }
 }
 
+/// One function-style tool made available to the model.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ChatTool {
+    pub name: String,
+    pub description: Option<String>,
+    pub parameters: Value,
+    pub strict: Option<bool>,
+}
+
+impl ChatTool {
+    /// Used internally for template rendering and passed to `tool-parser` crate.
+    pub(crate) fn to_openai_tool(&self) -> OpenAiTool {
+        OpenAiTool {
+            tool_type: "function".to_string(),
+            function: OpenAiFunction {
+                name: self.name.clone(),
+                description: self.description.clone(),
+                parameters: self.parameters.clone(),
+                strict: self.strict,
+            },
+        }
+    }
+
+    pub(crate) fn to_template_value(&self) -> Value {
+        serde_json::to_value(self.to_openai_tool()).expect("tool definition must serialize")
+    }
+}
+
+/// Tool-choice semantics supported by `vllm-chat`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatToolChoice {
+    Auto,
+    #[default]
+    None,
+}
+
 /// One chat request ready to be rendered into a prompt and lowered into a generate request.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ChatRequest {
@@ -252,6 +313,10 @@ pub struct ChatRequest {
     pub sampling_params: UserSamplingParams,
     /// Chat-specific rendering options.
     pub chat_options: ChatOptions,
+    /// Function tools made available to the model for this request.
+    pub tools: Vec<ChatTool>,
+    /// Tool-choice behavior for this request.
+    pub tool_choice: ChatToolChoice,
 }
 
 impl ChatRequest {
@@ -265,6 +330,39 @@ impl ChatRequest {
         }
         Ok(())
     }
+
+    /// Return the list of tools in the shape that can be passed to the chat template, based on the
+    /// tool choice and tool list.
+    pub(crate) fn template_tools(&self) -> Option<Vec<Value>> {
+        self.tool_parsing_enabled()
+            .then(|| self.tools.iter().map(ChatTool::to_template_value).collect())
+    }
+
+    /// Return the list of tools in the shape that can be passed to the `tool-parser` crate, based
+    /// on the tool choice and tool list.
+    pub(crate) fn parser_tools(&self) -> Option<Vec<OpenAiTool>> {
+        self.tool_parsing_enabled()
+            .then(|| self.tools.iter().map(ChatTool::to_openai_tool).collect())
+    }
+
+    /// Return true if this request should enable tool parsing based on the tool choice and tool
+    /// list.
+    pub(crate) fn tool_parsing_enabled(&self) -> bool {
+        matches!(self.tool_choice, ChatToolChoice::Auto) && !self.tools.is_empty()
+    }
+
+    /// Return the number of tool calls in the message history.
+    pub(crate) fn history_tool_call_count(&self) -> usize {
+        self.messages
+            .iter()
+            .filter_map(|message| match message {
+                ChatMessage::Assistant { content } => Some(content.tool_calls().count()),
+                ChatMessage::System { .. }
+                | ChatMessage::User { .. }
+                | ChatMessage::ToolResponse { .. } => None,
+            })
+            .sum()
+    }
 }
 
 impl ChatRole {
@@ -274,6 +372,7 @@ impl ChatRole {
             Self::System => "system",
             Self::User => "user",
             Self::Assistant => "assistant",
+            Self::ToolResponse => "tool_response",
         }
     }
 }

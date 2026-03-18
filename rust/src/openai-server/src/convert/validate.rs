@@ -63,18 +63,36 @@ pub(super) fn validate_request_compat(
         );
     }
 
-    if request
-        .tools
-        .as_ref()
-        .is_some_and(|tools| !tools.is_empty())
-    {
-        bail_invalid_request!(param = "tools", "Tool calling is not supported.");
+    if let Some(tools) = request.tools.as_ref() {
+        for tool in tools {
+            if tool.tool_type != "function" {
+                bail_invalid_request!(param = "tools", "Only function tools are supported.");
+            }
+        }
     }
 
-    if let Some(tool_choice) = &request.tool_choice
-        && !matches!(tool_choice, ToolChoice::Value(ToolChoiceValue::None))
-    {
-        bail_invalid_request!(param = "tool_choice", "tool_choice is not supported.");
+    if let Some(tool_choice) = &request.tool_choice {
+        match tool_choice {
+            ToolChoice::Value(ToolChoiceValue::Auto | ToolChoiceValue::None) => {}
+            ToolChoice::Value(ToolChoiceValue::Required) => {
+                bail_invalid_request!(
+                    param = "tool_choice",
+                    "tool_choice=required is not supported yet."
+                );
+            }
+            ToolChoice::Function { .. } => {
+                bail_invalid_request!(
+                    param = "tool_choice",
+                    "Named function tool_choice is not supported yet."
+                );
+            }
+            ToolChoice::AllowedTools { .. } => {
+                bail_invalid_request!(
+                    param = "tool_choice",
+                    "allowed_tools tool_choice is not supported yet."
+                );
+            }
+        }
     }
 
     reject_non_default(
@@ -149,18 +167,6 @@ pub(super) fn validate_request_compat(
         "reasoning controls are not supported.",
     )?;
 
-    if request.parallel_tool_calls.is_some_and(|value| value)
-        && request
-            .tools
-            .as_ref()
-            .is_some_and(|tools| !tools.is_empty())
-    {
-        bail_invalid_request!(
-            param = "parallel_tool_calls",
-            "parallel_tool_calls is not supported."
-        );
-    }
-
     if request.no_stop_trim {
         bail_invalid_request!(param = "no_stop_trim", "no_stop_trim is not supported.");
     }
@@ -211,7 +217,9 @@ fn reject_non_default<T>(
 #[cfg(test)]
 mod tests {
     use openai_protocol::chat::{ChatCompletionRequest, ChatMessage, MessageContent};
-    use openai_protocol::common::{ResponseFormat, Tool, ToolChoice};
+    use openai_protocol::common::{
+        FunctionChoice, ResponseFormat, Tool, ToolChoice, ToolReference,
+    };
     use serde_json::json;
 
     use super::validate_request_compat;
@@ -241,7 +249,7 @@ mod tests {
     }
 
     #[test]
-    fn validate_request_compat_rejects_non_zero_penalties_and_tools() {
+    fn validate_request_compat_rejects_non_zero_penalties_and_accepts_function_tools() {
         let request = ChatCompletionRequest {
             frequency_penalty: Some(0.5),
             ..base_request()
@@ -260,7 +268,8 @@ mod tests {
             }]),
             ..base_request()
         };
-        assert!(validate_request_compat(&request, "Qwen/Qwen1.5-0.5B-Chat").is_err());
+        validate_request_compat(&request, "Qwen/Qwen1.5-0.5B-Chat")
+            .expect("function tools should be accepted");
     }
 
     #[test]
@@ -283,5 +292,39 @@ mod tests {
 
         validate_request_compat(&request, "Qwen/Qwen1.5-0.5B-Chat")
             .expect("tool_choice=none is ok");
+    }
+
+    #[test]
+    fn validate_request_compat_rejects_required_and_named_tool_choices() {
+        let required = ChatCompletionRequest {
+            tool_choice: Some(ToolChoice::Value(
+                openai_protocol::common::ToolChoiceValue::Required,
+            )),
+            ..base_request()
+        };
+        assert!(validate_request_compat(&required, "Qwen/Qwen1.5-0.5B-Chat").is_err());
+
+        let named = ChatCompletionRequest {
+            tool_choice: Some(ToolChoice::Function {
+                tool_type: "function".to_string(),
+                function: FunctionChoice {
+                    name: "tool".to_string(),
+                },
+            }),
+            ..base_request()
+        };
+        assert!(validate_request_compat(&named, "Qwen/Qwen1.5-0.5B-Chat").is_err());
+
+        let allowed_tools = ChatCompletionRequest {
+            tool_choice: Some(ToolChoice::AllowedTools {
+                tool_type: "allowed_tools".to_string(),
+                mode: "auto".to_string(),
+                tools: vec![ToolReference::Function {
+                    name: "tool".to_string(),
+                }],
+            }),
+            ..base_request()
+        };
+        assert!(validate_request_compat(&allowed_tools, "Qwen/Qwen1.5-0.5B-Chat").is_err());
     }
 }

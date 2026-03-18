@@ -15,12 +15,14 @@ edition = "2024"
 [workspace.dependencies]
 anyhow = "1.0.100"
 async-openai = "0.33.1"
+async-trait = "0.1.89"
 axum = "0.8.8"
 bytes = "1.11.1"
 clap = { version = "4.5.38", features = ["derive"] }
 easy-ext = "1.0.3"
 enum-as-inner = "0.7.0"
 expect-test = "1.5.1"
+fastokens = "0.1.0"
 futures = "0.3.31"
 futures-async-stream = "0.2.13"
 hex = "0.4.3"
@@ -40,7 +42,6 @@ smg-tokenizer = { package = "llm-tokenizer", version = "1.3.0" }
 tempfile = "3.23.0"
 thiserror = "2.0.16"
 thiserror-ext = "0.3.0"
-fastokens = "0.1.0"
 tokenizers = "0.22.0"
 tokio = { version = "1.47.1", features = [
     "macros",
@@ -50,6 +51,7 @@ tokio = { version = "1.47.1", features = [
     "time",
 ] }
 tokio-util = { version = "0.7.18", features = ["rt"] }
+tool-parser = "1.1.2"
 tower = { version = "0.5.3", features = ["util"] }
 tower-http = { version = "0.6.8", features = ["trace"] }
 tracing = "0.1.44"

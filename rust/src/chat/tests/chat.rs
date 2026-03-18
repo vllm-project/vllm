@@ -9,7 +9,8 @@ use futures::StreamExt as _;
 use tokio::time::timeout;
 use vllm_chat::{
     AssistantBlockKind, AssistantContentBlock, AssistantMessageExt as _, ChatBackend, ChatEvent,
-    ChatLlm, ChatMessage, ChatOptions, ChatRequest, ChatRole, UserSamplingParams,
+    ChatLlm, ChatMessage, ChatOptions, ChatRequest, ChatRole, ChatTool, ChatToolChoice,
+    UserSamplingParams,
 };
 use vllm_engine_core_client::protocol::handshake::{HandshakeInitMessage, ReadyMessage};
 use vllm_engine_core_client::protocol::{
@@ -235,8 +236,25 @@ fn sample_request(request_id: &str) -> ChatRequest {
             ..Default::default()
         },
         chat_options: ChatOptions::default(),
-        // more fields here in the future
+        tools: Vec::new(),
+        tool_choice: ChatToolChoice::None,
     }
+}
+
+fn sample_tool_request(request_id: &str) -> ChatRequest {
+    let mut request = sample_request(request_id);
+    request.tools = vec![ChatTool {
+        name: "get_weather".to_string(),
+        description: Some("Get weather".to_string()),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {"city": {"type": "string"}},
+            "required": ["city"],
+        }),
+        strict: None,
+    }];
+    request.tool_choice = ChatToolChoice::Auto;
+    request
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -826,4 +844,178 @@ async fn chat_collectors_return_structured_message_and_visible_text() {
 
     chat.shutdown().await.unwrap();
     engine_task.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn chat_stream_parses_tool_calls_automatically() {
+    let handshake_address = unique_tcp_endpoint();
+    let engine_identity = b"engine-chat-tool".to_vec();
+
+    let engine_task = tokio::spawn({
+        let engine_handshake = handshake_address.clone();
+        let engine_identity = engine_identity.clone();
+        async move {
+            let (mut dealer, mut push) = setup_mock_engine(engine_handshake, engine_identity).await;
+            let _ = recv_engine_message(&mut dealer).await;
+            send_outputs(
+                &mut push,
+                EngineCoreOutputs {
+                    outputs: vec![
+                        request_output(
+                            "chat-tool",
+                            bytes_to_token_ids(b"<tool_call>\n{\"name\":\"get_weather\", "),
+                            None,
+                            None,
+                        ),
+                        request_output(
+                            "chat-tool",
+                            bytes_to_token_ids(
+                                b"\"arguments\":{\"city\":\"Paris\"}}\n</tool_call>",
+                            ),
+                            Some(FinishReason::Stop),
+                            None,
+                        ),
+                    ],
+                    finished_requests: Some(BTreeSet::from(["chat-tool".to_string()])),
+                    ..Default::default()
+                },
+            )
+            .await;
+        }
+    });
+
+    let backend: Arc<dyn ChatBackend> = Arc::new(FakeChatBackend::with_model_id("Qwen/Qwen3-0.6B"));
+    let chat = connect_chat_llm(handshake_address, backend).await;
+    let mut stream = chat.chat(sample_tool_request("chat-tool")).await.unwrap();
+
+    let mut saw_tool_start = false;
+    let mut saw_tool_args = false;
+    let mut saw_tool_end = false;
+
+    while let Some(event) = stream.next().await {
+        match event.unwrap() {
+            ChatEvent::Start => {}
+            ChatEvent::ToolCallStart { name, .. } => {
+                saw_tool_start = true;
+                assert_eq!(name, "get_weather");
+            }
+            ChatEvent::ToolCallArgumentsDelta { delta, .. } => {
+                saw_tool_args = true;
+                assert!(delta.contains("Paris"), "{delta}");
+            }
+            ChatEvent::ToolCallEnd { call, .. } => {
+                saw_tool_end = true;
+                assert_eq!(call.name, "get_weather");
+                assert_eq!(call.arguments, r#"{"city":"Paris"}"#);
+            }
+            ChatEvent::Done {
+                message,
+                finish_reason,
+                ..
+            } => {
+                assert_eq!(finish_reason, Some(FinishReason::Stop));
+                assert_eq!(message.text(), "");
+                let tool_calls = message.tool_calls().collect::<Vec<_>>();
+                assert_eq!(tool_calls.len(), 1);
+                assert_eq!(tool_calls[0].name, "get_weather");
+                assert_eq!(tool_calls[0].arguments, r#"{"city":"Paris"}"#);
+                break;
+            }
+            ChatEvent::BlockStart { .. }
+            | ChatEvent::BlockDelta { .. }
+            | ChatEvent::BlockEnd { .. } => {}
+        }
+    }
+
+    assert!(saw_tool_start);
+    assert!(saw_tool_args);
+    assert!(saw_tool_end);
+
+    chat.shutdown().await.unwrap();
+    engine_task.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn chat_stream_separates_reasoning_before_tool_calls() {
+    let handshake_address = unique_tcp_endpoint();
+    let engine_identity = b"engine-chat-reasoning-tool".to_vec();
+
+    let engine_task = tokio::spawn({
+        let engine_handshake = handshake_address.clone();
+        let engine_identity = engine_identity.clone();
+        async move {
+            let (mut dealer, mut push) = setup_mock_engine(engine_handshake, engine_identity).await;
+            let _ = recv_engine_message(&mut dealer).await;
+            send_outputs(
+                &mut push,
+                EngineCoreOutputs {
+                    outputs: vec![
+                        request_output(
+                            "chat-reasoning-tool",
+                            bytes_to_token_ids(
+                                b"<think>need weather lookup</think><tool_call>\n{\"name\":\"get_weather\", ",
+                            ),
+                            None,
+                            None,
+                        ),
+                        request_output(
+                            "chat-reasoning-tool",
+                            bytes_to_token_ids(
+                                b"\"arguments\":{\"city\":\"Paris\"}}\n</tool_call>",
+                            ),
+                            Some(FinishReason::Stop),
+                            None,
+                        ),
+                    ],
+                    finished_requests: Some(BTreeSet::from(["chat-reasoning-tool".to_string()])),
+                    ..Default::default()
+                },
+            )
+            .await;
+        }
+    });
+
+    let backend: Arc<dyn ChatBackend> = Arc::new(FakeChatBackend::with_model_id("Qwen/Qwen3-0.6B"));
+    let chat = connect_chat_llm(handshake_address, backend).await;
+    let message = chat
+        .chat(sample_tool_request("chat-reasoning-tool"))
+        .await
+        .unwrap()
+        .collect_message()
+        .await
+        .unwrap();
+
+    assert_eq!(message.reasoning().as_deref(), Some("need weather lookup"));
+    assert_eq!(message.text(), "");
+    assert_eq!(message.tool_calls().count(), 1);
+    assert_eq!(message.tool_calls().next().unwrap().name, "get_weather");
+
+    chat.shutdown().await.unwrap();
+    engine_task.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn chat_rejects_tool_parsing_without_model_hint() {
+    let handshake_address = unique_tcp_endpoint();
+    let engine_identity = b"engine-chat-tool-no-model".to_vec();
+
+    let engine_task = tokio::spawn({
+        let engine_handshake = handshake_address.clone();
+        let engine_identity = engine_identity.clone();
+        async move {
+            let _ = setup_mock_engine(engine_handshake, engine_identity).await;
+        }
+    });
+
+    let backend: Arc<dyn ChatBackend> = Arc::new(FakeChatBackend::new());
+    let chat = connect_chat_llm(handshake_address, backend).await;
+    let error = match chat.chat(sample_tool_request("chat-tool-no-model")).await {
+        Ok(_) => panic!("tool parsing without model hint should fail"),
+        Err(error) => error,
+    };
+
+    assert!(matches!(error, vllm_chat::Error::ToolParserRequiresModelId));
+
+    chat.shutdown().await.unwrap();
+    engine_task.abort();
 }
