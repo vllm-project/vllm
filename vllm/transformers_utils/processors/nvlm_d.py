@@ -8,7 +8,7 @@
 # Licensed under Apache 2.0 License [see LICENSE for details]
 # --------------------------------------------------------
 from vllm.multimodal.processing import PromptUpdateDetails
-from vllm.tokenizers import TokenizerLike
+from vllm.tokenizers.hf import HfTokenizer
 
 from .internvl import InternVLImageProcessor, InternVLProcessor
 
@@ -17,7 +17,7 @@ class NVLMProcessor(InternVLProcessor):
     def __init__(
         self,
         image_processor: InternVLImageProcessor,
-        tokenizer: TokenizerLike,
+        tokenizer: HfTokenizer,
         *,
         image_seq_length: int,
         image_token: str = "<|vision_pad|>",

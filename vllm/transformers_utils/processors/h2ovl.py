@@ -11,7 +11,7 @@
 import torch
 from PIL import Image
 
-from vllm.tokenizers import TokenizerLike
+from vllm.tokenizers.hf import HfTokenizer
 
 from .internvl import (
     InternVLImageProcessor,
@@ -290,7 +290,7 @@ class H2OVLProcessor(InternVLProcessor):
     def __init__(
         self,
         image_processor: H2OVLImageProcessor,
-        tokenizer: TokenizerLike,
+        tokenizer: HfTokenizer,
         *,
         image_seq_length: int,
         image_token: str = "<IMG_CONTEXT>",

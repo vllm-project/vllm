@@ -9,7 +9,7 @@ from transformers.processing_utils import ProcessorMixin
 
 from vllm.multimodal.image import convert_image_mode
 from vllm.multimodal.processing import PromptUpdateDetails
-from vllm.tokenizers import TokenizerLike
+from vllm.tokenizers.hf import HfTokenizer
 
 from .internvl import (
     InternVLImageProcessor,
@@ -191,7 +191,7 @@ class LlamaNemotronNanoVLProcessor(InternVLProcessorLike, ProcessorMixin):
     def __init__(
         self,
         image_processor: BaseImageProcessorFast,
-        tokenizer: TokenizerLike,
+        tokenizer: HfTokenizer,
         *,
         image_seq_length: int,
         image_token: str = "<image>",
@@ -386,7 +386,7 @@ class LlamaNemotronVLEmbedProcessor(InternVLProcessor):
     def __init__(
         self,
         image_processor: LlamaNemotronVLEmbedImageProcessor,
-        tokenizer: TokenizerLike,
+        tokenizer: HfTokenizer,
         *,
         image_seq_length: int,
         image_token: str = "<IMG_CONTEXT>",

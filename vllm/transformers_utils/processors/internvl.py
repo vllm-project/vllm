@@ -18,7 +18,7 @@ from transformers.processing_utils import ProcessorMixin
 
 from vllm.multimodal.image import convert_image_mode
 from vllm.multimodal.processing import PromptUpdateDetails
-from vllm.tokenizers import TokenizerLike
+from vllm.tokenizers.hf import HfTokenizer
 
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
@@ -395,7 +395,7 @@ class InternVLProcessor(InternVLProcessorLike, ProcessorMixin):
     def __init__(
         self,
         image_processor: InternVLImageProcessor,
-        tokenizer: TokenizerLike,
+        tokenizer: HfTokenizer,
         video_processor: InternVLVideoProcessor | None = None,
         *,
         image_seq_length: int,
