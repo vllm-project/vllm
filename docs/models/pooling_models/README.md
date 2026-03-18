@@ -34,7 +34,7 @@ Of course, we also have "plugin" tasks that allow users to customize input and o
 | Pooling Tasks      | Granularity   | Outputs                               |
 |--------------------|---------------|---------------------------------------|
 | `classify`         | Sequence-wise | class labels                          |
-| `score` (see note) | Sequence-wise | reranker                              |
+| `score` (see note) | Sequence-wise | reranker score                        |
 | `embed`            | Sequence-wise | vector representations                |
 | `token_classify`   | Token-wise    | class for each token                  |
 | `token_embed`      | Token-wise    | vector representations for each token |
