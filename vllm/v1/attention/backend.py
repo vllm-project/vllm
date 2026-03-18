@@ -722,7 +722,7 @@ class AttentionImpl(AttentionImplBase[T], Generic[T]):
     ``AttentionBackend.supported_kv_cache_dtypes`` must handle two paths:
 
     **Write path** (``do_kv_cache_update``):
-      * INT8 (``kv_quant_mode == KVQuantMode.INT8_PER_TOKEN``): call
+      * INT8 (``kv_quant_mode == KVQuantMode.INT8``): call
         ``self.ensure_int8_scale_caches(key_cache)`` to get
         ``(k_scale_cache, v_scale_cache)``, then quantize key/value into
         the cache with dynamic per-(token, head) scales, writing scales
@@ -762,7 +762,7 @@ class AttentionImpl(AttentionImplBase[T], Generic[T]):
         """Lazily allocate INT8 per-(token, head) float32 scale caches.
 
         Call from ``do_kv_cache_update`` when
-        ``kv_quant_mode == KVQuantMode.INT8_PER_TOKEN``.
+        ``kv_quant_mode == KVQuantMode.INT8``.
 
         Args:
             key_cache: The key cache tensor, used to infer shape and device.
@@ -1010,7 +1010,7 @@ class KVQuantMode(IntEnum):
 
     NONE = 0
     FP8 = 1
-    INT8_PER_TOKEN = 2
+    INT8 = 2
 
 
 def get_kv_quant_mode(kv_cache_dtype: str) -> KVQuantMode:
@@ -1018,7 +1018,7 @@ def get_kv_quant_mode(kv_cache_dtype: str) -> KVQuantMode:
     if kv_cache_dtype.startswith("fp8"):
         return KVQuantMode.FP8
     if kv_cache_dtype.startswith("int8"):
-        return KVQuantMode.INT8_PER_TOKEN
+        return KVQuantMode.INT8
     return KVQuantMode.NONE
 
 
@@ -1028,7 +1028,7 @@ def is_quantized_kv_cache(kv_cache_dtype: str) -> bool:
 
 def kv_cache_uses_per_token_scales(kv_cache_dtype: str) -> bool:
     """Return True if *kv_cache_dtype* needs per-token scales."""
-    return get_kv_quant_mode(kv_cache_dtype) == KVQuantMode.INT8_PER_TOKEN
+    return get_kv_quant_mode(kv_cache_dtype) == KVQuantMode.INT8
 
 
 def subclass_attention_backend(

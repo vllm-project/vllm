@@ -105,7 +105,7 @@ def kernel_unified_attention_2d(
     num_seqs: tl.int32,
     BLOCK_M: tl.constexpr,  # int
     USE_FP8: tl.constexpr,  # bool
-    # KV cache quantization: 0=none, 1=fp8, 2=int8_per_token
+    # KV cache quantization: 0=none, 1=fp8, 2=int8
     KV_QUANT_MODE: tl.constexpr = 0,
     FP8_MIN: tl.constexpr = float8_info.min,
     FP8_MAX: tl.constexpr = float8_info.max,
@@ -492,7 +492,7 @@ def kernel_unified_attention_3d(
     USE_MM_PREFIX: tl.constexpr,  # bool
     MAX_MM_RANGES: tl.constexpr,  # int
     mm_prefix_range_ptr,  # [num_seqs] - prefix length for each sequence
-    # KV cache quantization: 0=none, 1=fp8, 2=int8_per_token
+    # KV cache quantization: 0=none, 1=fp8, 2=int8
     KV_QUANT_MODE: tl.constexpr = 0,
     # INT8 per-(token, head) scale caches (KV_QUANT_MODE == 2 only)
     k_scale_cache_ptr=None,
@@ -1014,7 +1014,7 @@ def unified_attention(
     use_qq_bias = qq_bias is not None
 
     # KV cache quantization mode (detected from tensor dtype).
-    # 0=none, 1=fp8, 2=int8_per_token
+    # 0=none, 1=fp8, 2=int8
     if k.dtype == torch.int8:
         kv_quant_mode = 2  # INT8 per-token
     elif k.is_floating_point() and k.element_size() == 1:

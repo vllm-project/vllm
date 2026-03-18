@@ -485,7 +485,7 @@ class TritonAttentionImpl(AttentionImpl):
             assert layer._q_scale_float == 1.0, (
                 "A non 1.0 q_scale is not currently supported."
             )
-        elif quant_mode == KVQuantMode.INT8_PER_TOKEN:
+        elif quant_mode == KVQuantMode.INT8:
             if key_cache.dtype != torch.int8:
                 key_cache = key_cache.view(torch.int8)
                 value_cache = value_cache.view(torch.int8)
@@ -619,7 +619,7 @@ class TritonAttentionImpl(AttentionImpl):
 
         # Reshape the input keys and values and store them in the cache.
         quant_mode = self.kv_quant_mode
-        if quant_mode == KVQuantMode.INT8_PER_TOKEN:
+        if quant_mode == KVQuantMode.INT8:
             key_cache = key_cache.view(torch.int8)
             value_cache = value_cache.view(torch.int8)
             k_sc, v_sc = self.ensure_int8_scale_caches(key_cache)
