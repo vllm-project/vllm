@@ -192,14 +192,15 @@ class ChunkGatedDeltaRule(CustomOp):
             use_flashinfer = supports_flashinfer
 
         if use_flashinfer:
-            logger.info_once("Using FlashInfer GDN prefill kernel")
+            logger.info_once("Using FlashInfer GDN prefill kernel", scope="local")
             logger.info_once(
                 "FlashInfer GDN prefill kernel is JIT-compiled; first run may "
                 "take a while to compile. Set `--gdn-prefill-backend triton` to "
-                "avoid JIT compile time."
+                "avoid JIT compile time.",
+                scope="local",
             )
         else:
-            logger.info_once("Using Triton/FLA GDN prefill kernel")
+            logger.info_once("Using Triton/FLA GDN prefill kernel", scope="local")
 
         self._forward_method = (
             self.forward_cuda if use_flashinfer else self.forward_native
@@ -426,7 +427,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         self.aux_stream = aux_stream()
         self.events = (
             [torch.cuda.Event(), torch.cuda.Event()]
-            if current_platform.is_cuda()
+            if current_platform.is_cuda_alike()
             else [None, None]
         )
 
