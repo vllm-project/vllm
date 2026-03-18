@@ -4,14 +4,6 @@ A reward model (RM) is designed to evaluate and score the quality of outputs gen
 
 ## Supported Models
 
-### Pooling task corresponding to reward model types
-
-| Types                              | Pooling tasks  |
-|------------------------------------|----------------|
-| (sequence) (outcome) reward models | classify       |
-| token (outcome) reward models      | token_classify |
-| process reward model               | token_classify |
-
 ### Reward Models
 
 Using sequence classification models as (sequence) (outcome) reward models, the usage and supported features are the same as for normal [classification models](classify.md).
@@ -57,6 +49,15 @@ The process reward models used for evaluating intermediate steps are crucial to 
 !!! important
     For process-supervised reward models such as `peiyi9979/math-shepherd-mistral-7b-prm`, the pooling config should be set explicitly,
     e.g.: `--pooler-config '{"pooling_type": "STEP", "step_tag_id": 123, "returned_token_ids": [456, 789]}'`.
+
+## Pooling task corresponding to reward model types
+
+| Types                              | Pooling tasks  |
+|------------------------------------|----------------|
+| (sequence) (outcome) reward models | classify       |
+| token (outcome) reward models      | token_classify |
+| process reward model               | token_classify |
+
 
 ## Offline Inference
 
