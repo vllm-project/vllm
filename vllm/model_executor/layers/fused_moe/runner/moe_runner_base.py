@@ -321,7 +321,10 @@ class MoERunnerBase(MoERunner):
             shared_experts_input.shape[-1] if shared_experts_input is not None else 0
         )
         transformed_hidden_dim = hidden_states.shape[-1]
-        if self.moe_config.hidden_dim != transformed_hidden_dim:
+        if (
+            not self.quant_method.skip_forward_padding
+            and self.moe_config.hidden_dim != transformed_hidden_dim
+        ):
             hidden_states = F.pad(
                 hidden_states,
                 (0, self.moe_config.hidden_dim - transformed_hidden_dim),
