@@ -107,7 +107,7 @@ async def test_encode_accepts_pooling_task():
             self.request_id = "request-1"
             self._output = PoolingRequestOutput(
                 request_id="request-1",
-                outputs=[],
+                outputs=PoolingOutput(data=torch.empty(0)),
                 prompt_token_ids=[],
                 num_cached_tokens=0,
                 finished=True,
