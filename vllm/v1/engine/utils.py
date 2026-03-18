@@ -1090,7 +1090,6 @@ def wait_for_engine_startup(
 
         if status == "HELLO" and engine.state == CoreEngineState.NEW:
             # Send init message with DP config info.
-
             init_message = msgspec.msgpack.encode(
                 EngineHandshakeMetadata(
                     addresses=addresses,

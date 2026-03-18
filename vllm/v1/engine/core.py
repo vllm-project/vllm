@@ -1055,9 +1055,7 @@ class EngineCoreProc(EngineCore):
             for key, value in init_message.parallel_config.items():
                 setattr(parallel_config, key, value)
 
-        addresses = init_message.addresses
-
-        return addresses
+        return init_message.addresses
 
     @staticmethod
     def run_engine_core(

@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from __future__ import annotations
-
 import dataclasses
 import importlib
 import pickle
@@ -158,7 +156,7 @@ class MsgpackEncoder:
     def __init__(
         self,
         size_threshold: int | None = None,
-        tensor_ipc_sender: TensorIpcSender | None = None,
+        tensor_ipc_sender: "TensorIpcSender | None" = None,
     ):
         if size_threshold is None:
             size_threshold = envs.VLLM_MSGPACK_ZERO_COPY_THRESHOLD
@@ -168,15 +166,9 @@ class MsgpackEncoder:
         # pass custom data to the hook otherwise.
         self.aux_buffers: list[bytestr] | None = None
         self.size_threshold = size_threshold
-        # Optional sender for tensor IPC via torch.multiprocessing.Queue
         self.tensor_ipc_sender = tensor_ipc_sender
         if envs.VLLM_ALLOW_INSECURE_SERIALIZATION:
             _log_insecure_serialization_warning()
-
-    @property
-    def _current_request_id(self) -> str | None:
-        sender = self.tensor_ipc_sender
-        return None if sender is None else sender.current_request_id
 
     def encode(self, obj: Any) -> Sequence[bytestr]:
         try:
@@ -270,14 +262,12 @@ class MsgpackEncoder:
     ) -> (
         tuple[str, tuple[int, ...], int | memoryview] | dict[str, Any] | TensorIpcHandle
     ):
-        assert self.aux_buffers is not None
-
-        # Check if we should use torch_shm IPC for this tensor
         sender = self.tensor_ipc_sender
         if sender and (tensor_handle := sender.send_tensor(obj)) is not None:
             return tensor_handle
 
         # view the tensor as a contiguous 1D array of bytes
+        assert self.aux_buffers is not None
         arr_data = tensor_data(obj)
         if obj.nbytes < self.size_threshold:
             # Smaller tensors are encoded inline, just like ndarrays.
@@ -342,7 +332,7 @@ class MsgpackDecoder:
         self,
         t: Any | None = None,
         share_mem: bool = True,
-        tensor_ipc_receiver: TensorIpcReceiver | None = None,
+        tensor_ipc_receiver: "TensorIpcReceiver | None" = None,
     ):
         self.share_mem = share_mem
         self.pin_tensors = is_pin_memory_available()
@@ -351,7 +341,6 @@ class MsgpackDecoder:
             *args, ext_hook=self.ext_hook, dec_hook=self.dec_hook
         )
         self.aux_buffers: Sequence[bytestr] = ()
-        # Optional receiver for tensor IPC via torch.multiprocessing.Queue
         self.tensor_ipc_receiver = tensor_ipc_receiver
         if envs.VLLM_ALLOW_INSECURE_SERIALIZATION:
             _log_insecure_serialization_warning()
@@ -418,7 +407,6 @@ class MsgpackDecoder:
         return arr.reshape(shape)
 
     def _decode_tensor(self, arr: Any) -> torch.Tensor:
-        # Standard tensor decoding
         dtype, shape, data = arr
         is_aux = isinstance(data, int)
         buffer = self.aux_buffers[data] if is_aux else data
@@ -445,9 +433,8 @@ class MsgpackDecoder:
 
         Delegates to the TensorIpcReceiver. Works for CUDA and CPU.
         """
-        receiver = self.tensor_ipc_receiver
-        assert receiver is not None, "Tensor IPC receiver is not set"
-        return receiver.recv_tensor(handle)
+        assert self.tensor_ipc_receiver, "Tensor IPC receiver is not set"
+        return self.tensor_ipc_receiver.recv_tensor(handle)
 
     def _decode_mm_items(self, obj: dict[str, Any]) -> MultiModalKwargsItems:
         return MultiModalKwargsItems(
@@ -483,9 +470,6 @@ class MsgpackDecoder:
             # Although it violates NestedTensors type, MultiModalKwargs
             # values are sometimes floats.
             return obj
-        receiver = self.tensor_ipc_receiver
-        if receiver is not None and receiver.is_handle_like(obj):
-            return receiver.recv_tensor(obj)
         if not isinstance(obj, list):
             raise TypeError(f"Unexpected NestedTensors contents: {type(obj)}")
         if obj and isinstance(obj[0], str):
