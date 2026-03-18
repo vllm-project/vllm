@@ -83,19 +83,25 @@ def _log_retry(
     backoff: float,
     base_timeout: float | None,
 ) -> None:
+    # args[0] is `self` (bound method), args[1] is the URL
+    url = args[1] if len(args) > 1 else kwargs.get("url")
+    timeout_info = (
+        f"timeout={attempt_timeout:.3f}s" if base_timeout is not None else "no timeout"
+    )
+    next_timeout = (
+        f" with timeout={base_timeout * (_RETRY_BACKOFF_FACTOR ** (attempt + 1)):.3f}s"
+        if base_timeout is not None
+        else ""
+    )
     logger.warning(
-        "HTTP fetch failed for %s (attempt %d/%d, "
-        "timeout=%ss): %s -- retrying in %ds with "
-        "timeout=%ss",
-        args[0] if args else kwargs.get("url"),
+        "HTTP fetch failed for %s (attempt %d/%d, %s): %s -- retrying in %.3fs%s",
+        url,
         attempt + 1,
         max_retries,
-        attempt_timeout,
+        timeout_info,
         exc,
         backoff,
-        base_timeout * (_RETRY_BACKOFF_FACTOR ** (attempt + 1))
-        if base_timeout is not None
-        else None,
+        next_timeout,
     )
 
 
@@ -111,7 +117,7 @@ def _sync_retry(
     """
 
     @functools.wraps(fn)
-    def wrapper(*args: Any, **kwargs: Any) -> Any:
+    def wrapper(*args: Any, **kwargs: Any) -> _T:
         base_timeout: float | None = kwargs.get("timeout")
         max_retries = max(envs.VLLM_MEDIA_FETCH_MAX_RETRIES, 1)
 
@@ -121,8 +127,9 @@ def _sync_retry(
                 if base_timeout is not None
                 else None
             )
+            kwargs["timeout"] = attempt_timeout
             try:
-                return fn(*args, **{**kwargs, "timeout": attempt_timeout})
+                return fn(*args, **kwargs)
             except Exception as e:
                 if not _is_retryable(e) or attempt + 1 >= max_retries:
                     raise
@@ -156,7 +163,7 @@ def _async_retry(
     """
 
     @functools.wraps(fn)
-    async def wrapper(*args: Any, **kwargs: Any) -> Any:
+    async def wrapper(*args: Any, **kwargs: Any) -> _T:
         base_timeout: float | None = kwargs.get("timeout")
         max_retries = max(envs.VLLM_MEDIA_FETCH_MAX_RETRIES, 1)
 
@@ -166,11 +173,9 @@ def _async_retry(
                 if base_timeout is not None
                 else None
             )
+            kwargs["timeout"] = attempt_timeout
             try:
-                return await fn(
-                    *args,
-                    **{**kwargs, "timeout": attempt_timeout},
-                )
+                return await fn(*args, **kwargs)
             except Exception as e:
                 if not _is_retryable(e) or attempt + 1 >= max_retries:
                     raise
@@ -270,35 +275,16 @@ class HTTPConnection:
             allow_redirects=allow_redirects,
         )
 
-    def _sync_fetch(self, url: str, extract: Callable, **kwargs: Any) -> Any:
-        with self.get_response(url, **kwargs) as r:
-            r.raise_for_status()
-            return extract(r)
-
-    async def _async_fetch(
-        self,
-        url: str,
-        extract: Callable,
-        **kwargs: Any,
-    ) -> Any:
-        async with await self.get_async_response(url, **kwargs) as r:
-            r.raise_for_status()
-            return await extract(r)
-
     @_sync_retry
     def get_bytes(
-        self,
-        url: str,
-        *,
-        timeout: float | None = None,
-        allow_redirects: bool = True,
+        self, url: str, *, timeout: float | None = None, allow_redirects: bool = True
     ) -> bytes:
-        return self._sync_fetch(
-            url,
-            lambda r: r.content,
-            timeout=timeout,
-            allow_redirects=allow_redirects,
-        )
+        with self.get_response(
+            url, timeout=timeout, allow_redirects=allow_redirects
+        ) as r:
+            r.raise_for_status()
+
+            return r.content
 
     @_async_retry
     async def async_get_bytes(
@@ -308,15 +294,18 @@ class HTTPConnection:
         timeout: float | None = None,
         allow_redirects: bool = True,
     ) -> bytes:
-        return await self._async_fetch(
-            url,
-            lambda r: r.read(),
-            timeout=timeout,
-            allow_redirects=allow_redirects,
-        )
+        async with await self.get_async_response(
+            url, timeout=timeout, allow_redirects=allow_redirects
+        ) as r:
+            r.raise_for_status()
+
+            return await r.read()
 
     def get_text(self, url: str, *, timeout: float | None = None) -> str:
-        return self._sync_fetch(url, lambda r: r.text, timeout=timeout)
+        with self.get_response(url, timeout=timeout) as r:
+            r.raise_for_status()
+
+            return r.text
 
     async def async_get_text(
         self,
@@ -324,14 +313,16 @@ class HTTPConnection:
         *,
         timeout: float | None = None,
     ) -> str:
-        return await self._async_fetch(
-            url,
-            lambda r: r.text(),
-            timeout=timeout,
-        )
+        async with await self.get_async_response(url, timeout=timeout) as r:
+            r.raise_for_status()
+
+            return await r.text()
 
     def get_json(self, url: str, *, timeout: float | None = None) -> Any:
-        return self._sync_fetch(url, lambda r: r.json(), timeout=timeout)
+        with self.get_response(url, timeout=timeout) as r:
+            r.raise_for_status()
+
+            return r.json()
 
     async def async_get_json(
         self,
@@ -339,11 +330,10 @@ class HTTPConnection:
         *,
         timeout: float | None = None,
     ) -> Any:
-        return await self._async_fetch(
-            url,
-            lambda r: r.json(),
-            timeout=timeout,
-        )
+        async with await self.get_async_response(url, timeout=timeout) as r:
+            r.raise_for_status()
+
+            return await r.json()
 
     @_sync_retry
     def download_file(
