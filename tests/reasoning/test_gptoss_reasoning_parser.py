@@ -15,7 +15,6 @@ from vllm.reasoning.gptoss_reasoning_parser import (
     from_function_tool_to_tag,
     no_func_reasoning_tag,
     tag_with_builtin_funcs,
-    tag_with_function_tools,
 )
 
 REASONING_MODEL_NAME = "openai/gpt-oss-120b"
@@ -410,10 +409,7 @@ class TestGptOssStructuralTags:
         assert len(parsed["format"]["tags"]) == 2
 
         # Verify analysis tag is unchanged
-        assert (
-            parsed["format"]["tags"][0]["begin"]
-            == "<|channel|>analysis<|message|>"
-        )
+        assert parsed["format"]["tags"][0]["begin"] == "<|channel|>analysis<|message|>"
         assert parsed["format"]["tags"][0]["content"]["type"] == "any_text"
 
         # Verify final channel tag has the json_schema content constraint
@@ -531,21 +527,13 @@ class TestGptOssStructuralTags:
 
         tag_begins = [t["begin"] for t in parsed["format"]["tags"]]
         # Function tool tags present
-        assert (
-            "<|channel|>commentary to=functions.get_weather<|message|>"
-            in tag_begins
-        )
-        assert (
-            "<|channel|>analysis to=functions.get_weather<|message|>"
-            in tag_begins
-        )
+        assert "<|channel|>commentary to=functions.get_weather<|message|>" in tag_begins
+        assert "<|channel|>analysis to=functions.get_weather<|message|>" in tag_begins
         # No final
         assert not any("final" in b for b in tag_begins)
         assert "<|channel|>final" not in parsed["format"]["triggers"]
 
-    def test_tool_choice_required_ignores_final_content_format(
-        self, reasoning_parser
-    ):
+    def test_tool_choice_required_ignores_final_content_format(self, reasoning_parser):
         """Final is blocked even when final_content_format is provided."""
         content_fmt = {
             "type": "json_schema",
@@ -564,9 +552,7 @@ class TestGptOssStructuralTags:
         tag_begins = [t["begin"] for t in parsed["format"]["tags"]]
         assert not any("final" in b for b in tag_begins)
 
-    def test_tool_choice_auto_with_tools_and_content_format(
-        self, reasoning_parser
-    ):
+    def test_tool_choice_auto_with_tools_and_content_format(self, reasoning_parser):
         """Tool tags + final with content constraint for auto."""
         schema = {"type": "object", "properties": {"x": {"type": "integer"}}}
         content_fmt = {"type": "json_schema", "json_schema": schema}
@@ -583,10 +569,7 @@ class TestGptOssStructuralTags:
 
         tag_begins = [t["begin"] for t in parsed["format"]["tags"]]
         # Function tool tags
-        assert (
-            "<|channel|>commentary to=functions.compute<|message|>"
-            in tag_begins
-        )
+        assert "<|channel|>commentary to=functions.compute<|message|>" in tag_begins
         # Final tag with content constraint
         assert "<|channel|>final<|message|>" in tag_begins
         assert "<|channel|>final" in parsed["format"]["triggers"]
@@ -598,9 +581,7 @@ class TestGptOssStructuralTags:
         )
         assert final_tag["content"] == content_fmt
 
-    def test_tool_choice_auto_with_tools_final_is_any_text(
-        self, reasoning_parser
-    ):
+    def test_tool_choice_auto_with_tools_final_is_any_text(self, reasoning_parser):
         """auto + function tools but no content format -> final allows free text."""
         fn_tools = [{"name": "get_weather", "parameters": {"type": "object"}}]
         result = reasoning_parser.prepare_structured_tag(
@@ -655,14 +636,8 @@ class TestGptOssStructuralTags:
         assert "<|channel|>commentary to=browser" in tag_begins
         assert "<|channel|>analysis to=browser" in tag_begins
         # Function tool tags
-        assert (
-            "<|channel|>commentary to=functions.get_weather<|message|>"
-            in tag_begins
-        )
-        assert (
-            "<|channel|>analysis to=functions.get_weather<|message|>"
-            in tag_begins
-        )
+        assert "<|channel|>commentary to=functions.get_weather<|message|>" in tag_begins
+        assert "<|channel|>analysis to=functions.get_weather<|message|>" in tag_begins
         # Final tag (auto + function tools)
         assert "<|channel|>final<|message|>" in tag_begins
         # General commentary trigger covers both builtin and function
@@ -684,14 +659,8 @@ class TestGptOssStructuralTags:
 
         tag_begins = [t["begin"] for t in parsed["format"]["tags"]]
         # Only get_weather tags, not get_stock
-        assert (
-            "<|channel|>commentary to=functions.get_weather<|message|>"
-            in tag_begins
-        )
-        assert (
-            "<|channel|>analysis to=functions.get_weather<|message|>"
-            in tag_begins
-        )
+        assert "<|channel|>commentary to=functions.get_weather<|message|>" in tag_begins
+        assert "<|channel|>analysis to=functions.get_weather<|message|>" in tag_begins
         assert not any("get_stock" in b for b in tag_begins)
         # No final (named tool choice blocks final)
         assert not any("final" in b for b in tag_begins)

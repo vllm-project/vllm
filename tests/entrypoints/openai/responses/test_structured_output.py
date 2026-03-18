@@ -141,9 +141,7 @@ class TestConstraintToContentFormat:
 
     def test_structural_tag_only_returns_none(self):
         """structural_tag is not a content constraint -- should return None."""
-        params = StructuredOutputsParams(
-            structural_tag='{"type": "structural_tag"}'
-        )
+        params = StructuredOutputsParams(structural_tag='{"type": "structural_tag"}')
         result = _constraint_to_content_format(params)
 
         assert result is None

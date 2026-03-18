@@ -944,9 +944,7 @@ class TestInjectResponseFormats:
         assert '{"type":"object"}' in result
 
     def test_custom_format_name(self):
-        result = inject_response_formats(
-            None, {"type": "object"}, format_name="order"
-        )
+        result = inject_response_formats(None, {"type": "object"}, format_name="order")
         assert "## order" in result
 
     def test_compact_json_no_spaces(self):
@@ -955,15 +953,8 @@ class TestInjectResponseFormats:
             "properties": {"name": {"type": "string"}},
         }
         result = inject_response_formats(None, schema)
-        assert (
-            '{"type":"object","properties":{"name":{"type":"string"}}}'
-            in result
-        )
+        assert '{"type":"object","properties":{"name":{"type":"string"}}}' in result
 
     def test_section_separated_by_blank_lines(self):
-        result = inject_response_formats(
-            "Instructions here.", {"type": "object"}
-        )
-        assert (
-            "\n\n# Response Formats\n\n## structured_output\n\n" in result
-        )
+        result = inject_response_formats("Instructions here.", {"type": "object"})
+        assert "\n\n# Response Formats\n\n## structured_output\n\n" in result

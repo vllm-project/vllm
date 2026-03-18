@@ -3,7 +3,7 @@
 import copy
 import json
 from collections.abc import Sequence
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from transformers import PreTrainedTokenizerBase
 
@@ -81,17 +81,13 @@ def from_function_tool_to_tag(name: str, parameters: dict | None) -> list[dict]:
     ]
 
 
-def tag_with_function_tools(
-    base_tag: dict, function_tools: list[dict]
-) -> dict:
+def tag_with_function_tools(base_tag: dict, function_tools: list[dict]) -> dict:
     new_tag = copy.deepcopy(base_tag)
 
     # Add commentary trigger for function tools if not already covered
     # by the general commentary trigger (added by builtin tools).
     if "<|channel|>commentary to=" not in new_tag["format"]["triggers"]:
-        new_tag["format"]["triggers"].append(
-            "<|channel|>commentary to=functions."
-        )
+        new_tag["format"]["triggers"].append("<|channel|>commentary to=functions.")
 
     for tool in function_tools:
         new_tag["format"]["tags"].extend(
@@ -207,7 +203,7 @@ class GptOssReasoningParser(ReasoningParser):
             # There is potential risk for appending the tag to the original tag
             return original_tag
 
-        base_tag = copy.deepcopy(no_func_reasoning_tag)
+        base_tag: dict[str, Any] = copy.deepcopy(no_func_reasoning_tag)
 
         # Add builtin tool tags (unless tool_choice is "none")
         if tool_choice != "none" and tool_server is not None:
@@ -236,9 +232,7 @@ class GptOssReasoningParser(ReasoningParser):
                     t for t in function_tools if t["name"] == named
                 ]
             if effective_function_tools:
-                base_tag = tag_with_function_tools(
-                    base_tag, effective_function_tools
-                )
+                base_tag = tag_with_function_tools(base_tag, effective_function_tools)
 
         # Add final channel tag unless tool_choice blocks it
         if tool_choice != "required" and not isinstance(tool_choice, dict):
@@ -249,11 +243,13 @@ class GptOssReasoningParser(ReasoningParser):
                     if final_content_format
                     else {"type": "any_text"}
                 )
-                base_tag["format"]["tags"].append({
-                    "begin": "<|channel|>final<|message|>",
-                    "content": final_content,
-                    "end": "<|end|>",
-                })
+                base_tag["format"]["tags"].append(
+                    {
+                        "begin": "<|channel|>final<|message|>",
+                        "content": final_content,
+                        "end": "<|end|>",
+                    }
+                )
                 base_tag["format"]["triggers"].append("<|channel|>final")
 
         # For tool_choice=required or named tool, force at least one triggered
@@ -267,7 +263,8 @@ class GptOssReasoningParser(ReasoningParser):
             # satisfying at_least_one with a pure reasoning channel instead of
             # an actual tool call.
             base_tag["format"]["tags"] = [
-                t for t in base_tag["format"]["tags"]
+                t
+                for t in base_tag["format"]["tags"]
                 if t.get("begin") != "<|channel|>analysis<|message|>"
             ]
             base_tag["format"]["at_least_one"] = True

@@ -168,9 +168,7 @@ def _constraint_to_content_format(
     if params.choice is not None:
         return {
             "type": "or",
-            "elements": [
-                {"type": "const_string", "value": c} for c in params.choice
-            ],
+            "elements": [{"type": "const_string", "value": c} for c in params.choice],
         }
     return None
 
@@ -526,11 +524,7 @@ class OpenAIServingResponses(OpenAIServing):
                 ft = [
                     {
                         "name": t.name,
-                        **(
-                            {"parameters": t.parameters}
-                            if t.parameters
-                            else {}
-                        ),
+                        **({"parameters": t.parameters} if t.parameters else {}),
                     }
                     for t in request.tools
                     if getattr(t, "type", None) == "function"
@@ -561,18 +555,14 @@ class OpenAIServingResponses(OpenAIServing):
                         # Content constraint present (json, regex,
                         # grammar, choice, json_object). Embed it in the
                         # final channel tag within the structural tag.
-                        content_fmt = _constraint_to_content_format(
-                            struct_out
-                        )
+                        content_fmt = _constraint_to_content_format(struct_out)
                         if content_fmt is not None:
-                            structural_tag = (
-                                reasoning_parser.prepare_structured_tag(
-                                    None,
-                                    self.tool_server,
-                                    final_content_format=content_fmt,
-                                    tool_choice=request.tool_choice,
-                                    function_tools=function_tools_for_parser,
-                                )
+                            structural_tag = reasoning_parser.prepare_structured_tag(
+                                None,
+                                self.tool_server,
+                                final_content_format=content_fmt,
+                                tool_choice=request.tool_choice,
+                                function_tools=function_tools_for_parser,
                             )
                             if structural_tag is not None:
                                 # Clear content constraints, set
@@ -597,10 +587,8 @@ class OpenAIServingResponses(OpenAIServing):
                         function_tools=function_tools_for_parser,
                     )
                     if tag is not None:
-                        sampling_params.structured_outputs = (
-                            StructuredOutputsParams(
-                                structural_tag=tag  # type: ignore[call-arg]
-                            )
+                        sampling_params.structured_outputs = StructuredOutputsParams(
+                            structural_tag=tag  # type: ignore[call-arg]
                         )
             generator = self._generate_with_builtin_tools(
                 request_id=request.request_id,
@@ -1256,9 +1244,7 @@ class OpenAIServingResponses(OpenAIServing):
             # structural tag grammar already blocks tool channels, but
             # omitting tools from the system/developer messages
             # prevents the model from even reasoning about calling them.
-            tools_visible = (
-                with_custom_tools and request.tool_choice != "none"
-            )
+            tools_visible = with_custom_tools and request.tool_choice != "none"
 
             sys_msg = self._construct_harmony_system_input_message(
                 request, tools_visible, tool_types
@@ -1269,9 +1255,7 @@ class OpenAIServingResponses(OpenAIServing):
             # Per Harmony cookbook: developer message holds instructions,
             # function tools, AND response format schemas.
             response_format_schema = _extract_response_format_schema(request)
-            needs_dev_msg = (
-                tools_visible or response_format_schema is not None
-            )
+            needs_dev_msg = tools_visible or response_format_schema is not None
 
             if needs_dev_msg:
                 dev_instructions = request.instructions
