@@ -335,8 +335,6 @@ class EngineCore:
             if tps > best_tps * 1.05:
                 best_tps = tps
                 optimal_batch = batch_size
-            else:
-                break
 
         elapsed = time.perf_counter() - t_start
         for batch_size in candidates:
