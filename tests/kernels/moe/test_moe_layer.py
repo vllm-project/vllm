@@ -1257,9 +1257,6 @@ def _run_one_config(
 
     baseline_output = baseline_layer(hidden_states, router_logits)
 
-    del baseline_layer
-    torch.accelerator.empty_cache()
-
     with set_current_vllm_config(vllm_config):
         # Chunk weights for EP/TP (after baseline is created)
         if ep_size > 1:
