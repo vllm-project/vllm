@@ -744,6 +744,8 @@ class AttentionImpl(AttentionImplBase[T], Generic[T]):
         ``AttentionSpec.auxiliary_memory_per_block``.
     """
 
+    kv_cache_dtype: str
+
     # INT8 per-(token, head) scale caches.  Lazily allocated by
     # ensure_int8_scale_caches().
     # Shape when allocated: [num_blocks, block_size, num_kv_heads], float32.
