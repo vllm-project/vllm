@@ -103,6 +103,7 @@ class SkyworkR1VProcessingInfo(BaseProcessingInfo):
         config = self.get_hf_config()
         vision_config = config.vision_config
 
+        kwargs = self.ctx.get_merged_mm_kwargs(kwargs)
         kwargs.setdefault("image_size", vision_config.image_size)
         kwargs.setdefault("min_dynamic_patch", config.min_dynamic_patch)
         kwargs.setdefault("max_dynamic_patch", config.max_dynamic_patch)
@@ -121,8 +122,7 @@ class SkyworkR1VProcessingInfo(BaseProcessingInfo):
         downsample_ratio = config.downsample_ratio
         image_seq_length = int((image_size // patch_size) ** 2 * (downsample_ratio**2))
 
-        return self.ctx.init_processor(
-            InternVLProcessor,
+        return InternVLProcessor(
             tokenizer=self.get_tokenizer(),
             image_processor=image_processor,
             image_seq_length=image_seq_length,

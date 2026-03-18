@@ -312,6 +312,7 @@ class InternVLProcessingInfo(BaseInternVLProcessingInfo):
         config = self.get_hf_config()
         vision_config = config.vision_config
 
+        kwargs = self.ctx.get_merged_mm_kwargs(kwargs)
         kwargs.setdefault("image_size", vision_config.image_size)
         kwargs.setdefault("min_dynamic_patch", config.min_dynamic_patch)
         kwargs.setdefault("max_dynamic_patch", config.max_dynamic_patch)
@@ -324,6 +325,7 @@ class InternVLProcessingInfo(BaseInternVLProcessingInfo):
         config = self.get_hf_config()
         vision_config = config.vision_config
 
+        kwargs = self.ctx.get_merged_mm_kwargs(kwargs)
         kwargs.setdefault("image_size", vision_config.image_size)
 
         return InternVLVideoProcessor(**kwargs)
@@ -350,8 +352,7 @@ class InternVLProcessingInfo(BaseInternVLProcessingInfo):
 
         video_token = self.get_video_token()
 
-        return self.ctx.init_processor(
-            InternVLProcessor,
+        return InternVLProcessor(
             tokenizer=self.get_tokenizer(),
             image_processor=image_processor,
             video_processor=self.get_video_processor(**kwargs) if video_token else None,
