@@ -25,7 +25,7 @@ The most fundamental application of classification models is to categorize input
 
 ## Supported Models
 
---8<-- "docs/models/pooling_models/supported_models.inc.md:classify-models"
+--8<-- "docs/models/pooling_models/scoring.md:classify-models"
 
 ### As cross-encoder models
 
