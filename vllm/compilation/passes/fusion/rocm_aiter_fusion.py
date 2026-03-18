@@ -288,8 +288,8 @@ class AiterRMSNormStaticQuantPattern(AiterRMSNormQuantPattern):
         # Cannot use methods, as the self argument affects tracing
         def pattern(input: torch.Tensor, weight: torch.Tensor, scale: torch.Tensor):
             result_rms = self.rmsnorm_matcher(input, weight)
-            out = self.quant_matcher(result_rms, scale)
-            return out
+            result, scale = self.quant_matcher(result_rms, scale)
+            return result, scale
 
         def replacement(input: torch.Tensor, weight: torch.Tensor, scale: torch.Tensor):
             result = self.FUSED_OP(
@@ -307,7 +307,6 @@ class AiterRMSNormStaticQuantPattern(AiterRMSNormQuantPattern):
             *self.rmsnorm_matcher.inputs(),
             self.quant_matcher.inputs()[1],  # scale
         ]
-        pattern(*inputs)
 
         pm.register_replacement(pattern, replacement, inputs, pm.fwd_only, pm_pass)
 
