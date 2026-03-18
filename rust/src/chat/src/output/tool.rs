@@ -15,9 +15,9 @@ use tool_parser::ToolParser;
 use tracing::warn;
 use uuid::Uuid;
 
+use super::{AssistantEvent, ContentEvent, ContentEventStream};
 use crate::error::Error;
 use crate::event::{AssistantBlockKind, AssistantToolCall};
-use crate::pipeline::{AssistantStreamEvent, AssistantStreamEventStream};
 use crate::request::ChatRequest;
 
 /// One currently open tool call being assembled from streaming parser output.
@@ -59,14 +59,14 @@ impl ToolState {
         &mut self,
         kind: AssistantBlockKind,
         delta: String,
-    ) -> Vec<AssistantStreamEvent> {
+    ) -> Vec<AssistantEvent> {
         let mut events = Vec::new();
 
         // Only normal assistant text is eligible for tool parsing. Reasoning
         // blocks and plain-text fallback should pass through unchanged.
         if kind != AssistantBlockKind::Text || self.parser_failed {
             self.close_all_open_calls(&mut events);
-            events.push(AssistantStreamEvent::TextDelta { kind, delta });
+            events.push(AssistantEvent::TextDelta { kind, delta });
             return events;
         }
 
@@ -99,7 +99,7 @@ impl ToolState {
                     self.parser_failed = true;
                 }
                 self.close_all_open_calls(&mut events);
-                events.push(AssistantStreamEvent::TextDelta { kind, delta });
+                events.push(AssistantEvent::TextDelta { kind, delta });
             }
         }
 
@@ -110,7 +110,7 @@ impl ToolState {
     fn process_tool_items(
         &mut self,
         items: Vec<tool_parser::types::ToolCallItem>,
-        events: &mut Vec<AssistantStreamEvent>,
+        events: &mut Vec<AssistantEvent>,
     ) {
         for item in items {
             if let Some(name) = item.name {
@@ -125,7 +125,7 @@ impl ToolState {
                         name: name.clone(),
                         arguments: String::new(),
                     });
-                    events.push(AssistantStreamEvent::ToolCallStart { id, name });
+                    events.push(AssistantEvent::ToolCallStart { id, name });
                 }
             }
 
@@ -138,7 +138,7 @@ impl ToolState {
             };
             open_call.arguments.push_str(&item.parameters);
 
-            events.push(AssistantStreamEvent::ToolCallArgumentsDelta {
+            events.push(AssistantEvent::ToolCallArgumentsDelta {
                 id: open_call.id.clone(),
                 delta: item.parameters,
             });
@@ -150,7 +150,7 @@ impl ToolState {
     fn close_calls_not_matching(
         &mut self,
         keep_tool_index: usize,
-        events: &mut Vec<AssistantStreamEvent>,
+        events: &mut Vec<AssistantEvent>,
     ) {
         let old = std::mem::take(&mut self.open_calls);
         for (idx, open_call) in old {
@@ -163,7 +163,7 @@ impl ToolState {
     }
 
     /// Close every currently open tool call.
-    fn close_all_open_calls(&mut self, events: &mut Vec<AssistantStreamEvent>) {
+    fn close_all_open_calls(&mut self, events: &mut Vec<AssistantEvent>) {
         for (_, open_call) in std::mem::take(&mut self.open_calls) {
             push_tool_call_end(events, open_call);
         }
@@ -171,8 +171,8 @@ impl ToolState {
 }
 
 /// Emit one `ToolCallEnd` event from a completed open call.
-fn push_tool_call_end(events: &mut Vec<AssistantStreamEvent>, open_call: OpenToolCallState) {
-    events.push(AssistantStreamEvent::ToolCallEnd {
+fn push_tool_call_end(events: &mut Vec<AssistantEvent>, open_call: OpenToolCallState) {
+    events.push(AssistantEvent::ToolCallEnd {
         call: AssistantToolCall {
             id: open_call.id,
             name: open_call.name,
@@ -182,15 +182,11 @@ fn push_tool_call_end(events: &mut Vec<AssistantStreamEvent>, open_call: OpenToo
 }
 
 /// Push one plain-text delta if it is non-empty.
-fn push_text_delta(
-    events: &mut Vec<AssistantStreamEvent>,
-    kind: AssistantBlockKind,
-    delta: String,
-) {
+fn push_text_delta(events: &mut Vec<AssistantEvent>, kind: AssistantBlockKind, delta: String) {
     if delta.is_empty() {
         return;
     }
-    events.push(AssistantStreamEvent::TextDelta { kind, delta });
+    events.push(AssistantEvent::TextDelta { kind, delta });
 }
 
 /// Generate the northbound tool-call ID using the OpenAI-style `call_<id>` format.
@@ -202,9 +198,9 @@ fn generate_tool_call_id() -> String {
 
 /// Wrap one semantic assistant stream into the internal tool-aware assistant
 /// stream.
-#[try_stream(ok = AssistantStreamEvent, error = Error)]
+#[try_stream(ok = AssistantEvent, error = Error)]
 pub(crate) async fn tool_event_stream(
-    stream: impl AssistantStreamEventStream,
+    stream: impl ContentEventStream,
     request: ChatRequest,
     parser: Option<Box<dyn ToolParser>>,
 ) {
@@ -213,7 +209,7 @@ pub(crate) async fn tool_event_stream(
     // Without a parser, pass through the input stream unchanged.
     let Some(parser) = parser else {
         while let Some(event) = stream.next().await.transpose()? {
-            yield event;
+            yield event.into();
         }
         return Ok(());
     };
@@ -222,13 +218,13 @@ pub(crate) async fn tool_event_stream(
 
     while let Some(event) = stream.next().await.transpose()? {
         match event {
-            AssistantStreamEvent::Start => yield AssistantStreamEvent::Start,
-            AssistantStreamEvent::TextDelta { kind, delta } => {
+            ContentEvent::Start => yield AssistantEvent::Start,
+            ContentEvent::TextDelta { kind, delta } => {
                 for next in state.process_text_delta(kind, delta).await {
                     yield next;
                 }
             }
-            AssistantStreamEvent::Done {
+            ContentEvent::Done {
                 token_ids,
                 finish_reason,
                 stop_reason,
@@ -246,16 +242,11 @@ pub(crate) async fn tool_event_stream(
                     yield next;
                 }
 
-                yield AssistantStreamEvent::Done {
+                yield AssistantEvent::Done {
                     token_ids,
                     finish_reason,
                     stop_reason,
                 };
-            }
-            AssistantStreamEvent::ToolCallStart { .. }
-            | AssistantStreamEvent::ToolCallArgumentsDelta { .. }
-            | AssistantStreamEvent::ToolCallEnd { .. } => {
-                unreachable!("tool events must not appear before tool parsing stage")
             }
         }
     }
@@ -271,15 +262,15 @@ mod tests {
     use tool_parser::types::{StreamingParseResult, ToolCall, ToolCallItem};
     use vllm_engine_core_client::protocol::FinishReason;
 
+    use super::super::structured::structured_chat_event_stream;
+    use super::super::{AssistantEvent, ContentEvent};
     use super::tool_event_stream;
     use crate::UserSamplingParams;
     use crate::event::{AssistantBlockKind, AssistantMessageExt as _};
-    use crate::pipeline::AssistantStreamEvent;
     use crate::request::{
         ChatMessage, ChatOptions, ChatRequest, ChatRole, ChatTool, ChatToolChoice,
     };
     use crate::stream::ChatEventStream;
-    use crate::structured::structured_chat_event_stream;
 
     struct FailingParser {
         fail_next: bool,
@@ -335,16 +326,16 @@ mod tests {
     #[tokio::test]
     async fn tool_parser_failure_falls_back_to_plain_text() {
         let events = stream::iter(vec![
-            Ok(AssistantStreamEvent::Start),
-            Ok(AssistantStreamEvent::TextDelta {
+            Ok(ContentEvent::Start),
+            Ok(ContentEvent::TextDelta {
                 kind: AssistantBlockKind::Text,
                 delta: "abc".to_string(),
             }),
-            Ok(AssistantStreamEvent::TextDelta {
+            Ok(ContentEvent::TextDelta {
                 kind: AssistantBlockKind::Text,
                 delta: "def".to_string(),
             }),
-            Ok(AssistantStreamEvent::Done {
+            Ok(ContentEvent::Done {
                 token_ids: vec![],
                 finish_reason: Some(FinishReason::Stop),
                 stop_reason: None,
@@ -367,16 +358,16 @@ mod tests {
         assert_eq!(
             events,
             vec![
-                AssistantStreamEvent::Start,
-                AssistantStreamEvent::TextDelta {
+                AssistantEvent::Start,
+                AssistantEvent::TextDelta {
                     kind: AssistantBlockKind::Text,
                     delta: "abc".to_string(),
                 },
-                AssistantStreamEvent::TextDelta {
+                AssistantEvent::TextDelta {
                     kind: AssistantBlockKind::Text,
                     delta: "def".to_string(),
                 },
-                AssistantStreamEvent::Done {
+                AssistantEvent::Done {
                     token_ids: vec![],
                     finish_reason: Some(FinishReason::Stop),
                     stop_reason: None,

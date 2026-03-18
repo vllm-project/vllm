@@ -13,11 +13,11 @@ pub struct ChatEventStream {
 }
 
 impl ChatEventStream {
-    pub(crate) fn new(
-        request_id: String,
-        inner: Pin<Box<dyn Stream<Item = Result<ChatEvent>> + Send>>,
-    ) -> Self {
-        Self { request_id, inner }
+    pub(crate) fn new(request_id: String, inner: impl crate::output::ChatEventStream) -> Self {
+        Self {
+            request_id,
+            inner: Box::pin(inner),
+        }
     }
 
     /// Return the request ID associated with this stream.

@@ -1,0 +1,17 @@
+repos:
+  - repo: local
+    hooks:
+      - id: cargo-sort
+        name: cargo sort --workspace
+        entry: cargo sort --workspace
+        language: system
+        pass_filenames: false
+        require_serial: true
+        files: '(^|/)Cargo\.toml$'
+      - id: cargo-fmt
+        name: cargo fmt
+        entry: cargo fmt
+        language: system
+        pass_filenames: false
+        require_serial: true
+        files: '(\.rs$|(^|/)Cargo\.toml$|(^|/)rustfmt\.toml$)'

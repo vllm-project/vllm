@@ -1,13 +1,12 @@
-use futures::Stream;
 use futures_async_stream::try_stream;
 use tracing::info;
 use vllm_engine_core_client::protocol::{FinishReason, StopReason};
 use vllm_llm::GenerateOutputStream;
 
+use super::incremental::IncrementalTextDecoder;
 use crate::ChatRequest;
 use crate::backend::DynChatBackend;
-use crate::error::{Error, Result};
-use crate::incremental::IncrementalTextDecoder;
+use crate::error::Error;
 
 /// Internal decoded-text event emitted before higher-level reasoning adaptation.
 ///
@@ -30,8 +29,6 @@ pub(crate) enum DecodedTextEvent {
         stop_reason: Option<StopReason>,
     },
 }
-
-pub(crate) trait DecodedTextEventStream = Stream<Item = Result<DecodedTextEvent>> + Send + 'static;
 
 /// Convert the output token stream from the `vllm_llm` layer into incrementally decoded text.
 // TODO: apply small-string-optimization

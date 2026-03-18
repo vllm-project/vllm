@@ -3349,6 +3349,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "subenum"
+version = "1.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ec3d08fe7078c57309d5c3d938e50eba95ba1d33b9c3a101a8465fc6861a5416"
+dependencies = [
+ "heck",
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "subtle"
 version = "2.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4146,6 +4158,7 @@ dependencies = [
  "serde",
  "serde_default",
  "serde_json",
+ "subenum",
  "tempfile",
  "thiserror 2.0.18",
  "thiserror-ext",

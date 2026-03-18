@@ -24,18 +24,13 @@ pub use stream::ChatEventStream;
 
 mod backend;
 pub mod backends;
-mod decoded;
 mod error;
 mod event;
-mod incremental;
 mod lower;
-mod pipeline;
-mod reasoning;
+mod output;
 mod request;
 mod stream;
-mod structured;
 mod template;
-mod tool;
 
 use lower::lower_chat_request;
 use reasoning_parser::ParserFactory as ReasoningParserFactory;
@@ -77,38 +72,14 @@ impl ChatLlm {
         let prepared = lower_chat_request(request, prompt_token_ids, sampling_hints)?;
 
         let raw_stream = self.llm.generate(prepared.generate_request).await?;
-        let tool_parser = if prepared.chat_request.tool_parsing_enabled() {
-            if let Some(model_id) = model_id {
-                self.tool_parser_factory
-                    .registry()
-                    .create_for_model(model_id)
-                    .ok_or_else(|| Error::ToolParserUnavailableForModel {
-                        model_id: model_id.to_string(),
-                    })?
-                    .into()
-            } else {
-                return Err(Error::ToolParserRequiresModelId);
-            }
-        } else {
-            None
-        };
-        let reasoning_parser = if let Some(model_id) = model_id {
-            self.reasoning_parser_factory
-                .registry()
-                .create_for_model(model_id)
-        } else {
-            None
-        };
-
-        let decoded_stream = decoded::decoded_text_event_stream(
+        let structured_stream = output::output_stream(
             prepared.chat_request.clone(),
             self.backend.clone(),
             raw_stream,
-        );
-        let reasoning_stream = reasoning::reasoning_event_stream(decoded_stream, reasoning_parser);
-        let content_stream =
-            tool::tool_event_stream(reasoning_stream, prepared.chat_request.clone(), tool_parser);
-        let structured_stream = structured::structured_chat_event_stream(content_stream);
+            model_id,
+            &self.reasoning_parser_factory,
+            &self.tool_parser_factory,
+        )?;
 
         Ok(ChatEventStream::new(
             prepared.chat_request.request_id.clone(),

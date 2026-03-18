@@ -16,6 +16,7 @@ serde.workspace = true
 serde_default.workspace = true
 serde_json.workspace = true
 smg-tokenizer.workspace = true
+subenum.workspace = true
 thiserror.workspace = true
 thiserror-ext.workspace = true
 tokenizers.workspace = true

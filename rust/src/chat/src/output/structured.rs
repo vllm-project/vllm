@@ -9,11 +9,11 @@ use futures::{StreamExt as _, pin_mut};
 use futures_async_stream::try_stream;
 use vllm_engine_core_client::protocol::{FinishReason, StopReason};
 
+use super::{AssistantEvent, AssistantEventStream};
 use crate::error::Error;
 use crate::event::{
     AssistantBlockKind, AssistantContentBlock, AssistantMessage, AssistantToolCall, ChatEvent,
 };
-use crate::pipeline::{AssistantStreamEvent, AssistantStreamEventStream};
 
 /// One currently open assistant text-like block being assembled from streamed
 /// deltas.
@@ -214,35 +214,35 @@ impl StructuredEventState {
 /// Wrap one parsed assistant stream into the public structured chat event
 /// stream.
 #[try_stream(ok = ChatEvent, error = Error)]
-pub(crate) async fn structured_chat_event_stream(stream: impl AssistantStreamEventStream) {
+pub(super) async fn structured_chat_event_stream(stream: impl AssistantEventStream) {
     pin_mut!(stream);
 
     let mut state = StructuredEventState::new();
 
     while let Some(event) = stream.next().await.transpose()? {
         match event {
-            AssistantStreamEvent::Start => yield ChatEvent::Start,
-            AssistantStreamEvent::TextDelta { kind, delta } => {
+            AssistantEvent::Start => yield ChatEvent::Start,
+            AssistantEvent::TextDelta { kind, delta } => {
                 for next in state.process_text_delta(kind, delta) {
                     yield next;
                 }
             }
-            AssistantStreamEvent::ToolCallStart { id, name } => {
+            AssistantEvent::ToolCallStart { id, name } => {
                 for next in state.start_tool_call(id, name) {
                     yield next;
                 }
             }
-            AssistantStreamEvent::ToolCallArgumentsDelta { id, delta } => {
+            AssistantEvent::ToolCallArgumentsDelta { id, delta } => {
                 for next in state.push_tool_call_arguments(id, delta) {
                     yield next;
                 }
             }
-            AssistantStreamEvent::ToolCallEnd { call } => {
+            AssistantEvent::ToolCallEnd { call } => {
                 for next in state.end_tool_call(call) {
                     yield next;
                 }
             }
-            AssistantStreamEvent::Done {
+            AssistantEvent::Done {
                 token_ids,
                 finish_reason,
                 stop_reason,

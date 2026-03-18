@@ -11,10 +11,11 @@ use reasoning_parser::ReasoningParser;
 use thiserror_ext::AsReport;
 use tracing::warn;
 
-use crate::decoded::{DecodedTextEvent, DecodedTextEventStream};
+use super::ContentEvent;
+use super::decoded::DecodedTextEvent;
 use crate::error::Error;
 use crate::event::AssistantBlockKind;
-use crate::pipeline::AssistantStreamEvent;
+use crate::output::DecodedTextEventStream;
 
 /// Per-stream reasoning parsing state.
 struct ReasoningState {
@@ -34,10 +35,10 @@ impl ReasoningState {
     }
 
     /// Convert one decoded text delta into zero or more semantic assistant deltas.
-    fn process_delta(&mut self, delta: String) -> Vec<AssistantStreamEvent> {
+    fn process_delta(&mut self, delta: String) -> Vec<ContentEvent> {
         // If the parser has already failed, skip parsing and return plain text deltas.
         if self.parser_failed {
-            return vec![AssistantStreamEvent::TextDelta {
+            return vec![ContentEvent::TextDelta {
                 kind: AssistantBlockKind::Text,
                 delta,
             }];
@@ -72,20 +73,15 @@ impl ReasoningState {
 }
 
 /// Push one semantic text delta if it is non-empty.
-fn push_text_delta(
-    events: &mut Vec<AssistantStreamEvent>,
-    kind: AssistantBlockKind,
-    delta: String,
-) {
+fn push_text_delta(events: &mut Vec<ContentEvent>, kind: AssistantBlockKind, delta: String) {
     if delta.is_empty() {
         return;
     }
-    events.push(AssistantStreamEvent::TextDelta { kind, delta });
+    events.push(ContentEvent::TextDelta { kind, delta });
 }
 
-/// Wrap one decoded-text stream into the internal reasoning-aware assistant
-/// stream.
-#[try_stream(ok = AssistantStreamEvent, error = Error)]
+/// Wrap one decoded-text stream into the internal reasoning event stream.
+#[try_stream(ok = ContentEvent, error = Error)]
 pub(crate) async fn reasoning_event_stream(
     decoded_stream: impl DecodedTextEventStream,
     reasoning_parser: Option<Box<dyn ReasoningParser>>,
@@ -95,7 +91,7 @@ pub(crate) async fn reasoning_event_stream(
     // Without a parser, pass through as plain text deltas.
     let Some(reasoning_parser) = reasoning_parser else {
         while let Some(event) = decoded_stream.next().await.transpose()? {
-            yield AssistantStreamEvent::from_decoded_plain_text(event);
+            yield ContentEvent::from_decoded_plain_text(event);
         }
         return Ok(());
     };
@@ -104,7 +100,7 @@ pub(crate) async fn reasoning_event_stream(
 
     while let Some(event) = decoded_stream.next().await.transpose()? {
         match event {
-            DecodedTextEvent::Start => yield AssistantStreamEvent::Start,
+            DecodedTextEvent::Start => yield ContentEvent::Start,
             DecodedTextEvent::TextDelta { delta, .. } => {
                 for next in state.process_delta(delta) {
                     yield next;
@@ -116,7 +112,7 @@ pub(crate) async fn reasoning_event_stream(
                 stop_reason,
                 ..
             } => {
-                yield AssistantStreamEvent::Done {
+                yield ContentEvent::Done {
                     token_ids,
                     finish_reason,
                     stop_reason,
@@ -132,10 +128,10 @@ mod tests {
     use reasoning_parser::{ParseError, ParserResult, ReasoningParser};
     use vllm_engine_core_client::protocol::FinishReason;
 
+    use super::super::ContentEvent;
+    use super::super::decoded::DecodedTextEvent;
     use super::reasoning_event_stream;
-    use crate::decoded::DecodedTextEvent;
     use crate::event::AssistantBlockKind;
-    use crate::pipeline::AssistantStreamEvent;
 
     struct FailingReasoningParser {
         fail_next: bool,
@@ -206,16 +202,16 @@ mod tests {
         assert_eq!(
             events,
             vec![
-                AssistantStreamEvent::Start,
-                AssistantStreamEvent::TextDelta {
+                ContentEvent::Start,
+                ContentEvent::TextDelta {
                     kind: AssistantBlockKind::Text,
                     delta: "abc".to_string(),
                 },
-                AssistantStreamEvent::TextDelta {
+                ContentEvent::TextDelta {
                     kind: AssistantBlockKind::Text,
                     delta: "def".to_string(),
                 },
-                AssistantStreamEvent::Done {
+                ContentEvent::Done {
                     token_ids: vec![],
                     finish_reason: Some(FinishReason::Stop),
                     stop_reason: None,
