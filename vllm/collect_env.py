@@ -124,7 +124,7 @@ def run(command):
         else:
             enc = locale.getpreferredencoding()
         output = raw_output.decode(enc)
-        if command == "nvidia-smi topo -m":
+        if command in ("nvidia-smi topo -m", "xpu-smi topology -m"):
             # don't remove the leading whitespace of `nvidia-smi topo -m`
             #   because they are meaningful
             output = output.rstrip()
