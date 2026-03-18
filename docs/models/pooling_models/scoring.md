@@ -1,4 +1,4 @@
-# Scoring Models
+# Scoring Usages
 
 The score models is designed to compute similarity scores between two input prompts. It supports three model types (aka `score_type`): `cross-encoder`, `late-interaction`, and `bi-encoder`.
 
@@ -6,6 +6,9 @@ The score models is designed to compute similarity scores between two input prom
     vLLM handles only the model inference component of RAG pipelines (such as embedding generation and reranking). For higher-level RAG orchestration, you should leverage integration frameworks like [LangChain](https://github.com/langchain-ai/langchain).
 
 ## Summary
+
+- Model Usage: Scoring
+- Pooling Task:
 
 | Score Types        | Pooling Tasks | scoring function         |
 |--------------------|---------------|--------------------------|
@@ -16,8 +19,8 @@ The score models is designed to compute similarity scores between two input prom
 - Offline APIs:
     - `LLM.score`
 - Online APIs:
-    - [Score API](score.md#score-api)(`/score`)
-    - [Rerank API](score.md#rerank-api) (`/rerank`, `/v1/rerank`, `/v2/rerank`)
+    - [Score API](scoring.md#score-api)(`/score`)
+    - [Rerank API](scoring.md#rerank-api) (`/rerank`, `/v1/rerank`, `/v2/rerank`)
 
 ## Supported Models
 

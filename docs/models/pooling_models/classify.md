@@ -1,11 +1,11 @@
-# Classification Models
+# Classification Usages
 
 Classification involves predicting which predefined category, class, or label best corresponds to a given input.
 
 ## Summary
 
-- Model Types: (sequence) classification models
-- Pooling Tasks: `classify`
+- Model Usage: (sequence) classification
+- Pooling Task: `classify`
 - Offline APIs:
     - `LLM.classify(...)`
     - `LLM.encode(..., pooling_task="classify")`
@@ -27,7 +27,7 @@ The most fundamental application of classification models is to categorize input
 
 ### As cross-encoder models
 
-Cross-encoder (aka reranker) models are a subset of classification models that accept two prompts as input and output num_labels equal to 1. Most [cross-encoder models](score.md#cross-encoder-models) can also be used as classification models. For more information on cross-encoder models, please refer to [this page](score.md#cross-encoder-models).
+Cross-encoder (aka reranker) models are a subset of classification models that accept two prompts as input and output num_labels equal to 1. Most [cross-encoder models](scoring.md#cross-encoder-models) can also be used as classification models. For more information on cross-encoder models, please refer to [this page](scoring.md#cross-encoder-models).
 
 ### As reward Models
 

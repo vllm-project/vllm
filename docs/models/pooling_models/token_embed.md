@@ -1,8 +1,8 @@
-# Token Embedding Models
+# Token Embedding Usages
 
 ## Summary
 
-- Model Types: Token classification models
+- Model Usage: Token classification models
 - Pooling Tasks: `token_embed`
 - Offline APIs:
     - `LLM.encode(..., pooling_task="token_embed")`
@@ -25,7 +25,7 @@ Online: [examples/pooling/token_embed/multi_vector_retrieval_online.py](../../..
 
 ### Late interaction
 
-Similarity scores can be computed using late interaction between two input prompts via the score API. For more information, see [Score API](score.md).
+Similarity scores can be computed using late interaction between two input prompts via the score API. For more information, see [Score API](scoring.md).
 
 ### Extract last hidden states
 

@@ -1,8 +1,8 @@
-# Token Classification Models
+# Token Classification Usages
 
 ## Summary
 
-- Model Types: Token classification models
+- Model Usage: token classification
 - Pooling Tasks: `token_classify`
 - Offline APIs:
     - `LLM.encode(..., pooling_task="token_classify")`

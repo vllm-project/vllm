@@ -681,7 +681,7 @@ See the link below for more information on the models supported for specific poo
 - [Reward Models](pooling_models/reward.md)
 - [Token Classification Models](pooling_models/token_classify.md)
 - [Token Embedding Models](pooling_models/token_embed.md)
-- [Score Models](pooling_models/score.md)
+- [Score Models](pooling_models/scoring.md)
 - [Specific Models](pooling_models/specific_models.md)
 
 ## Model Support Policy

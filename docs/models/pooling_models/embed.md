@@ -1,11 +1,11 @@
-# Embedding Models
+# Embedding Usages
 
 Embedding models are a class of machine learning models designed to transform unstructured data—such as text, images, or audio—into a structured numerical representation known as an embedding.
 
 ## Summary
 
-- Model Types: (sequence) embedding models
-- Pooling Tasks: `embed`
+- Model Usage: (sequence) embedding
+- Pooling Task: `embed`
 - Offline APIs:
     - `LLM.embed(...)`
     - `LLM.encode(..., pooling_task="embed")`
@@ -27,7 +27,7 @@ The most basic use case of embedding models is to embed the inputs, e.g. for RAG
 
 ### Pairwise Similarity
 
-You can compute pairwise similarity scores to build a similarity matrix using the [Score API](score.md).
+You can compute pairwise similarity scores to build a similarity matrix using the [Score API](scoring.md).
 
 ## Supported Models
 

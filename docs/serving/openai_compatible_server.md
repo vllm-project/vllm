@@ -73,9 +73,9 @@ In addition, we have the following custom APIs:
 - [Cohere Embed API](../models/pooling_models/embed.md#cohere-embed-api) (`/v2/embed`)
     - Compatible with [Cohere's Embed API](https://docs.cohere.com/reference/embed)
     - Works with any [embedding model](../models/pooling_models/embed.md#supported-models), including multimodal models.
-- [Score API](../models/pooling_models/score.md#score-api) (`/score`)
-    - Applicable to [score models](../models/pooling_models/score.md).
-- [Rerank API](../models/pooling_models/score.md#rerank-api) (`/rerank`, `/v1/rerank`, `/v2/rerank`)
+- [Score API](../models/pooling_models/scoring.md#score-api) (`/score`)
+    - Applicable to [score models](../models/pooling_models/scoring.md).
+- [Rerank API](../models/pooling_models/scoring.md#rerank-api) (`/rerank`, `/v1/rerank`, `/v2/rerank`)
     - Implements [Jina AI's v1 rerank API](https://jina.ai/reranker/)
     - Also compatible with [Cohere's v1 & v2 rerank APIs](https://docs.cohere.com/v2/reference/rerank)
     - Jina and Cohere's APIs are very similar; Jina's includes extra information in the rerank endpoint's response.
