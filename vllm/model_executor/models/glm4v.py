@@ -395,13 +395,13 @@ class GLM4VProcessingInfo(BaseProcessingInfo):
         vision_config = config.vision_config
 
         image_size = vision_config["image_size"]
+        kwargs = self.ctx.get_merged_mm_kwargs(kwargs)
         kwargs.setdefault("size", {"width": image_size, "height": image_size})
 
         return GLM4VImageProcessorFast(**kwargs)
 
     def get_hf_processor(self, **kwargs: object) -> GLM4VProcessor:
-        return self.ctx.init_processor(
-            GLM4VProcessor,
+        return GLM4VProcessor(
             tokenizer=self.get_tokenizer(),
             image_processor=self.get_image_processor(**kwargs),
         )
