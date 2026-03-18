@@ -1535,7 +1535,7 @@ def _parse_chat_message_content(
                 result_msg["reasoning"] = cast(str, reasoning)
                 result_msg["reasoning_content"] = cast(
                     str, reasoning
-                ) # keep compatibility
+                )  # keep compatibility
 
         elif role == "tool":
             parsed_msg = _ToolParser(message)
