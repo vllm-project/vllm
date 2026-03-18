@@ -423,13 +423,13 @@ class TestAudioPipelineE2E:
         # Verify channel averaging: mean of [0.5, -0.5] = 0.0
         np.testing.assert_array_almost_equal(audio_output, np.zeros(16000), decimal=5)
 
-    def test_librosa_mono_passthrough_e2e(self):
-        """Full pipeline: librosa mono format → preserved as mono."""
+    def test_pyav_mono_passthrough_e2e(self):
+        """Full pipeline: pyav mono format → preserved as mono."""
         from vllm.multimodal.parse import MultiModalDataParser
 
-        # Simulate librosa output: already mono (time,) format
-        mono_librosa = np.random.randn(16000).astype(np.float32)
-        assert mono_librosa.shape == (16000,)
+        # Simulate pyav output: already mono (time,) format
+        mono_pyav = np.random.randn(16000).astype(np.float32)
+        assert mono_pyav.shape == (16000,)
 
         # Create parser with mono normalization
         parser = MultiModalDataParser(
@@ -438,7 +438,7 @@ class TestAudioPipelineE2E:
         )
 
         # Process audio through the parser
-        result = parser._parse_audio_data((mono_librosa, 16000))
+        result = parser._parse_audio_data((mono_pyav, 16000))
         audio_output = result.get(0)
 
         # Verify output is still mono 1D
@@ -446,7 +446,7 @@ class TestAudioPipelineE2E:
         assert audio_output.shape == (16000,)
 
         # Verify audio content is preserved
-        np.testing.assert_array_almost_equal(audio_output, mono_librosa)
+        np.testing.assert_array_almost_equal(audio_output, mono_pyav)
 
     def test_multichannel_5_1_surround_to_mono_e2e(self):
         """Full pipeline: 5.1 surround (6 channels) → mono output."""
