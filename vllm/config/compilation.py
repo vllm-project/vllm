@@ -984,13 +984,6 @@ class CompilationConfig:
                 self.splitting_ops = []
             return
 
-        # NOTE: this function needs to be called only when mode is
-        # CompilationMode.VLLM_COMPILE
-        assert self.mode == CompilationMode.VLLM_COMPILE, (
-            "set_splitting_ops_for_v1 should only be called when "
-            "mode is CompilationMode.VLLM_COMPILE"
-        )
-
         if self.pass_config.fuse_attn_quant and not self.use_inductor_graph_partition:
             self.set_splitting_ops_for_attn_fusion()
         else:
@@ -1095,6 +1088,20 @@ class CompilationConfig:
         )
 
     def splitting_ops_contain_kv_cache_update(self) -> bool:
+        # when using Dynamo partition while splitting ops is None
+        # and attn+quant fusion disabled, the kv_cache_update_ops are
+        # appended to splitting_ops in set_splitting_ops_for_v1 due to
+        # https://github.com/vllm-project/vllm/issues/33267
+        # In this case, we return True if the kv_cache_update_ops
+        # are not in the splitting_ops yet, but will subsequently
+        # be added to splitting_ops.
+        if (
+            not self.use_inductor_graph_partition
+            and self.splitting_ops is None
+            and not self.pass_config.fuse_attn_quant
+        ):
+            return True
+
         kv_cache_update_ops = [
             "vllm::unified_kv_cache_update",
             "vllm::unified_mla_kv_cache_update",
