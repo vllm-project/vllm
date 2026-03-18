@@ -246,6 +246,7 @@ class CpuPlatform(Platform):
                     "size_asserts": False,
                     "nan_asserts": False,
                     "epilogue_fusion": True,
+                    "cpp.dynamic_threads": True,
                 }
             )
 
