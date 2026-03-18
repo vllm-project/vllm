@@ -5,7 +5,7 @@
 //! and translates incremental `tool-parser` output into internal tool-call
 //! events while preserving plain-text fallback behavior.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, btree_map};
 
 use futures::{StreamExt as _, pin_mut};
 use futures_async_stream::try_stream;
@@ -32,33 +32,23 @@ struct OpenToolCallState {
 
 /// Per-stream tool parsing state.
 struct ToolState {
-    /// Optional parser for the current model family.
-    parser: Option<Box<dyn ToolParser>>,
+    /// Parser for the current model family.
+    parser: Box<dyn ToolParser>,
     /// Whether tool parsing has already failed for this stream.
     parser_failed: bool,
     /// Northbound tool definitions made available to the parser.
     tools: Vec<OpenAiTool>,
-    /// Backend model ID, used for parser-specific ID conventions.
-    model_id: Option<String>,
-    /// Number of historical assistant tool calls in the request.
-    history_tool_calls_count: usize,
     /// Open tool calls keyed by the parser's tool index.
     open_calls: BTreeMap<usize, OpenToolCallState>,
 }
 
 impl ToolState {
     /// Create one fresh tool-parsing state for a new streamed response.
-    fn new(
-        request: &ChatRequest,
-        parser: Option<Box<dyn ToolParser>>,
-        model_id: Option<String>,
-    ) -> Self {
+    fn new(request: &ChatRequest, parser: Box<dyn ToolParser>) -> Self {
         Self {
             parser,
             parser_failed: false,
             tools: request.parser_tools().unwrap_or_default(),
-            model_id,
-            history_tool_calls_count: request.history_tool_call_count(),
             open_calls: BTreeMap::new(),
         }
     }
@@ -74,19 +64,13 @@ impl ToolState {
 
         // Only normal assistant text is eligible for tool parsing. Reasoning
         // blocks and plain-text fallback should pass through unchanged.
-        if kind != AssistantBlockKind::Text || self.parser.is_none() {
+        if kind != AssistantBlockKind::Text || self.parser_failed {
             self.close_all_open_calls(&mut events);
             events.push(AssistantStreamEvent::TextDelta { kind, delta });
             return events;
         }
 
-        let parse_result = {
-            let parser = self
-                .parser
-                .as_mut()
-                .expect("tool parser must exist when parsing is enabled");
-            parser.parse_incremental(&delta, &self.tools).await
-        };
+        let parse_result = self.parser.parse_incremental(&delta, &self.tools).await;
 
         match parse_result {
             Ok(result) => {
@@ -110,12 +94,10 @@ impl ToolState {
                 if !self.parser_failed {
                     warn!(
                         error = %error.as_report(),
-                        model_id = ?self.model_id,
                         "tool parser failed; falling back to plain text deltas"
                     );
                     self.parser_failed = true;
                 }
-                self.parser = None;
                 self.close_all_open_calls(&mut events);
                 events.push(AssistantStreamEvent::TextDelta { kind, delta });
             }
@@ -135,33 +117,27 @@ impl ToolState {
                 // The parser is now advancing a specific tool index, so any
                 // previously open sibling calls must be finalized first.
                 self.close_calls_not_matching(item.tool_index, events);
-                if !self.open_calls.contains_key(&item.tool_index) {
-                    let id = generate_tool_call_id(
-                        self.model_id.as_deref(),
-                        &name,
-                        item.tool_index,
-                        self.history_tool_calls_count,
-                    );
-                    self.open_calls.insert(
-                        item.tool_index,
-                        OpenToolCallState {
-                            id: id.clone(),
-                            name: name.clone(),
-                            arguments: String::new(),
-                        },
-                    );
+
+                if let btree_map::Entry::Vacant(e) = self.open_calls.entry(item.tool_index) {
+                    let id = generate_tool_call_id();
+                    e.insert(OpenToolCallState {
+                        id: id.clone(),
+                        name: name.clone(),
+                        arguments: String::new(),
+                    });
                     events.push(AssistantStreamEvent::ToolCallStart { id, name });
                 }
             }
 
             if item.parameters.is_empty() {
+                // No arguments delta to apply.
                 continue;
             }
-
             let Some(open_call) = self.open_calls.get_mut(&item.tool_index) else {
                 continue;
             };
             open_call.arguments.push_str(&item.parameters);
+
             events.push(AssistantStreamEvent::ToolCallArgumentsDelta {
                 id: open_call.id.clone(),
                 delta: item.parameters,
@@ -176,41 +152,33 @@ impl ToolState {
         keep_tool_index: usize,
         events: &mut Vec<AssistantStreamEvent>,
     ) {
-        let to_close: Vec<_> = self
-            .open_calls
-            .keys()
-            .copied()
-            .filter(|tool_index| *tool_index != keep_tool_index)
-            .collect();
-        for tool_index in to_close {
-            if let Some(open_call) = self.open_calls.remove(&tool_index) {
-                events.push(AssistantStreamEvent::ToolCallEnd {
-                    call: AssistantToolCall {
-                        id: open_call.id,
-                        name: open_call.name,
-                        arguments: open_call.arguments,
-                    },
-                });
+        let old = std::mem::take(&mut self.open_calls);
+        for (idx, open_call) in old {
+            if idx == keep_tool_index {
+                self.open_calls.insert(idx, open_call);
+            } else {
+                push_tool_call_end(events, open_call);
             }
         }
     }
 
     /// Close every currently open tool call.
     fn close_all_open_calls(&mut self, events: &mut Vec<AssistantStreamEvent>) {
-        let to_close: Vec<_> = self.open_calls.keys().copied().collect();
-        for tool_index in to_close {
-            if let Some(open_call) = self.open_calls.remove(&tool_index) {
-                let _ = tool_index;
-                events.push(AssistantStreamEvent::ToolCallEnd {
-                    call: AssistantToolCall {
-                        id: open_call.id,
-                        name: open_call.name,
-                        arguments: open_call.arguments,
-                    },
-                });
-            }
+        for (_, open_call) in std::mem::take(&mut self.open_calls) {
+            push_tool_call_end(events, open_call);
         }
     }
+}
+
+/// Emit one `ToolCallEnd` event from a completed open call.
+fn push_tool_call_end(events: &mut Vec<AssistantStreamEvent>, open_call: OpenToolCallState) {
+    events.push(AssistantStreamEvent::ToolCallEnd {
+        call: AssistantToolCall {
+            id: open_call.id,
+            name: open_call.name,
+            arguments: open_call.arguments,
+        },
+    });
 }
 
 /// Push one plain-text delta if it is non-empty.
@@ -225,26 +193,10 @@ fn push_text_delta(
     events.push(AssistantStreamEvent::TextDelta { kind, delta });
 }
 
-/// Generate the northbound tool-call ID for one parsed call.
+/// Generate the northbound tool-call ID using the OpenAI-style `call_<id>` format.
 ///
-/// Most models use an OpenAI-style `call_<id>` identifier. Kimi-family models
-/// instead mirror vLLM / SMG's `functions.{name}:{global_index}` convention,
-/// where `global_index` includes historical assistant tool calls from earlier
-/// turns.
-fn generate_tool_call_id(
-    model_id: Option<&str>,
-    function_name: &str,
-    tool_index: usize,
-    history_tool_calls_count: usize,
-) -> String {
-    if model_id.is_some_and(|model| model.to_ascii_lowercase().contains("kimi")) {
-        return format!(
-            "functions.{}:{}",
-            function_name,
-            history_tool_calls_count + tool_index
-        );
-    }
-
+/// TODO: support other ID scheme like Kimi-K2's `functions.{name}:{global_index}`.
+fn generate_tool_call_id() -> String {
     format!("call_{}", &Uuid::new_v4().simple().to_string()[..24])
 }
 
@@ -255,11 +207,18 @@ pub(crate) async fn tool_event_stream(
     stream: impl AssistantStreamEventStream,
     request: ChatRequest,
     parser: Option<Box<dyn ToolParser>>,
-    model_id: Option<String>,
 ) {
     pin_mut!(stream);
 
-    let mut state = ToolState::new(&request, parser, model_id);
+    // Without a parser, pass through the input stream unchanged.
+    let Some(parser) = parser else {
+        while let Some(event) = stream.next().await.transpose()? {
+            yield event;
+        }
+        return Ok(());
+    };
+
+    let mut state = ToolState::new(&request, parser);
 
     while let Some(event) = stream.next().await.transpose()? {
         match event {
@@ -277,8 +236,8 @@ pub(crate) async fn tool_event_stream(
                 let mut flush_events = Vec::new();
                 // Some parsers buffer a trailing arguments fragment and only
                 // expose it once streaming is complete.
-                if let Some(parser) = state.parser.as_ref()
-                    && let Some(remaining) = parser.get_unstreamed_tool_args()
+                if !state.parser_failed
+                    && let Some(remaining) = state.parser.get_unstreamed_tool_args()
                 {
                     state.process_tool_items(remaining, &mut flush_events);
                 }
@@ -312,7 +271,7 @@ mod tests {
     use tool_parser::types::{StreamingParseResult, ToolCall, ToolCallItem};
     use vllm_engine_core_client::protocol::FinishReason;
 
-    use super::{generate_tool_call_id, tool_event_stream};
+    use super::tool_event_stream;
     use crate::UserSamplingParams;
     use crate::event::{AssistantBlockKind, AssistantMessageExt as _};
     use crate::pipeline::AssistantStreamEvent;
@@ -396,7 +355,6 @@ mod tests {
             events,
             tool_request("req_fallback"),
             Some(Box::new(FailingParser { fail_next: true })),
-            Some("Qwen/Qwen3-32B".to_string()),
         )
         .collect::<Vec<_>>()
         .await;
@@ -437,13 +395,5 @@ mod tests {
         .expect("collect_message should succeed");
         assert_eq!(message.text(), "abcdef");
         assert!(message.tool_calls().next().is_none());
-    }
-
-    #[test]
-    fn kimi_tool_call_ids_include_history_offset() {
-        assert_eq!(
-            generate_tool_call_id(Some("MoonshotAI/Kimi-K2-Instruct"), "lookup", 1, 2),
-            "functions.lookup:3"
-        );
     }
 }

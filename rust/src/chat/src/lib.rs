@@ -106,12 +106,8 @@ impl ChatLlm {
             raw_stream,
         );
         let reasoning_stream = reasoning::reasoning_event_stream(decoded_stream, reasoning_parser);
-        let content_stream = tool::tool_event_stream(
-            reasoning_stream,
-            prepared.chat_request.clone(),
-            tool_parser,
-            self.backend.model_id().map(str::to_owned),
-        );
+        let content_stream =
+            tool::tool_event_stream(reasoning_stream, prepared.chat_request.clone(), tool_parser);
         let structured_stream = structured::structured_chat_event_stream(content_stream);
 
         Ok(ChatEventStream::new(

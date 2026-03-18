@@ -350,19 +350,6 @@ impl ChatRequest {
     pub(crate) fn tool_parsing_enabled(&self) -> bool {
         matches!(self.tool_choice, ChatToolChoice::Auto) && !self.tools.is_empty()
     }
-
-    /// Return the number of tool calls in the message history.
-    pub(crate) fn history_tool_call_count(&self) -> usize {
-        self.messages
-            .iter()
-            .filter_map(|message| match message {
-                ChatMessage::Assistant { content } => Some(content.tool_calls().count()),
-                ChatMessage::System { .. }
-                | ChatMessage::User { .. }
-                | ChatMessage::ToolResponse { .. } => None,
-            })
-            .sum()
-    }
 }
 
 impl ChatRole {

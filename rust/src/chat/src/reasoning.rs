@@ -18,55 +18,55 @@ use crate::pipeline::AssistantStreamEvent;
 
 /// Per-stream reasoning parsing state.
 struct ReasoningState {
-    /// Optional reasoning parser for streams whose model supports reasoning
-    /// separation.
-    reasoning_parser: Option<Box<dyn ReasoningParser>>,
+    /// Reasoning parser for the current model family.
+    parser: Box<dyn ReasoningParser>,
     /// Whether reasoning parsing has already failed for this stream.
-    reasoning_parser_failed: bool,
+    parser_failed: bool,
 }
 
 impl ReasoningState {
     /// Create one fresh reasoning-adaptation state for a new streamed response.
-    fn new(reasoning_parser: Option<Box<dyn ReasoningParser>>) -> Self {
+    fn new(parser: Box<dyn ReasoningParser>) -> Self {
         Self {
-            reasoning_parser,
-            reasoning_parser_failed: false,
+            parser,
+            parser_failed: false,
         }
     }
 
-    /// Convert one decoded text delta into zero or more semantic assistant
-    /// deltas.
+    /// Convert one decoded text delta into zero or more semantic assistant deltas.
     fn process_delta(&mut self, delta: String) -> Vec<AssistantStreamEvent> {
+        // If the parser has already failed, skip parsing and return plain text deltas.
+        if self.parser_failed {
+            return vec![AssistantStreamEvent::TextDelta {
+                kind: AssistantBlockKind::Text,
+                delta,
+            }];
+        }
+
         let mut events = Vec::new();
 
-        // If we have a reasoning parser, try to split the delta into reasoning
-        // vs. normal assistant text.
-        if let Some(parser) = self.reasoning_parser.as_mut() {
-            match parser.parse_reasoning_streaming_incremental(&delta) {
-                Ok(result) => {
-                    push_text_delta(
-                        &mut events,
-                        AssistantBlockKind::Reasoning,
-                        result.reasoning_text,
+        match self.parser.parse_reasoning_streaming_incremental(&delta) {
+            Ok(result) => {
+                push_text_delta(
+                    &mut events,
+                    AssistantBlockKind::Reasoning,
+                    result.reasoning_text,
+                );
+                push_text_delta(&mut events, AssistantBlockKind::Text, result.normal_text);
+            }
+            Err(error) => {
+                if !self.parser_failed {
+                    warn!(
+                        parser = self.parser.model_type(),
+                        error = %error.as_report(),
+                        "reasoning parser failed; falling back to plain text deltas"
                     );
-                    push_text_delta(&mut events, AssistantBlockKind::Text, result.normal_text);
-                    return events;
+                    self.parser_failed = true;
                 }
-                Err(error) => {
-                    if !self.reasoning_parser_failed {
-                        warn!(
-                            parser = parser.model_type(),
-                            error = %error.as_report(),
-                            "reasoning parser failed; falling back to plain text deltas"
-                        );
-                        self.reasoning_parser_failed = true;
-                    }
-                    self.reasoning_parser = None;
-                }
+                push_text_delta(&mut events, AssistantBlockKind::Text, delta);
             }
         }
 
-        push_text_delta(&mut events, AssistantBlockKind::Text, delta);
         events
     }
 }
@@ -92,6 +92,14 @@ pub(crate) async fn reasoning_event_stream(
 ) {
     pin_mut!(decoded_stream);
 
+    // Without a parser, pass through as plain text deltas.
+    let Some(reasoning_parser) = reasoning_parser else {
+        while let Some(event) = decoded_stream.next().await.transpose()? {
+            yield AssistantStreamEvent::from_decoded_plain_text(event);
+        }
+        return Ok(());
+    };
+
     let mut state = ReasoningState::new(reasoning_parser);
 
     while let Some(event) = decoded_stream.next().await.transpose()? {
@@ -115,5 +123,104 @@ pub(crate) async fn reasoning_event_stream(
                 };
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use futures::{StreamExt as _, stream};
+    use reasoning_parser::{ParseError, ParserResult, ReasoningParser};
+    use vllm_engine_core_client::protocol::FinishReason;
+
+    use super::reasoning_event_stream;
+    use crate::decoded::DecodedTextEvent;
+    use crate::event::AssistantBlockKind;
+    use crate::pipeline::AssistantStreamEvent;
+
+    struct FailingReasoningParser {
+        fail_next: bool,
+    }
+
+    impl ReasoningParser for FailingReasoningParser {
+        fn detect_and_parse_reasoning(&mut self, _text: &str) -> Result<ParserResult, ParseError> {
+            Ok(ParserResult::default())
+        }
+
+        fn parse_reasoning_streaming_incremental(
+            &mut self,
+            _text: &str,
+        ) -> Result<ParserResult, ParseError> {
+            if self.fail_next {
+                self.fail_next = false;
+                return Err(ParseError::ConfigError("boom".to_string()));
+            }
+
+            Ok(ParserResult::default())
+        }
+
+        fn reset(&mut self) {
+            self.fail_next = false;
+        }
+
+        fn model_type(&self) -> &str {
+            "test"
+        }
+
+        fn is_in_reasoning(&self) -> bool {
+            false
+        }
+    }
+
+    #[tokio::test]
+    async fn reasoning_parser_failure_falls_back_to_plain_text() {
+        let events = stream::iter(vec![
+            Ok(DecodedTextEvent::Start),
+            Ok(DecodedTextEvent::TextDelta {
+                delta: "abc".to_string(),
+                text: "abc".to_string(),
+            }),
+            Ok(DecodedTextEvent::TextDelta {
+                delta: "def".to_string(),
+                text: "abcdef".to_string(),
+            }),
+            Ok(DecodedTextEvent::Done {
+                text: "abcdef".to_string(),
+                token_ids: vec![],
+                finish_reason: Some(FinishReason::Stop),
+                stop_reason: None,
+            }),
+        ]);
+
+        let collected = reasoning_event_stream(
+            events,
+            Some(Box::new(FailingReasoningParser { fail_next: true })),
+        )
+        .collect::<Vec<_>>()
+        .await;
+
+        let events = collected
+            .into_iter()
+            .collect::<crate::Result<Vec<_>>>()
+            .expect("reasoning stream should not fail");
+
+        assert_eq!(
+            events,
+            vec![
+                AssistantStreamEvent::Start,
+                AssistantStreamEvent::TextDelta {
+                    kind: AssistantBlockKind::Text,
+                    delta: "abc".to_string(),
+                },
+                AssistantStreamEvent::TextDelta {
+                    kind: AssistantBlockKind::Text,
+                    delta: "def".to_string(),
+                },
+                AssistantStreamEvent::Done {
+                    token_ids: vec![],
+                    finish_reason: Some(FinishReason::Stop),
+                    stop_reason: None,
+                },
+            ]
+        );
     }
 }

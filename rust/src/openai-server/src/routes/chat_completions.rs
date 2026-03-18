@@ -82,20 +82,20 @@ async fn chat_completion_chunk_stream(
                 yield block_delta_chunk(&response_id, &response_model, created, kind, delta)
             }
             Ok(ChatEvent::BlockStart { kind, .. }) => {
-                debug!(
-                    request_id = %response_id, ?kind,
-                    "starting new block in chat completion stream"
-                );
+                debug!(request_id = %response_id, ?kind, "starting new block");
             }
             Ok(ChatEvent::BlockEnd { .. }) => {
-                debug!(
-                    request_id = %response_id,
-                    "ending current block in chat completion stream"
-                );
+                debug!(request_id = %response_id, "ending current block");
             }
             Ok(ChatEvent::ToolCallStart { id, name, .. }) => {
                 let tool_index = tool_call_indices.len() as u32;
                 tool_call_indices.insert(id.clone(), tool_index);
+                debug!(
+                    request_id = %response_id,
+                    tool_call_id = %id,
+                    tool_call_name = %name,
+                    "starting new tool call"
+                );
                 yield tool_call_start_chunk(
                     &response_id,
                     &response_model,
@@ -120,7 +120,7 @@ async fn chat_completion_chunk_stream(
                 );
             }
             Ok(ChatEvent::ToolCallEnd { .. }) => {
-                debug!(request_id = %response_id, "ending current tool call in chat completion stream");
+                debug!(request_id = %response_id, "ending current tool call");
             }
             Ok(ChatEvent::Done {
                 finish_reason: Some(finish_reason),
@@ -370,6 +370,13 @@ fn final_chunk(
             bail_server_error!("stream terminated without a valid OpenAI finish reason");
         }
     };
+
+    debug!(
+        request_id = %response_id,
+        finish_reason = %finish_reason,
+        stop_reason = ?stop_reason,
+        "chat stream finished"
+    );
 
     let matched_stop = stop_reason.map(stop_reason_to_json);
 
