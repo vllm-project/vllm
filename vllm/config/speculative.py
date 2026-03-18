@@ -3,7 +3,7 @@
 
 import ast
 import copy
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, Any, Literal, get_args
 
 from pydantic import Field, SkipValidation, model_validator
@@ -61,11 +61,23 @@ SpeculativeMethod = Literal[
 RejectionSampleMethod = Literal["strict", "probabilistic"]
 
 
-class _DraftHfOverrides(dict[str, Any]):
-    """Draft-model HF overrides that remain dict-like after config loading."""
+class _DraftHfOverrides:
+    """Compose target-model HF overrides with draft-model overrides."""
+
+    def __init__(
+        self,
+        target_hf_overrides: Mapping[str, Any]
+        | Callable[[PretrainedConfig], PretrainedConfig],
+    ) -> None:
+        self.target_hf_overrides = target_hf_overrides
 
     def __call__(self, hf_config: PretrainedConfig) -> PretrainedConfig:
-        SpeculativeConfig._apply_hf_overrides_dict(hf_config, self)
+        if isinstance(self.target_hf_overrides, Mapping):
+            SpeculativeConfig._apply_hf_overrides_dict(
+                hf_config, dict(self.target_hf_overrides)
+            )
+        else:
+            hf_config = self.target_hf_overrides(hf_config)
         return SpeculativeConfig.hf_config_override(hf_config)
 
 
@@ -387,20 +399,12 @@ class SpeculativeConfig:
     @staticmethod
     def _get_draft_hf_overrides(target_hf_overrides: Any) -> Any:
         if isinstance(target_hf_overrides, Mapping):
-            merged_overrides = _DraftHfOverrides(
-                copy.deepcopy(dict(target_hf_overrides))
-            )
-            return merged_overrides
+            if not target_hf_overrides:
+                return SpeculativeConfig.hf_config_override
+            return _DraftHfOverrides(copy.deepcopy(dict(target_hf_overrides)))
 
         if callable(target_hf_overrides):
-
-            def composed_hf_overrides(
-                hf_config: PretrainedConfig,
-            ) -> PretrainedConfig:
-                hf_config = target_hf_overrides(hf_config)
-                return SpeculativeConfig.hf_config_override(hf_config)
-
-            return composed_hf_overrides
+            return _DraftHfOverrides(target_hf_overrides)
 
         return SpeculativeConfig.hf_config_override
 
