@@ -740,10 +740,15 @@ class NixlConnectorScheduler:
             params is not None
             # Guard against repeated truncation after preemption/reschedule.
             and not params.get("_p_side_truncated")
-            and request.prompt_token_ids
-            and len(request.prompt_token_ids) > 1
+            and request.num_prompt_tokens > 1
         ):
-            request.prompt_token_ids.pop()
+            if request.prompt_token_ids is not None:
+                request.prompt_token_ids.pop()
+            elif request.prompt_embeds is not None:
+                request.prompt_embeds = request.prompt_embeds[:-1]
+            else:
+                return
+
             request._all_token_ids.pop()
             request.num_prompt_tokens -= 1
             request.max_tokens = 1
