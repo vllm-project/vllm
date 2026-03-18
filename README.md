@@ -15,7 +15,7 @@ Easy, fast, and cheap LLM serving for everyone
 </p>
 
 <p align="center">
-<b>English</b> | <a href="README_zh-CN.md">简体中文</a>
+<b>English</b> | <a href="docs/zh/README.md">简体中文</a>
 </p>
 
 🔥 We have built a vllm website to help you get started with vllm. Please visit [vllm.ai](https://vllm.ai) to learn more.

@@ -142,6 +142,15 @@ markdown_extensions:
   - pymdownx.arithmatex:
       generic: true
 
+extra:
+  alternate:
+    - name: English
+      link: /en/
+      lang: en
+    - name: 简体中文
+      link: /zh/
+      lang: zh
+
 extra_css:
   - mkdocs/stylesheets/extra.css
 
