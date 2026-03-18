@@ -643,8 +643,6 @@ class OpenAIServingResponses(OpenAIServing):
                 request_metadata,
                 messages=messages,
             )
-        except GenerationError as e:
-            return self._convert_generation_error_to_response(e)
         except Exception as e:
             return self.create_error_response(e)
 
