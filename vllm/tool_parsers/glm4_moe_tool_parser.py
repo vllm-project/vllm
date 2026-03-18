@@ -206,7 +206,12 @@ class Glm4MoeModelToolParser(ToolParser):
             )
         else:
             if len(tool_calls) > 0:
-                content = model_output[: model_output.find(self.tool_calls_start_token)]
+                content: str | None = model_output[
+                    : model_output.find(self.tool_calls_start_token)
+                ]
+                # Normalize empty/whitespace-only content to None
+                if not content or not content.strip():
+                    content = None
                 return ExtractedToolCallInformation(
                     tools_called=True, tool_calls=tool_calls, content=content
                 )
