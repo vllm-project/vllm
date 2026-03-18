@@ -106,6 +106,7 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
             kv_b_proj=self.kv_b_proj,
             use_sparse=self.is_sparse,
             indexer=self.indexer,
+            rotary_emb=self.rotary_emb,
         )
 
         self.prefix = prefix
@@ -154,10 +155,9 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
         # Add head dim of 1 to k_pe
         k_pe = k_pe.unsqueeze(1)
 
-        if self.rotary_emb is not None:
-            q[..., self.qk_nope_head_dim :], k_pe = self.rotary_emb(
-                positions, q[..., self.qk_nope_head_dim :], k_pe
-            )
+        # RoPE is now applied in impl (MLACommonImpl) to enable fused RoPE+quant
+        # for decode path. Pass raw q_pe and k_pe along with positions and
+        # cos_sin_cache for impl to apply RoPE.
 
         if self.indexer and self.is_sparse:
             _topk_indices = self.indexer(
@@ -172,6 +172,7 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
             kv_c_normed,
             k_pe,
             output_shape=(hidden_states.shape[0], self.num_heads * self.v_head_dim),
+            positions=positions,
         )
 
         return self.o_proj(attn_out)[0]

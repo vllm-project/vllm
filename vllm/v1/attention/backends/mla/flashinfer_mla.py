@@ -5,6 +5,7 @@ from typing import ClassVar
 
 import torch
 from flashinfer.decode import trtllm_batch_decode_with_kv_cache_mla
+from flashinfer.rope import mla_rope_quantize_fp8
 
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
@@ -150,6 +151,65 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
         self._workspace_buffer = g_fi_workspace
         self.bmm1_scale: float | None = None
         self.bmm2_scale: float | None = None
+
+        # Fused RoPE+FP8 quant for FP8 cache (disable with
+        # --attention-config '{"use_fused_rope_quant": false}')
+        from vllm.config import get_current_vllm_config
+
+        vllm_config = get_current_vllm_config()
+        self.use_fused_rope_quant = (
+            kv_cache_dtype.startswith("fp8")
+            and vllm_config.attention_config.use_fused_rope_quant
+        )
+
+    def _fused_rope_quant(
+        self,
+        ql_nope: torch.Tensor,
+        q_pe: torch.Tensor,
+        k_nope: torch.Tensor,
+        k_pe: torch.Tensor,
+        positions: torch.Tensor,
+        q_scale: torch.Tensor,
+        k_scale: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        assert self.rotary_emb is not None
+        L = ql_nope.shape[-1]
+        attn_dtype = torch.float8_e4m3fn
+
+        q_out = q_pe.new_empty(
+            q_pe.shape[0], q_pe.shape[1], L + q_pe.shape[2], dtype=attn_dtype
+        )
+        k_nope_out = k_nope.new_empty(k_nope.shape, dtype=attn_dtype)
+        k_pe_out = k_pe.new_empty(k_pe.shape, dtype=attn_dtype)
+
+        # Use cached fp32 cos_sin_cache to avoid bf16→fp32 cast every call
+        if not hasattr(self, "_cos_sin_cache_f32"):
+            self._cos_sin_cache_f32 = self.rotary_emb.cos_sin_cache.float()
+        cos_sin_cache_f32 = self._cos_sin_cache_f32
+
+        # Cache scale floats to avoid .item() during CUDA graph capture
+        if not hasattr(self, "_cached_q_scale"):
+            self._cached_q_scale = q_scale.item()
+            self._cached_k_scale = k_scale.item()
+
+        mla_rope_quantize_fp8(
+            q_rope=q_pe,
+            k_rope=k_pe,
+            q_nope=ql_nope,
+            k_nope=k_nope,
+            cos_sin_cache=cos_sin_cache_f32,
+            pos_ids=positions,
+            is_neox=False,
+            quantize_dtype=attn_dtype,
+            q_rope_out=q_out[..., L:],
+            q_nope_out=q_out[..., :L],
+            k_rope_out=k_pe_out,
+            k_nope_out=k_nope_out,
+            quant_scale_q=self._cached_q_scale,
+            quant_scale_kv=self._cached_k_scale,
+        )
+
+        return q_out, k_nope_out, k_pe_out
 
     def forward_mqa(
         self,
