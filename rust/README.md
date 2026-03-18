@@ -18,7 +18,7 @@ The project is organized as a Cargo workspace with 5 crates, layered bottom-up:
 ├─────────────────────────────────┤
 │  vllm-chat                      │  Chat interface: message rendering,
 │                                 │  tokenization, structured assistant
-│                                 │  events, reasoning parsing
+│                                 │  events, reasoning & tool parsing
 ├─────────────────────────────────┤
 │  vllm-llm                       │  Thin token-in/token-out facade over
 │                                 │  the engine client
