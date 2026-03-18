@@ -376,7 +376,7 @@ class InternVLProcessor(ProcessorMixin):
         start_image_token: str = "<img>",
         end_image_token: str = "</img>",
         ctx_image_token: str = "<IMG_CONTEXT>",
-        video_token: str | None = None,
+        ctx_video_token: str | None = None,
     ) -> None:
         self.image_processor = image_processor
         self.tokenizer = tokenizer
@@ -386,15 +386,15 @@ class InternVLProcessor(ProcessorMixin):
         self.start_image_token = start_image_token
         self.end_image_token = end_image_token
         self.ctx_image_token = ctx_image_token
-        self.video_token = video_token
+        self.ctx_video_token = ctx_video_token
 
         self.start_image_token_id = tokenizer.convert_tokens_to_ids(start_image_token)
         self.end_image_token_id = tokenizer.convert_tokens_to_ids(end_image_token)
         self.ctx_image_token_id = tokenizer.convert_tokens_to_ids(ctx_image_token)
-        self.video_token_id = (
+        self.ctx_video_token_id = (
             None
-            if video_token is None
-            else tokenizer.convert_tokens_to_ids(video_token)
+            if ctx_video_token is None
+            else tokenizer.convert_tokens_to_ids(ctx_video_token)
         )
 
     def resolve_target_ratios(
@@ -451,9 +451,9 @@ class InternVLProcessor(ProcessorMixin):
         return PromptUpdateDetails.select_text(repl_full, self.ctx_image_token)
 
     def get_video_repl(self, num_patches: int) -> PromptUpdateDetails[str]:
-        assert self.video_token is not None and self.video_processor is not None
+        assert self.ctx_video_token is not None
 
-        repl_features = self.video_token * self.image_seq_length
+        repl_features = self.ctx_video_token * self.image_seq_length
         repl_features_with_sep = (
             self.start_image_token + repl_features + self.end_image_token
         )
@@ -462,7 +462,7 @@ class InternVLProcessor(ProcessorMixin):
             [f"Frame{i + 1}: {repl_features_with_sep}" for i in range(num_patches)]
         )
 
-        return PromptUpdateDetails.select_text(repl_full, self.video_token)
+        return PromptUpdateDetails.select_text(repl_full, self.ctx_video_token)
 
     def __call__(
         self,

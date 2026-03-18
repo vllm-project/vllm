@@ -331,23 +331,23 @@ class InternVLProcessingInfo(BaseInternVLProcessingInfo):
         return InternVLVideoProcessor(**kwargs)
 
     @cached_property
-    def video_token(self):
+    def ctx_video_token(self):
         text_model_type = self.get_hf_config().get_text_config().model_type
-        video_token_map = {
+        ctx_video_token_map = {
             "qwen2": "<|video_pad|>",
             "qwen3": "<|video_pad|>",
             "qwen3_moe": "<|video_pad|>",
             "gpt_oss": "<|reserved_200000|>",
         }
 
-        if text_model_type not in video_token_map:
+        if text_model_type not in ctx_video_token_map:
             return None
 
-        video_token = video_token_map[text_model_type]
-        if video_token not in self.get_tokenizer().get_vocab():
+        ctx_video_token = ctx_video_token_map[text_model_type]
+        if ctx_video_token not in self.get_tokenizer().get_vocab():
             return None
 
-        return video_token
+        return ctx_video_token
 
     def get_hf_processor(self, **kwargs: object) -> InternVLProcessor:
         config = self.get_hf_config()
@@ -359,19 +359,21 @@ class InternVLProcessingInfo(BaseInternVLProcessingInfo):
         downsample_ratio = config.downsample_ratio
         image_seq_length = int((image_size // patch_size) ** 2 * (downsample_ratio**2))
 
-        video_token = self.video_token
-        video_processor = self.get_video_processor(**kwargs) if video_token else None
+        ctx_video_token = self.ctx_video_token
+        video_processor = (
+            self.get_video_processor(**kwargs) if ctx_video_token else None
+        )
 
         return InternVLProcessor(
             tokenizer=self.get_tokenizer(),
             image_processor=image_processor,
             video_processor=video_processor,
             image_seq_length=image_seq_length,
-            video_token=video_token,
+            ctx_video_token=ctx_video_token,
         )
 
     def get_supported_mm_limits(self):
-        video_limit = {"video": None} if self.video_token else {}
+        video_limit = {"video": None} if self.ctx_video_token else {}
         return {**super().get_supported_mm_limits(), **video_limit}
 
     def get_num_frames_with_most_features(
@@ -409,7 +411,7 @@ class InternVLDummyInputsBuilder(
         mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
         dummy_image = super().get_dummy_mm_data(seq_len, mm_counts, mm_options)
-        if self.info.video_token:
+        if self.info.ctx_video_token:
             config = self.info.get_hf_config()
             image_size: int = config.vision_config.image_size
             target_num_frames = self.info.get_num_frames_with_most_features(
@@ -448,7 +450,7 @@ class InternVLMultiModalProcessor(
         )
 
         hf_processor = self.info.get_hf_processor(**mm_kwargs)
-        if (video_token_id := hf_processor.video_token_id) is not None:
+        if (video_token_id := hf_processor.ctx_video_token_id) is not None:
             processed_outputs["video_token_id"] = torch.tensor(video_token_id)
 
         return processed_outputs
@@ -459,7 +461,7 @@ class InternVLMultiModalProcessor(
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
         image_fields = super()._get_mm_fields_config(hf_inputs, hf_processor_mm_kwargs)
-        if self.info.video_token:
+        if self.info.ctx_video_token:
             video_num_patches = hf_inputs.get("video_num_patches", torch.empty(0))
             num_videos = len(video_num_patches)
             video_fields = dict(
@@ -485,7 +487,7 @@ class InternVLMultiModalProcessor(
             hf_processor_mm_kwargs=hf_processor_mm_kwargs,
             out_mm_kwargs=out_mm_kwargs,
         )
-        if self.info.video_token is None:
+        if self.info.ctx_video_token is None:
             return prompt_repl
 
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
