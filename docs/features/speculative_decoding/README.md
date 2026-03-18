@@ -71,7 +71,7 @@ allowed values so that users do not have to read the source code.
 | `method` | `str` | Auto-detected | The speculative method to use. Accepted values: `"ngram"`, `"ngram_gpu"`, `"medusa"`, `"mlp_speculator"`, `"draft_model"`, `"suffix"`, `"eagle"`, `"eagle3"`, `"mtp"`, `"extract_hidden_states"`. When `model` is provided and `method` is omitted, the method is inferred from the draft model config (e.g. an EAGLE checkpoint is detected automatically). If `model` is not provided, `method` must be set explicitly. |
 | `model` | `str` | `None` | The Hugging Face model name or local path for the draft model, EAGLE head, or speculator weights. Not required for `ngram`, `ngram_gpu`, `suffix`, `mtp`, or `extract_hidden_states` methods (set automatically). |
 | `num_speculative_tokens` | `int` | From draft config, or required | The number of tokens to speculate per step. Must be **> 0**. For models with an `n_predict` field in their config (e.g. MTP, EAGLE), this defaults to that value. For suffix decoding it acts as the *maximum* and defaults to `suffix_decoding_max_tree_depth` (24). |
-| `enforce_eager` | `bool` | `None` | Override the target model's `enforce_eager` setting for the draft model. When `None`, inherits from the target model config. |
+| `enforce_eager` | `bool` | `None` | When `True`, disables CUDA graph capture for the speculative model and forces eager-mode execution. When `None` (default), CUDA graphs are used if the runtime otherwise enables them. Automatically set to `True` for DeepSeek-V3-style MTP models. |
 
 ### Draft model keys
 
