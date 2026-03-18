@@ -178,6 +178,8 @@ def fused_moe_kernel_gptq_awq(
     # Cast to int64 to prevent overflow in stride*offset products
     offs_token = tl.load(sorted_token_ids_ptr + offs_token_id).to(tl.int64)
     token_mask = offs_token < num_valid_tokens
+    # Pre-compute 2D mask to avoid MLIR dominance issues when used inside loops
+    token_mask_2d = token_mask[:, None]
 
     off_experts = tl.load(expert_ids_ptr + pid_m).to(tl.int64)
     if off_experts == -1:
@@ -246,7 +248,7 @@ def fused_moe_kernel_gptq_awq(
 
         a = tl.load(
             a_ptrs,
-            mask=token_mask[:, None] & (offs_k[None, :] < K - k * BLOCK_SIZE_K),
+            mask=token_mask_2d & (offs_k[None, :] < K - k * BLOCK_SIZE_K),
             other=0.0,
         )
         b = tl.load(b_ptrs)
@@ -307,7 +309,7 @@ def fused_moe_kernel_gptq_awq(
     # Write back the block of the output
     offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
     c_ptrs = c_ptr + stride_cm * offs_token[:, None] + stride_cn * offs_cn[None, :]
-    c_mask = token_mask[:, None] & (offs_cn[None, :] < N)
+    c_mask = token_mask_2d & (offs_cn[None, :] < N)
     tl.store(c_ptrs, accumulator, mask=c_mask)
 
 
@@ -432,6 +434,8 @@ def fused_moe_kernel(
     offs_token = offs_token.to(tl.int64)
 
     token_mask = offs_token < num_valid_tokens
+    # Pre-compute 2D mask to avoid MLIR dominance issues when used inside loops
+    token_mask_2d = token_mask[:, None]
 
     off_experts = tl.load(expert_ids_ptr + pid_m).to(tl.int64)
     if off_experts == -1:
@@ -505,7 +509,7 @@ def fused_moe_kernel(
         # K dimension.
         a = tl.load(
             a_ptrs,
-            mask=token_mask[:, None] & (offs_k[None, :] < K - k * BLOCK_SIZE_K),
+            mask=token_mask_2d & (offs_k[None, :] < K - k * BLOCK_SIZE_K),
             other=0.0,
         )
         b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0)
@@ -571,7 +575,7 @@ def fused_moe_kernel(
     # Write back the block of the output
     offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
     c_ptrs = c_ptr + stride_cm * offs_token[:, None] + stride_cn * offs_cn[None, :]
-    c_mask = token_mask[:, None] & (offs_cn[None, :] < N)
+    c_mask = token_mask_2d & (offs_cn[None, :] < N)
     tl.store(c_ptrs, accumulator, mask=c_mask)
 
 
