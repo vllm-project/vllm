@@ -218,7 +218,9 @@ class HTTPConnection:
         return self._async_client
 
     def _validate_http_url(self, url: str):
-        if parse_url(url).scheme not in ("http", "https"):
+        parsed_url = parse_url(url)
+
+        if parsed_url.scheme not in ("http", "https"):
             raise ValueError(
                 "Invalid HTTP URL: A valid HTTP URL must have scheme 'http' or 'https'."
             )
