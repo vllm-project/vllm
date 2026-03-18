@@ -122,10 +122,16 @@ def create_tool_definition(tool: ChatCompletionToolsParam | Tool):
 def get_developer_message(
     instructions: str | None = None,
     tools: list[Tool | ChatCompletionToolsParam] | None = None,
+    response_format_section: str | None = None,
 ) -> Message:
     dev_msg_content = DeveloperContent.new()
+    parts: list[str] = []
     if instructions is not None and not envs.VLLM_GPT_OSS_HARMONY_SYSTEM_INSTRUCTIONS:
-        dev_msg_content = dev_msg_content.with_instructions(instructions)
+        parts.append(instructions)
+    if response_format_section is not None:
+        parts.append(response_format_section)
+    if parts:
+        dev_msg_content = dev_msg_content.with_instructions("\n\n".join(parts))
     if tools is not None:
         function_tools: list[Tool | ChatCompletionToolsParam] = []
         for tool in tools:

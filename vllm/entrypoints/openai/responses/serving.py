@@ -519,61 +519,61 @@ class OpenAIServingResponses(OpenAIServing):
                     else:
                         context = SimpleContext()
 
-                    if self.parser and self.parser.reasoning_parser_cls is not None:
-                        reasoning_parser = self.parser.reasoning_parser_cls(tokenizer)
-                        struct_out = sampling_params.structured_outputs
+                if self.parser and self.parser.reasoning_parser_cls is not None:
+                    reasoning_parser = self.parser.reasoning_parser_cls(tokenizer)
+                    struct_out = sampling_params.structured_outputs
 
-                        if isinstance(struct_out, StructuredOutputsParams):
-                            if struct_out.all_non_structural_tag_constraints_none():
-                                # No content constraint — just apply reasoning
-                                # channel tags
-                                sampling_params.structured_outputs = replace(
-                                    struct_out,
-                                    structural_tag=(
-                                        reasoning_parser.prepare_structured_tag(
-                                            struct_out.structural_tag,
-                                            self.tool_server,
-                                        )
-                                    ),
-                                )
-                            else:
-                                # Content constraint present (json, regex,
-                                # grammar, choice, json_object). Embed it in the
-                                # final channel tag within the structural tag.
-                                content_fmt = _constraint_to_content_format(struct_out)
-                                if content_fmt is not None:
-                                    structural_tag = (
-                                        reasoning_parser.prepare_structured_tag(
-                                            None,
-                                            self.tool_server,
-                                            final_content_format=content_fmt,
-                                        )
+                    if isinstance(struct_out, StructuredOutputsParams):
+                        if struct_out.all_non_structural_tag_constraints_none():
+                            # No content constraint — just apply reasoning
+                            # channel tags
+                            sampling_params.structured_outputs = replace(
+                                struct_out,
+                                structural_tag=(
+                                    reasoning_parser.prepare_structured_tag(
+                                        struct_out.structural_tag,
+                                        self.tool_server,
                                     )
-                                    if structural_tag is not None:
-                                        # Clear content constraints, set
-                                        # structural_tag, but preserve options
-                                        # like disable_any_whitespace.
-                                        sampling_params.structured_outputs = replace(
-                                            struct_out,
-                                            json=None,
-                                            regex=None,
-                                            choice=None,
-                                            grammar=None,
-                                            json_object=None,
-                                            structural_tag=structural_tag,
-                                        )
-                        elif struct_out is None:
-                            # No structured output requested, but still need
-                            # reasoning channel tags
-                            tag = reasoning_parser.prepare_structured_tag(
-                                None, self.tool_server
+                                ),
                             )
-                            if tag is not None:
-                                sampling_params.structured_outputs = (
-                                    StructuredOutputsParams(
-                                        structural_tag=tag  # type: ignore[call-arg]
+                        else:
+                            # Content constraint present (json, regex,
+                            # grammar, choice, json_object). Embed it in the
+                            # final channel tag within the structural tag.
+                            content_fmt = _constraint_to_content_format(struct_out)
+                            if content_fmt is not None:
+                                structural_tag = (
+                                    reasoning_parser.prepare_structured_tag(
+                                        None,
+                                        self.tool_server,
+                                        final_content_format=content_fmt,
                                     )
                                 )
+                                if structural_tag is not None:
+                                    # Clear content constraints, set
+                                    # structural_tag, but preserve options
+                                    # like disable_any_whitespace.
+                                    sampling_params.structured_outputs = replace(
+                                        struct_out,
+                                        json=None,
+                                        regex=None,
+                                        choice=None,
+                                        grammar=None,
+                                        json_object=None,
+                                        structural_tag=structural_tag,
+                                    )
+                    elif struct_out is None:
+                        # No structured output requested, but still need
+                        # reasoning channel tags
+                        tag = reasoning_parser.prepare_structured_tag(
+                            None, self.tool_server
+                        )
+                        if tag is not None:
+                            sampling_params.structured_outputs = (
+                                StructuredOutputsParams(
+                                    structural_tag=tag  # type: ignore[call-arg]
+                                )
+                            )
                 generator = self._generate_with_builtin_tools(
                     request_id=request.request_id,
                     engine_prompt=engine_prompt,
@@ -1242,14 +1242,15 @@ class OpenAIServingResponses(OpenAIServing):
             needs_dev_msg = with_custom_tools or response_format_schema is not None
 
             if needs_dev_msg:
-                dev_instructions = request.instructions
+                response_format_text = None
                 if response_format_schema is not None:
-                    dev_instructions = inject_response_formats(
-                        dev_instructions, response_format_schema
+                    response_format_text = inject_response_formats(
+                        None, response_format_schema
                     )
                 dev_msg = get_developer_message(
-                    instructions=dev_instructions,
+                    instructions=request.instructions,
                     tools=request.tools if with_custom_tools else None,
+                    response_format_section=response_format_text,
                 )
                 messages.append(dev_msg)
             messages += construct_harmony_previous_input_messages(request)
