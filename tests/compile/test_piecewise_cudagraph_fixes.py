@@ -118,10 +118,11 @@ def test_cudagraph_entry_input_buffers_populated():
     entry = CUDAGraphEntry(batch_descriptor=None)  # type: ignore[arg-type]
     assert entry.input_buffers is None, "input_buffers should be None before capture"
 
-    # Simulate capture: save tensor references into input_buffers
+    # Simulate capture: clone into input_buffers (as the real code does)
     x = torch.randn(4, device="cuda")
-    entry.input_buffers = [x]
-    assert entry.input_buffers[0] is x
+    entry.input_buffers = [x.clone()]
+    assert torch.allclose(entry.input_buffers[0], x)
+    assert entry.input_buffers[0].data_ptr() != x.data_ptr()
 
     # Simulate replay with a splitting_op that allocated a new tensor
     x_new = torch.randn(4, device="cuda")

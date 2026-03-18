@@ -286,11 +286,15 @@ class CUDAGraphWrapper:
                 x.data_ptr() for x in args if isinstance(x, torch.Tensor)
             ]
             entry.input_addresses = input_addresses
-            # Save input tensor references for piecewise cudagraph support.
+            # Save input buffers for piecewise cudagraph support.
             # When a splitting_op between two pieces allocates new tensors,
             # the next piece's inputs will have different addresses. We need
             # to copy the new data into these saved buffers before replay.
-            entry.input_buffers = [x for x in args if isinstance(x, torch.Tensor)]
+            # Clone into separate tensors so we don't hold strong references
+            # to the original activation tensors (which should be freeable).
+            entry.input_buffers = [
+                x.clone() for x in args if isinstance(x, torch.Tensor)
+            ]
             cudagraph = torch.cuda.CUDAGraph()
 
             with ExitStack() as stack:
@@ -361,18 +365,23 @@ class CUDAGraphWrapper:
                     buf.copy_(arg)
 
         if self.is_debugging_mode:
-            # check if the input addresses are the same
-            # (after piecewise sync, buffers have the right data
-            # even if args point to different addresses)
             new_input_addresses = [
                 x.data_ptr() for x in args if isinstance(x, torch.Tensor)
             ]
             if new_input_addresses != entry.input_addresses:
-                logger.debug(
-                    "Input addresses changed during replay "
-                    "(piecewise splitting_op allocation). "
-                    "Data was synced via input_buffers copy."
-                )
+                if entry.input_buffers is None:
+                    # Non-piecewise mode: address change is unexpected
+                    assert False, (
+                        f"Input addresses for cudagraphs are different "
+                        f"during replay. Expected {entry.input_addresses}, "
+                        f"got {new_input_addresses}"
+                    )
+                else:
+                    logger.debug(
+                        "Input addresses changed during replay "
+                        "(piecewise splitting_op allocation). "
+                        "Data was synced via input_buffers copy."
+                    )
 
         # Sync offloader before replay - ensures any external dependencies
         # from pre-capture prefetches are satisfied.
