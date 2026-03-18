@@ -421,7 +421,7 @@ async def wait_for_batch_ready(
     session: aiohttp.ClientSession,
     rotator: EndpointRotator,
     target_running: int,
-    timeout_s: float = 120.0,
+    timeout_s: float = 1800.0,
     poll_interval_s: float = 0.1,
 ) -> bool:
     """Poll /debug/batch_info until all requests are running (in decode).
