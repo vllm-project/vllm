@@ -21,6 +21,7 @@ from vllm.v1.attention.backend import (
     AttentionLayer,
     AttentionType,
     MultipleOf,
+    is_quantized_kv_cache,
 )
 from vllm.v1.attention.backends.utils import KVCacheLayoutType
 
@@ -151,6 +152,11 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
         self.bmm1_scale: float | None = None
         self.bmm2_scale: float | None = None
 
+        # Pre-allocated output buffer, lazily sized on first call.
+        # Zero-init once to prevent NaN in padding slots (seq_lens=0)
+        # from contaminating downstream per-tensor reductions.
+        self._decode_out: torch.Tensor | None = None
+
     def forward_mqa(
         self,
         q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
@@ -181,6 +187,26 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
         if self.bmm2_scale is None:
             self.bmm2_scale = layer._v_scale_float
 
+        # Reuse pre-allocated zero-init output buffer to avoid a memset
+        # kernel on every CUDA graph replay.
+        B = q.shape[0]
+        dtype = (
+            torch.bfloat16 if is_quantized_kv_cache(self.kv_cache_dtype) else q.dtype
+        )
+        if (
+            self._decode_out is None
+            or self._decode_out.shape[0] < B
+            or self._decode_out.dtype != dtype
+        ):
+            self._decode_out = torch.zeros(
+                B,
+                q.shape[2],
+                self.kv_lora_rank,
+                dtype=dtype,
+                device=q.device,
+            )
+        out = self._decode_out[:B]
+
         o = trtllm_batch_decode_with_kv_cache_mla(
             query=q,
             kv_cache=kv_c_and_k_pe_cache.unsqueeze(1),
@@ -193,6 +219,7 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
             max_seq_len=attn_metadata.max_seq_len,
             bmm1_scale=self.bmm1_scale,
             bmm2_scale=self.bmm2_scale,
+            out=out,
         )
 
         # Flatten the output for consistent shape
