@@ -230,7 +230,8 @@ class CrossDPKVCacheCoordinatorNoPrefixCache:
                 tuple(
                     manager.allocate_new_blocks(
                         request_id,
-                        results[idx]
+                        results[idx],
+                        num_tokens_main_model
                     ) for manager in self.corss_dp_single_type_managers[rank]
                 )
             )
@@ -410,7 +411,7 @@ class CrossDPKVCacheManager:
             new_computed_block_list = self.empty_kv_cache_blocks.blocks
 
         self.coordinator.remove_skipped_blocks(
-            cp_ranks, request.request_id, total_computed_tokens
+            cp_ranks, request.request_id, request.num_computed_tokens
         )
 
         num_local_computed_tokens = (

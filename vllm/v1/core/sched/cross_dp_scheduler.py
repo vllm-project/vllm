@@ -28,7 +28,6 @@ from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.v1.core.encoder_cache_manager import (
     EncoderCacheManager,
     EncoderDecoderCacheManager,
-    compute_encoder_budget,
 )
 from vllm.v1.core.sched.dynamic_bucket_load_balancer import NoStandardBucketLoadBalancer
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
@@ -266,10 +265,11 @@ class CrossDPScheduler(Scheduler):
         # [vllm added]
         # Free any out-of-window prefix blocks before we hand the block table to
         # the connector.
-        self.kv_cache_manager.remove_skipped_blocks(
-            request_id=request.request_id,
-            total_computed_tokens=request.num_tokens,
-        )
+        # 等后续调优后再释放
+        # self.kv_cache_manager.remove_skipped_blocks(
+        #     request_id=request.request_id,
+        #     total_computed_tokens=request.num_tokens,
+        # )
 
         block_ids = self.kv_cache_manager.get_block_ids(request)
 
@@ -967,8 +967,6 @@ class CrossDPScheduler(Scheduler):
                     request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
                     continue
 
-                self._update_connector_prefix_cache_stats(request)
-                
                 self.running.append(request)
                 self.waiting.running_long_count += 1 if self.waiting.is_long_request(request) else 0
                 self.request_manager.add_req(request)
