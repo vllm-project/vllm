@@ -51,6 +51,15 @@ def _remove_noop_permutes(gm: torch.fx.GraphModule) -> None:
 
 
 def attn_fp8_static_quant(layer: Attention, dtype: torch.dtype) -> PatternReplacement:
+    """
+    Fusion for Attention+Fp8StaticQuant.
+
+    Only triggers when the attention implementation returns True in
+    `fused_output_quant_supported()`. If the pattern is found, the
+    Fp8StaticQuant op will be removed from the graph, and its scale
+    will be passed into Attention op as the `output_scale` argument.
+    """
+
     layer_name = layer.layer_name
     num_heads = layer.num_heads
     head_size = layer.head_size
@@ -114,6 +123,15 @@ def attn_fp8_static_quant(layer: Attention, dtype: torch.dtype) -> PatternReplac
 
 
 def attn_nvfp4_quant(layer: Attention, dtype: torch.dtype) -> PatternReplacement:
+    """
+    Fusion for Attention+Nvfp4Quant.
+
+    Only triggers when the attention implementation returns True in
+    `fused_output_quant_supported()`. If the pattern is found, the
+    Nvfp4Quant op will be removed from the graph, and its scale
+    will be passed into Attention op as the `output_scale` argument.
+    """
+
     layer_name = layer.layer_name
     num_heads = layer.num_heads
     head_size = layer.head_size
@@ -211,6 +229,13 @@ def build_attn_quant_patterns(config: VllmConfig) -> list[PatternReplacement]:
             for layer in layers
             if layer.impl.fused_output_quant_supported(kNvfp4Dynamic)
         ]
+
+    if len(layers) == 0:
+        logger.warning(
+            "Attention + quant fusion is enabled, but no attention layers "
+            "were found in CompilationConfig.static_forward_context "
+            "so no fusion patterns were registered."
+        )
 
     return patterns
 
