@@ -31,15 +31,12 @@ Of course, we also have "plugin" tasks that allow users to customize input and o
 
 ### Pooling Tasks
 
-```text
-Pooling Tasks
-├── Sequence-wise Tasks
-│ ├── classify – Outputs class labels 
-│ └── embed – Outputs vector representations
-└── Token-wise Tasks
-    ├── token_classify – Outputs class for each token
-    └── token_embed – Outputs vector for each token
-```
+| Type          | Pooling Tasks  | Outputs                               |
+|---------------|----------------|---------------------------------------|
+| Sequence-wise | classify       | class labels                          |
+| Sequence-wise | embed          | vector representations                |
+| Token-wise    | token_classify | class for each token                  |
+| Token-wise    | token_embed    | vector representations for each token |
 
 Within classification tasks, there is a specialized subcategory: Cross-encoder (aka reranker) models. These models are a subset of classification models that accept two prompts as input and output num_labels equal to 1.
 
@@ -68,7 +65,9 @@ For more detailed information, please refer to the link below.
 
 Each pooling model in vLLM supports one or more of these tasks according to
 [Pooler.get_supported_tasks][vllm.model_executor.layers.pooler.Pooler.get_supported_tasks],
-enabling the corresponding APIs:
+enabling the corresponding APIs.
+
+### Pooling tasks corresponding APIs
 
 | Task             | APIs                                                                       |
 |------------------|----------------------------------------------------------------------------|
@@ -100,16 +99,7 @@ It is primarily designed for [score models](score.md).
 
 The [encode][vllm.LLM.encode] method is available to all pooling models in vLLM.
 
-!!! note
-    Please use one of the more specific methods or set the task directly when using `LLM.encode`:
-
-    - For embeddings, use `LLM.embed(...)` or `pooling_task="embed"`.
-    - For classification logits, use `LLM.classify(...)` or `pooling_task="classify"`.
-    - For similarity scores, use `LLM.score(...)`.
-    - For rewards, use `LLM.reward(...)` or `pooling_task="token_classify"`.
-    - For token classification, use `pooling_task="token_classify"`.
-    - For multi-vector retrieval, use `pooling_task="token_embed"`.
-    - For IO Processor Plugins, use `pooling_task="plugin"`.
+Please use one of the more specific methods or set the task directly when using `LLM.encode`. For pooling tasks corresponding APIs, refer to the [table above](#pooling-tasks-corresponding-apis).
 
 ### Examples
 
@@ -145,18 +135,9 @@ Our Pooling API (`/pooling`) is similar to `LLM.encode`, being applicable to all
 
 The input format is the same as [Embeddings API](embed.md#openai-compatible-embeddings-api), but the output data can contain an arbitrary nested list, not just a 1-D list of floats.
 
+Please use one of the more specific APIs or set the task directly when using the Pooling API. For pooling tasks corresponding APIs, refer to the [table above](#pooling-tasks-corresponding-apis).
+
 Code example: [examples/pooling/pooling/pooling_online.py](../../../examples/pooling/pooling/pooling_online.py)
-
-!!! note
-    Please use one of the more specific APIs or set the task directly when using the Pooling API:
-
-    - For embeddings, use [Embeddings API](embed.md) or `"task":"embed"`.
-    - For classification logits, use [Classification API](classify.md) or `"task":"classify"`.
-    - For similarity scores, use [Score API](score.md).
-    - For rewards, use `"task":"token_classify"`.
-    - For token classification, use `"task":"token_classify"`.
-    - For multi-vector retrieval and token embeddings, use `"task":"token_embed"`.
-    - For IO Processor Plugins, use `"task":"plugin"`.
 
 ### Examples
 

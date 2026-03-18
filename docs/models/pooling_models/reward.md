@@ -4,9 +4,9 @@ A reward model (RM) is designed to evaluate and score the quality of outputs gen
 
 ## Supported Models
 
-### (Sequence) (Outcome) Reward Models
+### Reward Models
 
-Using sequence classification models as reward models, the usage and supported features are the same as for normal [classification models](classify.md).
+Using sequence classification models as (sequence) (outcome) reward models, the usage and supported features are the same as for normal [classification models](classify.md).
 
 | Architecture | Models | Example HF Models | [LoRA](../../features/lora.md) | [PP](../../serving/parallelism_scaling.md) |
 | ------------ | ------ | ----------------- | -------------------- | ------------------------- |
@@ -20,11 +20,11 @@ Using sequence classification models as reward models, the usage and supported f
 If your model is not in the above list, we will try to automatically convert the model using
 [as_seq_cls_model][vllm.model_executor.models.adapters.as_seq_cls_model]. By default, the class probabilities are extracted from the softmaxed hidden state corresponding to the last token.
 
-### Token (Outcome) Reward Models
+### Token Reward Models
 
 The key distinction between (sequence) classification and token classification lies in their output granularity: (sequence) classification produces a single result for an entire input sequence, whereas token classification yields a result for each individual token within the sequence.
 
-Using token classification models as reward models, the usage and supported features are the same as for normal [token classification models](token_classify.md).
+Using token classification models as token (outcome) reward models, the usage and supported features are the same as for normal [token classification models](token_classify.md).
 
 | Architecture | Models | Example HF Models | [LoRA](../../features/lora.md) | [PP](../../serving/parallelism_scaling.md) |
 | ------------ | ------ | ----------------- | -------------------- | ------------------------- |
@@ -65,7 +65,7 @@ The following [pooling parameters][vllm.PoolingParams] are supported.
 
 The [encode][vllm.LLM.encode] method is available to all pooling models in vLLM.
 
-- (Sequence) (Outcome) Reward Models
+- Reward Models
 
 Set `pooling_task="classify"` when using `LLM.encode` for (sequence) (outcome) reward models:
 
@@ -79,7 +79,7 @@ data = output.outputs.data
 print(f"Data: {data!r}")
 ```
 
-- Token (Outcome) Reward Models
+- Token Reward Models
 
 Set `pooling_task="token_classify"` when using `LLM.encode` for token (outcome) reward models:
 

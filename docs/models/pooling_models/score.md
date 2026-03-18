@@ -13,7 +13,7 @@ This functionality is supported through the offline `LLM.score(...)` API, along 
 
 [Cross-encoder](https://www.sbert.net/examples/applications/cross-encoder/README.html) (aka reranker) models are a subset of classification models that accept two prompts as input and output num_labels equal to 1.
 
-- Text only models
+### Text only models
 
 | Architecture | Models | Example HF Models | Score template (see note) | [LoRA](../../features/lora.md) | [PP](../../serving/parallelism_scaling.md) |
 | ------------ | ------ | ----------------- | ------------------------- | --------------------------- | --------------------------------------- |
@@ -61,7 +61,7 @@ This functionality is supported through the offline `LLM.score(...)` API, along 
     vllm serve Qwen/Qwen3-Reranker-0.6B --hf_overrides '{"architectures": ["Qwen3ForSequenceClassification"],"classifier_from_token": ["no", "yes"],"is_original_qwen3_reranker": true}'
     ```
 
-- Multimodal Models
+### Multimodal Models
 
 !!! note
     For more information about multimodal models inputs, see [this page](../supported_models.md#list-of-multimodal-language-models).

@@ -26,7 +26,7 @@ Models of any architecture can be converted into embedding models using `--conve
 
 ## Supported Models
 
-- Text only models
+### Text only models
 
 | Architecture | Models | Example HF Models | [LoRA](../../features/lora.md) | [PP](../../serving/parallelism_scaling.md) |
 | ------------ | ------ | ----------------- | -------------------- | ------------------------- |
@@ -35,7 +35,7 @@ Models of any architecture can be converted into embedding models using `--conve
 | `HF_ColBERT` | BERT | `answerdotai/answerai-colbert-small-v1`, `colbert-ir/colbertv2.0` | | |
 | `*Model`<sup>C</sup>, `*ForCausalLM`<sup>C</sup>, etc. | Generative models | N/A | \* | \* |
 
-- Multimodal Models
+### Multimodal Models
 
 !!! note
     For more information about multimodal models inputs, see [this page](../supported_models.md#list-of-multimodal-language-models).

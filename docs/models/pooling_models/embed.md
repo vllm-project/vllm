@@ -20,7 +20,7 @@ You can compute pairwise similarity scores to build a similarity matrix using th
 
 ## Supported Models
 
-- Text only models
+### Text only models
 
 | Architecture | Models | Example HF Models | [LoRA](../../features/lora.md) | [PP](../../serving/parallelism_scaling.md) |
 | ------------ | ------ | ----------------- | ------------------------------ | ------------------------------------------ |
@@ -60,7 +60,7 @@ You can compute pairwise similarity scores to build a similarity matrix using th
 !!! note
     `jinaai/jina-embeddings-v3` supports multiple tasks through LoRA, while vllm temporarily only supports text-matching tasks by merging LoRA weights.
 
-- Multimodal Models
+### Multimodal Models
 
 !!! note
     For more information about multimodal models inputs, see [this page](../supported_models.md#list-of-multimodal-language-models).

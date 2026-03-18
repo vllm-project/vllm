@@ -14,17 +14,17 @@ Many classification models support both (sequence) classification and token clas
 
 The most fundamental application of classification models is to categorize input data into predefined classes.
 
-### Cross-encoder models
+### As cross-encoder models
 
-Cross-encoder (aka reranker) models are a subset of classification models that accept two prompts as input and output num_labels equal to 1. For more information on cross-encoder models, , please refer to [this page](score.md#cross-encoder-models).
+Cross-encoder (aka reranker) models are a subset of classification models that accept two prompts as input and output num_labels equal to 1. For more information on cross-encoder models, please refer to [this page](score.md#cross-encoder-models).
 
-### Reward Models
+### As reward Models
 
-For more information, see [Reward Models](reward.md).
+Using (sequence) classification models as reward models, For more information, see [Reward Models](reward.md).
 
 ## Supported Models
 
-- Text only models
+### Text only models
 
 | Architecture | Models | Example HF Models | [LoRA](../../features/lora.md) | [PP](../../serving/parallelism_scaling.md) |
 | ------------ | ------ | ----------------- | ------------------------------ | ------------------------------------------ |
@@ -36,7 +36,7 @@ For more information, see [Reward Models](reward.md).
 !!! note
     Most [cross-encoder models](score.md#cross-encoder) can also be used as classification models.
 
-- Multimodal Models
+### Multimodal Models
 
 !!! note
     For more information about multimodal models inputs, see [this page](../supported_models.md#list-of-multimodal-language-models).
