@@ -377,10 +377,10 @@ class Glm4MoeModelToolParser(ToolParser):
                         full_args_str = self.streamed_args_for_tool[
                             self.current_tool_id
                         ]
-                        args_dict = json.loads(full_args_str)
+                        json.loads(full_args_str)  # validate JSON
                         self.prev_tool_call_arr[self.current_tool_id] = {
                             "name": self._current_tool_name,
-                            "arguments": args_dict,
+                            "arguments": full_args_str,
                         }
                     except (json.JSONDecodeError, IndexError) as e:
                         logger.warning(
@@ -454,7 +454,7 @@ class Glm4MoeModelToolParser(ToolParser):
     def _emit_tool_name_delta(self, tool_name: str) -> DeltaMessage:
         self.prev_tool_call_arr[self.current_tool_id] = {
             "name": self._current_tool_name,
-            "arguments": {},
+            "arguments": "{}",
         }
         return DeltaMessage(
             tool_calls=[
