@@ -770,13 +770,9 @@ class ModuleName(OpaqueBase):  # type: ignore[misc]
 
 
 if HAS_OPAQUE_TYPE:
-    from torch._library.opaque_object import MemberType, register_opaque_type
+    from torch._library.opaque_object import register_opaque_type
 
-    register_opaque_type(ModuleName,
-                         typ="value",
-                         hoist=True,
-                         members={"value": MemberType.USE_REAL})
-
+    register_opaque_type(ModuleName, typ="value", hoist=True)
 
 # Supports xccl with PyTorch versions >= 2.8.0.dev for XPU platform
 def supports_xccl() -> bool:
