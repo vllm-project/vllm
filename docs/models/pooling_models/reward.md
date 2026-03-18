@@ -58,7 +58,6 @@ The process reward models used for evaluating intermediate steps are crucial to 
 | token (outcome) reward models      | token_classify |
 | process reward model               | token_classify |
 
-
 ## Offline Inference
 
 ### Pooling Parameters
