@@ -186,7 +186,7 @@ class TrainModel:
 # Build platform-specific env vars for Ray
 ray_env_vars = {
     # Prevent Ray from setting CUDA_VISIBLE_DEVICES
-    "RAY_EXPERIMENTAL_NOSET_CUDA_ENV_VAR": "1",
+    "RAY_EXPERIMENTAL_NOSET_CUDA_ENV_VAR": "1"
 }
 
 if current_platform.is_rocm():

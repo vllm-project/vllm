@@ -12,7 +12,12 @@ _TORCH_CUDA_PATTERNS = [
     r"\bwith\storch\.cuda\.device\b",
 ]
 
-ALLOWED_FILES = {"vllm/platforms/", "vllm/device_allocator/"}
+ALLOWED_FILES = {
+    "vllm/platforms/",
+    "vllm/device_allocator/",
+    "vllm/distributed/weight_transfer/ipc_engine.py",
+    "tests/distributed/test_packed_tensor.py",
+}
 
 
 def scan_file(path: str) -> int:

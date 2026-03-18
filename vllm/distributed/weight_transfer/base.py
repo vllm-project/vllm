@@ -33,6 +33,12 @@ class WeightTransferUpdateInfo(ABC):  # noqa: B024
     """Set to True if weights are in checkpoint/original model format and need
     layerwise processing. Set to False if weights have already been processed
     into kernel format (repacking, renaming, etc.)."""
+    run_initialize_layerwise_reload: bool = True
+    """Whether to call initialize_layerwise_reload before loading weights.
+    Set to False for middle/last chunks in a multi-call streaming transfer."""
+    run_finalize_layerwise_reload: bool = True
+    """Whether to call finalize_layerwise_reload after loading weights.
+    Set to False for first/middle chunks in a multi-call streaming transfer."""
 
 
 # API-level request classes (accept dicts for backend-agnostic serialization)
