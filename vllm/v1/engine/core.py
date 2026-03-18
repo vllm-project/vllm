@@ -645,9 +645,8 @@ class EngineCore:
         if self.scheduler:
             self.scheduler.shutdown()
 
-    def profile(self, is_start: bool = True, profile_prefix: str | None = None,
-                delay: int = 0, max_steps: int = 0):
-        results = self.model_executor.profile(is_start, profile_prefix, delay=delay)
+    def profile(self, is_start: bool = True, profile_prefix: str | None = None, max_steps: int = 0):
+        results = self.model_executor.profile(is_start, profile_prefix)
         if is_start and max_steps > 0:
             self._profiling_steps_remaining = max_steps
         elif not is_start:

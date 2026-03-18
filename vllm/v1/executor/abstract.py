@@ -247,9 +247,8 @@ class Executor(ABC):
         return 1
 
     def profile(self, is_start: bool = True, profile_prefix: str | None = None,
-                delay: int = 0, max_steps: int = 0):
-        return self.collective_rpc("profile", args=(is_start, profile_prefix),
-                            kwargs={"delay": delay})
+                max_steps: int = 0):
+        return self.collective_rpc("profile", args=(is_start, profile_prefix))
 
     def save_sharded_state(
         self,
