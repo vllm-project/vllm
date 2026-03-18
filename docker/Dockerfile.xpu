@@ -85,7 +85,10 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         --index-strategy unsafe-best-match \
         --extra-index-url ${PIP_EXTRA_INDEX_URL} \
         --python-version ${PYTHON_VERSION} && \
-    \
+    uv pip install grpcio-tools protobuf nanobind && \
+    source /opt/intel/oneapi/setvars.sh --force && \
+    source /opt/intel/oneapi/ccl/2021.15/env/vars.sh --force && \
+    export CMAKE_PREFIX_PATH="$(python3 -c 'import site; print(site.getsitepackages()[0])'):${CMAKE_PREFIX_PATH}" && \
     uv pip install --no-build-isolation -r /workspace/vllm/requirements/xpu-test.txt
 
 

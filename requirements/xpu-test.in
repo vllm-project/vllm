@@ -7,8 +7,6 @@ pytest-rerunfailures
 pytest-shard
 
 # --- Core Tools & Bindings ---
-grpcio-tools
-nanobind
 absl-py
 arctic-inference
 

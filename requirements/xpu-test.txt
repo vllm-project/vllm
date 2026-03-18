@@ -13,9 +13,6 @@ pytest-forked==1.6.0
 pytest-rerunfailures==14.0
 pytest-shard==0.1.2
 
-grpcio-tools>=1.76.0
-nanobind
-
 arctic-inference==0.1.1
 
 # Required for audio processing tests
