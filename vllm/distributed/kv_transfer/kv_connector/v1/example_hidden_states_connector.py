@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import fcntl
 import os
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Optional
 
-import safetensors
 import torch
 
 from vllm.config import VllmConfig, get_layers_from_vllm_config
@@ -37,6 +38,26 @@ def extract_from_kv_cache(
     padded_kv = kv_cache.flatten(0, 1)[slot_mapping]
     # shape: [len(slot_mapping), num_heads, head_size]
     return padded_kv[:num_tokens]  # shape: [num_tokens, num_heads, head_size]
+
+
+def load_hidden_states(path: str) -> dict[str, torch.Tensor]:
+    """Load hidden states written by ExampleHiddenStatesConnector.
+
+    Blocks (without polling) until the async write is complete by
+    acquiring a shared flock on the companion lock file.  The kernel
+    puts the caller to sleep until the writer releases its exclusive lock.
+
+    Args:
+        path: The file path returned in kv_transfer_params["hidden_states_path"].
+
+    Returns:
+        Dict with "hidden_states" and "token_ids" tensors.
+    """
+    lock_path = path + ".lock"
+    with open(lock_path) as lf:
+        fcntl.flock(lf, fcntl.LOCK_SH)  # sleeps until writer releases LOCK_EX
+        data = torch.load(path, map_location="cpu")
+    return data
 
 
 @dataclass
@@ -148,17 +169,67 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1):
         self._active_requests: dict[str, NewRequestData] = {}
         self._req_blocks: dict[str, list[int]] = {}
 
+        # Async write infrastructure (worker-side).
+        # Dedicated CUDA stream for DtoH copies so they don't block
+        # the default stream (model forward). Thread pool for disk writes.
+        self._copy_stream: torch.cuda.Stream | None = None  # lazy init
+        self._executor = ThreadPoolExecutor(
+            max_workers=8, thread_name_prefix="vllm-hs-save"
+        )
+        # (tensors_dict, copy_done_event, filename, req_id) queued by
+        # save_kv_layer, submitted to thread pool by wait_for_save.
+        self._pending_copies: list[
+            tuple[dict[str, torch.Tensor], torch.cuda.Event, str, str]
+        ] = []
+        # req_id → most recent in-flight Future for that req_id.
+        self._req_futures: dict[str, Future] = {}
+        # req_ids reported as finished-generating by the scheduler,
+        # accumulated across get_finished calls.
+        self._accumulated_finished_req_ids: set[str] = set()
+
+    def _get_copy_stream(self) -> torch.cuda.Stream:
+        """Lazily create the copy stream (CUDA must be initialized)."""
+        if self._copy_stream is None:
+            self._copy_stream = torch.cuda.Stream()
+        return self._copy_stream
+
     # ==============================
     # Worker-side methods
     # ==============================
     def start_load_kv(self, *args, **kwargs: Any) -> None:
-        pass  # Empty implementation of abstract method
+        pass  # Store-only connector — nothing to load
 
     def wait_for_layer_load(self, layer_name: str) -> None:
-        pass  # Empty implementation of abstract method
+        pass  # Store-only connector — nothing to load
 
     def wait_for_save(self):
-        pass  # Empty implementation of abstract method
+        """Submit pending async copies to the thread pool for disk write.
+
+        For each pending write we acquire an exclusive flock on a
+        companion ``.lock`` file **before** submitting to the thread pool.
+        The thread worker releases the lock after the data file is fully
+        written.  Clients call :func:`load_hidden_states` which takes a
+        shared flock — the kernel sleeps the client until the writer is
+        done.  Because ``wait_for_save`` runs before the worker returns
+        output to the scheduler, the lock file is guaranteed to exist
+        (and be held) by the time the client receives the path.
+        """
+        for tensors, event, filename, req_id in self._pending_copies:
+            prior = self._req_futures.get(req_id)
+            assert prior is None, "Found another KV transfer request with same req_id!"
+
+            # Create/open the lock file and acquire an exclusive lock.
+            # The lock is held by this fd; the thread worker will close
+            # the fd after writing, which releases the lock.
+            lock_path = filename + ".lock"
+            lock_fd = os.open(lock_path, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o644)
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+
+            future = self._executor.submit(
+                self._write_tensors, tensors, event, filename, lock_fd
+            )
+            self._req_futures[req_id] = future
+        self._pending_copies.clear()
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         from vllm.model_executor.models.extract_hidden_states import (
@@ -174,6 +245,25 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1):
             f"Expected 1 CacheOnlyAttentionLayer, got {len(self.cache_layers)}"
         )
 
+    @staticmethod
+    def _write_tensors(
+        tensors: dict[str, torch.Tensor],
+        event: torch.cuda.Event,
+        filename: str,
+        lock_fd: int,
+    ) -> None:
+        """Thread worker: wait for async DtoH copy, write to disk, release lock.
+
+        ``lock_fd`` is an open file descriptor on the companion ``.lock``
+        file with ``LOCK_EX`` already held.  Closing it releases the lock,
+        which unblocks any client sleeping on ``LOCK_SH``.
+        """
+        try:
+            event.synchronize()
+            torch.save(tensors, filename)
+        finally:
+            os.close(lock_fd)  # releases LOCK_EX
+
     def save_kv_layer(
         self,
         layer_name: str,
@@ -183,6 +273,10 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1):
     ) -> None:
         """Start saving the KV cache of the layer from vLLM's paged buffer
         to the connector.
+
+        Launches an async DtoH copy on a dedicated CUDA stream.  The
+        actual disk write is deferred to wait_for_save() which submits
+        it to a thread pool.
 
         Args:
             layer_name (str): the name of the layer.
@@ -206,15 +300,46 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1):
         assert isinstance(connector_metadata, ExampleHiddenStatesConnectorMetadata)
 
         os.makedirs(self._storage_path, exist_ok=True)
+
+        copy_stream = self._get_copy_stream()
+
+        # Ensure the copy stream sees all prior writes on the default stream.
+        ready_event = torch.cuda.Event()
+        ready_event.record()
+        copy_stream.wait_event(ready_event)
+
         for request in connector_metadata.requests:
-            hidden_states = extract_from_kv_cache(
-                kv_layer, request.slot_mapping, request.token_ids.shape[0]
+            with torch.cuda.stream(copy_stream):
+                # Move the CPU slot_mapping to GPU on the copy stream so the
+                # implicit H2D inside fancy indexing doesn't sync the default
+                # stream.
+                slot_mapping_gpu = request.slot_mapping.to(
+                    device=kv_layer.device, non_blocking=True
+                )
+                hidden_states_gpu = extract_from_kv_cache(
+                    kv_layer, slot_mapping_gpu, request.token_ids.shape[0]
+                )
+                # Async DtoH copy into pinned host memory.
+                pinned_hs = torch.empty_like(
+                    hidden_states_gpu, device="cpu", pin_memory=True
+                )
+                pinned_hs.copy_(hidden_states_gpu, non_blocking=True)
+
+            # Record completion of this copy on the copy stream.
+            copy_done = torch.cuda.Event()
+            copy_done.record(copy_stream)
+
+            # token_ids is already on CPU (created in ReqMeta.make_meta).
+            assert not request.token_ids.is_cuda, (
+                "Expected token_ids on CPU, got CUDA tensor"
             )
             tensors = {
-                "hidden_states": hidden_states.detach().cpu(),
-                "token_ids": request.token_ids.detach().cpu(),
+                "hidden_states": pinned_hs,
+                "token_ids": request.token_ids.clone(),
             }
-            safetensors.torch.save_file(tensors, request.filename)
+            self._pending_copies.append(
+                (tensors, copy_done, request.filename, request.req_id)
+            )
 
     # ==============================
     # Scheduler-side methods
@@ -264,7 +389,7 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1):
         meta = ExampleHiddenStatesConnectorMetadata()
         for new_req in scheduler_output.scheduled_new_reqs:
             token_ids = new_req.prompt_token_ids or []
-            filename = os.path.join(self._storage_path, f"{new_req.req_id}.safetensors")
+            filename = os.path.join(self._storage_path, f"{new_req.req_id}.pt")
             meta.add_request(
                 new_req.req_id,
                 filename=filename,
@@ -329,7 +454,31 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1):
         _ = self._active_requests.pop(req_id, None)
         _ = self._req_blocks.pop(req_id, None)
 
-        return False, {"hidden_states_path": req_filename}
+        return True, {"hidden_states_path": req_filename}
+
+    def get_finished(
+        self, finished_req_ids: set[str]
+    ) -> tuple[set[str] | None, set[str] | None]:
+        """Poll async write completion for requests that finished generating.
+
+        The scheduler passes finished_req_ids to tell the worker which
+        requests are done generating.  We accumulate these across calls
+        and return a request as "finished sending" once its disk write
+        Future is complete (or if it never had a pending write).
+        """
+        self._accumulated_finished_req_ids.update(finished_req_ids)
+
+        done_sending: set[str] = set()
+        for req_id in list(self._accumulated_finished_req_ids):
+            future = self._req_futures.get(req_id)
+            if future is None or future.done():
+                if future is not None:
+                    future.result()  # propagate write exceptions
+                    del self._req_futures[req_id]
+                done_sending.add(req_id)
+                self._accumulated_finished_req_ids.discard(req_id)
+
+        return done_sending or None, None
 
     @classmethod
     def get_required_kvcache_layout(cls, vllm_config: "VllmConfig") -> str | None:

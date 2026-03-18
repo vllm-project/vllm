@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import numpy as np
 import torch
 import torch.nn as nn
 
@@ -12,8 +13,10 @@ from vllm.config import CUDAGraphMode, VllmConfig, get_layers_from_vllm_config
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.model_loader import get_model
+from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.attention.backend import AttentionMetadataBuilder, CommonAttentionMetadata
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
+from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.dp_utils import coordinate_batch_across_dp
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
@@ -47,6 +50,14 @@ class ExtractHiddenStatesProposer:
         max_batch_size = vllm_config.scheduler_config.max_num_seqs
         self.max_num_tokens = (
             vllm_config.scheduler_config.max_num_batched_tokens + max_batch_size
+        )
+
+        self.backup_next_token_ids = CpuGpuBuffer(
+            max_batch_size,
+            dtype=torch.int32,
+            pin_memory=is_pin_memory_available(),
+            device=device,
+            with_numpy=True,
         )
 
         self.hf_config = vllm_config.speculative_config.draft_model_config.hf_config
@@ -300,19 +311,19 @@ class ExtractHiddenStatesProposer:
         (if valid and not discarded) or a backup token from the request state.
         """
         num_reqs = gpu_input_batch.num_reqs
-        device = sampled_token_ids.device
 
         # Compute backup tokens for discarded / invalid requests
-        backup_tokens_gpu = torch.tensor(
+        self.backup_next_token_ids.np[:num_reqs] = np.array(
             [
                 requests[gpu_input_batch.req_ids[i]].get_token_id(
                     common_attn_metadata.seq_lens_cpu[i].item()
                 )
                 for i in range(num_reqs)
             ],
-            dtype=torch.int32,
-            device=device,
+            dtype=np.int32,
         )
+        self.backup_next_token_ids.copy_to_gpu(num_reqs)
+        backup_tokens_gpu = self.backup_next_token_ids.gpu[:num_reqs]
 
         assert discard_request_mask.dtype == torch.bool
 
