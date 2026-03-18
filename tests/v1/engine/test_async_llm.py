@@ -7,6 +7,7 @@ from contextlib import ExitStack
 from unittest.mock import MagicMock
 
 import pytest
+import torch
 
 from vllm import PoolingParams, SamplingParams
 from vllm.assets.image import ImageAsset
@@ -105,15 +106,17 @@ async def test_encode_accepts_pooling_task():
     class FakeCollector:
         def __init__(self):
             self.request_id = "request-1"
-            self._output = PoolingRequestOutput(
-                request_id="request-1",
-                outputs=PoolingOutput(data=torch.empty(0)),
-                prompt_token_ids=[],
-                num_cached_tokens=0,
-                finished=True,
+            self._output: PoolingRequestOutput[PoolingOutput] | None = (
+                PoolingRequestOutput(
+                    request_id="request-1",
+                    outputs=PoolingOutput(data=torch.empty(0)),
+                    prompt_token_ids=[],
+                    num_cached_tokens=0,
+                    finished=True,
+                )
             )
 
-        def get_nowait(self):
+        def get_nowait(self) -> PoolingRequestOutput[PoolingOutput] | None:
             output, self._output = self._output, None
             return output
 
