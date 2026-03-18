@@ -254,6 +254,7 @@ class HelionKernelWrapper:
         op_name: str,
         fake_impl: Callable,
         config_picker: Callable[[tuple[Any, ...], list[str]], str | None],
+        mutates_args: list[str] | None = None,
         helion_settings: "helion.Settings | None" = None,
         input_generator: Callable[[], dict[str, tuple[Any, ...]]] | None = None,
     ):
@@ -266,6 +267,7 @@ class HelionKernelWrapper:
         self.helion_settings = helion_settings
         self._config_picker = config_picker
         self._input_generator = input_generator
+        self._mutates_args = mutates_args
         self._configured_kernel: ConfiguredHelionKernel | None = None
         # TODO(@gmagogsfm): Remove this disable flag once integrated with vLLM IR,
         # which handles op enablement/disablement.
@@ -415,7 +417,7 @@ class HelionKernelWrapper:
         direct_register_custom_op(
             op_name=self.op_name,
             op_func=configured_kernel._decorated_kernel,
-            mutates_args=None,
+            mutates_args=self._mutates_args,
             fake_impl=self._fake_impl,
             target_lib=vllm_helion_lib,
         )
@@ -460,6 +462,8 @@ def register_kernel(
     *,
     config_picker: Callable[[tuple[Any, ...], list[str]], str | None],
     fake_impl: Callable | None = None,
+    # WARNING: mutates_args will be deprecated later when CustomOp path is removed
+    mutates_args: list[str] | None = None,
     helion_settings: "helion.Settings | None" = None,
     input_generator: Callable[[], dict[str, tuple[Any, ...]]] | None = None,
 ) -> Callable[[Callable], HelionKernelWrapper]:
@@ -521,6 +525,7 @@ def register_kernel(
             op_name=final_op_name,
             fake_impl=final_fake_impl,
             config_picker=config_picker,
+            mutates_args=mutates_args,
             helion_settings=helion_settings,
             input_generator=input_generator,
         )
