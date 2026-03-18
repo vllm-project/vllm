@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import ParamSpec
 
 import torch
 from torch._higher_order_ops.auto_functionalize import auto_functionalized
@@ -23,7 +22,7 @@ from .matcher_utils import MatcherQuantFP8
 from .rms_quant_fusion import QUANT_OPS, empty_bf16, empty_fp32, empty_i32
 
 logger = init_logger(__name__)
-P = ParamSpec("P")
+
 FP8_DTYPE = current_platform.fp8_dtype()
 FP4_DTYPE = torch.uint8
 

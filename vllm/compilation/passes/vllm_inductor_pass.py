@@ -6,7 +6,7 @@ import time
 from collections import defaultdict
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Generic, ParamSpec, TypeVar
 
 import regex as re
 import torch
@@ -181,10 +181,14 @@ class VllmPatternMatcherPass(VllmInductorPass):
                     print(f"{pattern_repr}\n", file=f)
 
 
+P = ParamSpec("P")
+R = TypeVar("R")
+
+
 @dataclass(eq=False)
-class PatternReplacement:
-    pattern: Callable
-    replacement: Callable
+class PatternReplacement(Generic[P, R]):
+    pattern: Callable[P, R]
+    replacement: Callable[P, R]
     inputs: list[torch.Tensor]
 
 
