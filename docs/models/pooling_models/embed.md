@@ -20,7 +20,7 @@ You can compute pairwise similarity scores to build a similarity matrix using th
 
 ## Supported Models
 
-### Text only models
+### Text-only Models
 
 | Architecture | Models | Example HF Models | [LoRA](../../features/lora.md) | [PP](../../serving/parallelism_scaling.md) |
 | ------------ | ------ | ----------------- | ------------------------------ | ------------------------------------------ |

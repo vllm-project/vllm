@@ -16,7 +16,7 @@ The most fundamental application of classification models is to categorize input
 
 ## Supported Models
 
-### Text only models
+### Text-only Models
 
 | Architecture | Models | Example HF Models | [LoRA](../../features/lora.md) | [PP](../../serving/parallelism_scaling.md) |
 | ------------ | ------ | ----------------- | ------------------------------ | ------------------------------------------ |

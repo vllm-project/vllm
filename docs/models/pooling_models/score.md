@@ -13,7 +13,7 @@ This functionality is supported through the offline `LLM.score(...)` API, along 
 
 [Cross-encoder](https://www.sbert.net/examples/applications/cross-encoder/README.html) (aka reranker) models are a subset of classification models that accept two prompts as input and output num_labels equal to 1.
 
-#### Text only models
+#### Text-only Models
 
 | Architecture | Models | Example HF Models | Score template (see note) | [LoRA](../../features/lora.md) | [PP](../../serving/parallelism_scaling.md) |
 | ------------ | ------ | ----------------- | ------------------------- | --------------------------- | --------------------------------------- |

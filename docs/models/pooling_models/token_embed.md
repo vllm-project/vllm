@@ -26,7 +26,7 @@ Models of any architecture can be converted into embedding models using `--conve
 
 ## Supported Models
 
-### Text only models
+### Text-only Models
 
 | Architecture | Models | Example HF Models | [LoRA](../../features/lora.md) | [PP](../../serving/parallelism_scaling.md) |
 | ------------ | ------ | ----------------- | -------------------- | ------------------------- |
