@@ -94,7 +94,7 @@ class SharedExperts:
                 self._moe_config.moe_parallel_config.enable_eplb
                 and backend != "allgather_reducescatter"
             )
-            or self._moe_config.moe_parallel_config.use_fi_all2allv_kernels
+            or self._moe_config.moe_parallel_config.use_fi_nvl_two_sided_kernels
         )
 
     @property

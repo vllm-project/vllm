@@ -942,7 +942,6 @@ class FusedMoEParallelConfig:
         return (
             self.use_deepep_ll_kernels
             or self.use_mori_kernels
-            or self.use_fi_all2allv_kernels
             or self.use_fi_nvl_two_sided_kernels
             or self.use_nixl_ep_kernels
         ) and envs.VLLM_ENABLE_MOE_DP_CHUNK
