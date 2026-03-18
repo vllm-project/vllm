@@ -3,19 +3,22 @@
 import functools
 import operator
 import time
-from collections.abc import Callable
+from collections import defaultdict
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import ClassVar
+from typing import Any, ClassVar
 
 import regex as re
 import torch
+import torch._inductor.pattern_matcher as pm
+from torch import fx
 from torch._dynamo.utils import lazy_format_graph_code
 from torch._inductor.pattern_matcher import PatternMatcherPass, PatternPrettyPrinter
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 
-from .inductor_pass import InductorPass
+from .inductor_pass import InductorPass, enable_fake_mode
 
 logger = init_logger(__name__)
 
@@ -82,14 +85,14 @@ class VllmInductorPass(InductorPass):
 class VllmPatternMatcherPass(VllmInductorPass):
     """
     A VllmInductorPass that uses the Inductor pattern matcher.
-    Its main use is providing the dump_patterns utility that dumps the
-    Inductor pattern matcher patterns into a file, which greatly aids debugging.
-
-    TODO(luka) move more utilities to this pass.
+    Provides pattern registration with match counting, debug dumping, and logging.
     """
 
     matched_count: int = 0
     """The number of matched patterns in the pass."""
+
+    match_table: ClassVar[defaultdict[str, int]] = defaultdict(int)
+    """Global table mapping pass name to its total match count."""
 
     _OP_OVERLOAD_PATTERN: ClassVar[re.Pattern] = re.compile(
         r"<OpOverload\(op='([^']*)', overload='([^']*)'\)>"
@@ -103,6 +106,13 @@ class VllmPatternMatcherPass(VllmInductorPass):
                 string,
             )
         )
+
+    def end_and_log(self) -> None:
+        super().end_and_log()
+        if VllmPatternMatcherPass.match_table:
+            logger.debug(
+                "fusion pass matches: %s", dict(VllmPatternMatcherPass.match_table)
+            )
 
     def dump_patterns(self, config: VllmConfig, pm_pass: PatternMatcherPass) -> None:
         """
@@ -169,6 +179,55 @@ class VllmPatternMatcherPass(VllmInductorPass):
 
                     pattern_repr = self._replace_op_overloads(pattern_repr)
                     print(f"{pattern_repr}\n", file=f)
+
+
+@dataclass(eq=False)
+class PatternReplacement:
+    pattern: Callable
+    replacement: Callable
+    inputs: list[torch.Tensor]
+
+
+def make_fusion_pass(
+    pass_name: str,
+    builder: Callable[[VllmConfig], Sequence[PatternReplacement]],
+    preprocessors: list[Callable[[fx.GraphModule], None]] | None = None,
+    extra_sources: Sequence[Any] = (),
+) -> type[InductorPass]:
+    def _trace_fn(*args: Any, **kwargs: Any) -> fx.GraphModule:
+        gm = pm.fwd_only(*args, **kwargs)
+        for pre in preprocessors or []:
+            pre(gm)
+        return gm
+
+    class _FusionPass(VllmPatternMatcherPass):
+        @enable_fake_mode
+        def __init__(self, config: VllmConfig) -> None:
+            super().__init__(config)
+            self.pm_pass = PatternMatcherPass(pass_name=pass_name)
+
+            for pattern_replacement in builder(config):
+                pm.register_replacement(
+                    pattern_replacement.pattern,
+                    pattern_replacement.replacement,
+                    pattern_replacement.inputs,
+                    _trace_fn,
+                    self.pm_pass,
+                )
+
+            self.dump_patterns(config, self.pm_pass)
+
+        @VllmInductorPass.time_and_log
+        def __call__(self, graph: torch.fx.Graph) -> None:
+            self.matched_count = self.pm_pass.apply(graph)
+            VllmPatternMatcherPass.match_table[pass_name] += self.matched_count
+
+        def uuid(self) -> str:
+            return InductorPass.hash_source(builder, *extra_sources)
+
+    _FusionPass.__name__ = pass_name
+    _FusionPass.__qualname__ = pass_name
+    return _FusionPass
 
 
 class PrinterInductorPass(VllmInductorPass):
