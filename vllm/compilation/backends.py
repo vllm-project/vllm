@@ -490,8 +490,12 @@ def split_graph(
             # Assign this getitem to the same subgraph as its input
             input_node = node.args[0]
             if input_node.op != "placeholder":
-                assert input_node in node_to_subgraph_id
-                node_to_subgraph_id[node] = node_to_subgraph_id[input_node]
+                # Handle case where input_node hasn't been processed yet
+                # Assign to current subgraph temporarily, will be adjusted later
+                if input_node not in node_to_subgraph_id:
+                    node_to_subgraph_id[node] = subgraph_id
+                else:
+                    node_to_subgraph_id[node] = node_to_subgraph_id[input_node]
                 continue
 
         if should_split(node, splitting_ops):

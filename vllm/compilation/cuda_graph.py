@@ -335,16 +335,24 @@ class CUDAGraphWrapper:
             # manage the memory during cuda graph capture
             return output
 
+        # Check input addresses to detect if tensors have been reallocated
+        # This can happen when splitting_ops allocate new tensors (e.g., via torch.bmm)
+        new_input_addresses = [
+            x.data_ptr() for x in args if isinstance(x, torch.Tensor)
+        ]
+
         if self.is_debugging_mode:
-            # check if the input addresses are the same
-            new_input_addresses = [
-                x.data_ptr() for x in args if isinstance(x, torch.Tensor)
-            ]
+            # In debug mode, assert to catch issues early
             assert new_input_addresses == entry.input_addresses, (
                 f"Input addresses for cudagraphs are different "
                 f"during replay. Expected {entry.input_addresses}, "
                 f"got {new_input_addresses}"
             )
+        elif new_input_addresses != entry.input_addresses:
+            # Input tensors have been reallocated (e.g., by splitting_ops that
+            # allocate new tensors like torch.bmm). Fall back to eager mode
+            # instead of using stale CUDA graph addresses.
+            return self.runnable(*args, **kwargs)
 
         # Sync offloader before replay - ensures any external dependencies
         # from pre-capture prefetches are satisfied.
