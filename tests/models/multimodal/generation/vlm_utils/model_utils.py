@@ -1149,6 +1149,31 @@ def ovis2_5_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     return hf_model
 
 
+def paddleocr_vl_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
+    """Patches the HfRunner to fix create_causal_mask API mismatch.
+
+    The PaddleOCR-VL HF model passes `inputs_embeds` to create_causal_mask,
+    but transformers renamed this parameter to `input_embeds`.
+    """
+    import sys
+
+    model_module = sys.modules.get(type(hf_model.model.model).__module__)
+    if model_module is None:
+        return hf_model
+
+    original_create_causal_mask = getattr(model_module, "create_causal_mask", None)
+    if original_create_causal_mask is None:
+        return hf_model
+
+    def patched_create_causal_mask(*args, **kwargs):
+        if "inputs_embeds" in kwargs:
+            kwargs["input_embeds"] = kwargs.pop("inputs_embeds")
+        return original_create_causal_mask(*args, **kwargs)
+
+    model_module.create_causal_mask = patched_create_causal_mask  # type: ignore[attr-defined]
+    return hf_model
+
+
 def qwen2_5_omni_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     """Patches and returns an instance of the HfRunner for Qwen2.5-Omni."""
     thinker = hf_model.model.thinker
@@ -1235,9 +1260,9 @@ def voxtral_patch_hf_runner(hf_model: "HfRunner") -> "HfRunner":
     generated).
     """
 
-    import base64
     import io
 
+    import pybase64 as base64
     import soundfile as sf
 
     processor = hf_model.processor
