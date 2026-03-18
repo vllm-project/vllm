@@ -278,23 +278,26 @@ class DeepSeekV32ToolParser(ToolParser):
         in one shot.
         """
 
-        # Reset state on new request (parser is reused across streams).
-        tool_call_starting = self.tool_call_start_token in delta_text
-        if not previous_text or tool_call_starting:
+        # First chunk of a new stream — reset state from prior request.
+        if not previous_text:
             self._reset_streaming_state()
-            self.is_tool_call_started = tool_call_starting
 
-        # Pass through content before any tool call.
-        if not self.is_tool_call_started:
+        # Detect whether we've entered the tool-call region.
+        # Use current_text (not delta_text) since the start token may
+        # be split across chunks.
+        content_before = None
+        if self.is_tool_call_started:
+            pass
+        elif self.tool_call_start_token in current_text:
+            # Tool-call region found, capture any plain text before it.
+            self.is_tool_call_started = True
+            start_idx = current_text.index(self.tool_call_start_token)
+            content_before = current_text[len(previous_text) : start_idx] or None
+        else:
+            # Still in plain-text region, forward as content.
             return DeltaMessage(content=delta_text) if delta_text else None
 
-        # Capture content before the start token.
-        content_before = None
-        if tool_call_starting:
-            before = delta_text[: delta_text.index(self.tool_call_start_token)]
-            content_before = before or None
-
-        # Extract newly completed <invoke> blocks as DeltaToolCalls.
+        # Inside tool-call region: emit any newly completed invokes.
         delta_tool_calls = self._extract_delta_tool_calls(current_text, request)
 
         if delta_tool_calls or content_before:
@@ -303,9 +306,8 @@ class DeepSeekV32ToolParser(ToolParser):
                 tool_calls=delta_tool_calls,
             )
 
-        # Special tokens (EOS, </function_calls>) arrive with no decoded
-        # text. Return non-None so the serving framework reaches the
-        # finish-reason handling path instead of skipping.
+        # Empty delta with token ids means EOS or closing tag; return
+        # non-None so the serving framework can finalize finish_reason.
         if not delta_text and delta_token_ids and self.prev_tool_call_arr:
             return DeltaMessage(content="")
 

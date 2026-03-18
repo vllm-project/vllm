@@ -400,6 +400,69 @@ class TestExtractToolCallsStreaming:
         assert s_names[0] == ns_name
         assert s_args == ns_args
 
+    def _stream_chunked(self, parser, full_text: str, chunk_size: int, request=None):
+        """Drive the parser with fixed-size chunks (simulates stream interval).
+
+        Unlike ``_stream`` which splits on newlines, this splits the text
+        into ``chunk_size``-character pieces so the start token can be
+        split across chunks — exactly what happens with stream interval > 1.
+        """
+        if request is None:
+            request = make_request()
+        chunks = [
+            full_text[i : i + chunk_size] for i in range(0, len(full_text), chunk_size)
+        ]
+        deltas = []
+        prev = ""
+        for chunk in chunks:
+            curr = prev + chunk
+            result = parser.extract_tool_calls_streaming(
+                previous_text=prev,
+                current_text=curr,
+                delta_text=chunk,
+                previous_token_ids=[],
+                current_token_ids=[],
+                delta_token_ids=[1],
+                request=request,
+            )
+            prev = curr
+            if result is not None:
+                deltas.append(result)
+        return deltas
+
+    def test_single_tool_chunked_stream_interval(self, parser):
+        """Start token split across chunks (stream interval > 1)."""
+        full_text = build_tool_call("get_weather", {"location": "SF"})
+        # Use a chunk size that splits the start token
+        deltas = self._stream_chunked(parser, full_text, chunk_size=5)
+        args_str = self._reconstruct_args(deltas)
+        assert json.loads(args_str) == {"location": "SF"}
+
+    def test_content_before_tool_chunked(self, parser):
+        """Content before tool call with chunked streaming."""
+        full_text = "Thinking... " + build_tool_call("fn", {"a": "b"})
+        deltas = self._stream_chunked(parser, full_text, chunk_size=7)
+        content = "".join(d.content for d in deltas if d.content is not None)
+        assert "Thinking" in content
+        args_str = self._reconstruct_args(deltas)
+        assert json.loads(args_str) == {"a": "b"}
+
+    def test_multiple_tools_chunked(self, parser):
+        """Multiple tools with chunked streaming."""
+        full_text = (
+            f"{FC_START}\n"
+            f'{INV_START}func_a">\n'
+            f'{PARAM_START}p" string="true">v1{PARAM_END}\n'
+            f"{INV_END}\n"
+            f'{INV_START}func_b">\n'
+            f'{PARAM_START}q" string="true">v2{PARAM_END}\n'
+            f"{INV_END}\n"
+            f"{FC_END}"
+        )
+        deltas = self._stream_chunked(parser, full_text, chunk_size=10)
+        assert json.loads(self._reconstruct_args(deltas, tool_index=0)) == {"p": "v1"}
+        assert json.loads(self._reconstruct_args(deltas, tool_index=1)) == {"q": "v2"}
+
     def test_no_emission_while_incomplete(self, parser):
         """No tool calls should be emitted until an invoke block completes."""
         # Stream only a partial invoke (no closing tag)
