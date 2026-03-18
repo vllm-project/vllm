@@ -540,6 +540,8 @@ class ModelConfig:
                 self.tokenizer_mode = "kimi_audio"
             elif arch == "QwenVLForConditionalGeneration":
                 self.tokenizer_mode = "qwen_vl"
+            elif arch == "DeepseekV32ForCausalLM":
+                self.tokenizer_mode = "deepseek_v32"
 
             if self.tokenizer_mode != "auto":
                 logger.info(
@@ -1140,6 +1142,7 @@ class ModelConfig:
             return bool(self.hf_config.is_mm_prefix_lm)
         # fallback to list of known models
         MM_PREFIX_LM_MODELS = (
+            "bagel",
             "gemma3",
             "molmo2",
             "paligemma",
@@ -2018,6 +2021,15 @@ def _get_and_verify_max_len(
 
                 if rope_type == "yarn":
                     derived_max_model_len = rp["original_max_position_embeddings"]
+        if scaling_factor is None:
+            # Fallback the factor to 1.0 if a user assigned `null`
+            logger.warning_once(
+                "The model's RoPE configuration has a null scaling "
+                "factor which is unexpected. This likely indicates a bug "
+                "in the model's HuggingFace config.json. Please notify the "
+                "model vendor. Falling back the value to 1.0. "
+            )
+            scaling_factor = 1.0
         # Do this outside loop since all layer types should have the same scaling
         derived_max_model_len *= scaling_factor
 

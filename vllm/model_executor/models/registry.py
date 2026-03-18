@@ -133,7 +133,7 @@ _TEXT_GENERATION_MODELS = {
     "HunYuanDenseV1ForCausalLM": ("hunyuan_v1", "HunYuanDenseV1ForCausalLM"),
     "HCXVisionForCausalLM": ("hyperclovax_vision", "HCXVisionForCausalLM"),
     "HCXVisionV2ForCausalLM": ("hyperclovax_vision_v2", "HCXVisionV2ForCausalLM"),
-    "HyperCLOVAXForCausalLM": ("llama", "LlamaForCausalLM"),
+    "HyperCLOVAXForCausalLM": ("hyperclovax", "HyperCLOVAXForCausalLM"),
     "InternLMForCausalLM": ("llama", "LlamaForCausalLM"),
     "InternLM2ForCausalLM": ("internlm2", "InternLM2ForCausalLM"),
     "InternLM2VEForCausalLM": ("internlm2_ve", "InternLM2VEForCausalLM"),
@@ -214,6 +214,7 @@ _EMBEDDING_MODELS = {
     # [Text-only]
     "BertModel": ("bert", "BertEmbeddingModel"),
     "BertSpladeSparseEmbeddingModel": ("bert", "BertSpladeSparseEmbeddingModel"),
+    "ErnieModel": ("ernie", "ErnieEmbeddingModel"),
     "BgeM3EmbeddingModel": ("roberta", "BgeM3EmbeddingModel"),
     "DeciLMForCausalLM": ("nemotron_nas", "DeciLMForCausalLM"),
     "Gemma2Model": ("gemma2", "Gemma2ForCausalLM"),
@@ -247,6 +248,7 @@ _EMBEDDING_MODELS = {
     "XLMRobertaModel": ("roberta", "RobertaEmbeddingModel"),
     # [Multimodal]
     "CLIPModel": ("clip", "CLIPEmbeddingModel"),
+    "ColPaliForRetrieval": ("colpali", "ColPaliModel"),
     "LlavaNextForConditionalGeneration": (
         "llava_next",
         "LlavaNextForConditionalGeneration",
@@ -272,8 +274,10 @@ _LATE_INTERACTION_MODELS = {
     "ColBERTJinaRobertaModel": ("colbert", "ColBERTJinaRobertaModel"),
     # [Multimodal]
     "ColModernVBertForRetrieval": ("colmodernvbert", "ColModernVBertForRetrieval"),
+    "ColPaliForRetrieval": ("colpali", "ColPaliModel"),
     "ColQwen3": ("colqwen3", "ColQwen3Model"),
     "OpsColQwen3Model": ("colqwen3", "ColQwen3Model"),
+    "ColQwen3_5": ("colqwen3_5", "ColQwen3_5Model"),
     "Qwen3VLNemotronEmbedModel": ("colqwen3", "ColQwen3Model"),
 }
 
@@ -285,6 +289,7 @@ _REWARD_MODELS = {
 
 _TOKEN_CLASSIFICATION_MODELS = {
     "BertForTokenClassification": ("bert", "BertForTokenClassification"),
+    "ErnieForTokenClassification": ("ernie", "ErnieForTokenClassification"),
     "ModernBertForTokenClassification": (
         "modernbert",
         "ModernBertForTokenClassification",
@@ -294,6 +299,7 @@ _TOKEN_CLASSIFICATION_MODELS = {
 _SEQUENCE_CLASSIFICATION_MODELS = {
     "BertForSequenceClassification": ("bert", "BertForSequenceClassification"),
     "GPT2ForSequenceClassification": ("gpt2", "GPT2ForSequenceClassification"),
+    "ErnieForSequenceClassification": ("ernie", "ErnieForSequenceClassification"),
     "GteNewForSequenceClassification": (
         "bert_with_rope",
         "GteNewForSequenceClassification",
@@ -530,6 +536,10 @@ _MULTIMODAL_MODELS = {
     "VoxtralForConditionalGeneration": ("voxtral", "VoxtralForConditionalGeneration"),  # noqa: E501
     "VoxtralRealtimeGeneration": ("voxtral_realtime", "VoxtralRealtimeGeneration"),  # noqa: E501
     # [Encoder-decoder]
+    "CohereASRForConditionalGeneration": (
+        "cohere_asr",
+        "CohereASRForConditionalGeneration",
+    ),
     "NemotronParseForConditionalGeneration": (
         "nemotron_parse",
         "NemotronParseForConditionalGeneration",

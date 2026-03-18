@@ -20,6 +20,7 @@ from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
     AttentionImpl,
+    AttentionLayer,
     AttentionMetadataBuilder,
     AttentionType,
     CommonAttentionMetadata,
@@ -735,6 +736,7 @@ class AiterFlashAttentionBackend(AttentionBackend):
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
         "auto",
+        "float16",
         "bfloat16",
         "fp8",
         "fp8_e4m3",
@@ -1308,7 +1310,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
 
     def do_kv_cache_update(
         self,
-        layer: Attention,
+        layer: AttentionLayer,
         key: torch.Tensor,
         value: torch.Tensor,
         kv_cache: torch.Tensor,
@@ -1359,3 +1361,47 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 layer._k_scale,
                 layer._v_scale,
             )
+
+    def fused_rope_kvcache_supported(self):
+        # Only support fusion when shuffle KV cache layout is not used;
+        # shuffle layout uses a different cache update path.
+        return (
+            rocm_aiter_ops.is_enabled()
+            and not rocm_aiter_ops.is_shuffle_kv_cache_enabled()
+        )
+
+    def do_rope_and_kv_cache_update(
+        self,
+        layer: AttentionLayer,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        positions: torch.Tensor,
+        cos_sin_cache: torch.Tensor,
+        is_neox: bool,
+        kv_cache: torch.Tensor,
+        layer_slot_mapping: torch.Tensor,
+    ):
+        key_cache, value_cache = kv_cache.unbind(0)
+        flash_layout = True
+
+        is_fp8_kv_cache = self.kv_cache_dtype.startswith("fp8")
+        if is_fp8_kv_cache:
+            key_cache = key_cache.view(current_platform.fp8_dtype())
+            value_cache = value_cache.view(current_platform.fp8_dtype())
+
+        rocm_aiter_ops.triton_rope_and_cache(
+            query,
+            key,
+            value,
+            positions,
+            cos_sin_cache,
+            is_neox,
+            key_cache,
+            value_cache,
+            layer_slot_mapping,
+            layer._k_scale,
+            layer._v_scale,
+            flash_layout,
+            is_fp8_kv_cache,
+        )
