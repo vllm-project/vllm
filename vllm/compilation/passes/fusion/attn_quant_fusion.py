@@ -143,11 +143,11 @@ def attn_nvfp4_quant(layer: Attention, dtype: torch.dtype) -> PatternReplacement
         attn_out_view = RESHAPE_OP(at1[1], [q.shape[0], num_heads * head_size])
         at2 = auto_functionalized(
             QUANT_OP,
-            output=output_quant,
             input=attn_out_view,
-            output_scale=output_scale,
             input_scale=input_scale,
             is_sf_swizzled_layout=True,
+            output=output_quant,
+            output_scale=output_scale,
         )
         output_scale_view = torch.ops.aten.view.dtype(at2[2], FP8_DTYPE)
         return at2[1], output_scale_view

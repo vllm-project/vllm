@@ -6,6 +6,7 @@ import json
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
+from http import HTTPStatus
 from typing import TYPE_CHECKING, Any, Final
 
 import partial_json_parser
@@ -309,11 +310,14 @@ class OpenAIServingChat(OpenAIServing):
                     trace_headers=trace_headers,
                 )
             else:
-                reasoning_ended = (
-                    reasoning_parser.is_reasoning_end(prompt_token_ids or [])
-                    if reasoning_parser
-                    else None
-                )
+                if not request.include_reasoning:
+                    reasoning_ended = True
+                elif reasoning_parser:
+                    reasoning_ended = reasoning_parser.is_reasoning_end(
+                        prompt_token_ids or []
+                    )
+                else:
+                    reasoning_ended = None
 
                 generator = self.engine_client.generate(
                     engine_prompt,
@@ -1289,7 +1293,12 @@ class OpenAIServingChat(OpenAIServing):
         except asyncio.CancelledError:
             return self.create_error_response("Client disconnected")
 
-        assert final_res is not None
+        if final_res is None:
+            return self.create_error_response(
+                "No output received from the engine.",
+                err_type="InternalServerError",
+                status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
 
         choices: list[ChatCompletionResponseChoice] = []
         if self.tool_call_id_type == "kimi_k2":

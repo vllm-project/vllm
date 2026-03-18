@@ -45,7 +45,9 @@ All2AllBackend = Literal[
     "mori",
     "nixl_ep",
     "allgather_reducescatter",
-    "flashinfer_all2allv",
+    "flashinfer_all2allv",  # temporary alias for flashinfer_nvlink_two_sided
+    "flashinfer_nvlink_two_sided",
+    "flashinfer_nvlink_one_sided",
 ]
 
 
@@ -136,6 +138,13 @@ class ParallelConfig:
     """Whether the deployed model is MoE (if known)."""
     enable_expert_parallel: bool = False
     """Use expert parallelism instead of tensor parallelism for MoE layers."""
+    enable_ep_weight_filter: bool = False
+    """Skip non-local expert weights during model loading when expert
+    parallelism is active.  Each rank only reads its own expert shard from
+    disk, which can drastically reduce storage I/O for MoE models with
+    per-expert weight tensors (e.g. DeepSeek, Mixtral, Kimi-K2.5).  Has no
+    effect on 3D fused-expert checkpoints (e.g. GPT-OSS) or non-MoE
+    models."""
     enable_eplb: bool = False
     """Enable expert parallelism load balancing for MoE layers."""
     eplb_config: EPLBConfig = Field(default_factory=EPLBConfig)
@@ -158,7 +167,8 @@ class ParallelConfig:
     - "deepep_low_latency": Use deepep low-latency kernels\n
     - "mori": Use mori kernels\n
     - "nixl_ep": Use nixl-ep kernels\n
-    - "flashinfer_all2allv": Use flashinfer alltoallv kernels for mnnvl"""
+    - "flashinfer_nvlink_two_sided": Use flashinfer two-sided kernels for mnnvl
+    - "flashinfer_nvlink_one_sided": Use flashinfer high-throughput a2a kernels"""
 
     max_parallel_loading_workers: int | None = None
     """Maximum number of parallel loading workers when loading model
