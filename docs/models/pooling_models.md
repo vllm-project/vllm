@@ -31,7 +31,7 @@ vLLM will attempt to automatically convert the model according to the architectu
 shown in the table below.
 
 | Architecture                                    | `--convert` | Supported pooling tasks               |
-|-------------------------------------------------|-------------|---------------------------------------|
+| ----------------------------------------------- | ----------- | ------------------------------------- |
 | `*ForTextEncoding`, `*EmbeddingModel`, `*Model` | `embed`     | `token_embed`, `embed`                |
 | `*ForRewardModeling`, `*RewardModel`            | `embed`     | `token_embed`, `embed`                |
 | `*For*Classification`, `*ClassificationModel`   | `classify`  | `token_classify`, `classify`, `score` |
@@ -46,7 +46,7 @@ Each pooling model in vLLM supports one or more of these tasks according to
 enabling the corresponding APIs:
 
 | Task             | APIs                                                                          |
-|------------------|-------------------------------------------------------------------------------|
+| ---------------- | ----------------------------------------------------------------------------- |
 | `embed`          | `LLM.embed(...)`, `LLM.score(...)`\*, `LLM.encode(..., pooling_task="embed")` |
 | `classify`       | `LLM.classify(...)`, `LLM.encode(..., pooling_task="classify")`               |
 | `score`          | `LLM.score(...)`                                                              |
@@ -69,7 +69,7 @@ If the model has been converted via `--convert` (see above),
 the pooler assigned to each task has the following attributes by default:
 
 | Task       | Pooling Type | Normalization | Softmax |
-|------------|--------------|---------------|---------|
+| ---------- | ------------ | ------------- | ------- |
 | `embed`    | `LAST`       | ✅︎            | ❌      |
 | `classify` | `LAST`       | ❌            | ✅︎      |
 
@@ -99,7 +99,7 @@ embeds = output.outputs.embedding
 print(f"Embeddings: {embeds!r} (size={len(embeds)})")
 ```
 
-A code example can be found here: [examples/offline_inference/basic/embed.py](../../examples/offline_inference/basic/embed.py)
+A code example can be found here: [examples/basic/offline_inference/embed.py](../../examples/basic/offline_inference/embed.py)
 
 ### `LLM.classify`
 
@@ -116,7 +116,7 @@ probs = output.outputs.probs
 print(f"Class Probabilities: {probs!r} (size={len(probs)})")
 ```
 
-A code example can be found here: [examples/offline_inference/basic/classify.py](../../examples/offline_inference/basic/classify.py)
+A code example can be found here: [examples/basic/offline_inference/classify.py](../../examples/basic/offline_inference/classify.py)
 
 ### `LLM.score`
 
@@ -140,7 +140,7 @@ score = output.outputs.score
 print(f"Score: {score}")
 ```
 
-A code example can be found here: [examples/offline_inference/basic/score.py](../../examples/offline_inference/basic/score.py)
+A code example can be found here: [examples/basic/offline_inference/score.py](../../examples/basic/offline_inference/score.py)
 
 ### `LLM.reward`
 
@@ -156,7 +156,7 @@ data = output.outputs.data
 print(f"Data: {data!r}")
 ```
 
-A code example can be found here: [examples/offline_inference/basic/reward.py](../../examples/offline_inference/basic/reward.py)
+A code example can be found here: [examples/basic/offline_inference/reward.py](../../examples/basic/offline_inference/reward.py)
 
 ### `LLM.encode`
 
@@ -314,7 +314,7 @@ An OpenAI client example can be found here: [examples/pooling/embed/openai_embed
 vLLM supports ColBERT models with multiple encoder backbones:
 
 | Architecture | Backbone | Example HF Models |
-|---|---|---|
+| - | - | - |
 | `HF_ColBERT` | BERT | `answerdotai/answerai-colbert-small-v1`, `colbert-ir/colbertv2.0` |
 | `ColBERTModernBertModel` | ModernBERT | `lightonai/GTE-ModernColBERT-v1` |
 | `ColBERTJinaRobertaModel` | Jina XLM-RoBERTa | `jinaai/jina-colbert-v2` |
@@ -379,7 +379,7 @@ An example can be found here: [examples/pooling/score/colbert_rerank_online.py](
 ColQwen3 is based on [ColPali](https://arxiv.org/abs/2407.01449), which extends ColBERT's late interaction approach to **multi-modal** inputs. While ColBERT operates on text-only token embeddings, ColPali/ColQwen3 can embed both **text and images** (e.g. PDF pages, screenshots, diagrams) into per-token L2-normalized vectors and compute relevance via MaxSim scoring. ColQwen3 specifically uses Qwen3-VL as its vision-language backbone.
 
 | Architecture | Backbone | Example HF Models |
-|---|---|---|
+| - | - | - |
 | `ColQwen3` | Qwen3-VL | `TomoroAI/tomoro-colqwen3-embed-4b`, `TomoroAI/tomoro-colqwen3-embed-8b` |
 | `OpsColQwen3Model` | Qwen3-VL | `OpenSearch-AI/Ops-Colqwen3-4B`, `OpenSearch-AI/Ops-Colqwen3-8B` |
 | `Qwen3VLNemotronEmbedModel` | Qwen3-VL | `nvidia/nemotron-colembed-vl-4b-v2`, `nvidia/nemotron-colembed-vl-8b-v2` |
@@ -507,7 +507,7 @@ Llama Nemotron VL Embedding models combine the bidirectional Llama embedding bac
 single-vector embeddings from text and/or images.
 
 | Architecture | Backbone | Example HF Models |
-|---|---|---|
+| - | - | - |
 | `LlamaNemotronVLModel` | Bidirectional Llama + SigLIP | `nvidia/llama-nemotron-embed-vl-1b-v2` |
 
 Start the server:
@@ -567,7 +567,7 @@ Llama Nemotron VL reranker models combine the same bidirectional Llama + SigLIP
 backbone with a sequence-classification head for cross-encoder scoring and reranking.
 
 | Architecture | Backbone | Example HF Models |
-|---|---|---|
+| - | - | - |
 | `LlamaNemotronVLForSequenceClassification` | Bidirectional Llama + SigLIP | `nvidia/llama-nemotron-rerank-vl-1b-v2` |
 
 Start the server:
@@ -624,6 +624,46 @@ curl -s http://localhost:8000/rerank -H "Content-Type: application/json" -d '{
     "top_n": 2
 }'
 ```
+
+### ColQwen3.5 Multi-Modal Late Interaction Models
+
+ColQwen3.5 is based on [ColPali](https://arxiv.org/abs/2407.01449), extending ColBERT's late interaction approach to **multi-modal** inputs. It uses the Qwen3.5 hybrid backbone (linear + full attention) and produces per-token L2-normalized vectors for MaxSim scoring.
+
+| Architecture | Backbone | Example HF Models |
+| - | - | - |
+| `ColQwen3_5` | Qwen3.5 | `athrael-soju/colqwen3.5-4.5B` |
+
+Start the server:
+
+```shell
+vllm serve athrael-soju/colqwen3.5-4.5B --max-model-len 4096
+```
+
+Then you can use the rerank endpoint:
+
+```shell
+curl -s http://localhost:8000/rerank -H "Content-Type: application/json" -d '{
+    "model": "athrael-soju/colqwen3.5-4.5B",
+    "query": "What is machine learning?",
+    "documents": [
+        "Machine learning is a subset of artificial intelligence.",
+        "Python is a programming language.",
+        "Deep learning uses neural networks."
+    ]
+}'
+```
+
+Or the score endpoint:
+
+```shell
+curl -s http://localhost:8000/score -H "Content-Type: application/json" -d '{
+    "model": "athrael-soju/colqwen3.5-4.5B",
+    "text_1": "What is the capital of France?",
+    "text_2": ["The capital of France is Paris.", "Python is a programming language."]
+}'
+```
+
+An example can be found here: [examples/pooling/score/colqwen3_5_rerank_online.py](../../examples/pooling/score/colqwen3_5_rerank_online.py)
 
 ### BAAI/bge-m3
 
