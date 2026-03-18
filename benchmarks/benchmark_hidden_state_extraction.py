@@ -22,6 +22,7 @@ Usage:
 
 import argparse
 import asyncio
+import os
 import time
 from concurrent.futures import ThreadPoolExecutor
 
@@ -58,6 +59,14 @@ def make_random_prompts(
     ]
 
 
+def cleanup_hidden_states(path: str) -> None:
+    lock_path = path + ".lock"
+    if os.path.exists(lock_path):
+        os.remove(lock_path)
+    if os.path.exists(path):
+        os.remove(path)
+
+
 def consume_hidden_states(path: str) -> float:
     """Load hidden states from disk and compute per-position mean.
 
@@ -70,7 +79,11 @@ def consume_hidden_states(path: str) -> float:
     """
     obj = example_hidden_states_connector.load_hidden_states(path)
     hs = obj["hidden_states"]
-    return hs.mean().item()
+    total = hs.mean().item()
+
+    cleanup_hidden_states(path)
+
+    return total
 
 
 def run_baseline(
@@ -185,6 +198,7 @@ async def _run_extraction_async(
     engine_args = AsyncEngineArgs(
         model=model,
         enable_prefix_caching=False,
+        enable_chunked_prefill=False,
         speculative_config={
             "method": "extract_hidden_states",
             "num_speculative_tokens": 1,
@@ -206,15 +220,21 @@ async def _run_extraction_async(
     engine = AsyncLLM.from_engine_args(engine_args)
 
     try:
-        # Warmup: run a few prompts sequentially
+        # Warmup: run a few prompts sequentially, cleaning up generated files
         for i in range(min(4, len(prompts))):
             sp = SamplingParams(max_tokens=1, output_kind=RequestOutputKind.FINAL_ONLY)
-            async for _ in engine.generate(
+            final_output = None
+            async for output in engine.generate(
                 request_id=f"warmup-{i}",
                 prompt={"prompt_token_ids": prompts[i]},
                 sampling_params=sp,
             ):
-                pass
+                if output.finished:
+                    final_output = output
+            if final_output and final_output.kv_transfer_params:
+                path = final_output.kv_transfer_params.get("hidden_states_path")
+                if path:
+                    cleanup_hidden_states(path)
 
         if profile_dir:
             await engine.start_profile()
