@@ -329,7 +329,10 @@ class CacheOnlyAttentionLayer(nn.Module, AttentionLayerBase):
         # Note: we use MLAAttentionSpec here to because it will
         # produce page sizes of (block_size * num_kv_heads * head_size * dtype_size)
         # whereas FullAttentionSpec will add an additional factor of 2
-        return MLAAttentionSpec(
+        from vllm.v1.kv_cache_registry import KVCacheSpecRegistry
+
+        return KVCacheSpecRegistry.create(
+            kvcache_spec_cls=MLAAttentionSpec,
             block_size=self.block_size,
             num_kv_heads=self.num_heads,
             head_size=self.head_size,

@@ -517,6 +517,10 @@ class Worker(WorkerBase):
         return {tp_rank: metadata}
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
+        from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
+
+        # register all kvcache specs in worker process
+        register_all_kvcache_specs(self.vllm_config)
         return self.model_runner.get_kv_cache_spec()
 
     def update_max_model_len(self, max_model_len: int) -> None:

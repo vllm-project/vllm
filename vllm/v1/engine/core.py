@@ -227,6 +227,11 @@ class EngineCore:
     def _initialize_kv_caches(self, vllm_config: VllmConfig) -> KVCacheConfig:
         start = time.time()
 
+        # register all kvcache specs in enginecore process.
+        from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
+
+        register_all_kvcache_specs(vllm_config)
+
         # Get all kv cache needed by the model
         kv_cache_specs = self.model_executor.get_kv_cache_specs()
 

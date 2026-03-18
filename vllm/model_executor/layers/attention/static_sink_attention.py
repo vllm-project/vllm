@@ -210,8 +210,10 @@ class StaticSinkAttention(Attention, CustomOp):
         self.block_size = vllm_config.cache_config.block_size
         # Should not be called for enc-dec or encoder-only attention.
         assert self.attn_type == AttentionType.DECODER
+        from vllm.v1.kv_cache_registry import KVCacheSpecRegistry
 
-        return SinkFullAttentionSpec(
+        return KVCacheSpecRegistry.create(
+            kvcache_spec_cls=SinkFullAttentionSpec,
             block_size=self.block_size,
             num_kv_heads=self.num_kv_heads,
             head_size=self.head_size,
