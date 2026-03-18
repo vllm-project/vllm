@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import base64
 from functools import partial
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import numpy.typing as npt
+import pybase64
 from PIL import Image
 
 from vllm import envs
@@ -96,7 +96,7 @@ class VideoMediaIO(MediaIO[tuple[npt.NDArray, dict[str, Any]]]):
             }
             return frames, metadata
 
-        return self.load_bytes(base64.b64decode(data))
+        return self.load_bytes(pybase64.b64decode(data))
 
     def load_file(self, filepath: Path) -> tuple[npt.NDArray, dict[str, Any]]:
         with filepath.open("rb") as f:

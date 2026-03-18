@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
-import base64
 import sys
 import tempfile
 from argparse import Namespace
@@ -13,6 +12,7 @@ from typing import Any, TypeAlias
 from urllib.parse import urlparse
 
 import aiohttp
+import pybase64 as base64
 import torch
 from fastapi import UploadFile
 from prometheus_client import start_http_server

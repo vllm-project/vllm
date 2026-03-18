@@ -1012,6 +1012,7 @@ class OpenAIServingResponses(OpenAIServing):
             parser = self.parser(tokenizer)
             return parser.extract_response_outputs(
                 model_output=final_output.text,
+                model_output_token_ids=final_output.token_ids,
                 request=request,
                 enable_auto_tools=self.enable_auto_tools,
                 tool_call_id_type=self.tool_call_id_type,
