@@ -135,6 +135,34 @@ async def test_function_tool_use(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_max_tokens_with_tool_choice_required(
+    client: openai.AsyncOpenAI, model_name: str
+):
+    prompt = [
+        {
+            "role": "user",
+            "content": "Can you tell me what the current weather is in Berlin and the "
+            "forecast for the next 5 days, in fahrenheit?",
+        },
+    ]
+    response = await client.responses.create(
+        model=model_name,
+        input=prompt,
+        tools=tools,
+        tool_choice="required",
+        max_output_tokens=10,
+    )
+    assert len(response.output) >= 1
+    for out in response.output:
+        # When `tool_choice="required"` and the tokens of `tools`
+        # exceed `max_output_tokens`,`function_call` should be empty.
+        # This behavior should be consistent with OpenAI
+        assert out.type != "function_call"
+    assert response.incomplete_details.reason == "max_output_tokens"
+
+
+@pytest.mark.asyncio
 async def test_named_tool_use(client: openai.AsyncOpenAI):
     def get_weather(latitude: float, longitude: float) -> str:
         """
