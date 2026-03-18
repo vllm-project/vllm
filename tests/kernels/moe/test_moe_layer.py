@@ -1602,14 +1602,17 @@ def test_moe_layer(
         test_configs = new_test_configs
 
     try:
-        parallel_launch_with_config(
-            world_size,
-            _parallel_worker,
-            vllm_config,
-            test_env,
-            test_configs,
-            verbosity,
-        )
+        if len(test_configs) > 0:
+            parallel_launch_with_config(
+                world_size,
+                _parallel_worker,
+                vllm_config,
+                test_env,
+                test_configs,
+                verbosity,
+            )
+        else:
+            pytest.skip("No valid test configs for current parallel config.")
     finally:
         torch.accelerator.synchronize()  # TODO: Is this needed?
         torch.accelerator.empty_cache()
