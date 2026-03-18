@@ -3594,10 +3594,10 @@ class GPUModelRunner(
                 scheduled_spec_decode_tokens=spec_decode_tokens_copy,
             )
 
-        if scheduler_output.preempted_req_ids and has_kv_transfer_group():
-            get_kv_transfer_group().handle_preemptions(
-                scheduler_output.preempted_req_ids
-            )
+        if has_kv_transfer_group():
+            kv_connector_metadata = scheduler_output.kv_connector_metadata
+            assert kv_connector_metadata is not None
+            get_kv_transfer_group().handle_preemptions(kv_connector_metadata)
 
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         with (
@@ -5510,13 +5510,14 @@ class GPUModelRunner(
                             dummy_modality
                         ]
 
-                        logger.info(
+                        logger.info_once(
                             "Encoder cache will be initialized with a "
                             "budget of %s tokens, and profiled with "
                             "%s %s items of the maximum feature size.",
                             encoder_budget,
                             max_mm_items_per_batch,
                             dummy_modality,
+                            scope="local",
                         )
 
                         # Create dummy batch of multimodal inputs.
