@@ -1,4 +1,4 @@
-# Classification Task
+# Classification Models
 
 Classification involves predicting which predefined category, class, or label best corresponds to a given input.
 

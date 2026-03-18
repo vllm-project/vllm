@@ -1,4 +1,4 @@
-# Embedding Task
+# Embedding Models
 
 Embedding models are a class of machine learning models designed to transform unstructured data—such as text, images, or audio—into a structured numerical representation known as an embedding.
 
