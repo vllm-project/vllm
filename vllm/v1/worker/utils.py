@@ -510,7 +510,7 @@ def bind_kv_cache(
 
     # Bind kv_caches to forward context
     for layer_name, kv_cache in kv_caches.items():
-        # NOTE: Use list because of v0 PP virtual engine.
+        # NOTE: Keep list wrapper for layers that index kv_cache by engine slot.
         forward_context[layer_name].kv_cache = [kv_cache]
 
 
