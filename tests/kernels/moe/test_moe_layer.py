@@ -1594,7 +1594,8 @@ def test_moe_layer(
                 new_test_configs.append(sub_test_config)
             else:
                 pytest.skip(
-                    "subtest config does not match any valid test configuration"
+                    f"subtest config {subtest} does not match any valid test "
+                    "configuration"
                 )
         test_configs = new_test_configs
 
