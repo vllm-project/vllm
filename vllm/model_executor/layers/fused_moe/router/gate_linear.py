@@ -15,25 +15,34 @@ if has_flashinfer():
         x: torch.Tensor,
         weight: torch.Tensor,
         bias: torch.Tensor | None,
-        out: torch.Tensor,
-    ) -> None:
+    ) -> torch.Tensor:
         from flashinfer.gemm.routergemm import tinygemm_bf16
 
-        tinygemm_bf16(x, weight, out, bias)
+        output = torch.empty(
+            x.shape[0],
+            weight.shape[0],
+            dtype=torch.bfloat16,
+            device=x.device,
+        )
+        tinygemm_bf16(x, weight, output, bias)
+        return output
 
     def flashinfer_tinygemm_router_gemm_fake(
         x: torch.Tensor,
         weight: torch.Tensor,
         bias: torch.Tensor | None,
-        out: torch.Tensor,
-    ) -> None:
-        return
+    ) -> torch.Tensor:
+        return torch.empty(
+            x.shape[0],
+            weight.shape[0],
+            dtype=torch.bfloat16,
+            device=x.device,
+        )
 
     direct_register_custom_op(
         op_name="flashinfer_tinygemm_router_gemm",
         op_func=flashinfer_tinygemm_router_gemm_impl,
         fake_impl=flashinfer_tinygemm_router_gemm_fake,
-        mutates_args=["out"],
     )
 
 
@@ -65,12 +74,11 @@ class GateLinear(ReplicatedLinear):
         force_fp32_compute: bool = False,
         prefix: str = "",
     ):
-        is_hopper_or_blackwell = current_platform.is_device_capability(
-            (9, 0)
-        ) or current_platform.is_device_capability_family(100)
-        can_use_specialized_kernels = (
-            current_platform.is_cuda() and is_hopper_or_blackwell
+        is_hopper_or_blackwell = current_platform.is_cuda() and (
+            current_platform.is_device_capability((9, 0))
+            or current_platform.is_device_capability_family(100)
         )
+        can_use_specialized_kernels = is_hopper_or_blackwell and not bias
 
         # If fp32 compute is required and no specialized kernel is available,
         # store weights in fp32 so Tier 3 computes in fp32 natively.
@@ -87,33 +95,29 @@ class GateLinear(ReplicatedLinear):
         )
         self.out_dtype = out_dtype
 
+        # DSV3 specialized kernel eligibility (SM90+, exact dims)
         self.allow_specialized_router_gemm = can_use_specialized_kernels
-        self.allow_specialized_router_gemm_no_bias = (
-            can_use_specialized_kernels and not bias
-        )
-
-        # DSV3 specialized kernel eligibility (SM90+, exact dims, no bias)
         self.allow_dsv3_router_gemm = (
-            self.allow_specialized_router_gemm_no_bias
+            self.allow_specialized_router_gemm
             and output_size in self.DSV3_SUPPORTED_NUM_EXPERTS
             and input_size in self.DSV3_SUPPORTED_HIDDEN_SIZES
         )
 
-        # cuBLAS bf16→fp32 eligibility (no bias)
+        # cuBLAS bf16→fp32 eligibility
         self.allow_cublas_router_gemm = (
-            self.allow_specialized_router_gemm_no_bias
+            self.allow_specialized_router_gemm
             and self.weight.dtype == torch.bfloat16
             and self.out_dtype == torch.float32
         )
 
         # Flashinfer tinygemm_bf16 (SM90+, aligned dims, supports bias)
-        self.allow_tinygemm_router_gemm = (
-            self.allow_specialized_router_gemm
+        self.allow_flashinfer_tinygemm_router_gemm = (
+            is_hopper_or_blackwell
+            and has_flashinfer()
             and self.weight.dtype == torch.bfloat16
-            and self.out_dtype != torch.float32
+            and self.out_dtype in [None, torch.bfloat16]
             and input_size % 64 == 0
             and output_size % 16 == 0
-            and has_flashinfer()
         )
 
     def set_out_dtype(self, out_dtype: torch.dtype) -> None:
@@ -128,14 +132,14 @@ class GateLinear(ReplicatedLinear):
 
         if (
             not self.allow_cublas_router_gemm
-            and self.allow_specialized_router_gemm_no_bias
+            and self.allow_specialized_router_gemm
             and out_dtype == torch.float32
         ):
             self.allow_cublas_router_gemm = self.weight.dtype == torch.bfloat16
 
         # tinygemm outputs bf16 — disable if fp32 output is now required
         if out_dtype == torch.float32:
-            self.allow_tinygemm_router_gemm = False
+            self.allow_flashinfer_tinygemm_router_gemm = False
 
     def forward(
         self, x: torch.Tensor
@@ -157,15 +161,13 @@ class GateLinear(ReplicatedLinear):
             return output, None
 
         # Tier 3: Flashinfer tinygemm_bf16
-        if self.allow_tinygemm_router_gemm and x.dtype == torch.bfloat16:
-            output = torch.empty(
-                x.shape[0],
-                self.weight.shape[0],
-                dtype=torch.bfloat16,
-                device=x.device,
-            )
-            torch.ops.vllm.flashinfer_tinygemm_router_gemm(
-                x, self.weight, self.bias, output
+        if (
+            self.allow_flashinfer_tinygemm_router_gemm
+            and x.dtype == torch.bfloat16
+            and x.shape[0] <= 128
+        ):
+            output = torch.ops.vllm.flashinfer_tinygemm_router_gemm(
+                x, self.weight, self.bias
             )
             return output, None
 
