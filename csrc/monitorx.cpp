@@ -5,8 +5,10 @@ extern "C" {
 #include <stdbool.h>
 #include <time.h>
 
-#include <cpuid.h>
-#include <mwaitxintrin.h>
+#if defined(__i386__) || defined(__x86_64__)
+  #include <cpuid.h>
+  #include <mwaitxintrin.h>
+#endif
 
 #if defined(CLOCK_MONOTONIC_RAW)
   #define TIMEOUT_CLOCK CLOCK_MONOTONIC_RAW
@@ -26,6 +28,7 @@ static void determine_cpu_support(monitorx_state_t* state) {
   state->cpu_support = CPU_SUPPORT_NONE;
   state->max_monitor_line_size = 0;
 
+#if defined(__i386__) || defined(__x86_64__)
   unsigned int eax, ebx, ecx, edx;
   if (__get_cpuid(0, &eax, &ebx, &ecx, &edx) == 1) {
     // AMD CPU (possible monitorx/mwaitx support)
@@ -45,6 +48,7 @@ static void determine_cpu_support(monitorx_state_t* state) {
       state->max_monitor_line_size = ebx & 0xff;
     }
   }
+#endif
 }
 
 static PyObject* method_monitorx(PyObject* self, PyObject* args,
@@ -117,6 +121,7 @@ static PyObject* method_monitorx(PyObject* self, PyObject* args,
     }
     ++iteration;
 
+#if defined(__i386__) || defined(__x86_64__)
     // monitorx + mwaitx with qualified buffer
     if (buffer_qualifies && state->cpu_support == CPU_SUPPORT_MONITORX) {
       _mm_monitorx(buffer.buf, 0, 0);
@@ -145,10 +150,13 @@ static PyObject* method_monitorx(PyObject* self, PyObject* args,
 
     // Fallback: Busy poll
     else {
+#endif
       Py_BEGIN_ALLOW_THREADS
           // Give other threads a chance to be scheduled
           Py_END_ALLOW_THREADS
+#if defined(__i386__) || defined(__x86_64__)
     }
+#endif
   }
 
   PyBuffer_Release(&buffer);
