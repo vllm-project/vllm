@@ -2,12 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
-import base64
 import json
 import warnings
 
 import librosa
 import numpy as np
+import pybase64 as base64
 import pytest
 import websockets
 

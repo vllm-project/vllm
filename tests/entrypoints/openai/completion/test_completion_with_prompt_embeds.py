@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import base64
 import io
 import json
 
 import openai  # use the official client for correctness check
+import pybase64 as base64
 import pytest
 import pytest_asyncio
 import torch
@@ -14,7 +14,7 @@ import torch
 from openai import BadRequestError
 from transformers import AutoConfig
 
-from ...utils import RemoteOpenAIServer
+from tests.utils import RemoteOpenAIServer
 
 # any model with a chat template should work here
 MODEL_NAME = "facebook/opt-125m"
