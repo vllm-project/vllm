@@ -24,6 +24,7 @@ from vllm.entrypoints.openai.parser.harmony_utils import (
     parse_chat_inputs_to_harmony_messages,
     render_for_completion,
 )
+from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.entrypoints.serve.disagg.protocol import (
     GenerateRequest,
     MultiModalFeatures,
@@ -226,7 +227,7 @@ class OpenAIServingRender:
 
         if not self.use_harmony:
             # Common case.
-            error_check_ret = self._validate_chat_template(
+            error_check_ret = self.validate_chat_template(
                 request_chat_template=request.chat_template,
                 chat_template_kwargs=request.chat_template_kwargs,
                 trust_request_chat_template=self.trust_request_chat_template,
@@ -234,7 +235,7 @@ class OpenAIServingRender:
             if error_check_ret is not None:
                 return error_check_ret
 
-            conversation, engine_prompts = await self._preprocess_chat(
+            conversation, engine_prompts = await self.preprocess_chat(
                 request,
                 request.messages,
                 default_template=self.chat_template,
@@ -328,7 +329,7 @@ class OpenAIServingRender:
                 "prompt_logprobs is not compatible with prompt embeds."
             )
 
-        engine_prompts = await self._preprocess_completion(
+        engine_prompts = await self.preprocess_completion(
             request,
             prompt_input=request.prompt,
             prompt_embeds=request.prompt_embeds,
@@ -426,7 +427,7 @@ class OpenAIServingRender:
     ) -> ErrorResponse | None:
         return await self.model_registry.check_model(request.model)
 
-    def _validate_chat_template(
+    def validate_chat_template(
         self,
         request_chat_template: str | None,
         chat_template_kwargs: dict[str, Any] | None,
@@ -447,7 +448,7 @@ class OpenAIServingRender:
             )
         return None
 
-    async def _preprocess_completion(
+    async def preprocess_completion(
         self,
         request: Any,
         prompt_input: str | list[str] | list[int] | list[list[int]] | None,
@@ -459,9 +460,9 @@ class OpenAIServingRender:
             prompts.extend(prompt_to_seq(prompt_embeds))
         if prompt_input is not None:
             prompts.extend(prompt_to_seq(prompt_input))
-        return await self._preprocess_cmpl(request, prompts)
+        return await self.preprocess_cmpl(request, prompts)
 
-    async def _preprocess_cmpl(
+    async def preprocess_cmpl(
         self,
         request: Any,
         prompts: Sequence[PromptType | bytes],
@@ -490,7 +491,7 @@ class OpenAIServingRender:
             },
         )
 
-    async def _preprocess_chat(
+    async def preprocess_chat(
         self,
         request: Any,
         messages: list[Any],
@@ -500,12 +501,9 @@ class OpenAIServingRender:
         tool_dicts: list[dict[str, Any]] | None = None,
         tool_parser: Callable[[TokenizerLike], ToolParser] | None = None,
     ) -> tuple[list[ConversationMessage], list[ProcessorInputs]]:
-        """Copied from OpenAIServing._preprocess_chat.
-
-        Differences: isinstance check is ChatCompletionRequest-only
-        (ResponsesRequest not supported here); TODO comment dropped accordingly.
-        """
+        """Copied from OpenAIServing._preprocess_chat."""
         renderer = self.renderer
+        mm_config = self.model_config.multimodal_config
 
         default_template_kwargs = merge_kwargs(
             default_template_kwargs,
@@ -518,7 +516,11 @@ class OpenAIServingRender:
         tok_params = request.build_tok_params(self.model_config)
         chat_params = request.build_chat_params(
             default_template, default_template_content_format
-        ).with_defaults(default_template_kwargs)
+        ).with_defaults(
+            default_template_kwargs,
+            default_media_io_kwargs=(mm_config.media_io_kwargs if mm_config else None),
+            default_mm_processor_kwargs=getattr(request, "mm_processor_kwargs", None),
+        )
 
         (conversation,), (engine_prompt,) = await renderer.render_chat_async(
             [messages],
@@ -537,11 +539,11 @@ class OpenAIServingRender:
         if tool_parser is not None:
             tool_choice = getattr(request, "tool_choice", "none")
             if tool_choice != "none":
-                if not isinstance(request, ChatCompletionRequest):
+                if not isinstance(request, ChatCompletionRequest | ResponsesRequest):
                     msg = (
                         "Tool usage is only supported "
-                        " for ChatCompletionRequest, but got "
-                        f"{type(request).__name__}"
+                        "for Chat Completions API or Responses API requests, "
+                        f"but got {type(request).__name__}"
                     )
                     raise NotImplementedError(msg)
                 tokenizer = renderer.get_tokenizer()

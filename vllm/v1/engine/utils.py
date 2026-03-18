@@ -309,7 +309,20 @@ class CoreEngineActorManager:
         else:
             ray.init()
 
-        vllm_config.parallel_config.allocate_elastic_ep_ports()
+        parallel_config = vllm_config.parallel_config
+        if parallel_config.enable_elastic_ep:
+            from vllm.distributed.utils import create_tcp_store
+
+            ip = parallel_config.data_parallel_master_ip
+            store = create_tcp_store(
+                ip,
+                0,
+                is_master=True,
+                world_size=-1,
+                wait_for_workers=False,
+            )
+            parallel_config._coord_store_port = store.port
+            self._coord_store = store
 
         if placement_groups is not None:
             assert local_dp_ranks is not None, (

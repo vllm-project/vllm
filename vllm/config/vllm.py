@@ -682,12 +682,11 @@ class VllmConfig:
                 self.model_config, self.load_config
             )
 
+        from vllm.v1.executor.abstract import Executor
+
         executor_backend = self.parallel_config.distributed_executor_backend
-        executor_supports_async_sched = executor_backend in (
-            "mp",
-            "uni",
-            "external_launcher",
-        )
+        executor_class = Executor.get_class(self)
+        executor_supports_async_sched = executor_class.supports_async_scheduling()
 
         if self.scheduler_config.async_scheduling:
             # Async scheduling explicitly enabled, hard fail any incompatibilities.
@@ -711,9 +710,7 @@ class VllmConfig:
                     )
             if not executor_supports_async_sched:
                 raise ValueError(
-                    "Currently, async scheduling only supports `mp`, `uni`, or "
-                    "`external_launcher` distributed executor backend, but you chose "
-                    f"`{executor_backend}`."
+                    f"`{executor_backend}` does not support async scheduling yet."
                 )
         elif self.scheduler_config.async_scheduling is None:
             # Enable async scheduling unless there is an incompatible option.
@@ -742,8 +739,7 @@ class VllmConfig:
             elif not executor_supports_async_sched:
                 logger.warning_once(
                     "Async scheduling will be disabled because it is not supported "
-                    "with the `%s` distributed executor backend (only `mp`, `uni`, and "
-                    "`external_launcher` are supported).",
+                    "with the `%s` distributed executor backend. ",
                     executor_backend,
                     scope="local",
                 )
@@ -1584,8 +1580,9 @@ class VllmConfig:
                 "runai_streamer_sharded",
             ):
                 raise ValueError(
-                    f"To load a model from S3, 'load_format' "
-                    f"must be 'runai_streamer' or 'runai_streamer_sharded', "
+                    f"To load a model from object storage (S3/GCS/Azure), "
+                    f"'load_format' must be 'runai_streamer' or "
+                    f"'runai_streamer_sharded', "
                     f"but got '{self.load_config.load_format}'. "
                     f"Model: {self.model_config.model}"
                 )
