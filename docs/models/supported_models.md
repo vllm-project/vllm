@@ -676,13 +676,13 @@ See [this page](pooling_models/README.md) for more information on how to use poo
 
 See the link below for more information on the models supported for specific pooling tasks.
 
-- [Classification Models](pooling_models/classify.md)
-- [Embedding models](pooling_models/embed.md)
-- [Reward Models](pooling_models/reward.md)
-- [Token Classification Models](pooling_models/token_classify.md)
-- [Token Embedding Models](pooling_models/token_embed.md)
-- [Score Models](pooling_models/scoring.md)
-- [Specific Models](pooling_models/specific_models.md)
+- [Classification Usages](pooling_models/classify.md)
+- [Embedding Usages](pooling_models/embed.md)
+- [Reward Usages](pooling_models/reward.md)
+- [Token Classification Usages](pooling_models/token_classify.md)
+- [Token Embedding Usages](pooling_models/token_embed.md)
+- [Scoring Usages](pooling_models/scoring.md)
+- [Specific Model Examples](pooling_models/specific_models.md)
 
 ## Model Support Policy
 
