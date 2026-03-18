@@ -2,6 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+import atexit
+import os
+import random
+import threading
+
 import torch
 import torch.distributed as dist
 from torch.distributed import ProcessGroup
@@ -64,15 +69,20 @@ def initialize_fi_ar_workspace(
 
     backend = envs.VLLM_FLASHINFER_ALLREDUCE_BACKEND
     comm_backend = TorchDistBackend(group=group)
-    _fi_ar_workspace = flashinfer_comm.create_allreduce_fusion_workspace(
-        backend=backend,
-        world_size=world_size,
-        rank=rank,
-        max_token_num=max_token_num,
-        hidden_dim=hidden_dim,
-        dtype=dtype,
-        comm_backend=comm_backend,
-    )
+    rng_state = random.getstate()
+    try:
+        random.seed(int.from_bytes(os.urandom(16), byteorder="big"))
+        _fi_ar_workspace = flashinfer_comm.create_allreduce_fusion_workspace(
+            backend=backend,
+            world_size=world_size,
+            rank=rank,
+            max_token_num=max_token_num,
+            hidden_dim=hidden_dim,
+            dtype=dtype,
+            comm_backend=comm_backend,
+        )
+    finally:
+        random.setstate(rng_state)
     assert _fi_ar_workspace is not None
     logger.debug(
         "Initialized FlashInfer All Reduce workspace: backend=%s, "
@@ -132,18 +142,25 @@ def initialize_fi_ar_quant_workspace(
     )
 
 
+_fi_ar_workspace_lock = threading.Lock()
+
+
 def destroy_fi_ar_workspace():
     global _fi_ar_workspace
     global _fi_ar_quant_workspace
-    if (
-        _fi_ar_quant_workspace is not None
-        and _fi_ar_quant_workspace is not _fi_ar_workspace
-    ):
-        _fi_ar_quant_workspace.destroy()
-    _fi_ar_quant_workspace = None
-    if _fi_ar_workspace is not None:
-        _fi_ar_workspace.destroy()
-        _fi_ar_workspace = None
+    with _fi_ar_workspace_lock:
+        if (
+            _fi_ar_quant_workspace is not None
+            and _fi_ar_quant_workspace is not _fi_ar_workspace
+        ):
+            _fi_ar_quant_workspace.destroy()
+        _fi_ar_quant_workspace = None
+        if _fi_ar_workspace is not None:
+            _fi_ar_workspace.destroy()
+            _fi_ar_workspace = None
+
+
+atexit.register(destroy_fi_ar_workspace)
 
 
 class FlashInferAllReduce:
