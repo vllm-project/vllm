@@ -664,3 +664,61 @@ class TestGptOssStructuralTags:
         assert not any("get_stock" in b for b in tag_begins)
         # No final (named tool choice blocks final)
         assert not any("final" in b for b in tag_begins)
+
+    def test_named_tool_choice_excludes_builtins(
+        self, reasoning_parser, mock_tool_server_with_all_tools
+    ):
+        """Named function tool_choice must exclude builtin tool tags.
+
+        With at_least_one=True, builtin channels (browser/python/container)
+        could satisfy the grammar constraint instead of the named function."""
+        fn_tools = [{"name": "get_weather", "parameters": {"type": "object"}}]
+        result = reasoning_parser.prepare_structured_tag(
+            None,
+            mock_tool_server_with_all_tools,
+            tool_choice={"type": "function", "name": "get_weather"},
+            function_tools=fn_tools,
+        )
+        parsed = json.loads(result)
+
+        tag_begins = [t["begin"] for t in parsed["format"]["tags"]]
+        # Named function tags present
+        assert "<|channel|>commentary to=functions.get_weather<|message|>" in tag_begins
+        # No builtin tags
+        assert not any("to=browser" in b for b in tag_begins)
+        assert not any("to=python" in b for b in tag_begins)
+        assert not any("to=container" in b for b in tag_begins)
+
+    def test_tool_choice_none_excludes_builtins(
+        self, reasoning_parser, mock_tool_server_with_all_tools
+    ):
+        """tool_choice='none' must suppress builtin tool tags even when
+        a tool_server with builtins is present."""
+        result = reasoning_parser.prepare_structured_tag(
+            None,
+            mock_tool_server_with_all_tools,
+            tool_choice="none",
+        )
+        parsed = json.loads(result)
+
+        tag_begins = [t["begin"] for t in parsed["format"]["tags"]]
+        # Only the base analysis tag — no builtin channels
+        assert tag_begins == ["<|channel|>analysis<|message|>"]
+
+    @pytest.mark.parametrize("tool_choice", ["auto", "required", None])
+    def test_tool_choice_auto_required_include_builtins(
+        self, reasoning_parser, mock_tool_server_with_all_tools, tool_choice
+    ):
+        """tool_choice='auto'/'required'/None should include builtin tool
+        tags when a tool_server has builtins."""
+        result = reasoning_parser.prepare_structured_tag(
+            None,
+            mock_tool_server_with_all_tools,
+            tool_choice=tool_choice,
+        )
+        parsed = json.loads(result)
+
+        tag_begins = [t["begin"] for t in parsed["format"]["tags"]]
+        assert "<|channel|>commentary to=browser" in tag_begins
+        assert "<|channel|>commentary to=python" in tag_begins
+        assert "<|channel|>commentary to=container" in tag_begins

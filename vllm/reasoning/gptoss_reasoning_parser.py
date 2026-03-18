@@ -205,8 +205,15 @@ class GptOssReasoningParser(ReasoningParser):
 
         base_tag: dict[str, Any] = copy.deepcopy(no_func_reasoning_tag)
 
-        # Add builtin tool tags (unless tool_choice is "none")
-        if tool_choice != "none" and tool_server is not None:
+        # Add builtin tool tags unless tool_choice is "none" or a named
+        # function dict — named forcing should only allow the specific
+        # function, not builtin channels that could satisfy at_least_one.
+        is_named_function_choice = isinstance(tool_choice, dict)
+        if (
+            tool_choice != "none"
+            and not is_named_function_choice
+            and tool_server is not None
+        ):
             builtin_tool_list: list[str] = []
             if tool_server.has_tool("browser"):
                 builtin_tool_list.append("browser")

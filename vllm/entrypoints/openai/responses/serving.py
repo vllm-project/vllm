@@ -1178,7 +1178,10 @@ class OpenAIServingResponses(OpenAIServing):
         return system_msg
 
     def _construct_harmony_system_input_message(
-        self, request: ResponsesRequest, with_custom_tools: bool, tool_types: set[str]
+        self,
+        request: ResponsesRequest,
+        tools_visible: bool,
+        tool_types: set[str],
     ) -> OpenAIHarmonyMessage:
         model_identity = self._extract_system_message_from_request(request)
 
@@ -1189,11 +1192,14 @@ class OpenAIServingResponses(OpenAIServing):
 
         # Get filtered tool descriptions first.
         # If get_tool_description returns None (due to filtering), the tool is disabled.
+        # When tools_visible is False (e.g. tool_choice="none"), suppress all
+        # builtin tool descriptions so the model doesn't see them.
         browser_description = (
             self.tool_server.get_tool_description(
                 "browser", allowed_tools_map.get("web_search_preview")
             )
-            if "web_search_preview" in tool_types
+            if tools_visible
+            and "web_search_preview" in tool_types
             and self.tool_server is not None
             and self.tool_server.has_tool("browser")
             else None
@@ -1202,7 +1208,8 @@ class OpenAIServingResponses(OpenAIServing):
             self.tool_server.get_tool_description(
                 "python", allowed_tools_map.get("code_interpreter")
             )
-            if "code_interpreter" in tool_types
+            if tools_visible
+            and "code_interpreter" in tool_types
             and self.tool_server is not None
             and self.tool_server.has_tool("python")
             else None
@@ -1211,7 +1218,8 @@ class OpenAIServingResponses(OpenAIServing):
             self.tool_server.get_tool_description(
                 "container", allowed_tools_map.get("container")
             )
-            if "container" in tool_types
+            if tools_visible
+            and "container" in tool_types
             and self.tool_server is not None
             and self.tool_server.has_tool("container")
             else None
@@ -1224,7 +1232,7 @@ class OpenAIServingResponses(OpenAIServing):
             python_description=python_description,
             container_description=container_description,
             instructions=request.instructions,
-            with_custom_tools=with_custom_tools,
+            with_custom_tools=tools_visible,
         )
         return sys_msg
 
@@ -1255,7 +1263,11 @@ class OpenAIServingResponses(OpenAIServing):
             # Per Harmony cookbook: developer message holds instructions,
             # function tools, AND response format schemas.
             response_format_schema = _extract_response_format_schema(request)
-            needs_dev_msg = tools_visible or response_format_schema is not None
+            needs_dev_msg = (
+                tools_visible
+                or response_format_schema is not None
+                or request.instructions is not None
+            )
 
             if needs_dev_msg:
                 dev_instructions = request.instructions
