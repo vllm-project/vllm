@@ -30,9 +30,7 @@ from vllm.config import (
 )
 from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    GroupShape,
     QuantKey,
     kFp8Dynamic128Sym,
     kFp8StaticTensorSym,
@@ -224,7 +222,7 @@ class TestAttentionFp8GroupQuantPatternModel(AttentionQuantPatternModel):
     """Test model for AttentionFp8GroupQuantPattern fusion.
 
     Uses per-group (group_size=128) dynamic FP8 quantization after attention,
-    followed by a simple dequant+matmul to produce a comparable output.
+    via TestFP8Layer which handles quant + matmul internally.
     """
 
     quant_key = kFp8Dynamic128Sym
@@ -233,41 +231,29 @@ class TestAttentionFp8GroupQuantPatternModel(AttentionQuantPatternModel):
         super().__init__(*args, **kwargs)
 
         hidden_size = self.num_qo_heads * self.head_size
-        self.group_size = self.quant_key.scale.group_shape[1]
-
-        self.quant_fp8 = QuantFP8(
-            static=False,
-            group_shape=GroupShape(1, self.group_size),
-            column_major_scales=False,
-            tma_aligned_scales=False,
-            compile_native=False,
+        self.fp8_linear = TestFP8Layer(
+            weight_shape=(hidden_size, hidden_size),
+            activation_quant_key=self.quant_key,
+            weight_quant_key=self.quant_key,
+            device=self.device,
         )
 
-        # Simple weight for downstream matmul (dequant -> matmul)
         w = kwargs.get("w")
         if w is not None:
-            self.proj_weight = w["weight"]
-        else:
-            self.proj_weight = torch.randn(
-                hidden_size,
-                hidden_size,
-                dtype=torch.get_default_dtype(),
-                device=kwargs.get("device", torch.device("cuda:0")),
-            )
-        self.w = {"weight": self.proj_weight}
+            self.fp8_linear.weight = w["weight"]
+            self.fp8_linear.weight_scale = w["wscale"]
+            self.fp8_linear.input_scale = w["scale"]
+
+        self.w = {
+            "weight": self.fp8_linear.weight,
+            "wscale": self.fp8_linear.weight_scale,
+            "scale": self.fp8_linear.input_scale,
+        }
 
     def forward(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor):
-        """Forward pass: attention -> per-group FP8 quant -> dequant -> matmul"""
+        """Forward pass: attention -> per-group FP8 quant + matmul"""
         attn_output = self.attn(q, k, v)
-        quant_output, scales = self.quant_fp8(attn_output)
-        # Dequantize for a fair comparison (the fusion changes quant numerics
-        # slightly, so we compare the dequantized result)
-        num_groups = quant_output.shape[-1] // self.group_size
-        dequant = quant_output.float().reshape(
-            -1, num_groups, self.group_size
-        ) * scales.float().unsqueeze(-1)
-        dequant = dequant.reshape(quant_output.shape).to(attn_output.dtype)
-        return torch.matmul(dequant, self.proj_weight.t())
+        return self.fp8_linear(attn_output)
 
 
 PATTERN_TEST_MODELS_FP8: list[tuple[str, type]] = []
