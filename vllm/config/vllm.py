@@ -900,6 +900,15 @@ class VllmConfig:
                 self.speculative_config is None
             )
 
+        # Resolve fast_kv_cache_cold_start tri-state (True/False/None)
+        # into a concrete bool. Note: unlike MOE, the opaque type approach
+        # has not been implemented for KV cache ops yet, so HAS_OPAQUE_TYPE
+        # does not supersede this.
+        if self.compilation_config.fast_kv_cache_cold_start is None:
+            self.compilation_config.fast_kv_cache_cold_start = (
+                self.speculative_config is None
+            )
+
         self._set_max_num_scheduled_tokens()
 
         if current_platform.support_static_graph_mode():

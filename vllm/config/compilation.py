@@ -656,6 +656,21 @@ class CompilationConfig:
     NB: We're working on a longer-term solution that doesn't need these assumptions.
     """
 
+    fast_kv_cache_cold_start: bool | None = None
+    """Optimization for fast KV cache update cold start.
+
+    Similar to fast_moe_cold_start, this assumes that:
+    1. the only decoder forward pass being run is the current model
+    2. the decoder forward pass runs all attention layers in the order
+       in which they are initialized
+
+    The options are:
+    - True: optimization is always on
+    - False: optimization is always off
+    - None (default): optimization is on usually but off for speculative
+      decoding
+    """
+
     # keep track of enabled and disabled custom ops
     enabled_custom_ops: Counter[str] = field(default_factory=Counter, init=False)
     """custom ops that are enabled"""
@@ -673,6 +688,13 @@ class CompilationConfig:
 
     static_all_moe_layers: list[str] = field(default_factory=list, init=False)
     """The names of all the MOE layers in the model
+    """
+    static_all_kv_cache_update_layers: list[str] = field(
+        default_factory=list, init=False
+    )
+    """The names of all attention layers that call unified_kv_cache_update.
+    These are layers where forward_includes_kv_cache_update is False
+    and kv_sharing_target_layer_name is None.
     """
 
     # Attention ops; used for piecewise cudagraphs
@@ -1005,11 +1027,11 @@ class CompilationConfig:
                 # list via reference.
                 self.splitting_ops = list(self._attention_ops)
 
-                # unified_kv_cache_update has a string param that prevents Inductor
-                # from reusing piecewise graphs. Remove it from the compiled graph.
-                # This has the side-effect of excluding cache from cudagraphs but
-                # that doesn't seem to affect performance.
-                # https://github.com/vllm-project/vllm/issues/33267
+                # unified_kv_cache_update has a string param that prevents
+                # Inductor from reusing piecewise graphs. Remove it from
+                # the compiled graph. This has the side-effect of excluding
+                # cache from cudagraphs but that doesn't seem to affect
+                # performance.
                 if not self.use_inductor_graph_partition:
                     self.splitting_ops.append("vllm::unified_kv_cache_update")
                     self.splitting_ops.append("vllm::unified_mla_kv_cache_update")

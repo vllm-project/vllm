@@ -9,7 +9,11 @@ import torch.nn as nn
 import vllm.envs as envs
 from vllm.config import CacheConfig, get_current_vllm_config
 from vllm.config.vllm import VllmConfig
-from vllm.forward_context import ForwardContext, get_forward_context
+from vllm.forward_context import (
+    ForwardContext,
+    get_forward_context,
+    is_forward_context_available,
+)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.kv_transfer_utils import (
     maybe_transfer_kv_layer,
@@ -347,6 +351,12 @@ class Attention(nn.Module, AttentionLayerBase):
             )
         self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
 
+        if (
+            not self.attn_backend.forward_includes_kv_cache_update
+            and kv_sharing_target_layer_name is None
+        ):
+            compilation_config.static_all_kv_cache_update_layers.append(prefix)
+
         # use a placeholder kv cache tensor during init, which will be replaced
         # by bind_kv_cache
         # this variable will not be accessed if use_direct_call is True
@@ -427,6 +437,15 @@ class Attention(nn.Module, AttentionLayerBase):
                 key = key.view(-1, self.num_kv_heads, self.head_size)
             if value is not None:
                 value = value.view(-1, self.num_kv_heads, self.head_size_v)
+
+            def encode_kv_cache_layer_name() -> str:
+                if (
+                    is_forward_context_available()
+                    and get_forward_context().all_kv_cache_update_layers is not None
+                ):
+                    return "from_forward_context"
+                return self.layer_name
+
             kv_cache_dummy_dep = None
             if self.use_direct_call:
                 # Skip this if sharing KV cache with an earlier attention layer.
@@ -437,7 +456,7 @@ class Attention(nn.Module, AttentionLayerBase):
                     and value is not None
                 ):
                     kv_cache_dummy_dep = unified_kv_cache_update(
-                        key, value, self.layer_name
+                        key, value, encode_kv_cache_layer_name()
                     )
                 unified_attention_with_output(
                     query,
@@ -456,7 +475,7 @@ class Attention(nn.Module, AttentionLayerBase):
                     and value is not None
                 ):
                     kv_cache_dummy_dep = torch.ops.vllm.unified_kv_cache_update(
-                        key, value, self.layer_name
+                        key, value, encode_kv_cache_layer_name()
                     )
                 torch.ops.vllm.unified_attention_with_output(
                     query,
@@ -647,6 +666,20 @@ def unified_kv_cache_update(
     Returns a dummy that is passed to unified_attention to signal a side effect and
     the data dependency between them to ensure torch.compile preserves ordering.
     """
+    # Resolve sentinel string to actual layer name
+    if layer_name == "from_forward_context":
+        forward_context = get_forward_context()
+        all_kv_cache_update_layers = forward_context.all_kv_cache_update_layers
+        assert all_kv_cache_update_layers is not None
+        kv_cache_update_index = forward_context.kv_cache_update_index
+        if kv_cache_update_index >= len(all_kv_cache_update_layers):
+            raise AssertionError(
+                "We expected the number of KV cache update layers in "
+                "`all_kv_cache_update_layers` to be equal to the number of "
+                "unified_kv_cache_update calls."
+            )
+        layer_name = all_kv_cache_update_layers[kv_cache_update_index]
+        forward_context.kv_cache_update_index += 1
     _, attn_layer, kv_cache, layer_slot_mapping = get_attention_context(layer_name)
     if layer_slot_mapping is not None:
         assert hasattr(attn_layer.impl, "do_kv_cache_update"), (
