@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
-import base64
 import sys
 import tempfile
 from argparse import Namespace
@@ -13,6 +12,7 @@ from typing import Any, TypeAlias
 from urllib.parse import urlparse
 
 import aiohttp
+import pybase64 as base64
 import torch
 from fastapi import UploadFile
 from prometheus_client import start_http_server
@@ -53,6 +53,8 @@ from vllm.entrypoints.pooling.score.protocol import (
     ScoreRequest,
     ScoreResponse,
 )
+from vllm.entrypoints.utils import create_error_response
+from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
 from vllm.utils import random_uuid
@@ -85,9 +87,10 @@ class BatchTranscriptionRequest(TranscriptionRequest):
     def validate_no_file(cls, data: Any):
         """Ensure file field is not provided in batch requests."""
         if isinstance(data, dict) and "file" in data:
-            raise ValueError(
+            raise VLLMValidationError(
                 "The 'file' field is not supported in batch requests. "
-                "Use 'file_url' instead."
+                "Use 'file_url' instead.",
+                parameter="file",
             )
         return data
 
@@ -115,9 +118,10 @@ class BatchTranslationRequest(TranslationRequest):
     def validate_no_file(cls, data: Any):
         """Ensure file field is not provided in batch requests."""
         if isinstance(data, dict) and "file" in data:
-            raise ValueError(
+            raise VLLMValidationError(
                 "The 'file' field is not supported in batch requests. "
-                "Use 'file_url' instead."
+                "Use 'file_url' instead.",
+                parameter="file",
             )
         return data
 
@@ -319,6 +323,7 @@ class BatchProgressTracker:
 async def read_file(path_or_url: str) -> str:
     if path_or_url.startswith("http://") or path_or_url.startswith("https://"):
         async with aiohttp.ClientSession() as session, session.get(path_or_url) as resp:
+            resp.raise_for_status()
             return await resp.text()
     else:
         with open(path_or_url, encoding="utf-8") as f:
@@ -503,7 +508,10 @@ async def run_request(
     request: BatchRequestInput,
     tracker: BatchProgressTracker,
 ) -> BatchRequestOutput:
-    response = await serving_engine_func(request.body)
+    try:
+        response = await serving_engine_func(request.body)
+    except Exception as e:
+        response = create_error_response(e)
 
     if isinstance(
         response,
@@ -678,10 +686,10 @@ async def build_endpoint_registry(
 
     # Get serving objects from state (defaulting to None if not set)
     openai_serving_chat = getattr(state, "openai_serving_chat", None)
-    openai_serving_embedding = getattr(state, "openai_serving_embedding", None)
-    openai_serving_scores = getattr(state, "openai_serving_scores", None)
     openai_serving_transcription = getattr(state, "openai_serving_transcription", None)
     openai_serving_translation = getattr(state, "openai_serving_translation", None)
+    serving_embedding = getattr(state, "serving_embedding", None)
+    serving_scores = getattr(state, "serving_scores", None)
 
     # Registry of endpoint configurations
     endpoint_registry: dict[str, dict[str, Any]] = {
@@ -697,27 +705,21 @@ async def build_endpoint_registry(
         "embeddings": {
             "url_matcher": lambda url: url == "/v1/embeddings",
             "handler_getter": lambda: (
-                openai_serving_embedding.create_embedding
-                if openai_serving_embedding is not None
-                else None
+                serving_embedding if serving_embedding is not None else None
             ),
             "wrapper_fn": None,
         },
         "score": {
             "url_matcher": lambda url: url.endswith("/score"),
             "handler_getter": lambda: (
-                openai_serving_scores.create_score
-                if openai_serving_scores is not None
-                else None
+                serving_scores.create_score if serving_scores is not None else None
             ),
             "wrapper_fn": None,
         },
         "rerank": {
             "url_matcher": lambda url: url.endswith("/rerank"),
             "handler_getter": lambda: (
-                openai_serving_scores.do_rerank
-                if openai_serving_scores is not None
-                else None
+                serving_scores.do_rerank if serving_scores is not None else None
             ),
             "wrapper_fn": None,
         },

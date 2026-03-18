@@ -986,14 +986,6 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         self.dummy_inputs = dummy_inputs
         self.cache = cache
 
-        # TODO: Remove in v0.18
-        if hasattr(self, "_get_data_parser"):
-            raise ValueError(
-                "BaseMultiModalProcessor._get_data_parser has been "
-                "moved to `BaseProcessingInfo.build_data_parser` in v0.16. "
-                "You should override `BaseProcessingInfo.build_data_parser` instead."
-            )
-
         self.data_parser = self.info.get_data_parser()
 
     def __call__(
@@ -1073,21 +1065,6 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             unbound_prompt_updates,
             mm_items.get_all_counts(),
         )
-
-        for modality, prompt_updates in mm_prompt_updates.items():
-            for item_idx, item_prompt_updates in enumerate(prompt_updates):
-                if len(item_prompt_updates) > 1:
-                    logger.warning_once(
-                        "Detected %d prompt updates for `mm_items[%r][%s]`. "
-                        "Multiple prompt updates per item is now "
-                        "deprecated and may be removed in v0.13. "
-                        "Instead, please specify dynamic update targets "
-                        "in the same prompt update definition by passing "
-                        "a function to `PromptUpdate.target`.",
-                        len(prompt_updates),
-                        modality,
-                        item_idx,
-                    )
 
         return mm_prompt_updates
 
@@ -1705,6 +1682,8 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
 
 class EncDecMultiModalProcessor(BaseMultiModalProcessor[_I]):
+    skip_decoder_start_token: bool = False
+
     @abstractmethod
     def create_encoder_prompt(
         self,

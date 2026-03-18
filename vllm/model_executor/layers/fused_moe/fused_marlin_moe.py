@@ -409,7 +409,7 @@ def batched_fused_marlin_moe(
     Note that the moe_align_block_size function indicates,
         - What rows of the A matrix (hidden_states) to access during the
         matmul, via sorted_ids output.
-        - What expert_id to use for each block matmul, via expert_ids ouptut.
+        - What expert_id to use for each block matmul, via expert_ids output.
 
     In the batched version, the tokens are already grouped/batched by experts
     they subscribe to. Due to this, we can represent the batched hidden_states
@@ -526,7 +526,7 @@ def batched_fused_marlin_moe(
     return output
 
 
-class MarlinExpertsBase(mk.FusedMoEPermuteExpertsUnpermute):
+class MarlinExpertsBase(mk.FusedMoEExpertsModular):
     def __init__(
         self,
         moe_config: FusedMoEConfig,
@@ -600,7 +600,10 @@ class MarlinExpertsBase(mk.FusedMoEPermuteExpertsUnpermute):
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
-        return not moe_parallel_config.use_fi_all2allv_kernels
+        return not (
+            moe_parallel_config.use_fi_nvl_two_sided_kernels
+            or moe_parallel_config.use_fi_nvl_one_sided_kernels
+        )
 
     @property
     def quant_type_id(self) -> int:
@@ -657,9 +660,6 @@ class MarlinExperts(MarlinExpertsBase):
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.Standard
-
-    def supports_chunking(self) -> bool:
-        return True
 
     def workspace_shapes(
         self,
@@ -785,9 +785,6 @@ class BatchedMarlinExperts(MarlinExpertsBase):
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.BatchedExperts
-
-    def supports_chunking(self) -> bool:
-        return False
 
     def workspace_shapes(
         self,

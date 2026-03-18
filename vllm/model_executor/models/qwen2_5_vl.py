@@ -42,11 +42,13 @@ from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import (
     Qwen2_5_VLVisionConfig,
 )
 
-from vllm.compilation.decorators import support_torch_compile
+from vllm.compilation.decorators import (
+    should_torch_compile_mm_encoder,
+    support_torch_compile,
+)
 from vllm.config import VllmConfig
 from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
-from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_and_mul_fn
 from vllm.model_executor.layers.attention import MMEncoderAttention
@@ -65,7 +67,6 @@ from vllm.model_executor.layers.rotary_embedding.common import (
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.module_mapping import MultiModelKeys
-from vllm.model_executor.models.vision import should_torch_compile_mm_vit
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.evs import (
     compute_mrope_for_media,
@@ -87,6 +88,7 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .interfaces import (
     MultiModalEmbeddings,
+    SupportsEagle,
     SupportsEagle3,
     SupportsLoRA,
     SupportsMRoPE,
@@ -195,6 +197,8 @@ class Qwen2_5_VLVideoPixelInputs(TensorSchema):
         - second_per_grid_ts: The video time interval (in seconds) for each
           grid along the temporal dimension in the 3D position IDs. Returned
           when `videos` is not `None`.
+        - timestamps: List of timestamp values (in seconds) for each frame
+          after merging. Length equals the temporal dimension after merging.
     """
 
     type: Literal["pixel_values_videos"]
@@ -214,6 +218,8 @@ class Qwen2_5_VLVideoPixelInputs(TensorSchema):
         TensorShape("nv"),
     ]
 
+    timestamps: list[list[float]] | None = None
+
 
 class Qwen2_5_VLVideoEmbeddingInputs(TensorSchema):
     """
@@ -232,6 +238,8 @@ class Qwen2_5_VLVideoEmbeddingInputs(TensorSchema):
         - second_per_grid_ts: The video time interval (in seconds) for each
           grid along the temporal dimension in the 3D position IDs. Returned
           when `videos` is not `None`.
+        - timestamps: List of timestamp values (in seconds) for each frame
+          after merging. Length equals the temporal dimension after merging.
     """
 
     type: Literal["video_embeds"]
@@ -250,6 +258,7 @@ class Qwen2_5_VLVideoEmbeddingInputs(TensorSchema):
         torch.Tensor | None,
         TensorShape("nv"),
     ] = None
+    timestamps: list[list[float]] | None = None
 
 
 Qwen2_5_VLVideoInputs: TypeAlias = (
@@ -417,7 +426,7 @@ class Qwen2_5_VisionAttention(nn.Module):
         "rotary_pos_emb_cos": 0,
         "rotary_pos_emb_sin": 0,
     },
-    enable_if=should_torch_compile_mm_vit,
+    enable_if=should_torch_compile_mm_encoder,
 )
 class Qwen2_5_VisionBlock(nn.Module):
     def __init__(
@@ -476,7 +485,7 @@ class Qwen2_5_VisionBlock(nn.Module):
     dynamic_arg_dims={
         "x": 0,
     },
-    enable_if=should_torch_compile_mm_vit,
+    enable_if=should_torch_compile_mm_encoder,
 )
 class Qwen2_5_VisionPatchEmbed(nn.Module):
     def __init__(
@@ -511,7 +520,7 @@ class Qwen2_5_VisionPatchEmbed(nn.Module):
     dynamic_arg_dims={
         "x": 0,
     },
-    enable_if=should_torch_compile_mm_vit,
+    enable_if=should_torch_compile_mm_encoder,
 )
 class Qwen2_5_VisionPatchMerger(nn.Module):
     def __init__(
@@ -991,6 +1000,7 @@ class Qwen2_5_VLForConditionalGeneration(
     SupportsLoRA,
     SupportsPP,
     SupportsQuant,
+    SupportsEagle,
     SupportsEagle3,
     SupportsMultiModalPruning,
     SupportsMRoPE,
@@ -1134,13 +1144,6 @@ class Qwen2_5_VLForConditionalGeneration(
             self.language_model.make_empty_intermediate_tensors
         )
 
-    def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
-        self.language_model.model.aux_hidden_state_layers = layers
-
-    def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:
-        num_layers = len(self.language_model.model.layers)
-        return (2, num_layers // 2, num_layers - 3)
-
     def _parse_and_validate_image_input(
         self, **kwargs: object
     ) -> Qwen2_5_VLImageInputs | None:
@@ -1203,13 +1206,12 @@ class Qwen2_5_VLForConditionalGeneration(
             image_embeds = image_input["image_embeds"].type(self.visual.dtype)
         else:
             pixel_values = image_input["pixel_values"]
-            with set_forward_context(None, self.vllm_config):
-                if self.use_data_parallel:
-                    return run_dp_sharded_mrope_vision_model(
-                        self.visual, pixel_values, grid_thw_list, rope_type="rope_3d"
-                    )
-                else:
-                    image_embeds = self.visual(pixel_values, grid_thw=grid_thw_list)
+            if self.use_data_parallel:
+                return run_dp_sharded_mrope_vision_model(
+                    self.visual, pixel_values, grid_thw_list, rope_type="rope_3d"
+                )
+            else:
+                image_embeds = self.visual(pixel_values, grid_thw=grid_thw_list)
 
         # Split concatenated embeddings for each image item.
         merge_size = self.visual.spatial_merge_size
@@ -1258,18 +1260,15 @@ class Qwen2_5_VLForConditionalGeneration(
             video_embeds = video_input["video_embeds"].type(self.visual.dtype)
         else:
             pixel_values_videos = video_input["pixel_values_videos"]
-            with set_forward_context(None, self.vllm_config):
-                if self.use_data_parallel:
-                    return run_dp_sharded_mrope_vision_model(
-                        self.visual,
-                        pixel_values_videos,
-                        grid_thw_list,
-                        rope_type="rope_3d",
-                    )
-                else:
-                    video_embeds = self.visual(
-                        pixel_values_videos, grid_thw=grid_thw_list
-                    )
+            if self.use_data_parallel:
+                return run_dp_sharded_mrope_vision_model(
+                    self.visual,
+                    pixel_values_videos,
+                    grid_thw_list,
+                    rope_type="rope_3d",
+                )
+            else:
+                video_embeds = self.visual(pixel_values_videos, grid_thw=grid_thw_list)
 
         # Split concatenated embeddings for each video item.
         merge_size = self.visual.spatial_merge_size

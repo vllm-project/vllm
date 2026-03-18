@@ -719,7 +719,7 @@ def isaac_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
         # Convert to tuple or None
         all_hidden_states = tuple(hidden_states_list) if output_hidden_states else None
 
-        # Include hiden_states for compatibility with hidden_states_to_seq_logprobs()
+        # Include hidden_states for compatibility with hidden_states_to_seq_logprobs()
         return BaseModelOutputWithPast(
             last_hidden_state=hidden_states,
             past_key_values=past_key_values,
@@ -1149,6 +1149,31 @@ def ovis2_5_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     return hf_model
 
 
+def paddleocr_vl_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
+    """Patches the HfRunner to fix create_causal_mask API mismatch.
+
+    The PaddleOCR-VL HF model passes `inputs_embeds` to create_causal_mask,
+    but transformers renamed this parameter to `input_embeds`.
+    """
+    import sys
+
+    model_module = sys.modules.get(type(hf_model.model.model).__module__)
+    if model_module is None:
+        return hf_model
+
+    original_create_causal_mask = getattr(model_module, "create_causal_mask", None)
+    if original_create_causal_mask is None:
+        return hf_model
+
+    def patched_create_causal_mask(*args, **kwargs):
+        if "inputs_embeds" in kwargs:
+            kwargs["input_embeds"] = kwargs.pop("inputs_embeds")
+        return original_create_causal_mask(*args, **kwargs)
+
+    model_module.create_causal_mask = patched_create_causal_mask  # type: ignore[attr-defined]
+    return hf_model
+
+
 def qwen2_5_omni_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     """Patches and returns an instance of the HfRunner for Qwen2.5-Omni."""
     thinker = hf_model.model.thinker
@@ -1226,7 +1251,7 @@ def voxtral_patch_hf_runner(hf_model: "HfRunner") -> "HfRunner":
        dicts (accepting ``url``, ``path``, or ``base64`` audio) rather than
        the standard ``processor(text=, audio=, sampling_rate=)`` interface.
     2. HfRunner.get_inputs cannot handle multi-audio per prompt because it
-       mis-unpacks ``[(arr1, sr1), (arr2, sr2)]`` via a ``len == 2`` check.
+       incorrectly unpacks ``[(arr1, sr1), (arr2, sr2)]`` via a ``len == 2`` check.
 
     We override ``get_inputs`` to build conversation dicts and call
     ``apply_chat_template`` directly, bypassing both issues. We also wrap
@@ -1235,9 +1260,9 @@ def voxtral_patch_hf_runner(hf_model: "HfRunner") -> "HfRunner":
     generated).
     """
 
-    import base64
     import io
 
+    import pybase64 as base64
     import soundfile as sf
 
     processor = hf_model.processor

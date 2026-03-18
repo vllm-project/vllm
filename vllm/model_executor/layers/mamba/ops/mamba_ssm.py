@@ -8,6 +8,7 @@ import torch
 from packaging import version
 
 from vllm import _custom_ops as ops
+from vllm.model_executor.layers.mamba.ops.triton_helpers import fast_exp
 from vllm.triton_utils import HAS_TRITON, tl, triton
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
@@ -215,7 +216,7 @@ def _selective_scan_update_kernel(
                 mask=(offs_m[:, None] < dim) & (offs_n[None, :] < dstate),
                 other=0.0,
             ).to(tl.float32)
-            dA = tl.exp(A * dt[:, None])
+            dA = fast_exp(A * dt[:, None])
         else:
             dt = tl.load(dt_ptr).to(tl.float32)
             if HAS_DT_BIAS:
@@ -223,7 +224,7 @@ def _selective_scan_update_kernel(
             if DT_SOFTPLUS:
                 dt = softplus(dt)
             A = tl.load(A_ptr).to(tl.float32)
-            dA = tl.exp(A * dt)  # scalar, not a matrix
+            dA = fast_exp(A * dt)  # scalar, not a matrix
 
         B = tl.load(B_ptrs, mask=offs_n < dstate, other=0.0).to(tl.float32)
         C = tl.load(C_ptrs, mask=offs_n < dstate, other=0.0).to(tl.float32)
@@ -333,13 +334,13 @@ def selective_state_update(
         dt_bias = dt_bias.unsqueeze(0)
     if out.dim() == 2:
         out = out.unsqueeze(1)
-    if num_accepted_tokens is not None:
-        assert state_batch_indices is not None and state_batch_indices.dim() == 2
-        assert dst_state_batch_indices is None or dst_state_batch_indices.dim() == 2
     if state_batch_indices is not None and state_batch_indices.dim() == 1:
         state_batch_indices = state_batch_indices.unsqueeze(1)
     if dst_state_batch_indices is not None and dst_state_batch_indices.dim() == 1:
         dst_state_batch_indices = dst_state_batch_indices.unsqueeze(1)
+    if num_accepted_tokens is not None:
+        assert state_batch_indices is not None and state_batch_indices.dim() == 2
+        assert dst_state_batch_indices is None or dst_state_batch_indices.dim() == 2
 
     _, nheads, dim, dstate = state.shape
     batch = x.shape[0]
@@ -418,7 +419,7 @@ def selective_state_update(
         and dt.stride(-1) == 0
         and dt_bias.stride(-1) == 0
     )
-    with torch.cuda.device(x.device.index):
+    with torch.accelerator.device_index(x.device.index):
         _selective_scan_update_kernel[grid](
             state,
             x,
