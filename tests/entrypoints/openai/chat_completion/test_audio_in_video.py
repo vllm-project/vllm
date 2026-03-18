@@ -1,15 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import base64
 import json
 
 import openai
+import pybase64 as base64
 import pytest
 import pytest_asyncio
 
 from tests.conftest import VideoTestAssets
-from tests.utils import RemoteOpenAIServer
+from tests.utils import ROCM_EXTRA_ARGS, RemoteOpenAIServer
 
 MODEL_NAME = "Qwen/Qwen2.5-Omni-3B"
 
@@ -22,6 +22,7 @@ def server():
         "--enforce-eager",
         "--limit-mm-per-prompt",
         json.dumps({"audio": 3, "video": 3}),
+        *ROCM_EXTRA_ARGS,
     ]
 
     with RemoteOpenAIServer(
