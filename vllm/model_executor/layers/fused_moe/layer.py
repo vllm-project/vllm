@@ -479,6 +479,14 @@ class FusedMoE(CustomOp):
         self.apply_router_weight_on_input = apply_router_weight_on_input
         self.activation = MoEActivation.from_str(activation)
 
+        # Extract layer index from prefix (e.g. "model.layers.5.mlp" → 5)
+        import re
+        from vllm.model_executor.layers.fused_moe.riy import get_riy_state
+        _layer_match = re.search(r"layers\.(\d+)\.", prefix)
+        _layer_idx = int(_layer_match.group(1)) if _layer_match else -1
+        if _layer_idx >= 0:
+            get_riy_state().register_layer(_layer_idx, num_experts)
+
         # TODO(bnell): we should not have to create a router if the kernel is
         # monolithic.
         self.router = create_fused_moe_router(
@@ -498,6 +506,7 @@ class FusedMoE(CustomOp):
             # TODO(bnell): once we can construct the MK at init time, we
             # can make this a value.
             indices_type_getter=lambda: self.quant_method.topk_indices_dtype,
+            layer_idx=_layer_idx,
         )
         self.routing_method_type: RoutingMethodType = self.router.routing_method_type
 

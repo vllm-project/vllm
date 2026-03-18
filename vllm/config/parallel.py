@@ -148,6 +148,10 @@ class ParallelConfig:
     models."""
     enable_eplb: bool = False
     """Enable expert parallelism load balancing for MoE layers."""
+    riy_expert_profile: str | None = None
+    """Path to a RIY expert profile JSON. Masked experts will be deactivated
+    at load time (weights zeroed, routing weights renormalized). The model
+    structure remains unchanged. See https://github.com/flash7777/riy"""
     eplb_config: EPLBConfig = Field(default_factory=EPLBConfig)
     """Expert parallelism configuration."""
     expert_placement_strategy: ExpertPlacementStrategy = "linear"
