@@ -1011,6 +1011,16 @@ class CompilationConfig:
                 # that doesn't seem to affect performance.
                 # https://github.com/vllm-project/vllm/issues/33267
                 if not self.use_inductor_graph_partition:
+                    if self.pass_config.fuse_rope_kvcache:
+                        logger.warning_once(
+                            "fuse_rope_kvcache is enabled, but splitting_ops is None "
+                            "and Inductor graph partition is not enabled."
+                            "Disabling fuse_rope_kvcache."
+                            "Please either set splitting_ops to an empty list []"
+                            "or set use_inductor_graph_partition to True "
+                            "to enable RoPE+KV cache fusion."
+                        )
+                        self.pass_config.fuse_rope_kvcache = False
                     self.splitting_ops.append("vllm::unified_kv_cache_update")
                     self.splitting_ops.append("vllm::unified_mla_kv_cache_update")
 
