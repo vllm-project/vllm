@@ -471,18 +471,6 @@ class NanoNemotronVLMultiModalProcessor(
 
         processor_inputs.hf_processor_mm_kwargs = hf_processor_mm_kwargs
 
-        # Prepend "This is a video:\n" before <video> to match training format
-        if "video" in processor_inputs.mm_data_items:
-            prompt = processor_inputs.prompt
-            tokenizer = self.info.get_tokenizer()
-            if not isinstance(prompt, str):
-                prompt = tokenizer.decode(prompt, skip_special_tokens=False)
-            if "<video>" in prompt and "This is a video:" not in prompt:
-                prompt = prompt.replace("<video>", "This is a video:\n<video>")
-                processor_inputs.prompt = tokenizer.encode(
-                    prompt, add_special_tokens=False
-                )
-
         if not (
             use_audio_in_video
             and "video" in processor_inputs.mm_data_items
