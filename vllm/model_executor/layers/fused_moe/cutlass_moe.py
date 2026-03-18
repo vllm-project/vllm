@@ -945,6 +945,50 @@ def run_cutlass_moe_mxfp4(
     return
 
 
+def swizzle_mxfp4_scales(
+    scales: torch.Tensor,
+    N: int,
+    K: int,
+) -> torch.Tensor:
+    """Swizzle flat [N, K//32] E8M0 scales to CUTLASS tiled layout.
+
+    CUTLASS expects MX scale factors in a tiled layout:
+        [numMTiles, numKTiles, 32, 4, 4]
+    where numMTiles = ceil(N/128), numKTiles = ceil(K/128),
+    and the inner dimensions correspond to the swizzle pattern:
+        mTileIdx = mIdx / 128
+        outerMIdx = mIdx % 32
+        innerMIdx = (mIdx / 32) % 4
+        kTileIdx = kIdx / 4
+        innerKIdx = kIdx % 4
+    with kIdx = col_in_scale_space (i.e., index into K//32).
+    """
+    assert scales.dtype == torch.uint8
+    num_scale_cols = K // 32  # number of E8M0 scale values per row
+
+    num_m_tiles = (N + 127) // 128
+    num_k_tiles = (num_scale_cols + 3) // 4
+
+    # Pad N to multiple of 128 and scale_cols to multiple of 4
+    padded_N = num_m_tiles * 128
+    padded_scale_cols = num_k_tiles * 4
+
+    # Start with flat scales, pad if needed
+    padded = torch.zeros(
+        padded_N, padded_scale_cols, dtype=torch.uint8, device=scales.device
+    )
+    padded[:N, :num_scale_cols] = scales
+
+    # Reshape to tile structure:
+    # [numMTiles, 4, 32, numKTiles, 4]
+    #  mTileIdx, innerMIdx, outerMIdx, kTileIdx, innerKIdx
+    tiled = padded.reshape(num_m_tiles, 4, 32, num_k_tiles, 4)
+    # Permute to [numMTiles, numKTiles, 32, 4, 4]
+    #            (outerMIdx, innerMIdx, innerKIdx)
+    tiled = tiled.permute(0, 3, 2, 1, 4).contiguous()
+    return tiled.reshape(-1)
+
+
 class CutlassExpertsMxfp4(mk.FusedMoEExpertsModular):
     """CUTLASS MXFP4 x MXFP4 fused MoE expert implementation.
 

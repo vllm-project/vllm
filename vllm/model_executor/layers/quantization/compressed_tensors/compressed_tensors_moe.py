@@ -240,9 +240,12 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
         super().__init__(moe)
         self.group_size = 32
         self.use_cutlass_mxfp4 = CutlassExpertsMxfp4._supports_current_device()
+        self.experts_cls: type[mk.FusedMoEExperts]
         if self.use_cutlass_mxfp4:
+            logger.info_once("Using CutlassExpertsMxfp4 for MXFP4 MoE", scope="local")
             self.experts_cls = CutlassExpertsMxfp4
         else:
+            logger.info_once("Using MarlinExperts for MXFP4 MoE", scope="local")
             self.mxfp4_backend = NvFp4MoeBackend.MARLIN
             self.experts_cls = MarlinExperts
 
@@ -341,7 +344,38 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
         )
         delattr(layer, "w2_weight_packed")
 
-        if not self.use_cutlass_mxfp4:
+        if self.use_cutlass_mxfp4:
+            # Swizzle weight scales from flat checkpoint layout [E, N, K//32]
+            # to CUTLASS tiled layout [E, numMTiles*numKTiles*512].
+            from vllm.model_executor.layers.fused_moe.cutlass_moe import (
+                swizzle_mxfp4_scales,
+            )
+
+            E = layer.w13_weight_scale.shape[0]
+            w13_N = layer.w13_weight_scale.shape[1]
+            w13_scale_K = layer.w13_weight_scale.shape[2]
+            w13_K = w13_scale_K * 32
+
+            w2_M = layer.w2_weight_scale.shape[1]
+            w2_scale_N = layer.w2_weight_scale.shape[2]
+            w2_N = w2_scale_N * 32
+
+            swizzled_w13 = []
+            swizzled_w2 = []
+            for e_idx in range(E):
+                s13 = layer.w13_weight_scale[e_idx]
+                sw13 = swizzle_mxfp4_scales(s13, w13_N, w13_K)
+                swizzled_w13.append(sw13.reshape(w13_N, w13_scale_K))
+                s2 = layer.w2_weight_scale[e_idx]
+                sw2 = swizzle_mxfp4_scales(s2, w2_M, w2_N)
+                swizzled_w2.append(sw2.reshape(w2_M, w2_scale_N))
+            layer.w13_weight_scale = torch.nn.Parameter(
+                torch.stack(swizzled_w13), requires_grad=False
+            )
+            layer.w2_weight_scale = torch.nn.Parameter(
+                torch.stack(swizzled_w2), requires_grad=False
+            )
+        else:
             logger.warning_once(
                 "Your GPU does not have native support for FP4 computation "
                 "but FP4 quantization is being used. Weight-only FP4 "
