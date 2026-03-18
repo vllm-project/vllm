@@ -8,6 +8,7 @@ from typing import Any, ClassVar, overload
 import torch
 from torch.library import Library, infer_schema
 
+from vllm.ir.util import hash_source, weak_cache
 from vllm.logger import init_logger
 from vllm.logging_utils import lazy, tensors_str_no_data
 
@@ -395,3 +396,14 @@ class IrOpImpl:
             return True
 
         return self._supports_args(*args, **kwargs)
+
+    @weak_cache
+    def uuid(self):
+        """
+        Compile-time hash to uniquely determine whether the implementation has changed.
+        Used by vllm-compile hash mechanism and torch.compile lowering pass uuid to
+        control the vLLM compile cache and AOTAutograd/Inductor caches respectively.
+
+        impl_fn and _supports_args should not change after construction, so we cache it.
+        """
+        return hash_source(self.impl_fn, self._supports_args)

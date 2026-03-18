@@ -36,9 +36,24 @@ class IrOpPriorityConfig:
         Produces a hash unique to the pass configuration.
         Any new fields that affect compilation should be added to the hash.
         Any future fields that don't affect compilation should be excluded.
-        """
 
-        return hash_factors(get_hash_factors(self, set()))
+        Also, manually add IR op impl UUIDs to make sure they affect the compile cache.
+        """
+        factors = get_hash_factors(self, set())
+
+        # Implementations are hidden from Dynamo,
+        # so they don't show up in the traced files list.
+        from vllm.ir.op import IrOp
+
+        assert "_impls" not in factors
+        factors["_impls"] = {
+            name: {
+                provider: IrOp.registry[name].impls[provider].uuid() for provider in p
+            }
+            for name, p in asdict(self).items()
+        }
+
+        return hash_factors(factors)
 
     @field_validator("*", mode="before")
     @classmethod
@@ -139,8 +154,13 @@ class KernelConfig:
         Any new fields that affect compilation should be added to the hash.
         Any future fields that don't affect compilation should be excluded.
         """
-        ignored_factors = {"enable_flashinfer_autotune"}
-        return hash_factors(get_hash_factors(self, ignored_factors))
+        ignored_factors = {
+            "enable_flashinfer_autotune",
+            "ir_op_priority",  # handled separately below
+        }
+        factors = get_hash_factors(self, ignored_factors)
+        factors["ir_op_priority"] = self.ir_op_priority.compute_hash()
+        return hash_factors(factors)
 
     @field_validator("enable_flashinfer_autotune", mode="wrap")
     @classmethod

@@ -139,10 +139,20 @@ class VllmIRLoweringPass(VllmInductorPass):
             logger.warning("Full node list: %s", failed_nodes)
 
     def uuid(self) -> str:
-        """IR op priority affects lowering pass, so we include it in the cache key."""
+        """
+        IR op priority & impl sources affect lowering pass output,
+        so we include them in the cache key.
+        """
         priorities = {name: op.get_priority() for name, op in IrOp.registry.items()}
         priorities_str = ";".join(
             f"{name}={','.join(p)}" for name, p in priorities.items()
         )
-        # TODO ir op impl uuid (ir op itself gets hit)
-        return super().uuid() + priorities_str
+
+        impl_uuids_str = ";".join(
+            f"{name}={
+                ','.join(IrOp.registry[name].impls[provider].uuid() for provider in p)
+            }"
+            for name, p in priorities.items()
+        )
+
+        return f"{super().uuid()}|{priorities_str}|{impl_uuids_str}"
