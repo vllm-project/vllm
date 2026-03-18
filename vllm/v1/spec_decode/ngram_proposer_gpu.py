@@ -7,6 +7,7 @@ This version uses a fully vectorized approach with unfold and argmax for
 finding the first match across all sequences in parallel.
 """
 
+import numpy as np
 import torch
 from torch import nn
 
@@ -19,6 +20,11 @@ from vllm.config import (
 )
 from vllm.forward_context import set_forward_context
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.spec_decode.metadata import (
+    SpecDecodeInput,
+    SpecDecodePrepareOutput,
+    SpecDecodeProposer,
+)
 from vllm.v1.utils import record_function_or_nullcontext
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
@@ -212,11 +218,13 @@ class NgramGPUKernel(nn.Module):
         pass
 
 
-class NgramProposerGPU:
+class NgramProposerGPU(SpecDecodeProposer):
     def __init__(self, vllm_config: VllmConfig, device: torch.device, runner=None):
         assert vllm_config.speculative_config is not None
         assert vllm_config.speculative_config.prompt_lookup_min is not None
         assert vllm_config.speculative_config.prompt_lookup_max is not None
+
+        self.runner = runner
 
         compilation_config = CompilationConfig(
             mode=CompilationMode.VLLM_COMPILE,
@@ -311,30 +319,97 @@ class NgramProposerGPU:
 
         return token_ids, num_tokens, sampled_flags, valid_mask
 
+    def prepare_inputs(
+        self,
+        scheduler_output: "SchedulerOutput",
+        sampled_token_ids: torch.Tensor | list[list[int]],
+        sampling_metadata: "SamplingMetadata",
+        hidden_states: torch.Tensor,
+        sample_hidden_states: torch.Tensor,
+        aux_hidden_states: list[torch.Tensor] | None,
+        spec_decode_metadata: "SpecDecodeMetadata | None",
+        common_attn_metadata: "CommonAttentionMetadata",
+        slot_mappings: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]] | None,
+        input_batch: "InputBatch",
+    ) -> SpecDecodePrepareOutput:
+        """
+        Prepare inputs for GPU N-gram draft token proposal.
+
+        This method handles the GPU-specific preparation including calling
+        update_token_ids_ngram to prepare the token IDs and valid counts.
+        """
+        assert self.runner is not None
+
+        # Call update_token_ids_ngram to prepare next token IDs and counts
+        (
+            next_token_ids,
+            valid_sampled_tokens_count,
+            valid_sampled_token_ids_gpu,
+        ) = self.update_token_ids_ngram(
+            sampled_token_ids,
+            input_batch,
+            self.token_ids_gpu_tensor,
+            self.num_tokens_no_spec_gpu,
+            self.runner.discard_request_mask.gpu,
+        )
+
+        # Copy valid sampled token count if needed
+        if self.runner.valid_sampled_token_count_event is not None:
+            self.runner._copy_valid_sampled_token_count(
+                next_token_ids, valid_sampled_tokens_count
+            )
+
+        # Build unified input container
+        inputs = SpecDecodeInput(
+            num_tokens_no_spec=self.num_tokens_no_spec_gpu[
+                : valid_sampled_tokens_count.shape[0]
+            ],
+            token_ids_cpu=self.token_ids_gpu_tensor[
+                : valid_sampled_tokens_count.shape[0]
+            ],
+            target_hidden_states=valid_sampled_token_ids_gpu,
+            valid_sampled_tokens_count=valid_sampled_tokens_count,
+            slot_mappings=slot_mappings,
+        )
+
+        return SpecDecodePrepareOutput(inputs=inputs)
+
     def propose(
         self,
-        num_tokens_no_spec: torch.Tensor,  # [batch_size]
-        token_ids_gpu: torch.Tensor,  # [batch_size, max_len]
-        valid_sampled_token_ids_gpu: torch.Tensor,  # [batch_size, num_spec_tokens + 1]
-        valid_sampled_tokens_count: torch.Tensor,  # [batch_size]
+        inputs: SpecDecodeInput,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Propose draft tokens using GPU-accelerated n-gram matching.
 
-        Scatter sampled tokens into `token_ids_gpu`, compute temporary
-        updated lengths, then run the kernel.
-
         Args:
-            num_tokens_no_spec: Number of tokens per sequence (read-only)
-            token_ids_gpu: Token IDs tensor (modified in-place with new tokens)
-            valid_sampled_token_ids_gpu: Newly sampled tokens to scatter
-            valid_sampled_tokens_count: Count of valid tokens per sequence
+            inputs: Unified input container. Required fields:
+                - num_tokens_no_spec: torch.Tensor [batch_size]
+                - token_ids_cpu: torch.Tensor [batch_size, max_len]
+                - target_hidden_states: torch.Tensor (valid_sampled_token_ids_gpu)
+                - valid_sampled_tokens_count: torch.Tensor [batch_size]
 
         Returns:
             draft_tokens: Proposed draft token IDs [batch_size, k]
             num_valid_draft_tokens: Count of leading valid draft tokens
                 per request [batch_size]
         """
+        # Extract fields from unified input
+        num_tokens_no_spec = inputs.num_tokens_no_spec
+        token_ids_gpu = inputs.token_ids_cpu
+        valid_sampled_token_ids_gpu = inputs.target_hidden_states
+        valid_sampled_tokens_count = inputs.valid_sampled_tokens_count
+
+        assert num_tokens_no_spec is not None
+        assert token_ids_gpu is not None
+        assert valid_sampled_token_ids_gpu is not None
+        assert valid_sampled_tokens_count is not None
+
+        # Ensure tensors are on GPU
+        if isinstance(num_tokens_no_spec, np.ndarray):
+            num_tokens_no_spec = torch.from_numpy(num_tokens_no_spec).to(self.device)
+        if isinstance(token_ids_gpu, np.ndarray):
+            token_ids_gpu = torch.from_numpy(token_ids_gpu).to(self.device)
+
         assert token_ids_gpu.device == self.device
         assert num_tokens_no_spec.device == self.device
 

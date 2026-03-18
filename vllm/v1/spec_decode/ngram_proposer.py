@@ -1,15 +1,26 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
 from numba import get_num_threads, jit, njit, prange, set_num_threads
 
 from vllm.config import VllmConfig
+from vllm.v1.spec_decode.metadata import (
+    SpecDecodeInput,
+    SpecDecodePrepareOutput,
+    SpecDecodeProposer,
+)
+
+if TYPE_CHECKING:
+    from vllm.v1.core.sched.output import SchedulerOutput
+    from vllm.v1.sample.metadata import SamplingMetadata
+    from vllm.v1.worker.gpu_input_batch import InputBatch
 
 
-class NgramProposer:
+class NgramProposer(SpecDecodeProposer):
     def __init__(self, vllm_config: VllmConfig):
         assert vllm_config.speculative_config is not None
         assert vllm_config.speculative_config.prompt_lookup_min is not None
@@ -128,15 +139,61 @@ class NgramProposer:
 
         return draft_token_ids
 
+    def prepare_inputs(
+        self,
+        scheduler_output: "SchedulerOutput",
+        sampled_token_ids: torch.Tensor | list[list[int]],
+        sampling_metadata: "SamplingMetadata",
+        hidden_states: torch.Tensor,
+        sample_hidden_states: torch.Tensor,
+        aux_hidden_states: list[torch.Tensor] | None,
+        spec_decode_metadata: "SpecDecodeMetadata | None",
+        common_attn_metadata: "CommonAttentionMetadata",
+        slot_mappings: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]] | None,
+        input_batch: "InputBatch",
+    ) -> SpecDecodePrepareOutput:
+        """
+        Prepare inputs for N-gram draft token proposal.
+
+        For N-gram, no special input preparation is needed beyond what's
+        already in the input_batch. Just build the SpecDecodeInput container.
+        """
+        inputs = SpecDecodeInput(
+            sampled_token_ids=sampled_token_ids,
+            sampling_metadata=sampling_metadata,
+            common_attn_metadata=common_attn_metadata,
+            input_batch=input_batch,
+            num_tokens_no_spec=input_batch.num_tokens_no_spec,
+            token_ids_cpu=input_batch.token_ids_cpu,
+            slot_mappings=slot_mappings,
+        )
+        return SpecDecodePrepareOutput(inputs=inputs)
+
     def propose(
         self,
-        sampled_token_ids: list[list[int]],
-        num_tokens_no_spec: np.ndarray,
-        token_ids_cpu: np.ndarray,
-        slot_mappings: dict[str, torch.Tensor]
-        | list[dict[str, torch.Tensor]]
-        | None = None,  # unused
+        inputs: SpecDecodeInput,
     ) -> list[list[int]]:
+        """
+        Propose draft tokens using n-gram matching.
+
+        Args:
+            inputs: Unified input container. Required fields:
+                - sampled_token_ids: list[list[int]] (CPU-side valid tokens)
+                - num_tokens_no_spec: np.ndarray
+                - token_ids_cpu: np.ndarray
+
+        Returns:
+            List of draft token IDs per request.
+        """
+        # Extract fields from unified input
+        sampled_token_ids = inputs.sampled_token_ids
+        num_tokens_no_spec = inputs.num_tokens_no_spec
+        token_ids_cpu = inputs.token_ids_cpu
+
+        assert isinstance(sampled_token_ids, list)
+        assert num_tokens_no_spec is not None
+        assert token_ids_cpu is not None
+
         # find which requests need ngram proposals
         valid_ngram_requests = []
         for i, sampled_ids in enumerate(sampled_token_ids):

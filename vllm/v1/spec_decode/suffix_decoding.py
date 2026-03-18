@@ -1,12 +1,24 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from typing import TYPE_CHECKING
+
 import torch
 
 from vllm.config import VllmConfig
+from vllm.v1.spec_decode.metadata import (
+    SpecDecodeInput,
+    SpecDecodePrepareOutput,
+    SpecDecodeProposer,
+)
 from vllm.v1.worker.gpu_input_batch import InputBatch
 
+if TYPE_CHECKING:
+    from vllm.v1.core.sched.output import SchedulerOutput
+    from vllm.v1.sample.metadata import SamplingMetadata
+    from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 
-class SuffixDecodingProposer:
+
+class SuffixDecodingProposer(SpecDecodeProposer):
     """
     Speculative decoding proposer for Suffix Decoding (https://arxiv.org/pdf/2411.04975).
     This class imports and uses the official implementation from Arctic Inference
@@ -32,19 +44,58 @@ class SuffixDecodingProposer:
             max_cached_requests=config.suffix_decoding_max_cached_requests,
         )
 
+    def prepare_inputs(
+        self,
+        scheduler_output: "SchedulerOutput",
+        sampled_token_ids: torch.Tensor | list[list[int]],
+        sampling_metadata: "SamplingMetadata",
+        hidden_states: torch.Tensor,
+        sample_hidden_states: torch.Tensor,
+        aux_hidden_states: list[torch.Tensor] | None,
+        spec_decode_metadata: "SpecDecodeMetadata | None",
+        common_attn_metadata: "CommonAttentionMetadata",
+        slot_mappings: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]] | None,
+        input_batch: "InputBatch",
+    ) -> SpecDecodePrepareOutput:
+        """
+        Prepare inputs for Suffix Decoding draft token proposal.
+
+        For Suffix Decoding, no special input preparation is needed beyond
+        what's already in the input_batch. Just build the SpecDecodeInput.
+        """
+        inputs = SpecDecodeInput(
+            sampled_token_ids=sampled_token_ids,
+            sampling_metadata=sampling_metadata,
+            common_attn_metadata=common_attn_metadata,
+            input_batch=input_batch,
+            slot_mappings=slot_mappings,
+        )
+        return SpecDecodePrepareOutput(inputs=inputs)
+
     def propose(
         self,
-        input_batch: InputBatch,
-        sampled_token_ids: list[list[int]],
-        slot_mappings: dict[str, torch.Tensor]
-        | list[dict[str, torch.Tensor]]
-        | None = None,  # unused
+        inputs: SpecDecodeInput,
     ) -> list[list[int]]:
         """
-        Propose speculative tokens for each request in the input batch. Suffix Decoding
-        will speculate a dynamic number of tokens for each request every decoding step,
-        so each entry in the returned list may have different lengths.
+        Propose speculative tokens for each request in the input batch.
+
+        Args:
+            inputs: Unified input container. Required fields:
+                - input_batch: InputBatch with request states
+                - sampled_token_ids: list[list[int]] (CPU-side valid tokens)
+
+        Returns:
+            List of draft token IDs per request. Suffix Decoding speculates
+            a dynamic number of tokens per request, so entries may have
+            different lengths.
         """
+        # Extract fields from unified input
+        input_batch = inputs.input_batch
+        sampled_token_ids = inputs.sampled_token_ids
+
+        assert input_batch is not None
+        assert isinstance(sampled_token_ids, list)
+
         draft_token_ids: list[list[int]] = []
         for i, sampled_ids in enumerate(sampled_token_ids):
             if not sampled_ids:

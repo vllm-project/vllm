@@ -14,17 +14,25 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.model_loader import get_model
 from vllm.v1.attention.backend import AttentionMetadataBuilder, CommonAttentionMetadata
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
+from vllm.v1.spec_decode.metadata import (
+    SpecDecodeInput,
+    SpecDecodePrepareOutput,
+    SpecDecodeProposer,
+)
 from vllm.v1.worker.dp_utils import coordinate_batch_across_dp
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
 if TYPE_CHECKING:
+    from vllm.v1.core.sched.output import SchedulerOutput
     from vllm.v1.kv_cache_interface import KVCacheConfig
+    from vllm.v1.sample.metadata import SamplingMetadata
+    from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 
 PADDING_SLOT_ID = -1
 
 
-class ExtractHiddenStatesProposer:
-    def __init__(self, vllm_config: VllmConfig, device):
+class ExtractHiddenStatesProposer(SpecDecodeProposer):
+    def __init__(self, vllm_config: VllmConfig, device, runner=None):
         assert vllm_config.speculative_config is not None
 
         assert vllm_config.speculative_config.num_speculative_tokens == 1
@@ -37,6 +45,7 @@ class ExtractHiddenStatesProposer:
         self.device = device
         self.dtype = vllm_config.model_config.dtype
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank
+        self.runner = runner
 
         # Model and attention layer tracking (initialized in load_model)
         self.model: nn.Module | None = None
@@ -69,16 +78,67 @@ class ExtractHiddenStatesProposer:
             self.max_num_tokens, dtype=torch.int64, device=device
         )
 
+    def prepare_inputs(
+        self,
+        scheduler_output: SchedulerOutput,
+        sampled_token_ids: torch.Tensor | list[list[int]],
+        sampling_metadata: SamplingMetadata,
+        hidden_states: torch.Tensor,
+        sample_hidden_states: torch.Tensor,
+        aux_hidden_states: list[torch.Tensor] | None,
+        spec_decode_metadata: SpecDecodeMetadata | None,
+        common_attn_metadata: CommonAttentionMetadata,
+        slot_mappings: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]] | None,
+        input_batch: InputBatch,
+    ) -> SpecDecodePrepareOutput:
+        """
+        Prepare inputs for ExtractHiddenStates draft token proposal.
+
+        This method prepares the target hidden states from aux_hidden_states
+        and builds the SpecDecodeInput container.
+        """
+        assert isinstance(sampled_token_ids, torch.Tensor), (
+            "sampled_token_ids should be a torch.Tensor for "
+            "extract_hidden_states method."
+        )
+
+        num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+        if not self.runner.use_aux_hidden_state_outputs or aux_hidden_states is None:
+            raise ValueError(
+                "aux_hidden_states are required when using `extract_hidden_states`"
+            )
+        target_hidden_states = [h[:num_scheduled_tokens] for h in aux_hidden_states]
+
+        inputs = SpecDecodeInput(
+            sampled_token_ids=sampled_token_ids,
+            target_hidden_states=target_hidden_states,
+            common_attn_metadata=common_attn_metadata,
+            slot_mappings=slot_mappings,
+        )
+
+        # Store a post-process function to call prepare_next_token_ids_padded
+        def post_process_fn(runner):
+            next_token_ids, valid_sampled_tokens_count = (
+                self.prepare_next_token_ids_padded(
+                    common_attn_metadata,
+                    sampled_token_ids,
+                    runner.requests,
+                    input_batch,
+                    runner.discard_request_mask.gpu,
+                )
+            )
+            runner._copy_valid_sampled_token_count(
+                next_token_ids, valid_sampled_tokens_count
+            )
+
+        return SpecDecodePrepareOutput(inputs=inputs, post_process_fn=post_process_fn)
+
     def propose(
         self,
-        sampled_token_ids: torch.Tensor,
-        target_hidden_states: list[torch.Tensor],
-        common_attn_metadata: CommonAttentionMetadata,
-        slot_mappings: dict[str, torch.Tensor]
-        | list[dict[str, torch.Tensor]]
-        | None = None,
+        inputs: SpecDecodeInput,
     ) -> torch.Tensor:
-        """Propose draft tokens by calling the ExtractHiddenStatesModel model.
+        """
+        Propose draft tokens by calling the ExtractHiddenStatesModel model.
 
         The ExtractHiddenStatesModel caches the hidden states in the KV cache
         without performing actual attention computation. This allows us to
@@ -89,19 +149,24 @@ class ExtractHiddenStatesProposer:
         The main purpose is to cache hidden states, not to speculate.
 
         Args:
-            sampled_token_ids: Sampled token IDs from the target model
-            target_hidden_states: List of hidden state tensors from target model
-                                (one per aux hidden state layer)
-            common_attn_metadata: Attention metadata
-            slot_mappings: Slot mappings for KV cache (unused, provided for
-                          interface compatibility)
+            inputs: Unified input container. Required fields:
+                - sampled_token_ids: torch.Tensor [batch_size, 1]
+                - target_hidden_states: list[torch.Tensor] (one per aux layer)
+                - common_attn_metadata: CommonAttentionMetadata
 
         Returns:
-            Tuple of:
-                - Draft tokens matching sampled tokens, shape [batch_size, 1]
-                - KV connector output (if KV transfer is active), else None
+            Draft tokens matching sampled tokens, shape [batch_size, 1].
         """
-        assert self.model is not None and isinstance(target_hidden_states, list)
+        # Extract fields from unified input
+        sampled_token_ids = inputs.sampled_token_ids
+        target_hidden_states = inputs.target_hidden_states
+        common_attn_metadata = inputs.common_attn_metadata
+        slot_mappings = inputs.slot_mappings
+
+        assert self.model is not None
+        assert isinstance(sampled_token_ids, torch.Tensor)
+        assert isinstance(target_hidden_states, list)
+        assert common_attn_metadata is not None
 
         # target_hidden_states is a list of tensors (one per layer)
         # Each tensor has shape [num_tokens, hidden_size]

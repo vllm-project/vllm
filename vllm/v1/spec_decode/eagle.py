@@ -38,7 +38,12 @@ from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 from vllm.v1.kv_cache_interface import KVCacheConfig, UniformTypeKVCacheSpecs
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.sampler import _SAMPLING_EPS
-from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
+from vllm.v1.spec_decode.metadata import (
+    SpecDecodeInput,
+    SpecDecodeMetadata,
+    SpecDecodePrepareOutput,
+    SpecDecodeProposer,
+)
 from vllm.v1.spec_decode.utils import (
     PADDING_SLOT_ID,
     compute_new_slot_mapping,
@@ -56,7 +61,7 @@ from vllm.v1.worker.utils import AttentionGroup
 logger = init_logger(__name__)
 
 
-class SpecDecodeBaseProposer:
+class SpecDecodeBaseProposer(SpecDecodeProposer):
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -382,25 +387,80 @@ class SpecDecodeBaseProposer:
             return self.model.get_top_tokens(hidden_states)
         return self.model.compute_logits(hidden_states).argmax(dim=-1)
 
+    def prepare_inputs(
+        self,
+        scheduler_output: "SchedulerOutput",
+        sampled_token_ids: torch.Tensor | list[list[int]],
+        sampling_metadata: SamplingMetadata,
+        hidden_states: torch.Tensor,
+        sample_hidden_states: torch.Tensor,
+        aux_hidden_states: list[torch.Tensor] | None,
+        spec_decode_metadata: SpecDecodeMetadata | None,
+        common_attn_metadata: CommonAttentionMetadata,
+        slot_mappings: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]] | None,
+        input_batch: InputBatch,
+    ) -> SpecDecodePrepareOutput:
+        """
+        Prepare inputs for draft token proposal.
+
+        This is the base implementation that should be overridden by subclasses.
+        Eagle/DraftModel proposers use this to prepare target token ids, positions,
+        hidden states, and other inputs needed for drafting.
+
+        Args:
+            scheduler_output: Scheduler output with scheduling information
+            sampled_token_ids: Sampled token IDs from target model
+            sampling_metadata: Sampling metadata
+            hidden_states: Full hidden states from target model
+            sample_hidden_states: Hidden states at sample positions
+            aux_hidden_states: Auxiliary hidden states (for eagle3, etc.)
+            spec_decode_metadata: Speculative decoding metadata (if any)
+            common_attn_metadata: Common attention metadata
+            slot_mappings: Slot mappings for KV cache
+            input_batch: Input batch with request states
+
+        Returns:
+            SpecDecodePrepareOutput containing prepared inputs
+        """
+        raise NotImplementedError("prepare_inputs() must be implemented by subclasses")
+
     def propose(
         self,
-        # [num_tokens]
-        target_token_ids: torch.Tensor,
-        # [num_tokens] or [3, num_tokens] when M-RoPE is enabled
-        target_positions: torch.Tensor,
-        # [num_tokens, hidden_size]
-        target_hidden_states: torch.Tensor,
-        # [batch_size]
-        next_token_ids: torch.Tensor,
-        token_indices_to_sample: torch.Tensor | None,
-        common_attn_metadata: CommonAttentionMetadata,
-        sampling_metadata: SamplingMetadata,
-        mm_embed_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
-        num_rejected_tokens_gpu: torch.Tensor | None = None,
-        slot_mappings: dict[str, torch.Tensor]
-        | list[dict[str, torch.Tensor]]
-        | None = None,
+        inputs: SpecDecodeInput,
     ) -> torch.Tensor:
+        """
+        Propose draft tokens using the unified SpecDecodeInput interface.
+
+        Args:
+            inputs: Unified input container with all necessary data for drafting.
+                Required fields for Eagle/DraftModel:
+                - target_token_ids, target_positions, target_hidden_states
+                - next_token_ids, common_attn_metadata, sampling_metadata
+                - token_indices_to_sample, mm_embed_inputs, num_rejected_tokens_gpu
+                - slot_mappings
+
+        Returns:
+            Draft token IDs tensor of shape [batch_size, num_spec_tokens].
+        """
+        # Extract fields from unified input
+        target_token_ids = inputs.target_token_ids
+        target_positions = inputs.target_positions
+        target_hidden_states = inputs.target_hidden_states
+        next_token_ids = inputs.next_token_ids
+        token_indices_to_sample = inputs.token_indices_to_sample
+        common_attn_metadata = inputs.common_attn_metadata
+        sampling_metadata = inputs.sampling_metadata
+        mm_embed_inputs = inputs.mm_embed_inputs
+        num_rejected_tokens_gpu = inputs.num_rejected_tokens_gpu
+        slot_mappings = inputs.slot_mappings
+
+        assert target_token_ids is not None
+        assert target_positions is not None
+        assert target_hidden_states is not None
+        assert next_token_ids is not None
+        assert common_attn_metadata is not None
+        assert sampling_metadata is not None
+
         batch_size = common_attn_metadata.batch_size()
 
         if self.method == "eagle3":
@@ -1110,7 +1170,7 @@ class SpecDecodeBaseProposer:
             total_num_drafts = self.cu_drafts_per_level[level + 1]
         return draft_token_ids_list
 
-    def prepare_inputs(
+    def _prepare_inputs_eagle(
         self,
         common_attn_metadata: CommonAttentionMetadata,
         sampled_token_ids: list[list[int]],
@@ -1682,6 +1742,139 @@ class EagleProposer(SpecDecodeBaseProposer):
             pass_hidden_states_to_model=True,
             runner=runner,
         )
+
+    def prepare_inputs(
+        self,
+        scheduler_output: "SchedulerOutput",
+        sampled_token_ids: torch.Tensor | list[list[int]],
+        sampling_metadata: SamplingMetadata,
+        hidden_states: torch.Tensor,
+        sample_hidden_states: torch.Tensor,
+        aux_hidden_states: list[torch.Tensor] | None,
+        spec_decode_metadata: SpecDecodeMetadata | None,
+        common_attn_metadata: CommonAttentionMetadata,
+        slot_mappings: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]] | None,
+        input_batch: InputBatch,
+    ) -> SpecDecodePrepareOutput:
+        """
+        Prepare inputs for Eagle/DraftModel draft token proposal.
+
+        This method handles all the method-specific input preparation logic
+        including preparing next token IDs, target token IDs, positions, and
+        hidden states.
+        """
+        assert self.runner is not None
+        num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+        spec_config = self.speculative_config
+
+        # Prepare next token IDs
+        valid_sampled_tokens_count = None
+        if spec_config.disable_padded_drafter_batch:
+            assert isinstance(sampled_token_ids, list), (
+                "sampled_token_ids should be a python list when "
+                "padded-batch is disabled."
+            )
+            next_token_ids = self.prepare_next_token_ids_cpu(
+                sampled_token_ids,
+                self.runner.requests,
+                input_batch,
+                scheduler_output.num_scheduled_tokens,
+            )
+        else:
+            assert isinstance(sampled_token_ids, torch.Tensor), (
+                "sampled_token_ids should be a torch.Tensor when "
+                "padded-batch is enabled."
+            )
+            next_token_ids, valid_sampled_tokens_count = (
+                self.prepare_next_token_ids_padded(
+                    common_attn_metadata,
+                    sampled_token_ids,
+                    self.runner.requests,
+                    input_batch,
+                    self.runner.discard_request_mask.gpu,
+                )
+            )
+            # Copy valid sampled token count if needed
+            if self.runner.valid_sampled_token_count_event is not None:
+                self.runner._copy_valid_sampled_token_count(
+                    next_token_ids, valid_sampled_tokens_count
+                )
+
+        # Prepare target token IDs, positions, and hidden states
+        num_rejected_tokens_gpu = None
+        token_indices_to_sample = None
+
+        if spec_decode_metadata is None:
+            # First proposal (no draft tokens yet)
+            target_token_ids = self.runner.input_ids.gpu[:num_scheduled_tokens]
+            target_positions = self.runner._get_positions(num_scheduled_tokens)
+            if self.runner.use_aux_hidden_state_outputs:
+                assert aux_hidden_states is not None
+                target_hidden_states = torch.cat(
+                    [h[:num_scheduled_tokens] for h in aux_hidden_states], dim=-1
+                )
+            else:
+                target_hidden_states = hidden_states[:num_scheduled_tokens]
+        else:
+            if spec_config.disable_padded_drafter_batch:
+                common_attn_metadata, token_indices = self._prepare_inputs_eagle(
+                    common_attn_metadata,
+                    sampled_token_ids,
+                    spec_decode_metadata.num_draft_tokens,
+                )
+                target_token_ids = self.runner.input_ids.gpu[token_indices]
+                target_positions = self.runner._get_positions(token_indices)
+                if self.runner.use_aux_hidden_state_outputs:
+                    assert aux_hidden_states is not None
+                    target_hidden_states = torch.cat(
+                        [h[token_indices] for h in aux_hidden_states], dim=-1
+                    )
+                else:
+                    target_hidden_states = hidden_states[token_indices]
+            else:
+                (
+                    common_attn_metadata,
+                    token_indices_to_sample,
+                    num_rejected_tokens_gpu,
+                ) = self.prepare_inputs_padded(
+                    common_attn_metadata,
+                    spec_decode_metadata,
+                    valid_sampled_tokens_count,
+                )
+                total_num_tokens = common_attn_metadata.num_actual_tokens
+                target_token_ids = self.runner.input_ids.gpu[:total_num_tokens]
+                target_positions = self.runner._get_positions(total_num_tokens)
+                if self.runner.use_aux_hidden_state_outputs:
+                    assert aux_hidden_states is not None
+                    target_hidden_states = torch.cat(
+                        [h[:total_num_tokens] for h in aux_hidden_states], dim=-1
+                    )
+                else:
+                    target_hidden_states = hidden_states[:total_num_tokens]
+
+        # Prepare multi-modal embeddings if needed
+        mm_embed_inputs = None
+        if self.runner.supports_mm_inputs and self.supports_mm_inputs:
+            mm_embed_inputs = self.runner._gather_mm_embeddings(
+                scheduler_output,
+                shift_computed_tokens=1,
+            )
+
+        # Build unified input container
+        inputs = SpecDecodeInput(
+            target_token_ids=target_token_ids,
+            target_positions=target_positions,
+            target_hidden_states=target_hidden_states,
+            next_token_ids=next_token_ids,
+            token_indices_to_sample=token_indices_to_sample,
+            sampling_metadata=sampling_metadata,
+            common_attn_metadata=common_attn_metadata,
+            mm_embed_inputs=mm_embed_inputs,
+            num_rejected_tokens_gpu=num_rejected_tokens_gpu,
+            slot_mappings=slot_mappings,
+        )
+
+        return SpecDecodePrepareOutput(inputs=inputs)
 
 
 # NOTE(woosuk): Currently, the below code is not used and we always use argmax
