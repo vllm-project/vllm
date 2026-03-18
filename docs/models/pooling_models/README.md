@@ -67,7 +67,7 @@ Each pooling model in vLLM supports one or more of these tasks according to
 [Pooler.get_supported_tasks][vllm.model_executor.layers.pooler.Pooler.get_supported_tasks],
 enabling the corresponding APIs.
 
-### Pooling tasks corresponding APIs
+### Offline APIs corresponding to pooling tasks
 
 | Task             | APIs                                                                       |
 |------------------|----------------------------------------------------------------------------|
@@ -99,7 +99,7 @@ It is primarily designed for [score models](score.md).
 
 The [encode][vllm.LLM.encode] method is available to all pooling models in vLLM.
 
-Please use one of the more specific methods or set the task directly when using `LLM.encode`. For pooling tasks corresponding APIs, refer to the [table above](#pooling-tasks-corresponding-apis).
+Please use one of the more specific methods or set the task directly when using `LLM.encode`, refer to the [table above](#offline-apis-corresponding-to-pooling-tasks).
 
 ### Examples
 
@@ -135,7 +135,7 @@ Our Pooling API (`/pooling`) is similar to `LLM.encode`, being applicable to all
 
 The input format is the same as [Embeddings API](embed.md#openai-compatible-embeddings-api), but the output data can contain an arbitrary nested list, not just a 1-D list of floats.
 
-Please use one of the more specific APIs or set the task directly when using the Pooling API. For pooling tasks corresponding APIs, refer to the [table above](#pooling-tasks-corresponding-apis).
+Please use one of the more specific APIs or set the task directly when using the Pooling API, refer to the [table above](#offline-apis-corresponding-to-pooling-tasks).
 
 Code example: [examples/pooling/pooling/pooling_online.py](../../../examples/pooling/pooling/pooling_online.py)
 
@@ -234,4 +234,4 @@ We have split the `encode` task into two more specific token-wise tasks: `token_
 Pooling models now default support all pooling, you can use it without any settings.
 
 - Extracting hidden states prefers using `token_embed` task.
-- Reward models prefers using `token_classify` task.
+- Named Entity Recognition (NER) and reward models prefers using `token_classify` task.

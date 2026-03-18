@@ -4,6 +4,14 @@ A reward model (RM) is designed to evaluate and score the quality of outputs gen
 
 ## Supported Models
 
+### Pooling task corresponding to reward model types
+
+| Types                              | Pooling tasks  |
+|------------------------------------|----------------|
+| (sequence) (outcome) reward models | classify       |
+| token (outcome) reward models      | token_classify |
+| process reward model               | token_classify |
+
 ### Reward Models
 
 Using sequence classification models as (sequence) (outcome) reward models, the usage and supported features are the same as for normal [classification models](classify.md).
@@ -106,3 +114,7 @@ llm = LLM(model="Qwen/Qwen2.5-Math-PRM-7B", runner="pooling")
 data = output.outputs.data
 print(f"Data: {data!r}")
 ```
+
+## Online Serving
+
+Please refer to the [pooling API](README.md#pooling-api). Pooling task corresponding to reward model types refer to the [table above](#pooling-task-corresponding-to-reward-model-types).
