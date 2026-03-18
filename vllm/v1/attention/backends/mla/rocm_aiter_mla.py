@@ -19,7 +19,12 @@ from vllm.model_executor.layers.attention.mla_attention import (
     QueryLenSupport,
 )
 from vllm.triton_utils import tl, triton
-from vllm.v1.attention.backend import AttentionCGSupport, AttentionLayer, MultipleOf
+from vllm.v1.attention.backend import (
+    AttentionCGSupport,
+    AttentionLayer,
+    CommonAttentionMetadata,
+    MultipleOf,
+)
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 
@@ -70,16 +75,15 @@ class AiterMLADecodeMetadata(MLACommonDecodeMetadata):
     # The max query output length: int
     max_qo_len: int | None = None
 
+
+@dataclass
+class AiterMLAMetadata(MLACommonMetadata[AiterMLADecodeMetadata]):
     work_meta_data: torch.Tensor | None = None
     work_indptr: torch.Tensor | None = None
     work_info_set: torch.Tensor | None = None
     reduce_indptr: torch.Tensor | None = None
     reduce_final_map: torch.Tensor | None = None
     reduce_partial_map: torch.Tensor | None = None
-
-
-class AiterMLAMetadata(MLACommonMetadata[AiterMLADecodeMetadata]):
-    pass
 
 
 class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
@@ -244,12 +248,6 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
                 0, num_reqs + 1, step=1, dtype=torch.int32, device=device
             )
 
-        decode_work_meta_data = None
-        decode_work_indptr = None
-        decode_work_info_set = None
-        decode_reduce_indptr = None
-        decode_reduce_final_map = None
-        decode_reduce_partial_map = None
         if getattr(self, "_mla_work_meta_data", None) is not None:
             from aiter import get_mla_metadata_v1
 
@@ -272,12 +270,6 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
                 uni_seqlen_qo=max_qo_len,
                 fast_mode=True,
             )
-            decode_work_meta_data = self._mla_work_meta_data
-            decode_work_indptr = self._mla_work_indptr
-            decode_work_info_set = self._mla_work_info_set
-            decode_reduce_indptr = self._mla_reduce_indptr
-            decode_reduce_final_map = self._mla_reduce_final_map
-            decode_reduce_partial_map = self._mla_reduce_partial_map
 
         attn_metadata = AiterMLADecodeMetadata(
             block_table=block_table_tensor,
@@ -289,14 +281,26 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             dcp_tot_seq_lens=dcp_tot_seq_lens_device,
             max_qo_len=max_qo_len,
             attn_out_dtype=self.decode_attn_out_dtype,
-            work_meta_data=decode_work_meta_data,
-            work_indptr=decode_work_indptr,
-            work_info_set=decode_work_info_set,
-            reduce_indptr=decode_reduce_indptr,
-            reduce_final_map=decode_reduce_final_map,
-            reduce_partial_map=decode_reduce_partial_map,
         )
 
+        return attn_metadata
+
+    def build(
+        self,
+        common_prefix_len: int,
+        common_attn_metadata: CommonAttentionMetadata,
+        fast_build: bool = False,
+    ) -> AiterMLAMetadata:
+        attn_metadata = super().build(
+            common_prefix_len, common_attn_metadata, fast_build
+        )
+        if getattr(self, "_mla_work_meta_data", None) is not None:
+            attn_metadata.work_meta_data = self._mla_work_meta_data
+            attn_metadata.work_indptr = self._mla_work_indptr
+            attn_metadata.work_info_set = self._mla_work_info_set
+            attn_metadata.reduce_indptr = self._mla_reduce_indptr
+            attn_metadata.reduce_final_map = self._mla_reduce_final_map
+            attn_metadata.reduce_partial_map = self._mla_reduce_partial_map
         return attn_metadata
 
 
@@ -439,12 +443,12 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
             attn_metadata.decode.paged_kv_last_page_len,
             q_scale=layer._q_scale,
             kv_scale=layer._k_scale,
-            work_meta_data=attn_metadata.decode.work_meta_data,
-            work_indptr=attn_metadata.decode.work_indptr,
-            work_info_set=attn_metadata.decode.work_info_set,
-            reduce_indptr=attn_metadata.decode.reduce_indptr,
-            reduce_final_map=attn_metadata.decode.reduce_final_map,
-            reduce_partial_map=attn_metadata.decode.reduce_partial_map,
+            work_meta_data=attn_metadata.work_meta_data,
+            work_indptr=attn_metadata.work_indptr,
+            work_info_set=attn_metadata.work_info_set,
+            reduce_indptr=attn_metadata.reduce_indptr,
+            reduce_final_map=attn_metadata.reduce_final_map,
+            reduce_partial_map=attn_metadata.reduce_partial_map,
         )
 
         if self._needs_head_repeat:
