@@ -24,7 +24,21 @@ A reward model (RM) is designed to evaluate and score the quality of outputs gen
 
 Using sequence classification models as (sequence) (outcome) reward models, the usage and supported features are the same as for normal [classification models](classify.md).
 
---8<-- "docs/models/pooling_models/supported_models.inc.md:sequence-reward-models"
+--8<-- [start:supported-sequence-reward-models]
+
+| Architecture | Models | Example HF Models | [LoRA](../../features/lora.md) | [PP](../../serving/parallelism_scaling.md) |
+| ------------ | ------ | ----------------- | -------------------- | ------------------------- |
+| `JambaForSequenceClassification` | Jamba | `ai21labs/Jamba-tiny-reward-dev`, etc. | ✅︎ | ✅︎ |
+| `Qwen3ForSequenceClassification`<sup>C</sup> | Qwen3-based | `Skywork/Skywork-Reward-V2-Qwen3-0.6B`, etc. | ✅︎ | ✅︎ |
+| `LlamaForSequenceClassification`<sup>C</sup> | Llama-based | `Skywork/Skywork-Reward-V2-Llama-3.2-1B`, etc. | ✅︎ | ✅︎ |
+| `*Model`<sup>C</sup>, `*ForCausalLM`<sup>C</sup>, etc. | Generative models | N/A | \* | \* |
+
+<sup>C</sup> Automatically converted into a classification model via `--convert classify`. ([details](./README.md#model-conversion))  
+
+If your model is not in the above list, we will try to automatically convert the model using
+[as_seq_cls_model][vllm.model_executor.models.adapters.as_seq_cls_model]. By default, the class probabilities are extracted from the softmaxed hidden state corresponding to the last token.
+
+--8<-- [end:supported-sequence-reward-models]
 
 ### Token Reward Models
 
@@ -32,13 +46,33 @@ The key distinction between (sequence) classification and token classification l
 
 Using token classification models as token (outcome) reward models, the usage and supported features are the same as for normal [token classification models](token_classify.md).
 
---8<-- "docs/models/pooling_models/supported_models.inc.md:token-reward-models"
+--8<-- [start:supported-token-reward-models]
+
+| Architecture | Models | Example HF Models | [LoRA](../../features/lora.md) | [PP](../../serving/parallelism_scaling.md) |
+| ------------ | ------ | ----------------- | -------------------- | ------------------------- |
+| `InternLM2ForRewardModel` | InternLM2-based | `internlm/internlm2-1_8b-reward`, `internlm/internlm2-7b-reward`, etc. | ✅︎ | ✅︎ |
+| `Qwen2ForRewardModel` | Qwen2-based | `Qwen/Qwen2.5-Math-RM-72B`, etc. | ✅︎ | ✅︎ |
+| `*Model`<sup>C</sup>, `*ForCausalLM`<sup>C</sup>, etc. | Generative models | N/A | \* | \* |
+
+<sup>C</sup> Automatically converted into a classification model via `--convert classify`. ([details](./README.md#model-conversion))  
+
+If your model is not in the above list, we will try to automatically convert the model using
+[as_seq_cls_model][vllm.model_executor.models.adapters.as_seq_cls_model].
+
+--8<-- [end:supported-token-reward-models]
 
 ### Process Reward Models
 
 The process reward models used for evaluating intermediate steps are crucial to achieving the desired outcome.
 
---8<-- "docs/models/pooling_models/supported_models.inc.md:process-reward-models"
+| Architecture | Models | Example HF Models | [LoRA](../../features/lora.md) | [PP](../../serving/parallelism_scaling.md) |
+| ------------ | ------ | ----------------- | -------------------- | ------------------------- |
+| `LlamaForCausalLM` | Llama-based | `peiyi9979/math-shepherd-mistral-7b-prm`, etc. | ✅︎ | ✅︎ |
+| `Qwen2ForProcessRewardModel` | Qwen2-based | `Qwen/Qwen2.5-Math-PRM-7B`, etc. | ✅︎ | ✅︎ |
+
+!!! important
+    For process-supervised reward models such as `peiyi9979/math-shepherd-mistral-7b-prm`, the pooling config should be set explicitly,
+    e.g.: `--pooler-config '{"pooling_type": "STEP", "step_tag_id": 123, "returned_token_ids": [456, 789]}'`.
 
 ## Offline Inference
 

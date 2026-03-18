@@ -29,13 +29,25 @@ The BAAI/bge-m3 model leverages token classification for sparse retrieval. For m
 
 ## Supported Models
 
---8<-- "docs/models/pooling_models/supported_models.inc.md:token-classify-models"
+| Architecture | Models | Example HF Models | [LoRA](../../features/lora.md) | [PP](../../serving/parallelism_scaling.md) |
+| ------------ | ------ | ----------------- | --------------------------- | --------------------------------------- |
+| `BertForTokenClassification` | bert-based | `boltuix/NeuroBERT-NER` (see note), etc. | | |
+| `ErnieForTokenClassification` | BERT-like Chinese ERNIE | `gyr66/Ernie-3.0-base-chinese-finetuned-ner` | | |
+| `ModernBertForTokenClassification` | ModernBERT-based | `disham993/electrical-ner-ModernBERT-base` | | |
+| `Qwen3ForTokenClassification`<sup>C</sup> | Qwen3-based | `bd2lcco/Qwen3-0.6B-finetuned` | | |
+| `*Model`<sup>C</sup>, `*ForCausalLM`<sup>C</sup>, etc. | Generative models | N/A | \* | \* |
+
+<sup>C</sup> Automatically converted into a classification model via `--convert classify`. ([details](./README.md#model-conversion))  
+\* Feature support is the same as that of the original model.
+
+If your model is not in the above list, we will try to automatically convert the model using
+[as_seq_cls_model][vllm.model_executor.models.adapters.as_seq_cls_model]. By default, the class probabilities are extracted from the softmaxed hidden state corresponding to the last token.
 
 ### As Reward Models
 
 Using token classification models as reward models. For details on reward models, see [Reward Models](reward.md).
 
---8<-- "docs/models/pooling_models/supported_models.inc.md:token-reward-models"
+--8<-- "docs/models/pooling_models/reward.md:supported-token-reward-models"
 
 ## Offline Inference
 
