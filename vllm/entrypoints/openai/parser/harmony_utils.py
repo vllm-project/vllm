@@ -122,6 +122,14 @@ class ResilientStreamableParser:
             self._inner.process(token_id)
             return
 
+        # Pattern 3: free text between harmony messages (e.g. model outputs plain
+        # text after a <|end|> before starting the next channel message).
+        # The triggered_tags grammar allows free tokens in the sub-dispatch loop,
+        # so the model may generate trailing text that isn't part of any channel.
+        # Silently discard these tokens rather than crashing with HarmonyError.
+        if state == StreamState.EXPECT_START and token_id != _TOK_START:
+            return
+
         # Pattern 2: <|constrain|> during HEADER → enter skip mode
         if state == StreamState.HEADER and token_id == _TOK_CONSTRAIN:
             self._skip_until_message_or_end = True
