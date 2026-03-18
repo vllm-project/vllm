@@ -2015,20 +2015,24 @@ class EngineArgs:
             default_max_num_batched_tokens = {
                 UsageContext.LLM_CLASS: 16384,
                 UsageContext.OPENAI_API_SERVER: 8192,
+                UsageContext.ENGINE_CONTEXT: 16384,
             }
             default_max_num_seqs = {
                 UsageContext.LLM_CLASS: 1024,
                 UsageContext.OPENAI_API_SERVER: 1024,
+                UsageContext.ENGINE_CONTEXT: 1024,
             }
         else:
             # TODO(woosuk): Tune the default values for other hardware.
             default_max_num_batched_tokens = {
                 UsageContext.LLM_CLASS: 8192,
                 UsageContext.OPENAI_API_SERVER: 2048,
+                UsageContext.ENGINE_CONTEXT: 8192,
             }
             default_max_num_seqs = {
                 UsageContext.LLM_CLASS: 256,
                 UsageContext.OPENAI_API_SERVER: 256,
+                UsageContext.ENGINE_CONTEXT: 256,
             }
 
         # tpu specific default values.
@@ -2039,16 +2043,19 @@ class EngineArgs:
                 default_max_num_batched_tokens = {
                     UsageContext.LLM_CLASS: 2048,
                     UsageContext.OPENAI_API_SERVER: 1024,
+                    UsageContext.ENGINE_CONTEXT: 2048,
                 }
             elif chip_name == "V5E":
                 default_max_num_batched_tokens = {
                     UsageContext.LLM_CLASS: 1024,
                     UsageContext.OPENAI_API_SERVER: 512,
+                    UsageContext.ENGINE_CONTEXT: 1024,
                 }
             elif chip_name == "V5P":
                 default_max_num_batched_tokens = {
                     UsageContext.LLM_CLASS: 512,
                     UsageContext.OPENAI_API_SERVER: 256,
+                    UsageContext.ENGINE_CONTEXT: 512,
                 }
 
         # cpu specific default values.
@@ -2056,10 +2063,12 @@ class EngineArgs:
             default_max_num_batched_tokens = {
                 UsageContext.LLM_CLASS: 4096 * world_size,
                 UsageContext.OPENAI_API_SERVER: 2048 * world_size,
+                UsageContext.ENGINE_CONTEXT: 4096 * world_size,
             }
             default_max_num_seqs = {
                 UsageContext.LLM_CLASS: 256 * world_size,
                 UsageContext.OPENAI_API_SERVER: 128 * world_size,
+                UsageContext.ENGINE_CONTEXT: 256 * world_size,
             }
 
         return default_max_num_batched_tokens, default_max_num_seqs
