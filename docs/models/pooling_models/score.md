@@ -13,7 +13,7 @@ The score models is designed to compute similarity scores between two input prom
 | `late-interaction` | `token_embed` | late interaction(MaxSim) |
 | `bi-encoder`       | `embed`       | cosine similarity        |
 
-- Offline APIs: 
+- Offline APIs:
     - `LLM.score`
 - Online APIs:
     - [Score API](score.md#score-api)(`/score`)

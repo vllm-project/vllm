@@ -9,7 +9,7 @@ Classification involves predicting which predefined category, class, or label be
 - Offline APIs:
     - `LLM.classify(...)`
     - `LLM.encode(..., pooling_task="classify")`
-- Online APIs: 
+- Online APIs:
     - [Classification API](classify.md#online-serving)(`/classify`)
     - Pooling API (`/pooling`)
 

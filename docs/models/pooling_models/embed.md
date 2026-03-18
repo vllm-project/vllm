@@ -10,7 +10,7 @@ Embedding models are a class of machine learning models designed to transform un
     - `LLM.embed(...)`
     - `LLM.encode(..., pooling_task="embed")`
     - `LLM.score(...)`
-- Online APIs: 
+- Online APIs:
     - [Cohere Embed API](embed.md#cohere-embed-api) (`/v2/embed`)
     - [Openai-compatible Embeddings API](embed.md#openai-compatible-embeddings-api) (`/v1/embeddings`)
     - Pooling API (`/pooling`)
