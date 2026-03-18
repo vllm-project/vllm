@@ -59,10 +59,8 @@ class H2OVLProcessingInfo(BaseInternVLProcessingInfo):
 
         image_processor = self.get_image_processor(**kwargs)
         image_size = image_processor.image_size
-        patch_size = int(kwargs.get("patch_size", vision_config.patch_size))
-        downsample_ratio = float(
-            kwargs.get("downsample_ratio", config.downsample_ratio)
-        )
+        patch_size = vision_config.patch_size
+        downsample_ratio = config.downsample_ratio
         image_seq_length = int((image_size // patch_size) ** 2 * (downsample_ratio**2))
 
         return self.ctx.init_processor(
