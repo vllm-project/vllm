@@ -3,6 +3,7 @@
 
 import ast
 import copy
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Literal, get_args
 
 from pydantic import Field, SkipValidation, model_validator
@@ -374,19 +375,21 @@ class SpeculativeConfig:
         config: PretrainedConfig,
         overrides: dict[str, Any],
     ) -> None:
+        from transformers import PretrainedConfig
+
         for key, value in overrides.items():
             attr = getattr(config, key, None)
-            if isinstance(value, dict) and attr is not None and (
-                isinstance(attr, dict) or hasattr(attr, "__dict__")
-            ):
+            if attr is not None and isinstance(attr, PretrainedConfig):
                 SpeculativeConfig._update_nested_hf_config(attr, value)
             else:
                 setattr(config, key, value)
 
     @staticmethod
     def _get_draft_hf_overrides(target_hf_overrides: Any) -> Any:
-        if isinstance(target_hf_overrides, dict):
-            merged_overrides = _DraftHfOverrides(copy.deepcopy(target_hf_overrides))
+        if isinstance(target_hf_overrides, Mapping):
+            merged_overrides = _DraftHfOverrides(
+                copy.deepcopy(dict(target_hf_overrides))
+            )
             return merged_overrides
 
         if callable(target_hf_overrides):

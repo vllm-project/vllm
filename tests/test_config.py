@@ -3,12 +3,14 @@
 
 import logging
 import os
+from collections import UserDict
 from dataclasses import MISSING, Field, asdict, dataclass, field
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 from pydantic import ValidationError
+from transformers import PretrainedConfig
 
 from vllm.compilation.backends import VllmBackend
 from vllm.config import (
@@ -1167,10 +1169,12 @@ def _apply_nested_overrides(target, overrides):
                 setattr(target, key, value)
 
 
-class _FakeHFConfig(SimpleNamespace):
+class _FakeHFConfig(PretrainedConfig):
+    model_type = "fake"
 
-    def update(self, values):
-        for key, value in values.items():
+    def __init__(self, **kwargs):
+        super().__init__()
+        for key, value in kwargs.items():
             setattr(self, key, value)
 
 
@@ -1183,6 +1187,7 @@ class _FakeDraftModelConfig:
         self.hf_config = _FakeHFConfig(
             model_type="qwen3_5",
             architectures=["Qwen3ForCausalLM"],
+            rope_parameters={"rope_type": "default", "rope_theta": 1_000_000},
             text_config=_FakeHFConfig(
                 rope_parameters={"rope_type": "default"},
             ),
@@ -1287,3 +1292,63 @@ def test_mtp_draft_model_config_preserves_callable_target_hf_overrides():
         == target_rope_parameters
     )
     assert draft_model_config.hf_config.model_type == "qwen3_5_mtp"
+
+
+@pytest.mark.skip_global_cleanup
+def test_mtp_draft_model_config_matches_top_level_dict_override_semantics():
+    """Top-level dict-valued attrs should be replaced, not merged."""
+    target_hf_overrides = {
+        "rope_parameters": {
+            "rope_type": "yarn",
+            "factor": 2.0,
+        },
+    }
+    target_model_config = _make_fake_target_model_config(target_hf_overrides)
+
+    with patch("vllm.config.speculative.ModelConfig", _FakeDraftModelConfig):
+        speculative_config = SpeculativeConfig(
+            target_model_config=target_model_config,
+            target_parallel_config=ParallelConfig(),
+            method="mtp",
+            num_speculative_tokens=1,
+        )
+
+    draft_model_config = speculative_config.draft_model_config
+    assert draft_model_config.hf_config.rope_parameters == {
+        "rope_type": "yarn",
+        "factor": 2.0,
+    }
+
+
+@pytest.mark.skip_global_cleanup
+def test_mtp_draft_model_config_preserves_mapping_target_hf_overrides():
+    """Mapping-like target overrides should not be silently dropped."""
+    target_hf_overrides = UserDict(
+        {
+            "text_config": {
+                "rope_parameters": {
+                    "rope_type": "yarn",
+                    "factor": 2.0,
+                    "original_max_position_embeddings": 262_144,
+                },
+            },
+        }
+    )
+    target_model_config = _make_fake_target_model_config(target_hf_overrides)
+
+    with patch("vllm.config.speculative.ModelConfig", _FakeDraftModelConfig):
+        speculative_config = SpeculativeConfig(
+            target_model_config=target_model_config,
+            target_parallel_config=ParallelConfig(),
+            method="mtp",
+            num_speculative_tokens=1,
+        )
+
+    draft_model_config = speculative_config.draft_model_config
+    assert isinstance(draft_model_config.hf_overrides, dict)
+    assert draft_model_config.hf_overrides == dict(target_hf_overrides)
+    assert draft_model_config.hf_config.text_config.rope_parameters == {
+        "rope_type": "yarn",
+        "factor": 2.0,
+        "original_max_position_embeddings": 262_144,
+    }
