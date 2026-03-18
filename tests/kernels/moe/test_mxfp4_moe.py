@@ -113,13 +113,12 @@ def test_cutlass_mxfp4_grouped_mm(num_experts, out_dtype):
         expert_offsets_input + [expert_offset], device=device, dtype=torch.int32
     )
     _inp_bs_offsets = torch.tensor(input_bs_offsets, device=device, dtype=torch.int32)
-    inp_global_scale = torch.ones(num_experts, device=device, dtype=torch.float32)
 
     input_quant, input_sf = ops.mxfp4_experts_quant(
         input_tensor,
-        inp_global_scale,
         _inp_expert_offsets,
         _inp_bs_offsets,
+        num_experts,
         topk=1,
     )
 
@@ -134,13 +133,12 @@ def test_cutlass_mxfp4_grouped_mm(num_experts, out_dtype):
         weight_expert_offsets, device=device, dtype=torch.int32
     )
     _wt_bs_offsets = torch.tensor(weight_bs_offsets, device=device, dtype=torch.int32)
-    wt_global_scale = torch.ones(num_experts, device=device, dtype=torch.float32)
 
     weight_quant, weight_sf = ops.mxfp4_experts_quant(
         weight_tensor,
-        wt_global_scale,
         _wt_expert_offsets,
         _wt_bs_offsets,
+        num_experts,
         topk=1,
     )
 
@@ -231,13 +229,12 @@ def test_mxfp4_experts_quant_basic():
     _blockscale_offsets = torch.tensor(
         blockscale_offsets, device=device, dtype=torch.int32
     )
-    input_global_scale = torch.ones(num_experts, device=device, dtype=torch.float32)
 
     output, output_sf = ops.mxfp4_experts_quant(
         input_tensor,
-        input_global_scale,
         _expert_offsets,
         _blockscale_offsets,
+        num_experts,
         topk=1,
     )
 

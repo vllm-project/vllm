@@ -880,20 +880,20 @@ def run_cutlass_moe_mxfp4(
         is_gated=is_gated,
     )
 
-    # MXFP4 has no global scales - use 1.0 for quant kernel and GEMM epilogue
-    ones_per_expert = torch.ones((e,), device=device, dtype=torch.float32)
-
     a = ops.shuffle_rows(a, a_map)
     rep_a_fp4, rep_a_blockscale = ops.mxfp4_experts_quant(
         a,
-        ones_per_expert,
         expert_offsets,
         blockscale_offsets,
+        e,
         num_topk,
     )
     c1 = _resize_cache(workspace13, (m * topk, w1_n))
     c2 = _resize_cache(workspace2, (m * topk, n))
     c3 = _resize_cache(workspace13, (m * topk, k))
+
+    # MXFP4 has no global scales - pass ones for GEMM epilogue alpha
+    ones_per_expert = torch.ones((e,), device=device, dtype=torch.float32)
     ops.cutlass_mxfp4_moe_mm(
         c1,
         rep_a_fp4,
@@ -908,12 +908,12 @@ def run_cutlass_moe_mxfp4(
     del rep_a_fp4, rep_a_blockscale
     if activation == MoEActivation.SILU:
         int_fp4, int_blockscale = ops.silu_and_mul_mxfp4_experts_quant(
-            c1, ones_per_expert, expert_offsets, blockscale_offsets, num_topk
+            c1, expert_offsets, blockscale_offsets, e, num_topk
         )
     else:
         apply_moe_activation(activation, c2, c1)
         int_fp4, int_blockscale = ops.mxfp4_experts_quant(
-            c2, ones_per_expert, expert_offsets, blockscale_offsets, num_topk
+            c2, expert_offsets, blockscale_offsets, e, num_topk
         )
 
     ops.cutlass_mxfp4_moe_mm(

@@ -1915,20 +1915,21 @@ def silu_and_mul_scaled_fp4_experts_quant(
 
 def mxfp4_experts_quant(
     input_tensor: torch.Tensor,
-    input_global_scale: torch.Tensor,
     expert_offsets: torch.Tensor,
     blockscale_offsets: torch.Tensor,
+    n_experts: int,
     topk: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Quantize input tensor to MXFP4 for packed MoE inputs.
     Uses 32-element blocks with E8M0 (power-of-two) scale factors.
+    MXFP4 has no global scale - only block-level E8M0 scale factors.
 
     Args:
         input_tensor: [m_topk, k] BF16/FP16 activations
-        input_global_scale: [n_experts] per-expert global scale (float32)
         expert_offsets: [n_experts+1] token boundaries per expert
         blockscale_offsets: [n_experts+1] SF row boundaries per expert
+        n_experts: number of experts
         topk: number of top-k experts
     Returns:
         output: [m_topk, k//2] packed E2M1 values (uint8)
@@ -1963,9 +1964,9 @@ def mxfp4_experts_quant(
         output,
         output_scales,
         input_tensor,
-        input_global_scale,
         expert_offsets,
         blockscale_offsets,
+        n_experts,
     )
     # E8M0 SFs are stored as uint8
     output_scales = output_scales.view(torch.uint8)
@@ -1974,13 +1975,14 @@ def mxfp4_experts_quant(
 
 def silu_and_mul_mxfp4_experts_quant(
     input_tensor: torch.Tensor,
-    input_global_scale: torch.Tensor,
     expert_offsets: torch.Tensor,
     blockscale_offsets: torch.Tensor,
+    n_experts: int,
     topk: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Fused SiLU+Mul+MXFP4 quantization for MoE intermediate activations.
+    MXFP4 has no global scale - only block-level E8M0 scale factors.
     """
     assert not current_platform.is_rocm()
     assert input_tensor.ndim == 2
@@ -2007,9 +2009,9 @@ def silu_and_mul_mxfp4_experts_quant(
         output,
         output_scales,
         input_tensor,
-        input_global_scale,
         expert_offsets,
         blockscale_offsets,
+        n_experts,
     )
     output_scales = output_scales.view(torch.uint8)
     return output, output_scales

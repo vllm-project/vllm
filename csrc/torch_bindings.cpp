@@ -606,16 +606,16 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // Compute MXFP4 experts quantization (32-element blocks, E8M0 SFs).
   ops.def(
       "mxfp4_experts_quant(Tensor! output, Tensor! output_scale,"
-      "Tensor input, Tensor input_global_scale, Tensor input_offset_by_experts,"
-      "Tensor output_scale_offset_by_experts) -> ()");
+      "Tensor input, Tensor input_offset_by_experts,"
+      "Tensor output_scale_offset_by_experts, int n_experts) -> ()");
   ops.impl("mxfp4_experts_quant", torch::kCUDA, &mxfp4_experts_quant);
 
   // Fused SiLU+Mul+MXFP4 experts quantization.
   ops.def(
       "silu_and_mul_mxfp4_experts_quant(Tensor! output, Tensor! "
       "output_scale,"
-      "Tensor input, Tensor input_global_scale, Tensor input_offset_by_experts,"
-      "Tensor output_scale_offset_by_experts) -> ()");
+      "Tensor input, Tensor input_offset_by_experts,"
+      "Tensor output_scale_offset_by_experts, int n_experts) -> ()");
   ops.impl("silu_and_mul_mxfp4_experts_quant", torch::kCUDA,
            &silu_and_mul_mxfp4_experts_quant);
 

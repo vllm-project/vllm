@@ -52,8 +52,8 @@ template <class Type, bool FUSE_SILU_MUL = false,
           bool SMALL_NUM_EXPERTS = false>
 __global__ void __launch_bounds__(512, VLLM_BLOCKS_PER_SM(512))
     mxfp4_cvt_fp16_to_fp4(int32_t numRows, int32_t numCols, Type const* in,
-                          float const* SFScale, fp4_packed_t* out,
-                          uint32_t* SFout, uint32_t* input_offset_by_experts,
+                          fp4_packed_t* out, uint32_t* SFout,
+                          uint32_t* input_offset_by_experts,
                           uint32_t* output_scale_offset_by_experts,
                           int n_experts, bool low_latency) {
   using PackedVec = PackedVec<Type, CVT_FP4_PACK16>;
@@ -129,8 +129,6 @@ __global__ void __launch_bounds__(512, VLLM_BLOCKS_PER_SM(512))
     int64_t outOffset = rowIdx * colsPerRow + colIdx;
     auto& out_pos = out[outOffset];
 
-    float const SFScaleVal = SFScale == nullptr ? 1.0f : SFScale[expert_idx];
-
     uint32_t* SFout_in_expert =
         SFout + output_scale_offset_by_experts[expert_idx] * numKTiles;
 
@@ -139,6 +137,8 @@ __global__ void __launch_bounds__(512, VLLM_BLOCKS_PER_SM(512))
         cvt_quant_to_fp4_get_sf_out_offset<uint32_t, MXFP4_NUM_THREADS_PER_SF>(
             rowIdx_in_expert, colIdx, numKTiles, SFout_in_expert);
 
+    // MXFP4 has no global scale, but this util is shared with NVFP4
+    constexpr float SFScaleVal = 1.0f;
     // UE8M0_SF=true for MXFP4 E8M0 scale factors
     out_pos =
         cvt_warp_fp16_to_fp4<Type, MXFP4_NUM_THREADS_PER_SF, /*UE8M0_SF=*/true>(
@@ -151,8 +151,8 @@ template <class Type, bool FUSE_SILU_MUL = false,
           bool SMALL_NUM_EXPERTS = false>
 __global__ void __launch_bounds__(1024, VLLM_BLOCKS_PER_SM(1024))
     mxfp4_cvt_fp16_to_fp4(int32_t numRows, int32_t numCols, Type const* in,
-                          float const* SFScale, fp4_packed_t* out,
-                          uint32_t* SFout, uint32_t* input_offset_by_experts,
+                          fp4_packed_t* out, uint32_t* SFout,
+                          uint32_t* input_offset_by_experts,
                           uint32_t* output_scale_offset_by_experts,
                           int n_experts) {
   using PackedVec = PackedVec<Type, CVT_FP4_PACK16>;
@@ -224,7 +224,8 @@ __global__ void __launch_bounds__(1024, VLLM_BLOCKS_PER_SM(1024))
     int64_t outOffset = rowIdx * colsPerRow + colIdx;
     auto& out_pos = out[outOffset];
 
-    float const SFScaleVal = SFScale == nullptr ? 1.0f : SFScale[expert_idx];
+    // MXFP4 has no global scale - only block-level E8M0 scale factors
+    constexpr float SFScaleVal = 1.0f;
 
     uint32_t* SFout_in_expert =
         SFout + output_scale_offset_by_experts[expert_idx] * numKTiles;
@@ -241,7 +242,7 @@ __global__ void __launch_bounds__(1024, VLLM_BLOCKS_PER_SM(1024))
 
 template <typename T, bool FUSE_SILU_MUL = false>
 void mxfp4_quant_impl(void* output, void* output_scale, void* input,
-                      void* input_global_scale, void* input_offset_by_experts,
+                      void* input_offset_by_experts,
                       void* output_scale_offset_by_experts, int m_topk, int k,
                       int n_experts, cudaStream_t stream) {
   int multiProcessorCount =
@@ -267,7 +268,6 @@ void mxfp4_quant_impl(void* output, void* output_scale, void* input,
       mxfp4_cvt_fp16_to_fp4<T, FUSE_SILU_MUL, false>
           <<<grid, block, shared_mem_size, stream>>>(
               m_topk, k, reinterpret_cast<T*>(input),
-              reinterpret_cast<float*>(input_global_scale),
               reinterpret_cast<fp4_packed_t*>(output),
               reinterpret_cast<uint32_t*>(output_scale),
               reinterpret_cast<uint32_t*>(input_offset_by_experts),
@@ -277,7 +277,6 @@ void mxfp4_quant_impl(void* output, void* output_scale, void* input,
       mxfp4_cvt_fp16_to_fp4<T, FUSE_SILU_MUL, true>
           <<<grid, block, shared_mem_size, stream>>>(
               m_topk, k, reinterpret_cast<T*>(input),
-              reinterpret_cast<float*>(input_global_scale),
               reinterpret_cast<fp4_packed_t*>(output),
               reinterpret_cast<uint32_t*>(output_scale),
               reinterpret_cast<uint32_t*>(input_offset_by_experts),
@@ -289,7 +288,6 @@ void mxfp4_quant_impl(void* output, void* output_scale, void* input,
       mxfp4_cvt_fp16_to_fp4<T, FUSE_SILU_MUL, false>
           <<<grid, block, 0, stream>>>(
               m_topk, k, reinterpret_cast<T*>(input),
-              reinterpret_cast<float*>(input_global_scale),
               reinterpret_cast<fp4_packed_t*>(output),
               reinterpret_cast<uint32_t*>(output_scale),
               reinterpret_cast<uint32_t*>(input_offset_by_experts),
@@ -298,7 +296,6 @@ void mxfp4_quant_impl(void* output, void* output_scale, void* input,
     } else {
       mxfp4_cvt_fp16_to_fp4<T, FUSE_SILU_MUL, true><<<grid, block, 0, stream>>>(
           m_topk, k, reinterpret_cast<T*>(input),
-          reinterpret_cast<float*>(input_global_scale),
           reinterpret_cast<fp4_packed_t*>(output),
           reinterpret_cast<uint32_t*>(output_scale),
           reinterpret_cast<uint32_t*>(input_offset_by_experts),
@@ -329,26 +326,22 @@ static constexpr int MXFP4_BLOCK_SIZE = 32;
 
 static void validate_mxfp4_experts_quant_inputs(
     torch::Tensor const& output, torch::Tensor const& output_scale,
-    torch::Tensor const& input, torch::Tensor const& input_global_scale,
-    torch::Tensor const& input_offset_by_experts,
-    torch::Tensor const& output_scale_offset_by_experts, int64_t m_topk,
-    int64_t k) {
+    torch::Tensor const& input, torch::Tensor const& input_offset_by_experts,
+    torch::Tensor const& output_scale_offset_by_experts, int64_t n_experts,
+    int64_t m_topk, int64_t k) {
   CHECK_INPUT(output, "output");
   CHECK_INPUT(output_scale, "output_scale");
   CHECK_INPUT(input, "input");
-  CHECK_INPUT(input_global_scale, "input_global_scale");
   CHECK_INPUT(input_offset_by_experts, "input_offset_by_experts");
   CHECK_INPUT(output_scale_offset_by_experts, "output_scale_offset_by_experts");
 
   TORCH_CHECK(output.dim() == 2);
   TORCH_CHECK(output_scale.dim() == 2);
   TORCH_CHECK(input.dim() == 2);
-  TORCH_CHECK(input_global_scale.dim() == 1);
   TORCH_CHECK(input_offset_by_experts.dim() == 1);
   TORCH_CHECK(output_scale_offset_by_experts.dim() == 1);
 
   TORCH_CHECK(input.scalar_type() == HALF || input.scalar_type() == BF16);
-  TORCH_CHECK(input_global_scale.scalar_type() == FLOAT);
   TORCH_CHECK(input_offset_by_experts.scalar_type() == INT);
   TORCH_CHECK(output_scale_offset_by_experts.scalar_type() == INT);
   // output is uint8 (two mxfp4 values packed into one uint8)
@@ -357,7 +350,6 @@ static void validate_mxfp4_experts_quant_inputs(
   TORCH_CHECK(output_scale.scalar_type() == INT);
 
   TORCH_CHECK(k % MXFP4_BLOCK_SIZE == 0, "k must be a multiple of 32");
-  auto n_experts = input_global_scale.size(0);
   TORCH_CHECK(input_offset_by_experts.size(0) == n_experts + 1);
   TORCH_CHECK(output_scale_offset_by_experts.size(0) == n_experts + 1);
   TORCH_CHECK(output.size(0) == m_topk);
@@ -371,17 +363,16 @@ static void validate_mxfp4_experts_quant_inputs(
 
 void mxfp4_experts_quant(torch::Tensor& output, torch::Tensor& output_scale,
                          torch::Tensor const& input,
-                         torch::Tensor const& input_global_scale,
                          torch::Tensor const& input_offset_by_experts,
-                         torch::Tensor const& output_scale_offset_by_experts) {
+                         torch::Tensor const& output_scale_offset_by_experts,
+                         int64_t n_experts) {
   auto m_topk = input.size(0);
   auto k = input.size(1);
 
   validate_mxfp4_experts_quant_inputs(
-      output, output_scale, input, input_global_scale, input_offset_by_experts,
-      output_scale_offset_by_experts, m_topk, k);
+      output, output_scale, input, input_offset_by_experts,
+      output_scale_offset_by_experts, n_experts, m_topk, k);
 
-  auto n_experts = input_global_scale.size(0);
   const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
   const cudaStream_t stream =
       at::cuda::getCurrentCUDAStream(input.get_device());
@@ -391,7 +382,7 @@ void mxfp4_experts_quant(torch::Tensor& output, torch::Tensor& output_scale,
         using cuda_type = vllm::CUDATypeConverter<scalar_t>::Type;
         vllm::mxfp4_quant_impl<cuda_type, /*FUSE_SILU_MUL=*/false>(
             output.data_ptr(), output_scale.data_ptr(), input.data_ptr(),
-            input_global_scale.data_ptr(), input_offset_by_experts.data_ptr(),
+            input_offset_by_experts.data_ptr(),
             output_scale_offset_by_experts.data_ptr(), m_topk, k, n_experts,
             stream);
       });
@@ -399,19 +390,17 @@ void mxfp4_experts_quant(torch::Tensor& output, torch::Tensor& output_scale,
 
 void silu_and_mul_mxfp4_experts_quant(
     torch::Tensor& output, torch::Tensor& output_scale,
-    torch::Tensor const& input, torch::Tensor const& input_global_scale,
-    torch::Tensor const& input_offset_by_experts,
-    torch::Tensor const& output_scale_offset_by_experts) {
+    torch::Tensor const& input, torch::Tensor const& input_offset_by_experts,
+    torch::Tensor const& output_scale_offset_by_experts, int64_t n_experts) {
   auto m_topk = input.size(0);
   auto k_times_2 = input.size(1);
   TORCH_CHECK(k_times_2 % 2 == 0, "input width must be even (gate || up)");
   auto k = k_times_2 / 2;
 
   validate_mxfp4_experts_quant_inputs(
-      output, output_scale, input, input_global_scale, input_offset_by_experts,
-      output_scale_offset_by_experts, m_topk, k);
+      output, output_scale, input, input_offset_by_experts,
+      output_scale_offset_by_experts, n_experts, m_topk, k);
 
-  auto n_experts = input_global_scale.size(0);
   const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
   const cudaStream_t stream =
       at::cuda::getCurrentCUDAStream(input.get_device());
@@ -421,7 +410,7 @@ void silu_and_mul_mxfp4_experts_quant(
         using cuda_type = vllm::CUDATypeConverter<scalar_t>::Type;
         vllm::mxfp4_quant_impl<cuda_type, /*FUSE_SILU_MUL=*/true>(
             output.data_ptr(), output_scale.data_ptr(), input.data_ptr(),
-            input_global_scale.data_ptr(), input_offset_by_experts.data_ptr(),
+            input_offset_by_experts.data_ptr(),
             output_scale_offset_by_experts.data_ptr(), m_topk, k, n_experts,
             stream);
       });
