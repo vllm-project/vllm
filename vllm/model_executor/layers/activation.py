@@ -16,7 +16,7 @@ from vllm.distributed import (
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.platforms import current_platform
+from vllm.platforms import CpuArchEnum, current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.collection_utils import LazyDict
 
@@ -242,6 +242,32 @@ class GeluAndMulSparse(CustomOp):
         out = self._gaussian_topk(x[..., :d])
         out = F.gelu(out, approximate=self.approximate)
         return out * x[..., d:]
+
+    def forward_cuda(self, x: torch.Tensor) -> torch.Tensor:
+        return self.forward_native(x)
+
+
+# --8<-- [start:gelu]
+@CustomOp.register("gelu")
+class GELU(CustomOp):
+    # --8<-- [end:gelu]
+
+    def __init__(self):
+        super().__init__()
+
+    def forward_native(self, x: torch.Tensor) -> torch.Tensor:
+        return F.gelu(x, approximate="none")
+
+    def forward_cpu(self, x: torch.Tensor) -> torch.Tensor:
+        if (
+            current_platform.get_cpu_architecture() == CpuArchEnum.ARM
+            and x.dtype == torch.bfloat16
+            and hasattr(torch.ops._C, "activation_lut_bf16")
+        ):
+            out = torch.empty_like(x)
+            torch.ops._C.activation_lut_bf16(out, x.contiguous(), "gelu")
+            return out
+        return self.forward_native(x)
 
     def forward_cuda(self, x: torch.Tensor) -> torch.Tensor:
         return self.forward_native(x)
@@ -635,7 +661,7 @@ class ScaledActivation(nn.Module):
 
 _ACTIVATION_REGISTRY = LazyDict(
     {
-        "gelu": lambda: nn.GELU(),
+        "gelu": lambda: GELU(),
         "gelu_fast": lambda: FastGELU(),
         "gelu_new": lambda: NewGELU(),
         "gelu_pytorch_tanh": lambda: (
