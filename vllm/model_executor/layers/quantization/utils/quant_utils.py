@@ -195,17 +195,23 @@ def _normalize_quant_group_shape(x: torch.Tensor, group_shape: GroupShape):
 # NOTE this function does not explicitly broadcast dimensions
 # with an extent of 1, since this can be done implicitly by pytorch
 def group_broadcast(t, shape):
+    from torch.fx.experimental.symbolic_shapes import guard_or_false
+
     for i, s in enumerate(shape):
         # If tensor has fewer dimensions than target shape, treat missing
         # dimensions as size 1 (standard PyTorch broadcasting behavior)
         t_dim_size = t.shape[i] if i < t.ndim else 1
-        if t_dim_size != s and t_dim_size != 1:
-            assert s % t_dim_size == 0
+        if guard_or_false(t_dim_size == 1):
+            continue
+        if guard_or_false(t_dim_size != s):
+            torch._check(s % t_dim_size == 0)
             t = (
                 t.unsqueeze(i + 1)
                 .expand(*t.shape[: i + 1], s // t_dim_size, *t.shape[i + 1 :])
                 .flatten(i, i + 1)
             )
+        else:
+            torch._check(t_dim_size == s)
     return t
 
 
