@@ -1172,11 +1172,17 @@ def test_mtp_draft_model_config_preserves_target_hf_overrides():
 
     def apply_nested_overrides(target, overrides):
         for key, value in overrides.items():
-            nested_target = getattr(target, key, None)
+            if isinstance(target, dict):
+                nested_target = target.get(key)
+            else:
+                nested_target = getattr(target, key, None)
             if isinstance(value, dict) and nested_target is not None:
                 apply_nested_overrides(nested_target, value)
             else:
-                setattr(target, key, value)
+                if isinstance(target, dict):
+                    target[key] = value
+                else:
+                    setattr(target, key, value)
 
     class FakeHFConfig(SimpleNamespace):
 
@@ -1198,10 +1204,10 @@ def test_mtp_draft_model_config_preserves_target_hf_overrides():
                 ),
             )
 
-            if isinstance(self.hf_overrides, dict):
-                apply_nested_overrides(self.hf_config, self.hf_overrides)
-            elif callable(self.hf_overrides):
+            if callable(self.hf_overrides):
                 self.hf_config = self.hf_overrides(self.hf_config)
+            elif isinstance(self.hf_overrides, dict):
+                apply_nested_overrides(self.hf_config, self.hf_overrides)
 
             self.hf_text_config = self.hf_config.text_config
 
@@ -1236,6 +1242,8 @@ def test_mtp_draft_model_config_preserves_target_hf_overrides():
         )
 
     draft_model_config = speculative_config.draft_model_config
+    assert isinstance(draft_model_config.hf_overrides, dict)
+    assert draft_model_config.hf_overrides == target_hf_overrides
     assert (
         draft_model_config.hf_config.text_config.rope_parameters
         == target_rope_parameters

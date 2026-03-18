@@ -60,6 +60,14 @@ SpeculativeMethod = Literal[
 RejectionSampleMethod = Literal["strict", "probabilistic"]
 
 
+class _DraftHfOverrides(dict[str, Any]):
+    """Draft-model HF overrides that remain dict-like after config loading."""
+
+    def __call__(self, hf_config: PretrainedConfig) -> PretrainedConfig:
+        SpeculativeConfig._apply_hf_overrides_dict(hf_config, self)
+        return SpeculativeConfig.hf_config_override(hf_config)
+
+
 @config
 class SpeculativeConfig:
     """Configuration for speculative decoding."""
@@ -335,6 +343,64 @@ class SpeculativeConfig:
 
         return hf_config
 
+    @staticmethod
+    def _update_nested_hf_config(
+        target: PretrainedConfig | dict[str, Any],
+        updates: dict[str, Any],
+    ) -> None:
+        for key, value in updates.items():
+            if isinstance(value, dict):
+                if isinstance(target, dict):
+                    nested_target = target.get(key)
+                else:
+                    nested_target = getattr(target, key, None)
+
+                if nested_target is not None and (
+                    isinstance(nested_target, dict)
+                    or hasattr(nested_target, "__dict__")
+                ):
+                    SpeculativeConfig._update_nested_hf_config(
+                        nested_target, value
+                    )
+                    continue
+
+            if isinstance(target, dict):
+                target[key] = value
+            else:
+                setattr(target, key, value)
+
+    @staticmethod
+    def _apply_hf_overrides_dict(
+        config: PretrainedConfig,
+        overrides: dict[str, Any],
+    ) -> None:
+        for key, value in overrides.items():
+            attr = getattr(config, key, None)
+            if isinstance(value, dict) and attr is not None and (
+                isinstance(attr, dict) or hasattr(attr, "__dict__")
+            ):
+                SpeculativeConfig._update_nested_hf_config(attr, value)
+            else:
+                setattr(config, key, value)
+
+    @staticmethod
+    def _get_draft_hf_overrides(target_hf_overrides: Any) -> Any:
+        if isinstance(target_hf_overrides, dict):
+            merged_overrides = _DraftHfOverrides(copy.deepcopy(target_hf_overrides))
+            return merged_overrides
+
+        if callable(target_hf_overrides):
+
+            def composed_hf_overrides(
+                hf_config: PretrainedConfig,
+            ) -> PretrainedConfig:
+                hf_config = target_hf_overrides(hf_config)
+                return SpeculativeConfig.hf_config_override(hf_config)
+
+            return composed_hf_overrides
+
+        return SpeculativeConfig.hf_config_override
+
     def __post_init__(self):
         # Note: "method" is a new parameter that helps to extend the
         # configuration of non-model-based proposers, and the "model" parameter
@@ -472,7 +538,9 @@ class SpeculativeConfig:
                     quantization=self.quantization,
                     enforce_eager=self.target_model_config.enforce_eager,
                     max_logprobs=self.target_model_config.max_logprobs,
-                    hf_overrides=SpeculativeConfig.hf_config_override,
+                    hf_overrides=SpeculativeConfig._get_draft_hf_overrides(
+                        self.target_model_config.hf_overrides
+                    ),
                     config_format=self.target_model_config.config_format,
                 )
 
