@@ -29,7 +29,6 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 
-
 def find_common_prefix(s1: str, s2: str) -> str:
     """
     Finds a common prefix that is shared between two strings, if there is one.

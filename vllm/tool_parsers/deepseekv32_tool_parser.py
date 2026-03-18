@@ -208,7 +208,7 @@ class DeepSeekV32ToolParser(ToolParser):
                 return json.loads(value)
             except json.JSONDecodeError:
                 return value
-            
+
     def _convert_params_with_schema(
         self,
         function_name: str,
