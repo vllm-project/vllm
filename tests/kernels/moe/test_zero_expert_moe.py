@@ -43,7 +43,7 @@ def zero_expert_moe(dist_init, default_vllm_config):
     vllm_config.compilation_config.static_forward_context = dict()
 
     with set_current_vllm_config(vllm_config), set_forward_context(None, vllm_config):
-        init_workspace_manager(torch.cuda.current_device())
+        init_workspace_manager(torch.accelerator.current_device_index())
 
         layer = FusedMoE(
             zero_expert_type="identity",
