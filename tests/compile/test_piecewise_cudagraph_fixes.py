@@ -69,8 +69,7 @@ def test_splitting_op_getitem_assigned_to_next_subgraph():
 
     # Verify the graph actually contains getitem nodes (sanity check)
     has_getitem = any(
-        n.op == "call_function" and n.target == operator.getitem
-        for n in gm.graph.nodes
+        n.op == "call_function" and n.target == operator.getitem for n in gm.graph.nodes
     )
     assert has_getitem, "Test setup failed: expected getitem nodes in graph"
 
@@ -117,9 +116,7 @@ def test_cudagraph_entry_input_buffers_populated():
     from vllm.compilation.cuda_graph import CUDAGraphEntry
 
     entry = CUDAGraphEntry(batch_descriptor=None)  # type: ignore[arg-type]
-    assert entry.input_buffers is None, (
-        "input_buffers should be None before capture"
-    )
+    assert entry.input_buffers is None, "input_buffers should be None before capture"
 
     # Simulate capture: save tensor references into input_buffers
     x = torch.randn(4, device="cuda")
