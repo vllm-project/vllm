@@ -74,6 +74,9 @@ class KVCacheSpecRegistry:
                 and `uniform_type_base_spec` will be trated as uniform type.
                 If None, defaults to kvcache_spec_cls itself (for built-in base specs).
         """
+        assert manager_class is not None, (
+            "manager_class is required when override=False"
+        )
         if uniform_type_base_spec is None:
             uniform_type_base_spec = kvcache_spec_cls
 
@@ -113,6 +116,9 @@ class KVCacheSpecRegistry:
                 manager_class=CustomFullAttentionManager,
             )
         """
+        assert target_kv_cache_spec_cls is not None, (
+            "Please specify a target_kv_cache_spec_cls when override a KVCacheSpec"
+        )
         if target_kv_cache_spec_cls not in _REGISTRY_KVCACHESPEC_LIST:
             raise ValueError(
                 f"Cannot override unregistered spec {kvcache_spec_cls.__name__}. "
@@ -195,7 +201,7 @@ class KVCacheSpecRegistry:
                 return _REGISTRY_KVCACHESPEC_LIST[base].uniform_type_base_spec
 
         raise ValueError(
-            f"No grouping base class registered for spec type {kvcache_spec_cls}."
+            f"No uniform type base class registered for spec type {kvcache_spec_cls}."
         )
 
 
@@ -243,9 +249,6 @@ def register_kv_cache_spec(
 
     def decorator(kvcache_spec_cls: type["KVCacheSpec"]) -> type["KVCacheSpec"]:
         if override:
-            assert target_kv_cache_spec_cls is not None, (
-                "Please specify a target_kv_cache_spec_cls when override a KVCacheSpec"
-            )
             # Use override() method for existing specs
             KVCacheSpecRegistry.override(
                 kvcache_spec_cls=kvcache_spec_cls,
@@ -258,9 +261,6 @@ def register_kv_cache_spec(
             assert target_kv_cache_spec_cls is None, (
                 f"Unexpected target_kv_cache_spec_cls: {target_kv_cache_spec_cls}"
                 " when just registering a KVCacheSpec"
-            )
-            assert manager_class is not None, (
-                "manager_class is required when override=False"
             )
             KVCacheSpecRegistry.register(
                 kvcache_spec_cls=kvcache_spec_cls,
