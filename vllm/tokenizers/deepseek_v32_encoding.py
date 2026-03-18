@@ -268,6 +268,9 @@ def render_message(
 
         summary_content = content or ""
 
+        # Trailing "\n\n" is the separator before the tool call block, not actual content
+        summary_content = summary_content.removesuffix("\n\n")
+
         if thinking_mode == "thinking" and index > last_user_idx:
             if not (reasoning or tool_calls):
                 raise ValueError(

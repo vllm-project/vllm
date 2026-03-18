@@ -218,10 +218,14 @@ class DeepSeekV32ToolParser(ToolParser):
         end = input_str.find('"', start)
         return input_str[start:end] if start > 0 and end > start else input_str
 
-    def _convert_param_value(self, value: str, param_type: str) -> Any:
+    def _convert_param_value(self, value: str, param_type: str | list[str]) -> Any:
         """Convert parameter value to the correct type."""
         if value.lower() == "null":
             return None
+
+        # Handle cases like ["string", "null"] or similar
+        if isinstance(param_type, list):
+            param_type = next((t for t in param_type if t != "null"), "string")
 
         param_type = param_type.lower()
         if param_type in ["string", "str", "text"]:
@@ -329,11 +333,12 @@ class DeepSeekV32ToolParser(ToolParser):
                     # We just ended a tool call, skip whitespace
                     return None
                 # Normal content, no tool call
+                content = delta_text
                 if delta_text.endswith("<"):
-                    return DeltaMessage(content=delta_text[:-1])
+                    content = content[:-1]
                 if previous_text and previous_text.endswith("<"):
-                    return DeltaMessage(content="<" + delta_text)
-                return DeltaMessage(content=delta_text)
+                    content = "<" + content
+                return DeltaMessage(content=content)
 
         # Check if we're between tool calls (waiting for next one)
         invoke_starts_count = current_text.count(self.invoke_start_prefix)
