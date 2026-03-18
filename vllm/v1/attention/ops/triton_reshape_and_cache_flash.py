@@ -29,7 +29,7 @@ def reshape_and_cache_kernel_flash(
     block_size: tl.constexpr,
     x: tl.constexpr,
     USE_HEAD_MAJOR_LAYOUT: tl.constexpr,
-    # FP8 quantization flag (INT8 uses dedicated per-token kernel)
+    # FP8 flags
     FP8_KV_CACHE: tl.constexpr,
     # tune parameters
     TILE_SIZE: tl.constexpr,
