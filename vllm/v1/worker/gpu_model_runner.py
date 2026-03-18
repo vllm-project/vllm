@@ -739,6 +739,19 @@ class GPUModelRunner(
 
         self.uniform_decode_query_len = 1 + self.num_spec_tokens
 
+        # When spec decode is active, the mamba backend classifies requests
+        # with query_len <= reorder_batch_threshold as "decodes". Prefill
+        # chunks that fall under this threshold get processed via the decode
+        # path, which stores intermediate states at sequential slots. We must
+        # set num_accepted_tokens to the chunk's query_len for those requests
+        # so the next iteration reads from the correct final-state slot.
+        # Prefills that went through the actual prefill path should keep the
+        # default value of 1 (the prefill path stores state at slot 0 only).
+        self.needs_prefill_as_decode_slots: bool = False
+        self.prefill_as_decode_num_tokens = self._make_buffer(
+            self.max_num_reqs, dtype=torch.int32
+        )
+
         # Cudagraph dispatcher for runtime cudagraph dispatching.
         self.cudagraph_dispatcher = CudagraphDispatcher(self.vllm_config)
 
@@ -1355,12 +1368,22 @@ class GPUModelRunner(
             .int()
             .argmax(-1)
         )
+        spec_decode_active = bool(scheduler_output.scheduled_spec_decode_tokens)
+        if self.needs_prefill_as_decode_slots and spec_decode_active:
+            mamba_utils.update_accepted_tokens_for_prefill_as_decode(
+                self.input_batch,
+                self.prefill_as_decode_num_tokens,
+                self.num_accepted_tokens.gpu,
+                scheduler_output,
+                self.reorder_batch_threshold,
+                num_reqs,
+            )
+
         if self.cache_config.mamba_cache_mode == "align":
             for i, num_tokens in enumerate(
                 self.num_accepted_tokens.gpu[:num_reqs].cpu().numpy()
             ):
                 self.input_batch.num_accepted_tokens_cpu[i] = num_tokens
-
             mamba_utils.postprocess_mamba(
                 scheduler_output,
                 self.kv_cache_config,
@@ -2024,6 +2047,8 @@ class GPUModelRunner(
                 else 0
             )
 
+            if isinstance(builder, Mamba2AttentionMetadataBuilder):
+                self.needs_prefill_as_decode_slots = True
             extra_attn_metadata_args = {}
             if use_spec_decode and isinstance(
                 builder, (Mamba2AttentionMetadataBuilder, GDNAttentionMetadataBuilder)
@@ -3569,10 +3594,10 @@ class GPUModelRunner(
                 scheduled_spec_decode_tokens=spec_decode_tokens_copy,
             )
 
-        if scheduler_output.preempted_req_ids and has_kv_transfer_group():
-            get_kv_transfer_group().handle_preemptions(
-                scheduler_output.preempted_req_ids
-            )
+        if has_kv_transfer_group():
+            kv_connector_metadata = scheduler_output.kv_connector_metadata
+            assert kv_connector_metadata is not None
+            get_kv_transfer_group().handle_preemptions(kv_connector_metadata)
 
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         with (
@@ -5485,13 +5510,14 @@ class GPUModelRunner(
                             dummy_modality
                         ]
 
-                        logger.info(
+                        logger.info_once(
                             "Encoder cache will be initialized with a "
                             "budget of %s tokens, and profiled with "
                             "%s %s items of the maximum feature size.",
                             encoder_budget,
                             max_mm_items_per_batch,
                             dummy_modality,
+                            scope="local",
                         )
 
                         # Create dummy batch of multimodal inputs.
