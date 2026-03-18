@@ -9,6 +9,7 @@
 # --------------------------------------------------------
 from abc import abstractmethod
 from collections.abc import Iterable, Mapping, Sequence
+from functools import cached_property
 from typing import Annotated, Literal, TypeAlias, TypeVar
 
 import torch
@@ -329,7 +330,8 @@ class InternVLProcessingInfo(BaseInternVLProcessingInfo):
 
         return InternVLVideoProcessor(**kwargs)
 
-    def get_video_token(self):
+    @cached_property
+    def video_token(self):
         text_model_type = self.get_hf_config().get_text_config().model_type
         video_token_map = {
             "qwen2": "<|video_pad|>",
@@ -338,6 +340,14 @@ class InternVLProcessingInfo(BaseInternVLProcessingInfo):
             "gpt_oss": "<|reserved_200000|>",
         }
         return video_token_map.get(text_model_type)
+
+    @cached_property
+    def supports_video(self):
+        video_token = self.video_token
+        if not video_token:
+            return False
+
+        return video_token in self.get_tokenizer().get_vocab()
 
     def get_hf_processor(self, **kwargs: object) -> InternVLProcessor:
         config = self.get_hf_config()
@@ -349,19 +359,17 @@ class InternVLProcessingInfo(BaseInternVLProcessingInfo):
         downsample_ratio = config.downsample_ratio
         image_seq_length = int((image_size // patch_size) ** 2 * (downsample_ratio**2))
 
-        video_token = self.get_video_token()
+        video_processor = (
+            self.get_video_processor(**kwargs) if self.supports_video else None
+        )
 
         return InternVLProcessor(
             tokenizer=self.get_tokenizer(),
             image_processor=image_processor,
-            video_processor=self.get_video_processor(**kwargs) if video_token else None,
+            video_processor=video_processor,
             image_seq_length=image_seq_length,
-            video_token=video_token,
+            video_token=self.video_token,
         )
-
-    @property
-    def supports_video(self):
-        return self.get_video_token() is not None
 
     def get_supported_mm_limits(self):
         video_limit = {"video": None} if self.supports_video else {}
