@@ -207,7 +207,6 @@ class GptOssReasoningParser(ReasoningParser):
             # There is potential risk for appending the tag to the original tag
             return original_tag
 
-        # Build base tag with analysis channel
         base_tag = copy.deepcopy(no_func_reasoning_tag)
 
         # Add builtin tool tags (unless tool_choice is "none")
@@ -261,6 +260,16 @@ class GptOssReasoningParser(ReasoningParser):
         # tag. This blocks <|channel|>final and EOS at the grammar level until
         # the model has emitted at least one tool-call channel.
         if tool_choice == "required" or isinstance(tool_choice, dict):
+            # Remove the pure analysis tag (no recipient) from the tag list so
+            # that triggered_tags_first only contains function-call tags.  The
+            # analysis trigger is kept so analysis-to-functions tags remain
+            # reachable in triggered_tags_sub.  This prevents the model from
+            # satisfying at_least_one with a pure reasoning channel instead of
+            # an actual tool call.
+            base_tag["format"]["tags"] = [
+                t for t in base_tag["format"]["tags"]
+                if t.get("begin") != "<|channel|>analysis<|message|>"
+            ]
             base_tag["format"]["at_least_one"] = True
 
         return json.dumps(base_tag)
