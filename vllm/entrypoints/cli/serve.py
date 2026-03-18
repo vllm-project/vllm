@@ -66,12 +66,12 @@ class ServeSubcommand(CLISubcommand):
             # Default to 0 in headless mode (no API servers)
             args.api_server_count = 0
 
-        # Elastic EP requires a single API server to coordinate scale up/down.
+        # Elastic EP currently only supports running with single API server.
         if getattr(args, "enable_elastic_ep", False):
             if args.api_server_count is not None and args.api_server_count > 1:
                 logger.warning(
-                    "--enable-elastic-ep requires a single API server; "
-                    "capping --api-server-count from %d to 1.",
+                    "Elastic EP only supports running with a single API server. "
+                    "Capping --api-server-count from %d to 1.",
                     args.api_server_count,
                 )
             args.api_server_count = 1
