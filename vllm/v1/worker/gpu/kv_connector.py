@@ -12,6 +12,9 @@ from vllm.distributed.kv_transfer import (
     kv_transfer_state,
 )
 from vllm.distributed.kv_transfer.kv_connector.utils import copy_kv_blocks
+from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    WorkerConnectorInitializationData,
+)
 from vllm.forward_context import (
     get_forward_context,
     is_forward_context_available,
@@ -60,10 +63,10 @@ class ActiveKVConnector(KVConnector):
         self.kv_connector.register_kv_caches(kv_caches_dict)
         self.kv_connector.set_host_xfer_buffer_ops(copy_kv_blocks)
 
-        # Register model for connectors that need model weights
-        # (e.g. LMCache CacheBlend selective recomputation).
-        if model is not None:
-            self.kv_connector.register_model(model)
+        # Pass initialization data (including optional model) to the connector.
+        self.kv_connector.initialize_worker_connector(
+            WorkerConnectorInitializationData(model=model)
+        )
 
         self._disabled = False
 

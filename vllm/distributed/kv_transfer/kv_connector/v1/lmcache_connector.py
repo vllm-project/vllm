@@ -16,6 +16,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorMetadata,
     KVConnectorRole,
+    WorkerConnectorInitializationData,
+    WorkerConnectorInitializationResponse,
 )
 from vllm.logger import init_logger
 from vllm.v1.attention.backend import AttentionMetadata
@@ -133,13 +135,21 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
                 "please check and use the latest version"
             )
 
-    def register_model(self, model: "torch.nn.Module") -> None:
-        """Register model with LMCache's VLLMModelTracker for CacheBlend.
+    def initialize_worker_connector(
+        self,
+        initialization_data: WorkerConnectorInitializationData,
+    ) -> WorkerConnectorInitializationResponse:
+        """Pass initialization data to the underlying LMCache engine.
 
-        Delegates to the underlying LMCache engine implementation.
+        Extracts ``model`` from *initialization_data* and forwards it to
+        LMCache's ``register_model`` when available (used by CacheBlend for
+        selective layer recomputation).
         """
-        if hasattr(self._lmcache_engine, "register_model"):
-            self._lmcache_engine.register_model(model)
+        if initialization_data.model is not None and hasattr(
+            self._lmcache_engine, "register_model"
+        ):
+            self._lmcache_engine.register_model(initialization_data.model)
+        return WorkerConnectorInitializationResponse()
 
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs: Any) -> None:
         """

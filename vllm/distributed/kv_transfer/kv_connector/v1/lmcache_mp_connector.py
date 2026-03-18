@@ -16,6 +16,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorMetadata,
     KVConnectorRole,
+    WorkerConnectorInitializationData,
+    WorkerConnectorInitializationResponse,
 )
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -513,10 +515,14 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         self.worker_adapter.register_kv_caches(kv_caches)
         return
 
-    def register_model(self, model: "torch.nn.Module") -> None:
-        """Register model — delegates to worker adapter."""
-        if hasattr(self.worker_adapter, "register_model"):
-            self.worker_adapter.register_model(model)
+    def initialize_worker_connector(
+        self,
+        initialization_data: WorkerConnectorInitializationData,
+    ) -> WorkerConnectorInitializationResponse:
+        """Delegate initialization data to the worker adapter."""
+        if hasattr(self.worker_adapter, "initialize_worker_connector"):
+            self.worker_adapter.initialize_worker_connector(initialization_data)
+        return WorkerConnectorInitializationResponse()
 
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs: Any) -> None:
         """

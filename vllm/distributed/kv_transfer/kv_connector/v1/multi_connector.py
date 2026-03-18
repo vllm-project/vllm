@@ -18,6 +18,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
     KVConnectorRole,
     KVConnectorWorkerMetadata,
+    WorkerConnectorInitializationData,
+    WorkerConnectorInitializationResponse,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     KVConnectorPromMetrics,
@@ -219,9 +221,13 @@ class MultiConnector(KVConnectorBase_V1):
         for c in self._connectors:
             c.register_kv_caches(kv_caches)
 
-    def register_model(self, model: "torch.nn.Module") -> None:
+    def initialize_worker_connector(
+        self,
+        initialization_data: WorkerConnectorInitializationData,
+    ) -> WorkerConnectorInitializationResponse:
         for c in self._connectors:
-            c.register_model(model)
+            c.initialize_worker_connector(initialization_data)
+        return WorkerConnectorInitializationResponse()
 
     # We must override the base class method here because we need to bind
     # the metadata to each connector in the order of the connectors in the

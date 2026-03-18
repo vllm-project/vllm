@@ -43,6 +43,7 @@ The class provides the following primitives:
 import enum
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
 import torch
@@ -79,6 +80,27 @@ CopyBlocksOp = Callable[
 ]
 
 logger = init_logger(__name__)
+
+
+@dataclass
+class WorkerConnectorInitializationData:
+    """Data passed to initialize_worker_connector().
+
+    Designed to be extended without breaking existing connectors: new optional
+    fields can be added here and connectors that don't need them simply ignore
+    the extra data.
+    """
+
+    model: "torch.nn.Module | None" = field(default=None)
+
+
+@dataclass
+class WorkerConnectorInitializationResponse:
+    """Response from initialize_worker_connector().
+
+    Currently empty; reserved for future use (e.g. reporting which
+    initialization steps were performed).
+    """
 
 
 class SupportsHMA(ABC):
@@ -264,18 +286,29 @@ class KVConnectorBase_V1(ABC):
         """
         return
 
-    def register_model(self, model: "torch.nn.Module") -> None:
+    def initialize_worker_connector(
+        self,
+        initialization_data: WorkerConnectorInitializationData,
+    ) -> WorkerConnectorInitializationResponse:
         """
-        Register the loaded vLLM model with the connector.
+        Initialize per-worker connector state after model loading.
 
-        Connectors that need access to model weights (e.g. LMCache's
-        CacheBlend selective recomputation) can override this method.
-        Called after model loading and before inference begins.
+        Called once by the GPU model runner after the model and KV caches
+        are ready.  The default implementation is a no-op; connectors that
+        need access to model weights (e.g. LMCache's CacheBlend selective
+        recomputation) should override this method.
 
         Args:
-            model: the loaded vLLM model (nn.Module).
+            initialization_data: data bag containing optional fields such
+                as the loaded model (``initialization_data.model``).
+                New fields may be added in future versions without breaking
+                existing connectors.
+
+        Returns:
+            WorkerConnectorInitializationResponse (currently empty, reserved
+            for future use).
         """
-        return
+        return WorkerConnectorInitializationResponse()
 
     def register_cross_layers_kv_cache(
         self, kv_cache: torch.Tensor, attn_backend: type["AttentionBackend"]

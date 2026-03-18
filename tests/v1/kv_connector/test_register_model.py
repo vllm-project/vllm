@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for register_model() on KVConnectorBase_V1.
+"""Tests for initialize_worker_connector() on KVConnectorBase_V1.
 
-Validates PR: add register_model() to KVConnectorBase_V1 for CacheBlend.
+Validates PR: replace register_model() with WorkerConnectorInitializationData
+pattern for extensible connector initialization.
 """
 
 from unittest.mock import MagicMock, patch
@@ -10,35 +11,68 @@ from unittest.mock import MagicMock, patch
 import torch
 
 
-class TestKVConnectorBaseRegisterModel:
-    """Test the base class register_model default behavior."""
+class TestWorkerConnectorInitializationData:
+    """Test the WorkerConnectorInitializationData dataclass."""
 
-    def test_base_class_has_register_model(self):
-        """register_model exists on KVConnectorBase_V1."""
+    def test_dataclass_default_model_is_none(self):
+        """WorkerConnectorInitializationData.model defaults to None."""
         from vllm.distributed.kv_transfer.kv_connector.v1.base import (
-            KVConnectorBase_V1,
+            WorkerConnectorInitializationData,
         )
 
-        assert hasattr(KVConnectorBase_V1, "register_model")
+        data = WorkerConnectorInitializationData()
+        assert data.model is None
 
-    def test_base_class_register_model_is_noop(self):
-        """Base class register_model does nothing (returns None)."""
+    def test_dataclass_accepts_model(self):
+        """WorkerConnectorInitializationData accepts an nn.Module."""
         from vllm.distributed.kv_transfer.kv_connector.v1.base import (
-            KVConnectorBase_V1,
+            WorkerConnectorInitializationData,
         )
 
-        # Create a minimal instance
-        connector = KVConnectorBase_V1.__new__(KVConnectorBase_V1)
         model = MagicMock(spec=torch.nn.Module)
-        result = connector.register_model(model)
-        assert result is None
+        data = WorkerConnectorInitializationData(model=model)
+        assert data.model is model
+
+    def test_response_dataclass_exists(self):
+        """WorkerConnectorInitializationResponse is importable."""
+        from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+            WorkerConnectorInitializationResponse,
+        )
+
+        resp = WorkerConnectorInitializationResponse()
+        assert resp is not None
 
 
-class TestActiveKVConnectorRegisterModel:
-    """Test that ActiveKVConnector passes model to the connector."""
+class TestKVConnectorBaseInitializeWorkerConnector:
+    """Test the base class initialize_worker_connector default behavior."""
 
-    def test_register_model_called_when_model_provided(self):
-        """ActiveKVConnector calls connector.register_model(model)."""
+    def test_base_class_has_initialize_worker_connector(self):
+        """initialize_worker_connector exists on KVConnectorBase_V1."""
+        from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+            KVConnectorBase_V1,
+        )
+
+        assert hasattr(KVConnectorBase_V1, "initialize_worker_connector")
+
+    def test_base_class_is_noop_returns_response(self):
+        """Base class initialize_worker_connector returns a response object."""
+        from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+            KVConnectorBase_V1,
+            WorkerConnectorInitializationData,
+            WorkerConnectorInitializationResponse,
+        )
+
+        connector = KVConnectorBase_V1.__new__(KVConnectorBase_V1)
+        data = WorkerConnectorInitializationData(model=MagicMock(spec=torch.nn.Module))
+        result = connector.initialize_worker_connector(data)
+        assert isinstance(result, WorkerConnectorInitializationResponse)
+
+
+class TestActiveKVConnectorInitializeWorkerConnector:
+    """Test that ActiveKVConnector forwards initialization data."""
+
+    def test_initialize_worker_connector_called_with_model(self):
+        """ActiveKVConnector calls initialize_worker_connector with model."""
         mock_connector = MagicMock()
         mock_model = MagicMock(spec=torch.nn.Module)
 
@@ -60,10 +94,13 @@ class TestActiveKVConnectorRegisterModel:
                 model=mock_model,
             )
 
-        mock_connector.register_model.assert_called_once_with(mock_model)
+        mock_connector.initialize_worker_connector.assert_called_once()
+        call_args = mock_connector.initialize_worker_connector.call_args
+        init_data = call_args[0][0]
+        assert init_data.model is mock_model
 
-    def test_register_model_not_called_when_no_model(self):
-        """ActiveKVConnector skips register_model when model=None."""
+    def test_initialize_worker_connector_called_with_none_model(self):
+        """ActiveKVConnector still calls initialize_worker_connector when model=None."""
         mock_connector = MagicMock()
 
         with (
@@ -84,14 +121,17 @@ class TestActiveKVConnectorRegisterModel:
                 model=None,
             )
 
-        mock_connector.register_model.assert_not_called()
+        mock_connector.initialize_worker_connector.assert_called_once()
+        call_args = mock_connector.initialize_worker_connector.call_args
+        init_data = call_args[0][0]
+        assert init_data.model is None
 
 
-class TestGetKVConnectorModel:
-    """Test that get_kv_connector passes model through."""
+class TestGetKVConnectorInitializeWorkerConnector:
+    """Test that get_kv_connector passes initialization data through."""
 
-    def test_passes_model_to_active_connector(self):
-        """get_kv_connector forwards model to ActiveKVConnector."""
+    def test_passes_model_via_initialization_data(self):
+        """get_kv_connector forwards model in WorkerConnectorInitializationData."""
         mock_connector = MagicMock()
         mock_model = MagicMock(spec=torch.nn.Module)
 
@@ -113,7 +153,10 @@ class TestGetKVConnectorModel:
                 model=mock_model,
             )
 
-        mock_connector.register_model.assert_called_once_with(mock_model)
+        mock_connector.initialize_worker_connector.assert_called_once()
+        call_args = mock_connector.initialize_worker_connector.call_args
+        init_data = call_args[0][0]
+        assert init_data.model is mock_model
 
     def test_noop_when_no_transfer_group(self):
         """get_kv_connector returns NoOp when no transfer group."""
@@ -134,11 +177,14 @@ class TestGetKVConnectorModel:
             assert result is NO_OP_KV_CONNECTOR
 
 
-class TestLMCacheConnectorRegisterModel:
-    """Test LMCache connector register_model delegation."""
+class TestLMCacheConnectorInitializeWorkerConnector:
+    """Test LMCache connector initialize_worker_connector delegation."""
 
-    def test_register_model_delegates_to_engine(self):
-        """LMCacheConnectorV1.register_model delegates to _lmcache_engine."""
+    def test_initialize_worker_connector_delegates_model_to_engine(self):
+        """LMCacheConnectorV1 forwards model to engine.register_model."""
+        from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+            WorkerConnectorInitializationData,
+        )
         from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_connector import (
             LMCacheConnectorV1,
         )
@@ -148,31 +194,56 @@ class TestLMCacheConnectorRegisterModel:
 
         connector = LMCacheConnectorV1.__new__(LMCacheConnectorV1)
         connector._lmcache_engine = mock_engine
-        connector.register_model(mock_model)
+        connector.initialize_worker_connector(
+            WorkerConnectorInitializationData(model=mock_model)
+        )
 
         mock_engine.register_model.assert_called_once_with(mock_model)
 
-    def test_register_model_skips_engine_without_method(self):
-        """register_model is a no-op when engine lacks register_model."""
+    def test_initialize_worker_connector_skips_engine_without_method(self):
+        """No-op when engine lacks register_model."""
+        from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+            WorkerConnectorInitializationData,
+        )
         from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_connector import (
             LMCacheConnectorV1,
         )
 
-        # Engine without register_model attribute
         mock_engine = MagicMock(spec=[])  # empty spec — no attributes
         mock_model = MagicMock(spec=torch.nn.Module)
 
         connector = LMCacheConnectorV1.__new__(LMCacheConnectorV1)
         connector._lmcache_engine = mock_engine
         # Should not raise
-        connector.register_model(mock_model)
+        connector.initialize_worker_connector(
+            WorkerConnectorInitializationData(model=mock_model)
+        )
+
+    def test_initialize_worker_connector_skips_when_model_none(self):
+        """Does not call register_model when model is None."""
+        from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+            WorkerConnectorInitializationData,
+        )
+        from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_connector import (
+            LMCacheConnectorV1,
+        )
+
+        mock_engine = MagicMock()
+        connector = LMCacheConnectorV1.__new__(LMCacheConnectorV1)
+        connector._lmcache_engine = mock_engine
+        connector.initialize_worker_connector(WorkerConnectorInitializationData())
+        mock_engine.register_model.assert_not_called()
 
 
-class TestLMCacheConnectorV1ImplRegisterModel:
-    """Test LMCacheConnectorV1Impl (native) register_model logic."""
+class TestLMCacheConnectorV1ImplInitializeWorkerConnector:
+    """Test LMCacheConnectorV1Impl initialize_worker_connector logic."""
 
-    def test_register_model_calls_vllm_model_tracker(self):
-        """LMCacheConnectorV1Impl.register_model registers with VLLMModelTracker."""
+    def test_registers_model_with_vllm_model_tracker(self):
+        """Impl registers model with VLLMModelTracker when model provided."""
+        from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+            WorkerConnectorInitializationData,
+        )
+
         mock_tracker = MagicMock()
         mock_model = MagicMock(spec=torch.nn.Module)
 
@@ -193,35 +264,71 @@ class TestLMCacheConnectorV1ImplRegisterModel:
             )
 
             impl = LMCacheConnectorV1Impl.__new__(LMCacheConnectorV1Impl)
-            impl.register_model(mock_model)
+            impl.initialize_worker_connector(
+                WorkerConnectorInitializationData(model=mock_model)
+            )
 
         mock_tracker.register_model.assert_called_once()
         call_args = mock_tracker.register_model.call_args
         assert call_args[0][1] is mock_model
 
-    def test_register_model_graceful_on_import_error(self):
-        """register_model doesn't crash if LMCache CacheBlend not installed."""
+    def test_graceful_on_import_error(self):
+        """Doesn't crash if LMCache CacheBlend not installed."""
+        from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+            WorkerConnectorInitializationData,
+        )
         from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_integration.vllm_v1_adapter import (  # noqa: E501
             LMCacheConnectorV1Impl,
         )
 
         impl = LMCacheConnectorV1Impl.__new__(LMCacheConnectorV1Impl)
 
-        # Should not raise even if lmcache imports fail
+        with patch.dict(
+            "sys.modules",
+            {"lmcache.v1.compute.models.utils": None},
+        ):
+            impl.initialize_worker_connector(
+                WorkerConnectorInitializationData(model=MagicMock(spec=torch.nn.Module))
+            )
+
+    def test_skips_tracker_when_model_none(self):
+        """Does not call VLLMModelTracker when model is None."""
+        from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+            WorkerConnectorInitializationData,
+        )
+
+        mock_tracker = MagicMock()
+
         with patch.dict(
             "sys.modules",
             {
-                "lmcache.v1.compute.models.utils": None,
+                "lmcache": MagicMock(),
+                "lmcache.v1": MagicMock(),
+                "lmcache.v1.compute": MagicMock(),
+                "lmcache.v1.compute.models": MagicMock(),
+                "lmcache.v1.compute.models.utils": MagicMock(
+                    VLLMModelTracker=mock_tracker
+                ),
             },
         ):
-            impl.register_model(MagicMock(spec=torch.nn.Module))
+            from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_integration.vllm_v1_adapter import (  # noqa: E501
+                LMCacheConnectorV1Impl,
+            )
+
+            impl = LMCacheConnectorV1Impl.__new__(LMCacheConnectorV1Impl)
+            impl.initialize_worker_connector(WorkerConnectorInitializationData())
+
+        mock_tracker.register_model.assert_not_called()
 
 
-class TestMultiConnectorRegisterModel:
-    """Test MultiConnector delegates register_model to sub-connectors."""
+class TestMultiConnectorInitializeWorkerConnector:
+    """Test MultiConnector delegates initialize_worker_connector to sub-connectors."""
 
     def test_delegates_to_all_sub_connectors(self):
-        """MultiConnector.register_model calls each sub-connector."""
+        """MultiConnector.initialize_worker_connector calls each sub-connector."""
+        from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+            WorkerConnectorInitializationData,
+        )
         from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
             MultiConnector,
         )
@@ -232,7 +339,8 @@ class TestMultiConnectorRegisterModel:
 
         connector = MultiConnector.__new__(MultiConnector)
         connector._connectors = [sub1, sub2]
-        connector.register_model(mock_model)
+        data = WorkerConnectorInitializationData(model=mock_model)
+        connector.initialize_worker_connector(data)
 
-        sub1.register_model.assert_called_once_with(mock_model)
-        sub2.register_model.assert_called_once_with(mock_model)
+        sub1.initialize_worker_connector.assert_called_once_with(data)
+        sub2.initialize_worker_connector.assert_called_once_with(data)
