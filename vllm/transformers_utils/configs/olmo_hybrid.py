@@ -230,6 +230,7 @@ class OlmoHybridConfig(PretrainedConfig):
 
         if hasattr(self, "validate_layer_type"):
             # Transformers v5
+            self.layer_types = layer_types
             self.validate_layer_type()
         else:
             # Transformers v4
