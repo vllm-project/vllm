@@ -70,7 +70,7 @@ def load_audio_pyav(
     if not chunks:
         raise ValueError("No audio found in the video.")
 
-    audio = np.concatenate(chunks, axis=-1).astype(np.float32)
+    audio = np.concatenate(chunks, axis=-1).squeeze(0).astype(np.float32)
     return audio, sr
 
 
