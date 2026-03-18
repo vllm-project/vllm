@@ -102,7 +102,11 @@ class RealtimeConnection:
         event_type = event.get("type")
         if event_type == "session.update":
             logger.debug("Session updated: %s", event)
-            err = self._check_model(event["model"])
+            model = event.get("model")
+            if model is None:
+                await self.send_error("Missing required field: model", "invalid_event")
+                return
+            err = self._check_model(model)
             if err is not None:
                 await self.send_error(err.message, "model_not_found")
                 return
