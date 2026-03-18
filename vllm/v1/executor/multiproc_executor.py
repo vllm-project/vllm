@@ -487,6 +487,10 @@ class MultiprocExecutor(Executor):
             * self.parallel_config.prefill_context_parallel_size
         )
 
+    @classmethod
+    def supports_async_scheduling(cls) -> bool:
+        return True
+
 
 @dataclass
 class UnreadyWorkerProcHandle:
