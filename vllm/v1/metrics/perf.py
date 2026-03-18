@@ -40,6 +40,42 @@ class InvalidComponent(Exception):
     pass
 
 
+# Mapping from quantization method name to effective weight byte size.
+# Used by both AttentionQuantizationConfigParser and
+# FfnQuantizationConfigParser to determine the weight_byte_size for
+# flops/memory estimation.
+#
+# NOTE: Methods like GPTQ and BitsAndBytes support variable bit-widths
+# (e.g., 4-bit and 8-bit). We default to 4-bit (0.5 bytes) since this
+# is by far the most common configuration.
+_QUANT_WEIGHT_BYTE_SIZE: dict[str, float] = {
+    # FP8 methods (1 byte per weight)
+    "fp8": 1,
+    "fbgemm_fp8": 1,
+    "ptpc_fp8": 1,
+    "fp_quant": 1,
+    "modelopt": 1,
+    "modelopt_mxfp8": 1,
+    # FP4 / INT4 methods (0.5 bytes per weight)
+    "mxfp4": 0.5,
+    "awq": 0.5,
+    "awq_marlin": 0.5,
+    "gptq": 0.5,
+    "gptq_marlin": 0.5,
+    "bitsandbytes": 0.5,
+    "modelopt_fp4": 0.5,
+    "petit_nvfp4": 0.5,
+    "gguf": 0.5,
+    "compressed-tensors": 0.5,
+    "torchao": 0.5,
+    "quark": 0.5,
+    "moe_wna16": 0.5,
+    "inc": 0.5,
+    "cpu_awq": 0.5,
+    "experts_int8": 1,
+}
+
+
 #### Basic Data Types ####
 
 
@@ -350,17 +386,12 @@ class AttentionQuantizationConfigParser(Parser):
             return args
 
         quant_method = cfg.get_name()
-        if quant_method in ["fp8", "fbgemm_fp8"]:
-            # FIXME: This is a hacky coarse-grained fp8 quantization detection.
-            # FIXME: These configs also have concept of "ignored layers" and we
-            # need to solve the same problem as above.
-            args.weight_byte_size = 1
-        elif quant_method == "mxfp4":
-            # FIXME: Also has "ignored layers" issue above
-            args.weight_byte_size = 0.5
+        if quant_method in _QUANT_WEIGHT_BYTE_SIZE:
+            args.weight_byte_size = _QUANT_WEIGHT_BYTE_SIZE[quant_method]
         else:
-            # FIXME: Add more parsing logic for different quant methods.
-            raise InvalidComponent
+            raise InvalidComponent(
+                f"Unsupported quantization method for attention metrics: {quant_method}"
+            )
 
         return args
 
@@ -617,19 +648,12 @@ class FfnQuantizationConfigParser(Parser):
             return args
 
         quant_method = cfg.get_name()
-        if quant_method in ["fp8", "fbgemm_fp8"]:
-            # FIXME: This is a hacky coarse-grained fp8 quantization detection.
-            # (there might be more quantization methods for fp8).
-            # FIXME: These configs also have concept of "ignored layers" and we
-            # need to solve the same problem as above.
-            args.weight_byte_size = 1
-            pass
-        elif quant_method == "mxfp4":
-            # FIXME: Also has "ignored layers" issue above
-            args.weight_byte_size = 0.5
+        if quant_method in _QUANT_WEIGHT_BYTE_SIZE:
+            args.weight_byte_size = _QUANT_WEIGHT_BYTE_SIZE[quant_method]
         else:
-            # FIXME: Add more parsing logic for different quant methods.
-            raise InvalidComponent
+            raise InvalidComponent(
+                f"Unsupported quantization method for FFN metrics: {quant_method}"
+            )
 
         return args
 
