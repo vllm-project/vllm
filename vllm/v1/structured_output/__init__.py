@@ -317,7 +317,13 @@ class StructuredOutputManager:
         if self.enable_in_reasoning:
             return True
 
+        # structural_tag grammars handle reasoning/content boundaries
+        # internally via triggers — always advance so the grammar can
+        # track tokens and fire triggers at the right time.
         structured_req = request.structured_output_request
+        if structured_req.params.structural_tag is not None:
+            return True
+
         if structured_req.reasoning_ended:
             return True
 
