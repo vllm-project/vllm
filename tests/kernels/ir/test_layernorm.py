@@ -50,7 +50,7 @@ def test_rms_norm_registration():
 class TestRMSNorm:
     @classmethod
     def setup_class(cls, **kwargs):
-        torch.set_default_device(current_platform.device_name)
+        torch.set_default_device(current_platform.device_type)
 
     def test_native_semantics(self, dtype, n_tokens, hidden_size, epsilon):
         x, weight = rms_norm_inputs(4, 8, dtype)
