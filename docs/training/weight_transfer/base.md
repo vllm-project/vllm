@@ -43,15 +43,24 @@ update_request = WeightTransferUpdateRequest(
 
 ### WeightTransferUpdateInfo
 
-The base `WeightTransferUpdateInfo` includes an `is_checkpoint_format` flag:
+The base `WeightTransferUpdateInfo` includes backend-agnostic fields that control how vLLM processes received weights. These apply regardless of which transport engine is used.
 
 ```python
 @dataclass
 class WeightTransferUpdateInfo(ABC):
     is_checkpoint_format: bool = True
+    run_initialize_layerwise_reload: bool = True
+    run_finalize_layerwise_reload: bool = True
 ```
 
-When `is_checkpoint_format=True` (the default), vLLM applies layerwise weight processing (repacking, renaming, etc.) on the received weights before loading them. Set to `False` if the trainer has already converted weights to the kernel format expected by the model.
+- **`is_checkpoint_format`**: When `True` (default), vLLM applies layerwise weight processing on the received weights before loading them. Set to `False` if the trainer has already converted weights to the kernel format expected by the model.
+- **`run_initialize_layerwise_reload`**: When `True` (default), calls `initialize_layerwise_reload` before loading weights. Set to `False` for middle or last chunks in a multi-call streaming transfer, since initialization should only happen once at the start.
+- **`run_finalize_layerwise_reload`**: When `True` (default), calls `finalize_layerwise_reload` after loading weights. Set to `False` for first or middle chunks in a multi-call streaming transfer, since finalization should only happen once at the end.
+
+For a single-shot weight transfer (all weights in one call), both flags default to `True` and the behavior is unchanged. For chunked/streaming transfers, the first call sets `run_finalize_layerwise_reload=False`, intermediate calls set both to `False`, and the last call sets `run_initialize_layerwise_reload=False`.
+
+!!! note "Layerwise Reloading"
+    By default, vLLM uses [layerwise reloading](https://docs.vllm.ai/en/stable/api/vllm/model_executor/model_loader/reload/layerwise/) to process received weights. This defers weight processing (quantization, repacking, renaming) until all weights for a given layer have been loaded, then materializes and processes the layer in one pass. This avoids holding the full model in memory twice.
 
 ## Implementing a Custom Engine
 
