@@ -39,11 +39,10 @@ class KimiK2ToolParser(ToolParser):
         # Section-level state management to prevent token leakage
         self.in_tool_section: bool = False
         self.token_buffer: str = ""
-        # Buffer size: empirical worst-case for longest marker (~30 chars) * 2
-        # + safety margin for unicode + partial overlap. Prevents unbounded growth.
+        # Buffer size for detecting split markers across token boundaries.
+        # Only needs to hold the longest marker (~30 chars) with safety margin.
+        # Prevents unbounded growth of the marker-detection buffer.
         self.buffer_max_size: int = 1024
-        self.section_char_count: int = 0  # Track characters processed in tool section
-        self.max_section_chars: int = 8192  # Force exit if section exceeds this
         self._buffer_overflow_logged: bool = False  # Log overflow once per session
 
         # Support both singular and plural variants
@@ -130,7 +129,6 @@ class KimiK2ToolParser(ToolParser):
         """Reset state when exiting tool section."""
         self.in_tool_section = False
         self.token_buffer = ""
-        self.section_char_count = 0
 
     def reset_streaming_state(self) -> None:
         """
@@ -216,7 +214,9 @@ class KimiK2ToolParser(ToolParser):
         # Add delta to buffer for split marker detection
         self.token_buffer += delta_text
 
-        # Enforce buffer size limit to prevent memory issues
+        # Enforce buffer size limit to prevent memory issues.
+        # This buffer is only used to detect section markers that may be split
+        # across token boundaries; it does NOT limit tool call argument size.
         if len(self.token_buffer) > self.buffer_max_size:
             if not self._buffer_overflow_logged:
                 logger.warning(
@@ -238,7 +238,6 @@ class KimiK2ToolParser(ToolParser):
             logger.debug("Entering tool section")
             self.in_tool_section = True
             self.token_buffer = buffered_text  # Use cleaned buffer
-            self.section_char_count = 0  # Reset counter for new section
 
         if found_section_end and self.in_tool_section:
             logger.debug("Detected section end marker")
@@ -279,7 +278,7 @@ class KimiK2ToolParser(ToolParser):
         if not has_section_token and not self.in_tool_section:
             logger.debug("No tool call tokens found!")
             # Don't clear buffer - it needs to accumulate partial markers across deltas
-            # Buffer overflow is already protected by lines 215-224
+            # Buffer overflow is already handled above
             return DeltaMessage(content=delta_text)
 
         # Strip section markers from delta_text for subsequent processing
@@ -288,20 +287,6 @@ class KimiK2ToolParser(ToolParser):
         # before pattern matching. No double-stripping occurs because
         # section markers and tool call markers are distinct.
         delta_text, _, _ = self._check_and_strip_markers(delta_text)
-
-        # Error recovery: If in tool section for too long, force exit
-        if self.in_tool_section:
-            self.section_char_count += len(delta_text)
-            if self.section_char_count > self.max_section_chars:
-                logger.warning(
-                    "Tool section exceeded max length (%d chars), forcing exit. "
-                    "This may indicate malformed model output.",
-                    self.max_section_chars,
-                )
-                self._reset_section_state()
-                # Deferred exit already handled by forced exit above
-                # Return remaining content as reasoning (or empty delta if no content)
-                return DeltaMessage(content=delta_text if delta_text.strip() else "")
 
         try:
             # figure out where we are in the parsing by counting tool call
