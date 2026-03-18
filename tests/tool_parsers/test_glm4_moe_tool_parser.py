@@ -107,7 +107,7 @@ def test_extract_tool_calls_no_tools(glm4_moe_tool_parser, mock_request):
                     )
                 )
             ],
-            "",
+            None,
         ),
         (
             """<tool_call>get_current_weather
@@ -152,7 +152,7 @@ def test_extract_tool_calls_no_tools(glm4_moe_tool_parser, mock_request):
                     )
                 ),
             ],
-            "",
+            None,
         ),
         (
             """I'll help you check the weather. <tool_call>get_current_weather
@@ -202,7 +202,7 @@ def test_extract_tool_calls_no_tools(glm4_moe_tool_parser, mock_request):
                     )
                 )
             ],
-            "",
+            None,
         ),
         (
             """I will help you get the weather.<tool_call>get_weather
