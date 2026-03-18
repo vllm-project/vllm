@@ -990,7 +990,8 @@ def unified_attention(
     # Optional tensor for prefix lengths (PrefixLM support)
     mm_prefix_range=None,
     use_alibi_sqrt=False,
-    # INT8 per-(token, head) scale caches
+    # KV cache quantization mode and INT8 scale caches.
+    kv_quant_mode: KVQuantMode = KVQuantMode.NONE,
     k_scale_cache=None,  # [num_blocks, block_size, num_kv_heads] float32
     v_scale_cache=None,  # [num_blocks, block_size, num_kv_heads] float32
 ):
@@ -1013,14 +1014,6 @@ def unified_attention(
 
     use_alibi_slopes = alibi_slopes is not None
     use_qq_bias = qq_bias is not None
-
-    # KV cache quantization mode (detected from tensor dtype).
-    if k.dtype == torch.int8:
-        kv_quant_mode = KVQuantMode.INT8
-    elif k.is_floating_point() and k.element_size() == 1:
-        kv_quant_mode = KVQuantMode.FP8
-    else:
-        kv_quant_mode = KVQuantMode.NONE
 
     block_size = v.shape[1]
     num_seqs = len(seqused_k)
