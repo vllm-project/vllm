@@ -154,9 +154,12 @@ class OpenAIServingChat(OpenAIServing):
 
         # Handle tool call ID type for Kimi K2 (supporting test mocking via overrides)
         hf_overrides = getattr(self.model_config, "hf_overrides", None)
-        if self.model_config.hf_text_config.model_type == "kimi_k2" or (
+        if self.model_config.hf_text_config.model_type in (
+            "kimi_k2",
+            "kimi_k25",
+        ) or (
             isinstance(hf_overrides, dict)
-            and hf_overrides.get("model_type") == "kimi_k2"
+            and hf_overrides.get("model_type") in ("kimi_k2", "kimi_k25")
         ):
             self.tool_call_id_type = "kimi_k2"
         else:

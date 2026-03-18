@@ -56,6 +56,10 @@ _REASONING_PARSERS_TO_REGISTER = {
         "kimi_k2_reasoning_parser",
         "KimiK2ReasoningParser",
     ),
+    "kimi_k25": (
+        "kimi_k2_reasoning_parser",
+        "KimiK2ReasoningParser",
+    ),
     "minimax_m2": (
         "minimax_m2_reasoning_parser",
         "MiniMaxM2ReasoningParser",
