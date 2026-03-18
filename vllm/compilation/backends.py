@@ -487,11 +487,19 @@ def split_graph(
         # tuple as input to submodules, which is against standalone_compile and
         # AoTAutograd input requirement.
         if node.op == "call_function" and node.target == operator.getitem:
-            # Assign this getitem to the same subgraph as its input
+            # Assign this getitem to the same subgraph as its input to avoid
+            # passing entire tuple as input to submodules.
+            # BUT: if the input is a splitting_op, assign to the NEXT subgraph
+            # to avoid creating cycles between partitions.
             input_node = node.args[0]
             if input_node.op != "placeholder":
                 assert input_node in node_to_subgraph_id
-                node_to_subgraph_id[node] = node_to_subgraph_id[input_node]
+                input_sub = node_to_subgraph_id[input_node]
+                if input_sub in split_op_graphs:
+                    # Input is a splitting_op — assign getitem to next subgraph
+                    node_to_subgraph_id[node] = input_sub + 1
+                else:
+                    node_to_subgraph_id[node] = input_sub
                 continue
 
         if should_split(node, splitting_ops):

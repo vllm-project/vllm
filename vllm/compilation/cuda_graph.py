@@ -134,6 +134,15 @@ class CUDAGraphEntry:
     # during capture, and check if they are the same during replay
     input_addresses: list[int] | None = None
 
+    # Piecewise CUDA graph support: references to the input tensors
+    # captured during graph recording. When a splitting_op between
+    # two compiled pieces allocates new output tensors (e.g. via BMM),
+    # the next piece's inputs will point to different addresses than
+    # during capture. We fix this by copying the new data into these
+    # captured buffers before replay, so the graph reads correct values
+    # at the expected addresses.
+    input_buffers: list[torch.Tensor] | None = None
+
 
 @dataclasses.dataclass
 class CUDAGraphOptions:
@@ -277,6 +286,11 @@ class CUDAGraphWrapper:
                 x.data_ptr() for x in args if isinstance(x, torch.Tensor)
             ]
             entry.input_addresses = input_addresses
+            # Save input tensor references for piecewise cudagraph support.
+            # When a splitting_op between two pieces allocates new tensors,
+            # the next piece's inputs will have different addresses. We need
+            # to copy the new data into these saved buffers before replay.
+            entry.input_buffers = [x for x in args if isinstance(x, torch.Tensor)]
             cudagraph = torch.cuda.CUDAGraph()
 
             with ExitStack() as stack:
@@ -335,16 +349,30 @@ class CUDAGraphWrapper:
             # manage the memory during cuda graph capture
             return output
 
+        # Piecewise CUDA graph input sync: when splitting_ops between
+        # compiled pieces allocate new tensors (e.g. custom ops using BMM),
+        # the input addresses may change between capture and replay.
+        # Copy the new data into the captured buffers so the graph kernel
+        # reads correct values at the expected addresses.
+        if entry.input_buffers is not None:
+            tensor_args = [x for x in args if isinstance(x, torch.Tensor)]
+            for buf, arg in zip(entry.input_buffers, tensor_args):
+                if buf.data_ptr() != arg.data_ptr():
+                    buf.copy_(arg)
+
         if self.is_debugging_mode:
             # check if the input addresses are the same
+            # (after piecewise sync, buffers have the right data
+            # even if args point to different addresses)
             new_input_addresses = [
                 x.data_ptr() for x in args if isinstance(x, torch.Tensor)
             ]
-            assert new_input_addresses == entry.input_addresses, (
-                f"Input addresses for cudagraphs are different "
-                f"during replay. Expected {entry.input_addresses}, "
-                f"got {new_input_addresses}"
-            )
+            if new_input_addresses != entry.input_addresses:
+                logger.debug(
+                    "Input addresses changed during replay "
+                    "(piecewise splitting_op allocation). "
+                    "Data was synced via input_buffers copy."
+                )
 
         # Sync offloader before replay - ensures any external dependencies
         # from pre-capture prefetches are satisfied.
