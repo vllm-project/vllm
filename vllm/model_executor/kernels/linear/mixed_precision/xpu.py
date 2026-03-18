@@ -171,7 +171,7 @@ class XPUw4A8IntLinearKernel(MPLinearKernel):
 
         # TODO: static and asymmetric quantization case
         # Common code for CompressedTensorsW4A8Int does not read act symmetry data
-        quant_x, x_scale, x_zero = ops.dynamic_per_token_int4_int8_quant_ref(
+        quant_x, x_scale, x_zero = ops.dynamic_per_token_int8_quant_ref(
             reshaped_x, True, 8
         )
 

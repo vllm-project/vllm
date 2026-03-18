@@ -109,7 +109,7 @@ _OPS_REGISTERED = False
 class xpu_ops:
     @staticmethod
     @torch.compile
-    def dynamic_per_token_int4_int8_quant_ref(
+    def dynamic_per_token_int8_quant_ref(
         input: torch.Tensor, use_sym_quant: bool, bits: int
     ):
         original_sizes = input.size()
