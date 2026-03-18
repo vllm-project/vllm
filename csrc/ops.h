@@ -114,14 +114,6 @@ void top_k_per_row_decode(const torch::Tensor& logits, int64_t next_n,
                           int64_t numRows, int64_t stride0, int64_t stride1,
                           int64_t topK);
 
-void medium_context_topk(const torch::Tensor& score, torch::Tensor& indices,
-                         const torch::Tensor& lengths,
-                         std::optional<torch::Tensor> row_starts_opt);
-
-void large_context_topk(const torch::Tensor& logits,
-                        const torch::Tensor& lengths, torch::Tensor& output,
-                        torch::Tensor& workspace, int64_t k);
-
 void persistent_topk(const torch::Tensor& logits, const torch::Tensor& lengths,
                      torch::Tensor& output, torch::Tensor& workspace, int64_t k,
                      int64_t max_seq_len);

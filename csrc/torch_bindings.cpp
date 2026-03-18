@@ -191,17 +191,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.impl("top_k_per_row_decode", torch::kCUDA, &top_k_per_row_decode);
 
   ops.def(
-      "medium_context_topk(Tensor score, Tensor indices, Tensor lengths, "
-      "Tensor? "
-      "row_starts_opt) -> ()");
-  ops.impl("medium_context_topk", torch::kCUDA, &medium_context_topk);
-
-  ops.def(
-      "large_context_topk(Tensor logits, Tensor lengths, Tensor output, "
-      "Tensor workspace, int k) -> ()");
-  ops.impl("large_context_topk", torch::kCUDA, &large_context_topk);
-
-  ops.def(
       "persistent_topk(Tensor logits, Tensor lengths, Tensor! output, "
       "Tensor workspace, int k, int max_seq_len) -> ()");
   ops.impl("persistent_topk", torch::kCUDA, &persistent_topk);

@@ -311,118 +311,6 @@ def test_top_k_per_row_decode_large_vocab_size(clean_logits: bool) -> None:
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
-@pytest.mark.parametrize("clean_logits", [True, False])
-@torch.inference_mode()
-def test_deepseek_hybrid_topk(clean_logits: bool) -> None:
-    torch.set_default_device("cuda:0")
-
-    top_k = 2048
-
-    # Test case 1: Short sequences (< 8192)
-    batch_size_short = 4
-    next_n = 1
-    num_rows_short = batch_size_short * next_n
-
-    # Create sequences with max length < 8192
-    seq_lens_short = torch.randint(
-        4000, 8000, (batch_size_short,), dtype=torch.int32, device="cuda"
-    )
-
-    row_starts_short = torch.zeros(num_rows_short, dtype=torch.int32, device="cuda")
-    row_indices_short = torch.arange(num_rows_short, device="cuda") // next_n
-    next_n_offset_short = torch.arange(num_rows_short, device="cuda") % next_n
-    row_ends_short = (
-        seq_lens_short[row_indices_short] - next_n + next_n_offset_short + 1
-    )
-
-    logits_short = create_random_logits(
-        row_starts_short, row_ends_short, torch.float32, 42, clean_logits, "random"
-    )
-
-    indices_vllm = torch.empty(
-        (num_rows_short, top_k), dtype=torch.int32, device="cuda"
-    )
-
-    # Use vllm's kernel for short sequences
-    torch.ops._C.top_k_per_row_decode(
-        logits_short,
-        next_n,
-        seq_lens_short,
-        indices_vllm,
-        num_rows_short,
-        logits_short.stride(0),
-        logits_short.stride(1),
-        top_k,
-    )
-
-    # Test case 2: Long sequences (>= 8192) - should use medium_context_topk kernel
-    batch_size_long = 4
-    num_rows_long = batch_size_long * next_n
-
-    # Create sequences with max length >= 8192
-    seq_lens_long = torch.randint(
-        8192, 16384, (batch_size_long,), dtype=torch.int32, device="cuda"
-    )
-
-    row_starts_long = torch.zeros(num_rows_long, dtype=torch.int32, device="cuda")
-    row_indices_long = torch.arange(num_rows_long, device="cuda") // next_n
-    next_n_offset_long = torch.arange(num_rows_long, device="cuda") % next_n
-    row_ends_long = seq_lens_long[row_indices_long] - next_n + next_n_offset_long + 1
-
-    logits_long = create_random_logits(
-        row_starts_long, row_ends_long, torch.float32, 43, clean_logits, "random"
-    )
-
-    indices = torch.empty((num_rows_long, top_k), dtype=torch.int32, device="cuda")
-
-    # Use medium_context_topk kernel for long sequences
-    if next_n == 1:
-        lengths = seq_lens_long
-    else:
-        offsets = torch.arange(next_n, device=logits_long.device, dtype=torch.int32)
-        lengths = (seq_lens_long.unsqueeze(1) - next_n + 1 + offsets).flatten()
-
-    torch.ops._C.medium_context_topk(
-        logits_long,
-        indices,
-        lengths,
-        None,
-    )
-
-    torch_indices_short = torch.empty(
-        (num_rows_short, top_k), dtype=torch.int32, device="cuda"
-    )
-    for i in range(num_rows_short):
-        row_end = int(row_ends_short[i])
-        k_i = min(top_k, row_end)
-        idx = logits_short[i, :row_end].topk(k_i, dim=-1)[1]
-        torch_indices_short[i, :k_i] = idx
-
-    assert compare_top_k_results(
-        logits_short,
-        indices_vllm,
-        torch_indices_short,
-        row_starts_short,
-        row_ends_short,
-        top_k,
-    ), "top_k_per_row_decode kernel (short sequences) doesn't match torch.topk"
-
-    torch_indices_long = torch.empty(
-        (num_rows_long, top_k), dtype=torch.int32, device="cuda"
-    )
-    for i in range(num_rows_long):
-        row_end = int(row_ends_long[i])
-        k_i = min(top_k, row_end)
-        idx = logits_long[i, :row_end].topk(k_i, dim=-1)[1]
-        torch_indices_long[i, :k_i] = idx
-
-    assert compare_top_k_results(
-        logits_long, indices, torch_indices_long, row_starts_long, row_ends_long, top_k
-    ), "medium_context_topk kernel (long sequences) doesn't match torch.topk"
-
-
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
-@pytest.mark.parametrize("kernel_name", ["large_context_topk", "medium_context_topk"])
 @pytest.mark.parametrize(
     "seq_len_range,test_id",
     [
@@ -434,8 +322,7 @@ def test_deepseek_hybrid_topk(clean_logits: bool) -> None:
 @pytest.mark.parametrize("top_k", [2048])
 @pytest.mark.parametrize("next_n", [1, 4])
 @torch.inference_mode()
-def test_deepseek_large_context_topk(
-    kernel_name: str,
+def test_deepseek_persistent_topk(
     seq_len_range: tuple[int, int],
     test_id: str,
     clean_logits: bool,
@@ -443,8 +330,7 @@ def test_deepseek_large_context_topk(
     next_n: int,
 ) -> None:
     """
-    Test top-k kernels with varying sequence lengths and speculative decoding.
-    Tests both large_context_topk and large_context_topk kernels.
+    Test persistent_topk with varying sequence lengths and speculative decoding.
     Supports speculative decoding with next_n > 1.
     """
     set_random_seed(42 if test_id == "short_sequences" else 43)
@@ -479,16 +365,14 @@ def test_deepseek_large_context_topk(
         offsets = torch.arange(next_n, device=logits.device, dtype=torch.int32)
         lengths = (seq_lens.unsqueeze(1) - next_n + 1 + offsets).flatten()
 
-    if kernel_name == "large_context_topk":
-        workspace = torch.empty(1024 * 1024, dtype=torch.uint8, device="cuda")
-        torch.ops._C.large_context_topk(logits, lengths, indices, workspace, top_k)
-    elif kernel_name == "medium_context_topk":
-        torch.ops._C.medium_context_topk(logits, indices, lengths, None)
-    else:
-        raise ValueError(f"Unknown kernel_name: {kernel_name}")
+    workspace = torch.empty(1024 * 1024, dtype=torch.uint8, device="cuda")
+    max_seq_len = int(seq_lens.max().item())
+    torch.ops._C.persistent_topk(
+        logits, lengths, indices, workspace, top_k, max_seq_len
+    )
 
     validate_topk_against_reference(
-        logits, indices, row_starts, row_ends, top_k, f"{kernel_name} ({test_id})"
+        logits, indices, row_starts, row_ends, top_k, f"persistent_topk ({test_id})"
     )
 
 
@@ -498,10 +382,9 @@ def run_large_context_topk_test(
     top_k: int,
     data_type: str = "random",
     seed: int = 42,
-    kernel_name: str = "large_context_topk",
 ) -> None:
     """
-    Helper to run top-k kernel test with given parameters.
+    Helper to run persistent_topk kernel test with given parameters.
 
     Args:
         batch_size: Number of rows/sequences
@@ -509,8 +392,6 @@ def run_large_context_topk_test(
         top_k: Number of top elements to select
         data_type: Type of test data to generate
         seed: Random seed for reproducibility
-        kernel_name: Which kernel to test ("large_context_topk"
-                     or "large_context_topk")
     """
     torch.set_default_device("cuda:0")
     set_random_seed(seed)
@@ -567,15 +448,13 @@ def run_large_context_topk_test(
     # Create output tensor
     indices = torch.empty((num_rows, top_k), dtype=torch.int32, device="cuda")
 
-    if kernel_name == "large_context_topk":
-        workspace = torch.empty(1024 * 1024, dtype=torch.uint8, device="cuda")
-        torch.ops._C.large_context_topk(logits, lengths, indices, workspace, top_k)
-    elif kernel_name == "medium_context_topk":
-        torch.ops._C.medium_context_topk(logits, indices, lengths, None)
-    else:
-        raise ValueError(f"Unknown kernel_name: {kernel_name}")
+    workspace = torch.empty(1024 * 1024, dtype=torch.uint8, device="cuda")
+    max_seq_len = max(seq_lens)
+    torch.ops._C.persistent_topk(
+        logits, lengths, indices, workspace, top_k, max_seq_len
+    )
 
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     torch_indices = torch.empty((num_rows, top_k), dtype=torch.int32, device="cuda")
     for i in range(num_rows):
@@ -645,7 +524,6 @@ def run_large_context_topk_test(
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
-@pytest.mark.parametrize("kernel_name", ["large_context_topk", "medium_context_topk"])
 @pytest.mark.parametrize(
     "test_config",
     [
@@ -727,29 +605,24 @@ def run_large_context_topk_test(
     ],
 )
 @torch.inference_mode()
-def test_large_context_topk_correctness(kernel_name: str, test_config: dict) -> None:
+def test_persistent_topk_correctness(test_config: dict) -> None:
     """
     Comprehensive correctness tests covering:
     - Sequence length edge cases (trivial, boundary, varied)
-    - Small top_k values (1, 2, 10, 256)
     - Very small sequences (< 100 elements)
     - Mixed sequence lengths in same batch
     - Data distributions (sorted, ties, precision)
     - Memory alignment / vectorization boundaries
-
-    Tests both large_context_topk and large_context_topk kernels.
     """
     run_large_context_topk_test(
         batch_size=len(test_config["seq_lens"]),
         seq_lens=test_config["seq_lens"],
         top_k=test_config["top_k"],
         data_type=test_config.get("data_type", "random"),
-        kernel_name=kernel_name,
     )
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
-@pytest.mark.parametrize("kernel_name", ["large_context_topk", "medium_context_topk"])
 @pytest.mark.parametrize(
     "test_config",
     [
@@ -795,33 +668,26 @@ def test_large_context_topk_correctness(kernel_name: str, test_config: dict) -> 
     ],
 )
 @torch.inference_mode()
-def test_large_context_topk_algorithm_paths(kernel_name: str, test_config: dict) -> None:
+def test_persistent_topk_algorithm_paths(test_config: dict) -> None:
     """
     Test different algorithm execution paths (capped at 163840 for DeepSeek V3.2):
-    - Batch size scalability (1, 4, 32, 256, 1024)
-    - FilteredTopK vs RadixTopK selection (8K to 163K)
+    - Batch size scalability (1, 4, 32, 256)
     - Single-CTA vs Multi-CTA execution
     - Extreme configurations (large batch, max context length)
-
-    Tests both large_context_topk and large_context_topk kernels.
     """
     run_large_context_topk_test(
         batch_size=test_config["batch_size"],
         seq_lens=[test_config["seq_len"]] * test_config["batch_size"],
         top_k=test_config["top_k"],
-        kernel_name=kernel_name,
     )
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
-@pytest.mark.parametrize("kernel_name", ["large_context_topk", "medium_context_topk"])
 @torch.inference_mode()
-def test_large_context_topk_stress(kernel_name: str) -> None:
+def test_persistent_topk_stress() -> None:
     """
     Stress test with random configurations to catch edge cases.
     Capped at 163840 (DeepSeek V3.2 max context) for realistic testing.
-
-    Tests both large_context_topk and large_context_topk kernels.
     """
     torch.set_default_device("cuda:0")
     top_k = 2048
@@ -840,5 +706,144 @@ def test_large_context_topk_stress(kernel_name: str) -> None:
             seq_lens=seq_lens,
             top_k=top_k,
             seed=seed,
-            kernel_name=kernel_name,
         )
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@pytest.mark.parametrize(
+    "test_config",
+    [
+        # Mixed batch: some rows medium, some large
+        pytest.param(
+            {
+                "seq_lens": [4000, 80000, 6000, 100000],
+                "top_k": 2048,
+                "data_type": "random",
+            },
+            id="mixed_medium_large",
+        ),
+        # All medium rows (typical decode scenario)
+        pytest.param(
+            {
+                "seq_lens": [2048, 4096, 6144, 8000],
+                "top_k": 2048,
+                "data_type": "random",
+            },
+            id="all_medium_decode",
+        ),
+        # All large rows
+        pytest.param(
+            {
+                "seq_lens": [70000, 100000, 163840],
+                "top_k": 2048,
+                "data_type": "random",
+            },
+            id="all_large",
+        ),
+        # Boundary around LARGE_THRESHOLD (64K)
+        pytest.param(
+            {
+                "seq_lens": [65535, 65536, 65537, 65540],
+                "top_k": 2048,
+                "data_type": "random",
+            },
+            id="large_threshold_boundary",
+        ),
+        # Single row medium
+        pytest.param(
+            {
+                "seq_lens": [5000],
+                "top_k": 2048,
+                "data_type": "random",
+            },
+            id="single_row_medium",
+        ),
+        # Single row large
+        pytest.param(
+            {
+                "seq_lens": [100000],
+                "top_k": 2048,
+                "data_type": "random",
+            },
+            id="single_row_large",
+        ),
+        # Trivial rows mixed with medium and large
+        pytest.param(
+            {
+                "seq_lens": [100, 2048, 10000, 80000],
+                "top_k": 2048,
+                "data_type": "random",
+            },
+            id="trivial_medium_large_mix",
+        ),
+    ],
+)
+@torch.inference_mode()
+def test_persistent_topk(test_config: dict) -> None:
+    """
+    Tests specific to the persistent_topk kernel:
+    - Mixed medium/large rows in the same batch (dynamic per-row dispatch)
+    - Boundary around LARGE_THRESHOLD (64K)
+    - Trivial + medium + large rows in a single batch
+    """
+    run_large_context_topk_test(
+        batch_size=len(test_config["seq_lens"]),
+        seq_lens=test_config["seq_lens"],
+        top_k=test_config["top_k"],
+        data_type=test_config.get("data_type", "random"),
+    )
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@torch.inference_mode()
+def test_persistent_topk_padded_stride() -> None:
+    """
+    Test persistent_topk with padded logits (large stride, small seq_len)
+    to simulate the e2e CUDAGraph scenario where fp8_paged_mqa_logits
+    returns [B, max_model_len] with max_model_len=163840.
+    """
+    set_random_seed(42)
+    torch.set_default_device("cuda:0")
+
+    top_k = 2048
+    batch_size = 4
+    padded_stride = 163840  # DeepSeek-V3.2 max_model_len
+    actual_seq_lens = [3000, 5000, 8000, 12000]
+
+    # Create padded logits tensor (like fp8_paged_mqa_logits output)
+    logits = torch.full(
+        (batch_size, padded_stride),
+        float("-inf"),
+        dtype=torch.float32,
+        device="cuda",
+    )
+    for i, sl in enumerate(actual_seq_lens):
+        logits[i, :sl] = torch.randn(sl, dtype=torch.float32, device="cuda")
+
+    lengths = torch.tensor(actual_seq_lens, dtype=torch.int32, device="cuda")
+    indices = torch.empty((batch_size, top_k), dtype=torch.int32, device="cuda")
+    workspace = torch.empty(1024 * 1024, dtype=torch.uint8, device="cuda")
+
+    torch.ops._C.persistent_topk(
+        logits, lengths, indices, workspace, top_k, max(actual_seq_lens)
+    )
+    torch.accelerator.synchronize()
+
+    # Validate against torch.topk
+    for i in range(batch_size):
+        sl = actual_seq_lens[i]
+        k_i = min(top_k, sl)
+        expected = logits[i, :sl].topk(k_i, dim=-1)[1].cpu()
+        actual = indices[i, :k_i].cpu()
+
+        expected_set = set(expected.tolist())
+        actual_set = set(actual.tolist())
+
+        if expected_set != actual_set:
+            # Allow ties
+            expected_vals = logits[i, expected].cpu().sort(descending=True)[0]
+            actual_vals = logits[i, actual].cpu().sort(descending=True)[0]
+            assert torch.allclose(expected_vals, actual_vals, rtol=1e-4, atol=1e-4), (
+                f"Row {i}: persistent_topk with padded stride doesn't match. "
+                f"seq_len={sl}, stride={padded_stride}"
+            )

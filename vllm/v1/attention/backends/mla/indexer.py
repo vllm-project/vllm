@@ -383,7 +383,6 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
 
             if use_native and next_n > 1:
                 offsets = self.offsets_buffer
-                batch_size = num_decodes
             elif max_decode_len > 1:
                 # Flatten multi-token decode requests into single-token
                 # batch entries, expanding seq_lens and block tables so
@@ -442,10 +441,8 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 self.decode_lens_buffer[:num_decode_tokens] = 1
                 decode_lens = self.decode_lens_buffer[:num_decode_tokens]
                 offsets = None
-                batch_size = num_decode_tokens
             else:
                 offsets = None
-                batch_size = num_decodes
 
             # DeepGEMM is required for the paged MQA logits on CUDA devices
             if current_platform.is_cuda() and is_deep_gemm_supported():
@@ -454,13 +451,6 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     self.kv_cache_spec.block_size,
                     self.num_sms,
                 )
-
-            # Decide which top-k kernel to use based on batch size and sequence length
-            # Decision logic based on micro-benchmark results:
-            # - large_context_topk wins for batch <= 128 and seq_len > 8K
-            # - top_k_per_row_decode wins for batch > 128 or seq_len <= 8K
-            _is_large_context = common_attn_metadata.max_seq_len > 8192
-            use_large_context_topk = batch_size <= 128 and _is_large_context
 
             decode_metadata = DeepSeekV32IndexerDecodeMetadata(
                 block_table=block_table,
