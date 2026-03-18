@@ -20,7 +20,7 @@ from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.inputs import PromptType
-from vllm.outputs import PoolingRequestOutput, RequestOutput
+from vllm.outputs import PoolingOutput, PoolingRequestOutput, RequestOutput
 from vllm.platforms import current_platform
 from vllm.sampling_params import RequestOutputKind
 from vllm.utils.torch_utils import set_default_torch_num_threads
