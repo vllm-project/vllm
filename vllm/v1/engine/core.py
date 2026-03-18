@@ -1807,6 +1807,7 @@ class DPEngineCoreProc(EngineCoreProc):
         new_parallel_config._data_parallel_master_port_list = (
             reconfig_request.new_data_parallel_master_port_list
         )
+        new_parallel_config._coord_store_port = reconfig_request.coord_store_port
 
         is_scale_down = reconfig_request.new_data_parallel_size < old_dp_size
         is_shutdown = (
