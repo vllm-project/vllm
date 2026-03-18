@@ -258,11 +258,13 @@ class GroupedTopKRouter(BaseRouter):
         e_score_correction_bias: torch.Tensor | None = None,
         num_fused_shared_experts: int = 0,
         eplb_state: EplbLayerState | None = None,
+        layer_idx: int = -1,
     ):
         super().__init__(
             top_k=top_k,
             global_num_experts=global_num_experts,
             eplb_state=eplb_state,
+            layer_idx=layer_idx,
         )
         self.num_expert_group = num_expert_group
         self.topk_group = topk_group

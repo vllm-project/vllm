@@ -277,6 +277,16 @@ def FusedMoE(
         rocm_aiter_enabled=rocm_aiter_ops.is_fused_moe_enabled() and is_act_and_mul,
     )
 
+    # Extract layer index from prefix (e.g. "model.layers.5.mlp" → 5)
+    import re
+
+    from vllm.model_executor.layers.fused_moe.riy import get_riy_state
+
+    layer_match = re.search(r"layers\.(\d+)\.", prefix)
+    layer_idx = int(layer_match.group(1)) if layer_match else -1
+    if layer_idx >= 0:
+        get_riy_state().register_layer(layer_idx, num_experts)
+
     # TODO(bnell): we should not have to create a router if the kernel is
     # monolithic.
     if router is None:
@@ -284,6 +294,7 @@ def FusedMoE(
             top_k=top_k,
             global_num_experts=global_num_experts,
             eplb_state=eplb_state,
+            layer_idx=layer_idx,
             renormalize=renormalize,
             use_grouped_topk=use_grouped_topk,
             num_expert_group=num_expert_group,
