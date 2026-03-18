@@ -705,10 +705,9 @@ def test_backend_correctness(
         if kv_cache_dtype in b.get_class().supported_kv_cache_dtypes
     ]
     if (
-        q_scale != 1.0
-        or k_scale != 1.0
-        and AttentionBackendEnum.CUTLASS_MLA in backends_to_test
-    ):
+        q_scale != 1.0 or k_scale != 1.0
+    ) and AttentionBackendEnum.CUTLASS_MLA in backends_to_test:
+        # CUTLASS_MLA does not support non-1 Q/K scales
         backends_to_test.remove(AttentionBackendEnum.CUTLASS_MLA)
     if not backends_to_test:
         pytest.skip(f"No backends support kv_cache_dtype={kv_cache_dtype}")
