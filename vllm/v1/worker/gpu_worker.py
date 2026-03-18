@@ -635,9 +635,16 @@ class Worker(WorkerBase):
             # slightly underestimate the memory consumption.
             # So leave a small buffer (=150MiB) to avoid OOM.
             redundancy_buffer_memory = 150 * (1 << 20)
+
+            cudagraph_memory_estimate_applied = (
+                self.cudagraph_memory_estimate
+                if envs.VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS
+                else 0
+            )
+
             non_kv_cache_memory = (
                 self.model_runner.model_memory_usage
-                + self.peak_activation_memory
+                + (self.peak_activation_memory - cudagraph_memory_estimate_applied)
                 + self.non_torch_memory
                 + cuda_graph_memory_bytes
             )
