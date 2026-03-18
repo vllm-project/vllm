@@ -767,7 +767,7 @@ class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
         sampled_num_frames: int | None = None,
     ) -> list[int]:
         video_processor = self.get_video_processor()
-        merge_size = video_processor.merge_size
+        temporal_patch_size = video_processor.temporal_patch_size
         indices = metadata["frames_indices"]
 
         # metadata["fps"] refers to the true fps of the input video.
@@ -806,7 +806,7 @@ class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
                 .astype(int)
                 .tolist()
             )
-        timestamps = self._calculate_timestamps(indices, video_fps, merge_size)
+        timestamps = self._calculate_timestamps(indices, video_fps, temporal_patch_size)
         return timestamps
 
 
