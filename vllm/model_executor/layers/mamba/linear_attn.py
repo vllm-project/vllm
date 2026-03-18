@@ -98,25 +98,35 @@ class MiniMaxText01RMSNormTP(CustomOp):
     def forward_qk(
         q_norm: "MiniMaxText01RMSNormTP",
         k_norm: "MiniMaxText01RMSNormTP",
-        q: torch.Tensor,
-        k: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+        qkv: torch.Tensor,
+        q_size: int,
+        kv_size: int,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """RMS-norm q and k in *qkv* in-place and return (q, k, v) views."""
+        input_seq = qkv.size(0)
         if (
             current_platform.is_cuda()
             and q_norm.tp_world > 1
             and q_norm._ar_workspace is not None
+            and input_seq <= 2048
         ):
             assert q_norm.variance_epsilon == k_norm.variance_epsilon
-            return torch.ops._C.minimax_allreduce_rms_qk(
-                q,
-                k,
+            torch.ops._C.minimax_allreduce_rms_qk(
+                qkv,
                 q_norm.weight,
                 k_norm.weight,
                 q_norm._ar_workspace,
+                q_size,
+                kv_size,
                 q_norm.tp_rank,
                 q_norm.tp_world,
                 q_norm.variance_epsilon,
             )
+            return qkv.split([q_size, kv_size, kv_size], dim=-1)
+
+        q, k, v = qkv.split([q_size, kv_size, kv_size], dim=-1)
+        q = q.contiguous()
+        k = k.contiguous()
         orig_dtype = q.dtype
         q = q.to(torch.float32)
         k = k.to(torch.float32)

@@ -236,9 +236,8 @@ class MiniMaxM2Attention(nn.Module):
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
-        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        q, k = MiniMaxText01RMSNormTP.forward_qk(
-            self.q_norm, self.k_norm, q.contiguous(), k.contiguous()
+        q, k, v = MiniMaxText01RMSNormTP.forward_qk(
+            self.q_norm, self.k_norm, qkv, self.q_size, self.kv_size
         )
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v)

@@ -48,6 +48,10 @@ struct MiniMaxReduceRMSParams {
   int hidden_dim{};
   int size_k{};
   int hidden_dim_k{};
+  int stride_q{};  // row stride for q (elements); when > hidden_dim, q is
+                   // part of a wider qkv tensor
+  int stride_k{};  // row stride for k (elements); when > hidden_dim_k, k is
+                   // part of a wider qkv tensor
   void** workspace{};
   void* allreduce_in{};
   void* rms_norm_out{};

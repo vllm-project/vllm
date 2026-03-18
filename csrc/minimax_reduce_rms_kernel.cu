@@ -336,6 +336,13 @@ __global__ void __launch_bounds__(1024)
   int access_per_row_q = params.hidden_dim / kElemsPerAccess<DType>;
   int access_per_row_k =
       IsQK ? (params.hidden_dim_k / kElemsPerAccess<DType>) : 0;
+  int access_stride_q =
+      (params.stride_q > 0 ? params.stride_q : params.hidden_dim) /
+      kElemsPerAccess<DType>;
+  int access_stride_k =
+      IsQK ? ((params.stride_k > 0 ? params.stride_k : params.hidden_dim_k) /
+              kElemsPerAccess<DType>)
+           : 0;
   int q_warps = (access_per_row_q + MINIMAX_REDUCE_RMS_WARP_SIZE - 1) /
                 MINIMAX_REDUCE_RMS_WARP_SIZE;
   int k_warps = IsQK ? ((access_per_row_k + MINIMAX_REDUCE_RMS_WARP_SIZE - 1) /
@@ -375,7 +382,7 @@ __global__ void __launch_bounds__(1024)
         if (token_r >= tot_tokens || (!is_valid_token)) {
           continue;
         }
-        int idx_r = token_r * access_per_row_q + access_id_in_token;
+        int idx_r = token_r * access_stride_q + access_id_in_token;
         *reinterpret_cast<float4*>(&vals[r][0]) =
             reinterpret_cast<float4 const*>(params.allreduce_in)[idx_r];
 #pragma unroll
@@ -395,7 +402,7 @@ __global__ void __launch_bounds__(1024)
           continue;
         }
 
-        int idx_r = token_r * access_per_row_k + k_thread_idx;
+        int idx_r = token_r * access_stride_k + k_thread_idx;
         *reinterpret_cast<float4*>(&vals[r][0]) =
             reinterpret_cast<float4 const*>(params.allreduce_in_k)[idx_r];
 #pragma unroll
@@ -532,7 +539,7 @@ __global__ void __launch_bounds__(1024)
                 static_cast<DType>(static_cast<float>(vals[r][i]) * scale *
                                    static_cast<float>(norm_weight[i]));
           }
-          int idx_out = token_r * access_per_row_q + access_id_in_token;
+          int idx_out = token_r * access_stride_q + access_id_in_token;
           reinterpret_cast<float4*>(params.rms_norm_out)[idx_out] =
               *reinterpret_cast<float4*>(&vals[r][0]);
         }
@@ -561,7 +568,7 @@ __global__ void __launch_bounds__(1024)
                 static_cast<DType>(static_cast<float>(vals[r][i]) * scale_k *
                                    static_cast<float>(norm_weight_k[i]));
           }
-          int idx_out = token_r * access_per_row_k + k_thread_idx;
+          int idx_out = token_r * access_stride_k + k_thread_idx;
           reinterpret_cast<float4*>(params.rms_norm_out_k)[idx_out] =
               *reinterpret_cast<float4*>(&vals[r][0]);
         }
@@ -648,12 +655,18 @@ void minimax_reduce_rms_kernel_launcher_float4(
     MiniMaxReduceRMSParams const& params) {
   TORCH_CHECK(params.size_q % params.hidden_dim == 0);
   TORCH_CHECK(params.hidden_dim % kElemsPerAccess<DType> == 0);
+  if (params.stride_q > 0) {
+    TORCH_CHECK(params.stride_q % kElemsPerAccess<DType> == 0);
+  }
   if (params.allreduce_in_k != nullptr) {
     TORCH_CHECK(params.hidden_dim >= params.hidden_dim_k);
     TORCH_CHECK(params.size_k % params.hidden_dim_k == 0);
     TORCH_CHECK(params.hidden_dim_k % kElemsPerAccess<DType> == 0);
     TORCH_CHECK(params.size_q / params.hidden_dim ==
                 params.size_k / params.hidden_dim_k);
+    if (params.stride_k > 0) {
+      TORCH_CHECK(params.stride_k % kElemsPerAccess<DType> == 0);
+    }
   }
   int token_num = params.size_q / params.hidden_dim;
   int tot_groups = (token_num + 3) / 4;  // ceiling
@@ -760,6 +773,7 @@ torch::Tensor minimax_allreduce_rms(torch::Tensor const& input,
   allreduce_params.dtype = input.scalar_type();
   allreduce_params.size_q = static_cast<int>(input.numel());
   allreduce_params.hidden_dim = static_cast<int>(input.size(-1));
+  allreduce_params.stride_q = allreduce_params.hidden_dim;
   allreduce_params.workspace =
       reinterpret_cast<void**>(workspace.mutable_data_ptr());
   allreduce_params.allreduce_in = input.data_ptr();
@@ -775,43 +789,48 @@ torch::Tensor minimax_allreduce_rms(torch::Tensor const& input,
   return rms_norm_out;
 }
 
-std::vector<torch::Tensor> minimax_allreduce_rms_qk(
-    torch::Tensor const& q, torch::Tensor const& k,
-    torch::Tensor const& norm_weight_q, torch::Tensor const& norm_weight_k,
-    torch::Tensor workspace, int64_t const rank, int64_t const nranks,
-    double const eps) {
-  TORCH_CHECK(q.scalar_type() == k.scalar_type(),
-              "minimax_allreduce_rms_qk: q and k must have same dtype");
-  TORCH_CHECK(q.dim() == 2 && k.dim() == 2,
-              "minimax_allreduce_rms_qk: q and k must be 2D");
-  TORCH_CHECK(q.size(0) == k.size(0),
-              "minimax_allreduce_rms_qk: q and k must have same num_token");
+void minimax_allreduce_rms_qk(torch::Tensor qkv,
+                              torch::Tensor const& norm_weight_q,
+                              torch::Tensor const& norm_weight_k,
+                              torch::Tensor workspace, int64_t const q_size,
+                              int64_t const kv_size, int64_t const rank,
+                              int64_t const nranks, double const eps) {
+  TORCH_CHECK(qkv.dim() == 2, "minimax_allreduce_rms_qk: qkv must be 2D");
+  TORCH_CHECK(qkv.is_contiguous(),
+              "minimax_allreduce_rms_qk: qkv must be contiguous");
+  int64_t qkv_dim = qkv.size(-1);
+  TORCH_CHECK(qkv_dim == q_size + 2 * kv_size,
+              "minimax_allreduce_rms_qk: qkv last dim must equal "
+              "q_size + 2 * kv_size");
   TORCH_CHECK(rank < nranks,
               "minimax_allreduce_rms_qk: rank must be less than nranks");
-  int64_t head_dim_q = q.size(-1);
-  int64_t head_dim_k = k.size(-1);
+
+  int64_t num_tokens = qkv.size(0);
+  int elem_bytes = qkv.element_size();
+
   auto params = vllm::tensorrt_llm::MiniMaxReduceRMSParams();
   params.nranks = static_cast<int>(nranks);
   params.rank = static_cast<int>(rank);
-  params.dtype = q.scalar_type();
-  params.size_q = static_cast<int>(q.numel());
-  params.hidden_dim = static_cast<int>(q.size(-1));
-  params.size_k = static_cast<int>(k.numel());
-  params.hidden_dim_k = static_cast<int>(k.size(-1));
+  params.dtype = qkv.scalar_type();
+  params.size_q = static_cast<int>(num_tokens * q_size);
+  params.hidden_dim = static_cast<int>(q_size);
+  params.size_k = static_cast<int>(num_tokens * kv_size);
+  params.hidden_dim_k = static_cast<int>(kv_size);
+  params.stride_q = static_cast<int>(qkv_dim);
+  params.stride_k = static_cast<int>(qkv_dim);
   params.workspace = reinterpret_cast<void**>(workspace.mutable_data_ptr());
-  params.allreduce_in = q.data_ptr();
+
+  uint8_t* base = static_cast<uint8_t*>(qkv.data_ptr());
+  params.allreduce_in = base;
+  params.allreduce_in_k = base + q_size * elem_bytes;
   params.rms_gamma = norm_weight_q.data_ptr();
-  params.allreduce_in_k = k.data_ptr();
   params.rms_gamma_k = norm_weight_k.data_ptr();
   params.rms_eps = static_cast<float>(eps);
-  params.stream = at::cuda::getCurrentCUDAStream(q.get_device());
+  params.stream = at::cuda::getCurrentCUDAStream(qkv.get_device());
 
-  torch::Tensor rms_norm_out_q = torch::empty_like(q);
-  torch::Tensor rms_norm_out_k = torch::empty_like(k);
-  params.rms_norm_out = rms_norm_out_q.mutable_data_ptr();
-  params.rms_norm_out_k = rms_norm_out_k.mutable_data_ptr();
+  // In-place: write normed q and k back into the qkv tensor
+  params.rms_norm_out = params.allreduce_in;
+  params.rms_norm_out_k = params.allreduce_in_k;
 
   vllm::tensorrt_llm::minimax_reduce_rms_op(params);
-
-  return {rms_norm_out_q, rms_norm_out_k};
 }

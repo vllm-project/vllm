@@ -720,14 +720,15 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.impl("minimax_allreduce_rms", torch::kCUDA, &minimax_allreduce_rms);
   ops.def(
       "minimax_allreduce_rms_qk("
-      "Tensor q,"
-      "Tensor k,"
+      "Tensor(a!) qkv,"
       "Tensor norm_weight_q,"
       "Tensor norm_weight_k,"
       "Tensor workspace,"
+      "int q_size,"
+      "int kv_size,"
       "int rank,"
       "int nranks,"
-      "float eps) -> Tensor[]");
+      "float eps) -> ()");
   ops.impl("minimax_allreduce_rms_qk", torch::kCUDA, &minimax_allreduce_rms_qk);
 
   //  conditionally compiled so impl in source file
