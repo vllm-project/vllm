@@ -313,7 +313,11 @@ class DefaultModelLoader(BaseModelLoader):
         vllm_config = get_current_vllm_config()
         parallel_config = vllm_config.parallel_config
 
-        if not (model_config.is_moe and parallel_config.enable_expert_parallel):
+        if not (
+            model_config.is_moe
+            and parallel_config.enable_expert_parallel
+            and parallel_config.enable_ep_weight_filter
+        ):
             return
 
         num_experts = model_config.get_num_experts()
