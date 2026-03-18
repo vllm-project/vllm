@@ -211,7 +211,7 @@ def sparse_attn_indexer(
 
         if next_n == 1:
             lengths = decode_metadata.seq_lens
-        else:  # TODO: isn't this a problem for next_n > 1 and top_k_per_row_decode?
+        else:
             # (bs,) -> (bs, 1) + (next_n,) -> (bs, next_n) -> (bs * next_n,)
             lengths = (
                 decode_metadata.seq_lens.unsqueeze(1)
