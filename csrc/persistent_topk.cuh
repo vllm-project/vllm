@@ -415,6 +415,11 @@ __device__ __noinline__ void decode_topk_cuda(
 // For sequences 8K < seq_len <= 64K.
 // ============================================================================
 
+// Adapted from:
+// https://github.com/sgl-project/sglang/blob/v0.5.8/sgl-kernel/csrc/elementwise/topk.cu#L87
+// by: DarkSharpness
+// which at the same time is an optimized topk kernel copied from tilelang
+// kernel
 __device__ __noinline__ void fast_topk_cuda_tl(const float* __restrict__ logits,
                                                int* __restrict__ output_indices,
                                                int logits_offset, int seq_len) {
@@ -635,6 +640,7 @@ __device__ __forceinline__ void wait_ge(int* ptr, int target_val,
 // coordinated radix select via global-memory histograms and barriers.
 // ============================================================================
 
+// Adapted from https://github.com/flashinfer-ai/flashinfer/pull/2215
 template <uint32_t VEC_SIZE>
 __device__ void large_topk_cuda(PersistentTopKParams params) {
   const uint32_t ctas_per_group = params.ctas_per_group;
