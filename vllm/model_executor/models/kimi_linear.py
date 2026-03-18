@@ -474,7 +474,7 @@ class KimiLinearModel(nn.Module):
         return hidden_states
 
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             (".gate_up_proj", ".gate_proj", 0),
@@ -568,6 +568,7 @@ class KimiLinearModel(nn.Module):
                     )
                     weight_loader(param, loaded_weight, **kwargs)
             loaded_params.add(name)
+        return loaded_params
 
 
 class KimiLinearForCausalLM(
