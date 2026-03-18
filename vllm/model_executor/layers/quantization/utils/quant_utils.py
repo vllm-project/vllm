@@ -155,6 +155,15 @@ kMxfp8Static = QuantKey(FP8_DTYPE, kMxfp8StaticScale, symmetric=True)
 kMxfp8DynamicScale = ScaleDesc(torch.uint8, False, GroupShape(1, 32))
 kMxfp8Dynamic = QuantKey(FP8_DTYPE, kMxfp8DynamicScale, symmetric=True)
 
+# MXFP4: E2M1 data with E8M0 (power-of-two) block scales, 32-element groups.
+# Unlike NVFP4 which has two-level scaling (block + global), MXFP4 only has
+# block scales - no scale2 (global/alpha) needed.
+kMxfp4StaticGroupScale = ScaleDesc(torch.uint8, True, GroupShape(1, 32))
+kMxfp4Static = QuantKey(FP4_DTYPE, scale=kMxfp4StaticGroupScale)
+
+kMxfp4DynamicGroupScale = ScaleDesc(torch.uint8, False, GroupShape(1, 32))
+kMxfp4Dynamic = QuantKey(FP4_DTYPE, scale=kMxfp4DynamicGroupScale)
+
 kDynamic64Scale = ScaleDesc(torch.float32, False, GroupShape(1, 64))
 kFp8Dynamic64Sym = QuantKey(FP8_DTYPE, kDynamic64Scale, symmetric=True)
 

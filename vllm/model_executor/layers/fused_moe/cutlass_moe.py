@@ -36,6 +36,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8DynamicTokenSym,
     kFp8StaticChannelSym,
     kFp8StaticTensorSym,
+    kMxfp4Dynamic,
+    kMxfp4Static,
     kNvfp4Dynamic,
     kNvfp4Static,
 )
@@ -781,6 +783,270 @@ class CutlassExpertsFp4(mk.FusedMoEExpertsModular):
             w2_fp4=w2,
             w2_blockscale=self.w2_scale,
             w2_alphas=self.g2_alphas,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            activation=activation,
+            workspace13=workspace13,
+            workspace2=workspace2,
+            m=m,
+            n=n,
+            k=k,
+            e=e,
+            device=hidden_states.device,
+            apply_router_weight_on_input=apply_router_weight_on_input,
+        )
+
+
+def run_cutlass_moe_mxfp4(
+    output: torch.Tensor,
+    a: torch.Tensor,
+    w1_fp4: torch.Tensor,
+    w1_blockscale: torch.Tensor,
+    w2_fp4: torch.Tensor,
+    w2_blockscale: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    activation: MoEActivation,
+    workspace13: torch.Tensor,
+    workspace2: torch.Tensor,
+    m: int,
+    n: int,
+    k: int,
+    e: int,
+    device: torch.device,
+    apply_router_weight_on_input: bool = False,
+) -> None:
+    """
+    MXFP4 x MXFP4 MoE implementation using CUTLASS grouped GEMM.
+
+    Unlike NVFP4, MXFP4 uses single-level block scaling only:
+    - 32-element blocks with E8M0 (power-of-two) scale factors
+    - No global scales (alphas/gscale) - the GEMM epilogue uses alpha=1.0
+    - Activation quantization uses global_scale=1.0 per expert
+    """
+    is_gated = activation.is_gated
+    w1_n = n * 2 if is_gated else n
+
+    assert topk_weights.shape == topk_ids.shape, "topk shape mismatch"
+    assert w1_fp4.dtype == torch.uint8, "weight 1 must be uint8"
+    assert w2_fp4.dtype == torch.uint8, "weight 2 must be uint8"
+    assert (
+        w1_fp4.ndim == 3
+        and w2_fp4.ndim == 3
+        and w1_blockscale.ndim == 3
+        and w2_blockscale.ndim == 3
+    ), "All Weights must be of rank 3 for cutlass_moe_mxfp4"
+    m_a, k_a = a.shape
+    e_w1, w1_n_actual, half_k_w1 = w1_fp4.shape
+    e_w2, k_w2, half_n_w2 = w2_fp4.shape
+
+    assert e_w1 == e_w2 and e_w1 == e
+    assert k_a == half_k_w1 * 2 and k == k_w2
+    assert w1_n_actual == w1_n and half_n_w2 * 2 == n
+    assert m == m_a
+    assert 2 * half_k_w1 == k_w2
+    assert a.dtype in [torch.half, torch.bfloat16], "Invalid input dtype"
+    assert topk_weights.size(0) == m and topk_ids.size(0) == m
+
+    topk = topk_ids.size(1)
+    out_dtype = a.dtype
+    num_topk = topk_ids.size(1)
+
+    expert_offsets = torch.empty((e + 1), dtype=torch.int32, device=device)
+    blockscale_offsets = torch.empty((e + 1), dtype=torch.int32, device=device)
+    problem_sizes1 = torch.empty((e, 3), dtype=torch.int32, device=device)
+    problem_sizes2 = torch.empty((e, 3), dtype=torch.int32, device=device)
+
+    a_map = torch.empty((topk_ids.numel()), dtype=torch.int32, device=device)
+    c_map = torch.empty((topk_ids.numel()), dtype=torch.int32, device=device)
+
+    if apply_router_weight_on_input:
+        assert num_topk == 1, (
+            "apply_router_weight_on_input is only implemented for topk=1"
+        )
+        a.mul_(topk_weights.to(out_dtype))
+
+    ops.get_cutlass_moe_mm_data(
+        topk_ids,
+        expert_offsets,
+        problem_sizes1,
+        problem_sizes2,
+        a_map,
+        c_map,
+        e,
+        n,
+        k,
+        blockscale_offsets,
+        is_gated=is_gated,
+    )
+
+    # MXFP4 has no global scales - use 1.0 for quant kernel and GEMM epilogue
+    ones_per_expert = torch.ones((e,), device=device, dtype=torch.float32)
+
+    a = ops.shuffle_rows(a, a_map)
+    rep_a_fp4, rep_a_blockscale = ops.mxfp4_experts_quant(
+        a,
+        ones_per_expert,
+        expert_offsets,
+        blockscale_offsets,
+        num_topk,
+    )
+    c1 = _resize_cache(workspace13, (m * topk, w1_n))
+    c2 = _resize_cache(workspace2, (m * topk, n))
+    c3 = _resize_cache(workspace13, (m * topk, k))
+    ops.cutlass_mxfp4_moe_mm(
+        c1,
+        rep_a_fp4,
+        w1_fp4,
+        rep_a_blockscale,
+        w1_blockscale,
+        ones_per_expert,
+        problem_sizes1,
+        expert_offsets[:-1],
+        blockscale_offsets[:-1],
+    )
+    del rep_a_fp4, rep_a_blockscale
+    if activation == MoEActivation.SILU:
+        int_fp4, int_blockscale = ops.silu_and_mul_mxfp4_experts_quant(
+            c1, ones_per_expert, expert_offsets, blockscale_offsets, num_topk
+        )
+    else:
+        apply_moe_activation(activation, c2, c1)
+        int_fp4, int_blockscale = ops.mxfp4_experts_quant(
+            c2, ones_per_expert, expert_offsets, blockscale_offsets, num_topk
+        )
+
+    ops.cutlass_mxfp4_moe_mm(
+        c3,
+        int_fp4,
+        w2_fp4,
+        int_blockscale,
+        w2_blockscale,
+        ones_per_expert,
+        problem_sizes2,
+        expert_offsets[:-1],
+        blockscale_offsets[:-1],
+    )
+    del int_fp4, int_blockscale
+
+    c3 = ops.shuffle_rows(c3, c_map)
+
+    assert output.dtype == out_dtype
+    if not apply_router_weight_on_input:
+        output.copy_(
+            (
+                c3.view(m, num_topk, k)
+                * topk_weights.view(m, num_topk, 1).to(out_dtype)
+            ).sum(dim=1),
+            non_blocking=True,
+        )
+    else:
+        output.copy_(c3.view(m, num_topk, k).sum(dim=1), non_blocking=True)
+    return
+
+
+class CutlassExpertsMxfp4(mk.FusedMoEExpertsModular):
+    """CUTLASS MXFP4 x MXFP4 fused MoE expert implementation.
+
+    MXFP4 uses single-level block scaling (E8M0, 32-element groups) without
+    the global scales (alphas/gscale) that NVFP4 requires.
+    """
+
+    @property
+    def expects_unquantized_inputs(self) -> bool:
+        return True
+
+    @staticmethod
+    def _supports_current_device() -> bool:
+        p = current_platform
+        return p.is_cuda() and p.is_device_capability_family(100)
+
+    @staticmethod
+    def _supports_no_act_and_mul() -> bool:
+        return True
+
+    @staticmethod
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        return (weight_key, activation_key) == (kMxfp4Static, kMxfp4Dynamic)
+
+    @staticmethod
+    def _supports_activation(activation: MoEActivation) -> bool:
+        return activation in [
+            MoEActivation.SILU,
+            MoEActivation.GELU,
+            MoEActivation.SWIGLUOAI,
+            MoEActivation.SWIGLUSTEP,
+            MoEActivation.SILU_NO_MUL,
+            MoEActivation.GELU_NO_MUL,
+            MoEActivation.RELU2_NO_MUL,
+        ]
+
+    @staticmethod
+    def _supports_parallel_config(
+        moe_parallel_config: FusedMoEParallelConfig,
+    ) -> bool:
+        return moe_parallel_config.ep_size == 1
+
+    @staticmethod
+    def activation_format() -> mk.FusedMoEActivationFormat:
+        return mk.FusedMoEActivationFormat.Standard
+
+    def supports_expert_map(self) -> bool:
+        return False
+
+    def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
+        return TopKWeightAndReduceNoOP()
+
+    def workspace_dtype(self, act_dtype: torch.dtype) -> torch.dtype:
+        return act_dtype
+
+    def workspace_shapes(
+        self,
+        M: int,
+        N: int,
+        K: int,
+        topk: int,
+        global_num_experts: int,
+        local_num_experts: int,
+        expert_tokens_meta: mk.ExpertTokensMetadata | None,
+        activation: MoEActivation,
+    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
+        workspace1 = (M * topk, max(2 * N, K))
+        workspace2 = (M * topk, N)
+        output = (M, K)
+        return (workspace1, workspace2, output)
+
+    def apply(
+        self,
+        output: torch.Tensor,
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        activation: MoEActivation,
+        global_num_experts: int,
+        expert_map: torch.Tensor | None,
+        a1q_scale: torch.Tensor | None,
+        a2_scale: torch.Tensor | None,
+        workspace13: torch.Tensor | None,
+        workspace2: torch.Tensor | None,
+        expert_tokens_meta: mk.ExpertTokensMetadata | None,
+        apply_router_weight_on_input: bool,
+    ):
+        e, m, n, k, _ = self.moe_problem_size(hidden_states, w1, w2, topk_ids)
+        n = w2.shape[2] * 2
+
+        run_cutlass_moe_mxfp4(
+            output=output,
+            a=hidden_states,
+            w1_fp4=w1,
+            w1_blockscale=self.w1_scale,
+            w2_fp4=w2,
+            w2_blockscale=self.w2_scale,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             activation=activation,
