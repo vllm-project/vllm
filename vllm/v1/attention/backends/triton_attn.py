@@ -643,6 +643,8 @@ class TritonAttentionImpl(AttentionImpl):
         )
 
     def fused_rope_kvcache_supported(self):
+        if self.kv_quant_mode == KVQuantMode.INT8:
+            return False
         return rocm_aiter_ops.is_enabled()
 
     def do_rope_and_kv_cache_update(
