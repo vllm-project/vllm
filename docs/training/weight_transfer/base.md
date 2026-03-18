@@ -14,7 +14,7 @@ The `WeightTransferEngine` is a generic abstract class parameterized by two data
 Subclasses must implement these four methods:
 
 | Method | Side | Description |
-|--------|------|-------------|
+| ------ | ---- | ----------- |
 | `init_transfer_engine(init_info)` | Inference | Initialize the communication channel on each inference worker |
 | `receive_weights(update_info, load_weights)` | Inference | Receive weights and call `load_weights` incrementally |
 | `shutdown()` | Inference | Clean up resources |

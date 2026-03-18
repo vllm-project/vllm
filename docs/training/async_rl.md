@@ -21,7 +21,7 @@ await engine.pause_generation(mode="keep", clear_cache=True)
 The `mode` parameter controls how in-flight requests are handled:
 
 | Mode | Behavior |
-|------|----------|
+| ---- | -------- |
 | `"abort"` | Abort all in-flight requests immediately and return partial results (default) |
 | `"wait"` | Wait for all in-flight requests to finish before pausing |
 | `"keep"` | Freeze requests in the queue; they resume when `resume_generation` is called |

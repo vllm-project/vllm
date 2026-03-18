@@ -12,9 +12,9 @@ The weight transfer system follows a **two-phase protocol** with a pluggable bac
 ## Available Backends
 
 | Backend | Transport | Use Case |
-|---------|-----------|----------|
-| [NCCL](nccl.md) | NCCL broadcast |Separate GPUs for training and inference |
-| [IPC](ipc.md) | CUDA IPC handles |Colocated training and inference on same GPU |
+| ------- | --------- | -------- |
+| [NCCL](nccl.md) | NCCL broadcast | Separate GPUs for training and inference |
+| [IPC](ipc.md) | CUDA IPC handles | Colocated training and inference on same GPU |
 
 ## Configuration
 
@@ -46,7 +46,7 @@ The `backend` field accepts `"nccl"` (default) or `"ipc"`.
 When running vLLM as an HTTP server, the following endpoints are available for weight transfer:
 
 | Endpoint | Method | Description |
-|----------|--------|-------------|
+| -------- | ------ | ----------- |
 | `/init_weight_transfer_engine` | POST | Initialize the weight transfer engine with backend-specific info |
 | `/update_weights` | POST | Trigger a weight update with backend-specific metadata |
 | `/pause` | POST | Pause generation before weight sync to handle inflight requests |
