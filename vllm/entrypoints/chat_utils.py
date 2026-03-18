@@ -326,8 +326,6 @@ class ConversationMessage(TypedDict, total=False):
     reasoning: str | None
     """The reasoning content for interleaved thinking."""
 
-    reasoning_content: str | None
-    """Deprecated: The reasoning content for interleaved thinking."""
 
     tools: list[ChatCompletionFunctionToolParam] | None
     """The tools for developer role."""
@@ -1535,7 +1533,7 @@ def _parse_chat_message_content(
             # Include reasoning if present for interleaved thinking.
             if reasoning is not None:
                 result_msg["reasoning"] = cast(str, reasoning)
-                result_msg["reasoning_content"] = cast(
+                result_msg["reasoning"] = cast(
                     str, reasoning
                 )  # keep compatibility
         elif role == "tool":
