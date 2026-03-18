@@ -6,12 +6,6 @@
  *   - Decode   (seq_len <= 8K):    2048-bin FP16 histogram + FP32 radix refine
  *   - Medium   (seq_len <= 64K):   256-bin FP16 histogram + FP32 radix refine
  *   - Large    (seq_len > 64K):    multi-CTA cooperative radix select
- *
- * CUDAGraph-safe: fixed grid configuration handles all seq_lens.
- * The grid is always set up for the large path (worst case). For non-large
- * rows, only CTA 0 of each group does work — others skip with no barrier
- * overhead. The inter-CTA barrier protocol naturally handles timing
- * differences between fast-skipping and working CTAs.
  */
 
 #ifndef PERSISTENT_TOPK_CUH_
@@ -33,9 +27,9 @@ namespace persistent {
 constexpr int TopK = 2048;
 constexpr int kThreadsPerBlock = 1024;
 constexpr int RADIX = 256;
-constexpr size_t kSmemMedium = 8 * 1024 * sizeof(uint32_t);          // 32KB
-constexpr int MAX_BUFFERED_ITEMS = kSmemMedium / (2 * sizeof(int));  // 4096
-constexpr uint32_t LARGE_THRESHOLD = 65536;                          // 64K
+constexpr size_t kSmemMedium = 8 * 1024 * sizeof(uint32_t);
+constexpr int MAX_BUFFERED_ITEMS = kSmemMedium / (2 * sizeof(int));
+constexpr uint32_t LARGE_THRESHOLD = 65536;
 
 // Decode path constants
 constexpr int kDecodeBins = 2048;
