@@ -560,18 +560,23 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
         return cuda_graph_size
 
+    def _remove_request(self, req_id: str) -> bool:
+        if not self.req_states.remove_request(req_id):
+            return False
+        if self.encoder_cache is not None:
+            self.encoder_cache.remove_request(req_id)
+        if self.prompt_logprobs_worker is not None:
+            self.prompt_logprobs_worker.remove_request(req_id)
+        self.lora_state.remove_request(req_id)
+        return True
+
     def finish_requests(self, scheduler_output: SchedulerOutput) -> None:
         finished_req_ids = scheduler_output.finished_req_ids
         preempted_req_ids = scheduler_output.preempted_req_ids
         if preempted_req_ids:
             finished_req_ids = finished_req_ids.union(preempted_req_ids)
         for req_id in finished_req_ids:
-            self.req_states.remove_request(req_id)
-            if self.encoder_cache is not None:
-                self.encoder_cache.remove_request(req_id)
-            if self.prompt_logprobs_worker is not None:
-                self.prompt_logprobs_worker.remove_request(req_id)
-            self.lora_state.remove_request(req_id)
+            self._remove_request(req_id)
 
     def free_states(self, scheduler_output: SchedulerOutput) -> None:
         if self.encoder_cache is not None:
@@ -587,13 +592,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Streaming input update: request already exists from a prior
             # chunk. Remove old state so it can be cleanly re-added below
             # with the updated prompt_token_ids and mm_features.
-            if req_id in self.req_states.req_id_to_index:
-                self.req_states.remove_request(req_id)
-                if self.encoder_cache is not None:
-                    self.encoder_cache.remove_request(req_id)
-                if self.prompt_logprobs_worker is not None:
-                    self.prompt_logprobs_worker.remove_request(req_id)
-                self.lora_state.remove_request(req_id)
+            self._remove_request(req_id)
 
             prompt_len = len(new_req_data.prompt_token_ids)
             self.req_states.add_request(

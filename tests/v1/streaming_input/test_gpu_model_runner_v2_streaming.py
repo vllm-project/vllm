@@ -45,7 +45,8 @@ def mock_model_runner_with_req_states():
     # Mock staged writes — they use Triton kernels that require GPU
     runner.req_states.apply_staged_writes = Mock()
 
-    # Bind the real add_requests method to our mock
+    # Bind the real methods to our mock
+    runner._remove_request = GPUModelRunner._remove_request.__get__(runner)
     runner.add_requests = GPUModelRunner.add_requests.__get__(runner)
     return runner
 

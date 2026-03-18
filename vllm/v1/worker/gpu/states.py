@@ -123,13 +123,14 @@ class RequestState:
         self.all_token_ids.apply_write()
         self.num_computed_tokens.apply_write()
 
-    def remove_request(self, req_id: str) -> None:
+    def remove_request(self, req_id: str) -> bool:
         req_idx = self.req_id_to_index.pop(req_id, None)
         if req_idx is None:
             # Request not found.
-            return
+            return False
         self.index_to_req_id.pop(req_idx, None)
         self.free_indices.append(req_idx)
+        return True
 
     def any_prefills(self, idx_mapping_np: np.ndarray) -> bool:
         return np.any(

@@ -216,12 +216,6 @@ def build_attn_metadata(
             common_attn_metadata.encoder_seq_lens = encoder_seq_lens_gpu
             common_attn_metadata.encoder_seq_lens_cpu = encoder_seq_lens_cpu
 
-        # Eagerly materialize deprecated lazy CPU fields so that
-        # attention backends that access them directly (e.g. Whisper
-        # with block pooling) get non-None values.
-        _ = common_attn_metadata.seq_lens_cpu
-        _ = common_attn_metadata.num_computed_tokens_cpu
-
         for attn_group in attn_groups[i]:
             attn_metadata_builder = attn_group.get_metadata_builder(0)
             metadata = attn_metadata_builder.build(
