@@ -145,8 +145,9 @@ class SkyworkR1VProcessingInfo(BaseProcessingInfo):
 
     def get_image_size_with_most_features(self) -> ImageSize:
         processor = self.get_hf_processor()
+        image_processor = processor.image_processor
 
-        base_size = processor.image_size
+        base_size = image_processor.image_size
         target_ratios = processor.resolve_target_ratios()
 
         largest_feature_size, largest_feature_pinpoint = 0, None

@@ -46,8 +46,6 @@ class NVLMProcessingInfo(BaseInternVLProcessingInfo):
 
         kwargs = self.ctx.get_merged_mm_kwargs(kwargs)
         kwargs.setdefault("image_size", vision_config.image_size)
-        kwargs.setdefault("patch_size", vision_config.patch_size)
-        kwargs.setdefault("downsample_ratio", config.downsample_ratio)
         kwargs.setdefault("min_dynamic_patch", config.min_dynamic_patch)
         kwargs.setdefault("max_dynamic_patch", config.max_dynamic_patch)
         kwargs.setdefault("dynamic_image_size", config.dynamic_image_size)
