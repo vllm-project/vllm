@@ -687,7 +687,7 @@ class VllmConfig:
             "mp",
             "uni",
             "external_launcher",
-        )
+        ) or (executor_backend == "ray" and envs.VLLM_USE_RAY_V2_EXECUTOR_BACKEND)
 
         if self.scheduler_config.async_scheduling:
             # Async scheduling explicitly enabled, hard fail any incompatibilities.
