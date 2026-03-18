@@ -1362,8 +1362,7 @@ class OpenAIServingResponses(OpenAIServing):
                                     name=current_tool_call_name,
                                     arguments=delta_message.tool_calls[
                                         0
-                                    ].function.arguments
-                                    or "",
+                                    ].function.arguments,
                                     status="in_progress",
                                 ),
                             )
@@ -1553,27 +1552,16 @@ class OpenAIServingResponses(OpenAIServing):
                     elif delta_message.tool_calls[0].function.name:
                         # send done with current content part
                         # and add new function call item
-                        # Collect accumulated content from previous delta messages
-                        final_content = "".join(
-                            pm.content for pm in previous_delta_messages if pm.content
-                        )
-                        previous_delta_messages = []
                         yield _increment_sequence_number_and_return(
                             ResponseTextDoneEvent(
                                 type="response.output_text.done",
                                 sequence_number=-1,
                                 output_index=current_output_index,
                                 content_index=current_content_index,
-                                text=final_content,
+                                text="",
                                 logprobs=[],
                                 item_id=current_item_id,
                             )
-                        )
-                        text_part = ResponseOutputText(
-                            type="output_text",
-                            text=final_content,
-                            annotations=[],
-                            logprobs=[],
                         )
                         yield _increment_sequence_number_and_return(
                             ResponseContentPartDoneEvent(
@@ -1582,10 +1570,14 @@ class OpenAIServingResponses(OpenAIServing):
                                 item_id=current_item_id,
                                 output_index=current_output_index,
                                 content_index=current_content_index,
-                                part=text_part,
+                                part=ResponseOutputText(
+                                    type="output_text",
+                                    text="",
+                                    annotations=[],
+                                    logprobs=[],
+                                ),
                             )
                         )
-                        content_list = [text_part] if final_content else []
                         yield _increment_sequence_number_and_return(
                             ResponseOutputItemDoneEvent(
                                 type="response.output_item.done",
@@ -1595,7 +1587,7 @@ class OpenAIServingResponses(OpenAIServing):
                                     id=current_item_id,
                                     type="message",
                                     role="assistant",
-                                    content=content_list,
+                                    content=[],
                                     status="completed",
                                 ),
                             )
