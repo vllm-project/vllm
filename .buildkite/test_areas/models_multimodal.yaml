@@ -84,6 +84,11 @@ steps:
   commands:
     - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
     - pytest -v -s models/multimodal/processing/test_tensor_schema.py
+  mirror:
+    amd:
+      device: mi325_1
+      depends_on:
+      - image-build-amd
 
 - label: Multi-Modal Accuracy Eval (Small Models) # 50min
   timeout_in_minutes: 70
@@ -117,6 +122,11 @@ steps:
   commands:
     - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
     - pytest -v -s models/multimodal/generation/test_common.py -m 'split(group=0) and not core_model'
+  mirror:
+    amd:
+      device: mi250_1
+      depends_on:
+      - image-build-amd
 
 - label: Multi-Modal Models (Extended) 3
   optional: true

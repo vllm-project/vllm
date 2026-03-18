@@ -55,6 +55,11 @@ steps:
   - pytest -v -s entrypoints/instrumentator
   - PYTHONPATH=/vllm-workspace pytest -v -s entrypoints/rpc
   - pytest -v -s tool_use
+  mirror:
+    amd:
+      device: mi250_1
+      depends_on:
+      - image-build-amd
 
 - label: Entrypoints Integration (Pooling)
   timeout_in_minutes: 50
@@ -84,7 +89,7 @@ steps:
     - pytest -v -s v1/entrypoints
   mirror:
     amd:
-      device: mi325_1
+      device: mi250_1
       depends_on:
       - image-build-amd
 
