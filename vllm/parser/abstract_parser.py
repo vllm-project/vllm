@@ -155,7 +155,9 @@ class Parser:
     @abstractmethod
     def extract_response_outputs(
         self,
+        *,
         model_output: str,
+        model_output_token_ids: Sequence[int],
         request: ResponsesRequest,
         enable_auto_tools: bool = False,
         tool_call_id_type: str = "random",
@@ -170,6 +172,7 @@ class Parser:
 
         Args:
             model_output: The complete model-generated string.
+            model_output_token_ids: The token IDs of the model output.
             request: The request object used to generate the output.
             enable_auto_tools: Whether to enable automatic tool call parsing.
             tool_call_id_type: Type of tool call ID generation ("random", etc).
@@ -313,7 +316,9 @@ class DelegatingParser(Parser):
 
     def extract_response_outputs(
         self,
+        *,
         model_output: str,
+        model_output_token_ids: Sequence[int],
         request: ResponsesRequest,
         enable_auto_tools: bool = False,
         tool_call_id_type: str = "random",
