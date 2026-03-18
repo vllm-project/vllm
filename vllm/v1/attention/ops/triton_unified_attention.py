@@ -13,6 +13,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.v1.attention.backend import KVQuantMode
 
 logger = init_logger(__name__)
 is_batch_invariant = vllm_is_batch_invariant()
@@ -1014,13 +1015,12 @@ def unified_attention(
     use_qq_bias = qq_bias is not None
 
     # KV cache quantization mode (detected from tensor dtype).
-    # 0=none, 1=fp8, 2=int8
     if k.dtype == torch.int8:
-        kv_quant_mode = 2  # INT8 per-token
+        kv_quant_mode = KVQuantMode.INT8
     elif k.is_floating_point() and k.element_size() == 1:
-        kv_quant_mode = 1  # FP8
+        kv_quant_mode = KVQuantMode.FP8
     else:
-        kv_quant_mode = 0  # none
+        kv_quant_mode = KVQuantMode.NONE
 
     block_size = v.shape[1]
     num_seqs = len(seqused_k)
