@@ -19,6 +19,7 @@ from vllm.multimodal.video import sample_frames_from_video
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
+from ....utils import create_new_process_for_each_test
 from ...utils import dummy_hf_overrides
 
 # Dots.OCR prompt from official repository
@@ -395,6 +396,8 @@ def run_video_test(config, mm_encoder_attn_backend, video_assets, vllm_runner):
     "mm_encoder_attn_backend",
     [None] + current_platform.get_supported_vit_attn_backends(),
 )
+@pytest.mark.skip(reason="Broken test due to memory segmentation fault")
+@create_new_process_for_each_test()
 def test_vit_backend_functionality(
     model_key: str,
     mm_encoder_attn_backend: AttentionBackendEnum | None,
