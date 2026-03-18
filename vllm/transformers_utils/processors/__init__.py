@@ -14,7 +14,6 @@ __all__ = [
     "BagelProcessor",
     "CohereASRProcessor",
     "DeepseekVLV2Processor",
-    "Eagle2_5_VLProcessor",
     "FireRedASR2Processor",
     "FunASRProcessor",
     "GLM4VProcessor",
@@ -26,7 +25,6 @@ __all__ = [
     "MistralCommonPixtralProcessor",
     "MistralCommonVoxtralProcessor",
     "NanoNemotronVLProcessor",
-    "NemotronParseProcessor",
     "NemotronVLProcessor",
     "LlamaNemotronVLEmbedProcessor",
     "NVLMProcessor",
@@ -34,14 +32,12 @@ __all__ = [
     "Ovis2_5Processor",
     "QwenVLProcessor",
     "Qwen3ASRProcessor",
-    "SkyworkR1VProcessor",
 ]
 
 _CLASS_TO_MODULE: dict[str, str] = {
     "BagelProcessor": "vllm.transformers_utils.processors.bagel",
     "CohereASRProcessor": "vllm.transformers_utils.processors.cohere_asr",
     "DeepseekVLV2Processor": "vllm.transformers_utils.processors.deepseek_vl2",
-    "Eagle2_5_VLProcessor": "vllm.transformers_utils.processors.eagle2_5_vl",
     "FireRedASR2Processor": "vllm.transformers_utils.processors.fireredasr2",
     "FunASRProcessor": "vllm.transformers_utils.processors.funasr",
     "GLM4VProcessor": "vllm.transformers_utils.processors.glm4v",
@@ -53,7 +49,6 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "MistralCommonPixtralProcessor": "vllm.transformers_utils.processors.pixtral",
     "MistralCommonVoxtralProcessor": "vllm.transformers_utils.processors.voxtral",
     "NanoNemotronVLProcessor": "vllm.transformers_utils.processors.nano_nemotron_vl",
-    "NemotronParseProcessor": "vllm.transformers_utils.processors.nemotron_parse",
     "NemotronVLProcessor": "vllm.transformers_utils.processors.nemotron_vl",
     "LlamaNemotronVLEmbedProcessor": "vllm.transformers_utils.processors.nemotron_vl",
     "NVLMProcessor": "vllm.transformers_utils.processors.nvlm_d",
@@ -61,7 +56,6 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "Ovis2_5Processor": "vllm.transformers_utils.processors.ovis2_5",
     "QwenVLProcessor": "vllm.transformers_utils.processors.qwen_vl",
     "Qwen3ASRProcessor": "vllm.transformers_utils.processors.qwen3_asr",
-    "SkyworkR1VProcessor": "vllm.transformers_utils.processors.skyworkr1v",
 }
 
 
