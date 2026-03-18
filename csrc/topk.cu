@@ -89,10 +89,6 @@ void persistent_topk(const torch::Tensor& logits, const torch::Tensor& lengths,
   TORCH_CHECK(workspace.size(0) >= static_cast<int64_t>(state_bytes),
               "workspace too small, need ", state_bytes, " bytes");
 
-  // No cudaMemsetAsync needed: CTA 0 of each group initializes the state
-  // before the row loop, and cleanup code zeros it at kernel end for the
-  // next invocation. This avoids an extra CUDA graph node per step.
-
   P::PersistentTopKParams params;
   params.input = logits.data_ptr<float>();
   params.output = output.data_ptr<int32_t>();
