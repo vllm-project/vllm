@@ -22,6 +22,7 @@ pub(crate) enum DecodedTextEvent {
     /// Terminal event carrying the full decoded text and final metadata.
     Done {
         text: String,
+        prompt_token_count: u32,
         /// Raw cumulative output token IDs, including a terminal stop token when
         /// the engine emitted one.
         token_ids: Vec<u32>,
@@ -106,6 +107,7 @@ pub(crate) async fn decoded_text_event_stream(
 
             yield DecodedTextEvent::Done {
                 text,
+                prompt_token_count: output.prompt_token_ids.len() as u32,
                 token_ids,
                 finish_reason: output.raw.finish_reason,
                 stop_reason: output.raw.stop_reason,

@@ -11,7 +11,7 @@ use futures_async_stream::try_stream;
 use openai_protocol::chat::{
     ChatCompletionRequest, ChatCompletionStreamResponse, ChatMessageDelta, ChatStreamChoice,
 };
-use openai_protocol::common::{FunctionCallDelta, ToolCallDelta};
+use openai_protocol::common::{FunctionCallDelta, ToolCallDelta, Usage};
 use openai_protocol::validated::ValidatedJson;
 use serde_json::Value;
 use thiserror_ext::AsReport as _;
@@ -36,6 +36,11 @@ pub(super) async fn chat_completions(
     let response_id = prepared.response_id.clone();
     let response_model = prepared.response_model.clone();
     let created = unix_timestamp();
+    let include_usage = body
+        .stream_options
+        .as_ref()
+        .and_then(|options| options.include_usage)
+        .unwrap_or(false);
     info!(request_id = %response_id, model = %response_model, "streaming chat completion");
 
     let chat_stream = match state.chat.chat(prepared.chat_request).await {
@@ -48,8 +53,13 @@ pub(super) async fn chat_completions(
             .into_response();
         }
     };
-    let chunk_stream =
-        chat_completion_chunk_stream(chat_stream, response_id, response_model, created);
+    let chunk_stream = chat_completion_chunk_stream(
+        chat_stream,
+        response_id,
+        response_model,
+        created,
+        include_usage,
+    );
     let sse_stream = chat_completion_sse_stream(chunk_stream);
 
     Sse::new(sse_stream)
@@ -72,6 +82,7 @@ async fn chat_completion_chunk_stream(
     response_id: String,
     response_model: String,
     created: u64,
+    include_usage: bool,
 ) {
     let mut tool_call_indices = BTreeMap::<String, u32>::new();
 
@@ -123,27 +134,41 @@ async fn chat_completion_chunk_stream(
                 debug!(request_id = %response_id, "ending current tool call");
             }
             Ok(ChatEvent::Done {
+                prompt_token_count,
                 finish_reason: Some(finish_reason),
                 stop_reason,
+                token_ids,
                 ..
-            }) => match final_chunk(
-                &response_id,
-                &response_model,
-                created,
-                finish_reason,
-                stop_reason,
-                !tool_call_indices.is_empty(),
-            ) {
-                Ok(chunk) => yield chunk,
-                Err(error) => {
-                    error!(
-                        request_id = %response_id,
-                        error = %error.to_error_response().error.message,
-                        "invalid terminal finish reason"
-                    );
-                    return Err(error);
+            }) => {
+                match final_chunk(
+                    &response_id,
+                    &response_model,
+                    created,
+                    finish_reason,
+                    stop_reason,
+                    !tool_call_indices.is_empty(),
+                ) {
+                    Ok(chunk) => yield chunk,
+                    Err(error) => {
+                        error!(
+                            request_id = %response_id,
+                            error = %error.to_error_response().error.message,
+                            "invalid terminal finish reason"
+                        );
+                        return Err(error);
+                    }
                 }
-            },
+
+                if include_usage {
+                    let completion_tokens = token_ids.len() as u32;
+                    yield usage_chunk(
+                        &response_id,
+                        &response_model,
+                        created,
+                        Usage::from_counts(prompt_token_count, completion_tokens),
+                    );
+                }
+            }
             Ok(ChatEvent::Done { .. }) => {
                 let error =
                     server_error!("chat stream terminated without a terminal finish reason",);
@@ -159,6 +184,23 @@ async fn chat_completion_chunk_stream(
                 bail_server_error!("{}", error.to_report_string());
             }
         }
+    }
+}
+
+fn usage_chunk(
+    response_id: &str,
+    response_model: &str,
+    created: u64,
+    usage: Usage,
+) -> ChatCompletionStreamResponse {
+    ChatCompletionStreamResponse {
+        id: response_id.to_string(),
+        object: "chat.completion.chunk".to_string(),
+        created,
+        model: response_model.to_string(),
+        system_fingerprint: None,
+        choices: Vec::new(),
+        usage: Some(usage),
     }
 }
 

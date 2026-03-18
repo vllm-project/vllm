@@ -145,6 +145,9 @@ pub enum ChatEvent {
     /// Terminal event carrying the final assembled assistant message and finish metadata.
     Done {
         message: AssistantMessage,
+        /// Number of prompt tokens actually sent to the engine after chat
+        /// template rendering and tokenization.
+        prompt_token_count: u32,
         /// Raw cumulative output token IDs, including a terminal stop token when
         /// the engine emitted one.
         token_ids: Vec<u32>,

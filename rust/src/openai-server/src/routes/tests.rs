@@ -80,6 +80,12 @@ fn default_stream_output_specs() -> Vec<(Vec<u32>, Option<FinishReason>)> {
     ]
 }
 
+fn sse_data_payloads(text: &str) -> Vec<&str> {
+    text.lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .collect()
+}
+
 fn engine_outputs_for_request(
     request_id: &str,
     output_specs: Vec<(Vec<u32>, Option<FinishReason>)>,
@@ -457,6 +463,7 @@ async fn stream_error_is_returned_as_openai_error_sse() {
                     json!({
                         "model": "Qwen/Qwen1.5-0.5B-Chat",
                         "stream": true,
+                        "stream_options": {"include_usage": true},
                         "messages": [{"role": "user", "content": "hello"}]
                     })
                     .to_string(),
@@ -480,6 +487,7 @@ async fn stream_error_is_returned_as_openai_error_sse() {
         text.contains("forced decode failure for streaming test"),
         "{text}"
     );
+    assert!(!text.contains("\"usage\":"), "{text}");
     assert!(text.trim_end().ends_with("data: [DONE]"), "{text}");
 }
 
@@ -487,6 +495,105 @@ async fn stream_error_is_returned_as_openai_error_sse() {
 async fn invalid_terminal_finish_reason_is_returned_as_openai_error_sse() {
     let (app, engine_task) =
         test_app_with_stream_output_specs(vec![(vec![], Some(FinishReason::Error))]).await;
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "Qwen/Qwen1.5-0.5B-Chat",
+                        "stream": true,
+                        "stream_options": {"include_usage": true},
+                        "messages": [{"role": "user", "content": "hello"}]
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("read body");
+    engine_task.await.expect("mock engine task");
+    let text = String::from_utf8(body.to_vec()).expect("utf8 body");
+
+    assert!(text.contains("\"role\":\"assistant\""), "{text}");
+    assert!(text.contains("\"type\":\"server_error\""), "{text}");
+    assert!(
+        text.contains("stream terminated without a valid OpenAI finish reason"),
+        "{text}"
+    );
+    assert!(!text.contains("\"usage\":"), "{text}");
+    assert!(text.trim_end().ends_with("data: [DONE]"), "{text}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn include_usage_adds_final_usage_chunk_before_done() {
+    let (app, engine_task) = test_app_with_stream_output_specs(default_stream_output_specs()).await;
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "Qwen/Qwen1.5-0.5B-Chat",
+                        "stream": true,
+                        "stream_options": {"include_usage": true},
+                        "messages": [{"role": "user", "content": "hello"}]
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("read body");
+    engine_task.await.expect("mock engine task");
+    let text = String::from_utf8(body.to_vec()).expect("utf8 body");
+
+    let payloads = sse_data_payloads(&text);
+    let finish_index = payloads
+        .iter()
+        .position(|payload| payload.contains("\"finish_reason\":\"stop\""))
+        .expect("finish chunk");
+    let usage_index = payloads
+        .iter()
+        .position(|payload| payload.contains("\"usage\":"))
+        .expect("usage chunk");
+    let done_index = payloads
+        .iter()
+        .position(|payload| *payload == "[DONE]")
+        .expect("done sentinel");
+
+    assert!(finish_index < usage_index, "{text}");
+    assert!(usage_index < done_index, "{text}");
+
+    let usage_chunk: serde_json::Value =
+        serde_json::from_str(payloads[usage_index]).expect("usage chunk json");
+    assert_eq!(usage_chunk["choices"], json!([]));
+    assert_eq!(usage_chunk["usage"]["prompt_tokens"], 22);
+    assert_eq!(usage_chunk["usage"]["completion_tokens"], 3);
+    assert_eq!(usage_chunk["usage"]["total_tokens"], 25);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stream_without_include_usage_keeps_existing_shape() {
+    let (app, engine_task) = test_app_with_stream_output_specs(default_stream_output_specs()).await;
     let response = app
         .clone()
         .oneshot(
@@ -515,12 +622,8 @@ async fn invalid_terminal_finish_reason_is_returned_as_openai_error_sse() {
     engine_task.await.expect("mock engine task");
     let text = String::from_utf8(body.to_vec()).expect("utf8 body");
 
-    assert!(text.contains("\"role\":\"assistant\""), "{text}");
-    assert!(text.contains("\"type\":\"server_error\""), "{text}");
-    assert!(
-        text.contains("stream terminated without a valid OpenAI finish reason"),
-        "{text}"
-    );
+    assert!(!text.contains("\"usage\":"), "{text}");
+    assert!(text.contains("\"finish_reason\":\"stop\""), "{text}");
     assert!(text.trim_end().ends_with("data: [DONE]"), "{text}");
 }
 

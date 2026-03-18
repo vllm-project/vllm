@@ -118,6 +118,7 @@ impl StructuredEventState {
     /// Close any open block and emit the terminal `Done` event.
     fn finish(
         &mut self,
+        prompt_token_count: u32,
         token_ids: Vec<u32>,
         finish_reason: Option<FinishReason>,
         stop_reason: Option<StopReason>,
@@ -127,6 +128,7 @@ impl StructuredEventState {
         self.close_open_tool_call(&mut events);
         events.push(ChatEvent::Done {
             message: self.message.clone(),
+            prompt_token_count,
             token_ids,
             finish_reason,
             stop_reason,
@@ -243,11 +245,13 @@ pub(super) async fn structured_chat_event_stream(stream: impl AssistantEventStre
                 }
             }
             AssistantEvent::Done {
+                prompt_token_count,
                 token_ids,
                 finish_reason,
                 stop_reason,
             } => {
-                for next in state.finish(token_ids, finish_reason, stop_reason) {
+                for next in state.finish(prompt_token_count, token_ids, finish_reason, stop_reason)
+                {
                     yield next;
                 }
             }

@@ -49,6 +49,7 @@ pub(crate) enum AssistantEvent {
     },
     #[subenum(ContentEvent)]
     Done {
+        prompt_token_count: u32,
         token_ids: Vec<u32>,
         finish_reason: Option<FinishReason>,
         stop_reason: Option<StopReason>,
@@ -66,11 +67,13 @@ impl ContentEvent {
                 delta,
             },
             DecodedTextEvent::Done {
+                prompt_token_count,
                 token_ids,
                 finish_reason,
                 stop_reason,
                 ..
             } => Self::Done {
+                prompt_token_count,
                 token_ids,
                 finish_reason,
                 stop_reason,

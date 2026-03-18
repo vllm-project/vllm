@@ -225,6 +225,7 @@ pub(crate) async fn tool_event_stream(
                 }
             }
             ContentEvent::Done {
+                prompt_token_count,
                 token_ids,
                 finish_reason,
                 stop_reason,
@@ -243,6 +244,7 @@ pub(crate) async fn tool_event_stream(
                 }
 
                 yield AssistantEvent::Done {
+                    prompt_token_count,
                     token_ids,
                     finish_reason,
                     stop_reason,
@@ -336,6 +338,7 @@ mod tests {
                 delta: "def".to_string(),
             }),
             Ok(ContentEvent::Done {
+                prompt_token_count: 3,
                 token_ids: vec![],
                 finish_reason: Some(FinishReason::Stop),
                 stop_reason: None,
@@ -368,6 +371,7 @@ mod tests {
                     delta: "def".to_string(),
                 },
                 AssistantEvent::Done {
+                    prompt_token_count: 3,
                     token_ids: vec![],
                     finish_reason: Some(FinishReason::Stop),
                     stop_reason: None,

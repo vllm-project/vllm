@@ -1,6 +1,5 @@
 use openai_protocol::chat::ChatCompletionRequest;
 use openai_protocol::common::{StringOrArray, ToolChoice, ToolChoiceValue};
-use tracing::warn;
 
 use crate::error::{ApiError, bail_invalid_request};
 
@@ -40,10 +39,6 @@ pub(super) fn validate_request_compat(
 
     if request.top_logprobs.unwrap_or(0) > 0 {
         bail_invalid_request!(param = "top_logprobs", "top_logprobs are not supported.");
-    }
-
-    if request.stream_options.is_some() {
-        warn!("stream_options are currently no-op.");
     }
 
     if request.response_format.is_some() {

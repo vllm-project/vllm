@@ -107,12 +107,14 @@ pub(crate) async fn reasoning_event_stream(
                 }
             }
             DecodedTextEvent::Done {
+                prompt_token_count,
                 token_ids,
                 finish_reason,
                 stop_reason,
                 ..
             } => {
                 yield ContentEvent::Done {
+                    prompt_token_count,
                     token_ids,
                     finish_reason,
                     stop_reason,
@@ -181,6 +183,7 @@ mod tests {
             }),
             Ok(DecodedTextEvent::Done {
                 text: "abcdef".to_string(),
+                prompt_token_count: 3,
                 token_ids: vec![],
                 finish_reason: Some(FinishReason::Stop),
                 stop_reason: None,
@@ -212,6 +215,7 @@ mod tests {
                     delta: "def".to_string(),
                 },
                 ContentEvent::Done {
+                    prompt_token_count: 3,
                     token_ids: vec![],
                     finish_reason: Some(FinishReason::Stop),
                     stop_reason: None,
