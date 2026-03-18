@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -15,7 +16,9 @@ from vllm.config import (
 from vllm.platforms import current_platform
 from vllm.platforms.cpu import CpuPlatform
 from vllm.platforms.cuda import CudaPlatform
+from vllm.platforms.interface import DeviceCapability
 from vllm.platforms.rocm import RocmPlatform
+from vllm.v1.attention.backend import AttentionType
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.selector import _cached_get_attn_backend, get_attn_backend
 
@@ -336,6 +339,37 @@ def test_auto_backend_selection_behavior():
 
     # Both should select the same backend
     assert backend_auto.get_name() == backend_none.get_name()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_encoder_decoder_prefers_flash_attn_on_cuda():
+    attention_config = AttentionConfig(backend=None)
+    cache_config = CacheConfig(block_size=16)
+    vllm_config = VllmConfig(
+        attention_config=attention_config, cache_config=cache_config
+    )
+    vllm_config.model_config = SimpleNamespace(
+        is_encoder_decoder=True,
+        is_hybrid=False,
+    )
+
+    with (
+        set_current_vllm_config(vllm_config),
+        patch("vllm.platforms.current_platform", CudaPlatform()),
+        patch.object(
+            CudaPlatform,
+            "get_device_capability",
+            return_value=DeviceCapability(10, 0),
+        ),
+    ):
+        backend = get_attn_backend(
+            64,
+            torch.float16,
+            None,
+            attn_type=AttentionType.DECODER,
+        )
+
+    assert backend.get_name() == "FLASH_ATTN"
 
 
 @pytest.mark.parametrize(

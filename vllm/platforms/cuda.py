@@ -299,6 +299,29 @@ class CudaPlatformBase(Platform):
                 f"with {config_str}. Reasons: {reasons_str}."
             )
 
+        # FlashInfer decoder attention is unstable for Whisper on CUDA in the
+        # encoder-decoder V2 path. Prefer FlashAttention when backend selection
+        # is automatic and FlashAttention is already known to be valid.
+        from vllm.config import get_current_vllm_config
+
+        vllm_config = get_current_vllm_config()
+        model_config = vllm_config.model_config
+        prefer_flash_attn = (
+            model_config is not None
+            and model_config.is_encoder_decoder
+            and attn_selector_config.attn_type == "decoder"
+            and not attn_selector_config.use_mla
+        )
+        if prefer_flash_attn:
+            for candidate_backend, _ in valid_backends_priorities:
+                if candidate_backend == AttentionBackendEnum.FLASH_ATTN:
+                    logger.info_once(
+                        "Preferring FLASH_ATTN over FLASHINFER for "
+                        "encoder-decoder decoder attention on CUDA.",
+                        scope="local",
+                    )
+                    return candidate_backend.get_path()
+
         # We have found some valid backends. Select the one with the
         # highest priority.
         sorted_indices = sorted(
