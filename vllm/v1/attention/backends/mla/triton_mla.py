@@ -187,7 +187,7 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
             self.scale,
             PAGE_SIZE,
             k_scale=layer._k_scale,
-            v_scale=layer._v_scale,
+            v_scale=layer._k_scale,
         )
 
         return o, lse
