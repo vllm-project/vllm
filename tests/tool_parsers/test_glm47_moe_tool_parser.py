@@ -13,7 +13,6 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionToolsParam,
     FunctionDefinition,
 )
-from vllm.entrypoints.openai.engine.protocol import FunctionCall, ToolCall
 from vllm.tokenizers import get_tokenizer
 from vllm.tool_parsers.glm47_moe_tool_parser import Glm47MoeModelToolParser
 
@@ -55,7 +54,6 @@ def mock_request() -> ChatCompletionRequest:
 
 
 class TestGlm47ExtractToolCalls:
-
     def test_no_tool_call(self, glm47_tool_parser, mock_request):
         out = "This is a plain response."
         r = glm47_tool_parser.extract_tool_calls(out, request=mock_request)
@@ -130,27 +128,41 @@ def _reset(parser):
 
 
 class TestGlm47Streaming:
-
     def test_no_args(self, glm47_tool_parser, mock_request):
         _reset(glm47_tool_parser)
         for chunk in ["<tool_call>", "get_current_date", "</tool_call>"]:
             glm47_tool_parser.extract_tool_calls_streaming(
-                previous_text="", current_text="", delta_text=chunk,
-                previous_token_ids=[], current_token_ids=[],
-                delta_token_ids=[], request=mock_request,
+                previous_text="",
+                current_text="",
+                delta_text=chunk,
+                previous_token_ids=[],
+                current_token_ids=[],
+                delta_token_ids=[],
+                request=mock_request,
             )
         assert len(glm47_tool_parser.prev_tool_call_arr) >= 1
 
     def test_with_args(self, glm47_tool_parser, mock_request):
         _reset(glm47_tool_parser)
+        # Split chunks so that the incremental string streaming path
+        # processes the value, its closing tag, and the tool-call closing
+        # tag in separate calls.
         for chunk in [
-            "<tool_call>", "get_weather\n",
-            "<arg_key>city</arg_key>", "<arg_value>Beijing</arg_value>",
+            "<tool_call>",
+            "get_weather\n",
+            "<arg_key>city</arg_key>",
+            "<arg_value>",
+            "Beijing",
+            "</arg_value>",
             "</tool_call>",
         ]:
             glm47_tool_parser.extract_tool_calls_streaming(
-                previous_text="", current_text="", delta_text=chunk,
-                previous_token_ids=[], current_token_ids=[],
-                delta_token_ids=[], request=mock_request,
+                previous_text="",
+                current_text="",
+                delta_text=chunk,
+                previous_token_ids=[],
+                current_token_ids=[],
+                delta_token_ids=[],
+                request=mock_request,
             )
         assert glm47_tool_parser.prev_tool_call_arr[0]["arguments"]["city"] == "Beijing"
