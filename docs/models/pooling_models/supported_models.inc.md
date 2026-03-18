@@ -264,4 +264,3 @@ If your model is not in the above list, we will try to automatically convert the
 If your model is not in the above list, we will try to automatically convert the model using [as_embedding_model][vllm.model_executor.models.adapters.as_embedding_model].
 
 --8<-- [end:token-embed-models]
-
