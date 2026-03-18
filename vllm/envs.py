@@ -112,6 +112,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION: bool = False
     VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: bool = False
     VLLM_ROCM_USE_AITER_TRITON_GEMM: bool = True
+    VLLM_ROCM_W8A8_TRITON_MAX_M: int = 16
     VLLM_ROCM_USE_SKINNY_GEMM: bool = True
     VLLM_ROCM_FP8_PADDING: bool = True
     VLLM_ROCM_MOE_PADDING: bool = True
@@ -985,6 +986,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # By default is enabled.
     "VLLM_ROCM_USE_AITER_TRITON_GEMM": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_TRITON_GEMM", "True").lower() in ("true", "1")
+    ),
+    # Max batch size (M) to use Triton kernels for FP8 w8a8 blockscale GEMMs.
+    # When M <= threshold, Triton is used (better for low concurrency).
+    # When M > threshold, CK is used (better for high concurrency).
+    # Set to 0 to always use CK. Default 16.
+    "VLLM_ROCM_W8A8_TRITON_MAX_M": lambda: int(
+        os.getenv("VLLM_ROCM_W8A8_TRITON_MAX_M", "16")
     ),
     # use rocm skinny gemms
     "VLLM_ROCM_USE_SKINNY_GEMM": lambda: (
