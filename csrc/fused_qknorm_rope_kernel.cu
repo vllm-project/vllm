@@ -811,14 +811,6 @@ void fused_qk_norm_rope(
     int64_t total_qk_units = num_tokens * (num_heads_q + num_heads_k);
     if (sm_version == 90) {
       if (head_dim >= 256) {
-        // head_dim=256: NTokenHeads uses 56 regs/thread vs 36 for base kernel,
-        // limiting occupancy to ~12% vs ~43% at small token counts (100 tokens,
-        // H100, num_heads_q=32, num_heads_k=4). Thresholds are 2x looser than
-        // head_dim=128; hpw capped at 4 (hpw=8 offers no benefit over hpw=4 at
-        // head_dim=256 and is much worse at small token counts).
-        // (benchmark: bench_headdim256.py, H100, num_heads_q=32, num_heads_k=4)
-        // hpw=2 wins at ~100 tokens (total_qk_units ~3600), hpw=4 wins at ~200
-        // tokens (~7200). Use 4096/8192 as round thresholds.
         if (total_qk_units < 4096LL) {
           token_heads_per_warp = 1;
         } else if (total_qk_units < 8192LL) {
@@ -827,8 +819,6 @@ void fused_qk_norm_rope(
           token_heads_per_warp = 4;
         }
       } else {
-        // head_dim=128: calibrated by bench_token_heads_crossover.py on H100,
-        // num_heads_q=32, num_heads_k=8.
         if (total_qk_units < 10240LL) {
           token_heads_per_warp = 1;
         } else if (total_qk_units < 40960LL) {
