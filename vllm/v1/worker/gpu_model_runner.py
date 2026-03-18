@@ -258,7 +258,20 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         This function blocks until the copy is finished.
         """
         max_gen_len = self.sampled_token_ids_cpu.shape[-1]
-        self.async_copy_ready_event.synchronize()
+        # Check if the event was recorded before synchronizing
+        # to avoid illegal memory access when tensors are already freed
+        try:
+            self.async_copy_ready_event.synchronize()
+        except torch.AcceleratorError as e:
+            # If synchronization fails due to illegal memory access,
+            # it may be because the tensors were freed prematurely.
+            # This can happen in speculative decoding with async scheduling.
+            # In this case, raise a more informative error.
+            raise torch.AcceleratorError(
+                f"CUDA error during async output copy synchronization: {e}. "
+                "This may be caused by premature tensor deallocation "
+                "in speculative decoding with async scheduling."
+            ) from e
 
         # Release the device tensors once the copy has completed.
         del self._logprobs_tensors
