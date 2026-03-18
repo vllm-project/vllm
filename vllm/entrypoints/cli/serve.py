@@ -66,16 +66,6 @@ class ServeSubcommand(CLISubcommand):
             # Default to 0 in headless mode (no API servers)
             args.api_server_count = 0
 
-        # Elastic EP currently only supports running with single API server.
-        if getattr(args, "enable_elastic_ep", False):
-            if args.api_server_count is not None and args.api_server_count > 1:
-                logger.warning(
-                    "Elastic EP only supports running with a single API server. "
-                    "Capping --api-server-count from %d to 1.",
-                    args.api_server_count,
-                )
-            args.api_server_count = 1
-
         # Detect LB mode for defaulting api_server_count.
         # External LB: --data-parallel-external-lb or --data-parallel-rank
         # Hybrid LB: --data-parallel-hybrid-lb or --data-parallel-start-rank
@@ -117,6 +107,15 @@ class ServeSubcommand(CLISubcommand):
                         "Defaulting api_server_count to data_parallel_size (%d).",
                         args.api_server_count,
                     )
+
+        # Elastic EP currently only supports running with at most one API server.
+        if getattr(args, "enable_elastic_ep", False) and args.api_server_count > 1:
+            logger.warning(
+                "Elastic EP only supports running with a single API server. "
+                "Capping the number of API servers from %d to 1.",
+                args.api_server_count,
+            )
+            args.api_server_count = 1
 
         if args.api_server_count < 1:
             run_headless(args)
