@@ -29,6 +29,7 @@ from vllm.entrypoints.serve.disagg.protocol import (
     GenerateResponse,
     GenerateResponseChoice,
 )
+from vllm.entrypoints.serve.render.serving import OpenAIServingRender
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.outputs import RequestOutput
@@ -45,6 +46,7 @@ class ServingTokens(OpenAIServing):
         self,
         engine_client: EngineClient,
         models: OpenAIServingModels,
+        openai_serving_render: OpenAIServingRender,
         *,
         request_logger: RequestLogger | None,
         force_no_detokenize: bool = False,
@@ -58,6 +60,7 @@ class ServingTokens(OpenAIServing):
             request_logger=request_logger,
             return_tokens_as_token_ids=return_tokens_as_token_ids,
         )
+        self.openai_serving_render = openai_serving_render
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
         self.enable_log_outputs = enable_log_outputs
         self.force_no_detokenize = force_no_detokenize
@@ -96,7 +99,7 @@ class ServingTokens(OpenAIServing):
         if raw_request:
             raw_request.state.request_metadata = request_metadata
 
-        engine_prompts = await self._preprocess_completion(
+        engine_prompts = await self.openai_serving_render.preprocess_completion(
             request,
             prompt_input=request.token_ids,
             prompt_embeds=None,
