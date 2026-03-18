@@ -31,7 +31,7 @@ from vllm.pooling_params import PoolingParams
 from vllm.renderers import renderer_from_config
 from vllm.renderers.inputs.preprocess import extract_prompt_components
 from vllm.sampling_params import RequestOutputKind, SamplingParams
-from vllm.tasks import SupportedTask
+from vllm.tasks import PoolingTask, SupportedTask
 from vllm.tokenizers import TokenizerLike
 from vllm.tracing import init_tracer
 from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
@@ -784,6 +784,7 @@ class AsyncLLM(EngineClient):
         priority: int = 0,
         tokenization_kwargs: dict[str, Any] | None = None,
         reasoning_ended: bool | None = None,
+        pooling_task: PoolingTask | None = None,
     ) -> AsyncGenerator[PoolingRequestOutput, None]:
         """
         Main function called by the API server to kick off a request
@@ -801,6 +802,17 @@ class AsyncLLM(EngineClient):
 
         q: RequestOutputCollector | None = None
         try:
+            if pooling_task is not None:
+                if pooling_params.task is None:
+                    pooling_params = pooling_params.clone()
+                    pooling_params.task = pooling_task
+                elif pooling_params.task != pooling_task:
+                    msg = (
+                        f"You cannot overwrite {pooling_params.task=!r} "
+                        f"with {pooling_task=!r}!"
+                    )
+                    raise ValueError(msg)
+
             q = await self.add_request(
                 request_id,
                 prompt,
