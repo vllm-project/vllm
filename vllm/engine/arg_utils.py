@@ -243,6 +243,17 @@ NEEDS_HELP = (
 )
 
 
+def _maybe_add_docs_url(cls: Any) -> str:
+    """Generate API docs URL for a vllm config class."""
+    if not cls.__module__.startswith("vllm.config"):
+        return ""
+
+    from vllm.version import __version__
+
+    version = f"v{__version__}" if "dev" not in __version__ else "latest"
+    return f"\n\nAPI docs: https://docs.vllm.ai/en/{version}/api/vllm/config/#vllm.config.{cls.__name__}"
+
+
 @functools.lru_cache(maxsize=30)
 def _compute_kwargs(cls: ConfigType) -> dict[str, dict[str, Any]]:
     # Save time only getting attr docs if we're generating help text
@@ -293,6 +304,7 @@ def _compute_kwargs(cls: ConfigType) -> dict[str, dict[str, Any]]:
                     raise argparse.ArgumentTypeError(repr(e)) from e
 
             kwargs[name]["type"] = parse_dataclass
+            kwargs[name]["help"] += _maybe_add_docs_url(dataclass_cls)
             kwargs[name]["help"] += f"\n\n{json_tip}"
         elif contains_type(type_hints, bool):
             # Creates --no-<name> and --<name> flags
