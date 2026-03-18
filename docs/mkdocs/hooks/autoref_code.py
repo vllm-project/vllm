@@ -145,7 +145,7 @@ def on_page_markdown(
 
     def _mask_block(match: re.Match) -> str:
         masks.append(match.group(0))
-        return rf"\uE000CODEBLOCK{len(masks) - 1}\uE000"
+        return f"\ue000CODEBLOCK{len(masks) - 1}\ue000"
 
     masked = _FENCED_BLOCK.sub(_mask_block, markdown)
 
@@ -162,6 +162,6 @@ def on_page_markdown(
 
     # Step 3: Restore masked code blocks.
     result = re.sub(
-        r"\uE000CODEBLOCK(\d+)\uE000", lambda m: masks[int(m.group(1))], result
+        r"\ue000CODEBLOCK(\d+)\ue000", lambda m: masks[int(m.group(1))], result
     )
     return result
