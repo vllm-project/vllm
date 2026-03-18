@@ -31,7 +31,7 @@ import torch
 from torch import nn
 from transformers import LlamaConfig
 
-from vllm.compilation.decorators import support_torch_compile
+from vllm.compilation.decorators import BATCH_SHAPE_ID, support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import SiluAndMul
@@ -341,10 +341,10 @@ class LlamaDecoderLayer(nn.Module):
     # TODO[#32068]: Investigate recompilation
     # mark_unbacked_dims={"input_ids": 0},
     dynamic_arg_dims={
-        "input_ids": {0: "b"},
-        "positions": {0: "b"},
-        "intermediate_tensors": {0: "b"},
-        "inputs_embeds": {0: "b"},
+        "input_ids": {0: BATCH_SHAPE_ID},
+        "positions": {0: BATCH_SHAPE_ID},
+        "intermediate_tensors": {0: BATCH_SHAPE_ID},
+        "inputs_embeds": {0: BATCH_SHAPE_ID},
     },
 )
 class LlamaModel(nn.Module, EagleModelMixin):
