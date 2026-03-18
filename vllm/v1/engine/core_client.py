@@ -12,6 +12,7 @@ from collections import defaultdict, deque
 from collections.abc import Awaitable, Callable, Sequence
 from concurrent.futures import Future
 from dataclasses import dataclass
+from multiprocessing.queues import Queue
 from threading import Thread
 from typing import Any, TypeAlias, TypeVar
 
@@ -46,7 +47,7 @@ from vllm.v1.engine import (
 from vllm.v1.engine.coordinator import DPCoordinator
 from vllm.v1.engine.core import EngineCore, EngineCoreProc
 from vllm.v1.engine.exceptions import EngineDeadError
-from vllm.v1.engine.tensor_ipc import TensorIpcSender
+from vllm.v1.engine.tensor_ipc import TensorIpcSender, encoder_request_context
 from vllm.v1.engine.utils import (
     CoreEngineActorManager,
     CoreEngineProcManager,
@@ -64,36 +65,6 @@ AnyFuture: TypeAlias = asyncio.Future[Any] | Future[Any]
 _R = TypeVar("_R")  # Return type for collective_rpc
 
 EngineIdentity = bytes
-
-
-@contextlib.contextmanager
-def encoder_request_context(
-    encoder: MsgpackEncoder,
-    engine: EngineIdentity,
-    request_type: EngineCoreRequestType,
-    request: Any,
-):
-    """Context manager for setting encoder state during request encoding.
-
-    When tensor IPC is in use, sets the request context (for ADD requests)
-    on entry and clears it on exit. The single IPC queue always targets
-    rank 0, so no per-request engine routing is needed.
-    When tensor IPC is not in use, does nothing so the hot path has no
-    extra ops.
-    """
-    sender = encoder.tensor_ipc_sender
-    if sender is None:
-        yield encoder
-        return
-
-    # Set request context if this is an ADD request with a request_id
-    if request_type == EngineCoreRequestType.ADD and hasattr(request, "request_id"):
-        sender.set_request_context(request.request_id)
-
-    try:
-        yield encoder
-    finally:
-        sender.set_request_context(None)
 
 
 class EngineCoreClient(ABC):
@@ -412,7 +383,7 @@ class BackgroundResources:
     output_queue_task: asyncio.Task | None = None
     stats_update_task: asyncio.Task | None = None
     shutdown_path: str | None = None
-    tensor_queues: list[Any] | None = None
+    tensor_queue: Queue | None = None
 
     # Set if any of the engines are dead. Here so that the output
     # processing threads can access it without holding a ref to the client.
@@ -581,14 +552,14 @@ class MPClient(EngineCoreClient):
             enable_input_socket_handover = parallel_config.enable_elastic_ep
 
             self.stats_update_address: str | None = None
-            tensor_queues: list[Any] | None = None
+            tensor_queue: Queue | None = None
             if client_addresses:
                 # Engines are managed externally to this client.
                 input_address = client_addresses["input_address"]
                 output_address = client_addresses["output_address"]
                 self.stats_update_address = client_addresses.get("stats_update_address")
                 # Tensor queues passed via client_addresses for multi-API-server case
-                tensor_queues = client_addresses.get("tensor_queues")  # type: ignore[assignment]
+                tensor_queue = client_addresses.get("tensor_queue")  # type: ignore[assignment]
                 self.input_socket = self.resources.input_socket = make_zmq_socket(
                     self.ctx,
                     input_address,
@@ -602,8 +573,6 @@ class MPClient(EngineCoreClient):
             else:
                 # Engines are managed by this client.
                 addresses = get_engine_zmq_addresses(vllm_config)
-                input_address = addresses.inputs[0]
-                output_address = addresses.outputs[0]
                 self.input_socket = self.resources.input_socket = make_zmq_socket(
                     self.ctx,
                     addresses.inputs[0],
@@ -620,12 +589,11 @@ class MPClient(EngineCoreClient):
                     executor_class,
                     log_stats,
                     addresses,
-                ) as (engine_manager, coordinator, addresses, _tensor_queues):
+                ) as (engine_manager, coordinator, addresses, tensor_queue):
                     self.resources.coordinator = coordinator
                     self.resources.engine_manager = engine_manager
 
                 self.stats_update_address = addresses.frontend_stats_publish_address
-                tensor_queues = _tensor_queues
                 if coordinator is not None:
                     assert self.stats_update_address == (
                         coordinator.get_stats_publish_address()
@@ -638,14 +606,14 @@ class MPClient(EngineCoreClient):
                 mm_tensor_ipc = vllm_config.model_config.multimodal_config.mm_tensor_ipc
 
             # Create TensorIpcSender when IPC is enabled and queues available
-            tensor_ipc_sender: TensorIpcSender | None = None
-            if mm_tensor_ipc == "torch_shm" and tensor_queues:
-                tensor_ipc_sender = TensorIpcSender(tensor_queues[0])
+            self.tensor_ipc_sender: TensorIpcSender | None = None
+            if mm_tensor_ipc == "torch_shm" and tensor_queue:
+                self.tensor_ipc_sender = TensorIpcSender(tensor_queue)
 
-            self.encoder = MsgpackEncoder(tensor_ipc_sender=tensor_ipc_sender)
+            self.encoder = MsgpackEncoder(tensor_ipc_sender=self.tensor_ipc_sender)
             self.decoder = MsgpackDecoder(EngineCoreOutputs)
             # Store tensor queues for routing
-            self.resources.tensor_queues = tensor_queues
+            self.resources.tensor_queue = tensor_queue
             dp_size = parallel_config.data_parallel_size
             dp_rank = parallel_config.data_parallel_index
             dp_local_size = parallel_config.data_parallel_size_local
@@ -876,11 +844,8 @@ class SyncMPClient(MPClient):
     def _send_input(self, request_type: EngineCoreRequestType, request: Any):
         self.ensure_alive()
         self.free_pending_messages()
-
         # (Identity, RequestType, SerializedRequest)
-        with encoder_request_context(
-            self.encoder, self.core_engine, request_type, request
-        ):
+        with encoder_request_context(self.tensor_ipc_sender, request_type, request):
             msg = (self.core_engine, request_type.value, *self.encoder.encode(request))
 
         if len(msg) <= 3:
@@ -1089,7 +1054,7 @@ class AsyncMPClient(MPClient):
         if engine is None:
             engine = self.core_engine
 
-        with encoder_request_context(self.encoder, engine, request_type, request):
+        with encoder_request_context(self.tensor_ipc_sender, request_type, request):
             message = (request_type.value, *self.encoder.encode(request))
 
         return self._send_input_message(message, engine, request)

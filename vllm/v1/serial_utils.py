@@ -178,12 +178,6 @@ class MsgpackEncoder:
         sender = self.tensor_ipc_sender
         return None if sender is None else sender.current_request_id
 
-    def set_request_context(self, request_id: str | None) -> None:
-        """Set the current request ID on the active tensor IPC transport."""
-        sender = self.tensor_ipc_sender
-        if sender is not None:
-            sender.set_request_context(request_id)
-
     def encode(self, obj: Any) -> Sequence[bytestr]:
         try:
             self.aux_buffers = bufs = [b""]
@@ -278,23 +272,10 @@ class MsgpackEncoder:
     ):
         assert self.aux_buffers is not None
 
-        # Check if we should use IPC for this tensor
+        # Check if we should use torch_shm IPC for this tensor
         sender = self.tensor_ipc_sender
-        if sender is not None:
-            try:
-                return sender.send_tensor(obj)
-            except Exception as e:
-                logger.warning(
-                    "Failed to send tensor via IPC queue: %s. "
-                    "Falling back to standard serialization.",
-                    e,
-                )
-                # Fall through to standard serialization
-
-        # Standard serialization fallback
-        # For CUDA tensors without IPC support, we need to move to CPU first
-        if obj.is_cuda:
-            obj = obj.cpu()
+        if sender and (tensor_handle := sender.send_tensor(obj)) is not None:
+            return tensor_handle
 
         # view the tensor as a contiguous 1D array of bytes
         arr_data = tensor_data(obj)
@@ -437,10 +418,6 @@ class MsgpackDecoder:
         return arr.reshape(shape)
 
     def _decode_tensor(self, arr: Any) -> torch.Tensor:
-        receiver = self.tensor_ipc_receiver
-        if receiver is not None and receiver.is_handle_like(arr):
-            return receiver.recv_tensor(arr)
-
         # Standard tensor decoding
         dtype, shape, data = arr
         is_aux = isinstance(data, int)

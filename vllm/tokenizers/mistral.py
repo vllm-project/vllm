@@ -7,9 +7,12 @@ from typing import TYPE_CHECKING, Any, cast, overload
 from mistral_common.protocol.instruct.request import (
     ChatCompletionRequest as MistralChatCompletionRequest,
 )
-from mistral_common.protocol.instruct.request import (
-    ReasoningEffort,
-)
+
+try:
+    from mistral_common.protocol.instruct.request import ReasoningEffort
+except ImportError:
+    # ReasoningEffort was added in a newer mistral_common; support older versions
+    ReasoningEffort = None  # type: ignore[misc, assignment]
 from mistral_common.protocol.instruct.tool_calls import Function, Tool
 from mistral_common.protocol.instruct.validator import ValidationMode
 from mistral_common.tokens.tokenizers.base import (
@@ -195,8 +198,10 @@ def validate_request_params(request: "ChatCompletionRequest"):
     if request.chat_template is not None or request.chat_template_kwargs is not None:
         raise ValueError("chat_template is not supported for Mistral tokenizers.")
 
-    if request.reasoning_effort and request.reasoning_effort not in list(
-        ReasoningEffort
+    if (
+        ReasoningEffort is not None
+        and request.reasoning_effort
+        and request.reasoning_effort not in list(ReasoningEffort)
     ):
         raise ValueError(
             f"reasoning_effort={request.reasoning_effort} is not supported by "

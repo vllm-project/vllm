@@ -10,6 +10,7 @@ state such as request association, handle generation, queue routing, buffering,
 and cleanup lives here.
 """
 
+import contextlib
 import dataclasses
 import threading
 from multiprocessing.queues import Queue as MPQueue
@@ -18,6 +19,7 @@ from typing import Any
 import torch
 
 from vllm.logger import init_logger
+from vllm.v1.engine import EngineCoreRequestType
 from vllm.v1.serial_utils import TensorIpcHandle
 
 logger = init_logger(__name__)
@@ -70,43 +72,51 @@ class TensorIpcSender:
         tensor: torch.Tensor,
         request_id: str | None = None,
         tensor_id: str | None = None,
-    ) -> TensorIpcHandle:
-        """Send tensor via queue, return its handle."""
-        if request_id is None:
-            request_id = self._current_request_id
-        if tensor_id is None:
-            tensor_id = f"{id(self)}_{self._tensor_id_counter}"
-            self._tensor_id_counter += 1
+    ) -> TensorIpcHandle | None:
+        """Send tensor via queue, return its handle. Returns None if failed."""
+        try:
+            if request_id is None:
+                request_id = self._current_request_id
+            if tensor_id is None:
+                tensor_id = f"{id(self)}_{self._tensor_id_counter}"
+                self._tensor_id_counter += 1
 
-        # Move tensor to shared memory for IPC
-        # This is required for proper inter-process communication
-        if not tensor.is_shared():
-            tensor = tensor.share_memory_()
+            # Move tensor to shared memory for IPC
+            # This is required for proper inter-process communication
+            if not tensor.is_shared():
+                tensor = tensor.share_memory_()
 
-        ipc_data = TensorIpcData(
-            request_id=request_id,
-            tensor_id=tensor_id,
-            tensor=tensor,
-        )
-        # Use a timeout to avoid blocking indefinitely
-        self.queue.put(ipc_data, timeout=10.0)
+            ipc_data = TensorIpcData(
+                request_id=request_id,
+                tensor_id=tensor_id,
+                tensor=tensor,
+            )
+            # Use a timeout to avoid blocking indefinitely
+            self.queue.put(ipc_data, timeout=10.0)
 
-        logger.debug(
-            "Sent tensor %s for request %s (shape=%s, device=%s) "
-            "via IPC queue (shared memory)",
-            tensor_id,
-            request_id,
-            tensor.shape,
-            tensor.device,
-        )
+            logger.debug(
+                "Sent tensor %s for request %s (shape=%s, device=%s) "
+                "via IPC queue (shared memory)",
+                tensor_id,
+                request_id,
+                tensor.shape,
+                tensor.device,
+            )
 
-        return TensorIpcHandle(
-            request_id=request_id,
-            tensor_id=tensor_id,
-            shape=tuple(tensor.shape),
-            dtype=str(tensor.dtype).removeprefix("torch."),
-            device=str(tensor.device),
-        )
+            return TensorIpcHandle(
+                request_id=request_id,
+                tensor_id=tensor_id,
+                shape=tuple(tensor.shape),
+                dtype=str(tensor.dtype).removeprefix("torch."),
+                device=str(tensor.device),
+            )
+        except Exception as e:
+            logger.warning(
+                "Failed to send tensor via IPC queue: %s. "
+                "Falling back to standard serialization.",
+                e,
+            )
+            return None
 
 
 class TensorIpcReceiver:
@@ -221,3 +231,28 @@ class TensorIpcReceiver:
                     )
 
             return removed_count
+
+
+@contextlib.contextmanager
+def encoder_request_context(
+    sender: TensorIpcSender | None,
+    request_type: EngineCoreRequestType,
+    request: Any,
+):
+    """Context manager for setting request state during request encoding.
+
+    When tensor IPC is in use, sets the request context on entry and
+    clears it on exit.
+    """
+    if sender is None:
+        yield
+        return
+
+    # Set request context if this is an ADD request with a request_id
+    if request_type == EngineCoreRequestType.ADD and hasattr(request, "request_id"):
+        sender.set_request_context(request.request_id)
+
+    try:
+        yield
+    finally:
+        sender.set_request_context(None)
