@@ -191,7 +191,7 @@ curl -s http://localhost:8000/pooling -H "Content-Type: application/json" -d '{
 - Multi-vector retrieval: [examples/pooling/token_embed/colqwen3_token_embed_online.py](../../../examples/pooling/token_embed/colqwen3_token_embed_online.py)
 - Reranking (text + multi-modal): [examples/pooling/score/colqwen3_rerank_online.py](../../../examples/pooling/score/colqwen3_rerank_online.py)
 
-### ColQwen3.5 Multi-Modal Late Interaction Models
+## ColQwen3.5 Multi-Modal Late Interaction Models
 
 ColQwen3.5 is based on [ColPali](https://arxiv.org/abs/2407.01449), extending ColBERT's late interaction approach to **multi-modal** inputs. It uses the Qwen3.5 hybrid backbone (linear + full attention) and produces per-token L2-normalized vectors for MaxSim scoring.
 
