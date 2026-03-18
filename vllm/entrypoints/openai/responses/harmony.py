@@ -138,8 +138,12 @@ def _parse_chat_format_message(chat_msg: dict) -> list[Message]:
 def response_input_to_harmony(
     response_msg: ResponseInputOutputItem,
     prev_responses: list[ResponseOutputItem | ResponseReasoningItem],
-) -> Message:
-    """Convert a single ResponseInputOutputItem into a Harmony Message."""
+) -> Message | None:
+    """Convert a single ResponseInputOutputItem into a Harmony Message.
+
+    Returns None for reasoning items with empty or absent content so
+    the caller can skip them.
+    """
     if not isinstance(response_msg, dict):
         response_msg = response_msg.model_dump()
     if "type" not in response_msg or response_msg["type"] == "message":
@@ -172,9 +176,13 @@ def response_input_to_harmony(
             response_msg["output"],
         )
     elif response_msg["type"] == "reasoning":
-        content = response_msg["content"]
-        assert len(content) == 1
-        msg = Message.from_role_and_content(Role.ASSISTANT, content[0]["text"])
+        content = response_msg.get("content")
+        if content and len(content) >= 1:
+            reasoning_text = "\n".join(item["text"] for item in content)
+            msg = Message.from_role_and_content(Role.ASSISTANT, reasoning_text)
+            msg = msg.with_channel("analysis")
+        else:
+            return None
     elif response_msg["type"] == "function_call":
         msg = Message.from_role_and_content(Role.ASSISTANT, response_msg["arguments"])
         msg = msg.with_channel("commentary")

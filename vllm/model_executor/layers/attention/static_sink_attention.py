@@ -190,7 +190,7 @@ class StaticSinkAttention(Attention, CustomOp):
         sink_kv_slot_mapping = torch.arange(
             self.block_size,
             self.sink_len + self.block_size,
-            device=torch.cuda.current_device(),
+            device=torch.accelerator.current_device_index(),
             dtype=torch.long,
         )
         triton_reshape_and_cache_flash_diffkv(
