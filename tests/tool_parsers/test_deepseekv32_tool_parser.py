@@ -111,70 +111,6 @@ class TestConvertParamValue:
 
 
 # ---------------------------------------------------------------------------
-# Tests: DeepSeekV32ToolParser._compute_current_args_json
-# ---------------------------------------------------------------------------
-
-
-class TestComputeCurrentArgsJson:
-    @pytest.fixture
-    def parser(self):
-        return make_parser()
-
-    def _tool_text(self, func_name: str, params: dict[str, str], complete=True) -> str:
-        param_strs = "".join(
-            f'{PARAM_START}{k}" string="true">{v}{PARAM_END}' for k, v in params.items()
-        )
-        text = f'{INV_START}{func_name}">\n{param_strs}\n'
-        if complete:
-            text += INV_END
-        return text
-
-    def test_no_params_incomplete(self, parser):
-        parser.current_function_name = "fn"
-        tool_text = f'{INV_START}fn">\n'
-        assert parser._compute_current_args_json(tool_text, None) == ""
-
-    def test_no_params_complete(self, parser):
-        parser.current_function_name = "fn"
-        tool_text = f'{INV_START}fn">\n{INV_END}'
-        assert parser._compute_current_args_json(tool_text, None) == "{}"
-
-    def test_single_param_incomplete(self, parser):
-        parser.current_function_name = "get_weather"
-        tool_text = self._tool_text("get_weather", {"location": "SF"}, complete=False)
-        result = parser._compute_current_args_json(tool_text, None)
-        assert result == '{"location": "SF"'
-
-    def test_single_param_complete(self, parser):
-        parser.current_function_name = "get_weather"
-        tool_text = self._tool_text("get_weather", {"location": "SF"}, complete=True)
-        result = parser._compute_current_args_json(tool_text, None)
-        assert json.loads(result) == {"location": "SF"}
-
-    def test_type_conversion_via_schema(self, parser):
-        parser.current_function_name = "fn"
-        tool = make_tool_param(
-            "fn",
-            {
-                "type": "object",
-                "properties": {"count": {"type": "integer"}},
-            },
-        )
-        request = make_request(tools=[tool])
-        tool_text = self._tool_text("fn", {"count": "5"}, complete=True)
-        result = parser._compute_current_args_json(tool_text, request)
-        assert json.loads(result) == {"count": 5}
-
-    def test_multiple_params_complete(self, parser):
-        parser.current_function_name = "search"
-        tool_text = self._tool_text(
-            "search", {"query": "vllm", "page": "1"}, complete=True
-        )
-        result = parser._compute_current_args_json(tool_text, None)
-        assert json.loads(result) == {"query": "vllm", "page": "1"}
-
-
-# ---------------------------------------------------------------------------
 # Tests: extract_tool_calls (non-streaming)
 # ---------------------------------------------------------------------------
 
@@ -390,3 +326,88 @@ class TestExtractToolCallsStreaming:
         # Second stream - should produce identical results
         deltas2 = self._stream(parser, full_text)
         assert json.loads(self._reconstruct_args(deltas2)) == {"k": "v"}
+
+    def test_empty_arguments_streaming(self, parser):
+        """Invoke block with zero parameters should produce empty JSON."""
+        full_text = f'{FC_START}\n{INV_START}get_time">\n{INV_END}\n{FC_END}'
+        deltas = self._stream(parser, full_text)
+        args_str = self._reconstruct_args(deltas)
+        assert json.loads(args_str) == {}
+
+    def test_unique_tool_call_ids(self, parser):
+        """Each tool call in a parallel stream must get a distinct id."""
+        full_text = (
+            f"{FC_START}\n"
+            f'{INV_START}fn_a">\n'
+            f'{PARAM_START}x" string="true">1{PARAM_END}\n'
+            f"{INV_END}\n"
+            f'{INV_START}fn_b">\n'
+            f'{PARAM_START}y" string="true">2{PARAM_END}\n'
+            f"{INV_END}\n"
+            f"{FC_END}"
+        )
+        deltas = self._stream(parser, full_text)
+        ids = [
+            tc.id
+            for d in deltas
+            if d.tool_calls
+            for tc in d.tool_calls
+            if tc.id is not None
+        ]
+        assert len(ids) == 2
+        assert ids[0] != ids[1]
+
+    def test_eos_after_tool_calls(self, parser):
+        """EOS token (empty delta_text, non-empty delta_token_ids) returns
+        a non-None DeltaMessage so the serving framework can finalize."""
+        full_text = build_tool_call("fn", {"k": "v"})
+        # Drive through the full text first
+        deltas = self._stream(parser, full_text)
+        assert any(d.tool_calls for d in deltas)
+        # Now simulate EOS: empty delta_text, but token ids present
+        prev = full_text
+        result = parser.extract_tool_calls_streaming(
+            previous_text=prev,
+            current_text=prev,
+            delta_text="",
+            previous_token_ids=[],
+            current_token_ids=[],
+            delta_token_ids=[2],  # EOS token id
+            request=make_request(),
+        )
+        assert result is not None
+
+    def test_streaming_matches_non_streaming(self, parser):
+        """Streaming and non-streaming must produce the same result."""
+        full_text = build_tool_call(
+            "get_weather", {"location": "SF", "date": "2024-01-16"}
+        )
+        # Non-streaming
+        non_stream = parser.extract_tool_calls(full_text, None)
+        assert non_stream.tools_called
+        ns_name = non_stream.tool_calls[0].function.name
+        ns_args = json.loads(non_stream.tool_calls[0].function.arguments)
+        # Streaming
+        deltas = self._stream(parser, full_text)
+        s_names = [
+            tc.function.name
+            for d in deltas
+            if d.tool_calls
+            for tc in d.tool_calls
+            if tc.function and tc.function.name
+        ]
+        s_args = json.loads(self._reconstruct_args(deltas))
+        assert s_names[0] == ns_name
+        assert s_args == ns_args
+
+    def test_no_emission_while_incomplete(self, parser):
+        """No tool calls should be emitted until an invoke block completes."""
+        # Stream only a partial invoke (no closing tag)
+        partial_text = (
+            f"{FC_START}\n"
+            f'{INV_START}fn">\n'
+            f'{PARAM_START}k" string="true">val{PARAM_END}\n'
+        )
+        deltas = self._stream(parser, partial_text)
+        # Should have no tool call deltas yet
+        assert all(not d.tool_calls for d in deltas)
