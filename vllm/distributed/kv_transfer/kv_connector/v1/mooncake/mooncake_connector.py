@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
+import logging
 import threading
 import time
 from collections import defaultdict
@@ -175,37 +176,46 @@ def _validate_asymmetric_region_lengths(
     local_tp_size: int,
     remote_tp_size: int,
     producer_cache_replicated: bool,
-) -> None:
+) -> str | None:
+    if len(local_regions) != len(remote_regions):
+        return (
+            "Mooncake asymmetric TP requires matching KV region counts between "
+            "producer and consumer."
+        )
+
     if producer_cache_replicated:
-        return
+        return None
 
     tp_ratio = _get_tp_ratio(local_tp_size, remote_tp_size)
     for idx, (local_region, remote_region) in enumerate(
         zip(local_regions, remote_regions)
     ):
         if tp_ratio == 1:
-            assert local_region.kv_block_len == remote_region.kv_block_len, (
-                "Mooncake KV region length mismatch for homogeneous TP at "
-                f"region {idx}: local={local_region.kv_block_len}, "
-                f"remote={remote_region.kv_block_len}."
-            )
+            if local_region.kv_block_len != remote_region.kv_block_len:
+                return (
+                    "Mooncake KV region length mismatch for homogeneous TP at "
+                    f"region {idx}: local={local_region.kv_block_len}, "
+                    f"remote={remote_region.kv_block_len}."
+                )
         elif tp_ratio > 0:
-            assert remote_region.kv_block_len == local_region.kv_block_len * tp_ratio, (
-                "Mooncake destination KV region length does not match the "
-                "producer TP ratio at region "
-                f"{idx}: local={local_region.kv_block_len}, "
-                f"remote={remote_region.kv_block_len}, tp_ratio={tp_ratio}."
-            )
+            if remote_region.kv_block_len != local_region.kv_block_len * tp_ratio:
+                return (
+                    "Mooncake destination KV region length does not match the "
+                    "producer TP ratio at region "
+                    f"{idx}: local={local_region.kv_block_len}, "
+                    f"remote={remote_region.kv_block_len}, tp_ratio={tp_ratio}."
+                )
         else:
             ratio_abs = -tp_ratio
-            assert (
-                local_region.kv_block_len == remote_region.kv_block_len * ratio_abs
-            ), (
-                "Mooncake source KV region length does not match the consumer "
-                "TP ratio at region "
-                f"{idx}: local={local_region.kv_block_len}, "
-                f"remote={remote_region.kv_block_len}, tp_ratio={tp_ratio}."
-            )
+            if local_region.kv_block_len != remote_region.kv_block_len * ratio_abs:
+                return (
+                    "Mooncake source KV region length does not match the "
+                    "consumer TP ratio at region "
+                    f"{idx}: local={local_region.kv_block_len}, "
+                    f"remote={remote_region.kv_block_len}, tp_ratio={tp_ratio}."
+                )
+
+    return None
 
 
 def _get_debug_head_range(
@@ -677,7 +687,6 @@ class MooncakeConnectorWorker:
         self.tp_rank = get_tensor_model_parallel_rank()
         self.tp_size = get_tensor_model_parallel_world_size()
         self.num_blocks = 0
-        self.block_len = 0
         self.block_len_per_layer: list[int] = []
         self.seen_base_addresses: list[int] = []
 
@@ -892,6 +901,26 @@ class MooncakeConnectorWorker:
             )
             await sock.send_multipart((identity, self._encoder.encode(response)))
             return
+        local_regions = self._get_transfer_regions(
+            self.kv_caches_base_addr, self.block_len_per_layer
+        )
+        remote_regions = self._get_transfer_regions(
+            meta.kv_caches_base_addr, meta.block_lens
+        )
+        validation_err = _validate_asymmetric_region_lengths(
+            local_regions=local_regions,
+            remote_regions=remote_regions,
+            local_tp_size=self.tp_size,
+            remote_tp_size=meta.remote_tp_size,
+            producer_cache_replicated=self._producer_cache_is_replicated(),
+        )
+        if validation_err is not None:
+            response = MooncakeXferResponse(
+                status=MooncakeXferResponseStatus.ERROR,
+                err_msg=validation_err,
+            )
+            await sock.send_multipart((identity, self._encoder.encode(response)))
+            return
         for d_req_id, (transfer_id, _) in meta.req_blocks.items():
             if transfer_id not in self.reqs_need_send:
                 # This req is not enqueued in P side yet, create it here.
@@ -960,17 +989,24 @@ class MooncakeConnectorWorker:
                         "Request %s expired before sending on P side.", d_req_id
                     )
 
-            src_ptrs, dst_ptrs, lengths, err_reqs = await self._build_transfer_params(
-                ready_reqs, meta
+            (
+                src_ptrs,
+                dst_ptrs,
+                lengths,
+                err_reqs,
+                err_msg,
+            ) = await self._build_transfer_params(
+                ready_reqs,
+                meta,
+                local_regions,
+                remote_regions,
             )
-
-            if err_reqs:
-                response = MooncakeXferResponse(
-                    status=response_status,
-                    err_reqs=err_reqs,
-                    err_msg="P num blocks less than D",
-                )
-                await sock.send_multipart((identity, self._encoder.encode(response)))
+            err_req_set = set(err_reqs)
+            ok_ready_reqs = [
+                (d_req_id, send_meta)
+                for d_req_id, send_meta in ready_reqs
+                if d_req_id not in err_req_set
+            ]
 
             if src_ptrs:
                 remote_session = f"{meta.remote_hostname}:{meta.remote_port}"
@@ -984,22 +1020,19 @@ class MooncakeConnectorWorker:
                 )
 
                 if ret_value != 0:
-                    err_reqs = []
-                    for d_req_id, send_meta in ready_reqs:
-                        send_meta.sending -= 1
+                    transfer_err_msg = f"Mooncake transfer engine returned {ret_value}"
+                    err_msg = (
+                        transfer_err_msg
+                        if err_msg is None
+                        else f"{err_msg}; {transfer_err_msg}"
+                    )
+                    err_reqs = list(err_reqs)
+                    for d_req_id, _ in ok_ready_reqs:
                         err_reqs.append(d_req_id)
-                    # Do best effort to transfer the remaining reqs.
-                    response = MooncakeXferResponse(
-                        status=response_status,
-                        err_reqs=err_reqs,
-                        err_msg=f"Mooncake transfer engine returned {ret_value}",
-                    )
-                    await sock.send_multipart(
-                        (identity, self._encoder.encode(response))
-                    )
-                    continue
+                        err_req_set.add(d_req_id)
+                    ok_ready_reqs = []
 
-            for d_req_id, send_meta in ready_reqs:
+            for d_req_id, send_meta in ok_ready_reqs:
                 # TODO: for heterogeneous TP (one P pairs to multiple D),
                 # we need to check whether all headers are sent.
                 # If not, we should set expire_time to normal and skip the below.
@@ -1011,9 +1044,15 @@ class MooncakeConnectorWorker:
                 ):
                     self.finished_sending_reqs.add(send_meta.p_req_id)
 
+            for d_req_id, send_meta in ready_reqs:
+                if d_req_id in err_req_set:
+                    send_meta.sending -= 1
+
             response = MooncakeXferResponse(
                 status=response_status,
-                ok_reqs=[d_req_id for d_req_id, _ in ready_reqs],
+                ok_reqs=[d_req_id for d_req_id, _ in ok_ready_reqs] or None,
+                err_reqs=err_reqs or None,
+                err_msg=err_msg,
             )
             await sock.send_multipart((identity, self._encoder.encode(response)))
 
@@ -1031,29 +1070,15 @@ class MooncakeConnectorWorker:
         self,
         ready_reqs: list[tuple[ReqId, SendBlockMeta]],
         agent_meta: MooncakeXferMetadata,
-    ) -> tuple[list[int], list[int], list[int], list[ReqId]]:
+        local_regions: list[TransferRegion],
+        remote_regions: list[TransferRegion],
+    ) -> tuple[list[int], list[int], list[int], list[ReqId], str | None]:
         src_ptrs = []
         dst_ptrs = []
         lengths = []
         err_reqs: list[ReqId] = []
+        err_msg: str | None = None
         remote_session = f"{agent_meta.remote_hostname}:{agent_meta.remote_port}"
-        local_regions = self._get_transfer_regions(
-            self.kv_caches_base_addr, self.block_len_per_layer
-        )
-        remote_regions = self._get_transfer_regions(
-            agent_meta.kv_caches_base_addr, agent_meta.block_lens
-        )
-        assert len(local_regions) == len(remote_regions), (
-            "Mooncake asymmetric TP requires matching KV region counts between "
-            "producer and consumer."
-        )
-        _validate_asymmetric_region_lengths(
-            local_regions=local_regions,
-            remote_regions=remote_regions,
-            local_tp_size=self.tp_size,
-            remote_tp_size=agent_meta.remote_tp_size,
-            producer_cache_replicated=self._producer_cache_is_replicated(),
-        )
 
         for d_req_id, send_meta in ready_reqs:
             _, remote_block_ids = agent_meta.req_blocks[d_req_id]
@@ -1072,6 +1097,8 @@ class MooncakeConnectorWorker:
                     num_remote_blocks,
                 )
                 err_reqs.append(d_req_id)
+                if err_msg is None:
+                    err_msg = "P num blocks less than D"
                 continue
             if num_local_blocks > num_remote_blocks:
                 local_block_ids = local_block_ids[-num_remote_blocks:]
@@ -1099,6 +1126,11 @@ class MooncakeConnectorWorker:
                     )
                 )
                 if not should_transfer:
+                    # Replicated KV cache: only one producer rank in the TP group
+                    # needs to send the actual bytes for this paired decoder rank.
+                    # TODO: Account for replicated producer KV in
+                    # get_target_remote_ranks() so we can avoid sending
+                    # unnecessary ZMQ requests and remove this branch.
                     continue
 
                 assert src_region_offset + transfer_len <= local_region.kv_block_len, (
@@ -1108,16 +1140,17 @@ class MooncakeConnectorWorker:
                     "Computed destination transfer region exceeds remote KV block size."
                 )
 
+                can_coalesce = _can_coalesce_block_transfers(
+                    local_region_block_len=local_region.block_len,
+                    remote_region_block_len=remote_region.block_len,
+                    src_region_offset=src_region_offset,
+                    dst_region_offset=dst_region_offset,
+                    transfer_len=transfer_len,
+                )
+
                 for group_local_block_id, group_remote_block_id in zip(
                     group_local_block_ids, group_remote_block_ids
                 ):
-                    can_coalesce = _can_coalesce_block_transfers(
-                        local_region_block_len=local_region.block_len,
-                        remote_region_block_len=remote_region.block_len,
-                        src_region_offset=src_region_offset,
-                        dst_region_offset=dst_region_offset,
-                        transfer_len=transfer_len,
-                    )
                     if can_coalesce:
                         src_ptrs.append(
                             local_region.base_addr
@@ -1161,13 +1194,7 @@ class MooncakeConnectorWorker:
                         src_region_offset,
                         dst_region_offset,
                         transfer_len,
-                        _can_coalesce_block_transfers(
-                            local_region_block_len=local_region.block_len,
-                            remote_region_block_len=remote_region.block_len,
-                            src_region_offset=src_region_offset,
-                            dst_region_offset=dst_region_offset,
-                            transfer_len=transfer_len,
-                        ),
+                        can_coalesce,
                     )
 
             logger.debug(
@@ -1177,7 +1204,7 @@ class MooncakeConnectorWorker:
                 remote_session,
             )
 
-        return src_ptrs, dst_ptrs, lengths, err_reqs
+        return src_ptrs, dst_ptrs, lengths, err_reqs, err_msg
 
     def _send_blocks(
         self,
@@ -1255,13 +1282,10 @@ class MooncakeConnectorWorker:
 
         assert tensor_size_bytes is not None
         assert self.num_blocks != 0
-        assert tensor_size_bytes % self.num_blocks == 0
-        self.block_len = tensor_size_bytes // self.num_blocks
         self.device_kv_caches = kv_caches
         logger.debug(
-            "registered num_blocks=%d block_len=%d block_lens=%s",
+            "registered num_blocks=%d block_lens=%s",
             self.num_blocks,
-            self.block_len,
             self.block_len_per_layer,
         )
 
@@ -1582,7 +1606,7 @@ class MooncakeConnectorWorker:
     def _log_debug_cache_registration(
         self, layer_name: str, cache: torch.Tensor
     ) -> None:
-        if not logger.isEnabledFor(10):
+        if not logger.isEnabledFor(logging.DEBUG):
             return
         logger.debug(
             "Mooncake register view layer=%s shape=%s stride=%s "
@@ -1605,7 +1629,7 @@ class MooncakeConnectorWorker:
         remote_tp_rank: int | None = None,
         remote_tp_size: int | None = None,
     ) -> None:
-        if not logger.isEnabledFor(10):
+        if not logger.isEnabledFor(logging.DEBUG):
             return
         if self.use_mla or not self.kv_topo.split_k_and_v:
             return
