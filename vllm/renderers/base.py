@@ -697,12 +697,20 @@ class BaseRenderer(ABC, Generic[_T]):
         enc_prompt = prompt["encoder_prompt"]
         dec_prompt = prompt["decoder_prompt"]
 
+        skip_decoder_start_token = False
+        if self.mm_processor is not None:
+            from vllm.multimodal.processing import EncDecMultiModalProcessor
+
+            if isinstance(self.mm_processor, EncDecMultiModalProcessor):
+                skip_decoder_start_token = self.mm_processor.skip_decoder_start_token
+
         return build_enc_dec_inputs(
             encoder_inputs=self._process_singleton(enc_prompt),
             decoder_inputs=(
                 None if dec_prompt is None else self._process_singleton(dec_prompt)
             ),
             decoder_start_token_id=self.get_dec_start_token_id(),
+            skip_decoder_start_token=skip_decoder_start_token,
         )
 
     def process_for_engine(
