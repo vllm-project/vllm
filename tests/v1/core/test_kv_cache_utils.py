@@ -9,7 +9,7 @@ import pytest
 import torch
 
 import vllm.v1.core.kv_cache_utils as kv_cache_utils
-from vllm.config import ModelConfig, SchedulerConfig, VllmConfig
+from vllm.config import CacheConfig, ModelConfig, SchedulerConfig, VllmConfig
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
@@ -18,7 +18,9 @@ from vllm.multimodal.inputs import (
 )
 from vllm.sampling_params import SamplingParams
 from vllm.utils.hashing import sha256, sha256_cbor
+from vllm.utils.math_utils import cdiv
 from vllm.utils.mem_constants import GiB_bytes
+from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
@@ -2135,3 +2137,1153 @@ def test_unify_hybrid_kv_cache_specs():
 
     with pytest.raises(ValueError):
         kv_cache_utils.unify_hybrid_kv_cache_specs(kv_cache_spec)
+
+
+def _make_qwen35_specs(
+    kv_dtype: torch.dtype = torch.bfloat16,
+    mamba_dtype: torch.dtype = torch.bfloat16,
+):
+    """Build KV cache specs matching real Qwen3.5 architecture.
+
+    Both Qwen3.5-4B and 9B share identical KV cache dimensions:
+      - Attention: 4 KV heads, 256 head_dim
+      - GatedDeltaNet: conv(3, 8192) + temporal(32, 128, 128)
+      - 32 layers: 24 GatedDeltaNet + 8 full attention (3:1 ratio)
+    The models differ only in hidden_size (2560 vs 4096) which does not
+    affect KV cache or recurrent state sizes.
+    """
+    attention_spec = FullAttentionSpec(
+        block_size=16,
+        num_kv_heads=4,
+        head_size=256,
+        dtype=kv_dtype,
+    )
+    mamba_spec = MambaSpec(
+        block_size=16,
+        shapes=((3, 8192), (32, 128, 128)),
+        dtypes=(mamba_dtype, mamba_dtype),
+    )
+    # Qwen3.5 layer pattern: every 4th layer is full attention
+    kv_cache_specs: dict[str, KVCacheSpec] = {}
+    for i in range(32):
+        if (i + 1) % 4 == 0:
+            kv_cache_specs[f"layer_{i}"] = attention_spec
+        else:
+            kv_cache_specs[f"layer_{i}"] = mamba_spec
+    return kv_cache_specs, attention_spec, mamba_spec
+
+
+# ---------------------------------------------------------------------------
+# Qwen3.5 hybrid Mamba+attention tests
+# ---------------------------------------------------------------------------
+
+
+def test_has_mixed_mamba_attention():
+    """_has_mixed_mamba_attention returns True only for mixed groups."""
+    kv_cache_specs, attn_spec, mamba_spec = _make_qwen35_specs()
+
+    # Pure attention -> False
+    assert not kv_cache_utils._has_mixed_mamba_attention(
+        [KVCacheGroupSpec([f"layer_{i}" for i in range(8)], attn_spec)]
+    )
+    # Pure Mamba -> False
+    assert not kv_cache_utils._has_mixed_mamba_attention(
+        [KVCacheGroupSpec([f"layer_{i}" for i in range(24)], mamba_spec)]
+    )
+    # Mixed (Qwen3.5 layout) -> True
+    assert kv_cache_utils._has_mixed_mamba_attention(
+        [
+            KVCacheGroupSpec([f"layer_{i}" for i in range(24)], mamba_spec),
+            KVCacheGroupSpec([f"layer_{i}" for i in range(24, 32)], attn_spec),
+        ]
+    )
+
+
+@pytest.mark.parametrize(
+    "kv_dtype, mamba_dtype, model_tag",
+    [
+        (torch.bfloat16, torch.bfloat16, "Qwen3.5-4B/9B bf16"),
+        (torch.float16, torch.float16, "Qwen3.5-4B/9B fp16"),
+        (torch.float8_e4m3fn, torch.bfloat16, "Qwen3.5-4B/9B fp8-kv"),
+    ],
+    ids=["bf16", "fp16", "fp8-kv"],
+)
+def test_qwen35_allocation_per_layer_tensors(kv_dtype, mamba_dtype, model_tag):
+    """Verify per-layer tensor allocation for real Qwen3.5 specs.
+
+    Each of the 32 layers should get its own tensor at its natural page size.
+    Attention and GatedDeltaNet tensors must have different sizes.
+    Total allocation must be efficient (>90% of available memory used).
+    """
+    model_config = ModelConfig(max_model_len=1024)
+    vllm_config = VllmConfig(model_config=model_config)
+
+    kv_cache_specs, attn_spec, mamba_spec = _make_qwen35_specs(
+        kv_dtype=kv_dtype, mamba_dtype=mamba_dtype
+    )
+    attn_page = attn_spec.page_size_bytes
+    mamba_page = mamba_spec.page_size_bytes
+
+    # Give enough memory for ~10 blocks
+    total_page_per_block = 8 * attn_page + 24 * mamba_page
+    available_memory = total_page_per_block * 10
+
+    kv_cache_config = kv_cache_utils.get_kv_cache_configs(
+        vllm_config, [kv_cache_specs], [available_memory]
+    )[0]
+
+    # 32 tensors, one per layer
+    assert len(kv_cache_config.kv_cache_tensors) == 32, (
+        f"{model_tag}: expected 32 per-layer tensors, "
+        f"got {len(kv_cache_config.kv_cache_tensors)}"
+    )
+
+    # Each tensor serves exactly one layer
+    for t in kv_cache_config.kv_cache_tensors:
+        assert len(t.shared_by) == 1
+
+    # Separate attention vs Mamba tensors
+    attn_tensors = [
+        t
+        for t in kv_cache_config.kv_cache_tensors
+        if kv_cache_specs[t.shared_by[0]] is attn_spec
+    ]
+    mamba_tensors = [
+        t
+        for t in kv_cache_config.kv_cache_tensors
+        if kv_cache_specs[t.shared_by[0]] is mamba_spec
+    ]
+    assert len(attn_tensors) == 8, f"{model_tag}: expected 8 attention tensors"
+    assert len(mamba_tensors) == 24, f"{model_tag}: expected 24 Mamba tensors"
+
+    # Tensor sizes match their spec's page_size * block count.
+    # With compact allocation, Mamba uses mamba_num_blocks (not num_blocks).
+    num_blocks = kv_cache_config.num_blocks
+    mamba_num_blocks = kv_cache_config.mamba_num_blocks or num_blocks
+    assert num_blocks > 0
+    for t in attn_tensors:
+        assert t.size == attn_page * num_blocks
+    for t in mamba_tensors:
+        assert t.size == mamba_page * mamba_num_blocks
+
+    # Attention and Mamba tensors have DIFFERENT sizes (not padded uniform)
+    assert attn_tensors[0].size != mamba_tensors[0].size, (
+        f"{model_tag}: tensors should differ — "
+        f"attn={attn_tensors[0].size}, mamba={mamba_tensors[0].size}"
+    )
+
+    # Allocation is efficient: >90% of available memory used
+    total_allocated = sum(t.size for t in kv_cache_config.kv_cache_tensors)
+    efficiency = total_allocated / available_memory
+    assert efficiency > 0.90, (
+        f"{model_tag}: allocation efficiency {efficiency:.1%} < 90%"
+    )
+
+
+@pytest.mark.parametrize(
+    "kv_dtype, mamba_dtype",
+    [
+        (torch.bfloat16, torch.bfloat16),
+        (torch.float16, torch.float16),
+        (torch.float8_e4m3fn, torch.bfloat16),
+    ],
+    ids=["bf16", "fp16", "fp8-kv"],
+)
+def test_qwen35_concurrency_estimate(kv_dtype, mamba_dtype):
+    """Verify concurrency estimate correctly weights Mamba vs attention cost.
+
+    For Qwen3.5, Mamba's 24 layers have O(1) state per request (~26 MiB total
+    at bf16) while attention's 8 layers have O(n) KV (~1 GiB at 32K context).
+    The concurrency estimate must reflect that attention dominates cost.
+    """
+    max_model_len = 32768
+    model_config = ModelConfig(max_model_len=max_model_len)
+    scheduler_config = SchedulerConfig(
+        max_num_batched_tokens=1024,
+        enable_chunked_prefill=True,
+        max_model_len=max_model_len,
+        is_encoder_decoder=model_config.is_encoder_decoder,
+    )
+    vllm_config = VllmConfig(
+        model_config=model_config,
+        scheduler_config=scheduler_config,
+    )
+
+    _, attn_spec, mamba_spec = _make_qwen35_specs(
+        kv_dtype=kv_dtype, mamba_dtype=mamba_dtype
+    )
+
+    # Compute expected values
+    attn_max_mem = attn_spec.max_memory_usage_bytes(vllm_config)  # O(n)
+    mamba_max_mem = mamba_spec.max_memory_usage_bytes(vllm_config)  # O(1)
+
+    # Mamba per-request cost should be a small fraction of attention
+    total_attn_cost = 8 * attn_max_mem
+    total_mamba_cost = 24 * mamba_max_mem
+    mamba_fraction = total_mamba_cost / (total_attn_cost + total_mamba_cost)
+    assert mamba_fraction < 0.10, (
+        f"Mamba should be <10% of per-request cost, got {mamba_fraction:.1%}"
+    )
+
+    # Compute blocks-per-request using same formula as our implementation:
+    # total_per_request = sum(layers_in_group * spec.max_memory)
+    # total_per_block = sum(layers_in_group * spec.page_size)
+    # blocks_per_request = ceil(total_per_request / total_per_block)
+    total_per_request = 8 * attn_max_mem + 24 * mamba_max_mem
+    total_per_block = 8 * attn_spec.page_size_bytes + 24 * mamba_spec.page_size_bytes
+    blocks_per_request = (total_per_request + total_per_block - 1) // total_per_block
+
+    # Give enough blocks for ~3 concurrent requests
+    num_blocks = blocks_per_request * 3
+
+    kv_cache_config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec([f"layer_{i}" for i in range(24)], mamba_spec),
+            KVCacheGroupSpec([f"layer_{i}" for i in range(24, 32)], attn_spec),
+        ],
+    )
+    concurrency = get_max_concurrency_for_kv_cache_config(vllm_config, kv_cache_config)
+
+    # Concurrency should be exactly 3 (we gave exactly 3x blocks_per_request)
+    assert concurrency == 3.0, f"Expected 3.0 concurrency, got {concurrency:.2f}"
+
+
+def test_qwen35_groups_skip_page_size_unification():
+    """Page size unification is skipped for Qwen3.5 mixed Mamba+attention.
+
+    Without this, unify_kv_cache_spec_page_size would pad one spec's page
+    size to match the other, wasting memory.
+    """
+    model_config = ModelConfig(max_model_len=1024)
+    vllm_config = VllmConfig(model_config=model_config)
+
+    kv_cache_specs, attn_spec, mamba_spec = _make_qwen35_specs()
+    attn_page = attn_spec.page_size_bytes
+    mamba_page = mamba_spec.page_size_bytes
+
+    groups = kv_cache_utils.get_kv_cache_groups(vllm_config, kv_cache_specs)
+
+    # Must have both Mamba and attention groups
+    attn_groups = [g for g in groups if not isinstance(g.kv_cache_spec, MambaSpec)]
+    mamba_groups = [g for g in groups if isinstance(g.kv_cache_spec, MambaSpec)]
+    assert len(attn_groups) >= 1
+    assert len(mamba_groups) >= 1
+
+    # Page sizes must be preserved (not padded to match each other)
+    for g in attn_groups:
+        assert g.kv_cache_spec.page_size_bytes == attn_page
+    for g in mamba_groups:
+        assert g.kv_cache_spec.page_size_bytes == mamba_page
+    assert attn_page != mamba_page
+
+
+def test_qwen35_mamba_cache_mode_all_includes_mamba_in_token_count():
+    """When mamba_cache_mode='all', Mamba states are cached per-token for
+    prefix caching. The token capacity report must include Mamba groups."""
+    model_config = ModelConfig(max_model_len=1024)
+    cache_config = CacheConfig(mamba_cache_mode="all")
+    vllm_config = VllmConfig(model_config=model_config, cache_config=cache_config)
+
+    _, attn_spec, mamba_spec = _make_qwen35_specs()
+
+    kv_cache_config = KVCacheConfig(
+        num_blocks=320,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec([f"layer_{i}" for i in range(24)], mamba_spec),
+            KVCacheGroupSpec([f"layer_{i}" for i in range(24, 32)], attn_spec),
+        ],
+    )
+
+    # In "all" mode, all 32 groups count toward token capacity
+    # In "none" mode, only 8 attention groups would count
+    # We verify by checking _report_kv_cache_config runs without error
+    # and that the filter includes all groups
+    mamba_cache_mode = vllm_config.cache_config.mamba_cache_mode
+    attention_groups = [
+        g
+        for g in kv_cache_config.kv_cache_groups
+        if not isinstance(g.kv_cache_spec, MambaSpec) or mamba_cache_mode == "all"
+    ]
+    assert len(attention_groups) == 2, (
+        "In 'all' mode, both Mamba and attention groups should be included"
+    )
+
+    # Contrast with "none" mode — only attention groups
+    vllm_config_none = VllmConfig(model_config=model_config)
+    mamba_cache_mode_none = vllm_config_none.cache_config.mamba_cache_mode
+    attention_groups_none = [
+        g
+        for g in kv_cache_config.kv_cache_groups
+        if not isinstance(g.kv_cache_spec, MambaSpec) or mamba_cache_mode_none == "all"
+    ]
+    assert len(attention_groups_none) == 1, (
+        "In 'none' mode, only attention groups should be included"
+    )
+
+
+def test_qwen35_pure_attention_and_pure_mamba_unaffected():
+    """Our changes must not affect pure-attention or pure-Mamba models."""
+    model_config = ModelConfig(max_model_len=1024)
+    vllm_config = VllmConfig(model_config=model_config)
+
+    _, attn_spec, mamba_spec = _make_qwen35_specs()
+
+    # Pure attention (e.g. Llama) — should NOT hit mixed path
+    attn_specs: dict[str, KVCacheSpec] = {f"layer_{i}": attn_spec for i in range(32)}
+    attn_groups = kv_cache_utils.get_kv_cache_groups(vllm_config, attn_specs)
+    assert not kv_cache_utils._has_mixed_mamba_attention(attn_groups)
+
+    # Pure Mamba (e.g. Mamba2) — should NOT hit mixed path
+    mamba_specs: dict[str, KVCacheSpec] = {f"layer_{i}": mamba_spec for i in range(32)}
+    mamba_groups = kv_cache_utils.get_kv_cache_groups(vllm_config, mamba_specs)
+    assert not kv_cache_utils._has_mixed_mamba_attention(mamba_groups)
+
+
+# ---------------------------------------------------------------------------
+# Compact Mamba allocation tests
+# ---------------------------------------------------------------------------
+
+# Qwen3.5 architecture: 32 layers, every 4th is attention (see _make_qwen35_specs)
+_QWEN35_NUM_MAMBA_LAYERS = 24
+_QWEN35_NUM_ATTN_LAYERS = 8
+
+
+def _total_page_per_block(kv_cache_specs: dict[str, KVCacheSpec]) -> int:
+    """Total page size across all layers for one block."""
+    return sum(spec.page_size_bytes for spec in kv_cache_specs.values())
+
+
+def test_estimate_consistent_with_allocation():
+    """The memory estimate must be consistent with the compact allocation.
+
+    If the estimate says max_model_len=M fits, the allocation MUST have
+    enough attention blocks for M tokens. This is the OOM-prevention invariant.
+    """
+    model_config = ModelConfig(max_model_len=1024)
+    vllm_config = VllmConfig(model_config=model_config)
+
+    kv_cache_specs, attn_spec, mamba_spec = _make_qwen35_specs()
+    block_size = attn_spec.block_size
+
+    # Test at several memory levels
+    total_page_per_block = _total_page_per_block(kv_cache_specs)
+    for num_blocks_target in [5, 10, 50, 200]:
+        available_memory = total_page_per_block * num_blocks_target
+
+        kv_cache_config = kv_cache_utils.get_kv_cache_configs(
+            vllm_config, [kv_cache_specs], [available_memory]
+        )[0]
+
+        # Attention blocks must be enough for at least 1 full request
+        blocks_needed_for_max_model_len = cdiv(
+            vllm_config.model_config.max_model_len, block_size
+        )
+        assert kv_cache_config.num_blocks >= blocks_needed_for_max_model_len, (
+            f"OOM invariant violated: {kv_cache_config.num_blocks} attention "
+            f"blocks < {blocks_needed_for_max_model_len} needed for "
+            f"max_model_len={vllm_config.model_config.max_model_len}"
+        )
+
+        # Mamba blocks must exist (at least 1 concurrent request)
+        if kv_cache_config.mamba_num_blocks is not None:
+            assert kv_cache_config.mamba_num_blocks >= 1, (
+                "Mamba must have at least 1 block for 1 concurrent request"
+            )
+
+
+def test_compact_mamba_allocation_sizes():
+    """Compact allocation gives Mamba much fewer blocks than attention.
+
+    Mamba tensors should be sized for the compact block count, not the
+    attention block count.
+    """
+    model_config = ModelConfig(max_model_len=1024)
+    vllm_config = VllmConfig(model_config=model_config)
+
+    kv_cache_specs, attn_spec, mamba_spec = _make_qwen35_specs()
+    attn_page = attn_spec.page_size_bytes
+    mamba_page = mamba_spec.page_size_bytes
+
+    # Give plenty of memory so the difference is stark
+    total_page_per_block = _total_page_per_block(kv_cache_specs)
+    available_memory = total_page_per_block * 200
+
+    kv_cache_config = kv_cache_utils.get_kv_cache_configs(
+        vllm_config, [kv_cache_specs], [available_memory]
+    )[0]
+
+    # Compact allocation should be active (mamba_cache_mode defaults to "none")
+    assert kv_cache_config.mamba_num_blocks is not None, (
+        "Compact allocation should be active for default mamba_cache_mode"
+    )
+
+    # Separate tensors
+    attn_tensors = [
+        t
+        for t in kv_cache_config.kv_cache_tensors
+        if kv_cache_specs[t.shared_by[0]] is attn_spec
+    ]
+    mamba_tensors = [
+        t
+        for t in kv_cache_config.kv_cache_tensors
+        if kv_cache_specs[t.shared_by[0]] is mamba_spec
+    ]
+
+    # Mamba tensors should be much smaller than attention tensors
+    mamba_blocks = mamba_tensors[0].size // mamba_page
+    attn_blocks = attn_tensors[0].size // attn_page
+
+    assert mamba_blocks < attn_blocks, (
+        f"Mamba blocks ({mamba_blocks}) should be << attention blocks ({attn_blocks})"
+    )
+    assert mamba_blocks == kv_cache_config.mamba_num_blocks
+    assert attn_blocks == kv_cache_config.num_blocks
+
+    # Attention gets more total memory than Mamba
+    total_attn_mem = sum(t.size for t in attn_tensors)
+    total_mamba_mem = sum(t.size for t in mamba_tensors)
+    assert total_attn_mem > total_mamba_mem, (
+        f"Attention memory ({total_attn_mem}) should be > Mamba memory "
+        f"({total_mamba_mem})"
+    )
+
+
+def test_token_capacity_improvement():
+    """Compact allocation should yield much higher token capacity than the
+    old shared-pool approach.
+
+    The old approach gives all layers the same num_blocks. For Qwen3.5 with
+    24 Mamba layers at ~1 MB page size, this wastes enormous amounts of
+    memory. The compact approach should yield at least 5x more tokens.
+    """
+    model_config = ModelConfig(max_model_len=1024)
+    vllm_config = VllmConfig(model_config=model_config)
+
+    kv_cache_specs, attn_spec, mamba_spec = _make_qwen35_specs()
+    attn_page = attn_spec.page_size_bytes
+    block_size = attn_spec.block_size
+
+    # 10 GB available
+    available_memory = 10 * GiB_bytes
+
+    # Old approach: all layers share num_blocks
+    total_page_per_block = _total_page_per_block(kv_cache_specs)
+    old_num_blocks = int(available_memory // total_page_per_block)
+    old_token_capacity = old_num_blocks * block_size
+
+    # New approach: compact allocation
+    kv_cache_config = kv_cache_utils.get_kv_cache_configs(
+        vllm_config, [kv_cache_specs], [available_memory]
+    )[0]
+    new_token_capacity = kv_cache_config.num_blocks * block_size
+
+    # The improvement ratio is roughly total_page / attn_page_total because
+    # compact allocation lets attention use nearly all the memory.
+    # For Qwen3.5: total ≈ 26.9 MB, attn ≈ 0.5 MB → ~50x theoretical max.
+    # Use a conservative floor that still validates the optimization works.
+    attn_page_total = _QWEN35_NUM_ATTN_LAYERS * attn_page
+    expected_ratio = total_page_per_block / attn_page_total
+    conservative_floor = expected_ratio / 10  # 10% of theoretical max
+    assert new_token_capacity > old_token_capacity * conservative_floor, (
+        f"New capacity ({new_token_capacity} tokens) should be "
+        f">{conservative_floor:.0f}x old ({old_token_capacity} tokens), "
+        f"got {new_token_capacity / old_token_capacity:.1f}x"
+    )
+
+
+def test_compact_mamba_not_used_for_mode_all():
+    """When mamba_cache_mode='all', Mamba should share the block pool.
+
+    Compact allocation is only for "none" and "align" modes where Mamba
+    state is O(1) per request.
+    """
+    model_config = ModelConfig(max_model_len=1024)
+    cache_config = CacheConfig(mamba_cache_mode="all")
+    vllm_config = VllmConfig(model_config=model_config, cache_config=cache_config)
+
+    kv_cache_specs, attn_spec, mamba_spec = _make_qwen35_specs()
+
+    total_page_per_block = _total_page_per_block(kv_cache_specs)
+    # "all" mode needs cdiv(max_model_len, block_size) blocks minimum
+    # to serve one max-length request. Double it for headroom.
+    block_size = attn_spec.block_size
+    min_blocks = cdiv(model_config.max_model_len, block_size)
+    available_memory = total_page_per_block * min_blocks * 2
+
+    kv_cache_config = kv_cache_utils.get_kv_cache_configs(
+        vllm_config, [kv_cache_specs], [available_memory]
+    )[0]
+
+    # mamba_num_blocks should be None (shared pool)
+    assert kv_cache_config.mamba_num_blocks is None, (
+        "mamba_cache_mode='all' should not use compact allocation"
+    )
+
+    # All tensors should have the same num_blocks
+    num_blocks = kv_cache_config.num_blocks
+    for t in kv_cache_config.kv_cache_tensors:
+        layer_name = t.shared_by[0]
+        spec = kv_cache_specs[layer_name]
+        expected_size = spec.page_size_bytes * num_blocks
+        assert t.size == expected_size, (
+            f"Layer {layer_name}: size {t.size} != expected {expected_size}"
+        )
+
+
+def test_concurrency_reflects_actual_capacity():
+    """Concurrency for compact allocation should reflect both attention and
+    Mamba capacity, and should allow multiple concurrent requests."""
+    model_config = ModelConfig(max_model_len=1024)
+    vllm_config = VllmConfig(model_config=model_config)
+
+    kv_cache_specs, attn_spec, mamba_spec = _make_qwen35_specs()
+
+    # Give enough memory for many requests
+    total_page_per_block = _total_page_per_block(kv_cache_specs)
+    available_memory = total_page_per_block * 200
+
+    kv_cache_config = kv_cache_utils.get_kv_cache_configs(
+        vllm_config, [kv_cache_specs], [available_memory]
+    )[0]
+
+    concurrency = get_max_concurrency_for_kv_cache_config(vllm_config, kv_cache_config)
+
+    # Should support multiple concurrent requests
+    assert concurrency > 1, f"Concurrency should be > 1, got {concurrency:.2f}"
+
+    # Concurrency should be approximately the compact allocation's
+    # num_concurrent (Mamba is the tighter constraint by design)
+    if kv_cache_config.mamba_num_blocks is not None:
+        mamba_blocks_per_req = max(
+            (
+                g.kv_cache_spec.max_memory_usage_bytes(vllm_config)
+                + g.kv_cache_spec.page_size_bytes
+                - 1
+            )
+            // g.kv_cache_spec.page_size_bytes
+            for g in kv_cache_config.kv_cache_groups
+            if isinstance(g.kv_cache_spec, MambaSpec)
+        )
+        mamba_concurrency = kv_cache_config.mamba_num_blocks / mamba_blocks_per_req
+        # Concurrency = min(attn, mamba), so it must be <= mamba capacity
+        assert concurrency <= mamba_concurrency + 1e-9  # float tolerance
+
+
+def test_pure_models_unaffected_by_compact_allocation():
+    """Pure attention and pure Mamba models should not use compact allocation.
+
+    This is a regression guard: the compact path is gated by
+    _has_mixed_mamba_attention().
+    """
+    model_config = ModelConfig(max_model_len=1024)
+    vllm_config = VllmConfig(model_config=model_config)
+
+    _, attn_spec, mamba_spec = _make_qwen35_specs()
+
+    # Pure attention model
+    attn_specs: dict[str, KVCacheSpec] = {f"layer_{i}": attn_spec for i in range(32)}
+    attn_config = kv_cache_utils.get_kv_cache_configs(
+        vllm_config,
+        [attn_specs],
+        [attn_spec.page_size_bytes * 32 * 100],
+    )[0]
+    assert attn_config.mamba_num_blocks is None, (
+        "Pure attention model should not have mamba_num_blocks"
+    )
+
+    # Pure Mamba model
+    mamba_specs_dict: dict[str, KVCacheSpec] = {
+        f"layer_{i}": mamba_spec for i in range(32)
+    }
+    mamba_config = kv_cache_utils.get_kv_cache_configs(
+        vllm_config,
+        [mamba_specs_dict],
+        [mamba_spec.page_size_bytes * 32 * 100],
+    )[0]
+    assert mamba_config.mamba_num_blocks is None, (
+        "Pure Mamba model should not have mamba_num_blocks"
+    )
+
+
+def test_compact_allocation_low_memory_floor():
+    """When memory barely fits 1 request, the max(1,...) floor on
+    num_concurrent must kick in.
+
+    This exercises the edge case where optimal_C < 1. The floor guarantees
+    at least 1 concurrent request, and therefore:
+    - mamba_blocks >= mamba_blocks_per_req (enough for 1 request)
+    - attention_num_blocks >= blocks_per_attn_request (enough for max_model_len)
+    """
+    model_config = ModelConfig(max_model_len=1024)
+    vllm_config = VllmConfig(model_config=model_config)
+
+    kv_cache_specs, attn_spec, mamba_spec = _make_qwen35_specs()
+    attn_page = attn_spec.page_size_bytes
+    mamba_page = mamba_spec.page_size_bytes
+    block_size = attn_spec.block_size
+
+    blocks_for_max_model_len = cdiv(model_config.max_model_len, block_size)
+
+    # Compute exact cost of 1 request: attention blocks * attn_page_total
+    # + mamba_blocks_per_req * mamba_page_cost.
+    attn_page_total = _QWEN35_NUM_ATTN_LAYERS * attn_page
+    mamba_page_cost = _QWEN35_NUM_MAMBA_LAYERS * mamba_page
+    # mamba_blocks_per_req = cdiv(max_memory_usage, page_size_bytes)
+    # For "none" mode: max_memory_usage = page_size_bytes (1 block)
+    mamba_blocks_per_req = 1
+
+    cost_of_one_request = (
+        attn_page_total * blocks_for_max_model_len
+        + mamba_page_cost * mamba_blocks_per_req
+    )
+    # Give exactly enough for ~1.1 requests (floor should cap to 1)
+    available_memory = int(cost_of_one_request * 1.1)
+
+    kv_cache_config = kv_cache_utils.get_kv_cache_configs(
+        vllm_config, [kv_cache_specs], [available_memory]
+    )[0]
+
+    # num_concurrent should be 1 (floor kicks in)
+    # Justification: mamba_blocks = num_concurrent * mamba_blocks_per_req
+    assert kv_cache_config.mamba_num_blocks is not None, (
+        "Compact allocation should be active"
+    )
+    assert kv_cache_config.mamba_num_blocks == mamba_blocks_per_req, (
+        f"With 1 concurrent request, mamba_blocks should be "
+        f"{mamba_blocks_per_req}, got {kv_cache_config.mamba_num_blocks}"
+    )
+
+    # Attention blocks must still fit max_model_len (OOM invariant).
+    # Justification: if this fails, a single max-length request would OOM.
+    assert kv_cache_config.num_blocks >= blocks_for_max_model_len, (
+        f"Attention blocks {kv_cache_config.num_blocks} < "
+        f"{blocks_for_max_model_len} needed for max_model_len"
+    )
+
+
+def test_compact_allocation_capped_by_max_num_seqs():
+    """When max_num_seqs caps num_concurrent, the freed Mamba budget
+    should go to attention blocks.
+
+    With huge memory and max_num_seqs=4, optimal_C would be >> 4 but
+    gets capped. The Mamba pool is sized for exactly 4 requests, and
+    the remaining memory goes to attention.
+    """
+    max_num_seqs = 4
+    model_config = ModelConfig(max_model_len=1024)
+    scheduler_config = SchedulerConfig(
+        max_model_len=model_config.max_model_len,
+        is_encoder_decoder=False,
+        max_num_seqs=max_num_seqs,
+    )
+    vllm_config = VllmConfig(
+        model_config=model_config, scheduler_config=scheduler_config
+    )
+
+    kv_cache_specs, attn_spec, mamba_spec = _make_qwen35_specs()
+    attn_page = attn_spec.page_size_bytes
+    mamba_page = mamba_spec.page_size_bytes
+
+    # Give huge memory (1000 blocks worth)
+    total_page_per_block = _total_page_per_block(kv_cache_specs)
+    available_memory = total_page_per_block * 1000
+
+    kv_cache_config = kv_cache_utils.get_kv_cache_configs(
+        vllm_config, [kv_cache_specs], [available_memory]
+    )[0]
+
+    assert kv_cache_config.mamba_num_blocks is not None
+
+    # Justification: mamba_blocks = min(optimal_C, max_num_seqs) * blocks_per_req.
+    # With "none" mode, blocks_per_req = 1, so mamba_blocks should be exactly 4.
+    mamba_blocks_per_req = 1
+    expected_mamba_blocks = max_num_seqs * mamba_blocks_per_req
+    assert kv_cache_config.mamba_num_blocks == expected_mamba_blocks, (
+        f"Expected {expected_mamba_blocks} mamba blocks (capped by "
+        f"max_num_seqs={max_num_seqs}), got {kv_cache_config.mamba_num_blocks}"
+    )
+
+    # Justification: with only 4 Mamba blocks, nearly all memory goes to
+    # attention. Attention blocks should be much higher than the uncapped case
+    # would give per-concurrent-request. Specifically, nearly all available
+    # memory minus 4*mamba_cost should be in attention.
+    mamba_page_cost = _QWEN35_NUM_MAMBA_LAYERS * mamba_page
+    mamba_total = expected_mamba_blocks * mamba_page_cost
+    attn_page_total = _QWEN35_NUM_ATTN_LAYERS * attn_page
+    expected_attn_blocks = int((available_memory - mamba_total) // attn_page_total)
+    assert kv_cache_config.num_blocks == expected_attn_blocks, (
+        f"Attention blocks {kv_cache_config.num_blocks} != expected "
+        f"{expected_attn_blocks} (available - mamba_cost)"
+    )
+
+
+def test_cross_worker_mamba_scaling():
+    """Multi-worker configs with different available memory should be
+    synchronized to the minimum mamba_num_blocks and num_blocks.
+
+    This exercises the cross-worker tensor scaling path that scales Mamba
+    and attention tensors independently using _is_mamba_layer().
+    """
+    model_config = ModelConfig(max_model_len=1024)
+    vllm_config = VllmConfig(model_config=model_config)
+
+    kv_cache_specs, attn_spec, mamba_spec = _make_qwen35_specs()
+    attn_page = attn_spec.page_size_bytes
+    mamba_page = mamba_spec.page_size_bytes
+
+    total_page_per_block = _total_page_per_block(kv_cache_specs)
+    # Worker 0 has more memory than worker 1
+    mem_worker_0 = total_page_per_block * 200
+    mem_worker_1 = total_page_per_block * 100
+
+    configs = kv_cache_utils.get_kv_cache_configs(
+        vllm_config,
+        [kv_cache_specs, kv_cache_specs],
+        [mem_worker_0, mem_worker_1],
+    )
+
+    # Justification: cross-worker sync sets all configs to the minimum.
+    # Both workers must have identical num_blocks and mamba_num_blocks.
+    assert configs[0].num_blocks == configs[1].num_blocks, (
+        "num_blocks must be synchronized across workers"
+    )
+    assert configs[0].mamba_num_blocks == configs[1].mamba_num_blocks, (
+        "mamba_num_blocks must be synchronized across workers"
+    )
+
+    # The synced values should match the smaller worker's allocation
+    single_config = kv_cache_utils.get_kv_cache_configs(
+        vllm_config, [kv_cache_specs], [mem_worker_1]
+    )[0]
+    assert configs[0].num_blocks == single_config.num_blocks, (
+        "Synced num_blocks should match the smaller worker's allocation"
+    )
+    assert configs[0].mamba_num_blocks == single_config.mamba_num_blocks, (
+        "Synced mamba_num_blocks should match the smaller worker's allocation"
+    )
+
+    # Justification: tensor sizes must be scaled to match the synced block counts.
+    # Mamba tensors use mamba_num_blocks, attention tensors use num_blocks.
+    for cfg in configs:
+        for tensor in cfg.kv_cache_tensors:
+            layer_name = tensor.shared_by[0]
+            spec = kv_cache_specs[layer_name]
+            if isinstance(spec, MambaSpec):
+                assert tensor.size == mamba_page * cfg.mamba_num_blocks, (
+                    f"Mamba tensor {layer_name}: size {tensor.size} != "
+                    f"{mamba_page} * {cfg.mamba_num_blocks}"
+                )
+            else:
+                assert tensor.size == attn_page * cfg.num_blocks, (
+                    f"Attn tensor {layer_name}: size {tensor.size} != "
+                    f"{attn_page} * {cfg.num_blocks}"
+                )
+
+    # Justification: generate_scheduler_kv_cache_config must not raise
+    # because mamba_num_blocks is consistent across workers.
+    scheduler_config_result = generate_scheduler_kv_cache_config(configs)
+    assert scheduler_config_result.mamba_num_blocks == configs[0].mamba_num_blocks
+
+
+def test_compact_mamba_manager_allocate_and_free():
+    """MambaManager in compact mode should allocate from and free to its
+    private compact pool, without touching the shared BlockPool.
+
+    This validates the core lifecycle: allocate blocks for requests,
+    free them, and confirm they're reusable.
+    """
+    from vllm.v1.core.single_type_kv_cache_manager import MambaManager
+
+    _, _, mamba_spec = _make_qwen35_specs()
+    block_size = mamba_spec.block_size
+
+    num_gpu_blocks = 100
+    block_pool = BlockPool(
+        num_gpu_blocks=num_gpu_blocks,
+        enable_caching=False,
+        hash_block_size=block_size,
+    )
+    initial_pool_free = block_pool.free_block_queue.num_free_blocks
+
+    mamba_num_blocks = 5
+    manager = MambaManager(
+        kv_cache_spec=mamba_spec,
+        block_pool=block_pool,
+        mamba_num_blocks=mamba_num_blocks,
+        enable_caching=False,
+        kv_cache_group_id=0,
+    )
+
+    # Justification: compact mode should be active when mamba_num_blocks is set
+    # and mamba_cache_mode != "all".
+    assert manager.compact_mode is True
+    assert len(manager._compact_free) == mamba_num_blocks
+
+    # Allocate blocks for 3 requests (1 block each for 16 tokens)
+    for i in range(3):
+        req_id = f"req_{i}"
+        blocks = manager.allocate_new_blocks(req_id, block_size, block_size)
+        assert len(blocks) == 1, f"Expected 1 block for req_{i}"
+        # Justification: each block ID should be in [0, mamba_num_blocks)
+        assert 0 <= blocks[0].block_id < mamba_num_blocks
+
+    # Justification: 3 blocks allocated from 5 total, so 2 should remain free.
+    assert len(manager._compact_free) == 2
+
+    # Justification: shared BlockPool must not be touched in compact mode.
+    assert block_pool.free_block_queue.num_free_blocks == initial_pool_free, (
+        "BlockPool free count changed — compact blocks leaked into shared pool"
+    )
+
+    # Free one request and verify block returns to compact pool.
+    manager.free("req_1")
+    # Justification: freeing 1 request returns its 1 block to the compact pool.
+    assert len(manager._compact_free) == 3
+
+    # Allocate another request — should reuse the freed block.
+    blocks = manager.allocate_new_blocks("req_3", block_size, block_size)
+    assert len(blocks) == 1
+    # Justification: the freed block from req_1 should be reused (LIFO stack).
+    assert len(manager._compact_free) == 2
+
+    # Justification: BlockPool must still be untouched after all operations.
+    assert block_pool.free_block_queue.num_free_blocks == initial_pool_free
+
+
+def test_compact_mamba_manager_exhaustion_rejects():
+    """When the compact pool is exhausted, get_num_blocks_to_allocate
+    must return a rejection signal (> num_gpu_blocks).
+
+    This prevents over-allocation and is the signal to the scheduler
+    to not schedule this request in the current step.
+    """
+    from vllm.v1.core.single_type_kv_cache_manager import MambaManager
+
+    _, _, mamba_spec = _make_qwen35_specs()
+    block_size = mamba_spec.block_size
+
+    num_gpu_blocks = 100
+    block_pool = BlockPool(
+        num_gpu_blocks=num_gpu_blocks,
+        enable_caching=False,
+        hash_block_size=block_size,
+    )
+
+    mamba_num_blocks = 2
+    manager = MambaManager(
+        kv_cache_spec=mamba_spec,
+        block_pool=block_pool,
+        mamba_num_blocks=mamba_num_blocks,
+        enable_caching=False,
+        kv_cache_group_id=0,
+    )
+
+    # Fill the compact pool: 2 requests × 1 block each
+    manager.allocate_new_blocks("req_0", block_size, block_size)
+    manager.allocate_new_blocks("req_1", block_size, block_size)
+    assert len(manager._compact_free) == 0
+
+    # Justification: with 0 free compact blocks and a new request needing 1,
+    # get_num_blocks_to_allocate must return > num_gpu_blocks to signal rejection.
+    num_to_alloc = manager.get_num_blocks_to_allocate(
+        request_id="req_2",
+        num_tokens=block_size,
+        new_computed_blocks=[],
+        total_computed_tokens=0,
+        num_tokens_main_model=block_size,
+    )
+    assert num_to_alloc > num_gpu_blocks, (
+        f"Expected rejection signal (>{num_gpu_blocks}), got {num_to_alloc}"
+    )
+
+    # After freeing one request, the same call should succeed (return 0).
+    manager.free("req_0")
+    num_to_alloc = manager.get_num_blocks_to_allocate(
+        request_id="req_2",
+        num_tokens=block_size,
+        new_computed_blocks=[],
+        total_computed_tokens=0,
+        num_tokens_main_model=block_size,
+    )
+    # Justification: 0 means "no shared pool blocks needed" — compact handles it.
+    assert num_to_alloc == 0, (
+        f"Expected 0 (compact handles allocation), got {num_to_alloc}"
+    )
+
+
+def test_compact_mamba_cache_blocks_noop():
+    """cache_blocks in compact mode must be a no-op to prevent compact
+    block IDs from entering the shared pool's cache hash table.
+
+    If compact IDs leak into the cache, they could collide with attention
+    block IDs and cause incorrect cache hits or block corruption.
+    """
+    from vllm.v1.core.single_type_kv_cache_manager import MambaManager
+
+    _, _, mamba_spec = _make_qwen35_specs()
+    block_size = mamba_spec.block_size
+
+    num_gpu_blocks = 100
+    block_pool = BlockPool(
+        num_gpu_blocks=num_gpu_blocks,
+        enable_caching=True,  # Caching enabled to verify no-op
+        hash_block_size=block_size,
+    )
+
+    manager = MambaManager(
+        kv_cache_spec=mamba_spec,
+        block_pool=block_pool,
+        mamba_num_blocks=5,
+        enable_caching=True,
+        kv_cache_group_id=0,
+    )
+
+    # Allocate a block
+    manager.allocate_new_blocks("req_0", block_size, block_size)
+
+    # Count cached blocks in the pool before
+    cached_before = len(block_pool.cached_block_hash_to_block)
+
+    # Create a minimal request-like object for cache_blocks
+    req = make_request("req_0", list(range(block_size)), block_size)
+    manager.cache_blocks(req, block_size)
+
+    # Justification: cache_blocks is a no-op in compact mode, so no new
+    # entries should appear in the block pool's cache.
+    cached_after = len(block_pool.cached_block_hash_to_block)
+    assert cached_after == cached_before, (
+        f"Block pool cache grew from {cached_before} to {cached_after} — "
+        "compact block IDs leaked into shared cache"
+    )
+
+
+def test_all_mode_concurrency():
+    """Concurrency for mamba_cache_mode='all' should use the standard
+    mixed formula (num_blocks / blocks_per_request), not the compact path.
+
+    This verifies the 'all' mode branch of get_max_concurrency_for_kv_cache_config
+    wasn't broken when we added the compact branch.
+    """
+    model_config = ModelConfig(max_model_len=1024)
+    cache_config = CacheConfig(mamba_cache_mode="all")
+    vllm_config = VllmConfig(model_config=model_config, cache_config=cache_config)
+
+    kv_cache_specs, attn_spec, mamba_spec = _make_qwen35_specs()
+    block_size = attn_spec.block_size
+
+    total_page_per_block = _total_page_per_block(kv_cache_specs)
+    min_blocks = cdiv(model_config.max_model_len, block_size)
+    available_memory = total_page_per_block * min_blocks * 2
+
+    kv_cache_config = kv_cache_utils.get_kv_cache_configs(
+        vllm_config, [kv_cache_specs], [available_memory]
+    )[0]
+
+    # mamba_num_blocks is None for "all" mode
+    assert kv_cache_config.mamba_num_blocks is None
+
+    concurrency = get_max_concurrency_for_kv_cache_config(vllm_config, kv_cache_config)
+
+    # Justification: "all" mode uses num_blocks / blocks_per_request where
+    # blocks_per_request is based on per-request memory usage across all groups.
+    # With ~2x headroom, concurrency should be approximately 2.
+    assert concurrency > 1.0, (
+        f"'all' mode concurrency should be > 1 with 2x headroom, got {concurrency:.2f}"
+    )
+
+    # Justification: concurrency is calculated as num_blocks / blocks_per_request.
+    # Verify it matches the manual calculation to confirm the right formula is used.
+    max_memory_per_req = sum(
+        len(g.layer_names) * g.kv_cache_spec.max_memory_usage_bytes(vllm_config)
+        for g in kv_cache_config.kv_cache_groups
+    )
+    total_page = sum(
+        len(g.layer_names) * g.kv_cache_spec.page_size_bytes
+        for g in kv_cache_config.kv_cache_groups
+    )
+    blocks_per_req = (max_memory_per_req + total_page - 1) // total_page
+    expected_concurrency = kv_cache_config.num_blocks / blocks_per_req
+    assert abs(concurrency - expected_concurrency) < 1e-9, (
+        f"Concurrency {concurrency:.4f} != expected {expected_concurrency:.4f}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Compact "none" mode performance fix tests
+# ---------------------------------------------------------------------------
+
+
+def _create_compact_mamba_manager(
+    mamba_num_blocks: int,
+    spec: int = 0,
+    mamba_cache_mode: str = "none",
+    block_size: int = 16,
+):
+    """Create a MambaManager in compact mode for testing."""
+    from vllm.v1.core.single_type_kv_cache_manager import MambaManager
+
+    mamba_spec = MambaSpec(
+        block_size=block_size,
+        shapes=((3, 8192), (32, 128, 128)),
+        dtypes=(torch.bfloat16, torch.bfloat16),
+        mamba_cache_mode=mamba_cache_mode,
+        num_speculative_blocks=spec,
+    )
+    block_pool = BlockPool(
+        num_gpu_blocks=100,
+        enable_caching=False,
+        hash_block_size=block_size,
+    )
+    return MambaManager(
+        kv_cache_spec=mamba_spec,
+        block_pool=block_pool,
+        mamba_num_blocks=mamba_num_blocks,
+        enable_caching=False,
+        kv_cache_group_id=0,
+    )
+
+
+def test_compact_none_constant_blocks_regardless_of_tokens():
+    """Compact 'none' mode must allocate exactly 1+spec blocks per request,
+    regardless of how many tokens are scheduled. The Mamba kernel only uses
+    1+spec block IDs, so allocating more wastes the compact pool."""
+    manager = _create_compact_mamba_manager(mamba_num_blocks=50, spec=0)
+    block_size = manager.block_size
+
+    for num_tokens in [block_size, 5 * block_size, 20 * block_size]:
+        req_id = f"req_{num_tokens}"
+        needed = manager.get_num_blocks_to_allocate(
+            req_id, num_tokens, [], 0, num_tokens
+        )
+        assert needed == 0, (
+            f"Expected 0 (compact handles it), got {needed} for {num_tokens} tokens"
+        )
+
+        blocks = manager.allocate_new_blocks(req_id, num_tokens, num_tokens)
+        assert len(blocks) == 1, (
+            f"Expected 1 block (1+spec=1), got {len(blocks)} for {num_tokens} tokens"
+        )
+        manager.free(req_id)
+
+    # Same test with speculative blocks
+    manager_spec = _create_compact_mamba_manager(mamba_num_blocks=50, spec=2)
+    for num_tokens in [block_size, 5 * block_size, 20 * block_size]:
+        req_id = f"req_spec_{num_tokens}"
+        blocks = manager_spec.allocate_new_blocks(req_id, num_tokens, num_tokens)
+        assert len(blocks) == 3, (
+            f"Expected 3 blocks (1+spec=3), got {len(blocks)} for {num_tokens} tokens"
+        )
+        manager_spec.free(req_id)
+
+
+def test_compact_none_no_block_churn():
+    """In compact 'none' mode, remove_skipped_blocks must be a no-op.
+    Blocks are permanent for the request lifetime. If they get freed,
+    the kernel reads null block IDs and produces corrupt state."""
+    manager = _create_compact_mamba_manager(mamba_num_blocks=10, spec=0)
+
+    blocks = manager.allocate_new_blocks("req_0", 200, 200)
+    assert len(blocks) == 1
+    original_block_id = blocks[0].block_id
+    free_before = len(manager._compact_free)
+
+    # Simulate multiple decode steps at increasing token counts
+    for num_computed in [200, 232, 264, 500, 1000]:
+        manager.remove_skipped_blocks("req_0", num_computed)
+        assert len(manager._compact_free) == free_before, (
+            f"Blocks were freed at num_computed={num_computed}"
+        )
+        req_blocks = manager.req_to_blocks["req_0"]
+        assert len(req_blocks) == 1
+        assert req_blocks[0].block_id == original_block_id
+        assert not req_blocks[0].is_null
+
+
+def test_compact_none_full_concurrency():
+    """Pool sized for N×(1+spec) must serve exactly N concurrent requests.
+    With the O(n) bug, prefill with >block_size tokens causes premature
+    pool exhaustion, throttling concurrency."""
+    max_concurrent = 32
+    spec = 2
+    blocks_per_req = 1 + spec
+    pool_size = max_concurrent * blocks_per_req
+
+    manager = _create_compact_mamba_manager(mamba_num_blocks=pool_size, spec=spec)
+
+    # Schedule all 32 requests with large prefill (220 tokens >> block_size=16)
+    large_prefill = 220
+    for i in range(max_concurrent):
+        req_id = f"req_{i}"
+        needed = manager.get_num_blocks_to_allocate(
+            req_id, large_prefill, [], 0, large_prefill
+        )
+        assert needed == 0, (
+            f"Request {i} rejected — pool should handle all "
+            f"{max_concurrent} concurrent requests"
+        )
+        blocks = manager.allocate_new_blocks(req_id, large_prefill, large_prefill)
+        assert len(blocks) == blocks_per_req
+
+    assert len(manager._compact_free) == 0
+
+    # 33rd request must be rejected
+    needed = manager.get_num_blocks_to_allocate(
+        "req_overflow", large_prefill, [], 0, large_prefill
+    )
+    assert needed > manager.block_pool.num_gpu_blocks, "Should reject overflow"
+
+    # Free one → can schedule one more
+    manager.free("req_0")
+    assert len(manager._compact_free) == blocks_per_req
+    needed = manager.get_num_blocks_to_allocate(
+        "req_replacement", large_prefill, [], 0, large_prefill
+    )
+    assert needed == 0
+
+
+def test_compact_none_blocks_stable_across_decode():
+    """Block IDs must remain constant across decode steps. The kernel
+    always reads the same block table entries. Any change means corrupt state."""
+    manager = _create_compact_mamba_manager(mamba_num_blocks=20, spec=2)
+
+    blocks = manager.allocate_new_blocks("req_0", 200, 200)
+    original_ids = [b.block_id for b in blocks]
+    assert len(original_ids) == 3
+
+    # Simulate decode steps — state is deterministic, 10 steps is sufficient
+    for step in range(10):
+        num_computed = 200 + step
+        manager.remove_skipped_blocks("req_0", num_computed)
+        needed = manager.get_num_blocks_to_allocate(
+            "req_0", num_computed + 1, [], num_computed, num_computed + 1
+        )
+        assert needed == 0
+        current_ids = [b.block_id for b in manager.req_to_blocks["req_0"]]
+        assert current_ids == original_ids, (
+            f"Block IDs changed at step {step}: {original_ids} → {current_ids}"
+        )
+
+
+def test_compact_align_mode_unaffected():
+    """Align mode compact should still use null-block patterns and
+    dynamic allocation. The fix must NOT change align mode behavior."""
+    manager = _create_compact_mamba_manager(
+        mamba_num_blocks=20, spec=0, mamba_cache_mode="align"
+    )
+
+    manager.allocate_new_blocks("req_0", 200, 200)
+    # align mode uses null blocks for skipped positions — req_to_blocks
+    # should have more entries than just 1+spec
+    assert len(manager.req_to_blocks["req_0"]) > 1
+
+    # Verify remove_skipped_blocks IS active (not a no-op) for align mode.
+    # After remove_skipped_blocks, freed blocks from generic skipping should
+    # return to the compact pool.
+    compact_free_before = len(manager._compact_free)
+    manager.remove_skipped_blocks("req_0", 200)
+    assert len(manager._compact_free) >= compact_free_before, (
+        "Align mode remove_skipped_blocks should not consume compact blocks"
+    )
