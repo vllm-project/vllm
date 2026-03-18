@@ -29,6 +29,7 @@ from vllm.model_executor.layers.pooler.tokwise import pooler_for_token_embed
 from .bert import BertEmbeddingModel, BertModel
 from .interfaces import SupportsLateInteraction
 from .interfaces_base import default_pooling_type
+from .lfm2 import Lfm2Model
 
 
 class ColBERTMixin(nn.Module, SupportsLateInteraction):
@@ -412,5 +413,78 @@ class ColBERTJinaRobertaModel(ColBERTMixin, nn.Module):
         if colbert_side:
             _, colbert_loaded = self._load_colbert_weights(colbert_side)
             loaded.update(colbert_loaded)
+
+        return loaded
+
+
+# -----------------------------------------------------------------------
+# Concrete model: ColBERT + LFM2 backbone
+# -----------------------------------------------------------------------
+
+
+@default_pooling_type(seq_pooling_type="CLS", tok_pooling_type="ALL")
+class ColBERTLfm2Model(ColBERTMixin, nn.Module):
+    """ColBERT late interaction model with LFM2 backbone.
+
+    For ``LiquidAI/LFM2-ColBERT-350M`` and similar models.
+
+    The projection is auto-loaded from sentence-transformers ``1_Dense/``
+    when not present in the main checkpoint.
+    """
+
+    is_pooling_model = True
+
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        super().__init__()
+        config = vllm_config.model_config.hf_config
+
+        colbert_dim = self.get_colbert_dim_from_config(config)
+        self._init_colbert_components(
+            hidden_size=config.hidden_size,
+            colbert_dim=colbert_dim,
+            head_dtype=vllm_config.model_config.head_dtype,
+        )
+
+        self.model = Lfm2Model(
+            vllm_config=vllm_config,
+            prefix=prefix,
+        )
+
+        pooler_config = vllm_config.model_config.pooler_config
+        assert pooler_config is not None
+        self.pooler = self._build_colbert_pooler(pooler_config)
+
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.embed_input_ids(input_ids)
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        intermediate_tensors=None,
+        inputs_embeds: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        return self.model(
+            input_ids=input_ids,
+            positions=positions,
+            inputs_embeds=inputs_embeds,
+            intermediate_tensors=intermediate_tensors,
+        )
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
+        other_weights, colbert_loaded = self._load_colbert_weights(weights)
+
+        loaded_model = self.model.load_weights(other_weights)
+        loaded = {f"model.{name}" for name in loaded_model} | colbert_loaded
+
+        # When the ST projector was auto-loaded during init
+        # (not from the main checkpoint), mark its params as loaded
+        # so the weight validator doesn't complain.
+        if hasattr(self.pooler, "head"):
+            head = self.pooler.head
+            projector = getattr(head, "projector", None)
+            if projector is not None and isinstance(projector, nn.Module):
+                for name, _ in projector.named_parameters():
+                    loaded.add(f"pooler.head.projector.{name}")
 
         return loaded
