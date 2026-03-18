@@ -142,7 +142,7 @@ class NVLMMultiModalProcessor(BaseInternVLMultiModalProcessor[NVLMProcessingInfo
             repl = hf_processor.get_image_repl(num_patches, num_features=feature_size)
 
             return PromptUpdateDetails.select_text(
-                repl.full + "\n", hf_processor.image_token
+                repl.full + "\n", hf_processor.ctx_image_token
             )
 
         # See note in dummy data regarding why we have the extra newline

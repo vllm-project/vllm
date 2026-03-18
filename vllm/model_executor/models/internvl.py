@@ -47,7 +47,6 @@ from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.processors.internvl import (
     InternVLImageProcessor,
     InternVLProcessor,
-    InternVLProcessorLike,
     InternVLVideoProcessor,
 )
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
@@ -125,7 +124,7 @@ class BaseInternVLProcessingInfo(BaseProcessingInfo):
     """Basic image-only ProcessingInfo for InternVL-style models."""
 
     @abstractmethod
-    def get_hf_processor(self, **kwargs: object) -> InternVLProcessorLike:
+    def get_hf_processor(self, **kwargs: object) -> InternVLProcessor:
         raise NotImplementedError
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
@@ -136,7 +135,7 @@ class BaseInternVLProcessingInfo(BaseProcessingInfo):
         *,
         image_width: int,
         image_height: int,
-        processor: InternVLProcessorLike,
+        processor: InternVLProcessor,
     ) -> int:
         return processor.get_num_image_tokens(
             image_width=image_width,
@@ -229,7 +228,7 @@ class BaseInternVLMultiModalProcessor(BaseMultiModalProcessor[_I]):
         )
 
         hf_processor = self.info.get_hf_processor(**mm_kwargs)
-        image_token_id = hf_processor.image_token_id
+        image_token_id = hf_processor.ctx_image_token_id
 
         # Since there may be extra tokens in the feature placeholders,
         # we need to pass the image token ID to the model to select the

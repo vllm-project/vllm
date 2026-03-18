@@ -20,17 +20,17 @@ class NVLMProcessor(InternVLProcessor):
         tokenizer: HfTokenizer,
         *,
         image_seq_length: int,
-        image_token: str = "<|vision_pad|>",
         start_image_token: str = "<Image>",
         end_image_token: str = "</Image>",
+        ctx_image_token: str = "<|vision_pad|>",
     ) -> None:
         super().__init__(
             image_processor=image_processor,
             tokenizer=tokenizer,
             image_seq_length=image_seq_length,
-            image_token=image_token,
             start_image_token=start_image_token,
             end_image_token=end_image_token,
+            ctx_image_token=ctx_image_token,
         )
 
     def get_image_repl(
@@ -47,10 +47,9 @@ class NVLMProcessor(InternVLProcessor):
         if self.image_processor.use_thumbnail:
             tile_pos_identifiers += ["<tile_global_thumbnail>"]
 
-        context_token = self.image_token
         context_size = num_features // num_patches
         features = "".join(
-            (identifier + context_token * context_size)
+            (identifier + self.ctx_image_token * context_size)
             for identifier in tile_pos_identifiers
         )
 
@@ -59,4 +58,4 @@ class NVLMProcessor(InternVLProcessor):
         # when trying to find "<tile" as a subsequence of "<Image><tile"
         repl = self.start_image_token + features + self.end_image_token
 
-        return PromptUpdateDetails.select_text(repl, context_token)
+        return PromptUpdateDetails.select_text(repl, self.ctx_image_token)

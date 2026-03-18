@@ -211,17 +211,17 @@ class LlamaNemotronNanoVLProcessor(InternVLProcessor):
         tokenizer: HfTokenizer,
         *,
         image_seq_length: int,
-        image_token: str = "<image>",
         start_image_token: str = "<img>",
         end_image_token: str = "</img>",
+        ctx_image_token: str = "<image>",
     ) -> None:
         super().__init__(
             image_processor=image_processor,
             tokenizer=tokenizer,
             image_seq_length=image_seq_length,
-            image_token=image_token,
             start_image_token=start_image_token,
             end_image_token=end_image_token,
+            ctx_image_token=ctx_image_token,
         )
 
     def get_num_image_tokens(
@@ -307,17 +307,17 @@ class LlamaNemotronVLEmbedProcessor(InternVLProcessor):
         tokenizer: HfTokenizer,
         *,
         image_seq_length: int,
-        image_token: str = "<IMG_CONTEXT>",
         start_image_token: str = "<img>",
         end_image_token: str = "</img>",
+        ctx_image_token: str = "<IMG_CONTEXT>",
     ) -> None:
         super().__init__(
             image_processor=image_processor,
             tokenizer=tokenizer,
             image_seq_length=image_seq_length,
-            image_token=image_token,
             start_image_token=start_image_token,
             end_image_token=end_image_token,
+            ctx_image_token=ctx_image_token,
         )
 
         self.image_processor: LlamaNemotronVLEmbedImageProcessor

@@ -7,7 +7,6 @@
 # Copyright (c) 2023 OpenGVLab
 # Licensed under The MIT License [see LICENSE for details]
 # --------------------------------------------------------
-from typing import Protocol
 
 import numpy.typing as npt
 import torch
@@ -353,32 +352,7 @@ class InternVLVideoProcessor:
         return BatchFeature(image_inputs, tensor_type=return_tensors)
 
 
-class InternVLProcessorLike(Protocol):
-    image_seq_length: int
-    image_token: str
-    image_token_id: int
-    start_image_token: str
-    start_image_token_id: int
-    end_image_token: str
-    end_image_token_id: int
-
-    def resolve_target_ratios(self) -> list[tuple[int, int]]: ...
-
-    def get_num_image_tokens(
-        self,
-        *,
-        image_width: int,
-        image_height: int,
-    ) -> int: ...
-
-    def get_image_repl(
-        self,
-        num_patches: int | None,
-        num_features: int | None = None,
-    ) -> PromptUpdateDetails[str]: ...
-
-
-class InternVLProcessor(InternVLProcessorLike, ProcessorMixin):
+class InternVLProcessor(ProcessorMixin):
     """
     This model doesn't define its own HF processor,
     so we implement our own one here.
@@ -399,9 +373,9 @@ class InternVLProcessor(InternVLProcessorLike, ProcessorMixin):
         video_processor: InternVLVideoProcessor | None = None,
         *,
         image_seq_length: int,
-        image_token: str = "<IMG_CONTEXT>",
         start_image_token: str = "<img>",
         end_image_token: str = "</img>",
+        ctx_image_token: str = "<IMG_CONTEXT>",
         video_token: str | None = None,
     ) -> None:
         self.image_processor = image_processor
@@ -409,14 +383,14 @@ class InternVLProcessor(InternVLProcessorLike, ProcessorMixin):
         self.video_processor = video_processor
 
         self.image_seq_length = image_seq_length
-        self.image_token = image_token
         self.start_image_token = start_image_token
         self.end_image_token = end_image_token
+        self.ctx_image_token = ctx_image_token
         self.video_token = video_token
 
-        self.image_token_id = tokenizer.convert_tokens_to_ids(image_token)
         self.start_image_token_id = tokenizer.convert_tokens_to_ids(start_image_token)
         self.end_image_token_id = tokenizer.convert_tokens_to_ids(end_image_token)
+        self.ctx_image_token_id = tokenizer.convert_tokens_to_ids(ctx_image_token)
         self.video_token_id = (
             None
             if video_token is None
@@ -475,17 +449,15 @@ class InternVLProcessor(InternVLProcessorLike, ProcessorMixin):
         else:
             num_features = num_patches * self.image_seq_length
 
-        context_token = self.image_token
-        repl_features = context_token * num_features
+        repl_features = self.ctx_image_token * num_features
         repl_full = self.start_image_token + repl_features + self.end_image_token
 
-        return PromptUpdateDetails.select_text(repl_full, context_token)
+        return PromptUpdateDetails.select_text(repl_full, self.ctx_image_token)
 
     def get_video_repl(self, num_patches: int) -> PromptUpdateDetails[str]:
         assert self.video_token is not None and self.video_processor is not None
 
-        context_token = self.video_token
-        repl_features = context_token * self.image_seq_length
+        repl_features = self.video_token * self.image_seq_length
         repl_features_with_sep = (
             self.start_image_token + repl_features + self.end_image_token
         )
@@ -494,7 +466,7 @@ class InternVLProcessor(InternVLProcessorLike, ProcessorMixin):
             [f"Frame{i + 1}: {repl_features_with_sep}" for i in range(num_patches)]
         )
 
-        return PromptUpdateDetails.select_text(repl_full, context_token)
+        return PromptUpdateDetails.select_text(repl_full, self.video_token)
 
     def __call__(
         self,
@@ -539,7 +511,7 @@ class InternVLProcessor(InternVLProcessorLike, ProcessorMixin):
                 text = [text]
 
             if image_inputs:
-                image_token = self.image_token
+                image_token = "<image>"
                 image_index = 0
                 processed_text = list[str]()
                 replace_strings = list[str]()
@@ -562,7 +534,7 @@ class InternVLProcessor(InternVLProcessorLike, ProcessorMixin):
                 text = processed_text
 
             if video_inputs:
-                video_token = self.video_token
+                video_token = "<video>"
                 video_index = 0
                 processed_text = list[str]()
                 replace_strings = list[str]()
