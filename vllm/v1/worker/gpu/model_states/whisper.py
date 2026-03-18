@@ -8,6 +8,7 @@ import torch.nn as nn
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.v1.kv_cache_interface import CrossAttentionSpec, KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
 from vllm.v1.worker.gpu.input_batch import InputBatch
@@ -44,6 +45,8 @@ class WhisperModelState(ModelState):
             encoder_cache=self.encoder_cache,
             dtype=self.model_config.dtype,
             device=self.device,
+            vllm_config=vllm_config,
+            mm_registry=MULTIMODAL_REGISTRY,
         )
 
         self.max_encoder_len = getattr(
@@ -56,6 +59,12 @@ class WhisperModelState(ModelState):
         )
 
         self.encoder_outputs: list[torch.Tensor] = []
+
+    def profile_encoder(self) -> None:
+        self.encoder_runner.profile_encoder()
+
+    def reset_mm_cache(self) -> None:
+        self.encoder_runner.reset_mm_cache()
 
     def get_supported_generation_tasks(self):
         return ("transcription",)

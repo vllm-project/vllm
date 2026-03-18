@@ -31,6 +31,14 @@ class ModelState(ABC):
     def get_supported_generation_tasks(self) -> tuple[GenerationTask, ...]:
         return ("generate",)
 
+    def profile_encoder(self) -> None:
+        """Profile the encoder to measure GPU memory. No-op for non-MM."""
+        return None
+
+    def reset_mm_cache(self) -> None:
+        """Clear the MM processor cache after profiling. No-op for non-MM."""
+        return None
+
     def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
         return None
 
