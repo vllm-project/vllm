@@ -57,6 +57,8 @@ class Mxfp4MoeBackend(Enum):
     # Marlin
     BATCHED_MARLIN = "BATCHED_MARLIN"
     MARLIN = "MARLIN"
+    # ROCm AITER (CK)
+    CK = "CK"
     # Triton
     TRITON = "TRITON"
     TRITON_UNFUSED = "TRITON_UNFUSED"
@@ -131,6 +133,13 @@ def backend_to_kernel_cls(
 
         return [BatchedMarlinExperts]
 
+    elif backend == Mxfp4MoeBackend.CK:
+        from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
+            AiterExperts,
+        )
+
+        return [AiterExperts]
+
     elif backend == Mxfp4MoeBackend.XPU:
         raise NotImplementedError("XPU backend uses XpuMxfp4MoEMethod directly.")
     else:
@@ -146,6 +155,7 @@ def map_mxfp4_backend(runner_backend: str) -> Mxfp4MoeBackend:
         "flashinfer_cutlass_afp8": Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_MXFP8,
         "triton": Mxfp4MoeBackend.TRITON,
         "marlin": Mxfp4MoeBackend.MARLIN,
+        "ck": Mxfp4MoeBackend.CK,
     }
     if backend := mapping.get(runner_backend):
         return backend
@@ -162,6 +172,7 @@ def _get_priority_backends() -> list[Mxfp4MoeBackend]:
     """
     _AVAILABLE_BACKENDS = [
         Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16,
+        Mxfp4MoeBackend.CK,
         Mxfp4MoeBackend.TRITON,
         Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_BF16,
         Mxfp4MoeBackend.TRITON_UNFUSED,
@@ -636,6 +647,68 @@ def convert_to_mxfp4_moe_kernel_format(
                 w2_bias,
             )
 
+    elif mxfp4_backend == Mxfp4MoeBackend.CK:
+        from vllm._aiter_ops import rocm_aiter_ops
+
+        if w13_bias is not None:
+            w13_bias = w13_bias.data.to(torch.float32)
+        if w2_bias is not None:
+            w2_bias = w2_bias.data.to(torch.float32)
+
+        e, n, k = w13_weight.shape
+
+        # De-interleave w13 rows: gate/up pairs -> contiguous gate, up blocks
+        w13_weight.view(torch.uint8).copy_(
+            w13_weight.data.view(torch.uint8)
+            .view(e, n // 2, 2, k)
+            .permute(0, 2, 1, 3)
+            .contiguous()
+            .view(e, n, k)
+        )
+        w13_weight_scale.data = (
+            w13_weight_scale.data.view(e, n // 2, 2, -1)
+            .permute(0, 2, 1, 3)
+            .contiguous()
+            .view(e, n, -1)
+        )
+
+        # View as native FP4 dtype for AITER shuffle
+        w13_weight.data = w13_weight.data.view(torch.float4_e2m1fn_x2)
+        w2_weight.data = w2_weight.data.view(torch.float4_e2m1fn_x2)
+
+        # Shuffle weights and scales for AITER CK kernel layout
+        w13_weight.data = rocm_aiter_ops.shuffle_weight_a16w4(w13_weight, 16, True)
+        shuffled_w13_scale = rocm_aiter_ops.shuffle_scale_a16w4(
+            w13_weight_scale.view(-1, w13_weight_scale.shape[-1]),
+            num_experts,
+            True,
+        )
+
+        w2_weight.data = rocm_aiter_ops.shuffle_weight_a16w4(w2_weight, 16, False)
+        shuffled_w2_scale = rocm_aiter_ops.shuffle_scale_a16w4(
+            w2_weight_scale.view(-1, w2_weight_scale.shape[-1]),
+            num_experts,
+            False,
+        )
+
+        # Permute bias to match de-interleaved weight layout
+        if w13_bias is not None:
+            w13_bias = (
+                w13_bias.data.view(-1, n // 2, 2)
+                .permute(0, 2, 1)
+                .contiguous()
+                .view(-1, n)
+            )
+
+        return (
+            w13_weight,
+            w2_weight,
+            shuffled_w13_scale,
+            shuffled_w2_scale,
+            w13_bias,
+            w2_bias,
+        )
+
     elif mxfp4_backend in TRITON_BACKENDS:
         from triton_kernels.matmul_ogs import FlexCtx, PrecisionConfig
 
@@ -702,6 +775,7 @@ def make_mxfp4_moe_quant_config(
         Mxfp4MoeBackend.TRITON_UNFUSED,
         Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16,
         Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_BF16,
+        Mxfp4MoeBackend.CK,
     ):
         return mxfp4_w4a16_moe_quant_config(
             w1_bias=w1_bias,

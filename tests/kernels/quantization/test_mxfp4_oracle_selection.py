@@ -54,6 +54,7 @@ class TestBackendActivationKey:
         for backend in [
             Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16,
             Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_BF16,
+            Mxfp4MoeBackend.CK,
             Mxfp4MoeBackend.TRITON,
             Mxfp4MoeBackend.TRITON_UNFUSED,
             Mxfp4MoeBackend.MARLIN,
@@ -77,8 +78,7 @@ class TestGetPriorityBackends:
     """Test _get_priority_backends returns correct priority list."""
 
     def test_returns_bf16_backends_only(self):
-        config = MagicMock()
-        backends = _get_priority_backends(config)
+        backends = _get_priority_backends()
         mxfp8_backends = {
             Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8,
             Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_MXFP8,
@@ -88,16 +88,20 @@ class TestGetPriorityBackends:
                 f"MXFP8 backend {b} should not be in default priority list"
             )
 
-    def test_trtllm_before_triton(self):
-        config = MagicMock()
-        backends = _get_priority_backends(config)
+    def test_trtllm_before_ck(self):
+        backends = _get_priority_backends()
         fi_idx = backends.index(Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16)
+        ck_idx = backends.index(Mxfp4MoeBackend.CK)
+        assert fi_idx < ck_idx, "FlashInfer TRTLLM BF16 should come before CK"
+
+    def test_ck_before_triton(self):
+        backends = _get_priority_backends()
+        ck_idx = backends.index(Mxfp4MoeBackend.CK)
         triton_idx = backends.index(Mxfp4MoeBackend.TRITON)
-        assert fi_idx < triton_idx, "FlashInfer TRTLLM BF16 should come before Triton"
+        assert ck_idx < triton_idx, "CK should come before Triton"
 
     def test_triton_before_cutlass(self):
-        config = MagicMock()
-        backends = _get_priority_backends(config)
+        backends = _get_priority_backends()
         triton_idx = backends.index(Mxfp4MoeBackend.TRITON)
         cutlass_idx = backends.index(Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_BF16)
         assert triton_idx < cutlass_idx, (
@@ -105,8 +109,7 @@ class TestGetPriorityBackends:
         )
 
     def test_cutlass_before_marlin(self):
-        config = MagicMock()
-        backends = _get_priority_backends(config)
+        backends = _get_priority_backends()
         cutlass_idx = backends.index(Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_BF16)
         marlin_idx = backends.index(Mxfp4MoeBackend.MARLIN)
         assert cutlass_idx < marlin_idx, (
@@ -114,16 +117,14 @@ class TestGetPriorityBackends:
         )
 
     def test_no_xpu_in_list(self):
-        config = MagicMock()
-        backends = _get_priority_backends(config)
+        backends = _get_priority_backends()
         assert Mxfp4MoeBackend.XPU not in backends
 
     def test_returns_fresh_list(self):
         """Mutating returned list should not affect next call."""
-        config = MagicMock()
-        a = _get_priority_backends(config)
+        a = _get_priority_backends()
         a.pop()
-        b = _get_priority_backends(config)
+        b = _get_priority_backends()
         assert len(b) > len(a)
 
 
@@ -260,8 +261,8 @@ class TestSelectMxfp4MoeBackendForLoop:
         # FlashInfer BF16 backends should NOT appear
         assert Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16 not in visited_backends
         assert Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_BF16 not in visited_backends
-        # First visited should be TRITON
-        assert backend == Mxfp4MoeBackend.TRITON
+        # First visited should be CK (second in priority after FlashInfer)
+        assert backend == Mxfp4MoeBackend.CK
 
     @patch("vllm.model_executor.layers.fused_moe.oracle.mxfp4.current_platform")
     @patch(
