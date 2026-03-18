@@ -130,6 +130,14 @@ class PassConfig:
     (threshold is device-capability dependent)."""
     fuse_gemm_comms: bool = Field(default=None)
     """Enable async TP."""
+    async_tp_min_tokens: int | None = Field(default=128)
+    """Minimum number of tokens (batch size) for async TP fusion to be applied.
+    When a compile range's max batch size is below this threshold, both
+    sequence parallelism and async TP passes are skipped, as unfused
+    reduce_scatter/all_gather has more kernel launches than all_reduce at
+    small batch sizes. Default 128 is derived from the AutoHeuristic
+    crossover at arith_intensity ≈ 237.51 on H100. Set to 1 to always
+    fuse, or None to disable the threshold check."""
     fuse_allreduce_rms: bool = Field(default=None)
     """Enable flashinfer allreduce fusion."""
     enable_qk_norm_rope_fusion: bool = False

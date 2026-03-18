@@ -18,10 +18,36 @@ from vllm.platforms import current_platform
 
 from ..inductor_pass import enable_fake_mode
 from ..vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
+from .async_tp_heuristic import should_fuse_async_tp
 
 FP8_DTYPE = current_platform.fp8_dtype()
 
 logger = init_logger(__name__)
+
+
+def _mm_extra_check(match: pm.Match) -> bool:
+    """Per-matmul extra_check for async TP patterns.
+
+    Extracts (M, K, N) from the matched pattern's tensor shapes and
+    delegates to the AutoHeuristic decision tree.
+    """
+    try:
+        keys = list(match.kwargs.keys())
+        lhs_node = match.kwargs[keys[0]]
+        rhs_node = match.kwargs[keys[1]]
+        lhs_shape = lhs_node.meta["val"].shape
+        rhs_shape = rhs_node.meta["val"].shape
+        M, K = int(lhs_shape[0]), int(lhs_shape[1])
+        N = int(rhs_shape[1]) if len(rhs_shape) > 1 else int(rhs_shape[0])
+        result = should_fuse_async_tp(M, K, N)
+        if not result:
+            logger.debug(
+                "Heuristic skipping async TP fusion for M=%d K=%d N=%d",
+                M, K, N,
+            )
+        return result
+    except Exception:
+        return True
 
 
 class BasePattern:
@@ -61,7 +87,8 @@ class GEMMReduceScatterPattern(BasePattern):
             return gemm_rs
 
         pm.register_replacement(
-            pattern, replacement, self.get_inputs(), pm.fwd_only, pm_pass
+            pattern, replacement, self.get_inputs(), pm.fwd_only, pm_pass,
+            extra_check=_mm_extra_check,
         )
 
 
@@ -96,7 +123,8 @@ class AllGatherGEMMPattern(BasePattern):
             return mm_outputs
 
         pm.register_replacement(
-            pattern, replacement, self.get_inputs(), pm.fwd_only, pm_pass
+            pattern, replacement, self.get_inputs(), pm.fwd_only, pm_pass,
+            extra_check=_mm_extra_check,
         )
 
 
@@ -164,7 +192,8 @@ class ScaledMMReduceScatterPattern(BasePattern):
             return gemm_rs
 
         pm.register_replacement(
-            pattern, replacement, self.get_inputs(), pm.fwd_only, pm_pass
+            pattern, replacement, self.get_inputs(), pm.fwd_only, pm_pass,
+            extra_check=_mm_extra_check,
         )
 
 
@@ -226,7 +255,8 @@ class AllGatherScaledMMPattern(BasePattern):
             return mm_outputs
 
         pm.register_replacement(
-            pattern, replacement, self.get_inputs(), pm.fwd_only, pm_pass
+            pattern, replacement, self.get_inputs(), pm.fwd_only, pm_pass,
+            extra_check=_mm_extra_check,
         )
 
 
@@ -299,7 +329,8 @@ class CutlassScaledMMReduceScatterPattern(BasePattern):
             return gemm_rs
 
         pm.register_replacement(
-            pattern, replacement, self.get_inputs(), pm.fwd_only, pm_pass
+            pattern, replacement, self.get_inputs(), pm.fwd_only, pm_pass,
+            extra_check=_mm_extra_check,
         )
 
 
@@ -367,7 +398,8 @@ class AllGatherCutlassScaledMMPattern(BasePattern):
             return mm_outputs
 
         pm.register_replacement(
-            pattern, replacement, self.get_inputs(), pm.fwd_only, pm_pass
+            pattern, replacement, self.get_inputs(), pm.fwd_only, pm_pass,
+            extra_check=_mm_extra_check,
         )
 
 
@@ -406,6 +438,11 @@ class AsyncTPPass(VllmPatternMatcherPass):
         self.dump_patterns(config, self.patterns)
 
     def is_applicable_for_range(self, compile_range: Range) -> bool:
+        # Coarse-grained batch-size gating: skip entirely for small ranges
+        min_tokens = self.pass_config.async_tp_min_tokens
+        if min_tokens is not None and compile_range.end < min_tokens:
+            return False
+
         # This pass is applied on top of the sequence parallelism pass.
         # It inherits the same applicability condition as `SequenceParallelismPass`.
         # See `SequenceParallelismPass.is_applicable` for more details.
