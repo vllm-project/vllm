@@ -13,10 +13,14 @@ from vllm import SamplingParams
 from vllm.config import KVTransferConfig, VllmConfig
 from vllm.distributed.kv_events import BlockRemoved, BlockStored
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
+    OffloadingConnectorMetadata,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
+    OffloadingConnectorStats,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
     OffloadingConnector,
-    OffloadingConnectorMetadata,
-    OffloadingConnectorStats,
 )
 from vllm.forward_context import ForwardContext
 from vllm.utils.hashing import sha256
@@ -26,8 +30,13 @@ from vllm.v1.core.kv_cache_utils import (
     get_request_block_hasher,
     init_none_hash,
 )
+from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.scheduler import Scheduler
-from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheConfig,
+    KVCacheGroupSpec,
+)
 from vllm.v1.kv_offload.abstract import (
     LoadStoreSpec,
     OffloadingEvent,
@@ -43,11 +52,11 @@ from vllm.v1.kv_offload.worker.worker import (
 )
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, KVConnectorOutput
 from vllm.v1.request import Request, RequestStatus
+from vllm.v1.structured_output import StructuredOutputManager
 
 from .utils import (
     EOS_TOKEN_ID,
     create_model_runner_output,
-    create_scheduler,
     create_vllm_config,
 )
 
@@ -175,10 +184,37 @@ class RequestRunner:
             },
         )
 
-        self.scheduler: Scheduler = create_scheduler(
-            vllm_config, num_blocks=num_gpu_blocks
+        block_size = vllm_config.cache_config.block_size
+        kv_cache_config = KVCacheConfig(
+            num_blocks=num_gpu_blocks,
+            kv_cache_tensors=[],
+            kv_cache_groups=[
+                KVCacheGroupSpec(
+                    ["layer"],
+                    FullAttentionSpec(
+                        block_size=block_size,
+                        num_kv_heads=1,
+                        head_size=1,
+                        dtype=torch.float32,
+                    ),
+                )
+            ],
         )
-        self.worker_connector = OffloadingConnector(vllm_config, KVConnectorRole.WORKER)
+        vllm_config.cache_config.num_gpu_blocks = num_gpu_blocks
+        self.num_kv_groups = len(kv_cache_config.kv_cache_groups)
+
+        scheduler_cls = AsyncScheduler if async_scheduling else Scheduler
+        self.scheduler = scheduler_cls(
+            vllm_config=vllm_config,
+            kv_cache_config=kv_cache_config,
+            log_stats=True,
+            structured_output_manager=StructuredOutputManager(vllm_config),
+            block_size=block_size,
+        )
+
+        self.worker_connector = OffloadingConnector(
+            vllm_config, KVConnectorRole.WORKER, kv_cache_config
+        )
 
         # register worker kv_caches to enable OffloadingWorker creations
         self.worker_connector.register_cross_layers_kv_cache(
@@ -331,10 +367,7 @@ class RequestRunner:
             assert kv_connector_metadata is not None
             assert isinstance(kv_connector_metadata, OffloadingConnectorMetadata)
 
-            if scheduler_output.preempted_req_ids:
-                self.worker_connector.handle_preemptions(
-                    scheduler_output.preempted_req_ids
-                )
+            self.worker_connector.handle_preemptions(kv_connector_metadata)
 
             self.worker_connector.bind_connector_metadata(kv_connector_metadata)
             self.worker_connector.start_load_kv(self._dummy_ctx)

@@ -55,7 +55,7 @@ def test_gc():
     # The memory allocated for model and KV cache should be released.
     # The memory allocated for PyTorch and others should be less than 50MB.
     # Usually, it's around 10MB.
-    allocated = torch.cuda.memory_allocated()
+    allocated = torch.accelerator.memory_allocated()
     assert allocated < 50 * 1024 * 1024
 
 
