@@ -19,9 +19,9 @@ class ChunkingMoERunner(MoERunnerBase):
     """
     MoE runner wrapper that adds chunked processing to any MoERunnerBase.
 
-    This runner wraps an inner MoERunnerBase and overrides forward_impl to
+    This runner wraps an inner MoERunnerBase and overrides _forward_impl to
     process large batches by breaking them into smaller chunks. Each chunk
-    is delegated to the inner runner's forward_impl, making chunking
+    is delegated to the inner runner's _forward_impl, making chunking
     composable with any runner implementation.
 
     All MoERunnerBase state (moe_config, router, quant_method, etc.) is
@@ -31,7 +31,7 @@ class ChunkingMoERunner(MoERunnerBase):
 
     Key behaviors:
     - Pre-allocates workspace tensors for CUDA graph compatibility
-    - Processes chunks via inner.forward_impl per chunk
+    - Processes chunks via inner._forward_impl per chunk
     - Never reduces results (reduce_results always returns False)
     """
 
@@ -126,7 +126,7 @@ class ChunkingMoERunner(MoERunnerBase):
         out_slice.copy_(orig_slice, non_blocking=True)
         return out_slice
 
-    def forward_impl(
+    def _forward_impl(
         self,
         layer: torch.nn.Module,
         hidden_states: torch.Tensor,
@@ -185,7 +185,7 @@ class ChunkingMoERunner(MoERunnerBase):
                 )
 
                 # Delegate per-chunk computation to the inner runner.
-                chunk_result = self._inner.forward_impl(
+                chunk_result = self._inner._forward_impl(
                     layer=layer,
                     hidden_states=hidden_states_chunk,
                     router_logits=router_logits_chunk,

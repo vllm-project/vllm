@@ -1,8 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Callable
-from contextlib import nullcontext
-from typing import TYPE_CHECKING
 
 import torch
 
@@ -94,45 +91,21 @@ class DefaultMoERunner(MoERunnerBase):
         layer: torch.nn.Module,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
-        extra_tensor: torch.Tensor | None = None
-
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        # For naive dispatch/combine Dp/Ep, dispatch the hidden states and
+        # router logits to all experts.
+        # NOTE: this will be removed once all kernels are migrated into the
+        # MoEKernel framework.
         if self.do_naive_dispatch_combine:
-            post_quant_allgather = (
-                self.moe_config.dp_size > 1
-                and self.moe_config.use_ep
-                and getattr(self.quant_method, "do_post_quant_allgather", False)
-            )
-
-            extra_tensors: list[torch.Tensor] | None = None
-
-            if post_quant_allgather:
-                hidden_states_to_dispatch, extra_tensors = (
-                    self.quant_method.prepare_dp_allgather_tensor(
-                        layer, hidden_states, router_logits
-                    )
-                )
-            else:
-                hidden_states_to_dispatch = hidden_states
-
-            result = get_ep_group().dispatch_router_logits(
-                hidden_states_to_dispatch,
+            hidden_states, router_logits = get_ep_group().dispatch_router_logits(
+                hidden_states,
                 router_logits,
                 self.moe_config.is_sequence_parallel,
-                extra_tensors=extra_tensors,
             )
-
-            if len(result) == 3:
-                hidden_states, router_logits, extra_tensors = result
-                assert isinstance(extra_tensors, list) and len(extra_tensors) == 1
-                extra_tensor = extra_tensors[0]
-            else:
-                hidden_states, router_logits = result
 
         # NOTE: Similar with DP, PCP also needs dispatch and combine. For
         # simplicity, AgRsAll2All was added separately for PCP here. Maybe
         # we should modify All2AllManager abstraction to better support PCP.
-        # TODO(bnell): see what we can do here
         if self.moe_config.pcp_size > 1:
             hidden_states = get_pcp_group().all_gather(
                 hidden_states,
@@ -143,7 +116,7 @@ class DefaultMoERunner(MoERunnerBase):
                 dim=0,
             )
 
-        return hidden_states, router_logits, extra_tensor
+        return hidden_states, router_logits
 
     def _maybe_combine(
         self,
@@ -167,8 +140,9 @@ class DefaultMoERunner(MoERunnerBase):
         else:
             return hidden_states
 
-    def forward(
+    def _forward_impl(
         self,
+        layer: torch.nn.Module,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
         shared_experts_input: torch.Tensor | None,
@@ -176,7 +150,7 @@ class DefaultMoERunner(MoERunnerBase):
         # TODO(bnell): parts of the dispatch/combine steps will go away once
         # #32567 lands and the remaining kernels are made MKs.  The PCP
         # code will probably remain
-        hidden_states, router_logits, extra_tensor = self._maybe_dispatch(
+        hidden_states, router_logits = self._maybe_dispatch(
             layer,
             hidden_states,
             router_logits,
@@ -185,7 +159,6 @@ class DefaultMoERunner(MoERunnerBase):
         shared_output, hidden_states = self._apply_quant_method(
             layer=layer,
             hidden_states=hidden_states,
-            extra_tensor=extra_tensor,
             router_logits=router_logits,
             shared_experts_input=shared_experts_input,
         )

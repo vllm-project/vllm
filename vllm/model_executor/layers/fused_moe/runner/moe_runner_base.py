@@ -3,6 +3,7 @@
 from abc import abstractmethod
 from collections.abc import Callable
 from contextlib import nullcontext
+from typing import TYPE_CHECKING
 
 import torch
 import torch.nn.functional as F
@@ -32,6 +33,8 @@ from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
 )
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import (
+    HAS_OPAQUE_TYPE,
+    ModuleName,
     direct_register_custom_op,
 )
 
@@ -55,6 +58,20 @@ def get_layer_from_name(layer_name: str) -> torch.nn.Module:
     return forward_context.no_compile_layers[layer_name]
 
 
+# On torch >= 2.11, layer_name is a hoisted ModuleName opaque object;
+# on older versions it remains a plain str.
+if TYPE_CHECKING:
+    from typing import TypeAlias
+
+    _layer_name_type: TypeAlias = str | ModuleName
+else:
+    _layer_name_type = ModuleName if HAS_OPAQUE_TYPE else str
+
+
+def _resolve_layer_name(layer_name: str | ModuleName) -> str:
+    return layer_name.value if isinstance(layer_name, ModuleName) else layer_name
+
+
 # Note: _moe_forward and _moe_forward_shared should not contain any
 # implementation details, They should merely pass along control to
 # the runner's 'forward_dispatch' method.
@@ -62,9 +79,9 @@ def _moe_forward(
     hidden_states: torch.Tensor,
     router_logits: torch.Tensor,
     shared_experts_input: torch.Tensor | None,
-    layer_name: str,
+    layer_name: _layer_name_type,
 ) -> torch.Tensor:
-    layer = get_layer_from_name(layer_name)
+    layer = get_layer_from_name(_resolve_layer_name(layer_name))
     return layer.runner.forward_dispatch(
         layer,
         hidden_states,
@@ -77,7 +94,7 @@ def _moe_forward_fake(
     hidden_states: torch.Tensor,
     router_logits: torch.Tensor,
     shared_experts_input: torch.Tensor | None,
-    layer_name: str,
+    layer_name: _layer_name_type,
 ) -> torch.Tensor:
     return torch.empty_like(hidden_states)
 
@@ -86,9 +103,9 @@ def _moe_forward_shared(
     hidden_states: torch.Tensor,
     router_logits: torch.Tensor,
     shared_experts_input: torch.Tensor | None,
-    layer_name: str,
+    layer_name: _layer_name_type,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    layer = get_layer_from_name(layer_name)
+    layer = get_layer_from_name(_resolve_layer_name(layer_name))
     return layer.runner.forward_dispatch(
         layer,
         hidden_states,
@@ -101,7 +118,7 @@ def _moe_forward_shared_fake(
     hidden_states: torch.Tensor,
     router_logits: torch.Tensor,
     shared_experts_input: torch.Tensor | None,
-    layer_name: str,
+    layer_name: _layer_name_type,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     # Output shapes:
     # - fused_out: same as hidden_states (routed experts use transformed size)
@@ -109,19 +126,17 @@ def _moe_forward_shared_fake(
     #               hidden_states
     # (For latent MoE: shared experts use original hidden_size, not latent size)
     fused_out = torch.empty_like(hidden_states)
-
     if shared_experts_input is not None:
         shared_out = torch.empty_like(shared_experts_input)
     else:
         shared_out = torch.empty_like(hidden_states)
-
     return shared_out, fused_out
 
 
 direct_register_custom_op(
     op_name="moe_forward",
     op_func=_moe_forward,
-    mutates_args=["hidden_states"],  # ?
+    mutates_args=["hidden_states"],  # is this still true?
     fake_impl=_moe_forward_fake,
     tags=(torch.Tag.needs_fixed_stride_order,),
 )
@@ -130,7 +145,6 @@ direct_register_custom_op(
 direct_register_custom_op(
     op_name="moe_forward_shared",
     op_func=_moe_forward_shared,
-    mutates_args=["hidden_states"],  # ?
     fake_impl=_moe_forward_shared_fake,
     tags=(torch.Tag.needs_fixed_stride_order,),
 )
@@ -154,7 +168,7 @@ class MoERunnerBase(MoERunner):
 
     Key abstract methods that subclasses must implement:
     - reduce_results: Determines whether results should be reduced across ranks
-    - forward_impl: The core MoE computation logic specific to each runner type
+    - _forward_impl: The core MoE computation logic specific to each runner type
     """
 
     def __init__(
@@ -189,7 +203,7 @@ class MoERunnerBase(MoERunner):
         if current_platform.is_tpu() or current_platform.is_cpu():
             # TODO: Once the OOM issue for the TPU backend is resolved, we
             # will switch to using the moe_forward custom op.
-            # Note: CPU doesn't require wrapped forward_impl.
+            # Note: CPU doesn't require wrapped _forward_impl.
             return _moe_forward if self.shared_experts is None else _moe_forward_shared
 
         return (
@@ -217,8 +231,8 @@ class MoERunnerBase(MoERunner):
         early.
         """
         return (
-            self.quant_method.moe_mk is not None
-            and self.quant_method.moe_mk.output_is_reduced()
+            self.quant_method.moe_kernel is not None
+            and self.quant_method.moe_kernel.output_is_reduced()
         )
 
     def maybe_all_reduce_tensor_model_parallel(self, final_hidden_states: torch.Tensor):
@@ -287,7 +301,9 @@ class MoERunnerBase(MoERunner):
             assert len(trunc_sizes) == 1
             return func(states, trunc_sizes[0])
 
-    def _encode_layer_name(self) -> str:
+    def _encode_layer_name(self) -> str | ModuleName:
+        if HAS_OPAQUE_TYPE:
+            return ModuleName(self.layer_name)
         # Can be unavailable or None in unittests
         if (
             is_forward_context_available()
@@ -333,7 +349,6 @@ class MoERunnerBase(MoERunner):
         self,
         layer: torch.nn.Module,
         hidden_states: torch.Tensor,
-        extra_tensor: torch.Tensor | None,
         router_logits: torch.Tensor,
         shared_experts_input: torch.Tensor | None,
     ) -> tuple[torch.Tensor | None, torch.Tensor]:
@@ -343,14 +358,10 @@ class MoERunnerBase(MoERunner):
             SharedExpertsOrder.BEFORE_QUANT_METHOD,
         )
 
-        # TODO(bnell): deal with fp4 flashinfer tuple hidden states hack (#30014).
-        # Figure out nicer way to do this.
-        x_arg = hidden_states if extra_tensor is None else (hidden_states, extra_tensor)
-
         if self.quant_method.is_monolithic:
             fused_out = self.quant_method.apply_monolithic(
                 layer=layer,
-                x=x_arg,
+                x=hidden_states,
                 router_logits=router_logits,
             )
         else:
@@ -361,7 +372,7 @@ class MoERunnerBase(MoERunner):
 
             fused_out = self.quant_method.apply(
                 layer=layer,
-                x=x_arg,
+                x=hidden_states,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
                 shared_experts_input=shared_experts_input,
@@ -418,18 +429,18 @@ class MoERunnerBase(MoERunner):
         - forward
           - self.forward_entry (_moe_forward or _moe_forward_shared custom op)
             - forward_dispatch
-              - forward_impl
+              - _forward_impl
 
         Note: The existence of _moe_forward and _moe_forward_shared custom ops are due
         to the following reasons:
-        1. the chunking loop in _forward_impl_chunked cannot be compiled by
+        1. the chunking loop in ChunkingMoERunner._forward_impl cannot be compiled by
            torch.compile
         2. pytorch cannot handle union types in custom op signatures so _moe_forward
            and _moe_forward_shared must be split.
 
-        If _forward_impl_chunked can be implemented via torch.scan we can potentially
-        get rid of _moe_forward and _moe_forward_shared and collapse the whole sequence
-        into the 'forward' method.
+        If ChunkingMoERunner._forward_impl can be implemented via torch.scan we can
+        potentially get rid of _moe_forward and _moe_forward_shared and collapse the
+        whole sequence into the 'forward' method.
         """
 
         # Apply transform for routed experts (e.g., latent projection for latent MoE)
@@ -469,7 +480,7 @@ class MoERunnerBase(MoERunner):
         )
 
         with self._sequence_parallel_context():
-            return self.forward_impl(
+            return self._forward_impl(
                 layer,
                 hidden_states,
                 router_logits,
@@ -477,7 +488,7 @@ class MoERunnerBase(MoERunner):
             )
 
     @abstractmethod
-    def forward_impl(
+    def _forward_impl(
         self,
         layer: torch.nn.Module,
         hidden_states: torch.Tensor,

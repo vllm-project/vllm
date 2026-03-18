@@ -24,10 +24,6 @@ from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
     SharedExperts,
     SharedExpertsOrder,
 )
-from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
-    SharedExperts,
-    SharedExpertsOrder,
-)
 from vllm.model_executor.layers.fused_moe.utils import (
     _resize_cache,
     disable_inplace,
