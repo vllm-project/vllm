@@ -1152,6 +1152,74 @@ def test_eagle_draft_model_config():
     assert draft_model_config.architecture == "EagleLlamaForCausalLM"
 
 
+def _apply_nested_overrides(target, overrides):
+    for key, value in overrides.items():
+        if isinstance(target, dict):
+            nested_target = target.get(key)
+        else:
+            nested_target = getattr(target, key, None)
+        if isinstance(value, dict) and nested_target is not None:
+            _apply_nested_overrides(nested_target, value)
+        else:
+            if isinstance(target, dict):
+                target[key] = value
+            else:
+                setattr(target, key, value)
+
+
+class _FakeHFConfig(SimpleNamespace):
+
+    def update(self, values):
+        for key, value in values.items():
+            setattr(self, key, value)
+
+
+class _FakeDraftModelConfig:
+
+    def __init__(self, **kwargs):
+        self.model = kwargs["model"]
+        self.hf_overrides = kwargs["hf_overrides"]
+        self.max_model_len = kwargs["spec_target_max_model_len"]
+        self.hf_config = _FakeHFConfig(
+            model_type="qwen3_5",
+            architectures=["Qwen3ForCausalLM"],
+            text_config=_FakeHFConfig(
+                rope_parameters={"rope_type": "default"},
+            ),
+        )
+
+        if callable(self.hf_overrides):
+            self.hf_config = self.hf_overrides(self.hf_config)
+        elif isinstance(self.hf_overrides, dict):
+            _apply_nested_overrides(self.hf_config, self.hf_overrides)
+
+        self.hf_text_config = self.hf_config.text_config
+
+    def verify_with_parallel_config(self, parallel_config):
+        return None
+
+
+def _make_fake_target_model_config(hf_overrides):
+    return SimpleNamespace(
+        model="lukealonso/Qwen3.5-397B-A17B-NVFP4",
+        tokenizer="lukealonso/Qwen3.5-397B-A17B-NVFP4",
+        tokenizer_mode="auto",
+        trust_remote_code=True,
+        allowed_local_media_path="",
+        allowed_media_domains=None,
+        dtype="bfloat16",
+        seed=0,
+        hf_overrides=hf_overrides,
+        hf_text_config=SimpleNamespace(model_type="qwen3_5"),
+        quantization=None,
+        tokenizer_revision=None,
+        max_model_len=524_288,
+        enforce_eager=False,
+        max_logprobs=20,
+        config_format="auto",
+    )
+
+
 @pytest.mark.skip_global_cleanup
 def test_mtp_draft_model_config_preserves_target_hf_overrides():
     """Test that MTP draft config keeps target HF overrides."""
@@ -1169,71 +1237,9 @@ def test_mtp_draft_model_config_preserves_target_hf_overrides():
             "rope_parameters": target_rope_parameters,
         },
     }
+    target_model_config = _make_fake_target_model_config(target_hf_overrides)
 
-    def apply_nested_overrides(target, overrides):
-        for key, value in overrides.items():
-            if isinstance(target, dict):
-                nested_target = target.get(key)
-            else:
-                nested_target = getattr(target, key, None)
-            if isinstance(value, dict) and nested_target is not None:
-                apply_nested_overrides(nested_target, value)
-            else:
-                if isinstance(target, dict):
-                    target[key] = value
-                else:
-                    setattr(target, key, value)
-
-    class FakeHFConfig(SimpleNamespace):
-
-        def update(self, values):
-            for key, value in values.items():
-                setattr(self, key, value)
-
-    class FakeDraftModelConfig:
-
-        def __init__(self, **kwargs):
-            self.model = kwargs["model"]
-            self.hf_overrides = kwargs["hf_overrides"]
-            self.max_model_len = kwargs["spec_target_max_model_len"]
-            self.hf_config = FakeHFConfig(
-                model_type="qwen3_5",
-                architectures=["Qwen3ForCausalLM"],
-                text_config=FakeHFConfig(
-                    rope_parameters={"rope_type": "default"},
-                ),
-            )
-
-            if callable(self.hf_overrides):
-                self.hf_config = self.hf_overrides(self.hf_config)
-            elif isinstance(self.hf_overrides, dict):
-                apply_nested_overrides(self.hf_config, self.hf_overrides)
-
-            self.hf_text_config = self.hf_config.text_config
-
-        def verify_with_parallel_config(self, parallel_config):
-            return None
-
-    target_model_config = SimpleNamespace(
-        model="lukealonso/Qwen3.5-397B-A17B-NVFP4",
-        tokenizer="lukealonso/Qwen3.5-397B-A17B-NVFP4",
-        tokenizer_mode="auto",
-        trust_remote_code=True,
-        allowed_local_media_path="",
-        allowed_media_domains=None,
-        dtype="bfloat16",
-        seed=0,
-        hf_overrides=target_hf_overrides,
-        hf_text_config=SimpleNamespace(model_type="qwen3_5"),
-        quantization=None,
-        tokenizer_revision=None,
-        max_model_len=524_288,
-        enforce_eager=False,
-        max_logprobs=20,
-        config_format="auto",
-    )
-
-    with patch("vllm.config.speculative.ModelConfig", FakeDraftModelConfig):
+    with patch("vllm.config.speculative.ModelConfig", _FakeDraftModelConfig):
         speculative_config = SpeculativeConfig(
             target_model_config=target_model_config,
             target_parallel_config=ParallelConfig(),
@@ -1244,6 +1250,38 @@ def test_mtp_draft_model_config_preserves_target_hf_overrides():
     draft_model_config = speculative_config.draft_model_config
     assert isinstance(draft_model_config.hf_overrides, dict)
     assert draft_model_config.hf_overrides == target_hf_overrides
+    assert (
+        draft_model_config.hf_config.text_config.rope_parameters
+        == target_rope_parameters
+    )
+    assert draft_model_config.hf_config.model_type == "qwen3_5_mtp"
+
+
+@pytest.mark.skip_global_cleanup
+def test_mtp_draft_model_config_preserves_callable_target_hf_overrides():
+    """Test that callable target HF overrides are composed for MTP drafts."""
+    target_rope_parameters = {
+        "rope_type": "yarn",
+        "factor": 2.0,
+        "original_max_position_embeddings": 262_144,
+    }
+
+    def target_hf_overrides(hf_config):
+        hf_config.text_config.rope_parameters = target_rope_parameters
+        return hf_config
+
+    target_model_config = _make_fake_target_model_config(target_hf_overrides)
+
+    with patch("vllm.config.speculative.ModelConfig", _FakeDraftModelConfig):
+        speculative_config = SpeculativeConfig(
+            target_model_config=target_model_config,
+            target_parallel_config=ParallelConfig(),
+            method="mtp",
+            num_speculative_tokens=1,
+        )
+
+    draft_model_config = speculative_config.draft_model_config
+    assert callable(draft_model_config.hf_overrides)
     assert (
         draft_model_config.hf_config.text_config.rope_parameters
         == target_rope_parameters
