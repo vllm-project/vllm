@@ -82,6 +82,13 @@ from vllm.entrypoints.openai.responses.harmony import (
     response_input_to_harmony,
 )
 from vllm.entrypoints.openai.responses.protocol import (
+    AddConversationItemsRequest,
+    ConversationItemList,
+    ConversationItemObject,
+    ConversationObject,
+    CreateConversationRequest,
+    DeletedConversationItemObject,
+    DeletedConversationObject,
     InputTokensDetails,
     OutputTokensDetails,
     ResponseCompletedEvent,
@@ -95,6 +102,8 @@ from vllm.entrypoints.openai.responses.protocol import (
     ResponsesResponse,
     ResponseUsage,
     StreamingResponsesResponse,
+    UpdateConversationRequest,
+    extract_conversation_id,
 )
 from vllm.entrypoints.openai.responses.streaming_events import (
     StreamingState,
@@ -265,6 +274,11 @@ class OpenAIServingResponses(OpenAIServing):
 
         self.background_tasks: dict[str, asyncio.Task] = {}
 
+        # Conversations API stores (same pattern as response_store/msg_store)
+        self.conversation_store: dict[str, ConversationObject] = {}
+        self.conversation_store_lock = asyncio.Lock()
+        self.conversation_items_store: dict[str, list[ConversationItemObject]] = {}
+
         self.tool_server = tool_server
 
     def _validate_generator_input(
@@ -321,6 +335,25 @@ class OpenAIServingResponses(OpenAIServing):
                 status_code=HTTPStatus.BAD_REQUEST,
                 param="previous_response_id",
             )
+        conv_id = extract_conversation_id(request.conversation)
+        if conv_id is not None:
+            if not self.enable_store:
+                return self.create_error_response(
+                    err_type="invalid_request_error",
+                    message=(
+                        "`conversation` requires `VLLM_ENABLE_RESPONSES_API_STORE=1`."
+                    ),
+                    status_code=HTTPStatus.BAD_REQUEST,
+                    param="conversation",
+                )
+            if request.previous_input_messages:
+                return self.create_error_response(
+                    err_type="invalid_request_error",
+                    message="`conversation` and `previous_input_messages` "
+                    "cannot be used together.",
+                    status_code=HTTPStatus.BAD_REQUEST,
+                    param="conversation",
+                )
         return None
 
     async def create_responses(
@@ -365,15 +398,27 @@ class OpenAIServingResponses(OpenAIServing):
         else:
             prev_response = None
 
+        # Handle the conversation parameter.
+        conv_id = extract_conversation_id(request.conversation)
+        conv_items: list[ResponseInputOutputItem] | None = None
+        if conv_id is not None:
+            async with self.conversation_store_lock:
+                if conv_id not in self.conversation_store:
+                    return self._make_conversation_not_found_error(conv_id)
+                raw_items = self.conversation_items_store.get(conv_id, [])
+                conv_items = [ci.item for ci in raw_items]
+
         lora_request = self._maybe_get_adapters(request)
         model_name = self.models.model_name(lora_request)
 
         if self.use_harmony:
             messages, engine_prompts = self._make_request_with_harmony(
-                request, prev_response
+                request, prev_response, conv_items=conv_items
             )
         else:
-            messages, engine_prompts = await self._make_request(request, prev_response)
+            messages, engine_prompts = await self._make_request(
+                request, prev_response, conv_items=conv_items
+            )
 
         request_metadata = RequestResponseMetadata(request_id=request.request_id)
         if raw_request:
@@ -576,14 +621,30 @@ class OpenAIServingResponses(OpenAIServing):
         self,
         request: ResponsesRequest,
         prev_response: ResponsesResponse | None,
+        conv_items: list[ResponseInputOutputItem] | None = None,
     ):
         tool_dicts = construct_tool_dicts(request.tools, request.tool_choice)
+
+        # Build prev_msg from conversation items if provided.
+        if conv_items is not None:
+            from vllm.entrypoints.openai.responses.utils import (
+                construct_chat_messages_with_tool_call,
+            )
+
+            prev_msg = construct_chat_messages_with_tool_call(conv_items)
+        elif prev_response:
+            prev_msg = self.msg_store.get(prev_response.id)
+        else:
+            prev_msg = None
+
         # Construct the input messages.
         messages = construct_input_messages(
             request_instructions=request.instructions,
             request_input=request.input,
-            prev_msg=self.msg_store.get(prev_response.id) if prev_response else None,
-            prev_response_output=prev_response.output if prev_response else None,
+            prev_msg=prev_msg,
+            prev_response_output=(
+                prev_response.output if prev_response and conv_items is None else None
+            ),
         )
 
         _, engine_prompts = await self.openai_serving_render.preprocess_chat(
@@ -704,13 +765,16 @@ class OpenAIServingResponses(OpenAIServing):
         self,
         request: ResponsesRequest,
         prev_response: ResponsesResponse | None,
+        conv_items: list[ResponseInputOutputItem] | None = None,
     ):
         if request.tool_choice != "auto":
             raise NotImplementedError(
                 "Only 'auto' tool_choice is supported in response API with Harmony"
             )
 
-        messages = self._construct_input_messages_with_harmony(request, prev_response)
+        messages = self._construct_input_messages_with_harmony(
+            request, prev_response, conv_items=conv_items
+        )
         prompt_token_ids = render_for_completion(messages)
         engine_prompt = token_inputs(prompt_token_ids)
 
@@ -882,7 +946,49 @@ class OpenAIServingResponses(OpenAIServing):
                 # If the response is already cancelled, don't update it.
                 if stored_response is None or stored_response.status != "cancelled":
                     self.response_store[response.id] = response
+
+        # Auto-append input + output to conversation store.
+        conv_id = extract_conversation_id(request.conversation)
+        if conv_id is not None and response.status not in (
+            "cancelled",
+            "failed",
+        ):
+            await self._append_response_to_conversation(conv_id, request, response)
+
         return response
+
+    async def _append_response_to_conversation(
+        self,
+        conv_id: str,
+        request: ResponsesRequest,
+        response: ResponsesResponse,
+    ) -> None:
+        """Append request input + response output items to conversation."""
+        new_items: list[ConversationItemObject] = []
+
+        # Input items
+        if isinstance(request.input, str):
+            new_items.append(
+                ConversationItemObject(
+                    type="message",
+                    item={
+                        "role": "user",
+                        "content": request.input,
+                        "type": "message",
+                    },
+                )
+            )
+        else:
+            for item in request.input:
+                new_items.append(ConversationItemObject(item=item))
+
+        # Output items
+        for output_item in response.output:
+            new_items.append(ConversationItemObject(item=output_item))
+
+        async with self.conversation_store_lock:
+            if conv_id in self.conversation_store:
+                self.conversation_items_store.setdefault(conv_id, []).extend(new_items)
 
     def _topk_logprobs(
         self,
@@ -1126,9 +1232,33 @@ class OpenAIServingResponses(OpenAIServing):
         self,
         request: ResponsesRequest,
         prev_response: ResponsesResponse | None,
+        conv_items: list[ResponseInputOutputItem] | None = None,
     ) -> list[OpenAIHarmonyMessage]:
         messages: list[OpenAIHarmonyMessage] = []
-        if prev_response is None:
+        if conv_items is not None:
+            # Conversation mode: build system message + convert conv_items
+            # to harmony messages, then append new input.
+            tool_types = extract_tool_types(request.tools)
+            with_custom_tools = has_custom_tools(tool_types)
+            sys_msg = self._construct_harmony_system_input_message(
+                request, with_custom_tools, tool_types
+            )
+            messages.append(sys_msg)
+            if with_custom_tools:
+                dev_msg = get_developer_message(
+                    instructions=request.instructions, tools=request.tools
+                )
+                messages.append(dev_msg)
+            # Convert conversation items to harmony messages.
+            prev_outputs: list[ResponseInputOutputItem] = []
+            for item in conv_items:
+                new_msg = response_input_to_harmony(item, prev_outputs)
+                if new_msg is not None and new_msg.author.role != "system":
+                    messages.append(new_msg)
+                if isinstance(item, ResponseFunctionToolCall):
+                    prev_outputs.append(item)
+
+        elif prev_response is None:
             # New conversation.
             tool_types = extract_tool_types(request.tools)
             with_custom_tools = has_custom_tools(tool_types)
@@ -1322,6 +1452,167 @@ class OpenAIServingResponses(OpenAIServing):
             message=f"Response with id '{response_id}' not found.",
             status_code=HTTPStatus.NOT_FOUND,
             param="response_id",
+        )
+
+    # ---- Conversations API CRUD ----
+
+    def _make_conversation_not_found_error(self, conv_id: str) -> ErrorResponse:
+        return self.create_error_response(
+            err_type="invalid_request_error",
+            message=f"Conversation with id '{conv_id}' not found.",
+            status_code=HTTPStatus.NOT_FOUND,
+            param="conversation_id",
+        )
+
+    async def create_conversation(
+        self,
+        request: CreateConversationRequest,
+    ) -> ConversationObject | ErrorResponse:
+        if not self.enable_store:
+            return self.create_error_response(
+                err_type="invalid_request_error",
+                message="Conversations require `VLLM_ENABLE_RESPONSES_API_STORE=1`.",
+                status_code=HTTPStatus.BAD_REQUEST,
+                param="store",
+            )
+
+        conv = ConversationObject(metadata=request.metadata)
+        items: list[ConversationItemObject] = []
+        if request.items:
+            for item in request.items:
+                items.append(ConversationItemObject(item=item))
+
+        async with self.conversation_store_lock:
+            self.conversation_store[conv.id] = conv
+            self.conversation_items_store[conv.id] = items
+        return conv
+
+    async def retrieve_conversation(
+        self,
+        conv_id: str,
+    ) -> ConversationObject | ErrorResponse:
+        async with self.conversation_store_lock:
+            conv = self.conversation_store.get(conv_id)
+        if conv is None:
+            return self._make_conversation_not_found_error(conv_id)
+        return conv
+
+    async def update_conversation(
+        self,
+        conv_id: str,
+        request: UpdateConversationRequest,
+    ) -> ConversationObject | ErrorResponse:
+        async with self.conversation_store_lock:
+            conv = self.conversation_store.get(conv_id)
+            if conv is None:
+                return self._make_conversation_not_found_error(conv_id)
+            conv.metadata = request.metadata
+        return conv
+
+    async def delete_conversation(
+        self,
+        conv_id: str,
+    ) -> DeletedConversationObject | ErrorResponse:
+        async with self.conversation_store_lock:
+            conv = self.conversation_store.pop(conv_id, None)
+        if conv is None:
+            return self._make_conversation_not_found_error(conv_id)
+        # Items survive deletion per OpenAI spec.
+        return DeletedConversationObject(id=conv_id)
+
+    async def add_conversation_items(
+        self,
+        conv_id: str,
+        request: AddConversationItemsRequest,
+    ) -> ConversationItemList | ErrorResponse:
+        async with self.conversation_store_lock:
+            if conv_id not in self.conversation_store:
+                return self._make_conversation_not_found_error(conv_id)
+            new_items: list[ConversationItemObject] = []
+            for item in request.items:
+                new_items.append(ConversationItemObject(item=item))
+            self.conversation_items_store.setdefault(conv_id, []).extend(new_items)
+        return ConversationItemList(
+            data=new_items,
+            first_id=new_items[0].id if new_items else None,
+            last_id=new_items[-1].id if new_items else None,
+            has_more=False,
+        )
+
+    async def list_conversation_items(
+        self,
+        conv_id: str,
+        limit: int = 20,
+        after: str | None = None,
+        before: str | None = None,
+        order: str = "asc",
+    ) -> ConversationItemList | ErrorResponse:
+        async with self.conversation_store_lock:
+            if conv_id not in self.conversation_store:
+                return self._make_conversation_not_found_error(conv_id)
+            items = list(self.conversation_items_store.get(conv_id, []))
+
+        # Apply cursors on insertion-order list first, then reverse.
+        if after:
+            idx = next((i for i, ci in enumerate(items) if ci.id == after), -1)
+            items = items[idx + 1 :] if idx >= 0 else items
+
+        if before:
+            idx = next(
+                (i for i, ci in enumerate(items) if ci.id == before),
+                len(items),
+            )
+            items = items[:idx]
+
+        if order == "desc":
+            items = list(reversed(items))
+
+        has_more = len(items) > limit
+        page = items[:limit]
+        return ConversationItemList(
+            data=page,
+            first_id=page[0].id if page else None,
+            last_id=page[-1].id if page else None,
+            has_more=has_more,
+        )
+
+    async def retrieve_conversation_item(
+        self,
+        conv_id: str,
+        item_id: str,
+    ) -> ConversationItemObject | ErrorResponse:
+        async with self.conversation_store_lock:
+            if conv_id not in self.conversation_store:
+                return self._make_conversation_not_found_error(conv_id)
+            items = self.conversation_items_store.get(conv_id, [])
+            for ci in items:
+                if ci.id == item_id:
+                    return ci
+        return self.create_error_response(
+            err_type="invalid_request_error",
+            message=f"Item with id '{item_id}' not found.",
+            status_code=HTTPStatus.NOT_FOUND,
+            param="item_id",
+        )
+
+    async def delete_conversation_item(
+        self,
+        conv_id: str,
+        item_id: str,
+    ) -> DeletedConversationItemObject | ErrorResponse:
+        async with self.conversation_store_lock:
+            if conv_id not in self.conversation_store:
+                return self._make_conversation_not_found_error(conv_id)
+            items = self.conversation_items_store.get(conv_id, [])
+            for i, ci in enumerate(items):
+                if ci.id == item_id:
+                    items.pop(i)
+                    return DeletedConversationItemObject(id=item_id)
+        return self.create_error_response(
+            err_type="invalid_request_error",
+            message=f"Item with id '{item_id}' not found.",
+            status_code=HTTPStatus.NOT_FOUND,
+            param="item_id",
         )
 
     async def _process_simple_streaming_events(

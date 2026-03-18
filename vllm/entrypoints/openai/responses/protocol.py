@@ -157,6 +157,7 @@ class ResponsesRequest(OpenAIBaseModel):
     logit_bias: dict[str, float] | None = None
     parallel_tool_calls: bool | None = True
     previous_response_id: str | None = None
+    conversation: str | dict[str, str] | None = None
     prompt: ResponsePrompt | None = None
     reasoning: Reasoning | None = None
     service_tier: Literal["auto", "default", "flex", "scale", "priority"] = "auto"
@@ -404,6 +405,17 @@ class ResponsesRequest(OpenAIBaseModel):
 
     @model_validator(mode="before")
     @classmethod
+    def validate_conversation_exclusivity(cls, data):
+        conv = data.get("conversation")
+        if conv and data.get("previous_response_id"):
+            raise VLLMValidationError(
+                "`conversation` and `previous_response_id` cannot be used together.",
+                parameter="conversation",
+            )
+        return data
+
+    @model_validator(mode="before")
+    @classmethod
     def validate_prompt(cls, data):
         if data.get("prompt") is not None:
             raise VLLMValidationError(
@@ -467,6 +479,28 @@ class ResponsesRequest(OpenAIBaseModel):
         return data
 
 
+def _extract_conversation_response(
+    conversation: str | dict[str, str] | None,
+) -> dict[str, str] | None:
+    """Normalize the conversation field for the response object."""
+    if conversation is None:
+        return None
+    if isinstance(conversation, str):
+        return {"id": conversation}
+    return conversation
+
+
+def extract_conversation_id(
+    conversation: str | dict[str, str] | None,
+) -> str | None:
+    """Extract a plain conversation ID string from the request field."""
+    if conversation is None:
+        return None
+    if isinstance(conversation, str):
+        return conversation
+    return conversation.get("id")
+
+
 class ResponsesResponse(OpenAIBaseModel):
     id: str = Field(default_factory=lambda: f"resp_{random_uuid()}")
     created_at: int = Field(default_factory=lambda: int(time.time()))
@@ -486,6 +520,7 @@ class ResponsesResponse(OpenAIBaseModel):
     max_output_tokens: int
     max_tool_calls: int | None = None
     previous_response_id: str | None = None
+    conversation: dict[str, str] | None = None
     prompt: ResponsePrompt | None = None
     reasoning: Reasoning | None = None
     service_tier: Literal["auto", "default", "flex", "scale", "priority"]
@@ -571,6 +606,7 @@ class ResponsesResponse(OpenAIBaseModel):
             max_output_tokens=sampling_params.max_tokens,
             max_tool_calls=request.max_tool_calls,
             previous_response_id=request.previous_response_id,
+            conversation=_extract_conversation_response(request.conversation),
             prompt=request.prompt,
             reasoning=request.reasoning,
             service_tier=request.service_tier,
@@ -667,3 +703,88 @@ StreamingResponsesResponse: TypeAlias = (
     | ResponseMcpCallInProgressEvent
     | ResponseMcpCallCompletedEvent
 )
+
+
+# ---- Conversations API ----
+
+
+class ConversationObject(OpenAIBaseModel):
+    id: str = Field(default_factory=lambda: f"conv_{random_uuid()}")
+    object: Literal["conversation"] = "conversation"
+    created_at: int = Field(default_factory=lambda: int(time.time()))
+    metadata: Metadata | None = None
+
+
+class DeletedConversationObject(OpenAIBaseModel):
+    id: str
+    object: Literal["conversation.deleted"] = "conversation.deleted"
+    deleted: bool = True
+
+
+class ConversationItemObject(OpenAIBaseModel):
+    """A stored conversation item wrapping a ResponseInputOutputItem."""
+
+    id: str = Field(default_factory=lambda: f"item_{random_uuid()}")
+    object: Literal["conversation.item"] = "conversation.item"
+    type: str = "message"
+    item: ResponseInputOutputItem
+
+    @model_validator(mode="before")
+    @classmethod
+    def extract_type(cls, data):
+        if isinstance(data, dict):
+            item = data.get("item")
+            if isinstance(item, dict):
+                data["type"] = item.get("type", "message")
+            elif hasattr(item, "type"):
+                data["type"] = item.type
+        return data
+
+
+class ConversationItemList(OpenAIBaseModel):
+    object: Literal["list"] = "list"
+    data: list[ConversationItemObject]
+    first_id: str | None = None
+    last_id: str | None = None
+    has_more: bool = False
+
+
+class DeletedConversationItemObject(OpenAIBaseModel):
+    id: str
+    object: Literal["conversation.item.deleted"] = "conversation.item.deleted"
+    deleted: bool = True
+
+
+class CreateConversationRequest(OpenAIBaseModel):
+    metadata: Metadata | None = None
+    items: list[ResponseInputOutputItem] | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_items_limit(cls, data):
+        items = data.get("items")
+        if items is not None and len(items) > 20:
+            raise VLLMValidationError(
+                "Conversations may have at most 20 seed items.",
+                parameter="items",
+            )
+        return data
+
+
+class UpdateConversationRequest(OpenAIBaseModel):
+    metadata: Metadata | None = None
+
+
+class AddConversationItemsRequest(OpenAIBaseModel):
+    items: list[ResponseInputOutputItem]
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_items_limit(cls, data):
+        items = data.get("items", [])
+        if len(items) > 20:
+            raise VLLMValidationError(
+                "May add at most 20 items per call.",
+                parameter="items",
+            )
+        return data
