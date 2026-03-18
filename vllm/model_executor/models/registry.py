@@ -642,15 +642,15 @@ _PREVIOUSLY_SUPPORTED_MODELS = {
     "Phi4MultimodalForCausalLM": "0.12.0",
     # encoder-decoder models except whisper
     # have been removed for V0 deprecation.
-    "BartModel": "0.10.2",
     "DonutForConditionalGeneration": "0.10.2",
-    "MBartForConditionalGeneration": "0.10.2",
     "MllamaForConditionalGeneration": "0.10.2",
 }
 
 _OOT_SUPPORTED_MODELS = {
+    "BartModel": "https://github.com/vllm-project/bart-plugin",
     "BartForConditionalGeneration": "https://github.com/vllm-project/bart-plugin",
     "Florence2ForConditionalGeneration": "https://github.com/vllm-project/bart-plugin",
+    "MBartForConditionalGeneration": "https://github.com/vllm-project/bart-plugin",
 }
 
 
