@@ -397,10 +397,6 @@ class InternVLProcessor(ProcessorMixin):
             else tokenizer.convert_tokens_to_ids(video_token)
         )
 
-    @property
-    def supports_video(self) -> bool:
-        return self.video_token_id is not None
-
     def resolve_target_ratios(
         self,
         *,
