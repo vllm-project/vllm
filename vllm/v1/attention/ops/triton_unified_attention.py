@@ -1015,6 +1015,14 @@ def unified_attention(
     use_alibi_slopes = alibi_slopes is not None
     use_qq_bias = qq_bias is not None
 
+    # Auto-detect quant mode from tensor dtype if caller didn't specify.
+    # This keeps backward compatibility with existing FP8 callers/tests.
+    if kv_quant_mode == KVQuantMode.NONE:
+        if k.dtype == torch.int8:
+            kv_quant_mode = KVQuantMode.INT8
+        elif k.is_floating_point() and k.element_size() == 1:
+            kv_quant_mode = KVQuantMode.FP8
+
     block_size = v.shape[1]
     num_seqs = len(seqused_k)
     num_query_heads = q.shape[1]
