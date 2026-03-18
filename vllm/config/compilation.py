@@ -833,6 +833,16 @@ class CompilationConfig:
         if KEY not in self.inductor_compile_config:
             self.inductor_compile_config[KEY] = False
 
+        # Disable inductor size/stride assertions at runtime for performance.
+        # These assertions add ~2ms overhead per forward pass on large models
+        # (e.g., DeepSeek-R1 671B: ~340 assert_size_stride calls per forward).
+        # PyTorch is working on an assert-once solution; until then, we
+        # disable by default for serving. Users can re-enable via:
+        #   --compilation-config '{"inductor_compile_config": {"size_asserts": true}}'
+        # See: https://github.com/pytorch/pytorch/issues/177719
+        if "size_asserts" not in self.inductor_compile_config:
+            self.inductor_compile_config["size_asserts"] = False
+
         for k, v in self.inductor_passes.items():
             if not isinstance(v, str):
                 assert callable(v), f"pass {k} should be callable or a qualified name"
