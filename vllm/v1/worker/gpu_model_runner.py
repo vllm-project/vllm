@@ -7,7 +7,7 @@ import itertools
 import threading
 import time
 from collections import defaultdict
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from contextlib import contextmanager
 from copy import copy, deepcopy
 from dataclasses import dataclass, replace
@@ -567,7 +567,6 @@ class GPUModelRunner(
 
         self.num_spec_tokens = 0
         self.valid_sampled_token_count_gpu: torch.Tensor | None = None
-        self.spec_reqs_to_fix: dict[str, int] = {}
         if self.speculative_config:
             self.num_spec_tokens = self.speculative_config.num_speculative_tokens
             draft_config = self.speculative_config.draft_model_config
@@ -1044,7 +1043,7 @@ class GPUModelRunner(
     def _sync_device(self) -> None:
         torch.accelerator.synchronize()
 
-    def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
+    def _update_states(self, scheduler_output: "SchedulerOutput") -> Callable | None:
         """Update the cached states and the persistent batch with the scheduler
         output.
 
@@ -1109,6 +1108,8 @@ class GPUModelRunner(
             ngram_gpu_new_reqs: list[CachedRequestState] = []
 
         reqs_to_add: list[CachedRequestState] = []
+        deferred_spec_decode_corrections = []
+
         # Add new requests to the cached states.
         for new_req_data in scheduler_output.scheduled_new_reqs:
             req_id = new_req_data.req_id
@@ -1196,7 +1197,6 @@ class GPUModelRunner(
                 self.input_batch.req_id_to_index,
             )
 
-        self.spec_reqs_to_fix.clear()
         for i, req_id in enumerate(req_data.req_ids):
             req_state = self.requests[req_id]
             num_computed_tokens = req_data.num_computed_tokens[i]
@@ -1222,14 +1222,24 @@ class GPUModelRunner(
                 if req_index is None:
                     req_state.prev_num_draft_len = 0
                 else:
-                    # Optimistically assume all accepted; corrected on GPU in
-                    # _prepare_inputs, on CPU in _finalize_spec_cpu_state.
-                    num_accepted = req_state.prev_num_draft_len
-                    self.spec_reqs_to_fix[req_id] = num_accepted
-                    req_state.output_token_ids.extend([-1] * num_accepted)
+                    # Optimistically assume all accepted; queue up a correction
+                    # to be called after the model forward to preserve async
+                    # scheduling. Corrected on GPU in _prepare_inputs.
+                    optimistic_num_accepted = req_state.prev_num_draft_len
+                    req_state.output_token_ids.extend([-1] * optimistic_num_accepted)
 
-                    if is_ngram_gpu and num_accepted > 0 and req_index is not None:
-                        self.input_batch.num_tokens_no_spec[req_index] += num_accepted
+                    deferred_spec_decode_corrections.append(
+                        (req_id, optimistic_num_accepted, req_state)
+                    )
+
+                    if (
+                        is_ngram_gpu
+                        and optimistic_num_accepted > 0
+                        and req_index is not None
+                    ):
+                        self.input_batch.num_tokens_no_spec[req_index] += (
+                            optimistic_num_accepted
+                        )
 
             # Update the cached states.
             req_state.num_computed_tokens = num_computed_tokens
@@ -1345,6 +1355,38 @@ class GPUModelRunner(
                 _pinned_val_buf=self._ngram_pinned_val_buf,
             )
 
+        if deferred_spec_decode_corrections:
+
+            def correct_spec_decode_token_counts():
+                valid_sampled_token_count = self._get_valid_sampled_token_count()
+                if not valid_sampled_token_count:
+                    return
+                prev_req_id_to_index = self.input_batch.prev_req_id_to_index
+                if not prev_req_id_to_index:
+                    return
+                for (
+                    req_id,
+                    optimistic_num_accepted,
+                    req_state,
+                ) in deferred_spec_decode_corrections:
+                    prev_req_index = prev_req_id_to_index.get(req_id)
+                    if prev_req_index is None:
+                        continue
+                    num_accepted = valid_sampled_token_count[prev_req_index] - 1
+                    correction = optimistic_num_accepted - num_accepted
+                    if correction <= 0:
+                        continue
+                    req_state.num_computed_tokens -= correction
+                    cur_req_index = self.input_batch.req_id_to_index.get(req_id)
+                    if cur_req_index is not None:
+                        self.input_batch.num_computed_tokens_cpu[cur_req_index] -= (
+                            correction
+                        )
+
+            return correct_spec_decode_token_counts
+        else:
+            return None
+
     def _update_states_after_model_execute(
         self, output_token_ids: torch.Tensor, scheduler_output: "SchedulerOutput"
     ) -> None:
@@ -1404,30 +1446,6 @@ class GPUModelRunner(
             )
             assert self.num_accepted_tokens_event is not None
             self.num_accepted_tokens_event.record()
-
-    def _finalize_spec_cpu_state(self) -> None:
-        """Correct CPU-side num_computed_tokens after model forward."""
-        if not self.spec_reqs_to_fix:
-            return
-        prev_req_id_to_index = self.input_batch.prev_req_id_to_index
-        valid_sampled_token_count = self._get_valid_sampled_token_count()
-        if valid_sampled_token_count and prev_req_id_to_index:
-            for req_id, prev_num_draft_len in self.spec_reqs_to_fix.items():
-                prev_req_index = prev_req_id_to_index.get(req_id)
-                if prev_req_index is None:
-                    continue
-                num_rejected = prev_num_draft_len - (
-                    valid_sampled_token_count[prev_req_index] - 1
-                )
-                if num_rejected <= 0:
-                    continue
-                req_state = self.requests.get(req_id)
-                if req_state is not None:
-                    req_state.num_computed_tokens -= num_rejected
-                req_index = self.input_batch.req_id_to_index.get(req_id)
-                if req_index is not None:
-                    self.input_batch.num_computed_tokens_cpu[req_index] -= num_rejected
-        self.spec_reqs_to_fix.clear()
 
     def _update_streaming_request(
         self, req_id: str, new_req_data: NewRequestData
@@ -3742,7 +3760,7 @@ class GPUModelRunner(
             self.synchronize_input_prep(),
         ):
             # Update persistent batch states.
-            self._update_states(scheduler_output)
+            deferred_state_corrections_fn = self._update_states(scheduler_output)
 
             if has_ec_transfer() and not get_ec_transfer().is_consumer:
                 with self.maybe_get_ec_connector_output(
@@ -4026,6 +4044,12 @@ class GPUModelRunner(
             slot_mappings,
         )
         self.kv_connector_output = kv_connector_output
+
+        # Now the batch has been launched we can wait for corrections from the
+        # previous model forward without breaking async scheduling.
+        if deferred_state_corrections_fn:
+            deferred_state_corrections_fn()
+
         return None
 
     @torch.inference_mode
@@ -4075,7 +4099,6 @@ class GPUModelRunner(
         with record_function_or_nullcontext("gpu_model_runner: sample"):
             sampler_output = self._sample(logits, spec_decode_metadata)
 
-        self._finalize_spec_cpu_state()
         self._update_states_after_model_execute(
             sampler_output.sampled_token_ids, scheduler_output
         )
