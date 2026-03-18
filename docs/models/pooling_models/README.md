@@ -19,7 +19,7 @@ As the capabilities of generative models continue to improve, the boundaries of 
 - They do not require content generation.
 - They only need to perform very limited functions, without requiring strong generalization, creativity, or high intelligence.
 - They demand extremely low latency and may operate on cost-constrained hardware.
-- The number of model parameters is usually less than 10 billion.
+- Text-only models typically have fewer than 1 billion parameters, while multimodal models generally have fewer than 10 billion parameters.
 
 Although these models are relatively small in scale, they are still based on the Transformer architecture, similar or even identical to the most advanced large language models today. Many recently released pooling models are also fine-tuned from large language models, allowing them to benefit from the continuous improvements in large models. This architecture similarity enables them to reuse much of vLLM’s infrastructure. If compatible, we would be happy to help them leverage the latest features of vLLM as well.
 
