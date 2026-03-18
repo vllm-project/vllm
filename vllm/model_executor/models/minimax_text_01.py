@@ -52,7 +52,12 @@ from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backend import AttentionMetadata
 
 from .interfaces import HasInnerState, IsHybrid
-from .utils import AutoWeightsLoader, PPMissingLayer, is_pp_missing_parameter, make_layers
+from .utils import (
+    AutoWeightsLoader,
+    PPMissingLayer,
+    is_pp_missing_parameter,
+    make_layers,
+)
 
 
 def replace_weight_name(
@@ -633,9 +638,7 @@ class MiniMaxText01Model(nn.Module):
             return None
 
         def is_linear_attn_layer(layer_idx: int) -> bool:
-            if layer_idx is None or layer_idx >= len(
-                self.decoder_attention_types
-            ):
+            if layer_idx is None or layer_idx >= len(self.decoder_attention_types):
                 return False
             return self.decoder_attention_types[layer_idx] == 0
 
@@ -712,7 +715,6 @@ class MiniMaxText01Model(nn.Module):
                 weight_loader(param, loaded_weight)
                 loaded_params.add(name)
             return
-
 
         def is_shared_mlp_weight(name: str) -> bool:
             return "shared_mlp" in name and not name.endswith(".bias")
@@ -829,9 +831,7 @@ class MiniMaxText01Model(nn.Module):
 
         for name, loaded_weight in weights:
             weight_at_layer = which_layer(name)
-            if weight_at_layer and weight_at_layer >= len(
-                self.decoder_attention_types
-            ):
+            if weight_at_layer and weight_at_layer >= len(self.decoder_attention_types):
                 continue
 
             if is_layer_norm_weight(name):
@@ -855,7 +855,6 @@ class MiniMaxText01Model(nn.Module):
 
             load_basic_weight(name, loaded_weight, self)
         return loaded_params
-
 
     def forward(
         self,
@@ -978,8 +977,6 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid):
                 ),
             }
         )
-
-
 
     @classmethod
     def get_mamba_state_dtype_from_config(

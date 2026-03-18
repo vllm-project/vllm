@@ -473,7 +473,6 @@ class KimiLinearModel(nn.Module):
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 
-
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
@@ -657,13 +656,13 @@ class KimiLinearForCausalLM(
     ) -> torch.Tensor | None:
         return self.logits_processor(self.lm_head, hidden_states)
 
-
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(
             self,
             skip_prefixes=(["lm_head."] if self.config.tie_word_embeddings else None),
         )
         return loader.load_weights(weights)
+
 
 def get_spec_layer_idx_from_weight_name(
     config: KimiLinearConfig, weight_name: str
