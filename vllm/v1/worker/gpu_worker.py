@@ -430,10 +430,14 @@ class Worker(WorkerBase):
             "To fix this, ensure consistent GPU memory allocation or "
             "isolate vLLM in its own container."
         )
+        # Leave a small buffer (150 MiB) for caching allocator fragmentation
+        # and memory profiling inaccuracy to reduce risk of OOM at runtime.
+        self.redundancy_buffer_memory = 150 * (1 << 20)
         self.available_kv_cache_memory_bytes = (
             self.requested_memory
             - profile_result.non_kv_cache_memory
             - cudagraph_memory_estimate_applied
+            - self.redundancy_buffer_memory
         )
 
         unrequested_memory = self.init_snapshot.free_memory - self.requested_memory
@@ -631,10 +635,9 @@ class Worker(WorkerBase):
             # Users may want fine-grained control to specify kv cache
             # memory size.
 
-            # empirically observed that the memory profiling may
-            # slightly underestimate the memory consumption.
-            # So leave a small buffer (=150MiB) to avoid OOM.
-            redundancy_buffer_memory = 150 * (1 << 20)
+            # Reuse the redundancy buffer computed in
+            # determine_available_memory() for consistency.
+            redundancy_buffer_memory = self.redundancy_buffer_memory
             non_kv_cache_memory = (
                 self.model_runner.model_memory_usage
                 + self.peak_activation_memory
