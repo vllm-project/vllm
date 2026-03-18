@@ -707,6 +707,10 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             v = torch.randn(
                 1, T, num_v_heads, self.head_v_dim, device=device, dtype=dtype
             )
+            # Produce g and beta via fused_gdn_gating() so their dtypes
+            # match the real inference path (float32, not bfloat16);
+            # otherwise Triton autotuner cache keys won't match and
+            # autotuning will re-run on the first inference batch.
             dummy_a = torch.randn(T, num_v_heads, device=device, dtype=dtype)
             dummy_b = torch.randn(T, num_v_heads, device=device, dtype=dtype)
             g, beta = fused_gdn_gating(self.A_log, dummy_a, dummy_b, self.dt_bias)
