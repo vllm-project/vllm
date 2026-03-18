@@ -35,6 +35,140 @@ For reproducible measurements in your environment, use
 [`examples/offline_inference/spec_decode.py`](../../../examples/offline_inference/spec_decode.py)
 or the [benchmark CLI guide](../../benchmarking/cli.md).
 
+## `--speculative-config` Reference
+
+The `--speculative-config` flag (CLI) or `speculative_config` dict (Python API)
+accepts a JSON object whose keys map to the fields of
+[`SpeculativeConfig`](https://github.com/vllm-project/vllm/blob/main/vllm/config/speculative.py).
+This section documents every user-facing key, its type, default value, and
+allowed values so that users do not have to read the source code.
+
+### Usage
+
+=== "CLI (online serving)"
+
+    ```bash
+    vllm serve <model> \
+        --speculative-config '{"model": "draft-model-name", "num_speculative_tokens": 5}'
+    ```
+
+=== "Python (offline inference)"
+
+    ```python
+    llm = LLM(
+        model="target-model-name",
+        speculative_config={
+            "model": "draft-model-name",
+            "num_speculative_tokens": 5,
+        },
+    )
+    ```
+
+### General keys
+
+| Key | Type | Default | Description |
+| --- | --- | --- | --- |
+| `method` | `str` | Auto-detected | The speculative method to use. Accepted values: `"ngram"`, `"ngram_gpu"`, `"medusa"`, `"mlp_speculator"`, `"draft_model"`, `"suffix"`, `"eagle"`, `"eagle3"`, `"mtp"`, `"extract_hidden_states"`. When `model` is provided and `method` is omitted, the method is inferred from the draft model config (e.g. an EAGLE checkpoint is detected automatically). If `model` is not provided, `method` must be set explicitly. |
+| `model` | `str` | `None` | The Hugging Face model name or local path for the draft model, EAGLE head, or speculator weights. Not required for `ngram`, `ngram_gpu`, `suffix`, or `mtp` methods (set automatically). |
+| `num_speculative_tokens` | `int` | From draft config, or required | The number of tokens to speculate per step. Must be **> 0**. For models with an `n_predict` field in their config (e.g. MTP, EAGLE), this defaults to that value. For suffix decoding it acts as the *maximum* and defaults to `suffix_decoding_max_tree_depth` (24). |
+| `enforce_eager` | `bool` | `None` | Override the target model's `enforce_eager` setting for the draft model. When `None`, inherits from the target model config. |
+
+### Draft model keys
+
+These keys apply when using a model-based speculative method (`draft_model`,
+`eagle`, `eagle3`, `medusa`, `mlp_speculator`, `mtp`).
+
+| Key | Type | Default | Description |
+| --- | --- | --- | --- |
+| `draft_tensor_parallel_size` | `int` | Same as target TP | Tensor-parallel degree for the draft model. Must be **1** or equal to the target model's tensor parallel size. For `mlp_speculator` models this defaults to 1. |
+| `quantization` | `str` | `None` | Quantization method used for the draft model weights. Accepted values: `"awq"`, `"fp8"`, `"ptpc_fp8"`, `"fbgemm_fp8"`, `"fp_quant"`, `"modelopt"`, `"modelopt_fp4"`, `"modelopt_mxfp8"`, `"modelopt_mixed"`, `"gguf"`, `"gptq_marlin"`, `"awq_marlin"`, `"gptq"`, `"compressed-tensors"`, `"bitsandbytes"`, `"experts_int8"`, `"quark"`, `"moe_wna16"`, `"torchao"`, `"inc"`, `"mxfp4"`, `"mxfp8"`, `"petit_nvfp4"`, `"cpu_awq"`. When `None`, the model weights are assumed unquantized. For `mtp`, if unset, the target model's quantization is used automatically. |
+| `max_model_len` | `int` | `None` | Maximum sequence length for the draft model. Must be **>= 1**. When `None`, defaults to `min(draft_model_max_len, target_model_max_len)`. Useful for testing the ability to skip speculation for some sequences. |
+| `revision` | `str` | `None` | The specific model version to use for the draft model (branch name, tag, or commit id). |
+| `code_revision` | `str` | `None` | The specific code revision for the draft model on Hugging Face Hub (branch name, tag, or commit id). |
+
+### Advanced control keys
+
+| Key | Type | Default | Description |
+| --- | --- | --- | --- |
+| `disable_padded_drafter_batch` | `bool` | `False` | Disable input padding for speculative decoding. When `True`, speculative input batches can contain sequences of different lengths, which may only be supported by certain attention backends. Currently only affects the EAGLE method. |
+| `use_local_argmax_reduction` | `bool` | `False` | Use vocab-parallel local argmax instead of all-gathering full logits for draft token generation. Reduces communication from O(vocab_size) to O(2 * tp_size) per token. Only applies to greedy draft selection in non-tree speculation. |
+| `speculative_token_tree` | `str` | Auto-generated chain | Specifies the tree structure for speculative token generation as a Python list-of-tuples string, e.g. `"[(0,), (0, 0), (0, 1)]"`. When `None`, a simple chain of `num_speculative_tokens` tokens is generated. The tree is sorted breadth-first internally. |
+| `parallel_drafting` | `bool` | `False` | Enable parallel drafting, where all speculative tokens are generated in parallel rather than sequentially. Requires that the speculative model was trained to support parallel drafting (e.g. [PARD](https://arxiv.org/pdf/2504.18583) models). Only compatible with EAGLE and draft model methods. |
+| `rejection_sample_method` | `str` | `"strict"` | Whether to use strict (target and draft sampled tokens must match exactly) or probabilistic rejection sampling. Accepted values: `"strict"`, `"probabilistic"`. Both respect the target model distribution, but probabilistic sampling yields a higher acceptance rate at the cost of more memory to cache draft logits. |
+
+### N-gram proposer keys
+
+These keys apply only when `method` is `"ngram"` or `"ngram_gpu"`.
+
+| Key | Type | Default | Description |
+| --- | --- | --- | --- |
+| `prompt_lookup_max` | `int` | `5` | Maximum n-gram window size for matching against the prompt. Must be **>= 1**. |
+| `prompt_lookup_min` | `int` | `5` | Minimum n-gram window size for matching against the prompt. Must be **>= 1** and **<= `prompt_lookup_max`**. |
+
+!!! note
+    If neither `prompt_lookup_max` nor `prompt_lookup_min` is provided, both
+    default to 5. If only one is provided, the other is set to the same value.
+
+### Suffix decoding keys
+
+These keys apply only when `method` is `"suffix"`. Requires the
+[Arctic Inference](https://github.com/snowflakedb/ArcticInference) package
+(`pip install arctic-inference`).
+
+| Key | Type | Default | Description |
+| --- | --- | --- | --- |
+| `suffix_decoding_max_tree_depth` | `int` | `24` | Maximum depth of the suffix decoding global and prompt trees. Limits the sum of the prefix match and speculation lengths. Must be **>= 1**. |
+| `suffix_decoding_max_cached_requests` | `int` | `10000` | Maximum number of requests to cache in the global suffix tree. If exceeded, evicts in FIFO order. Set to `0` to disable the global suffix tree (prompt trees are still used). Must be **>= 0**. |
+| `suffix_decoding_max_spec_factor` | `float` | `1.0` | Controls speculation lengths based on the prefix match length: `max_spec_tokens = max_spec_factor * prefix_match_length`. Must be **>= 0**. |
+| `suffix_decoding_min_token_prob` | `float` | `0.1` | Minimum token probability (based on frequency counts) for a token to be speculated. Must be in **[0, 1]**. |
+
+### Examples
+
+Draft model with quantization:
+
+```bash
+vllm serve meta-llama/Meta-Llama-3-8B-Instruct \
+    --speculative-config '{
+        "model": "TechxGenus/Meta-Llama-3-8B-GPTQ",
+        "method": "draft_model",
+        "num_speculative_tokens": 3,
+        "quantization": "gptq"
+    }'
+```
+
+EAGLE with tree-structured speculation:
+
+```python
+speculative_config={
+    "model": "yuhuili/EAGLE-LLaMA3-Instruct-8B",
+    "method": "eagle",
+    "num_speculative_tokens": 3,
+    "speculative_token_tree": "[(0,), (0, 0), (0, 1), (0, 0, 0)]",
+}
+```
+
+N-gram with custom window:
+
+```python
+speculative_config={
+    "method": "ngram",
+    "num_speculative_tokens": 5,
+    "prompt_lookup_max": 8,
+    "prompt_lookup_min": 3,
+}
+```
+
+Suffix decoding with tuned parameters:
+
+```python
+speculative_config={
+    "method": "suffix",
+    "num_speculative_tokens": 32,
+    "suffix_decoding_max_tree_depth": 16,
+    "suffix_decoding_min_token_prob": 0.05,
+}
+```
+
 ## Lossless guarantees of Speculative Decoding
 
 In vLLM, speculative decoding aims to enhance inference efficiency while maintaining accuracy. This section addresses the lossless guarantees of
