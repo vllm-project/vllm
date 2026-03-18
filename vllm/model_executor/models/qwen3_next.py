@@ -2,9 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Inference-only Qwen3Next model."""
 
+import os
+import shutil
+import subprocess
 from collections.abc import Iterable
 from itertools import islice
 
+import regex as re
 import torch
 from einops import rearrange
 from torch import nn
@@ -177,6 +181,48 @@ class ChunkGatedDeltaRule(CustomOp):
         supports_flashinfer = (
             current_platform.is_cuda() and current_platform.is_device_capability(90)
         )
+        # FlashInfer officially supports CUDA 12.6, 12.8, 13.0, 13.1, following
+        # PyTorch's supported CUDA versions. Using flashinfer with an older CUDA
+        # toolkit (e.g. 12.4) causes JIT compilation of the GDN prefill kernel
+        # to fail with "namespace 'cuda::ptx' has no member '...'".
+        if supports_flashinfer:
+            _nvcc = shutil.which("nvcc")
+            if _nvcc is None:
+                _cuda_home = os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH")
+                if _cuda_home:
+                    _candidate = os.path.join(_cuda_home, "bin", "nvcc")
+                    if os.path.isfile(_candidate):
+                        _nvcc = _candidate
+            if _nvcc is not None:
+                _nvcc_version: tuple[int, int] | None = None
+                try:
+                    _out = subprocess.run(
+                        [_nvcc, "--version"],
+                        capture_output=True,
+                        text=True,
+                        timeout=10,
+                    )
+                    if _out.returncode == 0:
+                        _m = re.search(r"release (\d+)\.(\d+)", _out.stdout)
+                        if _m:
+                            _nvcc_version = (
+                                int(_m.group(1)),
+                                int(_m.group(2)),
+                            )
+                except Exception:
+                    pass
+                if _nvcc_version is not None and _nvcc_version < (12, 6):
+                    supports_flashinfer = False
+                    logger.warning_once(
+                        "FlashInfer GDN prefill kernel requires CUDA "
+                        "toolkit >= 12.6 (the minimum CUDA version "
+                        "supported by FlashInfer), but system nvcc is "
+                        "%d.%d. Falling back to Triton/FLA. "
+                        "Use --gdn-prefill-backend triton to suppress "
+                        "this warning.",
+                        _nvcc_version[0],
+                        _nvcc_version[1],
+                    )
 
         if backend == "flashinfer":
             use_flashinfer = supports_flashinfer
