@@ -470,6 +470,9 @@ class MsgpackDecoder:
             # Although it violates NestedTensors type, MultiModalKwargs
             # values are sometimes floats.
             return obj
+        receiver = self.tensor_ipc_receiver
+        if receiver is not None and receiver.is_handle_like(obj):
+            return receiver.recv_tensor(obj)
         if not isinstance(obj, list):
             raise TypeError(f"Unexpected NestedTensors contents: {type(obj)}")
         if obj and isinstance(obj[0], str):
