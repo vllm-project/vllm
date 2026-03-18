@@ -65,6 +65,11 @@ from .utils import request_memory
 
 logger = init_logger(__name__)
 
+# empirically observed that the memory profiling may
+# slightly underestimate the memory consumption.
+# So leave a small buffer (=150MiB) to avoid OOM.
+REDUNDANCY_BUFFER_MEMORY_BYTES = 150 * (1 << 20)
+
 if TYPE_CHECKING:
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
@@ -434,6 +439,7 @@ class Worker(WorkerBase):
             self.requested_memory
             - profile_result.non_kv_cache_memory
             - cudagraph_memory_estimate_applied
+            - REDUNDANCY_BUFFER_MEMORY_BYTES
         )
 
         unrequested_memory = self.init_snapshot.free_memory - self.requested_memory
@@ -631,10 +637,7 @@ class Worker(WorkerBase):
             # Users may want fine-grained control to specify kv cache
             # memory size.
 
-            # empirically observed that the memory profiling may
-            # slightly underestimate the memory consumption.
-            # So leave a small buffer (=150MiB) to avoid OOM.
-            redundancy_buffer_memory = 150 * (1 << 20)
+            redundancy_buffer_memory = REDUNDANCY_BUFFER_MEMORY_BYTES
             non_kv_cache_memory = (
                 self.model_runner.model_memory_usage
                 + self.peak_activation_memory
