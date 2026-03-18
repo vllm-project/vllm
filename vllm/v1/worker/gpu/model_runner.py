@@ -62,6 +62,7 @@ from vllm.v1.worker.gpu.cudagraph_utils import (
     get_uniform_token_count,
 )
 from vllm.v1.worker.gpu.dp_utils import sync_cudagraph_and_dp_padding
+from vllm.v1.worker.gpu.eplb_utils import EPLBGPUModelRunnerMixin
 from vllm.v1.worker.gpu.input_batch import (
     InputBatch,
     InputBuffers,
@@ -99,7 +100,7 @@ from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 logger = init_logger(__name__)
 
 
-class GPUModelRunner(LoRAModelRunnerMixin):
+class GPUModelRunner(EPLBGPUModelRunnerMixin, LoRAModelRunnerMixin):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
@@ -247,6 +248,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # For transferring state from execute_model to subsequent sample_tokens call.
         self.execute_model_state: ExecuteModelState | None = None
+        self._init_eplb_support()
 
     def update_max_model_len(self, max_model_len: int) -> None:
         self.max_model_len = max_model_len
@@ -263,8 +265,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             tasks.extend(PoolingRunner.get_supported_tasks(self.model))
         return tuple(tasks)
 
-    def load_model(self, *args, **kwargs) -> None:
+    def load_model(self, load_dummy_weights: bool = False, *args, **kwargs) -> None:
         time_before_load = time.perf_counter()
+        self._prepare_eplb_load(load_dummy_weights)
+        eplb_models_added = False
         with DeviceMemoryProfiler() as m:
             model_loader = get_model_loader(self.vllm_config.load_config)
             logger.info("Loading model from scratch...")
@@ -283,6 +287,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 set_eagle3_aux_hidden_state_layers(self.model, self.speculative_config)
             if self.speculator is not None:
                 self.speculator.load_model(self.model)
+                eplb_models_added = self._maybe_register_speculator_for_eplb(
+                    load_dummy_weights
+                )
         time_after_load = time.perf_counter()
 
         self.model_memory_usage = m.consumed_memory
@@ -292,9 +299,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             time_after_load - time_before_load,
         )
 
-        prepare_communication_buffer_for_model(self.model)
-        if self.speculator is not None:
-            prepare_communication_buffer_for_model(self.speculator.model)
+        if not load_dummy_weights:
+            prepare_communication_buffer_for_model(self.model)
+            if self.speculator is not None:
+                prepare_communication_buffer_for_model(self.speculator.model)
 
         # Initialize the components that require the model.
         self.model_state = init_model_state(
@@ -302,6 +310,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
         if self.is_pooling_model and self.is_last_pp_rank:
             self.pooling_runner = PoolingRunner(self.model)
+        eplb_models_added |= self._maybe_register_model_for_eplb(load_dummy_weights)
+        self._maybe_start_eplb_async_loop(eplb_models_added)
 
     def get_model(self) -> nn.Module:
         return self.model
@@ -372,6 +382,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         *args,
         skip_attn: bool = True,
         uniform_decode: bool = False,
+        skip_eplb: bool = False,
+        is_profile: bool = False,
         **kwargs,
     ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
         # Create a dummy scheduler output.
@@ -418,6 +430,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Non-last PP ranks don't produce output for sampling.
         if not self.is_last_pp_rank:
+            self._maybe_step_eplb_for_dummy_run(
+                skip_eplb=skip_eplb,
+                is_profile=is_profile,
+            )
             return None, None
 
         assert self.execute_model_state is not None
@@ -454,6 +470,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 skip_attn_for_dummy_run=skip_attn,
             )
 
+        self._maybe_step_eplb_for_dummy_run(
+            skip_eplb=skip_eplb,
+            is_profile=is_profile,
+        )
+
         assert hidden_states is not None  # Last PP rank always has hidden_states
         sample_hidden_states = hidden_states[input_batch.logits_indices]
         return hidden_states, sample_hidden_states
@@ -480,7 +501,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     @torch.inference_mode()
     def profile_run(self) -> None:
         hidden_states, sample_hidden_states = self._dummy_run(
-            self.max_num_tokens, skip_attn=True
+            self.max_num_tokens, skip_attn=True, is_profile=True
         )
 
         # Only run sampler/pooler on last PP rank (non-last ranks return None).
@@ -1085,6 +1106,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 input_batch.num_reqs, max_sample_len=self.num_speculative_steps + 1
             )
             self.postprocess(input_batch, sampled, num_sampled, num_rejected)
+            self.eplb_step()
             return None
 
         # Last rank: sample tokens
@@ -1155,6 +1177,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.req_states.draft_tokens[input_batch.idx_mapping] = draft_tokens
             self.draft_tokens_handler.set_draft_tokens(input_batch, draft_tokens)
 
+        self.eplb_step()
         if self.use_async_scheduling:
             return async_output
         return async_output.get_output()
@@ -1175,6 +1198,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         if not self.is_last_pp_rank:
             self.postprocess_pool(input_batch)
+            self.eplb_step()
             return None
 
         assert self.pooling_runner is not None
@@ -1182,6 +1206,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             hidden_states, input_batch, self.req_states
         )
         self.postprocess_pool(input_batch)
+        self.eplb_step()
 
         # Build the model runner output.
         model_runner_output = ModelRunnerOutput(
