@@ -856,8 +856,12 @@ def safetensors_weights_iterator(
                 for name in f.keys():  # noqa: SIM118
                     if should_skip_weight(name, local_expert_ids):
                         continue
-                    param = f.get_tensor(name)
-                    yield name, param
+                    # Yield a SafetensorsSlice that defers the disk
+                    # read.  Downstream weight loaders call .narrow()
+                    # to select only their TP shard; the actual I/O
+                    # happens at .materialize() time so we never read
+                    # data that will be discarded.
+                    yield name, SafetensorsSlice(f.get_slice(name))
 
 
 def multi_thread_safetensors_weights_iterator(
@@ -1153,6 +1157,141 @@ def gguf_quant_weights_iterator(
             else:
                 param = torch.tensor(weight)
             yield name, param
+
+
+class SafetensorsSlice:
+    """Lazy wrapper around a safetensors ``PySafeSlice`` for deferred,
+    partial disk reads.
+
+    When tensor-parallel weight loading is active, each rank only needs a
+    *shard* of most weight tensors.  Without this wrapper every rank reads
+    the **full** tensor from disk and then calls ``torch.Tensor.narrow()``
+    to extract its shard, throwing the rest away.
+
+    ``SafetensorsSlice`` intercepts ``.narrow()`` calls and records them
+    without touching the disk.  The actual (partial) read happens only when
+    ``.materialize()`` is called – or when the object is used in a context
+    that requires a real tensor (e.g. ``.reshape()``, ``.item()``,
+    ``param_data.copy_(lazy_weight)``).
+
+    Because the safetensors format stores tensors contiguously, slicing on
+    the outer-most dimension (dim 0) translates to a contiguous sub-read
+    and avoids pulling the full tensor into host memory.
+    """
+
+    __slots__ = ("_slice", "_ndim", "_dims")
+
+    def __init__(self, safe_slice: Any) -> None:
+        original_shape = safe_slice.get_shape()
+        self._slice = safe_slice
+        self._ndim = len(original_shape)
+        # Per-dimension bookkeeping: (absolute_offset, current_size)
+        self._dims: list[tuple[int, int]] = [(0, s) for s in original_shape]
+
+    # -- Tensor-like API used by weight loaders --------------------------
+
+    @property
+    def shape(self) -> torch.Size:
+        return torch.Size(s for _, s in self._dims)
+
+    def size(self, dim: int | None = None):  # type: ignore[override]
+        if dim is not None:
+            return self._dims[dim][1]
+        return self.shape
+
+    def numel(self) -> int:
+        result = 1
+        for _, s in self._dims:
+            result *= s
+        return result
+
+    def __len__(self) -> int:
+        return self._dims[0][1]
+
+    def dim(self) -> int:
+        return self._ndim
+
+    # -- Lazy operations (no disk I/O) -----------------------------------
+
+    def narrow(self, dim: int, start: int, length: int) -> "SafetensorsSlice":
+        """Return a new slice narrowed on *dim* – zero-cost, no I/O."""
+        offset, size = self._dims[dim]
+        assert start + length <= size, (
+            f"narrow(dim={dim}, start={start}, length={length}) "
+            f"out of bounds for size {size}"
+        )
+        new = SafetensorsSlice.__new__(SafetensorsSlice)
+        new._slice = self._slice
+        new._ndim = self._ndim
+        new._dims = list(self._dims)
+        new._dims[dim] = (offset + start, length)
+        return new
+
+    # -- Materialisation (disk I/O happens here) -------------------------
+
+    def materialize(self) -> torch.Tensor:
+        """Read only the recorded sub-region from disk."""
+        indexing = tuple(slice(offset, offset + size) for offset, size in self._dims)
+        return self._slice[indexing]
+
+    # -- Fallback: auto-materialise for ops we cannot defer ---------------
+
+    def reshape(self, *args: Any) -> torch.Tensor:
+        return self.materialize().reshape(*args)
+
+    def view(self, *args: Any) -> torch.Tensor:
+        return self.materialize().view(*args)
+
+    def t(self) -> torch.Tensor:
+        return self.materialize().t()
+
+    def item(self) -> Any:
+        return self.materialize().item()
+
+    def to(self, *args: Any, **kwargs: Any) -> torch.Tensor:
+        return self.materialize().to(*args, **kwargs)
+
+    @property
+    def dtype(self) -> torch.dtype:
+        return self.materialize().dtype
+
+    def __getitem__(self, key: Any) -> torch.Tensor:
+        return self.materialize().__getitem__(key)
+
+    @classmethod
+    def __torch_function__(cls, func, types, args=(), kwargs=None):
+        """Auto-materialise when used as an argument to any torch operation.
+
+        This ensures that ``param_data.copy_(safetensors_slice)`` works
+        transparently in all weight loaders without requiring any
+        downstream code changes.
+
+        The ``torch.narrow`` / ``torch.Tensor.narrow`` case is kept lazy
+        so that TP shard extraction still avoids unnecessary I/O.
+        """
+        kwargs = kwargs or {}
+        # Keep narrow lazy – delegate to the instance method.
+        if func is torch.narrow or func is torch.Tensor.narrow:
+            self_arg = args[0]
+            if isinstance(self_arg, SafetensorsSlice):
+                return self_arg.narrow(*args[1:], **(kwargs or {}))
+        new_args = tuple(
+            a.materialize() if isinstance(a, SafetensorsSlice) else a for a in args
+        )
+        return func(*new_args, **kwargs)
+
+    def __repr__(self) -> str:
+        return f"SafetensorsSlice(shape={list(self.shape)}, dims={self._dims})"
+
+
+def materialize_weight(
+    weight: "torch.Tensor | SafetensorsSlice",
+) -> torch.Tensor:
+    """Materialise a ``SafetensorsSlice`` into a real tensor (no-op on
+    tensors that are already materialised)."""
+    if isinstance(weight, SafetensorsSlice):
+        return weight.materialize()
+    return weight
 
 
 def convert_pyslice_to_tensor(x: Any) -> torch.Tensor:
