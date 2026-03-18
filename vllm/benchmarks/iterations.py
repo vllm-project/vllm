@@ -1001,38 +1001,30 @@ async def run_benchmark(
                     num_tokens_to_generate,
                 )
 
-                # Wait for all requests to enter steady-state decode.
-                # Poll batch_info until num_waiting == 0 (all prefills done),
-                # then poll step_stats until we see consecutive decode steps
-                # with the same token count (= steady state).
-                await wait_for_batch_ready(
-                    session, rotator, global_batch_size)
-                await call_debug_endpoint(
-                    session, rotator, "/debug/step_stats/reset")
-
-                # Poll step_stats until decode is in steady state
-                steady_state_reached = False
-                for _ in range(60):  # up to 60 polls
-                    await asyncio.sleep(0.5)
+                # wait_for_all_first_tokens confirmed all prefills are done.
+                # Now poll step_stats for decode_steps >= 3 to ensure
+                # steady-state decode before starting the profiler.
+                # Skip wait_for_batch_ready — it's redundant after
+                # wait_for_all_first_tokens and can timeout on fast decode.
+                steady_deadline = time.perf_counter() + 30.0
+                while time.perf_counter() < steady_deadline:
                     try:
                         resp = await session.get(
                             f"{rotator.all()[0]}/debug/step_stats")
                         if resp.status == 200:
                             stats = await resp.json()
                             if stats.get("decode_steps", 0) >= 3:
-                                steady_state_reached = True
                                 logger.info(
-                                    "Steady-state decode reached: %d steps "
-                                    "at %d toks/step",
-                                    stats["decode_steps"],
-                                    stats.get("decode_toks_per_step", 0))
+                                    "Steady-state reached: %d decode steps",
+                                    stats["decode_steps"])
                                 break
                     except Exception:
                         pass
-
-                if not steady_state_reached:
+                    await asyncio.sleep(0.5)
+                else:
                     logger.warning(
-                        "Timed out waiting for steady-state decode")
+                        "Timed out waiting for steady-state decode "
+                        "(30s). Proceeding with profiling anyway.")
 
                 # Reset stats again so profiled measurement is clean
                 await call_debug_endpoint(
