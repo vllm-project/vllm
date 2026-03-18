@@ -6504,15 +6504,17 @@ class GPUModelRunner(
         self.may_add_encoder_only_layers_to_kv_cache_config()
         self.maybe_add_kv_sharing_layers_to_kv_cache_groups(kv_cache_config)
         self.initialize_attn_backend(kv_cache_config)
-        # The kernel block size for all KV cache groups. For example, if
-        # kv_cache_manager uses block_size 256 for a given group, but the attention
-        # backends for that group only supports block_size 64, we will return
-        # kernel_block_size 64 and split the 256-token-block to 4 blocks with 64
-        # tokens each.
         kernel_block_sizes = prepare_kernel_block_sizes(
             kv_cache_config, self.attn_groups
         )
         self._kernel_block_sizes = kernel_block_sizes
+
+        block_sizes = []
+        for kv_cache_group in kv_cache_config.kv_cache_groups:
+            if not isinstance(kv_cache_group.kv_cache_spec, EncoderOnlyAttentionSpec):
+                block_sizes.append(kv_cache_group.kv_cache_spec.block_size)
+        self._init_block_sizes = block_sizes
+        self._init_kernel_block_sizes = kernel_block_sizes
 
         # create metadata builders
         self.initialize_metadata_builders(kv_cache_config, kernel_block_sizes)
