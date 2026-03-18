@@ -39,7 +39,7 @@ void nccl_free_plug(void* ptr, size_t size, int device, void* stream) {
 _allocator = None
 _allocator_wrapper = None
 _mem_pool = None
-_registered_base_addrs = set()
+_registered_base_addrs: dict[int, set] = {}
 _graph_pool_id = None
 _nccl_allocator_failed_to_compile = False
 _cached_pool_snapshot = None
@@ -181,11 +181,14 @@ class nccl_symm_mem_context:
         assert _pool is not None
         _cached_pool_snapshot = _pool.snapshot()
         assert self.pynccl_comm is not None
+        comm_id = id(self.pynccl_comm)
+        if comm_id not in _registered_base_addrs:
+            _registered_base_addrs[comm_id] = set()
         for segment in _cached_pool_snapshot:
-            if segment["address"] not in _registered_base_addrs:
+            if segment["address"] not in _registered_base_addrs[comm_id]:
                 self.pynccl_comm.register_comm_window_raw(
                     segment["address"], segment["total_size"]
                 )
-                _registered_base_addrs.add(segment["address"])
+                _registered_base_addrs[comm_id].add(segment["address"])
         if self.is_graph_capture:
             torch._C._cuda_beginAllocateCurrentThreadToPool(self.device, _graph_pool_id)

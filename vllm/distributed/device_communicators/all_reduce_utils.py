@@ -125,6 +125,44 @@ def should_nccl_symm_mem_allreduce(world_size: int, input_tensor: torch.Tensor) 
     return world_size > NCCL_SYMM_MEM_ALL_REDUCE_CONFIG["always_use_above_world_size"]
 
 
+NCCL_SYMM_MEM_AG_RS_CONFIG: dict[str, Any] = {
+    "min_world_size": 2,
+    "always_use_above_world_size": 8,
+}
+
+
+def should_nccl_symm_mem_allgather(
+    world_size: int, input_tensor: torch.Tensor
+) -> bool:
+    from vllm.distributed.device_communicators.pynccl_allocator import (
+        is_symmetric_memory_enabled,
+    )
+
+    if vllm_is_batch_invariant():
+        return False
+    if not is_symmetric_memory_enabled():
+        return False
+    if world_size < NCCL_SYMM_MEM_AG_RS_CONFIG["min_world_size"]:
+        return False
+    return True
+
+
+def should_nccl_symm_mem_reduce_scatter(
+    world_size: int, input_tensor: torch.Tensor
+) -> bool:
+    from vllm.distributed.device_communicators.pynccl_allocator import (
+        is_symmetric_memory_enabled,
+    )
+
+    if vllm_is_batch_invariant():
+        return False
+    if not is_symmetric_memory_enabled():
+        return False
+    if world_size < NCCL_SYMM_MEM_AG_RS_CONFIG["min_world_size"]:
+        return False
+    return True
+
+
 def producer(
     batch_src: Sequence[int],
     producer_queue,

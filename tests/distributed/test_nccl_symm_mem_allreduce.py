@@ -94,3 +94,132 @@ def test_nccl_symm_mem_allreduce(monkeypatch: pytest.MonkeyPatch, world_size):
 
     mp.spawn(nccl_symm_mem_allreduce_worker, args=(world_size,), nprocs=world_size)
     cleanup_dist_env_and_memory()
+
+
+def nccl_symm_mem_allgather_worker(local_rank: int, world_size: int):
+    monkeypatch = pytest.MonkeyPatch()
+    with monkeypatch.context() as m:
+        m.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+        dtype = torch.bfloat16
+        device = torch.device(f"cuda:{local_rank}")
+        torch.cuda.set_device(device)
+        torch.set_default_device(device)
+        torch.set_default_dtype(dtype)
+        update_environment_variables(
+            {
+                "RANK": str(local_rank),
+                "LOCAL_RANK": str(local_rank),
+                "WORLD_SIZE": str(world_size),
+                "MASTER_ADDR": "localhost",
+                "MASTER_PORT": "12346",
+            }
+        )
+
+        init_distributed_environment()
+        initialize_model_parallel(tensor_model_parallel_size=world_size)
+
+        cuda_communicator = typing.cast(
+            CudaCommunicator, get_tp_group().device_communicator
+        )
+        if get_nccl_mem_pool() is None:
+            pytest.skip(
+                "NCCL allocator compilation failed (probably missing NCCL headers)."
+            )
+        if not is_symmetric_memory_enabled():
+            pytest.skip("NCCL symmetric memory is disabled.")
+
+        per_rank_size = test_size_elements // world_size
+        input_tensor = torch.randint(
+            1, 23, (per_rank_size,), dtype=dtype, device=device
+        )
+        output = cuda_communicator.all_gatherv(input_tensor, dim=0)
+
+        group = get_tp_group().device_group
+        expected = torch.empty(
+            test_size_elements, dtype=dtype, device=device
+        )
+        dist.all_gather_into_tensor(expected, input_tensor, group=group)
+        torch.testing.assert_close(output, expected, atol=0.0, rtol=0.0)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda(),
+    reason="NCCL symmetric memory is only available for CUDA platforms.",
+)
+@pytest.mark.parametrize("world_size", [2])
+@pytest.mark.skipif(envs.VLLM_TARGET_DEVICE not in ["cuda"], reason="Only test on CUDA")
+def test_nccl_symm_mem_allgather(monkeypatch: pytest.MonkeyPatch, world_size):
+    if world_size > torch.cuda.device_count():
+        pytest.skip("Not enough GPUs to run the test.")
+
+    monkeypatch.setenv("VLLM_USE_NCCL_SYMM_MEM", "1")
+    monkeypatch.setenv("NCCL_NVLS_ENABLE", "1")
+    monkeypatch.setenv("NCCL_CUMEM_ENABLE", "1")
+
+    mp.spawn(nccl_symm_mem_allgather_worker, args=(world_size,), nprocs=world_size)
+    cleanup_dist_env_and_memory()
+
+
+def nccl_symm_mem_reduce_scatter_worker(local_rank: int, world_size: int):
+    monkeypatch = pytest.MonkeyPatch()
+    with monkeypatch.context() as m:
+        m.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+        dtype = torch.bfloat16
+        device = torch.device(f"cuda:{local_rank}")
+        torch.cuda.set_device(device)
+        torch.set_default_device(device)
+        torch.set_default_dtype(dtype)
+        update_environment_variables(
+            {
+                "RANK": str(local_rank),
+                "LOCAL_RANK": str(local_rank),
+                "WORLD_SIZE": str(world_size),
+                "MASTER_ADDR": "localhost",
+                "MASTER_PORT": "12347",
+            }
+        )
+
+        init_distributed_environment()
+        initialize_model_parallel(tensor_model_parallel_size=world_size)
+
+        cuda_communicator = typing.cast(
+            CudaCommunicator, get_tp_group().device_communicator
+        )
+        if get_nccl_mem_pool() is None:
+            pytest.skip(
+                "NCCL allocator compilation failed (probably missing NCCL headers)."
+            )
+        if not is_symmetric_memory_enabled():
+            pytest.skip("NCCL symmetric memory is disabled.")
+
+        per_rank_size = test_size_elements // world_size
+        input_tensor = torch.randint(
+            1, 23, (test_size_elements,), dtype=dtype, device=device
+        )
+        input_clone = input_tensor.clone()
+        output = cuda_communicator.reduce_scatter(input_tensor, dim=0)
+
+        group = get_tp_group().device_group
+        expected = torch.empty(per_rank_size, dtype=dtype, device=device)
+        dist.reduce_scatter_tensor(expected, input_clone, group=group)
+        torch.testing.assert_close(output, expected, atol=2.5, rtol=0.1)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda(),
+    reason="NCCL symmetric memory is only available for CUDA platforms.",
+)
+@pytest.mark.parametrize("world_size", [2])
+@pytest.mark.skipif(envs.VLLM_TARGET_DEVICE not in ["cuda"], reason="Only test on CUDA")
+def test_nccl_symm_mem_reduce_scatter(monkeypatch: pytest.MonkeyPatch, world_size):
+    if world_size > torch.cuda.device_count():
+        pytest.skip("Not enough GPUs to run the test.")
+
+    monkeypatch.setenv("VLLM_USE_NCCL_SYMM_MEM", "1")
+    monkeypatch.setenv("NCCL_NVLS_ENABLE", "1")
+    monkeypatch.setenv("NCCL_CUMEM_ENABLE", "1")
+
+    mp.spawn(
+        nccl_symm_mem_reduce_scatter_worker, args=(world_size,), nprocs=world_size
+    )
+    cleanup_dist_env_and_memory()
