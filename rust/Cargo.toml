@@ -18,7 +18,7 @@ async-openai = "0.33.1"
 async-trait = "0.1.89"
 axum = "0.8.8"
 bytes = "1.11.1"
-clap = { version = "4.5.38", features = ["derive"] }
+clap = { version = "4.5.38", features = ["derive", "env"] }
 easy-ext = "1.0.3"
 enum-as-inner = "0.7.0"
 expect-test = "1.5.1"

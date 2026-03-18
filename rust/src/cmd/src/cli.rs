@@ -1,3 +1,9 @@
+//! CLI argument definitions for the `vllm-rs` binary.
+//!
+//! Python vLLM references:
+//! - Engine args: <https://github.com/vllm-project/vllm/blob/bc2c0c86efb28e77677a3cfb8687e976914a313a/vllm/engine/arg_utils.py#L657-L1311>
+//! - Environment variables: <https://github.com/vllm-project/vllm/blob/bc2c0c86efb28e77677a3cfb8687e976914a313a/vllm/envs.py#L472>
+
 use std::time::Duration;
 
 use clap::{Args, Parser, Subcommand};
@@ -37,10 +43,10 @@ pub struct FrontendRuntimeArgs {
     #[arg(long, default_value_t = 8000)]
     pub port: u16,
     /// Local host/IP announced to the headless engine for ZMQ sockets.
-    #[arg(long, default_value = "127.0.0.1")]
+    #[arg(long, env = "VLLM_HOST_IP", default_value = "127.0.0.1")]
     pub engine_local_host: String,
     /// Maximum time to wait for the engine handshake to complete.
-    #[arg(long, default_value_t = 30)]
+    #[arg(long, env = "VLLM_ENGINE_READY_TIMEOUT_S", default_value_t = 30)]
     pub ready_timeout_secs: u64,
 }
 
@@ -76,15 +82,12 @@ impl FrontendArgs {
 }
 
 /// Arguments for the managed-engine mode that spawns Python on behalf of the user.
-///
-/// Original Python API reference:
-/// <https://github.com/vllm-project/vllm/blob/bc2c0c86efb28e77677a3cfb8687e976914a313a/vllm/engine/arg_utils.py#L657-L1311>
 #[derive(Debug, Clone, Args, PartialEq, Eq)]
 pub struct ServeArgs {
     #[command(flatten)]
     pub runtime: FrontendRuntimeArgs,
     /// Python executable used to launch the managed headless vLLM engine.
-    #[arg(long, default_value = "python3")]
+    #[arg(long, env = "VLLM_RS_PYTHON", default_value = "python3")]
     pub python: String,
     /// Additional arguments forwarded to `python -m vllm.entrypoints.cli.main serve ...`.
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
