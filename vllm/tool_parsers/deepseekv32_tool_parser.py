@@ -48,15 +48,8 @@ class DeepSeekV32ToolParser(ToolParser):
 
         self.prev_tool_call_arr: list[dict] = []
 
-        # Sentinel tokens
-        self.dsml_token: str = "｜DSML｜"
-        self.dsml_start_check: str = "<" + self.dsml_token
+        # Sentinel token
         self.tool_call_start_token: str = "<｜DSML｜function_calls>"
-        self.tool_call_end_token: str = "</｜DSML｜function_calls>"
-        self.invoke_start_prefix: str = "<｜DSML｜invoke name="
-        self.invoke_end_token: str = "</｜DSML｜invoke>"
-        self.parameter_prefix: str = "<｜DSML｜parameter name="
-        self.parameter_end_token: str = "</｜DSML｜parameter>"
 
         # Streaming state
         self.is_tool_call_started: bool = False
@@ -84,10 +77,6 @@ class DeepSeekV32ToolParser(ToolParser):
             "vLLM Successfully import tool parser %s !", self.__class__.__name__
         )
 
-    def _generate_tool_call_id(self) -> str:
-        """Generate a unique tool call ID."""
-        return f"call_{uuid.uuid4().hex[:24]}"
-
     def adjust_request(self, request):
         request = super().adjust_request(request)
         if request.tools and request.tool_choice != "none":
@@ -100,81 +89,15 @@ class DeepSeekV32ToolParser(ToolParser):
             request.skip_special_tokens = False
         return request
 
-    def _reset_streaming_state(self):
-        """Reset all streaming state."""
-        self.current_tool_index = 0
-        self.is_tool_call_started = False
-        self.prev_tool_call_arr.clear()
-        self.streamed_args_for_tool.clear()
+    def _generate_tool_call_id(self) -> str:
+        """Generate a unique tool call ID."""
+        return f"call_{uuid.uuid4().hex[:24]}"
 
-    def _parse_invoke_params(self, invoke_str: str) -> dict | None:
+    def _parse_invoke_params(self, invoke_str: str) -> dict:
         param_dict = dict()
         for param_name, param_val in self.parameter_complete_regex.findall(invoke_str):
             param_dict[param_name] = param_val
         return param_dict
-
-    def extract_tool_calls(
-        self,
-        model_output: str,
-        request: ChatCompletionRequest,
-    ) -> ExtractedToolCallInformation:
-        """Extract tool calls from complete model output (non-streaming)."""
-        # Quick check
-        if self.tool_call_start_token not in model_output:
-            return ExtractedToolCallInformation(
-                tools_called=False, tool_calls=[], content=model_output
-            )
-
-        try:
-            tool_calls = []
-
-            # Find all complete tool_call blocks
-            for tool_call_match in self.tool_call_complete_regex.findall(model_output):
-                # Find all invokes within this tool_call
-                for invoke_name, invoke_content in self.invoke_complete_regex.findall(
-                    tool_call_match
-                ):
-                    param_dict = self._parse_invoke_params(invoke_content)
-                    tool_calls.append(
-                        ToolCall(
-                            type="function",
-                            function=FunctionCall(
-                                name=invoke_name,
-                                arguments=json.dumps(param_dict, ensure_ascii=False),
-                            ),
-                        )
-                    )
-
-            if not tool_calls:
-                return ExtractedToolCallInformation(
-                    tools_called=False, tool_calls=[], content=model_output
-                )
-
-            # Extract content before first tool call
-            first_tool_idx = model_output.find(self.tool_call_start_token)
-            content = model_output[:first_tool_idx] if first_tool_idx > 0 else None
-
-            return ExtractedToolCallInformation(
-                tools_called=True, tool_calls=tool_calls, content=content
-            )
-
-        except Exception:
-            logger.exception("Error extracting tool calls")
-            return ExtractedToolCallInformation(
-                tools_called=False, tool_calls=[], content=model_output
-            )
-
-    def _extract_name(self, name_str: str) -> str:
-        """Extract name from quoted string."""
-        name_str = name_str.strip()
-        if (
-            name_str.startswith('"')
-            and name_str.endswith('"')
-            or name_str.startswith("'")
-            and name_str.endswith("'")
-        ):
-            return name_str[1:-1]
-        return name_str
 
     def _convert_param_value(self, value: str, param_type: str) -> Any:
         """Convert parameter value to the correct type."""
@@ -237,6 +160,64 @@ class DeepSeekV32ToolParser(ToolParser):
             converted[name] = self._convert_param_value(value, param_type)
         return converted
 
+    def extract_tool_calls(
+        self,
+        model_output: str,
+        request: ChatCompletionRequest,
+    ) -> ExtractedToolCallInformation:
+        """Extract tool calls from complete model output (non-streaming)."""
+        # Quick check
+        if self.tool_call_start_token not in model_output:
+            return ExtractedToolCallInformation(
+                tools_called=False, tool_calls=[], content=model_output
+            )
+
+        try:
+            tool_calls = []
+
+            # Find all complete tool_call blocks
+            for tool_call_match in self.tool_call_complete_regex.findall(model_output):
+                # Find all invokes within this tool_call
+                for invoke_name, invoke_content in self.invoke_complete_regex.findall(
+                    tool_call_match
+                ):
+                    param_dict = self._parse_invoke_params(invoke_content)
+                    tool_calls.append(
+                        ToolCall(
+                            type="function",
+                            function=FunctionCall(
+                                name=invoke_name,
+                                arguments=json.dumps(param_dict, ensure_ascii=False),
+                            ),
+                        )
+                    )
+
+            if not tool_calls:
+                return ExtractedToolCallInformation(
+                    tools_called=False, tool_calls=[], content=model_output
+                )
+
+            # Extract content before first tool call
+            first_tool_idx = model_output.find(self.tool_call_start_token)
+            content = model_output[:first_tool_idx] if first_tool_idx > 0 else None
+
+            return ExtractedToolCallInformation(
+                tools_called=True, tool_calls=tool_calls, content=content
+            )
+
+        except Exception:
+            logger.exception("Error extracting tool calls")
+            return ExtractedToolCallInformation(
+                tools_called=False, tool_calls=[], content=model_output
+            )
+
+    def _reset_streaming_state(self):
+        """Reset all streaming state."""
+        self.current_tool_index = 0
+        self.is_tool_call_started = False
+        self.prev_tool_call_arr.clear()
+        self.streamed_args_for_tool.clear()
+
     def _extract_delta_tool_calls(
         self,
         current_text: str,
@@ -253,9 +234,6 @@ class DeepSeekV32ToolParser(ToolParser):
         while len(complete_invokes) > self.current_tool_index:
             invoke_name, invoke_body = complete_invokes[self.current_tool_index]
             param_dict = self._parse_invoke_params(invoke_body)
-            if param_dict is None:
-                self.current_tool_index += 1
-                continue
 
             converted = self._convert_params_with_schema(
                 invoke_name, param_dict, request
