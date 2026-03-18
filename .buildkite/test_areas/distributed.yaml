@@ -204,7 +204,7 @@ steps:
   num_devices: 2
   commands:
     - pytest -v -s tests/distributed/test_context_parallel.py
-    - pytest -v -s tests/distributed/test_nccl_symm_mem_allreduce.py
+    - pytest -v -s tests/distributed/test_nccl_symm_mem.py
     - pytest -v -s tests/v1/distributed/test_dbo.py
 
 - label: 2 Node Test (4 GPUs)

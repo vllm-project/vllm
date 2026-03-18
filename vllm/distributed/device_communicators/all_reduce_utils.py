@@ -134,6 +134,29 @@ def should_nccl_symm_mem_allreduce(world_size: int, input_tensor: torch.Tensor) 
     return world_size > NCCL_SYMM_MEM_ALL_REDUCE_CONFIG["always_use_above_world_size"]
 
 
+NCCL_SYMM_MEM_AG_RS_MIN_WORLD_SIZE = 2
+
+
+def _should_nccl_symm_mem_collective(
+    world_size: int, input_tensor: torch.Tensor
+) -> bool:
+    """Check whether NCCL symmetric memory should be used for
+    AllGather / ReduceScatter collectives."""
+    from vllm.distributed.device_communicators.pynccl_allocator import (
+        is_symmetric_memory_enabled,
+    )
+
+    if envs.VLLM_BATCH_INVARIANT:
+        return False
+    if not is_symmetric_memory_enabled():
+        return False
+    return world_size >= NCCL_SYMM_MEM_AG_RS_MIN_WORLD_SIZE
+
+
+should_nccl_symm_mem_allgather = _should_nccl_symm_mem_collective
+should_nccl_symm_mem_reduce_scatter = _should_nccl_symm_mem_collective
+
+
 def producer(
     batch_src: Sequence[int],
     producer_queue,
