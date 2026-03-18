@@ -31,12 +31,12 @@ Of course, we also have "plugin" tasks that allow users to customize input and o
 
 ### Pooling Tasks
 
-| Type          | Pooling Tasks  | Outputs                               |
-|---------------|----------------|---------------------------------------|
-| Sequence-wise | classify       | class labels                          |
-| Sequence-wise | embed          | vector representations                |
-| Token-wise    | token_classify | class for each token                  |
-| Token-wise    | token_embed    | vector representations for each token |
+| Pooling Tasks  | Types         | Outputs                               |
+|----------------|---------------|---------------------------------------|
+| classify       | Sequence-wise | class labels                          |
+| embed          | Sequence-wise | vector representations                |
+| token_classify | Token-wise    | class for each token                  |
+| token_embed    | Token-wise    | vector representations for each token |
 
 Within classification tasks, there is a specialized subcategory: Cross-encoder (aka reranker) models. These models are a subset of classification models that accept two prompts as input and output num_labels equal to 1.
 
