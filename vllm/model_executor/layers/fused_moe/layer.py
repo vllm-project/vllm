@@ -926,13 +926,25 @@ class FusedMoE(CustomOp):
         if shard_id == "w2":
             expert_data.copy_(loaded_weight)
         elif shard_id in ("w1", "w3"):
-            self._load_w13(
-                shard_id=shard_id,
-                shard_dim=shard_dim,
-                loaded_weight=loaded_weight,
-                expert_data=expert_data,
-                tp_rank=tp_rank,
-            )
+            # Index the loaded weight for tp sharding.
+            # gate_up_proj: "MergedColumnParallel", so tp sharding on output_dim
+            if self.moe_config.is_act_and_mul:
+                shard_size = expert_data.shape[shard_dim] // 2
+            else:
+                shard_size = expert_data.shape[shard_dim]
+            # Only narrow if the loaded_weight is not a scalar (0-dim tensor)
+            if loaded_weight.ndim > 0:
+                loaded_weight = loaded_weight.narrow(
+                    shard_dim, shard_size * tp_rank, shard_size
+                )
+            # Narrow parameter and load.
+            # w1, gate_proj: Load into first logical weight of w13.
+            if shard_id == "w1":
+                expert_data = expert_data.narrow(shard_dim, 0, shard_size)
+            # w3, up_proj: Load into second logical weight of w13.
+            else:
+                expert_data = expert_data.narrow(shard_dim, shard_size, shard_size)
+            expert_data.copy_(loaded_weight)
 
     def _load_w13(
         self,
