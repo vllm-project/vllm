@@ -3,7 +3,7 @@ use std::time::Duration;
 use clap::{Args, Parser, Subcommand};
 use vllm_openai_server::Config;
 
-use crate::managed_engine::ManagedEngineConfig;
+use crate::managed_engine::{MANAGED_ENGINE_HANDSHAKE_HOST, ManagedEngineConfig};
 
 /// Top-level parser for the `vllm-rs` binary.
 #[derive(Debug, Parser)]
@@ -77,6 +77,9 @@ impl FrontendArgs {
 }
 
 /// Arguments for the managed-engine mode that spawns Python on behalf of the user.
+///
+/// Original Python API reference:
+/// <https://github.com/vllm-project/vllm/blob/bc2c0c86efb28e77677a3cfb8687e976914a313a/vllm/engine/arg_utils.py#L657-L1311>
 #[derive(Debug, Clone, Args, PartialEq, Eq)]
 pub struct ServeArgs {
     #[command(flatten)]
@@ -84,35 +87,24 @@ pub struct ServeArgs {
     /// Python executable used to launch the managed headless vLLM engine.
     #[arg(long, default_value = "python3")]
     pub python: String,
-    /// Host used for the managed headless-engine handshake endpoint.
-    #[arg(long, default_value = "127.0.0.1")]
-    pub handshake_host: String,
-    /// Port used for the managed headless-engine handshake endpoint.
-    #[arg(long, default_value_t = 62100)]
-    pub handshake_port: u16,
     /// Additional arguments forwarded to `python -m vllm.entrypoints.cli.main serve ...`.
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     pub python_args: Vec<String>,
 }
 
 impl ServeArgs {
-    /// Render the managed-engine handshake endpoint in the format expected by the client.
-    pub fn handshake_address(&self) -> String {
-        format!("tcp://{}:{}", self.handshake_host, self.handshake_port)
-    }
-
     /// Build the OpenAI-server runtime config that should connect to the managed engine.
-    pub fn frontend_config(&self) -> Config {
-        self.runtime.clone().into_config(self.handshake_address())
+    pub fn to_frontend_config(&self, handshake_address: String) -> Config {
+        self.runtime.clone().into_config(handshake_address)
     }
 
-    /// Build the managed Python-engine spawn configuration.
-    pub fn into_managed_engine_config(self) -> ManagedEngineConfig {
+    /// Build the managed Python-engine spawn configuration for one resolved handshake port.
+    pub fn into_managed_engine_config(self, handshake_port: u16) -> ManagedEngineConfig {
         ManagedEngineConfig {
             python: self.python,
             model: self.runtime.model,
-            handshake_host: self.handshake_host,
-            handshake_port: self.handshake_port,
+            handshake_host: MANAGED_ENGINE_HANDSHAKE_HOST.to_string(),
+            handshake_port,
             python_args: self.python_args,
         }
     }

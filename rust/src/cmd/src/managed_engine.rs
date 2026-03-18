@@ -1,4 +1,5 @@
 use std::io;
+use std::net::TcpListener;
 use std::process::{Command as StdCommand, ExitStatus, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -12,6 +13,20 @@ use tracing::info;
 
 const CHILD_POLL_INTERVAL: Duration = Duration::from_millis(200);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
+/// Loopback host used for managed-mode handshake traffic between the Rust frontend
+/// and the Python headless engine.
+pub const MANAGED_ENGINE_HANDSHAKE_HOST: &str = "127.0.0.1";
+
+/// Allocate one ephemeral loopback TCP port for the managed headless-engine handshake.
+pub fn allocate_handshake_port() -> Result<u16> {
+    let listener = TcpListener::bind((MANAGED_ENGINE_HANDSHAKE_HOST, 0))
+        .context("failed to allocate loopback handshake port")?;
+    let port = listener
+        .local_addr()
+        .context("failed to inspect allocated handshake listener address")?
+        .port();
+    Ok(port)
+}
 
 /// Spawn configuration for one managed headless Python vLLM engine.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -21,6 +36,8 @@ pub struct ManagedEngineConfig {
     /// Model identifier passed to `vllm ... serve <model>`.
     pub model: String,
     /// Host portion of the headless-engine handshake endpoint.
+    ///
+    /// In managed mode this is always loopback and is not user-configurable.
     pub handshake_host: String,
     /// Port portion of the headless-engine handshake endpoint.
     pub handshake_port: u16,
@@ -199,7 +216,7 @@ mod process_group {
 mod tests {
     use expect_test::expect;
 
-    use super::ManagedEngineConfig;
+    use super::{ManagedEngineConfig, allocate_handshake_port};
 
     #[test]
     #[cfg(unix)]
@@ -241,5 +258,11 @@ mod tests {
             }
         "#]]
         .assert_debug_eq(&config.to_command());
+    }
+
+    #[test]
+    fn allocate_handshake_port_returns_non_zero_port() {
+        let port = allocate_handshake_port().unwrap();
+        assert_ne!(port, 0);
     }
 }

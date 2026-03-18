@@ -11,7 +11,7 @@ use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
 use crate::cli::{Cli, Command};
-use crate::managed_engine::ManagedEngineHandle;
+use crate::managed_engine::{ManagedEngineHandle, allocate_handshake_port};
 
 /// Install one process-wide tracing subscriber for the CLI binary.
 fn init_tracing() {
@@ -46,8 +46,12 @@ async fn main() -> Result<()> {
     match Cli::parse().command {
         Command::Frontend(args) => vllm_openai_server::serve(args.into_config(), ctrl_c()).await,
         Command::Serve(args) => {
-            let config = args.frontend_config();
-            let engine = ManagedEngineHandle::spawn(args.into_managed_engine_config())
+            let handshake_port =
+                allocate_handshake_port().context("failed to allocate managed engine handshake port")?;
+            let engine_config = args.clone().into_managed_engine_config(handshake_port);
+            let config = args.to_frontend_config(engine_config.handshake_address());
+
+            let engine = ManagedEngineHandle::spawn(engine_config)
                 .await
                 .context("failed to start managed Python headless engine")?;
 
