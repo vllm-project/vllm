@@ -4,9 +4,9 @@
 import asyncio
 import functools
 import time
-from collections.abc import Callable, Mapping, MutableMapping
+from collections.abc import Callable, Coroutine, Mapping, MutableMapping
 from pathlib import Path
-from typing import Any
+from typing import Any, ParamSpec, TypeVar, overload
 
 import aiohttp
 import requests
@@ -17,6 +17,14 @@ from vllm.logger import init_logger
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
+
+_P = ParamSpec("_P")
+_T = TypeVar("_T")
+
+# Multiplier applied to timeout and sleep on each retry attempt.
+# Attempt N uses: base_timeout * (_RETRY_BACKOFF_FACTOR ** N) for the
+# per-attempt timeout and sleeps _RETRY_BACKOFF_FACTOR ** N seconds.
+_RETRY_BACKOFF_FACTOR = 4
 
 
 def _is_retryable(exc: Exception) -> bool:
@@ -65,84 +73,123 @@ def _is_retryable(exc: Exception) -> bool:
     return isinstance(exc, aiohttp.ClientResponseError) and exc.status >= 500
 
 
-def _sync_retry(fn: Callable[..., Any]) -> Callable[..., Any]:
-    """Add retry logic with exponential backoff to a sync method.
+def _log_retry(
+    args: tuple,
+    kwargs: dict,
+    attempt: int,
+    max_retries: int,
+    attempt_timeout: float | None,
+    exc: Exception,
+    backoff: float,
+    base_timeout: float | None,
+) -> None:
+    logger.warning(
+        "HTTP fetch failed for %s (attempt %d/%d, "
+        "timeout=%ss): %s -- retrying in %ds with "
+        "timeout=%ss",
+        args[0] if args else kwargs.get("url"),
+        attempt + 1,
+        max_retries,
+        attempt_timeout,
+        exc,
+        backoff,
+        base_timeout * (_RETRY_BACKOFF_FACTOR ** (attempt + 1))
+        if base_timeout is not None
+        else None,
+    )
+
+
+@overload
+def _retry(
+    fn: Callable[_P, Coroutine[Any, Any, _T]],
+) -> Callable[_P, Coroutine[Any, Any, _T]]: ...
+
+
+@overload
+def _retry(
+    fn: Callable[_P, _T],
+) -> Callable[_P, _T]: ...
+
+
+def _retry(fn: Callable[_P, Any]) -> Callable[_P, Any]:
+    """Add retry logic with exponential backoff to a sync or async method.
 
     The decorated method must accept ``timeout`` as a keyword argument.
-    The decorator replaces it with a per-attempt timeout that grows by 4x
-    on each retry so transient slowness on busy hosts is absorbed.
+    The decorator replaces it with a per-attempt timeout that grows by
+    ``_RETRY_BACKOFF_FACTOR`` on each retry so transient slowness on busy
+    hosts is absorbed.
     """
 
+    if asyncio.iscoroutinefunction(fn):
+
+        @functools.wraps(fn)
+        async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
+            base_timeout: float | None = kwargs.get("timeout")
+            max_retries = max(envs.VLLM_MEDIA_FETCH_MAX_RETRIES, 1)
+
+            for attempt in range(max_retries):
+                attempt_timeout = (
+                    base_timeout * (_RETRY_BACKOFF_FACTOR**attempt)
+                    if base_timeout is not None
+                    else None
+                )
+                try:
+                    return await fn(
+                        *args,
+                        **{**kwargs, "timeout": attempt_timeout},
+                    )
+                except Exception as e:
+                    if not _is_retryable(e) or attempt + 1 >= max_retries:
+                        raise
+                    backoff = _RETRY_BACKOFF_FACTOR**attempt
+                    _log_retry(
+                        args,
+                        kwargs,
+                        attempt,
+                        max_retries,
+                        attempt_timeout,
+                        e,
+                        backoff,
+                        base_timeout,
+                    )
+                    await asyncio.sleep(backoff)
+
+            raise AssertionError("unreachable")
+
+        return async_wrapper  # type: ignore[return-value]
+
     @functools.wraps(fn)
-    def wrapper(self: "HTTPConnection", *args: Any, **kwargs: Any) -> Any:
-        timeout: float | None = kwargs.get("timeout")
+    def sync_wrapper(*args: Any, **kwargs: Any) -> Any:
+        base_timeout: float | None = kwargs.get("timeout")
         max_retries = max(envs.VLLM_MEDIA_FETCH_MAX_RETRIES, 1)
 
         for attempt in range(max_retries):
-            attempt_timeout = timeout * (4**attempt) if timeout is not None else None
+            attempt_timeout = (
+                base_timeout * (_RETRY_BACKOFF_FACTOR**attempt)
+                if base_timeout is not None
+                else None
+            )
             try:
-                return fn(self, *args, **{**kwargs, "timeout": attempt_timeout})
+                return fn(*args, **{**kwargs, "timeout": attempt_timeout})
             except Exception as e:
                 if not _is_retryable(e) or attempt + 1 >= max_retries:
                     raise
-                backoff = 4**attempt
-                logger.warning(
-                    "HTTP fetch failed for %s (attempt %d/%d, "
-                    "timeout=%ss): %s -- retrying in %ds with "
-                    "timeout=%ss",
-                    args[0] if args else kwargs.get("url"),
-                    attempt + 1,
+                backoff = _RETRY_BACKOFF_FACTOR**attempt
+                _log_retry(
+                    args,
+                    kwargs,
+                    attempt,
                     max_retries,
                     attempt_timeout,
                     e,
                     backoff,
-                    timeout * (4 ** (attempt + 1)) if timeout is not None else None,
+                    base_timeout,
                 )
                 time.sleep(backoff)
 
         raise AssertionError("unreachable")
 
-    return wrapper
-
-
-def _async_retry(fn: Callable[..., Any]) -> Callable[..., Any]:
-    """Add retry logic with exponential backoff to an async method.
-
-    The decorated method must accept ``timeout`` as a keyword argument.
-    The decorator replaces it with a per-attempt timeout that grows by 4x
-    on each retry so transient slowness on busy hosts is absorbed.
-    """
-
-    @functools.wraps(fn)
-    async def wrapper(self: "HTTPConnection", *args: Any, **kwargs: Any) -> Any:
-        timeout: float | None = kwargs.get("timeout")
-        max_retries = max(envs.VLLM_MEDIA_FETCH_MAX_RETRIES, 1)
-
-        for attempt in range(max_retries):
-            attempt_timeout = timeout * (4**attempt) if timeout is not None else None
-            try:
-                return await fn(self, *args, **{**kwargs, "timeout": attempt_timeout})
-            except Exception as e:
-                if not _is_retryable(e) or attempt + 1 >= max_retries:
-                    raise
-                backoff = 4**attempt
-                logger.warning(
-                    "HTTP fetch failed for %s (attempt %d/%d, "
-                    "timeout=%ss): %s -- retrying in %ds with "
-                    "timeout=%ss",
-                    args[0] if args else kwargs.get("url"),
-                    attempt + 1,
-                    max_retries,
-                    attempt_timeout,
-                    e,
-                    backoff,
-                    timeout * (4 ** (attempt + 1)) if timeout is not None else None,
-                )
-                await asyncio.sleep(backoff)
-
-        raise AssertionError("unreachable")
-
-    return wrapper
+    return sync_wrapper  # type: ignore[return-value]
 
 
 class HTTPConnection:
@@ -171,9 +218,7 @@ class HTTPConnection:
         return self._async_client
 
     def _validate_http_url(self, url: str):
-        parsed_url = parse_url(url)
-
-        if parsed_url.scheme not in ("http", "https"):
+        if parse_url(url).scheme not in ("http", "https"):
             raise ValueError(
                 "Invalid HTTP URL: A valid HTTP URL must have scheme 'http' or 'https'."
             )
@@ -191,13 +236,9 @@ class HTTPConnection:
         allow_redirects: bool = True,
     ):
         self._validate_http_url(url)
-
-        client = self.get_sync_client()
-        extra_headers = extra_headers or {}
-
-        return client.get(
+        return self.get_sync_client().get(
             url,
-            headers=self._headers(**extra_headers),
+            headers=self._headers(**(extra_headers or {})),
             stream=stream,
             timeout=timeout,
             allow_redirects=allow_redirects,
@@ -212,18 +253,29 @@ class HTTPConnection:
         allow_redirects: bool = True,
     ):
         self._validate_http_url(url)
-
-        client = await self.get_async_client()
-        extra_headers = extra_headers or {}
-
-        return client.get(
+        return (await self.get_async_client()).get(
             url,
-            headers=self._headers(**extra_headers),
+            headers=self._headers(**(extra_headers or {})),
             timeout=timeout,
             allow_redirects=allow_redirects,
         )
 
-    @_sync_retry
+    def _sync_fetch(self, url: str, extract: Callable, **kwargs: Any) -> Any:
+        with self.get_response(url, **kwargs) as r:
+            r.raise_for_status()
+            return extract(r)
+
+    async def _async_fetch(
+        self,
+        url: str,
+        extract: Callable,
+        **kwargs: Any,
+    ) -> Any:
+        async with await self.get_async_response(url, **kwargs) as r:
+            r.raise_for_status()
+            return await extract(r)
+
+    @_retry
     def get_bytes(
         self,
         url: str,
@@ -231,15 +283,14 @@ class HTTPConnection:
         timeout: float | None = None,
         allow_redirects: bool = True,
     ) -> bytes:
-        with self.get_response(
+        return self._sync_fetch(
             url,
+            lambda r: r.content,
             timeout=timeout,
             allow_redirects=allow_redirects,
-        ) as r:
-            r.raise_for_status()
-            return r.content
+        )
 
-    @_async_retry
+    @_retry
     async def async_get_bytes(
         self,
         url: str,
@@ -247,19 +298,15 @@ class HTTPConnection:
         timeout: float | None = None,
         allow_redirects: bool = True,
     ) -> bytes:
-        async with await self.get_async_response(
+        return await self._async_fetch(
             url,
+            lambda r: r.read(),
             timeout=timeout,
             allow_redirects=allow_redirects,
-        ) as r:
-            r.raise_for_status()
-            return await r.read()
+        )
 
     def get_text(self, url: str, *, timeout: float | None = None) -> str:
-        with self.get_response(url, timeout=timeout) as r:
-            r.raise_for_status()
-
-            return r.text
+        return self._sync_fetch(url, lambda r: r.text, timeout=timeout)
 
     async def async_get_text(
         self,
@@ -267,29 +314,28 @@ class HTTPConnection:
         *,
         timeout: float | None = None,
     ) -> str:
-        async with await self.get_async_response(url, timeout=timeout) as r:
-            r.raise_for_status()
+        return await self._async_fetch(
+            url,
+            lambda r: r.text(),
+            timeout=timeout,
+        )
 
-            return await r.text()
-
-    def get_json(self, url: str, *, timeout: float | None = None) -> str:
-        with self.get_response(url, timeout=timeout) as r:
-            r.raise_for_status()
-
-            return r.json()
+    def get_json(self, url: str, *, timeout: float | None = None) -> Any:
+        return self._sync_fetch(url, lambda r: r.json(), timeout=timeout)
 
     async def async_get_json(
         self,
         url: str,
         *,
         timeout: float | None = None,
-    ) -> str:
-        async with await self.get_async_response(url, timeout=timeout) as r:
-            r.raise_for_status()
+    ) -> Any:
+        return await self._async_fetch(
+            url,
+            lambda r: r.json(),
+            timeout=timeout,
+        )
 
-            return await r.json()
-
-    @_sync_retry
+    @_retry
     def download_file(
         self,
         url: str,
@@ -313,7 +359,7 @@ class HTTPConnection:
                 save_path.unlink()
             raise
 
-    @_async_retry
+    @_retry
     async def async_download_file(
         self,
         url: str,
@@ -323,7 +369,10 @@ class HTTPConnection:
         chunk_size: int = 128,
     ) -> Path:
         try:
-            async with await self.get_async_response(url, timeout=timeout) as r:
+            async with await self.get_async_response(
+                url,
+                timeout=timeout,
+            ) as r:
                 r.raise_for_status()
 
                 with save_path.open("wb") as f:
