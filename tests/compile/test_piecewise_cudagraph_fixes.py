@@ -106,12 +106,14 @@ def test_splitting_op_getitem_assigned_to_next_subgraph():
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 def test_cudagraph_entry_input_buffers_populated():
     """
-    CUDAGraphEntry.input_buffers must be populated at capture time so that
-    data can be copied into them before replay when a splitting_op allocates
-    new tensors between two compiled pieces.
+    Unit test for the input_buffers copy mechanism on CUDAGraphEntry.
 
-    Tests the sync logic directly on CUDAGraphEntry without instantiating
-    the full VllmConfig stack.
+    Verifies that cloned buffers can receive new data via copy_() when
+    tensor addresses change — the core mechanism used by CUDAGraphWrapper
+    to handle splitting_ops that allocate new tensors between pieces.
+
+    Note: this does NOT test CUDAGraphWrapper.__call__ end-to-end; it only
+    validates the dataclass field and the copy logic in isolation.
     """
     from vllm.compilation.cuda_graph import CUDAGraphEntry
 
