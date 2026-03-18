@@ -245,6 +245,7 @@ class BaseRouter(FusedMoERouter):
         # Step 3b: RIY — record stats and apply expert mask
         riy = get_riy_state()
         if riy.enabled and self.layer_idx >= 0:
+            riy.on_forward()
             if riy.collecting:
                 riy.record_stats(self.layer_idx, topk_ids, topk_weights)
             mask_t = riy.get_mask_tensor(self.layer_idx)
