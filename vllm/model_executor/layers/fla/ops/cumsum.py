@@ -7,7 +7,6 @@
 # the following copyright notice:
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 # ruff: noqa: E501
-import os
 import warnings
 
 import torch
@@ -18,9 +17,6 @@ from .index import prepare_chunk_indices
 from .utils import check_shared_mem, input_guard
 
 BS_LIST = [32, 64] if check_shared_mem() else [16, 32]
-FLA_CUMSUM_SCALAR_VECTORIZATION = (
-    os.getenv("FLA_CUMSUM_SCALAR_VECTORIZATION", "1") == "1"
-)
 
 
 @triton.heuristics({"IS_VARLEN": lambda args: args["cu_seqlens"] is not None})
@@ -293,7 +289,7 @@ def chunk_local_cumsum_vector_kernel(
     tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0, 1))
 
 
-def chunk_local_cumsum_scalar(
+def _chunk_local_cumsum_scalar_legacy(
     g: torch.Tensor,
     chunk_size: int,
     reverse: bool = False,
@@ -305,49 +301,89 @@ def chunk_local_cumsum_scalar(
         B, H, T = g.shape
     else:
         B, T, H = g.shape
-    assert chunk_size == 2 ** (chunk_size.bit_length() - 1), (
-        "chunk_size must be a power of 2"
-    )
     BT = chunk_size
     chunk_indices = (
         prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
     )
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     g_org, g = g, torch.empty_like(g, dtype=output_dtype or g.dtype)
-    use_vectorized_scalar = FLA_CUMSUM_SCALAR_VECTORIZATION and not head_first and H > 1
-    if use_vectorized_scalar:
-        BH = min(8, triton.next_power_of_2(H))
-        grid = (NT, B * triton.cdiv(H, BH))
-        chunk_local_cumsum_scalar_vectorized_kernel[grid](
-            g_org,
-            g,
-            cu_seqlens,
-            chunk_indices,
-            T=T,
-            B=B,
-            H=H,
-            BT=BT,
-            BH=BH,
-            HEAD_FIRST=head_first,
-            REVERSE=reverse,
-            num_warps=1,
-            num_stages=3,
-        )
-    else:
-        grid = (NT, B * H)
-        chunk_local_cumsum_scalar_kernel[grid](
-            g_org,
-            g,
-            cu_seqlens,
-            chunk_indices,
-            T=T,
-            B=B,
-            H=H,
-            BT=BT,
-            HEAD_FIRST=head_first,
-            REVERSE=reverse,
-        )
+    grid = (NT, B * H)
+    chunk_local_cumsum_scalar_kernel[grid](
+        g_org,
+        g,
+        cu_seqlens,
+        chunk_indices,
+        T=T,
+        B=B,
+        H=H,
+        BT=BT,
+        HEAD_FIRST=head_first,
+        REVERSE=reverse,
+    )
     return g
+
+
+def _chunk_local_cumsum_scalar_vectorized(
+    g: torch.Tensor,
+    chunk_size: int,
+    reverse: bool = False,
+    cu_seqlens: torch.Tensor | None = None,
+    head_first: bool = False,
+    output_dtype: torch.dtype | None = torch.float,
+) -> torch.Tensor:
+    if head_first:
+        B, H, T = g.shape
+    else:
+        B, T, H = g.shape
+    BT = chunk_size
+    chunk_indices = (
+        prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+    )
+    NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
+    g_org, g = g, torch.empty_like(g, dtype=output_dtype or g.dtype)
+    BH = min(8, triton.next_power_of_2(H))
+    grid = (NT, B * triton.cdiv(H, BH))
+    chunk_local_cumsum_scalar_vectorized_kernel[grid](
+        g_org,
+        g,
+        cu_seqlens,
+        chunk_indices,
+        T=T,
+        B=B,
+        H=H,
+        BT=BT,
+        BH=BH,
+        HEAD_FIRST=head_first,
+        REVERSE=reverse,
+        num_warps=1,
+        num_stages=3,
+    )
+    return g
+
+
+def chunk_local_cumsum_scalar(
+    g: torch.Tensor,
+    chunk_size: int,
+    reverse: bool = False,
+    cu_seqlens: torch.Tensor | None = None,
+    head_first: bool = False,
+    output_dtype: torch.dtype | None = torch.float,
+) -> torch.Tensor:
+    if head_first:
+        _, H, _ = g.shape
+    else:
+        _, _, H = g.shape
+    assert chunk_size == 2 ** (chunk_size.bit_length() - 1), (
+        "chunk_size must be a power of 2"
+    )
+    if not head_first and H > 1:
+        return _chunk_local_cumsum_scalar_vectorized(
+            g, chunk_size, reverse, cu_seqlens, head_first, output_dtype
+        )
+
+    return _chunk_local_cumsum_scalar_legacy(
+        g, chunk_size, reverse, cu_seqlens, head_first, output_dtype
+    )
 
 
 def chunk_local_cumsum_vector(
