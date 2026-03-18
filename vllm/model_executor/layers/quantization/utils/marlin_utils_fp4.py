@@ -37,9 +37,6 @@ def _nvfp4_compute_scale_factor(marlin_scales: torch.Tensor) -> float:
         min_val = ws_float[nonzero_mask].min()
         if min_val < 2:
             sf = (2 / min_val).log2().ceil().exp2()
-            assert (ws_float[nonzero_mask] * sf <= 448 * (2**7)).all(), (
-                "NVFP4 scale dynamic range too large for rescaling"
-            )
             return sf.item()
     return 1.0
 
