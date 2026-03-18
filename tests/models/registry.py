@@ -286,7 +286,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         min_transformers_version="5.0.0",
     ),
     "GlmMoeDsaForCausalLM": _HfExamplesInfo(
-        "zai-org/GLM-5", min_transformers_version="5.0.1", is_available_online=False
+        "zai-org/GLM-5", min_transformers_version="5.0.1"
     ),
     "GPT2LMHeadModel": _HfExamplesInfo("openai-community/gpt2", {"alias": "gpt2"}),
     "GPTBigCodeForCausalLM": _HfExamplesInfo(
@@ -779,7 +779,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "rednote-hilab/dots.ocr", trust_remote_code=True
     ),
     "Eagle2_5_VLForConditionalGeneration": _HfExamplesInfo(
-        "nvidia/Eagle2.5-8B", trust_remote_code=True, is_available_online=False
+        "nvidia/Eagle2.5-8B", trust_remote_code=True
     ),
     "Emu3ForConditionalGeneration": _HfExamplesInfo("BAAI/Emu3-Chat-hf"),
     "Ernie4_5_VLMoeForConditionalGeneration": _HfExamplesInfo(
@@ -976,7 +976,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         trust_remote_code=True,
     ),
     "NemotronH_Nano_VL_V2": _HfExamplesInfo(
-        "nano_vl_dummy", is_available_online=False, trust_remote_code=True
+        "nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16", trust_remote_code=True
     ),
     "OpenCUAForConditionalGeneration": _HfExamplesInfo(
         "xlangai/OpenCUA-7B", trust_remote_code=True
@@ -1262,9 +1262,8 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         speculative_model="XiaomiMiMo/MiMo-7B-RL",
     ),
     "NemotronHMTPModel": _HfExamplesInfo(
-        "nvidia/Nemotron-Super-Placeholder",
-        speculative_model="nvidia/Nemotron-Super-Placeholder",
-        is_available_online=False,
+        "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
+        speculative_model="nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
     ),
     "OpenPanguMTPModel": _HfExamplesInfo(
         "FreedomIntelligence/openPangu-Ultra-MoE-718B-V1.1",
@@ -1288,7 +1287,6 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         use_original_num_layers=True,
         # Initialize at least one MoE layer
         hf_overrides={"num_hidden_layers": 4},
-        is_available_online=False,
     ),
 }
 
