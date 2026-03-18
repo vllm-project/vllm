@@ -156,8 +156,9 @@ class KernelConfig:
 
         platform_op_priority = current_platform.get_default_ir_op_priority(vllm_config)
         logger.debug(
-            "Setting platform-specific IR op priority defaults: %s",
+            "Setting platform-specific IR op priority defaults: %s, user-defined: %s",
             platform_op_priority,
+            self.ir_op_priority,
         )
         for op_name, op_priority in asdict(platform_op_priority).items():
             current_op_priority: list[str] = getattr(self.ir_op_priority, op_name)

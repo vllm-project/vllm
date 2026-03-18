@@ -8,7 +8,7 @@ import functools
 import json
 import sys
 from collections.abc import Callable
-from dataclasses import MISSING, dataclass, fields, is_dataclass
+from dataclasses import MISSING, asdict, dataclass, fields, is_dataclass
 from itertools import permutations
 from types import UnionType
 from typing import (
@@ -390,7 +390,7 @@ class EngineArgs:
     max_cudagraph_capture_size: int | None = get_field(
         CompilationConfig, "max_cudagraph_capture_size"
     )
-    ir_op_priority: IrOpPriorityConfig = KernelConfig.ir_op_priority
+    ir_op_priority: IrOpPriorityConfig = get_field(KernelConfig, "ir_op_priority")
     # Note: Specifying a custom executor backend by passing a class
     # is intended for expert use only. The API may change without
     # notice.
@@ -1837,6 +1837,22 @@ class EngineArgs:
             kernel_config.enable_flashinfer_autotune = self.enable_flashinfer_autotune
         if self.moe_backend != "auto":
             kernel_config.moe_backend = self.moe_backend
+
+        # Transfer top-level ir_op_priority into KernelConfig.ir_op_priority
+        for op_name, op_priority in asdict(self.ir_op_priority).items():
+            # Empty means unset
+            if not op_priority:
+                continue
+
+            # Priority cannot be set 2x for the same op
+            if getattr(kernel_config.ir_op_priority, op_name):
+                raise ValueError(
+                    f"Op priority for {op_name} specified via both ir_op_priority "
+                    f"and KernelConfig.ir_op_priority, only one allowed at a time."
+                )
+
+            # Set the attribute
+            setattr(kernel_config.ir_op_priority, op_name, op_priority)
 
         load_config = self.create_load_config()
 
