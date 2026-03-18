@@ -173,7 +173,11 @@ class OffloadingConnectorScheduler:
         )
 
         src_spec = self.manager.prepare_load(block_hashes)
-        dst_spec = GPULoadStoreSpec(block_ids[num_computed_gpu_blocks:])
+        dst_spec = GPULoadStoreSpec(
+            block_ids[num_computed_gpu_blocks:],
+            group_sizes=(num_pending_gpu_blocks,),
+            block_indices=(num_computed_gpu_blocks,),
+        )
 
         block_hashes = self._get_block_hashes(
             request, start_idx=start_block_idx, end_idx=num_blocks
@@ -246,7 +250,9 @@ class OffloadingConnectorScheduler:
                 gpu_block_idx = offloaded_block_idx * self.block_size_factor
                 for i in range(self.block_size_factor):
                     src_block_ids.append(block_ids[gpu_block_idx + i])
-            src_spec = GPULoadStoreSpec(src_block_ids)
+            src_spec = GPULoadStoreSpec(
+                src_block_ids, group_sizes=(len(src_block_ids),)
+            )
 
             reqs_to_store[req_id] = (src_spec, dst_spec)
             self._reqs_being_stored[req_id] |= block_hashes_to_store

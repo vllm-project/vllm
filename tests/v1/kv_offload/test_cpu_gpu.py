@@ -135,19 +135,19 @@ def test_transfer(
     # set transfer direction
     if gpu_to_cpu:
         handler = handlers.gpu_to_cpu_handler
-        src_spec_class = GPULoadStoreSpec
-        dst_spec_class = CPULoadStoreSpec
         src_blocks = gpu_blocks
         dst_blocks = cpu_blocks
+        src_spec = GPULoadStoreSpec(src_blocks, group_sizes=(len(src_blocks),))
+        dst_spec = CPULoadStoreSpec(dst_blocks)
         src_blocks_in_kernel_block_size = gpu_blocks_in_kernel_block_size
         dst_blocks_in_kernel_block_size = cpu_blocks_in_kernel_block_size
         dst_size_in_kernel_blocks = num_cpu_blocks * kernel_blocks_per_cpu_block
     else:
         handler = handlers.cpu_to_gpu_handler
-        src_spec_class = CPULoadStoreSpec
-        dst_spec_class = GPULoadStoreSpec
         src_blocks = cpu_blocks
         dst_blocks = gpu_blocks
+        src_spec = CPULoadStoreSpec(src_blocks)
+        dst_spec = GPULoadStoreSpec(dst_blocks, group_sizes=(len(dst_blocks),))
         src_blocks_in_kernel_block_size = cpu_blocks_in_kernel_block_size
         dst_blocks_in_kernel_block_size = gpu_blocks_in_kernel_block_size
         dst_size_in_kernel_blocks = num_gpu_blocks * kernel_blocks_per_gpu_block
@@ -158,10 +158,6 @@ def test_transfer(
         src_blocks_in_kernel_block_size, dst_blocks_in_kernel_block_size
     ):
         dst_to_src[dst_block] = src_block
-
-    # build transfer specs
-    src_spec = src_spec_class(src_blocks)
-    dst_spec = dst_spec_class(dst_blocks)
 
     # clone src and dst tensors before transfer
     orig_src_caches = [x.clone() for x in handler.src_tensors]
