@@ -338,7 +338,7 @@ def prepare_moe_fp4_layer_for_marlin(
     group_size = 16 if is_nvfp4 else 32
 
     e = layer.moe_config.num_experts
-    k = layer.moe_config.hidden_size
+    k = layer.moe_config.hidden_dim
     n = layer.moe_config.intermediate_size_per_partition
 
     # WORKSPACE
