@@ -110,38 +110,27 @@ def test_cudagraph_entry_input_buffers_populated():
     CUDAGraphEntry.input_buffers must be populated at capture time so that
     data can be copied into them before replay when a splitting_op allocates
     new tensors between two compiled pieces.
+
+    Tests the sync logic directly on CUDAGraphEntry without instantiating
+    the full VllmConfig stack.
     """
-    from vllm.compilation.cuda_graph import CUDAGraphEntry, CUDAGraphOptions, CUDAGraphWrapper
-    from vllm.config import CUDAGraphMode, VllmConfig
+    from vllm.compilation.cuda_graph import CUDAGraphEntry
 
-    vllm_config = VllmConfig()
-
-    def simple_fn(x: torch.Tensor) -> torch.Tensor:
-        return x * 2
-
-    wrapper = CUDAGraphWrapper(
-        runnable=simple_fn,
-        vllm_config=vllm_config,
-        runtime_mode=CUDAGraphMode.FULL,
-        cudagraph_options=CUDAGraphOptions(debug_log_enable=False),
-    )
-
-    # input_buffers is only populated during CUDA graph capture (inside __call__)
-    # We test the field exists and is typed correctly on CUDAGraphEntry
     entry = CUDAGraphEntry(batch_descriptor=None)  # type: ignore[arg-type]
     assert entry.input_buffers is None, (
         "input_buffers should be None before capture"
     )
 
-    # Simulate what capture does: save tensor references
+    # Simulate capture: save tensor references into input_buffers
     x = torch.randn(4, device="cuda")
     entry.input_buffers = [x]
     assert entry.input_buffers[0] is x
 
-    # Simulate what replay does: copy new data when address differs
+    # Simulate replay with a splitting_op that allocated a new tensor
     x_new = torch.randn(4, device="cuda")
     assert x_new.data_ptr() != x.data_ptr(), "Test setup: need different addresses"
 
+    # This is the exact sync logic from CUDAGraphWrapper.__call__
     for buf, arg in zip(entry.input_buffers, [x_new]):
         if buf.data_ptr() != arg.data_ptr():
             buf.copy_(arg)
