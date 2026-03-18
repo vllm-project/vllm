@@ -121,7 +121,7 @@ Our online Server provides endpoints that correspond to the offline APIs:
     - [Cohere Embed API](embed.md#cohere-embed-api) (`/v2/embed`)
     - [Openai-compatible Embeddings API](embed.md#openai-compatible-embeddings-api) (`/v1/embeddings`)
 - Corresponding to `LLM.classify`:
-    - [Classification API](classify.md#online-serving)(`/classify`) 
+    - [Classification API](classify.md#online-serving)(`/classify`)
 - Corresponding to `LLM.score`:
     - [Score API](score.md#score-api)(`/score`)
     - [Rerank API](score.md#rerank-api) (`/rerank`, `/v1/rerank`, `/v2/rerank`)
