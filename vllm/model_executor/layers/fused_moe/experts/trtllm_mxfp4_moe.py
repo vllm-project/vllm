@@ -226,6 +226,10 @@ class TrtLlmMxfp4ExpertsModular(TrtLlmMxfp4ExpertsBase, mk.FusedMoEExpertsModula
     Moved from trtllm_moe.py.
     """
 
+    @property
+    def expects_unquantized_inputs(self) -> bool:
+        return True
+
     @staticmethod
     def _supports_parallel_config(
         moe_parallel_config: FusedMoEParallelConfig,
@@ -278,10 +282,22 @@ class TrtLlmMxfp4ExpertsModular(TrtLlmMxfp4ExpertsBase, mk.FusedMoEExpertsModula
         intermediate_size = w2.size(1)
         local_expert_offset = self.moe_config.ep_rank * local_num_experts
 
-        x_quant = hidden_states
-        x_scale = a1q_scale
-        if x_scale is not None:
-            x_scale = x_scale.view(torch.float8_e4m3fn).reshape(*x_quant.shape[:-1], -1)
+        # Handle input quantization
+        if self.use_mxfp8_input:
+            from flashinfer import mxfp8_quantize
+
+            x_quant, x_scale = mxfp8_quantize(
+                hidden_states,
+                is_sf_swizzled_layout=False,
+                alignment=256,
+            )
+            x_scale = x_scale.view(torch.float8_e4m3fn).reshape(
+                *hidden_states.shape[:-1], -1
+            )
+        else:
+            assert hidden_states.dtype == torch.bfloat16
+            x_quant = hidden_states
+            x_scale = None
 
         packed_tensor = (topk_ids.to(torch.int32) << 16) | topk_weights.to(
             torch.bfloat16
