@@ -31,11 +31,9 @@ def register_vllm_serve_api_routers(app: FastAPI):
 
     attach_tokenize_router(app)
 
-    from vllm.entrypoints.serve.riy_api import (
-        attach_router as attach_riy_router,
-    )
-
-    attach_riy_router(app)
+    # RIY API runs as standalone HTTP server on port 8019 in the
+    # EngineCore worker process (not via FastAPI in the APIServer process).
+    # See vllm/model_executor/layers/fused_moe/riy.py
 
 
 def register_vllm_dev_api_routers(app: FastAPI):

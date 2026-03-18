@@ -24,20 +24,34 @@ logger = init_logger(__name__)
 
 @dataclass
 class RiyLayerStats:
-    """Per-layer expert statistics accumulator."""
+    """Per-layer expert statistics accumulator.
+
+    Tensors live on GPU to avoid CPU transfers in the hot path
+    (which fail silently during CUDA Graph replay).
+    """
     num_experts: int
+    device: torch.device = field(default_factory=lambda: torch.device("cpu"))
     # Token count per expert (how often selected by router)
     freq: torch.Tensor = field(init=False)
     # Sum of routing weights per expert (contribution magnitude)
     weight_sum: torch.Tensor = field(init=False)
 
     def __post_init__(self):
-        self.freq = torch.zeros(self.num_experts, dtype=torch.int64)
-        self.weight_sum = torch.zeros(self.num_experts, dtype=torch.float64)
+        self.freq = torch.zeros(self.num_experts, dtype=torch.int64,
+                                device=self.device)
+        self.weight_sum = torch.zeros(self.num_experts, dtype=torch.float32,
+                                      device=self.device)
 
     def reset(self):
         self.freq.zero_()
         self.weight_sum.zero_()
+
+    def ensure_device(self, device: torch.device):
+        """Move tensors to device on first call from GPU."""
+        if self.freq.device != device:
+            self.freq = self.freq.to(device)
+            self.weight_sum = self.weight_sum.to(device)
+            self.device = device
 
 
 class RiyState:
@@ -131,8 +145,8 @@ class RiyState:
             for i, s in enumerate(self._layer_stats):
                 layers.append({
                     "layer": i,
-                    "freq": s.freq.tolist(),
-                    "weight_sum": s.weight_sum.tolist(),
+                    "freq": s.freq.cpu().tolist(),
+                    "weight_sum": s.weight_sum.cpu().tolist(),
                 })
             return {
                 "num_layers": self._num_layers,
@@ -184,20 +198,33 @@ class RiyState:
         """Get pre-computed mask tensor for a layer. None = no mask."""
         return self._mask_tensors.get(layer_idx)
 
+    def on_forward(self):
+        """Called on every MoE forward pass (before stats check).
+
+        Starts the HTTP server lazily in the real EngineCore worker
+        process — not in the parent that forks and dies.
+        """
+        ensure_riy_server()
+
     def record_stats(self, layer_idx: int, topk_ids: torch.Tensor,
                      topk_weights: torch.Tensor):
-        """Record activation stats for a layer. Called from hot path."""
+        """Record activation stats for a layer. Called from hot path.
+
+        All operations stay on GPU to avoid CPU transfers that would
+        fail during CUDA Graph replay.
+        """
         if not self._collecting or layer_idx >= len(self._layer_stats):
             return
         stats = self._layer_stats[layer_idx]
-        # Frequency: count per expert
-        ids_flat = topk_ids.flatten().long().cpu()
+        stats.ensure_device(topk_ids.device)
+        # Frequency: count per expert (on GPU)
+        ids_flat = topk_ids.flatten().long()
         stats.freq.scatter_add_(
             0, ids_flat,
             torch.ones_like(ids_flat, dtype=torch.int64))
-        # Weight magnitude: sum of routing weights per expert
-        weights_flat = topk_weights.flatten().double().cpu()
-        stats.weight_sum.scatter_add_(0, ids_flat, weights_flat)
+        # Weight magnitude: sum of routing weights per expert (on GPU)
+        stats.weight_sum.scatter_add_(
+            0, ids_flat, topk_weights.flatten().float())
 
 
 def apply_riy_mask(topk_weights: torch.Tensor,
@@ -229,3 +256,133 @@ _riy_state = RiyState()
 
 def get_riy_state() -> RiyState:
     return _riy_state
+
+
+# ── Standalone HTTP server (runs in EngineCore process) ───────────────────────
+
+def _start_riy_server(port: int = 8019):
+    """Start a minimal HTTP server for RIY stats/mask API.
+
+    Runs in a daemon thread inside the EngineCore worker process, so it
+    has direct access to the RiyState singleton (same process, same memory).
+    The main vLLM API server runs on port 8011; this runs on a separate
+    port to avoid any interference.
+
+    Must be started from on_forward() (not register_layer), because
+    register_layer runs in the parent process that forks and dies.
+    """
+    from http.server import HTTPServer, BaseHTTPRequestHandler
+    import json as _json
+    import socket
+
+    class RiyHandler(BaseHTTPRequestHandler):
+        def log_message(self, format, *args):
+            pass  # silence per-request logs
+
+        def _json_response(self, data, status=200):
+            body = _json.dumps(data).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self):
+            riy = get_riy_state()
+            if self.path == "/riy/stats":
+                if not riy.enabled:
+                    self._json_response(
+                        {"error": "not initialized"}, 503)
+                else:
+                    self._json_response(riy.get_stats())
+            elif self.path == "/riy/mask":
+                self._json_response({
+                    "pruned_experts": riy.get_mask(),
+                    "count": len(riy.get_mask()),
+                })
+            elif self.path == "/riy/health":
+                self._json_response({
+                    "enabled": riy.enabled,
+                    "collecting": riy.collecting,
+                    "num_layers": riy._num_layers,
+                    "num_experts": riy._num_experts,
+                })
+            else:
+                self._json_response({"error": "not found"}, 404)
+
+        def do_POST(self):
+            riy = get_riy_state()
+            content_len = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(content_len) if content_len else b""
+
+            if self.path == "/riy/stats/start":
+                riy.start_collection()
+                self._json_response({"status": "collecting"})
+            elif self.path == "/riy/stats/stop":
+                riy.stop_collection()
+                self._json_response({"status": "stopped"})
+            elif self.path == "/riy/stats/reset":
+                riy.reset_stats()
+                self._json_response({"status": "reset"})
+            elif self.path == "/riy/mask":
+                if not riy.enabled:
+                    self._json_response(
+                        {"error": "not initialized"}, 503)
+                    return
+                data = _json.loads(body)
+                experts = [tuple(x) for x in data["pruned_experts"]]
+                riy.set_mask(experts)
+                self._json_response(
+                    {"status": "mask_set", "count": len(experts)})
+            elif self.path == "/riy/profile/load":
+                if not riy.enabled:
+                    self._json_response(
+                        {"error": "not initialized"}, 503)
+                    return
+                data = _json.loads(body)
+                try:
+                    riy.load_profile(data["path"])
+                    self._json_response({
+                        "status": "profile_loaded",
+                        "count": len(riy.get_mask()),
+                    })
+                except FileNotFoundError as e:
+                    self._json_response({"error": str(e)}, 404)
+            else:
+                self._json_response({"error": "not found"}, 404)
+
+        def do_DELETE(self):
+            riy = get_riy_state()
+            if self.path == "/riy/mask":
+                riy.clear_mask()
+                self._json_response({"status": "mask_cleared"})
+            else:
+                self._json_response({"error": "not found"}, 404)
+
+    # Allow port reuse in case parent process still holds it
+    class ReusableHTTPServer(HTTPServer):
+        allow_reuse_address = True
+        allow_reuse_port = True
+
+    try:
+        server = ReusableHTTPServer(("0.0.0.0", port), RiyHandler)
+        logger.info("RIY HTTP server started on port %d (pid=%d)",
+                     port, __import__('os').getpid())
+        server.serve_forever()
+    except OSError as e:
+        logger.warning("RIY HTTP server failed to start on port %d: %s",
+                        port, e)
+
+
+_riy_server_started = False
+
+
+def ensure_riy_server(port: int = 8019):
+    """Start RIY HTTP server once (idempotent)."""
+    global _riy_server_started
+    if _riy_server_started:
+        return
+    _riy_server_started = True
+    t = threading.Thread(target=_start_riy_server, args=(port,), daemon=True)
+    t.start()
