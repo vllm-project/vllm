@@ -1083,8 +1083,6 @@ def dflash_config():
     target_model = "Qwen/Qwen3-8B"
     draft_model = "z-lab/Qwen3-8B-DFlash-b16"
 
-    # Note, DFlash should set both disable_padded_drafter_batch
-    # and parallel_drafting automatically on startup
     return dict(
         model=target_model,
         trust_remote_code=True,

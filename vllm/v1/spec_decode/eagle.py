@@ -183,7 +183,7 @@ class SpecDecodeBaseProposer:
         )
 
         if self.needs_extra_input_slots:
-            # self._raise_if_padded_drafter_batch_disabled()
+            self._raise_if_padded_drafter_batch_disabled()
             self._raise_if_multimodal()
             self._raise_if_mrope()
 

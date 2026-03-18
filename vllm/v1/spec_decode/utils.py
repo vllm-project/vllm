@@ -480,6 +480,7 @@ def copy_and_expand_dflash_inputs_kernel(
     block_table_stride,  # stride of block_table dim 0 (in elements)
     # Metadata
     query_start_loc_ptr,  # [num_reqs + 1]
+    num_rejected_tokens_ptr,  # [num_reqs] or null (0) when not padded
     # Scalars
     parallel_drafting_token_id,  # tl.int32
     block_size,  # tl.int32
@@ -488,6 +489,7 @@ def copy_and_expand_dflash_inputs_kernel(
     num_context,  # tl.int32
     total_input_tokens,  # tl.int32
     BLOCK_SIZE: tl.constexpr,
+    HAS_NUM_REJECTED: tl.constexpr = False,
 ):
     """
     Fused kernel for DFlash first-pass input setup.
@@ -521,8 +523,15 @@ def copy_and_expand_dflash_inputs_kernel(
     ctx_pos_idx = tl.minimum(ctx_start + j, total_input_tokens - 1)
     ctx_pos = tl.load(target_positions_ptr + ctx_pos_idx, mask=is_ctx, other=0)
 
-    # Query: last_target_pos + 1 + query_off
-    last_pos = tl.load(target_positions_ptr + ctx_end - 1)
+    # Query: last_valid_pos + 1 + query_off
+    # In padded mode, ctx_end includes rejected tokens; use valid_ctx_end
+    # to find the last accepted context position.
+    if HAS_NUM_REJECTED:
+        num_rejected = tl.load(num_rejected_tokens_ptr + req_idx)
+        valid_ctx_end = ctx_end - num_rejected
+    else:
+        valid_ctx_end = ctx_end
+    last_pos = tl.load(target_positions_ptr + valid_ctx_end - 1)
     query_pos = last_pos + 1 + query_off
 
     positions = tl.where(is_ctx, ctx_pos, query_pos)

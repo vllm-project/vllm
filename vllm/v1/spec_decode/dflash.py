@@ -66,7 +66,12 @@ class DFlashProposer(SpecDecodeBaseProposer):
         self.parallel_drafting_hidden_state_tensor = None
 
     @override
-    @torch.cuda.nvtx.range("DFlashProposer.set_inputs_first_pass")
+    def _raise_if_multimodal(self):
+        # Override to allow multimodal inputs since DFlash supports Qwen3.5 models
+        # Support for multimodal inputs has not been tested.
+        pass
+
+    @override
     def set_inputs_first_pass(
         self,
         target_token_ids: torch.Tensor,
@@ -106,6 +111,7 @@ class DFlashProposer(SpecDecodeBaseProposer):
         num_blocks = triton.cdiv(max_tokens_per_req, BLOCK_SIZE)
         grid = (batch_size, num_blocks)
 
+        has_num_rejected = num_rejected_tokens_gpu is not None
         copy_and_expand_dflash_inputs_kernel[grid](
             # Inputs
             next_token_ids_ptr=next_token_ids,
@@ -120,6 +126,9 @@ class DFlashProposer(SpecDecodeBaseProposer):
             block_table_stride=cad.block_table_tensor.stride(0),
             # Metadata
             query_start_loc_ptr=cad.query_start_loc,
+            num_rejected_tokens_ptr=(
+                num_rejected_tokens_gpu if has_num_rejected else 0
+            ),
             # Scalars
             parallel_drafting_token_id=self.parallel_drafting_token_id,
             block_size=self.block_size,
@@ -128,6 +137,7 @@ class DFlashProposer(SpecDecodeBaseProposer):
             num_context=num_context,
             total_input_tokens=num_context,
             BLOCK_SIZE=BLOCK_SIZE,
+            HAS_NUM_REJECTED=has_num_rejected,
         )
 
         # Save context slot_mapping for pre-insertion (clone because buffer
@@ -144,9 +154,15 @@ class DFlashProposer(SpecDecodeBaseProposer):
         ].clone()
         new_query_start_loc = self.arange[: batch_size + 1] * num_query_per_req
 
+        # In padded mode, cad.seq_lens includes rejected tokens. Subtract
+        # them so attention only sees the valid prefix of context states.
+        effective_seq_lens = cad.seq_lens
+        if has_num_rejected:
+            effective_seq_lens = effective_seq_lens - num_rejected_tokens_gpu
+
         new_cad = CommonAttentionMetadata(
             query_start_loc=new_query_start_loc,
-            seq_lens=cad.seq_lens + num_query_per_req,
+            seq_lens=effective_seq_lens + num_query_per_req,
             query_start_loc_cpu=(
                 torch.from_numpy(self.token_arange_np[: batch_size + 1]).clone()
                 * num_query_per_req
@@ -231,7 +247,6 @@ class DFlashProposer(SpecDecodeBaseProposer):
             )
 
     @override
-    @torch.cuda.nvtx.range("DFlashProposer.build_model_inputs_first_pass")
     def build_model_inputs_first_pass(
         self,
         num_tokens: int,

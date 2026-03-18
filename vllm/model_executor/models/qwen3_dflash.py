@@ -10,7 +10,6 @@ from flashinfer.rope import apply_rope_with_cos_sin_cache
 from torch import nn
 from transformers import Qwen3Config
 
-from vllm._custom_ops import reshape_and_cache_flash
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
@@ -298,6 +297,9 @@ class DFlashQwen3Model(nn.Module):
         attn0 = layers_attn[0]
         has_bias = attn0.qkv_proj.bias is not None
 
+        # Hidden norm weight:
+        self._hidden_norm_weight = self.hidden_norm.weight.data
+
         # KV projection weights: [num_layers * 2 * kv_size, hidden_size]
         kv_weights = [a.qkv_proj.weight[a.q_size :] for a in layers_attn]
         self._fused_kv_weight = torch.cat(kv_weights, dim=0)
@@ -346,53 +348,62 @@ class DFlashQwen3Model(nn.Module):
         nkv = self._num_kv_heads
 
         # --- Fused KV projection (one GEMM for all layers) ---
-        all_kv_flat = F.linear(
-            self.hidden_norm(context_states), self._fused_kv_weight, self._fused_kv_bias
+        normed_context_states = rmsnorm(
+            input=context_states,
+            weight=self._hidden_norm_weight,
+            eps=self._rms_norm_eps,
         )
-        all_kv = all_kv_flat.view(num_ctx, L, 2 * kv).transpose(0, 1).contiguous()
-        all_k, all_v = all_kv.split(kv, dim=-1)
+        all_kv_flat = F.linear(
+            normed_context_states, self._fused_kv_weight, self._fused_kv_bias
+        )
+        # Single contiguous copy that separates K/V and transposes to
+        # layer-major layout.  Result: [2, L, num_ctx, nkv, hd] contiguous.
+        # Indexing dim-0 gives contiguous [L, num_ctx, nkv, hd] for K and V.
+        all_kv = (
+            all_kv_flat.view(num_ctx, L, 2, nkv, hd).permute(2, 1, 0, 3, 4).contiguous()
+        )
+        all_k = all_kv[0]  # [L, num_ctx, nkv, hd], contiguous
+        all_v = all_kv[1]  # [L, num_ctx, nkv, hd], contiguous
 
-        # --- Per-layer: RMSNorm K, RoPE K, cache insert ---
-        all_k = all_k.reshape(L, num_ctx * nkv, hd).contiguous()
+        # --- Per-layer RMSNorm K (3D: [num_ctx, nkv, hd] per layer) ---
+        all_k_normed = torch.empty_like(all_k)
         for i in range(L):
-            # RMSNorm on K
-            k_normed = rmsnorm(
+            rmsnorm(
                 input=all_k[i],
                 weight=self._k_norm_weights[i],
                 eps=self._rms_norm_eps,
-            )
-            k_normed = k_normed.reshape(num_ctx, kv)
-
-            # RoPE on K
-            _, k_roped = apply_rope_with_cos_sin_cache(
-                positions=context_positions,
-                query=k_normed,
-                key=k_normed,
-                head_size=self._rope_head_size,
-                cos_sin_cache=self._rope_cos_sin_cache,
-                is_neox=self._rope_is_neox,
+                out=all_k_normed[i],
             )
 
-            if context_slot_mapping is None:
-                continue
+        # --- Fused RoPE across all layers ---
+        # View as [L * num_ctx, kv] so RoPE sees one big batch (no copy).
+        # We pass all_k_normed as both query and key; the non-inplace version
+        # allocates separate outputs so both read from the unmodified input.
+        all_k_flat = all_k_normed.view(L * num_ctx, kv)
+        positions_repeated = context_positions.repeat(L)
+        _, all_k_flat = apply_rope_with_cos_sin_cache(
+            positions=positions_repeated,
+            query=all_k_flat,
+            key=all_k_flat,
+            head_size=self._rope_head_size,
+            cos_sin_cache=self._rope_cos_sin_cache,
+            is_neox=self._rope_is_neox,
+        )
 
-            # Reshape for cache: [num_ctx, num_kv_heads, head_dim]
-            k_cache_ready = k_roped.view(num_ctx, nkv, hd)
-            v_cache_ready = all_v[i].contiguous().view(num_ctx, nkv, hd)
+        if context_slot_mapping is None:
+            return
 
-            # Write directly to cache
+        # --- Per-layer cache insert ---
+        all_k_final = all_k_flat.view(L, num_ctx, nkv, hd)
+        for i in range(L):
             attn = self._attn_layers[i]
             kv_cache = attn.kv_cache[0]  # virtual_engine=0
-            key_cache, value_cache = kv_cache.unbind(0)
-            reshape_and_cache_flash(
-                k_cache_ready,
-                v_cache_ready,
-                key_cache,
-                value_cache,
+            attn.impl.do_kv_cache_update(
+                attn,
+                all_k_final[i],
+                all_v[i],
+                kv_cache,
                 context_slot_mapping,
-                attn.kv_cache_dtype,
-                attn._k_scale,
-                attn._v_scale,
             )
 
     def forward(
