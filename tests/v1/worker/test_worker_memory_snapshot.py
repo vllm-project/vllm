@@ -4,6 +4,7 @@
 import multiprocessing as mp
 import os
 import tempfile
+from importlib import import_module
 from multiprocessing.queues import Queue
 from unittest.mock import patch
 
@@ -12,8 +13,8 @@ import torch
 
 from vllm.config import set_current_vllm_config
 from vllm.engine.arg_utils import EngineArgs
+from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.utils.mem_utils import MemorySnapshot
-from vllm.v1.worker.gpu_worker import Worker, init_worker_distributed_environment
 
 # Global queue to track operation order across processes
 _QUEUE: Queue | None = None
@@ -66,22 +67,28 @@ def worker_process(
             model="facebook/opt-125m", tensor_parallel_size=2, load_format="dummy"
         ).create_engine_config()
 
-        # Create worker
-        worker = Worker(
+        # Create worker based on platform-specific worker class config
+        worker_cls_qualname = vllm_config.parallel_config.worker_cls
+        assert isinstance(worker_cls_qualname, str), (
+            "parallel_config.worker_cls must be a qualified class name"
+        )
+        worker_cls = resolve_obj_by_qualname(worker_cls_qualname)
+        worker = worker_cls(
             vllm_config=vllm_config,
             local_rank=rank,
             rank=rank,
             distributed_init_method=distributed_init_method,
         )
+        worker_module = import_module(worker_cls.__module__)
 
         # Get original functions before patching
-        original_init_worker = init_worker_distributed_environment
+        original_init_worker = worker_module.init_worker_distributed_environment
         original_memory_snapshot_init = MemorySnapshot.__init__
         original_all_reduce = torch.distributed.all_reduce
 
         # Apply minimal patches to track operation order
         init_patch = patch(
-            "vllm.v1.worker.gpu_worker.init_worker_distributed_environment",
+            f"{worker_cls.__module__}.init_worker_distributed_environment",
             side_effect=make_operation_tracker(
                 "init_distributed", original_init_worker
             ),
