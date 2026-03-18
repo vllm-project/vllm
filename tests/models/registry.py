@@ -639,6 +639,11 @@ _LATE_INTERACTION_EXAMPLE_MODELS = {
     "OpsColQwen3Model": _HfExamplesInfo(
         "OpenSearch-AI/Ops-Colqwen3-4B", trust_remote_code=True
     ),
+    "ColQwen3_5": _HfExamplesInfo(
+        "athrael-soju/colqwen3.5-4.5B-v3",
+        trust_remote_code=True,
+        max_model_len=4096,
+    ),
     "Qwen3VLNemotronEmbedModel": _HfExamplesInfo(
         "nvidia/nemotron-colembed-vl-4b-v2",
     ),
@@ -1116,6 +1121,11 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         tokenizer_mode="mistral",
     ),
     # [Encoder-decoder]
+    "CohereASRForConditionalGeneration": _HfExamplesInfo(
+        "/host/engines/vllm/audio/2b-release",
+        trust_remote_code=True,
+        is_available_online=False,  # TODO (ekagra): revert after asr release
+    ),
     "NemotronParseForConditionalGeneration": _HfExamplesInfo(
         "nvidia/NVIDIA-Nemotron-Parse-v1.1", trust_remote_code=True
     ),
