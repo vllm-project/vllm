@@ -183,6 +183,7 @@ class CUDAGraphWrapper:
         cudagraph_options: CUDAGraphOptions | None = None,
     ) -> None:
         self.runnable = runnable
+        self._runnable_str = str(runnable)
         self.vllm_config = vllm_config
         self.runtime_mode = runtime_mode
         self.compilation_config = vllm_config.compilation_config
@@ -212,7 +213,8 @@ class CUDAGraphWrapper:
         if hasattr(self.runnable, key):
             return getattr(self.runnable, key)
         raise AttributeError(
-            f"Attribute {key} not exists in the runnable of cudagraph wrapper"
+            f"Attribute {key} not exists in the runnable of "
+            f"cudagraph wrapper: {self._runnable_str}"
         )
 
     def unwrap(self) -> Callable[..., Any]:
