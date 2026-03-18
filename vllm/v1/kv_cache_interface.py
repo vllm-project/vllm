@@ -15,21 +15,6 @@ from vllm.utils.torch_utils import get_dtype_size
 
 logger = init_logger(__name__)
 
-# ---------------------------------------------------------------------------
-# Per-token quantization scale registry
-# ---------------------------------------------------------------------------
-# Quantized KV cache formats that require per-(token, head) scale buffers
-# stored alongside the KV cache.  To add a new format (e.g. NVFP4), simply
-# add its torch.dtype here and the rest of the infrastructure (memory
-# accounting, scale-cache allocation, attention kernel dispatch) will pick
-# it up automatically.
-_DTYPES_WITH_PER_TOKEN_SCALES: set[torch.dtype] = {torch.int8}
-
-
-def kv_cache_needs_per_token_scales(dtype: torch.dtype) -> bool:
-    """Return True if *dtype* requires per-(token, head) scale caches."""
-    return dtype in _DTYPES_WITH_PER_TOKEN_SCALES
-
 
 @dataclass(frozen=True)
 class KVCacheSpec:
@@ -64,7 +49,7 @@ class KVCacheSpec:
         """Extra per-block memory not stored in the KV cache tensor itself.
 
         Override in subclasses that allocate auxiliary buffers (e.g.
-        per-token quantization scale caches for INT8, NVFP4, etc.).
+        per-token quantization scale caches for INT8).
         This is subtracted from available memory when computing how many
         blocks fit, but is NOT included in page_size_bytes (which sizes
         the KV cache tensor).
@@ -106,17 +91,13 @@ class AttentionSpec(KVCacheSpec):
     @property
     def auxiliary_memory_per_block(self) -> int:
         """Per-block memory for auxiliary buffers allocated outside the KV
-        cache tensor (e.g. per-token quantization scale caches).
+        cache tensor (e.g. INT8 per-token scale caches).
 
         This is factored into the block count calculation but NOT into
         page_size_bytes, which must match the KV cache tensor layout
         exactly for reshape/view to work.
-
-        Formats registered in ``_DTYPES_WITH_PER_TOKEN_SCALES`` (currently
-        INT8; NVFP4 or other formats can be added later) automatically get
-        the right amount of auxiliary memory reserved.
         """
-        if not kv_cache_needs_per_token_scales(self.dtype):
+        if self.dtype != torch.int8:
             return 0
         # Two scale buffers (K and V), each [block_size, num_kv_heads] f32.
         return 2 * self.block_size * self.num_kv_heads * get_dtype_size(torch.float32)

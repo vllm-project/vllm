@@ -56,6 +56,22 @@ class BaseKVCacheMethod(QuantizeMethodBase):
             assert not hasattr(layer, "prob_scale")
             return
 
+        # INT8 KV cache: scales are computed dynamically per-token in the
+        # kernel at cache-write time.  Checkpoint scales are not used.
+        if (
+            kv_cache_uses_per_token_scales(layer.kv_cache_dtype)
+            and not layer.calculate_kv_scales
+        ):
+            layer._k_scale.copy_(1.0)
+            layer._v_scale.copy_(1.0)
+            layer._k_scale_float = 1.0
+            layer._v_scale_float = 1.0
+            del layer.k_scale
+            del layer.v_scale
+            del layer.q_scale
+            del layer.prob_scale
+            return
+
         # If the kv-cache is not quantized, we enforce the k/v_scale to be 1.0
         # regardless whether the kv-scale is available in the checkpoint.
         # No need to process kv scales after loading if we are going to
@@ -64,41 +80,23 @@ class BaseKVCacheMethod(QuantizeMethodBase):
             is_quantized_kv_cache(layer.kv_cache_dtype)
             and not layer.calculate_kv_scales
         ):
-            uses_per_token = kv_cache_uses_per_token_scales(layer.kv_cache_dtype)
-
-            if uses_per_token:
-                # Formats with per-token scales (INT8, future NVFP4, etc.)
-                # use dynamic scales computed in the kernel at cache-write
-                # time. Checkpoint scales are not used — set placeholders.
-                layer._k_scale.copy_(1.0)
-                layer._v_scale.copy_(1.0)
-                layer._k_scale_float = 1.0
-                layer._v_scale_float = 1.0
-                del layer.k_scale
-                del layer.v_scale
-                del layer.q_scale
-                del layer.prob_scale
-                return
-
-            # FP8 path below.
-            k_scale_all_positive = bool((layer.k_scale > 0.0).all())
-            v_scale_all_positive = bool((layer.v_scale > 0.0).all())
-            k_scale_all_negative = bool((layer.k_scale < 0.0).all())
-            v_scale_all_negative = bool((layer.v_scale < 0.0).all())
-
-            if k_scale_all_positive and v_scale_all_positive:
+            if layer.k_scale > 0.0 and layer.v_scale > 0.0:
+                # We prefer to use separate k_scale and v_scale if present
                 k_scale = layer.k_scale.to("cpu").tolist()
                 v_scale = layer.v_scale.to("cpu").tolist()
                 if current_platform.is_fp8_fnuz():
                     k_scale *= 2
                     v_scale *= 2
-            elif k_scale_all_negative and v_scale_all_negative:
-                # No scales in checkpoint — fall back to 1.0.
+            elif layer.k_scale < 0.0 and layer.v_scale < 0.0:
+                # If no scales were loaded (both scales are invalid negative
+                # values), use the default value of 1.0
                 k_scale = 1.0
                 v_scale = 1.0
             else:
-                # Single shared kv_scale in checkpoint — duplicate to k and v.
-                assert k_scale_all_positive
+                # If we find a single kv_scale in the checkpoint, we remap
+                # kv_scale to k_scale during weight loading, and duplicate
+                # k_scale to v_scale here
+                assert layer.k_scale > 0.0
                 scale_to_duplicate = max(layer.k_scale, layer.v_scale)
                 k_scale = scale_to_duplicate.to("cpu").tolist()
                 v_scale = scale_to_duplicate.to("cpu").tolist()
@@ -120,11 +118,11 @@ class BaseKVCacheMethod(QuantizeMethodBase):
                 layer._q_scale.copy_(k_scale)
                 layer._q_scale_float = k_scale
 
+            # These are used in the final Attention.forward()
             layer._k_scale.copy_(k_scale)
             layer._v_scale.copy_(v_scale)
-            layer._k_scale_float = float(k_scale)
-            layer._v_scale_float = float(v_scale)
-
+            layer._k_scale_float = k_scale
+            layer._v_scale_float = v_scale
             if k_scale == 1.0 and v_scale == 1.0 and "e5m2" not in layer.kv_cache_dtype:
                 logger.warning_once(
                     "Using KV cache scaling factor 1.0 for fp8_e4m3. "
