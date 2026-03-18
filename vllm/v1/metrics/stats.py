@@ -111,6 +111,89 @@ class CachingMetrics:
         return self.aggregated_query_hit / self.aggregated_query_total
 
 
+class QueueTimeTracker:
+    """Tracks average queue time over a sliding window of recent requests.
+
+    Modeled after CachingMetrics. Maintains a running average of queue time
+    (scheduled_ts - queued_ts) across the most recent N finished requests.
+
+    Includes time-based decay: if no requests have finished within a period
+    based on the current avg_queue_time, the tracker resets to 0 to avoid
+    blocking new requests when the server is idle.
+
+    Args:
+        max_recent_requests: The number of the most recent requests to
+            aggregate. Defaults to 100.
+        decay_multiplier: Multiplier for avg_queue_time to determine decay
+            period. Defaults to 3.0 (i.e., decay after 3x the avg queue time
+            with no new observations). Minimum decay period is 10 seconds.
+    """
+
+    def __init__(
+        self,
+        max_recent_requests: int = 100,
+        decay_multiplier: float = 3.0,
+    ) -> None:
+        self.max_recent_requests = max_recent_requests
+        self.decay_multiplier = decay_multiplier
+        self.aggregated_requests = 0
+        self.aggregated_queue_time = 0.0
+        self.queue: deque[tuple[int, float]] = deque()
+        self._last_observation_time: float | None = None
+        # Cache the avg at last observation time for decay calculation
+        self._last_avg_queue_time: float = 0.0
+
+    def observe(self, queue_time: float) -> None:
+        """Observe the queue time of a single finished request."""
+        self._last_observation_time = time.time()
+        self._last_avg_queue_time = self.avg_queue_time
+        self.queue.append((1, queue_time))
+        self.aggregated_requests += 1
+        self.aggregated_queue_time += queue_time
+
+        while (
+            len(self.queue) > 1 and self.aggregated_requests > self.max_recent_requests
+        ):
+            old_count, old_qt = self.queue.popleft()
+            self.aggregated_requests -= old_count
+            self.aggregated_queue_time -= old_qt
+
+    @property
+    def avg_queue_time(self) -> float:
+        """Return the average queue time in seconds.
+
+        Returns 0.0 if no requests have been observed recently (within
+        the decay period based on current avg_queue_time), indicating
+        the server is idle.
+        """
+        if self.aggregated_requests == 0:
+            return 0.0
+
+        # Calculate dynamic decay period: 3x the current average queue time
+        # But with a minimum of 10 seconds to handle the cold start case
+        current_avg = self.aggregated_queue_time / self.aggregated_requests
+        decay_period = max(10.0, current_avg * self.decay_multiplier)
+
+        # Check if we should decay - no observations within decay period
+        if (
+            self._last_observation_time is not None
+            and time.time() - self._last_observation_time > decay_period
+        ):
+            # Reset the tracker - server has been idle
+            self.reset()
+            return 0.0
+
+        return current_avg
+
+    def reset(self) -> None:
+        """Reset the tracker to initial state."""
+        self.aggregated_requests = 0
+        self.aggregated_queue_time = 0.0
+        self.queue.clear()
+        self._last_observation_time = None
+        self._last_avg_queue_time = 0.0
+
+
 @dataclass
 class PrefixCacheStats(BaseCacheStats):
     """

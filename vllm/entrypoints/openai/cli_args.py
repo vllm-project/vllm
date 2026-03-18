@@ -156,8 +156,13 @@ class BaseFrontendArgs:
     """If set to True, log the stack trace of error responses"""
     tokens_only: bool = False
     """
-    If set to True, only enable the Tokens In<>Out endpoint. 
+    If set to True, only enable the Tokens In<>Out endpoint.
     This is intended for use in a Disaggregated Everything setup.
+    """
+    max_waiting_queue_time: float | None = None
+    """
+    Maximum estimated queue time in seconds. If the predicted waiting time
+    exceeds this limit, new requests will be rejected with a 503 error.
     """
 
     @classmethod
