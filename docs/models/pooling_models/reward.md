@@ -37,7 +37,7 @@ Using token classification models as token (outcome) reward models, the usage an
 If your model is not in the above list, we will try to automatically convert the model using
 [as_seq_cls_model][vllm.model_executor.models.adapters.as_seq_cls_model].
 
-### Process Reward Model
+### Process Reward Models
 
 The process reward models used for evaluating intermediate steps are crucial to achieving the desired outcome.
 
