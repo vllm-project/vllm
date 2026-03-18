@@ -16,7 +16,7 @@
 # limitations under the License.
 """Qwen3.5-MoE model configuration"""
 
-from transformers.configuration_utils import PretrainedConfig, layer_type_validation
+from transformers.configuration_utils import PretrainedConfig
 
 
 class Qwen3_5MoeTextConfig(PretrainedConfig):
@@ -104,7 +104,14 @@ class Qwen3_5MoeTextConfig(PretrainedConfig):
                 else "full_attention"
                 for i in range(self.num_hidden_layers)
             ]
-        layer_type_validation(self.layer_types, self.num_hidden_layers)
+        if hasattr(self, "validate_layer_type"):
+            # Transformers v5
+            self.validate_layer_type()
+        else:
+            # Transformers v4
+            from transformers.configuration_utils import layer_type_validation
+
+            layer_type_validation(self.layer_types, self.num_hidden_layers)
 
         # linear attention part
         self.linear_conv_kernel_dim = linear_conv_kernel_dim
