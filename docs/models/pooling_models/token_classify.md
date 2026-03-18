@@ -20,6 +20,12 @@ Online: [examples/pooling/token_classify/ner_online.py](../../../examples/poolin
 
 The BAAI/bge-m3 model leverages token classification for sparse retrieval. For more information, see [this page](specific_models.md#baaibge-m3).
 
+## Advanced Use Cases
+
+### As Reward Models
+
+Using token classification models as reward models. For details on reward models, see [Reward Models](reward.md).
+
 ## Supported Models
 
 | Architecture | Models | Example HF Models | [LoRA](../../features/lora.md) | [PP](../../serving/parallelism_scaling.md) |
@@ -35,10 +41,6 @@ The BAAI/bge-m3 model leverages token classification for sparse retrieval. For m
 
 If your model is not in the above list, we will try to automatically convert the model using
 [as_seq_cls_model][vllm.model_executor.models.adapters.as_seq_cls_model]. By default, the class probabilities are extracted from the softmaxed hidden state corresponding to the last token.
-
-### As Reward Models
-
-For details on reward models, see [Reward Models](reward.md).
 
 ## Offline Inference
 

@@ -14,6 +14,16 @@ Many classification models support both (sequence) classification and token clas
 
 The most fundamental application of classification models is to categorize input data into predefined classes.
 
+## Advanced Use Cases
+
+### As cross-encoder models
+
+Cross-encoder (aka reranker) models are a subset of classification models that accept two prompts as input and output num_labels equal to 1. Most [cross-encoder models](score.md#cross-encoder-models) can also be used as classification models. For more information on cross-encoder models, please refer to [this page](score.md#cross-encoder-models).
+
+### As reward Models
+
+Using (sequence) classification models as reward models. For more information, see [Reward Models](reward.md).
+
 ## Supported Models
 
 ### Text-only Models
@@ -40,14 +50,6 @@ The most fundamental application of classification models is to categorize input
 
 If your model is not in the above list, we will try to automatically convert the model using
 [as_seq_cls_model][vllm.model_executor.models.adapters.as_seq_cls_model]. By default, the class probabilities are extracted from the softmaxed hidden state corresponding to the last token.
-
-### As cross-encoder models
-
-Cross-encoder (aka reranker) models are a subset of classification models that accept two prompts as input and output num_labels equal to 1. Most [cross-encoder models](score.md#cross-encoder-models) can also be used as classification models. For more information on cross-encoder models, please refer to [this page](score.md#cross-encoder-models).
-
-### As reward Models
-
-Using (sequence) classification models as reward models. For more information, see [Reward Models](reward.md).
 
 ## Offline Inference
 
