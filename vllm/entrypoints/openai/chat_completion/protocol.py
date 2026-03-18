@@ -356,6 +356,28 @@ class ChatCompletionRequest(OpenAIBaseModel):
 
     # --8<-- [end:chat-completion-extra-params]
 
+    @model_validator(mode="after")
+    def _materialize_tool_calls(self) -> "ChatCompletionRequest":
+        """Eagerly convert tool_calls from Iterable to list.
+
+        The OpenAI Python library types tool_calls as Iterable[...] in
+        ChatCompletionAssistantMessageParam. When Pydantic v2 validates from
+        Python objects (not JSON), it wraps Iterable fields in a one-shot
+        ValidatorIterator. If anything iterates that field first (e.g. debug
+        logging via model_dump_json()), the iterator is exhausted and
+        downstream code (e.g. the Mistral tokenizer) sees empty tool_calls.
+
+        Running after validation ensures we materialise even after Pydantic
+        wraps the field in a ValidatorIterator.
+        """
+        for msg in self.messages:
+            if not isinstance(msg, dict):
+                continue
+            tool_calls = msg.get("tool_calls")
+            if tool_calls is not None and not isinstance(tool_calls, list):
+                msg["tool_calls"] = list(tool_calls)
+        return self
+
     def build_chat_params(
         self,
         default_template: str | None,
