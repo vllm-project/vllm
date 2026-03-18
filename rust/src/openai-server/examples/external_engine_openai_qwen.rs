@@ -42,7 +42,7 @@ async fn main() -> Result<()> {
     let config = Config {
         handshake_address: args.handshake_address,
         model: args.model,
-        bind_host: "127.0.0.1".to_string(),
+        host: "127.0.0.1".to_string(),
         port,
         engine_local_host: args.host,
         ready_timeout: Duration::from_secs(args.ready_timeout_secs),

@@ -12,7 +12,7 @@ use tokio::time::{interval, timeout};
 use tracing::info;
 
 const CHILD_POLL_INTERVAL: Duration = Duration::from_millis(200);
-const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 /// Loopback host used for managed-mode handshake traffic between the Rust frontend
 /// and the Python headless engine.
 pub const MANAGED_ENGINE_HANDSHAKE_HOST: &str = "127.0.0.1";

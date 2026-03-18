@@ -8,7 +8,7 @@ pub struct Config {
     /// Backend model identifier and exposed OpenAI model ID.
     pub model: String,
     /// HTTP bind host.
-    pub bind_host: String,
+    pub host: String,
     /// HTTP bind port.
     pub port: u16,
     /// Local host/IP used when connecting to the engine.
@@ -20,6 +20,6 @@ pub struct Config {
 impl Config {
     /// Render the HTTP bind address as `host:port`.
     pub fn bind_address(&self) -> String {
-        format!("{}:{}", self.bind_host, self.port)
+        format!("{}:{}", self.host, self.port)
     }
 }

@@ -36,11 +36,14 @@ Use `serve` when you want `vllm-rs` to start a headless Python `vllm` engine for
 
 ```bash
 cargo run --bin vllm-rs -- serve \
-  --model Qwen/Qwen3-0.6B \
+  Qwen/Qwen3-0.6B \
   --python ../vllm/.venv/bin/python
+# --more-vllm-args ...
 ```
 
 This starts the Rust OpenAI-compatible server on `127.0.0.1:8000` by default.
+Additional Python `vllm serve` arguments can be appended directly after the model and managed-engine
+options with an optional `--` separator.
 
 ### External Engine
 
@@ -59,7 +62,7 @@ Then start the Rust frontend against that engine:
 ```bash
 cargo run --bin vllm-rs -- frontend \
   --handshake-address tcp://127.0.0.1:62100 \
-  --model Qwen/Qwen3-0.6B
+  Qwen/Qwen3-0.6B
 ```
 
 ### Example Request

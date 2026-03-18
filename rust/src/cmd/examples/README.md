@@ -8,9 +8,8 @@ VLLM_CPU_KVCACHE_SPACE=2 \
 VLLM_HOST_IP=127.0.0.1 \
 VLLM_LOOPBACK_IP=127.0.0.1 \
 cargo run --bin vllm-rs -- serve \
-  --model Qwen/Qwen3-0.6B \
+  Qwen/Qwen3-0.6B \
   --python ../vllm/.venv/bin/python \
-  -- \
   --max-model-len 512 \
   --dtype float16
 ```
@@ -37,5 +36,5 @@ If you already started headless `vllm` yourself, use `frontend` instead:
 ```bash
 cargo run --bin vllm-rs -- frontend \
   --handshake-address tcp://127.0.0.1:62100 \
-  --model Qwen/Qwen3-0.6B
+  Qwen/Qwen3-0.6B
 ```

@@ -29,11 +29,10 @@ pub enum Command {
 #[derive(Debug, Clone, Args, PartialEq, Eq)]
 pub struct FrontendRuntimeArgs {
     /// Hugging Face model identifier used both for backend loading and public model ID.
-    #[arg(long)]
     pub model: String,
     /// HTTP bind host for the OpenAI-compatible server.
     #[arg(long, default_value = "127.0.0.1")]
-    pub bind_host: String,
+    pub host: String,
     /// HTTP bind port for the OpenAI-compatible server.
     #[arg(long, default_value_t = 8000)]
     pub port: u16,
@@ -51,7 +50,7 @@ impl FrontendRuntimeArgs {
         Config {
             handshake_address,
             model: self.model,
-            bind_host: self.bind_host,
+            host: self.host,
             port: self.port,
             engine_local_host: self.engine_local_host,
             ready_timeout: Duration::from_secs(self.ready_timeout_secs),
@@ -62,11 +61,11 @@ impl FrontendRuntimeArgs {
 /// Arguments for connecting the Rust frontend to an already running headless engine.
 #[derive(Debug, Clone, Args, PartialEq, Eq)]
 pub struct FrontendArgs {
+    #[command(flatten)]
+    pub runtime: FrontendRuntimeArgs,
     /// Headless vLLM engine handshake endpoint, for example `tcp://127.0.0.1:62100`.
     #[arg(long)]
     pub handshake_address: String,
-    #[command(flatten)]
-    pub runtime: FrontendRuntimeArgs,
 }
 
 impl FrontendArgs {
@@ -107,5 +106,53 @@ impl ServeArgs {
             handshake_port,
             python_args: self.python_args,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser as _;
+    use expect_test::expect;
+
+    use super::Cli;
+
+    #[test]
+    fn serve_args_forward_python_flags_without_separator() {
+        let cli = Cli::try_parse_from([
+            "vllm-rs",
+            "serve",
+            "Qwen/Qwen3-0.6B",
+            "--python",
+            "../vllm/.venv/bin/python",
+            "--max-model-len",
+            "512",
+            "--dtype",
+            "float16",
+        ])
+        .unwrap();
+
+        expect![[r#"
+            Cli {
+                command: Serve(
+                    ServeArgs {
+                        runtime: FrontendRuntimeArgs {
+                            model: "Qwen/Qwen3-0.6B",
+                            host: "127.0.0.1",
+                            port: 8000,
+                            engine_local_host: "127.0.0.1",
+                            ready_timeout_secs: 30,
+                        },
+                        python: "../vllm/.venv/bin/python",
+                        python_args: [
+                            "--max-model-len",
+                            "512",
+                            "--dtype",
+                            "float16",
+                        ],
+                    },
+                ),
+            }
+        "#]]
+        .assert_debug_eq(&cli);
     }
 }
