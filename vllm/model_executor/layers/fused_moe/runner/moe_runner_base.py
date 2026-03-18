@@ -108,46 +108,10 @@ def _moe_forward_shared(
     hidden_states: torch.Tensor,
     router_logits: torch.Tensor,
     shared_experts_input: torch.Tensor | None,
-    layer_name: str,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    layer = get_layer_from_name(layer_name)
-    return layer.runner._forward_dispatch(
-        layer,
-        hidden_states,
-        router_logits,
-        shared_experts_input,
-    )
-
-
-def _moe_forward_shared_fake(
-    hidden_states: torch.Tensor,
-    router_logits: torch.Tensor,
-    shared_experts_input: torch.Tensor | None,
-    layer_name: str,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    # Output shapes:
-    # - fused_out: same as hidden_states (routed experts use transformed size)
-    # - shared_out: same as shared_experts_input if provided, else same as
-    #               hidden_states
-    # (For latent MoE: shared experts use original hidden_size, not latent size)
-    fused_out = torch.empty_like(hidden_states)
-
-    if shared_experts_input is not None:
-        shared_out = torch.empty_like(shared_experts_input)
-    else:
-        shared_out = torch.empty_like(hidden_states)
-
-    return shared_out, fused_out
-
-
-def _moe_forward_shared(
-    hidden_states: torch.Tensor,
-    router_logits: torch.Tensor,
-    shared_experts_input: torch.Tensor | None,
     layer_name: _layer_name_type,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     layer = get_layer_from_name(_resolve_layer_name(layer_name))
-    return layer.runner.forward_dispatch(
+    return layer.runner._forward_dispatch(
         layer,
         hidden_states,
         router_logits,
