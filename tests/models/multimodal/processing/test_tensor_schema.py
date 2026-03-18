@@ -34,7 +34,6 @@ from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.utils.collection_utils import is_list_of
 from vllm.utils.torch_utils import set_default_torch_dtype
 
-from ....utils import create_new_process_for_each_test
 from ...registry import HF_EXAMPLE_MODELS
 from ...utils import dummy_hf_overrides
 from .test_common import get_model_ids_to_test, get_text_token_prompts
@@ -155,7 +154,6 @@ def initialize_dummy_model(
     cleanup_dist_env_and_memory()
 
 
-@create_new_process_for_each_test()
 @pytest.mark.parametrize("model_id", get_model_ids_to_test())
 def test_model_tensor_schema(model_id: str):
     if model_id == "moonshotai/Kimi-K2.5":
