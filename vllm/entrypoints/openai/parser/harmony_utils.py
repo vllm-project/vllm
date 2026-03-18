@@ -98,10 +98,15 @@ class ResilientStreamableParser:
         self._inner = inner
         self._encoding = encoding
         self._skip_until_message_or_end = False
+        self._last_known_role: str | None = None
 
     # --- error-recovering process() -----------------------------------
 
     def process(self, token_id: int) -> None:
+        # Track role from inner parser while available
+        if self._inner.current_role is not None:
+            self._last_known_role = self._inner.current_role.value
+
         # Pattern 2: skip mode – discard until <|message|> or <|end|>
         if self._skip_until_message_or_end:
             if token_id in (_TOK_MESSAGE, _TOK_END):
@@ -116,7 +121,12 @@ class ResilientStreamableParser:
         if state == StreamState.EXPECT_START and token_id == _TOK_CHANNEL:
             # Inject <|start|> + assistant role token
             self._inner.process(_TOK_START)
-            role_tokens = self._encoding.encode(self._inner.role, allowed_special="all")
+            assert self._last_known_role is not None, (
+                "Pattern 1 recovery requires a prior message to establish role"
+            )
+            role_tokens = self._encoding.encode(
+                self._last_known_role, allowed_special="all"
+            )
             for rt in role_tokens:
                 self._inner.process(rt)
             self._inner.process(token_id)
