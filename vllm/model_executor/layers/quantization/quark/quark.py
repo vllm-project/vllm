@@ -64,12 +64,29 @@ class QuarkConfig(QuantizationConfig):
         self.dynamic_mxfp4_quant = False
 
     def maybe_update_config(self, model_name: str, revision: str | None = None):
-        self.hf_config = get_config(
-            model=model_name,
-            trust_remote_code=False,  # or get from model_config if available
-            revision=revision,
-            config_format="auto",
-        )
+        try:
+            self.hf_config = get_config(
+                model=model_name,
+                trust_remote_code=False,
+                revision=revision,
+                config_format="auto",
+            )
+        except (RuntimeError, ValueError) as e:
+            # Some local quantized checkpoints rely on custom HF config code.
+            # Retry only for the explicit trust-remote-code failure mode.
+            error_text = str(e)
+            if (
+                "trust_remote_code=True" not in error_text
+                and "contains custom code which must be executed" not in error_text
+                and "requires you to execute the configuration file" not in error_text
+            ):
+                raise
+            self.hf_config = get_config(
+                model=model_name,
+                trust_remote_code=True,
+                revision=revision,
+                config_format="auto",
+            )
 
         quant_config = getattr(self.hf_config, "quantization_config", None)
         if quant_config is not None:
