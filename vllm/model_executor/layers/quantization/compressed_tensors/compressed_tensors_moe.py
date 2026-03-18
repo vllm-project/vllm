@@ -289,10 +289,8 @@ class CompressedTensorsW4A16Mxfp4MoEMethod(CompressedTensorsMoEMethod):
             raise ValueError(f"Hidden size {hidden_size} must be divisible \
                     by MXFP4 block size {self.group_size}")
         if intermediate_size_per_partition % self.group_size != 0:
-            raise ValueError(
-                f"Intermediate size {intermediate_size_per_partition} must be divisible \
-                    by MXFP4 block size {self.group_size}"
-            )
+            raise ValueError(f"Intermediate size {intermediate_size_per_partition} \
+                    must be divisible by MXFP4 block size {self.group_size}")
 
         layer.intermediate_size_per_partition = intermediate_size_per_partition
         layer.hidden_size = hidden_size
