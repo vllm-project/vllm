@@ -217,6 +217,9 @@ class SamplingParams(
     min_tokens: int = 0
     """Minimum number of tokens to generate per output sequence before EOS or
     `stop_token_ids` can be generated"""
+    min_characters: int = 0
+    """Minimum number of characters to generate per output sequence before stop
+    strings can be matched"""
     logprobs: int | None = None
     """Number of log probabilities to return per output token. When set to
     `None`, no probability is returned. If set to a non-`None` value, the
@@ -308,6 +311,7 @@ class SamplingParams(
         ignore_eos: bool = False,
         max_tokens: int | None = 16,
         min_tokens: int = 0,
+        min_characters: int = 0,
         logprobs: int | None = None,
         prompt_logprobs: int | None = None,
         detokenize: bool = True,
@@ -348,6 +352,7 @@ class SamplingParams(
             ignore_eos=ignore_eos,
             max_tokens=max_tokens,
             min_tokens=min_tokens,
+            min_characters=min_characters,
             logprobs=logprobs,
             prompt_logprobs=prompt_logprobs,
             detokenize=detokenize,
@@ -471,6 +476,11 @@ class SamplingParams(
             raise ValueError(
                 f"min_tokens must be less than or equal to "
                 f"max_tokens={self.max_tokens}, got {self.min_tokens}."
+            )
+        if self.min_characters < 0:
+            raise ValueError(
+                f"min_characters must be greater than or equal to 0, "
+                f"got {self.min_characters}."
             )
         if self.logprobs is not None and self.logprobs != -1 and self.logprobs < 0:
             raise VLLMValidationError(
