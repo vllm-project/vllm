@@ -25,7 +25,7 @@ from vllm.model_executor.models.parakeet import ParakeetExtractor
 from vllm.multimodal.evs import compute_retained_tokens_count
 from vllm.multimodal.inputs import AudioItem
 from vllm.multimodal.processing.processor import PromptUpdateDetails, _seq2tokens
-from vllm.tokenizers import TokenizerLike
+from vllm.tokenizers.hf import HfTokenizer
 
 from .internvl import calculate_internvl_targets, get_internvl_target_ratios
 
@@ -508,7 +508,7 @@ class BaseNanoNemotronVLProcessor(ABC):
     def __init__(
         self,
         config: PretrainedConfig,
-        tokenizer: TokenizerLike,
+        tokenizer: HfTokenizer,
         *args,
         max_model_len: int,
         max_num_tiles: int | None = None,
@@ -689,7 +689,7 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
     def __init__(
         self,
         config: PretrainedConfig,
-        tokenizer: TokenizerLike,
+        tokenizer: HfTokenizer,
         *,
         max_model_len: int,
         max_num_tiles: int | None = None,
@@ -845,7 +845,7 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
         audios: list[npt.NDArray],
     ) -> tuple[list[str], dict[str, Any]]:
         if len(audios) == 0:
-            return text, {}
+            return text, {"audio_num_clips": []}
 
         assert self.audio_extractor is not None
         extractor = self.audio_extractor
@@ -869,13 +869,10 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
             sampling_rate=extractor.sampling_rate,
             return_tensors="pt",
         )
-        input_audio_features = audio_inputs.input_features
-        feature_attention_mask = audio_inputs.attention_mask
-        audio_feature_lengths = feature_attention_mask.sum(dim=1)
         audio_inputs = {
-            "input_audio_features": input_audio_features,
-            "feature_attention_mask": feature_attention_mask,
-            "audio_feature_lengths": audio_feature_lengths,
+            "input_audio_features": audio_inputs.input_features,
+            "feature_attention_mask": audio_inputs.attention_mask,
+            "audio_num_clips": audio_inputs.audio_num_clips,
         }
 
         return text, audio_inputs
@@ -961,7 +958,7 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
         tokens_per_frame: list[int],
         frames_indices: list[int],
         frame_duration_ms: int,
-        tokenizer: TokenizerLike,
+        tokenizer: HfTokenizer,
         img_start_token_ids: list[int],
         img_end_token_ids: list[int],
         img_context_token_ids: list[int],
@@ -986,7 +983,7 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
             tokens_per_frame (list[int]): number of tokens per frame
             frames_indices (list[int]): frame indices
             frame_duration_ms (int): duration of each frame in milliseconds
-            tokenizer (TokenizerLike): tokenizer to use for tokenizing frame separators
+            tokenizer (HfTokenizer): tokenizer to use for tokenizing frame separators
             img_start_token_ids (list[int]): pre-tokenized IMG_START tokens
             img_end_token_ids (list[int]): pre-tokenized IMG_END tokens
             img_context_token_ids (list[int]): pre-tokenized IMG_CONTEXT tokens
