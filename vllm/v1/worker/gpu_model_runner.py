@@ -5553,6 +5553,61 @@ class GPUModelRunner(
         self.encoder_cache.clear()
         gc.collect()
 
+    def profile_decode_throughput(
+        self,
+        batch_sizes: list[int],
+        num_warmup: int = 3,
+        num_iters: int = 10,
+    ) -> dict[int, float]:
+        """Measure decode throughput (tokens/sec) at each candidate batch size.
+
+        Runs pure-decode dummy forward passes (``uniform_decode=True``,
+        ``is_profile=True``) so no CUDA graph is replayed — measurements
+        reflect raw kernel execution time and scale faithfully with batch size.
+
+        Args:
+            batch_sizes: Candidate batch sizes to benchmark, in ascending order.
+                Any size exceeding ``scheduler_config.max_num_seqs`` is skipped.
+            num_warmup: Number of un-timed warmup iterations per batch size.
+            num_iters: Number of timed iterations per batch size.
+
+        Returns:
+            Mapping of batch_size → tokens-per-second.
+        """
+        import time
+
+        results: dict[int, float] = {}
+
+        for batch_size in batch_sizes:
+            # _dummy_run uses max_num_seqs as an upper bound on num_reqs.
+            if batch_size > self.scheduler_config.max_num_seqs:
+                break
+
+            # Warmup iterations — not timed.
+            for _ in range(num_warmup):
+                self._dummy_run(
+                    num_tokens=batch_size,
+                    uniform_decode=True,
+                    is_profile=True,
+                )
+
+            # Timed iterations.
+            self._sync_device()
+            t0 = time.perf_counter()
+            for _ in range(num_iters):
+                self._dummy_run(
+                    num_tokens=batch_size,
+                    uniform_decode=True,
+                    is_profile=True,
+                )
+            self._sync_device()
+            elapsed = time.perf_counter() - t0
+
+            tps = batch_size * num_iters / elapsed
+            results[batch_size] = tps
+
+        return results
+
     def _init_minimal_kv_cache_for_profiling(self) -> None:
         from vllm.v1.core.kv_cache_utils import (
             get_kv_cache_config_from_groups,
