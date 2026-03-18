@@ -675,15 +675,18 @@ class TestNixlHandshake:
     )
     @pytest.mark.parametrize("local_tp_size", [1, 2])
     def test_prefill_tp_size_greater_than_decode_tp_size(
-        self, local_tp_size: int, default_vllm_config, dist_init
+        self, local_tp_size: int, default_vllm_config, dist_init, monkeypatch
     ):
         """
         Verify remote TP > local TP handshake succeeds with different
         remote configurations.
         """
+        monkeypatch.setattr(
+            "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.get_tensor_model_parallel_world_size",
+            lambda: local_tp_size,
+        )
 
         vllm_config = create_vllm_config()
-        vllm_config.parallel_config.tensor_parallel_size = local_tp_size
 
         connector = NixlConnector(
             vllm_config, KVConnectorRole.WORKER, make_kv_cache_config(block_size=16)
@@ -718,10 +721,10 @@ class TestNixlHandshake:
         remote_agents = worker._nixl_handshake(
             host="localhost",
             port=1234,
-            remote_tp_size=2,
+            remote_tp_size=4,
             expected_engine_id=worker.REMOTE_ENGINE_ID,
         )
-        check_handshake(2)
+        check_handshake(4)
 
         # NOTE flexibility: a second remote with higher number of ranks is
         # discovered. This is not a scenario we actively support right now, but
@@ -739,9 +742,8 @@ class TestNixlHandshake:
         "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.NixlWrapper",
         FakeNixlWrapper,
     )
-    @pytest.mark.parametrize("local_tp_size", [1, 2])
     def test_prefill_tp_size_greater_than_decode_tp_size_mla(
-        self, local_tp_size: int, default_vllm_config, dist_init
+        self, default_vllm_config, dist_init
     ):
         """
         Verify remote TP > local TP handshake succeeds with different
