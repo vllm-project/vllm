@@ -66,15 +66,18 @@ def sanitize_harmony_recipient(recipient: str) -> str:
     """Sanitize a structured recipient name (e.g. ``browser.search``).
 
     Splits on ``'.'``, sanitizes each part individually with
-    :func:`sanitize_harmony_name`, filters out parts that became empty,
-    and rejoins.  This preserves the dotted structure while removing
-    control tokens from any component.
+    :func:`sanitize_harmony_name`, and rejoins.  If any component is
+    entirely consumed by control tokens (sanitizes to empty), the whole
+    recipient is considered corrupt and an empty string is returned so
+    that callers fall back to the safe no-recipient path.
 
     Example: ``browser<|channel|>.search`` → ``browser.search``
+    Example: ``functions.<|constrain|>json`` → ``""``
     """
     parts = recipient.split(".")
     sanitized_parts = [sanitize_harmony_name(part) for part in parts]
-    sanitized_parts = [p for p in sanitized_parts if p]
+    if any(not p for p in sanitized_parts):
+        return ""
     return ".".join(sanitized_parts)
 
 
@@ -99,6 +102,7 @@ class ResilientStreamableParser:
         self._encoding = encoding
         self._skip_until_message_or_end = False
         self._last_known_role: str | None = None
+        self._last_consumed_token: int | None = None
 
     # --- error-recovering process() -----------------------------------
 
@@ -112,6 +116,7 @@ class ResilientStreamableParser:
             if token_id in (_TOK_MESSAGE, _TOK_END):
                 self._skip_until_message_or_end = False
                 self._inner.process(token_id)
+                self._last_consumed_token = token_id
             # else: silently discard the token
             return
 
@@ -130,6 +135,7 @@ class ResilientStreamableParser:
             for rt in role_tokens:
                 self._inner.process(rt)
             self._inner.process(token_id)
+            self._last_consumed_token = token_id
             return
 
         # Pattern 3: free text between harmony messages (e.g. model outputs plain
@@ -146,6 +152,7 @@ class ResilientStreamableParser:
             return
 
         self._inner.process(token_id)
+        self._last_consumed_token = token_id
 
     # --- delegated properties -----------------------------------------
 
@@ -185,6 +192,10 @@ class ResilientStreamableParser:
     @property
     def last_content_delta(self):
         return self._inner.last_content_delta
+
+    @property
+    def last_consumed_token(self) -> int | None:
+        return self._last_consumed_token
 
 
 REASONING_EFFORT = {

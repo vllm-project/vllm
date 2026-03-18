@@ -1001,6 +1001,14 @@ class TestSanitizeHarmonyRecipient:
             sanitize_harmony_recipient("container<|channel|>.exec") == "container.exec"
         )
 
+    def test_full_component_contamination_returns_empty(self) -> None:
+        """functions.<|constrain|>json → "" (not "functions")"""
+        assert sanitize_harmony_recipient("functions.<|constrain|>json") == ""
+
+    def test_container_full_component_contamination_returns_empty(self) -> None:
+        """container.<|channel|>commentary → "" (not "container")"""
+        assert sanitize_harmony_recipient("container.<|channel|>commentary") == ""
+
 
 class TestResilientStreamableParser:
     """Tests for ResilientStreamableParser error recovery."""
@@ -1120,3 +1128,85 @@ class TestResilientStreamableParser:
                         f"Leaked control token {tok_str!r} "
                         f"in message recipient: {msg.recipient!r}"
                     )
+
+    def test_last_consumed_token_tracks_normal_processing(self) -> None:
+        """Normal tokens forwarded to inner parser update last_consumed_token."""
+        encoding = get_encoding()
+        harmony_str = "<|channel|>final<|message|>Hello world<|end|>"
+        token_ids = encoding.encode(harmony_str, allowed_special="all")
+
+        parser = get_streamable_parser_for_assistant()
+        assert parser.last_consumed_token is None
+
+        for tok in token_ids:
+            parser.process(tok)
+
+        # After processing, last_consumed_token should be the last token
+        assert parser.last_consumed_token == token_ids[-1]
+
+    def test_pattern3_discarded_tokens_not_in_last_consumed(self) -> None:
+        """Free-text tokens in EXPECT_START don't update last_consumed_token."""
+        encoding = get_encoding()
+        # Complete a message to reach EXPECT_START state
+        first_msg = "<|channel|>final<|message|>First.<|end|>"
+        first_tokens = encoding.encode(first_msg, allowed_special="all")
+
+        parser = get_streamable_parser_for_assistant()
+        for tok in first_tokens:
+            parser.process(tok)
+
+        last_consumed_after_first = parser.last_consumed_token
+        assert last_consumed_after_first is not None
+
+        # Now feed free-text tokens (not <|start|>) — these should be discarded
+        garbage_tokens = encoding.encode("some free text", allowed_special="all")
+        for tok in garbage_tokens:
+            parser.process(tok)
+
+        # last_consumed_token should NOT have changed
+        assert parser.last_consumed_token == last_consumed_after_first
+
+    def test_pattern2_skip_mode_discarded_tokens_not_in_last_consumed(self) -> None:
+        """Tokens skipped during Pattern 2 don't update last_consumed_token."""
+        encoding = get_encoding()
+        # Complete a first message
+        first_msg = "<|channel|>final<|message|>First.<|end|>"
+        first_tokens = encoding.encode(first_msg, allowed_special="all")
+
+        # Build second message with <|constrain|> in header
+        start_tok = encoding.encode("<|start|>", allowed_special="all")
+        role_toks = encoding.encode("assistant", allowed_special="all")
+        constrain_tok = encoding.encode("<|constrain|>", allowed_special="all")
+        json_toks = encoding.encode("json", allowed_special="all")
+        message_tok = encoding.encode("<|message|>", allowed_special="all")
+
+        parser = get_streamable_parser_for_assistant()
+        for tok in first_tokens:
+            parser.process(tok)
+
+        last_consumed_after_first = parser.last_consumed_token
+
+        # Feed <|start|>assistant to enter HEADER state
+        for tok in start_tok:
+            parser.process(tok)
+        for tok in role_toks:
+            parser.process(tok)
+
+        last_consumed_after_header = parser.last_consumed_token
+
+        # Feed <|constrain|> to enter skip mode
+        for tok in constrain_tok:
+            parser.process(tok)
+
+        # last_consumed should not change (constrain triggers skip, not forwarded)
+        assert parser.last_consumed_token == last_consumed_after_header
+
+        # Feed garbage tokens in skip mode — should not update
+        for tok in json_toks:
+            parser.process(tok)
+        assert parser.last_consumed_token == last_consumed_after_header
+
+        # Feed <|message|> to exit skip mode — this IS forwarded
+        for tok in message_tok:
+            parser.process(tok)
+        assert parser.last_consumed_token != last_consumed_after_first

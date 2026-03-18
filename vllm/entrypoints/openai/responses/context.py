@@ -883,7 +883,9 @@ class StreamingHarmonyContext(HarmonyContext):
             self.current_turn_metrics.reset()
         # Check if the current token is part of reasoning content
         self._update_num_reasoning_tokens()
-        self.last_tok = tok
+        consumed = self.parser.last_consumed_token
+        if consumed is not None:
+            self.last_tok = consumed
         if len(self._messages) - self.num_init_messages < len(self.parser.messages):
             self._messages.extend(
                 self.parser.messages[len(self._messages) - self.num_init_messages :]
@@ -917,7 +919,10 @@ class StreamingHarmonyContext(HarmonyContext):
 
         last_n = -1
         to_process = []
-        while rendered_tokens[last_n] != self.last_tok:
+        while (
+            abs(last_n) <= len(rendered_tokens)
+            and rendered_tokens[last_n] != self.last_tok
+        ):
             to_process.append(rendered_tokens[last_n])
             last_n -= 1
         for tok in reversed(to_process):
