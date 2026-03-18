@@ -24,7 +24,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
 )
 from vllm.forward_context import ForwardContext
 from vllm.logger import init_logger
-from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.kv_cache_utils import BlockHash
@@ -111,6 +111,7 @@ class OffloadingConnectorStats(KVConnectorStats):
 class OffloadingConnectorMetadata(KVConnectorMetadata):
     reqs_to_load: dict[ReqId, TransferSpec]
     reqs_to_store: dict[ReqId, TransferSpec]
+    reqs_to_flush: set[str] | None = None
 
 
 class OffloadingConnector(KVConnectorBase_V1):
@@ -146,9 +147,10 @@ class OffloadingConnector(KVConnectorBase_V1):
         assert self.connector_worker is not None
         self.connector_worker.register_cross_layers_kv_cache(kv_cache, attn_backend)
 
-    def handle_preemptions(self, preempted_req_ids: set[str]):
+    def handle_preemptions(self, kv_connector_metadata: KVConnectorMetadata):
         assert self.connector_worker is not None
-        self.connector_worker.handle_preemptions(preempted_req_ids)
+        assert isinstance(kv_connector_metadata, OffloadingConnectorMetadata)
+        self.connector_worker.handle_preemptions(kv_connector_metadata)
 
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
         assert self.connector_worker is not None
@@ -482,6 +484,7 @@ class OffloadingConnectorScheduler:
         meta = OffloadingConnectorMetadata(
             reqs_to_load=self._reqs_to_load,
             reqs_to_store=self._get_reqs_to_store(scheduler_output),
+            reqs_to_flush=scheduler_output.preempted_req_ids,
         )
         self._reqs_to_load = {}
 
@@ -601,7 +604,9 @@ class OffloadingConnectorWorker:
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         layer_names = list(kv_caches.keys())
         layers = get_layers_from_vllm_config(
-            self.spec.vllm_config, Attention, layer_names
+            self.spec.vllm_config,
+            AttentionLayerBase,  # type: ignore[type-abstract]
+            layer_names,
         )
         attn_backends = {
             layer_name: layers[layer_name].get_attn_backend()
@@ -617,13 +622,13 @@ class OffloadingConnectorWorker:
         attn_backends = {cross_layer_name: attn_backend}
         self._register_handlers(kv_caches, attn_backends)
 
-    def handle_preemptions(self, preempted_req_ids: set[str]):
+    def handle_preemptions(self, kv_connector_metadata: OffloadingConnectorMetadata):
         for job_id, transfer_spec in self._unsubmitted_store_jobs:
             success = self.worker.transfer_async(job_id, transfer_spec)
             assert success
         self._unsubmitted_store_jobs.clear()
 
-        for req_id in preempted_req_ids:
+        for req_id in kv_connector_metadata.reqs_to_flush or ():
             job_ids = self._store_jobs.get(req_id)
             if job_ids:
                 self.worker.wait(job_ids)
