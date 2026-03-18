@@ -745,17 +745,17 @@ class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
         return num_video_soft_tokens
 
     def _calculate_timestamps(
-        self, indices: list[int] | torch.Tensor, video_fps: float, merge_size: int
+        self, indices: list[int] | torch.Tensor, video_fps: float, temporal_patch_size: int
     ):
         if not isinstance(indices, list):
             indices = indices.tolist()
-        if len(indices) % merge_size != 0:
+        if len(indices) % temporal_patch_size != 0:
             # don't update metadata's frames_indices directly
-            indices = indices + [indices[-1]] * (merge_size - len(indices) % merge_size)
+            indices = indices + [indices[-1]] * (temporal_patch_size - len(indices) % temporal_patch_size)
         timestamps = [idx / video_fps for idx in indices]
         timestamps = [
-            (timestamps[i] + timestamps[i + merge_size - 1]) / 2
-            for i in range(0, len(timestamps), merge_size)
+            (timestamps[i] + timestamps[i + temporal_patch_size - 1]) / 2
+            for i in range(0, len(timestamps), temporal_patch_size)
         ]
         return timestamps
 
@@ -767,7 +767,7 @@ class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
         sampled_num_frames: int | None = None,
     ) -> list[int]:
         video_processor = self.get_video_processor()
-        merge_size = video_processor.merge_size
+        temporal_patch_size = video_processor.temporal_patch_size
         indices = metadata["frames_indices"]
 
         # metadata["fps"] refers to the true fps of the input video.
@@ -806,7 +806,7 @@ class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
                 .astype(int)
                 .tolist()
             )
-        timestamps = self._calculate_timestamps(indices, video_fps, merge_size)
+        timestamps = self._calculate_timestamps(indices, video_fps, temporal_patch_size)
         return timestamps
 
 
