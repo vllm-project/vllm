@@ -35,7 +35,11 @@ from vllm.v1.attention.backends.tree_attn import (
 )
 from vllm.v1.attention.backends.triton_attn import TritonAttentionMetadata
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
-from vllm.v1.kv_cache_interface import KVCacheConfig, UniformTypeKVCacheSpecs
+from vllm.v1.kv_cache_interface import (
+    KVCacheConfig,
+    MambaSpec,
+    UniformTypeKVCacheSpecs,
+)
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.sampler import _SAMPLING_EPS
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
@@ -114,6 +118,10 @@ class SpecDecodeBaseProposer:
 
         self.draft_attn_groups: list[AttentionGroup] = []
         self.kv_cache_gid: int = -1
+        # For hybrid draft models (e.g. Jamba) that have both attention and
+        # mamba layers in separate KV cache groups.
+        self._mamba_kv_cache_gids: list[int] = []
+        self._draft_attn_only_layer_names: set[str] = set()
         self.eagle3_use_aux_hidden_state: bool = (
             self._get_eagle3_use_aux_hidden_state_from_config()
         )
@@ -341,6 +349,38 @@ class SpecDecodeBaseProposer:
                 positions = positions[0]
             self.positions[:num_tokens] = positions
 
+    def _build_mamba_common_attn_metadata(
+        self,
+        common_attn_metadata: CommonAttentionMetadata,
+    ) -> dict[int, CommonAttentionMetadata]:
+        """Build CommonAttentionMetadata for each mamba KV cache group.
+
+        Call once at the start of propose_tokens; the returned objects
+        share seq_lens with the attention CAM so in-place updates
+        propagate automatically.
+        """
+        result: dict[int, CommonAttentionMetadata] = {}
+        batch_size = common_attn_metadata.batch_size()
+        for gid in self._mamba_kv_cache_gids:
+            mamba_block_table = (
+                self.runner.input_batch.block_table[gid]
+                .get_device_tensor(batch_size)
+            )
+            result[gid] = common_attn_metadata.replace(
+                block_table_tensor=mamba_block_table,
+            )
+        return result
+
+    def _get_group_cam(
+        self,
+        attn_group: AttentionGroup,
+        common_attn_metadata: CommonAttentionMetadata,
+        mamba_cams: dict[int, CommonAttentionMetadata],
+    ) -> CommonAttentionMetadata:
+        """Return the correct CommonAttentionMetadata for the given group."""
+        gid = attn_group.kv_cache_group_id
+        return mamba_cams.get(gid, common_attn_metadata)
+
     def _get_slot_mapping(
         self,
         num_tokens: int,
@@ -357,7 +397,10 @@ class SpecDecodeBaseProposer:
                 self._slot_mapping_buffer[num_actual:num_tokens].fill_(PADDING_SLOT_ID)
 
         view = self._slot_mapping_buffer[:num_tokens]
-        return {name: view for name in self._draft_attn_layer_names}
+        # Only attention layers use slot_mapping; mamba layers do not.
+        layer_names = (self._draft_attn_only_layer_names
+                       or self._draft_attn_layer_names)
+        return {name: view for name in layer_names}
 
     def initialize_cudagraph_keys(self, cudagraph_mode: CUDAGraphMode) -> None:
         """Initialize cudagraph dispatcher keys for eagle.
@@ -426,10 +469,17 @@ class SpecDecodeBaseProposer:
 
         assert self.runner is not None
 
+        # Build mamba CAMs once; they share seq_lens with the attention CAM
+        # so in-place updates in the autoregressive loop propagate.
+        mamba_cams = self._build_mamba_common_attn_metadata(
+            common_attn_metadata)
+
         per_layer_attn_metadata: dict[str, object] = {}
         for attn_group in self.draft_attn_groups:
+            group_cam = self._get_group_cam(
+                attn_group, common_attn_metadata, mamba_cams)
             attn_metadata = attn_group.get_metadata_builder().build_for_drafting(
-                common_attn_metadata=common_attn_metadata, draft_index=0
+                common_attn_metadata=group_cam, draft_index=0
             )
             for layer_name in attn_group.layer_names:
                 per_layer_attn_metadata[layer_name] = attn_metadata
@@ -597,8 +647,10 @@ class SpecDecodeBaseProposer:
 
             # Rebuild attention metadata
             for attn_group in self.draft_attn_groups:
+                group_cam = self._get_group_cam(
+                    attn_group, common_attn_metadata, mamba_cams)
                 attn_metadata = attn_group.get_metadata_builder().build_for_drafting(
-                    common_attn_metadata=common_attn_metadata,
+                    common_attn_metadata=group_cam,
                     draft_index=token_index + 1,
                 )
                 for layer_name in attn_group.layer_names:
@@ -1541,26 +1593,36 @@ class SpecDecodeBaseProposer:
 
     def validate_same_kv_cache_group(self, kv_cache_config: KVCacheConfig) -> None:
         """
-        Validate that all drafting layers belong to the same KVCacheGroup.
-        Need this assumption to ensure all drafting layers can use the
-        same AttentionMetadata.
-        May extend to multiple AttentionMetadata in the future.
+        Validate that draft attention layers belong to one KVCacheGroup
+        and draft mamba layers belong to separate groups.  Hybrid draft
+        models (e.g. Jamba) may have both types.
         """
-        kv_cache_groups: dict[str, int] = {}
-        for id, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
+        layer_to_gid: dict[str, int] = {}
+        gid_to_spec = {}
+        for gid, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
+            gid_to_spec[gid] = kv_cache_group.kv_cache_spec
             for layer_name in kv_cache_group.layer_names:
-                kv_cache_groups[layer_name] = id
-        assert (
-            len(
-                set(
-                    [
-                        kv_cache_groups[layer_name]
-                        for layer_name in self._draft_attn_layer_names
-                    ]
-                )
-            )
-            == 1
-        ), "All drafting layers should belong to the same kv cache group"
+                layer_to_gid[layer_name] = gid
+
+        # Classify draft layers into attention vs mamba groups.
+        attn_gids: set[int] = set()
+        mamba_gids: set[int] = set()
+        for layer_name in self._draft_attn_layer_names:
+            gid = layer_to_gid[layer_name]
+            spec = gid_to_spec[gid]
+            if isinstance(spec, MambaSpec) or (
+                isinstance(spec, UniformTypeKVCacheSpecs)
+                and any(isinstance(s, MambaSpec)
+                        for s in spec.kv_cache_specs.values())
+            ):
+                mamba_gids.add(gid)
+            else:
+                attn_gids.add(gid)
+
+        assert len(attn_gids) == 1, (
+            "All draft attention layers should belong to the same "
+            f"kv cache group, but found groups: {attn_gids}"
+        )
 
     def initialize_attn_backend(
         self,
@@ -1570,44 +1632,74 @@ class SpecDecodeBaseProposer:
         """
         Initialize AttentionGroups for draft layers using kv_cache_config.
         Called from the model runner's initialize_metadata_builders.
+        Supports hybrid draft models with both attention and mamba layers.
         """
         all_attn_layers = get_layers_from_vllm_config(
             self.vllm_config,
             AttentionLayerBase,  # type: ignore[type-abstract]
         )
 
-        # Find which kv_cache_group the draft layers belong to
         self.validate_same_kv_cache_group(kv_cache_config)
-        kv_cache_spec = None
+
+        # Build a mapping: layer_name -> (gid, is_mamba)
+        layer_gid: dict[str, int] = {}
+        gid_is_mamba: dict[int, bool] = {}
         for gid, group in enumerate(kv_cache_config.kv_cache_groups):
-            if self._draft_attn_layer_names & set(group.layer_names):
-                self.kv_cache_gid = gid
-                kv_cache_spec = group.kv_cache_spec
-                break
+            spec = group.kv_cache_spec
+            is_mamba = isinstance(spec, MambaSpec) or (
+                isinstance(spec, UniformTypeKVCacheSpecs)
+                and any(isinstance(s, MambaSpec)
+                        for s in spec.kv_cache_specs.values())
+            )
+            gid_is_mamba[gid] = is_mamba
+            for layer_name in group.layer_names:
+                layer_gid[layer_name] = gid
 
-        attention_groups: dict[tuple[str, str], AttentionGroup] = {}
-        if kv_cache_spec is not None:
-            for layer_name in self._draft_attn_layer_names:
+        # Classify draft layers and find the primary attention group.
+        self._draft_attn_only_layer_names = set()
+        self._mamba_kv_cache_gids = []
+        for layer_name in self._draft_attn_layer_names:
+            gid = layer_gid.get(layer_name, -1)
+            if gid >= 0 and gid_is_mamba.get(gid, False):
+                if gid not in self._mamba_kv_cache_gids:
+                    self._mamba_kv_cache_gids.append(gid)
+            else:
+                self._draft_attn_only_layer_names.add(layer_name)
+                if self.kv_cache_gid < 0 and gid >= 0:
+                    self.kv_cache_gid = gid
+
+        # Build AttentionGroups per KV cache group containing draft layers.
+        attention_groups: dict[str, AttentionGroup] = {}
+        draft_gids = {self.kv_cache_gid} | set(self._mamba_kv_cache_gids)
+        for gid in sorted(draft_gids):
+            if gid < 0:
+                continue
+            group = kv_cache_config.kv_cache_groups[gid]
+            group_spec = group.kv_cache_spec
+            draft_layers_in_group = [
+                ln for ln in self._draft_attn_layer_names
+                if layer_gid.get(ln) == gid
+            ]
+            for layer_name in draft_layers_in_group:
                 attn_backend = all_attn_layers[layer_name].get_attn_backend()
-                backend_key = attn_backend.full_cls_name()
+                backend_key = f"{gid}:{attn_backend.full_cls_name()}"
                 if backend_key not in attention_groups:
-                    layer_kv_cache_spec = kv_cache_spec
+                    layer_kv_cache_spec = group_spec
                     if isinstance(layer_kv_cache_spec, UniformTypeKVCacheSpecs):
-                        layer_kv_cache_spec = layer_kv_cache_spec.kv_cache_specs[
-                            layer_name
-                        ]
-
+                        layer_kv_cache_spec = (
+                            layer_kv_cache_spec.kv_cache_specs[layer_name]
+                        )
                     kernel_block_size = (
-                        kernel_block_sizes[self.kv_cache_gid]
+                        kernel_block_sizes[gid]
                         if kernel_block_sizes is not None
-                        and self.kv_cache_gid < len(kernel_block_sizes)
+                        and gid < len(kernel_block_sizes)
                         else None
                     )
                     attn_group = AttentionGroup(
                         backend=attn_backend,
                         layer_names=[layer_name],
                         kv_cache_spec=layer_kv_cache_spec,
-                        kv_cache_group_id=self.kv_cache_gid,
+                        kv_cache_group_id=gid,
                     )
                     attn_group.create_metadata_builders(
                         self.vllm_config,
@@ -1619,9 +1711,13 @@ class SpecDecodeBaseProposer:
                     attention_groups[backend_key].layer_names.append(layer_name)
 
         self.draft_attn_groups = list(attention_groups.values())
-        self.block_size = (
-            self.draft_attn_groups[0].get_metadata_builder().kv_cache_spec.block_size
-        )
+        # block_size comes from the attention group (used for slot mapping).
+        for ag in self.draft_attn_groups:
+            if ag.kv_cache_group_id == self.kv_cache_gid:
+                self.block_size = (
+                    ag.get_metadata_builder().kv_cache_spec.block_size
+                )
+                break
         logger.debug("Using block size %d for drafting layers", self.block_size)
 
     def _determine_batch_execution_and_padding(
