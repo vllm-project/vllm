@@ -1232,7 +1232,7 @@ steps:
   - pytest -v -s plugins_tests/test_scheduler_plugins.py
   - pip install -e ./plugins/vllm_add_dummy_model
   - pytest -v -s distributed/test_distributed_oot.py
-  - pytest -v -s entrypoints/openai/completion/test_oot_registration.py
+  - pytest -v -s entrypoints/openai/chat_completion/test_oot_registration.py
   - pytest -v -s models/test_oot_registration.py
   - pytest -v -s plugins/lora_resolvers
   # END: other tests
@@ -1354,7 +1354,7 @@ steps:
   commands:
   - export TORCH_NCCL_BLOCKING_WAIT=1
   - pytest -v -s tests/distributed/test_context_parallel.py
-  - VLLM_LOGGING_LEVEL=DEBUG python3 examples/offline_inference/data_parallel.py --model=Qwen/Qwen1.5-MoE-A2.7B -tp=1 -dp=2 --max-model-len=2048 --all2all-backend=deepep_high_throughput
+  - VLLM_LOGGING_LEVEL=DEBUG python3 examples/offline_inference/data_parallel.py --model=Qwen/Qwen1.5-MoE-A2.7B -tp=1 -dp=2 --max-model-len=2048 --all2all-backend=allgather_reducescatter --disable-nccl-for-dp-synchronization
   - pytest -v -s tests/v1/distributed/test_dbo.py
 
 
