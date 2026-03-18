@@ -233,7 +233,8 @@ class DefaultMoERunner(MoERunner):
         return (
             self.moe_config.moe_parallel_config.use_deepep_ll_kernels
             or self.moe_config.moe_parallel_config.use_mori_kernels
-            or self.moe_config.moe_parallel_config.use_fi_all2allv_kernels
+            or self.moe_config.moe_parallel_config.use_fi_nvl_two_sided_kernels
+            or self.moe_config.moe_parallel_config.use_nixl_ep_kernels
         ) and envs.VLLM_ENABLE_MOE_DP_CHUNK
 
     def _maybe_setup_shared_experts_stream(
@@ -414,7 +415,10 @@ class DefaultMoERunner(MoERunner):
 
         # This is the dimension after transform (for routed expert output slicing)
         transformed_hidden_dim = hidden_states.shape[-1]
-        if self.moe_config.hidden_dim != transformed_hidden_dim:
+        if (
+            not self.quant_method.skip_forward_padding
+            and self.moe_config.hidden_dim != transformed_hidden_dim
+        ):
             hidden_states = F.pad(
                 hidden_states,
                 (0, self.moe_config.hidden_dim - transformed_hidden_dim),

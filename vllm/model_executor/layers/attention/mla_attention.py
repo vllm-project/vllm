@@ -442,6 +442,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         # If kv_b_proj_weight is unquantized, quantize it to mxfp4 if supported
         self.is_aiter_triton_fp4_bmm_enabled = (
             rocm_aiter_ops.is_fp4bmm_enabled()
+            and hasattr(self.kv_b_proj, "weight")
             and self.kv_b_proj.weight.dtype == torch.bfloat16
         )
 
@@ -479,7 +480,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             attn_metadata = forward_context.attn_metadata
             if isinstance(attn_metadata, dict):
                 attn_metadata = attn_metadata[self.layer_name]
-            self_kv_cache = self.kv_cache[forward_context.virtual_engine]
+            self_kv_cache = self.kv_cache[0]
             slot_mapping = forward_context.slot_mapping
 
             assert isinstance(slot_mapping, dict), (
@@ -939,7 +940,7 @@ def unified_mla_kv_cache_update(
         return torch.empty(0, device=kv_c_normed.device, dtype=kv_c_normed.dtype)
 
     attn_layer = forward_context.no_compile_layers[layer_name]
-    kv_cache = attn_layer.kv_cache[forward_context.virtual_engine]
+    kv_cache = attn_layer.kv_cache[0]
 
     slot_mapping = forward_context.slot_mapping
     assert isinstance(slot_mapping, dict), (
@@ -1141,10 +1142,12 @@ class MLACommonBackend(AttentionBackend):
     def get_kv_cache_stride_order(
         include_num_layers_dimension: bool = False,
     ) -> tuple[int, ...]:
-        # `stride_order` indicates the permutation that gets
-        # us from `get_kv_cache_shape` to the actual memory layout we want.
-        # (num_blocks, num_layers, block_size, head_size)
-        return (1, 0, 2, 3) if include_num_layers_dimension else (0, 1, 2)
+        if include_num_layers_dimension:
+            # MLA kernels require contiguous per-layer KV cache views.
+            # Identity permutation keeps num_layers first in physical
+            # layout, signaling cross-layer allocation is unsupported.
+            return (0, 1, 2, 3)
+        return (0, 1, 2)
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
@@ -2492,11 +2495,15 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             kv_c_normed = workspace[:toks][..., : self.kv_lora_rank]
             # When FP8 weights are used without FP8 prefill, kv_b_proj expects
             # model dtype input and will quantize internally.
-            if (
-                use_fp8_prefill
-                or self.kv_b_proj.weight.dtype != current_platform.fp8_dtype()
-            ):
-                kv_c_normed = kv_c_normed.to(self.kv_b_proj.weight.dtype)
+            # For quantized layers (AWQ/GPTQ) that lack a .weight attribute,
+            # use params_dtype which is the expected input dtype.
+            _kv_b_proj_w_dtype = (
+                self.kv_b_proj.weight.dtype
+                if hasattr(self.kv_b_proj, "weight")
+                else self.kv_b_proj.params_dtype
+            )
+            if use_fp8_prefill or _kv_b_proj_w_dtype != current_platform.fp8_dtype():
+                kv_c_normed = kv_c_normed.to(_kv_b_proj_w_dtype)
 
             k_pe = workspace[:toks][..., self.kv_lora_rank :].unsqueeze(1)
             kv_nope = self.kv_b_proj(kv_c_normed)[0].view(

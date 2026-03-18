@@ -10,7 +10,7 @@ import logging
 import time
 import uuid
 from collections.abc import AsyncGenerator
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from fastapi import Request
 
@@ -43,6 +43,9 @@ from vllm.entrypoints.openai.engine.protocol import (
 )
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 
+if TYPE_CHECKING:
+    from vllm.entrypoints.serve.render.serving import OpenAIServingRender
+
 logger = logging.getLogger(__name__)
 
 
@@ -59,6 +62,7 @@ class AnthropicServingMessages(OpenAIServingChat):
         models: OpenAIServingModels,
         response_role: str,
         *,
+        openai_serving_render: "OpenAIServingRender",
         request_logger: RequestLogger | None,
         chat_template: str | None,
         chat_template_content_format: ChatTemplateContentFormatOption,
@@ -73,6 +77,7 @@ class AnthropicServingMessages(OpenAIServingChat):
             engine_client=engine_client,
             models=models,
             response_role=response_role,
+            openai_serving_render=openai_serving_render,
             request_logger=request_logger,
             chat_template=chat_template,
             chat_template_content_format=chat_template_content_format,
@@ -219,6 +224,12 @@ class AnthropicServingMessages(OpenAIServingChat):
             content_parts.append({"type": "image_url", "image_url": {"url": image_url}})
         elif block.type == "thinking" and block.thinking is not None:
             reasoning_parts.append(block.thinking)
+        elif block.type == "redacted_thinking":
+            # Redacted thinking blocks contain safety-filtered reasoning.
+            # We skip them as the content is opaque (base64 'data' field),
+            # but accepting the block prevents a validation error when the
+            # client echoes back the full assistant message.
+            pass
         elif block.type == "tool_use":
             cls._convert_tool_use_block(block, tool_calls)
         elif block.type == "tool_result":
