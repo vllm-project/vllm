@@ -5,7 +5,6 @@ import math
 from collections.abc import Callable
 from typing import TypeVar
 
-import regex as re
 import torch
 from torch import nn
 
@@ -25,13 +24,18 @@ from vllm.lora.utils import (
     from_layer,
     from_layer_logits_processor,
     get_supported_lora_modules,
+    is_in_target_modules,
     is_moe_model,
+    is_supported_lora_module,
     process_packed_modules_mapping,
     replace_submodule,
 )
 from vllm.model_executor.layers.fused_moe import FusedMoE
-from vllm.model_executor.models import SupportsLoRA, supports_multimodal
-from vllm.model_executor.models.interfaces import is_pooling_model
+from vllm.model_executor.models import (
+    SupportsLoRA,
+    is_pooling_model,
+    supports_multimodal,
+)
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.utils import PPMissingLayer
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -538,14 +542,23 @@ class LoRAModelManager:
                 model.loras[module_name] = lora
         return model
 
-    def _match_target_modules(self, module_name: str):
-        return any(
-            re.match(
-                r".*\.{target_module}$".format(target_module=target_module), module_name
-            )
-            or target_module == module_name
-            for target_module in self.supported_lora_modules
-        )
+    def _match_target_modules(self, module_name: str) -> bool:
+        """Check if a module should have LoRA applied.
+
+        This method first checks if the module is in vLLM's supported LoRA
+        modules, then applies deployment-time restrictions based on
+        LoRAConfig.target_modules.
+
+        Args:
+            module_name: Full dot-separated module name (e.g.,
+                "model.layers.0.self_attn.o_proj")
+
+        Returns:
+            True if LoRA should be applied to this module, False otherwise.
+        """
+        if not is_supported_lora_module(module_name, self.supported_lora_modules):
+            return False
+        return is_in_target_modules(module_name, self.lora_config.target_modules)
 
     def _get_punica_wrapper(self, module_name: str) -> PunicaWrapperBase | None:
         """
@@ -596,8 +609,8 @@ class LoRAModelManager:
                 replacement_loras[i] = None
             # HACK Temporary solution for the pool model.
             if self.is_pooling_model and not lora_model.check_lora_name(module_name):
-                replaced_module_name = module_name.replace("model.", "")
-                if lora_model.check_lora_name(module_name):
+                replaced_module_name = module_name.removeprefix("model.")
+                if lora_model.check_lora_name(replaced_module_name):
                     module_name = replaced_module_name
             if module_name.endswith(".experts"):
                 if self._is_non_gated_moe and len(replacement_loras) > 0:
@@ -742,7 +755,7 @@ class LoRAModelManager:
         if self.is_pooling_model and not lora_model.check_lora_name(module_name):
             # If it's a pool model, and the layer name is not found,
             # remove the prefix 'model.' and search again.
-            module_name = module_name.replace("model.", "")
+            module_name = module_name.removeprefix("model.")
             if lora_model.check_lora_name(module_name):
                 org_module_name = module_name
                 logger.info_once(
