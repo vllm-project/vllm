@@ -162,7 +162,7 @@ steps:
   - tests/entrypoints/test_chat_utils
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/test_chat_with_tool_reasoning.py --ignore=entrypoints/openai/test_oot_registration.py --ignore=entrypoints/openai/test_tensorizer_entrypoint.py --ignore=entrypoints/openai/correctness/ --ignore=entrypoints/openai/tool_parsers/ --ignore=entrypoints/openai/responses
+  - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/chat_completion/test_chat_with_tool_reasoning.py --ignore=entrypoints/openai/chat_completion/test_oot_registration.py --ignore=entrypoints/openai/completion/test_tensorizer_entrypoint.py --ignore=entrypoints/openai/correctness/ --ignore=entrypoints/openai/tool_parsers/ --ignore=entrypoints/openai/responses
   - pytest -v -s entrypoints/test_chat_utils.py
 
 - label: Entrypoints Integration Test (API Server 2)
@@ -369,7 +369,7 @@ steps:
     - vllm/
     - tests/v1
   commands:
-    - pytest -v -s v1/e2e/test_spec_decode.py -k "tensor_parallelism"
+    - pytest -v -s v1/e2e/spec_decode/test_spec_decode.py -k "tensor_parallelism"
 
 - label: V1 Test e2e (4 GPUs) # 65min
   timeout_in_minutes: 90
@@ -380,7 +380,7 @@ steps:
     - vllm/
     - tests/v1
   commands:
-    - pytest -v -s v1/e2e/test_spec_decode.py -k "eagle_correctness_heavy"
+    - pytest -v -s v1/e2e/spec_decode/test_spec_decode.py -k "eagle_correctness_heavy"
 
 - label: V1 Test entrypoints # 35min
   timeout_in_minutes: 50
@@ -674,12 +674,12 @@ steps:
   - vllm/config/model.py
   - vllm/model_executor
   - tests/model_executor
-  - tests/entrypoints/openai/test_tensorizer_entrypoint.py
+  - tests/entrypoints/openai/completion/test_tensorizer_entrypoint.py
   commands:
     - apt-get update && apt-get install -y curl libsodium23
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
     - pytest -v -s model_executor
-    - pytest -v -s entrypoints/openai/test_tensorizer_entrypoint.py
+    - pytest -v -s entrypoints/openai/completion/test_tensorizer_entrypoint.py
 
 - label: Benchmarks # 11min
   timeout_in_minutes: 20
@@ -1143,7 +1143,7 @@ steps:
   - pytest -v -s plugins_tests/test_scheduler_plugins.py
   - pip install -e ./plugins/vllm_add_dummy_model
   - pytest -v -s distributed/test_distributed_oot.py
-  - pytest -v -s entrypoints/openai/test_oot_registration.py
+  - pytest -v -s entrypoints/openai/chat_completion/test_oot_registration.py
   - pytest -v -s models/test_oot_registration.py
   - pytest -v -s plugins/lora_resolvers
 
@@ -1502,7 +1502,7 @@ steps:
   - tests/entrypoints/test_chat_utils
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/test_chat_with_tool_reasoning.py --ignore=entrypoints/openai/test_oot_registration.py --ignore=entrypoints/openai/test_tensorizer_entrypoint.py --ignore=entrypoints/openai/correctness/ --ignore=entrypoints/openai/tool_parsers/ --ignore=entrypoints/openai/responses
+  - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/chat_completion/test_chat_with_tool_reasoning.py --ignore=entrypoints/openai/chat_completion/test_oot_registration.py --ignore=entrypoints/openai/completion/test_tensorizer_entrypoint.py --ignore=entrypoints/openai/correctness/ --ignore=entrypoints/openai/tool_parsers/ --ignore=entrypoints/openai/responses
   - pytest -v -s entrypoints/test_chat_utils.py
 
 - label: Entrypoints Integration Test (API Server 2)
@@ -1573,7 +1573,7 @@ steps:
   - tests/compile/fullgraph/test_basic_correctness.py
   - examples/offline_inference/rlhf.py
   - examples/offline_inference/rlhf_colocate.py
-  - examples/offline_inference/new_weight_syncing/
+  - examples/rl/
   - tests/examples/offline_inference/data_parallel.py
   - tests/v1/distributed
   - tests/v1/engine/test_engine_core_client.py
@@ -1615,7 +1615,7 @@ steps:
   - VLLM_ALLOW_INSECURE_SERIALIZATION=1 RAY_DEDUP_LOGS=0 python3 rlhf_colocate.py
   - popd
   # NEW rlhf examples
-  - pushd ../examples/offline_inference/new_weight_syncing
+  - pushd ../examples/rl
   - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 rlhf_nccl.py
   - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 rlhf_ipc.py
   - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 rlhf_async_new_apis.py
@@ -1744,7 +1744,7 @@ steps:
     - tests/v1
   commands:
     # Only run tests that need exactly 2 GPUs
-    - pytest -v -s v1/e2e/test_spec_decode.py -k "tensor_parallelism"
+    - pytest -v -s v1/e2e/spec_decode/test_spec_decode.py -k "tensor_parallelism"
 
 - label: V1 Test e2e (4 GPUs) # 65min
   timeout_in_minutes: 90
@@ -1759,7 +1759,7 @@ steps:
     - tests/v1
   commands:
     # Only run tests that need 4 GPUs
-    - pytest -v -s v1/e2e/test_spec_decode.py -k "eagle_correctness_heavy"
+    - pytest -v -s v1/e2e/spec_decode/test_spec_decode.py -k "eagle_correctness_heavy"
 
 - label: V1 Test entrypoints # 35min
   timeout_in_minutes: 50
@@ -2133,12 +2133,12 @@ steps:
   - vllm/config/model.py
   - vllm/model_executor
   - tests/model_executor
-  - tests/entrypoints/openai/test_tensorizer_entrypoint.py
+  - tests/entrypoints/openai/completion/test_tensorizer_entrypoint.py
   commands:
     - apt-get update && apt-get install -y curl libsodium23
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
     - pytest -v -s model_executor
-    - pytest -v -s entrypoints/openai/test_tensorizer_entrypoint.py
+    - pytest -v -s entrypoints/openai/completion/test_tensorizer_entrypoint.py
 
 - label: Benchmarks # 11min
   timeout_in_minutes: 20
@@ -2660,7 +2660,7 @@ steps:
   - tests/v1/entrypoints/openai/test_multi_api_servers.py
   - tests/v1/shutdown
   - tests/v1/worker/test_worker_memory_snapshot.py
-  - examples/offline_inference/new_weight_syncing/
+  - examples/rl/
   commands:
   # Work around HIP bug tracked here: https://github.com/ROCm/hip/issues/3876
   # TODO: Remove when the bug is fixed in a future ROCm release
@@ -2735,7 +2735,7 @@ steps:
   - pytest -v -s plugins_tests/test_scheduler_plugins.py
   - pip install -e ./plugins/vllm_add_dummy_model
   - pytest -v -s distributed/test_distributed_oot.py
-  - pytest -v -s entrypoints/openai/test_oot_registration.py # it needs a clean process
+  - pytest -v -s entrypoints/openai/chat_completion/test_oot_registration.py # it needs a clean process
   - pytest -v -s models/test_oot_registration.py # it needs a clean process
   - pytest -v -s plugins/lora_resolvers # unit tests for in-tree lora resolver plugins
 
@@ -3257,7 +3257,7 @@ steps:
   - tests/entrypoints/test_chat_utils
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/test_chat_with_tool_reasoning.py --ignore=entrypoints/openai/test_oot_registration.py --ignore=entrypoints/openai/test_tensorizer_entrypoint.py --ignore=entrypoints/openai/correctness/ --ignore=entrypoints/openai/tool_parsers/ --ignore=entrypoints/openai/responses
+  - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/chat_completion/test_chat_with_tool_reasoning.py --ignore=entrypoints/openai/chat_completion/test_oot_registration.py --ignore=entrypoints/openai/completion/test_tensorizer_entrypoint.py --ignore=entrypoints/openai/correctness/ --ignore=entrypoints/openai/tool_parsers/ --ignore=entrypoints/openai/responses
   - pytest -v -s entrypoints/test_chat_utils.py
 
 - label: Entrypoints Integration Test (API Server 2)
@@ -3325,7 +3325,7 @@ steps:
   - tests/compile/fullgraph/test_basic_correctness.py
   - examples/offline_inference/rlhf.py
   - examples/offline_inference/rlhf_colocate.py
-  - examples/offline_inference/new_weight_syncing/
+  - examples/rl/
   - tests/examples/offline_inference/data_parallel.py
   - tests/v1/distributed
   - tests/v1/engine/test_engine_core_client.py
@@ -3367,7 +3367,7 @@ steps:
   - VLLM_ALLOW_INSECURE_SERIALIZATION=1 RAY_DEDUP_LOGS=0 python3 rlhf_colocate.py
   - popd
   # NEW rlhf examples
-  - pushd ../examples/offline_inference/new_weight_syncing
+  - pushd ../examples/rl
   - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 rlhf_nccl.py
   - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 rlhf_ipc.py
   - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 rlhf_async_new_apis.py
@@ -3494,7 +3494,7 @@ steps:
     - tests/v1
   commands:
     # Only run tests that need exactly 2 GPUs
-    - pytest -v -s v1/e2e/test_spec_decode.py -k "tensor_parallelism"
+    - pytest -v -s v1/e2e/spec_decode/test_spec_decode.py -k "tensor_parallelism"
 
 - label: V1 Test e2e (4 GPUs) # 65min
   timeout_in_minutes: 90
@@ -3509,7 +3509,7 @@ steps:
     - tests/v1
   commands:
     # Only run tests that need 4 GPUs
-    - pytest -v -s v1/e2e/test_spec_decode.py -k "eagle_correctness_heavy"
+    - pytest -v -s v1/e2e/spec_decode/test_spec_decode.py -k "eagle_correctness_heavy"
 
 - label: V1 Test entrypoints # 35min
   timeout_in_minutes: 50
@@ -3872,12 +3872,12 @@ steps:
   - vllm/config/model.py
   - vllm/model_executor
   - tests/model_executor
-  - tests/entrypoints/openai/test_tensorizer_entrypoint.py
+  - tests/entrypoints/openai/completion/test_tensorizer_entrypoint.py
   commands:
     - apt-get update && apt-get install -y curl libsodium23
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
     - pytest -v -s model_executor
-    - pytest -v -s entrypoints/openai/test_tensorizer_entrypoint.py
+    - pytest -v -s entrypoints/openai/completion/test_tensorizer_entrypoint.py
 
 - label: Benchmarks # 11min
   timeout_in_minutes: 20
@@ -4508,7 +4508,7 @@ steps:
   - pytest -v -s plugins_tests/test_scheduler_plugins.py
   - pip install -e ./plugins/vllm_add_dummy_model
   - pytest -v -s distributed/test_distributed_oot.py
-  - pytest -v -s entrypoints/openai/test_oot_registration.py # it needs a clean process
+  - pytest -v -s entrypoints/openai/chat_completion/test_oot_registration.py # it needs a clean process
   - pytest -v -s models/test_oot_registration.py # it needs a clean process
   - pytest -v -s plugins/lora_resolvers # unit tests for in-tree lora resolver plugins
 
