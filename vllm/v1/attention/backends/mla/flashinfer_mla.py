@@ -184,7 +184,6 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
         out = torch.zeros(q.shape[0], q.shape[2], self.kv_lora_rank,
                   dtype=torch.bfloat16, device=q.device)
 
-        self._workspace_buffer.fill_(0)
         o = trtllm_batch_decode_with_kv_cache_mla(
             out=out,
             query=q,
