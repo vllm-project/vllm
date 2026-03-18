@@ -371,7 +371,7 @@ class CUDAGraphWrapper:
             if new_input_addresses != entry.input_addresses:
                 if entry.input_buffers is None:
                     # Non-piecewise mode: address change is unexpected
-                    assert False, (
+                    raise AssertionError(
                         f"Input addresses for cudagraphs are different "
                         f"during replay. Expected {entry.input_addresses}, "
                         f"got {new_input_addresses}"
