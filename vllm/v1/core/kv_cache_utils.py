@@ -3,6 +3,7 @@
 """KV-Cache Utilities."""
 
 import copy
+import hashlib
 import os
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Iterator, Sequence
@@ -105,7 +106,7 @@ def init_none_hash(hash_fn: Callable[[Any], bytes]):
         NONE_HASH = BlockHash(hash_fn(hash_seed))
 
 
-@dataclass
+@dataclass(slots=True)
 class KVCacheBlock:
     """KV-cache block metadata."""
 
@@ -475,14 +476,19 @@ def _gen_prompt_embeds_extra_hash_keys(
         end_token_idx: The end token index of the block.
 
     Returns:
-        Return prompt embeddings data of the request if it has prompt embeds.
-        Return empty list otherwise.
+        Return a stable hash of the block prompt embeddings if prompt embeds
+        are present. Return empty list otherwise.
     """
     if request.prompt_embeds is None:
         return []
-    block_prompt_embeds = request.prompt_embeds[start_token_idx:end_token_idx]
-    embeds_bytes = tensor_data(block_prompt_embeds).tobytes()
-    return [embeds_bytes]
+    block_range = (start_token_idx, end_token_idx)
+    embeds_hash = request._prompt_embeds_per_block_hashes.get(block_range)
+    if embeds_hash is None:
+        block_prompt_embeds = request.prompt_embeds[start_token_idx:end_token_idx]
+        # Hash prompt embeds once per block and cache on request
+        embeds_hash = hashlib.sha256(tensor_data(block_prompt_embeds)).digest()
+        request._prompt_embeds_per_block_hashes[block_range] = embeds_hash
+    return [embeds_hash]
 
 
 def generate_block_hash_extra_keys(
@@ -490,7 +496,7 @@ def generate_block_hash_extra_keys(
 ) -> tuple[tuple[Any, ...] | None, int]:
     """Generate extra keys for the block hash. The extra keys can come from
     the multi-modal inputs, request specific metadata (e.g., LoRA names), and
-    data from prompt embeddings.
+    hashed data from prompt embeddings.
 
     Args:
         request: The request object.
@@ -1034,12 +1040,14 @@ def _get_kv_cache_groups_uniform_page_size(
     min_num_layers = min([len(layers) for layers in same_type_layers.values()])
     group_size = min_num_layers
     max_num_layers = max([len(layers) for layers in same_type_layers.values()])
-    if max_num_layers < min_num_layers * 1.25:
-        # If the number of layers is not much larger than the minimum number of layers,
-        # use the maximum number of layers as the group size to avoid too many padding
-        # layers. A typical example is gpt-oss-20b + eagle, with 12 sw + 13 full. We
-        # pad it to (13 sw, 13 full) instead of (12 sw, 24 full). 1.25 is just a
-        # magic number to avoid too many padding layers.
+    if max_num_layers < min_num_layers * 1.5:
+        # If the number of layers is not much larger than the minimum number of
+        # layers, use the maximum number of layers as the group size to avoid
+        # too many padding layers. A typical example is gpt-oss-20b + eagle,
+        # with 12 sw + 13 full. We pad it to (13 sw, 13 full) instead of
+        # (12 sw, 24 full). 1.5 is a heuristic to avoid too many padding
+        # layers while accommodating speculative decoding drafters that add
+        # extra layers to one attention type.
         group_size = max_num_layers
     grouped_layers = []
     for layers in same_type_layers.values():
@@ -1348,8 +1356,10 @@ def _max_memory_usage_bytes_from_groups(
     page_size = get_uniform_page_size(
         [group.kv_cache_spec for group in kv_cache_groups]
     )
-    any_spec = kv_cache_groups[0].kv_cache_spec
-    blocks_needed = cdiv(any_spec.max_memory_usage_bytes(vllm_config), page_size)
+    blocks_needed = sum(
+        cdiv(group.kv_cache_spec.max_memory_usage_bytes(vllm_config), page_size)
+        for group in kv_cache_groups
+    )
 
     return group_size * page_size * blocks_needed
 

@@ -184,6 +184,89 @@ def is_compile_cache_enabled(
     )
 
 
+def _patch_standalone_compile_atomic_save() -> None:
+    """Backport of pytorch/pytorch#162432 for torch < 2.10.0.
+
+    Patches CompiledArtifact.save() to use write_atomic for binary format,
+    preventing corrupt cache files when multiple processes compile
+    concurrently.
+    """
+    from torch._inductor.codecache import write_atomic
+    from torch._inductor.standalone_compile import CompiledArtifact as cls
+
+    if getattr(cls.save, "_vllm_patched", False):
+        return
+
+    original_save = cls.save
+
+    def _save(
+        self: Any, *, path: str, format: Literal["binary", "unpacked"] = "binary"
+    ) -> None:
+        if format != "binary":
+            return original_save(self, path=path, format=format)
+        from torch._dynamo.utils import dynamo_timed
+        from torch._inductor.codecache import torch_key
+        from torch.utils._appending_byte_serializer import BytesWriter
+
+        with dynamo_timed("CompiledArtifact.save"):
+            assert self._artifacts is not None
+            artifact_bytes, cache_info = self._artifacts
+            assert len(cache_info.aot_autograd_artifacts) == 1, cache_info
+            key = cache_info.aot_autograd_artifacts[0]
+            assert not os.path.isdir(path)
+            writer = BytesWriter()
+            writer.write_bytes(torch_key())
+            writer.write_str(key)
+            writer.write_bytes(artifact_bytes)
+            write_atomic(path, writer.to_bytes())
+
+    _save._vllm_patched = True  # type: ignore[attr-defined]
+    cls.save = _save  # type: ignore[assignment]
+    logger.debug("Patched %s.save for atomic writes (torch < 2.10)", cls.__name__)
+
+
+def _patch_constrain_to_fx_strides() -> contextlib.AbstractContextManager:
+    """Context manager that patches inductor's ``constrain_to_fx_strides``
+    to handle opaque (non-tensor) arguments.
+
+    The original calls ``.stride()`` on every FX arg's meta value, which
+    crashes on ``FakeScriptObject`` (the compile-time proxy for hoisted
+    opaque types).  The patched version skips args whose meta value is
+    not a ``torch.Tensor``.
+
+    Returns ``nullcontext`` on torch < 2.11.
+    Upstream issue: https://github.com/pytorch/pytorch/issues/175973
+    """
+    if not is_torch_equal_or_newer("2.11.0.dev"):
+        return contextlib.nullcontext()
+
+    import torch._inductor.ir as _ir
+    import torch._inductor.lowering as _lowering
+    from torch._inductor.virtualized import V as _V
+
+    def _patched(fx_node, *args, **kwargs):
+        def apply_constraint(arg, fx_arg):
+            if isinstance(arg, _ir.IRNode):
+                meta_val = fx_arg.meta.get("val")
+                if isinstance(meta_val, torch.Tensor):
+                    stride_order = _ir.get_stride_order(
+                        meta_val.stride(), _V.graph.sizevars.shape_env
+                    )
+                    return _ir.ExternKernel.require_stride_order(arg, stride_order)
+                return arg
+            if isinstance(arg, dict):
+                return {key: apply_constraint(arg[key], fx_arg[key]) for key in arg}
+            return arg
+
+        args = tuple(
+            apply_constraint(arg, fx_arg) for arg, fx_arg in zip(args, fx_node.args)
+        )
+        kwargs = {k: apply_constraint(v, fx_node.kwargs[k]) for k, v in kwargs.items()}
+        return args, kwargs
+
+    return patch.object(_lowering, "constrain_to_fx_strides", _patched)
+
+
 class InductorStandaloneAdaptor(CompilerInterface):
     """
     The adaptor for the Inductor compiler.
@@ -197,6 +280,8 @@ class InductorStandaloneAdaptor(CompilerInterface):
     name = "inductor_standalone"
 
     def __init__(self, save_format: Literal["binary", "unpacked"]) -> None:
+        if not is_torch_equal_or_newer("2.10.0"):
+            _patch_standalone_compile_atomic_save()
         self.save_format = save_format
 
     def compute_hash(self, vllm_config: VllmConfig) -> str:
@@ -263,13 +348,46 @@ class InductorStandaloneAdaptor(CompilerInterface):
         # Can remove this after the following issue gets fixed
         # https://github.com/pytorch/pytorch/issues/174502
         if envs.VLLM_ENABLE_PREGRAD_PASSES:
-            ctx: Any = contextlib.nullcontext()
+            pregrad_ctx: Any = contextlib.nullcontext()
         else:
-            ctx = patch(
+            pregrad_ctx = patch(
                 "torch._inductor.compile_fx._recursive_pre_grad_passes",
                 lambda gm, _: gm,
             )
-        with ctx:
+
+        # When inputs are FakeTensors (from create_concrete_args),
+        # standalone_compile("from_example_inputs") would normally create
+        # a fresh FakeTensorMode, causing a mode mismatch assertion.
+        # Patch FakeTensorMode in standalone_compile so it reuses the
+        # mode already attached to our FakeTensors. This gives us both
+        # ignore_shape_env=True (from "from_example_inputs") and mode
+        # consistency (from reusing our mode).
+        # Can remove this after the following issue gets fixed:
+        # https://github.com/pytorch/pytorch/issues/176562
+        from torch._subclasses.fake_tensor import FakeTensor
+
+        input_fake_mode = None
+        for x in example_inputs:
+            if isinstance(x, FakeTensor):
+                input_fake_mode = x.fake_mode
+                break
+
+        if input_fake_mode is not None:
+            # Use patch.object on the actual module from sys.modules
+            # because in Python <=3.10 the string-based patch() resolves
+            # torch._inductor.standalone_compile to the wrapper function
+            # (defined in __init__.py) instead of the module.
+            import sys
+
+            fake_mode_ctx: Any = patch.object(
+                sys.modules["torch._inductor.standalone_compile"],
+                "FakeTensorMode",
+                lambda *a, **kw: input_fake_mode,
+            )
+        else:
+            fake_mode_ctx = contextlib.nullcontext()
+
+        with pregrad_ctx, fake_mode_ctx, _patch_constrain_to_fx_strides():
             compiled_graph = standalone_compile(graph, example_inputs, **compile_kwargs)
 
         if use_aot:
@@ -325,6 +443,7 @@ class InductorStandaloneAdaptor(CompilerInterface):
         inductor_compiled_graph = torch._inductor.CompiledArtifact.load(
             path=path, format=self.save_format
         )
+        compilation_counter.num_compiled_artifacts_loaded += 1
         from torch._inductor.compile_fx import graph_returns_tuple
 
         returns_tuple = graph_returns_tuple(graph)
@@ -511,6 +630,7 @@ class InductorAdaptor(CompilerInterface):
             stack.enter_context(
                 torch._functorch.config.patch(enable_remote_autograd_cache=False)
             )
+            stack.enter_context(_patch_constrain_to_fx_strides())
 
             compiled_graph = compile_fx(
                 graph,

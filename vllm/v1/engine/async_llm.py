@@ -19,16 +19,16 @@ from vllm.distributed.weight_transfer.base import (
     WeightTransferUpdateRequest,
 )
 from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.engine.protocol import EngineClient
-from vllm.inputs import PromptType, StreamingInput
+from vllm.engine.protocol import EngineClient, StreamingInput
+from vllm.entrypoints.serve.elastic_ep.middleware import set_scaling_elastic_ep
+from vllm.inputs import ProcessorInputs, PromptType
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.outputs import STREAM_FINISHED, PoolingRequestOutput, RequestOutput
 from vllm.plugins.io_processors import get_io_processor
 from vllm.pooling_params import PoolingParams
-from vllm.renderers import merge_kwargs, renderer_from_config
-from vllm.renderers.inputs import DictPrompt, TokPrompt
+from vllm.renderers import renderer_from_config
 from vllm.renderers.inputs.preprocess import extract_prompt_components
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.tasks import SupportedTask
@@ -132,9 +132,10 @@ class AsyncLLM(EngineClient):
                 "enabling logging without default stat loggers."
             )
 
-        self.renderer = renderer = renderer_from_config(self.model_config)
+        self.renderer = renderer = renderer_from_config(self.vllm_config)
         self.io_processor = get_io_processor(
             self.vllm_config,
+            self.renderer,
             self.model_config.io_processor_plugin,
         )
 
@@ -172,9 +173,6 @@ class AsyncLLM(EngineClient):
             )
             self.logger_manager.log_engine_initialized()
 
-        # Pause / resume state for async RL workflows.
-        self._pause_cond = asyncio.Condition()
-        self._paused = False
         self._client_count = client_count
 
         self.output_handler: asyncio.Task | None = None
@@ -266,16 +264,15 @@ class AsyncLLM(EngineClient):
     def __del__(self):
         self.shutdown()
 
-    def shutdown(self):
+    def shutdown(self, timeout: float | None = None) -> None:
         """Shutdown, cleaning up the background proc and IPC."""
-
         shutdown_prometheus()
 
-        if engine_core := getattr(self, "engine_core", None):
-            engine_core.shutdown()
+        if renderer := getattr(self, "renderer", None):
+            renderer.shutdown()
 
-        if input_processor := getattr(self, "input_processor", None):
-            input_processor.close()
+        if engine_core := getattr(self, "engine_core", None):
+            engine_core.shutdown(timeout=timeout)
 
         handler = getattr(self, "output_handler", None)
         if handler is not None:
@@ -293,8 +290,7 @@ class AsyncLLM(EngineClient):
         request_id: str,
         prompt: EngineCoreRequest
         | PromptType
-        | DictPrompt
-        | TokPrompt
+        | ProcessorInputs
         | AsyncGenerator[StreamingInput, None],
         params: SamplingParams | PoolingParams,
         arrival_time: float | None = None,
@@ -304,6 +300,7 @@ class AsyncLLM(EngineClient):
         priority: int = 0,
         data_parallel_rank: int | None = None,
         prompt_text: str | None = None,
+        reasoning_ended: bool | None = None,
     ) -> RequestOutputCollector:
         """Add new request to the AsyncLLM."""
 
@@ -323,22 +320,10 @@ class AsyncLLM(EngineClient):
                 "prompt logprobs"
             )
 
-        if params.truncate_prompt_tokens is not None:
-            params_type = type(params).__name__
-            warnings.warn(
-                f"The `truncate_prompt_tokens` parameter in `{params_type}` "
-                "is deprecated and will be removed in v0.16. "
-                "Please pass it via `tokenization_kwargs` instead.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-
-            tokenization_kwargs = merge_kwargs(
-                tokenization_kwargs,
-                dict(truncate_prompt_tokens=params.truncate_prompt_tokens),
-            )
-
         if isinstance(prompt, AsyncGenerator):
+            if reasoning_ended is not None:
+                raise NotImplementedError
+
             # Streaming input case.
             return await self._add_streaming_input_request(
                 request_id,
@@ -354,6 +339,12 @@ class AsyncLLM(EngineClient):
 
         # Convert Input --> Request.
         if isinstance(prompt, EngineCoreRequest):
+            logger.warning_once(
+                "Passing EngineCoreRequest to AsyncLLM.generate() and .add_requests() "
+                "is deprecated and will be removed in v0.18. You should instead pass "
+                "the outputs of Renderer.render_cmpl() or Renderer.render_chat()."
+            )
+
             request = prompt
             if request_id != request.request_id:
                 logger.warning_once(
@@ -362,23 +353,22 @@ class AsyncLLM(EngineClient):
                     "latter will be used, and the former will be ignored."
                 )
         else:
-            if prompt_text is not None:
-                raise ValueError(
-                    "should only provide prompt_text with EngineCoreRequest"
-                )
             request = self.input_processor.process_inputs(
                 request_id,
                 prompt,
                 params,
+                supported_tasks=await self.get_supported_tasks(),
                 arrival_time=arrival_time,
                 lora_request=lora_request,
                 tokenization_kwargs=tokenization_kwargs,
                 trace_headers=trace_headers,
                 priority=priority,
                 data_parallel_rank=data_parallel_rank,
-                supported_tasks=await self.get_supported_tasks(),
             )
             prompt_text, _, _ = extract_prompt_components(self.model_config, prompt)
+
+        if reasoning_ended is not None:
+            request.reasoning_ended = reasoning_ended
 
         self.input_processor.assign_request_id(request)
 
@@ -386,10 +376,6 @@ class AsyncLLM(EngineClient):
         # we can call __init__ before the event loop, which enables us
         # to handle startup failure gracefully in the OpenAI server.
         self._run_output_handler()
-
-        # Respect pause state before accepting new requests.
-        async with self._pause_cond:
-            await self._pause_cond.wait_for(lambda: not self._paused)
 
         # Create a new output collector for the request.
         queue = RequestOutputCollector(params.output_kind, request.request_id)
@@ -448,6 +434,7 @@ class AsyncLLM(EngineClient):
         self._validate_streaming_input_sampling_params(sampling_params)
 
         inputs = dict(
+            supported_tasks=await self.get_supported_tasks(),
             arrival_time=arrival_time,
             lora_request=lora_request,
             tokenization_kwargs=tokenization_kwargs,
@@ -543,8 +530,7 @@ class AsyncLLM(EngineClient):
         self,
         prompt: EngineCoreRequest
         | PromptType
-        | DictPrompt
-        | TokPrompt
+        | ProcessorInputs
         | AsyncGenerator[StreamingInput, None],
         sampling_params: SamplingParams,
         request_id: str,
@@ -555,6 +541,7 @@ class AsyncLLM(EngineClient):
         trace_headers: Mapping[str, str] | None = None,
         priority: int = 0,
         data_parallel_rank: int | None = None,
+        reasoning_ended: bool | None = None,
     ) -> AsyncGenerator[RequestOutput, None]:
         """
         Main function called by the API server to kick off a request
@@ -583,6 +570,7 @@ class AsyncLLM(EngineClient):
                 priority=priority,
                 data_parallel_rank=data_parallel_rank,
                 prompt_text=prompt_text,
+                reasoning_ended=reasoning_ended,
             )
 
             # The output_handler task pushes items into the queue.
@@ -660,8 +648,12 @@ class AsyncLLM(EngineClient):
         engine_core = self.engine_core
         output_processor = self.output_processor
         log_stats = self.log_stats
-        logger_manager = self.logger_manager
-        input_processor = self.input_processor
+        # We use a mutable list for logger_manager so that it can be updated
+        # during elastic EP scaling (see scale_elastic_ep) without creating
+        # a circular reference via self.
+        self._logger_ref = [self.logger_manager]
+        logger_ref = self._logger_ref
+        renderer = self.renderer
         chunk_size = envs.VLLM_V1_OUTPUT_PROC_CHUNK_SIZE
 
         async def output_handler():
@@ -704,12 +696,12 @@ class AsyncLLM(EngineClient):
                     # 4) Logging.
                     # TODO(rob): make into a coroutine and launch it in
                     # background thread once Prometheus overhead is non-trivial.
-                    if logger_manager:
-                        logger_manager.record(
+                    if logger_ref[0]:
+                        logger_ref[0].record(
                             engine_idx=outputs.engine_index,
                             scheduler_stats=outputs.scheduler_stats,
                             iteration_stats=iteration_stats,
-                            mm_cache_stats=input_processor.stat_mm_cache(),
+                            mm_cache_stats=renderer.stat_mm_cache(),
                         )
             except Exception as e:
                 logger.exception("AsyncLLM output_handler failed.")
@@ -741,7 +733,9 @@ class AsyncLLM(EngineClient):
         """
         Pause generation to allow model weight updates.
 
-        New generation/encoding requests are blocked until resume.
+        All mode handling (abort / wait / keep) and cache clearing is done
+        in the engine. New generation/encoding requests will not be scheduled
+        until resume is called.
 
         Args:
             mode: How to handle in-flight requests:
@@ -751,11 +745,8 @@ class AsyncLLM(EngineClient):
                 - ``"keep"``: Freeze requests in queue; they resume on
                   :meth:`resume_generation`.
             wait_for_inflight_requests: DEPRECATED: use mode argument.
-                Whether to wait for in-flight requests to complete before pausing.
             clear_cache: Whether to clear KV cache and prefix cache after
                 draining. Set to ``False`` to preserve cache for faster resume.
-                Default is ``True`` (clear caches).
-
         """
         if wait_for_inflight_requests:
             warnings.warn(
@@ -766,60 +757,33 @@ class AsyncLLM(EngineClient):
                 stacklevel=2,
             )
             mode = "wait"
-
-        if mode == "keep":
-            # Freeze requests in the scheduler - they will resume on
-            # resume_generation().
-            await self.engine_core.pause_scheduler_async()
-        else:
-            if self._client_count > 1:
-                raise NotImplementedError(
-                    "pause_generation is not supported with --api-server-count > 1"
-                    " when mode is not 'keep'"
-                )
-            async with self._pause_cond:
-                if not self._paused:
-                    self._paused = True
-
-                    if mode == "abort":
-                        request_ids = list(self.output_processor.request_states.keys())
-                        if request_ids:
-                            await self.abort(request_ids, internal=True)
-                    elif mode == "wait":
-                        if self.output_processor.has_unfinished_requests():
-                            await self.output_processor.wait_for_requests_to_drain()
-                    else:
-                        raise ValueError(f"Invalid mode: {mode}")
-
-        # Clear cache
-        if clear_cache:
-            await self.reset_prefix_cache(reset_running_requests=True)
-            await self.reset_mm_cache()
-            await self.reset_encoder_cache()
+        await self.engine_core.pause_scheduler_async(mode=mode, clear_cache=clear_cache)
+        # Small sleep to help ensure that final outputs from any in-flight requests are
+        # returned prior to this method returning. These outputs come out of the engine
+        # prior to the wait-for-idle completion event, but involve additional async
+        # tasks in output processing.
+        # Note that this is not required for correctness, just more intuitive ordering
+        # of events from caller's pov.
+        await asyncio.sleep(0.02)
 
     async def resume_generation(self) -> None:
         """Resume generation after :meth:`pause_generation`."""
-
-        async with self._pause_cond:
-            await self.engine_core.resume_scheduler_async()
-            self._paused = False
-            self._pause_cond.notify_all()  # Wake up all waiting requests
+        await self.engine_core.resume_scheduler_async()
 
     async def is_paused(self) -> bool:
         """Return whether the engine is currently paused."""
-
-        async with self._pause_cond:
-            return self._paused
+        return await self.engine_core.is_scheduler_paused_async()
 
     async def encode(
         self,
-        prompt: PromptType | DictPrompt | TokPrompt,
+        prompt: PromptType | ProcessorInputs,
         pooling_params: PoolingParams,
         request_id: str,
         lora_request: LoRARequest | None = None,
         trace_headers: Mapping[str, str] | None = None,
         priority: int = 0,
         tokenization_kwargs: dict[str, Any] | None = None,
+        reasoning_ended: bool | None = None,
     ) -> AsyncGenerator[PoolingRequestOutput, None]:
         """
         Main function called by the API server to kick off a request
@@ -845,6 +809,7 @@ class AsyncLLM(EngineClient):
                 tokenization_kwargs=tokenization_kwargs,
                 trace_headers=trace_headers,
                 priority=priority,
+                reasoning_ended=reasoning_ended,
             )
 
             # The output_handler task pushes items into the queue.
@@ -924,7 +889,7 @@ class AsyncLLM(EngineClient):
         await asyncio.gather(*coros)
 
     async def reset_mm_cache(self) -> None:
-        self.input_processor.clear_mm_cache()
+        self.renderer.clear_mm_cache()
         await self.engine_core.reset_mm_cache_async()
 
     async def reset_prefix_cache(
@@ -937,10 +902,8 @@ class AsyncLLM(EngineClient):
     async def reset_encoder_cache(self) -> None:
         await self.engine_core.reset_encoder_cache_async()
 
-    async def sleep(self, level: int = 1) -> None:
-        if level > 0:
-            await self.reset_prefix_cache()
-        await self.engine_core.sleep_async(level)
+    async def sleep(self, level: int = 1, mode: PauseMode = "abort") -> None:
+        await self.engine_core.sleep_async(level, mode)
 
         if self.logger_manager is not None:
             self.logger_manager.record_sleep_state(1, level)
@@ -1018,17 +981,13 @@ class AsyncLLM(EngineClient):
                 new_data_parallel_size,
             )
             return
-        logger.info(
-            "Waiting for requests to drain before scaling up to %s engines...",
-            new_data_parallel_size,
-        )
-        await self.wait_for_requests_to_drain(drain_timeout)
-        logger.info(
-            "Requests have been drained, proceeding with scale to %s engines",
-            new_data_parallel_size,
-        )
-        await self.engine_core.scale_elastic_ep(new_data_parallel_size)
-        self.vllm_config.parallel_config.data_parallel_size = new_data_parallel_size
+
+        if envs.VLLM_ELASTIC_EP_DRAIN_REQUESTS:
+            logger.info(
+                "VLLM_ELASTIC_EP_DRAIN_REQUESTS is set, "
+                "waiting for requests to drain before scaling"
+            )
+            await self.wait_for_requests_to_drain(drain_timeout)
 
         # recreate stat loggers
         if new_data_parallel_size > old_data_parallel_size and self.log_stats:
@@ -1041,6 +1000,18 @@ class AsyncLLM(EngineClient):
                 engine_idxs=list(range(new_data_parallel_size)),
                 custom_stat_loggers=None,
             )
+            # Update the mutable ref so output_handler picks up the
+            # new logger without creating a circular reference via self.
+            if hasattr(self, "_logger_ref"):
+                self._logger_ref[0] = self.logger_manager
+            self.logger_manager.log_engine_initialized()
+
+        set_scaling_elastic_ep(True)
+        try:
+            await self.engine_core.scale_elastic_ep(new_data_parallel_size)
+            self.vllm_config.parallel_config.data_parallel_size = new_data_parallel_size
+        finally:
+            set_scaling_elastic_ep(False)
 
     @property
     def is_running(self) -> bool:

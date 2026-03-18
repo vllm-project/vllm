@@ -21,6 +21,7 @@ from vllm.entrypoints.chat_utils import (
     _parse_chat_message_content_parts,
 )
 from vllm.inputs import TokensPrompt
+from vllm.inputs.data import PromptType, TextPrompt
 from vllm.model_executor.models.interfaces import supports_score_template
 from vllm.multimodal.inputs import MultiModalDataDict, MultiModalUUIDDict
 from vllm.outputs import PoolingRequestOutput
@@ -153,29 +154,89 @@ def validate_score_input(
     return score_input_1, score_input_2
 
 
+def _ensure_str(content: list[ConversationMessage]) -> str:
+    """Extract a single string prompt from parsed conversation content."""
+    assert len(content) == 1
+    prompt = content[0]["content"]
+    if prompt is not None and isinstance(prompt, str):
+        return cast(str, prompt)
+    raise ValueError(f"Only string content is supported, but got {content}.")
+
+
 def parse_score_data(
     data_1: ScoreData,
     data_2: ScoreData,
     model_config: ModelConfig,
 ) -> tuple[str, str, MultiModalDataDict | None, MultiModalUUIDDict | None]:
+    """Parse a query-document pair into text prompts and shared multi-modal
+    data.
+
+    Uses a **single** :class:`MultiModalItemTracker` so that multi-modal
+    items from both inputs are merged into one ``mm_data`` dict.  This is
+    the correct behaviour for cross-encoder scoring, where query and
+    document are concatenated into a single model prompt.
+    """
     mm_tracker = MultiModalItemTracker(model_config)
 
     content_1 = _parse_score_content("query", data_1, mm_tracker)
     content_2 = _parse_score_content("document", data_2, mm_tracker)
 
-    def ensure_str(content: list[ConversationMessage]) -> str:
-        assert len(content) == 1
-        prompt = content[0]["content"]
-        if prompt is not None and isinstance(prompt, str):
-            return cast(str, prompt)
-        else:
-            raise ValueError(f"Only string content is supported, but got {content}.")
-
-    prompt_1 = ensure_str(content_1)
-    prompt_2 = ensure_str(content_2)
+    prompt_1 = _ensure_str(content_1)
+    prompt_2 = _ensure_str(content_2)
     mm_items, mm_uuids = mm_tracker.resolve_items()
 
     return prompt_1, prompt_2, mm_items, mm_uuids
+
+
+def parse_score_data_single(
+    data: ScoreData,
+    role: str,
+    model_config: ModelConfig,
+) -> tuple[str, MultiModalDataDict | None, MultiModalUUIDDict | None]:
+    """Parse **one** ScoreData into a text prompt and its own multi-modal
+    data.
+
+    Unlike :func:`parse_score_data`, each call creates an **independent**
+    :class:`MultiModalItemTracker` so multi-modal items are kept separate.
+    This is the correct behaviour for late-interaction scoring, where
+    query and document are encoded independently.
+    """
+    mm_tracker = MultiModalItemTracker(model_config)
+    content = _parse_score_content(role, data, mm_tracker)
+
+    prompt = _ensure_str(content)
+    mm_items, mm_uuids = mm_tracker.resolve_items()
+    return prompt, mm_items, mm_uuids
+
+
+def score_data_to_prompts(
+    data_list: list[ScoreData],
+    role: str,
+    model_config: ModelConfig,
+) -> list[PromptType]:
+    """Convert a list of ScoreData into PromptType objects.
+
+    For plain text inputs, returns the string directly.
+    For multimodal inputs (list of content parts), parses them into
+    a :class:`TextPrompt` with attached ``multi_modal_data`` /
+    ``multi_modal_uuids``.
+
+    This is used by late-interaction scoring where each query/document
+    is encoded independently.
+    """
+    prompts: list[PromptType] = []
+    for data in data_list:
+        if isinstance(data, str):
+            prompts.append(data)
+        else:
+            text, mm_data, mm_uuids = parse_score_data_single(data, role, model_config)
+            prompt: TextPrompt = TextPrompt(prompt=text)
+            if mm_data is not None:
+                prompt["multi_modal_data"] = mm_data
+            if mm_uuids is not None:
+                prompt["multi_modal_uuids"] = mm_uuids
+            prompts.append(prompt)
+    return prompts
 
 
 def _parse_score_content(

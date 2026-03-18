@@ -32,9 +32,43 @@ atexit.register(global_thread_pool.shutdown)
 
 MEDIA_CONNECTOR_REGISTRY = ExtensionManager()
 
+MODALITY_IO_MAP: dict[str, type[MediaIO]] = {
+    "audio": AudioMediaIO,
+    "image": ImageMediaIO,
+    "video": VideoMediaIO,
+}
+
+
+def merge_media_io_kwargs(
+    defaults: dict[str, dict[str, Any]] | None,
+    overrides: dict[str, dict[str, Any]] | None,
+) -> dict[str, dict[str, Any]] | None:
+    """Merge config-level and per-request media_io_kwargs per modality.
+
+    Each modality key is merged using the corresponding MediaIO subclass's
+    ``merge_kwargs``, which may apply modality-specific logic (e.g.
+    VideoMediaIO clears cross-dependent fps/num_frames fields).
+    """
+    if not defaults and not overrides:
+        return None
+    all_keys = set(defaults or {}) | set(overrides or {})
+    merged = {}
+    for key in all_keys:
+        io_cls = MODALITY_IO_MAP.get(key, MediaIO)
+        merged[key] = io_cls.merge_kwargs(
+            (defaults or {}).get(key),
+            (overrides or {}).get(key),
+        )
+    return merged or None
+
 
 @MEDIA_CONNECTOR_REGISTRY.register("http")
 class MediaConnector:
+    """Configuration values can be user-provided either by --media-io-kwargs or
+    by the runtime API field "media_io_kwargs". Ensure proper validation and
+    error handling.
+    """
+
     def __init__(
         self,
         media_io_kwargs: dict[str, dict[str, Any]] | None = None,
@@ -146,7 +180,7 @@ class MediaConnector:
 
             connection = self.connection
             data = connection.get_bytes(
-                url,
+                url_spec.url,
                 timeout=fetch_timeout,
                 allow_redirects=envs.VLLM_MEDIA_URL_ALLOW_REDIRECTS,
             )
@@ -177,7 +211,7 @@ class MediaConnector:
 
             connection = self.connection
             data = await connection.async_get_bytes(
-                url,
+                url_spec.url,
                 timeout=fetch_timeout,
                 allow_redirects=envs.VLLM_MEDIA_URL_ALLOW_REDIRECTS,
             )

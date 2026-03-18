@@ -23,6 +23,17 @@ from vllm import _custom_ops as ops
 from vllm.config import set_current_vllm_config
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.platforms import current_platform
+
+# TODO: Integrate ROCMAiterMLASparseBackend for ROCm.
+# The ROCm sparse MLA backend (rocm_aiter_mla_sparse.py) has a compatible
+# forward_mqa interface but needs validation on ROCm hardware.
+if not current_platform.is_cuda():
+    pytest.skip(
+        "Sparse MLA backend tests currently only support CUDA. "
+        "ROCm support requires integrating ROCMAiterMLASparseBackend.",
+        allow_module_level=True,
+    )
+
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
     FlashInferMLASparseBackend,
@@ -179,6 +190,16 @@ def test_sparse_backend_decode_correctness(
 ):
     if kv_cache_dtype not in backend_cls.supported_kv_cache_dtypes:
         pytest.skip(f"{backend_cls.get_name()} does not support {kv_cache_dtype}")
+
+    if (
+        backend_cls == FlashMLASparseBackend
+        and kv_cache_dtype.startswith("fp8")
+        and kv_cache_dtype != "fp8_ds_mla"
+    ):
+        pytest.skip(
+            "FlashMLA Sparse Attention backend fp8 only supports "
+            "fp8_ds_mla kv-cache dtype"
+        )
 
     supported_block_sizes = backend_cls.get_supported_kernel_block_sizes()
     if block_size not in supported_block_sizes:
@@ -408,7 +429,7 @@ def test_sparse_backend_decode_correctness(
         num_blocks=vllm_config.cache_config.num_gpu_blocks,
         common_attn_metadata=common_attn_metadata,
         randomize_blocks=False,
-        kv_cache_dtype=kv_cache_dtype if use_fp8_ds_mla_quantization else "auto",
+        kv_cache_dtype=kv_cache_dtype,
         scale=kv_cache_scale,
     )
 

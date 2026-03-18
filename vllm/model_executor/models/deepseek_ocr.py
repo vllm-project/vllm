@@ -196,8 +196,10 @@ class DeepseekOCRProcessingInfo(BaseProcessingInfo):
             crop_mode=CROP_MODE,
             strategy="v1",
         )
+
         return self.ctx.get_hf_processor(
-            DeepseekOCRProcessor, **{**kwargs, **v1_processor_config}
+            DeepseekOCRProcessor,
+            **{**v1_processor_config, **kwargs},
         )
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
@@ -255,8 +257,7 @@ class DeepseekOCRDummyInputsBuilder(BaseDummyInputsBuilder[DeepseekOCRProcessing
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
-        mm_processor_kwargs: Mapping[str, object] | None = None,
+        mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
 
@@ -453,10 +454,7 @@ class DeepseekOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, Supports
         # support arbitrary resolutions via pos-encoding interpolation,
         # so Tiny/Small/Base/Large variants all work with the same weights.
         base_size = pixel_values.shape[-1]
-        if images_crop is not None and images_crop.numel() > 0:
-            image_size = images_crop.shape[-1]
-        else:
-            image_size = base_size
+        image_size = images_crop.shape[-1] if images_crop is not None else base_size
 
         return DeepseekOCRImagePixelInputs(
             type="pixel_values",
