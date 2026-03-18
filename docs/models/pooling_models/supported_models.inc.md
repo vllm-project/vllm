@@ -145,6 +145,14 @@ If your model is not in the above list, we will try to automatically convert the
 
 #### Text-only Models
 
+[0](examples/pooling/score/template/bge-reranker-v2-gemma.jinja)
+[1](../examples/pooling/score/template/bge-reranker-v2-gemma.jinja)
+[2](../../examples/pooling/score/template/bge-reranker-v2-gemma.jinja)
+[3](../../../examples/pooling/score/template/bge-reranker-v2-gemma.jinja)
+[4](../../../../examples/pooling/score/template/bge-reranker-v2-gemma.jinja)
+[5](../../../../../examples/pooling/score/template/bge-reranker-v2-gemma.jinja)
+[6](../../../../../../examples/pooling/score/template/bge-reranker-v2-gemma.jinja)
+
 | Architecture | Models | Example HF Models | Score template (see note) | [LoRA](../../features/lora.md) | [PP](../../serving/parallelism_scaling.md) |
 | ------------ | ------ | ----------------- | ------------------------- | --------------------------- | --------------------------------------- |
 | `BertForSequenceClassification` | BERT-based | `cross-encoder/ms-marco-MiniLM-L-6-v2`, etc. | N/A | | |
