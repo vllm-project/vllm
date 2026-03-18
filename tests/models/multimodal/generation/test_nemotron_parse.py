@@ -10,6 +10,7 @@ from tests.models.utils import check_logprobs_close
 from vllm.assets.image import ImageAsset
 
 from ....conftest import HfRunner, PromptImageInput, VllmRunner
+from ....utils import create_new_process_for_each_test
 
 IMAGE = ImageAsset("paper-11").pil_image_ext(ext="png").convert("RGB")
 PROMPT = "</s><s><predict_bbox><predict_classes><output_markdown>"
@@ -67,6 +68,7 @@ def run_test(
 @pytest.mark.parametrize("model", ["nvidia/NVIDIA-Nemotron-Parse-v1.1"])
 @pytest.mark.parametrize("dtype", ["bfloat16"])
 @pytest.mark.parametrize("num_logprobs", [10])
+@create_new_process_for_each_test()  # Hangs otherwise
 def test_models(
     hf_runner, vllm_runner, model: str, dtype: str, num_logprobs: int
 ) -> None:
