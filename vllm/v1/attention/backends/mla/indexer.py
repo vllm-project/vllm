@@ -55,7 +55,10 @@ class DeepseekV32IndexerBackend(AttentionBackend):
         head_size: int,
         cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
-        assert num_kv_heads == 1
+        # MLA only supports num_kv_heads=1, but we don't assert here
+        # because the caller may pass different values for testing purposes
+        # (e.g., CpuGpuOffloadingHandlers uses arbitrary values).
+        # The actual validation happens at model initialization time.
         return (num_blocks, block_size, head_size)
 
     @staticmethod
