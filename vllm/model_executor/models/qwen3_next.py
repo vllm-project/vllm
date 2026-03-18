@@ -427,7 +427,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         self.aux_stream = aux_stream()
         self.events = (
             [torch.cuda.Event(), torch.cuda.Event()]
-            if current_platform.is_cuda()
+            if current_platform.is_cuda_alike()
             else [None, None]
         )
 
