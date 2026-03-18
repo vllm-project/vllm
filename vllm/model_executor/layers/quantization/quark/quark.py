@@ -81,6 +81,16 @@ class QuarkConfig(QuantizationConfig):
                 and "requires you to execute the configuration file" not in error_text
             ):
                 raise
+
+            import logging
+
+            logger = logging.getLogger(__name__)
+            logger.warning(
+                "The model %s requires custom code to be executed. "
+                "Falling back to `trust_remote_code=True`.",
+                model_name,
+            )
+
             self.hf_config = get_config(
                 model=model_name,
                 trust_remote_code=True,
