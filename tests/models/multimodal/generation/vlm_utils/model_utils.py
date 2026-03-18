@@ -1235,9 +1235,9 @@ def voxtral_patch_hf_runner(hf_model: "HfRunner") -> "HfRunner":
     generated).
     """
 
-    import base64
     import io
 
+    import pybase64 as base64
     import soundfile as sf
 
     processor = hf_model.processor

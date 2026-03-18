@@ -133,7 +133,7 @@ _TEXT_GENERATION_MODELS = {
     "HunYuanDenseV1ForCausalLM": ("hunyuan_v1", "HunYuanDenseV1ForCausalLM"),
     "HCXVisionForCausalLM": ("hyperclovax_vision", "HCXVisionForCausalLM"),
     "HCXVisionV2ForCausalLM": ("hyperclovax_vision_v2", "HCXVisionV2ForCausalLM"),
-    "HyperCLOVAXForCausalLM": ("llama", "LlamaForCausalLM"),
+    "HyperCLOVAXForCausalLM": ("hyperclovax", "HyperCLOVAXForCausalLM"),
     "InternLMForCausalLM": ("llama", "LlamaForCausalLM"),
     "InternLM2ForCausalLM": ("internlm2", "InternLM2ForCausalLM"),
     "InternLM2VEForCausalLM": ("internlm2_ve", "InternLM2VEForCausalLM"),
@@ -274,8 +274,10 @@ _LATE_INTERACTION_MODELS = {
     "ColBERTJinaRobertaModel": ("colbert", "ColBERTJinaRobertaModel"),
     # [Multimodal]
     "ColModernVBertForRetrieval": ("colmodernvbert", "ColModernVBertForRetrieval"),
+    "ColPaliForRetrieval": ("colpali", "ColPaliModel"),
     "ColQwen3": ("colqwen3", "ColQwen3Model"),
     "OpsColQwen3Model": ("colqwen3", "ColQwen3Model"),
+    "ColQwen3_5": ("colqwen3_5", "ColQwen3_5Model"),
     "Qwen3VLNemotronEmbedModel": ("colqwen3", "ColQwen3Model"),
 }
 
@@ -534,6 +536,10 @@ _MULTIMODAL_MODELS = {
     "VoxtralForConditionalGeneration": ("voxtral", "VoxtralForConditionalGeneration"),  # noqa: E501
     "VoxtralRealtimeGeneration": ("voxtral_realtime", "VoxtralRealtimeGeneration"),  # noqa: E501
     # [Encoder-decoder]
+    "CohereASRForConditionalGeneration": (
+        "cohere_asr",
+        "CohereASRForConditionalGeneration",
+    ),
     "NemotronParseForConditionalGeneration": (
         "nemotron_parse",
         "NemotronParseForConditionalGeneration",

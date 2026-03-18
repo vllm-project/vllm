@@ -557,7 +557,6 @@ class Qwen3_VisionTransformer(nn.Module):
         max_seqlen = torch.tensor(
             MMEncoderAttention.compute_max_seqlen(self.attn_backend, cu_seqlens),
             dtype=torch.int32,
-            device=self.device,
         )
         cu_seqlens = MMEncoderAttention.maybe_recompute_cu_seqlens(
             self.attn_backend,
@@ -1959,107 +1958,6 @@ class Qwen3VLForConditionalGeneration(
                     offset = vision_end_offset + 1
             else:
                 raise ValueError(f"Unsupported modality: {mm_feature.modality}")
-
-    def _get_evs_mask_segments(
-        self, mm_position: PlaceholderRange, expected_frames: int
-    ) -> list[torch.Tensor] | None:
-        """Extract contiguous segments from EVS is_embed mask.
-
-        The EVS (Efficient Video Sampling) mask marks which placeholder
-        positions should be filled with video embeddings. This method splits
-        the mask into contiguous segments, where each segment represents one
-        retained frame.
-
-        This is a pure function - it does not modify any state and always
-        returns the same output for the same input (idempotent).
-
-        Args:
-            mm_position: MultiModal position containing the is_embed mask
-            expected_frames: Expected number of frame segments
-
-        Returns:
-            List of tensors, each containing indices for one frame segment,
-            or None if EVS is not enabled or validation fails.
-        """
-        is_embed_mask = getattr(mm_position, "is_embed", None)
-        if is_embed_mask is None:
-            return None
-
-        # Find all True positions in the mask
-        mask_tensor = torch.as_tensor(is_embed_mask, dtype=torch.bool).view(-1)
-        true_indices = torch.nonzero(mask_tensor, as_tuple=False).flatten()
-        if true_indices.numel() == 0:
-            return None
-
-        # Split into contiguous segments (where diff > 1 indicates a gap)
-        if true_indices.numel() == 1:
-            segments = [true_indices]
-        else:
-            diffs = torch.diff(true_indices)
-            split_points = torch.nonzero(diffs != 1, as_tuple=False).flatten()
-            if split_points.numel() == 0:
-                segments = [true_indices]
-            else:
-                segments = torch.tensor_split(
-                    true_indices, split_points.add(1).tolist()
-                )
-
-        # Validate segment count matches expected frames
-        if len(segments) < expected_frames:
-            logger.debug(
-                "EVS mask segments (%d) do not match expected frames (%d)",
-                len(segments),
-                expected_frames,
-            )
-            return None
-
-        return segments[:expected_frames]
-
-    def _extract_frame_offsets_from_mask(
-        self, mm_position: PlaceholderRange, expected_frames: int
-    ) -> list[int] | None:
-        """Return relative offsets for each EVS-retained frame.
-
-        The prompt processor stores a boolean mask inside ``mm_position`` that
-        marks which placeholder locations should be populated with video
-        embeddings. By splitting that mask into contiguous runs we can recover
-        the start of every retained frame without probing ``input_tokens``.
-
-        Args:
-            mm_position: MultiModal position containing the is_embed mask
-            expected_frames: Expected number of frames
-
-        Returns:
-            List of starting offsets (relative to mm_position) for each frame,
-            or None if EVS is not enabled.
-        """
-        segments = self._get_evs_mask_segments(mm_position, expected_frames)
-        if segments is None:
-            return None
-
-        return [int(segment[0].item()) for segment in segments]
-
-    def _get_actual_frame_token_counts(
-        self, mm_position: PlaceholderRange, expected_frames: int
-    ) -> list[int] | None:
-        """Return actual token count for each EVS-retained frame.
-
-        This function calculates the actual number of tokens per frame by
-        analyzing the is_embed mask, accounting for EVS pruning. Each frame
-        may have a different token count due to content-aware pruning.
-
-        Args:
-            mm_position: MultiModal position containing the is_embed mask
-            expected_frames: Expected number of frames
-
-        Returns:
-            List of token counts for each frame, or None if EVS is not enabled.
-        """
-        segments = self._get_evs_mask_segments(mm_position, expected_frames)
-        if segments is None:
-            return None
-
-        return [len(seg) for seg in segments]
 
     def get_mrope_input_positions(
         self,
