@@ -111,7 +111,7 @@ def _build_serving_chat(engine: AsyncLLM) -> OpenAIServingChat:
             [{"prompt_token_ids": [1, 2, 3]}],
         )
 
-    serving_chat.openai_serving_render._preprocess_chat = AsyncMock(
+    serving_chat.openai_serving_render.preprocess_chat = AsyncMock(
         side_effect=_fake_preprocess_chat
     )
     return serving_chat

@@ -619,7 +619,7 @@ class FusedMoE(CustomOp):
         self.use_overlapped = (
             not (
                 (self.enable_eplb and backend != "allgather_reducescatter")
-                or self.moe_parallel_config.use_fi_all2allv_kernels
+                or self.moe_parallel_config.use_fi_nvl_two_sided_kernels
             )
             and self._shared_experts is not None
         )
@@ -1402,18 +1402,22 @@ class FusedMoE(CustomOp):
         weights = list(self.named_parameters())
         weights = [(name, _maybe_make_contiguous(name, p)) for name, p in weights]
 
+        # `w13_input_scale` and `w2_input_scale` are global per-tensor
+        # activation scales shared across all experts (e.g. NVFP4).
+        # They are broadcast views (stride 0) from .expand() and are
+        # not actual expert weights, so exclude them from EPLB.
+        NON_EXPERT_WEIGHTS = {
+            "e_score_correction_bias",
+            "w13_input_scale",
+            "w2_input_scale",
+        }
+
         assert all(
             weight.is_contiguous()
             for name, weight in weights
             if not (name.startswith("_shared_experts.") or name.startswith("_gate."))
+            and name not in NON_EXPERT_WEIGHTS
         )
-
-        # Filter out the non-expert weights.
-        # `e_score_correction_bias` is a bias for each logical expert,
-        # with shape (num_logical_experts,), not an expert weight.
-        NON_EXPERT_WEIGHTS = {
-            "e_score_correction_bias",
-        }
 
         return [
             weight.view(self.local_num_experts, -1)

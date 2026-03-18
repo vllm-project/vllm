@@ -363,11 +363,13 @@ def make_nvfp4_moe_quant_config(
             w2_scale=w2_scale,
         )
 
-    g1_alphas = a13_scale * w13_scale_2
-    g2_alphas = a2_scale * w2_scale_2
+    # Pass w13_scale_2 / w2_scale_2 directly as g1/g2_alphas.
+    # The expert's process_weights_after_loading will fuse activation
+    # scales in-place. Since the quant config references the same tensor
+    # as the registered parameter, EPLB rearrangement stays in sync.
     return nvfp4_moe_quant_config(
-        g1_alphas=g1_alphas,
-        g2_alphas=g2_alphas,
+        g1_alphas=w13_scale_2,
+        g2_alphas=w2_scale_2,
         a1_gscale=(1.0 / a13_scale),
         a2_gscale=(1.0 / a2_scale),
         w1_scale=w13_scale,

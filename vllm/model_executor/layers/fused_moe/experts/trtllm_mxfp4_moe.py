@@ -175,7 +175,11 @@ class TrtLlmMxfp4ExpertsMonolithic(
         if self.use_mxfp8_input:
             from flashinfer import mxfp8_quantize
 
-            x_quant, x_scale = mxfp8_quantize(hidden_states, False)
+            x_quant, x_scale = mxfp8_quantize(
+                hidden_states,
+                is_sf_swizzled_layout=False,
+                alignment=256,
+            )
             x_scale = x_scale.view(torch.float8_e4m3fn).reshape(
                 *hidden_states.shape[:-1], -1
             )
