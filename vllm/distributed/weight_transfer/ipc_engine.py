@@ -10,7 +10,7 @@ from typing import Any
 import pybase64 as base64
 import requests
 import torch
-from torch.multiprocessing.reductions import reduce_tensor
+from torch.multiprocessing.reductions import rebuild_cuda_tensor, reduce_tensor
 
 from vllm import envs
 from vllm.config.parallel import ParallelConfig
@@ -52,44 +52,16 @@ class IPCWeightTransferInitInfo(WeightTransferInitInfo):
 
 @dataclass
 class IPCWeightTransferUpdateInfo(WeightTransferUpdateInfo):
-    """Update info for IPC weight transfer backend.
-
-    Accepts IPC handles either directly via ``ipc_handles`` (Ray transport)
-    or as a base64-encoded pickle via ``ipc_handles_pickled`` (HTTP transport).
-    Exactly one of the two must be provided; if ``ipc_handles_pickled`` is set
-    it is unpickled into ``ipc_handles`` during ``__post_init__``.
-    """
+    """Update info for IPC weight transfer backend."""
 
     names: list[str]
     dtype_names: list[str]
     shapes: list[list[int]]
-    ipc_handles: list[dict[str, tuple[Callable, tuple]]] | None = None
-    """IPC handles mapping physical GPU UUID to (func, args) tuple.
-    Each handle is a dictionary mapping GPU UUID strings to IPC handle tuples."""
-    ipc_handles_pickled: str | None = None
-    """Base64-encoded pickled IPC handles, used for HTTP transport."""
+    ipc_handles: list[dict[str, tuple]]
+    """IPC handles mapping physical GPU UUID to rebuild_cuda_tensor args tuple.
+    Each handle is a dictionary mapping GPU UUID strings to args tuples."""
 
     def __post_init__(self):
-        if self.ipc_handles_pickled is not None:
-            if self.ipc_handles is not None:
-                raise ValueError(
-                    "Cannot specify both `ipc_handles` and `ipc_handles_pickled`"
-                )
-
-            if not envs.VLLM_ALLOW_INSECURE_SERIALIZATION:
-                raise ValueError(
-                    "Refusing to deserialize `ipc_handles_pickled` without "
-                    "VLLM_ALLOW_INSECURE_SERIALIZATION=1"
-                )
-
-            self.ipc_handles = pickle.loads(base64.b64decode(self.ipc_handles_pickled))
-            self.ipc_handles_pickled = None
-
-        if self.ipc_handles is None:
-            raise ValueError(
-                "Either `ipc_handles` or `ipc_handles_pickled` must be provided"
-            )
-
         num_params = len(self.names)
         if len(self.dtype_names) != num_params:
             raise ValueError(
@@ -135,6 +107,33 @@ class IPCWeightTransferEngine(
         """
         super().__init__(config, parallel_config)
 
+    def parse_update_info(
+        self, update_dict: dict[str, Any]
+    ) -> IPCWeightTransferUpdateInfo:
+        """Parse update dict, deserializing pickled IPC handles if present.
+
+        HTTP transport sends IPC handles as a base64-encoded pickle under the
+        key ``ipc_handles_pickled``. This method deserializes them back into
+        ``ipc_handles`` before constructing the typed dataclass, keeping
+        serialization concerns out of the dataclass itself.
+        """
+        if "ipc_handles_pickled" in update_dict:
+            if "ipc_handles" in update_dict:
+                raise ValueError(
+                    "Cannot specify both `ipc_handles` and `ipc_handles_pickled`"
+                )
+
+            if not envs.VLLM_ALLOW_INSECURE_SERIALIZATION:
+                raise ValueError(
+                    "Refusing to deserialize `ipc_handles_pickled` without "
+                    "VLLM_ALLOW_INSECURE_SERIALIZATION=1"
+                )
+
+            pickled = update_dict.pop("ipc_handles_pickled")
+            update_dict["ipc_handles"] = pickle.loads(base64.b64decode(pickled))
+
+        return super().parse_update_info(update_dict)
+
     def init_transfer_engine(self, init_info: IPCWeightTransferInitInfo) -> None:
         """
         Initialize the weight transfer mechanism.
@@ -157,11 +156,10 @@ class IPCWeightTransferEngine(
         Args:
             update_info: IPC update info containing parameter names, dtypes, shapes,
                         and IPC handles. Each IPC handle is a mapping between physical
-                        GPU UUID and the IPC handle tuple (func, args).
+                        GPU UUID and the rebuild_cuda_tensor args tuple.
             load_weights: Callable that loads weights into the model. Called
                          incrementally for each weight to avoid OOM.
         """
-        assert update_info.ipc_handles is not None
         weights = []
         for name, _dtype_name, _shape, ipc_handle in zip(
             update_info.names,
@@ -179,16 +177,15 @@ class IPCWeightTransferEngine(
                     f"Available UUIDs: {list(ipc_handle.keys())}"
                 )
 
-            handle = ipc_handle[physical_gpu_id]
+            args = ipc_handle[physical_gpu_id]
 
-            func, args = handle
-            list_args = list(args)  # type: ignore
-            # Index 6 is the device_index parameter in torch's
-            # IPC handle tuple (rebuild_cuda_tensor). Update it
-            # to the current device since the logical index can
-            # differ between sender and receiver.
+            list_args = list(args)
+            # Index 6 is the device_index parameter in
+            # rebuild_cuda_tensor's args. Update it to the current
+            # device since the logical index can differ between
+            # sender and receiver.
             list_args[6] = device_index
-            weight = func(*list_args)  # type: ignore
+            weight = rebuild_cuda_tensor(*list_args)
             weights.append((name, weight))
 
         load_weights(weights)
@@ -257,11 +254,9 @@ class IPCWeightTransferEngine(
             dtype_names.append(str(tensor.dtype).split(".")[-1])
             shapes.append(list(tensor.shape))
 
-            # Create IPC handle for this weight tensor
-            # The tensor must remain in memory for IPC to work
             weight = tensor.detach().contiguous()
-            ipc_handle = reduce_tensor(weight)
-            ipc_handles.append({gpu_uuid: ipc_handle})
+            _, ipc_args = reduce_tensor(weight)
+            ipc_handles.append({gpu_uuid: ipc_args})
 
         # Send weights based on mode
         if args.mode == "ray":

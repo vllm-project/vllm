@@ -39,8 +39,6 @@ The example performs the following steps:
 * Generate text again to show normal output after the weight update.
 """
 
-import os
-
 import requests
 import torch
 from openai import OpenAI
@@ -53,9 +51,6 @@ from vllm.distributed.weight_transfer.ipc_engine import (
 
 BASE_URL = "http://localhost:8000"
 MODEL_NAME = "facebook/opt-125m"
-
-# Enable insecure serialization for IPC handle serialization
-os.environ["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
 
 
 def generate_completions(client: OpenAI, model: str, prompts: list[str]) -> list[str]:

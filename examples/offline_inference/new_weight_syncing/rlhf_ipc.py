@@ -80,7 +80,7 @@ class TrainModel:
         )
 
 
-ray.init()
+ray.init(runtime_env={"env_vars": {"PYTHONPATH": "/home/ray/default/vllm"}})
 
 pg_colocate = placement_group([{"GPU": 1, "CPU": 0}])
 ray.get(pg_colocate.ready())
