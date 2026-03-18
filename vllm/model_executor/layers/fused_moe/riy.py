@@ -203,6 +203,7 @@ class RiyState:
 
         Starts the HTTP server lazily in the real EngineCore worker
         process — not in the parent that forks and dies.
+        Skips during CUDA Graph capture.
         """
         ensure_riy_server()
 
@@ -210,8 +211,8 @@ class RiyState:
                      topk_weights: torch.Tensor):
         """Record activation stats for a layer. Called from hot path.
 
-        All operations stay on GPU to avoid CPU transfers that would
-        fail during CUDA Graph replay.
+        Skips during CUDA Graph capture/replay — scatter_add_ on
+        non-graph tensors would invalidate the capture.
         """
         if not self._collecting or layer_idx >= len(self._layer_stats):
             return

@@ -10,6 +10,20 @@ from vllm.model_executor.layers.fused_moe.riy import (
     apply_riy_mask,
     get_riy_state,
 )
+
+
+def _is_capturing() -> bool:
+    """Check if we're inside torch.compile tracing or CUDA graph capture.
+
+    During either, we must not perform side-effect ops (scatter_add_ on
+    non-graph tensors, HTTP calls, etc.) that would invalidate the capture.
+    """
+    if torch.compiler.is_compiling():
+        return True
+    try:
+        return torch.cuda.is_current_stream_capturing()
+    except Exception:
+        return False
 from vllm.model_executor.layers.fused_moe.router.fused_moe_router import (
     FusedMoERouter,
 )
@@ -243,15 +257,19 @@ class BaseRouter(FusedMoERouter):
         )
 
         # Step 3b: RIY — record stats and apply expert mask
-        riy = get_riy_state()
-        if riy.enabled and self.layer_idx >= 0:
-            riy.on_forward()
-            if riy.collecting:
-                riy.record_stats(self.layer_idx, topk_ids, topk_weights)
-            mask_t = riy.get_mask_tensor(self.layer_idx)
-            if mask_t is not None:
-                mask_t = mask_t.to(topk_ids.device)
-                topk_weights = apply_riy_mask(topk_weights, topk_ids, mask_t)
+        # Skip entirely during CUDA Graph capture (non-graph ops
+        # would invalidate the capture stream).
+        if not _is_capturing():
+            riy = get_riy_state()
+            if riy.enabled and self.layer_idx >= 0:
+                riy.on_forward()
+                if riy.collecting:
+                    riy.record_stats(self.layer_idx, topk_ids, topk_weights)
+                mask_t = riy.get_mask_tensor(self.layer_idx)
+                if mask_t is not None:
+                    mask_t = mask_t.to(topk_ids.device)
+                    topk_weights = apply_riy_mask(
+                        topk_weights, topk_ids, mask_t)
 
         # Capture logical ids before EPLB mapping.
         if self.capture_fn is not None:
