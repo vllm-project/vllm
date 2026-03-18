@@ -295,7 +295,7 @@ def test_rope_kvcache_fusion(
             }
             q_unfused, k_unfused, v_unfused, dummy = model(qkv_unfused, pos_unfused)
             attn_layer = forward_context.no_compile_layers[model.layer_name]
-            kv_cache_unfused = attn_layer.kv_cache[forward_context.virtual_engine]
+            kv_cache_unfused = attn_layer.kv_cache[0]
         del dummy
 
         torch._dynamo.mark_dynamic(qkv, 0)
@@ -309,7 +309,7 @@ def test_rope_kvcache_fusion(
             }
             q_fused, k_fused, v_fused, dummy = model_fused(qkv, pos)
             attn_layer = forward_context.no_compile_layers[model.layer_name]
-            kv_cache_fused = attn_layer.kv_cache[forward_context.virtual_engine]
+            kv_cache_fused = attn_layer.kv_cache[0]
         del dummy
 
         assert fusion_pass.matched_count == 1

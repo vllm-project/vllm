@@ -480,7 +480,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             attn_metadata = forward_context.attn_metadata
             if isinstance(attn_metadata, dict):
                 attn_metadata = attn_metadata[self.layer_name]
-            self_kv_cache = self.kv_cache[forward_context.virtual_engine]
+            self_kv_cache = self.kv_cache[0]
             slot_mapping = forward_context.slot_mapping
 
             assert isinstance(slot_mapping, dict), (
@@ -940,7 +940,7 @@ def unified_mla_kv_cache_update(
         return torch.empty(0, device=kv_c_normed.device, dtype=kv_c_normed.dtype)
 
     attn_layer = forward_context.no_compile_layers[layer_name]
-    kv_cache = attn_layer.kv_cache[forward_context.virtual_engine]
+    kv_cache = attn_layer.kv_cache[0]
 
     slot_mapping = forward_context.slot_mapping
     assert isinstance(slot_mapping, dict), (

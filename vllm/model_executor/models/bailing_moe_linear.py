@@ -709,7 +709,7 @@ class BailingMoELinearAttention(nn.Module, MambaBase):
 
         # Get KV cache and state indices
         if attn_metadata is not None:
-            kv_cache = self.kv_cache[forward_context.virtual_engine][0]
+            kv_cache = self.kv_cache[0][0]
             state_indices_tensor = attn_metadata.state_indices_tensor
             clear_linear_attention_cache_for_new_sequences(
                 kv_cache, state_indices_tensor, attn_metadata

@@ -428,7 +428,7 @@ class OlmoHybridGatedDeltaNet(nn.Module, MambaBase):
         non_spec_token_indx = attn_metadata.non_spec_token_indx
         spec_state_indices_tensor = attn_metadata.spec_state_indices_tensor
         non_spec_state_indices_tensor = attn_metadata.non_spec_state_indices_tensor
-        self_kv_cache = self.kv_cache[forward_context.virtual_engine]
+        self_kv_cache = self.kv_cache[0]
         conv_state = self_kv_cache[0].transpose(-1, -2)
         ssm_state = self_kv_cache[1]
         num_actual_tokens = attn_metadata.num_actual_tokens
