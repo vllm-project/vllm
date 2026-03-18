@@ -197,7 +197,15 @@ class OpenAIServingModels:
                     ) from e
                 raise
 
-            self.lora_requests[lora_name] = lora_request
+            # load_inplace is only for the one-time reload call and should not be
+            # carried into request-time LoRA objects.
+            self.lora_requests[lora_name] = LoRARequest(
+                lora_name=lora_name,
+                base_model_name=lora_request.base_model_name,
+                lora_int_id=lora_request.lora_int_id,
+                lora_path=lora_request.lora_path,
+                load_inplace=False,
+            )
             logger.info(
                 "Loaded new LoRA adapter: name '%s', path '%s'", lora_name, lora_path
             )
