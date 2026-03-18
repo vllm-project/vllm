@@ -235,3 +235,55 @@ def test_video_media_io_backend_env_var_fallback(monkeypatch: pytest.MonkeyPatch
         frames_missing, metadata_missing = videoio_missing.load_bytes(b"test")
         np.testing.assert_array_equal(frames_missing, FAKE_OUTPUT_2)
         assert metadata_missing["video_backend"] == "test_video_backend_override_2"
+
+
+def test_load_base64_jpeg_returns_metadata():
+    """Regression test: load_base64 with video/jpeg must return metadata.
+
+    Previously, base64 JPEG frame sequences returned an empty dict for
+    metadata, which broke downstream consumers that rely on fields like
+    total_num_frames and fps. See PR #37301.
+    """
+    import io
+    import pybase64
+
+    num_test_frames = 3
+    frame_width, frame_height = 8, 8
+
+    # Build a few tiny JPEG frames and base64-encode them
+    b64_frames = []
+    for i in range(num_test_frames):
+        img = Image.new("RGB", (frame_width, frame_height), color=(i * 80, 0, 0))
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG")
+        b64_frames.append(pybase64.b64encode(buf.getvalue()).decode("ascii"))
+
+    data = ",".join(b64_frames)
+
+    imageio = ImageMediaIO()
+    videoio = VideoMediaIO(imageio, num_frames=num_test_frames)
+    frames, metadata = videoio.load_base64("video/jpeg", data)
+
+    # Frames array shape: (num_frames, H, W, 3)
+    assert frames.shape[0] == num_test_frames
+
+    # All required metadata keys must be present
+    required_keys = {
+        "total_num_frames",
+        "fps",
+        "duration",
+        "video_backend",
+        "frames_indices",
+        "do_sample_frames",
+    }
+    assert required_keys.issubset(metadata.keys()), (
+        f"Missing metadata keys: {required_keys - metadata.keys()}"
+    )
+
+    assert metadata["total_num_frames"] == num_test_frames
+    assert metadata["video_backend"] == "jpeg_sequence"
+    assert metadata["frames_indices"] == list(range(num_test_frames))
+    assert metadata["do_sample_frames"] is False
+    # Default fps=1 → duration == num_frames
+    assert metadata["fps"] == 1.0
+    assert metadata["duration"] == float(num_test_frames)
