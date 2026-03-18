@@ -474,6 +474,126 @@ class TestUtilsStateCarrierSkipping:
 # ---------------------------------------------------------------------------
 
 
+class TestNoDuplicateAssistantTurn:
+    def test_stateless_path_does_not_duplicate_assistant_output(self):
+        """Bug 1 regression: when prev_messages (from the state carrier)
+        already contains the assistant turn, _make_request must NOT also pass
+        prev_response_output, otherwise construct_input_messages appends the
+        assistant content twice.
+        """
+        from vllm.entrypoints.openai.responses.utils import construct_input_messages
+
+        # Simulate what the carrier stores: full history including assistant reply.
+        prev = [
+            {"role": "user", "content": "Who are you?"},
+            {"role": "assistant", "content": "I am helpful."},
+        ]
+
+        # When using the stateless path (prev_messages is not None),
+        # prev_response_output must be None — otherwise the assistant turn
+        # appears twice.
+        result = construct_input_messages(
+            request_instructions=None,
+            request_input="What did you say?",
+            prev_msg=prev,
+            prev_response_output=None,
+        )
+
+        assistant_msgs = [m for m in result if m.get("role") == "assistant"]
+        assert len(assistant_msgs) == 1, (
+            f"Expected 1 assistant message, got {len(assistant_msgs)}: {assistant_msgs}"
+        )
+
+        # Verify the full message list order.
+        assert result[0] == {"role": "user", "content": "Who are you?"}
+        assert result[1] == {"role": "assistant", "content": "I am helpful."}
+        assert result[2] == {"role": "user", "content": "What did you say?"}
+
+    def test_passing_both_prev_msg_and_output_causes_duplicate(self):
+        """Verify the bug scenario: passing both prev_msg AND prev_response_output
+        produces duplicate assistant messages (this is what we fixed).
+        """
+        from openai.types.responses import ResponseOutputMessage, ResponseOutputText
+
+        from vllm.entrypoints.openai.responses.utils import construct_input_messages
+
+        prev = [
+            {"role": "user", "content": "Who are you?"},
+            {"role": "assistant", "content": "I am helpful."},
+        ]
+
+        text = ResponseOutputText(
+            type="output_text", text="I am helpful.", annotations=[]
+        )
+        msg = ResponseOutputMessage(
+            id="msg_1",
+            type="message",
+            role="assistant",
+            content=[text],
+            status="completed",
+        )
+
+        # This is the BROKEN scenario — passing both leads to duplication.
+        result = construct_input_messages(
+            request_instructions=None,
+            request_input="What did you say?",
+            prev_msg=prev,
+            prev_response_output=[msg],
+        )
+
+        assistant_msgs = [m for m in result if m.get("role") == "assistant"]
+        assert len(assistant_msgs) == 2, (
+            "Expected duplicate assistant messages when both prev_msg and "
+            "prev_response_output are passed"
+        )
+
+
+class TestTamperedCarrierReturns400:
+    @pytest.mark.asyncio
+    async def test_tampered_carrier_returns_400_not_500(self):
+        """Bug 2 regression: a tampered state carrier must return 400, not 500.
+
+        _extract_state_from_response raises ValueError on HMAC mismatch.
+        Before the fix, this call was outside the try/except block, producing
+        an unhandled 500.
+        """
+        from vllm.entrypoints.openai.engine.protocol import ErrorResponse
+        from vllm.entrypoints.openai.responses.protocol import (
+            ResponsesRequest,
+            ResponsesResponse,
+        )
+        from vllm.entrypoints.openai.responses.serving import OpenAIServingResponses
+
+        serving = _make_minimal_serving(enable_store=False)
+        serving.engine_client = MagicMock()
+        serving.engine_client.errored = False
+
+        # Build a valid carrier then tamper with the HMAC.
+        carrier = OpenAIServingResponses._build_state_carrier(
+            serving, [{"role": "user", "content": "hi"}], "req"
+        )
+        parts = carrier.encrypted_content.split(":", 3)
+        parts[3] = "0" * 64
+        carrier.encrypted_content = ":".join(parts)
+
+        prev_resp = ResponsesResponse.model_construct(
+            id="resp_tampered", output=[carrier]
+        )
+
+        req = ResponsesRequest(
+            model="test",
+            input="Follow up",
+            store=False,
+            previous_response=prev_resp,
+        )
+
+        result = await OpenAIServingResponses.create_responses(serving, req)
+
+        assert isinstance(result, ErrorResponse)
+        assert result.error.code == HTTPStatus.BAD_REQUEST
+        assert "tampered" in result.error.message
+
+
 class TestPrevMessagesOverride:
     def test_construct_input_messages_prepends_prev_msg(self):
         """construct_input_messages correctly prepends a deserialized history

@@ -399,7 +399,21 @@ class OpenAIServingResponses(OpenAIServing):
         # This replaces the msg_store lookup for subsequent turns.
         prev_messages_from_state: list | None = None
         if prev_response is not None and request.previous_response is not None:
-            prev_messages_from_state = self._extract_state_from_response(prev_response)
+            try:
+                prev_messages_from_state = self._extract_state_from_response(
+                    prev_response
+                )
+            except ValueError as exc:
+                return self.create_error_response(
+                    err_type="invalid_request_error",
+                    message=(
+                        "The state carrier in 'previous_response' is invalid "
+                        f"({exc}). The data may have been tampered with. "
+                        "Ensure VLLM_RESPONSES_STATE_SIGNING_KEY is consistent "
+                        "across requests."
+                    ),
+                    status_code=HTTPStatus.BAD_REQUEST,
+                )
             if prev_messages_from_state is None:
                 # The caller passed previous_response but the prior response
                 # contains no vLLM state carrier — most likely because
@@ -665,7 +679,9 @@ class OpenAIServingResponses(OpenAIServing):
             request_instructions=request.instructions,
             request_input=request.input,
             prev_msg=prev_msg,
-            prev_response_output=prev_response.output if prev_response else None,
+            prev_response_output=prev_response.output
+            if prev_response and prev_messages is None
+            else None,
         )
 
         _, engine_prompts = await self.openai_serving_render.preprocess_chat(
