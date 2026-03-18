@@ -18,6 +18,7 @@ class TestKVConnectorBaseRegisterModel:
         from vllm.distributed.kv_transfer.kv_connector.v1.base import (
             KVConnectorBase_V1,
         )
+
         assert hasattr(KVConnectorBase_V1, "register_model")
 
     def test_base_class_register_model_is_noop(self):
@@ -25,6 +26,7 @@ class TestKVConnectorBaseRegisterModel:
         from vllm.distributed.kv_transfer.kv_connector.v1.base import (
             KVConnectorBase_V1,
         )
+
         # Create a minimal instance
         connector = KVConnectorBase_V1.__new__(KVConnectorBase_V1)
         model = MagicMock(spec=torch.nn.Module)
@@ -40,12 +42,15 @@ class TestActiveKVConnectorRegisterModel:
         mock_connector = MagicMock()
         mock_model = MagicMock(spec=torch.nn.Module)
 
-        with patch(
-            "vllm.v1.worker.gpu.kv_connector.get_kv_transfer_group",
-            return_value=mock_connector,
-        ), patch(
-            "vllm.v1.worker.gpu.kv_connector.has_kv_transfer_group",
-            return_value=True,
+        with (
+            patch(
+                "vllm.v1.worker.gpu.kv_connector.get_kv_transfer_group",
+                return_value=mock_connector,
+            ),
+            patch(
+                "vllm.v1.worker.gpu.kv_connector.has_kv_transfer_group",
+                return_value=True,
+            ),
         ):
             from vllm.v1.worker.gpu.kv_connector import ActiveKVConnector
 
@@ -61,12 +66,15 @@ class TestActiveKVConnectorRegisterModel:
         """ActiveKVConnector skips register_model when model=None."""
         mock_connector = MagicMock()
 
-        with patch(
-            "vllm.v1.worker.gpu.kv_connector.get_kv_transfer_group",
-            return_value=mock_connector,
-        ), patch(
-            "vllm.v1.worker.gpu.kv_connector.has_kv_transfer_group",
-            return_value=True,
+        with (
+            patch(
+                "vllm.v1.worker.gpu.kv_connector.get_kv_transfer_group",
+                return_value=mock_connector,
+            ),
+            patch(
+                "vllm.v1.worker.gpu.kv_connector.has_kv_transfer_group",
+                return_value=True,
+            ),
         ):
             from vllm.v1.worker.gpu.kv_connector import ActiveKVConnector
 
@@ -87,12 +95,15 @@ class TestGetKVConnectorModel:
         mock_connector = MagicMock()
         mock_model = MagicMock(spec=torch.nn.Module)
 
-        with patch(
-            "vllm.v1.worker.gpu.kv_connector.get_kv_transfer_group",
-            return_value=mock_connector,
-        ), patch(
-            "vllm.v1.worker.gpu.kv_connector.has_kv_transfer_group",
-            return_value=True,
+        with (
+            patch(
+                "vllm.v1.worker.gpu.kv_connector.get_kv_transfer_group",
+                return_value=mock_connector,
+            ),
+            patch(
+                "vllm.v1.worker.gpu.kv_connector.has_kv_transfer_group",
+                return_value=True,
+            ),
         ):
             from vllm.v1.worker.gpu.kv_connector import get_kv_connector
 
@@ -128,8 +139,9 @@ class TestLMCacheConnectorRegisterModel:
 
     def test_register_model_delegates_to_engine(self):
         """LMCacheConnectorV1.register_model delegates to _lmcache_engine."""
-        from vllm.distributed.kv_transfer.kv_connector.v1.\
-            lmcache_connector import LMCacheConnectorV1
+        from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_connector import (
+            LMCacheConnectorV1,
+        )
 
         mock_engine = MagicMock()
         mock_model = MagicMock(spec=torch.nn.Module)
@@ -142,8 +154,9 @@ class TestLMCacheConnectorRegisterModel:
 
     def test_register_model_skips_engine_without_method(self):
         """register_model is a no-op when engine lacks register_model."""
-        from vllm.distributed.kv_transfer.kv_connector.v1.\
-            lmcache_connector import LMCacheConnectorV1
+        from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_connector import (
+            LMCacheConnectorV1,
+        )
 
         # Engine without register_model attribute
         mock_engine = MagicMock(spec=[])  # empty spec — no attributes
@@ -163,17 +176,21 @@ class TestLMCacheConnectorV1ImplRegisterModel:
         mock_tracker = MagicMock()
         mock_model = MagicMock(spec=torch.nn.Module)
 
-        with patch.dict("sys.modules", {
-            "lmcache": MagicMock(),
-            "lmcache.v1": MagicMock(),
-            "lmcache.v1.compute": MagicMock(),
-            "lmcache.v1.compute.models": MagicMock(),
-            "lmcache.v1.compute.models.utils": MagicMock(
-                VLLMModelTracker=mock_tracker
-            ),
-        }):
-            from vllm.distributed.kv_transfer.kv_connector.v1.\
-                lmcache_integration.vllm_v1_adapter import LMCacheConnectorV1Impl
+        with patch.dict(
+            "sys.modules",
+            {
+                "lmcache": MagicMock(),
+                "lmcache.v1": MagicMock(),
+                "lmcache.v1.compute": MagicMock(),
+                "lmcache.v1.compute.models": MagicMock(),
+                "lmcache.v1.compute.models.utils": MagicMock(
+                    VLLMModelTracker=mock_tracker
+                ),
+            },
+        ):
+            from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_integration.vllm_v1_adapter import (  # noqa: E501
+                LMCacheConnectorV1Impl,
+            )
 
             impl = LMCacheConnectorV1Impl.__new__(LMCacheConnectorV1Impl)
             impl.register_model(mock_model)
@@ -184,15 +201,19 @@ class TestLMCacheConnectorV1ImplRegisterModel:
 
     def test_register_model_graceful_on_import_error(self):
         """register_model doesn't crash if LMCache CacheBlend not installed."""
-        from vllm.distributed.kv_transfer.kv_connector.v1.\
-            lmcache_integration.vllm_v1_adapter import LMCacheConnectorV1Impl
+        from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_integration.vllm_v1_adapter import (  # noqa: E501
+            LMCacheConnectorV1Impl,
+        )
 
         impl = LMCacheConnectorV1Impl.__new__(LMCacheConnectorV1Impl)
 
         # Should not raise even if lmcache imports fail
-        with patch.dict("sys.modules", {
-            "lmcache.v1.compute.models.utils": None,
-        }):
+        with patch.dict(
+            "sys.modules",
+            {
+                "lmcache.v1.compute.models.utils": None,
+            },
+        ):
             impl.register_model(MagicMock(spec=torch.nn.Module))
 
 

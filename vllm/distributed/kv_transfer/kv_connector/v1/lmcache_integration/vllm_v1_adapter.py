@@ -806,14 +806,14 @@ class LMCacheConnectorV1Impl:
         try:
             from lmcache.v1.compute.models.utils import VLLMModelTracker
 
-            from vllm.distributed.kv_transfer.kv_connector.v1.\
-                lmcache_integration.utils import ENGINE_NAME
+            from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_integration.utils import (  # noqa: E501
+                ENGINE_NAME,
+            )
+
             VLLMModelTracker.register_model(ENGINE_NAME, model)
             logger.info("Registered model with VLLMModelTracker")
         except ImportError:
-            logger.debug(
-                "LMCache CacheBlend model registration not available"
-            )
+            logger.debug("LMCache CacheBlend model registration not available")
         except Exception:
             logger.warning(
                 "Failed to register model with VLLMModelTracker",
