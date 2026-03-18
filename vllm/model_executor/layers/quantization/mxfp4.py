@@ -256,12 +256,6 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         self.weight_dtype = "mxfp4"
         self.mxfp4_backend = get_mxfp4_backend(moe.is_lora_enabled)
 
-        # SM100_FI_MXFP4_MXFP8_TRTLLM supports padding with mxfp8 quant
-        # so can skip the padding in the forward pass outside the moe method
-        self.support_skip_forward_padding = (
-            self.mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_TRTLLM
-        )
-
         self.max_capture_size = (
             get_current_vllm_config().compilation_config.max_cudagraph_capture_size
         )
@@ -299,6 +293,12 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         self._cache_permute_indices: dict[torch.Size, torch.Tensor] = {}
         # Initialized in process_weights_after_loading for CUTLASS/SM90 backends
         self.moe_kernel: mk.FusedMoEKernel | None = None
+
+    @property
+    def skip_forward_padding(self) -> bool:
+        # SM100_FI_MXFP4_MXFP8_TRTLLM supports padding with mxfp8 quant
+        # so can skip the padding in the forward before applying the moe method
+        return self.mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_TRTLLM
 
     def create_weights(
         self,
