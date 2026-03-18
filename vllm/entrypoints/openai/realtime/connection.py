@@ -108,7 +108,7 @@ class RealtimeConnection:
                 return
             err = self._check_model(model)
             if err is not None:
-                await self.send_error(err.message, "model_not_found")
+                await self.send_error(err.error.message, "model_not_found")
                 return
             self._is_model_validated = True
         elif event_type == "input_audio_buffer.append":
