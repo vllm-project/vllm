@@ -6,6 +6,7 @@ import copy
 import itertools
 import pickle as pkl
 import time
+import vllm.kernels.cutile.cutile_w8a8
 from collections.abc import Callable, Iterable
 
 import torch
@@ -160,6 +161,13 @@ def bench_fp8(
         ),
         "triton_fp8_fp8_fp16_scaled_mm_blockwise": lambda: w8a8_triton_block_scaled_mm(
             a_cont, b.t(), block_scale_a, block_scale_b.t(), (128, 128)
+        ),
+        "cutile_fp8_fp8_bf16_blockwise_mm": lambda: torch.ops.vllm.cutile_scaled_mm(
+            a_cont,
+            b.t(),
+            block_scale_a,
+            block_scale_b.t(),
+            torch.bfloat16
         ),
         "cutlass_fp8_fp8_fp16_scaled_mm_blockwise": lambda: ops.cutlass_scaled_mm(
             a, b, block_scale_a_M_major, block_scale_b_K_major, torch.float16
