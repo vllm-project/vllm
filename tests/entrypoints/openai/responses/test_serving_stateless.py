@@ -472,6 +472,123 @@ class TestUtilsStateCarrierSkipping:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Fix 1: Double-include prevention on stateless non-Harmony path
+# ---------------------------------------------------------------------------
+
+
+class TestDoubleIncludePrevention:
+    def test_stateless_path_does_not_duplicate_assistant_message(self):
+        """When prev_messages is provided (stateless path), the assistant
+        output from prev_response.output must NOT be appended again.
+
+        The state carrier already contains the full conversation history
+        including assistant messages.  Passing prev_response_output to
+        construct_input_messages would duplicate them.
+        """
+        from vllm.entrypoints.openai.responses.utils import construct_input_messages
+
+        assistant_text = "I am a helpful assistant."
+        prev_messages = [
+            {"role": "user", "content": "Who are you?"},
+            {"role": "assistant", "content": assistant_text},
+        ]
+
+        # Simulate the stateless path: prev_messages is not None.
+        # prev_response_output should be None (the fix).
+        result = construct_input_messages(
+            request_instructions=None,
+            request_input="What did you say?",
+            prev_msg=prev_messages,
+            prev_response_output=None,
+        )
+
+        assistant_msgs = [m for m in result if m.get("role") == "assistant"]
+        assert len(assistant_msgs) == 1, (
+            f"Expected exactly 1 assistant message, got {len(assistant_msgs)}: "
+            f"{assistant_msgs}"
+        )
+        assert assistant_msgs[0]["content"] == assistant_text
+
+    def test_store_path_still_includes_assistant_output(self):
+        """When prev_messages is None (store-backed path), prev_response_output
+        must still be used to add the assistant turn.
+        """
+        from openai.types.responses import ResponseOutputMessage, ResponseOutputText
+
+        from vllm.entrypoints.openai.responses.utils import construct_input_messages
+
+        text = ResponseOutputText(type="output_text", text="Hello!", annotations=[])
+        msg = ResponseOutputMessage(
+            id="msg_1",
+            type="message",
+            role="assistant",
+            content=[text],
+            status="completed",
+        )
+
+        result = construct_input_messages(
+            request_instructions=None,
+            request_input="What did you say?",
+            prev_msg=None,
+            prev_response_output=[msg],
+        )
+
+        assistant_msgs = [m for m in result if m.get("role") == "assistant"]
+        assert len(assistant_msgs) == 1
+        assert assistant_msgs[0]["content"] == "Hello!"
+
+
+# ---------------------------------------------------------------------------
+# Fix 2: Tampered state carrier returns 400, not 500
+# ---------------------------------------------------------------------------
+
+
+class TestTamperedCarrierReturns400:
+    @pytest.mark.asyncio
+    async def test_tampered_hmac_returns_400(self):
+        """A previous_response with a tampered HMAC in its state carrier
+        must return a 400 error, not raise an uncaught ValueError → 500.
+        """
+        from vllm.entrypoints.openai.engine.protocol import ErrorResponse
+        from vllm.entrypoints.openai.responses.protocol import (
+            ResponsesRequest,
+            ResponsesResponse,
+        )
+        from vllm.entrypoints.openai.responses.serving import OpenAIServingResponses
+
+        serving = _make_minimal_serving(enable_store=False)
+        serving.engine_client = MagicMock()
+        serving.engine_client.errored = False
+
+        # Build a valid carrier then corrupt the HMAC.
+        carrier = OpenAIServingResponses._build_state_carrier(
+            serving,
+            [{"role": "user", "content": "hi"}],
+            "req_123",
+        )
+        parts = carrier.encrypted_content.split(":", 3)
+        parts[3] = "0" * 64  # Replace HMAC with garbage
+        carrier.encrypted_content = ":".join(parts)
+
+        prev_resp = ResponsesResponse.model_construct(
+            id="resp_tampered", output=[carrier]
+        )
+
+        req = ResponsesRequest(
+            model="test",
+            input="follow up",
+            store=False,
+            previous_response=prev_resp,
+        )
+
+        result = await OpenAIServingResponses.create_responses(serving, req)
+
+        assert isinstance(result, ErrorResponse)
+        assert result.error.code == HTTPStatus.BAD_REQUEST
+        assert "integrity" in result.error.message.lower()
+
+
 class TestPrevMessagesOverride:
     def test_construct_input_messages_prepends_prev_msg(self):
         """construct_input_messages correctly prepends a deserialized history

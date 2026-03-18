@@ -181,6 +181,7 @@ def _make_minimal_serving(enable_store: bool = True):
     obj.enable_store = enable_store
     obj.store = InMemoryResponseStore()
     obj.background_tasks = {}
+    obj.event_store = {}
     obj.log_error_stack = False
     return obj
 
@@ -255,3 +256,43 @@ class TestServingRetrieveIntegration:
 
         assert isinstance(result, ErrorResponse)
         assert result.error.code == HTTPStatus.NOT_FOUND
+
+    @pytest.mark.asyncio
+    async def test_stream_retrieve_completed_without_event_buffer_returns_response(
+        self,
+    ):
+        """Streaming retrieval for a terminal response that has no local
+        event buffer (e.g. processed on another replica) should fall back
+        to returning the full response instead of raising.
+        """
+        from vllm.entrypoints.openai.responses.protocol import ResponsesResponse
+
+        serving = _make_minimal_serving()
+        resp = _make_response("resp_remote", status="completed")
+        await serving.store.put_response("resp_remote", resp)
+
+        # No entry in event_store — simulates cross-replica scenario.
+        result = await serving.retrieve_responses("resp_remote", None, True)
+
+        assert isinstance(result, ResponsesResponse)
+        assert result is resp
+
+    @pytest.mark.asyncio
+    async def test_stream_retrieve_in_progress_without_event_buffer_returns_400(
+        self,
+    ):
+        """Streaming retrieval for an in-progress response with no local
+        event buffer should return a 400 error directing the client to use
+        non-streaming retrieval.
+        """
+        from vllm.entrypoints.openai.engine.protocol import ErrorResponse
+
+        serving = _make_minimal_serving()
+        resp = _make_response("resp_other", status="in_progress")
+        await serving.store.put_response("resp_other", resp)
+
+        result = await serving.retrieve_responses("resp_other", None, True)
+
+        assert isinstance(result, ErrorResponse)
+        assert result.error.code == HTTPStatus.BAD_REQUEST
+        assert "non-streaming" in result.error.message.lower()

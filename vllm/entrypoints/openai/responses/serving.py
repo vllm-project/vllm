@@ -393,7 +393,20 @@ class OpenAIServingResponses(OpenAIServing):
         # This replaces the store message lookup for subsequent turns.
         prev_messages_from_state: list | None = None
         if prev_response is not None and request.previous_response is not None:
-            prev_messages_from_state = self._extract_state_from_response(prev_response)
+            try:
+                prev_messages_from_state = self._extract_state_from_response(
+                    prev_response
+                )
+            except ValueError as e:
+                return self.create_error_response(
+                    err_type="invalid_request_error",
+                    message=(
+                        "The state carrier in 'previous_response' failed "
+                        f"integrity validation: {e}. The response may have "
+                        "been tampered with or signed with a different key."
+                    ),
+                    status_code=HTTPStatus.BAD_REQUEST,
+                )
             if prev_messages_from_state is None:
                 # The caller passed previous_response but the prior response
                 # contains no vLLM state carrier — most likely because
@@ -663,7 +676,9 @@ class OpenAIServingResponses(OpenAIServing):
             request_instructions=request.instructions,
             request_input=request.input,
             prev_msg=prev_msg,
-            prev_response_output=prev_response.output if prev_response else None,
+            prev_response_output=prev_response.output
+            if prev_response and prev_messages is None
+            else None,
         )
 
         _, engine_prompts = await self.openai_serving_render.preprocess_chat(
@@ -1430,6 +1445,21 @@ class OpenAIServingResponses(OpenAIServing):
             return self._make_not_found_error(response_id)
 
         if stream:
+            if response_id not in self.event_store:
+                if response.status not in ("queued", "in_progress"):
+                    # Terminal state on another replica — return full response.
+                    return response
+                return self.create_error_response(
+                    err_type="invalid_request_error",
+                    message=(
+                        f"Streaming retrieval is not available for response "
+                        f"'{response_id}': no event buffer exists on this "
+                        f"server instance. The response may have been "
+                        f"processed on a different replica. Use non-streaming "
+                        f"retrieval instead."
+                    ),
+                    status_code=HTTPStatus.BAD_REQUEST,
+                )
             return self.responses_background_stream_generator(
                 response_id,
                 starting_after,
@@ -1486,6 +1516,11 @@ class OpenAIServingResponses(OpenAIServing):
             )
 
         # Abort the request.
+        # NOTE: With a shared ResponseStore across replicas, the CAS above
+        # marks the response as "cancelled" in the store, but the actual
+        # background task may be running on a different replica.  We can only
+        # cancel process-local tasks here; the remote replica will discard its
+        # result at finalization via put_response(..., unless_status="cancelled").
         if task := self.background_tasks.get(response_id):
             task.cancel()
             try:
