@@ -30,6 +30,6 @@ class NemotronV3ReasoningParser(DeepSeekR1ReasoningParser):
             )
             and final_content is None
         ):
-            reasoning, final_content = reasoning, final_content
+            reasoning, final_content = final_content, reasoning
 
         return reasoning, final_content
