@@ -25,9 +25,6 @@ The most fundamental application of classification models is to categorize input
 | `Qwen2ForSequenceClassification`<sup>C</sup> | Qwen2-based | `jason9693/Qwen2.5-1.5B-apeach` | | |
 | `*Model`<sup>C</sup>, `*ForCausalLM`<sup>C</sup>, etc. | Generative models | N/A | \* | \* |
 
-!!! note
-    Most [cross-encoder models](score.md#cross-encoder) can also be used as classification models.
-
 ### Multimodal Models
 
 !!! note
@@ -46,7 +43,7 @@ If your model is not in the above list, we will try to automatically convert the
 
 ### As cross-encoder models
 
-Cross-encoder (aka reranker) models are a subset of classification models that accept two prompts as input and output num_labels equal to 1. For more information on cross-encoder models, please refer to [this page](score.md#cross-encoder-models).
+Cross-encoder (aka reranker) models are a subset of classification models that accept two prompts as input and output num_labels equal to 1. Most [cross-encoder models](score.md#cross-encoder) can also be used as classification models. For more information on cross-encoder models, please refer to [this page](score.md#cross-encoder-models).
 
 ### As reward Models
 
