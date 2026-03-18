@@ -174,10 +174,12 @@ class LoRAModelManager:
             vllm_config.model_config.multimodal_config
             and vllm_config.model_config.multimodal_config.language_model_only
         ):
-            logger.warning(
-                "When the multimodal model only initializes the language model,"
-                "disable `enable_tower_connector_lora`"
-            )
+            if self.supports_tower_connector_lora:
+                logger.warning(
+                    "Disabling `enable_tower_connector_lora` because the multimodal "
+                    "model is configured to initialize the language model only."
+                )
+                self.supports_tower_connector_lora = False
             return
 
         logger.warning(
