@@ -16,6 +16,13 @@ from vllm.assets.audio import AudioAsset
 from ...utils import ROCM_ENV_OVERRIDES, ROCM_EXTRA_ARGS, RemoteOpenAIServer
 from .conftest import add_attention_backend
 
+# Increase engine iteration timeout for ROCm where first-use JIT compilation
+# can exceed the default 60s, causing a silent deadlock in feed_tokens.
+REALTIME_ENV_OVERRIDES = {
+    **ROCM_ENV_OVERRIDES,
+    "VLLM_ENGINE_ITERATION_TIMEOUT_S": "600",
+}
+
 MISTRAL_FORMAT_ARGS = [
     "--tokenizer_mode",
     "mistral",
@@ -78,7 +85,7 @@ async def test_multi_chunk_streaming(
     add_attention_backend(server_args, rocm_aiter_fa_attention)
 
     with RemoteOpenAIServer(
-        model_name, server_args, env_dict=ROCM_ENV_OVERRIDES
+        model_name, server_args, env_dict=REALTIME_ENV_OVERRIDES
     ) as remote_server:
         ws_url = _get_websocket_url(remote_server)
         async with websockets.connect(ws_url) as ws:
@@ -181,7 +188,7 @@ async def test_empty_commit_does_not_crash_engine(
     add_attention_backend(server_args, rocm_aiter_fa_attention)
 
     with RemoteOpenAIServer(
-        model_name, server_args, env_dict=ROCM_ENV_OVERRIDES
+        model_name, server_args, env_dict=REALTIME_ENV_OVERRIDES
     ) as remote_server:
         ws_url = _get_websocket_url(remote_server)
 
