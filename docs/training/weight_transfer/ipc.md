@@ -1,20 +1,35 @@
 # IPC Engine
 
-The IPC weight transfer engine uses **CUDA IPC** (Inter-Process Communication) handles to share GPU memory directly between the trainer and inference workers on the **same node and same GPU**. This avoids any data copying, making it a efficient option when colocating training and inference.
+The IPC weight transfer engine uses **CUDA IPC** (Inter-Process Communication) handles to share GPU memory directly between the trainer and inference workers on the **same GPU**. This avoids any data copying, making it the most efficient option when colocating training and inference. Multi-GPU setups are supported — each GPU's weights are transferred independently via its own IPC handle.
 
 ## When to Use IPC
 
-- Training and inference on the **same GPU** (colocated)
+- Training and inference share the **same GPU(s)** (colocated)
 - You want to minimize memory overhead by sharing tensors in-place
+- Single-GPU or multi-GPU (tensor parallel) setups where each GPU is shared between a trainer rank and an inference worker
 
 ## How It Works
 
-1. The trainer creates CUDA tensors for each weight and generates IPC handles using `torch.multiprocessing.reductions.reduce_tensor`.
-2. IPC handles are sent to the inference engine via **Ray.remote()** or **HTTP POST**.
-3. The inference worker reconstructs the tensors from the handles, reading directly from the trainer's GPU memory.
+1. The trainer creates CUDA tensors for each weight and generates IPC handles using `torch.multiprocessing.reductions.reduce_tensor`. In multi-GPU setups (e.g. FSDP), each trainer rank must all-gather the full tensor for each layer onto its own GPU before generating the IPC handle.
+2. IPC handles for each gpu are sent to the inference engine via **Ray**, **HTTP**, or a **custom callable**. Each rank only reads the handle corresponding to its own GPU.
+3. The inference worker reconstructs the tensors from the handles using `rebuild_cuda_tensor`, reading directly from the trainer's GPU memory.
 
-!!! warning
-    IPC handles involve sending serialized Python objects. When using HTTP transport, you must set `VLLM_ALLOW_INSECURE_SERIALIZATION=1` on both the server and client. This is because IPC handles are pickled and base64-encoded for HTTP transmission.
+## Packed (Chunked) Transfer
+
+By default, all weights are sent in a single API call. For large models, this requires the full model to reside in GPU memory on both sides simultaneously. Setting `packed=True` enables **chunked transfer** with bounded GPU memory:
+
+- Weights are concatenated into fixed-size packed buffers (controlled by `packed_buffer_size_bytes`).
+- Each chunk is sent as a separate API call with `run_initialize_layerwise_reload` and `run_finalize_layerwise_reload` flags so that vLLM only initializes/finalizes the reload pass on the first/last chunk.
+- After each chunk is consumed, the GPU memory for that chunk can be reclaimed.
+
+```python
+trainer_args = IPCTrainerSendWeightsArgs(
+    send_mode="ray",
+    llm_handle=llm_actor_handle,
+    packed=True,
+    packed_buffer_size_bytes=256 * 1024 * 1024,  # 256 MB chunks
+)
+```
 
 ## Initialization
 
@@ -22,7 +37,7 @@ The IPC backend requires no initialization on either side. The `init_transfer_en
 
 ## Sending Weights
 
-IPC supports two transport modes for delivering the handles:
+IPC supports three transport modes for delivering the handles:
 
 ### Ray Mode
 
@@ -35,7 +50,7 @@ from vllm.distributed.weight_transfer.ipc_engine import (
 )
 
 trainer_args = IPCTrainerSendWeightsArgs(
-    mode="ray",
+    send_mode="ray",
     llm_handle=llm_actor_handle,
 )
 
@@ -53,7 +68,7 @@ Used when vLLM is running as an HTTP server:
 
 ```python
 trainer_args = IPCTrainerSendWeightsArgs(
-    mode="http",
+    send_mode="http",
     url="http://localhost:8000",
 )
 
@@ -63,7 +78,26 @@ IPCWeightTransferEngine.trainer_send_weights(
 )
 ```
 
-In HTTP mode, IPC handles are pickled, base64-encoded, and sent as JSON to the `/update_weights` endpoint.
+In HTTP mode, IPC handles are pickled, base64-encoded, and sent as JSON to the `/update_weights` endpoint. The pickled payload contains only `rebuild_cuda_tensor` argument tuples (ints, bytes, strings) — no arbitrary callables — so no special environment flags are required.
+
+### Custom Callable Mode
+
+For custom transport mechanisms, pass a callable as `send_mode`. The callable receives an `IPCWeightTransferUpdateInfo` object and is responsible for delivering it to the inference engine:
+
+```python
+def my_custom_sender(update_info: IPCWeightTransferUpdateInfo):
+    # Custom logic to deliver update_info to vLLM
+    ...
+
+trainer_args = IPCTrainerSendWeightsArgs(
+    send_mode=my_custom_sender,
+)
+
+IPCWeightTransferEngine.trainer_send_weights(
+    iterator=model.named_parameters(),
+    trainer_args=trainer_args,
+)
+```
 
 See [`IPCTrainerSendWeightsArgs`](https://github.com/vllm-project/vllm/blob/main/vllm/distributed/weight_transfer/ipc_engine.py) for the full list of configurable fields.
 
