@@ -89,7 +89,7 @@ def _fused_marlin_moe(
     M, K = hidden_states.size()
     N = marlin_moe_intermediate_size(w1, w2, layer)
     w13_num_shards = 2 if activation.is_gated else 1
-    w13_size_n = getattr(layer, "marlin_moe_w13_size_n", w13_num_shards, *N)
+    w13_size_n = getattr(layer, "marlin_moe_w13_size_n", w13_num_shards * N)
     if workspace is None:
         workspace = marlin_make_workspace_new(hidden_states.device, 4)
 
