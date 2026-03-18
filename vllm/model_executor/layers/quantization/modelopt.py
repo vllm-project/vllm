@@ -2183,6 +2183,15 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
             if key.startswith(prefix_dot):
                 return info["quant_algo"].upper()
 
+        # 4. FusedMoE experts patch: prefix is e.g. "...moe.experts" but
+        #    quantized_layers keys use "...moe.gate_proj" / "...moe.up_proj".
+        #    Strip ".experts" and retry the prefix lookup.
+        if prefix.endswith(".experts"):
+            parent_dot = prefix.rsplit(".experts", 1)[0] + "."
+            for key, info in self.quantized_layers.items():
+                if key.startswith(parent_dot):
+                    return info["quant_algo"].upper()
+
         return None
 
     def get_quant_method(

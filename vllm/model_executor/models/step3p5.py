@@ -372,6 +372,9 @@ class FusedMoEBlock(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.share_expert",
         )
+        # NVFP4 FIX: The MoE experts should use quant_config directly
+        # The exclusion list in the checkpoint already specifies what to exclude
+        # (moe.gate, share_expert, etc.), so we don't need additional logic here
         self.experts = SharedFusedMoE(
             shared_experts=self.share_expert,
             gate=self.gate,
@@ -381,7 +384,7 @@ class FusedMoEBlock(nn.Module):
             intermediate_size=config.moe_intermediate_size,
             reduce_results=False,
             renormalize=config.norm_expert_weight,
-            quant_config=quant_config,
+            quant_config=quant_config,  # Pass quant_config correctly
             activation=activation,
             prefix=f"{prefix}.experts",
             scoring_func=getattr(config, "moe_router_activation", "sigmoid"),
@@ -647,6 +650,12 @@ class Step3p5Model(nn.Module):
             (".moe.experts.w13_weight", ".moe.gate_proj.weight", "w1"),
             (".moe.experts.w13_weight", ".moe.up_proj.weight", "w3"),
             (".moe.experts.w2_weight", ".moe.down_proj.weight", "w2"),
+            # NVFP4: per-expert input scales — must be loaded explicitly or
+            # w13_input_scale / w2_input_scale stay torch.empty (uninitialized),
+            # causing NaN logits and all-zero token generation.
+            (".moe.experts.w13_input_scale", ".moe.gate_proj.input_scale", "w1"),
+            (".moe.experts.w13_input_scale", ".moe.up_proj.input_scale", "w3"),
+            (".moe.experts.w2_input_scale", ".moe.down_proj.input_scale", "w2"),
         ]
 
         # New per-expert format: .moe.experts.E.gate_proj.weight_packed [out, in]
@@ -766,7 +775,11 @@ class Step3p5Model(nn.Module):
                     # Per-tensor global scales (e.g. weight_global_scale)
                     # have shape [1] in compressed-tensors NVFP4 checkpoints.
                     # Expand to per-expert before the iteration loop.
-                    if (
+                    if loaded_weight.ndim == 0:
+                        loaded_weight = loaded_weight.unsqueeze(0).expand(
+                            moe_expert_num
+                        )
+                    elif (
                         loaded_weight.shape[0] == 1
                         and loaded_weight.shape[0] != moe_expert_num
                     ):
