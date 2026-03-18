@@ -1369,7 +1369,13 @@ def test_abort_timeout_on_prefiller(monkeypatch, distributed_executor_backend):
                     "NIXL_TELEMETRY_ENABLE": "1",
                 },
             }
-            ray.init(runtime_env=runtime_env)
+            # On XPU/ROCm, vLLM expects Ray's device key to be "GPU".
+            # Explicitly reserving GPU resources here prevents false negatives
+            # when Ray cannot auto-detect accelerator resources in test envs.
+            ray_init_kwargs: dict[str, Any] = {"runtime_env": runtime_env}
+            if not current_platform.is_cuda():
+                ray_init_kwargs["num_gpus"] = 1
+            ray.init(**ray_init_kwargs)
             try:
                 run_test_and_cleanup()
             finally:
