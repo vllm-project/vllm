@@ -387,9 +387,9 @@ class Worker(WorkerBase):
         ) as profile_result:
             self.model_runner.profile_run()
 
-            profile_torch_peak = torch.accelerator.memory_stats(self.device).get(
-                "allocated_bytes.all.peak", 0
-            )
+            _mem_stats = current_platform.memory_stats(self.device)
+            profile_torch_peak = _mem_stats.get("allocated_bytes.all.peak", 0)
+            profile_torch_reserved_peak = _mem_stats.get("reserved_bytes.all.peak", 0)
 
             # Profile CUDA graph memory if graphs will be captured.
             # Skip on ROCm/HIP as graph pool handles and mem_get_info behave
@@ -422,6 +422,30 @@ class Worker(WorkerBase):
         )
         self.cudagraph_memory_estimate = cudagraph_memory_estimate
 
+        # Measure caching allocator fragmentation: the gap between what
+        # PyTorch reserved from CUDA vs what it actually allocated.
+        # At runtime, fragmentation grows beyond profiling (freshly initialized
+        # allocator is best-case). Use 2x as safety factor, minimum 150 MiB.
+        measured_fragmentation = max(
+            0,
+            profile_torch_reserved_peak - profile_torch_peak,
+        )
+        self.fragmentation_buffer = max(
+            150 * (1 << 20),
+            int(measured_fragmentation * 2),
+        )
+        fragmentation_buffer = self.fragmentation_buffer
+        logger.info(
+            "Memory profiling: allocated_peak=%.2f MiB, "
+            "reserved_peak=%.2f MiB, "
+            "measured_fragmentation=%.2f MiB, "
+            "fragmentation_buffer=%.2f MiB",
+            profile_torch_peak / (1 << 20),
+            profile_torch_reserved_peak / (1 << 20),
+            measured_fragmentation / (1 << 20),
+            fragmentation_buffer / (1 << 20),
+        )
+
         free_gpu_memory = profile_result.after_profile.free_memory
         # NOTE(woosuk): Here we assume that the other processes using the same
         # GPU did not change their memory usage during the profiling.
@@ -438,6 +462,7 @@ class Worker(WorkerBase):
             self.requested_memory
             - profile_result.non_kv_cache_memory
             - cudagraph_memory_estimate_applied
+            - fragmentation_buffer
         )
 
         unrequested_memory = self.init_snapshot.free_memory - self.requested_memory
@@ -634,10 +659,13 @@ class Worker(WorkerBase):
             # Users may want fine-grained control to specify kv cache
             # memory size.
 
-            # empirically observed that the memory profiling may
-            # slightly underestimate the memory consumption.
-            # So leave a small buffer (=150MiB) to avoid OOM.
-            redundancy_buffer_memory = 150 * (1 << 20)
+            # Use the same fragmentation buffer computed during profiling
+            # (in determine_available_memory) for consistent --kv-cache-memory
+            # suggestions. This ensures users who follow the suggestion get
+            # the same safety margin as the auto-profiling path.
+            redundancy_buffer_memory = getattr(
+                self, "fragmentation_buffer", 150 * (1 << 20)
+            )
             non_kv_cache_memory = (
                 self.model_runner.model_memory_usage
                 + self.peak_activation_memory
