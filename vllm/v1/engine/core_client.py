@@ -52,6 +52,7 @@ from vllm.v1.engine.utils import (
     launch_core_engines,
 )
 from vllm.v1.executor import Executor
+from vllm.v1.pool.late_interaction import get_late_interaction_engine_index
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder, bytestr
 
 logger = init_logger(__name__)
@@ -127,7 +128,7 @@ class EngineCoreClient(ABC):
         return AsyncMPClient(*client_args)
 
     @abstractmethod
-    def shutdown(self): ...
+    def shutdown(self, timeout: float | None = None) -> None: ...
 
     def get_output(self) -> EngineCoreOutputs:
         raise NotImplementedError
@@ -297,7 +298,7 @@ class InprocClient(EngineCoreClient):
         if len(request_ids) > 0:
             self.engine_core.abort_requests(request_ids)
 
-    def shutdown(self) -> None:
+    def shutdown(self, timeout: float | None = None) -> None:
         self.engine_core.shutdown()
 
     def profile(self, is_start: bool = True, profile_prefix: str | None = None) -> None:
@@ -389,9 +390,9 @@ class BackgroundResources:
 
         self.engine_dead = True
         if self.engine_manager is not None:
-            self.engine_manager.close()
+            self.engine_manager.shutdown()
         if self.coordinator is not None:
-            self.coordinator.close()
+            self.coordinator.shutdown()
 
         if isinstance(self.output_socket, zmq.asyncio.Socket):
             # Async case.
@@ -543,6 +544,11 @@ class MPClient(EngineCoreClient):
         try:
             # State used for data parallel.
             self.engines_running = False
+            parallel_config = vllm_config.parallel_config
+            # Elastic EP can remove a rank and later add it back with the same
+            # identity. The client input ROUTER needs handover to allow the new
+            # engine to replace the dead connection.
+            enable_input_socket_handover = parallel_config.enable_elastic_ep
 
             self.stats_update_address: str | None = None
             if client_addresses:
@@ -551,7 +557,11 @@ class MPClient(EngineCoreClient):
                 output_address = client_addresses["output_address"]
                 self.stats_update_address = client_addresses.get("stats_update_address")
                 self.input_socket = self.resources.input_socket = make_zmq_socket(
-                    self.ctx, input_address, zmq.ROUTER, bind=True
+                    self.ctx,
+                    input_address,
+                    zmq.ROUTER,
+                    bind=True,
+                    router_handover=enable_input_socket_handover,
                 )
                 self.resources.output_socket = make_zmq_socket(
                     self.ctx, output_address, zmq.PULL
@@ -560,17 +570,18 @@ class MPClient(EngineCoreClient):
                 # Engines are managed by this client.
                 addresses = get_engine_zmq_addresses(vllm_config)
                 self.input_socket = self.resources.input_socket = make_zmq_socket(
-                    self.ctx, addresses.inputs[0], zmq.ROUTER, bind=True
+                    self.ctx,
+                    addresses.inputs[0],
+                    zmq.ROUTER,
+                    bind=True,
+                    router_handover=enable_input_socket_handover,
                 )
                 self.resources.output_socket = make_zmq_socket(
                     self.ctx, addresses.outputs[0], zmq.PULL
                 )
 
                 with launch_core_engines(
-                    vllm_config,
-                    executor_class,
-                    log_stats,
-                    addresses,
+                    vllm_config, executor_class, log_stats, addresses
                 ) as (engine_manager, coordinator, addresses):
                     self.resources.coordinator = coordinator
                     self.resources.engine_manager = engine_manager
@@ -581,7 +592,6 @@ class MPClient(EngineCoreClient):
                         coordinator.get_stats_publish_address()
                     )
 
-            parallel_config = vllm_config.parallel_config
             dp_size = parallel_config.data_parallel_size
             dp_rank = parallel_config.data_parallel_index
             dp_local_size = parallel_config.data_parallel_size_local
@@ -636,9 +646,12 @@ class MPClient(EngineCoreClient):
             if not success:
                 self._finalizer()
 
-    def shutdown(self):
-        # Terminate background resources.
-        self._finalizer()
+    def shutdown(self, timeout: float | None = None) -> None:
+        """Shutdown engine manager under timeout and clean up resources."""
+        if self._finalizer.detach() is not None:
+            if self.resources.engine_manager is not None:
+                self.resources.engine_manager.shutdown(timeout=timeout)
+            self.resources()
 
     def _format_exception(self, e: Exception) -> Exception:
         """If errored, use EngineDeadError so root cause is clear."""
@@ -682,7 +695,7 @@ class MPClient(EngineCoreClient):
             sentinels = [proc.sentinel for proc in engine_processes]
             died = multiprocessing.connection.wait(sentinels)
             _self = self_ref()
-            if not _self or _self.resources.engine_dead:
+            if not _self or not _self._finalizer.alive or _self.resources.engine_dead:
                 return
             _self.resources.engine_dead = True
             proc_name = next(
@@ -1360,7 +1373,11 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
 
     def get_core_engine_for_request(self, request: EngineCoreRequest) -> EngineIdentity:
         # Engines are in rank order.
-        if (eng_index := request.data_parallel_rank) is None:
+        if (eng_index := request.data_parallel_rank) is None and (
+            eng_index := get_late_interaction_engine_index(
+                request.pooling_params, len(self.core_engines)
+            )
+        ) is None:
             current_counts = self.lb_engines
             # TODO use P2C alg for larger DP sizes
             num_engines = len(current_counts)
