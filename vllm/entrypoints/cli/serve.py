@@ -112,7 +112,7 @@ class ServeSubcommand(CLISubcommand):
         if getattr(args, "enable_elastic_ep", False) and args.api_server_count > 1:
             logger.warning(
                 "Elastic EP only supports running with with at most one API server. "
-                "Capping the number of API servers from %d to 1.",
+                "Capping api_server_count from %d to 1.",
                 args.api_server_count,
             )
             args.api_server_count = 1
