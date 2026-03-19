@@ -98,8 +98,7 @@ def run_multi_gpu_test(rank: int, world_size: int, port: str, test_func):
     os.environ.pop("CUDA_VISIBLE_DEVICES", None)
 
     # Set device for this rank
-    device = torch.device(f"cuda:{rank}")
-    torch.cuda.set_device(device)
+    torch.accelerator.set_device_index(rank)
 
     # Initialize distributed environment
     # Use world_size for tp to create multi-process setup
@@ -111,7 +110,7 @@ def run_multi_gpu_test(rank: int, world_size: int, port: str, test_func):
     assert torch.distributed.get_rank() == rank
 
     print(
-        f"\n[Rank {rank}] GPU: {torch.cuda.current_device()}, "
+        f"\n[Rank {rank}] GPU: {torch.accelerator.current_device_index()}, "
         f"World size: {torch.distributed.get_world_size()}"
     )
 
@@ -147,7 +146,7 @@ def manager_initialization_worker(rank: int, world_size: int):
     manager.initialize(
         world_size=world_size,
         rank=rank,
-        gpus_per_node=torch.cuda.device_count(),
+        gpus_per_node=torch.accelerator.device_count(),
     )
 
     assert manager.initialized
@@ -182,7 +181,7 @@ def workspace_reinitialization_worker(rank: int, world_size: int):
     manager.initialize(
         world_size=world_size,
         rank=rank,
-        gpus_per_node=torch.cuda.device_count(),
+        gpus_per_node=torch.accelerator.device_count(),
     )
     assert manager.initialized
     print(f"[Rank {rank}] First initialization complete")
@@ -200,7 +199,7 @@ def workspace_reinitialization_worker(rank: int, world_size: int):
     manager.initialize(
         world_size=world_size,
         rank=rank,
-        gpus_per_node=torch.cuda.device_count(),
+        gpus_per_node=torch.accelerator.device_count(),
     )
     assert manager.initialized
     print(f"[Rank {rank}] Re-initialization complete")
@@ -241,7 +240,7 @@ def ensure_initialized_worker(rank: int, world_size: int):
     manager.cleanup()
 
 
-@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="Need at least 2 GPUs")
+@pytest.mark.skipif(torch.accelerator.device_count() < 2, reason="Need at least 2 GPUs")
 @pytest.mark.skipif(
     not has_sys_ptrace_capability(),
     reason=(
@@ -280,7 +279,7 @@ def test_flashinfer_alltoall_manager_initialization(world_size: int):
         assert p.exitcode == 0, f"Process failed with exit code {p.exitcode}"
 
 
-@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="Need at least 2 GPUs")
+@pytest.mark.skipif(torch.accelerator.device_count() < 2, reason="Need at least 2 GPUs")
 @pytest.mark.skipif(
     not has_sys_ptrace_capability(),
     reason=(
@@ -318,7 +317,7 @@ def test_flashinfer_alltoall_workspace_reinitialization(world_size: int):
         assert p.exitcode == 0, f"Process failed with exit code {p.exitcode}"
 
 
-@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="Need at least 2 GPUs")
+@pytest.mark.skipif(torch.accelerator.device_count() < 2, reason="Need at least 2 GPUs")
 @pytest.mark.skipif(
     not has_sys_ptrace_capability(),
     reason=(
@@ -498,7 +497,7 @@ def data_communication_worker(rank: int, world_size: int):
             torch.distributed.barrier()
 
 
-@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="Need at least 2 GPUs")
+@pytest.mark.skipif(torch.accelerator.device_count() < 2, reason="Need at least 2 GPUs")
 @pytest.mark.parametrize("world_size", [2])
 def test_alltoall_data_communication(world_size: int):
     """
@@ -767,7 +766,7 @@ def flashinfer_data_communication_worker(rank: int, world_size: int):
             torch.distributed.barrier()
 
 
-@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="Need at least 2 GPUs")
+@pytest.mark.skipif(torch.accelerator.device_count() < 2, reason="Need at least 2 GPUs")
 @pytest.mark.parametrize("world_size", [2])
 def test_flashinfer_alltoall_data_communication(world_size: int):
     """
@@ -1004,7 +1003,7 @@ def deterministic_data_validation_worker(rank: int, world_size: int):
             torch.distributed.barrier()
 
 
-@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="Need at least 2 GPUs")
+@pytest.mark.skipif(torch.accelerator.device_count() < 2, reason="Need at least 2 GPUs")
 @pytest.mark.parametrize("world_size", [2])
 def test_alltoall_deterministic_data_validation(world_size: int):
     """
@@ -1078,7 +1077,7 @@ if __name__ == "__main__":
     print("MNNVL AllToAll Test Configuration")
     print("=" * 70)
 
-    print(f"\nGPUs available: {torch.cuda.device_count()}")
+    print(f"\nGPUs available: {torch.accelerator.device_count()}")
     print(f"FlashInfer AllToAll available: {has_flashinfer_all2all()}")
 
     if has_sys_ptrace_capability():
