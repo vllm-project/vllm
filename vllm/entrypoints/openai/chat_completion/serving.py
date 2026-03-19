@@ -1153,6 +1153,25 @@ class OpenAIServingChat(OpenAIServing):
 
                             # check to see if there's anything left to stream
                             remaining_call = expected_call.replace(actual_call, "", 1)
+
+                            # If the replace had no effect and args is a dict,
+                            # the mismatch may be caused by json.dumps using
+                            # different separators than the model's output
+                            # (e.g. '{"key": "v"}' vs '{"key":"v"}').
+                            # Retry with compact separators.
+                            if (
+                                remaining_call == expected_call
+                                and actual_call
+                                and not isinstance(args, str)
+                            ):
+                                expected_call = json.dumps(
+                                    args,
+                                    ensure_ascii=False,
+                                    separators=(",", ":"),
+                                )
+                                remaining_call = expected_call.replace(
+                                    actual_call, "", 1
+                                )
                             # set that as a delta message
                             delta_message = self._create_remaining_args_delta(
                                 delta_message, remaining_call, index
