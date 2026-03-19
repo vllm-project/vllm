@@ -483,19 +483,6 @@ steps:
     - pytest -v -s v1/e2e/spec_decode/test_spec_decode.py -k "tensor_parallelism"
 
 
-- label: Entrypoints V1 # TBD
-  timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
-  agent_pool: mi250_1
-  optional: true
-  working_dir: "/vllm-workspace/tests"
-  source_file_dependencies:
-  - vllm/
-  - tests/v1
-  commands:
-  - pytest -v -s v1/entrypoints
-
-
 - label: V1 Sample + Logits # TBD
   timeout_in_minutes: 60
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
@@ -1173,14 +1160,14 @@ steps:
   - vllm/v1/engine/
   - vllm/v1/worker/
   - tests/v1/distributed
-  - tests/v1/entrypoints/openai/test_multi_api_servers.py
+  - tests/entrypoints/openai/test_multi_api_servers.py
   - vllm/platforms/rocm.py
   commands:
   - export TORCH_NCCL_BLOCKING_WAIT=1
   - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_async_llm_dp.py
   - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_eagle_dp.py
   - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_external_lb_dp.py
-  - DP_SIZE=2 pytest -v -s v1/entrypoints/openai/test_multi_api_servers.py
+  - DP_SIZE=2 pytest -v -s entrypoints/openai/test_multi_api_servers.py
 
 
 - label: Distributed Compile + RPC Tests (2 GPUs) # TBD
@@ -1768,19 +1755,6 @@ steps:
   - tests/v1/e2e
   commands:
     - pytest -v -s v1/e2e/spec_decode/test_spec_decode.py -k "eagle_correctness_heavy"
-
-
-- label: Entrypoints V1 # 25.7m
-  timeout_in_minutes: 45
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
-  agent_pool: mi325_1
-  optional: true
-  working_dir: "/vllm-workspace/tests"
-  source_file_dependencies:
-  - vllm/
-  - tests/v1
-  commands:
-  - pytest -v -s v1/entrypoints
 
 
 - label: V1 Spec Decode # TBD
@@ -2395,14 +2369,14 @@ steps:
   - vllm/v1/engine/
   - vllm/v1/worker/
   - tests/v1/distributed
-  - tests/v1/entrypoints/openai/test_multi_api_servers.py
+  - tests/entrypoints/openai/test_multi_api_servers.py
   - vllm/platforms/rocm.py
   commands:
   - export TORCH_NCCL_BLOCKING_WAIT=1
   - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_async_llm_dp.py
   - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_eagle_dp.py
   - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_external_lb_dp.py
-  - DP_SIZE=2 pytest -v -s v1/entrypoints/openai/test_multi_api_servers.py
+  - DP_SIZE=2 pytest -v -s entrypoints/openai/test_multi_api_servers.py
 
 
 - label: Distributed Compile + RPC Tests (2 GPUs) # 56.1m
