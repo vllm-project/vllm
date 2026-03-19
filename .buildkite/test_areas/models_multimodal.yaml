@@ -62,7 +62,7 @@ steps:
       depends_on:
       - image-build-amd
 
-- label: Multi-Modal Processor Test (CPU)
+- label: Multi-Modal Processor (CPU)
   depends_on: 
   - image-build-cpu
   timeout_in_minutes: 60
@@ -95,34 +95,44 @@ steps:
   commands:
   - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-mm-small.txt --tp-size=1
 
-- label: Multi-Modal Models (Extended) 1
+- label: Multi-Modal Models (Extended Generation 1)
   optional: true
   source_file_dependencies:
   - vllm/
-  - tests/models/multimodal
+  - tests/models/multimodal/generation
+  - tests/models/multimodal/test_mapping.py
   commands:
     - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
-    - pytest -v -s models/multimodal -m 'not core_model' --ignore models/multimodal/generation/test_common.py --ignore models/multimodal/processing
+    - pytest -v -s models/multimodal/generation -m 'not core_model' --ignore models/multimodal/generation/test_common.py
+    - pytest -v -s models/multimodal/test_mapping.py
   mirror:
     amd:
       device: mi325_1
       depends_on:
       - image-build-amd
 
-- label: Multi-Modal Models (Extended) 2
+- label: Multi-Modal Models (Extended Generation 2)
   optional: true
   source_file_dependencies:
   - vllm/
-  - tests/models/multimodal
+  - tests/models/multimodal/generation
   commands:
     - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
     - pytest -v -s models/multimodal/generation/test_common.py -m 'split(group=0) and not core_model'
 
-- label: Multi-Modal Models (Extended) 3
+- label: Multi-Modal Models (Extended Generation 3)
   optional: true
   source_file_dependencies:
   - vllm/
-  - tests/models/multimodal
+  - tests/models/multimodal/generation
   commands:
     - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
     - pytest -v -s models/multimodal/generation/test_common.py -m 'split(group=1) and not core_model'
+
+- label: Multi-Modal Models (Extended Pooling)
+  optional: true
+  source_file_dependencies:
+  - vllm/
+  - tests/models/multimodal/pooling
+  commands:
+    - pytest -v -s models/multimodal/pooling -m 'not core_model'
