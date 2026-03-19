@@ -54,10 +54,6 @@ class PoolingParams(
     dimensions: int | None = None
     # --8<-- [end:embed-pooling-params]
 
-    ## for classification, scoring and rerank
-    # --8<-- [start:classify-pooling-params]
-    # --8<-- [end:classify-pooling-params]
-
     ## for step pooling models
     step_tag_id: int | None = None
     returned_token_ids: list[int] | None = None
@@ -79,7 +75,6 @@ class PoolingParams(
         return {
             "embed": ["dimensions", "use_activation"],
             "classify": ["use_activation"],
-            "score": ["use_activation"],
             "token_embed": ["dimensions", "use_activation"],
             "token_classify": ["use_activation"],
         }
@@ -184,7 +179,7 @@ class PoolingParams(
                 elif self.dimensions < 1:
                     raise ValueError("Dimensions must be greater than 0")
 
-        elif self.task in ["classify", "score", "token_classify"]:
+        elif self.task in ["classify", "token_classify"]:
             if self.use_activation is None:
                 self.use_activation = True
         else:

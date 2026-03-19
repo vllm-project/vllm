@@ -1435,8 +1435,8 @@ class ModelConfig:
     @property
     def score_type(self) -> ScoreType:
         """
-        Score API handles score/rerank for:
-        - "score" task (score_type: cross-encoder models)
+        Scoring API handles score/rerank for:
+        - "classify" task (score_type: cross-encoder models)
         - "embed" task (score_type: bi-encoder models)
         - "token_embed" task (score_type: late interaction models)
         """
