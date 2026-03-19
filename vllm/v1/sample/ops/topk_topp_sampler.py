@@ -103,6 +103,35 @@ class TopKTopPSampler(nn.Module):
 
         The logits tensor may be updated in-place.
         """
+        # Prevent massive memory spikes from PyTorch eager allocations (sort, empty_like, etc)
+        # by cleanly chunking large batches before evaluation.
+        CHUNK_SIZE = 64
+        batch_size = logits.shape[0]
+        if batch_size > CHUNK_SIZE:
+            out_tokens = []
+            out_logprobs = []
+            for start in range(0, batch_size, CHUNK_SIZE):
+                end = min(start + CHUNK_SIZE, batch_size)
+                chunk_logits = logits[start:end]
+                chunk_generators = {
+                    i - start: gen
+                    for i, gen in generators.items()
+                    if start <= i < end
+                }
+                chunk_k = k[start:end] if k is not None else None
+                chunk_p = p[start:end] if p is not None else None
+
+                tok, logp = self.forward_native(
+                    chunk_logits, chunk_generators, chunk_k, chunk_p
+                )
+                out_tokens.append(tok)
+                if logp is not None:
+                    out_logprobs.append(logp)
+
+            return torch.cat(out_tokens, dim=0), (
+                torch.cat(out_logprobs, dim=0) if out_logprobs else None
+            )
+
         logits = apply_top_k_top_p(logits, k, p)
         logits_to_return = None
         if self.logprobs_mode == "processed_logits":
