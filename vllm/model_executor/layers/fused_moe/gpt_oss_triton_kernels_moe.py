@@ -522,9 +522,14 @@ class BaseOAITritonExperts(mk.FusedMoEExpertsModular):
     @staticmethod
     def _supports_current_device() -> bool:
         p = current_platform
-        return p.is_cuda_alike() and (
-            p.is_device_capability(90) or p.is_device_capability_family(100)
-        )
+        if not p.is_cuda_alike():
+            return False
+        cap = p.get_device_capability()
+        if cap is None:
+            return False
+        # (9,0) <= cap < (11,0) covers CUDA SM90 (Hopper), SM100+ (Blackwell)
+        # and ROCm gfx942/gfx950 (which map to 9.4/9.5).
+        return (9, 0) <= (cap.major, cap.minor) < (11, 0)
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:
@@ -849,9 +854,14 @@ class OAITritonMxfp4ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
     @staticmethod
     def _supports_current_device() -> bool:
         p = current_platform
-        return p.is_cuda_alike() and (
-            p.is_device_capability(90) or p.is_device_capability_family(100)
-        )
+        if not p.is_cuda_alike():
+            return False
+        cap = p.get_device_capability()
+        if cap is None:
+            return False
+        # (9,0) <= cap < (11,0) covers CUDA SM90 (Hopper), SM100+ (Blackwell)
+        # and ROCm gfx942/gfx950 (which map to 9.4/9.5).
+        return (9, 0) <= (cap.major, cap.minor) < (11, 0)
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:
