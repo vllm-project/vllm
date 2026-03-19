@@ -14,6 +14,7 @@ from torch.distributed import ProcessGroup
 from vllm.distributed.parallel_state import get_eplb_group
 from vllm.logger import init_logger
 
+from .eplb_state import EPLBPhase
 from .rebalance_execute import transfer_layer
 
 if TYPE_CHECKING:
@@ -107,31 +108,35 @@ async def transfer_run_periodically(
     is_profile: bool = False,
 ) -> None:
     while True:
-        await asyncio.to_thread(state.rearrange_event.wait)
+        await asyncio.to_thread(state.wakeup_event.wait)
         logger.info("async worker woke up for EPLB transfer")
 
         assert state.is_async
         for model_state in state.model_states.values():
-            rebalancing_algorithm_executed = False
             physical_to_logical_map_cpu = None
             current_num_layers = model_state.model.num_moe_layers
+
             while (
-                model_state.rebalanced
+                model_state.is_rebalance_in_progress()
                 and model_state.layer_to_transfer < current_num_layers
             ):
-                if not model_state.ep_buffer_ready and model_state.rebalanced:
+                if model_state.is_scheduled() or model_state.can_prepare_next_layer():
                     # Polling the lock directly in the async thread avoids
                     # the thread switch overhead of asyncio.to_thread.
                     # This is typically faster than offloading to a worker thread.
                     while not model_state.buffer_lock.acquire(blocking=False):
                         await asyncio.sleep(0)
                     try:
+                        # Re-check phase under the lock: the main thread may
+                        # have completed the last layer and reset to IDLE while
+                        # we were polling for the lock.
+                        if not model_state.is_rebalance_in_progress():
+                            break
                         if model_state.layer_to_transfer >= current_num_layers:
                             break
-                        if (
-                            not rebalancing_algorithm_executed
-                            or model_state.new_physical_to_logical_map is None
-                        ):
+
+                        if model_state.is_scheduled():
+                            model_state.set_phase(EPLBPhase.PLANNING)
                             # Move the physical_to_logical_map to CPU
                             # for rebalancing and transfer_layer.
                             physical_to_logical_map_cpu = (
@@ -140,7 +145,7 @@ async def transfer_run_periodically(
                             run_rebalance_experts(
                                 model_state, state, physical_to_logical_map_cpu
                             )
-                            rebalancing_algorithm_executed = True
+                            model_state.set_phase(EPLBPhase.TRANSFER_PENDING)
                             logger.info(
                                 "Async worker computed new indices for model %s",
                                 model_state.model_name,
@@ -161,6 +166,7 @@ async def transfer_run_periodically(
                             cuda_stream.wait_event(model_state.buffer_consumed_event)
                             model_state.buffer_consumed_event = None
 
+                        model_state.set_phase(EPLBPhase.TRANSFERRING_LAYER)
                         (
                             model_state.is_unchanged,
                             model_state.is_received_locally,
@@ -177,12 +183,12 @@ async def transfer_run_periodically(
                         event = torch.cuda.Event(blocking=False)
                         cuda_stream.record_event(event)
                         model_state.buffer_ready_event = event
-                        model_state.ep_buffer_ready = 1
+                        model_state.set_phase(EPLBPhase.BUFFER_READY)
                     finally:
                         model_state.buffer_lock.release()
                 else:
-                    if not model_state.rebalanced:
+                    if not model_state.is_rebalance_in_progress():
                         break
                     await asyncio.sleep(0.001)
 
-        state.rearrange_event.clear()
+        state.wakeup_event.clear()
