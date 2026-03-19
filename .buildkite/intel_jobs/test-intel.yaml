@@ -14,7 +14,7 @@ steps:
           limit: 2
         - exit_status: -10  # Agent was lost
           limit: 2
-  - label: "Intel example Test"
+  - label: "XPU example Test"
     depends_on:
       - image-build-xpu
     timeout_in_minutes: 30
