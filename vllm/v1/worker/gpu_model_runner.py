@@ -2935,7 +2935,10 @@ class GPUModelRunner(
 
         pooling_metadata = self.input_batch.get_pooling_metadata()
         pooling_metadata.build_pooling_cursor(
-            num_scheduled_tokens_np, seq_lens_cpu, device=hidden_states.device
+            num_scheduled_tokens_np,
+            seq_lens_cpu,
+            device=hidden_states.device,
+            query_start_loc_gpu=self.query_start_loc.gpu[: num_reqs + 1],
         )
 
         model = cast(VllmModelForPooling, self.model)

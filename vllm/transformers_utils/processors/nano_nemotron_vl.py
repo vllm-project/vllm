@@ -994,7 +994,7 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
         audios: list[npt.NDArray],
     ) -> tuple[list[str], dict[str, Any]]:
         if len(audios) == 0:
-            return text, {}
+            return text, {"audio_num_clips": []}
 
         assert self.audio_extractor is not None
         extractor = self.audio_extractor
@@ -1018,13 +1018,10 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
             sampling_rate=extractor.sampling_rate,
             return_tensors="pt",
         )
-        input_audio_features = audio_inputs.input_features
-        feature_attention_mask = audio_inputs.attention_mask
-        audio_feature_lengths = feature_attention_mask.sum(dim=1)
         audio_inputs = {
-            "input_audio_features": input_audio_features,
-            "feature_attention_mask": feature_attention_mask,
-            "audio_feature_lengths": audio_feature_lengths,
+            "input_audio_features": audio_inputs.input_features,
+            "feature_attention_mask": audio_inputs.attention_mask,
+            "audio_num_clips": audio_inputs.audio_num_clips,
         }
 
         return text, audio_inputs

@@ -101,15 +101,16 @@ MAX_AUDIO_LEN_S = 10 * 60  # 10 minutes
 class NanoNemotronVLAudioFeatureInputs(TensorSchema):
     """
     Dimensions:
-        - b: Number of audio clips
+        - c: Number of audio clips (possibly flattened across audio items)
+        - b: Number of original audio items
         - t: Audio feature length
         - f: Feature size (mel bins)
     """
 
     type: Literal["audio_features"] = "audio_features"
-    input_audio_features: Annotated[torch.Tensor, TensorShape("b", "t", "f")]
-    feature_attention_mask: Annotated[torch.Tensor, TensorShape("b", "t")]
-    audio_feature_lengths: Annotated[torch.Tensor, TensorShape("b")]
+    input_audio_features: Annotated[torch.Tensor, TensorShape("c", "t", "f")]
+    feature_attention_mask: Annotated[torch.Tensor, TensorShape("c", "t")]
+    audio_num_clips: list[int]
 
 
 class NanoNemotronVLImagePixelInputs(TensorSchema):
@@ -553,10 +554,17 @@ class NanoNemotronVLMultiModalProcessor(
             video_fields = {}
 
         if self.info.audio_extractor is not None:
+            audio_num_clips = torch.as_tensor(hf_inputs["audio_num_clips"])
             audio_fields = dict(
-                input_audio_features=MultiModalFieldConfig.batched("audio"),
-                feature_attention_mask=MultiModalFieldConfig.batched("audio"),
-                audio_feature_lengths=MultiModalFieldConfig.batched("audio"),
+                input_audio_features=MultiModalFieldConfig.flat_from_sizes(
+                    "audio", audio_num_clips
+                ),
+                feature_attention_mask=MultiModalFieldConfig.flat_from_sizes(
+                    "audio", audio_num_clips
+                ),
+                audio_num_clips=MultiModalFieldConfig.batched(
+                    "audio", keep_on_cpu=True
+                ),
             )
         else:
             audio_fields = {}
@@ -1204,27 +1212,8 @@ class NemotronH_Nano_VL_V2(
         assert self.sound_encoder is not None
         input_audio_features = audio_input.input_audio_features
         feature_attention_mask = audio_input.feature_attention_mask
+        audio_num_clips = audio_input.audio_num_clips
         target_device = next(self.sound_encoder.parameters()).device
-
-        # When cross-request batching combines audio clips with different
-        # time dimensions, _reduce_data returns a list instead of a stacked
-        # tensor. Pad to the max time dim and stack; the attention mask
-        # already marks valid positions so zero-padding is safe.
-        if isinstance(input_audio_features, list):
-            feature_sizes = [f.shape[-2] for f in input_audio_features]
-            max_t = max(feature_sizes)
-            padded_feats = [
-                torch.nn.functional.pad(feat, (0, 0, 0, max_t - feat_size))
-                for feat, feat_size in zip(
-                    input_audio_features, feature_sizes, strict=True
-                )
-            ]
-            padded_masks = [
-                torch.nn.functional.pad(mask, (0, max_t - mask.shape[-1]))
-                for mask in feature_attention_mask
-            ]
-            input_audio_features = torch.stack(padded_feats)
-            feature_attention_mask = torch.stack(padded_masks)
 
         input_audio_features = input_audio_features.to(
             dtype=self.llm_dtype, device=target_device
@@ -1235,13 +1224,18 @@ class NemotronH_Nano_VL_V2(
         valid_input_lens = feature_attention_mask.sum(dim=1)
         valid_output_lens = self.sound_encoder.encoder._get_subsampling_output_length(
             valid_input_lens
-        )
-        truncated_embeds = []
-        for i in range(sound_embeds.shape[0]):
-            valid_len = valid_output_lens[i].item()
-            truncated_embeds.append(sound_embeds[i, :valid_len])
+        ).tolist()
+        grouped_embeds = []
+        clip_offset = 0
+        for num_clips in audio_num_clips:
+            embeds = []
+            for clip_idx in range(clip_offset, clip_offset + num_clips):
+                valid_len = valid_output_lens[clip_idx]
+                embeds.append(sound_embeds[clip_idx, :valid_len])
+            grouped_embeds.append(torch.cat(embeds, dim=0))
+            clip_offset += num_clips
 
-        return tuple(truncated_embeds)
+        return tuple(grouped_embeds)
 
     def _create_final_video_embeddings(
         self,
@@ -1376,7 +1370,7 @@ class NemotronH_Nano_VL_V2(
                 in (
                     "input_audio_features",
                     "feature_attention_mask",
-                    "audio_feature_lengths",
+                    "audio_num_clips",
                 )
                 and "audios" not in modalities
             ):
