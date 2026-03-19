@@ -882,6 +882,17 @@ async def run_benchmark(
             config=config, dp_size=dp_size,
         )
 
+        # Drain engine pipeline after warmup to prevent race with first
+        # benchmark iteration. Without this, warmup's last engine step
+        # can overlap with benchmark requests.
+        await call_debug_endpoint(
+            session, rotator, "/debug/sleep", {"level": "0"})
+        await asyncio.sleep(0.5)
+        await call_debug_endpoint(session, rotator, "/debug/wake_up")
+        await call_debug_endpoint(
+            session, rotator, "/debug/step_stats/reset")
+        logger.info("Engine drained after warmup")
+
         # Sweep all parameter combinations
         param_combos = list(
             itertools.product(
