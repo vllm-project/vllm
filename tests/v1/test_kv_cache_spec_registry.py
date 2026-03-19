@@ -1,35 +1,42 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import torch
-import pytest
 from dataclasses import dataclass
+from typing import Any
 
+import pytest
+import torch
+
+from vllm.config import (
+    CacheConfig,
+    VllmConfig,
+)
 from vllm.v1.core.single_type_kv_cache_manager import (
+    ChunkedLocalAttentionManager,
+    CrossAttentionManager,
     FullAttentionManager,
+    MambaManager,
     SingleTypeKVCacheManager,
+    SinkFullAttentionManager,
     SlidingWindowManager,
+    register_all_kvcache_specs,
 )
 from vllm.v1.kv_cache_interface import (
+    ChunkedLocalAttentionSpec,
+    CrossAttentionSpec,
     FullAttentionSpec,
     KVCacheSpec,
+    MambaSpec,
+    MLAAttentionSpec,
+    SinkFullAttentionSpec,
     SlidingWindowSpec,
-    UniformTypeKVCacheSpecs,
 )
 from vllm.v1.kv_cache_registry import (
+    _REGISTRY_KVCACHESPEC_LIST,
     KVCacheSpecRegistry,
     register_kv_cache_spec,
 )
 
-from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
-from vllm.config import (
-    CacheConfig,
-    CompilationConfig,
-    CompilationMode,
-    ModelConfig,
-    PassConfig,
-    VllmConfig,
-)
 
 def make_vllm_config() -> VllmConfig:
     return VllmConfig(
@@ -39,9 +46,11 @@ def make_vllm_config() -> VllmConfig:
         ),
     )
 
+
 # register all kvcache specs in enginecore process.
-vllm_config=make_vllm_config()
+vllm_config = make_vllm_config()
 register_all_kvcache_specs(vllm_config)
+
 
 @dataclass(frozen=True)
 class _TrulyUnregisteredSpec(KVCacheSpec):
@@ -58,25 +67,6 @@ class _TrulyUnregisteredSpec(KVCacheSpec):
     def max_memory_usage_bytes(self, _) -> int:
         return 0
 
-from vllm.v1.kv_cache_interface import (
-    ChunkedLocalAttentionSpec,
-    CrossAttentionSpec,
-    FullAttentionSpec,
-    KVCacheSpec,
-    MambaSpec,
-    MLAAttentionSpec,
-    SinkFullAttentionSpec,
-    SlidingWindowSpec,
-)
-from vllm.v1.core.single_type_kv_cache_manager import (
-    ChunkedLocalAttentionManager,
-    CrossAttentionManager,
-    FullAttentionManager,
-    MambaManager,
-    SinkFullAttentionManager,
-    SlidingWindowManager,
-)
-from vllm.v1.kv_cache_registry import _REGISTRY_KVCACHESPEC_LIST
 
 spec_manager_map: dict[type[KVCacheSpec], type[SingleTypeKVCacheManager]] = {
     FullAttentionSpec: FullAttentionManager,
@@ -89,15 +79,43 @@ spec_manager_map: dict[type[KVCacheSpec], type[SingleTypeKVCacheManager]] = {
 }
 
 base_args = dict(block_size=64, num_kv_heads=8, head_size=128, dtype=torch.bfloat16)
-spec_args_map: dict[type[KVCacheSpec], dict[str, int]] = {
-    FullAttentionSpec: dict(block_size=64, num_kv_heads=8, head_size=128, dtype=torch.bfloat16),
-    MLAAttentionSpec: dict(block_size=64, num_kv_heads=1, head_size=128, dtype=torch.bfloat16),
-    SlidingWindowSpec: dict(block_size=64, num_kv_heads=8, head_size=128, dtype=torch.bfloat16, sliding_window=128),
-    ChunkedLocalAttentionSpec: dict(block_size=64, num_kv_heads=8, head_size=128, dtype=torch.bfloat16, attention_chunk_size=4),
-    MambaSpec: dict(block_size=64, shapes=((2, 512), (3, 32, 32)), dtypes=(torch.float32, torch.float32), mamba_cache_mode="align", num_speculative_blocks=2),
-    CrossAttentionSpec: dict(block_size=64, num_kv_heads=8, head_size=128, dtype=torch.bfloat16),
-    SinkFullAttentionSpec: dict(block_size=64, num_kv_heads=8, head_size=128, dtype=torch.bfloat16, sink_len=16),
+spec_args_map: dict[type[KVCacheSpec], dict[str, Any]] = {
+    FullAttentionSpec: dict(
+        block_size=64, num_kv_heads=8, head_size=128, dtype=torch.bfloat16
+    ),
+    MLAAttentionSpec: dict(
+        block_size=64, num_kv_heads=1, head_size=128, dtype=torch.bfloat16
+    ),
+    SlidingWindowSpec: dict(
+        block_size=64,
+        num_kv_heads=8,
+        head_size=128,
+        dtype=torch.bfloat16,
+        sliding_window=128,
+    ),
+    ChunkedLocalAttentionSpec: dict(
+        block_size=64,
+        num_kv_heads=8,
+        head_size=128,
+        dtype=torch.bfloat16,
+        attention_chunk_size=4,
+    ),
+    MambaSpec: dict(
+        block_size=64,
+        shapes=((2, 512), (3, 32, 32)),
+        dtypes=(torch.float32, torch.float32),
+        mamba_cache_mode="align",
+        num_speculative_blocks=2,
+    ),
+    CrossAttentionSpec: dict(
+        block_size=64, num_kv_heads=8, head_size=128, dtype=torch.bfloat16
+    ),
+    SinkFullAttentionSpec: dict(
+        block_size=64, num_kv_heads=8, head_size=128, dtype=torch.bfloat16, sink_len=16
+    ),
 }
+
+
 class TestKVCacheSpecRegistry:
     """Test the core registry functionality."""
 
@@ -120,17 +138,21 @@ class TestKVCacheSpecRegistry:
         class _CustomFullSpec(FullAttentionSpec):
             custom_param: int = 16
 
-        spec = _CustomFullSpec(block_size=16, num_kv_heads=8, head_size=128,
-                               dtype=torch.bfloat16, custom_param=100)
-
-        assert KVCacheSpecRegistry.get_manager_class(spec) is FullAttentionManager
-        assert (
-            KVCacheSpecRegistry.get_uniform_type_base_spec(spec)
-            is FullAttentionSpec
+        spec = _CustomFullSpec(
+            block_size=16,
+            num_kv_heads=8,
+            head_size=128,
+            dtype=torch.bfloat16,
+            custom_param=100,
         )
 
-        with pytest.raises(AssertionError, 
-            match="Unexpected target_kv_cache_spec_cls:"):
+        assert KVCacheSpecRegistry.get_manager_class(spec) is FullAttentionManager
+        assert KVCacheSpecRegistry.get_uniform_type_base_spec(spec) is FullAttentionSpec
+
+        with pytest.raises(
+            AssertionError, match="Unexpected target_kv_cache_spec_cls:"
+        ):
+
             @register_kv_cache_spec(
                 manager_class=FullAttentionManager,
                 uniform_type_base_spec=FullAttentionSpec,
@@ -140,8 +162,10 @@ class TestKVCacheSpecRegistry:
             class _CustomFullSpecWithTargetSpec(FullAttentionSpec):
                 custom_param: int = 16
 
-        with pytest.raises(AssertionError, 
-            match="manager_class is required when override=False"):
+        with pytest.raises(
+            AssertionError, match="manager_class is required when override=False"
+        ):
+
             @register_kv_cache_spec(
                 uniform_type_base_spec=FullAttentionSpec,
             )
@@ -151,34 +175,43 @@ class TestKVCacheSpecRegistry:
 
     def test_custom_spec_override(self):
         """A decorated custom spec resolves to the declared manager."""
+
         @register_kv_cache_spec(
             manager_class=FullAttentionManager,
             uniform_type_base_spec=FullAttentionSpec,
             target_kv_cache_spec_cls=FullAttentionSpec,
-            override=True
+            override=True,
         )
         @dataclass(frozen=True, kw_only=True)
         class _CustomOverrideFullSpec(FullAttentionSpec):
             custom_param: int = 16
 
-        spec = _CustomOverrideFullSpec(block_size=16, num_kv_heads=8, head_size=128,
-                               dtype=torch.bfloat16, custom_param=100)
+        spec = _CustomOverrideFullSpec(
+            block_size=16,
+            num_kv_heads=8,
+            head_size=128,
+            dtype=torch.bfloat16,
+            custom_param=100,
+        )
 
         assert KVCacheSpecRegistry.get_manager_class(spec) is FullAttentionManager
+        assert KVCacheSpecRegistry.get_uniform_type_base_spec(spec) is FullAttentionSpec
         assert (
-            KVCacheSpecRegistry.get_uniform_type_base_spec(spec)
-            is FullAttentionSpec
+            _REGISTRY_KVCACHESPEC_LIST[FullAttentionSpec].kvcache_spec_cls
+            == _CustomOverrideFullSpec
         )
-        assert _REGISTRY_KVCACHESPEC_LIST[FullAttentionSpec].kvcache_spec_cls == _CustomOverrideFullSpec
-        with pytest.raises(AssertionError, 
-            match="Please specify a target_kv_cache_spec_cls when override a KVCacheSpec"):
+        with pytest.raises(
+            AssertionError,
+            match="Please specify a target_kv_cache_spec_cls when override",
+        ):
+
             @register_kv_cache_spec(
                 manager_class=FullAttentionManager,
                 uniform_type_base_spec=FullAttentionSpec,
-                override=True
+                override=True,
             )
             @dataclass(frozen=True, kw_only=True)
-            class _CustomOverrideFullSpec(FullAttentionSpec):
+            class _CustomOverrideFullSpecWithNoTargetSpec(FullAttentionSpec):
                 custom_param: int = 16
 
     def test_unregistered_spec_no_registered_parent_raises(self):
@@ -205,13 +238,9 @@ class TestKVCacheSpecRegistry:
         class _ImplicitlyInheritedSpec(FullAttentionSpec):
             pass
 
-        spec = _ImplicitlyInheritedSpec(block_size=16, num_kv_heads=8,
-                                        head_size=128, dtype=torch.bfloat16)
-
-        # MRO walk finds FullAttentionSpec → FullAttentionManager
-        assert (
-            KVCacheSpecRegistry.get_manager_class(spec) is FullAttentionManager
+        spec = _ImplicitlyInheritedSpec(
+            block_size=16, num_kv_heads=8, head_size=128, dtype=torch.bfloat16
         )
 
-# if __name__ == "__main__":
-#     pytest.main([__file__, "-v"])
+        # MRO walk finds FullAttentionSpec → FullAttentionManager
+        assert KVCacheSpecRegistry.get_manager_class(spec) is FullAttentionManager

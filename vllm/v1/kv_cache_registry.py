@@ -60,7 +60,7 @@ class KVCacheSpecRegistry:
     def register(
         cls,
         kvcache_spec_cls: type["KVCacheSpec"],
-        manager_class: type["SingleTypeKVCacheManager"],
+        manager_class: type["SingleTypeKVCacheManager"] | None = None,
         uniform_type_base_spec: type["KVCacheSpec"] | None = None,
     ) -> None:
         """
@@ -90,7 +90,7 @@ class KVCacheSpecRegistry:
     def override(
         cls,
         kvcache_spec_cls: type["KVCacheSpec"],
-        target_kv_cache_spec_cls: type["KVCacheSpec"],
+        target_kv_cache_spec_cls: type["KVCacheSpec"] | None = None,
         manager_class: type["SingleTypeKVCacheManager"] | None = None,
         uniform_type_base_spec: type["KVCacheSpec"] | None = None,
     ) -> None:
