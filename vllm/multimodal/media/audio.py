@@ -25,7 +25,6 @@ except ImportError:
     soundfile = PlaceholderModule("soundfile")  # type: ignore[assignment]
 
 
-# Default 22.05kHz to align with `librosa.load`
 def load_audio_pyav(
     path: BytesIO | Path | str,
     *,
