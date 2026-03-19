@@ -91,7 +91,7 @@ class Sampler(nn.Module):
         # We gracefully exploit PyTorch's in-place casting via copy_() using our
         # permanently pre-allocated 150MB Float32 workspace bounds to max_num_seqs.
         # This natively eliminates the memory spike from dynamic floats.
-        logits_fp32 = self.sampler_workspace[:logits.size(0)]
+        logits_fp32 = self.sampler_workspace[: logits.size(0)]
         logits_fp32.copy_(logits)
         logits = logits_fp32
 
