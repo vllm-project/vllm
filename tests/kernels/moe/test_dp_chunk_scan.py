@@ -7,18 +7,17 @@ Tests for the torch.scan-based DP chunking path in DefaultMoERunner
 Test organisation
 -----------------
 Unit tests (no multi-GPU, no DeepEP):
-  - test_can_use_scan_respects_flag          : _can_use_scan() honours env var
-  - test_staged_tensor_shape                 : staging produces (num_chunks, max_tokens, H)
-  - test_staged_tensor_content               : staging preserves data, zeros padding
-  - test_output_trim                         : trimming from stacked → original shape
+  - test_can_use_scan_respects_flag -> _can_use_scan() honours env var
+  - test_staged_tensor_shape -> staging produces (num_chunks, max_tokens, H)
+  - test_staged_tensor_content -> staging preserves data, zeros padding
+  - test_output_trim -> trimming from stacked → original shape
 
 Integration tests (require 2 GPUs + deep_ep):
-  - test_scan_matches_loop_ll_mode           : scan output numerically equals Python loop
-  - test_scan_matches_loop_ll_mode_chunked   : same but with num_tokens > max_tokens_per_rank
-                                               so multiple scan iterations are exercised
+  - test_scan_matches_loop_ll_mode -> scan output numerically equals Python loop
+  - test_scan_matches_loop_ll_mode_chunked -> same but with
+    num_tokens > max_tokens_per_rank (multiple scan iterations)
 """
 
-import os
 import unittest.mock as mock
 
 import pytest
@@ -31,9 +30,7 @@ from vllm.utils.math_utils import cdiv
 # ---------------------------------------------------------------------------
 
 
-def _make_staged(
-    src: torch.Tensor, num_chunks: int, max_tokens: int
-) -> torch.Tensor:
+def _make_staged(src: torch.Tensor, num_chunks: int, max_tokens: int) -> torch.Tensor:
     """Replicate the staging logic from forward_impl_scan for testing."""
     feat_dim = src.size(-1)
     buf = src.new_zeros(num_chunks, max_tokens, feat_dim)
@@ -58,12 +55,12 @@ def test_can_use_scan_respects_flag():
     _can_use_scan() must return False when VLLM_MOE_USE_SCAN_CHUNKING is not set
     and True when it is set (given a DeepEP-LL compatible runner config).
     """
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
     from vllm.model_executor.layers.fused_moe.config import (
         FusedMoEConfig,
         FusedMoEParallelConfig,
         RoutingMethodType,
     )
-    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
     from vllm.model_executor.layers.fused_moe.runner.default_moe_runner import (
         DefaultMoERunner,
     )
@@ -168,9 +165,9 @@ def test_can_use_scan_respects_flag():
 @pytest.mark.parametrize(
     "num_tokens,max_tokens",
     [
-        (64, 64),   # exactly one chunk, no padding
+        (64, 64),  # exactly one chunk, no padding
         (100, 64),  # two chunks, padding in second
-        (1, 64),    # single token
+        (1, 64),  # single token
         (128, 64),  # exactly two full chunks
         (200, 64),  # four chunks, last partial
     ],
@@ -257,9 +254,6 @@ if has_deep_ep():
         ProcessGroupInfo,
         parallel_launch,
     )
-    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
-    from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
-    from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEKernel
     from tests.kernels.moe.test_deepep_moe import (
         MAX_TOKENS_PER_RANK,
         TestConfig,
@@ -267,6 +261,9 @@ if has_deep_ep():
         make_modular_kernel,
         make_weights,
     )
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
+    from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEKernel
 
 
 def _deep_ep_moe_scan(
@@ -287,12 +284,10 @@ def _deep_ep_moe_scan(
     communication ops produces results numerically equal to the loop version.
     """
     from torch._higher_order_ops.scan import scan as torch_scan
-    from torch.distributed import ProcessGroup
 
     num_local_experts = w1.size(0)
     total_num_tokens = test_tensors.rank_tokens.size(0)
     H = test_tensors.rank_tokens.size(1)
-    topk_dim = test_tensors.topk.size(1)
 
     is_quantized = w1.dtype == torch.float8_e4m3fn
     q_dtype = torch.float8_e4m3fn if is_quantized else None
@@ -300,8 +295,10 @@ def _deep_ep_moe_scan(
     def build_expert_map() -> torch.Tensor:
         em = torch.full((num_experts,), fill_value=-1, dtype=torch.int32)
         s = pgi.rank * num_local_experts
-        em[s : s + num_local_experts] = torch.arange(num_local_experts, dtype=torch.int32)
-        return em.to(device=torch.cuda.current_device())
+        em[s : s + num_local_experts] = torch.arange(
+            num_local_experts, dtype=torch.int32
+        )
+        return em.to(device=torch.accelerator.current_device_index())
 
     pg = torch.distributed.new_group(list(range(pgi.world_size)))
     quant_config = FusedMoEQuantConfig.make(
@@ -339,9 +336,9 @@ def _deep_ep_moe_scan(
         buf.view(-1, feat)[:copy_len].copy_(src[:copy_len], non_blocking=True)
         return buf
 
-    chunked_h = stage(test_tensors.rank_tokens)      # (C, T, H)
-    chunked_topk = stage(test_tensors.topk)       # (C, T, topk)
-    chunked_w = stage(test_tensors.topk_weights)     # (C, T, topk)
+    chunked_h = stage(test_tensors.rank_tokens)  # (C, T, H)
+    chunked_topk = stage(test_tensors.topk)  # (C, T, topk)
+    chunked_w = stage(test_tensors.topk_weights)  # (C, T, topk)
 
     dummy_carry = test_tensors.rank_tokens.new_zeros(1)
 
@@ -385,9 +382,9 @@ def _worker_scan_vs_loop(
     per_act_token_quant: bool,
 ):
     """Per-rank worker: compare loop output vs scan output for DeepEP-LL."""
+    from tests.kernels.moe.test_deepep_moe import deep_ep_moe_impl
     from vllm.config import VllmConfig, set_current_vllm_config
     from vllm.v1.worker.workspace import init_workspace_manager
-    from tests.kernels.moe.test_deepep_moe import deep_ep_moe_impl
 
     device = torch.device(f"cuda:{pgi.local_rank}")
     init_workspace_manager(device)
@@ -396,6 +393,8 @@ def _worker_scan_vs_loop(
     w1 = w1.to(device=device)
     w2 = w2.to(device=device)
     if is_quantized:
+        assert w1_scale is not None
+        assert w2_scale is not None
         w1_scale = w1_scale.to(device=device)
         w2_scale = w2_scale.to(device=device)
 
@@ -406,8 +405,16 @@ def _worker_scan_vs_loop(
     e_start = num_local_experts * pgi.rank
     w1_ep = w1[e_start : e_start + num_local_experts]
     w2_ep = w2[e_start : e_start + num_local_experts]
-    w1_scale_ep = w1_scale[e_start : e_start + num_local_experts] if is_quantized else None
-    w2_scale_ep = w2_scale[e_start : e_start + num_local_experts] if is_quantized else None
+    w1_scale_ep = (
+        w1_scale[e_start : e_start + num_local_experts]
+        if w1_scale is not None
+        else None
+    )
+    w2_scale_ep = (
+        w2_scale[e_start : e_start + num_local_experts]
+        if w2_scale is not None
+        else None
+    )
 
     with set_current_vllm_config(VllmConfig()):
         # Reference: Python for-loop
@@ -451,9 +458,9 @@ def _worker_scan_vs_loop(
 
 # m values that require 2 chunks (> MAX_TOKENS_PER_RANK=64) test multi-iteration scan
 _SCAN_MNKs = [
-    (1, 128, 2560),    # single token, one chunk
-    (64, 128, 2560),   # exactly one full chunk
-    (65, 128, 2560),   # one full chunk + 1 overflow → 2 scan iterations
+    (1, 128, 2560),  # single token, one chunk
+    (64, 128, 2560),  # exactly one full chunk
+    (65, 128, 2560),  # one full chunk + 1 overflow → 2 scan iterations
     (128, 128, 2560),  # exactly two full chunks
 ]
 
@@ -496,8 +503,8 @@ def test_scan_matches_loop_ll_mode(
         w2,
         w1_scale,
         w2_scale,
-        False,   # use_fp8_dispatch
-        False,   # per_act_token_quant
+        False,  # use_fp8_dispatch
+        False,  # per_act_token_quant
     )
 
 
@@ -533,6 +540,6 @@ def test_scan_matches_loop_ll_mode_fp8_dispatch(
         w2,
         w1_scale,
         w2_scale,
-        True,   # use_fp8_dispatch
+        True,  # use_fp8_dispatch
         False,  # per_act_token_quant
     )

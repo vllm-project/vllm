@@ -478,13 +478,9 @@ class DefaultMoERunner(MoERunner):
     ) -> tuple[int, int, int]:
         """Return (max_tokens_across, chunk_size, num_chunks) for DP chunking."""
         ctx = get_forward_context()
-        max_tokens_across: int = int(
-            ctx.dp_metadata.max_tokens_across_dp_cpu.item()
-        )
+        max_tokens_across: int = int(ctx.dp_metadata.max_tokens_across_dp_cpu.item())
         if self.moe_config.is_sequence_parallel:
-            max_tokens_across = cdiv(
-                max_tokens_across, self.moe_config.sp_size
-            )
+            max_tokens_across = cdiv(max_tokens_across, self.moe_config.sp_size)
         chunk_size: int = self.moe_config.max_num_tokens
         num_chunks: int = cdiv(max_tokens_across, chunk_size)
         return max_tokens_across, chunk_size, num_chunks
@@ -635,9 +631,7 @@ class DefaultMoERunner(MoERunner):
             return False
         if self.enable_dbo:
             return False
-        if self.quant_method is not None and self.quant_method.is_monolithic:
-            return False
-        return True
+        return not (self.quant_method is not None and self.quant_method.is_monolithic)
 
     def forward_impl_scan(
         self,
@@ -668,9 +662,7 @@ class DefaultMoERunner(MoERunner):
             total_padded = num_chunks * max_tokens
             buf = src.new_zeros(num_chunks, max_tokens, feat_dim)
             copy_len = min(num_tokens, total_padded)
-            buf.view(-1, feat_dim)[:copy_len].copy_(
-                src[:copy_len], non_blocking=True
-            )
+            buf.view(-1, feat_dim)[:copy_len].copy_(src[:copy_len], non_blocking=True)
             return buf
 
         chunked_hidden = _make_staged(full_hidden_states, H)
@@ -707,8 +699,7 @@ class DefaultMoERunner(MoERunner):
         # short-circuits shape inference to avoid executing RDMA kernels on
         # fake inputs; return shape must match the real path exactly.
         has_two_outputs = (
-            has_separate_shared_experts
-            or self.quant_method.mk_owns_shared_expert
+            has_separate_shared_experts or self.quant_method.mk_owns_shared_expert
         )
         chunk_s_input = chunked_shared if chunked_shared is not None else chunked_hidden
 
@@ -720,15 +711,16 @@ class DefaultMoERunner(MoERunner):
         @allow_in_graph
         def _apply_chunk(
             carry: torch.Tensor,
-            xs_slice: tuple[
-                torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor
-            ],
+            xs_slice: tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
         ) -> tuple:
             chunk_h, chunk_tw, chunk_ti, chunk_s = xs_slice
             # FakeTensor guard: return shaped zeros for trace-time inference.
             if isinstance(chunk_h, torch._subclasses.FakeTensor):
                 if _has_two:
-                    return (carry.clone(), (torch.zeros_like(chunk_s), torch.zeros_like(chunk_h)))
+                    return (
+                        carry.clone(),
+                        (torch.zeros_like(chunk_s), torch.zeros_like(chunk_h)),
+                    )
                 return (carry.clone(), torch.zeros_like(chunk_h))
             out = _runner._apply_experts(
                 layer=_layer,
@@ -741,7 +733,12 @@ class DefaultMoERunner(MoERunner):
             return (carry.clone(), out)
 
         dummy_carry = full_hidden_states.new_zeros(1)
-        xs_tuple = (chunked_hidden, chunked_topk_weights, chunked_topk_ids, chunk_s_input)
+        xs_tuple = (
+            chunked_hidden,
+            chunked_topk_weights,
+            chunked_topk_ids,
+            chunk_s_input,
+        )
 
         # Call scan_op directly instead of torch.scan().  torch.scan() runs
         # _maybe_compile_and_run_fn which strips vLLM's TorchFunctionModes;
