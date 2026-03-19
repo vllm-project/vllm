@@ -303,6 +303,12 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         prefix: str = "",
         use_sparse: bool = False,
         indexer: object | None = None,
+        # RoPE caches for AITER fused kernels
+        cos_cache: torch.Tensor | None = None,
+        sin_cache: torch.Tensor | None = None,
+        is_neox_style: bool = False,
+        # RoPE module (static, doesn't change)
+        rotary_emb: torch.nn.Module | None = None,
         **extra_impl_args,
     ):
         super().__init__()
@@ -315,6 +321,9 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         self.kv_lora_rank = kv_lora_rank
         self.kv_b_proj = kv_b_proj
         self.head_size = kv_lora_rank + qk_rope_head_dim
+        # Store rotary_emb module as class attribute
+        # (static, shared across all forwards)
+        self.rotary_emb = rotary_emb
         self.layer_name = prefix
         self.indexer = indexer
 
@@ -349,20 +358,12 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             assert cache_config is not None
             cache_config.cache_dtype = "fp8_ds_mla"
             kv_cache_dtype = "fp8_ds_mla"
-            logger.info_once(
-                "Using DeepSeek's fp8_ds_mla KV cache format. To use standard "
-                "fp8 kv-cache format, please set `--attention-backend "
-                "FLASHINFER_MLA_SPARSE`"
-            )
 
         if (
             self.attn_backend.get_name() == "FLASHINFER_MLA_SPARSE"
             and kv_cache_dtype.startswith("fp8")
         ):
-            logger.info_once(
-                "Using standard fp8 KV cache format. To use DeepSeek's fp8_ds_mla "
-                "KV cache format, please set `--attention-backend FLASHMLA_SPARSE`"
-            )
+            pass
 
         # Initialize KV cache quantization attributes
         self.kv_cache_dtype = kv_cache_dtype
@@ -442,9 +443,66 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         # If kv_b_proj_weight is unquantized, quantize it to mxfp4 if supported
         self.is_aiter_triton_fp4_bmm_enabled = (
             rocm_aiter_ops.is_fp4bmm_enabled()
-            and hasattr(self.kv_b_proj, "weight")
             and self.kv_b_proj.weight.dtype == torch.bfloat16
         )
+
+        # Store RoPE caches for AITER fused kernels
+        self.cos_cache = cos_cache
+        self.sin_cache = sin_cache
+        self.is_neox_style = is_neox_style
+
+        # Detect if AITER fused decode kernel can be used (AMD GPU only)
+        # Support both FP4 and FP8 variants based on GPU capabilities
+        self.use_aiter_fused = (
+            current_platform.is_rocm()  # AMD GPU only
+            and (
+                self.is_aiter_triton_fp4_bmm_enabled
+                or self.is_aiter_triton_fp8_bmm_enabled
+            )  # FP4 or FP8 BMM available
+            and envs.VLLM_USE_AITER_FUSED  # Feature flag enabled
+            and cos_cache is not None  # RoPE caches available
+            and sin_cache is not None
+        )
+
+        if self.use_aiter_fused:
+            # Choose FP4 or FP8 variant based on GPU support (ATOM pattern)
+            if self.is_aiter_triton_fp4_bmm_enabled:
+                try:
+                    from aiter.ops.triton.fusions.fused_bmm_rope_kv_cache import (
+                        fused_fp4_bmm_rope_cat_and_cache_mla,
+                    )
+
+                    self._fused_decode_kernel = fused_fp4_bmm_rope_cat_and_cache_mla
+                    self._fused_kernel_type = "fp4"
+                except ImportError as e:
+                    logger.warning_once(
+                        f"AITER fused FP4 decode kernel not available: {e}, "
+                        "falling back to separate ops",
+                        scope="local",
+                    )
+                    self.use_aiter_fused = False
+            else:
+                try:
+                    from aiter.ops.triton.fusions.fused_bmm_rope_kv_cache import (
+                        fused_fp8_bmm_rope_cat_and_cache_mla,
+                    )
+
+                    self._fused_decode_kernel = fused_fp8_bmm_rope_cat_and_cache_mla
+                    self._fused_kernel_type = "fp8"
+                except ImportError as e:
+                    logger.warning_once(
+                        f"AITER fused FP8 decode kernel not available: {e}, "
+                        "falling back to separate ops",
+                        scope="local",
+                    )
+                    self.use_aiter_fused = False
+
+        # Log when AITER fused kernels are enabled
+        if self.use_aiter_fused:
+            logger.info(
+                "AITER fused MLA decode kernel ENABLED: %s variant",
+                self._fused_kernel_type.upper(),
+            )
 
         # Attributes for forward_impl method
         self._vllm_config = get_current_vllm_config()
@@ -471,12 +529,24 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         kv_c_normed: torch.Tensor,
         k_pe: torch.Tensor,
         output_shape: torch.Size | None = None,
+        positions: torch.Tensor | None = None,  # For AITER fused
+        slot_mapping: torch.Tensor | None = None,  # For custom ops
+        use_fused_path: bool = False,  # Use fused path
+        rotary_emb: torch.nn.Module | None = None,  # RoPE module
     ) -> torch.Tensor:
         if self.calculate_kv_scales:
             torch.ops.vllm.maybe_calc_kv_scales(q, kv_c_normed, k_pe, self.layer_name)
 
+        # Store positions, rotary_emb, use_fused_path in forward_context
+        # for custom ops to retrieve
+        forward_context: ForwardContext = get_forward_context()
+        if positions is not None:
+            forward_context._positions = positions
+        # rotary_emb is now stored as class attribute (self.rotary_emb) during __init__
+        # No need to store in forward_context
+        forward_context._use_fused_path = use_fused_path
+
         if self.use_direct_call:
-            forward_context: ForwardContext = get_forward_context()
             attn_metadata = forward_context.attn_metadata
             if isinstance(attn_metadata, dict):
                 attn_metadata = attn_metadata[self.layer_name]
@@ -486,14 +556,53 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             assert isinstance(slot_mapping, dict), (
                 f"Expected slot_mapping to be a dict, got {type(slot_mapping)}. "
             )
-            self.impl.do_kv_cache_update(
-                kv_c_normed,
-                k_pe,
-                self_kv_cache,
-                slot_mapping.get(self.layer_name),
-                self.kv_cache_dtype,
-                self._k_scale,
-            )
+
+            # Determine rope_applied based on use_fused_path flag
+            # Unfused path: RoPE applied in mla.py (rope_applied=True)
+            # Fused path: RoPE NOT applied in mla.py (rope_applied=False)
+            rope_applied = not use_fused_path
+
+            # SIMPLIFIED: Skip KV cache update if using fused path
+            # Fused path handles KV cache write either:
+            #   - In forward_impl() after applying RoPE for prefill
+            #   - In fused kernel for decode
+            skip_kv_cache_update = use_fused_path
+
+            # logger.info_once breaks torch.compile, commented out
+            # logger.info_once(
+            #     f"[MLA forward()] Path: {'FUSED' if use_fused_path else 'UNFUSED'}, "
+            #     f"skip_kv_cache_update={skip_kv_cache_update}",
+            #     scope="local",
+            # )
+
+            if not skip_kv_cache_update:
+                # Unfused path: update KV cache before attention
+                # (RoPE already applied in mla.py)
+                current_slot_mapping = slot_mapping.get(self.layer_name)
+
+                # VERIFY: Log unfused KV cache write (EAGER MODE ONLY)
+                # COMMENTED OUT: Breaks torch compile / CUDA graph capture
+                # if current_slot_mapping is not None and \
+                #         len(current_slot_mapping) > 0:
+                #     logger.warning(
+                #         f"[VERIFY UNFUSED KV] "
+                #         f"slot[0]={current_slot_mapping[0].item()}, "
+                #         f"k_nope: abs_max="
+                #         f"{kv_c_normed.float().abs().max().item():.6e}, "
+                #         f"first_3={kv_c_normed[0,:3].tolist()}, "
+                #         f"k_rope: abs_max="
+                #         f"{k_pe.float().abs().max().item():.6e}, "
+                #         f"first_3={k_pe[0,0,:3].tolist()}"
+                #     )
+
+                self.impl.do_kv_cache_update(
+                    kv_c_normed,
+                    k_pe,
+                    self_kv_cache,
+                    current_slot_mapping,
+                    self.kv_cache_dtype,
+                    self._k_scale,
+                )
             if self.attn_backend.accept_output_buffer:
                 output = torch.empty(output_shape, dtype=q.dtype, device=q.device)
                 self.forward_impl(
@@ -503,13 +612,48 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     self_kv_cache,
                     attn_metadata,
                     output=output,
+                    # Pass positions for AITER fused kernel
+                    positions=positions,
+                    # Pass slot_mapping for AITER fused kernel
+                    slot_mapping=slot_mapping.get(self.layer_name),
+                    # Pass RoPE status
+                    rope_applied=rope_applied,
+                    # Pass use_fused_path flag
+                    use_fused_path=use_fused_path,
+                    # Pass rotary_emb module
+                    rotary_emb=rotary_emb,
                 )
                 return output
             else:
                 return self.forward_impl(
-                    q, kv_c_normed, k_pe, self_kv_cache, attn_metadata
+                    q,
+                    kv_c_normed,
+                    k_pe,
+                    self_kv_cache,
+                    attn_metadata,
+                    # Pass positions for AITER fused kernel
+                    positions=positions,
+                    # Pass slot_mapping for AITER fused kernel
+                    slot_mapping=slot_mapping.get(self.layer_name),
+                    # Pass RoPE status
+                    rope_applied=rope_applied,
+                    # Pass use_fused_path flag
+                    use_fused_path=use_fused_path,
+                    # Pass rotary_emb module
+                    rotary_emb=rotary_emb,
                 )
         else:
+            # Custom ops path (ROCm)
+            # For fused path: unified_mla_kv_cache_update skips write,
+            # forward_impl handles it
+            # For unfused path: unified_mla_kv_cache_update writes all
+            # tokens
+
+            # Ensure slot_mapping is in forward_context
+            if slot_mapping is not None:
+                forward_context.slot_mapping[self.layer_name] = slot_mapping
+
+            # KV cache update (skipped for fused path, handled for unfused)
             kv_cache_dummy_dep = torch.ops.vllm.unified_mla_kv_cache_update(
                 kv_c_normed,
                 k_pe,
@@ -525,6 +669,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     k_pe,
                     output,
                     self.layer_name,
+                    positions,
+                    slot_mapping,
                     kv_cache_dummy_dep=kv_cache_dummy_dep,
                 )
                 return output
@@ -534,6 +680,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     kv_c_normed,
                     k_pe,
                     self.layer_name,
+                    positions,
+                    slot_mapping,
                     kv_cache_dummy_dep=kv_cache_dummy_dep,
                 )
 
@@ -547,8 +695,26 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         output: torch.Tensor | None = None,
         output_scale: torch.Tensor | None = None,
         output_block_scale: torch.Tensor | None = None,
+        positions: torch.Tensor | None = None,  # For AITER fused kernel
+        slot_mapping: torch.Tensor | None = None,  # For AITER fused kernel
+        rope_applied: bool | None = None,  # Whether RoPE was pre-applied in mla.py
+        use_fused_path: bool
+        | None = None,  # Single flag: use fused path for both prefill and decode
+        rotary_emb: torch.nn.Module | None = None,  # RoPE module for fused path
     ) -> torch.Tensor:
         assert output is not None, "Output tensor must be provided."
+
+        # If parameters not passed (from custom ops), derive from instance variables
+        if rope_applied is None:
+            rope_applied = not self.use_aiter_fused
+        if use_fused_path is None:
+            use_fused_path = self.use_aiter_fused
+
+        # Note: positions, slot_mapping, rope_applied, use_fused_path
+        # should be passed by caller
+        # Direct call path: forward() passes them explicitly
+        # Custom ops path: unified_mla_attention* retrieve from
+        # forward_context and pass them
 
         if output_scale is not None or output_block_scale is not None:
             raise NotImplementedError(
@@ -606,7 +772,123 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             num_mqa_tokens = attn_metadata.num_decode_tokens
             num_mha_tokens = q.size(0) - num_mqa_tokens
 
+        # Fix positions tensor size to match actual batch
+        # positions may have extra padding that doesn't match q.size(0)
+        if positions is not None:
+            num_actual_tokens = q.size(0)
+            if positions.size(0) > num_actual_tokens:
+                positions = positions[:num_actual_tokens]
+
+        # Retrieve slot_mapping from attn_metadata if not provided
+        # This is needed for both prefill and decode KV cache writes
+        if slot_mapping is None and attn_metadata is not None:
+            slot_mapping = attn_metadata.slot_mapping
+            # DEBUG: Commented out for performance
+            # logger.warning(
+            #     f"[MLA forward_impl] Retrieved slot_mapping from "
+            #     f"attn_metadata: "
+            #     f"shape={slot_mapping.shape if slot_mapping is not None "
+            #     f"else 'None'}, "
+            #     f"num_mqa_tokens={num_mqa_tokens}, "
+            #     f"num_mha_tokens={num_mha_tokens}"
+            # )
+
+        # DEBUG: Commented out for performance (runs every batch)
+        # logger.warning(
+        #     f"[MLA forward_impl] num_mqa_tokens={num_mqa_tokens}, "
+        #     f"num_mha_tokens={num_mha_tokens}, "
+        #     f"use_aiter_fused={self.use_aiter_fused}, "
+        #     f"slot_mapping={'None' if slot_mapping is None else "
+        #     f"slot_mapping.shape}"
+        # )
+
         if num_mha_tokens > 0:
+            # Prefill path: handle prefill tokens using unfused Flash Attention
+            # STEP 3: Apply RoPE here for prefill tokens (FUSED PATH ONLY)
+
+            # Apply RoPE to prefill tokens ONLY if using fused path
+            # (unfused path already has RoPE from mla.py)
+            # Use STATIC flag (rotary_emb and positions always available
+            # per assumptions)
+            # DEBUG: Commented out for performance (runs every batch)
+            # logger.warning(
+            #     f"[PREFILL CHECK] num_mha_tokens={num_mha_tokens}, "
+            #     f"use_aiter_fused={self.use_aiter_fused}, "
+            #     f"rotary_emb={'None' if rotary_emb is None else 'OK'}, "
+            #     f"positions={'None' if positions is None else "
+            #     f"positions.shape}"
+            # )
+            if (
+                self.use_aiter_fused
+                and rotary_emb is not None
+                and positions is not None
+            ):
+                # DEBUG: Commented out for performance (runs every batch)
+                # logger.warning(
+                #     f"[FUSED PREFILL] num_mha_tokens={num_mha_tokens}, "
+                #     f"use_aiter_fused={self.use_aiter_fused}, "
+                #     f"slot_mapping={'None' if slot_mapping is None else "
+                #     f"slot_mapping.shape}"
+                # )
+
+                # Apply RoPE to prefill tokens BEFORE KV cache write
+                # Problem: In mla.py, num_mqa_tokens from forward_context
+                # gets frozen in CUDA graph, causing wrong tokens to get
+                # RoPE (e.g., q[512:] vs q[1:])
+                # Solution: Apply RoPE here in forward_impl (outside CUDA
+                # graph) where num_mqa_tokens from attn_metadata is dynamic
+
+                # Extract prefill slices
+                prefill_q = q[num_mqa_tokens:]
+                prefill_k_pe = k_pe[num_mqa_tokens:]
+                prefill_positions = positions[num_mqa_tokens:]
+
+                # Apply RoPE to prefill tokens (q_pe part and k_pe)
+                if prefill_q.shape[0] > 0:  # Have prefill tokens
+                    prefill_q[..., self.qk_nope_head_dim :], prefill_k_pe = rotary_emb(
+                        prefill_positions,
+                        prefill_q[..., self.qk_nope_head_dim :],
+                        prefill_k_pe,
+                    )
+                    # Write back RoPE'd values
+                    q[num_mqa_tokens:] = prefill_q
+                    k_pe[num_mqa_tokens:] = prefill_k_pe
+
+                # For fused prefill path, we skipped KV cache update in forward()
+                # Now that RoPE is applied, we can write the correct values
+                # Extract prefill slices for KV cache write
+                prefill_k_c_normed = k_c_normed[num_mqa_tokens:]
+                prefill_k_pe = k_pe[num_mqa_tokens:]  # Now has RoPE applied
+
+                # Need to extract prefill slot_mapping
+                if slot_mapping is not None:
+                    prefill_slot_mapping = slot_mapping[num_mqa_tokens:]
+
+                    # Write prefill KV to cache
+                    self.impl.do_kv_cache_update(
+                        prefill_k_c_normed,
+                        prefill_k_pe,
+                        kv_cache,
+                        prefill_slot_mapping,
+                        self.kv_cache_dtype,
+                        self._k_scale,
+                    )
+
+                    # DEBUG: Commented out for performance (runs every batch)
+                    # logger.warning(
+                    #     f"[PREFILL KV] wrote prefill: "
+                    #     f"slot_map={prefill_slot_mapping.shape[0]} "
+                    #     f"(expected={num_mha_tokens})"
+                    # )
+                else:
+                    # DEBUG: Commented out for performance
+                    # logger.warning(
+                    #     f"[FUSED PREFILL] slot_mapping is None, "
+                    #     f"skipping KV cache write! "
+                    #     f"num_mha_tokens={num_mha_tokens}"
+                    # )
+                    pass
+
             self.impl.forward_mha(
                 q[num_mqa_tokens:],
                 k_c_normed[num_mqa_tokens:],
@@ -635,7 +917,116 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 mqa_pe_padded.copy_(mqa_q_pe)
                 mqa_q_pe = mqa_pe_padded
 
-            if self.is_aiter_triton_fp4_bmm_enabled:
+            # Compute positions from seq_lens if not provided
+            # For decode tokens, position = seq_lens - 1
+            # (current position in sequence)
+            # This matches the logic in prepare_pos_seq_lens_kernel
+            # where pos = num_computed_tokens
+            # and seq_len = num_computed_tokens + query_len,
+            # so pos = seq_len - query_len
+            # For decode (query_len=1): pos = seq_len - 1
+            if (
+                positions is None
+                and num_mqa_tokens > 0
+                and attn_metadata.decode is not None
+            ):
+                # Get decode sequence lengths for decode tokens only
+                decode_seq_lens = attn_metadata.decode.seq_lens
+                # Position is current sequence length - 1 (0-indexed)
+                positions = decode_seq_lens - 1
+                logger.info_once(
+                    "[MLA] Computed positions from decode seq_lens: shape=%s",
+                    positions.shape,
+                    scope="local",
+                )
+
+            # CUDA graph compatible: Use STATIC flag
+            # self.use_aiter_fused is class attribute, same for all
+            # batches. num_mqa_tokens > 0 is dynamic but OK - PyTorch
+            # handles control flow in graphs
+
+            if self.use_aiter_fused and num_mqa_tokens > 0 and slot_mapping is not None:
+                # FUSED PATH: Kernel applies RoPE internally AND writes
+                # to KV cache
+                # Get decode slices (NO RoPE yet)
+                mqa_k_c_normed = k_c_normed[:num_mqa_tokens]
+                mqa_k_pe = k_pe[:num_mqa_tokens]
+                # Type assertion for mypy
+                assert positions is not None
+                assert slot_mapping is not None
+                mqa_positions = positions[:num_mqa_tokens]
+                mqa_slot_mapping = slot_mapping[:num_mqa_tokens]
+
+                # Log when fused kernel is being used
+                logger.info_once(
+                    "Using AITER fused %s decode kernel for MLA",
+                    self._fused_kernel_type.upper(),
+                    scope="local",
+                )
+
+                # Log AITER kernel inputs
+                # logger.warning(
+                #     f"[AITER DECODE INPUT] "
+                #     f"num_tokens={len(mqa_positions)}, "
+                #     f"positions="
+                #     f"{mqa_positions.tolist()[:min(5, len(mqa_positions))]}, "
+                #     f"k_pe_abs_max="
+                #     f"{mqa_k_pe.float().abs().max().item():.6e}, "
+                #     f"k_pe_first3={mqa_k_pe[0, 0, :3].tolist()}, "
+                #     f"slot_mapping="
+                #     f"{mqa_slot_mapping.tolist()[:min(5, "
+                #     f"len(mqa_slot_mapping))]}"
+                # )
+
+                # Call fused kernel (applies RoPE internally AND writes
+                # to KV cache)
+                mqa_ql_nope, mqa_q_pe_rotated = self._run_atom_fused_decode(
+                    mqa_q_nope,  # [num_heads, batch, qk_nope_head_dim]
+                    mqa_q_pe,  # [batch, num_heads, qk_rope_head_dim]
+                    mqa_k_c_normed,  # [batch, kv_lora_rank]
+                    mqa_k_pe,  # [batch, 1, qk_rope_head_dim]
+                    kv_cache,
+                    mqa_slot_mapping,
+                    mqa_positions,
+                )
+                # Fused kernel output: mqa_ql_nope has BMM result,
+                # mqa_q_pe_rotated has RoPE applied
+                # KV cache was written by fused kernel (with RoPE)
+                # Assign to mqa_q_pe for subsequent concat/quant code
+                mqa_q_pe = mqa_q_pe_rotated
+
+                # DEBUG: Commented out for performance (runs every batch)
+                # logger.warning(
+                #     f"[DECODE KV] AITER kernel wrote "
+                #     f"{mqa_slot_mapping.shape[0]} decode tokens with RoPE"
+                # )
+
+                # Log AITER kernel outputs
+                # logger.warning(
+                #     f"[AITER DECODE OUTPUT] "
+                #     f"q_pe_rotated_abs_max="
+                #     f"{mqa_q_pe_rotated.float().abs().max().item():.6e}, "
+                #     f"ql_nope_abs_max="
+                #     f"{mqa_ql_nope.float().abs().max().item():.6e}"
+                # )
+
+                # VERIFY: Read back KV cache to verify fused decode
+                # write (EAGER MODE ONLY)
+                # COMMENTED OUT: Breaks execution
+                # if len(mqa_slot_mapping) > 0:
+                #     first_slot = mqa_slot_mapping[0].item()
+                #     kv_val = kv_cache[first_slot]
+                #     logger.warning(
+                #         f"[VERIFY FUSED DECODE KV] slot[0]={first_slot}, "
+                #         f"kv_cache: abs_max="
+                #         f"{kv_val.float().abs().max().item():.6e}"
+                #     )
+
+            elif self.is_aiter_triton_fp4_bmm_enabled:
+                # UNFUSED PATH: RoPE already applied in mla.py
+                # mqa_q_pe already has RoPE!
+                # Just do FP4 BMM (K = W_K @ kv_c_normed)
+                # logger.info("[MLA DECODE PATH] Using UNFUSED FP4 BMM")
                 from aiter.ops.triton.batched_gemm_a16wfp4 import batched_gemm_a16wfp4
 
                 mqa_ql_nope = batched_gemm_a16wfp4(
@@ -647,6 +1038,25 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     y_scale=self._q_scale if fp8_attention else None,
                 )
             elif self.is_aiter_triton_fp8_bmm_enabled:
+                # UNFUSED PATH: RoPE already applied in mla.py
+                # mqa_q_pe already has RoPE!
+                # Just do FP8 BMM (K = W_K @ kv_c_normed)
+                # logger.info("[MLA DECODE PATH] Using UNFUSED FP8 BMM")
+
+                # VERIFY: Log unfused decode inputs (EAGER MODE ONLY)
+                # COMMENTED OUT: Breaks torch compile / CUDA graph capture
+                # logger.warning(
+                #     f"[VERIFY UNFUSED IN] Shapes: "
+                #     f"q_nope={mqa_q_nope.shape}, q_pe={mqa_q_pe.shape}"
+                # )
+                # logger.warning(
+                #     f"[VERIFY UNFUSED IN] "
+                #     f"W_K_scale={self.W_K_scale.item():.6e}, "
+                #     f"k_scale={self._k_scale.item():.6e}, "
+                #     f"q_nope: abs_max="
+                #     f"{mqa_q_nope.float().abs().max().item():.6e}"
+                # )
+
                 # Multiply+Transpose (N, B, P)x(N, P, L)->(N, B, L)->(B, N, L)
                 mqa_ql_nope = rocm_aiter_ops.triton_fp8_bmm(
                     mqa_q_nope,
@@ -655,7 +1065,21 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     group_size=128,
                     transpose_bm=True,
                 )
+
+                # VERIFY: Log unfused decode output (EAGER MODE ONLY)
+                # COMMENTED OUT: Breaks torch compile / CUDA graph
+                # capture
+                # logger.warning(
+                #     f"[VERIFY UNFUSED OUT] ql_nope "
+                #     f"shape={mqa_ql_nope.shape}, "
+                #     f"dtype={mqa_ql_nope.dtype}, "
+                #     f"abs_max={mqa_ql_nope.float().abs().max().item():.6e}"
+                # )
+
             else:
+                # UNFUSED PATH: RoPE already applied in mla.py
+                # mqa_q_pe already has RoPE!
+                # Standard PyTorch BMM (K = W_K @ kv_c_normed)
                 # Pads the head_dim if necessary (for the underlying kernel)
                 N, B, P = mqa_q_nope.shape
                 _, _, L = self.W_UK_T.shape
@@ -672,6 +1096,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 # Convert from (N, B, L) to (B, N, L)
                 mqa_ql_nope = mqa_ql_nope.transpose(0, 1)
 
+            # DEBUG: Show intermediate values before concat
             if fp8_attention and self.impl.supports_quant_query_input:
                 assert mqa_ql_nope.shape[0] == mqa_q_pe.shape[0]
                 assert mqa_ql_nope.shape[1] == mqa_q_pe.shape[1]
@@ -711,12 +1136,142 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
             # v_up projection
             self._v_up_proj(attn_out, out=mqa_output_slice)
+
         return output_padded
+
+    def _run_atom_fused_decode(
+        self,
+        mqa_q_nope: torch.Tensor,
+        mqa_q_pe: torch.Tensor,
+        k_c_normed: torch.Tensor,
+        k_pe: torch.Tensor,
+        kv_cache: torch.Tensor,
+        slot_mapping: torch.Tensor,
+        positions: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Run AITER fused decode operation.
+
+        Fuses: FP4/FP8 BMM + RoPE + concat + KV cache write in ONE kernel.
+        Chooses FP4 or FP8 variant based on GPU capabilities.
+
+        Args:
+            mqa_q_nope: [num_heads, batch, qk_nope_head_dim]
+            mqa_q_pe: [batch, num_heads, qk_rope_head_dim] NO RoPE!
+            k_c_normed: [batch, kv_lora_rank]
+            k_pe: [batch, 1, qk_rope_head_dim] NO RoPE!
+            kv_cache: KV cache tensor
+            slot_mapping: Slot mapping for cache write
+            positions: Position IDs for RoPE
+
+        Returns:
+            mqa_ql_nope: [batch, num_heads, kv_lora_rank]
+            mqa_q_pe_rotated: [batch, num_heads, qk_rope_head_dim]
+        """
+        # Reshape K for fused kernel
+        # k_c_normed: [batch, kv_lora_rank] -> [batch, num_kv_heads, kv_lora_rank]
+        k_nope_3d = k_c_normed.view(-1, self.num_kv_heads, self.kv_lora_rank)
+        k_rope_3d = k_pe.squeeze(1).view(-1, self.num_kv_heads, self.qk_rope_head_dim)
+
+        # VERIFY: Log fused kernel inputs (EAGER MODE ONLY)
+        # COMMENTED OUT: Breaks torch compile / CUDA graph capture
+        # logger.warning(
+        #     f"[VERIFY FUSED IN] Shapes: "
+        #     f"q_nope={mqa_q_nope.shape}, q_pe={mqa_q_pe.shape}, "
+        #     f"k_nope={k_nope_3d.shape}, k_rope={k_rope_3d.shape}"
+        # )
+        # logger.warning(
+        #     f"[VERIFY FUSED IN] q_pe: abs_max="
+        #     f"{mqa_q_pe.float().abs().max().item():.6e}, "
+        #     f"first_3={mqa_q_pe[0,0,:3].tolist()}"
+        # )
+        # logger.warning(
+        #     f"[VERIFY FUSED IN] k_rope: abs_max="
+        #     f"{k_rope_3d.float().abs().max().item():.6e}, "
+        #     f"first_3={k_rope_3d[0,0,:3].tolist()}"
+        # )
+        # logger.warning(
+        #     f"[VERIFY FUSED IN] positions[0]={positions[0].item()}, "
+        #     f"slot[0]={slot_mapping[0].item()}"
+        # )
+        # logger.warning(
+        #     f"[VERIFY FUSED IN] W_K_scale={self.W_K_scale.item():.6e}, "
+        #     f"k_scale={self._k_scale.item():.6e}, "
+        #     f"q_nope: abs_max={mqa_q_nope.float().abs().max().item():.6e}"
+        # )
+
+        # Call AITER fused kernel (FP4 or FP8 variant)
+        if self._fused_kernel_type == "fp4":
+            # FP4 variant has different parameters
+            q_fused, _, _, _ = self._fused_decode_kernel(
+                mqa_q_nope,  # [num_heads, batch, qk_nope_head_dim]
+                self.W_K,  # [num_heads, kv_lora_rank, qk_nope_head_dim] - FP4
+                self.W_K_scale,  # FP4 scale
+                mqa_q_pe,  # [batch, num_heads, qk_rope_head_dim] - NO RoPE!
+                k_nope_3d,  # [batch, num_kv_heads, kv_lora_rank]
+                k_rope_3d,  # [batch, num_kv_heads, qk_rope_head_dim] - NO RoPE!
+                kv_cache,  # KV cache tensor
+                slot_mapping,  # [batch]
+                positions,  # [batch]
+                self.cos_cache,  # RoPE cos cache
+                self.sin_cache,  # RoPE sin cache
+                y=None,  # FP4-specific
+                transpose_bm=True,
+                prequant=True,  # FP4-specific
+                y_scale=None,  # FP4-specific
+                k_scale=self._k_scale,
+                is_neox=self.is_neox_style,
+                q_out_dtype=mqa_q_nope.dtype,  # Match input dtype
+                num_decode_toks_for_zeros=0,
+            )
+        else:  # fp8
+            # FP8 variant has group_size parameter
+            q_fused, _, _, _ = self._fused_decode_kernel(
+                mqa_q_nope,  # [num_heads, batch, qk_nope_head_dim]
+                self.W_K,  # [num_heads, kv_lora_rank, qk_nope_head_dim]
+                self.W_K_scale,  # [1,] - FP8 scale
+                mqa_q_pe,  # [batch, num_heads, qk_rope_head_dim]
+                k_nope_3d,  # [batch, num_kv_heads, kv_lora_rank]
+                k_rope_3d,  # [batch, num_kv_heads, qk_rope_head_dim]
+                kv_cache,  # KV cache tensor
+                slot_mapping,  # [batch]
+                positions,  # [batch]
+                self.cos_cache,  # RoPE cos cache
+                self.sin_cache,  # RoPE sin cache
+                group_size=128,  # FP8-specific
+                transpose_bm=True,
+                k_scale=self._k_scale,
+                is_neox=self.is_neox_style,
+                q_out_dtype=mqa_q_nope.dtype,  # Match input dtype
+                num_decode_toks_for_zeros=0,
+            )
+
+        # q_fused: [batch, num_heads, kv_lora_rank + qk_rope_head_dim]
+        # Contains both ql_nope and q_pe_rotated
+        # Split into components
+        mqa_ql_nope = q_fused[..., : self.kv_lora_rank]
+        mqa_q_pe_rotated = q_fused[..., self.kv_lora_rank :]
+
+        # VERIFY: Log fused kernel outputs (EAGER MODE ONLY)
+        # COMMENTED OUT: Breaks torch compile / CUDA graph capture
+        # logger.warning(
+        #     f"[VERIFY FUSED OUT] ql_nope shape={mqa_ql_nope.shape}, "
+        #     f"dtype={mqa_ql_nope.dtype}, "
+        #     f"abs_max={mqa_ql_nope.float().abs().max().item():.6e}"
+        # )
+        # logger.warning(
+        #     f"[VERIFY FUSED OUT] q_pe_rotated "
+        #     f"shape={mqa_q_pe_rotated.shape}, "
+        #     f"dtype={mqa_q_pe_rotated.dtype}, "
+        #     f"abs_max={mqa_q_pe_rotated.float().abs().max().item():.6e}"
+        # )
+
+        return mqa_ql_nope, mqa_q_pe_rotated
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         # we currently do not have quantized bmm's which are needed for
-        # `W_UV` and `W_UK_T`, we just store fp16/bf16 copies and perform
-        # the bmm's in 16-bit, the extra memory overhead of this is fairly low
+        # `W_UV` and `W_UK_T`, we just store fp16/bf16 copies and
+        # perform the bmm's in 16-bit, the extra memory overhead of
+        # this is fairly low
         kv_b_proj_weight = get_and_maybe_dequant_weights(
             self.kv_b_proj, out_dtype=act_dtype
         ).T
@@ -892,14 +1447,59 @@ def unified_mla_attention(
     kv_c_normed: torch.Tensor,
     k_pe: torch.Tensor,
     layer_name: str,
+    positions: torch.Tensor | None = None,
+    slot_mapping: torch.Tensor | None = None,
     kv_cache_dummy_dep: torch.Tensor | None = None,
 ) -> torch.Tensor:
     # kv_cache_dummy_dep is not used but accepting it creates a data dependency
     # that ensures torch.compile preserves ordering between KV cache update and
     # attention forward.
     del kv_cache_dummy_dep
-    attn_metadata, layer, kv_cache, _ = get_attention_context(layer_name)
-    output = layer.forward_impl(q, kv_c_normed, k_pe, kv_cache, attn_metadata)
+    attn_metadata, layer, kv_cache, forward_context = get_attention_context(layer_name)
+
+    # positions and slot_mapping come from parameters (passed through compiled graph)
+    # rotary_emb retrieved from layer (stored as class attribute during __init__)
+    rotary_emb = layer.rotary_emb
+
+    # Retrieve slot_mapping from forward_context or attn_metadata
+    slot_mapping = None
+    if hasattr(forward_context, "slot_mapping") and isinstance(
+        forward_context.slot_mapping, dict
+    ):
+        slot_mapping = forward_context.slot_mapping.get(layer_name)
+
+    # Fallback: get slot_mapping from attn_metadata if not in forward_context
+    # This happens with torch.compile when forward_context doesn't persist
+    if slot_mapping is None and attn_metadata is not None:
+        slot_mapping = attn_metadata.slot_mapping
+
+    logger.info_once(
+        f"[unified_mla_attention] RETRIEVED: "
+        f"positions={'exists' if positions is not None else 'None'}, "
+        f"slot_mapping={'exists' if slot_mapping is not None else 'None'}, "
+        f"layer={layer_name}",
+        scope="local",
+    )
+
+    # Determine rope_applied and use_fused_path from layer config
+    # STATIC decision based on whether AITER kernels available
+    # Assumptions: rotary_emb always exists, positions always provided
+    # Therefore: use_aiter_fused is the sole deciding factor
+    use_fused_path = layer.use_aiter_fused
+    rope_applied = not use_fused_path
+
+    output = layer.forward_impl(
+        q,
+        kv_c_normed,
+        k_pe,
+        kv_cache,
+        attn_metadata,
+        positions=positions,
+        slot_mapping=slot_mapping,
+        rope_applied=rope_applied,
+        use_fused_path=use_fused_path,
+        rotary_emb=rotary_emb,
+    )
 
     return output
 
@@ -909,6 +1509,8 @@ def unified_mla_attention_fake(
     kv_c_normed: torch.Tensor,
     k_pe: torch.Tensor,
     layer_name: str,
+    positions: torch.Tensor | None = None,
+    slot_mapping: torch.Tensor | None = None,
     kv_cache_dummy_dep: torch.Tensor | None = None,
 ) -> torch.Tensor:
     return torch.empty_like(q).contiguous()
@@ -931,8 +1533,11 @@ def unified_mla_kv_cache_update(
     k_scale: torch.Tensor,
 ) -> torch.Tensor:
     """
-    Returns a dummy that is passed to unified_attention to signal a side effect and
-    the data dependency between them to ensure torch.compile preserves ordering.
+    Write KV cache for UNFUSED path only.
+    For fused path, KV cache writes happen in forward_impl:
+      - Prefill tokens: after RoPE applied (line 806)
+      - Decode tokens: in fused kernel (line 890+)
+    Returns a dummy tensor to signal side effect for torch.compile ordering.
     """
     forward_context = get_forward_context()
     if forward_context.attn_metadata is None:
@@ -940,6 +1545,31 @@ def unified_mla_kv_cache_update(
         return torch.empty(0, device=kv_c_normed.device, dtype=kv_c_normed.dtype)
 
     attn_layer = forward_context.no_compile_layers[layer_name]
+
+    # CUDA graph compatible: Use STATIC flag (set at __init__)
+    # Decision is based on whether AITER kernels are available, not per-batch metadata
+    # Assumptions: rotary_emb always exists, positions always provided
+    # Therefore: use_aiter_fused is the sole deciding factor (static)
+    if attn_layer.use_aiter_fused:
+        # FUSED path (AITER kernels available):
+        # - mla.py applies RoPE only to prefill tokens (skips decode)
+        # - Skip KV write here, forward_impl handles it:
+        #   * Prefill: written in forward_impl after RoPE (line ~806)
+        #   * Decode: written in fused kernel (applies RoPE + writes KV)
+        logger.warning(
+            "[unified_mla_kv_cache_update] FUSED path: skipping KV write "
+            "(num_tokens=%s)",
+            kv_c_normed.shape[0],
+        )
+        return torch.empty(0, device=kv_c_normed.device, dtype=kv_c_normed.dtype)
+
+    # UNFUSED path (no AITER kernels):
+    # - mla.py applies RoPE to ALL tokens
+    # - Write all tokens to KV cache here
+    logger.warning(
+        "[unified_mla_kv_cache_update] UNFUSED path: writing all KV (num_tokens=%s)",
+        kv_c_normed.shape[0],
+    )
     kv_cache = attn_layer.kv_cache[forward_context.virtual_engine]
 
     slot_mapping = forward_context.slot_mapping
@@ -947,7 +1577,8 @@ def unified_mla_kv_cache_update(
         f"Expected slot_mapping to be a dict, got {type(slot_mapping)}. "
     )
     layer_slot_mapping = slot_mapping.get(layer_name)
-    if layer_slot_mapping is not None:
+
+    if layer_slot_mapping is not None and kv_c_normed.shape[0] > 0:
         attn_layer.impl.do_kv_cache_update(
             kv_c_normed,
             k_pe,
@@ -984,6 +1615,8 @@ def unified_mla_attention_with_output(
     k_pe: torch.Tensor,
     output: torch.Tensor,
     layer_name: str,
+    positions: torch.Tensor | None = None,
+    slot_mapping: torch.Tensor | None = None,
     output_scale: torch.Tensor | None = None,
     output_block_scale: torch.Tensor | None = None,
     kv_cache_dummy_dep: torch.Tensor | None = None,
@@ -992,7 +1625,49 @@ def unified_mla_attention_with_output(
     # that ensures torch.compile preserves ordering between KV cache update and
     # attention forward.
     del kv_cache_dummy_dep
-    attn_metadata, layer, kv_cache, _ = get_attention_context(layer_name)
+    attn_metadata, layer, kv_cache, forward_context = get_attention_context(layer_name)
+
+    # positions and slot_mapping come from parameters (passed through compiled graph)
+    # If slot_mapping is None, retrieve it from attn_metadata as fallback
+    # (happens when called from mla.py which doesn't have slot_mapping)
+    if slot_mapping is None and attn_metadata is not None:
+        if hasattr(attn_metadata, "slot_mapping"):
+            slot_mapping = attn_metadata.slot_mapping
+            logger.info_once(
+                "[custom op] Retrieved slot_mapping from attn_metadata: %s",
+                (slot_mapping.shape if slot_mapping is not None else "None"),
+                scope="local",
+            )
+        else:
+            logger.info_once(
+                f"[custom op] attn_metadata type={type(attn_metadata).__name__}, "
+                f"has slot_mapping attr={hasattr(attn_metadata, 'slot_mapping')}",
+                scope="local",
+            )
+
+    # positions and slot_mapping come from parameters (passed through compiled graph)
+    # rotary_emb retrieved from layer (stored as class attribute during __init__)
+    rotary_emb = layer.rotary_emb
+    # logger.warning(
+    #     f"[unified_mla_attention_with_output] Retrieved rotary_emb from layer: "
+    #     f"{'OK' if rotary_emb is not None else 'None'}"
+    # )
+
+    logger.info_once(
+        "[custom op] PARAMETERS: positions=%s, slot_mapping=%s, layer=%s",
+        "exists" if positions is not None else "None",
+        "exists" if slot_mapping is not None else "None",
+        layer_name,
+        scope="local",
+    )
+
+    # Determine rope_applied and use_fused_path from layer config
+    # STATIC decision based on whether AITER kernels available
+    # Assumptions: rotary_emb always exists, positions always provided
+    # Therefore: use_aiter_fused is the sole deciding factor
+    use_fused_path = layer.use_aiter_fused
+    rope_applied = not use_fused_path
+
     layer.forward_impl(
         q,
         kv_c_normed,
@@ -1002,6 +1677,11 @@ def unified_mla_attention_with_output(
         output=output,
         output_scale=output_scale,
         output_block_scale=output_block_scale,
+        positions=positions,
+        slot_mapping=slot_mapping,
+        rope_applied=rope_applied,
+        use_fused_path=use_fused_path,
+        rotary_emb=rotary_emb,
     )
 
 
@@ -1011,6 +1691,8 @@ def unified_mla_attention_with_output_fake(
     k_pe: torch.Tensor,
     output: torch.Tensor,
     layer_name: str,
+    positions: torch.Tensor | None = None,
+    slot_mapping: torch.Tensor | None = None,
     output_scale: torch.Tensor | None = None,
     output_block_scale: torch.Tensor | None = None,
     kv_cache_dummy_dep: torch.Tensor | None = None,
@@ -1142,16 +1824,14 @@ class MLACommonBackend(AttentionBackend):
     def get_kv_cache_stride_order(
         include_num_layers_dimension: bool = False,
     ) -> tuple[int, ...]:
-        if include_num_layers_dimension:
-            # MLA kernels require contiguous per-layer KV cache views.
-            # Identity permutation keeps num_layers first in physical
-            # layout, signaling cross-layer allocation is unsupported.
-            return (0, 1, 2, 3)
-        return (0, 1, 2)
+        # `stride_order` indicates the permutation that gets
+        # us from `get_kv_cache_shape` to the actual memory layout we want.
+        # (num_blocks, num_layers, block_size, head_size)
+        return (1, 0, 2, 3) if include_num_layers_dimension else (0, 1, 2)
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
-        return [320, 576]
+        return [576]
 
     @classmethod
     def is_mla(cls) -> bool:
@@ -1285,6 +1965,8 @@ def is_deepseek_r1_mla_compatible(vllm_config: VllmConfig) -> bool:
 
 @functools.cache
 def use_flashinfer_prefill() -> bool:
+    # For blackwell default to flashinfer prefill if it's available since
+    # it is faster than FA2.
     from vllm.config import get_current_vllm_config
 
     vllm_config = get_current_vllm_config()
@@ -1440,18 +2122,8 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
 
         if use_fp8:
             fp8_dtype = current_platform.fp8_dtype()
-            logger.info_once(
-                "FP8 prefill attention enabled: query data type is FP8", scope="local"
-            )
             return fp8_dtype
         elif vllm_config.attention_config.use_prefill_query_quantization:
-            logger.info_once(
-                "Unable to perform FP8 prefill attention when"
-                " use_prefill_query_quantization is enabled. Please"
-                " ensure that --kv-cache-dtype is set to fp8 and your prefill"
-                " backend is compatible with FP8 attention.",
-                scope="local",
-            )
             return model_dtype
 
         return model_dtype
@@ -2111,21 +2783,16 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         )
 
         if use_trtllm_ragged_deepseek_prefill():
-            logger.info_once(
-                "Using TRT-LLM ragged DeepSeek prefill for MLA", scope="local"
-            )
             self._run_prefill_context_chunk = (
                 self._run_prefill_context_chunk_trtllm_ragged
             )
             self._run_prefill_new_tokens = self._run_prefill_new_tokens_trtllm_ragged
             self._pad_v = False
         elif use_flashinfer_prefill():
-            logger.info_once("Using FlashInfer prefill for MLA", scope="local")
             self._run_prefill_context_chunk = self._run_prefill_context_chunk_fi
             self._run_prefill_new_tokens = self._run_prefill_new_tokens_fi
             self._pad_v = False
         elif use_cudnn_prefill():
-            logger.info_once("Using CUDNN prefill for MLA", scope="local")
             self._run_prefill_context_chunk = self._run_prefill_context_chunk_cudnn
             self._run_prefill_new_tokens = self._run_prefill_new_tokens_cudnn
             self._pad_v = False
@@ -2136,7 +2803,6 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
                     "available. Please install flash_attn or use "
                     "--attention-backend ROCM_AITER_MLA."
                 )
-            logger.info_once("Using FlashAttention prefill for MLA", scope="local")
             self._run_prefill_context_chunk = self._run_prefill_context_chunk_fa
             self._run_prefill_new_tokens = self._run_prefill_new_tokens_fa
 
@@ -2155,16 +2821,13 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
 
             # For MLA the v head dim is smaller than qk head dim so we pad out
             # v with 0s to match the qk head dim for attention backends that do
-            # not support different headdims.
-            # FA3 on Hopper (SM90) and FA4 natively handle diff headdims.
+            # not support different headdims
+            # We don't need to pad V if we are on a hopper system with FA3
             device_capability = current_platform.get_device_capability()
             self._pad_v = self.vllm_flash_attn_version is None or not (
-                (
-                    self.vllm_flash_attn_version == 3
-                    and device_capability is not None
-                    and device_capability[0] == 9
-                )
-                or self.vllm_flash_attn_version == 4
+                self.vllm_flash_attn_version == 3
+                and device_capability is not None
+                and device_capability[0] == 9
             )
 
         self.dcp_world_size: int = -1
@@ -2495,15 +3158,11 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             kv_c_normed = workspace[:toks][..., : self.kv_lora_rank]
             # When FP8 weights are used without FP8 prefill, kv_b_proj expects
             # model dtype input and will quantize internally.
-            # For quantized layers (AWQ/GPTQ) that lack a .weight attribute,
-            # use params_dtype which is the expected input dtype.
-            _kv_b_proj_w_dtype = (
-                self.kv_b_proj.weight.dtype
-                if hasattr(self.kv_b_proj, "weight")
-                else self.kv_b_proj.params_dtype
-            )
-            if use_fp8_prefill or _kv_b_proj_w_dtype != current_platform.fp8_dtype():
-                kv_c_normed = kv_c_normed.to(_kv_b_proj_w_dtype)
+            if (
+                use_fp8_prefill
+                or self.kv_b_proj.weight.dtype != current_platform.fp8_dtype()
+            ):
+                kv_c_normed = kv_c_normed.to(self.kv_b_proj.weight.dtype)
 
             k_pe = workspace[:toks][..., self.kv_lora_rank :].unsqueeze(1)
             kv_nope = self.kv_b_proj(kv_c_normed)[0].view(

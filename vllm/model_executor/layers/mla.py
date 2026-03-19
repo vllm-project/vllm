@@ -5,9 +5,12 @@ from dataclasses import dataclass
 import torch
 
 from vllm.config import CacheConfig
+from vllm.logger import init_logger
 from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.layers.quantization import QuantizationConfig
+
+logger = init_logger(__name__)
 
 
 @dataclass
@@ -87,6 +90,21 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
         self.indexer_rope_emb = mla_modules.indexer_rotary_emb
         self.is_sparse = mla_modules.is_sparse
 
+        # Extract RoPE caches for AITER fused kernels
+        if self.rotary_emb is not None:
+            # RoPE stores combined cos_sin_cache, need to split it
+            # Format: [seq_len, rotary_dim] where first half is cos, second half is sin
+            cos_sin_cache = self.rotary_emb.cos_sin_cache
+            rotary_dim = self.rotary_emb.rotary_dim
+            half_dim = rotary_dim // 2
+            self.cos_cache = cos_sin_cache[:, :half_dim]
+            self.sin_cache = cos_sin_cache[:, half_dim:]
+            self.is_neox_style = self.rotary_emb.is_neox_style
+        else:
+            self.cos_cache = None
+            self.sin_cache = None
+            self.is_neox_style = False
+
         if self.indexer is not None:
             assert hasattr(self.indexer, "topk_tokens")
             self.topk_tokens = self.indexer.topk_tokens
@@ -106,6 +124,12 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
             kv_b_proj=self.kv_b_proj,
             use_sparse=self.is_sparse,
             indexer=self.indexer,
+            # Pass RoPE caches for AITER fused kernels
+            cos_cache=self.cos_cache,
+            sin_cache=self.sin_cache,
+            is_neox_style=self.is_neox_style,
+            # Pass RoPE module (static, doesn't change)
+            rotary_emb=self.rotary_emb,
         )
 
         self.prefix = prefix
@@ -151,13 +175,61 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
         kv_c_normed = self.kv_a_layernorm(kv_c)
 
         q = q.view(-1, self.num_heads, self.qk_head_dim)
+
         # Add head dim of 1 to k_pe
         k_pe = k_pe.unsqueeze(1)
 
+        # VERIFY: Log mla.py outputs before RoPE (EAGER MODE ONLY)
+        # COMMENTED OUT: Breaks torch compile / CUDA graph capture
+        # from vllm.logger import init_logger
+        # logger = init_logger(__name__)
+        # logger.warning(
+        #     f"[VERIFY MLA] BEFORE RoPE: "
+        #     f"q: abs_max={q.float().abs().max().item():.6e}, "
+        #     f"first_3={q[0,0,:3].tolist()}, "
+        #     f"k_pe: abs_max={k_pe.float().abs().max().item():.6e}, "
+        #     f"first_3={k_pe[0,0,:3].tolist()}, "
+        #     f"kv_c_normed: abs_max="
+        #     f"{kv_c_normed.float().abs().max().item():.6e}, "
+        #     f"first_3={kv_c_normed[0,:3].tolist()}"
+        # )
+
+        # STEP 3: Determine if fused path can be used (SINGLE CHECK)
+        # Check all requirements once and use everywhere
+        can_use_fused_path = (
+            hasattr(self.mla_attn, "use_aiter_fused")
+            and self.mla_attn.use_aiter_fused  # Platform supports fused kernel
+            and positions is not None  # Required for RoPE
+            and self.rotary_emb is not None  # RoPE module available
+        )
+
+        # Apply RoPE based on fused vs unfused path
         if self.rotary_emb is not None:
-            q[..., self.qk_nope_head_dim :], k_pe = self.rotary_emb(
-                positions, q[..., self.qk_nope_head_dim :], k_pe
-            )
+            if can_use_fused_path:
+                # FUSED PATH: Skip RoPE here, custom op will apply it
+                # Problem: num_decode_tokens retrieved from forward_context gets
+                # frozen as a constant when CUDA graph is captured, causing RoPE
+                # to be applied to wrong tokens (e.g., q[512:] instead of q[1:])
+                # Solution: Move RoPE to custom op (splitting op, not compiled)
+                # where attn_metadata.num_decode_tokens is available dynamically
+                pass
+            else:
+                # UNFUSED PATH: Apply RoPE to ALL tokens
+                q[..., self.qk_nope_head_dim :], k_pe = self.rotary_emb(
+                    positions,
+                    q[..., self.qk_nope_head_dim :],  # Q PE part gets RoPE
+                    k_pe,  # K PE gets RoPE
+                )
+
+                # Log AFTER RoPE
+                # logger.warning(
+                #     f"[UNFUSED AFTER ROPE] "
+                #     f"q_pe_abs_max="
+                #     f"{q[..., self.qk_nope_head_dim:].float().abs().max()"
+                #     f".item():.6e}, "
+                #     f"k_pe_abs_max={k_pe.float().abs().max().item():.6e}, "
+                #     f"k_pe_after_first3={k_pe[0, 0, :3].tolist()}"
+                # )
 
         if self.indexer and self.is_sparse:
             _topk_indices = self.indexer(
@@ -167,11 +239,27 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
         if llama_4_scaling is not None:
             q *= llama_4_scaling
 
+        # STEP 4: Store rotary_emb in forward_context for custom ops
+        # positions is now passed as a parameter to custom ops (no longer
+        # stored in context). rotary_emb is still stored in context (not
+        # needed in compiled graph)
+        from vllm.forward_context import get_forward_context
+
+        forward_context = get_forward_context()
+        if self.rotary_emb is not None:
+            forward_context._rotary_emb = self.rotary_emb
+
+        # STEP 5: Pass to mla_attention
         attn_out = self.mla_attn(
-            q,
+            q,  # Has RoPE if unfused, NO RoPE if fused
             kv_c_normed,
-            k_pe,
+            k_pe,  # Has RoPE if unfused, NO RoPE if fused
             output_shape=(hidden_states.shape[0], self.num_heads * self.v_head_dim),
+            positions=positions,
+            slot_mapping=None,  # Retrieved from attn_metadata in mla_attention.py
+            use_fused_path=can_use_fused_path,  # Single flag for entire forward pass
+            rotary_emb=self.rotary_emb,
         )
 
-        return self.o_proj(attn_out)[0]
+        final_out = self.o_proj(attn_out)[0]
+        return final_out
