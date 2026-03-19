@@ -22,8 +22,9 @@ from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 VOCAB_SIZE = 1024
 NUM_OUTPUT_TOKENS = 20
 MAX_PROMPT_SIZE = 100
+DEVICE_TYPE = current_platform.device_type
 CUDA_DEVICES = [
-    f"{current_platform.device_type}:{i}"
+    f"{DEVICE_TYPE}:{i}"
     for i in range(min(current_platform.device_count(), 2))
 ]
 MAX_NUM_PROMPT_TOKENS = 64

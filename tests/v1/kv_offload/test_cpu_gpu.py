@@ -21,7 +21,8 @@ GPU_PAGE_SIZES = [512, 1024]
 BLOCK_SIZE_FACTORS = [1, 3]
 NUM_TENSORS = [4]
 SEEDS = [0]
-CUDA_DEVICES = ["cuda:0"]
+DEVICE_TYPE = current_platform.device_type
+CUDA_DEVICES = [f"{DEVICE_TYPE}:0"]
 NUM_MAPPINGS = [3]
 
 

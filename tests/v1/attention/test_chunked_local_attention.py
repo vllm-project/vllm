@@ -7,6 +7,7 @@ import pytest
 import torch
 
 from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
+from vllm.platforms import current_platform
 from vllm.v1.attention.backends.utils import make_local_attention_virtual_batches
 
 
@@ -21,6 +22,7 @@ class LocalAttentionTestData:
     expected_k_seqlens: list[int]
     expected_local_block_table: list[list[int]]
 
+DEVICE_TYPE = current_platform.device_type
 
 test_data_list = [
     # Same as example in docstring of make_local_attention_virtual_batches
@@ -151,7 +153,7 @@ test_data_list = [
 
 @pytest.mark.parametrize("test_data", test_data_list)
 def test_local_attention_virtual_batches(test_data: LocalAttentionTestData):
-    device = torch.device("cuda:0")
+    device = torch.device(f"{DEVICE_TYPE}:0")
     batch_spec = test_data.batch_spec
     attn_chunk_size = test_data.attn_chunk_size
     block_size = test_data.block_size
