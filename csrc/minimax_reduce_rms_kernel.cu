@@ -292,11 +292,9 @@ __global__ void __launch_bounds__(1024)
     // step 3: calculate the rms norm (input * rsqrt(variance + eps))
 
     // load norm weight
-    // TODO: correct the access_id_in_token
-    __nv_bfloat16 norm_weight[kElemsPerAccess<DType>];
-    *reinterpret_cast<typename ElemsPerAccess<DType>::norm_weight_type*>(
-        norm_weight) =
-        reinterpret_cast<typename ElemsPerAccess<DType>::norm_weight_type*>(
+    DType norm_weight[kElemsPerAccess<DType>];
+    *reinterpret_cast<typename ElemsPerAccess<DType>::vec_type*>(norm_weight) =
+        reinterpret_cast<typename ElemsPerAccess<DType>::vec_type*>(
             params.rms_gamma)[access_id_in_token];
 
 #pragma unroll
@@ -516,11 +514,10 @@ __global__ void __launch_bounds__(1024)
     // column)
     if (is_q) {
       if (access_id_in_token < access_per_row_q) {
-        __nv_bfloat16 norm_weight[kElemsPerAccess<DType>];
-        *reinterpret_cast<typename ElemsPerAccess<DType>::norm_weight_type*>(
+        DType norm_weight[kElemsPerAccess<DType>];
+        *reinterpret_cast<typename ElemsPerAccess<DType>::vec_type*>(
             norm_weight) =
-            reinterpret_cast<
-                typename ElemsPerAccess<DType>::norm_weight_type const*>(
+            reinterpret_cast<typename ElemsPerAccess<DType>::vec_type const*>(
                 params.rms_gamma)[access_id_in_token];
 #pragma unroll
         for (int r = 0; r < 4; ++r) {
@@ -546,11 +543,10 @@ __global__ void __launch_bounds__(1024)
       }
     } else if constexpr (IsQK) {
       if (k_thread_idx < access_per_row_k) {
-        __nv_bfloat16 norm_weight_k[kElemsPerAccess<DType>];
-        *reinterpret_cast<typename ElemsPerAccess<DType>::norm_weight_type*>(
+        DType norm_weight_k[kElemsPerAccess<DType>];
+        *reinterpret_cast<typename ElemsPerAccess<DType>::vec_type*>(
             norm_weight_k) =
-            reinterpret_cast<
-                typename ElemsPerAccess<DType>::norm_weight_type const*>(
+            reinterpret_cast<typename ElemsPerAccess<DType>::vec_type const*>(
                 params.rms_gamma_k)[k_thread_idx];
 #pragma unroll
         for (int r = 0; r < 4; ++r) {

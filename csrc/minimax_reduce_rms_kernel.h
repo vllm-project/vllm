@@ -8,33 +8,25 @@
 namespace vllm {
 namespace tensorrt_llm {
 
-struct alignas(16) bf16x8 {
-  __nv_bfloat16 array[8];
-};
-
-struct alignas(8) bf16x4 {
-  __nv_bfloat16 array[4];
-};
-
 template <typename DType>
 struct ElemsPerAccess;
 
 template <>
 struct ElemsPerAccess<half> {
   static constexpr int value = 8;
-  using norm_weight_type = bf16x8;
+  using vec_type = float4;
 };
 
 template <>
 struct ElemsPerAccess<nv_bfloat16> {
   static constexpr int value = 8;
-  using norm_weight_type = bf16x8;
+  using vec_type = float4;
 };
 
 template <>
 struct ElemsPerAccess<float> {
   static constexpr int value = 4;
-  using norm_weight_type = bf16x4;
+  using vec_type = float4;
 };
 
 template <typename DType>

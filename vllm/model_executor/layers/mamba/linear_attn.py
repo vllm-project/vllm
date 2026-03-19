@@ -35,6 +35,8 @@ from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.linear_attn import LinearAttentionMetadata
 
+_FUSED_AR_TOKEN_THRESHOLD = 2048
+
 
 class MiniMaxText01RMSNormTP(CustomOp):
     name = "MiniMaxText01RMSNormTP"
@@ -108,7 +110,7 @@ class MiniMaxText01RMSNormTP(CustomOp):
             current_platform.is_cuda()
             and q_norm.tp_world > 1
             and q_norm._ar_workspace is not None
-            and input_seq <= 2048
+            and input_seq <= _FUSED_AR_TOKEN_THRESHOLD
         ):
             assert q_norm.variance_epsilon == k_norm.variance_epsilon
             torch.ops._C.minimax_allreduce_rms_qk(
@@ -140,7 +142,7 @@ class MiniMaxText01RMSNormTP(CustomOp):
         k = k * torch.rsqrt(k_var + k_norm.variance_epsilon) * k_norm.weight
         q = q.to(orig_dtype)
         k = k.to(orig_dtype)
-        return q, k
+        return q, k, v
 
 
 def clear_linear_attention_cache_for_new_sequences(

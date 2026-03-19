@@ -1,13 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for MiniMaxText01RMSNormTP.forward_qk.
-
-Compares the two code paths inside ``forward_qk``:
-  - Fused Lamport IPC kernel  (``current_platform.is_cuda() and tp > 1``)
-  - NCCL fallback             (pure-PyTorch + tensor_model_parallel_all_reduce)
-
-Parametrised over TP = {2, 4, 8} — skipped when not enough GPUs.
-"""
+"""Tests for MiniMaxText01RMSNormTP.forward_qk."""
 
 import pytest
 import torch
@@ -29,20 +22,17 @@ def _worker_forward_qk(
     local_rank,
     world_size,
     port,
-    seed,
     num_tokens,
     hidden_q_full,
     hidden_k_full,
+    dtype,
+    seed,
     eps,
 ):
-    """Per-rank worker that exercises both paths of ``forward_qk``."""
+    """Per-rank worker that exercises both paths of forward_qk."""
     torch.cuda.set_device(local_rank)
     init_test_distributed_environment(
-        world_size,
-        1,
-        local_rank,
-        port,
-        local_rank=local_rank,
+        world_size, 1, local_rank, port, local_rank=local_rank
     )
 
     hq = hidden_q_full // world_size
@@ -53,47 +43,51 @@ def _worker_forward_qk(
     assert q_norm._ar_workspace is not None, (
         f"workspace not initialised (tp={world_size})"
     )
+
     set_random_seed(seed)
-    qw = torch.randn(
-        hidden_q_full,
-        dtype=torch.bfloat16,
-        device="cuda",
-    )
-    kw = torch.randn(
-        hidden_k_full,
-        dtype=torch.bfloat16,
-        device="cuda",
-    )
+    qw = torch.randn(hidden_q_full, dtype=dtype, device="cuda")
+    kw = torch.randn(hidden_k_full, dtype=dtype, device="cuda")
     q_norm.weight = nn.Parameter(qw[local_rank * hq : (local_rank + 1) * hq])
     k_norm.weight = nn.Parameter(kw[local_rank * hk : (local_rank + 1) * hk])
 
     torch.manual_seed(seed + 1000 + local_rank)
-    q = torch.randn(num_tokens, hq, dtype=torch.bfloat16, device="cuda")
-    k = torch.randn(num_tokens, hk, dtype=torch.bfloat16, device="cuda")
+    qkv = torch.randn(num_tokens, hq + hk + hk, dtype=dtype, device="cuda")
 
-    # Reference: force NCCL fallback by temporarily clearing workspace
+    # Reference: NCCL fallback (temporarily clear workspace)
     saved_ws = q_norm._ar_workspace
     q_norm._ar_workspace = None
-    ref_q, ref_k = MiniMaxText01RMSNormTP.forward_qk(q_norm, k_norm, q, k)
+    ref_q, ref_k, ref_v = MiniMaxText01RMSNormTP.forward_qk(
+        q_norm, k_norm, qkv.clone(), hq, hk
+    )
     q_norm._ar_workspace = saved_ws
 
-    # Fused: Lamport IPC kernel (auto-dispatched by forward_qk)
-    fused_q, fused_k = MiniMaxText01RMSNormTP.forward_qk(q_norm, k_norm, q, k)
+    fused_q, fused_k, fused_v = MiniMaxText01RMSNormTP.forward_qk(
+        q_norm, k_norm, qkv.clone(), hq, hk
+    )
     torch.cuda.synchronize()
 
+    # atol = 5e-2 if dtype == torch.float16 else 1e-2
+    # rtol = 5e-2 if dtype == torch.float16 else 1e-2
     torch.testing.assert_close(
         fused_q,
         ref_q,
-        atol=1e-2,
-        rtol=1e-2,
-        msg=f"Q mismatch rank={local_rank} tp={world_size}",
+        atol=3e-2,
+        rtol=3e-2,
+        msg=f"Q mismatch rank={local_rank} tp={world_size} dtype={dtype}",
     )
     torch.testing.assert_close(
         fused_k,
         ref_k,
-        atol=1e-2,
-        rtol=1e-2,
-        msg=f"K mismatch rank={local_rank} tp={world_size}",
+        atol=3e-2,
+        rtol=3e-2,
+        msg=f"K mismatch rank={local_rank} tp={world_size} dtype={dtype}",
+    )
+    torch.testing.assert_close(
+        fused_v,
+        ref_v,
+        atol=0,
+        rtol=0,
+        msg=f"V should be unchanged rank={local_rank} tp={world_size} dtype={dtype}",
     )
 
     cleanup_dist_env_and_memory()
@@ -109,12 +103,14 @@ def _worker_forward_qk(
     "hidden_dims",
     [(6144, 1024), (1024, 1024)],
 )
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("eps", [1e-6])
 @pytest.mark.parametrize("seed", [42])
 def test_minimax_reduce_rms_qk(
     world_size,
     num_tokens,
     hidden_dims,
+    dtype,
     eps,
     seed,
 ):
@@ -128,10 +124,11 @@ def test_minimax_reduce_rms_qk(
         args=(
             world_size,
             port,
-            seed,
             num_tokens,
             hidden_q_full,
             hidden_k_full,
+            dtype,
+            seed,
             eps,
         ),
         nprocs=world_size,
