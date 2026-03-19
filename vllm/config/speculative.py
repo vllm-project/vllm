@@ -529,8 +529,10 @@ class SpeculativeConfig:
 
                 # Replace hf_config for EAGLE draft_model
                 if self.method in ("eagle", "eagle3", "dflash"):
-                    from vllm.transformers_utils.configs import SpeculatorsConfig
                     from vllm.transformers_utils.configs.eagle import EAGLEConfig
+                    from vllm.transformers_utils.configs.speculators import (
+                        SpeculatorsConfig,
+                    )
 
                     if isinstance(
                         self.draft_model_config.hf_config,
