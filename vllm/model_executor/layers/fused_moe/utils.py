@@ -25,6 +25,7 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     per_tensor_dequantize,
 )
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import is_torch_equal_or_newer
@@ -343,3 +344,16 @@ def _validate_scale_shape(
 @functools.cache
 def disable_inplace() -> bool:
     return is_torch_equal_or_newer("2.9")
+
+
+@torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
+def _pack_topk_ids_weights(
+    topk_ids: torch.Tensor, topk_weights: torch.Tensor
+) -> torch.Tensor:
+    """
+    Pack topk_ids and topk_weights into a single int32 tensor.
+    Format: expert_id << 16) | weight_bf16.view(int16)
+    """
+    return (topk_ids.to(torch.int32) << 16) | topk_weights.to(torch.bfloat16).view(
+        torch.int16
+    )
