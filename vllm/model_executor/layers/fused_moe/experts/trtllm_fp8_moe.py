@@ -367,6 +367,9 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
         # TODO: fuse into the quant kernel.
         assert a1q_scale is not None
 
+        if e_score_correction_bias is not None:
+            e_score_correction_bias = e_score_correction_bias.to(hidden_states.dtype)
+
         if self.routing_method_type == RoutingMethodType.DeepSeekV3:
             router_logits = router_logits.to(torch.float32)
 
@@ -436,6 +439,9 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
         # The DeepSeekV3 routing method requires float32 router logits.
         if self.routing_method_type == RoutingMethodType.DeepSeekV3:
             router_logits = router_logits.to(torch.float32)
+
+        if e_score_correction_bias is not None:
+            e_score_correction_bias = e_score_correction_bias.to(hidden_states.dtype)
 
         out = flashinfer.fused_moe.trtllm_fp8_per_tensor_scale_moe(
             routing_logits=router_logits,
