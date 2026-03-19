@@ -18,8 +18,10 @@ class SpeculatorsConfig(PretrainedConfig):
     model_type = "speculators"
 
     def __init__(self, **kwargs):
-        """PretrainedConfig is a dataclass in Transformers v5.
-        This pass through is needed to avoid unexpected keyword arguments."""
+        """In Transformers v5, `PretrainedConfig` is decorated with `dataclass` and
+        `huggingface_hub.dataclasses.strict(accept_kwargs=True)`.
+        Inheriting classes do not inherit the `accept_kwargs=True` behaviour so we must
+        explicitly pass any kwargs to `PretrainedConfig.__init__`."""
         super().__init__(**kwargs)
 
     @classmethod
