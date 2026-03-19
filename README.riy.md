@@ -9,7 +9,7 @@
                    ── Pruning on Air ──
 ```
 
-# vllm rip-it-yourself
+# vllm reap-it-yourself
 
 **See which experts your model actually uses. Mask the rest. No restart needed.**
 
