@@ -15,6 +15,7 @@ from vllm.utils.import_utils import resolve_obj_by_qualname
 
 logger = init_logger(__name__)
 
+
 def get_act_fn(
     config: PretrainedConfig,
     static_num_labels: bool = True,

@@ -165,8 +165,8 @@ async def build_async_engine_client_from_engine_args(
 
 def build_app(
     args: Namespace,
-    model_config: ModelConfig | None = None,
     supported_tasks: tuple["SupportedTask", ...] | None = None,
+    model_config: ModelConfig | None = None,
 ) -> FastAPI:
     if supported_tasks is None:
         warnings.warn(
@@ -597,7 +597,7 @@ async def build_and_serve(
     model_config = engine_client.model_config
 
     logger.info("Supported tasks: %s", supported_tasks)
-    app = build_app(args, model_config, supported_tasks)
+    app = build_app(args, supported_tasks, model_config)
     await init_app_state(engine_client, app.state, args, supported_tasks)
 
     logger.info("Starting vLLM server on %s", listen_address)
