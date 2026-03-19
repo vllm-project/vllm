@@ -387,9 +387,12 @@ class Worker(WorkerBase):
         ) as profile_result:
             self.model_runner.profile_run()
 
-            profile_torch_peak = torch.accelerator.memory_stats(self.device).get(
-                "allocated_bytes.all.peak", 0
-            )
+            # Capture both peak and current allocation at the same point
+            # (after profile_run, before cudagraph) so transient headroom
+            # is measured consistently without cudagraph interference.
+            stats = torch.accelerator.memory_stats(self.device)
+            profile_torch_peak = stats.get("allocated_bytes.all.peak", 0)
+            profile_torch_allocated = stats.get("allocated_bytes.all.current", 0)
 
             # Profile CUDA graph memory if graphs will be captured.
             # Skip on ROCm/HIP as graph pool handles and mem_get_info behave
@@ -402,10 +405,13 @@ class Worker(WorkerBase):
         profile_result.torch_peak_increase = (
             profile_torch_peak - profile_result.before_profile.torch_peak
         )
+        # transient_peak_headroom = peak - current (both pre-cudagraph).
+        # This is the extra memory needed at peak above the persistent level.
+        # Using torch_peak_increase (peak - before_profile) would double-count
+        # persistent torch allocations already included in total_consumed.
+        transient_peak_headroom = profile_torch_peak - profile_torch_allocated
         profile_result.non_kv_cache_memory = (
-            profile_result.non_torch_increase
-            + profile_result.torch_peak_increase
-            + profile_result.weights_memory
+            profile_result.total_consumed + transient_peak_headroom
         )
 
         # On ROCm, cudagraph_memory_estimate is always 0 so this is a no-op.
@@ -416,9 +422,9 @@ class Worker(WorkerBase):
             else 0
         )
 
-        self.non_torch_memory = profile_result.non_torch_increase
+        self.total_consumed = profile_result.total_consumed
         self.peak_activation_memory = (
-            profile_result.torch_peak_increase + cudagraph_memory_estimate_applied
+            transient_peak_headroom + cudagraph_memory_estimate_applied
         )
         self.cudagraph_memory_estimate = cudagraph_memory_estimate
 
@@ -639,9 +645,8 @@ class Worker(WorkerBase):
             # So leave a small buffer (=150MiB) to avoid OOM.
             redundancy_buffer_memory = 150 * (1 << 20)
             non_kv_cache_memory = (
-                self.model_runner.model_memory_usage
+                self.total_consumed
                 + self.peak_activation_memory
-                + self.non_torch_memory
                 + cuda_graph_memory_bytes
             )
             kv_cache_memory_bytes_to_gpu_limit = (
@@ -662,10 +667,10 @@ class Worker(WorkerBase):
                 f"Desired GPU memory utilization is "
                 f"({self.cache_config.gpu_memory_utilization}, "
                 f"{format_gib(self.requested_memory)} GiB). "
-                f"Actual usage is {format_gib(self.model_runner.model_memory_usage)} "
-                f"GiB for weight, {format_gib(self.peak_activation_memory)} GiB "
-                f"for peak activation, {format_gib(self.non_torch_memory)} GiB "
-                f"for non-torch memory, and {format_gib(cuda_graph_memory_bytes)} "
+                f"Actual usage is {format_gib(self.total_consumed)} "
+                f"GiB for consumed memory (weights + non-torch), "
+                f"{format_gib(self.peak_activation_memory)} GiB "
+                f"for peak activation, and {format_gib(cuda_graph_memory_bytes)} "
                 f"GiB for CUDAGraph memory. Replace gpu_memory_utilization "
                 f"config with `--kv-cache-memory="
                 f"{kv_cache_memory_bytes_to_requested_limit}` "

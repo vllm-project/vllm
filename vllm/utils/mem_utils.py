@@ -68,6 +68,7 @@ class MemorySnapshot:
     """Memory snapshot."""
 
     torch_peak: int = 0
+    torch_allocated: int = 0
     free_memory: int = 0
     total_memory: int = 0
     cuda_memory: int = 0
@@ -97,9 +98,9 @@ class MemorySnapshot:
         # After `torch.accelerator.reset_peak_memory_stats()`,
         # `torch.accelerator.memory_reserved()` will keep growing, and only shrink
         # when we call `torch.accelerator.empty_cache()` or OOM happens.
-        self.torch_peak = torch.accelerator.memory_stats(device).get(
-            "allocated_bytes.all.peak", 0
-        )
+        stats = torch.accelerator.memory_stats(device)
+        self.torch_peak = stats.get("allocated_bytes.all.peak", 0)
+        self.torch_allocated = stats.get("allocated_bytes.all.current", 0)
 
         self.free_memory, self.total_memory = current_platform.mem_get_info(device)
         shared_sysmem_device_mem_sms = ((8, 7), (11, 0), (12, 1))  # Orin, Thor, Spark
@@ -140,6 +141,7 @@ class MemorySnapshot:
 
         return MemorySnapshot(
             torch_peak=self.torch_peak - other.torch_peak,
+            torch_allocated=self.torch_allocated - other.torch_allocated,
             free_memory=self.free_memory - other.free_memory,
             total_memory=self.total_memory - other.total_memory,
             cuda_memory=self.cuda_memory - other.cuda_memory,
@@ -153,6 +155,7 @@ class MemorySnapshot:
     def __repr__(self) -> str:
         return (
             f"torch_peak={format_gib(self.torch_peak)}GiB, "
+            f"torch_allocated={format_gib(self.torch_allocated)}GiB, "
             f"free_memory={format_gib(self.free_memory)}GiB, "
             f"total_memory={format_gib(self.total_memory)}GiB, "
             f"{current_platform.device_name}_memory={format_gib(self.cuda_memory)}GiB, "
@@ -170,6 +173,7 @@ class MemoryProfilingResult:
     non_kv_cache_memory: int = 0
     torch_peak_increase: int = 0
     non_torch_increase: int = 0
+    total_consumed: int = 0
     weights_memory: int = 0
     before_create: MemorySnapshot = field(default_factory=MemorySnapshot)
     profile_time: float = 0.0
@@ -187,8 +191,8 @@ class MemoryProfilingResult:
             f"{format_gib(self.non_kv_cache_memory)}GiB; "
             f"torch peak memory increase: "
             f"{format_gib(self.torch_peak_increase)}GiB; "
-            f"non-torch forward increase memory: "
-            f"{format_gib(self.non_torch_increase)}GiB; "
+            f"total consumed (from mem_get_info): "
+            f"{format_gib(self.total_consumed)}GiB; "
             f"weights memory: {format_gib(self.weights_memory)}GiB."
         )
 
@@ -274,8 +278,20 @@ def memory_profiling(
     result.non_torch_increase = diff_from_create.non_torch_memory
     result.profile_time = diff_profile.timestamp
 
-    non_torch_memory = result.non_torch_increase
-    peak_activation_memory = result.torch_peak_increase
-    result.non_kv_cache_memory = (
-        non_torch_memory + peak_activation_memory + result.weights_memory
+    # total_consumed measures all GPU memory used between before_create and
+    # after_profile via the CUDA driver's mem_get_info(). This is reliable
+    # even when pluggable allocators (e.g. cumem) bypass PyTorch's
+    # memory_reserved() tracking, which can make non_torch_memory negative.
+    result.total_consumed = (
+        result.before_create.free_memory - result.after_profile.free_memory
     )
+
+    # total_consumed already includes persistent torch allocations still alive
+    # at after_profile. The transient peak headroom is the extra memory needed
+    # at peak above the current persistent level: torch_peak - torch_allocated
+    # (both from after_profile). Using torch_peak_increase (peak - before)
+    # would double-count persistent torch allocations created during profiling.
+    transient_peak_headroom = (
+        result.after_profile.torch_peak - result.after_profile.torch_allocated
+    )
+    result.non_kv_cache_memory = result.total_consumed + transient_peak_headroom
