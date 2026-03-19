@@ -24,12 +24,8 @@ class ModelRequestData(NamedTuple):
     sampling_params: SamplingParams | None = None
 
 
-@pytest.mark.core_model
 @pytest.mark.parametrize("question", [QUESTION])
-def test_keye_vl(
-    image_assets,
-    question: str,
-):
+def test_keye_vl(image_assets, question: str):
     images = [asset.pil_image for asset in image_assets]
     image_urls = [encode_image_url(image) for image in images]
 
