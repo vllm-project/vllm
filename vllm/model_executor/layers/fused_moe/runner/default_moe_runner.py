@@ -886,13 +886,14 @@ class DefaultMoERunner(MoERunner):
                     shared_input,
                     has_separate_shared_experts,
                 )
-            return self.forward_impl_chunked(
-                layer,
-                hidden_states,
-                router_logits,
-                shared_input,
-                has_separate_shared_experts,
-            )
+            else:
+                return self.forward_impl_chunked(
+                    layer,
+                    hidden_states,
+                    router_logits,
+                    shared_input,
+                    has_separate_shared_experts,
+                )
 
         # NOTE(rob): once we finish migrating all the quant methods to use
         # MKs, we can remove the naive dispatch/combine path from here.
