@@ -2523,6 +2523,20 @@ steps:
     # Whisper needs spawn method to avoid deadlock
     - VLLM_WORKER_MULTIPROC_METHOD=spawn python3 examples/offline_inference/audio_language.py --model-type whisper
 
+- label: DeepEP MoE Test
+  mirror_hardwares: [amdexperimental, amdproduction]
+  agent_pool: mi325_1
+  # grade: Blocking
+  working_dir: "/vllm-workspace/"
+  optional: true
+  source_file_dependencies:
+  - docker
+  - vllm/model_executor/layers/fused_moe
+  - vllm/distributed/device_communicators
+  - tests/kernels/moe
+  commands:
+    - pytest -v -s tests/kernels/moe/test_deepep_moe.py
+
 - label: Blackwell Fusion and Compile Tests # 30 min
   timeout_in_minutes: 40
   working_dir: "/vllm-workspace/"
