@@ -2465,7 +2465,7 @@ steps:
   - export MIOPEN_DEBUG_CONV_GEMM=0
   - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-mm-small.txt
 
-- label: Multi-Modal Models Test (Extended) 1 # 60min
+- label: Multi-Modal Models Test (Extended 1) # 60min
   timeout_in_minutes: 120
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_1
@@ -2482,7 +2482,7 @@ steps:
     - pytest -v -s models/multimodal/generation -m 'not core_model' --ignore models/multimodal/generation/test_common.py
     - pytest -v -s models/multimodal/test_mapping.py
 
-- label: Multi-Modal Models Test (Extended) 2 # 60min
+- label: Multi-Modal Models Test (Extended 2) # 60min
   timeout_in_minutes: 120
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_1
@@ -2497,7 +2497,7 @@ steps:
     - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
     - pytest -v -s models/multimodal/generation/test_common.py -m 'split(group=0) and not core_model'
 
-- label: Multi-Modal Models Test (Extended) 3 # 75min
+- label: Multi-Modal Models Test (Extended 3) # 75min
   timeout_in_minutes: 150
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_1
@@ -4206,7 +4206,7 @@ steps:
   - export MIOPEN_DEBUG_CONV_GEMM=0
   - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-mm-small.txt
 
-- label: Multi-Modal Models Test (Extended) 1 # 60min
+- label: Multi-Modal Models Test (Extended 1) # 60min
   timeout_in_minutes: 120
   mirror_hardwares: [amdexperimental]
   agent_pool: mi355_1
@@ -4222,7 +4222,7 @@ steps:
     - pytest -v -s models/multimodal/generation -m 'not core_model' --ignore models/multimodal/generation/test_common.py
     - pytest -v -s models/multimodal/test_mapping.py
 
-- label: Multi-Modal Models Test (Extended) 2 # 60min
+- label: Multi-Modal Models Test (Extended 2) # 60min
   timeout_in_minutes: 120
   mirror_hardwares: [amdexperimental]
   agent_pool: mi355_1
@@ -4236,7 +4236,7 @@ steps:
     - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
     - pytest -v -s models/multimodal/generation/test_common.py -m 'split(group=0) and not core_model'
 
-- label: Multi-Modal Models Test (Extended) 3 # 75min
+- label: Multi-Modal Models Test (Extended 3) # 75min
   timeout_in_minutes: 150
   mirror_hardwares: [amdexperimental]
   agent_pool: mi355_1
