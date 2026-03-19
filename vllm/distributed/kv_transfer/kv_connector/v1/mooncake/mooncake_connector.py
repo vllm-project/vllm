@@ -1032,21 +1032,18 @@ class MooncakeConnectorWorker:
                         err_req_set.add(d_req_id)
                     ok_ready_reqs = []
 
-            for d_req_id, send_meta in ok_ready_reqs:
-                # TODO: for heterogeneous TP (one P pairs to multiple D),
-                # we need to check whether all headers are sent.
-                # If not, we should set expire_time to normal and skip the below.
+            for d_req_id, send_meta in ready_reqs:
                 send_meta.sending -= 1
+
+                if d_req_id in err_req_set:
+                    continue
+
                 send_meta.sent += 1
                 if (
                     send_meta.sent == send_meta.need_send
                     and self.reqs_need_send.pop(send_meta.transfer_id, None) is not None
                 ):
                     self.finished_sending_reqs.add(send_meta.p_req_id)
-
-            for d_req_id, send_meta in ready_reqs:
-                if d_req_id in err_req_set:
-                    send_meta.sending -= 1
 
             response = MooncakeXferResponse(
                 status=response_status,
