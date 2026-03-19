@@ -333,16 +333,18 @@ class IsaacProcessingInfo(BaseProcessingInfo):
             )
         return IsaacConfig()
 
+    def get_image_processor(self, **kwargs) -> IsaacImageProcessor:
+        return IsaacImageProcessor(kwargs)
+
     def get_hf_processor(self, **kwargs) -> IsaacProcessor:
         hf_config = self.get_hf_config()
-        processor_kwargs = {
-            "image_token": hf_config.vision_token,
-        }
-        processor_kwargs.update(kwargs)
-        return self.ctx.init_processor(IsaacProcessor, **processor_kwargs)
 
-    def get_tokenizer(self):
-        return self.ctx.tokenizer
+        return self.ctx.init_processor(
+            IsaacProcessor,
+            tokenizer=self.get_tokenizer(),
+            image_processor=self.get_image_processor(),
+            image_token=hf_config.vision_token,
+        )
 
     def get_image_size_with_most_features(self) -> ImageSize:
         hf_config = self.get_hf_config()
@@ -356,9 +358,6 @@ class IsaacProcessingInfo(BaseProcessingInfo):
             pixel_shuffle_scale=hf_config.pixel_shuffle_scale,
         )
         return ImageSize(width=target_width, height=target_height)
-
-    def get_image_processor(self, **kwargs) -> IsaacImageProcessor:
-        return self.get_hf_processor(**kwargs).image_processor
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": None}

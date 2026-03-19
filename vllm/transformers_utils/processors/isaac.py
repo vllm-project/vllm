@@ -390,7 +390,7 @@ class IsaacProcessor(ProcessorMixin):
 
     def __init__(self, image_processor=None, tokenizer=None, **kwargs):
         self.image_token = kwargs.pop("image_token", "<image>")
-        self.image_processor = image_processor or IsaacImageProcessor(kwargs)
+        self.image_processor = image_processor
         self.tokenizer = tokenizer
 
     def __call__(self, text=None, images=None, **kwargs) -> BatchFeature:
