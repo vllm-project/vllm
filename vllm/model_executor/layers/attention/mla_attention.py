@@ -764,19 +764,16 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             #     f"positions={'None' if positions is None else "
             #     f"positions.shape}"
             # )
+            # Extract ALL prefill slices ONCE to avoid redundant re-slicing
+            prefill_q = q[num_mqa_tokens:]
+            prefill_k_c_normed = k_c_normed[num_mqa_tokens:]
+            prefill_k_pe = k_pe[num_mqa_tokens:]
+
             if (
                 self.use_aiter_fused
                 and rotary_emb is not None
                 and positions is not None
             ):
-                # DEBUG: Commented out for performance (runs every batch)
-                # logger.warning(
-                #     f"[FUSED PREFILL] num_mha_tokens={num_mha_tokens}, "
-                #     f"use_aiter_fused={self.use_aiter_fused}, "
-                #     f"slot_mapping={'None' if slot_mapping is None else "
-                #     f"slot_mapping.shape}"
-                # )
-
                 # Apply RoPE to prefill tokens BEFORE KV cache write
                 # Problem: In mla.py, num_mqa_tokens from forward_context
                 # gets frozen in CUDA graph, causing wrong tokens to get
@@ -784,61 +781,34 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 # Solution: Apply RoPE here in forward_impl (outside CUDA
                 # graph) where num_mqa_tokens from attn_metadata is dynamic
 
-                # Extract prefill slices
-                prefill_q = q[num_mqa_tokens:]
-                prefill_k_pe = k_pe[num_mqa_tokens:]
                 prefill_positions = positions[num_mqa_tokens:]
 
-                # Apply RoPE to prefill tokens (q_pe part and k_pe)
+                # Apply RoPE in-place (modifies prefill_q and prefill_k_pe)
                 if prefill_q.shape[0] > 0:  # Have prefill tokens
                     prefill_q[..., self.qk_nope_head_dim :], prefill_k_pe = rotary_emb(
                         prefill_positions,
                         prefill_q[..., self.qk_nope_head_dim :],
                         prefill_k_pe,
                     )
-                    # Write back RoPE'd values
-                    q[num_mqa_tokens:] = prefill_q
-                    k_pe[num_mqa_tokens:] = prefill_k_pe
 
-                # For fused prefill path, we skipped KV cache update in forward()
-                # Now that RoPE is applied, we can write the correct values
-                # Extract prefill slices for KV cache write
-                prefill_k_c_normed = k_c_normed[num_mqa_tokens:]
-                prefill_k_pe = k_pe[num_mqa_tokens:]  # Now has RoPE applied
+                    # Write prefill KV to cache (reuse slices)
+                    if slot_mapping is not None:
+                        prefill_slot_mapping = slot_mapping[num_mqa_tokens:]
 
-                # Need to extract prefill slot_mapping
-                if slot_mapping is not None:
-                    prefill_slot_mapping = slot_mapping[num_mqa_tokens:]
+                        self.impl.do_kv_cache_update(
+                            prefill_k_c_normed,
+                            prefill_k_pe,
+                            kv_cache,
+                            prefill_slot_mapping,
+                            self.kv_cache_dtype,
+                            self._k_scale,
+                        )
 
-                    # Write prefill KV to cache
-                    self.impl.do_kv_cache_update(
-                        prefill_k_c_normed,
-                        prefill_k_pe,
-                        kv_cache,
-                        prefill_slot_mapping,
-                        self.kv_cache_dtype,
-                        self._k_scale,
-                    )
-
-                    # DEBUG: Commented out for performance (runs every batch)
-                    # logger.warning(
-                    #     f"[PREFILL KV] wrote prefill: "
-                    #     f"slot_map={prefill_slot_mapping.shape[0]} "
-                    #     f"(expected={num_mha_tokens})"
-                    # )
-                else:
-                    # DEBUG: Commented out for performance
-                    # logger.warning(
-                    #     f"[FUSED PREFILL] slot_mapping is None, "
-                    #     f"skipping KV cache write! "
-                    #     f"num_mha_tokens={num_mha_tokens}"
-                    # )
-                    pass
-
+            # Run prefill attention (reuse slices)
             self.impl.forward_mha(
-                q[num_mqa_tokens:],
-                k_c_normed[num_mqa_tokens:],
-                k_pe[num_mqa_tokens:],
+                prefill_q,
+                prefill_k_c_normed,
+                prefill_k_pe,
                 kv_cache,
                 attn_metadata,
                 self._k_scale,
