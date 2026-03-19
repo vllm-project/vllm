@@ -290,7 +290,6 @@ def build_actor_name(
 
 def get_bundles_sorted_by_node(
     placement_group: "PlacementGroup",
-    world_size: int,
 ) -> list[tuple[int, str, str]]:
     """
     Return GPU bundle indices paired with node IDs and node IPs,
@@ -326,7 +325,7 @@ def get_bundles_sorted_by_node(
         return (0 if node_id == driver_node else 1, node_id)
 
     bundle_to_node_id.sort(key=_sort_key)
-    return bundle_to_node_id[:world_size]
+    return bundle_to_node_id
 
 
 def _wait_until_pg_ready(current_placement_group: "PlacementGroup"):

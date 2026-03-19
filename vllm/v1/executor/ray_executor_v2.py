@@ -164,7 +164,7 @@ class RayExecutorV2(MultiprocExecutor):
         )
 
         # Step 2: Query PG table, sort bundles, assign ranks
-        bundle_to_node_id = get_bundles_sorted_by_node(placement_group, self.world_size)
+        bundle_to_node_id = get_bundles_sorted_by_node(placement_group)
         driver_node = ray.get_runtime_context().get_node_id()
 
         # Assign each worker a local rank
@@ -205,8 +205,11 @@ class RayExecutorV2(MultiprocExecutor):
         self.ray_worker_handles: list[RayWorkerHandle] = []
         instance_id = self.vllm_config.instance_id
 
-        # Create the remote actor
-        for bundle in bundle_assignments:
+        # Create exactly world_size remote actors despite the number of bundles
+        # in the placement group.
+        for bundle_idx in range(self.world_size):
+            # Fail fast if the placement group has less than world_size bundles.
+            bundle = bundle_assignments[bundle_idx]
             is_driver_worker = self._is_driver_worker(bundle["rank"])
             is_driver_node = bundle["node_id"] == driver_node
 
