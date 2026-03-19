@@ -275,6 +275,10 @@ class Dashboard:
         self.block_size = block_size  # 0 = auto (fit to terminal width)
         self.demo       = demo
         self.model_name = ""
+        self.hidden_size = 0
+        self.intermediate_size = 0
+        self.quantization = ""
+        self.prune_pct = 0  # current prune level
 
         self.demo_src   = DemoSource() if demo else None
         self.current    = Stats()
@@ -304,8 +308,36 @@ class Dashboard:
         except Exception:
             pass
 
+    def _fetch_health(self):
+        """Fetch expert dimensions from RIY health endpoint."""
+        try:
+            url = f"http://{self.host}:{self.port}/riy/health"
+            req = urllib.request.Request(url)
+            with urllib.request.urlopen(req, timeout=2.0) as resp:
+                data = json.loads(resp.read().decode())
+                self.hidden_size = data.get("hidden_size", 0)
+                self.intermediate_size = data.get("intermediate_size", 0)
+                self.quantization = data.get("quantization", "")
+        except Exception:
+            pass
+
+    def _estimate_expert_bytes(self):
+        """Estimate bytes per expert based on dimensions and quantization."""
+        if not self.hidden_size or not self.intermediate_size:
+            return 0
+        # 3 projections per expert: gate, up, down
+        params = 3 * self.hidden_size * self.intermediate_size
+        q = self.quantization.lower()
+        if "gptq" in q or "marlin" in q or "awq" in q or "int4" in q:
+            return params // 2  # 4 bit = 0.5 bytes
+        elif "fp8" in q:
+            return params  # 8 bit = 1 byte
+        else:
+            return params * 2  # BF16 = 2 bytes
+
     def fetch_loop(self):
         self._fetch_model_name()
+        self._fetch_health()
         if not self.demo:
             post_enable(self.host, self.port, True)
         while self.running:
@@ -461,6 +493,7 @@ class Dashboard:
             self._send_clear_mask()
             self.mask.clear()
             self.show_mask = False
+            self.prune_pct = 0
             self.set_status("Mask cleared")
             return
 
@@ -497,7 +530,17 @@ class Dashboard:
         self._send_mask(pruned)
         self.mask = set((l, e) for l, e in pruned)
         self.show_mask = True
-        self.set_status(f"Pruned {len(pruned)} experts ({pct}%) — mask active")
+        self.prune_pct = pct
+
+        # Estimate VRAM savings
+        expert_bytes = self._estimate_expert_bytes()
+        if expert_bytes > 0:
+            savings_gb = len(pruned) * expert_bytes / (1024**3)
+            self.set_status(
+                f"Pruned {len(pruned)} experts ({pct}%) "
+                f"~{savings_gb:.1f} GB savings — mask active")
+        else:
+            self.set_status(f"Pruned {len(pruned)} experts ({pct}%) — mask active")
 
     def _send_mask(self, pruned):
         """POST mask to RIY API."""
@@ -553,8 +596,10 @@ class Dashboard:
         err = f" ERR:{stats.error[:30]}" if stats.error else ""
         age = f"{time.time()-stats.timestamp:.1f}s ago" if stats.timestamp else "---"
         model = stats.model_name or "?"
-        hdr = (f" riy live | {model} | {connected}{err} | "
-               f"layers:{stats.max_layer+1} exp:{stats.max_expert+1} | "
+        quant = self.quantization.replace("QuantConfig","").replace("LinearMethod","")[:10] if self.quantization else ""
+        quant_str = f" [{quant}]" if quant else ""
+        hdr = (f" riy live | {model}{quant_str} | {connected}{err} | "
+               f"L:{stats.max_layer+1} E:{stats.max_expert+1} | "
                f"{self.interval:.1f}s | {age} | ?=help ")
         try:
             stdscr.addstr(0, 0, hdr[:w-1], curses.color_pair(9) | curses.A_BOLD)
@@ -737,7 +782,17 @@ class Dashboard:
                 pct = (dead + rare) / len(stats.experts)
                 filled = int(pct * bar_w)
                 bar = "\u2588" * filled + "\u2591" * (bar_w - filled)
-                prune_label = f" prune potential: [{bar}] {pct*100:.0f}%"
+                # Show current prune level + estimated savings
+                expert_bytes = self._estimate_expert_bytes()
+                mask_count = len(self.mask)
+                if mask_count > 0 and expert_bytes > 0:
+                    savings_gb = mask_count * expert_bytes / (1024**3)
+                    prune_info = f"  ACTIVE: {self.prune_pct}% ({mask_count} exp, ~{savings_gb:.1f}GB)"
+                elif mask_count > 0:
+                    prune_info = f"  ACTIVE: {self.prune_pct}% ({mask_count} exp)"
+                else:
+                    prune_info = ""
+                prune_label = f" prunable: [{bar}] {pct*100:.0f}%{prune_info}"
                 stdscr.addstr(prune_row, 0, prune_label[:w-1],
                               curses.color_pair(5) if pct > 0.3 else curses.color_pair(3))
         except:
