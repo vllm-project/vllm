@@ -1206,49 +1206,32 @@ class Glm4vDummyInputsBuilder(BaseDummyInputsBuilder[Glm4vProcessingInfo]):
         num_videos: int,
         overrides: VideoDummyOptions | None = None,
     ) -> list[VideoItem]:
-        if overrides:
-            if overrides.num_frames:
-                if overrides.num_frames > num_frames:
-                    logger.warning(
-                        "video.num_frames override (%d) exceeds model's "
-                        "maximum number of frames (%d), will be ignored",
-                        overrides.num_frames,
-                        num_frames,
-                    )
-                num_frames = min(num_frames, overrides.num_frames)
-            if overrides.width:
-                if overrides.width > width:
-                    logger.warning(
-                        "video.width override (%d) exceeds model's "
-                        "maximum width (%d), will be ignored",
-                        overrides.width,
-                        width,
-                    )
-                width = min(width, overrides.width)
-            if overrides.height:
-                if overrides.height > height:
-                    logger.warning(
-                        "video.height override (%d) exceeds model's "
-                        "maximum height (%d), will be ignored",
-                        overrides.height,
-                        height,
-                    )
-                height = min(height, overrides.height)
+        # GLM 4.6V requires at least 2 frames
+        num_frames = max(num_frames, 2)
+        if overrides and overrides.num_frames:
+            overrides.num_frames = max(overrides.num_frames, 2)
 
-        num_frames = max(num_frames, 2)  # GLM 4.6V requires 2 frames
-        video = np.full((num_frames, width, height, 3), 255, dtype=np.uint8)
+        videos = super()._get_dummy_videos(
+            width=width,
+            height=height,
+            num_frames=num_frames,
+            num_videos=num_videos,
+            overrides=overrides,
+        )
+        videos = [v.copy() for v in videos]
+
         video_items = []
-        for i in range(num_videos):
+        for video in videos:
+            video_num_frames = video.shape[0]
             video_metadata = {
                 "fps": 2.0,
-                "duration": num_frames / 2.0,
-                "total_num_frames": num_frames,
-                "frames_indices": [i for i in range(num_frames)],
+                "duration": video_num_frames / 2.0,
+                "total_num_frames": video_num_frames,
+                "frames_indices": list(range(video_num_frames)),
                 "video_backend": "opencv",
                 "do_sample_frames": False,
             }
-            video_item = (video.copy(), video_metadata)
-            video_items.append(video_item)
+            video_items.append((video, video_metadata))
 
         return video_items
 
