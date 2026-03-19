@@ -14,7 +14,6 @@ pin_memory = is_pin_memory_available()
 
 @dataclass
 class PoolingCursor:
-    index: list[int]
     first_token_indices_gpu: torch.Tensor
     last_token_indices_gpu: torch.Tensor
     prompt_lens_cpu: torch.Tensor
@@ -23,7 +22,6 @@ class PoolingCursor:
 
     def __getitem__(self, indices: slice):
         return PoolingCursor(
-            index=self.index[indices],
             first_token_indices_gpu=self.first_token_indices_gpu[indices],
             last_token_indices_gpu=self.last_token_indices_gpu[indices],
             prompt_lens_cpu=self.prompt_lens_cpu[indices],
@@ -108,7 +106,6 @@ class PoolingMetadata:
 
         assert len(prompt_lens) == n_seq
 
-        index = list(range(n_seq))
         num_scheduled_tokens_cpu = torch.from_numpy(num_scheduled_tokens_np)
         if query_start_loc_gpu is None:
             cumsum = torch.zeros(
@@ -130,7 +127,6 @@ class PoolingMetadata:
                 )
             cumsum = query_start_loc_gpu
         self.pooling_cursor = PoolingCursor(
-            index=index,
             first_token_indices_gpu=cumsum[:n_seq],
             last_token_indices_gpu=cumsum[1:] - 1,
             prompt_lens_cpu=prompt_lens,

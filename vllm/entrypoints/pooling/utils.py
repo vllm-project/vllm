@@ -60,14 +60,6 @@ def encode_pooling_output_float(output: PoolingRequestOutput) -> list[float]:
     return output.outputs.data.tolist()
 
 
-def encode_pooling_output_binary(
-    output: PoolingRequestOutput,
-    embed_dtype: EmbedDType,
-    endianness: Endianness,
-) -> bytes:
-    return tensor2binary(output.outputs.data, embed_dtype, endianness)
-
-
 def encode_pooling_output_base64(
     output: PoolingRequestOutput,
     embed_dtype: EmbedDType,
