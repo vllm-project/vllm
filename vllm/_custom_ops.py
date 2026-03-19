@@ -56,11 +56,11 @@ def create_fp4_scale_tensor(
         rounded_m = round_up(m, 128)
         scale_n = n // block_size
         rounded_n = round_up(scale_n, 4)
-        return torch.empty(
+        return torch.zeros(
             (rounded_m, rounded_n // 4), device=device, dtype=torch.int32
         )
     else:
-        return torch.empty((m, n // block_size), device=device, dtype=torch.uint8)
+        return torch.zeros((m, n // block_size), device=device, dtype=torch.uint8)
 
 
 def create_fp4_output_tensors(
@@ -1796,7 +1796,7 @@ def scaled_fp4_experts_quant(
     output = torch.empty(
         m_numtopk, k // 2, device=input_tensor.device, dtype=torch.uint8
     )
-    output_scales = torch.empty(
+    output_scales = torch.zeros(
         MAX_TOKENS_PER_EXPERT * topk,
         padded_k,
         dtype=torch.int32,
@@ -1861,7 +1861,7 @@ def silu_and_mul_scaled_fp4_experts_quant(
     output = torch.empty(
         m_numtopk, k // 2, device=input_tensor.device, dtype=torch.uint8
     )
-    output_scales = torch.empty(
+    output_scales = torch.zeros(
         MAX_TOKENS_PER_EXPERT * topk,
         padded_k,
         dtype=torch.int32,
