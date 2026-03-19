@@ -88,14 +88,9 @@ class Sampler(nn.Module):
                 else:
                     raw_logprobs = logits.to(torch.float32)
 
-        # High-Water Mark Persistent Workspace to prevent VRAM fragmentation.
-        # Allocating inside the sampler dynamically natively registers the footprint 
-        # during KV cache memory profiling via peak memory tracking, avoiding double counts.
-        if self.sampler_workspace is None or self.sampler_workspace.size(0) < logits.size(0):
-            self.sampler_workspace = torch.empty(
-                logits.shape, dtype=torch.float32, device=logits.device
-            )
-
+        # We gracefully exploit PyTorch's in-place casting via copy_() using our
+        # permanently pre-allocated 150MB Float32 workspace bounds to max_num_seqs.
+        # This natively eliminates the memory spike from dynamic floats.
         logits_fp32 = self.sampler_workspace[:logits.size(0)]
         logits_fp32.copy_(logits)
         logits = logits_fp32

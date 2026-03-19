@@ -4584,6 +4584,16 @@ class GPUModelRunner(
                         )
 
                     self.model.set_aux_hidden_state_layers(aux_layers)
+
+                # Preallocate sampler workspace inside the profiler block so its footprint
+                # is natively captured by memory profiling and deducted from KV cache.
+                if getattr(self, "sampler", None) is not None:
+                    self.sampler.sampler_workspace = torch.empty(
+                        (self.max_num_reqs, self.model_config.get_vocab_size()),
+                        dtype=torch.float32,
+                        device=self.device,
+                    )
+
                 time_after_load = time.perf_counter()
             self.model_memory_usage = m.consumed_memory
         except torch.cuda.OutOfMemoryError as e:
