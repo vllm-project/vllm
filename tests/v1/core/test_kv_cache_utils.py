@@ -2142,6 +2142,9 @@ def test_unify_hybrid_kv_cache_specs():
 def _make_qwen35_specs(
     kv_dtype: torch.dtype = torch.bfloat16,
     mamba_dtype: torch.dtype = torch.bfloat16,
+    block_size: int = 16,
+    mamba_cache_mode: str = "none",
+    num_speculative_blocks: int = 0,
 ):
     """Build KV cache specs matching real Qwen3.5 architecture.
 
@@ -2153,15 +2156,17 @@ def _make_qwen35_specs(
     affect KV cache or recurrent state sizes.
     """
     attention_spec = FullAttentionSpec(
-        block_size=16,
+        block_size=block_size,
         num_kv_heads=4,
         head_size=256,
         dtype=kv_dtype,
     )
     mamba_spec = MambaSpec(
-        block_size=16,
+        block_size=block_size,
         shapes=((3, 8192), (32, 128, 128)),
         dtypes=(mamba_dtype, mamba_dtype),
+        mamba_cache_mode=mamba_cache_mode,
+        num_speculative_blocks=num_speculative_blocks,
     )
     # Qwen3.5 layer pattern: every 4th layer is full attention
     kv_cache_specs: dict[str, KVCacheSpec] = {}
@@ -3287,3 +3292,285 @@ def test_compact_align_mode_unaffected():
     assert len(manager._compact_free) >= compact_free_before, (
         "Align mode remove_skipped_blocks should not consume compact blocks"
     )
+
+
+# ---------------------------------------------------------------------------
+# Compact allocation concurrency & memory efficiency tests
+# ---------------------------------------------------------------------------
+
+
+def test_compact_concurrency_independent_of_max_model_len():
+    """Mamba concurrency must not depend on max_model_len.
+
+    Mamba state is O(1) per request. The compact pool should be sized
+    for max_num_seqs regardless of whether sequences are 1K or 262K tokens.
+    The old formula erroneously used max_model_len in the denominator,
+    giving C=1 for long-context models like Qwen3.5 at 262K.
+    """
+    max_num_seqs = 32
+    kv_cache_specs, attn_spec, mamba_spec = _make_qwen35_specs()
+    total_page_per_block = _total_page_per_block(kv_cache_specs)
+    available_memory = total_page_per_block * 200  # plenty of memory
+
+    mamba_blocks_list = []
+    for max_model_len in [1024, 8192, 65536, 262144]:
+        model_config = ModelConfig(max_model_len=max_model_len)
+        scheduler_config = SchedulerConfig(
+            max_model_len=max_model_len,
+            is_encoder_decoder=False,
+            max_num_seqs=max_num_seqs,
+        )
+        vllm_config = VllmConfig(
+            model_config=model_config,
+            scheduler_config=scheduler_config,
+        )
+        kv_cache_config = kv_cache_utils.get_kv_cache_configs(
+            vllm_config, [kv_cache_specs], [available_memory]
+        )[0]
+
+        assert kv_cache_config.mamba_num_blocks is not None
+        mamba_blocks_list.append(kv_cache_config.mamba_num_blocks)
+
+    # All should give the same Mamba block count
+    assert all(m == mamba_blocks_list[0] for m in mamba_blocks_list), (
+        f"Mamba blocks vary with max_model_len: {mamba_blocks_list}. "
+        f"Expected all to be {mamba_blocks_list[0]}"
+    )
+    # And it should be max_num_seqs * blocks_per_req (=1 for "none" mode)
+    assert mamba_blocks_list[0] == max_num_seqs, (
+        f"Expected {max_num_seqs} mamba blocks, got {mamba_blocks_list[0]}"
+    )
+
+
+def test_compact_mamba_tensors_use_real_page_size():
+    """Compact Mamba tensors must use real_page_size_bytes, not padded.
+
+    HybridAttentionMambaModelConfig pads Mamba pages to match attention
+    pages. This is correct for shared-pool ("all") mode but wasteful for
+    compact mode where Mamba has its own separate tensors.
+
+    Uses a large block_size (like the real Qwen3.5 config) so that
+    attn_page_size >= mamba_page_size, which is the prerequisite for
+    padding to be applied by config.py.
+    """
+    # Use block_size=800 (like a real-world user config after auto-adjustment)
+    # so attention page > mamba page, enabling padding.
+    kv_cache_specs, attention_spec, mamba_spec = _make_qwen35_specs(block_size=800)
+    assert attention_spec.page_size_bytes > mamba_spec.real_page_size_bytes
+
+    # Create padded mamba spec (simulating what config.py does)
+    padded_value = attention_spec.page_size_bytes
+    padded_mamba_spec = MambaSpec(
+        block_size=mamba_spec.block_size,
+        shapes=mamba_spec.shapes,
+        dtypes=mamba_spec.dtypes,
+        page_size_padded=padded_value,
+    )
+    assert padded_mamba_spec.page_size_bytes == padded_value
+    real_mamba_page = padded_mamba_spec.real_page_size_bytes
+    assert real_mamba_page < padded_value, "Sanity: real < padded"
+
+    # Replace Mamba specs with padded versions
+    padded_specs: dict[str, KVCacheSpec] = {}
+    for name, spec in kv_cache_specs.items():
+        if isinstance(spec, MambaSpec):
+            padded_specs[name] = padded_mamba_spec
+        else:
+            padded_specs[name] = spec
+
+    model_config = ModelConfig(max_model_len=262144)
+    vllm_config = VllmConfig(model_config=model_config)
+    available_memory = 10 * GiB_bytes
+
+    kv_cache_config = kv_cache_utils.get_kv_cache_configs(
+        vllm_config, [padded_specs], [available_memory]
+    )[0]
+
+    assert kv_cache_config.mamba_num_blocks is not None
+    mamba_blocks = kv_cache_config.mamba_num_blocks
+
+    # Check tensor sizes: Mamba tensors should use REAL page size
+    for tensor in kv_cache_config.kv_cache_tensors:
+        layer_name = tensor.shared_by[0]
+        if isinstance(padded_specs[layer_name], MambaSpec):
+            expected_size = real_mamba_page * mamba_blocks
+            assert tensor.size == expected_size, (
+                f"Mamba tensor for {layer_name}: size={tensor.size}, "
+                f"expected={expected_size} (real_page={real_mamba_page} x "
+                f"{mamba_blocks} blocks). Padded would be "
+                f"{padded_value * mamba_blocks}."
+            )
+
+
+def test_compact_long_context_full_concurrency():
+    """Reproduces a reported regression: Qwen3.5 at 262K context with
+    align mode must support max_num_seqs concurrent Mamba requests.
+
+    The old formula gives optimal_C=1 because it divides available memory
+    by (attention_cost_at_max_model_len + mamba_cost). With 262K context
+    and block_size=800, attention_cost_at_max_model_len dominates,
+    crushing concurrency to 1.
+    """
+    max_num_seqs = 32
+    num_speculative_blocks = 2
+
+    # Use align mode with speculative blocks (like a real-world user config)
+    align_specs, _, _ = _make_qwen35_specs(
+        mamba_cache_mode="align",
+        num_speculative_blocks=num_speculative_blocks,
+    )
+
+    total_page = _total_page_per_block(align_specs)
+    available_memory = total_page * 200  # enough for many requests
+
+    model_config = ModelConfig(max_model_len=262144)
+    scheduler_config = SchedulerConfig(
+        max_model_len=262144,
+        is_encoder_decoder=False,
+        max_num_seqs=max_num_seqs,
+    )
+    vllm_config = VllmConfig(
+        model_config=model_config,
+        scheduler_config=scheduler_config,
+    )
+
+    kv_cache_config = kv_cache_utils.get_kv_cache_configs(
+        vllm_config, [align_specs], [available_memory]
+    )[0]
+
+    assert kv_cache_config.mamba_num_blocks is not None
+    # align mode: 2 + num_speculative_blocks = 4 blocks per request
+    mamba_blocks_per_req = 2 + num_speculative_blocks
+    expected_mamba = max_num_seqs * mamba_blocks_per_req
+
+    assert kv_cache_config.mamba_num_blocks == expected_mamba, (
+        f"Expected {expected_mamba} mamba blocks "
+        f"({max_num_seqs} reqs x {mamba_blocks_per_req} blocks/req), "
+        f"got {kv_cache_config.mamba_num_blocks}. "
+        f"Old formula likely gave C=1 -> {mamba_blocks_per_req} blocks."
+    )
+
+
+def test_compact_attention_always_ge_shared_pool():
+    """Compact allocation must yield attention_num_blocks >= shared pool blocks.
+
+    The shared pool gives num_shared = memory / (attn_page_total + mamba_page_cost).
+    The compact formula caps Mamba so this invariant always holds.
+    Test across multiple configurations.
+    """
+    kv_cache_specs, attn_spec, mamba_spec = _make_qwen35_specs()
+    total_page_per_block = _total_page_per_block(kv_cache_specs)
+
+    configs = [
+        # (max_num_seqs, max_model_len, memory_in_shared_blocks)
+        (4, 1024, 50),
+        (32, 1024, 200),
+        (32, 262144, 200),
+        (128, 1024, 500),
+        (128, 262144, 200),
+        (256, 1024, 1000),
+    ]
+    for max_num_seqs, max_model_len, num_shared_equiv in configs:
+        available_memory = total_page_per_block * num_shared_equiv
+
+        model_config = ModelConfig(max_model_len=max_model_len)
+        scheduler_config = SchedulerConfig(
+            max_model_len=max_model_len,
+            is_encoder_decoder=False,
+            max_num_seqs=max_num_seqs,
+        )
+        vllm_config = VllmConfig(
+            model_config=model_config,
+            scheduler_config=scheduler_config,
+        )
+        kv_cache_config = kv_cache_utils.get_kv_cache_configs(
+            vllm_config, [kv_cache_specs], [available_memory]
+        )[0]
+
+        if kv_cache_config.mamba_num_blocks is None:
+            continue  # not compact mode
+
+        attn_page_total = _QWEN35_NUM_ATTN_LAYERS * attn_spec.page_size_bytes
+        mamba_page_cost = _QWEN35_NUM_MAMBA_LAYERS * mamba_spec.page_size_bytes
+        shared_pool_blocks = int(
+            available_memory // (attn_page_total + mamba_page_cost)
+        )
+        assert kv_cache_config.num_blocks >= shared_pool_blocks, (
+            f"Config(seqs={max_num_seqs}, len={max_model_len}, "
+            f"mem={num_shared_equiv}): attention blocks "
+            f"{kv_cache_config.num_blocks} < shared pool {shared_pool_blocks}"
+        )
+
+
+def test_compact_mamba_capped_by_memory():
+    """With very high max_num_seqs, Mamba pool is capped by available memory.
+
+    The shared-pool-equivalent cap ensures we never allocate more Mamba
+    than the system could afford, leaving enough for attention.
+    """
+    max_num_seqs = 1000  # very high
+    kv_cache_specs, attn_spec, mamba_spec = _make_qwen35_specs()
+    total_page_per_block = _total_page_per_block(kv_cache_specs)
+
+    # Only 50 shared-pool-equivalent blocks of memory
+    available_memory = total_page_per_block * 50
+
+    model_config = ModelConfig(max_model_len=1024)
+    scheduler_config = SchedulerConfig(
+        max_model_len=1024,
+        is_encoder_decoder=False,
+        max_num_seqs=max_num_seqs,
+    )
+    vllm_config = VllmConfig(
+        model_config=model_config,
+        scheduler_config=scheduler_config,
+    )
+    kv_cache_config = kv_cache_utils.get_kv_cache_configs(
+        vllm_config, [kv_cache_specs], [available_memory]
+    )[0]
+
+    assert kv_cache_config.mamba_num_blocks is not None
+    # Should be much less than max_num_seqs * 1 = 1000
+    assert kv_cache_config.mamba_num_blocks < max_num_seqs, (
+        f"Mamba blocks {kv_cache_config.mamba_num_blocks} should be "
+        f"< max_num_seqs={max_num_seqs} due to memory cap"
+    )
+    # Should still have positive attention blocks
+    assert kv_cache_config.num_blocks > 0
+
+
+def test_compact_align_full_concurrency():
+    """Align mode compact pool sized for N*(2+spec) must serve N requests.
+
+    Similar to test_compact_none_full_concurrency but for align mode.
+    Each request uses 2+spec blocks (dual buffer + speculative).
+    """
+    max_concurrent = 16
+    spec = 2
+    blocks_per_req = 2 + spec  # align mode: 2 base + speculative
+    pool_size = max_concurrent * blocks_per_req
+
+    manager = _create_compact_mamba_manager(
+        mamba_num_blocks=pool_size, spec=spec, mamba_cache_mode="align"
+    )
+    block_size = manager.block_size
+
+    # Schedule all requests with prefill that spans multiple blocks
+    # Use exact multiple of block_size for clean align-mode allocation
+    prefill_tokens = block_size * 5  # 5 blocks worth, >> 1 block
+    for i in range(max_concurrent):
+        req_id = f"req_{i}"
+        needed = manager.get_num_blocks_to_allocate(
+            req_id, prefill_tokens, [], 0, prefill_tokens
+        )
+        assert needed == 0, (
+            f"Request {i} rejected - pool of {pool_size} blocks should "
+            f"handle {max_concurrent} concurrent align-mode requests"
+        )
+        manager.allocate_new_blocks(req_id, prefill_tokens, prefill_tokens)
+
+    # The key invariant: all requests were accepted without rejection
+    # Free all and verify blocks return
+    for i in range(max_concurrent):
+        manager.free(f"req_{i}")
+    assert len(manager._compact_free) == pool_size

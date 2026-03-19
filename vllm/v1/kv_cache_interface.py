@@ -280,11 +280,15 @@ class MambaSpec(KVCacheSpec):
     num_speculative_blocks: int = 0
 
     @property
-    def page_size_bytes(self) -> int:
-        page_size = sum(
+    def real_page_size_bytes(self) -> int:
+        return sum(
             prod(shape) * get_dtype_size(dtype)
             for (shape, dtype) in zip(self.shapes, self.dtypes)
         )
+
+    @property
+    def page_size_bytes(self) -> int:
+        page_size = self.real_page_size_bytes
         if self.page_size_padded is not None:
             assert self.page_size_padded >= page_size
             return self.page_size_padded

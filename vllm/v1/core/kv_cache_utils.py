@@ -9,7 +9,7 @@ from collections import defaultdict
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, replace
 from functools import partial
-from typing import Any, NewType, TypeAlias, overload
+from typing import Any, NewType, TypeAlias, cast, overload
 
 from vllm import envs
 from vllm.config import VllmConfig
@@ -1198,7 +1198,12 @@ def get_kv_cache_config_from_groups(
             num_blocks = may_override_num_blocks(vllm_config, num_blocks)
             kv_cache_tensors = [
                 KVCacheTensor(
-                    size=spec.page_size_bytes * num_blocks,
+                    size=(
+                        spec.real_page_size_bytes
+                        if isinstance(spec, MambaSpec)
+                        else spec.page_size_bytes
+                    )
+                    * num_blocks,
                     shared_by=[layer_name],
                 )
                 for layer_name, spec in all_layers.items()
@@ -1207,36 +1212,32 @@ def get_kv_cache_config_from_groups(
         else:
             # Compact Mamba allocation: Mamba state is O(1) per request,
             # so decouple it from the shared attention block pool.
-            # Solve for C (max concurrent requests):
-            #   C = available / (attn_page_total * B + mamba_cost_per_request)
-            # where B = blocks per attention request at max_model_len.
             attention_page_total = sum(
                 len(g.layer_names) * g.kv_cache_spec.page_size_bytes
                 for g in attention_groups_list
             )
             mamba_page_cost = sum(
-                len(g.layer_names) * g.kv_cache_spec.page_size_bytes
+                len(g.layer_names)
+                * cast(MambaSpec, g.kv_cache_spec).real_page_size_bytes
                 for g in mamba_groups
-            )
-            blocks_per_attn_request = _max_blocks_per_request(
-                vllm_config, attention_groups_list
             )
             # Mamba blocks per request varies by mode:
             # "none" = 1 (+speculative), "align" = 2 (+speculative)
             mamba_blocks_per_req = _max_blocks_per_request(vllm_config, mamba_groups)
-            mamba_cost_per_request = mamba_page_cost * mamba_blocks_per_req
             max_num_seqs = vllm_config.scheduler_config.max_num_seqs
 
-            # Optimal concurrent requests
-            optimal_C = int(
-                available_memory
-                // (
-                    attention_page_total * blocks_per_attn_request
-                    + mamba_cost_per_request
-                )
+            # Mamba state is O(1) per request and a hard constraint
+            # (no preemption). Size for max_num_seqs so Mamba never
+            # bottlenecks the scheduler.
+            # Cap: compact Mamba must never exceed what a shared pool
+            # would cost (guarantees attention_num_blocks >= shared pool).
+            num_shared_blocks = int(
+                available_memory // (attention_page_total + mamba_page_cost)
             )
-            # At least 1 request must fit; cap at scheduler limit
-            num_concurrent = max(1, min(optimal_C, max_num_seqs))
+            num_concurrent = max(
+                1,
+                min(max_num_seqs, num_shared_blocks // mamba_blocks_per_req),
+            )
 
             # Size compact pool: total blocks = requests * blocks_per_request
             mamba_blocks = num_concurrent * mamba_blocks_per_req
@@ -1253,7 +1254,7 @@ def get_kv_cache_config_from_groups(
                 if isinstance(spec, MambaSpec):
                     kv_cache_tensors.append(
                         KVCacheTensor(
-                            size=spec.page_size_bytes * mamba_blocks,
+                            size=spec.real_page_size_bytes * mamba_blocks,
                             shared_by=[layer_name],
                         )
                     )
