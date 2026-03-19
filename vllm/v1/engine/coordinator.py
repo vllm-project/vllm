@@ -231,13 +231,16 @@ class DPCoordinatorProc:
             ) as publish_back,
         ):
             if zmq_addr_pipe is not None:
-                zmq_addr_pipe.send(
-                    (
-                        publish_front.getsockopt(zmq.LAST_ENDPOINT).decode(),
-                        output_back.getsockopt(zmq.LAST_ENDPOINT).decode(),
-                        publish_back.getsockopt(zmq.LAST_ENDPOINT).decode(),
+                try:
+                    zmq_addr_pipe.send(
+                        (
+                            publish_front.getsockopt(zmq.LAST_ENDPOINT).decode(),
+                            output_back.getsockopt(zmq.LAST_ENDPOINT).decode(),
+                            publish_back.getsockopt(zmq.LAST_ENDPOINT).decode(),
+                        )
                     )
-                )
+                finally:
+                    zmq_addr_pipe.close()
             # Wait until all engines subscribe.
             for _ in self.engines:
                 if publish_back.recv() != b"\x01":
