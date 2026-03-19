@@ -6,8 +6,8 @@ import json
 
 import pytest
 
-from ...utils import ROCM_ENV_OVERRIDES, ROCM_EXTRA_ARGS, RemoteOpenAIServer
-from .conftest import add_attention_backend
+from tests.entrypoints.openai.conftest import add_attention_backend
+from tests.utils import ROCM_ENV_OVERRIDES, ROCM_EXTRA_ARGS, RemoteOpenAIServer
 
 MISTRAL_FORMAT_ARGS = [
     "--tokenizer_mode",
