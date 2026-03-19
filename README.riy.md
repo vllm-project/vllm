@@ -48,8 +48,87 @@ python3 tools/riy_live.py
   dead:1840(15%)  rare:4211  low:3892  active:2345  |  prunable:6051(49%)  specialists:23
   freq: · dead  ░ rare  ▒ low  ▓ high  █ dominant  |  color=contribution: ■■■■■
   prune potential: [████████████████████████░░░░░░░░░░░░░░░░░░░░░░░] 49%
-  q=quit  r=reset  e=enable  d=disable  m=mask  s=save  ?=help
+  q=quit  r=reset  p=prune  e=export  m=mask  s=save  d=stop  ?=help
 ```
+
+---
+
+## riy live — TUI Monitor
+
+![riy live monitoring Qwen3.5-122B expert activations](docs/riy-monitor.png)
+
+*riy live showing all 48 layers x 256 experts of Qwen3.5-122B-A10B (INT4 AutoRound)
+on a single screen. Each character represents one expert. Fill density shows activation
+frequency, color shows routing weight contribution (log scale). Summary statistics
+at the bottom: 106 dead, 2264 rare, 19% prunable, 40 specialists.*
+
+### Usage
+
+```bash
+python3 tools/riy_live.py                     # default: localhost:8019
+python3 tools/riy_live.py --port 8019         # explicit RIY port
+python3 tools/riy_live.py --vllm-port 8011    # vLLM API port (for model name)
+python3 tools/riy_live.py --demo              # synthetic data, no vLLM needed
+```
+
+### Display
+
+Each character in the grid represents one expert in one layer:
+
+| Symbol | Meaning |
+|--------|---------|
+| `·` | Dead — never activated |
+| `░` | Rare — activated < 1% of max |
+| `▒` | Low — activated 1-10% of max |
+| `▓` | High — frequently activated |
+| `█` | Dominant — most activated |
+| `X` | Masked — pruned by current filter |
+
+Color indicates routing weight magnitude (contribution):
+
+| Color | Contribution |
+|-------|-------------|
+| Dark/dim | Negligible |
+| Cyan | Low |
+| Green | Medium |
+| Orange | High |
+| Red (bold) | Dominant |
+
+Both scales are logarithmic — rare experts remain visible instead of
+being crushed to zero by a few dominant ones.
+
+### Keybindings
+
+| Key | Action |
+|-----|--------|
+| `p` | **Prune** — enter target percentage (0-100%), computes mask from current stats, applies live to vLLM, shows estimated VRAM savings |
+| `e` | **Export** — save current mask as `riy_filter.<timestamp>.json` |
+| `r` | **Reset** — zero all stats counters |
+| `s` | **Save** — dump raw stats to `riy_stats_export.json` |
+| `m` | **Mask toggle** — show/hide X overlay for pruned experts |
+| `d` | **Disable** — stop stats collection |
+| `j`/`k` | Scroll layers up/down |
+| `h`/`l` | Scroll expert blocks left/right |
+| `+`/`-` | Increase/decrease refresh interval |
+| `?` | Help screen |
+| `q` | Quit |
+
+### Summary Statistics
+
+The bottom section shows:
+
+```
+dead:106(0%)  rare:2264  low:8584  active:1334  |  prunable:2370(19%)  specialists:40  |  total:12288
+prunable: [██████████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░] 19%  ACTIVE: 20% (2457 exp, ~3.2GB)
+```
+
+- **dead** — zero activations (safe to prune)
+- **rare** — less than 1% of most active expert
+- **low** — 1-10% of most active
+- **active** — more than 10% of most active
+- **prunable** — dead + rare (conservative prune candidates)
+- **specialists** — rare frequency but high contribution (caution!)
+- **ACTIVE** — current prune filter applied, with estimated VRAM savings
 
 ---
 
@@ -225,11 +304,16 @@ Or use `--riy-expert-profile` CLI flag for load-time masking.
 
 ## Limitations
 
-- **No VRAM savings at runtime.** Masked experts still occupy memory.
-  Load-time masking zeros weights but doesn't skip allocation (follow-up).
+- **Profiling requires the full model.** To collect accurate routing statistics,
+  you must load the complete unmodified model — no VRAM savings during this step.
+  Once the profile is created, subsequent loads with `--riy-expert-profile` zero
+  the pruned expert weights at load time, reducing effective VRAM usage. The
+  profiling is a one-time cost; the savings are permanent.
 - **`--enforce-eager` required for stats.** CUDA Graphs replay the captured
   graph without executing Python — the stats hook doesn't fire during replay.
-  Masking works with CUDA Graphs; stats collection does not.
+  Masking works with CUDA Graphs; stats collection does not. Use `--enforce-eager`
+  during the profiling phase, then switch back to CUDA Graphs for production
+  serving with the profile applied.
 - **Single-process stats.** Stats are collected in the EngineCore worker process
   and served via a separate HTTP server on port 8019.
 
