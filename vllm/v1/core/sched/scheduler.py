@@ -2199,6 +2199,8 @@ class Scheduler(SchedulerInterface):
                 # collect invalid block and all downstream dependent blocks
                 if evict_blocks:
                     blocks_to_evict.update(req_block_ids[idx:])
+            print("_update_requests_with_invalid_blocks")
+            print(request.request_id, request.num_computed_tokens)
 
             if is_affected:
                 if not marked_invalid_block:
@@ -2236,6 +2238,46 @@ class Scheduler(SchedulerInterface):
                 async_load_reqs, invalid_block_ids, evict_blocks=False
             )
         )
+
+        # FIX: For async loading, blocks are not physically shared
+        # (delay_cache_blocks=True prevents cache_blocks() from being called,
+        # so no two requests hold the same physical block). Therefore,
+        # InvalidBlockReport for one request's block cannot directly match
+        # another request's block IDs.
+        #
+        # However, if any async request had a load failure, all other
+        # WAITING_FOR_REMOTE_KVS requests that overlap the failed token range
+        # must also have their credit reset, because they were scheduled in
+        # the same async load batch and their loads are equally unreliable.
+        #
+        # We identify "siblings" by checking whether their num_computed_tokens
+        # overlaps with the failed range: any request whose credit extends into
+        # a range that is now known to be invalid must be truncated.
+        async_load_reqs_list = [
+            req
+            for req in self.skipped_waiting
+            if req.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+        ]
+        if async_failed_req_ids:
+            # Find the minimum credit across all directly failed requests —
+            # this is the earliest token position we know is invalid.
+            min_valid_tokens = min(
+                req.num_computed_tokens
+                for req in async_load_reqs_list
+                if req.request_id in async_failed_req_ids
+            )
+            for req in async_load_reqs_list:
+                if req.request_id in async_failed_req_ids:
+                    continue
+                # This request was not directly affected, but if it has credit
+                # beyond the known-invalid range, it must also be reset.
+                if req.num_computed_tokens > min_valid_tokens:
+                    num_failed_tokens += req.num_computed_tokens - min_valid_tokens
+                    req.num_external_computed_tokens -= (
+                        req.num_computed_tokens - min_valid_tokens
+                    )
+                    req.num_computed_tokens = min_valid_tokens
+                    async_failed_req_ids.add(req.request_id)
 
         total_failed_requests = len(async_failed_req_ids)
         total_failed_tokens = num_failed_tokens
