@@ -11,7 +11,7 @@ concurrency:
 
 permissions:
   contents: read
-  pull-requests: write
+  pull-requests: read
 
 jobs:
   pre-run-check:
@@ -56,48 +56,3 @@ jobs:
     - uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd # v3.0.1
       with:
         extra_args: --all-files --hook-stage manual
-    - name: Comment on PR with pre-commit failure instructions
-      if: failure() && github.event_name == 'pull_request'
-      uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
-      with:
-        script: |
-          const body = `Hi @${context.payload.pull_request.user.login}, the pre-commit checks have failed. Please run:
-
-          \`\`\`bash
-          uv pip install pre-commit>=4.5.1
-          pre-commit install
-          pre-commit run --all-files
-          \`\`\`
-
-          Then, commit the changes and push to your branch.
-
-          For future commits, \`pre-commit\` will run automatically on changed files before each commit.
-
-          > [!TIP]
-          > <details>
-          > <summary>Is <code>mypy</code> failing?</summary>
-          > <br/>
-          > <code>mypy</code> is run differently in CI. If the failure is related to this check, please use the following command to run it locally:
-          >
-          > \`\`\`bash
-          > # For mypy (substitute "3.10" with the failing version if needed)
-          > pre-commit run --hook-stage manual mypy-3.10
-          > \`\`\`
-          > </details>`;
-
-          // Check if we already posted this comment
-          const { data: comments } = await github.rest.issues.listComments({
-            ...context.repo,
-            issue_number: context.payload.pull_request.number,
-          });
-          const marker = 'the pre-commit checks have failed';
-          if (comments.some(c => c.body.includes(marker))) {
-            core.info('Comment already exists, skipping.');
-            return;
-          }
-
-          await github.rest.issues.createComment({
-            ...context.repo,
-            issue_number: context.payload.pull_request.number,
-            body,
-          });
