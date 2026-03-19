@@ -148,24 +148,38 @@ class SharedExperts:
         else:
             return SharedExpertsOrder.AFTER_QUANT_METHOD, allow_shared_experts_stream
 
+    def maybe_setup_shared_experts_stream(
+        self,
+        shared_experts_input: torch.Tensor,
+    ):
+        experts_order, use_shared_experts_stream = self._determine_shared_experts_order(
+            shared_experts_input,
+        )
+
+        if (
+            experts_order == SharedExpertsOrder.AFTER_QUANT_METHOD
+            and use_shared_experts_stream
+        ):
+            assert self._shared_experts_stream is not None
+            assert self._moe_config.disable_inplace
+
+            # Record that the clone will be used by shared_experts_stream
+            # to avoid gc issue from deallocation of hidden_states_clone
+            # For more details: https://docs.pytorch.org/docs/stable/generated/torch.Tensor.record_stream.html # noqa: E501
+            # NOTE: We don't need shared_output.record_stream(current_stream())
+            # because we synch the streams before using shared_output.
+            shared_experts_input.record_stream(self._shared_experts_stream)
+
+            # Mark sync start point for the separate shared experts
+            # stream here since we want to run in parallel with the
+            # router/gate (next op below)
+            self._shared_experts_stream.wait_stream(current_stream())
+
     def _call_with_shared_experts_stream(
         self,
         shared_experts_input: torch.Tensor,
     ) -> torch.Tensor:
-        assert self._shared_experts_stream is not None
-        assert self._moe_config.disable_inplace
-
-        # Record that the clone will be used by shared_experts_stream
-        # to avoid gc issue from deallocation of hidden_states_clone
-        # For more details: https://docs.pytorch.org/docs/stable/generated/torch.Tensor.record_stream.html # noqa: E501
-        # NOTE: We don't need shared_output.record_stream(current_stream())
-        # because we synch the streams before using shared_output.
-        shared_experts_input.record_stream(self._shared_experts_stream)
-
-        # Mark sync start point for the separate shared experts
-        # stream here since we want to run in parallel with the
-        # router/gate (next op below)
-        self._shared_experts_stream.wait_stream(current_stream())
+        # TODO: assert that maybe_setup_shared_experts_stream has been called.
 
         # Run shared experts in parallel on a separate stream
         # NOTE: We start the separate stream here and mark the

@@ -476,17 +476,22 @@ class DefaultMoERunner(MoERunner):
 
         return final_shared_hidden_states, final_fused_hidden_states
 
-    def _maybe_gate(
+    def _maybe_overlap_gate_with_shared_experts(
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
+        shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor:
         # If router/gate provided, then apply it here.
         # (Note: This code runs only when "overlapped mode" is on to allow
         #        parallel execution of shared experts with the FusedMoE via
         #        separate cuda stream)
+        if self.shared_experts is not None:
+            self.shared_experts.maybe_setup_shared_experts_stream(shared_experts_input)
+
         if self.gate is not None:
             router_logits, _ = self.gate(hidden_states)
+
         return router_logits
 
     @property
@@ -613,7 +618,11 @@ class DefaultMoERunner(MoERunner):
         # TODO(bnell): this can be removed after MK migration is complete.
         layer.ensure_moe_quant_config_init()
 
-        router_logits = self._maybe_gate(hidden_states, router_logits)
+        router_logits = self._maybe_overlap_gate_with_shared_experts(
+            hidden_states,
+            router_logits,
+            shared_experts_input,
+        )
 
         self._maybe_apply_shared_experts(
             shared_experts_input,
@@ -655,10 +664,6 @@ class DefaultMoERunner(MoERunner):
         router_logits: torch.Tensor,
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        # Gate overlap not supported when chunking is enabled. Run the
-        # gate first.
-        router_logits = self._maybe_gate(hidden_states, router_logits)
-
         final_shared_hidden_states, final_fused_hidden_states = (
             self._allocate_dp_chunking_outputs(hidden_states, router_logits)
         )
