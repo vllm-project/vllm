@@ -1206,7 +1206,10 @@ class Glm4vDummyInputsBuilder(BaseDummyInputsBuilder[Glm4vProcessingInfo]):
         num_videos: int,
         overrides: VideoDummyOptions | None = None,
     ) -> list[VideoItem]:
-        num_frames = max(num_frames, 2)  # GLM 4.6V requires 2 frames
+        # GLM 4.6V requires at least 2 frames
+        num_frames = max(num_frames, 2)
+        if overrides and overrides.num_frames:
+            overrides.num_frames = max(overrides.num_frames, 2)
 
         videos = super()._get_dummy_videos(
             width=width,

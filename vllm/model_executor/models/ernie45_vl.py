@@ -1221,7 +1221,10 @@ class Ernie4_5_VLDummyInputsBuilder(BaseDummyInputsBuilder[Ernie4_5_VLProcessing
         num_videos: int,
         overrides: VideoDummyOptions | None = None,
     ):
-        num_frames = max(num_frames, 2)  # ernie4.5-vl requires at least 2 frames
+        # ernie4.5-vl requires at least 2 frames
+        num_frames = max(num_frames, 2)
+        if overrides and overrides.num_frames:
+            overrides.num_frames = max(overrides.num_frames, 2)
 
         videos = super()._get_dummy_videos(
             width=width,
