@@ -791,8 +791,10 @@ class EngineCore:
                 documentation of pause_scheduler method.
         """
         if level < 1:
-            self._scheduler_paused = True
-            return None
+            # Use pause_scheduler with clear_cache=False to avoid
+            # _reset_caches() → reset_encoder_cache() which is not
+            # implemented on TPU workers.
+            return self.pause_scheduler(mode="keep", clear_cache=False)
 
         # Pause scheduler before sleeping.
         clear_prefix_cache = level >= 1
