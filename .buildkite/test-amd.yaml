@@ -995,7 +995,7 @@ steps:
   - pytest -v -s models/language/pooling_mteb_test
 
 
-- label: Multi-Modal Processor Test (CPU) # TBD
+- label: Multi-Modal Processor (CPU) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
   agent_pool: mi250_1
@@ -1088,7 +1088,22 @@ steps:
   - cd .. && VLLM_WORKER_MULTIPROC_METHOD=spawn pytest -v -s tests/models/multimodal/generation/test_whisper.py -m core_model
 
 
-- label: Multi-Modal Models (Extended) 2 # TBD
+- label: Multi-Modal Models (Extended Generation 1) # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
+  agent_pool: mi250_1
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/
+  - tests/models/multimodal/generation
+  - tests/models/multimodal/test_mapping.py
+  commands:
+  - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
+  - pytest -v -s models/multimodal/generation -m 'not core_model' --ignore models/multimodal/generation/test_common.py
+  - pytest -v -s models/multimodal/test_mapping.py
+
+
+- label: Multi-Modal Models (Extended Generation 2) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
   agent_pool: mi250_1
@@ -1101,7 +1116,7 @@ steps:
   - pytest -v -s models/multimodal/generation/test_common.py -m 'split(group=0) and not core_model'
 
 
-- label: Multi-Modal Models (Extended) 3 # TBD
+- label: Multi-Modal Models (Extended Generation 3) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
   agent_pool: mi250_1
@@ -1112,6 +1127,18 @@ steps:
   commands:
   - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
   - pytest -v -s models/multimodal/generation/test_common.py -m 'split(group=1) and not core_model'
+
+
+- label: Multi-Modal Models (Extended Pooling) # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
+  agent_pool: mi250_1
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/
+  - tests/models/multimodal/pooling
+  commands:
+  - pytest -v -s models/multimodal/pooling -m 'not core_model'
 
 
 - label: Distributed Comm Ops # TBD
@@ -2231,8 +2258,23 @@ steps:
   - cd .. && VLLM_WORKER_MULTIPROC_METHOD=spawn pytest -v -s tests/models/multimodal/generation/test_whisper.py -m core_model
 
 
-- label: Multi-Modal Models (Extended) 1 # 1h 2m
+- label: Multi-Modal Models (Extended Generation 1) # 1h 2m
   timeout_in_minutes: 106
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
+  agent_pool: mi325_1
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/
+  - tests/models/multimodal/generation
+  - tests/models/multimodal/test_mapping.py
+  commands:
+  - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
+  - pytest -v -s models/multimodal/generation -m 'not core_model' --ignore models/multimodal/generation/test_common.py
+  - pytest -v -s models/multimodal/test_mapping.py
+
+
+- label: Multi-Modal Models (Extended Generation 2) # TBD
+  timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
@@ -2241,7 +2283,32 @@ steps:
   - tests/models/multimodal/generation
   commands:
   - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
-  - pytest -v -s models/multimodal -m 'not core_model' --ignore models/multimodal/generation/test_common.py --ignore models/multimodal/processing
+  - pytest -v -s models/multimodal/generation/test_common.py -m 'split(group=0) and not core_model'
+
+
+- label: Multi-Modal Models (Extended Generation 3) # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
+  agent_pool: mi325_1
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/
+  - tests/models/multimodal/generation
+  commands:
+  - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
+  - pytest -v -s models/multimodal/generation/test_common.py -m 'split(group=1) and not core_model'
+
+
+- label: Multi-Modal Models (Extended Pooling) # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
+  agent_pool: mi325_1
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/
+  - tests/models/multimodal/pooling
+  commands:
+  - pytest -v -s models/multimodal/pooling -m 'not core_model'
 
 
 - label: Quantized Models Test # 21.4m
@@ -3283,6 +3350,59 @@ steps:
   - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
   - pytest -v -s models/multimodal -m core_model --ignore models/multimodal/generation/test_common.py --ignore models/multimodal/generation/test_ultravox.py --ignore models/multimodal/generation/test_qwen2_5_vl.py --ignore models/multimodal/generation/test_qwen2_vl.py --ignore models/multimodal/generation/test_whisper.py --ignore models/multimodal/processing
   - cd .. && VLLM_WORKER_MULTIPROC_METHOD=spawn pytest -v -s tests/models/multimodal/generation/test_whisper.py -m core_model
+
+
+- label: Multi-Modal Models (Extended Generation 1) # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  agent_pool: mi355_1
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/
+  - tests/models/multimodal/generation
+  - tests/models/multimodal/test_mapping.py
+  commands:
+  - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
+  - pytest -v -s models/multimodal/generation -m 'not core_model' --ignore models/multimodal/generation/test_common.py
+  - pytest -v -s models/multimodal/test_mapping.py
+
+
+- label: Multi-Modal Models (Extended Generation 2) # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  agent_pool: mi355_1
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/
+  - tests/models/multimodal/generation
+  commands:
+  - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
+  - pytest -v -s models/multimodal/generation/test_common.py -m 'split(group=0) and not core_model'
+
+
+- label: Multi-Modal Models (Extended Generation 3) # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  agent_pool: mi355_1
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/
+  - tests/models/multimodal/generation
+  commands:
+  - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
+  - pytest -v -s models/multimodal/generation/test_common.py -m 'split(group=1) and not core_model'
+
+
+- label: Multi-Modal Models (Extended Pooling) # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  agent_pool: mi355_1
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/
+  - tests/models/multimodal/pooling
+  commands:
+  - pytest -v -s models/multimodal/pooling -m 'not core_model'
 
 
 - label: Quantized Models Test # TBD
