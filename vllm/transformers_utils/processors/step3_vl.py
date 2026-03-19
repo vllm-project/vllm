@@ -370,7 +370,7 @@ class Step3VLProcessor(ProcessorMixin):
             image_token_id
         ] * image_processor.num_patch_feature_size
 
-    def _get_patch_repl(
+    def _get_patch_repl_text(
         self,
         num_patches: int,
         patch_newline_mask: list[bool] | None,
@@ -414,7 +414,7 @@ class Step3VLProcessor(ProcessorMixin):
 
         return parts
 
-    def _get_image_repl(
+    def _get_image_repl_text(
         self,
         num_images: int,
     ) -> str:
@@ -432,17 +432,17 @@ class Step3VLProcessor(ProcessorMixin):
         ]
         return part * num_images
 
-    def _get_image_repl_features(
+    def get_image_repl_feature_text(
         self,
         num_images: int,
         num_patches: int,
         patch_new_line_idx: list[bool] | None,
     ) -> str:
-        patch_repl = self._get_patch_repl(num_patches, patch_new_line_idx)
-        image_repl = self._get_image_repl(num_images)
+        patch_repl = self._get_patch_repl_text(num_patches, patch_new_line_idx)
+        image_repl = self._get_image_repl_text(num_images)
         return patch_repl + image_repl
 
-    def _get_image_repl_feature_ids(
+    def get_image_repl_feature_ids(
         self,
         num_images: int,
         num_patches: int,
@@ -492,13 +492,16 @@ class Step3VLProcessor(ProcessorMixin):
             if image_inputs:
                 image_repl_str_lst = []
                 for n_patches, mask in zip(num_patches, patch_newline_mask):
-                    image_repl_str = self._get_image_repl_features(1, n_patches, mask)
+                    image_repl_str = self.get_image_repl_feature_text(
+                        1, n_patches, mask
+                    )
                     image_repl_str_lst.append(image_repl_str)
 
-            text = [
-                self.replace_placeholder(t, self.image_token, image_repl_str_lst)
-                for t in text
-            ]
+                text = [
+                    self.replace_placeholder(t, self.image_token, image_repl_str_lst)
+                    for t in text
+                ]
+
             text_inputs = self.tokenizer(text)
         else:
             text_inputs = {}

@@ -169,11 +169,11 @@ class Step3VLMultiModalProcessor(BaseMultiModalProcessor[Step3VLProcessingInfo])
             num_patches = int(out_item["num_patches"].data)
             if num_patches > 0:
                 patch_newline_mask = out_item["patch_newline_mask"].data
-                image_repl_ids = hf_processor._get_image_repl_feature_ids(
+                image_repl_ids = hf_processor.get_image_repl_feature_ids(
                     1, num_patches, patch_newline_mask.tolist()
                 )
             else:
-                image_repl_ids = hf_processor._get_image_repl_feature_ids(1, 0, None)
+                image_repl_ids = hf_processor.get_image_repl_feature_ids(1, 0, None)
 
             return PromptUpdateDetails.select_token_id(
                 seq=image_repl_ids,
