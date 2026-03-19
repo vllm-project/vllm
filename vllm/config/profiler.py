@@ -154,8 +154,8 @@ class ProfilerConfig:
         # These paths should not be converted to absolute paths
         if profiler_dir and not _is_uri_path(profiler_dir):
             self.torch_profiler_dir = os.path.abspath(os.path.expanduser(profiler_dir))
-                capture_dir = self.capture_torch_profiler_dir
         
+        capture_dir = self.capture_torch_profiler_dir
         if capture_dir and self.profiler != "torch":
             raise ValueError(
                 "capture_torch_profiler_dir is only applicable when profiler is set to 'torch'"
