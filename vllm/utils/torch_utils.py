@@ -774,7 +774,6 @@ if HAS_OPAQUE_TYPE:
 
     register_opaque_type(ModuleName, typ="value", hoist=True)
 
-
 # Supports xccl with PyTorch versions >= 2.8.0.dev for XPU platform
 def supports_xccl() -> bool:
     return torch.distributed.is_xccl_available()
