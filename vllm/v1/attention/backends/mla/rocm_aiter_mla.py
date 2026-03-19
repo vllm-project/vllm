@@ -316,7 +316,7 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         else:
             kernel_num_heads = self.num_heads
 
-        o = torch.zeros(
+        o = torch.empty(
             B,
             kernel_num_heads,
             self.kv_lora_rank,
