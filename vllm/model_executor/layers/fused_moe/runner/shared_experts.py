@@ -47,7 +47,7 @@ class SharedExpertsOrder(IntEnum):
 class SharedExperts:
     def __init__(
         self,
-        shared_experts: torch.nn.Module,
+        layer: torch.nn.Module,
         moe_config: FusedMoEConfig,
         quant_method: QuantizeMethodBase,
         reduce_results: bool,
@@ -61,7 +61,7 @@ class SharedExperts:
         assert isinstance(quant_method, FusedMoEMethodBase)
 
         self._output: torch.Tensor | None = None
-        self._shared_experts = shared_experts
+        self._layer = layer
         self._moe_config = moe_config
         self._quant_method = quant_method
         self._reduce_results = reduce_results
@@ -73,12 +73,12 @@ class SharedExperts:
         # and other execution modes
         if envs.VLLM_DISABLE_SHARED_EXPERTS_STREAM:
             logger.debug_once("Disabling MoE shared_experts cuda stream", scope="local")
-            self._shared_experts_stream = None
+            self._stream = None
         else:
             # TODO(rob): enable shared expert overlap with non-cuda-alike.
             # aux_stream() returns None on non-cuda-alike platforms.
-            self._shared_experts_stream = aux_stream()
-            if self._shared_experts_stream is not None:
+            self._stream = aux_stream()
+            if self._stream is not None:
                 logger.debug_once(
                     "Enabled separate cuda stream for MoE shared_experts", scope="local"
                 )
@@ -89,7 +89,7 @@ class SharedExperts:
         #   - we are using eplb with non-default backend, because of correctness issues
         #   - we are using flashinfer with DP, since there nothing to gain
         backend = self._moe_config.moe_parallel_config.all2all_backend
-        return self._shared_experts is not None and not (
+        return self._layer is not None and not (
             (
                 self._moe_config.moe_parallel_config.enable_eplb
                 and backend != "allgather_reducescatter"
@@ -99,10 +99,7 @@ class SharedExperts:
 
     @property
     def _has_mk_owned_shared_experts(self) -> bool:
-        return (
-            not self._quant_method.mk_owns_shared_expert
-            and self._shared_experts is not None
-        )
+        return not self._quant_method.mk_owns_shared_expert and self._layer is not None
 
     @property
     def _must_reduce_shared_expert_outputs(self) -> bool:
@@ -116,7 +113,7 @@ class SharedExperts:
         self,
         hidden_states: torch.Tensor,
     ) -> tuple[SharedExpertsOrder, bool]:
-        if self._shared_experts is None:
+        if self._layer is None:
             return SharedExpertsOrder.NONE, False
 
         if self._has_external_experts and not self._use_dp_chunking:
@@ -132,7 +129,7 @@ class SharedExperts:
             current_platform.is_cuda()
             and self._has_mk_owned_shared_experts
             and not self._use_dp_chunking
-            and self._shared_experts_stream is not None
+            and self._stream is not None
             and hidden_states.shape[0]
             <= envs.VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD
         )
@@ -160,7 +157,7 @@ class SharedExperts:
             experts_order == SharedExpertsOrder.AFTER_QUANT_METHOD
             and use_shared_experts_stream
         ):
-            assert self._shared_experts_stream is not None
+            assert self._stream is not None
             assert self._moe_config.disable_inplace
 
             # Record that the clone will be used by shared_experts_stream
@@ -168,12 +165,12 @@ class SharedExperts:
             # For more details: https://docs.pytorch.org/docs/stable/generated/torch.Tensor.record_stream.html # noqa: E501
             # NOTE: We don't need shared_output.record_stream(current_stream())
             # because we synch the streams before using shared_output.
-            shared_experts_input.record_stream(self._shared_experts_stream)
+            shared_experts_input.record_stream(self._stream)
 
             # Mark sync start point for the separate shared experts
             # stream here since we want to run in parallel with the
             # router/gate (next op below)
-            self._shared_experts_stream.wait_stream(current_stream())
+            self._stream.wait_stream(current_stream())
 
     def _call_with_shared_experts_stream(
         self,
@@ -186,11 +183,11 @@ class SharedExperts:
         # sync end point immediately after it is done. This is
         # important to avoid excessive stream allocations by the cuda
         # graph replay later.
-        with torch.cuda.stream(self._shared_experts_stream):
+        with torch.cuda.stream(self._stream):
             # Note that hidden_states clone() is necessary here to avoid
             # conflict with the main stream
-            output = self._shared_experts(shared_experts_input)
-        current_stream().wait_stream(self._shared_experts_stream)
+            output = self._layer(shared_experts_input)
+        current_stream().wait_stream(self._stream)
 
         return output
 
@@ -206,7 +203,7 @@ class SharedExperts:
 
     @property
     def output(self) -> torch.Tensor | None:
-        assert (self._shared_experts is None) == (self._output is None)
+        assert (self._layer is None) == (self._output is None)
         output = self._output
         self._output = None
         return output
@@ -223,13 +220,13 @@ class SharedExperts:
         if order != experts_order:
             return None
 
-        assert self._shared_experts is not None
+        assert self._layer is not None
         assert self._output is None
 
         if order == SharedExpertsOrder.AFTER_QUANT_METHOD and use_shared_experts_stream:
             self._output = self._call_with_shared_experts_stream(shared_experts_input)
         else:
-            self._output = self._shared_experts(shared_experts_input)
+            self._output = self._layer(shared_experts_input)
 
         if order == SharedExpertsOrder.EXTERNAL:
             # TODO: figure out how to combine this with maybe_reduce_output?

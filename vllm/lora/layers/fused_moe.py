@@ -150,11 +150,8 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                 self.base_layer.quant_method.select_gemm_impl(
                     prepare_finalize, self.base_layer
                 ),
-                self.base_layer.shared_experts,
             )
 
-        # TODO: could be incorrect due to monolithic kernel? or add assert it
-        # is modular?
         if quant_config.use_mxfp4_w4a16:
             assert isinstance(
                 m_fused_moe_fn.impl.fused_experts,
@@ -341,7 +338,6 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
 
         fused_experts = m_fused_moe_fn.impl.fused_experts
 
-        # TODO: seems like this could be done with modular kernel subclasses?
         m_fused_moe_fn.apply = fwd_decorator(self.base_layer, m_fused_moe_fn.apply)
         fused_experts.activation = act_decorator(
             self.base_layer, fused_experts.activation
