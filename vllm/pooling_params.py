@@ -96,6 +96,10 @@ class PoolingParams(
                 self.skip_reading_prefix_cache = True
             return
 
+        # skipping verify, let plugins configure and validate pooling params
+        if self.task not in self.valid_parameters:
+            return
+
         # NOTE: Task validation needs to done against the model instance,
         # which is not available in model config. So, it's not included
         # in this method
