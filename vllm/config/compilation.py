@@ -909,11 +909,19 @@ class CompilationConfig:
         if self.backend == "":
             self.backend = current_platform.get_compile_backend()
 
-    def init_backend(self, vllm_config: "VllmConfig") -> str | Callable:
+    def init_backend(
+        self,
+        vllm_config: "VllmConfig",
+        prefix: str = "",
+        is_encoder: bool = False,
+    ) -> str | Callable:
         """
         Initialize the backend for the compilation config from a vllm config.
         Arguments:
             vllm_config: The vllm config to initialize the backend from.
+            prefix: Cache directory prefix for this compiled module.
+            is_encoder: Whether this module is used in an encoder (as
+                opposed to a text backbone).
         Returns:
             The backend for the compilation config.
         """
@@ -943,9 +951,7 @@ class CompilationConfig:
 
         from vllm.compilation.backends import VllmBackend
 
-        # TODO[@lucaskabela]: See if we can forward prefix
-        # https://github.com/vllm-project/vllm/issues/27045
-        return VllmBackend(vllm_config)
+        return VllmBackend(vllm_config, prefix=prefix, is_encoder=is_encoder)
 
     def post_init_cudagraph_sizes(self) -> None:
         """To complete the initialization after cudagraph related
