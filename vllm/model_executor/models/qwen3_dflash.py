@@ -129,6 +129,10 @@ class DFlashQwen3Attention(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
+        """DFlash attention assumes that the KV cache is already populated
+        with the context K/V from the target model's hidden states. This forward op
+        computes attention for the query tokens only.
+        See also: precompute_and_store_context_kv"""
         qkv = F.linear(hidden_states, self.qkv_proj.weight, self.qkv_proj.bias)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
@@ -143,8 +147,6 @@ class DFlashQwen3Attention(nn.Module):
 
         q, k = self.rotary_emb(positions, q, k)
 
-        # Standard attention: writes query K/V to cache, reads full
-        # sequence from cache (including pre-inserted context KVs).
         attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
         return output
@@ -213,7 +215,6 @@ class DFlashQwen3DecoderLayer(nn.Module):
         return hidden_states, residual
 
 
-# NOTE: torch.compile is not stable here
 @support_torch_compile
 class DFlashQwen3Model(nn.Module):
     def __init__(
@@ -288,16 +289,15 @@ class DFlashQwen3Model(nn.Module):
     def _build_fused_kv_buffers(self) -> None:
         """Build fused weight buffers for precompute_and_store_context_kv.
 
-        Must be called after weights are loaded.  Stacks the KV-projection
+        Must be called after weights are loaded. Stacks the KV-projection
         weights, K-norm weights, and RoPE parameters from every attention
         layer so that precompute_and_store_context_kv can run one fused
-        GEMM for all layers at once.
+        GEMM for all layers at once. Also aliases the weight of the hidden_norm.
         """
         layers_attn = [layer.self_attn for layer in self.layers]
         attn0 = layers_attn[0]
         has_bias = attn0.qkv_proj.bias is not None
 
-        # Hidden norm weight:
         self._hidden_norm_weight = self.hidden_norm.weight.data
 
         # KV projection weights: [num_layers * 2 * kv_size, hidden_size]
@@ -313,10 +313,16 @@ class DFlashQwen3Model(nn.Module):
         # Used with flashinfer rmsnorm (one fused kernel per layer).
         self._k_norm_weights = [a.k_norm.weight.data for a in layers_attn]
 
-        # RoPE params (shared across all layers)
+        # RoPE parameters
         self._rope_head_size = attn0.rotary_emb.head_size
         self._rope_cos_sin_cache = attn0.rotary_emb.cos_sin_cache
         self._rope_is_neox = attn0.rotary_emb.is_neox_style
+        # Validation that RoPE params are the same across all layers
+        for attn in layers_attn[1:]:
+            assert (
+                attn.rotary_emb.head_size == self._rope_head_size
+                and attn.rotary_emb.is_neox_style == self._rope_is_neox
+            ), "All layers must have the same RoPE parameters for DFlash precomputation"
 
         # Layer metadata
         self._num_attn_layers = len(layers_attn)
@@ -324,6 +330,14 @@ class DFlashQwen3Model(nn.Module):
         self._head_dim = attn0.head_dim
         self._num_kv_heads = attn0.num_kv_heads
         self._rms_norm_eps = attn0.q_norm.variance_epsilon
+        # Validation that all layers have the same attention config
+        for attn in layers_attn[1:]:
+            assert (
+                attn.kv_size == self._kv_size
+                and attn.head_dim == self._head_dim
+                and attn.num_kv_heads == self._num_kv_heads
+                and attn.q_norm.variance_epsilon == self._rms_norm_eps
+            ), "All layers must have the same attn config for DFlash precomputation"
 
         # References to inner Attention layers for direct cache writes
         self._attn_layers = [layer.self_attn.attn for layer in self.layers]
@@ -334,12 +348,17 @@ class DFlashQwen3Model(nn.Module):
         context_positions: torch.Tensor,
         context_slot_mapping: torch.Tensor | None = None,
     ) -> None:
-        """Precompute projected, normed, RoPE'd K/V for context states
-        and optionally write them directly into each layer's KV cache.
+        """Precompute K/V for context states write them into each layer's KV cache.
 
-        When context_slot_mapping is None (e.g. during dummy_run), only
-        the computation runs — useful for memory profiling without
-        requiring valid slot mappings or a bound KV cache.
+        Input context states are projected to K/V, normed, and have RoPE applied.
+        Since the context shape is different than the query shape, we can't rely on the
+        regular forward pass to apply torch.compile and CUDA graphs to this section.
+        As such, this function is optimized to minimize the number of torch ops present:
+        we use fused flashinfer kernels for RMSNorm and RoPE, fuse the GEMM into one
+        large projection, and avoid cloning buffers (with .contiguous()) where possible.
+
+        When context_slot_mapping is None (e.g. during dummy_run) only
+        the computation runs, and no K/V is written to cache.
         """
         num_ctx = context_states.shape[0]
         L = self._num_attn_layers
@@ -381,6 +400,8 @@ class DFlashQwen3Model(nn.Module):
         # allocates separate outputs so both read from the unmodified input.
         all_k_flat = all_k_normed.view(L * num_ctx, kv)
         positions_repeated = context_positions.repeat(L)
+        # In-place RoPE cannot be called here, since we use K for both query and key.
+        # Instead we just call the fused kernel and ignore the query output.
         _, all_k_flat = apply_rope_with_cos_sin_cache(
             positions=positions_repeated,
             query=all_k_flat,
@@ -397,7 +418,9 @@ class DFlashQwen3Model(nn.Module):
         all_k_final = all_k_flat.view(L, num_ctx, nkv, hd)
         for i in range(L):
             attn = self._attn_layers[i]
-            kv_cache = attn.kv_cache[0]  # virtual_engine=0
+            # TODO(ben): generalize to PP compatibility if needed
+            # assumes virtual_engine=0 for now
+            kv_cache = attn.kv_cache[0]
             attn.impl.do_kv_cache_update(
                 attn,
                 all_k_final[i],
