@@ -145,13 +145,11 @@ class NVLMMultiModalProcessor(BaseInternVLMultiModalProcessor[NVLMProcessingInfo
             )
 
         # See note in dummy data regarding why we have the extra newline
-        return [
-            PromptReplacement(
-                modality="image",
-                target="<image>\n",
-                replacement=get_replacement_nvlm,
-            )
-        ]
+        return PromptReplacement(
+            modality="image",
+            target="<image>\n",
+            replacement=get_replacement_nvlm,
+        )
 
 
 @MULTIMODAL_REGISTRY.register_processor(
