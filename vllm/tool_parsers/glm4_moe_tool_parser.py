@@ -206,7 +206,12 @@ class Glm4MoeModelToolParser(ToolParser):
             )
         else:
             if len(tool_calls) > 0:
-                content = model_output[: model_output.find(self.tool_calls_start_token)]
+                content: str | None = model_output[
+                    : model_output.find(self.tool_calls_start_token)
+                ]
+                # Normalize empty/whitespace-only content to None
+                if not content or not content.strip():
+                    content = None
                 return ExtractedToolCallInformation(
                     tools_called=True, tool_calls=tool_calls, content=content
                 )
@@ -337,10 +342,10 @@ class Glm4MoeModelToolParser(ToolParser):
                     key_json = json.dumps(key, ensure_ascii=False)
 
                     if not self._args_started[self.current_tool_id]:
-                        frag = "{" + key_json + ':"'
+                        frag = "{" + key_json + ': "'
                         self._args_started[self.current_tool_id] = True
                     else:
-                        frag = "," + key_json + ':"'
+                        frag = ", " + key_json + ': "'
 
                     self.streamed_args_for_tool[self.current_tool_id] += frag
                     self._streaming_string_value = True
@@ -447,6 +452,10 @@ class Glm4MoeModelToolParser(ToolParser):
         self.current_tool_id -= 1
 
     def _emit_tool_name_delta(self, tool_name: str) -> DeltaMessage:
+        self.prev_tool_call_arr[self.current_tool_id] = {
+            "name": self._current_tool_name,
+            "arguments": {},
+        }
         return DeltaMessage(
             tool_calls=[
                 DeltaToolCall(
@@ -493,10 +502,10 @@ class Glm4MoeModelToolParser(ToolParser):
         val_json = json.dumps(val_obj, ensure_ascii=False)
 
         if not self._args_started[self.current_tool_id]:
-            fragment = "{" + key_json + ":" + val_json
+            fragment = "{" + key_json + ": " + val_json
             self._args_started[self.current_tool_id] = True
         else:
-            fragment = "," + key_json + ":" + val_json
+            fragment = "," + key_json + ": " + val_json
 
         self._seen_keys[self.current_tool_id].add(key)
         self.streamed_args_for_tool[self.current_tool_id] += fragment

@@ -359,6 +359,13 @@ class Executor(ABC):
     ) -> None:
         raise NotImplementedError
 
+    @classmethod
+    def supports_async_scheduling(cls) -> bool:
+        """
+        Whether the executor supports async scheduling.
+        """
+        return False
+
 
 from vllm.v1.executor.uniproc_executor import (  # noqa: E402
     ExecutorWithExternalLauncher as _ExecutorWithExternalLauncher,
