@@ -227,8 +227,7 @@ steps:
   - tests/distributed/test_pynccl
   - tests/distributed/test_events
   - tests/compile/fullgraph/test_basic_correctness.py
-  - examples/offline_inference/rlhf_colocate.py
-  - examples/offline_inference/new_weight_syncing/
+  - examples/rl/
   - tests/examples/offline_inference/data_parallel.py
   - tests/v1/distributed
   - tests/v1/engine/test_engine_core_client.py
@@ -253,7 +252,7 @@ steps:
   - pytest -v -s distributed/test_pynccl.py
   - pytest -v -s distributed/test_events.py
   - pytest -v -s distributed/test_symm_mem_allreduce.py
-  - pushd ../examples/offline_inference/new_weight_syncing
+  - pushd ../examples/rl
   - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 rlhf_nccl.py
   - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 rlhf_ipc.py
   - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 rlhf_async_new_apis.py
@@ -1581,7 +1580,6 @@ steps:
   - tests/distributed/test_pynccl
   - tests/distributed/test_events
   - tests/compile/fullgraph/test_basic_correctness.py
-  - examples/offline_inference/rlhf_colocate.py
   - examples/rl/
   - tests/examples/offline_inference/data_parallel.py
   - tests/v1/distributed
@@ -3340,7 +3338,6 @@ steps:
   - tests/distributed/test_pynccl
   - tests/distributed/test_events
   - tests/compile/fullgraph/test_basic_correctness.py
-  - examples/offline_inference/rlhf_colocate.py
   - examples/rl/
   - tests/examples/offline_inference/data_parallel.py
   - tests/v1/distributed
