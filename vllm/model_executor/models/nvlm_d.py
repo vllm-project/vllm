@@ -27,56 +27,46 @@ from vllm.multimodal.processing import (
     PromptUpdate,
     PromptUpdateDetails,
 )
+from vllm.transformers_utils.processors.internvl import InternVLImageProcessor
+from vllm.transformers_utils.processors.nvlm_d import NVLMProcessor
 
 from .intern_vit import InternVisionModel
 from .internvl import (
     BaseInternVLDummyInputsBuilder,
     BaseInternVLMultiModalProcessor,
     BaseInternVLProcessingInfo,
-    BaseInternVLProcessor,
     InternVLChatModel,
 )
 
-IMG_PAD = "<|vision_pad|>"
-
-
-class NVLMProcessor(BaseInternVLProcessor):
-    @property
-    def image_token_id(self) -> int:
-        return self.tokenizer.get_vocab()[IMG_PAD]
-
-    def get_image_repl(
-        self,
-        feature_size: int,
-        num_patches: int | None,
-    ) -> PromptUpdateDetails[str]:
-        if num_patches is None:
-            raise NotImplementedError("Embedding inputs are not supported")
-
-        tile_pos_identifiers = [f"<tile_{i}>" for i in range(1, num_patches)]
-        if self.use_thumbnail:
-            tile_pos_identifiers += ["<tile_global_thumbnail>"]
-
-        context_size = feature_size // num_patches
-        features = "".join(
-            identifier + IMG_PAD * context_size for identifier in tile_pos_identifiers
-        )
-
-        # We include the start and end as well because "<Image><tile" is
-        # tokenized as ["<Image", "><", "tile"], resulting in assertion error
-        # when trying to find "<tile" as a subsequence of "<Image><tile"
-        repl = "<Image>" + features + "</Image>"
-
-        return PromptUpdateDetails.select_text(repl, IMG_PAD)
-
 
 class NVLMProcessingInfo(BaseInternVLProcessingInfo):
+    def get_image_processor(self, **kwargs):
+        config = self.get_hf_config()
+        vision_config = config.vision_config
+
+        kwargs = self.ctx.get_merged_mm_kwargs(kwargs)
+        kwargs.setdefault("image_size", vision_config.image_size)
+        kwargs.setdefault("min_dynamic_patch", config.min_dynamic_patch)
+        kwargs.setdefault("max_dynamic_patch", config.max_dynamic_patch)
+        kwargs.setdefault("dynamic_image_size", config.dynamic_image_size)
+        kwargs.setdefault("use_thumbnail", config.use_thumbnail)
+
+        return InternVLImageProcessor(**kwargs)
+
     def get_hf_processor(self, **kwargs: object) -> NVLMProcessor:
-        return self.ctx.init_processor(
-            NVLMProcessor,
-            config=self.get_hf_config(),
+        config = self.get_hf_config()
+        vision_config = config.vision_config
+
+        image_processor = self.get_image_processor(**kwargs)
+        image_size = image_processor.image_size
+        patch_size = vision_config.patch_size
+        downsample_ratio = config.downsample_ratio
+        image_seq_length = int((image_size // patch_size) ** 2 * (downsample_ratio**2))
+
+        return NVLMProcessor(
             tokenizer=self.get_tokenizer(),
-            **kwargs,
+            image_processor=image_processor,
+            image_seq_length=image_seq_length,
         )
 
 
@@ -149,9 +139,11 @@ class NVLMMultiModalProcessor(BaseInternVLMultiModalProcessor[NVLMProcessingInfo
             if num_patches is not None:
                 assert isinstance(num_patches, int)
 
-            repl = hf_processor.get_image_repl(feature_size, num_patches)
+            repl = hf_processor.get_image_repl(num_patches, num_features=feature_size)
 
-            return PromptUpdateDetails.select_text(repl.full + "\n", IMG_PAD)
+            return PromptUpdateDetails.select_text(
+                repl.full + "\n", hf_processor.ctx_image_token
+            )
 
         # See note in dummy data regarding why we have the extra newline
         return [

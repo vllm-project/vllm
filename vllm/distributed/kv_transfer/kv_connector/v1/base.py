@@ -25,8 +25,8 @@ The class provides the following primitives:
 
     Worker-side: runs in each worker, loads/saves KV cache to/from
     the Connector based on the metadata.
-        handle_preemptions() - called if there are preempted requests,
-            before their blocks are overwritten
+        handle_preemptions() - called for handling preempted requests
+            or request evicted blocks before they are overwritten
 
         start_load_kv() - starts loading all KVs (maybe async)
         wait_for_layer_load() - blocks until layer i load is done
@@ -36,6 +36,8 @@ The class provides the following primitives:
 
         get_finished() - called with ids of finished requests, returns
             ids of requests that have completed async sending/recving.
+        build_connector_worker_meta() - builds metadata to be sent
+            back to the scheduler-side connector
 """
 
 import enum
@@ -137,11 +139,32 @@ class KVConnectorHandshakeMetadata(ABC):  # noqa: B024
 
 class KVConnectorMetadata(ABC):  # noqa: B024
     """
-    Abstract Metadata used to communicate between the
-    Scheduler KVConnector and Worker KVConnector.
+    Abstract Metadata used to communicate
+    Scheduler KVConnector -> Worker KVConnector.
     """
 
     pass
+
+
+class KVConnectorWorkerMetadata(ABC):
+    """
+    Abstract Metadata used to communicate back
+    Worker KVConnector -> Scheduler KVConnector.
+
+    Each worker can output its own metadata.
+    For a single engine step, all metadata objects returned by workers
+    will be aggregated using the `aggregate` method below, before
+    being passed to the Scheduler KVConnector.
+    """
+
+    @abstractmethod
+    def aggregate(
+        self, other: "KVConnectorWorkerMetadata"
+    ) -> "KVConnectorWorkerMetadata":
+        """
+        Aggregate metadata with another `KVConnectorWorkerMetadata` object.
+        """
+        pass
 
 
 class KVConnectorBase_V1(ABC):
@@ -265,9 +288,9 @@ class KVConnectorBase_V1(ABC):
         """
         return
 
-    def handle_preemptions(self, preempted_req_ids: set[str]):
+    def handle_preemptions(self, kv_connector_metadata: KVConnectorMetadata):
         """
-        Handle preempted requests BEFORE their blocks are overwritten.
+        Handle preempted requests or evicted blocks BEFORE they are overwritten.
         Needed for connectors which use async saves (e.g., OffloadingConnector)
         """
         return
@@ -406,6 +429,16 @@ class KVConnectorBase_V1(ABC):
         Returns:
             KVConnectorHandshakeMetadata: the handshake metadata.
             None if no handshake metadata is available.
+        """
+        return None
+
+    def build_connector_worker_meta(self) -> KVConnectorWorkerMetadata | None:
+        """
+        Build the KVConnector worker metadata for this engine step.
+
+        Returns:
+            KVConnectorWorkerMetadata: the worker metadata.
+            None if no worker metadata is available.
         """
         return None
 
