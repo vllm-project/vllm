@@ -229,7 +229,7 @@ def maybe_make_prepare_finalize(
             num_dispatchers=all2all_manager.world_size,
         )
 
-    elif moe.use_naive_all2all_kernels and allow_new_interface:
+    elif moe.use_ag_rs_all2all_kernels and allow_new_interface:
         prepare_finalize = make_moe_prepare_and_finalize_naive_dp_ep(
             use_monolithic=use_monolithic,
             is_sequence_parallel=moe.moe_parallel_config.is_sequence_parallel,

@@ -103,7 +103,7 @@ To be used with a particular `FusedMoEPrepareAndFinalizeModular` subclass, MoE k
 
 ## Modular Kernel "families"
 
-The following table shows "families" of modular kernels that are intended to work together. There are some combinations which may work but have not yet been tested, e.g. flashinfer with other fp8 experts. Note that the "naive" backend will work with any non-modular experts.
+The following table shows "families" of modular kernels that are intended to work together. There are some combinations which may work but have not yet been tested, e.g. flashinfer with other fp8 experts.
 
 | backend | `FusedMoEPrepareAndFinalizeModular` subclasses | `FusedMoEExpertsModular` subclasses |
 | ------- | ---------------------------------------------- | ----------------------------------- |
