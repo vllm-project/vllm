@@ -251,6 +251,18 @@ class SimpleCPUOffloadWorker:
 
         return finished_sending, finished_recving
 
+    def handle_preemptions(self, preempted_req_ids: set[str]) -> None:
+        """Sync all in-flight transfers before preempted blocks are reused."""
+        for event_idx, event in self._load_events:
+            event.synchronize()
+            self._load_hwm = event_idx
+        self._load_events.clear()
+
+        for event_idx, event in self._store_events:
+            event.synchronize()
+            self._store_hwm = event_idx
+        self._store_events.clear()
+
     @staticmethod
     def _copy_loop(q: queue.SimpleQueue, device: torch.device) -> None:
         current_platform.set_device(device)

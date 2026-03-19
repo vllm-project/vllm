@@ -113,7 +113,8 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
             self.worker_handler.clear_connector_metadata()
 
     def handle_preemptions(self, preempted_req_ids: set[str]) -> None:
-        pass  # No operation needed
+        if self.worker_handler is not None:
+            self.worker_handler.handle_preemptions(preempted_req_ids)
 
     def start_load_kv(
         self,
