@@ -70,6 +70,7 @@ class Sampler(nn.Module):
         sampling_metadata: SamplingMetadata,
         predict_bonus_token: bool = False,
         logprobs_mode_override: LogprobsMode | None = None,
+        sampler_workspace: torch.Tensor | None = None,
     ) -> SamplerOutput:
         logprobs_mode = logprobs_mode_override or self.logprobs_mode
         # NOTE(woosuk): Use the original logits (before any penalties or
@@ -87,7 +88,12 @@ class Sampler(nn.Module):
                     raw_logprobs = logits.to(torch.float32)
 
         # Use float32 for the logits.
-        logits = logits.to(torch.float32)
+        if sampler_workspace is not None:
+            logits_fp32 = sampler_workspace[:logits.size(0)]
+            logits_fp32.copy_(logits)
+            logits = logits_fp32
+        else:
+            logits = logits.to(torch.float32)
 
         logits = self.apply_logits_processors(
             logits, sampling_metadata, predict_bonus_token

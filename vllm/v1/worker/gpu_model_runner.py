@@ -674,6 +674,14 @@ class GPUModelRunner(
         self.discard_request_mask = self._make_buffer(
             self.max_num_reqs, dtype=torch.bool
         )
+
+        # Permanent FP32 workspace for the sampler to prevent out-of-memory
+        # crashes during engine initialization due to eager PyTorch allocation.
+        self.sampler_workspace = torch.empty(
+            (self.max_num_reqs, self.model_config.get_vocab_size()),
+            dtype=torch.float32,
+            device=self.device,
+        )
         self.num_decode_draft_tokens = self._make_buffer(
             self.max_num_reqs, dtype=torch.int32
         )
@@ -3122,6 +3130,7 @@ class GPUModelRunner(
             return self.sampler(
                 logits=logits,
                 sampling_metadata=sampling_metadata,
+                sampler_workspace=self.sampler_workspace,
             )
 
         # Update spec_token_ids with real draft tokens from pre step only when
@@ -5355,7 +5364,9 @@ class GPUModelRunner(
         )
         try:
             sampler_output = self.sampler(
-                logits=logits, sampling_metadata=dummy_metadata
+                logits=logits,
+                sampling_metadata=dummy_metadata,
+                sampler_workspace=self.sampler_workspace,
             )
         except RuntimeError as e:
             if "out of memory" in str(e):
