@@ -16,8 +16,6 @@ import torch
 from vllm import LLM, SamplingParams
 from vllm.distributed import cleanup_dist_env_and_memory
 
-from ..utils import multi_process_parallel
-
 
 @pytest.fixture(scope="module")
 def model_name():
@@ -40,9 +38,7 @@ def example_prompts():
 class TestDistributedCommunicationPatterns:
     """Test suite for distributed inference communication patterns."""
 
-    def test_tensor_parallel_output_consistency(
-        self, model_name, example_prompts
-    ):
+    def test_tensor_parallel_output_consistency(self, model_name, example_prompts):
         """
         Test that tensor parallelism produces consistent outputs
         across different TP sizes.
@@ -89,9 +85,7 @@ class TestDistributedCommunicationPatterns:
             )
             for i, (text1, text2) in enumerate(zip(texts_single, texts_tp2)):
                 assert text1 == text2, (
-                    f"Output mismatch at index {i}:\n"
-                    f"TP=1: {text1}\n"
-                    f"TP=2: {text2}"
+                    f"Output mismatch at index {i}:\nTP=1: {text1}\nTP=2: {text2}"
                 )
         except Exception as e:
             pytest.skip(f"TP=2 test skipped: {e}")
@@ -186,9 +180,7 @@ class TestDistributedCommunicationPatterns:
                     f"Empty output for prompt {i}: '{prompts[i]}'"
                 )
                 # Verify we got some tokens
-                assert len(output.outputs[0].token_ids) > 0, (
-                    f"No tokens for prompt {i}"
-                )
+                assert len(output.outputs[0].token_ids) > 0, f"No tokens for prompt {i}"
 
             del llm
             cleanup_dist_env_and_memory()
@@ -245,7 +237,8 @@ class TestDistributedCommunicationPatterns:
         This addresses the gap: configuration validation.
         """
         import torch
-        num_gpus = torch.cuda.device_count()
+
+        num_gpus = torch.accelerator.device_count()
 
         # Test that valid TP configurations work correctly
         # vLLM accepts non-power-of-2 TP sizes
@@ -320,8 +313,8 @@ class TestDistributedCommunicationPatterns:
 
 
 @pytest.mark.skipif(
-    torch.cuda.device_count() < 4,
-    reason="Need at least 4 GPUs for PP+TP combination tests"
+    torch.accelerator.device_count() < 4,
+    reason="Need at least 4 GPUs for PP+TP combination tests",
 )
 class TestMixedParallelism:
     """Test suite for mixed tensor and pipeline parallelism."""
