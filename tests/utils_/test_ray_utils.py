@@ -5,6 +5,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from vllm.v1.executor.ray_utils import get_bundles_sorted_by_node
+
 NODE_A = "node_a"
 NODE_B = "node_b"
 NODE_C = "node_c"
@@ -23,12 +25,11 @@ MOCK_RAY_NODES = [
 
 
 @pytest.mark.parametrize(
-    "bundles_to_node_id,bundle_specs,world_size,expected",
+    "bundles_to_node_id,bundle_specs,expected",
     [
         pytest.param(
             {0: NODE_C, 1: NODE_A, 2: NODE_B, 3: NODE_C, 4: NODE_A, 5: NODE_B},
             [{"GPU": 1}] * 6,
-            6,
             [
                 (1, NODE_A, IP_A),
                 (4, NODE_A, IP_A),
@@ -41,7 +42,6 @@ MOCK_RAY_NODES = [
         pytest.param(
             {0: NODE_B, 1: NODE_B, 2: NODE_A, 3: NODE_A},
             [{"GPU": 1}] * 4,
-            4,
             [
                 (2, NODE_A, IP_A),
                 (3, NODE_A, IP_A),
@@ -52,7 +52,6 @@ MOCK_RAY_NODES = [
         pytest.param(
             {0: NODE_C, 1: NODE_B, 2: NODE_C, 3: NODE_B},
             [{"GPU": 1}] * 4,
-            4,
             [
                 (1, NODE_B, IP_B),
                 (3, NODE_B, IP_B),
@@ -63,39 +62,21 @@ MOCK_RAY_NODES = [
         pytest.param(
             {0: NODE_A, 1: NODE_A, 2: NODE_A},
             [{"GPU": 1}] * 3,
-            3,
             [(0, NODE_A, IP_A), (1, NODE_A, IP_A), (2, NODE_A, IP_A)],
-        ),
-        pytest.param(
-            {0: NODE_A},
-            [{"GPU": 1}],
-            1,
-            [(0, NODE_A, IP_A)],
         ),
         pytest.param(
             {},
             [],
-            0,
             [],
-        ),
-        pytest.param(
-            {0: NODE_A, 1: NODE_B, 2: NODE_A, 3: NODE_B},
-            [{"GPU": 1}] * 4,
-            2,
-            # After sort-then-clip, driver node (NODE_A) bundles are prioritized
-            [(0, NODE_A, IP_A), (2, NODE_A, IP_A)],
         ),
         pytest.param(
             {0: NODE_A, 1: NODE_B, 2: NODE_A},
             [{"CPU": 1}, {"GPU": 1}, {"GPU": 1}],
-            2,
             [(2, NODE_A, IP_A), (1, NODE_B, IP_B)],
         ),
     ],
 )
-def test_get_bundles_sorted_by_node(
-    bundles_to_node_id, bundle_specs, world_size, expected
-):
+def test_get_bundles_sorted_by_node(bundles_to_node_id, bundle_specs, expected):
     mock_pg = MagicMock()
     mock_pg.bundle_specs = bundle_specs
 
@@ -114,8 +95,6 @@ def test_get_bundles_sorted_by_node(
         mock_ray.nodes.return_value = MOCK_RAY_NODES
         mock_platform.ray_device_key = "GPU"
 
-        from vllm.v1.executor.ray_utils import get_bundles_sorted_by_node
-
-        result = get_bundles_sorted_by_node(mock_pg, world_size)
+        result = get_bundles_sorted_by_node(mock_pg)
 
     assert result == expected

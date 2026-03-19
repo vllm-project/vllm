@@ -15,7 +15,6 @@ from unittest.mock import patch
 
 import pytest
 import ray
-from ray.util.placement_group import PlacementGroup
 from ray.util.state import list_actors
 
 from vllm import LLM

@@ -325,6 +325,7 @@ def get_bundles_sorted_by_node(
         return (0 if node_id == driver_node else 1, node_id)
 
     bundle_to_node_id.sort(key=_sort_key)
+
     return bundle_to_node_id
 
 
