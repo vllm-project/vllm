@@ -316,6 +316,7 @@ class ModelConfig:
     skip_mm_profiling: InitVar[bool | None] = None
     video_pruning_rate: InitVar[float | None] = None
     mm_tensor_ipc: InitVar[MMTensorIPC] = None
+    async_mm_input_processing: InitVar[bool | None] = None
 
     def compute_hash(self) -> str:
         """
@@ -437,6 +438,7 @@ class ModelConfig:
         skip_mm_profiling: bool | None,
         video_pruning_rate: float | None,
         mm_tensor_ipc: MMTensorIPC,
+        async_mm_input_processing: bool | None,
     ) -> None:
         # Keep set served_model_name before maybe_model_redirect(self.model)
         self.served_model_name = get_served_model_name(
@@ -629,6 +631,7 @@ class ModelConfig:
                 skip_mm_profiling=skip_mm_profiling,
                 video_pruning_rate=video_pruning_rate,
                 mm_tensor_ipc=mm_tensor_ipc,
+                async_mm_input_processing=async_mm_input_processing,
             )
 
             mm_config_kwargs = {

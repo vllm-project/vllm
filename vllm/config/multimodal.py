@@ -178,6 +178,14 @@ class MultiModalConfig:
     - "direct_rpc": Use msgspec serialization via RPC
     - "torch_shm": Use torch.multiprocessing shared memory for zero-copy IPC
     Defaults to "direct_rpc". """
+    async_mm_input_processing: bool = False
+    """If enabled, offloads multimodal input preprocessing to a background
+    thread pool to avoid blocking the asyncio event loop.
+
+    This improves frontend liveness under high concurrency with multimodal
+    requests, preventing connection timeouts caused by CPU-bound HuggingFace
+    processor operations. May introduce a small throughput overhead (~4%)
+    due to thread context switching."""
 
     @field_validator("limit_per_prompt", mode="before")
     @classmethod
