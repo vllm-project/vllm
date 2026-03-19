@@ -665,12 +665,7 @@ class FusedMoE(CustomOp):
         self.shared_experts = SharedExperts(
             self._shared_experts,
             moe_config=self.moe_config,
-            # Note: For now we must pass quant_method along to SharedExperts so it
-            # can property determine where the shared experts are supposed to be
-            # called, i.e. by a MK or by the MoERunner.
-            # Once the MK can be created upfront, we can just pass in the proper
-            # flags derived from the quant_method's MK.
-            quant_method=self.quant_method,
+            mk_owns_shared_expert=self.quant_method.mk_owns_shared_expert,
         )
 
     def _init_runner(self) -> MoERunner:
@@ -683,11 +678,11 @@ class FusedMoE(CustomOp):
             moe_config=self.moe_config,
             router=self.router,
             routed_input_transform=self._routed_input_transform,
+            routed_output_transform=self._routed_output_transform,
             gate=self._gate,
             shared_experts=self.shared_experts,
             quant_method=self.quant_method,
             enable_dbo=self.vllm_config.parallel_config.enable_dbo,
-            routed_output_transform=self._routed_output_transform,
             apply_scale_to_output=self._apply_scale_to_output,
             routed_scaling_factor=self.routed_scaling_factor,
         )

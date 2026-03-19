@@ -9,9 +9,6 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
 )
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizeMethodBase,
-)
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import (
     aux_stream,
@@ -45,20 +42,12 @@ class SharedExperts:
         self,
         layer: torch.nn.Module,
         moe_config: FusedMoEConfig,
-        quant_method: QuantizeMethodBase,
+        mk_owns_shared_expert: bool,
     ):
-        from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
-            FusedMoEMethodBase,
-        )
-
-        # quant_method must be a FusedMoEMethodBase but we can't use the type
-        # due to circular imports.
-        assert isinstance(quant_method, FusedMoEMethodBase)
-
         self._output: torch.Tensor | None = None
         self._layer = layer
         self._moe_config = moe_config
-        self._quant_method = quant_method
+        self._mk_owns_shared_expert = mk_owns_shared_expert
         self._use_dp_chunking = moe_config.moe_parallel_config.use_dp_chunking
 
         # Allow disabling of the separate shared experts stream for
