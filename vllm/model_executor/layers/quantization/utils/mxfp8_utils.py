@@ -28,8 +28,8 @@ MXFP8_BLOCK_SIZE = 32
 def select_mxfp8_linear_backend() -> Mxfp8LinearBackend:
     """Select the best MXFP8 linear backend for the current device.
 
-    - SM100+ (Blackwell): FLASHINFER_CUTLASS (native CUTLASS MXFP8 GEMM)
-    - SM80+ (Ampere/Ada): MARLIN (weight-only FP8 with e8m0 scales)
+    - SM100+ (Blackwell): FLASHINFER_CUTLASS (native MXFP8 W8A8 GEMM)
+    - SM80+ (Ampere/Ada): MARLIN (MXFP8 W8A16 GEMM)
     - Otherwise: EMULATION (dequant to BF16 fallback)
     """
     from vllm.platforms import current_platform
@@ -154,7 +154,7 @@ direct_register_custom_op(
 class Mxfp8LinearOp:
     def __init__(self):
         self.backend = select_mxfp8_linear_backend()
-        logger.info_once("Using %s backend for MXFP8 GEMM", self.backend.value)
+        logger.info_once("Using %s backend for MXFP8 GEMM", self.backend)
 
     def process_weights(self, layer: torch.nn.Module) -> None:
         """Process MXFP8 weights after loading into backend-specific format."""
