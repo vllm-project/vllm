@@ -714,9 +714,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
     validate_parsed_serve_args(args)
 
-    if args.headless or (
-        args.api_server_count is not None and args.api_server_count < 1
-    ):
+    if args.headless or (args.api_server_count is None or args.api_server_count < 1):
         run_headless(args)
 
     else:
