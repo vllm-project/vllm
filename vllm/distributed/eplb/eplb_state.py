@@ -173,9 +173,8 @@ class EplbModelState:
     """
     map_lock: threading.Lock
     """
-    Protects physical_to_logical_map (and related maps) against concurrent
-    reads by the async worker (snapshot at cycle start) and writes by the
-    main thread (_update_layer_mapping_from_new).
+    Protects physical_to_logical_map. Acquired by the async worker when copying the map
+    to CPU and by the main thread when updating the map with the result from rearrange.
     """
     window_ready_event: torch.cuda.Event | None
     """
@@ -196,11 +195,9 @@ class EplbModelState:
     """
     pending_result: AsyncEPLBLayerResult | None = None
     """
-    Set by the async worker after cuda_stream.synchronize() completes for a
-    layer, guaranteeing all GPU writes to expert_buffer are done.  Consumed
-    and reset to None by step() via move_to_workspace().  At most one result
-    is ever pending at a time — the GPU ordering via consumed_event ensures
-    the previous result is consumed before the next one is produced.
+    Set by the async worker after all writes to expert_buffer are done. Consumed
+    and reset to None by the main thread in move_to_workspace() after the contents of
+    expert_buffer have been transferred out. At most one result is pending at a time.
     """
 
 
@@ -790,9 +787,8 @@ class EplbState:
         new_physical = result.new_physical_to_logical_map
         with model_state.map_lock:
             target_device = model_state.physical_to_logical_map.device
-            # If the number of physical experts has changed, then the new map
-            # needs to be replaced atomically to avoid a race with the async
-            # worker's snapshot (which reads physical_to_logical_map.cpu()).
+            # If the number of physical experts has changed, then the new map needs to
+            # be copied synchronously to avoid a race condition with the async worker
             if model_state.physical_to_logical_map.shape[1] != new_physical.shape[1]:
                 model_state.physical_to_logical_map = new_physical.to(target_device)
             else:
@@ -816,12 +812,6 @@ class EplbState:
         )
 
     def _all_ranks_result_ready(self, model_state: EplbModelState) -> bool:
-        """Return True only when every EP rank has a result queued.
-
-        Prevents one rank from consuming its result (and updating
-        expert_weights) while another rank is still transferring, which would
-        cause a forward pass to run with partially-updated weights.
-        """
         parallel_state = get_ep_group()
         has_result = int(model_state.pending_result is not None)
 
@@ -857,9 +847,7 @@ class EplbState:
             new_indices=result.new_physical_to_logical_map[result.layer_idx].numpy(),
             ep_rank=ep_group.rank(),
         )
-        # Unblock the async worker's cuda_stream: it queued a wait on this
-        # event before publishing the result, so recording it here signals
-        # that expert_buffer is free to be overwritten for the next layer.
+        # Unblock the async worker
         result.consumed_event.record()
 
         self._update_layer_mapping_from_new(model_state, result)

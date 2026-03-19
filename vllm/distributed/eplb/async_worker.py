@@ -63,16 +63,12 @@ def run_rebalance_experts(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Compute new expert mappings for one rebalancing cycle.
 
-    Returns:
-        (new_physical_to_logical_map, new_logical_to_physical_map,
-         new_logical_replica_count) — tensors shared across all
-        AsyncEPLBLayerResult objects produced in this cycle.
+    Returns: new_physical_to_logical_map
     """
     assert model_state.eplb_stats is not None
     eplb_stats = model_state.eplb_stats
 
-    # Wait for the main thread's all-reduce and clone to complete before
-    # accessing the global_expert_load_window tensor.
+    # Wait for global_expert_load_window tensor to be ready.
     assert model_state.window_ready_event is not None
     model_state.window_ready_event.wait()
     model_state.window_ready_event = None
@@ -125,10 +121,10 @@ async def transfer_run_periodically(
             layer_idx = 0
             current_num_layers = model_state.model.num_moe_layers
 
-            # Snapshot physical_to_logical_map under the map lock so we don't
-            # race with _update_layer_mapping_from_new on the main thread.
+            # Snapshot the physical_to_logical_map and copy it to CPU
             with model_state.map_lock:
                 physical_to_logical_map_cpu = model_state.physical_to_logical_map.cpu()
+
             (
                 new_physical_to_logical_map,
                 new_logical_to_physical_map,
@@ -153,14 +149,14 @@ async def transfer_run_periodically(
                     is_profile=is_profile,
                     cuda_stream=cuda_stream,
                 )
-                # Block until all GPU writes to expert_buffer are done so the
-                # main thread can safely call move_from_buffer.
+
+                # Wait until all writes to expert_buffer have finished before making the
+                # AsynEPLBLayerResult visible to the main thread.
                 cuda_stream.synchronize()
 
-                # Create the consumed_event before publishing the result.
-                # The main thread records it after move_from_buffer(); the
-                # cuda_stream wait below prevents the next transfer_layer from
-                # overwriting expert_buffer before that recording completes.
+                # This event guarantees that expert_buffer will not be overwritten by
+                # subsequent iterations of this loop until the main thread has consumed
+                # it. Record is called by the main thread after move_from_buffer().
                 consumed_event = torch.cuda.Event()
                 cuda_stream.wait_event(consumed_event)
 
