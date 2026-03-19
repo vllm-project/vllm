@@ -381,10 +381,12 @@ class Step3VLProcessor(ProcessorMixin):
                 patch_newline_mask is not None
                 and len(patch_newline_mask) == num_patches
             )
-            parts.append(
-                self.patch_start_token
-                + self.patch_feature_tokens
-                + self.patch_end_token
+            parts.extend(
+                [
+                    self.patch_start_token,
+                    self.patch_feature_tokens,
+                    self.patch_end_token,
+                ]
             )
             if patch_newline_mask[i]:
                 parts.append(self.patch_newline_token)
@@ -418,8 +420,13 @@ class Step3VLProcessor(ProcessorMixin):
         self,
         num_images: int,
     ) -> str:
-        part = self.image_start_token + self.image_feature_tokens + self.image_end_token
-        return part * num_images
+        parts = [
+            self.image_start_token,
+            self.image_feature_tokens,
+            self.image_end_token,
+        ] * num_images
+
+        return "".join(parts)
 
     def _get_image_repl_ids(
         self,
