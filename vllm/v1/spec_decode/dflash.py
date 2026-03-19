@@ -93,7 +93,6 @@ class DFlashProposer(SpecDecodeBaseProposer):
         # Store for build_model_inputs_first_pass to use
         self._dflash_num_context = num_context
 
-        # Copy hidden states (wide memcpy, not suitable for triton)
         self.hidden_states[:num_context] = target_hidden_states
 
         # Allocate output for token_indices_to_sample
