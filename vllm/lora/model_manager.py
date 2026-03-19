@@ -169,8 +169,8 @@ class LoRAModelManager:
             self.model, "get_num_mm_encoder_tokens"
         )
         if (
-            not self.lora_config.enable_tower_connector_lora
-            and self.supports_tower_connector_lora
+            self.supports_tower_connector_lora
+            and not self.lora_config.enable_tower_connector_lora
         ):
             logger.info(
                 "%s supports adding LoRA to the tower modules. If needed, "
