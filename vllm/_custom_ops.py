@@ -92,16 +92,18 @@ if hasattr(torch.ops, "_C") and hasattr(torch.ops._C, "scaled_fp4_quant"):
         m = input.numel() // n
         return create_fp4_output_tensors(m, n, input.device, is_sf_swizzled_layout)
 
-    @register_fake("_C::scaled_fp4_quant.out")
-    def _scaled_fp4_quant_out_fake(
-        input: torch.Tensor,
-        input_scale: torch.Tensor,
-        is_sf_swizzled_layout: bool,
-        *,
-        output: torch.Tensor,
-        output_scale: torch.Tensor,
-    ) -> None:
-        return None
+    if hasattr(torch.ops._C.scaled_fp4_quant, "out"):
+
+        @register_fake("_C::scaled_fp4_quant.out")
+        def _scaled_fp4_quant_out_fake(
+            input: torch.Tensor,
+            input_scale: torch.Tensor,
+            is_sf_swizzled_layout: bool,
+            *,
+            output: torch.Tensor,
+            output_scale: torch.Tensor,
+        ) -> None:
+            return None
 
 
 # page attention ops

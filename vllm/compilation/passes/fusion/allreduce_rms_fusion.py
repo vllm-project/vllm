@@ -46,7 +46,9 @@ if find_spec("flashinfer"):
     except ImportError:
         pass
 
-if hasattr(torch.ops._C, "scaled_fp4_quant"):
+if hasattr(torch.ops._C, "scaled_fp4_quant") and hasattr(
+    torch.ops._C.scaled_fp4_quant, "out"
+):
     STATIC_FP4_QUANT_OP = torch.ops._C.scaled_fp4_quant.out
 
 # Max size of the input tensor per world size per device capability
@@ -808,7 +810,11 @@ class AllReduceFusionPass(VllmPatternMatcherPass):
                     self.device,
                     self.allreduce_params,
                 ).register(self.patterns)
-                if current_platform.has_device_capability(100):
+                if (
+                    current_platform.has_device_capability(100)
+                    and hasattr(torch.ops._C, "scaled_fp4_quant")
+                    and hasattr(torch.ops._C.scaled_fp4_quant, "out")
+                ):
                     AllReduceFusedRMSNormStaticQuantNVFP4Pattern(
                         epsilon,
                         self.model_dtype,
