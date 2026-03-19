@@ -115,16 +115,13 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
         """
         cache_config = vllm_config.cache_config
 
-        # Disable calculate_kv_scales for hybrid models.
-        # During the dummy forward pass used for FP8 KV cache scale
-        # calibration, recurrent layers (GDN, Mamba, SSM) have
-        # uninitialized state, producing garbage activations that corrupt
-        # downstream attention layer scales.
+        # Disable calculate_kv_scales for hybrid models: uninitialized
+        # recurrent state corrupts scales during the calibration pass.
         if cache_config.calculate_kv_scales:
             logger.warning(
                 "Disabling calculate_kv_scales for hybrid model '%s'. "
                 "Hybrid models with recurrent layers (GDN, Mamba, SSM) "
-                "produce unreliable FP8 KV cache scales during the "
+                "produce unreliable KV cache scales during the "
                 "calibration pass because recurrent state is "
                 "uninitialized. Using default scale of 1.0 instead.",
                 vllm_config.model_config.model,
