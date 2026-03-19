@@ -5,6 +5,7 @@
 import torch
 from torch.nn.parameter import Parameter
 
+from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils import replace_parameter
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
@@ -12,6 +13,8 @@ from vllm.scalar_type import scalar_types
 from .MPLinearKernel import MPLinearKernel, MPLinearLayerConfig
 
 _XPUWNA16_SUPPORTED_QUANT_TYPES = (scalar_types.uint4, scalar_types.uint4b8)
+
+logger = init_logger(__name__)
 
 
 class XPUwNa16LinearKernel(MPLinearKernel):
@@ -125,6 +128,15 @@ class XPUW4A8IntLinearKernel(MPLinearKernel):
                 False,
                 f"in/out sizes ({in_size}, {out_size}) must be multiples of 8",
             )
+
+        if c.act_type != torch.float16:
+            logger.warning_once(
+                "XPUW4A8IntLinearKernel is running with model dtype %s, "
+                "but int4_gemm_w4a8 produces float16 output. Recommend "
+                "setting --dtype float16 for best performance.",
+                c.act_type,
+            )
+
         return True, None
 
     def _pack_int4_weight(self, w: torch.Tensor) -> torch.Tensor:

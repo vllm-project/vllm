@@ -54,7 +54,7 @@ if hasattr(torch.ops._xpu_C, "int4_gemm_w4a8"):
         input_2d = input.view(-1, input.shape[-1])
         M = input_2d.size(0)
         N = q_weight.size(1)
-        return torch.empty((M, N), dtype=input.dtype, device=input.device)
+        return torch.empty((M, N), dtype=torch.float16, device=input.device)
 
 
 if hasattr(torch.ops._xpu_C, "int4_gemm_w4a16"):
@@ -113,7 +113,8 @@ class xpu_ops:
         input: torch.Tensor, use_sym_quant: bool, bits: int
     ):
         original_sizes = input.size()
-        input = input.view(
+        # view is not safe in torch.compile if input is not contiguous
+        input = input.reshape(
             -1, original_sizes[-1]
         )  # Flatten except for the last dimension
         qmin = -(2 ** (bits - 1)) if use_sym_quant else 0
