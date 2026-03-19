@@ -22,7 +22,7 @@ from vllm.v1.kv_cache_interface import (
     SinkFullAttentionSpec,
     SlidingWindowSpec,
 )
-from vllm.v1.kv_cache_registry import KVCacheSpecRegistry
+from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 from vllm.v1.request import Request
 
 

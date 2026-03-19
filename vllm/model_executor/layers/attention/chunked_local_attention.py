@@ -118,7 +118,7 @@ class ChunkedLocalAttention(Attention):
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
         assert self.attention_chunk_size
-        from vllm.v1.kv_cache_registry import KVCacheSpecRegistry
+        from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
         return KVCacheSpecRegistry.create(
             kvcache_spec_cls=ChunkedLocalAttentionSpec,

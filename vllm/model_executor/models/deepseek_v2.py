@@ -597,7 +597,7 @@ class DeepseekV32IndexerCache(torch.nn.Module, AttentionLayerBase):
         compilation_config.static_forward_context[prefix] = self
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
-        from vllm.v1.kv_cache_registry import KVCacheSpecRegistry
+        from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
         return KVCacheSpecRegistry.create(  # Only has one vector instead of K + V
             kvcache_spec_cls=MLAAttentionSpec,

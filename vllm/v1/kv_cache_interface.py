@@ -12,7 +12,7 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import get_dtype_size
-from vllm.v1.kv_cache_registry import KVCacheSpecRegistry
+from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
 logger = init_logger(__name__)
 

@@ -516,7 +516,7 @@ class Attention(nn.Module, AttentionLayerBase):
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
         # Block size may get updated after model loading, refresh it
         block_size = vllm_config.cache_config.block_size
-        from vllm.v1.kv_cache_registry import KVCacheSpecRegistry
+        from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
         # Should not be called for enc-dec or encoder-only attention.
         assert self.attn_type == AttentionType.DECODER

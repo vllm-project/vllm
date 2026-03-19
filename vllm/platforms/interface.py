@@ -473,6 +473,7 @@ class Platform:
             )
         cache_config.block_size = preferred
 
+    @classmethod
     def register_custom_kv_cache_specs(cls, vllm_config: "VllmConfig") -> None:
         """
         Register custom KVCacheSpec class on current platform.

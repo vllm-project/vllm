@@ -43,7 +43,7 @@ class MambaBase(AttentionLayerBase):
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec | None:
         mamba_block_size = vllm_config.cache_config.mamba_block_size
         page_size_padded = vllm_config.cache_config.mamba_page_size_padded
-        from vllm.v1.kv_cache_registry import KVCacheSpecRegistry
+        from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
         return KVCacheSpecRegistry.create(
             kvcache_spec_cls=MambaSpec,
