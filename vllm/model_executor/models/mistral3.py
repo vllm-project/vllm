@@ -44,6 +44,7 @@ from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (
     MultiModalEmbeddings,
+    SupportsEagle,
     SupportsEagle3,
     SupportsLoRA,
     SupportsMultiModal,
@@ -409,7 +410,12 @@ def init_vision_tower_for_llava(
     dummy_inputs=Mistral3DummyInputsBuilder,
 )
 class Mistral3ForConditionalGeneration(
-    nn.Module, SupportsLoRA, SupportsMultiModal, SupportsPP, SupportsEagle3
+    nn.Module,
+    SupportsLoRA,
+    SupportsMultiModal,
+    SupportsPP,
+    SupportsEagle,
+    SupportsEagle3,
 ):
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
@@ -423,6 +429,9 @@ class Mistral3ForConditionalGeneration(
             "model.vision_tower.": "vision_tower.",
             "model.multi_modal_projector.": "multi_modal_projector.",
             "lm_head.": "language_model.lm_head.",
+            # Some PEFT LoRAs are trained against the text submodule directly
+            # and produce names like `base_model.model.model.layers.*`.
+            "model.": "language_model.model.",
         }
     )
 
@@ -432,13 +441,6 @@ class Mistral3ForConditionalGeneration(
             return None
 
         raise ValueError("Only image modality is supported")
-
-    def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
-        self.get_language_model().model.aux_hidden_state_layers = layers
-
-    def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:
-        num_layers = len(self.get_language_model().model.layers)
-        return (2, num_layers // 2, num_layers - 3)
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()

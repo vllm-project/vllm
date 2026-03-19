@@ -294,6 +294,12 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         # Initialized in process_weights_after_loading for CUTLASS/SM90 backends
         self.moe_kernel: mk.FusedMoEKernel | None = None
 
+    @property
+    def skip_forward_padding(self) -> bool:
+        # SM100_FI_MXFP4_MXFP8_TRTLLM supports padding with mxfp8 quant
+        # so can skip the padding in the forward before applying the moe method
+        return self.mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_TRTLLM
+
     def create_weights(
         self,
         layer: torch.nn.Module,
@@ -896,7 +902,9 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             # batched activation format. As self.fused_experts is not
             # initialized at this point, we resort to checking the MoE config
             # directly.
-            is_batched_moe = self.moe.use_deepep_ll_kernels
+            is_batched_moe = (
+                self.moe.use_deepep_ll_kernels or self.moe.use_nixl_ep_kernels
+            )
             if is_batched_moe:
                 num_warps = 4 if envs.VLLM_MOE_DP_CHUNK_SIZE <= 512 else 8
             else:
@@ -1128,8 +1136,16 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             elif self.mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_TRTLLM:
                 from flashinfer import mxfp8_quantize
 
-                x_quant, x_scale = mxfp8_quantize(x, False)  # to mxfp8
+                # x_quant is padded in hidden dimension with alignment=256
+                x_quant, x_scale = mxfp8_quantize(
+                    x,
+                    is_sf_swizzled_layout=False,
+                    alignment=256,
+                )
                 x_scale = x_scale.view(torch.float8_e4m3fn).reshape(*x.shape[:-1], -1)
+
+            # output with original unpadded hidden size
+            output = torch.empty_like(x)
 
             trtllm_gen_output = trtllm_fp4_block_scale_moe(
                 routing_logits=router_logits.to(torch.bfloat16),
@@ -1159,6 +1175,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 routing_method_type=1 if layer.renormalize else 0,
                 do_finalize=True,
                 tune_max_num_tokens=max(self.max_capture_size, 1),
+                output=output,
             )[0]
             return trtllm_gen_output
         elif self.mxfp4_backend == Mxfp4Backend.CK:
