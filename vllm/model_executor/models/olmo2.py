@@ -63,7 +63,7 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs import Olmo3Config
+from vllm.transformers_utils.configs.olmo3 import Olmo3Config
 
 
 class Olmo2Attention(nn.Module):

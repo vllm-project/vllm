@@ -77,7 +77,7 @@ from vllm.multimodal.processing import (
     PromptUpdate,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs import KimiVLConfig, MoonViTConfig
+from vllm.transformers_utils.configs.kimi_vl import KimiVLConfig, MoonViTConfig
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .utils import AutoWeightsLoader, init_vllm_registered_model, maybe_prefix

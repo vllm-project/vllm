@@ -26,7 +26,7 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs import NemotronHConfig
+from vllm.transformers_utils.configs.nemotron_h import NemotronHConfig
 
 from .interfaces import SupportsPP
 from .nemotron_h import (

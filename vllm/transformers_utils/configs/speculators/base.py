@@ -8,9 +8,6 @@ from transformers import PretrainedConfig
 from vllm.transformers_utils.configs.speculators.algos import (
     SUPPORTED_SPECULATORS_TYPES,
 )
-
-__all__ = ["SpeculatorsConfig"]
-
 from vllm.transformers_utils.utils import without_trust_remote_code
 
 
