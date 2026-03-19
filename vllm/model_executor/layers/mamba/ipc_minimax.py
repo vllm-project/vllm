@@ -1,52 +1,9 @@
-# SPDX-FileCopyrightText: Copyright (c) 2022-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-"""
-Standalone workspace allocator for Lamport-based AllReduce CUDA kernels.
 
-Compatible with MiniMaxReduceRMSKernel's LamportComm protocol.
-No dependency on TensorRT-LLM internals -- only requires PyTorch and cuda-python.
-
-Workspace memory layout (device-side void* array, N = world_size):
-    [0     .. N-1]   : ipc_buffers   (placeholder zeros, unused by MiniMax kernel)
-    [N     .. 2N-1]  : ipc_barriers  (placeholder zeros, unused by MiniMax kernel)
-    [2N    .. 3N-1]  : lamport_bufs  — IPC triple-buffer pointer per rank
-    [3N]             : flag_buffer   → int32[3] = {counter, unused, lamport_flag}
-    [3N+1]           : layout_buffer → int64[2] = {clear_size, comm_size}
-
-Usage:
-    import torch
-    import torch.distributed as dist
-
-    dist.init_process_group(backend="nccl")
-    rank = dist.get_rank()
-    world_size = dist.get_world_size()
-    torch.cuda.set_device(rank)
-
-    # Option 1: class-based (explicit lifecycle)
-    ws = LamportWorkspace(rank, world_size, comm_size=2 * 1024 * 1024)
-    workspace_tensor = ws.workspace   # torch.Tensor(int64, CUDA)
-
-    # Option 2: cached function (matches TRT-LLM's get_allreduce_workspace API)
-    workspace_tensor = get_allreduce_workspace(rank, world_size)
-
-    # Pass to kernel
-    output = your_minimax_kernel(input, weights, workspace_tensor, rank, world_size, eps)
-"""
 
 import array
+import contextlib
 import struct
 import sys
 import threading
@@ -160,10 +117,8 @@ class IpcBuffer:
             if r == self.rank:
                 _cuda_free(self.peer_ptrs[r])
             else:
-                try:
+                with contextlib.suppress(RuntimeError):
                     _check(cudart.cudaIpcCloseMemHandle(self.peer_ptrs[r])[0])
-                except RuntimeError:
-                    pass
             self.peer_ptrs[r] = 0
         self.local_ptr = 0
 
