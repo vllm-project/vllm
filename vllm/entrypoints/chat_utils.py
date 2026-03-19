@@ -326,7 +326,6 @@ class ConversationMessage(TypedDict, total=False):
     reasoning: str | None
     """The reasoning content for interleaved thinking."""
 
-
     tools: list[ChatCompletionFunctionToolParam] | None
     """The tools for developer role."""
 
