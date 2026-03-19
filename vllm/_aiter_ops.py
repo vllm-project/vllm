@@ -402,11 +402,21 @@ def _rocm_aiter_mla_decode_fwd_impl(
         kwargs["kv_scale"] = kv_scale
 
     if work_meta_data is not None:
-        assert work_indptr is not None, "work_indptr must be provided with work_meta_data"
-        assert work_info_set is not None, "work_info_set must be provided with work_meta_data"
-        assert reduce_indptr is not None, "reduce_indptr must be provided with work_meta_data"
-        assert reduce_final_map is not None, "reduce_final_map must be provided with work_meta_data"
-        assert reduce_partial_map is not None, "reduce_partial_map must be provided with work_meta_data"
+        assert work_indptr is not None, (
+            "work_indptr must be provided with work_meta_data"
+        )
+        assert work_info_set is not None, (
+            "work_info_set must be provided with work_meta_data"
+        )
+        assert reduce_indptr is not None, (
+            "reduce_indptr must be provided with work_meta_data"
+        )
+        assert reduce_final_map is not None, (
+            "reduce_final_map must be provided with work_meta_data"
+        )
+        assert reduce_partial_map is not None, (
+            "reduce_partial_map must be provided with work_meta_data"
+        )
         kwargs["work_meta_data"] = work_meta_data
         kwargs["work_indptr"] = work_indptr
         kwargs["work_info_set"] = work_info_set
