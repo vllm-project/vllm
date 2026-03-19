@@ -370,11 +370,10 @@ class Dashboard:
             else:
                 self.set_status("Reset failed")
         elif key == ord('e'):
-            post_enable(self.host, self.port, True)
-            self.set_status("Stats enabled")
+            self._export_filter()
         elif key == ord('d'):
             post_enable(self.host, self.port, False)
-            self.set_status("Stats disabled")
+            self.set_status("Stats collection stopped")
         elif key in (ord('+'), ord('=')):
             self.interval = min(10.0, self.interval + 0.5)
             self.set_status(f"Interval: {self.interval:.1f}s")
@@ -400,6 +399,8 @@ class Dashboard:
             self.set_status(f"Mask overlay: {'on' if self.show_mask else 'off'}")
         elif key == ord('s'):
             self._save_stats()
+        elif key == ord('p'):
+            self._prompt_prune(stdscr)
         elif key == ord('?'):
             self.show_help = not self.show_help
 
@@ -424,6 +425,120 @@ class Dashboard:
         with open(path, "w") as f:
             json.dump(out, f, indent=2)
         self.set_status(f"Saved -> {path}")
+
+    def _prompt_prune(self, stdscr):
+        """Prompt for prune percentage, compute mask, send to vLLM."""
+        h, w = stdscr.getmaxyx()
+        prompt = " set prune level (0=clear): ___% "
+        try:
+            stdscr.addstr(h-1, 0, prompt.ljust(w-1), curses.color_pair(9))
+            stdscr.refresh()
+        except:
+            pass
+
+        # Read number input
+        curses.echo()
+        curses.curs_set(1)
+        stdscr.nodelay(False)
+        try:
+            stdscr.move(h-1, len(" set prune level (0=clear): "))
+            raw = stdscr.getstr(4).decode().strip()
+            pct = int(raw) if raw else -1
+        except (ValueError, curses.error):
+            pct = -1
+        finally:
+            curses.noecho()
+            curses.curs_set(0)
+            stdscr.nodelay(True)
+            stdscr.timeout(100)
+
+        if pct < 0 or pct > 100:
+            self.set_status("Invalid — enter 0-100")
+            return
+
+        if pct == 0:
+            # Clear mask
+            self._send_clear_mask()
+            self.mask.clear()
+            self.show_mask = False
+            self.set_status("Mask cleared")
+            return
+
+        self._apply_prune(pct)
+
+    def _apply_prune(self, pct):
+        """Rank experts by combined score, prune bottom N%, send mask."""
+        with self.lock:
+            stats = self.current
+
+        if not stats.experts:
+            self.set_status("No stats — send requests first")
+            return
+
+        # Score each expert: combined frequency + contribution
+        # Normalize both to [0,1] then average
+        mf = stats.max_freq
+        mg = stats.max_gate
+        scored = []
+        for (l, e), v in stats.experts.items():
+            f_norm = v.frequency / mf if mf > 0 else 0
+            g_norm = v.avg_gate / mg if mg > 0 else 0
+            score = (f_norm + g_norm) / 2.0
+            scored.append((score, l, e))
+
+        # Sort ascending — lowest score = best prune candidates
+        scored.sort()
+
+        # Take bottom N%
+        n_prune = int(len(scored) * pct / 100.0)
+        pruned = [(l, e) for _, l, e in scored[:n_prune]]
+
+        # Send to vLLM
+        self._send_mask(pruned)
+        self.mask = set((l, e) for l, e in pruned)
+        self.show_mask = True
+        self.set_status(f"Pruned {len(pruned)} experts ({pct}%) — mask active")
+
+    def _send_mask(self, pruned):
+        """POST mask to RIY API."""
+        try:
+            data = json.dumps({"pruned_experts": [list(p) for p in pruned]}).encode()
+            req = urllib.request.Request(
+                f"http://{self.host}:{self.port}/riy/mask",
+                data=data, method='POST',
+                headers={"Content-Type": "application/json"})
+            urllib.request.urlopen(req, timeout=3.0)
+        except Exception as ex:
+            self.set_status(f"Mask send failed: {ex}")
+
+    def _send_clear_mask(self):
+        """DELETE mask via RIY API."""
+        try:
+            req = urllib.request.Request(
+                f"http://{self.host}:{self.port}/riy/mask",
+                method='DELETE')
+            urllib.request.urlopen(req, timeout=3.0)
+        except Exception:
+            pass
+
+    def _export_filter(self):
+        """Export current mask as timestamped profile JSON."""
+        if not self.mask:
+            self.set_status("No mask to export — press 'p' first")
+            return
+        ts = time.strftime("%Y%m%d_%H%M%S")
+        path = f"riy_filter.{ts}.json"
+        profile = {
+            "version": 1,
+            "model": self.model_name or "unknown",
+            "workload": "live capture",
+            "timestamp": ts,
+            "pruned_experts": sorted([list(p) for p in self.mask]),
+            "count": len(self.mask),
+        }
+        with open(path, "w") as f:
+            json.dump(profile, f, indent=2)
+        self.set_status(f"Exported {len(self.mask)} experts -> {path}")
 
     def _draw(self, stdscr, stats, flash):
         h, w = stdscr.getmaxyx()
@@ -605,8 +720,8 @@ class Dashboard:
 
         # Status bar
         status = self.status_msg if time.time() < self.status_ts else (
-            "  q=quit  r=reset  e=enable  d=disable  m=mask  s=save  ?=help  "
-            "j/k=scroll  h/l=blocks  [/]=size  +/-=interval"
+            "  q=quit  r=reset  p=prune  e=export  m=mask  s=save  d=stop  ?=help  "
+            "j/k=scroll  h/l=blocks  +/-=interval"
         )
         try:
             stdscr.addstr(h-1, 0, status[:w-1].ljust(w-1),
@@ -655,9 +770,11 @@ class Dashboard:
             "  vllm-riy live -- Help",
             "",
             "  q         quit",
-            "  r         reset stats (POST /riy/stats/reset)",
-            "  e / d     enable / disable stats collection",
-            "  s         save current stats to riy_stats_export.json",
+            "  r         reset stats",
+            "  p         set prune level (0-100%, 0=clear)",
+            "  e         export current mask as riy_filter.<ts>.json",
+            "  s         save raw stats to riy_stats_export.json",
+            "  d         stop stats collection",
             "",
             "  h / l     scroll expert blocks left / right",
             "  j / k     scroll layers up / down",

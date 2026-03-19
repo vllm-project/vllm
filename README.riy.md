@@ -138,6 +138,73 @@ The TUI shows these as:
 
 ---
 
+## Using Profiles — Your Personal REAP
+
+The key insight: **profiling and serving are separate steps.**
+
+### Step 1: Profile on the full model
+
+You need the complete, unmodified model loaded in vLLM to collect accurate
+routing statistics. This requires the full VRAM footprint — no savings yet.
+
+```bash
+# Load the full model (e.g. Qwen3.5-397B on 2x GPUs)
+vllm serve Qwen/Qwen3.5-397B-A17B --tensor-parallel-size 2
+
+# Collect stats on YOUR workload — not a generic benchmark
+curl -X POST :8019/riy/stats/start
+# ... run your actual traffic ...
+# Use the TUI to set a prune level: press 'p', enter '35'
+# Export: press 'e' → riy_filter.20260319_143022.json
+```
+
+The profile is a plain JSON list of `(layer, expert)` tuples. It does not
+contain weights, activations, or any model data. Just indices.
+
+### Step 2: Serve with the profile
+
+Now anyone can load the **same unmodified model** with your profile.
+Masked experts are zeroed at load time — they consume no useful VRAM
+and the routing weights are renormalized around them.
+
+```bash
+vllm serve Qwen/Qwen3.5-397B-A17B \
+  --riy-expert-profile riy_filter.20260319_143022.json
+```
+
+No model conversion. No re-quantization. No export step. The original
+HuggingFace checkpoint is used as-is.
+
+### What this means
+
+- **You create your own REAP-equivalent profile** — calibrated on your
+  actual workload, not generic benchmarks
+- **Profiles are shareable.** A German law office, a Japanese game studio,
+  and a medical research lab would each produce different profiles for the
+  same model — and each would be optimal for their use case
+- **Profiles are stackable with quantization.** Profile a BF16 model,
+  then apply the same profile to an INT4 AutoRound or FP8 version.
+  The expert indices don't change across quantization formats
+- **No vendor lock-in.** Profiles work on any vLLM installation with
+  the RIY patch. The model on HuggingFace stays untouched
+
+### Community profiles
+
+Publish profiles on HuggingFace for others to use:
+
+```
+flash7777/riy-profiles/
+  Qwen3.5-397B-A17B/
+    german-administrative-35pct.json
+    general-coding-20pct.json
+    japanese-customer-support-40pct.json
+```
+
+Each profile documents its workload, prune percentage, and evaluation results.
+Users pick the profile that matches their use case — or create their own.
+
+---
+
 ## Installation
 
 This is a branch on a vLLM fork. Apply the patch to any vLLM image:
