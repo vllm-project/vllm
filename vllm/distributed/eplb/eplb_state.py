@@ -31,7 +31,6 @@ import threading
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 
-import numpy as np
 import torch
 from torch.distributed import ProcessGroup, all_reduce
 
@@ -50,7 +49,6 @@ from .async_worker import start_async_worker
 from .policy import EPLB_POLICIES, AbstractEplbPolicy, DefaultEplbPolicy
 from .rebalance_execute import (
     AsyncEPLBLayerResult,
-    RecvMetadata,
     move_from_buffer,
     rearrange_expert_weights_inplace,
 )
@@ -174,14 +172,11 @@ class EplbModelState:
     """
     The buffer to store the expert weights during transfer.
     """
-    buffer_lock: threading.Lock
+    map_lock: threading.Lock
     """
-    The lock to protect the expert buffer.
-    """
-    buffer_consumed_event: torch.cuda.Event | None
-    """
-    CUDA event recorded after the main thread finishes consuming the buffer.
-    The async worker waits on this before writing to the buffer again.
+    Protects physical_to_logical_map (and related maps) against concurrent
+    reads by the async worker (snapshot at cycle start) and writes by the
+    main thread (_update_layer_mapping_from_new).
     """
     window_ready_event: torch.cuda.Event | None
     """
@@ -452,8 +447,7 @@ class EplbState:
             model_name=model_config.model,
             model=model,
             expert_buffer=expert_buffer,
-            buffer_lock=threading.Lock(),
-            buffer_consumed_event=None,
+            map_lock=threading.Lock(),
             window_ready_event=None,
             rebalanced=False,
             eplb_stats=None,
@@ -794,16 +788,18 @@ class EplbState:
         self, model_state: EplbModelState, result: AsyncEPLBLayerResult
     ) -> None:
         layer = result.layer_idx
-        target_device = model_state.physical_to_logical_map.device
         new_physical = result.new_physical_to_logical_map
-        # If the number of physical experts has changed, then the new map needs to
-        # be copied synchronously to avoid a race condition with the async worker
-        if model_state.physical_to_logical_map.shape[1] != new_physical.shape[1]:
-            model_state.physical_to_logical_map = new_physical.to(target_device)
-        else:
-            model_state.physical_to_logical_map[layer].copy_(
-                new_physical[layer].to(target_device, non_blocking=True)
-            )
+        with model_state.map_lock:
+            target_device = model_state.physical_to_logical_map.device
+            # If the number of physical experts has changed, then the new map
+            # needs to be replaced atomically to avoid a race with the async
+            # worker's snapshot (which reads physical_to_logical_map.cpu()).
+            if model_state.physical_to_logical_map.shape[1] != new_physical.shape[1]:
+                model_state.physical_to_logical_map = new_physical.to(target_device)
+            else:
+                model_state.physical_to_logical_map[layer].copy_(
+                    new_physical[layer].to(target_device, non_blocking=True)
+                )
 
         logical_device = model_state.logical_to_physical_map.device
         new_logical = result.new_logical_to_physical_map[layer].to(logical_device)
@@ -854,65 +850,34 @@ class EplbState:
         ep_group: ProcessGroup,
         is_profile: bool = False,
     ) -> None:
-        # The worker holds buffer_lock for the full duration of
-        # transfer_layer + synchronize, then releases it.  We may need to wait
-        # briefly if the worker just finished and hasn't released yet.
-        max_retries = 6  # 1 minute max
-        retries = 0
-        while not model_state.buffer_lock.acquire(blocking=True, timeout=10.0):
-            retries += 1
-            if retries >= max_retries:
-                raise RuntimeError(
-                    f"Rank {ep_group.rank()}: buffer_lock timeout after "
-                    f"{max_retries * 10}s"
-                )
-            logger.warning(
-                "Rank %d: EPLB buffer_lock acquire failed, retrying (%d/%d)",
-                ep_group.rank(),
-                retries,
-                max_retries,
-            )
-        try:
-            move_from_buffer(
-                expert_weights=model_state.model.expert_weights[result.layer_idx],
-                expert_weights_buffers=model_state.expert_buffer,
-                is_unchanged=result.is_unchanged,
-                is_received_locally=result.is_received_locally,
-                recv_metadata=result.recv_metadata,
-                new_indices=result.new_physical_to_logical_map[
-                    result.layer_idx
-                ].numpy(),
-                ep_rank=ep_group.rank(),
-            )
-            # Signal the async worker's GPU stream that the buffer is free to
-            # be overwritten for the next layer.
-            consumed_event = torch.cuda.Event()
-            consumed_event.record()
-            model_state.buffer_consumed_event = consumed_event
+        move_from_buffer(
+            expert_weights=model_state.model.expert_weights[result.layer_idx],
+            expert_weights_buffers=model_state.expert_buffer,
+            is_unchanged=result.is_unchanged,
+            is_received_locally=result.is_received_locally,
+            recv_metadata=result.recv_metadata,
+            new_indices=result.new_physical_to_logical_map[result.layer_idx].numpy(),
+            ep_rank=ep_group.rank(),
+        )
+        # Unblock the async worker's cuda_stream: it queued a wait on this
+        # event before publishing the result, so recording it here signals
+        # that expert_buffer is free to be overwritten for the next layer.
+        result.consumed_event.record()
 
-            self._update_layer_mapping_from_new(model_state, result)
-            logger.debug(
-                "model %s successfully move_to_workspace layer %d",
+        self._update_layer_mapping_from_new(model_state, result)
+        logger.debug(
+            "model %s successfully move_to_workspace layer %d",
+            model_state.model_name,
+            result.layer_idx,
+        )
+        if result.layer_idx == model_state.model.num_moe_layers - 1:
+            self.post_eplb(model_state, result, is_profile)
+            model_state.rebalanced = False
+            logger.info(
+                "finish async transfer for model %s rank %d",
                 model_state.model_name,
-                result.layer_idx,
+                ep_group.rank(),
             )
-            if result.layer_idx == model_state.model.num_moe_layers - 1:
-                self.post_eplb(model_state, result, is_profile)
-                model_state.rebalanced = False
-                logger.info(
-                    "finish async transfer for model %s rank %d",
-                    model_state.model_name,
-                    ep_group.rank(),
-                )
-        finally:
-            try:
-                model_state.buffer_lock.release()
-            except Exception as e:
-                logger.error(
-                    "Rank %d: buffer_lock release failed in move_to_workspace: %s",
-                    ep_group.rank(),
-                    str(e),
-                )
 
     def post_eplb(
         self,

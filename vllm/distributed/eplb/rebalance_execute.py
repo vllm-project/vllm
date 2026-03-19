@@ -82,6 +82,13 @@ class AsyncEPLBLayerResult:
     """Per-physical-expert flag: weight was received on this rank."""
     recv_metadata: RecvMetadata
     """Metadata describing what was received during transfer_layer."""
+    consumed_event: torch.cuda.Event
+    """
+    Unrecorded CUDA event created by the async worker before publishing this
+    result.  The async worker's cuda_stream waits on it, so the main thread
+    must call consumed_event.record() after move_from_buffer() completes to
+    allow the next layer's transfer to begin.
+    """
 
 
 def get_ep_ranks_with_experts_batch(

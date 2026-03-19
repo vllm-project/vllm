@@ -122,78 +122,60 @@ async def transfer_run_periodically(
 
         assert state.is_async
         for model_state in state.model_states.values():
-            new_eplb_maps: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None
-            physical_to_logical_map_cpu: torch.Tensor | None = None
             layer_idx = 0
             current_num_layers = model_state.model.num_moe_layers
 
+            # Snapshot physical_to_logical_map under the map lock so we don't
+            # race with _update_layer_mapping_from_new on the main thread.
+            with model_state.map_lock:
+                physical_to_logical_map_cpu = model_state.physical_to_logical_map.cpu()
+            (
+                new_physical_to_logical_map,
+                new_logical_to_physical_map,
+                new_logical_replica_count,
+            ) = run_rebalance_experts(model_state, state, physical_to_logical_map_cpu)
+            logger.info(
+                "Async worker computed new indices for model %s",
+                model_state.model_name,
+            )
+
             while model_state.rebalanced and layer_idx < current_num_layers:
-                # Polling the lock directly in the async thread avoids
-                # the thread switch overhead of asyncio.to_thread.
-                # This is typically faster than offloading to a worker thread.
-                while not model_state.buffer_lock.acquire(blocking=False):
-                    await asyncio.sleep(0)
-                try:
-                    if not model_state.rebalanced or layer_idx >= current_num_layers:
-                        break
+                (
+                    is_unchanged,
+                    is_received_locally,
+                    recv_metadata,
+                ) = await transfer_layer(
+                    old_layer_indices=physical_to_logical_map_cpu[layer_idx],
+                    new_layer_indices=new_physical_to_logical_map[layer_idx],
+                    expert_weights=model_state.model.expert_weights[layer_idx],
+                    expert_weights_buffer=model_state.expert_buffer,
+                    ep_group=eplb_group,
+                    is_profile=is_profile,
+                    cuda_stream=cuda_stream,
+                )
+                # Block until all GPU writes to expert_buffer are done so the
+                # main thread can safely call move_from_buffer.
+                cuda_stream.synchronize()
 
-                    if new_eplb_maps is None:
-                        # Compute new expert mappings once per cycle.
-                        physical_to_logical_map_cpu = (
-                            model_state.physical_to_logical_map.cpu()
-                        )
-                        new_eplb_maps = run_rebalance_experts(
-                            model_state, state, physical_to_logical_map_cpu
-                        )
-                        logger.info(
-                            "Async worker computed new indices for model %s",
-                            model_state.model_name,
-                        )
+                # Create the consumed_event before publishing the result.
+                # The main thread records it after move_from_buffer(); the
+                # cuda_stream wait below prevents the next transfer_layer from
+                # overwriting expert_buffer before that recording completes.
+                consumed_event = torch.cuda.Event()
+                cuda_stream.wait_event(consumed_event)
 
-                    assert physical_to_logical_map_cpu is not None
-                    (
-                        new_physical_to_logical_map,
-                        new_logical_to_physical_map,
-                        new_logical_replica_count,
-                    ) = new_eplb_maps
-
-                    # Insert a GPU wait for the main thread to finish consuming
-                    # the previous layer's buffer before overwriting it.
-                    if model_state.buffer_consumed_event is not None:
-                        cuda_stream.wait_event(model_state.buffer_consumed_event)
-                        model_state.buffer_consumed_event = None
-
-                    (
-                        is_unchanged,
-                        is_received_locally,
-                        recv_metadata,
-                    ) = await transfer_layer(
-                        old_layer_indices=physical_to_logical_map_cpu[layer_idx],
-                        new_layer_indices=new_physical_to_logical_map[layer_idx],
-                        expert_weights=model_state.model.expert_weights[layer_idx],
-                        expert_weights_buffer=model_state.expert_buffer,
-                        ep_group=eplb_group,
-                        is_profile=is_profile,
-                        cuda_stream=cuda_stream,
+                model_state.result_queue.put(
+                    AsyncEPLBLayerResult(
+                        layer_idx=layer_idx,
+                        new_physical_to_logical_map=new_physical_to_logical_map,
+                        new_logical_to_physical_map=new_logical_to_physical_map,
+                        new_logical_replica_count=new_logical_replica_count,
+                        is_unchanged=is_unchanged,
+                        is_received_locally=is_received_locally,
+                        recv_metadata=recv_metadata,
+                        consumed_event=consumed_event,
                     )
-                    # Block until all GPU writes to the intermediate buffer are complete
-                    # so that step() on the main thread can read from the intermediate
-                    # buffer without a separate GPU event.
-                    cuda_stream.synchronize()
-
-                    model_state.result_queue.put(
-                        AsyncEPLBLayerResult(
-                            layer_idx=layer_idx,
-                            new_physical_to_logical_map=new_physical_to_logical_map,
-                            new_logical_to_physical_map=new_logical_to_physical_map,
-                            new_logical_replica_count=new_logical_replica_count,
-                            is_unchanged=is_unchanged,
-                            is_received_locally=is_received_locally,
-                            recv_metadata=recv_metadata,
-                        )
-                    )
-                    layer_idx += 1
-                finally:
-                    model_state.buffer_lock.release()
+                )
+                layer_idx += 1
 
         state.rearrange_event.clear()
