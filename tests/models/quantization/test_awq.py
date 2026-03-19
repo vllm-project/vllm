@@ -141,13 +141,16 @@ def test_awq_models(
     )
 
 
-@pytest.mark.parametrize("num_tokens,expect_gemm", [
-    (1, True),
-    (128, True),
-    (255, True),
-    (256, False),
-    (512, False),
-])
+@pytest.mark.parametrize(
+    "num_tokens,expect_gemm",
+    [
+        (1, True),
+        (128, True),
+        (255, True),
+        (256, False),
+        (512, False),
+    ],
+)
 @torch.inference_mode()
 def test_awq_linear_kernel_dispatch(num_tokens, expect_gemm):
     """Verify awq_linear dispatches to awq_gemm for small batch sizes
@@ -159,25 +162,33 @@ def test_awq_linear_kernel_dispatch(num_tokens, expect_gemm):
     group_size = 32
     pack_factor = 8
 
-    input = torch.randn(num_tokens, in_features, dtype=torch.float16,
-                         device="cuda")
-    qweight = torch.randint(0, 100, (in_features, out_features // pack_factor),
-                            dtype=torch.int32, device="cuda")
-    scales = torch.randn(in_features // group_size, out_features,
-                         dtype=torch.float16, device="cuda")
-    qzeros = torch.randint(0, 100,
-                           (in_features // group_size,
-                            out_features // pack_factor),
-                           dtype=torch.int32, device="cuda")
+    input = torch.randn(num_tokens, in_features, dtype=torch.float16, device="cuda")
+    qweight = torch.randint(
+        0,
+        100,
+        (in_features, out_features // pack_factor),
+        dtype=torch.int32,
+        device="cuda",
+    )
+    scales = torch.randn(
+        in_features // group_size, out_features, dtype=torch.float16, device="cuda"
+    )
+    qzeros = torch.randint(
+        0,
+        100,
+        (in_features // group_size, out_features // pack_factor),
+        dtype=torch.int32,
+        device="cuda",
+    )
 
     # Mock both paths and return tensors of the correct shape
-    gemm_ret = torch.empty(num_tokens, out_features, dtype=torch.float16,
-                           device="cuda")
-    deq_ret = torch.empty(in_features, out_features, dtype=torch.float16,
-                          device="cuda")
+    gemm_ret = torch.empty(num_tokens, out_features, dtype=torch.float16, device="cuda")
+    deq_ret = torch.empty(in_features, out_features, dtype=torch.float16, device="cuda")
 
-    with patch("vllm._custom_ops.awq_gemm", return_value=gemm_ret) as mock_gemm, \
-         patch("vllm._custom_ops.awq_dequantize", return_value=deq_ret) as mock_deq:
+    with (
+        patch("vllm._custom_ops.awq_gemm", return_value=gemm_ret) as mock_gemm,
+        patch("vllm._custom_ops.awq_dequantize", return_value=deq_ret) as mock_deq,
+    ):
         awq_linear(input, qweight, scales, qzeros, pack_factor)
 
         if expect_gemm:

@@ -13,6 +13,7 @@ from vllm.utils.flashinfer import (
     flashinfer_quant_nvfp4_8x4_sf_layout,
 )
 from vllm.utils.math_utils import cdiv
+from vllm.utils.torch_utils import direct_register_custom_op
 
 logger = init_logger(__name__)
 
@@ -678,8 +679,6 @@ def _awq_linear_fake(
         device=input.device,
     )
 
-
-from vllm.utils.torch_utils import direct_register_custom_op
 
 direct_register_custom_op(
     op_name="awq_linear",

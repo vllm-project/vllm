@@ -6,7 +6,6 @@ from typing import TYPE_CHECKING, Any, Union
 import torch
 from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
 
-from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE
 from vllm.model_executor.layers.linear import (
@@ -266,7 +265,8 @@ class AWQLinearMethod(LinearMethodBase):
         reshaped_x = x.reshape(-1, x.shape[-1])
 
         out = torch.ops.vllm.awq_linear(
-            reshaped_x, qweight, scales, qzeros, pack_factor)
+            reshaped_x, qweight, scales, qzeros, pack_factor
+        )
         if bias is not None:
             out.add_(bias)
         return out.reshape(out_shape)
