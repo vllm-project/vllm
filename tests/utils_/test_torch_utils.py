@@ -68,7 +68,7 @@ def _test_stream_thread(main_expected_stream: torch.cuda.Stream):
     thread_can_exit = threading.Event()
 
     def child_thread_func():
-        with torch.cuda.stream(child_stream):
+        with child_stream:
             thread_stream_ready.set()
             thread_can_exit.wait(timeout=10)
 

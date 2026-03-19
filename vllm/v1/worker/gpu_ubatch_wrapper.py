@@ -206,9 +206,9 @@ class UBatchWrapper:
         def _capture_ubatch_thread(results, ubatch_metadata):
             torch.accelerator.set_device_index(self.device)
             ubatch_context = ubatch_metadata.context
-            with torch.cuda.stream(ubatch_context.compute_stream):
+            with ubatch_context.compute_stream:
                 _ = torch.cuda.current_blas_handle()
-            with torch.cuda.stream(ubatch_context.comm_stream):
+            with ubatch_context.comm_stream:
                 _ = torch.cuda.current_blas_handle()
             with ubatch_context:
                 model_output = model(
