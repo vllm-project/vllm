@@ -1556,20 +1556,22 @@ def unified_mla_kv_cache_update(
         # - Skip KV write here, forward_impl handles it:
         #   * Prefill: written in forward_impl after RoPE (line ~806)
         #   * Decode: written in fused kernel (applies RoPE + writes KV)
-        logger.warning(
-            "[unified_mla_kv_cache_update] FUSED path: skipping KV write "
-            "(num_tokens=%s)",
-            kv_c_normed.shape[0],
-        )
+        # DEBUG: Commented out for performance (runs every batch)
+        # logger.warning(
+        #     "[unified_mla_kv_cache_update] FUSED path: skipping KV write "
+        #     "(num_tokens=%s)",
+        #     kv_c_normed.shape[0],
+        # )
         return torch.empty(0, device=kv_c_normed.device, dtype=kv_c_normed.dtype)
 
     # UNFUSED path (no AITER kernels):
     # - mla.py applies RoPE to ALL tokens
     # - Write all tokens to KV cache here
-    logger.warning(
-        "[unified_mla_kv_cache_update] UNFUSED path: writing all KV (num_tokens=%s)",
-        kv_c_normed.shape[0],
-    )
+    # DEBUG: Commented out for performance (runs every batch)
+    # logger.warning(
+    #     "[unified_mla_kv_cache_update] UNFUSED path: writing all KV (num_tokens=%s)",
+    #     kv_c_normed.shape[0],
+    # )
     kv_cache = attn_layer.kv_cache[forward_context.virtual_engine]
 
     slot_mapping = forward_context.slot_mapping
