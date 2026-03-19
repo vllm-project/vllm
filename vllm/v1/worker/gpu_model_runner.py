@@ -674,6 +674,10 @@ class GPUModelRunner(
         self.discard_request_mask = self._make_buffer(
             self.max_num_reqs, dtype=torch.bool
         )
+        # Initialize pointer to satisfy architectural tracking, but delay allocation
+        # until the memory profiler runs natively down-stack.
+        self.sampler_workspace = None
+
         self.num_decode_draft_tokens = self._make_buffer(
             self.max_num_reqs, dtype=torch.int32
         )
@@ -4575,6 +4579,18 @@ class GPUModelRunner(
                         )
 
                     self.model.set_aux_hidden_state_layers(aux_layers)
+
+                # Preallocate sampler workspace inside the profiler block
+                # so its footprint is natively captured by memory profiling
+                # and appropriately deducted from the KV cache bounds.
+                if getattr(self, "sampler", None) is not None:
+                    max_tokens = self.scheduler_config.max_num_batched_tokens
+                    self.sampler.sampler_workspace = torch.empty(
+                        (max_tokens, self.model_config.get_vocab_size()),
+                        dtype=torch.float32,
+                        device=self.device,
+                    )
+
                 time_after_load = time.perf_counter()
             self.model_memory_usage = m.consumed_memory
         except torch.cuda.OutOfMemoryError as e:
@@ -5355,7 +5371,8 @@ class GPUModelRunner(
         )
         try:
             sampler_output = self.sampler(
-                logits=logits, sampling_metadata=dummy_metadata
+                logits=logits,
+                sampling_metadata=dummy_metadata,
             )
         except RuntimeError as e:
             if "out of memory" in str(e):
