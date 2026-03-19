@@ -63,6 +63,7 @@ class Sampler(nn.Module):
         self.topk_topp_sampler = TopKTopPSampler(logprobs_mode)
         self.pin_memory = is_pin_memory_available()
         self.logprobs_mode = logprobs_mode
+        self.sampler_workspace = None
 
     def forward(
         self,
@@ -87,13 +88,17 @@ class Sampler(nn.Module):
                 else:
                     raw_logprobs = logits.to(torch.float32)
 
-        # Use float32 for the logits.
-        if sampler_workspace is not None:
-            logits_fp32 = sampler_workspace[:logits.size(0)]
-            logits_fp32.copy_(logits)
-            logits = logits_fp32
-        else:
-            logits = logits.to(torch.float32)
+        # High-Water Mark Persistent Workspace to prevent VRAM fragmentation.
+        # Allocating inside the sampler dynamically natively registers the footprint 
+        # during KV cache memory profiling via peak memory tracking, avoiding double counts.
+        if self.sampler_workspace is None or self.sampler_workspace.size(0) < logits.size(0):
+            self.sampler_workspace = torch.empty(
+                logits.shape, dtype=torch.float32, device=logits.device
+            )
+
+        logits_fp32 = self.sampler_workspace[:logits.size(0)]
+        logits_fp32.copy_(logits)
+        logits = logits_fp32
 
         logits = self.apply_logits_processors(
             logits, sampling_metadata, predict_bonus_token
