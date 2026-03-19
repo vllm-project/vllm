@@ -43,8 +43,12 @@ class RiyLayerStats:
                                       device=self.device)
 
     def reset(self):
-        self.freq.zero_()
-        self.weight_sum.zero_()
+        # Replace tensors instead of in-place zero — safe from HTTP thread
+        # (in-place .zero_() on GPU tensors from a non-CUDA thread crashes)
+        self.freq = torch.zeros(self.num_experts, dtype=torch.int64,
+                                device=self.device)
+        self.weight_sum = torch.zeros(self.num_experts, dtype=torch.float32,
+                                      device=self.device)
 
     def ensure_device(self, device: torch.device):
         """Move tensors to device on first call from GPU."""
@@ -143,10 +147,16 @@ class RiyState:
         with self._lock:
             layers = []
             for i, s in enumerate(self._layer_stats):
+                try:
+                    freq = s.freq.detach().cpu().tolist()
+                    wsum = s.weight_sum.detach().cpu().tolist()
+                except Exception:
+                    freq = [0] * s.num_experts
+                    wsum = [0.0] * s.num_experts
                 layers.append({
                     "layer": i,
-                    "freq": s.freq.cpu().tolist(),
-                    "weight_sum": s.weight_sum.cpu().tolist(),
+                    "freq": freq,
+                    "weight_sum": wsum,
                 })
             return {
                 "num_layers": self._num_layers,
