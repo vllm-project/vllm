@@ -2482,7 +2482,7 @@ steps:
     - pytest -v -s models/multimodal/generation -m 'not core_model' --ignore models/multimodal/generation/test_common.py
     - pytest -v -s models/multimodal/test_mapping.py
 
-- label: Multi-Modal Models Test (Extended) 2 #6 0min
+- label: Multi-Modal Models Test (Extended) 2 # 60min
   timeout_in_minutes: 120
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_1
