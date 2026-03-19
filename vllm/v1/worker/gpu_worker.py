@@ -718,7 +718,7 @@ class Worker(WorkerBase):
 
         iteration_details = compute_iteration_details(scheduler_output)
 
-         if self.vllm_config.profiler_config.detailed_trace_annotation:
+        if self.vllm_config.profiler_config.detailed_trace_annotation:
             # Compute roofline-model metrics per request, split by phase
             # (context vs generation). These help estimate compute and
             # memory intensity from the trace.
