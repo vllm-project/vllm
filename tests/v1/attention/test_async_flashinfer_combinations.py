@@ -54,8 +54,9 @@ class TestAsyncFlashInferBaseline:
         print("\n[Verification] Checking async scheduling state...")
 
         # Verify we have the V1 engine
-        assert hasattr(llm.llm_engine, 'vllm_config'), \
+        assert hasattr(llm.llm_engine, "vllm_config"), (
             "Not using V1 engine with proper config"
+        )
         print("  ✓ Using V1 engine")
 
         # Access scheduler configuration through vllm_config
@@ -63,14 +64,15 @@ class TestAsyncFlashInferBaseline:
         scheduler_config = vllm_config.scheduler_config
 
         # Verify chunked prefill is enabled (required for async)
-        assert scheduler_config.enable_chunked_prefill, \
+        assert scheduler_config.enable_chunked_prefill, (
             "Chunked prefill not enabled - async scheduling cannot work properly"
-        print(f"  ✓ Chunked prefill enabled")
+        )
+        print("  ✓ Chunked prefill enabled")
         print(f"  ✓ Max batched tokens: {scheduler_config.max_num_batched_tokens}")
 
         # Check if async scheduling is configured
         if scheduler_config.async_scheduling is not False:
-            print(f"  ✓ Async scheduling enabled")
+            print("  ✓ Async scheduling enabled")
         else:
             print(f"  ℹ Async scheduling: {scheduler_config.async_scheduling}")
 
@@ -198,15 +200,16 @@ class TestAsyncFlashInferBaseline:
         scheduler_config = vllm_config.scheduler_config
 
         # Check scheduler configuration
-        assert scheduler_config.enable_chunked_prefill, \
+        assert scheduler_config.enable_chunked_prefill, (
             "FAIL: Chunked prefill is disabled - async cannot work properly"
-        print(f"  ✓ Chunked prefill enabled")
+        )
+        print("  ✓ Chunked prefill enabled")
         print(f"  ✓ Max batched tokens: {scheduler_config.max_num_batched_tokens}")
         print(f"  ✓ Max num seqs: {scheduler_config.max_num_seqs}")
 
         # Check async scheduling configuration
         if scheduler_config.async_scheduling is not False:
-            print(f"  ✓ Async scheduling enabled")
+            print("  ✓ Async scheduling enabled")
         else:
             print(f"  ℹ Async scheduling config: {scheduler_config.async_scheduling}")
 
@@ -256,12 +259,13 @@ class TestAsyncFlashInferBaseline:
         very_long_prompt = ["The quick brown fox " * 100]
 
         print("  Testing with very long prompt (2000+ tokens)...")
-        outputs = llm.generate(very_long_prompt,
-                              SamplingParams(temperature=0.0, max_tokens=10, seed=42))
+        outputs = llm.generate(
+            very_long_prompt, SamplingParams(temperature=0.0, max_tokens=10, seed=42)
+        )
 
         assert len(outputs) == 1, "Should have one output"
         assert len(outputs[0].outputs[0].text) > 0, "Should have generated text"
-        print(f"  ✓ Long prompt handled successfully")
+        print("  ✓ Long prompt handled successfully")
         print(f"  ✓ Generated: {repr(outputs[0].outputs[0].text[:50])}")
 
         # If this succeeds without errors and with reasonable latency,
@@ -278,7 +282,7 @@ class TestAsyncFlashInferBaseline:
         for batch_idx in range(3):
             batch_outputs = llm.generate(
                 TEST_PROMPTS,
-                SamplingParams(temperature=0.0, max_tokens=5, seed=42 + batch_idx)
+                SamplingParams(temperature=0.0, max_tokens=5, seed=42 + batch_idx),
             )
             assert len(batch_outputs) == len(TEST_PROMPTS)
             print(f"  ✓ Batch {batch_idx + 1} completed successfully")
