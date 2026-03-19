@@ -6,7 +6,7 @@ import httpx
 import pytest
 import pytest_asyncio
 
-from ...utils import RemoteLaunchRenderServer
+from ....utils import RemoteLaunchRenderServer
 
 MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
 
