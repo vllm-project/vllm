@@ -7,7 +7,7 @@
 # Copyright (c) 2024 NVIDIA
 # Licensed under Apache 2.0 License [see LICENSE for details]
 # --------------------------------------------------------
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 
 import torch
 import torch.nn as nn
@@ -16,7 +16,10 @@ from transformers import PretrainedConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import MultiModalDataDict, MultiModalKwargsItems
+from vllm.multimodal.inputs import (
+    BatchedTensorInputs,
+    MultiModalDataDict,
+)
 from vllm.multimodal.parse import (
     ImageEmbeddingItems,
     ImageProcessorItems,
@@ -24,7 +27,6 @@ from vllm.multimodal.parse import (
 )
 from vllm.multimodal.processing import (
     PromptReplacement,
-    PromptUpdate,
     PromptUpdateDetails,
 )
 from vllm.transformers_utils.processors.internvl import InternVLImageProcessor
@@ -100,15 +102,12 @@ class NVLMDummyInputsBuilder(BaseInternVLDummyInputsBuilder[NVLMProcessingInfo])
 
 
 class NVLMMultiModalProcessor(BaseInternVLMultiModalProcessor[NVLMProcessingInfo]):
-    def _get_prompt_updates(
+    def _get_prompt_repl_image(
         self,
         mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
-        out_mm_kwargs: MultiModalKwargsItems,
-    ) -> Sequence[PromptUpdate]:
-        hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
-
-        out_mm_data = out_mm_kwargs.get_data()
+        hf_processor: NVLMProcessor,
+        out_mm_data: BatchedTensorInputs,
+    ):
         if "image_num_patches" in out_mm_data:
             image_num_patches = out_mm_data["image_num_patches"]
             assert isinstance(image_num_patches, torch.Tensor)
@@ -146,13 +145,11 @@ class NVLMMultiModalProcessor(BaseInternVLMultiModalProcessor[NVLMProcessingInfo
             )
 
         # See note in dummy data regarding why we have the extra newline
-        return [
-            PromptReplacement(
-                modality="image",
-                target="<image>\n",
-                replacement=get_replacement_nvlm,
-            )
-        ]
+        return PromptReplacement(
+            modality="image",
+            target="<image>\n",
+            replacement=get_replacement_nvlm,
+        )
 
 
 @MULTIMODAL_REGISTRY.register_processor(

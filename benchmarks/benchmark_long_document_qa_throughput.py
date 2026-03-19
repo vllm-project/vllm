@@ -40,9 +40,9 @@ LLM engine. You can refer to the `vllm.engine.arg_utils.EngineArgs` for more
 details.
 """
 
-import dataclasses
 import random
 import time
+from dataclasses import fields
 
 from vllm import LLM, SamplingParams
 from vllm.engine.arg_utils import EngineArgs
@@ -124,7 +124,7 @@ def main(args):
 
     # Create the LLM engine
     engine_args = EngineArgs.from_cli_args(args)
-    llm = LLM(**dataclasses.asdict(engine_args))
+    llm = LLM(**{f.name: getattr(engine_args, f.name) for f in fields(engine_args)})
     sampling_params = SamplingParams(temperature=0, max_tokens=args.output_len)
 
     print("------warm up------")

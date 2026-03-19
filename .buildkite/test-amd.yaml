@@ -944,47 +944,62 @@ steps:
   - export MIOPEN_DEBUG_CONV_GEMM=0
   - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-mm-small.txt
 
-- label: Multi-Modal Models Test (Extended) 1 # 60min
+- label: Multi-Modal Models Test (Extended Generation 1) # 60min
   timeout_in_minutes: 120
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90a]
   agent_pool: mi250_1
   optional: true
   source_file_dependencies:
   - vllm/
-  - tests/models/multimodal
+  - tests/models/multimodal/generation
+  - tests/models/multimodal/test_mapping.py
   commands:
     - export MIOPEN_DEBUG_CONV_DIRECT=0
     - export MIOPEN_DEBUG_CONV_GEMM=0
     - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
-    - pytest -v -s models/multimodal -m 'not core_model' --ignore models/multimodal/generation/test_common.py --ignore models/multimodal/processing
+    - pytest -v -s models/multimodal/generation -m 'not core_model' --ignore models/multimodal/generation/test_common.py
+    - pytest -v -s models/multimodal/test_mapping.py
 
-- label: Multi-Modal Models Test (Extended) 2 #60min
+- label: Multi-Modal Models Test (Extended Generation 2) # 60min
   timeout_in_minutes: 120
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90a]
   agent_pool: mi250_1
   optional: true
   source_file_dependencies:
   - vllm/
-  - tests/models/multimodal
+  - tests/models/multimodal/generation
   commands:
     - export MIOPEN_DEBUG_CONV_DIRECT=0
     - export MIOPEN_DEBUG_CONV_GEMM=0
     - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
     - pytest -v -s models/multimodal/generation/test_common.py -m 'split(group=0) and not core_model'
 
-- label: Multi-Modal Models Test (Extended) 3 # 75min
+- label: Multi-Modal Models Test (Extended Generation 3) # 75min
   timeout_in_minutes: 150
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90a]
   agent_pool: mi250_1
   optional: true
   source_file_dependencies:
   - vllm/
-  - tests/models/multimodal
+  - tests/models/multimodal/generation
   commands:
     - export MIOPEN_DEBUG_CONV_DIRECT=0
     - export MIOPEN_DEBUG_CONV_GEMM=0
     - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
     - pytest -v -s models/multimodal/generation/test_common.py -m 'split(group=1) and not core_model'
+
+- label: Multi-Modal Models Test (Extended Pooling) # 60min
+  timeout_in_minutes: 120
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90a]
+  agent_pool: mi250_1
+  optional: true
+  source_file_dependencies:
+  - vllm/
+  - tests/models/multimodal/pooling
+  commands:
+    - export MIOPEN_DEBUG_CONV_DIRECT=0
+    - export MIOPEN_DEBUG_CONV_GEMM=0
+    - pytest -v -s models/multimodal/pooling -m 'not core_model'
 
 - label: Quantized Models Test # 45 min
   timeout_in_minutes: 60
@@ -2450,7 +2465,7 @@ steps:
   - export MIOPEN_DEBUG_CONV_GEMM=0
   - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-mm-small.txt
 
-- label: Multi-Modal Models Test (Extended) 1 # 60min
+- label: Multi-Modal Models Test (Extended 1) # 60min
   timeout_in_minutes: 120
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_1
@@ -2458,14 +2473,16 @@ steps:
   optional: true
   source_file_dependencies:
   - vllm/
-  - tests/models/multimodal
+  - tests/models/multimodal/generation
+  - tests/models/multimodal/test_mapping.py
   commands:
     - export MIOPEN_DEBUG_CONV_DIRECT=0
     - export MIOPEN_DEBUG_CONV_GEMM=0
     - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
-    - pytest -v -s models/multimodal -m 'not core_model' --ignore models/multimodal/generation/test_common.py --ignore models/multimodal/processing
+    - pytest -v -s models/multimodal/generation -m 'not core_model' --ignore models/multimodal/generation/test_common.py
+    - pytest -v -s models/multimodal/test_mapping.py
 
-- label: Multi-Modal Models Test (Extended) 2 #60min
+- label: Multi-Modal Models Test (Extended 2) # 60min
   timeout_in_minutes: 120
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_1
@@ -2473,14 +2490,14 @@ steps:
   optional: true
   source_file_dependencies:
   - vllm/
-  - tests/models/multimodal
+  - tests/models/multimodal/generation
   commands:
     - export MIOPEN_DEBUG_CONV_DIRECT=0
     - export MIOPEN_DEBUG_CONV_GEMM=0
     - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
     - pytest -v -s models/multimodal/generation/test_common.py -m 'split(group=0) and not core_model'
 
-- label: Multi-Modal Models Test (Extended) 3 # 75min
+- label: Multi-Modal Models Test (Extended 3) # 75min
   timeout_in_minutes: 150
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_1
@@ -2488,12 +2505,26 @@ steps:
   optional: true
   source_file_dependencies:
   - vllm/
-  - tests/models/multimodal
+  - tests/models/multimodal/generation
   commands:
     - export MIOPEN_DEBUG_CONV_DIRECT=0
     - export MIOPEN_DEBUG_CONV_GEMM=0
     - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
     - pytest -v -s models/multimodal/generation/test_common.py -m 'split(group=1) and not core_model'
+
+- label: Multi-Modal Models Test (Extended Pooling) # 60min
+  timeout_in_minutes: 120
+  mirror_hardwares: [amdexperimental, amdproduction]
+  agent_pool: mi325_1
+  # grade: Blocking
+  optional: true
+  source_file_dependencies:
+  - vllm/
+  - tests/models/multimodal/pooling
+  commands:
+    - export MIOPEN_DEBUG_CONV_DIRECT=0
+    - export MIOPEN_DEBUG_CONV_GEMM=0
+    - pytest -v -s models/multimodal/pooling -m 'not core_model'
 
 - label: Quantized Models Test # 45 min
   timeout_in_minutes: 60
@@ -4175,47 +4206,62 @@ steps:
   - export MIOPEN_DEBUG_CONV_GEMM=0
   - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-mm-small.txt
 
-- label: Multi-Modal Models Test (Extended) 1 # 60min
+- label: Multi-Modal Models Test (Extended 1) # 60min
   timeout_in_minutes: 120
   mirror_hardwares: [amdexperimental]
   agent_pool: mi355_1
   optional: true
   source_file_dependencies:
   - vllm/
-  - tests/models/multimodal
+  - tests/models/multimodal/generation
+  - tests/models/multimodal/test_mapping.py
   commands:
     - export MIOPEN_DEBUG_CONV_DIRECT=0
     - export MIOPEN_DEBUG_CONV_GEMM=0
     - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
-    - pytest -v -s models/multimodal -m 'not core_model' --ignore models/multimodal/generation/test_common.py --ignore models/multimodal/processing
+    - pytest -v -s models/multimodal/generation -m 'not core_model' --ignore models/multimodal/generation/test_common.py
+    - pytest -v -s models/multimodal/test_mapping.py
 
-- label: Multi-Modal Models Test (Extended) 2 #60min
+- label: Multi-Modal Models Test (Extended 2) # 60min
   timeout_in_minutes: 120
   mirror_hardwares: [amdexperimental]
   agent_pool: mi355_1
   optional: true
   source_file_dependencies:
   - vllm/
-  - tests/models/multimodal
+  - tests/models/multimodal/generation
   commands:
     - export MIOPEN_DEBUG_CONV_DIRECT=0
     - export MIOPEN_DEBUG_CONV_GEMM=0
     - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
     - pytest -v -s models/multimodal/generation/test_common.py -m 'split(group=0) and not core_model'
 
-- label: Multi-Modal Models Test (Extended) 3 # 75min
+- label: Multi-Modal Models Test (Extended 3) # 75min
   timeout_in_minutes: 150
   mirror_hardwares: [amdexperimental]
   agent_pool: mi355_1
   optional: true
   source_file_dependencies:
   - vllm/
-  - tests/models/multimodal
+  - tests/models/multimodal/generation
   commands:
     - export MIOPEN_DEBUG_CONV_DIRECT=0
     - export MIOPEN_DEBUG_CONV_GEMM=0
     - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
     - pytest -v -s models/multimodal/generation/test_common.py -m 'split(group=1) and not core_model'
+
+- label: Multi-Modal Models Test (Extended Pooling) # 60min
+  timeout_in_minutes: 120
+  mirror_hardwares: [amdexperimental]
+  agent_pool: mi355_1
+  optional: true
+  source_file_dependencies:
+  - vllm/
+  - tests/models/multimodal/pooling
+  commands:
+    - export MIOPEN_DEBUG_CONV_DIRECT=0
+    - export MIOPEN_DEBUG_CONV_GEMM=0
+    - pytest -v -s models/multimodal/pooling -m 'not core_model'
 
 - label: Quantized Models Test # 45 min
   timeout_in_minutes: 60
