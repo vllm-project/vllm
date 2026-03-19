@@ -491,7 +491,12 @@ class ColBERTLfm2Model(ColBERTMixin, nn.Module, HasInnerState, IsHybrid):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         other_weights, colbert_loaded = self._load_colbert_weights(weights)
 
-        loaded_model = self.model.load_weights(other_weights)
+        # Strip "model." prefix added by the embedding adapter
+        model_weights = [
+            (n[len("model."):] if n.startswith("model.") else n, w)
+            for n, w in other_weights
+        ]
+        loaded_model = self.model.load_weights(model_weights)
         loaded = {f"model.{name}" for name in loaded_model} | colbert_loaded
 
         # When the ST projector was auto-loaded during init
