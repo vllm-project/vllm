@@ -1704,6 +1704,8 @@ class ConformerEncoder(nn.Module):
 # ----- Encoder END -----
 
 
+# This subclass is specific to vLLM in order for
+# `_mark_composite_model` to target this module
 class CohereASRProjector(nn.Linear):
     pass
 
