@@ -109,8 +109,11 @@ def determine_expert_map(
     remainder = global_num_experts % ep_size
     local_num_experts = base_experts + 1 if ep_rank < remainder else base_experts
 
-    # Create a tensor of size num_experts filled with -1
-    expert_map = torch.full((global_num_experts,), -1, dtype=torch.int32)
+    # Create a tensor of size num_experts filled with -1.
+    # Force CPU to avoid dynamic-shape ops (torch.where) on TPU/XLA, which
+    # fail in multi-process PJRT (TP>1). Callers move to device after init.
+    expert_map = torch.full((global_num_experts,), -1, dtype=torch.int32,
+                            device="cpu")
     # Create an expert map for the local experts
     if expert_placement_strategy == "linear":
         start_idx = ep_rank * base_experts + min(ep_rank, remainder)
@@ -135,7 +138,8 @@ def determine_expert_map(
     expert_mask = None
     if return_expert_mask:
         expert_mask = torch.ones(
-            (global_num_experts + num_fused_shared_experts + 1,), dtype=torch.int32
+            (global_num_experts + num_fused_shared_experts + 1,),
+            dtype=torch.int32, device="cpu"
         )
         expert_mask[-1] = 0
         expert_mask[:global_num_experts] = expert_map > -1
@@ -202,6 +206,8 @@ def get_compressed_expert_map(expert_map: torch.Tensor) -> str:
         str: A string mapping from local to global index.
             Using str to support hashing for logging once only.
     """
+    # Force CPU for torch.where — dynamic-shape op unsupported on TPU/XLA.
+    expert_map = expert_map.cpu()
     global_indices = torch.where(expert_map != -1)[0]
     local_indices = expert_map[global_indices]
     return ", ".join(
@@ -1015,7 +1021,9 @@ class FusedMoE(CustomOp):
     def _map_global_expert_id_to_local_expert_id(self, expert_id: int) -> int:
         if self._expert_map is None:
             return expert_id
-        return self._expert_map[expert_id].item()
+        # Use int() instead of .item() — .item() can fail on CPU tensors
+        # when the default device context is TPU.
+        return int(self._expert_map[expert_id])
 
     def _init_aiter_shared_experts_topK_buffer(
         self, vllm_config: VllmConfig, dp_size: int
