@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import copy
 import multiprocessing
+import multiprocessing.connection
 import time
 import weakref
 
