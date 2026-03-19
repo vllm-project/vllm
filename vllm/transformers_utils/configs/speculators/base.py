@@ -17,6 +17,11 @@ from vllm.transformers_utils.utils import without_trust_remote_code
 class SpeculatorsConfig(PretrainedConfig):
     model_type = "speculators"
 
+    def __init__(self, **kwargs):
+        """PretrainedConfig is a dataclass in Transformers v5.
+        This pass through is needed to avoid unexpected keyword arguments."""
+        super().__init__(**kwargs)
+
     @classmethod
     def from_pretrained(
         cls,
