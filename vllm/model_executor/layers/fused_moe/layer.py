@@ -572,22 +572,11 @@ class FusedMoE(CustomOp):
 
         logger.debug("FusedMoEConfig = %s", self.moe_config)
 
-        def _get_quant_method() -> FusedMoEMethodBase:
-            """
-            Helper method to ensure self.quant_method is never None and
-            of the proper type.
-            """
-            quant_method = None
-            if self.quant_config is not None:
-                quant_method = self.quant_config.get_quant_method(self, prefix)
-            if quant_method is None:
-                quant_method = UnquantizedFusedMoEMethod(self.moe_config)
-            assert isinstance(quant_method, FusedMoEMethodBase)
-            return quant_method
-
-        # Note: get_quant_method will look at the layer's local_num_experts
-        # for heuristic purposes, so it must be initialized first.
-        self.quant_method: FusedMoEMethodBase = _get_quant_method()
+        self.quant_method = self._get_quant_method(
+            prefix,
+            quant_config,
+            self.moe_config,
+        )
 
         if not self.moe_config.is_act_and_mul and not current_platform.is_cuda_alike():
             raise NotImplementedError(
@@ -638,7 +627,25 @@ class FusedMoE(CustomOp):
         self.shared_experts: SharedExperts | None = None
         self.runner = self._init_runner()
 
-    def _init_shared_experts(self):  # -> SharedExperts | None:
+    def _get_quant_method(
+        self,
+        prefix: str,
+        quant_config: QuantizationConfig | None,
+        moe_config: FusedMoEConfig,
+    ) -> FusedMoEMethodBase:
+        """
+        Helper method to ensure self.quant_method is never None and
+        of the proper type.
+        """
+        quant_method = None
+        if quant_config is not None:
+            quant_method = quant_config.get_quant_method(self, prefix)
+        if quant_method is None:
+            quant_method = UnquantizedFusedMoEMethod(moe_config)
+        assert isinstance(quant_method, FusedMoEMethodBase)
+        return quant_method
+
+    def _init_shared_experts(self):
         if self._shared_experts is None:
             return
 
