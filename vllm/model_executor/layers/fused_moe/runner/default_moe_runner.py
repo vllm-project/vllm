@@ -84,7 +84,6 @@ def _moe_forward(
     # TODO(bnell): this can be removed after MK migration is complete.
     layer.ensure_moe_quant_config_init()
     runner = layer.runner
-    router_logits = runner._maybe_gate(hidden_states, router_logits)
     with runner._sequence_parallel_context():
         if runner.use_dp_chunking:
             return runner.forward_impl_chunked(
@@ -121,7 +120,6 @@ def _moe_forward_shared(
     # TODO(bnell): this can be removed after MK migration is complete.
     layer.ensure_moe_quant_config_init()
     runner = layer.runner
-    router_logits = runner._maybe_gate(hidden_states, router_logits)
     with runner._sequence_parallel_context():
         if runner.use_dp_chunking:
             return runner.forward_impl_chunked(
@@ -274,8 +272,7 @@ class DefaultMoERunner(MoERunner):
         self,
         hidden_states: torch.Tensor,
         shared_input: torch.Tensor | None,
-    ) -> torch.Tensor | None:
-        shared_experts_input: torch.Tensor | None = None
+    ):
         if self.use_shared_experts_stream:
             assert self.shared_experts_stream is not None
             assert self.moe_config.disable_inplace
@@ -297,8 +294,6 @@ class DefaultMoERunner(MoERunner):
             # router/gate (next op below)
             assert self.shared_experts_stream is not None
             self.shared_experts_stream.wait_stream(current_stream())
-
-        return shared_experts_input
 
     def _maybe_init_dp_chunking(self):
         if not self.use_dp_chunking:
@@ -486,20 +481,12 @@ class DefaultMoERunner(MoERunner):
         shared_input: torch.Tensor | None,
         run_shared_experts_before: bool = True,
     ) -> tuple[torch.Tensor | None, torch.Tensor]:
+        shared_input = shared_input if shared_input is not None else hidden_states
         shared_output: torch.Tensor | None = None
 
         # Run this before quant_method to avoid inplace issues.
         if run_shared_experts_before:
-            shared_input = shared_input if shared_input is not None else hidden_states
-            shared_output = self._apply_shared_experts(
-                shared_input,
-                False,
-            )
-        else:
-            hidden_states_clone = self._maybe_setup_shared_experts_stream(
-                hidden_states,
-                shared_input,
-            )
+            shared_output = self._apply_shared_experts(shared_input, False)
 
         if self.quant_method.is_monolithic:
             result = self.quant_method.apply_monolithic(
@@ -529,10 +516,7 @@ class DefaultMoERunner(MoERunner):
 
         if not run_shared_experts_before and self.has_separate_shared_experts:
             assert shared_output is None
-            shared_output = self._apply_shared_experts(
-                hidden_states_clone,
-                True,
-            )
+            shared_output = self._apply_shared_experts(shared_input, True)
 
         return shared_output, hidden_states
 
@@ -704,6 +688,10 @@ class DefaultMoERunner(MoERunner):
         router_logits: torch.Tensor,
         shared_input: torch.Tensor | None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        # Gate overlap not supported when chunking is enabled. Run the
+        # gate first.
+        router_logits = self._maybe_gate(hidden_states, router_logits)
+
         final_shared_hidden_states, final_fused_hidden_states = (
             self._allocate_dp_chunking_outputs(hidden_states, router_logits)
         )
@@ -804,6 +792,16 @@ class DefaultMoERunner(MoERunner):
         run_shared_experts_before = (
             self.has_separate_shared_experts and not self.use_shared_experts_stream
         )
+
+        # The shared experts stream must be set up before calling the gate so they
+        # can be overlapped.
+        if not run_shared_experts_before:
+            self._maybe_setup_shared_experts_stream(
+                hidden_states,
+                shared_input,
+            )
+
+        router_logits = self._maybe_gate(hidden_states, router_logits)
 
         # TODO(bnell): parts of the dispatch/combine steps will go away once
         # #32567 lands and the remaining kernels are made MKs.  The PCP
