@@ -331,6 +331,7 @@ class AnthropicServingMessages(OpenAIServingChat):
             temperature=anthropic_request.temperature,
             top_p=anthropic_request.top_p,
             top_k=anthropic_request.top_k,
+            kv_transfer_params=anthropic_request.kv_transfer_params,
         )
 
     @classmethod
@@ -441,6 +442,7 @@ class AnthropicServingMessages(OpenAIServingChat):
                 input_tokens=generator.usage.prompt_tokens,
                 output_tokens=generator.usage.completion_tokens,
             ),
+            kv_transfer_params=generator.kv_transfer_params,
         )
         choice = generator.choices[0]
         if choice.finish_reason == "stop":
