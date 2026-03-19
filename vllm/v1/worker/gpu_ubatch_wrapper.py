@@ -119,6 +119,8 @@ class UBatchWrapper:
 
         self.sm_control = self._create_sm_control_context(vllm_config)
         self.device = device
+        self.is_debugging_mode = envs.VLLM_LOGGING_LEVEL == "DEBUG"
+        self._runnable_str = str(runnable) if self.is_debugging_mode else None
 
     @property
     def graph_pool(self):
@@ -170,10 +172,12 @@ class UBatchWrapper:
         # allow accessing the attributes of the runnable.
         if hasattr(self.runnable, key):
             return getattr(self.runnable, key)
-        raise AttributeError(
-            f"Attribute {key} not exists in the runnable of "
-            f"cudagraph wrapper: {self.runnable}"
-        )
+        if self.is_debugging_mode:
+            raise AttributeError(
+                f"Attribute {key} not exists in the runnable of "
+                f"cudagraph wrapper: {self._runnable_str}"
+            )
+        raise AttributeError
 
     def unwrap(self) -> Callable:
         # in case we need to access the original runnable.
