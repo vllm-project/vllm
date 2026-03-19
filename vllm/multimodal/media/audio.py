@@ -140,6 +140,10 @@ def load_audio(
         # Re-raise anything else (e.g. corrupt but recognised format).
         if exc.code not in _BAD_SF_CODES:
             raise
+        # soundfile may have advanced the BytesIO seek position before failing;
+        # reset it so PyAV can read from the beginning.
+        if isinstance(path, BytesIO):
+            path.seek(0)
         try:
             return load_audio_pyav(path, sr=sr, mono=mono)
         except Exception as pyav_exc:
@@ -164,7 +168,7 @@ class AudioMediaIO(MediaIO[tuple[npt.NDArray, float]]):
         self.kwargs = kwargs
 
     def load_bytes(self, data: bytes) -> tuple[npt.NDArray, float]:
-        return load_audio_pyav(BytesIO(data))
+        return load_audio(BytesIO(data), sr=None)
 
     def load_base64(
         self,
@@ -174,7 +178,7 @@ class AudioMediaIO(MediaIO[tuple[npt.NDArray, float]]):
         return self.load_bytes(pybase64.b64decode(data))
 
     def load_file(self, filepath: Path) -> tuple[npt.NDArray, float]:
-        return load_audio_pyav(filepath)
+        return load_audio(filepath, sr=None)
 
     def encode_base64(
         self,

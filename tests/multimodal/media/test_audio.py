@@ -33,7 +33,7 @@ def test_audio_media_io_load_bytes(dummy_audio_bytes):
     audio_io = AudioMediaIO()
     out = audio_io.load_bytes(dummy_audio_bytes)
     assert isinstance(out[0], np.ndarray)
-    assert out[1] == 22050
+    assert out[1] == 16000
 
 
 def test_audio_media_io_load_base64(dummy_audio_bytes):
@@ -41,7 +41,7 @@ def test_audio_media_io_load_base64(dummy_audio_bytes):
     encoded = base64.b64encode(dummy_audio_bytes).decode("utf-8")
     out = audio_io.load_base64("audio/wav", encoded)
     assert isinstance(out[0], np.ndarray)
-    assert out[1] == 22050
+    assert out[1] == 16000
 
 
 def test_audio_media_io_load_file(audio_assets: AudioTestAssets):
@@ -49,7 +49,7 @@ def test_audio_media_io_load_file(audio_assets: AudioTestAssets):
     path = audio_assets[0].get_local_path()
     out = audio_io.load_file(path)
     assert isinstance(out[0], np.ndarray)
-    assert out[1] == 22050
+    assert out[1] == 16000
 
 
 def test_audio_media_io_encode_base64(dummy_audio):
