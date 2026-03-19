@@ -303,9 +303,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       ") -> Tensor");
   // conditionally compiled so impl registration is in source file
 
-  ops.def("permute_cols(Tensor A, Tensor perm) -> Tensor");
-  ops.impl("permute_cols", torch::kCUDA, &permute_cols);
-
   // Marlin Optimized Quantized GEMM (supports GPTQ, AWQ, FP8, NVFP4, MXFP4).
   ops.def(
       "marlin_gemm(Tensor a, Tensor? c_or_none, Tensor b_q_weight, "
@@ -489,8 +486,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "                        Tensor! problem_sizes1, Tensor! problem_sizes2, "
       "                        Tensor! input_permutation, "
       "                        Tensor! output_permutation, int num_experts, "
-      "                        int n, int k, Tensor? blockscale_offsets) -> "
-      "()");
+      "                        int n, int k, Tensor? blockscale_offsets, "
+      "                        bool is_gated) -> ()");
   ops.impl("get_cutlass_moe_mm_data", torch::kCUDA, &get_cutlass_moe_mm_data);
 
   // compute per-expert problem sizes from expert_first_token_offset
@@ -564,10 +561,21 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
 
   // Compute NVFP4 block quantized tensor.
   ops.def(
-      "scaled_fp4_quant(Tensor! output, Tensor input,"
-      "                 Tensor! output_scale, Tensor input_scale, bool "
-      "is_sf_swizzled_layout) -> ()");
-  ops.impl("scaled_fp4_quant", torch::kCUDA, &scaled_fp4_quant);
+      "scaled_fp4_quant(Tensor input,"
+      "                 Tensor input_scale, bool "
+      "is_sf_swizzled_layout) -> (Tensor, Tensor)");
+  ops.impl("scaled_fp4_quant", torch::kCUDA, &scaled_fp4_quant_func);
+
+  // Out variant
+  // TODO: Add {at::Tag::out_variant} tag and update all call sites
+  // to use the functional variant once vLLM upgrades PyTorch.
+  // See pytorch/pytorch#176117.
+  ops.def(
+      "scaled_fp4_quant.out(Tensor input,"
+      "                     Tensor input_scale, bool "
+      "is_sf_swizzled_layout, *, Tensor(a!) output, Tensor(b!) output_scale) "
+      "-> ()");
+  ops.impl("scaled_fp4_quant.out", torch::kCUDA, &scaled_fp4_quant_out);
 
   // Compute NVFP4 experts quantization.
   ops.def(

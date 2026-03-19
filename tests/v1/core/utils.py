@@ -47,7 +47,7 @@ def create_scheduler(
     enable_prefix_caching: bool = False,
     long_prefill_token_threshold: int = 0,
     disable_chunked_mm_input: bool = False,
-    use_kv_connector: None | bool | MockKVConfig = None,
+    use_kv_connector: None | bool | str | MockKVConfig = None,
     num_blocks: int = 10000,
     block_size: int = 16,
     max_model_len: int | None = None,
@@ -106,6 +106,11 @@ def create_scheduler(
                 "matched_tokens": use_kv_connector.matched_tokens,
                 "is_async": use_kv_connector.is_async,
             },
+        )
+    elif isinstance(use_kv_connector, str):
+        kv_transfer_config = KVTransferConfig(
+            kv_connector=use_kv_connector,
+            kv_role="kv_both",
         )
     elif use_kv_connector:
         kv_transfer_config = KVTransferConfig(
