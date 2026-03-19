@@ -115,7 +115,7 @@ FUSED_OPS: dict[FusedRMSQuantKey, OpOverload] = {
 
 STATIC_FP4_QUANT_OP: OpOverload | None = None
 if current_platform.is_cuda() and hasattr(torch.ops._C, "scaled_fp4_quant"):
-    STATIC_FP4_QUANT_OP = torch.ops._C.scaled_fp4_quant.default
+    STATIC_FP4_QUANT_OP = torch.ops._C.scaled_fp4_quant.out
 
 FLASHINFER_RMSNORM_FP4QUANT_OP: OpOverload | None = None
 FLASHINFER_ADD_RMSNORM_FP4QUANT_OP: OpOverload | None = None
