@@ -4,7 +4,7 @@
 import functools
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Literal, TypeAlias, cast
+from typing import Literal, TypeAlias
 
 import torch
 
@@ -39,18 +39,6 @@ def get_conv_state_layout() -> ConvStateLayoutType:
             layout,
         )
         return layout
-
-    # Fall back to connector preference (e.g. NIXL → DW).
-    try:
-        from vllm.distributed.kv_transfer.kv_connector.utils import (
-            get_kv_connector_conv_state_layout,
-        )
-
-        connector_layout = get_kv_connector_conv_state_layout()
-        if connector_layout is not None:
-            return cast(ConvStateLayoutType, connector_layout)
-    except Exception:
-        pass
 
     return "SD"
 
