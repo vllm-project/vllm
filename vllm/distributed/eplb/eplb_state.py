@@ -569,7 +569,6 @@ class EplbState:
                         model_state=eplb_model_state,
                         result=result,
                         ep_group=ep_group,
-                        is_profile=is_profile,
                     )
 
         if self.expert_rearrangement_step >= self.expert_rearrangement_step_interval:
@@ -848,7 +847,6 @@ class EplbState:
         model_state: EplbModelState,
         result: AsyncEPLBLayerResult,
         ep_group: ProcessGroup,
-        is_profile: bool = False,
     ) -> None:
         move_from_buffer(
             expert_weights=model_state.model.expert_weights[result.layer_idx],
@@ -871,23 +869,12 @@ class EplbState:
             result.layer_idx,
         )
         if result.layer_idx == model_state.model.num_moe_layers - 1:
-            self.post_eplb(model_state, result, is_profile)
             model_state.rebalanced = False
             logger.info(
                 "finish async transfer for model %s rank %d",
                 model_state.model_name,
                 ep_group.rank(),
             )
-
-    def post_eplb(
-        self,
-        model_state: EplbModelState,
-        result: AsyncEPLBLayerResult,
-        is_profile: bool = False,
-    ) -> None:
-        # Maps are owned by the result object and will be garbage-collected
-        # naturally; nothing to clear here.
-        pass
 
     def _allreduce_list(self, tensor_list: list[torch.Tensor]) -> list[torch.Tensor]:
         """
