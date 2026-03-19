@@ -17,9 +17,9 @@ IMAGE = ImageAsset("paper-11").pil_image_ext(ext="png").convert("RGB")
 PROMPT = "</s><s><predict_bbox><predict_classes><output_markdown>"
 
 
-class DummyLogprobs(dict[int, float]):
+class DummyLogprobs(dict[int, Logprob]):
     def __init__(self, vocab_ids: Iterable[int]):
-        super().__init__(dict.fromkeys(vocab_ids, 0.0))
+        super().__init__(dict.fromkeys(vocab_ids, Logprob(0.0)))
 
     def __repr__(self):
         return "DummyLogprobs()"
