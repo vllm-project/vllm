@@ -306,6 +306,8 @@ class Dashboard:
 
     def fetch_loop(self):
         self._fetch_model_name()
+        if not self.demo:
+            post_enable(self.host, self.port, True)
         while self.running:
             new = self.demo_src.fetch() if self.demo else fetch_stats(self.host, self.port)
             new.model_name = self.model_name
