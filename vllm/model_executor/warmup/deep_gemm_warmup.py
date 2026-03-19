@@ -19,6 +19,7 @@ from vllm.model_executor.layers.fused_moe.triton_deep_gemm_moe import (
 )
 from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod
+from vllm.model_executor.layers.quantization.mxfp8 import Mxfp8OnlineLinearMethod
 from vllm.tracing import instrument
 from vllm.utils.deep_gemm import (
     fp8_gemm_nt,
@@ -136,8 +137,9 @@ def _fp8_linear_may_use_deep_gemm(module: torch.nn.Module) -> bool:
     if not (
         isinstance(module, LinearBase)
         and isinstance(module.quant_method, Fp8LinearMethod)
-        and module.quant_method.block_quant
-        and not module.quant_method.use_marlin
+        and not isinstance(module.quant_method, Mxfp8OnlineLinearMethod)
+        and getattr(module.quant_method, "block_quant", False)
+        and not getattr(module.quant_method, "use_marlin", True)
     ):
         return False
 
