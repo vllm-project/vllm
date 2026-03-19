@@ -1763,7 +1763,7 @@ def scaled_fp4_experts_quant(
     output = torch.empty(
         m_numtopk, k // 2, device=input_tensor.device, dtype=torch.uint8
     )
-    output_scales = torch.empty(
+    output_scales = torch.zeros(
         MAX_TOKENS_PER_EXPERT * topk,
         padded_k,
         dtype=torch.int32,
@@ -1828,7 +1828,7 @@ def silu_and_mul_scaled_fp4_experts_quant(
     output = torch.empty(
         m_numtopk, k // 2, device=input_tensor.device, dtype=torch.uint8
     )
-    output_scales = torch.empty(
+    output_scales = torch.zeros(
         MAX_TOKENS_PER_EXPERT * topk,
         padded_k,
         dtype=torch.int32,
