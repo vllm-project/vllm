@@ -17,6 +17,7 @@ from vllm.utils.system_utils import set_env_var
 from .vllm_inductor_pass import VllmInductorPass
 
 if rocm_aiter_ops.is_enabled():
+    from .fusion.allreduce_rms_fusion import RocmAiterAllReduceFusionPass
     from .fusion.rocm_aiter_fusion import (
         RocmAiterRMSNormQuantFusionPass,
         RocmAiterSiluMulFp8GroupQuantFusionPass,
@@ -122,7 +123,10 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
                     self.passes += [AsyncTPPass(config)]
 
             if self.pass_config.fuse_allreduce_rms:
-                self.passes += [AllReduceFusionPass(config)]
+                if current_platform.is_cuda():
+                    self.passes += [AllReduceFusionPass(config)]
+                if rocm_aiter_ops.is_enabled():
+                    self.passes += [RocmAiterAllReduceFusionPass(config)]
 
             if self.pass_config.fuse_norm_quant:
                 self.passes += [RMSNormQuantFusionPass(config)]
