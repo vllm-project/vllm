@@ -1635,17 +1635,20 @@ def unified_mla_attention_with_output(
     if slot_mapping is None and attn_metadata is not None:
         if hasattr(attn_metadata, "slot_mapping"):
             slot_mapping = attn_metadata.slot_mapping
-            logger.info_once(
-                "[custom op] Retrieved slot_mapping from attn_metadata: %s",
-                (slot_mapping.shape if slot_mapping is not None else "None"),
-                scope="local",
-            )
+            # DEBUG: Commented out - logs once per worker (8x with TP8)
+            # logger.info_once(
+            #     "[custom op] Retrieved slot_mapping from attn_metadata: %s",
+            #     (slot_mapping.shape if slot_mapping is not None else "None"),
+            #     scope="local",
+            # )
         else:
-            logger.info_once(
-                f"[custom op] attn_metadata type={type(attn_metadata).__name__}, "
-                f"has slot_mapping attr={hasattr(attn_metadata, 'slot_mapping')}",
-                scope="local",
-            )
+            # DEBUG: Commented out - logs once per worker (8x with TP8)
+            # logger.info_once(
+            #     f"[custom op] attn_metadata type={type(attn_metadata).__name__}, "
+            #     f"has slot_mapping attr={hasattr(attn_metadata, 'slot_mapping')}",
+            #     scope="local",
+            # )
+            pass
 
     # positions and slot_mapping come from parameters (passed through compiled graph)
     # rotary_emb retrieved from layer (stored as class attribute during __init__)
@@ -1655,13 +1658,14 @@ def unified_mla_attention_with_output(
     #     f"{'OK' if rotary_emb is not None else 'None'}"
     # )
 
-    logger.info_once(
-        "[custom op] PARAMETERS: positions=%s, slot_mapping=%s, layer=%s",
-        "exists" if positions is not None else "None",
-        "exists" if slot_mapping is not None else "None",
-        layer_name,
-        scope="local",
-    )
+    # DEBUG: Commented out - logs once per worker (8x with TP8)
+    # logger.info_once(
+    #     "[custom op] PARAMETERS: positions=%s, slot_mapping=%s, layer=%s",
+    #     "exists" if positions is not None else "None",
+    #     "exists" if slot_mapping is not None else "None",
+    #     layer_name,
+    #     scope="local",
+    # )
 
     # Determine rope_applied and use_fused_path from layer config
     # STATIC decision based on whether AITER kernels available
