@@ -78,9 +78,10 @@ def patch_hf_vision_attn_for_rocm(model):
     inner = getattr(model, "model", model)
 
     # Isaac-style: inner.vision_embedding[0].encoder
-    if hasattr(inner, "vision_embedding"):
+    if hasattr(inner, "vision_embedding") and inner.vision_embedding:
         vit = inner.vision_embedding[0]
-        _patch_encoder_layers(vit.encoder)
+        if hasattr(vit, "encoder"):
+            _patch_encoder_layers(vit.encoder)
 
     # SigLIP-based (e.g. Nemotron VL): inner.vision_model.vision_model.encoder
     # or inner.vision_model.encoder
