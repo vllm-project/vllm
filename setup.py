@@ -980,6 +980,7 @@ setup(
         "runai": ["runai-model-streamer[s3,gcs,azure] >= 0.15.7"],
         "audio": [
             "av",
+            "resampy",
             "scipy",
             "soundfile",
             "mistral_common[audio]",
