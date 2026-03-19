@@ -20,12 +20,11 @@ from vllm.distributed import (
     tensor_model_parallel_all_gather,
 )
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import FusedMoE, GateLinear
 from vllm.model_executor.layers.fused_moe.config import FusedMoEParallelConfig
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     QKVParallelLinear,
-    ReplicatedLinear,
     RowParallelLinear,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -47,7 +46,13 @@ from vllm.sequence import IntermediateTensors
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backend import AttentionType
 
-from .interfaces import SupportsEagle3, SupportsLoRA, SupportsPP
+from .interfaces import (
+    EagleModelMixin,
+    SupportsEagle,
+    SupportsEagle3,
+    SupportsLoRA,
+    SupportsPP,
+)
 from .utils import (
     AutoWeightsLoader,
     WeightsMapper,
@@ -169,13 +174,11 @@ class MLPBlock(torch.nn.Module):
         self.hidden_size = config.hidden_size
         self.experts_per_token = config.num_experts_per_tok
         self.world_size = dist.get_world_size() if dist.is_initialized() else 1
-        self.router = ReplicatedLinear(
+        self.router = GateLinear(
             config.hidden_size,
             config.num_local_experts,
             bias=True,
-            quant_config=None,
             prefix=f"{prefix}.router",
-            return_bias=False,
         )
         assert config.intermediate_size % self.world_size == 0
         self.experts = FusedMoE(
@@ -203,7 +206,7 @@ class MLPBlock(torch.nn.Module):
                 self, x[:, : self.hidden_size], self.router.weight, self.router.bias
             )
         else:
-            g = self.router(x)
+            g, _ = self.router(x)
         x = self.experts(hidden_states=x, router_logits=g)[:, : self.hidden_size]
 
         if self.is_sequence_parallel:
@@ -256,7 +259,7 @@ class TransformerBlock(torch.nn.Module):
 
 
 @support_torch_compile
-class GptOssModel(nn.Module):
+class GptOssModel(nn.Module, EagleModelMixin):
     def __init__(
         self,
         *,
@@ -267,7 +270,6 @@ class GptOssModel(nn.Module):
         self.config = vllm_config.model_config.hf_config
         self.quant_config = vllm_config.quant_config
         self.parallel_config = vllm_config.parallel_config
-        self.config.hidden_size = self.config.hidden_size
         self.embedding = VocabParallelEmbedding(
             self.config.vocab_size,
             self.config.hidden_size,
@@ -285,7 +287,6 @@ class GptOssModel(nn.Module):
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
             ["hidden_states", "residual"], self.config.hidden_size
         )
-        self.aux_hidden_state_layers = tuple[int, ...]()
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embedding(input_ids)
@@ -309,12 +310,13 @@ class GptOssModel(nn.Module):
             x = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        aux_hidden_states = []
+        aux_hidden_states = self._maybe_add_hidden_state(
+            [], self.start_layer, x, residual
+        )
         for i in range(self.start_layer, self.end_layer):
             layer = self.layers[i]
-            if i in self.aux_hidden_state_layers:
-                aux_hidden_states.append(x if residual is None else x + residual)
             x, residual = layer(x, positions, residual)
+            self._maybe_add_hidden_state(aux_hidden_states, i + 1, x, residual)
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({"hidden_states": x, "residual": residual})
         x, _ = self.norm(x, residual)
@@ -1141,7 +1143,9 @@ class GptOssModel(nn.Module):
             )
 
 
-class GptOssForCausalLM(nn.Module, SupportsPP, SupportsEagle3, SupportsLoRA):
+class GptOssForCausalLM(
+    nn.Module, SupportsPP, SupportsEagle, SupportsEagle3, SupportsLoRA
+):
     is_3d_moe_weight: bool = True
     packed_modules_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
 
@@ -1196,13 +1200,6 @@ class GptOssForCausalLM(nn.Module, SupportsPP, SupportsEagle3, SupportsLoRA):
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors
         )
-
-    def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
-        self.model.aux_hidden_state_layers = layers
-
-    def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:
-        num_layers = len(self.model.layers)
-        return (2, num_layers // 2, num_layers - 3)
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)

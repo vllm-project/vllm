@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import base64
 from pathlib import Path
 from unittest.mock import patch
 
+import librosa
 import numpy as np
+import pybase64 as base64
 import pytest
 
 from vllm.multimodal.media import AudioMediaIO
@@ -71,3 +72,13 @@ def test_audio_media_io_encode_base64(dummy_audio):
         decoded = base64.b64decode(out)
         assert decoded == b"dummy_wav_data"
         mock_write.assert_called_once()
+
+
+def test_audio_media_io_from_video(video_assets):
+    audio_io = AudioMediaIO()
+    video_path = video_assets[0].video_path
+    with open(video_path, "rb") as f:
+        audio, sr = audio_io.load_bytes(f.read())
+    audio_ref, sr_ref = librosa.load(video_path, sr=None)
+    assert sr == sr_ref
+    np.testing.assert_allclose(audio_ref, audio, atol=1e-4)
