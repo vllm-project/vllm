@@ -180,14 +180,15 @@ class Qwen3_5GatedDeltaNet(Qwen3NextGatedDeltaNet):
         # ============================================================
         # Part 1: Input Projection
         # ============================================================
-        mixed_qkvz, ba = torch.ops.vllm.gdn_in_proj(
-            hidden_states,
-            self.in_proj_qkvz.weight.shape[0],
-            self.in_proj_ba.weight.shape[0],
-            self.prefix,
-        )
         qkv_size = (self.key_dim * 2 + self.value_dim) // self.tp_size
         z_size = self.value_dim // self.tp_size
+        ba_size = (self.num_v_heads * 2) // self.tp_size
+        mixed_qkvz, ba = torch.ops.vllm.gdn_in_proj(
+            hidden_states,
+            qkv_size + z_size,
+            ba_size,
+            self.prefix,
+        )
         mixed_qkv, z = mixed_qkvz.split([qkv_size, z_size], dim=-1)
         z = z.reshape(z.size(0), -1, self.head_v_dim)
         b, a = ba.chunk(2, dim=-1)
