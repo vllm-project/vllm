@@ -4,9 +4,7 @@ import torch
 from transformers import BatchFeature
 from transformers.processing_utils import ProcessorMixin
 
-from vllm.multimodal.inputs import (
-    VisionChunk,
-)
+from vllm.multimodal.inputs import VisionChunk
 
 
 class KimiK25Processor(ProcessorMixin):
