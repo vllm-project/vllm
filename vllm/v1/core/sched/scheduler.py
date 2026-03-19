@@ -2199,8 +2199,6 @@ class Scheduler(SchedulerInterface):
                 # collect invalid block and all downstream dependent blocks
                 if evict_blocks:
                     blocks_to_evict.update(req_block_ids[idx:])
-            print("_update_requests_with_invalid_blocks")
-            print(request.request_id, request.num_computed_tokens)
 
             if is_affected:
                 if not marked_invalid_block:
@@ -2239,20 +2237,9 @@ class Scheduler(SchedulerInterface):
             )
         )
 
-        # FIX: For async loading, blocks are not physically shared
-        # (delay_cache_blocks=True prevents cache_blocks() from being called,
-        # so no two requests hold the same physical block). Therefore,
-        # InvalidBlockReport for one request's block cannot directly match
-        # another request's block IDs.
-        #
-        # However, if any async request had a load failure, all other
-        # WAITING_FOR_REMOTE_KVS requests that overlap the failed token range
-        # must also have their credit reset, because they were scheduled in
-        # the same async load batch and their loads are equally unreliable.
-        #
-        # We identify "siblings" by checking whether their num_computed_tokens
-        # overlaps with the failed range: any request whose credit extends into
-        # a range that is now known to be invalid must be truncated.
+        # Handle cases when other request's num computed tokens need to be modified
+        # The logic could be more clean if handle in cache_blocks but don't want
+        # to modify that part heavily
         async_load_reqs_list = [
             req
             for req in self.skipped_waiting
@@ -2273,10 +2260,10 @@ class Scheduler(SchedulerInterface):
                 # beyond the known-invalid range, it must also be reset.
                 if req.num_computed_tokens > min_valid_tokens:
                     num_failed_tokens += req.num_computed_tokens - min_valid_tokens
+                    req.num_computed_tokens = min_valid_tokens
                     req.num_external_computed_tokens -= (
                         req.num_computed_tokens - min_valid_tokens
                     )
-                    req.num_computed_tokens = min_valid_tokens
                     async_failed_req_ids.add(req.request_id)
 
         total_failed_requests = len(async_failed_req_ids)
