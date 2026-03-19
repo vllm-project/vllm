@@ -882,31 +882,33 @@ async def run_benchmark(
             config=config, dp_size=dp_size,
         )
 
-        # Drain engine pipeline after warmup to prevent race with first
-        # benchmark iteration. Wait for engine to finish processing all
-        # warmup requests (XLA compilation can take 10+ seconds), then
-        # sleep/wake to ensure clean state.
-        drain_deadline = time.perf_counter() + 60.0
-        while time.perf_counter() < drain_deadline:
-            try:
-                resp = await session.get(
-                    f"{rotator.all()[0]}/debug/batch_info")
-                if resp.status == 200:
-                    info = await resp.json()
-                    if info.get("num_running", 0) == 0 and info.get("num_waiting", 0) == 0:
-                        break
-                elif resp.status == 404:
-                    break  # No batch_info endpoint, skip polling
-            except Exception:
-                pass
-            await asyncio.sleep(0.5)
+        # Drain engine pipeline after warmup. Sleep to pause scheduling,
+        # then poll step_stats until total_steps stops increasing (= executor
+        # finished all in-flight steps including XLA compilation).
         await call_debug_endpoint(
             session, rotator, "/debug/sleep", {"level": "0"})
-        await asyncio.sleep(0.5)
+        last_total = -1
+        stable_count = 0
+        drain_deadline = time.perf_counter() + 60.0
+        while stable_count < 3 and time.perf_counter() < drain_deadline:
+            try:
+                resp = await session.get(
+                    f"{rotator.all()[0]}/debug/step_stats")
+                if resp.status == 200:
+                    stats = await resp.json()
+                    current_total = stats.get("total_steps", 0) + stats.get("prefill_steps", 0) + stats.get("decode_steps", 0)
+                    if current_total == last_total:
+                        stable_count += 1
+                    else:
+                        stable_count = 0
+                        last_total = current_total
+            except Exception:
+                pass
+            await asyncio.sleep(1.0)
         await call_debug_endpoint(session, rotator, "/debug/wake_up")
         await call_debug_endpoint(
             session, rotator, "/debug/step_stats/reset")
-        logger.info("Engine drained after warmup")
+        logger.info("Engine drained after warmup (step_stats stable)")
 
         # Sweep all parameter combinations
         param_combos = list(

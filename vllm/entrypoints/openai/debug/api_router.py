@@ -45,10 +45,10 @@ async def debug_batch_info(request: Request):
     For DP>1, sums request counts across all DP engine cores.
     """
     client = engine_client(request)
-    all_counts = await client.engine_core.call_utility_async(
+    counts = await client.engine_core.call_utility_async(
         "get_request_counts")
-    total_running = sum(c[0] for c in all_counts)
-    total_waiting = sum(c[1] for c in all_counts)
+    # counts is a tuple (num_running, num_waiting) from a single engine core
+    total_running, total_waiting = counts
     return JSONResponse(content={
         "num_running": total_running,
         "num_waiting": total_waiting,
