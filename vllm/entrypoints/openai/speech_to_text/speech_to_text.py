@@ -43,7 +43,7 @@ from vllm.logger import init_logger
 from vllm.logprobs import FlatLogprobs, Logprob
 from vllm.model_executor.models import SupportsTranscription
 from vllm.multimodal.audio import get_audio_duration, split_audio
-from vllm.multimodal.media.audio import load_audio_pyav
+from vllm.multimodal.media.audio import load_audio
 from vllm.outputs import RequestOutput
 from vllm.renderers.inputs import DictPrompt, EncoderDecoderDictPrompt
 from vllm.renderers.inputs.preprocess import parse_enc_dec_prompt, parse_model_prompt
@@ -195,7 +195,7 @@ class OpenAISpeechToText(OpenAIServing):
         # pre-requisite for chunking, as it assumes Whisper SR.
         try:
             with io.BytesIO(audio_data) as buf:
-                y, sr = load_audio_pyav(buf, sr=self.asr_config.sample_rate)
+                y, sr = load_audio(buf, sr=self.asr_config.sample_rate)
         except Exception as exc:
             raise ValueError("Invalid or unsupported audio file.") from exc
 

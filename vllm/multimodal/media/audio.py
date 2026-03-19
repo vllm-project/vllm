@@ -25,10 +25,26 @@ except ImportError:
     soundfile = PlaceholderModule("soundfile")  # type: ignore[assignment]
 
 
+try:
+    import resampy
+except ImportError:
+    resampy = PlaceholderModule("resampy")  # type: ignore[assignment]
+
+
+# Public libsndfile error codes exposed via `soundfile.LibsndfileError.code`, soundfile
+# being librosa's main backend. Used to validate if an audio loading error is due to a
+# server error vs a client error (invalid audio file).
+# 1 = unrecognised format      (file is not a supported audio container)
+# 3 = malformed file           (corrupt or structurally invalid audio)
+# 4 = unsupported encoding     (codec not supported by this libsndfile build)
+_BAD_SF_CODES = {1, 3, 4}
+
+
 def load_audio_pyav(
     path: BytesIO | Path | str,
     *,
-    sr: float | None = None,
+    sr: float | None = 22050,
+    mono: bool = True,
 ) -> tuple[npt.NDArray, float]:
     """Load an audio file using PyAV (FFmpeg), returning float32 mono waveform.
 
@@ -84,8 +100,50 @@ def load_audio_pyav(
     if not chunks:
         raise ValueError("No audio found in the video.")
 
-    audio = np.concatenate(chunks, axis=-1).squeeze(0).astype(np.float32)
+    audio = np.concatenate(chunks, axis=-1).astype(np.float32)
+    if mono and audio.ndim > 1:
+        audio = np.mean(audio, axis=0)
+
     return audio, sr
+
+
+def load_audio_soundfile(
+    path: BytesIO | Path | str,
+    *,
+    sr: float | None = 22050,
+    mono: bool = True,
+) -> tuple[np.ndarray, int]:
+    """Load audio via soundfile"""
+    with soundfile.SoundFile(path) as f:
+        native_sr = f.samplerate
+        y = f.read(dtype="float32", always_2d=False).T
+
+    if mono and y.ndim > 1:
+        y = np.mean(y, axis=tuple(range(y.ndim - 1)))
+
+    if sr is not None and sr != native_sr:
+        y = resampy.resample(y, sr_orig=native_sr, sr_new=sr)
+        return y, int(sr)
+    return y, native_sr
+
+
+def load_audio(
+    path: BytesIO | Path | str,
+    *,
+    sr: float | None = 22050,
+    mono: bool = True,
+):
+    try:
+        return load_audio_soundfile(path, sr=sr, mono=mono)
+    except soundfile.LibsndfileError as exc:
+        # Only fall back for known format-detection failures.
+        # Re-raise anything else (e.g. corrupt but recognised format).
+        if exc.code not in _BAD_SF_CODES:
+            raise
+        try:
+            return load_audio_pyav(path, sr=sr, mono=mono)
+        except Exception as pyav_exc:
+            raise ValueError("Invalid or unsupported audio file.") from pyav_exc
 
 
 class AudioMediaIO(MediaIO[tuple[npt.NDArray, float]]):

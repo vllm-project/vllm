@@ -17,6 +17,11 @@ except ImportError:
     av = PlaceholderModule("av")  # type: ignore[assignment]
 
 try:
+    import resampy
+except ImportError:
+    resampy = PlaceholderModule("resampy")  # type: ignore[assignment]
+
+try:
     import scipy.signal as scipy_signal
 except ImportError:
     scipy_signal = PlaceholderModule("scipy").placeholder_attr("signal")  # type: ignore[assignment]
@@ -224,6 +229,15 @@ def resample_audio_pyav(
     return result[:expected_len]
 
 
+def resample_audio_resampy(
+    audio: npt.NDArray[np.floating],
+    *,
+    orig_sr: float,
+    target_sr: float,
+) -> npt.NDArray[np.floating]:
+    return resampy.resample(audio, orig_sr=orig_sr, target_sr=target_sr)
+
+
 def resample_audio_scipy(
     audio: npt.NDArray[np.floating],
     *,
@@ -243,7 +257,7 @@ class AudioResampler:
     def __init__(
         self,
         target_sr: float | None = None,
-        method: Literal["pyav", "scipy"] = "pyav",
+        method: Literal["pyav", "resampy", "scipy"] = "resampy",
     ):
         self.target_sr = target_sr
         self.method = method
@@ -267,6 +281,10 @@ class AudioResampler:
             return audio
         if self.method == "pyav":
             return resample_audio_pyav(audio, orig_sr=orig_sr, target_sr=self.target_sr)
+        if self.method == "resampy":
+            return resample_audio_resampy(
+                audio, orig_sr=orig_sr, target_sr=self.target_sr
+            )
         elif self.method == "scipy":
             return resample_audio_scipy(
                 audio, orig_sr=orig_sr, target_sr=self.target_sr
