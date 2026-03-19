@@ -184,13 +184,11 @@ class Scheduler(SchedulerInterface):
 
         # Encoder-related.
         # Calculate encoder cache size if applicable
-        self.supports_mm_inputs = mm_registry.supports_multimodal_inputs(
+        supports_mm_inputs = mm_registry.supports_multimodal_inputs(
             vllm_config.model_config
         )
-        self.mm_budget = mm_budget = (
-            MultiModalBudget(vllm_config, mm_registry)
-            if self.supports_mm_inputs
-            else None
+        mm_budget = (
+            MultiModalBudget(vllm_config, mm_registry) if supports_mm_inputs else None
         )
 
         # NOTE: Text-only encoder-decoder models are implemented as
@@ -912,9 +910,7 @@ class Scheduler(SchedulerInterface):
         # 2. Wrap up all the KV cache load / save ops into an opaque object
         # 3. Clear the internal states of the connector
         if self.connector is not None:
-            meta: KVConnectorMetadata = self.connector.build_connector_meta(
-                scheduler_output
-            )
+            meta = self._build_kv_connector_meta(self.connector, scheduler_output)
             scheduler_output.kv_connector_metadata = meta
 
         # Build the connector meta for ECConnector
@@ -927,6 +923,11 @@ class Scheduler(SchedulerInterface):
         with record_function_or_nullcontext("schedule: update_after_schedule"):
             self._update_after_schedule(scheduler_output)
         return scheduler_output
+
+    def _build_kv_connector_meta(
+        self, connector: KVConnectorBase_V1, scheduler_output: SchedulerOutput
+    ) -> KVConnectorMetadata:
+        return connector.build_connector_meta(scheduler_output)
 
     def _preempt_request(self, request: Request, timestamp: float) -> None:
         """Preempt a request and put it back to the waiting queue.
