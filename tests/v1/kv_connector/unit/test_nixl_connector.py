@@ -2007,7 +2007,7 @@ def test_transfer_failure_logging(
     connector = NixlConnector(
         vllm_config,
         KVConnectorRole.WORKER,
-        make_kv_cache_config(block_size=16, hma_enabled=enable_hma),
+        make_kv_cache_config(block_size=16, swa_enabled=enable_hma),
     )
     connector.connector_worker = FakeNixlConnectorWorker(
         vllm_config,
