@@ -39,7 +39,11 @@ from vllm.multimodal.processing import (
 )
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.step3_vl import Step3VisionEncoderConfig
-from vllm.transformers_utils.processors.step3_vl import Step3VLProcessor
+from vllm.transformers_utils.processors.step3_vl import (
+    MAX_IMAGE_SIZE,
+    Step3VLImageProcessor,
+    Step3VLProcessor,
+)
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
@@ -86,10 +90,20 @@ Step3VLImageInputs: TypeAlias = Step3VLImagePixelInputs | Step3VLImageEmbeddingI
 
 
 class Step3VLProcessingInfo(BaseProcessingInfo):
+    def get_image_processor(self, **kwargs):
+        config = self.get_hf_config()
+
+        kwargs.setdefault(
+            "enable_patch",
+            getattr(config.vision_config, "enable_patch", True),
+        )
+
+        return Step3VLImageProcessor(**kwargs)
+
     def get_hf_processor(self) -> Step3VLProcessor:
         return Step3VLProcessor(
-            self.get_hf_config(),
-            self.get_tokenizer(),
+            tokenizer=self.get_tokenizer(),
+            image_processor=self.get_image_processor(),
         )
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
@@ -97,9 +111,10 @@ class Step3VLProcessingInfo(BaseProcessingInfo):
 
     def get_max_image_tokens(self) -> int:
         hf_processor = self.get_hf_processor()
-        return hf_processor.get_num_image_tokens(
-            self.get_image_size_with_most_features().width,
-            self.get_image_size_with_most_features().height,
+        target_width, target_height = self.get_image_size_with_most_features()
+
+        return hf_processor.image_processor.get_num_image_tokens(
+            target_width, target_height
         )
 
     def get_mm_max_tokens_per_item(
@@ -110,20 +125,7 @@ class Step3VLProcessingInfo(BaseProcessingInfo):
         return {"image": self.get_max_image_tokens()}
 
     def get_image_size_with_most_features(self) -> ImageSize:
-        return ImageSize(3024, 3024)
-
-    def get_num_mm_tokens(self, mm_data: MultiModalDataDict) -> int:
-        if len(mm_data) != 1 or "image" not in mm_data:
-            raise ValueError("mm_data could only contain one key 'image' for steo1o")
-
-        image_data = mm_data["image"]
-        if not isinstance(image_data, (list, tuple)):
-            image_data = [image_data]
-
-        return sum(
-            self.get_hf_processor().get_num_image_tokens(img.width, img.height)
-            for img in image_data
-        )
+        return ImageSize(MAX_IMAGE_SIZE, MAX_IMAGE_SIZE)
 
 
 class Step3VLDummyInputsBuilder(BaseDummyInputsBuilder[Step3VLProcessingInfo]):
@@ -167,11 +169,12 @@ class Step3VLMultiModalProcessor(BaseMultiModalProcessor[Step3VLProcessingInfo])
             num_patches = int(out_item["num_patches"].data)
             if num_patches > 0:
                 patch_newline_mask = out_item["patch_newline_mask"].data
-                image_repl_ids = hf_processor._get_image_repl_features(
+                image_repl_ids = hf_processor._get_image_repl_feature_ids(
                     1, num_patches, patch_newline_mask.tolist()
-                )[1]
+                )
             else:
-                image_repl_ids = hf_processor._get_image_repl_features(1, 0, None)[1]
+                image_repl_ids = hf_processor._get_image_repl_feature_ids(1, 0, None)
+
             return PromptUpdateDetails.select_token_id(
                 seq=image_repl_ids,
                 embed_token_id=image_placeholder_token_id,
