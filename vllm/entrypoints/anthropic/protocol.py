@@ -187,7 +187,7 @@ class AnthropicMessagesResponse(BaseModel):
     stop_sequence: str | None = None
     usage: AnthropicUsage | None = None
 
-    # vLLM-specific fields that are not in OpenAI spec
+    # vLLM-specific fields that are not in Anthropic spec
     kv_transfer_params: dict[str, Any] | None = Field(
         default=None, description="KVTransfer parameters."
     )
