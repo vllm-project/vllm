@@ -594,7 +594,24 @@ class Worker(WorkerBase):
                     warmup_sizes.append(compile_range.end)
 
         # We skip EPLB here since we don't want to record dummy metrics
-        for size in sorted(warmup_sizes, reverse=True):
+        max_num_tokens = self.model_runner.max_num_tokens
+        invalid_warmup_sizes = sorted(
+            {size for size in warmup_sizes if size > max_num_tokens},
+            reverse=True,
+        )
+        if invalid_warmup_sizes:
+            logger.warning(
+                "Skipping invalid compile warmup sizes %s because they exceed "
+                "max_num_tokens=%d.",
+                invalid_warmup_sizes,
+                max_num_tokens,
+            )
+
+        valid_warmup_sizes = sorted(
+            {size for size in warmup_sizes if size <= max_num_tokens},
+            reverse=True,
+        )
+        for size in valid_warmup_sizes:
             logger.info("Compile and warming up model for size %d", size)
             self.model_runner._dummy_run(size, skip_eplb=True, remove_lora=False)
         self.model_runner.maybe_remove_all_loras(self.model_runner.lora_config)
