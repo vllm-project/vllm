@@ -71,6 +71,9 @@ class DPCoordinator:
         )
 
         local_only_eng = dp_size == parallel_config.data_parallel_size_local
+        # NOTE(yongji): handling scaling from intra-node to inter-node
+        if parallel_config.enable_elastic_ep:
+            local_only_eng = False
         back_publish_address = get_engine_client_zmq_addr(local_only_eng, host)
         back_output_address = get_engine_client_zmq_addr(local_only_eng, host)
 
@@ -101,8 +104,10 @@ class DPCoordinator:
         """Returns tuple of ZMQ input address, output address."""
         return self.coord_in_address, self.coord_out_address
 
-    def close(self):
-        self._finalizer()
+    def shutdown(self, timeout: float | None = None) -> None:
+        """Shutdown coordinator process with configurable timeout."""
+        if self._finalizer.detach() is not None:
+            shutdown([self.proc], timeout=timeout)
 
 
 class EngineState:
@@ -201,6 +206,7 @@ class DPCoordinatorProc:
 
             poller = zmq.Poller()
             poller.register(publish_front, zmq.POLLIN)
+            poller.register(publish_back, zmq.POLLIN)
             poller.register(output_back, zmq.POLLIN)
             last_publish_time = 0
             while True:
@@ -231,6 +237,22 @@ class DPCoordinatorProc:
                 events = dict(events)
                 wave_state_changed = False
 
+                if publish_back in events:
+                    buffer = publish_back.recv()
+                    if buffer == b"\x01":
+                        # NOTE(yongji): newly started engine subscribed
+                        # We need to send READY message here instead of receiving
+                        # SCALE_ELASTIC_EP notification from engine core client
+                        # as SCALE_ELASTIC_EP is only sent when
+                        # new engines finished initialization.
+                        # Subscription message, on the other hand, is sent
+                        # by each engine during initialization
+                        publish_back.send(b"READY")
+                    elif buffer != b"\x00":
+                        logger.error(
+                            "DP Coordinator received unexpected message from engines"
+                        )
+
                 if publish_front in events:
                     buffer = publish_front.recv()
                     if buffer in (b"\x01", b"\x00"):
@@ -259,7 +281,6 @@ class DPCoordinatorProc:
                             # current_wave
                             # we note that 0 is the wave number for the new
                             # engine
-                            engines_running = False
                             logger.info(
                                 "DPCoordinator scaled up from %s to %s engines",
                                 current_count,

@@ -173,6 +173,9 @@ VLM_TEST_SETTINGS = {
         marks=[
             pytest.mark.core_model,
         ],
+        vllm_runner_kwargs={"attention_backend": "TRITON_ATTN"}
+        if current_platform.is_rocm()
+        else {},
     ),
     "ultravox": VLMTestInfo(
         models=["fixie-ai/ultravox-v0_5-llama-3_2-1b"],
@@ -203,9 +206,7 @@ VLM_TEST_SETTINGS = {
             "model_impl": "transformers",
             "default_torch_num_threads": 1,
         },
-        # FIXME: Investigate why the test hangs
-        # when processing the 3rd prompt in vLLM
-        marks=[pytest.mark.core_model, pytest.mark.skip(reason="Test hangs")],
+        marks=[pytest.mark.core_model],
     ),
     # Gemma3 has bidirectional mask on images
     "gemma3-transformers": VLMTestInfo(

@@ -17,6 +17,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadata
 from vllm.utils.hashing import safe_hash
 from vllm.v1.attention.backend import AttentionMetadata
+from vllm.v1.attention.backends.triton_attn import TritonAttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 
 if TYPE_CHECKING:
@@ -118,12 +119,12 @@ class ExampleConnector(KVConnectorBase_V1):
             The number of elements in kv_caches and layer_names should be
             the same.
         """
-        attn_metadata = forward_context.attn_metadata
 
         def inject_kv_into_layer(
             dst_kv_cache_layer: torch.Tensor,
             src_kv_cache: torch.Tensor,
             slot_mapping: torch.Tensor,
+            attn_metadata: AttentionMetadata,
         ) -> None:
             """Inject the KV cache into the layer.
 
@@ -145,6 +146,10 @@ class ExampleConnector(KVConnectorBase_V1):
                     num_pages * page_size, -1
                 )
                 dst_kv_cache_layer[slot_mapping, ...] = src_kv_cache
+            elif isinstance(attn_metadata, TritonAttentionMetadata):
+                block_idxs = slot_mapping // self._block_size
+                offsets = slot_mapping % self._block_size
+                dst_kv_cache_layer[block_idxs, :, offsets] = src_kv_cache
             else:
                 num_pages = dst_kv_cache_layer_shape[1]
                 page_size = dst_kv_cache_layer_shape[2]
@@ -186,7 +191,13 @@ class ExampleConnector(KVConnectorBase_V1):
                     layer_name, request.token_ids, request.mm_hashes
                 )
                 kv_cache = safetensors.torch.load_file(filename)["kv_cache"].cuda()
-                inject_kv_into_layer(kv_cache_layer, kv_cache, request.slot_mapping)
+                if isinstance(attn_metadata, dict):
+                    inject_kv_into_layer(
+                        kv_cache_layer,
+                        kv_cache,
+                        request.slot_mapping,
+                        attn_metadata[layer_name],
+                    )
 
     def wait_for_layer_load(self, layer_name: str) -> None:
         """Blocking until the KV for a specific layer is loaded into vLLM's
@@ -229,6 +240,10 @@ class ExampleConnector(KVConnectorBase_V1):
             if isinstance(attn_metadata, MLACommonMetadata):
                 num_pages, page_size = layer.shape[0], layer.shape[1]
                 return layer.reshape(num_pages * page_size, -1)[slot_mapping, ...]
+            elif isinstance(attn_metadata, TritonAttentionMetadata):
+                block_idxs = slot_mapping // self._block_size
+                offsets = slot_mapping % self._block_size
+                return layer[block_idxs, :, offsets]
             num_pages, page_size = layer.shape[1], layer.shape[2]
             return layer.reshape(2, num_pages * page_size, -1)[:, slot_mapping, ...]
 

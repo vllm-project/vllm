@@ -18,6 +18,7 @@ QuantizationMethods = Literal[
     "modelopt",
     "modelopt_fp4",
     "modelopt_mxfp8",
+    "modelopt_mixed",
     "gguf",
     "gptq_marlin",
     "awq_marlin",
@@ -30,6 +31,7 @@ QuantizationMethods = Literal[
     "torchao",
     "inc",
     "mxfp4",
+    "mxfp8",
     "petit_nvfp4",
     "cpu_awq",
 ]
@@ -120,9 +122,15 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     from .gptq import GPTQConfig
     from .gptq_marlin import GPTQMarlinConfig
     from .inc import INCConfig
-    from .modelopt import ModelOptFp8Config, ModelOptMxFp8Config, ModelOptNvFp4Config
+    from .modelopt import (
+        ModelOptFp8Config,
+        ModelOptMixedPrecisionConfig,
+        ModelOptMxFp8Config,
+        ModelOptNvFp4Config,
+    )
     from .moe_wna16 import MoeWNA16Config
     from .mxfp4 import Mxfp4Config
+    from .mxfp8 import Mxfp8Config
     from .petit import PetitNvFp4Config
     from .ptpc_fp8 import PTPCFp8Config
     from .torchao import TorchAOConfig
@@ -135,6 +143,7 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
         "modelopt": ModelOptFp8Config,
         "modelopt_fp4": ModelOptNvFp4Config,
         "modelopt_mxfp8": ModelOptMxFp8Config,
+        "modelopt_mixed": ModelOptMixedPrecisionConfig,
         "gguf": GGUFConfig,
         "gptq_marlin": GPTQMarlinConfig,
         "awq_marlin": AWQMarlinConfig,
@@ -149,6 +158,7 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
         "auto-round": INCConfig,
         "inc": INCConfig,
         "mxfp4": Mxfp4Config,
+        "mxfp8": Mxfp8Config,
         "petit_nvfp4": PetitNvFp4Config,
         "cpu_awq": CPUAWQConfig,
     }
