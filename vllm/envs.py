@@ -138,6 +138,7 @@ if TYPE_CHECKING:
     VLLM_DP_MASTER_PORT: int = 0
     VLLM_MOE_DP_CHUNK_SIZE: int = 256
     VLLM_ENABLE_MOE_DP_CHUNK: bool = True
+    VLLM_MOE_USE_SCAN_CHUNKING: bool = False
     VLLM_RANDOMIZE_DP_DUMMY_INPUTS: bool = False
     VLLM_RAY_DP_PACK_STRATEGY: Literal["strict", "fill", "span"] = "strict"
     VLLM_RAY_EXTRA_ENV_VAR_PREFIXES_TO_COPY: str = ""
@@ -1092,6 +1093,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_MOE_DP_CHUNK_SIZE": lambda: int(os.getenv("VLLM_MOE_DP_CHUNK_SIZE", "256")),
     "VLLM_ENABLE_MOE_DP_CHUNK": lambda: bool(
         int(os.getenv("VLLM_ENABLE_MOE_DP_CHUNK", "1"))
+    ),
+    # Replace the Python for-loop in forward_impl_chunked with a torch.scan-based
+    # implementation for the DeepEP low-latency kernel path. This makes the chunking
+    # loop torch.compile-traceable. Disabled by default while experimental.
+    "VLLM_MOE_USE_SCAN_CHUNKING": lambda: bool(
+        int(os.getenv("VLLM_MOE_USE_SCAN_CHUNKING", "0"))
     ),
     # Randomize inputs during dummy runs when using Data Parallel
     "VLLM_RANDOMIZE_DP_DUMMY_INPUTS": lambda: os.environ.get(
