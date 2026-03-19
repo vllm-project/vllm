@@ -14,6 +14,13 @@ from vllm.transformers_utils.utils import without_trust_remote_code
 class SpeculatorsConfig(PretrainedConfig):
     model_type = "speculators"
 
+    def __init__(self, **kwargs):
+        """In Transformers v5, `PretrainedConfig` is decorated with `dataclass` and
+        `huggingface_hub.dataclasses.strict(accept_kwargs=True)`.
+        Inheriting classes do not inherit the `accept_kwargs=True` behaviour so we must
+        explicitly pass any kwargs to `PretrainedConfig.__init__`."""
+        super().__init__(**kwargs)
+
     @classmethod
     def from_pretrained(
         cls,
