@@ -231,7 +231,7 @@ class TestRmsNormPerBlockQuantCorrectness:
                 )
                 shape = (num_tokens, groups_per_row)
                 stride = (1, tma_aligned_m)
-                ops_scales = torch.empty_strided(
+                ref_scales = torch.empty_strided(
                     shape, stride, device=input.device, dtype=torch.float32
                 )
         else:
