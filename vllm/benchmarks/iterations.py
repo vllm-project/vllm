@@ -883,8 +883,23 @@ async def run_benchmark(
         )
 
         # Drain engine pipeline after warmup to prevent race with first
-        # benchmark iteration. Without this, warmup's last engine step
-        # can overlap with benchmark requests.
+        # benchmark iteration. Wait for engine to finish processing all
+        # warmup requests (XLA compilation can take 10+ seconds), then
+        # sleep/wake to ensure clean state.
+        drain_deadline = time.perf_counter() + 60.0
+        while time.perf_counter() < drain_deadline:
+            try:
+                resp = await session.get(
+                    f"{rotator.all()[0]}/debug/batch_info")
+                if resp.status == 200:
+                    info = await resp.json()
+                    if info.get("num_running", 0) == 0 and info.get("num_waiting", 0) == 0:
+                        break
+                elif resp.status == 404:
+                    break  # No batch_info endpoint, skip polling
+            except Exception:
+                pass
+            await asyncio.sleep(0.5)
         await call_debug_endpoint(
             session, rotator, "/debug/sleep", {"level": "0"})
         await asyncio.sleep(0.5)
