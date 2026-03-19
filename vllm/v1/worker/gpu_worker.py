@@ -184,20 +184,27 @@ class Worker(WorkerBase):
         """
         if distributed_init_method is not None:
             self.distributed_init_method = distributed_init_method
-        init_worker_distributed_environment(
-            self.vllm_config,
-            self.rank,
-            self.distributed_init_method,
-            self.local_rank,
-            current_platform.dist_backend,
-        )
 
-        # Recapture CUDA graphs so they record the new NCCL handles.
-        # With TP>1, captured graphs embed NCCL collective ops that
-        # reference specific communicator handles — stale after rebuild.
-        if not self.model_config.enforce_eager:
-            logger.info("Recapturing CUDA graphs with fresh NCCL handles")
-            self.model_runner.capture_model()
+        # set_current_vllm_config is required because
+        # initialize_model_parallel() reads from the global config
+        # (e.g. data_parallel_size, enable_elastic_ep).  The context
+        # manager that was active during initial worker init has long
+        # exited, so we must re-enter it here.
+        with set_current_vllm_config(self.vllm_config):
+            init_worker_distributed_environment(
+                self.vllm_config,
+                self.rank,
+                self.distributed_init_method,
+                self.local_rank,
+                current_platform.dist_backend,
+            )
+
+            # Recapture CUDA graphs so they record the new NCCL handles.
+            # With TP>1, captured graphs embed NCCL collective ops that
+            # reference specific communicator handles — stale after rebuild.
+            if not self.model_config.enforce_eager:
+                logger.info("Recapturing CUDA graphs with fresh NCCL handles")
+                self.model_runner.capture_model()
 
     def sleep(self, level: int = 1) -> None:
         from vllm.device_allocator.cumem import CuMemAllocator
