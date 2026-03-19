@@ -124,7 +124,29 @@ def rocm_platform_plugin() -> str | None:
         finally:
             amdsmi.amdsmi_shut_down()
     except Exception as e:
-        logger.debug("ROCm platform is not available because: %s", str(e))
+        logger.debug(
+            "amdsmi not available: %s. Trying torch.version.hip fallback.", str(e)
+        )
+        # Fallback: on WSL2, amdsmi is unavailable but ROCm works
+        # via torch HIP backend. Check torch.version.hip instead.
+        try:
+            import torch
+
+            if torch.version.hip is not None and torch.cuda.is_available():
+                is_rocm = True
+                logger.debug(
+                    "Confirmed ROCm platform via torch.version.hip "
+                    "(amdsmi unavailable, e.g. WSL2)."
+                )
+            else:
+                logger.debug(
+                    "ROCm platform is not available: "
+                    "torch.version.hip=%s, cuda.is_available=%s",
+                    torch.version.hip,
+                    torch.cuda.is_available() if hasattr(torch, "cuda") else False,
+                )
+        except Exception as e2:
+            logger.debug("ROCm platform fallback also failed: %s", str(e2))
 
     return "vllm.platforms.rocm.RocmPlatform" if is_rocm else None
 
