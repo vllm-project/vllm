@@ -467,13 +467,11 @@ def selective_state_update(
         and dt.stride(-1) == 0
         and dt_bias.stride(-1) == 0
     )
-    if enable_stochastic_rounding:
-        assert state.dtype == torch.float16, (
-            f"Stochastic rounding requires fp16 state, got {state.dtype}"
-        )
-        rand_seed = torch.randint(0, 2**32, (1,), device=state.device)
-    else:
-        rand_seed = None
+    rand_seed = (
+        torch.randint(0, 2**32, (1,), device=state.device)
+        if enable_stochastic_rounding
+        else None
+    )
 
     with torch.accelerator.device_index(x.device.index):
         _selective_scan_update_kernel[grid](
