@@ -307,13 +307,6 @@ class VllmSerializableFunction(SerializableCallable):  # type: ignore[misc]
             num_submods = len(submod_names)
             num_artifacts = standalone_compile_artifacts.num_artifacts()
 
-            logger.info(
-                "reconstructing serializable fn from standalone compile "
-                "artifacts. num_artifacts=%d num_submods=%d",
-                num_artifacts,
-                num_submods,
-            )
-
             with functorch_ctx:
                 fn = reconstruct_serializable_fn_from_mega_artifact(
                     state=state,
@@ -324,7 +317,10 @@ class VllmSerializableFunction(SerializableCallable):  # type: ignore[misc]
                 )
 
             logger.info(
-                "reconstructed serializable fn from standalone compile artifacts"
+                "reconstructed serializable fn from standalone compile "
+                "artifacts. num_artifacts=%d num_submods=%d",
+                num_artifacts,
+                num_submods,
             )
 
             return fn
@@ -369,8 +365,14 @@ class VllmSerializableFunction(SerializableCallable):  # type: ignore[misc]
 
         from vllm.compilation.backends import VllmBackend
 
+        saved_aot_autograd_config = self.aot_autograd_config
+        if saved_aot_autograd_config is not None:
+            functorch_ctx = torch._functorch.config.patch(saved_aot_autograd_config)
+        else:
+            functorch_ctx = contextlib.nullcontext()
+
         vllm_backend = VllmBackend(vllm_config, self.prefix, self.is_encoder)
-        with tracing(TracingContext(self._fake_mode)):
+        with tracing(TracingContext(self._fake_mode)), functorch_ctx:
             result = vllm_backend(self.graph_module, list(self.example_inputs))
             self.optimized_call = result.optimized_call
             self.vllm_backend = vllm_backend

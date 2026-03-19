@@ -10,38 +10,53 @@ reasons:
 
 import importlib
 
-_CLASS_TO_MODULE: dict[str, str] = {
-    "BagelProcessor": "vllm.transformers_utils.processors.bagel",
-    "DeepseekVLV2Processor": "vllm.transformers_utils.processors.deepseek_vl2",
-    "FireRedASR2Processor": "vllm.transformers_utils.processors.fireredasr2",
-    "FunASRProcessor": "vllm.transformers_utils.processors.funasr",
-    "GLM4VProcessor": "vllm.transformers_utils.processors.glm4v",
-    "HunYuanVLProcessor": "vllm.transformers_utils.processors.hunyuan_vl",
-    "HunYuanVLImageProcessor": "vllm.transformers_utils.processors.hunyuan_vl_image",
-    "MistralCommonPixtralProcessor": "vllm.transformers_utils.processors.pixtral",
-    "MistralCommonVoxtralProcessor": "vllm.transformers_utils.processors.voxtral",
-    "OvisProcessor": "vllm.transformers_utils.processors.ovis",
-    "Ovis2_5Processor": "vllm.transformers_utils.processors.ovis2_5",
-    "QwenVLProcessor": "vllm.transformers_utils.processors.qwen_vl",
-    "Qwen3ASRProcessor": "vllm.transformers_utils.processors.qwen3_asr",
-}
-
-
 __all__ = [
     "BagelProcessor",
+    "CohereASRProcessor",
     "DeepseekVLV2Processor",
     "FireRedASR2Processor",
     "FunASRProcessor",
     "GLM4VProcessor",
+    "H2OVLProcessor",
     "HunYuanVLProcessor",
     "HunYuanVLImageProcessor",
+    "InternVLProcessor",
+    "KimiAudioProcessor",
     "MistralCommonPixtralProcessor",
     "MistralCommonVoxtralProcessor",
+    "NanoNemotronVLProcessor",
+    "NemotronVLProcessor",
+    "LlamaNemotronVLEmbedProcessor",
+    "NVLMProcessor",
     "OvisProcessor",
     "Ovis2_5Processor",
     "QwenVLProcessor",
     "Qwen3ASRProcessor",
 ]
+
+_CLASS_TO_MODULE: dict[str, str] = {
+    "BagelProcessor": "vllm.transformers_utils.processors.bagel",
+    "CohereASRProcessor": "vllm.transformers_utils.processors.cohere_asr",
+    "DeepseekVLV2Processor": "vllm.transformers_utils.processors.deepseek_vl2",
+    "FireRedASR2Processor": "vllm.transformers_utils.processors.fireredasr2",
+    "FunASRProcessor": "vllm.transformers_utils.processors.funasr",
+    "GLM4VProcessor": "vllm.transformers_utils.processors.glm4v",
+    "H2OVLProcessor": "vllm.transformers_utils.processors.h2ovl",
+    "HunYuanVLProcessor": "vllm.transformers_utils.processors.hunyuan_vl",
+    "HunYuanVLImageProcessor": "vllm.transformers_utils.processors.hunyuan_vl_image",
+    "InternVLProcessor": "vllm.transformers_utils.processors.internvl",
+    "KimiAudioProcessor": "vllm.transformers_utils.processors.kimi_audio",
+    "MistralCommonPixtralProcessor": "vllm.transformers_utils.processors.pixtral",
+    "MistralCommonVoxtralProcessor": "vllm.transformers_utils.processors.voxtral",
+    "NanoNemotronVLProcessor": "vllm.transformers_utils.processors.nano_nemotron_vl",
+    "NemotronVLProcessor": "vllm.transformers_utils.processors.nemotron_vl",
+    "LlamaNemotronVLEmbedProcessor": "vllm.transformers_utils.processors.nemotron_vl",
+    "NVLMProcessor": "vllm.transformers_utils.processors.nvlm_d",
+    "OvisProcessor": "vllm.transformers_utils.processors.ovis",
+    "Ovis2_5Processor": "vllm.transformers_utils.processors.ovis2_5",
+    "QwenVLProcessor": "vllm.transformers_utils.processors.qwen_vl",
+    "Qwen3ASRProcessor": "vllm.transformers_utils.processors.qwen3_asr",
+}
 
 
 def __getattr__(name: str):
