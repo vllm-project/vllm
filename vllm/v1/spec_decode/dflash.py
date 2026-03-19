@@ -251,7 +251,7 @@ class DFlashProposer(SpecDecodeBaseProposer):
         num_tokens: int,
         num_input_tokens: int,
         mm_embed_inputs: tuple[list[torch.Tensor], torch.Tensor] | None,
-    ) -> tuple[dict[str, Any], int, dict[str, Any]]:
+    ) -> tuple[dict[str, Any], int]:
         # Input ids: (padded) query tokens
         # Positions: (unpadded) context tokens + (padded) query tokens
         # Hidden states: (unpadded) context tokens
@@ -279,7 +279,6 @@ class DFlashProposer(SpecDecodeBaseProposer):
                 inputs_embeds=None,
             ),
             num_input_tokens,
-            {},
         )
 
     @override

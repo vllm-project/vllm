@@ -15,7 +15,7 @@ from vllm.config import (
     get_layers_from_vllm_config,
 )
 from vllm.distributed.parallel_state import get_pp_group
-from vllm.forward_context import get_forward_context, set_forward_context
+from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.model_loader import get_model
@@ -450,7 +450,7 @@ class SpecDecodeBaseProposer:
             self._determine_batch_execution_and_padding(num_tokens)
         )
 
-        model_kwargs, slot_mapping_size, fc_extras = self.build_model_inputs_first_pass(
+        model_kwargs, slot_mapping_size = self.build_model_inputs_first_pass(
             num_tokens, num_input_tokens, mm_embed_inputs
         )
 
@@ -464,9 +464,6 @@ class SpecDecodeBaseProposer:
                 slot_mapping_size, common_attn_metadata.slot_mapping
             ),
         ):
-            fc = get_forward_context()
-            for k, v in fc_extras.items():
-                setattr(fc, k, v)
             ret_hidden_states = self.model(**model_kwargs)
             if not self.model_returns_tuple():
                 last_hidden_states = ret_hidden_states
@@ -784,7 +781,7 @@ class SpecDecodeBaseProposer:
         num_tokens: int,
         num_input_tokens: int,
         mm_embed_inputs: tuple[list[torch.Tensor], torch.Tensor] | None,
-    ) -> tuple[dict[str, Any], int, dict[str, Any]]:
+    ) -> tuple[dict[str, Any], int]:
         if self.supports_mm_inputs:
             mm_embeds, is_mm_embed = mm_embed_inputs or (None, None)
 
@@ -808,7 +805,7 @@ class SpecDecodeBaseProposer:
         if self.pass_hidden_states_to_model:
             model_kwargs["hidden_states"] = self.hidden_states[:num_input_tokens]
 
-        return model_kwargs, num_input_tokens, {}
+        return model_kwargs, num_input_tokens
 
     def build_per_layer_attn_metadata(
         self, common_attn_metadata: CommonAttentionMetadata, draft_index: int = 0
