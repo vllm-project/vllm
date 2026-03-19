@@ -54,6 +54,17 @@ def test_registry_imports(model_arch):
         assert supports_multimodal(model_cls)
 
 
+@pytest.mark.parametrize(
+    "model_arch",
+    ["Qwen3_5ForCausalLM", "Qwen3_5MoeForCausalLM"],
+)
+def test_qwen3_5_text_models_are_not_multimodal(model_arch):
+    model_cls = ModelRegistry._try_load_model_cls(model_arch)
+    assert model_cls is not None
+    assert is_text_generation_model(model_cls)
+    assert not supports_multimodal(model_cls)
+
+
 @create_new_process_for_each_test()
 @pytest.mark.parametrize(
     "model_arch,is_mm,init_cuda,score_type",

@@ -5,6 +5,7 @@ import importlib
 import os
 from collections.abc import Callable, Sequence
 from functools import cached_property
+from typing import Any
 
 from openai.types.responses import (
     ResponseFormatTextJSONSchemaConfig,
@@ -67,8 +68,11 @@ class ToolParser:
             if isinstance(request, ChatCompletionRequest):
                 # tool_choice: "Forced Function" or "required" will override
                 # structured output json settings to make tool calling work correctly
+                structured_outputs_kwargs: dict[str, Any] = {
+                    "json": json_schema_from_tool
+                }
                 request.structured_outputs = StructuredOutputsParams(
-                    json=json_schema_from_tool  # type: ignore[call-arg]
+                    **structured_outputs_kwargs
                 )
                 request.response_format = None
             if isinstance(request, ResponsesRequest):

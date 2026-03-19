@@ -77,6 +77,7 @@ from .interfaces import (
     MultiModalEmbeddings,
     SupportsEagle3,
     SupportsLoRA,
+    SupportsMRoPE,
     SupportsPP,
     _require_is_multimodal,
 )
@@ -99,6 +100,7 @@ from .qwen3_vl import (
 from .utils import (
     AutoWeightsLoader,
     PPMissingLayer,
+    WeightsMapper,
     _merge_multimodal_embeddings,
     extract_layer_index,
     is_pp_missing_parameter,
@@ -544,9 +546,67 @@ class Qwen3_5ForCausalLMBase(
     nn.Module,
     HasInnerState,
     SupportsEagle3,
+    IsHybrid,
+    SupportsMRoPE,
     SupportsLoRA,
     SupportsPP,
 ):
+    # Qwen3.5 interleaves full-attention layers (every 4th) with
+    # GatedDeltaNet (Mamba-style) layers, making it a hybrid model.
+    is_hybrid = True
+    supports_mrope: typing.ClassVar[typing.Literal[True]] = True
+
+    def get_mrope_input_positions(
+        self,
+        input_tokens: list[int],
+        mm_features: list,
+    ) -> tuple[torch.Tensor, int]:
+        # Text-only model: all three M-RoPE axes use identical 1-D positions.
+        # The config inherits mrope_section from the VL parent, but for
+        # text-only inference the three sections are identical.
+        n = len(input_tokens)
+        positions = torch.arange(n).unsqueeze(0).expand(3, -1)
+        return positions, 0
+
+    @classmethod
+    def get_mamba_state_dtype_from_config(
+        cls,
+        vllm_config: "VllmConfig",
+    ) -> tuple[torch.dtype, torch.dtype]:
+        return MambaStateDtypeCalculator.gated_delta_net_state_dtype(
+            vllm_config.model_config.dtype,
+            vllm_config.cache_config.mamba_cache_dtype,
+            vllm_config.cache_config.mamba_ssm_cache_dtype,
+        )
+
+    @classmethod
+    def get_mamba_state_shape_from_config(
+        cls, vllm_config: "VllmConfig"
+    ) -> tuple[tuple[int, int], tuple[int, int, int]]:
+        parallel_config = vllm_config.parallel_config
+        hf_config = vllm_config.model_config.hf_text_config
+        tp_size = parallel_config.tensor_parallel_size
+        num_spec = (
+            vllm_config.speculative_config.num_speculative_tokens
+            if vllm_config.speculative_config
+            else 0
+        )
+        return MambaStateShapeCalculator.gated_delta_net_state_shape(
+            tp_size,
+            hf_config.linear_num_key_heads,
+            hf_config.linear_num_value_heads,
+            hf_config.linear_key_head_dim,
+            hf_config.linear_value_head_dim,
+            hf_config.linear_conv_kernel_dim,
+            num_spec,
+        )
+
+    @classmethod
+    def get_mamba_state_copy_func(
+        cls,
+    ) -> tuple[MambaStateCopyFunc, MambaStateCopyFunc]:
+        return MambaStateCopyFuncCalculator.gated_delta_net_state_copy_func()
+
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -628,11 +688,20 @@ class Qwen3_5ForCausalLMBase(
         return self.logits_processor(self.lm_head, hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        # Checkpoints quantized from the VL model (Qwen3_5ForConditionalGeneration)
+        # store weights under "model.language_model." and include vision-encoder
+        # keys under "model.visual.".  Remap the prefix so that the text-only
+        # model (which expects "model.") can load them, and silently ignore
+        # any vision-encoder weights that have no counterpart here.
+        mapper = WeightsMapper(
+            orig_to_new_prefix={"model.language_model.": "model."},
+        )
         loader = AutoWeightsLoader(
             self,
             skip_prefixes=["mtp."],
+            ignore_unexpected_prefixes=["model.visual."],
         )
-        return loader.load_weights(weights)
+        return loader.load_weights(weights, mapper=mapper)
 
 
 class Qwen3_5ForCausalLM(Qwen3_5ForCausalLMBase):
