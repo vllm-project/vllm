@@ -53,7 +53,7 @@ def matmul_kernel(A, B, As, Bs, C,
         b_tile = ct.load(B, index=(k_idx, bid_n), shape=(TILE_K, TILE_N), padding_mode=zero_pad).astype(dtype)
 
         a_scale = ct.load(As, index=(bid_m, k_idx), shape=(TILE_M, 1))
-        b_scale = ct.load(Bs, index=(bid_n, k_idx), shape=(1, 1))
+        b_scale = ct.load(Bs, index=(k_idx, bid_n), shape=(1, 1))
 
         a_fp32 = ct.astype(a_tile, ct.float32) * a_scale
         b_fp32 = ct.astype(b_tile, ct.float32) * b_scale
