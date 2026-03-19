@@ -69,7 +69,6 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     MXFP8_VALUE_DTYPE,
     Mxfp8LinearOp,
     mxfp8_e4m3_quantize,
-    select_mxfp8_linear_backend,
 )
 from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
     apply_nvfp4_linear,
@@ -1551,8 +1550,7 @@ class ModelOptMxFp8LinearMethod(LinearMethodBase):
                 "Dynamic quantization is not supported."
             )
 
-        backend = select_mxfp8_linear_backend()
-        self.mxfp8_linear_op = Mxfp8LinearOp(backend=backend)
+        self.mxfp8_linear_op = Mxfp8LinearOp()
 
     def create_weights(
         self,

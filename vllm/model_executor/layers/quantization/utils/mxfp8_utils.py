@@ -152,11 +152,8 @@ direct_register_custom_op(
 
 
 class Mxfp8LinearOp:
-    def __init__(self, backend: Mxfp8LinearBackend):
-        if backend not in Mxfp8LinearBackend:
-            raise ValueError(f"Unsupported backend: {backend}")
-
-        self.backend = backend
+    def __init__(self):
+        self.backend = select_mxfp8_linear_backend()
         logger.info_once("Using %s backend for MXFP8 GEMM", self.backend.value)
 
     def process_weights(self, layer: torch.nn.Module) -> None:

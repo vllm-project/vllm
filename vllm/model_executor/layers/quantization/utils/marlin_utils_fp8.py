@@ -336,12 +336,8 @@ def pack_fp8_to_int32(
     return int32_tensor.T.contiguous() if size_k_first else int32_tensor
 
 
-def mxfp8_marlin_process_scales(marlin_scales):
-    """Reorder scales for e8m0 kernel layout and convert to float8_e8m0fnu.
-
-    Same reordering as mxfp4_marlin_process_scales but without the FP8
-    activation bias adjustment (MXFP8 is BF16-activation only).
-    """
+def mxfp8_marlin_process_scales(marlin_scales: torch.Tensor) -> torch.Tensor:
+    """Reorder scales for e8m0 kernel layout and convert to float8_e8m0fnu."""
     # fit the layout of fp8 dequantization
     marlin_scales = marlin_scales.view(-1, 4)[:, [0, 2, 1, 3]].view(
         marlin_scales.size(0), -1

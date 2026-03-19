@@ -37,7 +37,6 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     MXFP8_BLOCK_SIZE,
     Mxfp8LinearOp,
     mxfp8_e4m3_quantize,
-    select_mxfp8_linear_backend,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     is_layer_skipped,
@@ -133,8 +132,7 @@ class Mxfp8OnlineLinearMethod(Fp8OnlineLinearMethod):
     def __init__(self, quant_config: "Mxfp8Config"):
         self.quant_config = quant_config
         self.out_dtype = torch.get_default_dtype()
-        backend = select_mxfp8_linear_backend()
-        self.mxfp8_linear = Mxfp8LinearOp(backend)
+        self.mxfp8_linear = Mxfp8LinearOp()
 
     def create_weights(
         self,
