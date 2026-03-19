@@ -4584,7 +4584,10 @@ class GPUModelRunner(
                 # so its footprint is natively captured by memory profiling
                 # and appropriately deducted from the KV cache bounds.
                 if getattr(self, "sampler", None) is not None:
-                    max_tokens = self.scheduler_config.max_num_batched_tokens
+                    # Allocate strictly to sequence limits (with speculative draft tokens).
+                    # Prompt logprobs natively bypass this workspace entirely during chunked prefill,
+                    # avoiding the need to allocate to max_num_batched_tokens.
+                    max_tokens = self.max_num_reqs * (1 + getattr(self, "num_spec_tokens", 0))
                     self.sampler.sampler_workspace = torch.empty(
                         (max_tokens, self.model_config.get_vocab_size()),
                         dtype=torch.float32,
