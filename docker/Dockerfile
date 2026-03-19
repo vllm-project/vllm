@@ -587,7 +587,15 @@ RUN echo "DEBUG [vllm-base torch install]:" && \
     echo "  PYTORCH_CUDA_INDEX_BASE_URL=${PYTORCH_CUDA_INDEX_BASE_URL}" && \
     echo "  CUDA_VERSION=${CUDA_VERSION}" && \
     echo "  Resolved extra-index-url: ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')" && \
-    cat /tmp/requirements-cuda.txt | grep -i torch
+    echo "  --- /tmp/requirements-cuda.txt contents ---" && \
+    cat -A /tmp/requirements-cuda.txt && \
+    echo "  --- /tmp/common.txt contents ---" && \
+    cat -A /tmp/common.txt && \
+    echo "  --- grep -i torch results ---" && \
+    (grep -i torch /tmp/requirements-cuda.txt /tmp/common.txt || echo "  (no torch matches found)") && \
+    echo "  --- file sizes ---" && \
+    wc -l /tmp/requirements-cuda.txt /tmp/common.txt && \
+    echo "  --- end debug ---"
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system --prerelease=allow -r /tmp/requirements-cuda.txt \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') -v && \
