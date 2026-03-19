@@ -89,16 +89,7 @@ class XPUwNa16LinearKernel(MPLinearKernel):
         return out
 
 
-def _pack_int4_weight(w: torch.Tensor) -> torch.Tensor:
-    # w is [N, K] int8 with values in [-8, 7]
-    w_u4 = w.to(torch.int32) + 8  # shift to [0, 15]
-    w_u4 = w_u4.reshape(w.shape[0], w.shape[1] // 8, 8)  # [N, K/8, 8]
-    shifts = torch.arange(0, 32, 4, dtype=torch.int32, device=w.device)
-    packed = ((w_u4 & 0xF) << shifts[None, None, :]).sum(dim=2).to(torch.int32)
-    return packed
-
-
-class XPUw4A8IntLinearKernel(MPLinearKernel):
+class XPUW4A8IntLinearKernel(MPLinearKernel):
     """XPU kernel for W4A8 integer quantization using oneDNN int4_gemm_w4a8.
 
     Weights are symmetric group-quantized int4 packed as uint4.
@@ -112,20 +103,20 @@ class XPUw4A8IntLinearKernel(MPLinearKernel):
     @classmethod
     def can_implement(cls, c: MPLinearLayerConfig) -> tuple[bool, str | None]:
         if not current_platform.is_xpu():
-            return False, "XPUw4A8Int only supported on XPU"
+            return False, "XPUW4A8Int only supported on XPU"
         if c.act_type not in (torch.bfloat16, torch.float16):
-            return False, "XPUw4A8Int requires BF16/FP16 activations"
+            return False, "XPUW4A8Int requires BF16/FP16 activations"
         if c.weight_type != scalar_types.int4:
             return (
                 False,
-                f"XPUw4A8Int requires int4 weights, got {c.weight_type}",
+                f"XPUW4A8Int requires int4 weights, got {c.weight_type}",
             )
         if c.zero_points:
-            return False, "XPUw4A8Int only supports symmetric weight quantization"
+            return False, "XPUW4A8Int only supports symmetric weight quantization"
         if c.group_size != -1 and c.group_size % 32 != 0:
             return (
                 False,
-                f"Group size ({c.group_size}) not supported by XPUw4A8Int, "
+                f"Group size ({c.group_size}) not supported by XPUW4A8Int, "
                 "must be a multiple of 32",
             )
         in_size, out_size = c.partition_weight_shape
@@ -135,6 +126,14 @@ class XPUw4A8IntLinearKernel(MPLinearKernel):
                 f"in/out sizes ({in_size}, {out_size}) must be multiples of 8",
             )
         return True, None
+
+    def _pack_int4_weight(self, w: torch.Tensor) -> torch.Tensor:
+        # w is [N, K] int8 with values in [-8, 7]
+        w_u4 = w.to(torch.int32) + 8  # shift to [0, 15]
+        w_u4 = w_u4.reshape(w.shape[0], w.shape[1] // 8, 8)  # [N, K/8, 8]
+        shifts = torch.arange(0, 32, 4, dtype=torch.int32, device=w.device)
+        packed = ((w_u4 & 0xF) << shifts[None, None, :]).sum(dim=2).to(torch.int32)
+        return packed
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         layer.weight_scale.data = layer.weight_scale.data.t().contiguous()
@@ -148,7 +147,7 @@ class XPUw4A8IntLinearKernel(MPLinearKernel):
         w = layer.weight_packed.data  # [out, in]
 
         # TODO: implement asym case
-        packed = _pack_int4_weight(w)  # [out, in/8] packed uint4
+        packed = self._pack_int4_weight(w)  # [out, in/8] packed uint4
 
         replace_parameter(
             layer,
