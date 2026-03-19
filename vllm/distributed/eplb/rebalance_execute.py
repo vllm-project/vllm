@@ -48,12 +48,6 @@ MoveToBufferResult = tuple[np.ndarray, np.ndarray, RecvMetadata]
 class AsyncEPLBLayerResult:
     """
     The result of one completed async EPLB layer transfer.
-
-    Produced by the async worker after transfer_layer() completes and
-    cuda_stream.synchronize() is called — meaning all GPU writes to
-    expert_buffer are finished before step() ever dequeues this object.
-
-    Consumed by EplbState.step() via EplbModelState.pending_result.
     """
 
     layer_idx: int
@@ -62,19 +56,16 @@ class AsyncEPLBLayerResult:
     """
     New physical→logical mapping for all layers, on CPU.
     Shape: (num_moe_layers, num_physical_experts)
-    All layer results in a single cycle share the same tensor object.
     """
     new_logical_to_physical_map: torch.Tensor
     """
     New logical→physical mapping for all layers, on GPU.
     Shape: (num_moe_layers, num_logical_experts, max_slots)
-    All layer results in a single cycle share the same tensor object.
     """
     new_logical_replica_count: torch.Tensor
     """
     New replica count for all layers, on GPU.
     Shape: (num_moe_layers, num_logical_experts)
-    All layer results in a single cycle share the same tensor object.
     """
     is_unchanged: np.ndarray
     """Per-physical-expert flag: weight was not moved during transfer."""
