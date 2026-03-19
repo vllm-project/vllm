@@ -21,7 +21,6 @@ from openai.types.responses.response_reasoning_item import ResponseReasoningItem
 from openai.types.responses.tool import Tool
 
 from vllm import envs
-from vllm.entrypoints.constants import MCP_PREFIX
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionMessageParam
 from vllm.entrypoints.openai.responses.protocol import ResponseInputOutputItem
 from vllm.logger import init_logger
@@ -122,34 +121,39 @@ def construct_input_messages(
 def _maybe_combine_reasoning_and_tool_call(
     item: ResponseInputOutputItem, messages: list[ChatCompletionMessageParam]
 ) -> ChatCompletionMessageParam | None:
-    """Many models treat MCP calls and reasoning as a single message.
-    This function checks if the last message is a reasoning message and
-    the current message is a tool call"""
-    if not (
-        isinstance(item, ResponseFunctionToolCall)
-        and item.id
-        and item.id.startswith(MCP_PREFIX)
-    ):
+    """Combine tool calls with preceding assistant messages (reasoning or content).
+
+    Many models (Qwen3, Qwen3.5, etc.) expect content/reasoning and tool calls
+    in a single message, matching the chat completions API. This function merges
+    ResponseFunctionToolCall items into the preceding assistant message when
+    it has reasoning or content, and appends to existing tool_calls for parallel
+    tool calls.
+    """
+    if not isinstance(item, ResponseFunctionToolCall):
         return None
     if len(messages) == 0:
         return None
     last_message = messages[-1]
     if not (
         last_message.get("role") == "assistant"
-        and last_message.get("reasoning") is not None
+        and (
+            last_message.get("reasoning") is not None
+            or last_message.get("content") is not None
+        )
     ):
         return None
 
-    last_message["tool_calls"] = [
-        ChatCompletionMessageToolCallParam(
-            id=item.call_id,
-            function=FunctionCallTool(
-                name=item.name,
-                arguments=item.arguments,
-            ),
-            type="function",
-        )
-    ]
+    new_tool_call = ChatCompletionMessageToolCallParam(
+        id=item.call_id,
+        function=FunctionCallTool(
+            name=item.name,
+            arguments=item.arguments,
+        ),
+        type="function",
+    )
+    existing_tool_calls = list(last_message.get("tool_calls", []))
+    existing_tool_calls.append(new_tool_call)
+    last_message["tool_calls"] = existing_tool_calls
     return last_message
 
 
