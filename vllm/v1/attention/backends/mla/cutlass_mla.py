@@ -39,6 +39,7 @@ class CutlassMLABackend(MLACommonBackend):
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
         "auto",
+        "float16",
         "bfloat16",
         "fp8",
         "fp8_e4m3",
@@ -161,6 +162,11 @@ class CutlassMLAImpl(MLACommonImpl[MLACommonMetadata]):
         # Share workspace buffer across all executions
         self._workspace = g_sm100_workspace
 
+        # Pre-allocated output buffer, lazily sized on first call.
+        # Zero-init once to prevent NaN in padding slots (seq_lens=0)
+        # from contaminating downstream per-tensor reductions.
+        self._decode_out: torch.Tensor | None = None
+
     def _sm100_cutlass_mla_decode(
         self,
         q_nope: torch.Tensor,
@@ -217,7 +223,15 @@ class CutlassMLAImpl(MLACommonImpl[MLACommonMetadata]):
             if is_quantized_kv_cache(self.kv_cache_dtype)
             else q_nope.dtype
         )
-        out = q_nope.new_empty((B_q, MAX_HEADS, D_latent), dtype=dtype)
+        # Reuse pre-allocated zero-init output buffer to avoid a memset
+        # kernel on every CUDA graph replay.
+        if (
+            self._decode_out is None
+            or self._decode_out.shape[0] < B_q
+            or self._decode_out.dtype != dtype
+        ):
+            self._decode_out = q_nope.new_zeros((B_q, MAX_HEADS, D_latent), dtype=dtype)
+        out = self._decode_out[:B_q]
         lse = (
             torch.empty((B_q, MAX_HEADS), dtype=torch.float32, device=q_nope.device)
             if self.need_to_return_lse_for_decode
@@ -253,6 +267,11 @@ class CutlassMLAImpl(MLACommonImpl[MLACommonMetadata]):
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         assert kv_c_and_k_pe_cache.numel() > 0
         assert attn_metadata.decode is not None
+
+        if layer._q_scale_float != 1.0 or layer._k_scale_float != 1.0:
+            raise NotImplementedError(
+                "CutlassMLAImpl does not support scaling for q and kv_latent yet"
+            )
 
         if type(q) is tuple:
             q_nope, q_pe = q
