@@ -216,7 +216,6 @@ def select_mxfp4_moe_backend(
         logger.info_once("Using Marlin backend for mxfp4 lora")
         return Mxfp4MoeBackend.MARLIN, backend_to_kernel_cls(Mxfp4MoeBackend.MARLIN)[0]
 
-    # Issue 7 fix: use high-level property (consistent with FP8 oracle)
     activation_format = (
         mk.FusedMoEActivationFormat.BatchedExperts
         if config.moe_parallel_config.use_batched_activation_format
@@ -226,7 +225,6 @@ def select_mxfp4_moe_backend(
     def _make_log_backend(backend: Mxfp4MoeBackend):
         return f"Using '{backend.value}' Mxfp4 MoE backend."
 
-    # Issue 8 fix: consistent quoting in log messages
     def _make_log_unsupported(backend: Mxfp4MoeBackend, reason: str | None) -> str:
         if reason:
             return (

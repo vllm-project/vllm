@@ -217,7 +217,6 @@ def maybe_roundup_hidden_size(
     moe_parallel_config: FusedMoEParallelConfig,
     is_lora_enabled: bool,
     model_type: str | None,
-    is_mxfp4_quant: bool,
 ) -> int:
     """
     Given layer hidden size and MoE configurations, round up hidden_size
@@ -519,9 +518,6 @@ class FusedMoE(CustomOp):
             moe_parallel_config=self.moe_parallel_config,
             is_lora_enabled=vllm_config.lora_config is not None,
             model_type=self.model_type,
-            is_mxfp4_quant=(
-                quant_config is not None and quant_config.is_mxfp4_quant(prefix, self)
-            ),
         )
         self.hidden_size = hidden_size
 
