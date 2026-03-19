@@ -15,6 +15,7 @@ import torch.nn as nn
 from torch._dynamo.symbolic_convert import InliningInstructionTranslator
 
 import vllm.envs as envs
+from vllm.compilation.caching import compile_cache_prefix
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.wrapper import TorchCompileWithNoGuardsWrapper
 from vllm.config import (
@@ -473,8 +474,7 @@ def _support_torch_compile(
             factors.append(_model_hash_key(self.forward))
             hash_key = hashlib.sha256(str(factors).encode()).hexdigest()
             cache_dir = os.path.join(
-                envs.VLLM_CACHE_ROOT,
-                "torch_compile_cache",
+                compile_cache_prefix(),
                 "torch_aot_compile",
                 hash_key,
             )

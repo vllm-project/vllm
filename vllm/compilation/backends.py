@@ -22,6 +22,7 @@ from torch._dynamo.utils import dynamo_timed
 from torch._logging._internal import trace_structured
 
 import vllm.envs as envs
+from vllm.compilation.caching import compile_cache_prefix
 from vllm.config import CompilationConfig, CUDAGraphMode, VllmConfig
 from vllm.config.compilation import DynamicShapesType
 from vllm.config.utils import Range, hash_factors
@@ -958,9 +959,7 @@ class VllmBackend:
             # Use SHA-256 for cache key hashing to be consistent across
             # compute_hash functions. Truncate for a short cache dir name.
             hash_key = hashlib.sha256(str(factors).encode()).hexdigest()[:10]
-            cache_dir = os.path.join(
-                envs.VLLM_CACHE_ROOT, "torch_compile_cache", hash_key
-            )
+            cache_dir = os.path.join(compile_cache_prefix(), hash_key)
             self.compilation_config.cache_dir = cache_dir
 
         cache_dir = self.compilation_config.cache_dir
