@@ -1,14 +1,11 @@
 group: Intel
-env:
-  REGISTRY: "public.ecr.aws/q9t5s3a7"
-  REPO: "vllm-ci-test-repo"
 steps:
   - label: ":docker: Build XPU image"
     soft_fail: true
     depends_on: []
     key: image-build-xpu
     commands:
-      - bash -lc '.buildkite/image_build/image_build_xpu.sh "$$REGISTRY" "$$REPO" "$BUILDKITE_COMMIT"'
+      - bash -lc '.buildkite/image_build/image_build_xpu.sh "public.ecr.aws/q9t5s3a7" "vllm-ci-test-repo" "$BUILDKITE_COMMIT"'
     env:
       DOCKER_BUILDKIT: "1"
     retry:
