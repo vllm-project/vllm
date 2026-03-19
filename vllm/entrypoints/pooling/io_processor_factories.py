@@ -23,7 +23,7 @@ def init_pooling_io_processors(
     if "embed" in supported_tasks:
         from vllm.entrypoints.pooling.embed.io_processor import EmbedIOProcessor
 
-        processors.append(("classify", EmbedIOProcessor))
+        processors.append(("embed", EmbedIOProcessor))
 
     return {
         task: processor_cls(
