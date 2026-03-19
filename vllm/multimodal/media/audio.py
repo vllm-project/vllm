@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import math
 from io import BytesIO
 from pathlib import Path
 
@@ -28,7 +29,7 @@ except ImportError:
 def load_audio_pyav(
     path: BytesIO | Path | str,
     *,
-    sr: float | None = 22050,
+    sr: float | None = None,
 ) -> tuple[npt.NDArray, float]:
     """Load an audio file using PyAV (FFmpeg), returning float32 mono waveform.
 
@@ -44,20 +45,35 @@ def load_audio_pyav(
         ``(waveform, sample_rate)`` where *waveform* is a 1-D float32
         NumPy array and *sample_rate* is the native sample rate in Hz.
     """
+    native_sr = None
     try:
         with av.open(path) as container:
             if not container.streams.audio:
                 raise ValueError("No audio stream found.")
             stream = container.streams.audio[0]
+            stream.thread_type = "AUTO"
             native_sr = stream.rate
             sr = sr or native_sr
 
-            # Enforce calling resampler to return mono audio in float32
-            resampler = av.AudioResampler(format="fltp", layout="mono", rate=sr)
             chunks: list[npt.NDArray] = []
+            needs_resampling = not math.isclose(
+                float(sr),
+                float(native_sr),
+                rel_tol=0.0,
+                abs_tol=1e-6,
+            )
+            resampler = (
+                av.AudioResampler(format="fltp", layout="mono", rate=sr)
+                if needs_resampling
+                else None
+            )
             for frame in container.decode(stream):
-                for out_frame in resampler.resample(frame):
-                    chunks.append(out_frame.to_ndarray())
+                if needs_resampling:
+                    assert resampler is not None
+                    for out_frame in resampler.resample(frame):
+                        chunks.append(out_frame.to_ndarray())
+                else:
+                    chunks.append(frame.to_ndarray())
     except ValueError:
         raise
     except Exception as e:
