@@ -185,7 +185,6 @@ class Mxfp8OnlineLinearMethod(Fp8OnlineLinearMethod):
         replace_parameter(layer, "weight", weight_fp8.data)
         replace_parameter(layer, "weight_scale", weight_scale.data)
 
-        # Delegate backend-specific weight processing (swizzle/repack)
         self.mxfp8_linear.process_weights(layer)
 
         layer._already_called_process_weights_after_loading = True
