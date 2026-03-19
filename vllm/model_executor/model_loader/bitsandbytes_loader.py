@@ -42,6 +42,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     safetensors_weights_iterator,
 )
 from vllm.model_executor.models import is_pooling_model
+from vllm.model_executor.models.utils import is_pp_missing_parameter
 from vllm.model_executor.utils import (
     get_moe_expert_mapping,
     get_packed_modules_mapping,
@@ -699,10 +700,6 @@ class BitsAndBytesModelLoader(BaseModelLoader):
         self, model: nn.Module, quant_state_dict: dict
     ) -> dict[str, dict[int, Any]]:
         stacked_quant_state_dict: dict[str, dict[int, Any]] = {}
-        # TODO: Change this lazy import to normal import
-        # after the checks are updated to run on a new version
-        from vllm.model_executor.models.utils import is_pp_missing_parameter
-
         param_dict = dict(model.named_parameters())
         for quant_param_name in quant_state_dict:
             if is_pp_missing_parameter(quant_param_name, model):
