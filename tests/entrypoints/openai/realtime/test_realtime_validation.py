@@ -11,10 +11,9 @@ import pybase64 as base64
 import pytest
 import websockets
 
+from tests.entrypoints.openai.conftest import add_attention_backend
+from tests.utils import ROCM_ENV_OVERRIDES, ROCM_EXTRA_ARGS, RemoteOpenAIServer
 from vllm.assets.audio import AudioAsset
-
-from ...utils import ROCM_ENV_OVERRIDES, ROCM_EXTRA_ARGS, RemoteOpenAIServer
-from .conftest import add_attention_backend
 
 # Increase engine iteration timeout for ROCm where first-use JIT compilation
 # can exceed the default 60s, causing a silent deadlock in feed_tokens.
