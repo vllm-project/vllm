@@ -784,14 +784,14 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 prefill_positions = positions[num_mqa_tokens:]
 
                 # Apply RoPE to prefill tokens (q_pe part and k_pe)
+                # Note: rotary_emb returns NEW tensor for prefill_k_pe
+                # We use the new tensor directly, no write-back needed
                 if prefill_q.shape[0] > 0:  # Have prefill tokens
                     prefill_q[..., self.qk_nope_head_dim :], prefill_k_pe = rotary_emb(
                         prefill_positions,
                         prefill_q[..., self.qk_nope_head_dim :],
                         prefill_k_pe,
                     )
-                    # Write back RoPE'd values (required for correctness)
-                    k_pe[num_mqa_tokens:] = prefill_k_pe
 
                     # Write prefill KV to cache (reuse extracted slices)
                     if slot_mapping is not None:
@@ -818,8 +818,17 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             )
 
         if num_mqa_tokens > 0:
+            # Extract decode slices
             mqa_q = q[:num_mqa_tokens]
             mqa_output_slice = output[:num_mqa_tokens]
+
+            # Extract additional decode slices for fused path
+            if self.use_aiter_fused and slot_mapping is not None:
+                mqa_k_c_normed = k_c_normed[:num_mqa_tokens]
+                mqa_k_pe = k_pe[:num_mqa_tokens]
+                if positions is not None:
+                    mqa_positions = positions[:num_mqa_tokens]
+                mqa_slot_mapping = slot_mapping[:num_mqa_tokens]
 
             mqa_q_nope, mqa_q_pe = mqa_q.split(
                 [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
@@ -843,11 +852,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             # and seq_len = num_computed_tokens + query_len,
             # so pos = seq_len - query_len
             # For decode (query_len=1): pos = seq_len - 1
-            if (
-                positions is None
-                and num_mqa_tokens > 0
-                and attn_metadata.decode is not None
-            ):
+            if positions is None and attn_metadata.decode is not None:
                 # Get decode sequence lengths for decode tokens only
                 decode_seq_lens = attn_metadata.decode.seq_lens
                 # Position is current sequence length - 1 (0-indexed)
@@ -863,17 +868,13 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             # batches. num_mqa_tokens > 0 is dynamic but OK - PyTorch
             # handles control flow in graphs
 
-            if self.use_aiter_fused and num_mqa_tokens > 0 and slot_mapping is not None:
-                # FUSED PATH: Kernel applies RoPE internally AND writes
-                # to KV cache
-                # Get decode slices (NO RoPE yet)
-                mqa_k_c_normed = k_c_normed[:num_mqa_tokens]
-                mqa_k_pe = k_pe[:num_mqa_tokens]
-                # Type assertion for mypy
+            if self.use_aiter_fused and slot_mapping is not None:
+                # FUSED PATH: Kernel applies RoPE internally AND writes to KV cache
+                # Decode slices already extracted above (lines 828-833)
+
+                # Type assertions for mypy
                 assert positions is not None
                 assert slot_mapping is not None
-                mqa_positions = positions[:num_mqa_tokens]
-                mqa_slot_mapping = slot_mapping[:num_mqa_tokens]
 
                 # Log when fused kernel is being used
                 logger.info_once(
