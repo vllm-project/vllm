@@ -117,7 +117,7 @@ class FilterReusedOffloadingManager(OffloadingManager):
 
     def get_stats(self) -> dict[str, Any]:
         stats = self._backing.get_stats()
-        stats["stores_skipped"] = self.stores_skipped
+        stats.setdefault("gauges", {})["stores_skipped"] = self.stores_skipped
         return stats
 
     def complete_store(
