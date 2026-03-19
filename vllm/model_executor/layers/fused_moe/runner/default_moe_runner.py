@@ -445,6 +445,54 @@ class DefaultMoERunner(MoERunner):
 
         return self._reduce_output(fused_output, orig_hidden_dims)
 
+    def _apply_experts(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        shared_experts_input: torch.Tensor,
+        has_separate_shared_experts: bool,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        """Run routed experts and optionally combine with shared expert output.
+
+        Shared by forward_impl_chunked (per-chunk) and forward_impl_scan
+        (pre-staged scan body).
+        """
+        out = self.quant_method.apply(
+            layer=layer,
+            x=x,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            shared_experts_input=shared_experts_input,
+        )
+        if has_separate_shared_experts:
+            assert not isinstance(out, tuple)
+            assert self.shared_experts is not None
+            shared_out = self.shared_experts(shared_experts_input)
+            return (shared_out, out)
+        return out
+
+    def _get_chunk_metadata(
+        self,
+        full_hidden_states: torch.Tensor,
+    ) -> tuple[int, int, int]:
+        """Return (max_tokens_across, chunk_size, num_chunks) for DP chunking.
+
+        Shared by forward_impl_chunked and forward_impl_scan.
+        """
+        ctx = get_forward_context()
+        max_tokens_across: int = int(
+            ctx.dp_metadata.max_tokens_across_dp_cpu.item()
+        )
+        if self.moe_config.is_sequence_parallel:
+            max_tokens_across = cdiv(
+                max_tokens_across, self.moe_config.sp_size
+            )
+        chunk_size: int = self.moe_config.max_num_tokens
+        num_chunks: int = cdiv(max_tokens_across, chunk_size)
+        return max_tokens_across, chunk_size, num_chunks
+
     def forward_impl_chunked(
         self,
         layer: torch.nn.Module,
@@ -522,29 +570,23 @@ class DefaultMoERunner(MoERunner):
                     x=staged_hidden_states,
                     router_logits=staged_router_logits,
                 )
+                if has_separate_shared_experts:
+                    assert not isinstance(final_hidden_states, tuple)
+                    assert self.shared_experts is not None
+                    shared_output = self.shared_experts(shared_input)
+                    final_hidden_states = (shared_output, final_hidden_states)
             else:
                 topk_weights, topk_ids = self.router.select_experts(
                     hidden_states=staged_hidden_states,
                     router_logits=staged_router_logits,
                 )
-
-                final_hidden_states = self.quant_method.apply(
+                final_hidden_states = self._apply_experts(
                     layer=layer,
                     x=staged_hidden_states,
                     topk_weights=topk_weights,
                     topk_ids=topk_ids,
                     shared_experts_input=shared_input,
-                )
-
-            if has_separate_shared_experts:
-                assert not isinstance(final_hidden_states, tuple)
-                assert self.shared_experts is not None
-
-                shared_output = self.shared_experts(shared_input)
-
-                final_hidden_states = (
-                    shared_output,
-                    final_hidden_states,
+                    has_separate_shared_experts=has_separate_shared_experts,
                 )
 
             if not skip_result_store:
@@ -561,16 +603,9 @@ class DefaultMoERunner(MoERunner):
                     )
 
         ctx = get_forward_context()
-        # flashinfer_cutlass_kernels can handle: optional DP + TP/EP
-        max_tokens_across_dispatchers = ctx.dp_metadata.max_tokens_across_dp_cpu
-        moe_dp_chunk_size_per_rank = self.moe_config.max_num_tokens
-
-        # If the input to the MoE is sequence parallel then divide by sp_size
-        # to find the maximum number of tokens for any individual dispatcher.
-        if self.moe_config.is_sequence_parallel:
-            max_tokens_across_dispatchers = cdiv(
-                max_tokens_across_dispatchers, self.moe_config.sp_size
-            )
+        max_tokens_across_dispatchers, moe_dp_chunk_size_per_rank, _ = (
+            self._get_chunk_metadata(full_hidden_states)
+        )
 
         num_tokens = full_hidden_states.size(0)
         for chunk_idx, chunk_start_ in enumerate(
@@ -653,17 +688,7 @@ class DefaultMoERunner(MoERunner):
         assert self.batched_hidden_states is not None
         assert self.batched_router_logits is not None
 
-        ctx = get_forward_context()
-        assert ctx.dp_metadata is not None
-
-        max_tokens: int = self.moe_config.max_num_tokens
-        max_tokens_across: int = int(
-            ctx.dp_metadata.max_tokens_across_dp_cpu.item()
-        )
-        if self.moe_config.is_sequence_parallel:
-            max_tokens_across = cdiv(max_tokens_across, self.moe_config.sp_size)
-
-        num_chunks: int = cdiv(max_tokens_across, max_tokens)
+        _, max_tokens, num_chunks = self._get_chunk_metadata(full_hidden_states)
         num_tokens: int = full_hidden_states.size(0)
         H: int = full_hidden_states.size(-1)
 
@@ -732,14 +757,15 @@ class DefaultMoERunner(MoERunner):
         # The return type must match the real path exactly (Error 6):
         # two-output case returns a 2-tuple, single-output returns a tensor.
         # ------------------------------------------------------------------
-        mk_owns_shared = self.quant_method.mk_owns_shared_expert
-        has_two_outputs = has_separate_shared_experts or mk_owns_shared
+        has_two_outputs = (
+            has_separate_shared_experts
+            or self.quant_method.mk_owns_shared_expert
+        )
         chunk_s_input = chunked_shared if chunked_shared is not None else chunked_hidden
 
         _layer = layer
         _runner = self
         _has_sep = has_separate_shared_experts
-        _mk_owns_shared = mk_owns_shared
         _has_two = has_two_outputs
 
         @allow_in_graph
@@ -755,23 +781,15 @@ class DefaultMoERunner(MoERunner):
                 if _has_two:
                     return (carry.clone(), (torch.zeros_like(chunk_s), torch.zeros_like(chunk_h)))
                 return (carry.clone(), torch.zeros_like(chunk_h))
-            out = _runner.quant_method.apply(
+            out = _runner._apply_experts(
                 layer=_layer,
                 x=chunk_h,
                 topk_weights=chunk_tw,
                 topk_ids=chunk_ti,
                 shared_experts_input=chunk_s,
+                has_separate_shared_experts=_has_sep,
             )
-            if _has_sep:
-                assert _runner.shared_experts is not None
-                assert not isinstance(out, tuple)
-                shared_out = _runner.shared_experts(chunk_s)
-                return (carry.clone(), (shared_out, out))
-            elif _mk_owns_shared:
-                assert isinstance(out, tuple)
-                return (carry.clone(), out)
-            else:
-                return (carry.clone(), out)
+            return (carry.clone(), out)
 
         dummy_carry = full_hidden_states.new_zeros(1)
         xs_tuple = (chunked_hidden, chunked_topk_weights, chunked_topk_ids, chunk_s_input)
