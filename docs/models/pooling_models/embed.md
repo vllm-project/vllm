@@ -457,15 +457,13 @@ depend on the model:
 
 More examples can be found here: [examples/pooling/embed](../../../examples/pooling/embed)
 
-## Features
+## Supported Features
 
-### Supported Features
-
-#### Enable/disable normalize
+### Enable/disable normalize
 
 You can enable or disable normalize via `use_activation`.
 
-#### Matryoshka Embeddings
+### Matryoshka Embeddings
 
 [Matryoshka Embeddings](https://sbert.net/examples/sentence_transformer/training/matryoshka/README.html#matryoshka-embeddings) or [Matryoshka Representation Learning (MRL)](https://arxiv.org/abs/2205.13147) is a technique used in training embedding models. It allows users to trade off between performance and cost.
 
@@ -478,7 +476,7 @@ You can enable or disable normalize via `use_activation`.
     {"object":"error","message":"Model \"BAAI/bge-m3\" does not support matryoshka representation, changing output dimensions will lead to poor results.","type":"BadRequestError","param":null,"code":400}
     ```
 
-##### Manually enable Matryoshka Embeddings
+#### Manually enable Matryoshka Embeddings
 
 There is currently no official interface for specifying support for Matryoshka Embeddings. In vLLM, if `is_matryoshka` is `True` in `config.json`, you can change the output dimension to arbitrary values. Use `matryoshka_dimensions` to control the allowed output dimensions.
 
@@ -490,7 +488,7 @@ Here is an example to serve a model with Matryoshka Embeddings enabled.
 vllm serve Snowflake/snowflake-arctic-embed-m-v1.5 --hf-overrides '{"matryoshka_dimensions":[256]}'
 ```
 
-##### Offline Inference
+#### Offline Inference
 
 You can change the output dimensions of embedding models that support Matryoshka Embeddings by using the dimensions parameter in [PoolingParams][vllm.PoolingParams].
 
@@ -511,7 +509,7 @@ print(outputs[0].outputs)
 
 A code example can be found here: [examples/pooling/embed/embed_matryoshka_fy_offline.py](../../../examples/pooling/embed/embed_matryoshka_fy_offline.py)
 
-##### Online Inference
+#### Online Inference
 
 Use the following command to start the vLLM server.
 
@@ -541,8 +539,8 @@ Expected output:
 
 An OpenAI client example can be found here: [examples/pooling/embed/openai_embedding_matryoshka_fy_client.py](../../../examples/pooling/embed/openai_embedding_matryoshka_fy_client.py)
 
-### Removed Features
+## Removed Features
 
-#### Remove `normalize` from PoolingParams
+### Remove `normalize` from PoolingParams
 
 We have already removed `normalize` from PoolingParams, use `use_activation` instead.

@@ -52,7 +52,7 @@ If your model is not in the above list, we will try to automatically convert the
 
 ### Cross-encoder Models
 
-Cross-encoder (aka reranker) models are a subset of classification models that accept two prompts as input and output num_labels equal to 1. Most [cross-encoder models](scoring.md#cross-encoder-models) can also be used as classification models. For more information on cross-encoder models, please refer to [this page](scoring.md).
+Cross-encoder (aka reranker) models are a subset of classification models that accept two prompts as input and output num_labels equal to 1. Most classification models can also be used as [cross-encoder models](scoring.md#cross-encoder-models). For more information on cross-encoder models, please refer to [this page](scoring.md).
 
 --8<-- "disable/docs/models/pooling_models/scoring.md:supported-score-models"
 
@@ -253,26 +253,24 @@ curl -v "http://127.0.0.1:8000/classify" \
 
 More examples can be found here: [examples/pooling/classify](../../../examples/pooling/classify)
 
-## Features
+## Supported Features
 
-### Supported Features
-
-#### Enable/disable activation
+### Enable/disable activation
 
 You can enable or disable activation via `use_activation`.
 
-#### Problem type (e.g. `multi_label_classification`)
+### Problem type (e.g. `multi_label_classification`)
 
 You can modify the `problem_type` via problem_type in the Hugging Face config. The supported problem types are: `single_label_classification`, `multi_label_classification`, and `regression`.
 
 Implement alignment with transformers [ForSequenceClassificationLoss](https://github.com/huggingface/transformers/blob/57bb6db6ee4cfaccc45b8d474dfad5a17811ca60/src/transformers/loss/loss_utils.py#L92).
 
-#### Logit bias
+### Logit bias
 
 You can modify the `logit_bias` (aka `sigmoid_normalize`) through the logit_bias parameter in `vllm.config.PoolerConfig`.
 
-### Removed Features
+## Removed Features
 
-#### Remove softmax from PoolingParams
+### Remove softmax from PoolingParams
 
 We have already removed `softmax` and `activation` from PoolingParams. Instead, use `use_activation`, since we allow `classify` and `token_classify` to use any activation function.

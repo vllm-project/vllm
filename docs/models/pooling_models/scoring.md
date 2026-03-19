@@ -19,7 +19,7 @@ The score models is designed to compute similarity scores between two input prom
 - Offline APIs:
     - `LLM.score`
 - Online APIs:
-    - [Score API](scoring.md#score-api)(`/score`)
+    - [Score API](scoring.md#score-api) (`/score`)
     - [Rerank API](scoring.md#rerank-api) (`/rerank`, `/v1/rerank`, `/v2/rerank`)
 
 ## Supported Models
@@ -424,9 +424,9 @@ Result documents will be sorted by relevance, and the `index` property can be us
 
 More examples can be found here: [examples/pooling/score](../../../examples/pooling/score)
 
-## Features
+## Supported Features
 
-AS cross-encoder models are a subset of classification models that accept two prompts as input and output num_labels equal to 1, cross-encoder features should be consistent with (sequence) classification. For more information, see [this page](classify.md#features).
+AS cross-encoder models are a subset of classification models that accept two prompts as input and output num_labels equal to 1, cross-encoder features should be consistent with (sequence) classification. For more information, see [this page](classify.md#supported-features).
 
 ### Score Template
 

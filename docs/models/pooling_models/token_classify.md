@@ -84,6 +84,6 @@ Please refer to the [pooling API](README.md#pooling-api) and use `"task":"token_
 
 More examples can be found here: [examples/pooling/token_classify](../../../examples/pooling/token_classify)
 
-## Features
+## Supported Features
 
-Token classification features should be consistent with (sequence) classification. For more information, see [this page](classify.md#features).
+Token classification features should be consistent with (sequence) classification. For more information, see [this page](classify.md#supported-features).

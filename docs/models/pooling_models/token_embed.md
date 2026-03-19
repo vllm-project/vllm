@@ -120,6 +120,6 @@ Please refer to the [pooling API](README.md#pooling-api) and use `"task":"token_
 
 More examples can be found here: [examples/pooling/token_embed](../../../examples/pooling/token_embed)
 
-## Features
+## Supported Features
 
-Token embedding features should be consistent with (sequence) embedding. For more information, see [this page](embed.md#features).
+Token embedding features should be consistent with (sequence) embedding. For more information, see [this page](embed.md#supported-features).
