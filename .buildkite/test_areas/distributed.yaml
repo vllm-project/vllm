@@ -204,6 +204,7 @@ steps:
   working_dir: "/vllm-workspace/"
   num_devices: 2
   commands:
+    - pytest -v -s tests/distributed/test_distributed_communication_patterns.py
     - pytest -v -s tests/distributed/test_context_parallel.py
     - pytest -v -s tests/distributed/test_nccl_symm_mem_allreduce.py
     - pytest -v -s tests/v1/distributed/test_dbo.py
