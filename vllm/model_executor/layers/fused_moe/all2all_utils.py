@@ -186,13 +186,22 @@ def maybe_make_prepare_finalize(
         use_fp8_dispatch = (
             quant_config.is_per_act_token or quant_config.is_block_quantized
         )
-        # For PTPC (per token per channel) quant, the scale dim for each token is 1
-        # For 1x128 quant, the scale dim for each token is hidden_dim // 128
-        scale_dim = 1 if quant_config.is_per_act_token else moe.hidden_dim // 128
+        if use_fp8_dispatch:
+            # For PTPC (per token per channel) quant, scale dim is 1
+            # For 1x128 quant, scale dim is hidden_dim // 128
+            quant_dtype = quant_config.quant_dtype
+            scale_dim = (
+                1 if quant_config.is_per_act_token else moe.hidden_dim // 128
+            )
+        else:
+            # Unquantized dispatch (e.g. AITER with defer_input_quant):
+            # dispatch raw BF16/FP16 data, no scales needed.
+            quant_dtype = moe.in_dtype
+            scale_dim = 0
         all_to_all_args = dict(
             rank=all2all_manager.rank,
             num_ep_ranks=all2all_manager.world_size,
-            quant_dtype=quant_config.quant_dtype,
+            quant_dtype=quant_dtype,
             token_hidden_size=moe.hidden_dim,
             scale_dim=scale_dim,
             scale_type_size=torch.float32.itemsize,
